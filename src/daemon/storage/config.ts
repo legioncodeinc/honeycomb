@@ -1,0 +1,131 @@
+/**
+ * DeepLake storage config: zod-validated, fail-closed (PRD-002a FR-2 / a-AC-3).
+ *
+ * Config is resolved once at daemon startup from a credentials provider seam.
+ * Today the seam reads `HONEYCOMB_DEEPLAKE_*` from the environment; the real
+ * secret store is PRD-012 and slots in behind the same `CredentialProvider`
+ * interface without touching the client. Validation is fail-closed: a missing
+ * endpoint/token/org or an out-of-range knob throws a structured
+ * `StorageConfigError` at init, so the daemon never starts against bad config
+ * and never reaches first-write before discovering it (the coding-standards
+ * fail-closed posture, D-1).
+ *
+ * Decision D-1 (binding): connection/auth model is a config object
+ * { endpoint, token, org, timeout, tracing } validated by zod. Org travels as
+ * a request header (resolved per query — see client.ts). Single shared
+ * connection, per-query org resolution (D-2).
+ */
+
+import { z } from "zod";
+
+/** Default per-statement timeout when `HONEYCOMB_QUERY_TIMEOUT_MS` is unset. */
+export const DEFAULT_QUERY_TIMEOUT_MS = 10_000;
+
+/**
+ * Coercing, clamping schema for the query timeout. A non-numeric or negative
+ * value is clamped to a non-negative range rather than rejected: `0` means
+ * "abort immediately", never "block forever" (FR-4). `NaN` falls back to the
+ * default. Upper-bounded so a fat-fingered value can't disable the guard.
+ */
+const QueryTimeoutMs = z.preprocess((raw) => {
+	// Coerce here so a non-numeric value (e.g. "abc") becomes the default rather
+	// than failing the whole config — the timeout is a tuning knob, not a
+	// required field. A negative/oversized value is clamped, never rejected.
+	const n = typeof raw === "number" ? raw : Number(raw);
+	if (!Number.isFinite(n)) return DEFAULT_QUERY_TIMEOUT_MS;
+	// Clamp to [0, 10 minutes]. Non-negative per the fail-closed posture.
+	return Math.min(Math.max(0, Math.trunc(n)), 600_000);
+}, z.number());
+
+/**
+ * The validated storage config the client runs against. Credentials are kept
+ * here in memory only; redaction (FR-8) happens at every log/error boundary.
+ */
+export const StorageConfigSchema = z.object({
+	/** DeepLake HTTP query endpoint, e.g. https://api.activeloop.ai. */
+	endpoint: z.string().url("endpoint must be a valid URL"),
+	/** Bearer token. Never logged in full — see redactToken. */
+	token: z.string().min(1, "token must not be empty"),
+	/** Org identity sent as a request header so DeepLake enforces tenancy. */
+	org: z.string().min(1, "org must not be empty"),
+	/** Workspace/partition the queries target within the org. */
+	workspace: z.string().min(1, "workspace must not be empty"),
+	/** Per-statement timeout, clamped non-negative. */
+	queryTimeoutMs: QueryTimeoutMs.default(DEFAULT_QUERY_TIMEOUT_MS),
+	/** SQL tracing gate (FR-6). Evaluated at call time, see client.ts. */
+	traceSql: z.boolean().default(false),
+});
+
+/** The validated config object every storage layer reads. */
+export type StorageConfig = z.infer<typeof StorageConfigSchema>;
+
+/**
+ * Structured config error. Carries the flattened zod issues so the daemon can
+ * log exactly which knob failed without echoing the bad values (which may hold
+ * a token). Distinct error type so a config failure is never mistaken for a
+ * runtime query failure.
+ */
+export class StorageConfigError extends Error {
+	readonly issues: string[];
+	constructor(issues: string[]) {
+		super(`Invalid DeepLake storage config: ${issues.join("; ")}`);
+		this.name = "StorageConfigError";
+		this.issues = issues;
+	}
+}
+
+/**
+ * The credentials provider seam (D-1). The env provider is the default today;
+ * PRD-012's secret store implements the same interface later. Returns the raw,
+ * un-validated record — validation is the schema's job so there is one
+ * fail-closed gate, not two.
+ */
+export interface CredentialProvider {
+	/** Read the raw config record. Missing keys yield undefined, not throw. */
+	read(): Record<string, unknown>;
+}
+
+/**
+ * Default provider: reads `HONEYCOMB_DEEPLAKE_*` from the environment plus the
+ * shared tuning/tracing knobs. This is daemon-only code and is never bundled
+ * into the OpenClaw target (which forbids `process.env`), so a direct env read
+ * is correct here.
+ */
+export function envCredentialProvider(env: NodeJS.ProcessEnv = process.env): CredentialProvider {
+	return {
+		read(): Record<string, unknown> {
+			return {
+				endpoint: env.HONEYCOMB_DEEPLAKE_ENDPOINT,
+				token: env.HONEYCOMB_DEEPLAKE_TOKEN,
+				org: env.HONEYCOMB_DEEPLAKE_ORG,
+				workspace: env.HONEYCOMB_DEEPLAKE_WORKSPACE,
+				queryTimeoutMs: env.HONEYCOMB_QUERY_TIMEOUT_MS,
+				traceSql: env.HONEYCOMB_TRACE_SQL === "1" || env.HONEYCOMB_TRACE_SQL === "true",
+			};
+		},
+	};
+}
+
+/**
+ * Validate raw config into a StorageConfig, failing closed. Throws
+ * StorageConfigError listing every issue. This is the single boundary where
+ * untrusted config crosses into typed config (zod-at-boundary discipline).
+ */
+export function resolveStorageConfig(provider: CredentialProvider): StorageConfig {
+	const parsed = StorageConfigSchema.safeParse(provider.read());
+	if (!parsed.success) {
+		const issues = parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`);
+		throw new StorageConfigError(issues);
+	}
+	return parsed.data;
+}
+
+/**
+ * Redact a credential/org value for logs and errors (FR-8). Never echoes a
+ * token in full: keeps the last 4 chars for correlation, masks the rest. An
+ * empty/short value collapses to a fixed mask so length isn't leaked either.
+ */
+export function redactToken(value: string): string {
+	if (value.length <= 4) return "****";
+	return `****${value.slice(-4)}`;
+}

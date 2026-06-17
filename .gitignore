@@ -104,3 +104,6 @@ otherhive-v1/
 /embeddings/embed-daemon.js
 /embeddings/chunks/
 /harnesses/openclaw/dist/chunks/
+
+.cursor/
+.claude/
