@@ -1,0 +1,207 @@
+# Schema
+
+> Category: Data | Version: 1.0 | Date: June 2026 | Status: Active
+
+The canonical table catalog for Honeycomb on DeepLake: the capture and summary tables, the distilled-memory engine model, the knowledge graph, sources, the product tables (skills, rules, goals, KPIs, codebase), and the tenancy and auth tables.
+
+**Related:**
+- [`deeplake-storage.md`](deeplake-storage.md)
+- [`memory-virtual-filesystem.md`](memory-virtual-filesystem.md)
+- [`codebase-graph.md`](codebase-graph.md)
+- [`../ai/session-capture.md`](../ai/session-capture.md)
+- [`../ai/knowledge-graph-ontology.md`](../ai/knowledge-graph-ontology.md)
+- [`../multi-tenant/org-workspace-model.md`](../multi-tenant/org-workspace-model.md)
+
+---
+
+## How to read this catalog
+
+Every table here lives in DeepLake and is written through the daemon using the patterns in [`deeplake-storage.md`](deeplake-storage.md). Org and workspace isolation is enforced at the storage partition layer, so most tables do not need explicit tenancy columns; the engine tables additionally carry `agent_id` (default `'default'`) and a `visibility` for within-workspace scoping, and a few cross-cutting tables (notably `codebase`) carry explicit `org_id` and `workspace_id`. DDL shown below is the logical shape; the runtime source of truth is the daemon's schema definition module, and the lazy heal pass converges every table toward it.
+
+Three tables are easy to confuse because they all hold "memory," so fix them first. `sessions` is the raw capture stream (one row per event). `memories` is the distilled engine output (facts the pipeline decided to keep). `memory` is the wiki-summary and virtual-filesystem table. Capture writes `sessions`; the pipeline reads `sessions` and writes `memories`; the summary worker writes `memory`.
+
+```mermaid
+flowchart LR
+    sessions["sessions (raw events)"] --> pipeline["pipeline"]
+    pipeline --> memories["memories (distilled facts)"]
+    pipeline --> entities["entities + ontology"]
+    sessions --> summary["summary worker"]
+    summary --> memory["memory (wiki + VFS)"]
+    memories --> skills["skillify -> skills"]
+```
+
+## Capture and summaries
+
+`sessions` holds the raw event stream from capture: one row per prompt, tool call, or response. Its `message` is `JSONB` because each row is a structured payload, and `message_embedding` is the optional 768-dim vector. Rows are append-only INSERTs; readers concatenate by `path` ordered by `creation_date`.
+
+```sql
+CREATE TABLE IF NOT EXISTS "sessions" (
+  id                TEXT NOT NULL DEFAULT '',
+  path              TEXT NOT NULL DEFAULT '',
+  filename          TEXT NOT NULL DEFAULT '',
+  message           JSONB,
+  message_embedding FLOAT4[],
+  author            TEXT NOT NULL DEFAULT '',
+  agent             TEXT NOT NULL DEFAULT '',
+  project           TEXT NOT NULL DEFAULT '',
+  plugin_version    TEXT NOT NULL DEFAULT '',
+  creation_date     TEXT NOT NULL DEFAULT '',
+  last_update_date  TEXT NOT NULL DEFAULT ''
+) USING deeplake;
+```
+
+`memory` holds wiki summaries and the virtual-filesystem file rows. Its `summary` is the file body and `summary_embedding` powers semantic recall over summaries. It is UPDATE-or-INSERT keyed by `path`. The VFS dispatch over this table is documented in [`memory-virtual-filesystem.md`](memory-virtual-filesystem.md).
+
+```sql
+CREATE TABLE IF NOT EXISTS "memory" (
+  id                TEXT NOT NULL DEFAULT '',
+  path              TEXT NOT NULL DEFAULT '',
+  filename          TEXT NOT NULL DEFAULT '',
+  summary           TEXT NOT NULL DEFAULT '',
+  summary_embedding FLOAT4[],
+  author            TEXT NOT NULL DEFAULT '',
+  mime_type         TEXT NOT NULL DEFAULT 'text/plain',
+  project           TEXT NOT NULL DEFAULT '',
+  agent             TEXT NOT NULL DEFAULT '',
+  creation_date     TEXT NOT NULL DEFAULT '',
+  last_update_date  TEXT NOT NULL DEFAULT ''
+) USING deeplake;
+```
+
+## Distilled memory: the engine model
+
+`memories` is the engine's output, the facts the pipeline decided to keep, with confidence, importance, provenance, dedup hash, and scope. It is the table recall ranks over.
+
+```sql
+CREATE TABLE IF NOT EXISTS "memories" (
+  id                 TEXT NOT NULL DEFAULT '',
+  type               TEXT NOT NULL DEFAULT 'fact',
+  content            TEXT NOT NULL DEFAULT '',
+  normalized_content TEXT NOT NULL DEFAULT '',
+  content_hash       TEXT NOT NULL DEFAULT '',
+  confidence         FLOAT4 NOT NULL DEFAULT 1.0,
+  importance         FLOAT4 NOT NULL DEFAULT 0.5,
+  tags               TEXT NOT NULL DEFAULT '',
+  who                TEXT NOT NULL DEFAULT '',
+  project            TEXT NOT NULL DEFAULT '',
+  source_id          TEXT NOT NULL DEFAULT '',
+  source_type        TEXT NOT NULL DEFAULT '',
+  pinned             BIGINT NOT NULL DEFAULT 0,
+  is_deleted         BIGINT NOT NULL DEFAULT 0,
+  extraction_status  TEXT NOT NULL DEFAULT 'none',
+  agent_id           TEXT NOT NULL DEFAULT 'default',
+  visibility         TEXT NOT NULL DEFAULT 'global',
+  content_embedding  FLOAT4[],
+  created_at         TEXT NOT NULL DEFAULT '',
+  updated_at         TEXT NOT NULL DEFAULT ''
+) USING deeplake;
+```
+
+Supporting the engine: `memory_history` is the audit trail (every proposal, applied or shadowed, with `changed_by` distinguishing the harness from `pipeline` and `pipeline-shadow`); `memory_jobs` is the durable distillation queue (lease, complete, fail, dead, with bounded retries) that lets work survive a daemon restart; embeddings are stored on the `content_embedding` column and mirrored for GPU vector search. The pipeline that writes these is [`../ai/memory-pipeline.md`](../ai/memory-pipeline.md).
+
+## Knowledge graph
+
+The ontology is a set of related tables: `entities` (canonical name, type, agent scope, optional source provenance), `entity_aspects` (weighted dimensions), `entity_attributes` (claim values with `kind`, `status`, `claim_key`, `group_key`, and version lineage), `entity_dependencies` (audited edges with type, strength, confidence, and a required reason for loose links), `memory_entity_mentions` (the memory-to-entity join), `epistemic_assertions` (who claimed, believed, observed, decided, preferred, denied, questioned), and `ontology_proposals` (the audited control plane). Because DeepLake cannot safely update in place, supersession appends a new attribute version and marks the prior one superseded rather than mutating it. The model is documented in [`../ai/knowledge-graph-ontology.md`](../ai/knowledge-graph-ontology.md).
+
+```sql
+CREATE TABLE IF NOT EXISTS "entity_attributes" (
+  id                 TEXT NOT NULL DEFAULT '',
+  aspect_id          TEXT NOT NULL DEFAULT '',
+  agent_id           TEXT NOT NULL DEFAULT 'default',
+  memory_id          TEXT NOT NULL DEFAULT '',
+  kind               TEXT NOT NULL DEFAULT 'attribute',
+  content            TEXT NOT NULL DEFAULT '',
+  confidence         FLOAT4 NOT NULL DEFAULT 0.0,
+  importance         FLOAT4 NOT NULL DEFAULT 0.5,
+  status             TEXT NOT NULL DEFAULT 'active',
+  superseded_by      TEXT NOT NULL DEFAULT '',
+  claim_key          TEXT NOT NULL DEFAULT '',
+  group_key          TEXT NOT NULL DEFAULT '',
+  version            BIGINT NOT NULL DEFAULT 1,
+  created_at         TEXT NOT NULL DEFAULT '',
+  updated_at         TEXT NOT NULL DEFAULT ''
+) USING deeplake;
+```
+
+## Sources and documents
+
+External knowledge bases and ad-hoc documents land in their own tables. `memory_artifacts` holds source-backed rows keyed by `source_id` so a source can be purged cleanly; `documents` tracks ingested URLs and files through the `queued -> extracting -> chunking -> embedding -> indexing -> done` lifecycle; `document_memories` joins a document to its chunk memories; `connectors` tracks external connectors and their sync cursors. Soft-delete advances a status rather than updating in place, in keeping with the DeepLake write patterns. The lifecycle is documented in [`../sources/source-lifecycle.md`](../sources/source-lifecycle.md).
+
+## Skills, rules, goals, KPIs
+
+These are the product tables carried from Hivemind. `skills` holds mined `SKILL.md` versions (append-only, version-bumped, with `scope`, `author`, `contributors`, `source_sessions`); `rules` holds org-wide principles (append-only, version-bumped); `goals` and `kpis` are UPDATE-or-INSERT by logical key, backed by the virtual-filesystem path conventions.
+
+```sql
+CREATE TABLE IF NOT EXISTS "skills" (
+  id              TEXT NOT NULL DEFAULT '',
+  name            TEXT NOT NULL DEFAULT '',
+  project_key     TEXT NOT NULL DEFAULT '',
+  scope           TEXT NOT NULL DEFAULT 'me',
+  install         TEXT NOT NULL DEFAULT 'project',
+  author          TEXT NOT NULL DEFAULT '',
+  contributors    TEXT NOT NULL DEFAULT '[]',
+  source_sessions TEXT NOT NULL DEFAULT '[]',
+  description     TEXT NOT NULL DEFAULT '',
+  trigger_text    TEXT NOT NULL DEFAULT '',
+  body            TEXT NOT NULL DEFAULT '',
+  version         BIGINT NOT NULL DEFAULT 1,
+  created_at      TEXT NOT NULL DEFAULT '',
+  updated_at      TEXT NOT NULL DEFAULT ''
+) USING deeplake;
+```
+
+The current state for a `(project_key, name)` pair is the highest version. Skillify and team sharing that read and write this table are documented in [`../ai/skillify-pipeline.md`](../ai/skillify-pipeline.md) and [`../collaboration/team-skills-sharing.md`](../collaboration/team-skills-sharing.md).
+
+## Codebase graph
+
+`codebase` stores one snapshot row per `(org, workspace, repo, user, worktree, commit)` identity. `snapshot_jsonb` holds the canonical node-link JSON and `snapshot_sha256` dedups identical content and detects extractor drift. The push path uses SELECT-before-INSERT and re-verifies to make concurrent-writer races observable. The build and pull lifecycle is in [`codebase-graph.md`](codebase-graph.md).
+
+```sql
+CREATE TABLE IF NOT EXISTS "codebase" (
+  org_id            TEXT NOT NULL DEFAULT '',
+  workspace_id      TEXT NOT NULL DEFAULT '',
+  repo_slug         TEXT NOT NULL DEFAULT '',
+  user_id           TEXT NOT NULL DEFAULT '',
+  worktree_id       TEXT NOT NULL DEFAULT '',
+  commit_sha        TEXT NOT NULL DEFAULT '',
+  branch            TEXT NOT NULL DEFAULT '',
+  snapshot_sha256   TEXT NOT NULL DEFAULT '',
+  snapshot_jsonb    TEXT NOT NULL DEFAULT '',
+  node_count        BIGINT NOT NULL DEFAULT 0,
+  edge_count        BIGINT NOT NULL DEFAULT 0,
+  generator_version TEXT NOT NULL DEFAULT '',
+  schema_version    BIGINT NOT NULL DEFAULT 1
+) USING deeplake;
+```
+
+## Tenancy, agents, and auth
+
+`agents` is the within-workspace roster that drives read-policy enforcement (`isolated`, `shared`, `group` with a `policy_group`). `api_keys` holds named, revocable, hashed credentials for remote connectors, with a role, scope, optional explicit permission list, and connector/harness/agent binding. Org and workspace identity is carried on every request and resolved by DeepLake; the model is documented in [`../multi-tenant/org-workspace-model.md`](../multi-tenant/org-workspace-model.md), and the auth that consumes `api_keys` and `agents` is in [`../auth/auth-architecture.md`](../auth/auth-architecture.md) and [`../security/scoping-and-visibility.md`](../security/scoping-and-visibility.md).
+
+```sql
+CREATE TABLE IF NOT EXISTS "agents" (
+  id           TEXT NOT NULL DEFAULT '',
+  name         TEXT NOT NULL DEFAULT '',
+  read_policy  TEXT NOT NULL DEFAULT 'isolated',
+  policy_group TEXT NOT NULL DEFAULT '',
+  created_at   TEXT NOT NULL DEFAULT '',
+  updated_at   TEXT NOT NULL DEFAULT ''
+) USING deeplake;
+```
+
+## Telemetry
+
+Telemetry is opt-in and local to the deployment: usage counters and an optional recall QA ledger, used for diagnostics and never carrying secrets or request bodies. The router's redacted routing history (see [`../ai/model-provider-router.md`](../ai/model-provider-router.md)) lands here too.
+
+## Retention summary
+
+| Data | Default behavior |
+|---|---|
+| `sessions` raw events | Pruned by the `sessions prune` operation; summaries retained in `memory` |
+| `memories` | Soft-delete window before purge; history retained longer |
+| `memory_jobs` | Completed purged after a window; dead jobs later |
+| `memory_artifacts` | Soft-delete on source file removal, hard purge on source disconnect by `source_id` |
+| `skills` / `rules` | Append-only version history retained |
+| embeddings / vectors | Purged with their owning row during retention sweeps |
+
+Because DeepLake exposes no transactions at this layer, retention runs as batched, idempotent sweeps in a daemon worker rather than cascading deletes, consistent with the patterns in [`deeplake-storage.md`](deeplake-storage.md).

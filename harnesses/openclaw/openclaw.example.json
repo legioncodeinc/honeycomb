@@ -1,0 +1,16 @@
+{
+  "plugins": {
+    "entries": {
+      "honeycomb": {
+        "config": {
+          "autoCapture": true,
+          "autoRecall": true,
+          "tuning": {
+            "HONEYCOMB_DEBUG": "1",
+            "HONEYCOMB_QUERY_TIMEOUT_MS": "8000"
+          }
+        }
+      }
+    }
+  }
+}
