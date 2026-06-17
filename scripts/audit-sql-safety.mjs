@@ -27,8 +27,15 @@
  * escaping, so its `${value}`-shaped regex bodies are not call sites.
  *
  * Usage:
- *   node scripts/audit-sql-safety.mjs                 # scan src/daemon/storage
+ *   node scripts/audit-sql-safety.mjs                 # scan src/daemon (default)
  *   node scripts/audit-sql-safety.mjs <dir>           # scan a specific dir
+ *
+ * Default scope is `src/daemon` — the WHOLE daemon, not just `src/daemon/storage`.
+ * The storage layer is not the only place that hand-builds SQL: the daemon runtime
+ * (`src/daemon/runtime/services/job-queue.ts`) builds its own version-bumped
+ * statements. Scanning only `storage/` left that builder ungated, so the default
+ * was widened to cover every daemon SQL builder. Pass a narrower dir explicitly
+ * only for a focused re-scan; CI always runs the wide default.
  *
  * Exits non-zero on any finding.
  */
@@ -38,7 +45,7 @@ import { readdir } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 
 const rawArgs = process.argv.slice(2);
-const SCAN_DIR = rawArgs.find((a) => !a.startsWith("--")) ?? "src/daemon/storage";
+const SCAN_DIR = rawArgs.find((a) => !a.startsWith("--")) ?? "src/daemon";
 const SCANNABLE_EXT = new Set([".ts", ".mts", ".cts"]);
 
 /**
@@ -161,6 +168,61 @@ function collectSafeBindings(lines) {
 }
 
 /**
+ * Collect class methods / getters whose body returns a value routed through a
+ * known-safe builder, so an interpolation of `this.<method>()` is recognized as
+ * pre-escaped. The job queue, for example, defines `private tbl(): string {
+ * return sqlIdent(this.cfg.tableName); }` and then interpolates `${this.tbl()}`
+ * — the returned string IS `sqlIdent`-validated, but the call SITE shows only
+ * `this.tbl()`, which the helper regex cannot see through. Without this pass the
+ * gate would either false-positive on every such call or force the code to inline
+ * the helper at every site. We match two shapes:
+ *   - one-line method:  `tbl(): string { return sqlIdent(...); }`
+ *   - one-line getter:  `get cols() { return sqlColumnList(...); }`
+ * plus a multi-line form where the `methodName(...) {` header is followed within a
+ * few lines by a `return <SAFE_BINDING_RHS>` before the method's first `}` at the
+ * same indentation. Conservative: only a return whose expression is wholly a safe
+ * helper call (no concatenation with a raw operand) marks the method safe.
+ */
+function collectSafeMethods(lines) {
+	const safe = new Set();
+	// One-line `name(...) { ... return SAFE(...) ... }` (method or getter).
+	const oneLine = /(?:get\s+)?([A-Za-z_]\w*)\s*\([^)]*\)\s*(?::\s*[\w<>[\].| ]+)?\s*\{[^}]*\breturn\b([^}]*)\}/;
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		const m = line.match(oneLine);
+		if (m && SAFE_BINDING_RHS.test(m[2]) && !/\+/.test(m[2])) {
+			safe.add(m[1]);
+			continue;
+		}
+		// Multi-line: a method header line, then a `return SAFE(...)` within a small
+		// window. Only the header's name is captured; we require the return to be a
+		// pure safe-helper expression (no `+` concatenation with a raw operand).
+		const header = line.match(/(?:get\s+)?(?:private\s+|public\s+|protected\s+)?([A-Za-z_]\w*)\s*\([^)]*\)\s*(?::\s*[\w<>[\].| ]+)?\s*\{\s*$/);
+		if (header) {
+			for (let j = i + 1; j < Math.min(lines.length, i + 6); j++) {
+				const body = lines[j];
+				const ret = body.match(/^\s*return\b(.*);?\s*$/);
+				if (ret) {
+					if (SAFE_BINDING_RHS.test(ret[1]) && !/\+/.test(ret[1])) safe.add(header[1]);
+					break;
+				}
+				if (/\}/.test(body)) break; // method ended before a return
+			}
+		}
+	}
+	return safe;
+}
+
+/**
+ * Is the interpolation/operand body a call to a same-file safe method? Matches
+ * `this.tbl()`, `tbl()`, or `self.tbl()` whose method name is in `safeMethods`.
+ */
+function isSafeMethodCall(body, safeMethods) {
+	const m = body.match(/^(?:this\.|self\.)?([A-Za-z_]\w*)\s*\(\s*\)/);
+	return m !== null && safeMethods.has(m[1]);
+}
+
+/**
  * Split a source line into its top-level `+`-separated operands, respecting
  * string / template-literal / parenthesis / bracket / brace nesting so a `+`
  * INSIDE a string (`"a + b"`), a template (`${x + 1}`), or a call's arg list
@@ -265,13 +327,14 @@ function isStringOrTemplateLiteral(operand) {
  * value interpolation and is flagged. Fails closed: an operand it cannot prove
  * safe is treated as a bypass.
  */
-function concatOperandIsSafe(operand, safeBindings) {
+function concatOperandIsSafe(operand, safeBindings, safeMethods) {
 	const s = operand.trim();
 	if (s === "") return true;
 	if (isStringOrTemplateLiteral(s)) return true;
 	if (HELPER.test(s)) return true;
 	if (NUMERIC_OR_PREBUILT.test(s)) return true;
 	if (SAFE_BINDING_RHS.test(s)) return true;
+	if (isSafeMethodCall(s, safeMethods)) return true;
 	const root = s.match(/^[A-Za-z_]\w*/);
 	if (root && safeBindings.has(root[0])) return true;
 	return false;
@@ -281,6 +344,7 @@ function inspectFile(path) {
 	const source = readFileSync(path, "utf-8");
 	const lines = source.split("\n");
 	const safeBindings = collectSafeBindings(lines);
+	const safeMethods = collectSafeMethods(lines);
 	const findings = [];
 
 	for (let i = 0; i < lines.length; i++) {
@@ -295,6 +359,9 @@ function inspectFile(path) {
 			if (body === "") continue;
 			if (HELPER.test(body)) continue;
 			if (NUMERIC_OR_PREBUILT.test(body)) continue;
+			// A `this.tbl()`-style call to a same-file method that returns a safe
+			// helper result is pre-escaped (data-flow through the method body).
+			if (isSafeMethodCall(body, safeMethods)) continue;
 			// The interpolation's root identifier — `tbl` from `tbl`, `scope` from
 			// `scope.org`. Safe when it was bound from a known-safe builder.
 			const root = body.match(/^[A-Za-z_]\w*/);
@@ -326,7 +393,7 @@ function inspectFile(path) {
 				);
 				if (hasSqlLiteralOperand) {
 					for (const op of operands) {
-						if (concatOperandIsSafe(op, safeBindings)) continue;
+						if (concatOperandIsSafe(op, safeBindings, safeMethods)) continue;
 						findings.push({
 							file: path,
 							line: i + 1,

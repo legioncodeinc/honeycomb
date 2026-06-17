@@ -1,6 +1,6 @@
 # PRD-004: Daemon Runtime
 
-> **Status:** Backlog
+> **Status:** In-Work
 > **Priority:** P0
 > **Effort:** L
 > **Schema changes:** Additive

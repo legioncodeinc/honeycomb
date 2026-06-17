@@ -58,8 +58,12 @@ export const val = {
 	raw: (value: string): ColumnValue => ({ kind: "raw", value }),
 };
 
-/** Render one `ColumnValue` into its SQL text via the 002b helpers. */
-function renderValue(v: ColumnValue): string {
+/**
+ * Render one `ColumnValue` into its SQL text via the 002b helpers. Exported so a
+ * caller that builds its own statement (e.g. the job queue's direct-UPDATE state
+ * transitions) renders values through the SAME guarded path, never hand-quoting.
+ */
+export function renderValue(v: ColumnValue): string {
 	switch (v.kind) {
 		case "text":
 			return eLiteral(v.value);
@@ -83,6 +87,20 @@ function buildColsVals(row: RowValues): { cols: string; vals: string } {
 }
 
 /**
+ * Build a single `INSERT INTO "<table>" (cols) VALUES (vals)` statement, every
+ * identifier through `sqlIdent` and every value through `renderValue` (the guarded
+ * path). Exported so a caller that appends its own version-bumped rows (e.g. the
+ * job queue's transition appends) builds the INSERT through the SAME helper rather
+ * than hand-assembling it — keeping the SQL-safety floor and avoiding a duplicated
+ * INSERT shape the audit gate would otherwise see twice.
+ */
+export function buildInsert(table: string, row: RowValues): string {
+	const tbl = sqlIdent(table);
+	const { cols, vals } = buildColsVals(row);
+	return `INSERT INTO "${tbl}" (${cols}) VALUES (${vals})`;
+}
+
+/**
  * Append-only INSERT (FR-1 / d-AC-4): one row per event, never concatenating an
  * existing one. Used by `sessions` and raw events. Heal-aware via `withHeal`.
  */
@@ -92,9 +110,7 @@ export function appendOnlyInsert(
 	scope: QueryScope,
 	row: RowValues,
 ): Promise<QueryResult> {
-	const tbl = sqlIdent(target.table);
-	const { cols, vals } = buildColsVals(row);
-	const sql = `INSERT INTO "${tbl}" (${cols}) VALUES (${vals})`;
+	const sql = buildInsert(target.table, row);
 	return withHeal(client, target, scope, () => client.query(sql, scope));
 }
 
@@ -153,9 +169,7 @@ export async function appendVersionBumped(
 	// Compose the new row: caller columns + the bumped version. The version is a
 	// numeric scalar inlined by design.
 	const row: RowValues = [...args.row, [versionColumn, val.num(nextVersion)] as const];
-	const tbl = sqlIdent(target.table);
-	const { cols, vals } = buildColsVals(row);
-	const sql = `INSERT INTO "${tbl}" (${cols}) VALUES (${vals})`;
+	const sql = buildInsert(target.table, row);
 	const result = await withHeal(client, target, scope, () => client.query(sql, scope));
 	return { result, version: nextVersion };
 }
@@ -215,8 +229,7 @@ export async function updateOrInsertByKey(
 		return withHeal(client, target, scope, () => client.query(updateSql, scope));
 	}
 
-	const { cols, vals } = buildColsVals(args.row);
-	const insertSql = `INSERT INTO "${tbl}" (${cols}) VALUES (${vals})`;
+	const insertSql = buildInsert(target.table, args.row);
 	return withHeal(client, target, scope, () => client.query(insertSql, scope));
 }
 
@@ -260,8 +273,7 @@ export async function selectBeforeInsert(
 		return { result: probe, alreadyPresent: true, raceDetected: false };
 	}
 
-	const { cols, vals } = buildColsVals(args.row);
-	const insertSql = `INSERT INTO "${tbl}" (${cols}) VALUES (${vals})`;
+	const insertSql = buildInsert(target.table, args.row);
 	const inserted = await withHeal(client, target, scope, () => client.query(insertSql, scope));
 	if (!isOk(inserted)) return { result: inserted, alreadyPresent: false, raceDetected: false };
 

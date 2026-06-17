@@ -25,6 +25,7 @@ import { KNOWLEDGE_GRAPH_TABLES } from "./knowledge-graph.js"; // PRD-003b (stub
 import { MEMORIES_TABLES } from "./memories.js"; // PRD-003a (implemented)
 import { PRODUCT_TABLES } from "./product.js"; // PRD-003d (stub)
 import { buildRegistry, type CatalogRegistry } from "./registry.js";
+import { RUNTIME_JOBS_TABLES } from "./runtime-jobs.js"; // PRD-004b (durable job queue)
 import { SESSIONS_SUMMARIES_TABLES } from "./sessions-summaries.js"; // PRD-003c (implemented)
 import { TENANCY_TABLES } from "./tenancy.js"; // PRD-003e (stub)
 import { type CatalogTable } from "./types.js";
@@ -40,6 +41,7 @@ export const CATALOG: readonly CatalogTable[] = Object.freeze([
 	...KNOWLEDGE_GRAPH_TABLES,
 	...PRODUCT_TABLES,
 	...TENANCY_TABLES,
+	...RUNTIME_JOBS_TABLES,
 ]);
 
 /** The write-pattern registry over the whole catalog (table → pattern → primitive). */
@@ -89,4 +91,20 @@ export {
 } from "./sessions-summaries.js";
 export { KNOWLEDGE_GRAPH_TABLES } from "./knowledge-graph.js";
 export { PRODUCT_TABLES } from "./product.js";
+export {
+	DEFAULT_BACKOFF_BASE_MS,
+	DEFAULT_BACKOFF_CAP_MS,
+	DEFAULT_LEASE_MS,
+	DEFAULT_MAX_ATTEMPTS,
+	JOB_DEAD,
+	JOB_DONE,
+	JOB_FAILED,
+	JOB_LEASED,
+	JOB_QUEUED,
+	JOB_STATUSES,
+	type JobStatus,
+	MEMORY_JOBS_COLUMNS,
+	MEMORY_JOBS_TABLE,
+	RUNTIME_JOBS_TABLES,
+} from "./runtime-jobs.js";
 export { TENANCY_TABLES } from "./tenancy.js";
