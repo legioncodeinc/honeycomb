@@ -1,6 +1,6 @@
 # PRD-005: Capture Intake
 
-> **Status:** Backlog
+> **Status:** In-Work
 > **Priority:** P0
 > **Effort:** M
 > **Schema changes:** None
