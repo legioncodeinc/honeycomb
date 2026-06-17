@@ -75,9 +75,19 @@ const HELPER = /\b(sqlStr|sqlLike|sqlIdent|sqlColumnList|eLiteral|sLiteral)\s*\(
  * Likewise `FROM "${...}"` is matched explicitly so a `FROM "<table>"` whose
  * table is interpolated is fingerprinted even when the rest of the clause is on
  * a following concatenated line.
+ *
+ * The keyword group carries a LEADING `\b` only — NOT a trailing one. A trailing
+ * `\b` after an alternative whose final char class matched a single operand char
+ * (`SELECT *`, `FROM "${t…`, `WHERE id…`) fails whenever that char is followed by
+ * another identifier char (the common multi-char table/column case) or by a
+ * non-word char like `*`. That false-negative let the single-line `SELECT * FROM
+ * "${tbl}" WHERE id = '${raw}'` shape — and any raw value inside it — slip the
+ * gate entirely. Keyword specificity comes from the required trailing query
+ * syntax in each alternative (whitespace + an operand/identifier char), so the
+ * leading `\b` alone is enough to avoid matching mid-word prose.
  */
 const STATEMENT_FINGERPRINT =
-	/(\b(INSERT\s+INTO|SELECT\s+[\w*]|FROM\s+["'`]?\$?\{?[\w"]|WHERE\s+[\w$]|VALUES\s*\(|SET\s+[\w$]|ADD\s+COLUMN\s+[\w$]|ORDER\s+BY\s+[\w$]|CREATE\s+TABLE\s+IF|ALTER\s+TABLE\s+["'`]|USING\s+deeplake|information_schema\.columns|::float4|::text\s+ILIKE)\b|SELECT\s+\$\{)/i;
+	/(?:\b(?:INSERT\s+INTO|SELECT\s+[\w*]|FROM\s+["'`]?\$?\{?[\w"]|WHERE\s+[\w$]|VALUES\s*\(|SET\s+[\w$]|ADD\s+COLUMN\s+[\w$]|ORDER\s+BY\s+[\w$]|CREATE\s+TABLE\s+IF|ALTER\s+TABLE\s+["'`]|USING\s+deeplake|information_schema\.columns|::float4|::text\s+ILIKE)|SELECT\s+\$\{)/i;
 
 /**
  * Lines that are comments or diagnostic-message assembly (an Error/throw/super
@@ -91,13 +101,24 @@ const NON_BUILDER_LINE = /^\s*(\/\/|\*|\/\*)|throw\s+new\b|new\s+Error\s*\(|supe
  * An interpolation body is SAFE without a helper when it is plainly a number or
  * a numeric expression — non-string scalars are formatted inline at the call
  * site by design (PRD-002b open question resolved: no `sqlNum`/`sqlBool`; format
- * numbers inline, strings through helpers). We allow: a numeric variable named
- * like a count/limit/version/dim/multiplier, `Number(...)`, `.length`, a digit
- * literal, or an already-built fragment variable suffixed `Sql`/`Clause`/`Lit`/
- * `Filter` (a fragment assembled elsewhere from helpers).
+ * numbers inline, strings through helpers). We allow:
+ *   - `Number(...)`, `.length`, a digit literal, or a numeric variable named like
+ *     a count/limit/version/dim/multiplier/offset;
+ *   - an already-built fragment variable suffixed `Sql`/`Clause(s)`/`Lit`/`Filter`/
+ *     `Cols`/`Vals`/… (a fragment assembled elsewhere from helpers);
+ *   - a SCREAMING_SNAKE_CASE constant (e.g. `KEY_REVOKED`, `KEY_LIVE`) — a
+ *     compile-time numeric/string literal const, never a runtime/caller value;
+ *   - a `.sql` / `.name` property of a load-validated `ColumnDef` (`col.sql`,
+ *     `c.sql`, `col.name`) — schema text validated at load by `validateColumnDefs`
+ *     / `sqlIdent`, not a runtime value sink.
+ *
+ * The fragment-suffix and count-suffix words allow an optional trailing plural
+ * `s` (`Clauses`, `Limits`, `Counts`) so the `\b` lands after the real word end
+ * rather than failing on the plural — without that, a legitimately pre-escaped
+ * `setClauses` fragment was mis-flagged as a raw value.
  */
 const NUMERIC_OR_PREBUILT =
-	/^[\s(]*(Number\(|[\d.]+$|[A-Za-z_][\w.]*\.length\b|[A-Za-z_]*([Ll]imit|[Cc]ount|[Vv]ersion|[Dd]im|[Mm]ultiplier|[Oo]ffset|[Nn]extVersion)\b|[A-Za-z_][\w.]*(Sql|Clause|Lit|Literal|Filter|Cols|Vals|Where|Body|Ident|Name|Table)\b)/;
+	/^[\s(]*(Number\(|[\d.]+$|[A-Z][A-Z0-9_]*$|[A-Za-z_][\w.]*\.(sql|name)\b|[A-Za-z_][\w.]*\.length\b|[A-Za-z_]*([Ll]imit|[Cc]ount|[Vv]ersion|[Dd]im|[Mm]ultiplier|[Oo]ffset|[Nn]extVersion)s?\b|[A-Za-z_][\w.]*(Sql|Clause|Lit|Literal|Filter|Cols|Vals|Where|Body|Ident|Name|Table)s?\b)/;
 
 /**
  * The known-safe SQL-fragment builders. A value bound from one of these (or from
