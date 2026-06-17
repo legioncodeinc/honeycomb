@@ -13,6 +13,11 @@ import { DAEMON_HOST, DAEMON_PORT, HONEYCOMB_VERSION } from "../shared/constants
 
 // DeepLake access path lives here (PRD-002). Do NOT add a DeepLake import in any
 // non-daemon package; harness/CLI/MCP bundles must stay DeepLake-free.
+//
+// PRD-002a: the storage adapter (DeepLake client/config/transport/result-union)
+// lives under ./storage and is re-exported ONLY from this daemon root, so the
+// DeepLake path is reachable solely inside the daemon bundle (a-AC-5).
+export * from "./storage/index.js";
 
 /** Static description of the daemon process, derived from shared constants. */
 export interface DaemonInfo {

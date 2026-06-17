@@ -35,21 +35,29 @@
     "lint": "biome check .",
     "format": "biome format --write .",
     "dup": "jscpd src harnesses mcp embeddings",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "audit:openclaw": "node scripts/audit-openclaw-bundle.mjs",
+    "audit:sql": "node scripts/audit-sql-safety.mjs",
     "pack:check": "node scripts/pack-check.mjs",
     "rebuild:native": "node scripts/ensure-tree-sitter.mjs",
-    "ci": "npm run typecheck && npm run dup",
+    "ci": "npm run typecheck && npm run dup && npm run test && npm run audit:sql",
     "postinstall": "node scripts/ensure-tree-sitter.mjs",
     "prepack": "npm run build"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.0",
     "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^3.2.6",
     "esbuild": "^0.28.1",
     "jscpd": "^4.0.5",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.6"
   },
   "engines": {
     "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
   }
 }
