@@ -1,6 +1,6 @@
 # PRD-003: Core Data Model
 
-> **Status:** Backlog
+> **Status:** In-Work
 > **Priority:** P0
 > **Effort:** L
 > **Schema changes:** Additive
