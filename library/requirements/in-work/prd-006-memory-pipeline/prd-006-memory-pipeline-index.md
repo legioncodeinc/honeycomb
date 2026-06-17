@@ -1,6 +1,6 @@
 # PRD-006: Memory Pipeline
 
-> **Status:** Backlog
+> **Status:** In-Work
 > **Priority:** P0
 > **Effort:** XL
 > **Schema changes:** Additive
