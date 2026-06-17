@@ -1,0 +1,19 @@
+{
+	"threshold": 7,
+	"reporters": ["console"],
+	"ignore": [
+		"**/node_modules/**",
+		"**/dist/**",
+		"**/bundle/**",
+		"**/coverage/**",
+		"**/jscpd-report/**",
+		"**/*.test.ts",
+		"**/tests/**",
+		"**/fixtures/**"
+	],
+	"absolute": false,
+	"gitignore": true,
+	"format": ["typescript"],
+	"minLines": 10,
+	"minTokens": 60
+}

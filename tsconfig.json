@@ -1,0 +1,30 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "Node16",
+		"moduleResolution": "Node16",
+		"lib": ["ES2022"],
+		"outDir": "./dist",
+		"rootDir": ".",
+		"strict": true,
+		"types": ["node"],
+		"esModuleInterop": true,
+		"skipLibCheck": true,
+		"forceConsistentCasingInFileNames": true,
+		"declaration": true,
+		"declarationMap": true,
+		"sourceMap": true,
+		"resolveJsonModule": true,
+		"baseUrl": ".",
+		"paths": {
+			"@honeycomb/shared": ["src/shared/index.ts"],
+			"@honeycomb/shared/*": ["src/shared/*"],
+			"@honeycomb/daemon-client": ["src/daemon-client/index.ts"],
+			"@honeycomb/daemon-client/*": ["src/daemon-client/*"],
+			"@honeycomb/daemon": ["src/daemon/index.ts"],
+			"@honeycomb/daemon/*": ["src/daemon/*"]
+		}
+	},
+	"include": ["src/**/*", "harnesses/**/*", "mcp/**/*", "embeddings/**/*"],
+	"exclude": ["node_modules", "dist", "**/bundle", "**/*.test.ts"]
+}

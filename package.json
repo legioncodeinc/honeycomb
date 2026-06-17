@@ -1,0 +1,55 @@
+{
+  "name": "honeycomb",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Honeycomb monorepo foundation: a long-lived daemon plus thin clients for six coding harnesses, the unified honeycomb CLI, the MCP server, and the embed daemon.",
+  "type": "module",
+  "//build-order": "Fixed dependency direction enforced by import direction under one tsc pass: (1) core = src/shared + src/daemon-client, (2) connector-base = src/daemon, (3) plugins/native = embeddings, (4) connectors = harnesses/* + mcp + src/cli, (5) assembled distribution = esbuild per-target bundles (PRD-001b). tsc compiles the whole graph in one pass; dependents never import upward, so the single tsc invocation respects this order. PRD-001b appends '&& node esbuild.config.mjs' to the build script; that seam is intentional.",
+  "bin": {
+    "honeycomb": "bundle/cli.js"
+  },
+  "files": [
+    "bundle",
+    "daemon",
+    "harnesses/claude-code/bundle",
+    "harnesses/claude-code/.claude-plugin",
+    "harnesses/codex/bundle",
+    "harnesses/codex/package.json",
+    "harnesses/cursor/bundle",
+    "harnesses/hermes/bundle",
+    "harnesses/pi/bundle",
+    "harnesses/openclaw/dist",
+    "harnesses/openclaw/openclaw.plugin.json",
+    "harnesses/openclaw/package.json",
+    "mcp/bundle",
+    "embeddings/embed-daemon.js",
+    ".claude-plugin",
+    "scripts/ensure-tree-sitter.mjs",
+    "README.md"
+  ],
+  "scripts": {
+    "prebuild": "node scripts/sync-versions.mjs",
+    "build": "tsc && node esbuild.config.mjs",
+    "bundle": "node esbuild.config.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "dup": "jscpd src harnesses mcp embeddings",
+    "audit:openclaw": "node scripts/audit-openclaw-bundle.mjs",
+    "pack:check": "node scripts/pack-check.mjs",
+    "rebuild:native": "node scripts/ensure-tree-sitter.mjs",
+    "ci": "npm run typecheck && npm run dup",
+    "postinstall": "node scripts/ensure-tree-sitter.mjs",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.0",
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.28.1",
+    "jscpd": "^4.0.5",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

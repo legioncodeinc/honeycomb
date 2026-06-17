@@ -1,0 +1,15 @@
+{
+  "name": "honeycomb",
+  "description": "Honeycomb — a long-lived daemon plus thin clients for six coding harnesses, the unified honeycomb CLI, the MCP server, and the embed daemon",
+  "version": "0.1.0",
+  "author": {
+    "name": "Honeycomb"
+  },
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "daemon",
+    "agent-memory",
+    "harness"
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "honeycomb-openclaw",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Honeycomb — persistent shared memory for AI agents, OpenClaw harness",
+  "license": "MIT",
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "install": {
+      "npmSpec": "honeycomb"
+    },
+    "compat": {
+      "pluginApi": ">=1.0.0"
+    }
+  },
+  "files": [
+    "dist",
+    "openclaw.plugin.json"
+  ]
+}
