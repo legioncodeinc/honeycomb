@@ -104,19 +104,39 @@ jobs:
       - name: Test
         run: npm run test
 
+  # ── Secret gate. ───────────────────────────────────────────────────────────
+  # The `secrets` context is NOT available in a job-level `if:`, so a tiny job
+  # reads the token in a `run` step (secrets ARE allowed in run/env) and emits a
+  # boolean the integration job keys off. On a fork or before the secret is set,
+  # the token is empty -> `has_token=false` -> integration is SKIPPED (not
+  # failed), so the initial green state holds.
+  gate:
+    name: Secret gate
+    runs-on: ubuntu-latest
+    outputs:
+      has_token: ${{ steps.check.outputs.has_token }}
+    steps:
+      - id: check
+        env:
+          TOKEN: ${{ secrets.HONEYCOMB_DEEPLAKE_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # ── OPT-IN live-DeepLake integration suite. ────────────────────────────────
   # Runs the real round-trips against a real DeepLake org — gated on the
-  # HONEYCOMB_DEEPLAKE_TOKEN secret being present. On a fork or before the secret
-  # is configured, `secrets.HONEYCOMB_DEEPLAKE_TOKEN` is empty and the whole job
-  # is SKIPPED (not failed), so the initial green state holds. The four
-  # HONEYCOMB_DEEPLAKE_* secrets are passed through `env:`; the suite reads them
-  # via the storage layer's env provider and writes only to a namespaced
-  # `honeycomb_ci` workspace with a per-run table prefix.
+  # HONEYCOMB_DEEPLAKE_TOKEN secret being present (via the `gate` job output).
+  # The four HONEYCOMB_DEEPLAKE_* secrets are passed through `env:`; the suite
+  # reads them via the storage layer's env provider and writes only to a
+  # namespaced `honeycomb_ci` workspace with a per-run table prefix.
   integration:
     name: Live DeepLake integration (gated)
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'push' && secrets.HONEYCOMB_DEEPLAKE_TOKEN != '' }}
-    needs: quality-gate
+    needs: [quality-gate, gate]
+    if: ${{ github.event_name == 'push' && needs.gate.outputs.has_token == 'true' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4.2.2
