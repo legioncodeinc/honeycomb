@@ -16,11 +16,19 @@ import { defineConfig } from "vitest/config";
  * resolution). Vite/Vitest resolves those `.js` specifiers to the `.ts` source
  * during test runs, so the test tree and the production build share one import
  * style with no duplicate extension-less variant.
+ *
+ * The OPT-IN live-DeepLake integration suite lives under `tests/integration`
+ * with an `.itest.ts` suffix and runs under `vitest.integration.config.ts` only
+ * (via `npm run test:integration`). It is kept out of this default run two ways:
+ * its `.itest.ts` suffix does not match the `*.test.ts` glob below, AND it is
+ * excluded explicitly. So `npm run test` / `npm run ci` never touch a live
+ * backend and the unit count stays stable.
  */
 export default defineConfig({
 	test: {
 		environment: "node",
 		include: ["tests/**/*.test.ts"],
+		exclude: ["tests/integration/**"],
 		coverage: {
 			provider: "v8",
 			include: ["src/**/*.ts"],

@@ -1,0 +1,161 @@
+name: CI
+
+# The quality gate on every push to main and every PR into main. It runs the
+# SAME recipe a developer runs locally — `npm run ci` (= typecheck + jscpd dup +
+# vitest + audit:sql) plus the build and publish-surface scanners (audit:openclaw,
+# pack:check) — so a green local gate predicts a green CI (ci-release-stinger
+# principle #4: local equals CI).
+#
+# The opt-in live-DeepLake integration job runs ONLY when the
+# HONEYCOMB_DEEPLAKE_TOKEN secret is configured; on a fork or before the secret
+# is set it is SKIPPED (not failed), so the initial state stays green.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel a superseded run on the same ref (a force-push or a new commit on a PR)
+# so CI minutes are not spent on a stale commit.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: the gate only reads the repo. No job here comments, pushes, or
+# publishes, so nothing needs write scope (ci-release-stinger principle #7).
+permissions:
+  contents: read
+
+jobs:
+  # ── The quality gate. Runs across the supported Node majors. ───────────────
+  # The matrix is the engine-compatibility canary: honeycomb is `engines.node
+  # >=22`, so the gate runs on 22.x (the floor) and 24.x (the next even/LTS-line
+  # major) to prove a clean install + the full gate works across the range, not
+  # just one pinned version. `npm ci` installs against the committed lockfile.
+  quality-gate:
+    name: Quality gate (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['22.x', '24.x']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+
+      - name: Setup Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      # `npm ci` runs the `postinstall` (ensure-tree-sitter) step. In this
+      # skeleton there are no tree-sitter deps, so the script logs and exits 0 —
+      # it cannot hard-fail a clean install. We deliberately do NOT set
+      # HONEYCOMB_STRICT_POSTINSTALL here: strict mode only turns a *heal miss*
+      # into a red check, and with no grammars there is nothing to heal yet.
+      - name: Install (npm ci)
+        run: npm ci
+
+      # `npm run ci` = typecheck && dup && test && audit:sql. Discrete from the
+      # build/audit steps below so a failure points at the exact gate stage.
+      - name: Quality gate (typecheck + dup + test + audit:sql)
+        run: npm run ci
+
+      # The build is `tsc && node esbuild.config.mjs` — both must run. The
+      # `prebuild` (sync-versions) runs first and keeps every manifest version
+      # single-sourced.
+      - name: Build (tsc + esbuild bundles)
+        run: npm run build
+
+      # Publish-surface scanners: replicate the ClawHub static scan over the
+      # OpenClaw bundle, then prove `npm pack`'s tarball carries no forbidden
+      # filenames (pack:check runs `prepack` → a fresh build first).
+      - name: Audit OpenClaw bundle (ClawHub rules)
+        run: npm run audit:openclaw
+
+      - name: Pack-check (tarball secret/forbidden-file scan)
+        run: npm run pack:check
+
+  # ── Windows smoke. The dev host is Windows and the build scripts
+  # (esbuild.config.mjs chmod, pack-check.mjs) have win32 branches that Linux CI
+  # would never exercise. One pinned Node major is enough here — the Node matrix
+  # lives on the Linux gate; this proves the win32 code paths build + test.
+  windows-smoke:
+    name: Windows smoke (build + test)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+
+      - name: Setup Node
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: '22.x'
+          cache: npm
+
+      - name: Install (npm ci)
+        run: npm ci
+
+      - name: Build (win32 paths)
+        run: npm run build
+
+      - name: Test
+        run: npm run test
+
+  # ── Secret gate. ───────────────────────────────────────────────────────────
+  # The `secrets` context is NOT available in a job-level `if:`, so a tiny job
+  # reads the token in a `run` step (secrets ARE allowed in run/env) and emits a
+  # boolean the integration job keys off. On a fork or before the secret is set,
+  # the token is empty -> `has_token=false` -> integration is SKIPPED (not
+  # failed), so the initial green state holds.
+  gate:
+    name: Secret gate
+    runs-on: ubuntu-latest
+    outputs:
+      has_token: ${{ steps.check.outputs.has_token }}
+    steps:
+      - id: check
+        env:
+          TOKEN: ${{ secrets.HONEYCOMB_DEEPLAKE_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── OPT-IN live-DeepLake integration suite. ────────────────────────────────
+  # Runs the real round-trips against a real DeepLake org — gated on the
+  # HONEYCOMB_DEEPLAKE_TOKEN secret being present (via the `gate` job output).
+  # The four HONEYCOMB_DEEPLAKE_* secrets are passed through `env:`; the suite
+  # reads them via the storage layer's env provider and writes only to a
+  # namespaced `honeycomb_ci` workspace with a per-run table prefix.
+  integration:
+    name: Live DeepLake integration (gated)
+    runs-on: ubuntu-latest
+    needs: [quality-gate, gate]
+    if: ${{ github.event_name == 'push' && needs.gate.outputs.has_token == 'true' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+
+      - name: Setup Node
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: '22.x'
+          cache: npm
+
+      - name: Install (npm ci)
+        run: npm ci
+
+      - name: Run live integration smoke
+        run: npm run test:integration
+        env:
+          HONEYCOMB_DEEPLAKE_ENDPOINT: ${{ secrets.HONEYCOMB_DEEPLAKE_ENDPOINT }}
+          HONEYCOMB_DEEPLAKE_TOKEN: ${{ secrets.HONEYCOMB_DEEPLAKE_TOKEN }}
+          HONEYCOMB_DEEPLAKE_ORG: ${{ secrets.HONEYCOMB_DEEPLAKE_ORG }}
+          HONEYCOMB_DEEPLAKE_WORKSPACE: ${{ secrets.HONEYCOMB_DEEPLAKE_WORKSPACE }}
+          # Stable per-run table prefix so two CI runs never collide.
+          HONEYCOMB_CI_RUN_ID: ${{ github.run_id }}
