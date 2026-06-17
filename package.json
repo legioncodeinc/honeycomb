@@ -37,6 +37,7 @@
     "dup": "jscpd src harnesses mcp embeddings",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
     "audit:openclaw": "node scripts/audit-openclaw-bundle.mjs",
     "audit:sql": "node scripts/audit-sql-safety.mjs",
     "pack:check": "node scripts/pack-check.mjs",
