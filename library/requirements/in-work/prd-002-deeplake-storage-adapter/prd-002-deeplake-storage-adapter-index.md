@@ -1,6 +1,6 @@
 # PRD-002: DeepLake Storage Adapter
 
-> **Status:** Backlog
+> **Status:** In-Work
 > **Priority:** P0
 > **Effort:** XL
 > **Schema changes:** Additive
