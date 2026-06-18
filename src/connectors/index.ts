@@ -28,6 +28,8 @@ export {
 
 export { ClaudeCodeConnector, type ClaudeCodeConnectorOptions } from "./claude-code.js";
 
+export { CursorConnector, type CursorConnectorOptions } from "./cursor.js";
+
 export {
 	connectorMain,
 	type ConnectorCommandDeps,
