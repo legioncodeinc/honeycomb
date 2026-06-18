@@ -16,7 +16,7 @@
 import { describe, expect, it } from "vitest";
 import { createStorageClient } from "../../../../src/daemon/storage/index.js";
 import { buildCreateTableSql, validateColumnDefs } from "../../../../src/daemon/storage/schema.js";
-import { appendOnlyInsert, updateOrInsertByKey, val } from "../../../../src/daemon/storage/writes.js";
+import { appendOnlyInsert, appendVersionBumped, updateOrInsertByKey, val } from "../../../../src/daemon/storage/writes.js";
 import { CATALOG, REGISTRY, healTargetFor } from "../../../../src/daemon/storage/catalog/index.js";
 import {
 	AGENT_READ_POLICIES,
@@ -115,25 +115,34 @@ describe("PRD-003e tenancy catalog", () => {
 		expect(sql).toMatch(/revoked = 0/);
 		expect(sql).not.toContain("sk-super-secret-key");
 
-		// Pattern and scope.
-		expect(CATALOG.find((t) => t.name === "api_keys")?.pattern).toBe("update-or-insert");
+		// Pattern and scope. api_keys is APPEND-ONLY VERSION-BUMPED (PRD-011d / d-AC-4):
+		// an in-place revoke UPDATE does not converge on this backend (a revoked key would
+		// still authenticate), so revocation APPENDs a new highest-version row with
+		// revoked=1 and the authenticator reads the highest version.
+		expect(CATALOG.find((t) => t.name === "api_keys")?.pattern).toBe("version-bumped");
 		expect(CATALOG.find((t) => t.name === "api_keys")?.scope).toBe("tenant");
+
+		// The version column is additive (heal-compatible) and BIGINT NOT NULL DEFAULT 0.
+		expect(colSql(API_KEYS_COLUMNS, "version")).toMatch(/BIGINT NOT NULL DEFAULT 0/);
 	});
 
 	// ── e-AC-3 ───────────────────────────────────────────────────────────────
-	it("e-AC-3 API key revoke advances revoked flag — row retained, no DELETE emitted", async () => {
+	it("e-AC-3 API key revoke advances revoked flag via an APPEND — prior row retained, no DELETE, no in-place UPDATE", async () => {
 		expect(KEY_LIVE).toBe(0);
 		expect(KEY_REVOKED).toBe(1);
 
 		// revoked is a BIGINT 0/1 (D-3), default 0 (live).
 		expect(colSql(API_KEYS_COLUMNS, "revoked")).toMatch(/BIGINT NOT NULL DEFAULT 0/);
 
-		// Revoke via UPDATE-or-INSERT: the row exists → UPDATE path sets revoked=1.
+		// Revoke is APPEND-ONLY VERSION-BUMPED (PRD-011d / d-AC-4): the bump primitive reads
+		// the current MAX(version) for the id, then INSERTs a NEW row at version N+1 carrying
+		// revoked=1. NEVER an in-place UPDATE (which does not converge live — a revoked key
+		// would still authenticate). The prior (live) version stays on disk for audit.
 		const fake = new FakeDeepLakeTransport();
-		fake.enqueueRows([{ id: "key-1" }]); // SELECT probe → row exists
-		fake.enqueueRows([]); // UPDATE ok
+		fake.enqueueRows([{ version: 1 }]); // MAX(version) read → current highest is 1
+		fake.enqueueRows([]); // INSERT (the appended v2 revoked row) ok
 
-		const res = await updateOrInsertByKey(client(fake), healTargetFor("api_keys"), SCOPE, {
+		const { result, version } = await appendVersionBumped(client(fake), healTargetFor("api_keys"), SCOPE, {
 			keyColumn: "id",
 			keyValue: "key-1",
 			row: [
@@ -141,16 +150,20 @@ describe("PRD-003e tenancy catalog", () => {
 				["revoked", val.num(KEY_REVOKED)],
 			],
 		});
-		expect(res.kind).toBe("ok");
+		expect(result.kind).toBe("ok");
+		expect(version).toBe(2); // the revoked row is the new HIGHEST version.
 
-		// The UPDATE was emitted with revoked=1.
-		const updateSql = fake.requests.find((r) => /^UPDATE/.test(r.sql))?.sql ?? "";
-		expect(updateSql).toMatch(/revoked = 1/);
+		// Revocation is an APPEND (INSERT), carrying revoked=1 at the bumped version.
+		const insertSql = fake.requests.find((r) => /^INSERT INTO "api_keys"/.test(r.sql))?.sql ?? "";
+		expect(insertSql).toMatch(/revoked.*1/);
+		expect(insertSql).toMatch(/version/);
 
-		// No DELETE was ever emitted.
+		// No in-place UPDATE and no DELETE were ever emitted — the prior version is retained.
+		expect(fake.requests.every((r) => !/^UPDATE/.test(r.sql))).toBe(true);
 		expect(fake.requests.every((r) => !/^DELETE/.test(r.sql))).toBe(true);
 
-		// buildRevokeApiKeySql helper also emits an UPDATE (not DELETE).
+		// The retired buildRevokeApiKeySql helper still emits the legacy UPDATE shape (no
+		// DELETE), but it is RETIRED — no live path calls it; revocation now APPENDs (above).
 		const revokeSql = buildRevokeApiKeySql("key-2");
 		expect(revokeSql).toMatch(/^UPDATE "api_keys"/);
 		expect(revokeSql).toMatch(/revoked = 1/);
@@ -347,7 +360,9 @@ describe("PRD-003e tenancy catalog", () => {
 			return [];
 		});
 
-		const res = await updateOrInsertByKey(client(fake), healTargetFor("api_keys"), SCOPE, {
+		// api_keys is APPEND-ONLY VERSION-BUMPED (PRD-011d / d-AC-4): the first write goes
+		// through appendVersionBumped (MAX(version) read → INSERT v1), which is heal-aware.
+		const { result } = await appendVersionBumped(client(fake), healTargetFor("api_keys"), SCOPE, {
 			keyColumn: "id",
 			keyValue: "key-first",
 			row: [
@@ -356,7 +371,7 @@ describe("PRD-003e tenancy catalog", () => {
 				["role", val.str("connector")],
 			],
 		});
-		expect(res.kind).toBe("ok");
+		expect(result.kind).toBe("ok");
 		expect(seen.some((s) => /CREATE TABLE IF NOT EXISTS "api_keys"/.test(s))).toBe(true);
 		expect(seen.filter((s) => /^INSERT/.test(s)).length).toBe(2);
 	});
@@ -395,11 +410,13 @@ describe("PRD-003e tenancy catalog", () => {
 
 	// ── Registry wiring ──────────────────────────────────────────────────────
 	it("registry: all 5 tenancy tables are wired with the correct pattern and appear in CATALOG", () => {
-		// agents and api_keys → update-or-insert
+		// agents → update-or-insert
 		expect(REGISTRY.patternFor("agents")).toBe("update-or-insert");
 		expect(REGISTRY.primitiveFor("agents")).toBe("updateOrInsertByKey");
-		expect(REGISTRY.patternFor("api_keys")).toBe("update-or-insert");
-		expect(REGISTRY.primitiveFor("api_keys")).toBe("updateOrInsertByKey");
+		// api_keys → version-bumped (PRD-011d / d-AC-4): create → v1, revoke → v+1, never an
+		// in-place UPDATE (which does not converge live — a revoked key would still authenticate).
+		expect(REGISTRY.patternFor("api_keys")).toBe("version-bumped");
+		expect(REGISTRY.primitiveFor("api_keys")).toBe("appendVersionBumped");
 
 		// telemetry tables → append-only
 		expect(REGISTRY.patternFor("telemetry_counters")).toBe("append-only");

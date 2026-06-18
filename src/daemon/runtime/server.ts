@@ -22,12 +22,20 @@
  */
 
 import { Hono } from "hono";
+import type { MiddlewareHandler } from "hono";
 import { HONEYCOMB_VERSION } from "../../shared/constants.js";
 import { CATALOG } from "../storage/catalog/index.js";
 import type { StorageQuery } from "../storage/client.js";
 import { type DeploymentMode, type RuntimeConfig, resolveRuntimeConfig } from "./config.js";
 import { createRequestLogger, type RequestLogger } from "./logger.js";
-import { type PermissionCheck, defaultDenyPermissionCheck, permissionMiddleware } from "./middleware/permission.js";
+import {
+	type PermissionCheck,
+	type PermissionMiddlewareOptions,
+	defaultDenyPermissionCheck,
+	legacyPermissionCheckAdapter,
+	permissionMiddleware,
+} from "./middleware/permission.js";
+import { type AuthorizationPolicy, type Authenticator } from "./auth/contracts.js";
 import {
 	type RuntimePathService,
 	noopRuntimePathService,
@@ -117,8 +125,27 @@ export interface CreateDaemonOptions {
 	 * /api/status omits the live probe.
 	 */
 	readonly storage?: StorageQuery;
-	/** The pluggable permission policy (default: default-deny). */
+	/**
+	 * The LEGACY 004a pluggable permission check (default: default-deny). When
+	 * supplied, the daemon mounts the legacy header-resolved adapter for the 004a
+	 * compatibility surface (the 004a server tests inject this). New (PRD-011) code
+	 * injects `authenticator` + `policy` instead — see below.
+	 *
+	 * @deprecated Prefer `authenticator` + `policy` (PRD-011). A header-resolved role
+	 * is a privilege-escalation bypass; this only exists for 004a compatibility.
+	 */
 	readonly permissionCheck?: PermissionCheck;
+	/**
+	 * The PRD-011 authenticator (011b token + 011d api-key, composed at assembly).
+	 * Default fail-closed: always-unauthenticated → every team/hybrid request is 401.
+	 * Ignored when the legacy `permissionCheck` is supplied (the 004a path).
+	 */
+	readonly authenticator?: Authenticator;
+	/**
+	 * The PRD-011 RBAC policy (011c). Default fail-closed: default-deny → an
+	 * authenticated caller is still 403. Ignored when `permissionCheck` is supplied.
+	 */
+	readonly policy?: AuthorizationPolicy;
 	/** The request logger (default: stderr JSON-lines + ring buffer). */
 	readonly logger?: RequestLogger;
 	/** Wave-2 services. Each defaults to its no-op stub. */
@@ -172,7 +199,6 @@ type PipelineStatus = "ok" | "degraded" | "unconfigured";
 export function createDaemon(options: CreateDaemonOptions = {}): Daemon {
 	const config = options.config ?? resolveRuntimeConfig();
 	const logger = options.logger ?? createRequestLogger();
-	const permissionCheck = options.permissionCheck ?? defaultDenyPermissionCheck;
 	const services: DaemonServices = {
 		queue: options.services?.queue ?? noopJobQueueService,
 		watcher: options.services?.watcher ?? noopFileWatcherService,
@@ -185,6 +211,21 @@ export function createDaemon(options: CreateDaemonOptions = {}): Daemon {
 	// The mode is read through a thunk so every mounted middleware reflects the
 	// daemon's mode without re-binding (and tests build daemons in each mode).
 	const getMode = (): DeploymentMode => config.mode;
+
+	// Permission posture: when the LEGACY 004a `permissionCheck` is supplied, mount the
+	// header-resolved legacy adapter (the 004a compatibility surface its tests cover).
+	// Otherwise mount the PRD-011 auth gate with the injected `authenticator` + `policy`,
+	// both defaulting fail-closed (always-unauthenticated → 401, default-deny → 403).
+	const legacyCheck = options.permissionCheck;
+	const useLegacy = legacyCheck !== undefined;
+	const permissionOptions: PermissionMiddlewareOptions = {
+		...(options.authenticator !== undefined ? { authenticator: options.authenticator } : {}),
+		...(options.policy !== undefined ? { policy: options.policy } : {}),
+	};
+	const mountPermission = (groupPath: string): MiddlewareHandler =>
+		useLegacy
+			? legacyPermissionCheckAdapter(groupPath, getMode, legacyCheck ?? defaultDenyPermissionCheck)
+			: permissionMiddleware(groupPath, getMode, permissionOptions);
 
 	const app = new Hono();
 
@@ -236,7 +277,7 @@ export function createDaemon(options: CreateDaemonOptions = {}): Daemon {
 			if (spec.session) {
 				app.use(mwPattern, runtimePathMiddleware(services.runtimePath, getMode));
 			}
-			app.use(mwPattern, permissionMiddleware(spec.path, getMode, permissionCheck));
+			app.use(mwPattern, mountPermission(spec.path));
 		}
 		// A basePath router bound to the root app: a later module attaches handlers
 		// to it (e.g. `daemon.group("/api/memories").get("/:id", h)`) and they
