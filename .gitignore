@@ -110,3 +110,9 @@ otherhive-v1/
 
 .cursor/
 .claude/
+
+# Stryker mutation-testing artifacts (npm run mutation): per-run sandboxes and
+# the JSON/HTML reports. The stryker/ configs ARE committed; their outputs are not.
+.stryker-tmp*/
+/reports/mutation/
+stryker.log
