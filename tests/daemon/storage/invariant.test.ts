@@ -20,8 +20,27 @@ import { describe, expect, it } from "vitest";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 
-/** Source roots that must stay DeepLake-free (everything but src/daemon). */
-const NON_DAEMON_ROOTS = ["src/cli", "src/daemon-client", "src/shared", "mcp", "harnesses", "embeddings"];
+/**
+ * Source roots that must stay DeepLake-free (everything but src/daemon).
+ *
+ * PRD-019 (D-2) adds the three new thin-client surfaces — `src/connectors`
+ * (019a install-time connectors), `src/hooks` (019b shared core + 019c per-harness
+ * shims), and `src/sdk` (019e fetch-only client). Each reaches the daemon ONLY
+ * through an injected HTTP/dispatch seam and imports nothing from `daemon/storage`
+ * except the pure `sql.js` helpers, so it belongs in this scan alongside the
+ * existing non-daemon roots.
+ */
+const NON_DAEMON_ROOTS = [
+	"src/cli",
+	"src/daemon-client",
+	"src/shared",
+	"src/connectors",
+	"src/hooks",
+	"src/sdk",
+	"mcp",
+	"harnesses",
+	"embeddings",
+];
 
 /** Recursively collect `.ts` files (skipping bundles/dist/node_modules). */
 function collectTs(dir: string, out: string[]): void {

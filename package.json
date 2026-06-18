@@ -8,8 +8,16 @@
   "bin": {
     "honeycomb": "bundle/cli.js"
   },
+  "//exports": "PRD-019e: @honeycomb/sdk subpath exports. The core entry (.) is the fetch-only, browser-safe HoneycombClient; the three framework helpers ship as separate entry points reusing the core's token/actor model. react + ai are peerDependencies (never bundled into core).",
+  "exports": {
+    ".": "./sdk/index.js",
+    "./react": "./sdk/react.js",
+    "./vercel": "./sdk/vercel.js",
+    "./openai": "./sdk/openai.js"
+  },
   "files": [
     "bundle",
+    "sdk",
     "daemon",
     "harnesses/claude-code/bundle",
     "harnesses/claude-code/.claude-plugin",
@@ -58,8 +66,18 @@
   "engines": {
     "node": ">=22.0.0"
   },
+  "//peerDependencies": "PRD-019e: react powers @honeycomb/sdk/react; ai powers @honeycomb/sdk/vercel. Both are OPTIONAL peers (peerDependenciesMeta) so the core entry stays dependency-free for Node/Bun/browser. The core client (.) pulls in NEITHER.",
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "ai": ">=3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": { "optional": true },
+    "ai": { "optional": true }
+  },
   "dependencies": {
     "@hono/node-server": "^1.19.14",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@noble/ciphers": "^2.2.0",
     "hono": "^4.12.25",
     "tree-sitter-wasms": "^0.1.13",
