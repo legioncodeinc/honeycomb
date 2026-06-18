@@ -60,6 +60,7 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.19.14",
+    "@noble/ciphers": "^2.2.0",
     "hono": "^4.12.25",
     "yaml": "^2.9.0",
     "zod": "^4.4.3"
