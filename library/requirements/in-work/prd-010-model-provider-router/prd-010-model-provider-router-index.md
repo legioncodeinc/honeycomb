@@ -1,6 +1,6 @@
 # PRD-010: Model and Provider Router
 
-> **Status:** Backlog
+> **Status:** In-Work
 > **Priority:** P1
 > **Effort:** L
 > **Schema changes:** Additive
