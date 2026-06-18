@@ -64,6 +64,10 @@ export const MEMORY_COLUMNS = Object.freeze([
 	{ name: "filename", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "summary", sql: "TEXT NOT NULL DEFAULT ''" },
 	embeddingColumn("summary_embedding"),
+	// PRD-017: a short excerpt of the summary body. Also load-bearing for the
+	// wiki summary worker's in-progress placeholder marker (description='in progress')
+	// so a stranded placeholder can be targeted for removal. Additive, heal-compatible.
+	{ name: "description", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "author", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "mime_type", sql: "TEXT NOT NULL DEFAULT 'text/plain'" },
 	{ name: "project", sql: "TEXT NOT NULL DEFAULT ''" },
