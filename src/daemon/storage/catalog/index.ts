@@ -29,6 +29,7 @@ import { buildRegistry, type CatalogRegistry } from "./registry.js";
 import { ROUTING_HISTORY_TABLES } from "./routing-history.js"; // PRD-010 (routing-decision telemetry)
 import { RUNTIME_JOBS_TABLES } from "./runtime-jobs.js"; // PRD-004b (durable job queue)
 import { SESSIONS_SUMMARIES_TABLES } from "./sessions-summaries.js"; // PRD-003c (implemented)
+import { SOURCES_TABLES } from "./sources.js"; // PRD-013a (source-artifact + document tables)
 import { TENANCY_TABLES } from "./tenancy.js"; // PRD-003e (stub)
 import { type CatalogTable } from "./types.js";
 
@@ -46,6 +47,7 @@ export const CATALOG: readonly CatalogTable[] = Object.freeze([
 	...RUNTIME_JOBS_TABLES,
 	...DREAMING_STATE_TABLES,
 	...ROUTING_HISTORY_TABLES,
+	...SOURCES_TABLES,
 ]);
 
 /** The write-pattern registry over the whole catalog (table → pattern → primitive). */
@@ -114,3 +116,19 @@ export {
 export { TENANCY_TABLES } from "./tenancy.js";
 export { DREAMING_STATE_COLUMNS, DREAMING_STATE_TABLE, DREAMING_STATE_TABLES } from "./dreaming-state.js";
 export { ROUTING_HISTORY_COLUMNS, ROUTING_HISTORY_TABLE, ROUTING_HISTORY_TABLES } from "./routing-history.js";
+export {
+	ARTIFACT_ACTIVE,
+	ARTIFACT_DELETED,
+	ARTIFACT_FAILURE,
+	ARTIFACT_STATUSES,
+	ARTIFACT_SUPERSEDED,
+	type ArtifactStatus,
+	DOCUMENT_CHUNK_COLUMNS,
+	DOCUMENT_CHUNK_TABLE,
+	DOCUMENT_MEMORIES_COLUMNS,
+	DOCUMENT_MEMORIES_TABLE,
+	MEMORY_ARTIFACTS_COLUMNS,
+	MEMORY_ARTIFACTS_TABLE,
+	PROVENANCE_COLUMNS,
+	SOURCES_TABLES,
+} from "./sources.js";
