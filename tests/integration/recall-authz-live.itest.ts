@@ -98,6 +98,49 @@ function repoint(sql: string): string {
 	return sql.replace('FROM "memories"', `FROM "${sqlIdent(CI_TABLE)}"`);
 }
 
+/**
+ * How many times the authorization re-query is polled, unioning the ids it observes.
+ * WHY (and why this is NOT a security crutch): this backend serves a bare scan from
+ * segments of differing freshness that flap NON-MONOTONICALLY, so a SINGLE immediate
+ * re-query of just-seeded rows can return a STALE subset (live evidence: agent A owns
+ * two durable rows but one immediate read returned only `[a2]` — the failure that kept
+ * main's gated integration job red across PR #9/#10/#11). This is the same fact behind
+ * `graph-persist-live.itest.ts`'s `scanDistinct` and `services/job-queue.ts`'s polled
+ * `discoverIds`. A scan can MISS a row on a stale segment but NEVER INVENTS one, so
+ * unioning across polls converges UP to the durable truth — it can only turn a
+ * false-absent into a true-present. Crucially the union stays STRICT for the boundary:
+ * the authorization clause can only ever return rows that satisfy it, so a cross-agent
+ * or archived leak on ANY poll would land in the union and fail the exclusion asserts.
+ * Convergence makes the exact-set assertion MEANINGFUL rather than flaky; it does not
+ * weaken it.
+ */
+const SCAN_POLLS = 20;
+
+/**
+ * Poll an authorization re-query {@link SCAN_POLLS} times and return the UNION of the
+ * ids observed. Also asserts IDs-only (no `content` column) on EVERY observed row, so
+ * the "content never loads pre-authorization" guarantee is checked on every poll.
+ */
+async function pollAuthorizedIds(
+	storage: StorageClient,
+	sql: string,
+	scope: { org: string; workspace: string },
+): Promise<Set<string>> {
+	const seen = new Set<string>();
+	for (let poll = 0; poll < SCAN_POLLS; poll++) {
+		const res = await storage.query(sql, scope);
+		expect(res.kind, `authz re-query must succeed: ${describeResult(res)}`).toBe("ok");
+		if (isOk(res)) {
+			for (const row of res.rows) {
+				// IDs only — no content column may come back from an authorization read.
+				expect(row.content).toBeUndefined();
+				seen.add(String(row.id));
+			}
+		}
+	}
+	return seen;
+}
+
 describe.skipIf(!HAS_TOKEN)("live recall-authorization smoke (opt-in, real backend)", () => {
 	let storage: StorageClient;
 	let org: string;
@@ -160,22 +203,18 @@ describe.skipIf(!HAS_TOKEN)("live recall-authorization smoke (opt-in, real backe
 			buildAuthorizationSql({ candidateIds, clause, filters: undefined }) ?? "",
 		);
 		expect(sql).not.toBe("");
-		const res = await storage.query(sql, scope);
-		expect(res.kind, `authz re-query must succeed: ${describeResult(res)}`).toBe("ok");
 
-		if (isOk(res)) {
-			const ids = res.rows.map((r) => String(r.id)).sort();
-			// Only agent A's own LIVE rows survive.
-			expect(ids).toEqual([ID_A_1, ID_A_2].sort());
-			// Agent B's row is EXCLUDED — the isolated boundary does not leak cross-agent.
-			expect(ids).not.toContain(ID_B_1);
-			// The archived row of agent A is EXCLUDED (is_deleted = 0 conjunct).
-			expect(ids).not.toContain(ID_A_ARCHIVED);
-			// IDs only — no content column came back.
-			for (const row of res.rows) {
-				expect(row.content).toBeUndefined();
-			}
-		}
+		// Poll-union the re-query: converges UP to agent A's two durable rows while the
+		// authorization clause keeps the set STRICT (B's row + the archived row can never
+		// satisfy it, so they can never enter the union).
+		const seen = await pollAuthorizedIds(storage, sql, scope);
+		const ids = [...seen].sort();
+		// Only agent A's own LIVE rows survive.
+		expect(ids).toEqual([ID_A_1, ID_A_2].sort());
+		// Agent B's row is EXCLUDED — the isolated boundary does not leak cross-agent.
+		expect(seen.has(ID_B_1)).toBe(false);
+		// The archived row of agent A is EXCLUDED (is_deleted = 0 conjunct).
+		expect(seen.has(ID_A_ARCHIVED)).toBe(false);
 	});
 
 	it("a different agent B re-query returns ONLY agent B's row, never agent A's", async () => {
@@ -183,13 +222,9 @@ describe.skipIf(!HAS_TOKEN)("live recall-authorization smoke (opt-in, real backe
 		const candidateIds = [ID_A_1, ID_A_2, ID_B_1];
 		const clause = buildScopeClause({ agentId: AGENT_B, readPolicy: "isolated", org, workspace });
 		const sql = repoint(buildAuthorizationSql({ candidateIds, clause, filters: undefined }) ?? "");
-		const res = await storage.query(sql, scope);
-		expect(res.kind, `authz re-query must succeed: ${describeResult(res)}`).toBe("ok");
-		if (isOk(res)) {
-			const ids = res.rows.map((r) => String(r.id));
-			expect(ids).toEqual([ID_B_1]);
-			expect(ids).not.toContain(ID_A_1);
-			expect(ids).not.toContain(ID_A_2);
-		}
+		const seen = await pollAuthorizedIds(storage, sql, scope);
+		expect([...seen]).toEqual([ID_B_1]);
+		expect(seen.has(ID_A_1)).toBe(false);
+		expect(seen.has(ID_A_2)).toBe(false);
 	});
 });
