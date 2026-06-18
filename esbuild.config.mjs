@@ -39,20 +39,21 @@ const HONEYCOMB_VERSION = JSON.parse(readFileSync("package.json", "utf-8")).vers
 
 const VERSION_DEFINE = { __HONEYCOMB_VERSION__: JSON.stringify(HONEYCOMB_VERSION) };
 
-// Native modules that ship .node prebuilds esbuild cannot bundle. tree-sitter
-// + its grammars (FR-2) plus the compression/inference native stack. Resolved
-// from node_modules at runtime.
+// The tree-sitter parser stack (PRD-014 codebase graph, D-1). RESOLVED to
+// `web-tree-sitter` (WASM) over native `tree-sitter` + `tree-sitter-<lang>`
+// modules: WASM is deterministic, needs NO native compile/postinstall, and keeps
+// the cross-platform CI matrix (ubuntu Node 22/24 + windows-smoke) green. The
+// per-language grammars ship as prebuilt `.wasm` in `tree-sitter-wasms` and are
+// loaded at runtime via `Language.load(<path>.wasm)` from the resolved
+// node_modules path — they are DATA, not importable modules, so esbuild never
+// tries to bundle them. `web-tree-sitter` itself loads its own `tree-sitter.wasm`
+// emscripten runtime relative to its package dir at runtime, so it must stay
+// external (esbuild cannot inline the sibling `.wasm` it `fs.readFileSync`s).
+// `tree-sitter-wasms` is external too: it is consumed only as a require.resolve()
+// anchor to locate the `out/*.wasm` grammar directory, never imported for code.
 const TREE_SITTER_EXTERNAL = [
-  "tree-sitter",
-  "tree-sitter-typescript",
-  "tree-sitter-javascript",
-  "tree-sitter-python",
-  "tree-sitter-go",
-  "tree-sitter-rust",
-  "tree-sitter-java",
-  "tree-sitter-ruby",
-  "tree-sitter-c",
-  "tree-sitter-cpp",
+  "web-tree-sitter",
+  "tree-sitter-wasms",
 ];
 
 const NATIVE_COMPRESSION_EXTERNAL = ["node-liblzma", "@mongodb-js/zstd"];
