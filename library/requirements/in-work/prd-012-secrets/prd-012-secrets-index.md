@@ -1,6 +1,6 @@
 # PRD-012: Secrets
 
-> **Status:** Backlog
+> **Status:** In-Work
 > **Priority:** P1
 > **Effort:** M
 > **Schema changes:** None
