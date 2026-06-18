@@ -1,6 +1,6 @@
 # PRD-007: Retrieval
 
-> **Status:** Backlog
+> **Status:** In-Work
 > **Priority:** P0
 > **Effort:** XL
 > **Schema changes:** None
