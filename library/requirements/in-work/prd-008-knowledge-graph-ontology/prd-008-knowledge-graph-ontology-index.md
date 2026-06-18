@@ -1,6 +1,6 @@
 # PRD-008: Knowledge Graph and Ontology
 
-> **Status:** Backlog
+> **Status:** In-Work
 > **Priority:** P1
 > **Effort:** L
 > **Schema changes:** Additive
