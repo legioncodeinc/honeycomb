@@ -26,6 +26,7 @@ import { KNOWLEDGE_GRAPH_TABLES } from "./knowledge-graph.js"; // PRD-003b (stub
 import { MEMORIES_TABLES } from "./memories.js"; // PRD-003a (implemented)
 import { PRODUCT_TABLES } from "./product.js"; // PRD-003d (stub)
 import { buildRegistry, type CatalogRegistry } from "./registry.js";
+import { ROUTING_HISTORY_TABLES } from "./routing-history.js"; // PRD-010 (routing-decision telemetry)
 import { RUNTIME_JOBS_TABLES } from "./runtime-jobs.js"; // PRD-004b (durable job queue)
 import { SESSIONS_SUMMARIES_TABLES } from "./sessions-summaries.js"; // PRD-003c (implemented)
 import { TENANCY_TABLES } from "./tenancy.js"; // PRD-003e (stub)
@@ -44,6 +45,7 @@ export const CATALOG: readonly CatalogTable[] = Object.freeze([
 	...TENANCY_TABLES,
 	...RUNTIME_JOBS_TABLES,
 	...DREAMING_STATE_TABLES,
+	...ROUTING_HISTORY_TABLES,
 ]);
 
 /** The write-pattern registry over the whole catalog (table → pattern → primitive). */
@@ -111,3 +113,4 @@ export {
 } from "./runtime-jobs.js";
 export { TENANCY_TABLES } from "./tenancy.js";
 export { DREAMING_STATE_COLUMNS, DREAMING_STATE_TABLE, DREAMING_STATE_TABLES } from "./dreaming-state.js";
+export { ROUTING_HISTORY_COLUMNS, ROUTING_HISTORY_TABLE, ROUTING_HISTORY_TABLES } from "./routing-history.js";
