@@ -52,6 +52,33 @@ export const CLAIM_SUPERSEDED = "superseded" as const;
 export const RELATED_TO = "related_to" as const;
 
 /**
+ * PRD-013a — the source-provenance quartet ADDED ADDITIVELY to the source-derived
+ * graph rows so a graph row a source produced is purgeable by `source_id`
+ * (013a-AC-3 / a-AC-2). These columns mirror `catalog/sources.ts`'s
+ * `PROVENANCE_COLUMNS` (kept inline here to avoid a catalog↔catalog import cycle;
+ * the shapes are identical by contract). Each is `TEXT NOT NULL DEFAULT ''`, so the
+ * 002c heal pass `ALTER TABLE ADD COLUMN … NOT NULL` BACKFILLS cleanly on the
+ * already-populated graph tables and a pre-013 row reads `''` (no source — never
+ * swept by a source purge). `entities` already carried `source_id` + `source_type`
+ * from 008; the quartet adds the missing `source_kind`/`source_path`/`source_root`
+ * there and the full quartet on the other source-derived tables.
+ */
+export const GRAPH_SOURCE_PROVENANCE_COLUMNS = Object.freeze([
+	{ name: "source_kind", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "source_path", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "source_root", sql: "TEXT NOT NULL DEFAULT ''" },
+]);
+
+/**
+ * The full provenance quartet for a source-derived graph table that did NOT
+ * already carry `source_id` (everything except `entities`, which has it from 008).
+ */
+export const GRAPH_SOURCE_PROVENANCE_QUARTET = Object.freeze([
+	{ name: "source_id", sql: "TEXT NOT NULL DEFAULT ''" },
+	...GRAPH_SOURCE_PROVENANCE_COLUMNS,
+]);
+
+/**
  * `entities` — canonical graph nodes (FR-1). UPDATE-or-INSERT by `id` (the entity
  * identity). Carries `name`/`type`, optional `source_id`/`source_type`
  * provenance, and the engine scope columns. No embedding column (entity recall
@@ -66,6 +93,9 @@ export const ENTITIES_COLUMNS = Object.freeze([
 	{ name: "type", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "source_id", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "source_type", sql: "TEXT NOT NULL DEFAULT ''" },
+	// PRD-013a provenance quartet (additive; `source_id` already above) — a
+	// source-mounted entity is purgeable by `source_id` (a-AC-2 / a-AC-3).
+	...GRAPH_SOURCE_PROVENANCE_COLUMNS,
 	{ name: "agent_id", sql: "TEXT NOT NULL DEFAULT 'default'" },
 	{ name: "visibility", sql: "TEXT NOT NULL DEFAULT 'global'" },
 	{ name: "created_at", sql: "TEXT NOT NULL DEFAULT ''" },
@@ -117,6 +147,9 @@ export const ENTITY_ATTRIBUTES_COLUMNS = Object.freeze([
 	{ name: "group_key", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "version", sql: "BIGINT NOT NULL DEFAULT 1" },
 	{ name: "visibility", sql: "TEXT NOT NULL DEFAULT 'global'" },
+	// PRD-013a provenance quartet (additive) — a source-derived claim is purgeable
+	// by `source_id` (a-AC-2 / a-AC-3).
+	...GRAPH_SOURCE_PROVENANCE_QUARTET,
 	embeddingColumn("content_embedding"),
 	{ name: "created_at", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "updated_at", sql: "TEXT NOT NULL DEFAULT ''" },
@@ -143,6 +176,9 @@ export const ENTITY_DEPENDENCIES_COLUMNS = Object.freeze([
 	{ name: "reason", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "agent_id", sql: "TEXT NOT NULL DEFAULT 'default'" },
 	{ name: "visibility", sql: "TEXT NOT NULL DEFAULT 'global'" },
+	// PRD-013a provenance quartet (additive) — a source-mounted edge is purgeable
+	// by `source_id` (a-AC-2 / a-AC-3).
+	...GRAPH_SOURCE_PROVENANCE_QUARTET,
 	{ name: "created_at", sql: "TEXT NOT NULL DEFAULT ''" },
 ]);
 
@@ -160,6 +196,9 @@ export const MEMORY_ENTITY_MENTIONS_COLUMNS = Object.freeze([
 	{ name: "score", sql: "FLOAT4 NOT NULL DEFAULT 0.0" },
 	{ name: "agent_id", sql: "TEXT NOT NULL DEFAULT 'default'" },
 	{ name: "visibility", sql: "TEXT NOT NULL DEFAULT 'global'" },
+	// PRD-013a provenance quartet (additive) — a source-derived mention is purgeable
+	// by `source_id` (a-AC-2 / a-AC-3).
+	...GRAPH_SOURCE_PROVENANCE_QUARTET,
 	{ name: "created_at", sql: "TEXT NOT NULL DEFAULT ''" },
 ]);
 
