@@ -1,6 +1,6 @@
 # PRD-017: Wiki Summaries
 
-> **Status:** Backlog
+> **Status:** In-Work
 > **Priority:** P1
 > **Effort:** M
 > **Schema changes:** Additive
