@@ -176,7 +176,24 @@ export interface Skill {
 	readonly install: SkillInstall;
 	/** The provenance (sessions / version / createdBy / scope). */
 	readonly provenance: SkillProvenance;
+	/**
+	 * The recorded contributor list (PRD-018a a-AC-4 / FR-8). Absent on a plain KEEP (the
+	 * row's `contributors` then defaults to just the author). On a CROSS-author MERGE it
+	 * carries the `skillopt` lineage marker ({@link SKILLOPT_CONTRIBUTOR}) + the ORIGINAL
+	 * author, so a later pull surfaces that a machine merge co-owned the skill — distinct
+	 * from a human contributor. The writer (`contributorsFor`) honors this when present.
+	 */
+	readonly contributors?: readonly string[];
 }
+
+/**
+ * The lineage marker stamped into a cross-author merge's `contributors` (PRD-018a a-AC-4 /
+ * FR-8). It distinguishes a MACHINE merge (the skillify gate folded one author's skill into
+ * another's) from a human contributor, so the provenance is honest about how co-ownership
+ * arose. A row carrying `skillopt` was merged across authors; the original author rides
+ * alongside it.
+ */
+export const SKILLOPT_CONTRIBUTOR = "skillopt" as const;
 
 /**
  * Derive a skill's stable LOGICAL id from its name + author (the version-chain key,

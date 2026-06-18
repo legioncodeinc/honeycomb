@@ -22,7 +22,26 @@
  *
  * What is OK to import (pure, storage-free): nothing under `daemon/storage` except the
  * pure `sql.ts` helpers (the SQL-injection floor) — the same exemption the VFS uses.
+ *
+ * ── PRD-018 extends this surface (no removals) ──────────────────────────────
+ * 018 hardens the COLLAB half into a real team-sharing pipeline. It adds (below):
+ *   - the `me`/`team` {@link SkillScope} + `project`/`global` {@link SkillInstall}
+ *     re-exports (so the thin-client side shares one source with the daemon contracts);
+ *   - the {@link TrustedTableList} seam (018b trusted-table early-exit, b-AC-2);
+ *   - {@link PullManifestStore} + {@link PullManifestEntry} (018b manifest, b-AC tracking);
+ *   - {@link PullAction} + {@link DecideActionInput} (018b `decideAction` policy).
  */
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SkillScope / SkillInstall — the me/team + project/global axes (PRD-018a).
+// One source for both the thin-client config (config.ts) and the pull engine.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A skill's sharing scope (PRD-018a). `me` = private; `team` = co-owned. */
+export type SkillScope = "me" | "team";
+
+/** Where a SKILL.md lands (PRD-018a). `project` = cwd `.claude/skills`; `global` = home. */
+export type SkillInstall = "project" | "global";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PulledSkill — the highest-version skill row a pull writes (mirrors `skills`).
@@ -42,7 +61,12 @@
 export interface PulledSkill {
 	/** The skill's logical name (the `<name>` half of the canonical dir). */
 	readonly name: string;
-	/** The author/agent that mined it (the `--<author>` half of the canonical dir). */
+	/**
+	 * The author/agent that mined it (the `--<author>` half of the canonical dir). An
+	 * EMPTY author is the local-mined-slot sentinel: a remote skill with `author === ""`
+	 * is SKIPPED on pull (PRD-018b b-AC-5 / FR-7), because writing it to `<root>/<name>/`
+	 * would clobber the user's own locally-mined `<name>/` slot and break coexistence.
+	 */
 	readonly author: string;
 	/** The append-only version this row sits at (highest = current). */
 	readonly version: number;
@@ -146,4 +170,106 @@ export interface AgentRootDetector {
 export interface AuthCheck {
 	/** True when the session has credentials a pull can run under. */
 	isAuthenticated(): boolean;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TrustedTableList SEAM — the trusted-table early-exit gate (PRD-018b b-AC-2).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The trusted-table-list probe auto-pull consults BEFORE the SELECT (PRD-018b b-AC-2 /
+ * FR-5). On a fresh workspace the `skills` table may not exist yet; rather than dispatch
+ * a SELECT that the daemon answers with a `relation "skills" does not exist` error (which
+ * would surface in the logs), the pull asks the daemon for its trusted table list and, if
+ * `skills` is absent, SKIPS the SELECT entirely — no error, no noise.
+ *
+ * The real impl asks the daemon (which holds the DeepLake catalog) over the same 3850
+ * dispatch; a test injects a fixed set. `null` means "could not determine" → the pull
+ * proceeds (fail-open: a transient list failure must not silently disable pulls forever).
+ */
+export interface TrustedTableList {
+	/**
+	 * The set of table names the daemon trusts/knows, or `null` when the list could not be
+	 * resolved. When non-null and `skills` is absent, the pull skips the SELECT (b-AC-2).
+	 */
+	tables(): Promise<readonly string[] | null>;
+}
+
+/** Build a FAKE {@link TrustedTableList} from a fixed table set (or `null`) for tests. */
+export function createFakeTrustedTableList(tables: readonly string[] | null): TrustedTableList {
+	return { tables: () => Promise.resolve(tables) };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PullAction — the decideAction policy verdict (PRD-018b b-AC-1 / b-AC-3 / FR-3).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * What a pull should DO with one remote skill, resolved by `decideAction` (PRD-018b
+ * FR-3). The policy compares the remote version against the local copy:
+ *
+ *   - `write`         the local file is ABSENT → write it (no backup needed).
+ *   - `backup-write`  the remote is NEWER than local (or `--force`) → back the existing
+ *                     `SKILL.md` up to `SKILL.md.bak`, THEN write the newer body (b-AC-3).
+ *   - `skip`          the remote is at-or-older than local and not forced → touch nothing.
+ */
+export type PullAction = "write" | "backup-write" | "skip";
+
+/** The inputs `decideAction` resolves a {@link PullAction} from (PRD-018b FR-3). */
+export interface DecideActionInput {
+	/** True when a local `SKILL.md` already exists at the canonical path. */
+	readonly localExists: boolean;
+	/** The local SKILL.md's frontmatter version, or `null` when absent/unreadable. */
+	readonly localVersion: number | null;
+	/** The remote skill's version. */
+	readonly remoteVersion: number;
+	/** The `--force` flag: re-write even when remote is not newer (backs up first). */
+	readonly force: boolean;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PullManifestEntry + PullManifestStore — the reversible pull record (PRD-018b).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * One globally-installed pulled skill's manifest record (PRD-018b FR-8 / b-AC tracking).
+ * The manifest is the source of truth for `honeycomb skill unpull` (it reverses ONLY
+ * pull-managed entries) AND for 018c's `backfillSymlinks` (it scans every globally-
+ * installed entry to ensure a link in each detected root). Persisted on disk under
+ * `~/.honeycomb/state/skillify/pull-manifest.json`, keyed by `dirName`.
+ */
+export interface PullManifestEntry {
+	/** The canonical `<name>--<author>` dir name (the manifest key + the link/file name). */
+	readonly dirName: string;
+	/** The skill's logical name. */
+	readonly name: string;
+	/** The skill's author. */
+	readonly author: string;
+	/** The project key the pull ran under (provenance; project-local pulls record it). */
+	readonly projectKey: string;
+	/** The remote version this entry was written at. */
+	readonly remoteVersion: number;
+	/** Where it was installed — `project` | `global`. Backfill/fan-out gate on `global`. */
+	readonly install: SkillInstall;
+	/** The canonical root the SKILL.md was written under (the symlink target's parent). */
+	readonly installRoot: string;
+	/** ISO timestamp the pull wrote this entry. */
+	readonly pulledAt: string;
+	/** The absolute symlink paths fanned out into the other roots (for `unpull`). */
+	readonly symlinks: readonly string[];
+}
+
+/**
+ * The on-disk pull manifest store (PRD-018b FR-8). Records one {@link PullManifestEntry}
+ * per globally-installed pulled skill so `unpull` can reverse pull-managed entries and
+ * `backfillSymlinks` can re-fan prior pulls into a newly-installed agent. Filesystem-only
+ * (LOCAL bookkeeping, never DeepLake), mirroring the `watermark.ts` state-root convention.
+ */
+export interface PullManifestStore {
+	/** Read every recorded entry (empty when the manifest is absent/garbled — never throws). */
+	read(): readonly PullManifestEntry[];
+	/** Upsert one entry, keyed by `dirName` (a re-pull replaces the prior record). */
+	record(entry: PullManifestEntry): void;
+	/** Remove the entry for `dirName` (the `unpull` reversal). Returns the removed entry, or null. */
+	remove(dirName: string): PullManifestEntry | null;
 }
