@@ -1,6 +1,6 @@
 # PRD-011: Tenancy and Auth
 
-> **Status:** Backlog
+> **Status:** In-Work
 > **Priority:** P0
 > **Effort:** L
 > **Schema changes:** Additive

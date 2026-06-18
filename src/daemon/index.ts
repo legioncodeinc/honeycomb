@@ -45,10 +45,15 @@ export {
 export { createRequestLogger, type RequestLogger, type RequestLogRecord } from "./runtime/logger.js";
 export {
 	defaultDenyPermissionCheck,
+	legacyPermissionCheckAdapter,
+	noSocketPeer,
 	type PermissionCheck,
 	type PermissionContext,
+	type PermissionMiddlewareOptions,
 	permissionMiddleware,
+	type SocketPeerProbe,
 } from "./runtime/middleware/permission.js";
+export * from "./runtime/auth/index.js";
 export {
 	noopRuntimePathService,
 	type RuntimePath,

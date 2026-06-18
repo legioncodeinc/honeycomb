@@ -9,10 +9,15 @@
  *                         bounds visibility for group-scoped agents (e-AC-1/e-AC-6).
  *
  *   - `api_keys`        → hashed, revocable credentials for remote connectors.
- *                         UPDATE-or-INSERT by `id`. Holds ONLY `key_hash` (SHA-256
- *                         hex) — NEVER a plaintext key column. Revoke by advancing
- *                         `revoked` (BIGINT 0→1); the row is retained for audit,
- *                         never deleted in place (e-AC-2/e-AC-3).
+ *                         APPEND-ONLY VERSION-BUMPED by `id` (PRD-011d / d-AC-4).
+ *                         A key's current state is the HIGHEST-`version` row for its
+ *                         `id`; every transition (create, revoke) APPENDs a fresh row
+ *                         at `version` = N+1 — NEVER an in-place UPDATE. Holds ONLY
+ *                         `key_hash` (a scrypt-salted string for 011d keys; a legacy
+ *                         SHA-256 hex for 003e keys) — NEVER a plaintext key column.
+ *                         Revoke APPENDs a new version with `revoked = 1` (BIGINT) and
+ *                         every other field copied forward; the prior version is
+ *                         retained for audit, never mutated in place (e-AC-2/e-AC-3).
  *
  *   - `telemetry_counters` → opt-in diagnostics counters (FR-5 / e-AC-4).
  *                         Append-only. counter_name + value + window only;
@@ -53,7 +58,7 @@
  *  telemetry tables   → append-only       (one row per event, never mutated)
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { sqlIdent, sLiteral } from "../sql.js";
 import { type CatalogTable, defineGroup } from "./types.js";
 
@@ -86,16 +91,36 @@ export const AGENTS_COLUMNS = Object.freeze([
 // ── API_KEYS columns (FR-3 / e-AC-2 / e-AC-3) ────────────────────────────────
 
 /**
- * `api_keys` — hashed, revocable credentials (FR-3). UPDATE-or-INSERT by `id`.
+ * `api_keys` — hashed, revocable credentials (FR-3). APPEND-ONLY VERSION-BUMPED
+ * by `id` (PRD-011d / d-AC-4).
  *
- * SECURITY: `key_hash` is the ONLY credential column (SHA-256 hex, 64 chars).
- * There is intentionally NO `key`, `secret`, `token`, or `plaintext` column.
- * See {@link hashApiKey} to compute the hash before writing.
+ * SECURITY: `key_hash` is the ONLY credential column (a scrypt-salted string for
+ * 011d keys, a legacy SHA-256 hex for 003e keys). There is intentionally NO `key`,
+ * `secret`, `token`, or `plaintext` column. See {@link scryptHashSecret} (new keys)
+ * / {@link hashApiKey} (legacy) to compute the hash before writing.
  *
  * `permissions` stores a JSON array of explicit permission strings (default '[]').
  * `connector`, `harness`, `agent` name the binding (empty when not bound).
- * `revoked` is BIGINT 0 (live) / 1 (revoked) — advance to revoke, never DELETE.
- * `last_used_at` accepts the UPDATE-coalescing trade-off for rare concurrent touch.
+ * `revoked` is BIGINT 0 (live) / 1 (revoked).
+ *
+ * ── Why append-only version-bump, NOT in-place UPDATE (PRD-011d / d-AC-4) ─────
+ * A key is a LOGICAL key whose state is the HIGHEST-`version` row carrying its
+ * `id`; every transition (create → v1, revoke → v+1) APPENDs a fresh row, never an
+ * in-place UPDATE — the SAME rationale as `runtime-jobs.ts` (the `memory_jobs`
+ * queue) and `ontology/supersede.ts`. Independent live testing proved an in-place
+ * `UPDATE … SET revoked = 1 WHERE id = …` on this backend is NOT deterministic: the
+ * store serves a by-id point read from segments of differing freshness, so a
+ * just-UPDATEd row can return its pre-write (pre-revoke) snapshot — and a REVOKED
+ * key would still authenticate. Append-only version-bump sidesteps it: versions only
+ * ever INCREASE and a higher version is never fictitious, so resolving a key by
+ * `MAX(version)` (`ORDER BY version DESC LIMIT 1`) converges monotonically to the
+ * true current state — a revoked key's highest version carries `revoked = 1` and is
+ * rejected. The authenticator + revoke + list all resolve the highest version per id.
+ *
+ * `version` is BIGINT, defaults to 0 so the heal's `ALTER TABLE ADD COLUMN … NOT
+ * NULL DEFAULT 0` lands additively on a populated 003e table; {@link createApiKey}
+ * writes the first row at version 1. `last_used_at` is retained for compatibility
+ * but is never mutated in place (a touch would be a new appended version).
  *
  * Scope: tenant (cross-cutting, carries explicit org_id + workspace_id).
  */
@@ -114,6 +139,7 @@ export const API_KEYS_COLUMNS = Object.freeze([
 	{ name: "workspace_id", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "created_at", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "last_used_at", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "version", sql: "BIGINT NOT NULL DEFAULT 0" },
 ]);
 
 /** `revoked` encodings (e-AC-3 / D-3). BIGINT 0/1 per D-3. */
@@ -202,7 +228,10 @@ export const TENANCY_TABLES: readonly CatalogTable[] = defineGroup([
 	{
 		name: "api_keys",
 		columns: API_KEYS_COLUMNS,
-		pattern: "update-or-insert",
+		// Append-only version-bump by `id` (PRD-011d / d-AC-4): create → v1, revoke
+		// → v+1, NEVER an in-place UPDATE (which does not converge on this backend —
+		// a revoked key would still authenticate). State = highest-version row per id.
+		pattern: "version-bumped",
 		embeddingColumns: [],
 		scope: "tenant",
 	},
@@ -239,6 +268,14 @@ export const TENANCY_TABLES: readonly CatalogTable[] = defineGroup([
  * Pure and deterministic: the same plaintext always yields the same hash,
  * so a caller validating a presented key computes `hashApiKey(presented)` and
  * compares to the stored `key_hash`.
+ *
+ * ── SUPERSEDED for new keys by {@link scryptHashSecret} (PRD-011d / d-AC-1) ──
+ * SHA-256 is unsalted + fast — a leaked `api_keys` table would be brute-forceable.
+ * New keys (011d) store a salted, cost-parameterized {@link scryptHashSecret} string
+ * in the SAME `key_hash` column and look up by `id` ({@link buildApiKeyLookupByIdSql})
+ * + verify with {@link scryptVerifySecret}. This deterministic helper is RETAINED only
+ * for the existing live-smoke scaffold (which needs a hash it can recompute for a probe)
+ * and any 003e caller not yet migrated; do NOT use it to mint a new production key.
  */
 export function hashApiKey(plaintext: string): string {
 	return createHash("sha256").update(plaintext, "utf8").digest("hex");
@@ -257,14 +294,144 @@ export function buildApiKeyLookupSql(keyHash: string): string {
 }
 
 /**
- * Build the revocation SQL for an API key (e-AC-3). Sets `revoked = 1` by key
- * `id`. The row is RETAINED for audit — this is a status advance, not a DELETE.
- * Both identifiers route through `sqlIdent`; the id value routes through
- * `sLiteral` (SQL-safety floor, PRD-002b).
+ * Build the API-key lookup SQL by `id`, resolving the HIGHEST-`version` row (the
+ * public KEY-ID prefix — d-AC-1/d-AC-4).
+ *
+ * The scrypt reconciliation (PRD-011d) changes the validation shape: a scrypt hash
+ * carries a PER-KEY random salt, so it is NOT deterministic and a presented key can
+ * no longer be matched by a `key_hash = <hash>` equality probe (the SHA-256 path
+ * {@link buildApiKeyLookupSql} relied on). Instead the plaintext is `<keyid>.<secret>`:
+ * the public `keyid` is the row `id`, looked up here, and the secret is scrypt-verified
+ * against the row's salt-embedding `key_hash` string in TypeScript via
+ * {@link scryptVerifySecret}.
+ *
+ * ── Highest version per id (PRD-011d / d-AC-4) ───────────────────────────────
+ * `api_keys` is append-only version-bumped: a key has ONE row per transition
+ * (create → v1, revoke → v+1) and its current state is the row with the greatest
+ * `version`. So this read is `ORDER BY version DESC LIMIT 1` — NOT a bare
+ * `LIMIT 1`. After revoke appends a v+1 row carrying `revoked = 1`, that v+1 row IS
+ * the highest version, so the authenticator reads the REVOKED state and rejects the
+ * key (d-AC-4). A plain by-id read could serve the stale pre-revoke v1 segment and
+ * let a revoked key authenticate — the exact bug this fixes. The row is NOT filtered
+ * by `revoked` so the authenticator can reject a revoked record explicitly and
+ * per-key; the caller MUST check `revoked` on the WINNING (highest) version after
+ * the scrypt verify. Both identifiers route through `sqlIdent`; the id value routes
+ * through `sLiteral` (SQL-safety floor, PRD-002b).
+ */
+export function buildApiKeyLookupByIdSql(id: string): string {
+	const tbl = sqlIdent("api_keys");
+	const col = sqlIdent("id");
+	const ver = sqlIdent("version");
+	return `SELECT * FROM "${tbl}" WHERE ${col} = ${sLiteral(id)} ORDER BY ${ver} DESC LIMIT 1`;
+}
+
+/**
+ * Build the highest-version SELECT for ONE api-key `id` (PRD-011d / d-AC-4). The
+ * append-only revoke path reads this to find the current row to copy forward before
+ * appending the v+1 revoked row (the same shape as the authenticator's lookup). It
+ * is `ORDER BY version DESC LIMIT 1` so it resolves the current state, never a stale
+ * segment. Identifiers via `sqlIdent`; the id value via `sLiteral` (PRD-002b).
+ *
+ * This is an alias of {@link buildApiKeyLookupByIdSql} kept as a named, intent-revealing
+ * entry point for the revoke read so a future reader sees the highest-version contract
+ * at the revoke call site, not a generic "lookup".
+ */
+export function buildApiKeyHighestVersionByIdSql(id: string): string {
+	return buildApiKeyLookupByIdSql(id);
+}
+
+/**
+ * ── RETIRED (PRD-011d / d-AC-4): the in-place-UPDATE revoke. NO LIVE CALLER. ──
+ *
+ * Build the legacy 003e revocation SQL — `UPDATE "api_keys" SET revoked = 1 WHERE
+ * id = …`. This in-place UPDATE is RETIRED: independent live testing proved a by-id
+ * `SET revoked = 1` does NOT reliably land on this backend (the store serves a by-id
+ * point read from segments of differing freshness, so a just-UPDATEd row can return
+ * its pre-revoke snapshot — and a REVOKED key would still authenticate). Revocation is
+ * now an APPEND of a new highest `version` row with `revoked = 1` (see `revokeKey` in
+ * `runtime/auth/api-keys.ts`, mirroring `ontology/supersede.ts`'s `appendPriorSuperseded`).
+ *
+ * The function is RETAINED only so the original 003e shape test still imports it; it
+ * MUST NOT be called on a live path. Both identifiers route through `sqlIdent`; the id
+ * value routes through `sLiteral` (SQL-safety floor, PRD-002b).
  */
 export function buildRevokeApiKeySql(id: string): string {
 	const tbl = sqlIdent("api_keys");
 	const idCol = sqlIdent("id");
 	const revokedCol = sqlIdent("revoked");
 	return `UPDATE "${tbl}" SET ${revokedCol} = ${KEY_REVOKED} WHERE ${idCol} = ${sLiteral(id)}`;
+}
+
+// ── scrypt key-hashing (d-AC-1 — the SHA-256 → scrypt+salt reconciliation) ─────
+
+/**
+ * The scrypt cost parameters for an API-key secret hash (d-AC-1). N=16384 (2^14),
+ * r=8, p=1 is the interactive-login baseline recommended for scrypt: meaningful work
+ * per guess without making a single legitimate verify slow. `keyLen=32` matches the
+ * `<#>`-free 256-bit output. Encoded INTO the hash string so a future cost bump is
+ * forward-compatible (an old key still verifies under its own recorded N/r/p).
+ */
+export const SCRYPT_PARAMS = Object.freeze({ N: 16384, r: 8, p: 1, keyLen: 32 } as const);
+
+/** The self-describing scrypt hash prefix; the format is `scrypt$N$r$p$<saltB64url>$<hashB64url>`. */
+export const SCRYPT_HASH_SCHEME = "scrypt" as const;
+
+/**
+ * Hash an API-key SECRET with scrypt and a fresh per-key random salt (d-AC-1).
+ *
+ * Returns a single self-describing string — `scrypt$N$r$p$<salt>$<hash>` — so the salt
+ * and the cost parameters travel WITH the hash and NO schema change is needed (the salt
+ * lives inside `api_keys.key_hash`, not a new column). The plaintext secret is NEVER
+ * stored; only this string is. Use {@link scryptVerifySecret} to check a presented
+ * secret against it. The salt makes two keys with the same secret hash differently, and
+ * the embedded params let an old key verify even after the cost is raised later.
+ *
+ * This is the scrypt reconciliation of the legacy SHA-256 {@link hashApiKey}: new keys
+ * (011d) use THIS; {@link hashApiKey} is retained only for the existing deterministic
+ * live-smoke scaffold + any 003e caller that has not migrated (see its doc).
+ */
+export function scryptHashSecret(secret: string): string {
+	const salt = randomBytes(16);
+	const { N, r, p, keyLen } = SCRYPT_PARAMS;
+	const hash = scryptSync(secret, salt, keyLen, { N, r, p });
+	const saltB64 = salt.toString("base64url");
+	const hashB64 = hash.toString("base64url");
+	return `${SCRYPT_HASH_SCHEME}$${N}$${r}$${p}$${saltB64}$${hashB64}`;
+}
+
+/**
+ * Verify a presented secret against a stored {@link scryptHashSecret} string (d-AC-1).
+ *
+ * Parses the embedded salt + cost params, recomputes the scrypt hash of the presented
+ * secret under THOSE params, and compares with {@link timingSafeEqual} so the check is
+ * constant-time (no early-exit timing oracle on the secret). Returns `false` — never
+ * throws — on any malformed/non-scrypt stored string (fail-closed): a bad record can
+ * never accidentally authenticate. The recompute uses the recorded N/r/p, so a key
+ * hashed under an older cost still verifies after {@link SCRYPT_PARAMS} is raised.
+ */
+export function scryptVerifySecret(secret: string, stored: string): boolean {
+	const parts = stored.split("$");
+	if (parts.length !== 6 || parts[0] !== SCRYPT_HASH_SCHEME) return false;
+	const N = Number(parts[1]);
+	const r = Number(parts[2]);
+	const p = Number(parts[3]);
+	if (!Number.isInteger(N) || !Number.isInteger(r) || !Number.isInteger(p)) return false;
+	let salt: Buffer;
+	let expected: Buffer;
+	try {
+		salt = Buffer.from(parts[4], "base64url");
+		expected = Buffer.from(parts[5], "base64url");
+	} catch {
+		return false;
+	}
+	if (salt.length === 0 || expected.length === 0) return false;
+	let actual: Buffer;
+	try {
+		actual = scryptSync(secret, salt, expected.length, { N, r, p });
+	} catch {
+		// scrypt rejects out-of-range cost params → treat as a non-verifying record.
+		return false;
+	}
+	if (actual.length !== expected.length) return false;
+	return timingSafeEqual(actual, expected);
 }
