@@ -1,6 +1,6 @@
 # PRD-014: Codebase Graph
 
-> **Status:** Backlog
+> **Status:** In-Work
 > **Priority:** P2
 > **Effort:** L
 > **Schema changes:** Additive

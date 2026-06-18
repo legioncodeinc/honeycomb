@@ -1,27 +1,39 @@
 #!/usr/bin/env node
-// Ensures the native tree-sitter bindings are loadable on this platform / Node
-// ABI (PRD-001b implementation note; ci-release-stinger hard rule #7: native
-// deps self-heal on install).
+// Confirms the tree-sitter WASM parser stack is present and loadable after install
+// (PRD-014 codebase graph, D-1). This script HEALS NOTHING and COMPILES NOTHING:
+// the parser is `web-tree-sitter` (a WASM/emscripten runtime) + `tree-sitter-wasms`
+// (prebuilt `.wasm` grammars), so there is no native binding to build, no node-gyp,
+// no C/C++ toolchain, and no per-platform/per-ABI compile. That is the whole point
+// of choosing WASM over native `tree-sitter` + `tree-sitter-<lang>`: the install is
+// deterministic and identical across the CI matrix (ubuntu Node 22/24 + windows-smoke),
+// with no postinstall compile that could break Windows or linux-arm64.
 //
-// Why this exists: tree-sitter@0.21.x ships no linux-arm64 prebuild, and
-// tree-sitter-typescript@0.23.x ships a mislabeled (x86-64) one. On linux-arm64
-// both must compile from source, and under Node >=22 that compile requires
-// C++20 (tree-sitter@0.21's binding.gyp does not request it). tree-sitter is
-// declared as an optionalDependency so the expected arm64 build failure does
-// not abort `npm install`; this script then heals it afterwards.
+// Why this file still exists (and stays in the `files` allowlist + `postinstall`):
+//   1. Backwards-compatible name — the build script + CI reference `rebuild:native`
+//      and `postinstall` by this path; keeping it avoids churn in those surfaces.
+//   2. A fast, non-fatal SANITY check: if a consumer's install dropped a grammar
+//      `.wasm` (a partial extract, a pruned `node_modules`), we say so clearly
+//      rather than letting the daemon fail later with an opaque WASM load error.
 //
-// Greenfield-safe (this skeleton has NO tree-sitter deps yet): if the grammars
-// are absent it logs and exits 0 — it never hard-fails the install. On Windows
-// it is also non-fatal: no toolchain assumptions, no CXXFLAGS, log-and-continue.
-import { execSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+// It ALWAYS exits 0 (unless explicitly run in strict CI mode and a grammar is
+// genuinely missing): an end-user consumer must never get a hard install break from
+// this hook.
+import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 
 const ROOT = process.cwd();
 const require = createRequire(`${ROOT}/`);
-const PKGS = [
-  "tree-sitter",
+
+// Recursion guard for nested npm calls (kept for parity with prior behaviour).
+if (process.env.ENSURE_TS_RUNNING) process.exit(0);
+
+// The nine PRD-014 languages map to these grammar `.wasm` files (TS routes both
+// `tree-sitter-typescript` and `tree-sitter-tsx`). Located by resolving the
+// `tree-sitter-wasms` package and reading its `out/` directory — the SAME anchor
+// the runtime extractor uses (`src/daemon/runtime/codebase/extract.ts`).
+const GRAMMARS = [
   "tree-sitter-typescript",
+  "tree-sitter-tsx",
   "tree-sitter-javascript",
   "tree-sitter-python",
   "tree-sitter-go",
@@ -32,92 +44,46 @@ const PKGS = [
   "tree-sitter-cpp",
 ];
 
-// Greenfield short-circuit: if tree-sitter is not even declared/installed yet
-// (the PRD-001 skeleton has no grammar deps), there is nothing to heal. Log and
-// exit 0 so `npm install` / `npm run rebuild:native` never breaks.
-if (!existsSync(`${ROOT}/node_modules/tree-sitter/package.json`)) {
+// Greenfield / not-yet-installed short-circuit: if the parser deps are not present
+// (a checkout before `npm install`, or a slimmed environment), there is nothing to
+// check. Log and exit 0 so `npm install` / `npm run rebuild:native` never breaks.
+let wasmDir;
+try {
+  wasmDir = require.resolve("tree-sitter-wasms/package.json").replace(/package\.json$/, "out/");
+} catch {
   console.error(
-    "[ensure-tree-sitter] no tree-sitter packages installed — nothing to heal (skeleton). Skipping.",
+    "[ensure-tree-sitter] web-tree-sitter / tree-sitter-wasms not installed yet — nothing to check. Skipping.",
   );
   process.exit(0);
 }
 
-function bindingsLoad() {
-  try {
-    const Parser = require("tree-sitter");
-    const langs = [
-      require("tree-sitter-typescript").typescript,
-      require("tree-sitter-javascript"),
-      require("tree-sitter-python"),
-      require("tree-sitter-go"),
-      require("tree-sitter-rust"),
-      require("tree-sitter-java"),
-      require("tree-sitter-ruby"),
-      require("tree-sitter-c"),
-      require("tree-sitter-cpp"),
-    ];
-    for (const lang of langs) {
-      const p = new Parser();
-      p.setLanguage(lang);
-      p.parse("x");
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-if (process.env.ENSURE_TS_RUNNING) process.exit(0); // recursion guard for nested npm calls
-if (bindingsLoad()) process.exit(0); // healthy prebuild / prior build -> nothing to do
-
-console.error(
-  "[ensure-tree-sitter] native bindings not loadable on this platform — building from source...",
-);
-
-const pkg = JSON.parse(readFileSync(`${ROOT}/package.json`, "utf8"));
-const declared = { ...pkg.dependencies, ...pkg.optionalDependencies };
-
-const env = { ...process.env, ENSURE_TS_RUNNING: "1" };
-if (process.platform !== "win32") {
-  // Node >=22 V8 headers require C++20; tree-sitter@0.21's binding.gyp doesn't request it.
-  env.CXXFLAGS = `${process.env.CXXFLAGS ?? ""} -std=c++20`.trim();
-}
-const run = (cmd) => execSync(cmd, { stdio: "inherit", env, cwd: ROOT });
-
+// Confirm the web-tree-sitter runtime resolves too (it carries its own
+// `tree-sitter.wasm` emscripten runtime loaded at parse time).
+let runtimeOk = true;
 try {
-  // 1. Re-fetch any package npm dropped — a failed optional dependency is
-  //    removed from node_modules. --ignore-scripts: fetch only.
-  const missing = PKGS.filter((n) => !existsSync(`${ROOT}/node_modules/${n}/package.json`));
-  if (missing.length) {
-    const specs = missing.map((n) => `${n}@${declared[n] ?? "latest"}`);
-    run(`npm install ${specs.join(" ")} --no-save --ignore-scripts`);
-  }
-
-  // 2. Force a from-source compile. node-gyp-build loads build/Release ahead of
-  //    prebuilds, so removing the (absent/wrong-arch) prebuilds + stale build
-  //    guarantees the correct local binary wins.
-  for (const n of PKGS) {
-    rmSync(`${ROOT}/node_modules/${n}/prebuilds`, { recursive: true, force: true });
-    rmSync(`${ROOT}/node_modules/${n}/build`, { recursive: true, force: true });
-  }
-  run(`npm rebuild ${PKGS.join(" ")}`);
-} catch (err) {
-  console.error("[ensure-tree-sitter] rebuild command failed:", err.message);
+  require.resolve("web-tree-sitter");
+} catch {
+  runtimeOk = false;
 }
 
-if (bindingsLoad()) {
-  console.error("[ensure-tree-sitter] OK — bindings compiled from source and loadable.");
+const missing = GRAMMARS.filter((g) => !existsSync(`${wasmDir}${g}.wasm`));
+
+if (runtimeOk && missing.length === 0) {
+  console.error(
+    `[ensure-tree-sitter] OK — web-tree-sitter runtime + ${GRAMMARS.length} WASM grammars present (no native build needed).`,
+  );
   process.exit(0);
 }
 
-// Strict mode (opt-in via HONEYCOMB_STRICT_POSTINSTALL=1 — set by CI) turns the
-// warning into a hard failure so a heal miss surfaces as a red check rather
-// than re-emerging as `tsc: Cannot find module 'tree-sitter'`. Default stays
-// non-fatal so end-user consumers never get a hard install break.
+// Something is missing. In strict CI mode (HONEYCOMB_STRICT_POSTINSTALL=1) this is a
+// hard failure so a partial install surfaces as a red check; otherwise it is a
+// non-fatal warning so an end-user install never breaks.
 const strict = process.env.HONEYCOMB_STRICT_POSTINSTALL === "1";
 console.error(
-  "[ensure-tree-sitter] WARNING: tree-sitter bindings still unavailable. " +
-    "Install a C/C++ toolchain and re-run `npm run rebuild:native`." +
+  "[ensure-tree-sitter] WARNING: tree-sitter WASM stack incomplete — " +
+    (runtimeOk ? "" : "web-tree-sitter runtime not resolvable; ") +
+    (missing.length ? `missing grammars: ${missing.join(", ")}. ` : "") +
+    "Re-run `npm install` to restore the parser deps." +
     (strict ? " (strict mode — failing this install)" : " (non-fatal)"),
 );
 process.exit(strict ? 1 : 0);
