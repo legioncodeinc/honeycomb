@@ -23,12 +23,19 @@
  * truncated JSON, partially-invalid fields) without the seam pre-cleaning them.
  *
  * ── Workloads (the router-selection enum) ───────────────────────────────────
- * The two v1 workloads. New stages add a workload here; the router maps each to a
+ * The v1 workloads. New stages add a workload here; the router maps each to a
  * model. The token is opaque to the stage beyond "which workload am I".
+ *
+ * `memory_dreaming` (PRD-009 / D-5) is the corrective-maintenance pass's workload.
+ * The router (PRD-010) maps it to a STRONGER target than `memory_extraction`: the
+ * dreaming pass reasons over accumulated summaries against the whole entity graph,
+ * so it warrants a more capable model than the near-sighted per-chunk extractor.
+ * The seam stays "raw text in, raw text out" — the dreaming runner parses the
+ * returned mutation set defensively, exactly as the extraction stage parses facts.
  */
 
 /** The router-selection token a stage passes to {@link ModelClient.complete}. */
-export const MODEL_WORKLOADS = Object.freeze(["memory_extraction", "memory_decision"] as const);
+export const MODEL_WORKLOADS = Object.freeze(["memory_extraction", "memory_decision", "memory_dreaming"] as const);
 
 /** A model workload (router-selection token). */
 export type ModelWorkload = (typeof MODEL_WORKLOADS)[number];

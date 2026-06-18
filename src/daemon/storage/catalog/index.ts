@@ -20,6 +20,7 @@
  */
 
 import { type HealTarget } from "../heal.js";
+import { DREAMING_STATE_TABLES } from "./dreaming-state.js"; // PRD-009a (dreaming token-budget counter)
 // ── The five group arrays. Wave 1 implemented a + c; b/d/e are wired stubs. ──
 import { KNOWLEDGE_GRAPH_TABLES } from "./knowledge-graph.js"; // PRD-003b (stub)
 import { MEMORIES_TABLES } from "./memories.js"; // PRD-003a (implemented)
@@ -42,6 +43,7 @@ export const CATALOG: readonly CatalogTable[] = Object.freeze([
 	...PRODUCT_TABLES,
 	...TENANCY_TABLES,
 	...RUNTIME_JOBS_TABLES,
+	...DREAMING_STATE_TABLES,
 ]);
 
 /** The write-pattern registry over the whole catalog (table → pattern → primitive). */
@@ -108,3 +110,4 @@ export {
 	RUNTIME_JOBS_TABLES,
 } from "./runtime-jobs.js";
 export { TENANCY_TABLES } from "./tenancy.js";
+export { DREAMING_STATE_COLUMNS, DREAMING_STATE_TABLE, DREAMING_STATE_TABLES } from "./dreaming-state.js";
