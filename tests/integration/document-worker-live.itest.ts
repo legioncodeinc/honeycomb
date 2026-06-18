@@ -186,5 +186,11 @@ describe.skipIf(!HAS_TOKEN)("live document-worker smoke (opt-in, real backend, d
 		// The document's current row reads `deleted` (poll-convergent) — out of recall,
 		// history retained (the active versions stay on disk).
 		expect(await currentStatus(storage, TBL_ARTIFACTS, documentId, scope)).toBe(ARTIFACT_DELETED);
-	});
+		// Per-test 120s budget (overrides the suite's 60s `testTimeout`): this is the
+		// heaviest live itest — submit→index→chunk, dedup, then a paired soft-delete of the
+		// doc AND its N chunks across THREE throwaway tables, each `currentStatus` read
+		// poll-converging up to SCAN_POLLS×spaced reads on the eventually-consistent backend.
+		// It converges + asserts correctly at ~70s; 60s clipped it deterministically. Matches
+		// the file's existing `queryTimeoutMs: 120_000`. (Found via a full live-suite run.)
+	}, 120_000);
 });
