@@ -29,9 +29,22 @@ const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
  * through an injected HTTP/dispatch seam and imports nothing from `daemon/storage`
  * except the pure `sql.js` helpers, so it belongs in this scan alongside the
  * existing non-daemon roots.
+ *
+ * PRD-020 (D-2) adds the four new operator-facing SURFACES, all thin clients of
+ * the daemon: `src/commands` (020a the unified CLI dispatcher + handlers),
+ * `src/dashboard` (020b the daemon-served view layer), `src/notifications` (020d
+ * the fail-soft pipeline + D1–D5 health), and `harnesses/cursor/extension` (020c
+ * the Cursor extension shell). Each reaches the daemon ONLY through an injected
+ * seam and opens NO DeepLake (`harnesses` is already scanned, but the explicit
+ * `harnesses/cursor/extension` entry documents the 020c surface). The four
+ * `src/*` surfaces are listed below; `harnesses/cursor/extension` is covered by
+ * the existing `harnesses` root and is named here for intent.
  */
 const NON_DAEMON_ROOTS = [
 	"src/cli",
+	"src/commands",
+	"src/dashboard",
+	"src/notifications",
 	"src/daemon-client",
 	"src/shared",
 	"src/connectors",
@@ -39,6 +52,7 @@ const NON_DAEMON_ROOTS = [
 	"src/sdk",
 	"mcp",
 	"harnesses",
+	"harnesses/cursor/extension",
 	"embeddings",
 ];
 
