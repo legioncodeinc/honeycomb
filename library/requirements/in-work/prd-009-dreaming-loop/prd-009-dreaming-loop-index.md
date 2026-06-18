@@ -1,6 +1,6 @@
 # PRD-009: Dreaming Loop
 
-> **Status:** Backlog
+> **Status:** In-Work
 > **Priority:** P2
 > **Effort:** L
 > **Schema changes:** Additive
