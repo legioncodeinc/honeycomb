@@ -225,6 +225,40 @@ stampExecutable("mcp/bundle/server.js");
 stampEsm("mcp/bundle");
 
 // ---------------------------------------------------------------------------
+// 4b. @honeycomb/sdk (PRD-019e) — the fetch-only typed client + 3 framework
+//     helper entry points, each a SEPARATE bundle so the core (.) stays
+//     dependency-free for browser use. The core + openai entries are pure
+//     fetch-only TS (no peer dep). The react + vercel entries reference their
+//     peer deps (`react`, `ai`) as EXTERNAL — they are peerDependencies, never
+//     bundled into the SDK, so an app's own react/ai is used at runtime and a
+//     consumer that never imports those entry points pulls in neither.
+//
+//     The package.json#exports map points `.`/`./react`/`./vercel`/`./openai`
+//     at these `sdk/*.js` outputs. Honest deferral: the SDK is constructed,
+//     bundled, and tested here; publishing `@honeycomb/sdk` as its own package
+//     (vs. these subpath exports of the repo) is out of scope for 019e.
+// ---------------------------------------------------------------------------
+const SDK_ENTRIES = [
+  { entry: "dist/src/sdk/index.js", external: THIN_CLIENT_EXTERNAL },
+  { entry: "dist/src/sdk/react.js", external: [...THIN_CLIENT_EXTERNAL, "react"] },
+  { entry: "dist/src/sdk/vercel.js", external: [...THIN_CLIENT_EXTERNAL, "ai"] },
+  { entry: "dist/src/sdk/openai.js", external: THIN_CLIENT_EXTERNAL },
+];
+
+for (const s of SDK_ENTRIES) {
+  await build({
+    entryPoints: [s.entry],
+    bundle: true,
+    platform: "node",
+    format: "esm",
+    outdir: "sdk",
+    external: s.external,
+    define: VERSION_DEFINE,
+  });
+}
+stampEsm("sdk");
+
+// ---------------------------------------------------------------------------
 // 5. Unified CLI -> bundle/cli.js with a Node hash-bang + 0755 (FR-8).
 // ---------------------------------------------------------------------------
 await build({
@@ -261,5 +295,5 @@ stampExecutable("embeddings/embed-daemon.js");
 // scripts/pack-check.mjs runs build via prepack) don't get log noise mixed
 // into their JSON data pipe.
 console.error(
-  `Built: 1 daemon + ${HOOK_HARNESSES.length} hook-harness + 1 OpenClaw + 1 MCP + 1 CLI + 1 embed-daemon bundle @ ${HONEYCOMB_VERSION}`,
+  `Built: 1 daemon + ${HOOK_HARNESSES.length} hook-harness + 1 OpenClaw + 1 MCP + ${SDK_ENTRIES.length} SDK + 1 CLI + 1 embed-daemon bundle @ ${HONEYCOMB_VERSION}`,
 );
