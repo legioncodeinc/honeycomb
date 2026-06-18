@@ -144,3 +144,38 @@ are mounted by the daemon-assembly step (the same deferred-assembly posture as
 `sources/api.ts` / `secrets/api.ts`). Wave 1 does NOT edit `server.ts` or the worker
 registry — it ships the verdict→write core + the seams. 016a wires the trigger + the
 worker; 016c wires the auto-pull at session start.
+
+## 12. PRD-018 team-skill-sharing hardening (the 018a/b/c layer)
+
+PRD-018 hardens the COLLAB half into a real team-sharing pipeline. The new modules and
+where they live (all thin-client EXCEPT the daemon publish endpoint):
+
+| Module | Home | What it owns |
+|--------|------|--------------|
+| `config.ts` | `daemon-client/skillify` | 018a scope/team/install persistence at `~/.honeycomb/state/skillify/config.json`; **legacy `org`→`team` coercion on READ** (in-memory, file rewritten only on explicit set — D-5). Filesystem-only. |
+| `manifest.ts` | `daemon-client/skillify` | 018b pull manifest at `~/.honeycomb/state/skillify/pull-manifest.json` — one record per globally-installed pulled skill; the source of truth for `unpull` + `backfillSymlinks`. Filesystem-only. |
+| `install.ts` (extended) | `daemon-client/skillify` | 018b `decideAction` (write / backup-`SKILL.md.bak` / skip / force), `--dry-run`, trusted-table early-exit, empty-author skip, manifest record + `manifestError` surfacing, `unpullSkill`; 018c global-install-only fan-out gating (D-4), self-healing stale links, `backfillSymlinks`. |
+| `publish-endpoint.ts` | `daemon/runtime/skillify` | 018a daemon-side publish (append-only, reuses `createSkillStore`) + `selectNewerForOrgUsers` (highest-version-per-id, poll-convergent — D-7). **Reaches DeepLake → daemon-only.** |
+| `src/cli/skill.ts` | `cli` | `honeycomb skill scope <me|team> [--users …] [--install …]` + `skill unpull <name>--<author>`. Thin client, injected seams, mirrors `org.ts` / `skillify.ts`. |
+
+Cross-author MERGE lineage (a-AC-4): `skills-write.ts`'s `mergeSkill` stamps the
+`SKILLOPT_CONTRIBUTOR = "skillopt"` marker + the original (merging) author into the row's
+`contributors` (`Skill.contributors` carries it; `contributorsFor` records it verbatim).
+
+**The daemon-only invariant holds:** the thin-client modules reach the `skills` table ONLY
+through the injected `SkillPullClient` / `TrustedTableList` seams; the publish endpoint is the
+sole DeepLake-touching 018 module and lives under `src/daemon/`. The symlink/backup logic is
+factored into ONE `linkInto` primitive + a `backupExisting` helper (no copy-paste — jscpd).
+
+## 13. Deferred 018 wiring (honest deferral — matches 016c/017 posture)
+
+The hook-assembly wiring is the deferred pure-wiring step, NOT built here:
+  - the SessionStart hook actually calling `autoPull` (with the real `install`/`manifest`/
+    `trustedTables` seams supplied);
+  - the bundled `honeycomb` bin dispatching `skill scope` / `skill unpull` (`src/cli/index.ts`
+    is still the version-print stub — `skill.ts` / `skillify.ts` / `org.ts` are all
+    constructed-and-tested behind seams but not yet mounted on the bin);
+  - the daemon HTTP route mounting `createSkillPublishEndpoint` (mirrors `sources/api.ts`).
+
+All 018 modules are constructed-and-tested behind seams (21/21 ACs green). The hook is NOT
+wired — do not claim it is.

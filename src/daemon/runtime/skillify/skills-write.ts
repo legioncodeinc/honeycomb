@@ -59,6 +59,7 @@ import { appendOnlyInsert, type RowValues, val } from "../../storage/writes.js";
 import {
 	type GateVerdict,
 	type Skill,
+	SKILLOPT_CONTRIBUTOR,
 	skillLogicalId,
 	type SkillInstall,
 	type SkillInstallTarget,
@@ -191,13 +192,22 @@ export function createSkillStore(
 }
 
 /**
- * Contributors for a recorded row. A `team` skill carries BOTH the original author
- * and the merging author as contributors so a later pull surfaces co-ownership; a
- * `me` skill lists just its author. (The merge path supplies the merging author by
- * recording under the target's id with the merger added — see {@link mergeSkill}.)
+ * Contributors for a recorded row (PRD-018a a-AC-4 / FR-8). When the skill carries an
+ * explicit `contributors` list (a CROSS-author merge stamps the {@link SKILLOPT_CONTRIBUTOR}
+ * marker + the original author — see {@link mergeSkill}), that list is recorded VERBATIM so
+ * the lineage is preserved. Otherwise a plain row lists just its author. The author is always
+ * present (deduped) so a contributor list never drops the chain owner.
  */
 function contributorsFor(skill: Skill): readonly string[] {
-	return [skill.author];
+	const explicit = skill.contributors ?? [];
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const c of [skill.author, ...explicit]) {
+		if (c === "" || seen.has(c)) continue;
+		seen.add(c);
+		out.push(c);
+	}
+	return out;
 }
 
 /** Map a raw `skills` row back to the {@link Skill} shape (highest-version read). */
@@ -403,10 +413,16 @@ export async function mergeSkill(
 	const crossAuthor = targetAuthor !== deps.author;
 	const scope: SkillScope = crossAuthor ? "team" : "me";
 
+	// PRD-018a a-AC-4: a cross-author merge stamps the `skillopt` lineage marker + the
+	// ORIGINAL author (the merging author, `deps.author`), recorded alongside the chain
+	// owner so a later pull surfaces that a MACHINE merge produced the co-ownership. A
+	// same-author bump carries no extra contributors.
+	const contributors = crossAuthor ? [SKILLOPT_CONTRIBUTOR, deps.author] : undefined;
+
 	// Record under the TARGET's logical id so the bump accrues on the original chain.
 	const id = skillLogicalId(targetName, targetAuthor);
 	const version = (await deps.store.maxVersion(id)) + 1;
-	const skill = buildSkill(id, targetName, targetAuthor, verdict, sourceSessions, version, scope, install);
+	const skill = buildSkill(id, targetName, targetAuthor, verdict, sourceSessions, version, scope, install, contributors);
 
 	const filePath = await deps.install.write(install, targetName, renderSkillMarkdown(skill));
 	const writtenVersion = await deps.store.appendVersion(skill);
@@ -422,7 +438,7 @@ export async function mergeSkill(
 	};
 }
 
-/** Assemble a {@link Skill} from a verdict + the resolved version/scope/install. */
+/** Assemble a {@link Skill} from a verdict + the resolved version/scope/install/contributors. */
 function buildSkill(
 	id: string,
 	name: string,
@@ -432,6 +448,7 @@ function buildSkill(
 	version: number,
 	scope: SkillScope,
 	install: SkillInstall,
+	contributors?: readonly string[],
 ): Skill {
 	const provenance: SkillProvenance = {
 		sourceSessions: [...sourceSessions],
@@ -448,6 +465,7 @@ function buildSkill(
 		body: verdict.body ?? "",
 		install,
 		provenance,
+		...(contributors !== undefined ? { contributors } : {}),
 	};
 }
 

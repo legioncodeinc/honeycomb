@@ -21,6 +21,7 @@ export {
 	type Skill,
 	SKILL_INSTALLS,
 	SKILL_SCOPES,
+	SKILLOPT_CONTRIBUTOR,
 	type SkillInstall,
 	type SkillInstallTarget,
 	skillLogicalId,
@@ -93,20 +94,39 @@ export {
 	type WorkerLock,
 } from "./miner.js";
 
-// ── 016c skill install (FULL — re-exported from the thin-client `daemon-client/skillify`) ──
+// ── 016c skill install + 018b/c hardening (FULL — re-exported from `daemon-client/skillify`) ──
 export {
 	AUTOPULL_DISABLED_ENV,
 	AUTOPULL_TIMEOUT_MS,
 	autoPull,
 	type AutoPullDeps,
+	backfillSymlinks,
 	canonicalDirName,
 	createAuthCheck,
 	createDaemonPullClient,
 	createDefaultAgentRoots,
 	createFakeSkillPullClient,
+	createPullManifestStore,
+	createSkillifyConfigStore,
+	decideAction,
+	type PullAction,
 	type PulledSkill,
 	pull,
 	type PullDeps,
+	type PullManifestStore,
 	type PullOutcome,
+	recordPull,
+	type SkillifyConfig,
+	type SkillifyConfigStore,
 	type SkillPullClient,
+	type TrustedTableList,
+	unpullSkill,
 } from "./install.js";
+
+// ── 018a daemon-side publish/select endpoint seam (reaches DeepLake — daemon-only) ──
+export {
+	buildSelectNewerSql,
+	createSkillPublishEndpoint,
+	type PublishedSkill,
+	type SkillPublishEndpoint,
+} from "./publish-endpoint.js";
