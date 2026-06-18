@@ -45,7 +45,16 @@ import { readdir } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 
 const rawArgs = process.argv.slice(2);
-const SCAN_DIR = rawArgs.find((a) => !a.startsWith("--")) ?? "src/daemon";
+/**
+ * The roots to scan. An explicit dir argument narrows to JUST that dir (a focused re-scan);
+ * the default covers EVERY place that hand-builds SQL — `src/daemon` (the storage layer +
+ * the daemon runtime) AND `src/daemon-client` (PRD-015's `DeepLakeFs` VFS, which builds SQL
+ * to dispatch THROUGH the daemon). The VFS routes every value through `sLiteral`/`eLiteral`
+ * and every identifier through `sqlIdent`; gating it here keeps a future raw-interpolation
+ * regression in the thin-client SQL builders from shipping (security-worker-bee, PRD-015).
+ */
+const explicitDir = rawArgs.find((a) => !a.startsWith("--"));
+const SCAN_DIRS = explicitDir ? [explicitDir] : ["src/daemon", "src/daemon-client"];
 const SCANNABLE_EXT = new Set([".ts", ".mts", ".cts"]);
 
 /**
@@ -429,12 +438,14 @@ async function* walk(dir) {
 
 const findings = [];
 let scanned = 0;
-for await (const file of walk(SCAN_DIR)) {
-	scanned++;
-	findings.push(...inspectFile(file));
+for (const dir of SCAN_DIRS) {
+	for await (const file of walk(dir)) {
+		scanned++;
+		findings.push(...inspectFile(file));
+	}
 }
 
-console.log(`\nSQL-safety audit: scanned ${scanned} file(s) under ${SCAN_DIR}/\n`);
+console.log(`\nSQL-safety audit: scanned ${scanned} file(s) under ${SCAN_DIRS.join(", ")}/\n`);
 
 if (findings.length === 0) {
 	console.log("OK - every SQL interpolation routes through an escaping helper.\n");

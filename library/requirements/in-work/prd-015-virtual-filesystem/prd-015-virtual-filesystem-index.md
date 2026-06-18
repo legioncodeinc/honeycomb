@@ -1,6 +1,6 @@
 # PRD-015: Virtual Filesystem
 
-> **Status:** Backlog
+> **Status:** In-Work
 > **Priority:** P2
 > **Effort:** M
 > **Schema changes:** None
