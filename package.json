@@ -48,6 +48,11 @@
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "audit:openclaw": "node scripts/audit-openclaw-bundle.mjs",
     "audit:sql": "node scripts/audit-sql-safety.mjs",
+    "mutation": "npm run mutation:sql && npm run mutation:prune && npm run mutation:normalize && npm run mutation:state",
+    "mutation:sql": "stryker run stryker/sql.json",
+    "mutation:prune": "stryker run stryker/prune.json",
+    "mutation:normalize": "stryker run stryker/normalize.json",
+    "mutation:state": "stryker run stryker/state.json",
     "pack:check": "node scripts/pack-check.mjs",
     "rebuild:native": "node scripts/ensure-tree-sitter.mjs",
     "ci": "npm run typecheck && npm run dup && npm run test && npm run audit:sql",
@@ -56,6 +61,8 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.0",
+    "@stryker-mutator/core": "^8.7.1",
+    "@stryker-mutator/vitest-runner": "^8.7.1",
     "@types/node": "^22.0.0",
     "@vitest/coverage-v8": "^3.2.6",
     "esbuild": "^0.28.1",
@@ -68,12 +75,16 @@
   },
   "//peerDependencies": "PRD-019e: react powers @honeycomb/sdk/react; ai powers @honeycomb/sdk/vercel. Both are OPTIONAL peers (peerDependenciesMeta) so the core entry stays dependency-free for Node/Bun/browser. The core client (.) pulls in NEITHER.",
   "peerDependencies": {
-    "react": ">=18.0.0",
-    "ai": ">=3.0.0"
+    "ai": ">=3.0.0",
+    "react": ">=18.0.0"
   },
   "peerDependenciesMeta": {
-    "react": { "optional": true },
-    "ai": { "optional": true }
+    "react": {
+      "optional": true
+    },
+    "ai": {
+      "optional": true
+    }
   },
   "dependencies": {
     "@hono/node-server": "^1.19.14",

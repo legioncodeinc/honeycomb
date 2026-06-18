@@ -184,4 +184,110 @@ describe("PRD-019c c-AC-1: harness equivalence to the Claude Code reference", ()
 		// Codex drops a non-Bash PreToolUse (Bash-only, FR-3).
 		expect(createCodexShim().normalize({ name: "PreToolUse", payload: { tool_name: "Read" } }, META)).toBeUndefined();
 	});
+
+	// ── Reference-extractor coverage (the equivalence BASELINE the other shims claim
+	// parity with). The fixtures above only exercise user_message/tool_call/assistant_message;
+	// the reference's pre-tool-use / session-start / session-end extractors define the canonical
+	// `{ kind, ... }` shapes every shim normalizes onto, so they must be pinned EXACTLY here. ──
+
+	it("c-AC-1 the reference pre-tool-use extractor lowers tool_input.{command,file_path,pattern} to the canonical shape", () => {
+		// Claude Code reads the pre-tool fields out of the NESTED tool_input object (nestedString),
+		// unlike the flat-field harnesses. Pin every nested field so a flip to the wrong key,
+		// a dropped optional, or a wrong literal is caught.
+		const input = reference.normalize(
+			{
+				name: "PreToolUse",
+				payload: { tool_name: "Bash", tool_input: { command: "ls -la", file_path: "/repo/a.ts", pattern: "token" } },
+			},
+			META,
+		);
+		expect(input).toBeDefined();
+		expect(input!.event).toBe("pre-tool-use");
+		// The EXACT canonical pre_tool_use shape: kind + tool + all three nested fields present.
+		expect(input!.data).toEqual({
+			kind: "pre_tool_use",
+			tool: "Bash",
+			command: "ls -la",
+			path: "/repo/a.ts",
+			query: "token",
+		});
+	});
+
+	it("c-AC-1 the reference pre-tool-use extractor OMITS absent optional fields (no empty keys)", () => {
+		// With only a command present, `path` and `query` must be ABSENT keys (not undefined/empty) —
+		// kills the ConditionalExpression mutants that force the spread to always/never include them.
+		const input = reference.normalize(
+			{ name: "PreToolUse", payload: { tool_name: "Bash", tool_input: { command: "echo hi" } } },
+			META,
+		) as HookInput;
+		expect(input.data).toEqual({ kind: "pre_tool_use", tool: "Bash", command: "echo hi" });
+		expect(Object.prototype.hasOwnProperty.call(input.data, "path")).toBe(false);
+		expect(Object.prototype.hasOwnProperty.call(input.data, "query")).toBe(false);
+	});
+
+	it("c-AC-1 the reference pre-tool-use extractor reads the `path`/`query` fallback keys", () => {
+		// file_path|path and pattern|query are alternates; the fallback arm must be reachable.
+		const input = reference.normalize(
+			{ name: "PreToolUse", payload: { tool_name: "Grep", tool_input: { path: "/p", query: "q" } } },
+			META,
+		) as HookInput;
+		expect(input.data).toEqual({ kind: "pre_tool_use", tool: "Grep", path: "/p", query: "q" });
+	});
+
+	it("c-AC-1 the reference assistant_message extractor lowers `text` to the EXACT canonical shape", () => {
+		// The cross-harness fixtures assert each shim EQUALS the reference — but a mutation in the
+		// SHARED assistantMessageData would change every harness identically and stay invisible.
+		// Pin the ABSOLUTE shape so the literal key/value cannot be emptied unnoticed.
+		const input = reference.normalize({ name: "Stop", payload: { text: asstText } }, META) as HookInput;
+		expect(input.event).toBe("assistant_message");
+		expect(input.data).toEqual({ kind: "assistant_message", text: asstText });
+	});
+
+	it("c-AC-1 the reference pre-tool-use extractor OMITS command when the native payload has none", () => {
+		// A pre-tool event with NO command (e.g. a path-only tool) must NOT carry a `command` key —
+		// kills the spread mutant that forces `command` to always be included.
+		const input = reference.normalize(
+			{ name: "PreToolUse", payload: { tool_name: "Read", tool_input: { file_path: "/only/path.ts" } } },
+			META,
+		) as HookInput;
+		expect(input.data).toEqual({ kind: "pre_tool_use", tool: "Read", path: "/only/path.ts" });
+		expect(Object.prototype.hasOwnProperty.call(input.data, "command")).toBe(false);
+	});
+
+	it("c-AC-1 the reference session-start extractor lowers `source` (defaulting to startup)", () => {
+		const withSource = reference.normalize({ name: "SessionStart", payload: { source: "resume" } }, META) as HookInput;
+		expect(withSource.event).toBe("session-start");
+		expect(withSource.data).toEqual({ kind: "session_start", source: "resume" });
+		// Absent source defaults to the literal "startup" (kills the `|| "startup"` + literal mutants).
+		const noSource = reference.normalize({ name: "SessionStart", payload: {} }, META) as HookInput;
+		expect(noSource.data).toEqual({ kind: "session_start", source: "startup" });
+	});
+
+	it("c-AC-1 the reference session-end extractor lowers `reason` (defaulting to Stop)", () => {
+		const withReason = reference.normalize({ name: "SessionEnd", payload: { reason: "logout" } }, META) as HookInput;
+		expect(withReason.event).toBe("session-end");
+		expect(withReason.data).toEqual({ kind: "session_end", reason: "logout" });
+		const noReason = reference.normalize({ name: "SessionEnd", payload: {} }, META) as HookInput;
+		expect(noReason.data).toEqual({ kind: "session_end", reason: "Stop" });
+	});
+
+	it("c-AC-1 a numeric messageEmbedding on the native payload is carried onto the HookInput", () => {
+		// The embedding passthrough is otherwise unexercised: a present numeric array must be carried,
+		// an absent one must NOT add the key (kills the extractEmbedding guard + spread mutants).
+		const withEmb = reference.normalize(
+			{ name: "UserPromptSubmit", payload: { prompt: userText, messageEmbedding: [0.1, 0.2, 0.3] } },
+			META,
+		) as HookInput;
+		expect(withEmb.messageEmbedding).toEqual([0.1, 0.2, 0.3]);
+
+		const noEmb = reference.normalize({ name: "UserPromptSubmit", payload: { prompt: userText } }, META) as HookInput;
+		expect(Object.prototype.hasOwnProperty.call(noEmb, "messageEmbedding")).toBe(false);
+
+		// A non-numeric array is rejected (the `every(typeof === number)` guard) → no key added.
+		const badEmb = reference.normalize(
+			{ name: "UserPromptSubmit", payload: { prompt: userText, messageEmbedding: [1, "x", 3] } },
+			META,
+		) as HookInput;
+		expect(Object.prototype.hasOwnProperty.call(badEmb, "messageEmbedding")).toBe(false);
+	});
 });
