@@ -15,15 +15,26 @@
  * The config schema + hook protocol implemented here is Cursor's: hooks live in
  * `~/.cursor/hooks.json` under a top-level `hooks` object keyed by Cursor's native event names
  * (`sessionStart`, `beforeSubmitPrompt`, `beforeShellExecution`, `postToolUse`,
- * `afterAgentResponse`, `stop`, `sessionEnd`), each holding matcher blocks with a `hooks` array
- * of `{ type:"command", command, timeout, async }` entries — the same Claude Code lingua franca
- * the 019b cursor shim (`src/hooks/cursor/shim.ts`, `CURSOR_EVENT_MAP`) targets. Honeycomb's
- * compiled handlers come from `harnesses/cursor/bundle/`.
+ * `afterAgentResponse`, `stop`, `sessionEnd`). UNLIKE Claude Code, REAL Cursor lists each event's
+ * handlers as a FLAT array of entries directly under the event key —
+ * `hooks[event] = [ { command, type?, timeout?, matcher?, … } ]` — NOT the Claude-Code-style
+ * nested `{ matcher?, hooks: [...] }` matcher block. (Contract: `references/cursor/hooks-schema.ts`.)
+ *
+ * Because the 019a base emits + merges the nested matcher-block shape, this subclass OVERRIDES the
+ * config-shape seams ({@link patchConfig} emit/merge and {@link stripHoneycomb}) to produce and
+ * reclaim the FLAT per-event array Cursor actually parses — while still inheriting install/uninstall
+ * and PRESERVING the base's guarantees on that flat shape (foreign-preserve via
+ * {@link isHoneycombEntry}, idempotent `writeJsonIfChanged`, reversible uninstall, crash-safety
+ * against BOTH a pre-existing flat config AND an unlikely nested one). Honeycomb's compiled
+ * handlers come from `harnesses/cursor/bundle/`.
  */
 
 import {
+	type ConfigHookEntry,
 	type ConnectorFs,
+	type HarnessConfig,
 	HarnessConnector,
+	HONEYCOMB_ENTRY_KEY,
 	HONEYCOMB_MARKER,
 	type HookHandlerEntry,
 	type SkillLinkTarget,
@@ -123,4 +134,114 @@ export class CursorConnector extends HarnessConnector {
 	protected configRoot(): string {
 		return `${this.opts.home}/.cursor`;
 	}
+
+	// ── Cursor FLAT-shape overrides (the real `hooks.json` contract) ──────────────
+	//
+	// REAL Cursor stores each event's handlers as a FLAT array of entries directly under the event
+	// key: `hooks[event] = [ { command, type?, matcher?, … } ]`. The 019a base emits + merges the
+	// Claude-Code-style nested `{ matcher?, hooks: [...] }` block, which Cursor cannot read (capture/
+	// recall silently dead) and which crashes the base merge over a pre-existing flat entry (no
+	// `.hooks` to `.filter`). These three overrides produce, merge, and strip the flat shape.
+
+	/**
+	 * Render one Honeycomb handler into a FLAT Cursor entry — `{ command, type, matcher?, timeout?,
+	 * _honeycomb }` — carrying the sentinel so {@link isHoneycombEntry} reclaims exactly THIS entry
+	 * on re-install/uninstall and never a foreign one. The `pre-tool-use → beforeShellExecution`
+	 * handler carries a `Shell` matcher (Cursor's terminal-tool gate, the analogue of Claude Code's
+	 * Bash matcher) so the VFS intercept lands on the shell command, per the 019b shim.
+	 */
+	protected override toConfigEntry(handler: HookHandlerEntry): ConfigHookEntry {
+		const entry: ConfigHookEntry = { type: "command", command: handler.command };
+		const isShellGate = handler.event === "beforeShellExecution";
+		return {
+			...entry,
+			...(isShellGate ? { matcher: "Shell" } : {}),
+			...(handler.timeout !== undefined ? { timeout: handler.timeout } : {}),
+			// Cursor has NO `async` field; its concurrency model is timeout/failClosed/loop_limit.
+			// We deliberately DROP `async` here so the emitted entry is honest Cursor config.
+			[HONEYCOMB_ENTRY_KEY]: true,
+		};
+	}
+
+	/**
+	 * Merge Honeycomb's flat entries into the existing config, foreign-preserving + idempotent, in
+	 * Cursor's FLAT shape (`hooks[event] = ConfigHookEntry[]`). For each event: drop any prior
+	 * Honeycomb entries (a re-install refreshes ours, never duplicates), then append the current
+	 * ones. Foreign FLAT entries are kept byte-identical; an (unlikely) pre-existing nested block is
+	 * tolerated — its own foreign handlers are flattened forward so the merge never throws.
+	 */
+	protected override patchConfig(config: HarnessConfig, handlers: readonly HookHandlerEntry[]): HarnessConfig {
+		const existing = flatHooks(config);
+		// Null-prototype accumulator: a foreign event key like `__proto__` / `constructor` must
+		// round-trip as an OWN data property, not assign through the prototype setter (which would
+		// SILENTLY DROP that foreign event — a foreign-preserve violation, FR-2 / a-AC-1) — and must
+		// never reach `Object.prototype`. JSON.stringify still re-emits own keys verbatim.
+		const hooks: Record<string, ConfigHookEntry[]> = Object.create(null) as Record<string, ConfigHookEntry[]>;
+		for (const [event, entries] of Object.entries(existing)) {
+			const kept = entries.filter((e) => !this.isHoneycombEntry(e));
+			if (kept.length > 0) hooks[event] = kept;
+		}
+		for (const handler of handlers) {
+			const entry = this.toConfigEntry(handler);
+			hooks[handler.event] = [...(hooks[handler.event] ?? []), entry];
+		}
+		return { ...config, hooks: hooks as unknown as HarnessConfig["hooks"] };
+	}
+
+	/**
+	 * Strip every Honeycomb entry from the FLAT Cursor config (the uninstall counterpart of
+	 * {@link patchConfig}). Each event's flat array is filtered through {@link isHoneycombEntry}; an
+	 * emptied event key is removed; foreign flat entries + foreign top-level keys survive verbatim.
+	 * When no event remains, the `hooks` key is dropped so the base unlinks an emptied config.
+	 */
+	protected override stripHoneycomb(config: HarnessConfig): HarnessConfig {
+		if (config.hooks === undefined) return config;
+		const existing = flatHooks(config);
+		// Null-prototype accumulator — see {@link patchConfig}: keep a foreign `__proto__`-keyed event
+		// as an OWN key so uninstall PRESERVES it rather than dropping it through the prototype setter.
+		const hooks: Record<string, ConfigHookEntry[]> = Object.create(null) as Record<string, ConfigHookEntry[]>;
+		for (const [event, entries] of Object.entries(existing)) {
+			const kept = entries.filter((e) => !this.isHoneycombEntry(e));
+			if (kept.length > 0) hooks[event] = kept;
+		}
+		const next: HarnessConfig = { ...config };
+		if (Object.keys(hooks).length > 0) next.hooks = hooks as unknown as HarnessConfig["hooks"];
+		else delete next.hooks;
+		return next;
+	}
+}
+
+/**
+ * Read a config's `hooks` map as Cursor's FLAT per-event entry arrays. Crash-safety bridge: a real
+ * Cursor config holds `hooks[event] = [ entry, … ]` (flat); an unlikely Claude-Code-shaped config
+ * holds `hooks[event] = [ { hooks: [ entry, … ] }, … ]` (nested). This normalizes BOTH to a flat
+ * entry array per event so neither the merge nor the strip ever reads `.filter` off `undefined`
+ * (bug #2) — foreign handlers from a nested block are flattened forward, never dropped.
+ */
+function flatHooks(config: HarnessConfig): Record<string, ConfigHookEntry[]> {
+	// Null-prototype accumulator so a foreign event key like `__proto__` / `constructor` lands as an
+	// OWN property (preserved, not silently dropped via the prototype setter) and can never pollute
+	// `Object.prototype`. The downstream merge/strip iterate this with `Object.entries`, which only
+	// reads own enumerable keys — so the dangerous key is carried forward faithfully, never executed.
+	const out: Record<string, ConfigHookEntry[]> = Object.create(null) as Record<string, ConfigHookEntry[]>;
+	const raw = (config.hooks ?? {}) as Record<string, unknown>;
+	for (const [event, value] of Object.entries(raw)) {
+		if (!Array.isArray(value)) continue;
+		const entries: ConfigHookEntry[] = [];
+		for (const item of value) {
+			if (item === null || typeof item !== "object") continue;
+			const nested = (item as { hooks?: unknown }).hooks;
+			if (Array.isArray(nested)) {
+				// A nested matcher block: flatten its handler array forward (preserve foreign handlers).
+				for (const h of nested) {
+					if (h !== null && typeof h === "object") entries.push(h as ConfigHookEntry);
+				}
+			} else {
+				// A real FLAT Cursor entry.
+				entries.push(item as ConfigHookEntry);
+			}
+		}
+		out[event] = entries;
+	}
+	return out;
 }

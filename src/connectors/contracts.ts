@@ -380,10 +380,10 @@ export abstract class HarnessConnector {
 	async uninstall(): Promise<ConnectorRunResult> {
 		const path = this.configPath();
 		const config = parseConfig(await this.fs.readFile(path));
-		const stripped = stripHoneycomb(config, (e) => this.isHoneycombEntry(e));
+		const stripped = this.stripHoneycomb(config);
 
 		let wroteConfig = false;
-		if (isConfigEmpty(stripped)) {
+		if (this.isConfigEmpty(stripped)) {
 			// FR-6: an emptied config is cleanly UNLINKED, not left as `{}`.
 			if (await this.fs.exists(path)) {
 				await this.fs.removeFile(path);
@@ -421,8 +421,12 @@ export abstract class HarnessConnector {
 	protected patchConfig(config: HarnessConfig, handlers: readonly HookHandlerEntry[]): HarnessConfig {
 		const hooks: Record<string, ConfigMatcherBlock[]> = {};
 		for (const [event, blocks] of Object.entries(config.hooks ?? {})) {
-			hooks[event] = blocks
-				.map((b) => ({ ...b, hooks: b.hooks.filter((h) => !this.isHoneycombEntry(h)) }))
+			hooks[event] = (Array.isArray(blocks) ? blocks : [])
+				// Guard a block that lacks a `.hooks` array (e.g. a FLAT Cursor entry that reached the
+				// nested-shape base): treat its handler list as empty rather than throwing on
+				// `undefined.filter` — crash-safety for the base, even though the Cursor subclass
+				// overrides this method with its own flat merge.
+				.map((b) => ({ ...b, hooks: (Array.isArray(b.hooks) ? b.hooks : []).filter((h) => !this.isHoneycombEntry(h)) }))
 				.filter((b) => b.hooks.length > 0);
 		}
 		// Group handlers by native event, append one Honeycomb matcher block per event.
@@ -438,6 +442,26 @@ export abstract class HarnessConnector {
 			hooks[event] = [...(hooks[event] ?? []), block];
 		}
 		return { ...config, hooks };
+	}
+
+	/**
+	 * SEAM (strip) — remove every Honeycomb hook entry from a parsed config, preserving foreign
+	 * entries + foreign top-level keys verbatim (FR-6 / a-AC-2). Default is the Claude-Code-style
+	 * nested-matcher-block strip; a subclass whose on-disk shape differs (e.g. Cursor's FLAT
+	 * per-event entry array) overrides this to strip in ITS shape. The base delegates to the pure
+	 * {@link stripHoneycomb} helper so the inherited behavior is byte-identical for nested harnesses.
+	 */
+	protected stripHoneycomb(config: HarnessConfig): HarnessConfig {
+		return stripHoneycomb(config, (e) => this.isHoneycombEntry(e));
+	}
+
+	/**
+	 * SEAM (empty) — true when a stripped config holds NO entries at all (the unlink trigger,
+	 * FR-6). Default keys off the total key count; a subclass overrides only if its shape needs a
+	 * different emptiness rule. The base delegates to the pure {@link isConfigEmpty} helper.
+	 */
+	protected isConfigEmpty(config: HarnessConfig): boolean {
+		return isConfigEmpty(config);
 	}
 
 	/**
