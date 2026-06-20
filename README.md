@@ -1,7 +1,7 @@
 <p align="center">
-  <a href="https://github.com/legioncodeinc"><img src="assets/legion-code.svg" alt="Legion Code" height="76"></a>
+  <a href="https://github.com/legioncodeinc"><img src="assets/legion-code.png" alt="Legion Code" height="80"></a>
   &nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://activeloop.ai"><img src="assets/activeloop.svg" alt="Activeloop Deep Lake" height="76"></a>
+  <a href="https://activeloop.ai"><img src="assets/activeloop.png" alt="Activeloop Deep Lake" height="80"></a>
 </p>
 
 <h1 align="center">Honeycomb</h1>
