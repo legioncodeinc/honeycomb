@@ -1,0 +1,21 @@
+<!-- @dsCard group="Spacing" viewport="700x190" name="Elevation & glow" subtitle="Subtle shadows; honey/dream glow are the only expressive lights" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../../styles.css">
+<style>
+  body { margin: 0; padding: 28px 24px; background: var(--bg-canvas); display: flex; gap: 20px; align-items: center; }
+  .box { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+  .card { width: 96px; height: 70px; background: var(--bg-elevated); border: 1px solid var(--border-default); border-radius: var(--radius-lg); }
+  .t { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); }
+</style>
+</head>
+<body>
+  <div class="box"><div class="card" style="box-shadow:var(--shadow-sm)"></div><span class="t">sm</span></div>
+  <div class="box"><div class="card" style="box-shadow:var(--shadow-md)"></div><span class="t">md</span></div>
+  <div class="box"><div class="card" style="box-shadow:var(--shadow-lg)"></div><span class="t">lg</span></div>
+  <div class="box"><div class="card" style="box-shadow:var(--glow-honey);border-color:var(--honey-border)"></div><span class="t" style="color:var(--honey)">glow-honey</span></div>
+  <div class="box"><div class="card" style="box-shadow:var(--glow-dream);border-color:var(--dream-border)"></div><span class="t" style="color:var(--dream)">glow-dream</span></div>
+</body>
+</html>

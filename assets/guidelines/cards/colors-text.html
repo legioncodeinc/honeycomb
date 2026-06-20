@@ -1,0 +1,22 @@
+<!-- @dsCard group="Colors" viewport="700x180" name="Text on dark" subtitle="Four levels of warm off-white, plus inverse" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../../styles.css">
+<style>
+  body { margin: 0; padding: 24px; background: var(--bg-canvas); display: flex; flex-direction: column; gap: 14px; }
+  .line { display: flex; align-items: baseline; gap: 16px; }
+  .label { font-family: var(--font-mono); font-size: 12px; color: var(--text-tertiary); width: 150px; }
+  .spec { font-size: 22px; font-weight: 600; }
+  .inv { background: var(--text-primary); color: var(--text-inverse); padding: 4px 10px; border-radius: var(--radius-sm); font-size: 16px; font-weight: 600; }
+</style>
+</head>
+<body>
+  <div class="line"><span class="label">text-primary</span><span class="spec" style="color:var(--text-primary)">Memory that sticks.</span></div>
+  <div class="line"><span class="label">text-secondary</span><span class="spec" style="color:var(--text-secondary)">Recall it everywhere.</span></div>
+  <div class="line"><span class="label">text-tertiary</span><span class="spec" style="color:var(--text-tertiary)">Captured 4 minutes ago</span></div>
+  <div class="line"><span class="label">text-disabled</span><span class="spec" style="color:var(--text-disabled)">Daemon offline</span></div>
+  <div class="line"><span class="label">text-inverse</span><span class="inv">on honey / on light</span></div>
+</body>
+</html>

@@ -1,0 +1,23 @@
+<!-- @dsCard group="Spacing" viewport="700x170" name="Radii" subtitle="Five-step ladder — chips to hero, plus full for dots/avatars" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../../styles.css">
+<style>
+  body { margin: 0; padding: 24px; background: var(--bg-canvas); display: flex; gap: 16px; align-items: center; }
+  .box { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .sq { width: 88px; height: 80px; background: var(--bg-elevated); border: 1px solid var(--border-strong); border-top: 3px solid var(--honey); }
+  .t { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); }
+  .v { font-family: var(--font-mono); font-size: 10px; color: var(--text-tertiary); }
+</style>
+</head>
+<body>
+  <div class="box"><div class="sq" style="border-radius:var(--radius-sm)"></div><span class="t">sm · chip</span><span class="v">4</span></div>
+  <div class="box"><div class="sq" style="border-radius:var(--radius-md)"></div><span class="t">md · button</span><span class="v">8</span></div>
+  <div class="box"><div class="sq" style="border-radius:var(--radius-lg)"></div><span class="t">lg · card</span><span class="v">12</span></div>
+  <div class="box"><div class="sq" style="border-radius:var(--radius-xl)"></div><span class="t">xl · panel</span><span class="v">16</span></div>
+  <div class="box"><div class="sq" style="border-radius:var(--radius-2xl)"></div><span class="t">2xl · hero</span><span class="v">20</span></div>
+  <div class="box"><div class="sq" style="width:80px;border-radius:var(--radius-full)"></div><span class="t">full · dot</span><span class="v">9999</span></div>
+</body>
+</html>

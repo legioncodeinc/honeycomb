@@ -1,0 +1,29 @@
+<!-- @dsCard group="Brand" viewport="700x200" name="Logomark & wordmark" subtitle="Comb-cell mark — outer cell holds the stored memory" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../../styles.css">
+<style>
+  body { margin: 0; padding: 24px; background: var(--bg-canvas); display: flex; gap: 24px; align-items: stretch; }
+  .panel { flex: 1; border: 1px solid var(--border-default); border-radius: var(--radius-lg); display: flex; align-items: center; justify-content: center; gap: 14px; }
+  .light { background: var(--text-primary); }
+  .lbl { position: absolute; font-family: var(--font-mono); font-size: 10px; color: var(--text-tertiary); margin: 10px; align-self: flex-start; }
+  .wm { font-weight: 700; letter-spacing: -0.03em; font-size: 30px; }
+</style>
+</head>
+<body>
+  <div class="panel" style="background:var(--bg-surface); flex-direction:column; gap:12px">
+    <img src="../../logos/honeycomb-mark.svg" width="64" height="64" alt="mark">
+    <span class="mono" style="font-size:11px;color:var(--text-tertiary)">honeycomb-mark</span>
+  </div>
+  <div class="panel" style="background:var(--bg-surface)">
+    <img src="../../logos/honeycomb-mark.svg" width="44" height="44" alt="mark">
+    <span class="wm" style="color:var(--text-primary)">honeycomb</span>
+  </div>
+  <div class="panel light">
+    <img src="../../logos/honeycomb-mark.svg" width="44" height="44" alt="mark">
+    <span class="wm" style="color:var(--bg-canvas)">honeycomb</span>
+  </div>
+</body>
+</html>

@@ -1,0 +1,27 @@
+<!-- @dsCard group="Spacing" viewport="700x180" name="Spacing scale" subtitle="4px base unit; every value a multiple of 4" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../../styles.css">
+<style>
+  body { margin: 0; padding: 24px; background: var(--bg-canvas); display: flex; align-items: flex-end; gap: 16px; }
+  .col { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .bar { background: var(--honey); border-radius: var(--radius-sm); width: 100%; }
+  .box { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .t { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); }
+  .v { font-family: var(--font-mono); font-size: 10px; color: var(--text-tertiary); }
+</style>
+</head>
+<body>
+  <div class="box"><div style="width:4px;height:4px;background:var(--honey);border-radius:2px"></div><span class="t">1</span><span class="v">4</span></div>
+  <div class="box"><div style="width:8px;height:8px;background:var(--honey);border-radius:2px"></div><span class="t">2</span><span class="v">8</span></div>
+  <div class="box"><div style="width:12px;height:12px;background:var(--honey);border-radius:2px"></div><span class="t">3</span><span class="v">12</span></div>
+  <div class="box"><div style="width:16px;height:16px;background:var(--honey);border-radius:2px"></div><span class="t">4</span><span class="v">16</span></div>
+  <div class="box"><div style="width:24px;height:24px;background:var(--honey);border-radius:3px"></div><span class="t">6</span><span class="v">24</span></div>
+  <div class="box"><div style="width:32px;height:32px;background:var(--honey);border-radius:4px"></div><span class="t">8</span><span class="v">32</span></div>
+  <div class="box"><div style="width:48px;height:48px;background:var(--honey);border-radius:4px"></div><span class="t">12</span><span class="v">48</span></div>
+  <div class="box"><div style="width:64px;height:64px;background:var(--honey);border-radius:6px"></div><span class="t">16</span><span class="v">64</span></div>
+  <div class="box"><div style="width:80px;height:80px;background:var(--honey);border-radius:6px"></div><span class="t">20</span><span class="v">80</span></div>
+</body>
+</html>

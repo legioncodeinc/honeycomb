@@ -1,0 +1,24 @@
+<!-- @dsCard group="Colors" viewport="700x190" name="Surfaces" subtitle="Warm near-black canvas, five elevation steps" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../../styles.css">
+<style>
+  body { margin: 0; padding: 24px; background: var(--bg-canvas); }
+  .row { display: flex; gap: 12px; }
+  .sw { flex: 1; height: 110px; border-radius: var(--radius-lg); border: 1px solid var(--border-default); display: flex; flex-direction: column; justify-content: flex-end; padding: 12px; }
+  .name { font-family: var(--font-mono); font-size: 12px; color: var(--text-primary); font-weight: 600; }
+  .hex { font-family: var(--font-mono); font-size: 11px; color: var(--text-tertiary); }
+</style>
+</head>
+<body>
+  <div class="row">
+    <div class="sw" style="background:var(--bg-inset)"><span class="name">inset</span><span class="hex">#070501</span></div>
+    <div class="sw" style="background:var(--bg-canvas)"><span class="name">canvas</span><span class="hex">#0C0A07</span></div>
+    <div class="sw" style="background:var(--bg-surface)"><span class="name">surface</span><span class="hex">#15120B</span></div>
+    <div class="sw" style="background:var(--bg-elevated)"><span class="name">elevated</span><span class="hex">#1E1A11</span></div>
+    <div class="sw" style="background:var(--bg-subtle)"><span class="name">subtle</span><span class="hex">#292317</span></div>
+  </div>
+</body>
+</html>

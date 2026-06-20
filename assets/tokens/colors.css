@@ -1,0 +1,111 @@
+/* ============================================================
+   Honeycomb — Color tokens
+   Dark-native, warm-tinted. Inherits the Legion Code structure
+   (5 surfaces, 4 text levels, 3 borders, semantic severity) but
+   shifts the canvas warm and makes HONEY AMBER the one brand hue.
+
+   Two accents only:
+     --honey  : the brand. Memory, recall, the live comb. Scarcity
+                rule applies — one saturated honey region per view.
+     --dream  : violet. Reserved for the Dreaming consolidation
+                loop and night/maintenance states. Never decorative.
+   Use these tokens; never raw hex outside this file.
+   ============================================================ */
+
+:root {
+  /* ---- Surfaces (dark — primary; warm near-black) --------------- */
+  --bg-canvas:    #0C0A07;
+  --bg-surface:   #15120B;
+  --bg-elevated:  #1E1A11;
+  --bg-subtle:    #29231799;
+  --bg-inset:     #070501;
+
+  /* ---- Text (warm off-white on dark) --------------------------- */
+  --text-primary:   #F7F3EC;
+  --text-secondary: #ADA28F;
+  --text-tertiary:  #877E6C;
+  --text-disabled:  #524B3C;
+  --text-inverse:   #0C0A07;
+
+  /* ---- Borders & dividers (on dark) ---------------------------- */
+  --border-subtle:  #221E15;
+  --border-default: #322B1E;
+  --border-strong:  #483F2C;
+
+  /* ---- Brand: HONEY AMBER (scarcity rule applies) -------------- */
+  --honey:          #F7A823;
+  --honey-hover:    #FFBA47;
+  --honey-pressed:  #D98C0C;
+  --honey-subtle:   rgba(247, 168, 35, 0.12);
+  --honey-border:   rgba(247, 168, 35, 0.32);
+  --honey-on:       #1A1206;   /* ink that sits on a honey fill   */
+
+  /* ---- Honey scale (comb cells, heat, data viz) ---------------- */
+  --honey-50:  #FFE9C2;
+  --honey-100: #FFD894;
+  --honey-200: #FFC661;
+  --honey-300: #F7A823;
+  --honey-400: #D98C0C;
+  --honey-500: #A86A07;
+  --honey-600: #6E4604;
+
+  /* ---- Dream: VIOLET (the Dreaming loop + night states) -------- */
+  --dream:          #8B7CF0;
+  --dream-hover:    #A89CF5;
+  --dream-pressed:  #6E5DDB;
+  --dream-subtle:   rgba(139, 124, 240, 0.14);
+  --dream-border:   rgba(139, 124, 240, 0.34);
+  --dream-on:       #0B0814;
+
+  /* ---- Severity (semantic; never decorative) ------------------- */
+  --severity-critical:    #FF5C63;
+  --severity-critical-bg: rgba(255, 92, 99, 0.12);
+  --severity-warning:     #FFC24B;
+  --severity-warning-bg:  rgba(255, 194, 75, 0.12);
+  --severity-info:        #5FA8FF;
+  --severity-info-bg:     rgba(95, 168, 255, 0.12);
+  --severity-success:     #3DDC97;   /* verified-green: proven / receipts */
+  --severity-success-bg:  rgba(61, 220, 151, 0.12);
+
+  /* ---- Status accents reused across product -------------------- */
+  --verified:       #3DDC97;   /* a proven, source-backed memory  */
+  --verified-subtle: rgba(61, 220, 151, 0.12);
+}
+
+/* ---- Light theme — docs, printed/exported reports only --------- */
+:root[data-theme="light"],
+.theme-light {
+  --bg-canvas:    #FBF7EF;
+  --bg-surface:   #F5EFE2;
+  --bg-elevated:  #FFFFFF;
+  --bg-subtle:    #EFE7D5;
+  --bg-inset:     #F0E8D8;
+
+  --text-primary:   #1A1206;
+  --text-secondary: #5C513C;
+  --text-tertiary:  #877E6C;
+  --text-disabled:  #B5AC97;
+  --text-inverse:   #FBF7EF;
+
+  --border-subtle:  #EAE0CD;
+  --border-default: #DACFB6;
+  --border-strong:  #C2B594;
+
+  --honey:          #B7790A;
+  --honey-hover:    #9A6606;
+  --honey-pressed:  #7E5304;
+  --honey-subtle:   rgba(183, 121, 10, 0.10);
+  --honey-border:   rgba(183, 121, 10, 0.30);
+  --honey-on:       #FFFFFF;
+
+  --dream:          #6E5DDB;
+  --dream-hover:    #5B49C6;
+  --dream-subtle:   rgba(110, 93, 219, 0.10);
+  --dream-border:   rgba(110, 93, 219, 0.28);
+
+  --severity-critical:    #D93741;
+  --severity-warning:     #B5790A;
+  --severity-info:        #2E6FD9;
+  --severity-success:     #18A968;
+  --verified:             #18A968;
+}

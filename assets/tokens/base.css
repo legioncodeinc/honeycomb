@@ -1,0 +1,76 @@
+/* ============================================================
+   Honeycomb — Base + semantic element styles
+   Foundation layer applied to the document. Tag elements with the
+   classes below or use as a base for product CSS.
+   ============================================================ */
+
+* { box-sizing: border-box; }
+
+html, body {
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--lh-base);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'cv11', 'ss01';
+}
+
+/* Headings — Inter 700, tight tracking */
+h1, .h1 { font-size: var(--text-5xl); line-height: var(--lh-5xl); font-weight: 700; letter-spacing: var(--tracking-tight); margin: 0; }
+h2, .h2 { font-size: var(--text-4xl); line-height: var(--lh-4xl); font-weight: 700; letter-spacing: -0.02em; margin: 0; }
+h3, .h3 { font-size: var(--text-3xl); line-height: var(--lh-3xl); font-weight: 700; letter-spacing: -0.02em; margin: 0; }
+h4, .h4 { font-size: var(--text-2xl); line-height: var(--lh-2xl); font-weight: 600; letter-spacing: -0.01em; margin: 0; }
+h5, .h5 { font-size: var(--text-xl);  line-height: var(--lh-xl);  font-weight: 600; margin: 0; }
+h6, .h6 { font-size: var(--text-lg);  line-height: var(--lh-lg);  font-weight: 600; margin: 0; }
+
+p, .body { font-size: var(--text-base); line-height: var(--lh-base); color: var(--text-secondary); }
+.body-lg { font-size: var(--text-lg); line-height: var(--lh-lg); color: var(--text-secondary); }
+.body-sm { font-size: var(--text-sm); line-height: var(--lh-sm); color: var(--text-secondary); }
+.caption { font-size: var(--text-xs); line-height: var(--lh-xs); color: var(--text-tertiary); }
+
+/* Display — marketing hero only */
+.display { font-size: var(--text-7xl); line-height: var(--lh-7xl); font-weight: 700; letter-spacing: -0.04em; }
+
+/* Mono — the texture of trust. Memory keys, session ids, hashes,
+   file paths, recall queries, token counts, timestamps. */
+code, kbd, samp, pre, .mono {
+  font-family: var(--font-mono);
+  font-feature-settings: 'liga' 0;
+}
+.mono-sm { font-family: var(--font-mono); font-size: var(--text-sm); line-height: var(--lh-sm); }
+.mono-xs { font-family: var(--font-mono); font-size: var(--text-xs); line-height: var(--lh-xs); }
+
+/* Eyebrow — uppercase mono label above section titles */
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+  color: var(--text-tertiary);
+}
+
+/* Wordmark — Inter 700, lowercase, tight tracking (the honeycomb mark) */
+.wordmark {
+  font-family: var(--font-sans);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+
+/* Focus ring — honey, on interactive elements */
+:focus-visible {
+  outline: 2px solid var(--honey);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Selection */
+::selection {
+  background: var(--honey-subtle);
+  color: var(--text-primary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
+}

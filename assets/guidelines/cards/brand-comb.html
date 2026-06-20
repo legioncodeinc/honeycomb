@@ -1,0 +1,38 @@
+<!-- @dsCard group="Brand" viewport="700x180" name="The comb motif" subtitle="Hex-cell grid — each cell a memory; lit cells are recalled/verified" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../../styles.css">
+<style>
+  body { margin: 0; padding: 24px; background: var(--bg-canvas); display: flex; gap: 36px; align-items: center; }
+  .comb { display: flex; flex-direction: column; }
+  .row { display: flex; gap: 5px; }
+  .row + .row { margin-top: -13px; }
+  .row.odd { margin-left: 28px; }
+  .hex { width: 50px; height: 56px; clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%); background: var(--bg-elevated); }
+  .hex.dim { background: var(--bg-subtle); }
+  .hex.honey { background: var(--honey); }
+  .hex.honey2 { background: var(--honey-400); }
+  .hex.verified { background: var(--verified); }
+  .hex.dream { background: var(--dream); animation: pulse var(--dur-dream) var(--ease-in-out) infinite alternate; }
+  @keyframes pulse { from { opacity: .4 } to { opacity: 1 } }
+  .key { display: flex; flex-direction: column; gap: 10px; }
+  .ki { display: flex; align-items: center; gap: 10px; font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); }
+  .sw { width: 14px; height: 16px; clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%); }
+</style>
+</head>
+<body>
+  <div class="comb">
+    <div class="row"><div class="hex dim"></div><div class="hex honey2"></div><div class="hex"></div><div class="hex verified"></div><div class="hex dim"></div><div class="hex"></div></div>
+    <div class="row odd"><div class="hex honey"></div><div class="hex"></div><div class="hex dream"></div><div class="hex dim"></div><div class="hex honey2"></div></div>
+    <div class="row"><div class="hex"></div><div class="hex dim"></div><div class="hex"></div><div class="hex dim"></div><div class="hex"></div><div class="hex dim"></div></div>
+  </div>
+  <div class="key">
+    <div class="ki"><span class="sw" style="background:var(--bg-elevated)"></span>stored memory</div>
+    <div class="ki"><span class="sw" style="background:var(--honey)"></span>recalled this turn</div>
+    <div class="ki"><span class="sw" style="background:var(--verified)"></span>verified · source-backed</div>
+    <div class="ki"><span class="sw" style="background:var(--dream)"></span>consolidating (dreaming)</div>
+  </div>
+</body>
+</html>
