@@ -6,9 +6,11 @@
  * the single named step the daemon assembly calls AFTER `createDaemon(...)` to attach the
  * dashboard data handlers onto the already-mounted route groups, mirroring
  * `attachHooksHandlers` (019b). ZERO edits to `server.ts`: the route groups
- * (`/api/diagnostics`, `/api/kpis`, `/api/sessions`, `/api/graph`, `/api/rules`,
- * `/api/skills`) are already scaffolded + protected, so attaching via `daemon.group(path)`
- * inherits auth/RBAC with no re-wiring.
+ * (`/api/diagnostics`, `/api/graph`) are already scaffolded + protected, so attaching via
+ * `daemon.group(path)` inherits auth/RBAC with no re-wiring. The kpis/rules/skills VIEW-MODELS
+ * are served UNDER the diagnostics group (`/api/diagnostics/{kpis,rules,skills}`), NOT on the
+ * canonical `/api/kpis|rules|skills` resource paths — those belong to the PRD-022 product-data
+ * data-access API (the rows the CLI/SDK/MCP read), and a same-named dashboard view-model yields.
  *
  * It is storage-correct (lives under `src/daemon/`): handlers reach storage ONLY through the
  * injected {@link StorageQuery}, building guarded SQL with the pure `sql.ts` helpers
@@ -69,8 +71,13 @@ export interface DashboardSettingsConfig {
  * dashboard fills — no new group, no `server.ts` edit.
  */
 export const DASHBOARD_GROUPS = Object.freeze({
-	/** KPIs view-model (FR-2). */
-	kpis: "/api/kpis",
+	/**
+	 * KPIs view-model (FR-2) — served off the diagnostics group at `/kpis` (full path
+	 * `/api/diagnostics/kpis`). The canonical `/api/kpis` resource path is owned by the PRD-022
+	 * product-data data-access API (the rows the CLI/SDK/MCP read); this dashboard VIEW-MODEL is a
+	 * presentation concern and yields to it, namespaced under diagnostics alongside sessions/settings.
+	 */
+	kpis: "/api/diagnostics",
 	/**
 	 * Sessions view-model (FR-3) — served off the diagnostics group at `/sessions` (full path
 	 * `/api/diagnostics/sessions`). There is NO standalone `/api/sessions` route group mounted in
@@ -80,12 +87,20 @@ export const DASHBOARD_GROUPS = Object.freeze({
 	sessions: "/api/diagnostics",
 	/** Settings view-model (FR-4) — served off the diagnostics group at `/settings`. */
 	settings: "/api/diagnostics",
-	/** Graph view-model (FR-5 / a-AC-6 empty-state). */
+	/** Graph view-model (FR-5 / a-AC-6 empty-state). Product-data does NOT claim `/api/graph`, so this stays. */
 	graph: "/api/graph",
-	/** Rules view-model (FR-6 / a-AC-4). */
-	rules: "/api/rules",
-	/** Skill-sync view-model (FR-6). */
-	skills: "/api/skills",
+	/**
+	 * Rules view-model (FR-6 / a-AC-4) — served off the diagnostics group at `/rules` (full path
+	 * `/api/diagnostics/rules`). The canonical `/api/rules` resource path is owned by the PRD-022
+	 * product-data data-access API; this dashboard VIEW-MODEL yields to it, under diagnostics.
+	 */
+	rules: "/api/diagnostics",
+	/**
+	 * Skill-sync view-model (FR-6) — served off the diagnostics group at `/skills` (full path
+	 * `/api/diagnostics/skills`). The canonical `/api/skills` resource path is owned by the PRD-022
+	 * product-data data-access API; this dashboard VIEW-MODEL yields to it, under diagnostics.
+	 */
+	skills: "/api/diagnostics",
 } as const);
 
 /**
@@ -233,7 +248,9 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 
 	const kpis = daemon.group(DASHBOARD_GROUPS.kpis);
 	if (kpis !== undefined) {
-		kpis.get("/", async (c) => {
+		// Served at `/kpis` under the diagnostics group (full `/api/diagnostics/kpis`) so the
+		// canonical `/api/kpis` resource path is left to the PRD-022 product-data data-access API.
+		kpis.get("/kpis", async (c) => {
 			const scope = resolveScope(c);
 			if (scope === null) return c.json(NO_ORG_BODY, 400);
 			return c.json(await fetchKpisView(storage, scope));
@@ -272,7 +289,9 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 
 	const rules = daemon.group(DASHBOARD_GROUPS.rules);
 	if (rules !== undefined) {
-		rules.get("/", async (c) => {
+		// Served at `/rules` under the diagnostics group (full `/api/diagnostics/rules`) so the
+		// canonical `/api/rules` resource path is left to the PRD-022 product-data data-access API.
+		rules.get("/rules", async (c) => {
 			const scope = resolveScope(c);
 			if (scope === null) return c.json(NO_ORG_BODY, 400);
 			return c.json(await fetchRulesView(storage, scope));
@@ -281,7 +300,9 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 
 	const skills = daemon.group(DASHBOARD_GROUPS.skills);
 	if (skills !== undefined) {
-		skills.get("/", async (c) => {
+		// Served at `/skills` under the diagnostics group (full `/api/diagnostics/skills`) so the
+		// canonical `/api/skills` resource path is left to the PRD-022 product-data data-access API.
+		skills.get("/skills", async (c) => {
 			const scope = resolveScope(c);
 			if (scope === null) return c.json(NO_ORG_BODY, 400);
 			return c.json(await fetchSkillSyncView(storage, scope));

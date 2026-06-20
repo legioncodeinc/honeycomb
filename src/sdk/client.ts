@@ -82,6 +82,21 @@ export function isTokenTransportSafe(baseUrl: string): boolean {
 const HEADER_ACTOR = "x-honeycomb-actor";
 const HEADER_ACTOR_TYPE = "x-honeycomb-actor-type";
 const HEADER_RUNTIME_PATH = "x-honeycomb-runtime-path";
+const HEADER_SESSION = "x-honeycomb-session";
+
+/**
+ * The daemon SESSION groups (PRD-022d / d-AC-3). The runtime-path middleware in front of
+ * `/api/memories` and `/memory` requires BOTH `x-honeycomb-runtime-path` AND
+ * `x-honeycomb-session`; a call missing either 400s before the handler. The SDK already
+ * stamps the plugin runtime-path on every call, so it adds a synthetic per-call session id
+ * for these paths so `recall()`/`remember()` reach the wired endpoints (no 400).
+ */
+const SESSION_GROUP_PREFIXES = ["/api/memories", "/memory"] as const;
+
+/** True when `path` targets a session group (so the SDK must stamp the synthetic session header). */
+export function isSdkSessionGroupPath(path: string): boolean {
+	return SESSION_GROUP_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`) || path.startsWith(`${p}?`));
+}
 
 /** One internal request the pipeline dispatches. */
 interface SdkRequest {
@@ -111,14 +126,27 @@ export function createHoneycombClient(opts: HoneycombClientOptions): HoneycombCl
 	// `http://` to a remote host (SSRF-adjacent credential exposure). FR-6 / security.
 	const tokenTransportSafe = isTokenTransportSafe(baseUrl);
 
+	// A stable-per-client-instance synthetic session counter for session-group calls
+	// (PRD-022d / d-AC-3). No `Date.now()`/`Math.random()` and no Node import (the SDK stays
+	// node-free + browser-safe, e-AC-3): a monotonic closure counter keyed on the actor.
+	let sdkSessionCounter = 0;
+	function mintSdkSessionId(): string {
+		sdkSessionCounter += 1;
+		return `sdk-${opts.actor}-${sdkSessionCounter}`;
+	}
+
 	/** Build the headers carried on EVERY call: actor + actorType + runtime-path + token (FR-2 / FR-6). */
-	function buildHeaders(hasBody: boolean): Record<string, string> {
+	function buildHeaders(hasBody: boolean, path: string): Record<string, string> {
 		const headers: Record<string, string> = {
 			[HEADER_ACTOR]: opts.actor,
 			[HEADER_ACTOR_TYPE]: opts.actorType,
 			// The SDK is a plugin-path thin client; the daemon enforces, we stamp (D-6).
 			[HEADER_RUNTIME_PATH]: "plugin",
 		};
+		// A SESSION-group call (`/api/memories`, `/memory`) additionally stamps a synthetic
+		// session id the runtime-path middleware requires (PRD-022d / d-AC-3) — without it the
+		// call 400s before the wired handler. A non-session path carries no session header.
+		if (isSdkSessionGroupPath(path)) headers[HEADER_SESSION] = mintSdkSessionId();
 		if (hasBody) headers["content-type"] = "application/json";
 		// Token rides on Authorization; it is carried, never logged (FR-6 / security).
 		// It is attached ONLY when the transport is safe (loopback or HTTPS) so a
@@ -145,7 +173,7 @@ export function createHoneycombClient(opts: HoneycombClientOptions): HoneycombCl
 		try {
 			const init: RequestInit = {
 				method: req.method,
-				headers: buildHeaders(req.body !== undefined),
+				headers: buildHeaders(req.body !== undefined, req.path),
 				signal: controller.signal,
 			};
 			if (req.body !== undefined) init.body = JSON.stringify(req.body);
@@ -242,15 +270,32 @@ export function createHoneycombClient(opts: HoneycombClientOptions): HoneycombCl
 	// ── memory (FR-3) ──────────────────────────────────────────────────────────
 	const memory: MemoryApi = {
 		async search(query: string, o?: RecallOptions): Promise<readonly RecallResult[]> {
-			const body = await request<{ results?: readonly RecallResult[] }>({
+			// The WIRED recall endpoint (022a): `POST /api/memories/recall {query, limit?}` →
+			// `{ hits: [{source, id, text}], sources, degraded }`. Map the hits to RecallResult
+			// (path ← id). Tolerate the legacy `{ results }` envelope for forward-compat.
+			const body = await request<{
+				hits?: readonly { id?: string; text?: string; score?: number }[];
+				results?: readonly RecallResult[];
+			}>({
 				method: "POST",
-				path: "/api/memories/search",
-				body: { query, limit: o?.limit },
+				path: "/api/memories/recall",
+				body: o?.limit !== undefined ? { query, limit: o.limit } : { query },
 			});
-			return body?.results ?? [];
+			if (body?.results !== undefined) return body.results;
+			return (body?.hits ?? []).map((h) => ({
+				path: h.id ?? "",
+				text: h.text ?? "",
+				...(h.score !== undefined ? { score: h.score } : {}),
+			}));
 		},
 		async store(text: string, o?: RememberOptions): Promise<void> {
-			await request<void>({ method: "POST", path: "/api/memories", body: { text, path: o?.path } });
+			// The WIRED store endpoint (022a): `POST /api/memories {content, ...}` → 201. The
+			// daemon owns the row; the SDK passes the content (and the path as a normalized hint).
+			await request<void>({
+				method: "POST",
+				path: "/api/memories",
+				body: o?.path !== undefined ? { content: text, normalizedContent: o.path } : { content: text },
+			});
 		},
 		async get(path: string): Promise<RecallResult | undefined> {
 			return await request<RecallResult | undefined>({

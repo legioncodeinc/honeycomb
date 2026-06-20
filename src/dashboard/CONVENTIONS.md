@@ -74,8 +74,11 @@ D1/D2 dimensions use, so the message is consistent across surfaces.
 The data `DashboardDataSource` fetches is served by `mountDashboardApi` (daemon-side, storage-correct,
 scaffolded under `src/daemon/runtime/` this wave — Wave 2 fills the handlers). The dashboard attaches
 nothing to `server.ts`; it consumes the endpoints. The daemon already mounts the relevant route
-groups (`/api/diagnostics`, `/api/kpis`, `/api/sessions`, `/api/graph`, `/api/rules`, `/api/skills`),
-so the Wave-2 attach is `daemon.group(path)` with zero `server.ts` edits.
+groups (`/api/diagnostics`, `/api/graph`), so the Wave-2 attach is `daemon.group(path)` with zero
+`server.ts` edits. The kpis/sessions/settings/rules/skills VIEW-MODELS are served under
+`/api/diagnostics/{kpis,sessions,settings,rules,skills}` — the canonical `/api/kpis`, `/api/rules`,
+`/api/skills` resource paths belong to the PRD-022 product-data data-access API, so the dashboard's
+same-named view-models yield to the diagnostics namespace (only `/api/graph` stays standalone).
 
 ## The `honeycomb dashboard` launch surface (FR-1)
 

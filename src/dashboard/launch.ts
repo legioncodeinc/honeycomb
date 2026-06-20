@@ -101,7 +101,7 @@ export function createDaemonDashboardDataSource(options: LaunchDashboardOptions 
 			// full DashboardData. A missing/empty endpoint falls back to the empty-but-valid shape
 			// so one absent view never blanks the whole dashboard.
 			const [kpis, sessions, settings, graph, rules, skillSync] = await Promise.all([
-				getJson<DashboardData["kpis"]>(fetchImpl, `${base}/api/kpis`, headers, timeoutMs).catch(
+				getJson<DashboardData["kpis"]>(fetchImpl, `${base}/api/diagnostics/kpis`, headers, timeoutMs).catch(
 					() => EMPTY_DASHBOARD_DATA.kpis,
 				),
 				getJson<DashboardData["sessions"]>(fetchImpl, `${base}/api/diagnostics/sessions`, headers, timeoutMs).catch(
@@ -113,10 +113,10 @@ export function createDaemonDashboardDataSource(options: LaunchDashboardOptions 
 				getJson<DashboardData["graph"]>(fetchImpl, `${base}/api/graph`, headers, timeoutMs).catch(
 					() => EMPTY_DASHBOARD_DATA.graph,
 				),
-				getJson<DashboardData["rules"]>(fetchImpl, `${base}/api/rules`, headers, timeoutMs).catch(
+				getJson<DashboardData["rules"]>(fetchImpl, `${base}/api/diagnostics/rules`, headers, timeoutMs).catch(
 					() => EMPTY_DASHBOARD_DATA.rules,
 				),
-				getJson<DashboardData["skillSync"]>(fetchImpl, `${base}/api/skills`, headers, timeoutMs).catch(
+				getJson<DashboardData["skillSync"]>(fetchImpl, `${base}/api/diagnostics/skills`, headers, timeoutMs).catch(
 					() => EMPTY_DASHBOARD_DATA.skillSync,
 				),
 			]);

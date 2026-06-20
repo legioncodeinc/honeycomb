@@ -3,12 +3,18 @@
  *
  * `mountDashboardApi` is the single named seam the daemon assembly calls after
  * `createDaemon(...)` to wire the six dashboard read handlers onto the already-mounted route
- * groups (`/api/kpis`, `/api/sessions`, `/api/diagnostics`, `/api/graph`, `/api/rules`,
- * `/api/skills`). This suite proves: BEFORE the attach the groups answer the 501 scaffold;
- * AFTER the attach each endpoint is LIVE and returns the matching 020b view-model shape, read
- * through the injected storage client (storage-correct — never a raw fetch). It also proves the
- * graph empty-state (b-AC-6) and the built-graph canvas (b-AC-3) come from the daemon's graph
- * endpoint.
+ * groups (`/api/diagnostics`, `/api/graph`). This suite proves: BEFORE the attach the
+ * diagnostics group answers the 501 scaffold; AFTER the attach each endpoint is LIVE and returns
+ * the matching 020b view-model shape, read through the injected storage client (storage-correct —
+ * never a raw fetch). It also proves the graph empty-state (b-AC-6) and the built-graph canvas
+ * (b-AC-3) come from the daemon's graph endpoint.
+ *
+ * ── Route-collision contract (PRD-022) ───────────────────────────────────────
+ * The kpis/rules/skills VIEW-MODELS are served UNDER the diagnostics namespace
+ * (`/api/diagnostics/{kpis,rules,skills}`), NOT on the canonical `/api/kpis|rules|skills`
+ * resource paths — those belong to the PRD-022 product-data data-access API. This suite asserts
+ * the views answer at the diagnostics paths AND that the dashboard no longer claims `/api/kpis`
+ * (so product-data owns it; see the regression test below).
  */
 
 import { describe, expect, it } from "vitest";
@@ -67,21 +73,37 @@ function makeDaemon(graphBuilt: boolean) {
 }
 
 describe("PRD-020b mountDashboardApi wires the six dashboard read handlers", () => {
-	it("BEFORE attach: /api/kpis answers the 501 scaffold", async () => {
+	it("BEFORE attach: /api/diagnostics/kpis answers the 501 scaffold", async () => {
 		const { daemon } = makeDaemon(true);
-		const res = await daemon.app.request("/api/kpis", { headers: headers() });
+		const res = await daemon.app.request("/api/diagnostics/kpis", { headers: headers() });
 		expect(res.status).toBe(501);
 	});
 
-	it("b-AC-1: AFTER attach: /api/kpis returns the KpisView read through storage", async () => {
+	it("b-AC-1: AFTER attach: /api/diagnostics/kpis returns the KpisView read through storage", async () => {
 		const { daemon, storage } = makeDaemon(true);
 		mountDashboardApi(daemon, { storage });
-		const res = await daemon.app.request("/api/kpis", { headers: headers() });
+		const res = await daemon.app.request("/api/diagnostics/kpis", { headers: headers() });
 		expect(res.status).toBe(200);
 		const json = (await res.json()) as Record<string, number>;
 		expect(json.memoryCount).toBe(42);
 		expect(json.sessionCount).toBe(7);
 		expect(json.estimatedSavings).toBe(0);
+	});
+
+	it("PRD-022 collision: the dashboard does NOT claim /api/kpis (left to product-data)", async () => {
+		const { daemon, storage } = makeDaemon(true);
+		mountDashboardApi(daemon, { storage });
+		// mountDashboardApi attaches NOTHING to the canonical `/api/kpis` resource group, so it
+		// still answers the scaffold 501 — product-data's GET handler is what fills it. This is the
+		// regression for the live dogfood collision where the dashboard view-model shadowed the
+		// product-data rows on `/api/kpis` (Hono first-match wins).
+		const res = await daemon.app.request("/api/kpis", { headers: headers() });
+		expect(res.status).toBe(501);
+		const body = (await res.json()) as { error?: string };
+		expect(body.error).toBe("not_implemented");
+		// The same regression holds for the other two collided resource paths.
+		expect((await daemon.app.request("/api/rules", { headers: headers() })).status).toBe(501);
+		expect((await daemon.app.request("/api/skills", { headers: headers() })).status).toBe(501);
 	});
 
 	it("b-AC-1: /api/sessions returns the SessionsView with project/date metadata", async () => {
@@ -122,19 +144,19 @@ describe("PRD-020b mountDashboardApi wires the six dashboard read handlers", () 
 		expect(json.nodes).toHaveLength(0);
 	});
 
-	it("b-AC-4: /api/rules lists the active rules through storage", async () => {
+	it("b-AC-4: /api/diagnostics/rules lists the active rules through storage", async () => {
 		const { daemon, storage } = makeDaemon(true);
 		mountDashboardApi(daemon, { storage });
-		const res = await daemon.app.request("/api/rules", { headers: headers() });
+		const res = await daemon.app.request("/api/diagnostics/rules", { headers: headers() });
 		const json = (await res.json()) as { rules: { title: string; active: boolean }[] };
 		expect(json.rules[0].title).toBe("Use ESM");
 		expect(json.rules[0].active).toBe(true);
 	});
 
-	it("b-AC-1: /api/skills returns the skill-sync view", async () => {
+	it("b-AC-1: /api/diagnostics/skills returns the skill-sync view", async () => {
 		const { daemon, storage } = makeDaemon(true);
 		mountDashboardApi(daemon, { storage });
-		const res = await daemon.app.request("/api/skills", { headers: headers() });
+		const res = await daemon.app.request("/api/diagnostics/skills", { headers: headers() });
 		const json = (await res.json()) as { skills: { name: string; syncState: string }[] };
 		expect(json.skills[0].name).toBe("deeplake-recall");
 		expect(json.skills[0].syncState).toBe("shared");
@@ -143,7 +165,7 @@ describe("PRD-020b mountDashboardApi wires the six dashboard read handlers", () 
 	it("fail-closed: a request with no org header 400s rather than reading a broad scope", async () => {
 		const { daemon, storage } = makeDaemon(true);
 		mountDashboardApi(daemon, { storage });
-		const res = await daemon.app.request("/api/kpis", {});
+		const res = await daemon.app.request("/api/diagnostics/kpis", {});
 		expect(res.status).toBe(400);
 	});
 });

@@ -69,6 +69,9 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 		attachPrune: 0,
 		mountLogs: 0,
 		mountDashboardHost: 0,
+		mountMemories: 0,
+		mountVfs: 0,
+		mountProductData: 0,
 	} as Record<keyof SeamFns, number>;
 	const seams: SeamFns = {
 		attachHooks: ((daemon) => {
@@ -105,6 +108,41 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 			order.push("mountDashboardHost");
 			expect(typeof daemon.group).toBe("function");
 		}) as SeamFns["mountDashboardHost"],
+		// ── The three data-API seams (022a / 022b / 022c) the 022d composition root fires. ──
+		mountMemories: ((daemon, options) => {
+			calls.mountMemories += 1;
+			order.push("mountMemories");
+			expect(typeof daemon.group).toBe("function");
+			// The memories API is wired with the live storage client (the recall + write engines).
+			expect(options.storage).toBeDefined();
+				// PRD-022: the daemon's default tenancy scope is threaded so a no-org loopback
+				// request resolves in local mode (the SDK/MCP 400 regression fix).
+				expect(options.defaultScope, "memories receives the threaded default scope").toBeDefined();
+				expect(options.defaultScope?.org).toBeTruthy();
+		}) as SeamFns["mountMemories"],
+		mountVfs: ((daemon, options) => {
+			calls.mountVfs += 1;
+			order.push("mountVfs");
+			expect(typeof daemon.group).toBe("function");
+			// The VFS browse reads run through the same live storage client.
+			expect(options.storage).toBeDefined();
+				// PRD-022: the VFS browse receives the threaded default scope too.
+				expect(options.defaultScope, "vfs receives the threaded default scope").toBeDefined();
+				expect(options.defaultScope?.org).toBeTruthy();
+		}) as SeamFns["mountVfs"],
+		mountProductData: ((daemon, options) => {
+			calls.mountProductData += 1;
+			order.push("mountProductData");
+			expect(typeof daemon.group).toBe("function");
+			// goals/kpis/skills/rules wire through storage; secrets is wired (constructible),
+			// sources is deferred (NOT faked) — see resolveProductDataDeps in assemble.ts.
+			expect(options.storage).toBeDefined();
+			expect(options.secrets, "secrets engine is wired at the composition root").toBeDefined();
+			expect(options.sources, "sources is deferred (not wired, not faked — D-1)").toBeUndefined();
+				// PRD-022: the product-data surface receives the threaded default scope.
+				expect(options.defaultScope, "product-data receives the threaded default scope").toBeDefined();
+				expect(options.defaultScope?.org).toBeTruthy();
+		}) as SeamFns["mountProductData"],
 	};
 	return { seams, calls };
 }
@@ -120,8 +158,8 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-describe("a-AC-2 the mount/attach seams fire exactly once, after construction", () => {
-	it("in LOCAL mode fires all six seams (logs + dashboard-host included) each exactly once, in order", () => {
+describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after construction", () => {
+	it("in LOCAL mode fires all nine seams (logs + dashboard-host + the three data seams) each exactly once, in order", () => {
 		const order: string[] = [];
 		const { seams, calls } = recordingSeams(order);
 		assembleDaemon({
@@ -132,14 +170,19 @@ describe("a-AC-2 the mount/attach seams fire exactly once, after construction", 
 			seams,
 		});
 		// The four core seams + the /api/logs reader (always) + the /dashboard host
-		// (local-mode only, fired here because the mode is `local`) each fire EXACTLY ONCE.
+		// (local-mode only, fired here because the mode is `local`) + the three data-API
+		// seams (memories / vfs / product-data, always) each fire EXACTLY ONCE.
 		expect(calls.attachHooks).toBe(1);
 		expect(calls.mountDashboard).toBe(1);
 		expect(calls.mountNotifications).toBe(1);
 		expect(calls.attachPrune).toBe(1);
 		expect(calls.mountLogs).toBe(1);
 		expect(calls.mountDashboardHost).toBe(1);
-		// Deterministic order: hooks → dashboard → notifications → prune → logs → host.
+		// d-AC-1: every data-API seam fires once and only once.
+		expect(calls.mountMemories).toBe(1);
+		expect(calls.mountVfs).toBe(1);
+		expect(calls.mountProductData).toBe(1);
+		// Deterministic order: the 021 seams, then the 022 data seams (memories → vfs → product).
 		expect(order).toEqual([
 			"attachHooks",
 			"mountDashboard",
@@ -147,7 +190,29 @@ describe("a-AC-2 the mount/attach seams fire exactly once, after construction", 
 			"attachPrune",
 			"mountLogs",
 			"mountDashboardHost",
+			"mountMemories",
+			"mountVfs",
+			"mountProductData",
 		]);
+	});
+
+	it("d-AC-1 the three data-API seams fire UNCONDITIONALLY (in team mode too, each exactly once)", () => {
+		const order: string[] = [];
+		const { seams, calls } = recordingSeams(order);
+		assembleDaemon({
+			config: cfg({ mode: "team" }),
+			storage: fakeStorage(OK_RESULT),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+			seams,
+		});
+		// The data-API seams resolve their own protected groups, so they are NOT mode-gated —
+		// each fires once regardless of mode (the production assembly fires them in team too).
+		expect(calls.mountMemories).toBe(1);
+		expect(calls.mountVfs).toBe(1);
+		expect(calls.mountProductData).toBe(1);
+		// The /dashboard host stays local-only (security F-1) even though the data seams fire.
+		expect(calls.mountDashboardHost).toBe(0);
 	});
 
 	it("mountLogs fires UNCONDITIONALLY (its /api/logs group is already protect:true) — fired in team mode too", () => {
@@ -191,6 +256,104 @@ describe("security F-1: mountDashboardHost is LOCAL-MODE ONLY (the team-mode ten
 			expect(calls.mountLogs).toBe(1);
 		});
 	}
+});
+
+describe("d-AC-5 the ASSEMBLED daemon still rejects malformed/no-session requests at the edge", () => {
+	/** The session-group headers a valid request to /api/memories must carry. */
+	const sessionHeaders = {
+		"x-honeycomb-org": "acme",
+		"x-honeycomb-workspace": "default",
+		"x-honeycomb-runtime-path": "legacy",
+		"x-honeycomb-session": "d-ac-5-session",
+		"content-type": "application/json",
+	};
+
+	it("d-AC-5 a recall with NO x-honeycomb-session is 400'd by the runtime-path middleware (before the wired handler)", async () => {
+		// Assemble with the REAL seams (mountMemoriesApi fires via assembleSeams) + a fake storage
+		// client, so the actual `/api/memories` session group + middleware run in-process.
+		const { daemon } = assembleDaemon({
+			config: cfg({ mode: "local" }),
+			storage: fakeStorage(OK_RESULT),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+		});
+		const noSession = { ...sessionHeaders } as Record<string, string>;
+		delete noSession["x-honeycomb-session"];
+		const res = await daemon.app.request("/api/memories/recall", {
+			method: "POST",
+			headers: noSession,
+			body: JSON.stringify({ query: "anything" }),
+		});
+		// The runtime-path middleware 400s a session-group request missing the session header,
+		// BEFORE the wired recall handler — the wiring did not open a no-session hole (FR-8 / D-3).
+		expect(res.status).toBe(400);
+	});
+
+	it("d-AC-5 a recall WITH a session but a MALFORMED body is 400'd by zod (before the engine)", async () => {
+		const { daemon } = assembleDaemon({
+			config: cfg({ mode: "local" }),
+			storage: fakeStorage(OK_RESULT),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+		});
+		// A body missing the required `query` clears the middleware (session present) but fails the
+		// 022a zod schema → 400 before the recall engine. The wiring preserved the boundary guard.
+		const res = await daemon.app.request("/api/memories/recall", {
+			method: "POST",
+			headers: sessionHeaders,
+			body: JSON.stringify({ notquery: "oops" }),
+		});
+		expect(res.status).toBe(400);
+		const body = (await res.json()) as { error?: string };
+		expect(body.error).toBe("bad_request");
+	});
+
+	it("PRD-022 (local) a store with a session but NO org falls back to the daemon's default tenant (not 400)", async () => {
+		// THE dogfood fix: in LOCAL mode the assembled daemon threads its configured default
+		// scope into the data mounts, so a loopback thin client (SDK/MCP) that carries a session
+		// but NO x-honeycomb-org resolves to the single local tenant instead of 400'ing. (Before
+		// PRD-022 this returned 400 — the SDK/MCP recall regression. The CLI worked only because
+		// it happened to send the org header.)
+		const { daemon } = assembleDaemon({
+			config: cfg({ mode: "local" }),
+			storage: fakeStorage(OK_RESULT),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+		});
+		const noOrg = { ...sessionHeaders } as Record<string, string>;
+		delete noOrg["x-honeycomb-org"];
+		const res = await daemon.app.request("/api/memories", {
+			method: "POST",
+			headers: noOrg,
+			body: JSON.stringify({ content: "hi" }),
+		});
+		// The store reached the engine via the default tenant — NOT a 400 fail-closed.
+		expect(res.status).not.toBe(400);
+		expect(res.status).toBe(201);
+	});
+
+	it("d-AC-5 (team) a store with NO org is STILL rejected (the team-mode tenancy guard is intact)", async () => {
+		// The PRD-022 fallback is LOCAL-ONLY: in team mode an unauthenticated/no-org store must
+		// still be rejected. The assembled team daemon's permission middleware rejects it (401)
+		// before the handler — either way it is NEVER 201, so the fallback did not widen team
+		// tenancy.
+		const { daemon } = assembleDaemon({
+			config: cfg({ mode: "team" }),
+			storage: fakeStorage(OK_RESULT),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+		});
+		const noOrg = { ...sessionHeaders } as Record<string, string>;
+		delete noOrg["x-honeycomb-org"];
+		const res = await daemon.app.request("/api/memories", {
+			method: "POST",
+			headers: noOrg,
+			body: JSON.stringify({ content: "hi" }),
+		});
+		// Rejected — the no-org store never resolved to any tenant in team mode.
+		expect(res.status).not.toBe(201);
+		expect([400, 401, 403]).toContain(res.status);
+	});
 });
 
 describe("a-AC-3 the three no-op services are replaced with their real implementations", () => {

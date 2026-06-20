@@ -65,6 +65,7 @@ import { type PipelineConfig } from "./config.js";
 import type { StageHandler, StageJob } from "./stage-worker.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import type { HealTarget } from "../../storage/heal.js";
+import { classifyFailure } from "../../storage/heal.js";
 import { isOk, type StorageRow } from "../../storage/result.js";
 import {
 	appendVersionBumped,
@@ -367,9 +368,27 @@ async function applyAdd(
 		return { action: "deduped", memoryId: existingId, reason: "hash_present" };
 	}
 	if (!isOk(dedup)) {
-		// A failed dedup probe is not a silent pass: surface it so the job fails and
-		// the queue retries, rather than risk an unguarded duplicate insert.
-		throw new Error(`controlled-write dedup probe failed: ${dedup.kind}`);
+		// A dedup probe against a partition whose `memories` table (or `content_hash`
+		// column) does not exist yet is NOT a duplicate: a missing table trivially
+		// contains no rows, and the INSERT below heals/CREATEs it. Classify with the
+		// SAME engine the heal path uses (`classifyFailure`, which forces auth/
+		// permission failures to `other` FIRST). `query_error` carries `.message`;
+		// `connection_error`/`timeout` carry `.message` too but classify as `other`,
+		// so a dropped socket or timeout STILL fails the job — never an unguarded
+		// duplicate insert on a real error. Mirrors the RECALL path, which tolerates a
+		// failed query by returning no rows (recall/collection.ts).
+		const failure = classifyFailure(dedup.message);
+		if (failure === "missing-table" || failure === "missing-column") {
+			logger.event("controlled_write.dedup_probe_table_absent", {
+				kind: dedup.kind,
+				classification: failure,
+			});
+			// Fall through to the INSERT (which heals the table) — NOT deduped, NOT skipped.
+		} else {
+			// A genuine failure (permission/syntax/connection/timeout): surface it so the
+			// job fails and the queue retries, rather than risk an unguarded duplicate insert.
+			throw new Error(`controlled-write dedup probe failed: ${dedup.kind}`);
+		}
 	}
 
 	// Insert a fresh version-1 memory row. The write goes through the version-bumped

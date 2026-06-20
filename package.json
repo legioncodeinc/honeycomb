@@ -47,6 +47,7 @@
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "smoke:golden-path": "node scripts/golden-path-smoke.mjs",
+    "smoke:data-api": "node scripts/dogfood-acceptance-smoke.mjs",
     "audit:openclaw": "node scripts/audit-openclaw-bundle.mjs",
     "audit:sql": "node scripts/audit-sql-safety.mjs",
     "mutation": "npm run mutation:sql && npm run mutation:prune && npm run mutation:normalize && npm run mutation:state",

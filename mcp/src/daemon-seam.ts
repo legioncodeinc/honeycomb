@@ -26,9 +26,25 @@ import type { Actor, DaemonApiRequest, DaemonApiResponse, DaemonApiSeam } from "
 export const RUNTIME_PATH_HEADER = "x-honeycomb-runtime-path";
 export const ACTOR_HEADER = "x-honeycomb-actor";
 export const ACTOR_TYPE_HEADER = "x-honeycomb-actor-type";
+/** The session header a SESSION-group call additionally stamps (PRD-022d / d-AC-3). */
+export const SESSION_HEADER = "x-honeycomb-session";
 
 /** The runtime path MCP traffic always stamps (FR-2). */
 export const MCP_RUNTIME_PATH = "plugin";
+
+/**
+ * The daemon SESSION groups (PRD-004d / 022a). The runtime-path middleware in front of
+ * `/api/memories` and `/memory` requires BOTH the runtime-path AND a `x-honeycomb-session`
+ * header; a call missing either 400s before the wired handler. The MCP seam already stamps
+ * the plugin runtime-path on every call, so it adds a synthetic session id for these paths
+ * so `memory_search` / `memory_store` reach the wired endpoints (PRD-022d / d-AC-3).
+ */
+const SESSION_GROUP_PREFIXES = ["/api/memories", "/memory"] as const;
+
+/** True when `path` targets a session group (so the synthetic session header must be stamped). */
+export function isMcpSessionGroupPath(path: string): boolean {
+	return SESSION_GROUP_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`) || path.startsWith(`${p}?`));
+}
 
 /** The minimal `fetch` shape this seam depends on (injected so tests need no socket). */
 export type FetchLike = (
@@ -46,14 +62,33 @@ export interface HttpDaemonApiSeamOptions {
 	readonly fetch?: FetchLike;
 }
 
-/** Build the headers for a daemon call — always stamps plugin + actor (FR-2 / d-AC-1). */
-export function stampHeaders(actor: Actor): Record<string, string> {
-	return {
+/**
+ * A stable-per-process synthetic session counter for MCP session-group calls (d-AC-3).
+ * `mcp-<n>` — monotonic, no `Date.now()`/`Math.random()`. The runtime-path claim service
+ * only needs a non-empty key it can claim; this satisfies it without persisting session
+ * state. Module-scoped so a long-lived MCP server reuses the counter across tool calls.
+ */
+let mcpSessionCounter = 0;
+function mintMcpSessionId(): string {
+	mcpSessionCounter += 1;
+	return `mcp-${mcpSessionCounter}`;
+}
+
+/**
+ * Build the headers for a daemon call — always stamps plugin + actor (FR-2 / d-AC-1). For a
+ * SESSION-group `path` (`/api/memories`, `/memory`) it ADDITIONALLY stamps a synthetic
+ * `x-honeycomb-session` the runtime-path middleware requires (PRD-022d / d-AC-3), so
+ * `memory_search` / `memory_store` reach the wired endpoints instead of 400ing at the edge.
+ */
+export function stampHeaders(actor: Actor, path = ""): Record<string, string> {
+	const headers: Record<string, string> = {
 		"content-type": "application/json",
 		[RUNTIME_PATH_HEADER]: MCP_RUNTIME_PATH,
 		[ACTOR_HEADER]: actor.actor,
 		[ACTOR_TYPE_HEADER]: actor.actorType,
 	};
+	if (isMcpSessionGroupPath(path)) headers[SESSION_HEADER] = mintMcpSessionId();
+	return headers;
 }
 
 /**
@@ -70,7 +105,7 @@ export function createHttpDaemonApiSeam(opts: HttpDaemonApiSeamOptions = {}): Da
 
 	return {
 		async call(req: DaemonApiRequest): Promise<DaemonApiResponse> {
-			const headers = stampHeaders(req.actor);
+			const headers = stampHeaders(req.actor, req.path);
 			const init: { method: string; headers: Record<string, string>; body?: string } = {
 				method: req.method,
 				headers,

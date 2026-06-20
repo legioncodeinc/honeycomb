@@ -112,12 +112,12 @@ describe("PRD-020b FR-1 launchDashboard points the dashboard at the daemon on 38
 			const path = url.replace("http://127.0.0.1:3850", "");
 			const bodies: Record<string, unknown> = {
 				"/health": { status: "ok" },
-				"/api/kpis": fullData().kpis,
+				"/api/diagnostics/kpis": fullData().kpis,
 				"/api/diagnostics/sessions": fullData().sessions,
 				"/api/diagnostics/settings": fullData().settings,
 				"/api/graph": fullData().graph,
-				"/api/rules": fullData().rules,
-				"/api/skills": fullData().skillSync,
+				"/api/diagnostics/rules": fullData().rules,
+				"/api/diagnostics/skills": fullData().skillSync,
 			};
 			return { ok: true, status: 200, async json() { return bodies[path] ?? {}; } };
 		};
