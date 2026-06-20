@@ -36,7 +36,7 @@ import {
 	type Responder,
 	stubProvider,
 } from "../../../helpers/fake-deeplake.js";
-import type { TransportRequest } from "../../../../src/daemon/storage/transport.js";
+import { TransportError, type TransportRequest } from "../../../../src/daemon/storage/transport.js";
 
 // ── fixtures ──────────────────────────────────────────────────────────────────────
 
@@ -571,6 +571,98 @@ describe("createControlledWriteHandler: payload → write, drop-invalid, scope t
 		const insert = requests.find((r) => isInsert(r.sql));
 		expect(insert).toBeDefined();
 		expect(/'agent-from-scope'/.test(insert?.sql ?? "")).toBe(true);
+	});
+});
+
+// ── dedup probe failure classification (live dogfood regression) ──────────────────
+
+describe("dedup probe failure: missing-table/column tolerated → INSERT; genuine error fatal", () => {
+	/**
+	 * A responder that FAILS the dedup probe (the SELECT-before-INSERT on
+	 * `content_hash`) by throwing the given `TransportError` — exactly how the real
+	 * HTTP transport reports a server rejection / dropped socket / timeout — and
+	 * answers every other statement (the version read, the INSERT, the heal
+	 * CREATE/ALTER) with no rows so they succeed. The storage client maps the thrown
+	 * `TransportError` into the `QueryResult` union (`query_error` keeps the message
+	 * verbatim; `connection`→`connection_error`; `timeout`→`timeout`), which is what
+	 * the dedup-failure branch under test classifies. This isolates that branch.
+	 */
+	function dedupFails(error: TransportError): Responder {
+		return (req: TransportRequest) => {
+			if (isDedupProbe(req.sql)) throw error;
+			return [];
+		};
+	}
+
+	it("REGRESSION: a missing-table dedup probe is NOT a duplicate — the INSERT proceeds (heals the table)", async () => {
+		// The exact live-dogfood shape: first write to a fresh workspace partition,
+		// `memories` does not exist yet → DeepLake returns a relation-does-not-exist
+		// query_error. A missing table trivially holds no duplicate, so the write must
+		// proceed to the INSERT (which heals/CREATEs the table), NOT 500.
+		const { storage, requests } = storageWith(
+			dedupFails(new TransportError("query", 'relation "memories" does not exist', 404)),
+		);
+		const embed = recordingEmbed();
+		const out = await applyControlledWrite(input(), SCOPE, deps(storage, config(), embed));
+
+		// Not a throw, not a skip, not a dedupe — a real insert.
+		expect(out.action).toBe("inserted");
+		expect(out.memoryId).toBe("mem_fixed_id");
+		// The dedup probe ran AND, despite its failure, the INSERT was still attempted.
+		expect(requests.some((r) => isDedupProbe(r.sql))).toBe(true);
+		expect(requests.some((r) => isInsert(r.sql))).toBe(true);
+	});
+
+	it("REGRESSION: a missing-column dedup probe is NOT a duplicate — the INSERT proceeds", async () => {
+		// A partition where `memories` exists but `content_hash` has not healed in yet.
+		const { storage, requests } = storageWith(
+			dedupFails(new TransportError("query", 'column "content_hash" does not exist', 400)),
+		);
+		const embed = recordingEmbed();
+		const out = await applyControlledWrite(input(), SCOPE, deps(storage, config(), embed));
+
+		expect(out.action).toBe("inserted");
+		expect(requests.some((r) => isInsert(r.sql))).toBe(true);
+	});
+
+	it("a genuine query_error (permission denied) STILL throws — no unguarded duplicate insert", async () => {
+		// `classifyFailure` forces auth/permission failures to `other` FIRST, so this
+		// must remain fatal: the job fails, the queue retries, and no INSERT is risked.
+		const { storage, requests } = storageWith(
+			dedupFails(new TransportError("query", "permission denied for relation memories", 403)),
+		);
+		const embed = recordingEmbed();
+		await expect(
+			applyControlledWrite(input(), SCOPE, deps(storage, config(), embed)),
+		).rejects.toThrow(/controlled-write dedup probe failed/);
+		// The duplicate-safety property: a genuine probe failure never reaches the INSERT.
+		expect(requests.some((r) => isInsert(r.sql))).toBe(false);
+	});
+
+	it("a connection_error (dropped socket) STILL throws — a transient failure must not pass the dedup guard", async () => {
+		// A connection_error carries `.message` but classifies as `other`, so it stays
+		// fatal — a dropped socket must NOT be misread as 'no duplicate, go ahead'.
+		const { storage, requests } = storageWith(
+			dedupFails(new TransportError("connection", "ECONNREFUSED")),
+		);
+		const embed = recordingEmbed();
+		await expect(
+			applyControlledWrite(input(), SCOPE, deps(storage, config(), embed)),
+		).rejects.toThrow(/controlled-write dedup probe failed/);
+		expect(requests.some((r) => isInsert(r.sql))).toBe(false);
+	});
+
+	it("a timeout dedup probe STILL throws — a slow probe must not pass the dedup guard", async () => {
+		// A timeout result's message is synthesized (not the thrown text) and classifies
+		// as `other`, so a slow probe stays fatal — never read as 'no duplicate'.
+		const { storage, requests } = storageWith(
+			dedupFails(new TransportError("timeout", "request timed out")),
+		);
+		const embed = recordingEmbed();
+		await expect(
+			applyControlledWrite(input(), SCOPE, deps(storage, config(), embed)),
+		).rejects.toThrow(/controlled-write dedup probe failed/);
+		expect(requests.some((r) => isInsert(r.sql))).toBe(false);
 	});
 });
 

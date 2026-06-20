@@ -122,7 +122,8 @@ describe("e-AC-2: a real in-process client gets a real initialize + the honeycom
 			// The handler routed through the injected seam, stamping the plugin-path actor —
 			// the only path out (no DeepLake import anywhere in mcp/, invariant.test.ts).
 			expect(daemon.calls.length).toBe(1);
-			expect(daemon.calls[0].path).toBe("/api/memories/search");
+			// PRD-022d: memory_search reaches the WIRED recall endpoint over the live transport.
+			expect(daemon.calls[0].path).toBe("/api/memories/recall");
 			expect(daemon.calls[0].actor).toEqual(ACTOR);
 		} finally {
 			await client.close();

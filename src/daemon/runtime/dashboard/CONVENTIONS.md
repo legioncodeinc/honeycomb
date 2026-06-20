@@ -3,9 +3,10 @@
 `mountDashboardApi` (`api.ts`) is the daemon-side seam serving the 020b dashboard view-models. It
 mirrors `attachHooksHandlers` (019b): the daemon assembly calls it ONCE after `createDaemon(...)`,
 and it attaches handlers onto the ALREADY-MOUNTED route groups via `daemon.group(path)` — ZERO
-`server.ts` edits. The groups (`/api/kpis`, `/api/sessions`, `/api/diagnostics`, `/api/graph`,
-`/api/rules`, `/api/skills`) are scaffolded + protected in `server.ts`, so attaching inherits
-auth/RBAC.
+`server.ts` edits. The groups (`/api/diagnostics`, `/api/graph`) are scaffolded + protected in
+`server.ts`, so attaching inherits auth/RBAC. The kpis/rules/skills VIEW-MODELS are served UNDER the
+diagnostics group (see below), NOT on the canonical `/api/kpis|rules|skills` resource paths — those
+belong to the PRD-022 product-data data-access API.
 
 **Storage-correct.** This lives under `src/daemon/` (the only DeepLake client). Each Wave-2 handler
 reads through the injected `StorageQuery` and returns the matching 020b view-model
@@ -18,12 +19,16 @@ the injected `StorageQuery` with guarded SQL (`sqlIdent` / `sLiteral`), and retu
 020b view-model. A non-ok query result is fail-soft (empty rows) so one storage hiccup never throws
 the whole dashboard.
 
-**No standalone `/api/sessions` group.** `server.ts` mounts NO `/api/sessions` route group (sessions
-capture lives under `/api/memories` / `/api/hooks`). This seam NEVER edits `server.ts`, so the
-sessions AND settings views attach off the already-mounted `/api/diagnostics` group:
-`GET /api/diagnostics/sessions` (FR-3) and `GET /api/diagnostics/settings` (FR-4). KPIs / graph /
-rules / skills attach at `/` under their own mounted groups (`/api/kpis`, `/api/graph`, `/api/rules`,
-`/api/skills`). `DASHBOARD_GROUPS` documents the group each view fills.
+**The diagnostics namespace owns five view-models; the canonical resource paths yield.** `server.ts`
+mounts NO `/api/sessions` route group (sessions capture lives under `/api/memories` / `/api/hooks`).
+This seam NEVER edits `server.ts`, so the sessions AND settings views attach off the already-mounted
+`/api/diagnostics` group: `GET /api/diagnostics/sessions` (FR-3) and `GET /api/diagnostics/settings`
+(FR-4). The kpis/rules/skills VIEW-MODELS attach there too — `GET /api/diagnostics/kpis`,
+`GET /api/diagnostics/rules`, `GET /api/diagnostics/skills` — because the canonical `/api/kpis`,
+`/api/rules`, `/api/skills` resource paths are owned by the PRD-022 product-data data-access API (the
+rows the CLI/SDK/MCP read). A dashboard view-model is a presentation concern and yields to the
+resource it shares a name with; only graph keeps its own group (`GET /api/graph`), which product-data
+does not claim. `DASHBOARD_GROUPS` documents the group each view fills.
 
 **a-AC-6 empty-state:** the `/api/graph` handler returns `{ built: false, nodes: [], edges: [] }`
 when no codebase snapshot exists for the workspace; the 020b `buildGraphView` renders the

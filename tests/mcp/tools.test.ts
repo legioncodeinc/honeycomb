@@ -71,10 +71,26 @@ describe("d-AC-1: unified surface lists + stamps plugin + actor", () => {
 				} };
 			},
 		});
-		await seam.call({ method: "POST", path: "/api/memories/search", body: { query: "x" }, actor: ACTOR });
+		await seam.call({ method: "POST", path: "/api/memories/recall", body: { query: "x" }, actor: ACTOR });
 		expect(seen[RUNTIME_PATH_HEADER]).toBe("plugin");
 		expect(seen[ACTOR_HEADER]).toBe("agent-7");
 		expect(seen[ACTOR_TYPE_HEADER]).toBe("agent");
+		// PRD-022d / d-AC-3: a SESSION-group call (/api/memories) also stamps the session header.
+		expect(seen["x-honeycomb-session"], "session-group call stamps x-honeycomb-session").toBeDefined();
+	});
+
+	it("d-AC-3 a NON-session daemon call does NOT stamp x-honeycomb-session", async () => {
+		const { createHttpDaemonApiSeam } = await import("../../mcp/src/daemon-seam.js");
+		let seen: Record<string, string> = {};
+		const seam = createHttpDaemonApiSeam({
+			fetch: async (_url, init) => {
+				seen = init.headers;
+				return { status: 200, async json() { return {}; }, async text() { return ""; } };
+			},
+		});
+		await seam.call({ method: "GET", path: "/api/goals", actor: ACTOR });
+		expect(seen["x-honeycomb-runtime-path"]).toBe("plugin");
+		expect(seen["x-honeycomb-session"]).toBeUndefined();
 	});
 });
 
@@ -148,7 +164,85 @@ describe("FR-10: unknown / extra args are rejected, not passed to the daemon", (
 		registerHoneycombSurface(registry);
 		await registry.invoke("memory_search", { query: "hi" });
 		expect(daemon.calls.length).toBe(1);
-		expect(daemon.calls[0].path).toBe("/api/memories/search");
+		// PRD-022d: memory_search now reaches the WIRED recall endpoint, not the /search scaffold.
+		expect(daemon.calls[0].path).toBe("/api/memories/recall");
+	});
+});
+
+describe("S-1: memory_get / memory_list hit the WIRED PRD-022a read routes", () => {
+	it("S-1 memory_get issues GET /api/memories/<id> (id URL-encoded on the PATH), not /api/memories/get?path=", async () => {
+		const daemon = createFakeDaemonApiSeam({ status: 200, body: { memory: { id: "m/1 a", content: "hi" } } });
+		const out = (await HANDLERS.memory_get({ path: "m/1 a" }, ACTOR, daemon)) as { memory?: unknown };
+		expect(daemon.calls.length).toBe(1);
+		expect(daemon.calls[0].method).toBe("GET");
+		// The id rides the PATH segment, URL-encoded (slash + space escaped) — NOT a `?path=` query.
+		expect(daemon.calls[0].path).toBe("/api/memories/m%2F1%20a");
+		expect(daemon.calls[0].path).not.toContain("/get?");
+		expect(daemon.calls[0].path).not.toContain("?path=");
+		// The wired route returns `{memory}`; the handler passes that shape straight through.
+		expect(out.memory).toEqual({ id: "m/1 a", content: "hi" });
+	});
+
+	it("S-1 memory_get with no id hits the bare /api/memories/ route (empty encoded segment)", async () => {
+		const daemon = createFakeDaemonApiSeam({ status: 404, body: { error: "not_found" } });
+		await HANDLERS.memory_get({}, ACTOR, daemon).catch(() => undefined);
+		expect(daemon.calls.length).toBe(1);
+		expect(daemon.calls[0].path).toBe("/api/memories/");
+	});
+
+	it("S-1 memory_list issues GET /api/memories (no ?prefix=) and returns {memories:[...]}", async () => {
+		const daemon = createFakeDaemonApiSeam({ status: 200, body: { memories: [{ id: "a" }, { id: "b" }] } });
+		const out = (await HANDLERS.memory_list({ prefix: "anything" }, ACTOR, daemon)) as { memories?: unknown[] };
+		expect(daemon.calls.length).toBe(1);
+		expect(daemon.calls[0].method).toBe("GET");
+		// The WIRED list route is `/api/memories` (+ optional `?limit=`); it has NO prefix filter.
+		expect(daemon.calls[0].path).toBe("/api/memories");
+		expect(daemon.calls[0].path).not.toContain("/list");
+		expect(daemon.calls[0].path).not.toContain("prefix=");
+		expect(out.memories).toEqual([{ id: "a" }, { id: "b" }]);
+	});
+
+	it("S-1 memory_list with a numeric limit issues GET /api/memories?limit=<n>", async () => {
+		const daemon = createFakeDaemonApiSeam({ status: 200, body: { memories: [] } });
+		await HANDLERS.memory_list({ limit: 5 }, ACTOR, daemon);
+		expect(daemon.calls.length).toBe(1);
+		expect(daemon.calls[0].path).toBe("/api/memories?limit=5");
+	});
+
+	it("S-1 the production seam stamps the session-group headers for memory_get's GET /api/memories/<id>", async () => {
+		const { createHttpDaemonApiSeam, RUNTIME_PATH_HEADER, SESSION_HEADER } = await import(
+			"../../mcp/src/daemon-seam.js"
+		);
+		let seenUrl = "";
+		let seen: Record<string, string> = {};
+		const seam = createHttpDaemonApiSeam({
+			fetch: async (url, init) => {
+				seenUrl = url;
+				seen = init.headers;
+				return { status: 200, async json() { return { memory: {} }; }, async text() { return ""; } };
+			},
+		});
+		await seam.call({ method: "GET", path: "/api/memories/m%2F1", actor: ACTOR });
+		expect(seenUrl).toContain("/api/memories/m%2F1");
+		// /api/memories/:id is a SESSION group → runtime-path + session header both stamp (no 400).
+		expect(seen[RUNTIME_PATH_HEADER]).toBe("plugin");
+		expect(seen[SESSION_HEADER], "GET /api/memories/<id> must stamp x-honeycomb-session").toBeDefined();
+	});
+
+	it("S-1 the production seam stamps the session-group headers for memory_list's GET /api/memories", async () => {
+		const { createHttpDaemonApiSeam, RUNTIME_PATH_HEADER, SESSION_HEADER } = await import(
+			"../../mcp/src/daemon-seam.js"
+		);
+		let seen: Record<string, string> = {};
+		const seam = createHttpDaemonApiSeam({
+			fetch: async (_url, init) => {
+				seen = init.headers;
+				return { status: 200, async json() { return { memories: [] }; }, async text() { return ""; } };
+			},
+		});
+		await seam.call({ method: "GET", path: "/api/memories?limit=5", actor: ACTOR });
+		expect(seen[RUNTIME_PATH_HEADER]).toBe("plugin");
+		expect(seen[SESSION_HEADER], "GET /api/memories?limit= must stamp x-honeycomb-session").toBeDefined();
 	});
 });
 

@@ -54,6 +54,40 @@ import {
 } from "../auth/contracts.js";
 
 // ────────────────────────────────────────────────────────────────────────────
+// Validated-Identity context propagation (PRD-022 cross-tenant hardening).
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The Hono context key the permission middleware stamps the VALIDATED {@link Identity}
+ * under after a successful authenticate (team/hybrid). Downstream scope resolvers read
+ * it via {@link getRequestIdentity} to cross-check the `x-honeycomb-org` header against
+ * the token's own org, so a forged tenancy header can never partition storage to a
+ * tenant the caller's token does not bind to. Absent in `local` mode (no auth runs).
+ */
+export const IDENTITY_CONTEXT_KEY = "honeycombIdentity" as const;
+
+/**
+ * Read the VALIDATED {@link Identity} the permission middleware stamped onto the context
+ * (team/hybrid authenticated requests), or `undefined` when none is present (local mode,
+ * or an unauthenticated/legacy path). Pure — never throws. This is the trustworthy org
+ * source a tenancy cross-check compares the request's `x-honeycomb-org` header against.
+ */
+export function getRequestIdentity(c: Context): Identity | undefined {
+	const value = c.get(IDENTITY_CONTEXT_KEY) as unknown;
+	return isIdentity(value) ? value : undefined;
+}
+
+/** Narrow an arbitrary context value to an {@link Identity} (defensive — the var is untyped). */
+function isIdentity(value: unknown): value is Identity {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		typeof (value as { org?: unknown }).org === "string" &&
+		typeof (value as { role?: unknown }).role === "string"
+	);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Socket-peer seam (hybrid fail-closed, c-AC-1).
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -178,6 +212,15 @@ export function permissionMiddleware(
 		if (identity === null) {
 			return unauthorized(c);
 		}
+
+		// Stamp the VALIDATED Identity onto the request context so downstream scope
+		// resolvers can cross-check the `x-honeycomb-org` header against the token's
+		// own org (PRD-022 cross-tenant hardening). The data handlers partition storage
+		// by the header org; without this, an authenticated caller for org A could forge
+		// `x-honeycomb-org: orgB` and read/write org B's tenant. The handlers consult
+		// `c.get(IDENTITY_CONTEXT_KEY)` and reject a header that disagrees with the
+		// validated org. Purely additive — no existing allow/deny path changes here.
+		c.set(IDENTITY_CONTEXT_KEY, identity);
 
 		// Authorize the validated Identity against the route context. The project comes
 		// from the request (query/header is a HINT only); the policy compares it to the

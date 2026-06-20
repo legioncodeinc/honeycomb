@@ -71,7 +71,8 @@ describe("d-AC-6: HTTP and stdio both route through the same daemon-backed serve
 		await handle.registry.invoke("memory_search", { query: "same" });
 
 		expect(daemon.calls.length).toBe(2);
-		expect(daemon.calls[0].path).toBe("/api/memories/search");
+		// PRD-022d: memory_search reaches the WIRED recall endpoint over either transport.
+		expect(daemon.calls[0].path).toBe("/api/memories/recall");
 		expect(daemon.calls[1].path).toBe(daemon.calls[0].path);
 		expect(daemon.calls[0].actor).toEqual(daemon.calls[1].actor);
 		expect(daemon.calls[0].actor).toEqual(ACTOR);

@@ -48,7 +48,8 @@ describe("e-AC-5: Vercel AI SDK helper reuses the core client", () => {
 
 		expect(out).toEqual([{ path: "p", text: "t" }]);
 		expect(calls).toHaveLength(1);
-		expect(calls[0].url).toBe(`${DAEMON}/api/memories/search`);
+		// PRD-022d: the core client now reaches the WIRED recall endpoint.
+		expect(calls[0].url).toBe(`${DAEMON}/api/memories/recall`);
 		expect(header(calls[0].init, "x-honeycomb-actor")).toBe("mario");
 		expect(header(calls[0].init, "x-honeycomb-actor-type")).toBe("user");
 		expect(header(calls[0].init, "authorization")).toBe("Bearer tok-9");
@@ -61,8 +62,9 @@ describe("e-AC-5: Vercel AI SDK helper reuses the core client", () => {
 		const tools = createVercelAiTools(client);
 		await tools.honeycomb_remember.execute({ text: "remember this", path: "notes/x" });
 
+		// PRD-022d: the WIRED store body is `{ content, normalizedContent }`.
 		expect(calls[0].url).toBe(`${DAEMON}/api/memories`);
-		expect(JSON.parse(calls[0].init?.body as string)).toEqual({ text: "remember this", path: "notes/x" });
+		expect(JSON.parse(calls[0].init?.body as string)).toEqual({ content: "remember this", normalizedContent: "notes/x" });
 		expect(header(calls[0].init, "x-honeycomb-actor")).toBe("mario");
 	});
 
@@ -88,7 +90,8 @@ describe("e-AC-5: OpenAI tool helper reuses the core client", () => {
 		const out = await dispatchOpenAiToolCall(client, OPENAI_TOOL_RECALL, { query: "deploy", limit: 2 });
 
 		expect(out).toEqual([{ path: "p", text: "t" }]);
-		expect(calls[0].url).toBe(`${DAEMON}/api/memories/search`);
+		// PRD-022d: the OpenAI helper reuses the core client, which now hits the wired endpoint.
+		expect(calls[0].url).toBe(`${DAEMON}/api/memories/recall`);
 		expect(header(calls[0].init, "x-honeycomb-actor")).toBe("mario");
 		expect(header(calls[0].init, "authorization")).toBe("Bearer tok-7");
 	});

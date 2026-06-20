@@ -132,6 +132,31 @@ function rec(args: unknown): Record<string, unknown> {
 }
 
 /**
+ * Map the `memory_store` tool args (`{ text, path? }`) onto the WIRED `/api/memories`
+ * store body (`{ content, normalizedContent? }`) — PRD-022d / d-AC-3. The 022a controlled-
+ * writes engine keys on `content`; the optional `path` rides as a normalized hint.
+ */
+function toStoreBody(args: Record<string, unknown>): Record<string, unknown> {
+	const content = typeof args.text === "string" ? args.text : String(args.text ?? "");
+	const body: Record<string, unknown> = { content };
+	if (typeof args.path === "string" && args.path.length > 0) body.normalizedContent = args.path;
+	return body;
+}
+
+/**
+ * Build the WIRED `memory_list` path (PRD-022a `GET /api/memories?limit=`). A numeric `limit`
+ * arg becomes `?limit=<n>`; anything else (absent / non-numeric) hits the bare list route so the
+ * daemon applies its own default page size. The published `prefix` arg has no server-side filter
+ * on this route, so it is intentionally not forwarded.
+ */
+function memoryListPath(args: Record<string, unknown>): string {
+	const raw = args.limit;
+	const n = typeof raw === "number" ? raw : Number(raw);
+	if (Number.isFinite(n) && n > 0) return `/api/memories?limit=${Math.trunc(n)}`;
+	return "/api/memories";
+}
+
+/**
  * The full handler table, keyed by the registered tool name. Each entry is a
  * {@link ToolHandler} that routes through the daemon seam (FR-2). Wave 2's
  * registry registers each tool with its handler from this table. The daemon API
@@ -141,14 +166,23 @@ function rec(args: unknown): Record<string, unknown> {
  */
 export const HANDLERS: Readonly<Record<string, ToolHandler>> = {
 	// ── Memory cluster (FR-3) ────────────────────────────────────────────────
+	// PRD-022d: route to the WIRED recall endpoint (022a `/api/memories/recall`), not the
+	// PRD-004 `/search` scaffold. The seam stamps the session-group headers (d-AC-3).
 	memory_search: async (args, actor, daemon) =>
-		route(daemon, actor, "POST", "/api/memories/search", rec(args)),
-	memory_store: async (args, actor, daemon) =>
-		route(daemon, actor, "POST", "/api/memories", rec(args)),
+		route(daemon, actor, "POST", "/api/memories/recall", rec(args)),
+	// PRD-022d: the WIRED store endpoint (022a) expects `{ content }`; the tool schema
+	// publishes `{ text, path? }`, so map text→content (path→normalizedContent) at the seam.
+	memory_store: async (args, actor, daemon) => route(daemon, actor, "POST", "/api/memories", toStoreBody(rec(args))),
+	// PRD-022a wires `GET /api/memories/:id` (id on the PATH) → `200 {memory}` | `404`. The id
+	// rides the path segment (URL-encoded so a slash/space/special char can't break it), NOT a
+	// `?path=` query. The seam stamps the session-group headers (`/api/memories/*` is a session
+	// group → x-honeycomb-session + runtime-path), else the runtime-path middleware 400s.
 	memory_get: async (args, actor, daemon) =>
-		route(daemon, actor, "GET", `/api/memories/get?path=${encodeURIComponent(String(rec(args).path ?? ""))}`),
+		route(daemon, actor, "GET", `/api/memories/${encodeURIComponent(String(rec(args).path ?? ""))}`),
+	// PRD-022a wires `GET /api/memories?limit=` → `200 {memories:[...]}`. Send `?limit=` only when a
+	// numeric limit arg is supplied; otherwise hit the bare list route (server applies its default).
 	memory_list: async (args, actor, daemon) =>
-		route(daemon, actor, "GET", `/api/memories?prefix=${encodeURIComponent(String(rec(args).prefix ?? ""))}`),
+		route(daemon, actor, "GET", memoryListPath(rec(args))),
 
 	// memory_modify / memory_forget REQUIRE a `reason` (FR-9 / d-AC-3). The gate
 	// short-circuits BEFORE any daemon call — the seam records nothing on rejection.

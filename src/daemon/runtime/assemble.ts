@@ -60,6 +60,13 @@ import { mountLogsApi } from "./logs/api.js";
 import { mountNotificationsApi } from "./notifications/api.js";
 import { attachSessionsPrune } from "./sessions/prune.js";
 
+// ── Data-API mount seams (PRD-022a / 022b / 022c) the composition root fires (D-2 / d-AC-1) ──
+import { mountMemoriesApi } from "./memories/index.js";
+import { mountVfsApi } from "./vfs/api.js";
+import { mountProductDataApi } from "./product/index.js";
+import { type SecretsApiDeps } from "./secrets/api.js";
+import { SecretsStore, createMachineKeyProvider } from "./secrets/store.js";
+
 import { createStorageClient } from "../storage/index.js";
 import type { QueryScope, StorageClient } from "../storage/client.js";
 import { isOk } from "../storage/result.js";
@@ -135,6 +142,12 @@ export interface SeamFns {
 	readonly mountLogs: typeof mountLogsApi;
 	/** The viewable `/dashboard` HTML host (021d). Fires LOCAL-MODE ONLY (security F-1). */
 	readonly mountDashboardHost: typeof mountDashboardHost;
+	/** The `/api/memories/*` data API (022a). Fires UNCONDITIONALLY — its group is a protected session group. */
+	readonly mountMemories: typeof mountMemoriesApi;
+	/** The `/memory/*` VFS browse reads (022b). Fires UNCONDITIONALLY — its group is a protected session group. */
+	readonly mountVfs: typeof mountVfsApi;
+	/** The product-data surface — goals/kpis/skills/rules (+secrets) (022c). Fires UNCONDITIONALLY. */
+	readonly mountProductData: typeof mountProductDataApi;
 }
 
 /** The REAL seam functions (the production wiring). */
@@ -145,6 +158,9 @@ export const defaultSeamFns: SeamFns = {
 	attachPrune: attachSessionsPrune,
 	mountLogs: mountLogsApi,
 	mountDashboardHost,
+	mountMemories: mountMemoriesApi,
+	mountVfs: mountVfsApi,
+	mountProductData: mountProductDataApi,
 };
 
 /** An assembled, fully-wired daemon plus the composition root's lifecycle controls. */
@@ -311,9 +327,19 @@ function authForMode(
  * state — the once-ness lives here).
  *
  * The first FIVE seams fire UNCONDITIONALLY. The sixth (`mountDashboardHost`) fires
- * LOCAL-MODE ONLY — see the security gate at step 6.
+ * LOCAL-MODE ONLY — see the security gate at step 6. Steps 7–9 fire the data-API mount
+ * seams (022a/022b/022c) UNCONDITIONALLY: each resolves its OWN already-mounted +
+ * protected route group (`/api/memories`, `/memory`, `/api/goals`…), so there is no
+ * `server.ts` edit and the fire order among them is unconstrained.
  */
 export function assembleSeams(daemon: Daemon, storage: StorageClient, seams: SeamFns = defaultSeamFns): void {
+	// The daemon's configured default tenancy scope (the single LOCAL tenant). Threaded into
+	// the three data-API mounts as `defaultScope` so a loopback thin client (SDK/MCP) that
+	// carries NO `x-honeycomb-org` header resolves to this tenant in local mode (PRD-022).
+	// In team/hybrid the data handlers ignore it (the fallback fires ONLY in local mode), so
+	// threading it unconditionally is safe — tenancy is never loosened outside local.
+	const defaultScope = resolveDaemonScope(storage);
+
 	// 1. /api/hooks/* capture (019b). The capture write enqueues per-turn cues into the
 	//    REAL durable queue (a-AC-3 service), heals the `sessions` table lazily.
 	//    NOTE (021c): the context + session-end hook endpoints are NOT attached here yet
@@ -362,6 +388,62 @@ export function assembleSeams(daemon: Daemon, storage: StorageClient, seams: Sea
 	if (daemon.config.mode === "local") {
 		seams.mountDashboardHost(daemon, { storage });
 	}
+
+	// 7. The /api/memories/* data API (022a). Recall + store + get/list + reason-gated
+	//    modify/forget land on the already-mounted, protected `/api/memories` SESSION
+	//    group. `embed` defaults to the no-op (embeddings off, ledger D-4) — the stored
+	//    row stays lexically recallable via the BM25/ILIKE fallback. This replaces the
+	//    PRD-004 501 scaffold: after this, `honeycomb recall`/`remember`, the SDK
+	//    `recall()`, and the MCP `memory_search` reach a REAL handler (no 501).
+	seams.mountMemories(daemon, { storage, defaultScope });
+
+	// 8. The /memory/* VFS browse reads (022b). cat / grep / ls / find / classify attach
+	//    onto the already-mounted `/memory` SESSION group; `recallConfig` defaults to the
+	//    env-resolved recall config and `hints` to the empty source, so `{ storage }` is
+	//    the full wiring. Read-only — writes 405 with a pointer to `/api/memories` (022a).
+	seams.mountVfs(daemon, { storage, defaultScope });
+
+	// 9. The product-data surface (022c): goals + kpis (read/upsert) + skills + rules
+	//    (read-only) always; PLUS the names-only `/api/secrets` engine (012), whose store
+	//    is cleanly constructible at the composition root. `/api/sources` (013) is DEFERRED
+	//    — see {@link resolveProductDataDeps} — because its registry/providers deps are not
+	//    yet constructible here; the goal is NOT mounted (it falls through to the 501
+	//    scaffold) rather than wired with a fake (D-1, never fake a dep).
+	seams.mountProductData(daemon, resolveProductDataDeps(storage, defaultScope));
+}
+
+/**
+ * Build the product-data seam deps (022c) the composition root can construct TODAY.
+ *
+ * - `storage`: the live client (goals/kpis/skills/rules read+write through it).
+ * - `secrets`: the names-only secrets engine (012). Its only dep is a {@link SecretsStore}
+ *   constructed from `$HONEYCOMB_WORKSPACE` (the workspace root the `.secrets/` dir lives
+ *   under) + the real machine-key provider — both available at assembly. No value ever
+ *   crosses the HTTP boundary (the API mounts no value-returning route by construction).
+ * - `sources`: DEFERRED (NOT wired, NOT faked — D-1). The existing `mountSourcesApi` (013)
+ *   needs a `registry` + a `providers` resolver that are not yet constructible at the
+ *   composition root (they belong to the sources subsystem's own assembly, a follow-up).
+ *   Omitting `sources` makes `mountProductDataApi` skip the `/api/sources` mount, so the
+ *   group falls through to the 501 scaffold — the correct honest posture until the deps
+ *   land. 022e does not depend on `/api/sources`.
+ */
+function resolveProductDataDeps(
+	storage: StorageClient,
+	defaultScope: QueryScope,
+): {
+	storage: StorageClient;
+	secrets?: SecretsApiDeps;
+	defaultScope: QueryScope;
+} {
+	// The secrets store base dir is the workspace root ($HONEYCOMB_WORKSPACE), defaulting to
+	// the daemon's cwd when unset (the same default the secrets CONVENTIONS document).
+	const baseDir = process.env.HONEYCOMB_WORKSPACE ?? process.cwd();
+	const secrets: SecretsApiDeps = {
+		store: new SecretsStore({ baseDir, machineKey: createMachineKeyProvider() }),
+	};
+	// `defaultScope` is threaded so goals/kpis/skills/rules apply the local-mode fallback
+	// (PRD-022); the secrets/sources sub-handlers carry their own header scope resolvers.
+	return { storage, secrets, defaultScope };
 }
 
 /**
@@ -422,8 +504,9 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	};
 	const daemon = createDaemon(createOptions);
 
-	// ── a-AC-2: fire the seams EXACTLY ONCE, after construction (four core seams + the
-	// /api/logs reader always; the /dashboard host local-mode only per security F-1).
+	// ── a-AC-2 / d-AC-1: fire the seams EXACTLY ONCE, after construction (the four core
+	// seams + the /api/logs reader always; the /dashboard host local-mode only per security
+	// F-1; PLUS the three data-API seams — memories/vfs/product-data — always, 022d).
 	assembleSeams(daemon, storage, options.seams ?? defaultSeamFns);
 
 	// ── The cached-health refresher: a cheap connectivity round trip on an interval,

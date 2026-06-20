@@ -250,30 +250,81 @@ export function createFakeDaemonClient(options: FakeDaemonClientOptions = {}): F
 }
 
 /**
+ * The runtime-path the one-shot CLI stamps on a SESSION-group request (PRD-022d / d-AC-2).
+ * The CLI is the `legacy` path (the harness hook is `plugin`); the runtime-path middleware
+ * accepts either, so a single deterministic value is sufficient for the loopback client.
+ */
+export const CLI_RUNTIME_PATH = "legacy" as const;
+
+/**
+ * The daemon SESSION groups (PRD-004d / 022a): the runtime-path middleware in front of
+ * these REQUIRES both `x-honeycomb-runtime-path` AND `x-honeycomb-session`, 400ing a
+ * request missing either BEFORE any handler runs. A one-shot CLI has no prior session, so
+ * the loopback client stamps a synthetic per-invocation session id for these paths
+ * (d-AC-2 / d-AC-3). The root of the dogfood 400 was these headers being absent.
+ */
+const SESSION_GROUP_PREFIXES = ["/api/memories", "/memory"] as const;
+
+/** True when `path` targets a session group (so the session + runtime-path headers must be stamped). */
+export function isSessionGroupPath(path: string): boolean {
+	return SESSION_GROUP_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`) || path.startsWith(`${p}?`));
+}
+
+/**
+ * Mint a stable-per-process synthetic session id for a stateless CLI invocation (d-AC-3).
+ * `cli-<pid>-<counter>` — deterministic enough (no `Date.now()`/`Math.random()`), unique
+ * per send within a process, and stable across the handful of calls one verb makes. The
+ * runtime-path claim service only needs a non-empty key it can claim; this satisfies it
+ * without persisting session state the one-shot CLI does not have.
+ */
+let cliSessionCounter = 0;
+export function mintCliSessionId(): string {
+	cliSessionCounter += 1;
+	return `cli-${process.pid}-${cliSessionCounter}`;
+}
+
+/**
  * The real loopback {@link DaemonClient} (FR-3): a thin `fetch` to `127.0.0.1:3850` that stamps
  * the actor/scope headers from the shared credential and parses the JSON body. This is the
  * production seam the bin wires; it carries NO DeepLake path (it dials the daemon). The
  * `headers` (actor/org/workspace from the credential) are injected so the bin assembly supplies
  * them without this module reading the credential file itself. Constructed-and-tested behind the
  * seam; the live bin assembly is deferred (D-7).
+ *
+ * ── Session-group header stamping (PRD-022d / d-AC-2 / d-AC-3) ────────────────
+ * A request to a SESSION group (`/api/memories`, `/memory`) additionally stamps
+ * `x-honeycomb-runtime-path` (`legacy`) AND a synthetic per-invocation `x-honeycomb-session`,
+ * which the runtime-path middleware REQUIRES. Without them the request 400s at the middleware
+ * before reaching the handler — the dogfood-found root cause of `honeycomb recall` returning
+ * 400. A non-session path (e.g. `/api/goals`) carries only the tenancy headers, unchanged.
+ * The injected `headers` win on conflict, so a caller can override the runtime-path/session
+ * (e.g. a test, or a future plugin-path caller).
  */
 export function createLoopbackDaemonClient(options: {
 	readonly baseUrl?: string;
 	readonly headers?: Readonly<Record<string, string>>;
 	readonly fetchImpl?: typeof fetch;
+	/** Override the synthetic-session minter (tests). Defaults to {@link mintCliSessionId}. */
+	readonly sessionId?: () => string;
 } = {}): DaemonClient {
 	const baseUrl = options.baseUrl ?? "http://127.0.0.1:3850";
 	const headers = options.headers ?? {};
 	const doFetch = options.fetchImpl ?? fetch;
+	const mintSession = options.sessionId ?? mintCliSessionId;
 	return {
 		async send(req: DaemonRequest): Promise<DaemonResponse> {
 			const qs =
 				req.query !== undefined && Object.keys(req.query).length > 0
 					? `?${new URLSearchParams(req.query as Record<string, string>).toString()}`
 					: "";
+			// Session-group requests get the runtime-path + synthetic session header (d-AC-2/3).
+			// The injected `headers` are spread LAST so a caller-supplied value wins.
+			const sessionHeaders: Record<string, string> = isSessionGroupPath(req.path)
+				? { "x-honeycomb-runtime-path": CLI_RUNTIME_PATH, "x-honeycomb-session": mintSession() }
+				: {};
 			const res = await doFetch(`${baseUrl}${req.path}${qs}`, {
 				method: req.method,
-				headers: { "content-type": "application/json", ...headers },
+				headers: { "content-type": "application/json", ...sessionHeaders, ...headers },
 				...(req.body !== undefined ? { body: JSON.stringify(req.body) } : {}),
 			});
 			let body: unknown;

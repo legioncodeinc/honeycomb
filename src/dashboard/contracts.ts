@@ -197,8 +197,9 @@ export function unreachable(url: string, detail?: string): Connectivity {
 
 /**
  * THE DATA SEAM (FR-7 / a-AC-1 / D-2). Every view reads its view-model ONLY through this.
- * The real impl fetches each view from the daemon's dashboard endpoints (`/api/diagnostics`,
- * `/api/kpis`, `/api/sessions`, `/api/graph`, `/api/rules`, `/api/skills`); the fake replays
+ * The real impl fetches each view from the daemon's dashboard endpoints (`/api/diagnostics/kpis`,
+ * `/api/diagnostics/sessions`, `/api/diagnostics/settings`, `/api/diagnostics/rules`,
+ * `/api/diagnostics/skills`, `/api/graph`); the fake replays
  * a canned {@link DashboardData} / connectivity for view tests. The source NEVER opens
  * DeepLake — the daemon does, behind these endpoints. The SAME source feeds the Cursor
  * webview (D-6), so both surfaces share the data contract.

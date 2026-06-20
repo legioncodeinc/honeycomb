@@ -5,10 +5,13 @@
  * ║  PRD-021d (d-AC-1 / d-AC-2 / d-AC-3 / d-AC-4). Boots the REAL              ║
  * ║  `assembleDaemon()` against LIVE DeepLake on an EPHEMERAL port (NOT 3850), ║
  * ║  then proves the operator-visible surface end-to-end:                      ║
- * ║    - d-AC-1: the dashboard data endpoints (`/api/kpis`,                    ║
+ * ║    - d-AC-1: the dashboard data endpoints (`/api/diagnostics/kpis`,        ║
  * ║      `/api/diagnostics/sessions`, `/api/diagnostics/settings`, `/api/graph`,║
- * ║      `/api/rules`, `/api/skills`) serve REAL view-models read from live    ║
- * ║      DeepLake (mountDashboardApi is fired by assembleDaemon).             ║
+ * ║      `/api/diagnostics/rules`, `/api/diagnostics/skills`) serve REAL        ║
+ * ║      view-models read from live DeepLake (mountDashboardApi is fired by     ║
+ * ║      assembleDaemon). The canonical `/api/kpis|rules|skills` resource paths ║
+ * ║      belong to the PRD-022 product-data API, so the dashboard VIEW-MODELS   ║
+ * ║      live under the diagnostics namespace.                                  ║
  * ║    - d-AC-3: the viewable host `GET /dashboard` returns an HTML page with  ║
  * ║      the six canonical view titles, pointed at the live daemon data.       ║
  * ║    - d-AC-2 / d-AC-4: `GET /api/logs` returns the request-logger ring      ║
@@ -82,8 +85,8 @@ describe.skipIf(!HAS_TOKEN)("LIVE DASHBOARD+LOGS: real view-models, viewable hos
 			const b = booted!;
 			const h = tenancyHeaders();
 
-			const kpis = await fetch(`${b.baseUrl}/api/kpis`, { headers: h });
-			expect(kpis.status, "GET /api/kpis is 200 against live storage").toBe(200);
+			const kpis = await fetch(`${b.baseUrl}/api/diagnostics/kpis`, { headers: h });
+			expect(kpis.status, "GET /api/diagnostics/kpis is 200 against live storage").toBe(200);
 			const kpisBody = (await kpis.json()) as { memoryCount: number; sessionCount: number };
 			expect(typeof kpisBody.memoryCount).toBe("number");
 			expect(typeof kpisBody.sessionCount).toBe("number");
@@ -103,11 +106,11 @@ describe.skipIf(!HAS_TOKEN)("LIVE DASHBOARD+LOGS: real view-models, viewable hos
 			const graphBody = (await graph.json()) as { built: boolean };
 			expect(typeof graphBody.built).toBe("boolean");
 
-			const rules = await fetch(`${b.baseUrl}/api/rules`, { headers: h });
+			const rules = await fetch(`${b.baseUrl}/api/diagnostics/rules`, { headers: h });
 			expect(rules.status).toBe(200);
 			expect(Array.isArray(((await rules.json()) as { rules: unknown[] }).rules)).toBe(true);
 
-			const skills = await fetch(`${b.baseUrl}/api/skills`, { headers: h });
+			const skills = await fetch(`${b.baseUrl}/api/diagnostics/skills`, { headers: h });
 			expect(skills.status).toBe(200);
 			expect(Array.isArray(((await skills.json()) as { skills: unknown[] }).skills)).toBe(true);
 		},

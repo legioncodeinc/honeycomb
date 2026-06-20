@@ -17,7 +17,11 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { createLoopbackDaemonClient } from "../../src/commands/index.js";
+import {
+	CLI_RUNTIME_PATH,
+	createLoopbackDaemonClient,
+	isSessionGroupPath,
+} from "../../src/commands/index.js";
 import {
 	buildAuthPassthrough,
 	buildDaemonLifecycle,
@@ -91,6 +95,81 @@ describe("PRD-021b b-AC-1 — real loopback DaemonClient", () => {
 		await client.send({ method: "GET", path: "/api/memories" });
 		expect(headerKeys).not.toContain("authorization");
 		expect(headerKeys.some((k) => /token/i.test(k))).toBe(false);
+	});
+});
+
+describe("PRD-022d d-AC-2 / d-AC-3 — the loopback client stamps the session-group headers", () => {
+	/** Capture the headers a single send emits over an injected fetch. */
+	async function headersFor(path: string, method: "GET" | "POST" = "POST"): Promise<Record<string, string>> {
+		let seen: Record<string, string> = {};
+		const fakeFetch = (async (_url: string, init: { headers: Record<string, string> }) => {
+			seen = init.headers;
+			return { ok: true, status: 200, async json() { return {}; } };
+		}) as unknown as typeof fetch;
+		const client = createLoopbackDaemonClient({
+			baseUrl: "http://127.0.0.1:3850",
+			headers: { "x-honeycomb-org": "acme", "x-honeycomb-workspace": "default", "x-honeycomb-actor": "agent-1" },
+			fetchImpl: fakeFetch,
+		});
+		await client.send(method === "POST" ? { method, path, body: { query: "x" } } : { method, path });
+		return seen;
+	}
+
+	it("d-AC-2 a recall (POST /api/memories/recall) stamps BOTH x-honeycomb-runtime-path AND x-honeycomb-session", async () => {
+		const headers = await headersFor("/api/memories/recall");
+		// The dogfood 400 root cause: these two headers were absent. Both are present now.
+		expect(headers["x-honeycomb-runtime-path"]).toBe(CLI_RUNTIME_PATH);
+		expect(headers["x-honeycomb-session"]).toBeDefined();
+		expect(headers["x-honeycomb-session"].length).toBeGreaterThan(0);
+		// The tenancy headers still ride alongside.
+		expect(headers["x-honeycomb-org"]).toBe("acme");
+	});
+
+	it("d-AC-3 the synthetic session id is a stable-per-process `cli-<pid>-<n>` shape (no Date.now/Math.random)", async () => {
+		const headers = await headersFor("/api/memories", "POST");
+		expect(headers["x-honeycomb-session"]).toMatch(/^cli-\d+-\d+$/);
+	});
+
+	it("d-AC-2 a remember (POST /api/memories) and a /memory browse both get the session headers", async () => {
+		const remember = await headersFor("/api/memories", "POST");
+		const browse = await headersFor("/memory/cat", "GET");
+		for (const h of [remember, browse]) {
+			expect(h["x-honeycomb-runtime-path"]).toBe(CLI_RUNTIME_PATH);
+			expect(h["x-honeycomb-session"]).toBeDefined();
+		}
+	});
+
+	it("d-AC-3 a NON-session storage path (/api/goals) carries the tenancy headers but NOT the session headers", async () => {
+		const headers = await headersFor("/api/goals", "POST");
+		expect(headers["x-honeycomb-org"]).toBe("acme");
+		expect(headers["x-honeycomb-runtime-path"]).toBeUndefined();
+		expect(headers["x-honeycomb-session"]).toBeUndefined();
+	});
+
+	it("d-AC-3 isSessionGroupPath classifies the session groups and excludes the rest", () => {
+		expect(isSessionGroupPath("/api/memories")).toBe(true);
+		expect(isSessionGroupPath("/api/memories/recall")).toBe(true);
+		expect(isSessionGroupPath("/memory")).toBe(true);
+		expect(isSessionGroupPath("/memory/cat")).toBe(true);
+		// Not a session group: a path that merely shares a prefix word must not match.
+		expect(isSessionGroupPath("/api/goals")).toBe(false);
+		expect(isSessionGroupPath("/api/memories-archive")).toBe(false);
+		expect(isSessionGroupPath("/health")).toBe(false);
+	});
+
+	it("d-AC-3 a caller-supplied runtime-path/session override wins over the synthetic stamp", async () => {
+		let seen: Record<string, string> = {};
+		const fakeFetch = (async (_url: string, init: { headers: Record<string, string> }) => {
+			seen = init.headers;
+			return { ok: true, status: 200, async json() { return {}; } };
+		}) as unknown as typeof fetch;
+		const client = createLoopbackDaemonClient({
+			headers: { "x-honeycomb-org": "acme", "x-honeycomb-runtime-path": "plugin", "x-honeycomb-session": "fixed-1" },
+			fetchImpl: fakeFetch,
+		});
+		await client.send({ method: "POST", path: "/api/memories/recall", body: { query: "x" } });
+		expect(seen["x-honeycomb-runtime-path"]).toBe("plugin");
+		expect(seen["x-honeycomb-session"]).toBe("fixed-1");
 	});
 });
 

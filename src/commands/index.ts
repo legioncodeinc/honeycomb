@@ -12,6 +12,7 @@
 export {
 	AUTH_SUBCOMMANDS,
 	type AuthPassthrough,
+	CLI_RUNTIME_PATH,
 	type CommandDeps,
 	type CommandDispatcher,
 	type CommandInvocation,
@@ -19,6 +20,8 @@ export {
 	createFakeDaemonClient,
 	createLoopbackDaemonClient,
 	type DaemonClient,
+	isSessionGroupPath,
+	mintCliSessionId,
 	type DaemonRequest,
 	type DaemonResponse,
 	DEFAULT_GLOBAL_FLAGS,

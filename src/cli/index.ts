@@ -24,6 +24,7 @@
 
 import { createDispatcher } from "../commands/index.js";
 import { buildRuntimeDeps } from "./runtime.js";
+import { finalizeCliExit } from "./exit.js";
 
 /** Entry point (FR-1 / b-AC-6): parse global flags → route to the matching BOUND handler. */
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
@@ -40,11 +41,21 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
 // Run when invoked directly as the `honeycomb` binary (PRD-001b FR-8 / b-AC-6).
 // The bundle is the bin target, so executing it must do work, not just export.
 if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("cli.js")) {
+	// PRD-022d / d-AC-4: do NOT call `process.exit(code)` here. An abrupt `process.exit()`
+	// races libuv handle teardown on Windows — the detached daemon-spawn child handle and the
+	// undici keep-alive socket pool (from the loopback `fetch`) may still be mid-close, which
+	// trips `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)` (exit 127). Instead we close
+	// those handles deterministically (`finalizeCliExit`) and set `process.exitCode`, letting the
+	// (now-unref'd) event loop drain and Node exit cleanly. See `./exit.ts`.
 	main().then(
-		(code) => process.exit(code),
-		(err) => {
+		async (code) => {
+			await finalizeCliExit();
+			process.exitCode = code;
+		},
+		async (err) => {
 			process.stderr.write(`${String(err)}\n`);
-			process.exit(1);
+			await finalizeCliExit();
+			process.exitCode = 1;
 		},
 	);
 }
