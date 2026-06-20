@@ -117,7 +117,8 @@ async function dispatchStorage(inv: CommandInvocation, deps: CommandDeps): Promi
 	if (inv.verb === "sessions") {
 		return runSessionsCommand(parseSessionsArgs(inv.argv), deps);
 	}
-	return runStorageVerb(inv.verb, inv.argv, deps);
+	// `recall` renders the daemon's hits; `--json` (the global flag) switches it to the raw JSON body.
+	return runStorageVerb(inv.verb, inv.argv, deps, inv.flags.json);
 }
 
 /** Route a `local` verb (setup/connect/uninstall/dashboard/status/hook/update). */

@@ -392,10 +392,36 @@ describe("PRD-021b b-AC-6 — every seam is bound", () => {
 
 	it("b-AC-6 the bound auth passthrough is callable for login/logout/org", async () => {
 		const auth = buildAuthPassthrough();
+		// The seam is bound and callable — that is the b-AC-6 invariant being proven.
 		expect(typeof auth.dispatch).toBe("function");
-		// A logout with no credentials present (a fresh temp HOME) exits SUCCESS — proof the seam runs.
-		const code = await auth.dispatch(["logout"]);
-		expect(typeof code).toBe("number");
+
+		// SELF-ISOLATION (data-loss guard): the passthrough's `dispatch` does not accept a dir
+		// injection — a real `logout` resolves `credentialsPath()` from `os.homedir()` and
+		// `unlinkSync`s it. PRD-023 made that the SHARED `~/.deeplake/credentials.json` (the
+		// file `hivemind login` writes), so dispatching `["logout"]` against the real home would
+		// WIPE the developer's real login on every `npm run ci`. The global `setupFiles` HOME
+		// redirect (tests/setup/isolate-home.ts) already points home at temp space, but we ALSO
+		// pin home to a fresh, EMPTY per-test temp dir here so this seam-callable assertion can
+		// never touch any shared/real path even if the global guard regresses. With no file under
+		// the temp home, `logout` is a clean no-op (exit 0) and nothing is deleted — proof the
+		// seam runs end-to-end without performing a destructive logout.
+		const isoHome = mkdtempSync(join(tmpdir(), "hc-runtime-logout-iso-"));
+		const prevUserProfile = process.env.USERPROFILE;
+		const prevHome = process.env.HOME;
+		process.env.USERPROFILE = isoHome;
+		process.env.HOME = isoHome;
+		try {
+			// The credentials path now resolves UNDER the throwaway temp home — never `~/.deeplake`.
+			expect(credentialsPath().startsWith(isoHome)).toBe(true);
+			const code = await auth.dispatch(["logout"]);
+			expect(typeof code).toBe("number");
+		} finally {
+			if (prevUserProfile === undefined) delete process.env.USERPROFILE;
+			else process.env.USERPROFILE = prevUserProfile;
+			if (prevHome === undefined) delete process.env.HOME;
+			else process.env.HOME = prevHome;
+			rmSync(isoHome, { recursive: true, force: true });
+		}
 	});
 
 	it("b-AC-6 the bound daemon lifecycle exposes start/stop/status", () => {
