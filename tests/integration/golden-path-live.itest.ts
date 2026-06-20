@@ -305,7 +305,10 @@ describe.skipIf(!HAS_TOKEN)("GOLDEN PATH 021f: capture → summary → cross-ses
 			const dashHeaders = { "x-honeycomb-org": org, "x-honeycomb-workspace": workspace };
 
 			// The KPIs view counts the real `memory` + `sessions` rows (both > 0 after our run).
-			const kpisRes = await fetch(`${booted.baseUrl}/api/kpis`, { headers: dashHeaders });
+			// NOTE (PRD-022): the dashboard KPIs VIEW moved from `/api/kpis` to
+			// `/api/diagnostics/kpis` — `/api/kpis` is now the product-data resource
+			// (`{kpis:[...]}`), so the operator-visible counts live under diagnostics.
+			const kpisRes = await fetch(`${booted.baseUrl}/api/diagnostics/kpis`, { headers: dashHeaders });
 			expect(kpisRes.status, "f-AC-4: the dashboard KPIs endpoint serves").toBe(200);
 			const kpis = (await kpisRes.json()) as { memoryCount: number; sessionCount: number; estimatedSavings: number };
 			expect(kpis.sessionCount, "f-AC-4: the dashboard KPIs see real captured sessions").toBeGreaterThan(0);
