@@ -1,5 +1,18 @@
 /**
- * The `/api/hooks/*` handler attach seam — PRD-019b (daemon side).
+ * The `/api/hooks/*` handler attach seam — PRD-019b + PRD-021c (daemon side).
+ *
+ * ── PRD-021c (c-AC-3): the two missing endpoints attach ALONGSIDE capture ────
+ * The 019b hook lifecycle has THREE daemon calls: `/capture` (per-turn rows),
+ * `/context` (the session-start rules/goals block the renderer asks for), and
+ * `/session-end` (mark-ended + usage + skillify). Originally only `/capture` was
+ * attached. This seam now also attaches `/context` and `/session-end` onto the SAME
+ * already-mounted `/api/hooks` group (they inherit the runtime-path + permission
+ * middleware with zero re-wiring, exactly like capture), so all three lifecycle
+ * calls REACH the daemon. Their full handler bodies are 021d/021e's; this seam wires
+ * DEFAULTED lifecycle-composing handlers and exposes `contextHandler` /
+ * `sessionEndHandler` options for 021d/021e to pass the real bodies. The change is
+ * ADDITIVE — `assembleSeams` calls `attachHooks(daemon, { storage, queue })`
+ * unchanged and now gets all three endpoints.
  *
  * The capture handler (`capture-handler.ts`) ships a `register(daemon)` method (the
  * PRD-005a a-AC-6 seam) but nothing called it yet: the daemon bootstrap
@@ -23,6 +36,7 @@
  * auto-invoked by importing the daemon (no behavior change to `createDaemon`).
  */
 
+import type { Context } from "hono";
 import { healTargetFor } from "../../storage/catalog/index.js";
 import type { HealTarget } from "../../storage/heal.js";
 import type { StorageQuery } from "../../storage/client.js";
@@ -33,7 +47,22 @@ import {
 	type CaptureHandler,
 	type CaptureLogger,
 	createCaptureHandler,
+	HOOKS_GROUP,
 } from "./capture-handler.js";
+
+/** The session-start context route, relative to {@link HOOKS_GROUP} (PRD-021c c-AC-3). */
+export const CONTEXT_PATH = "/context" as const;
+/** The session-end route, relative to {@link HOOKS_GROUP} (PRD-021c c-AC-3). */
+export const SESSION_END_PATH = "/session-end" as const;
+
+/**
+ * A daemon hook endpoint handler (the 021d/021e seam). Returns the {@link Response}
+ * the route serves. The 021c attach wires a DEFAULTED handler so the endpoint exists
+ * and serves NOW (c-AC-3 — all three lifecycle calls reach the daemon); 021d/021e
+ * pass the real bodies (the rules/goals render for `/context`, the mark-ended +
+ * usage + skillify for `/session-end`).
+ */
+export type HookEndpointHandler = (c: Context) => Response | Promise<Response>;
 
 /** Options for {@link attachHooksHandlers}. Mirrors the capture handler's deps, with sane defaults. */
 export interface AttachHooksOptions {
@@ -47,14 +76,33 @@ export interface AttachHooksOptions {
 	readonly embed?: EmbedAttachment;
 	/** Optional structured-log sink. */
 	readonly logger?: CaptureLogger;
+	/**
+	 * The `/api/hooks/context` handler (PRD-021c c-AC-3). Defaults to a renderer that
+	 * returns an EMPTY context block (`{ additionalContext: "" }`, status 200) — so the
+	 * session-start renderer's read SUCCEEDS and the lifecycle composes; 021d/021e
+	 * supply the real rules/goals render under the request scope.
+	 */
+	readonly contextHandler?: HookEndpointHandler;
+	/**
+	 * The `/api/hooks/session-end` handler (PRD-021c c-AC-3). Defaults to an
+	 * acknowledgement (`{ ok: true }`, status 200) — so the session-end core's
+	 * mark+usage+skillify call SUCCEEDS and the lifecycle composes; 021d/021e supply
+	 * the real server-side work.
+	 */
+	readonly sessionEndHandler?: HookEndpointHandler;
 }
 
 /**
  * Attach the `/api/hooks/*` handlers onto the daemon's already-mounted `/api/hooks`
- * route group (the a-AC-6 / 019b attach step). Constructs the capture handler with
- * the injected storage + queue (+ the `sessions` heal target, defaulted) and calls
- * its `register(daemon)`. Returns the constructed {@link CaptureHandler} so the
- * caller can read its per-turn counters. Call ONCE after `createDaemon(...)`.
+ * route group (the a-AC-6 / 019b + 021c c-AC-3 attach step). Constructs the capture
+ * handler with the injected storage + queue (+ the `sessions` heal target, defaulted)
+ * and calls its `register(daemon)`, THEN attaches `/context` and `/session-end` onto
+ * the SAME group so all three lifecycle calls reach the daemon. The two new endpoints
+ * inherit the runtime-path + permission middleware with zero re-wiring (exactly like
+ * capture). Their handlers default to lifecycle-composing responders that 021d/021e
+ * replace. ADDITIVE: `assembleSeams` calls `attachHooks(daemon, { storage, queue })`
+ * unchanged and gets all three endpoints. Returns the constructed
+ * {@link CaptureHandler} so the caller can read its per-turn counters. Call ONCE.
  */
 export function attachHooksHandlers(daemon: Daemon, options: AttachHooksOptions): CaptureHandler {
 	const handler = createCaptureHandler({
@@ -65,5 +113,39 @@ export function attachHooksHandlers(daemon: Daemon, options: AttachHooksOptions)
 		...(options.logger !== undefined ? { logger: options.logger } : {}),
 	});
 	handler.register(daemon);
+
+	// ── c-AC-3: attach the two missing endpoints ALONGSIDE capture. They join the
+	// SAME `/api/hooks` group the capture handler registered on, inheriting the
+	// runtime-path + permission middleware with zero re-wiring. Defaulted handlers
+	// make all three lifecycle calls reach the daemon NOW; 021d/021e replace them.
+	const group = daemon.group(HOOKS_GROUP);
+	if (group === undefined) {
+		throw new Error(`attachHooksHandlers: route group "${HOOKS_GROUP}" is not scaffolded`);
+	}
+	const contextHandler = options.contextHandler ?? defaultContextHandler;
+	const sessionEndHandler = options.sessionEndHandler ?? defaultSessionEndHandler;
+	group.post(CONTEXT_PATH, (c) => contextHandler(c));
+	group.post(SESSION_END_PATH, (c) => sessionEndHandler(c));
+
 	return handler;
+}
+
+/**
+ * The defaulted `/api/hooks/context` handler (c-AC-3). Returns an empty context block
+ * with status 200, so the session-start {@link ContextRenderer} read SUCCEEDS (it
+ * coerces an empty `additionalContext` to `""`) and the lifecycle composes. 021d/021e
+ * replace this with the real rules/goals render under the request scope.
+ */
+function defaultContextHandler(c: Context): Response {
+	return c.json({ additionalContext: "" }, 200);
+}
+
+/**
+ * The defaulted `/api/hooks/session-end` handler (c-AC-3). Acknowledges the
+ * mark-ended + usage + skillify intents with status 200, so the session-end core's
+ * call SUCCEEDS and the lifecycle composes. 021d/021e replace this with the real
+ * server-side mark + usage + skillify work.
+ */
+function defaultSessionEndHandler(c: Context): Response {
+	return c.json({ ok: true }, 200);
 }

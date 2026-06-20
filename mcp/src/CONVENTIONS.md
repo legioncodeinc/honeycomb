@@ -106,3 +106,23 @@ result.
   once it owns the HTTP request stream / the process stdio.
 - We do **NOT** claim a live MCP endpoint is serving — only that the seams stamp + route correctly
   and that HTTP and stdio resolve to the same handler dispatch.
+
+## Wave 2b — PRD-021e MCP transport BOUND LIVE (the deferral above is now CLOSED)
+
+021e flips the "imports clean but doesn't serve" state. `index.ts` adds `startMcpServer()` — the
+caller 019d defined but never made — and a `isMainEntry()` guard so the bundled `mcp/bundle/server.js`
+auto-starts when run directly (never on import; mirrors `src/daemon/index.ts`).
+
+| Concern | 021e resolution |
+|---------|-----------------|
+| **stdio bind (e-AC-1/e-AC-2)** | `startMcpServer()` calls `transports.stdio.connect()` on the constructed server, so the bundle answers a REAL `initialize` over the process stdin/stdout — the path a harness uses when it spawns the bundle. Proven by the gated itest spawning the BUILT bundle. |
+| **HTTP `/mcp` serve (e-AC-1/e-AC-6)** | `serveStreamableHttp()` stands up a loopback `node:http` server (127.0.0.1 only) routing `/mcp` into the connected `StreamableHTTPServerTransport` (stateless, `enableJsonResponse: true`). Opt-in via `startMcpServer({ serveHttp: true })`. |
+| **SDK one-transport-per-server rule** | The MCP SDK `Protocol` allows ONE transport per `McpServer` (`server.connect` throws on a second). `bindAllTransports` stays a CONSTRUCTION-equivalence seam (same registry → same handlers); the LIVE path connects stdio to the primary server and stands up a SECOND server (identical surface) for the served HTTP transport. Same `honeycomb_` contract byte-for-byte (e-AC-5). |
+| **DaemonApiSeam loopback (e-AC-3)** | Unchanged — every handler still routes through `createHttpDaemonApiSeam` over `127.0.0.1:3850` stamping `plugin` + actor. mcp/ opens NO DeepLake; `invariant.test.ts` stays green. |
+| **Harness registration (e-AC-4)** | `harnesses/hermes/.mcp.json` registers a `honeycomb` stdio server (`node mcp/bundle/server.js`) so the hermes tool list loads the unified surface. A distinct config file — NOT `harnesses/hermes/src/index.ts` (021c owns that). |
+
+Tests: `tests/mcp/start-server.test.ts` (in-memory `Client` real `initialize` + tool list; tool call
+routes via the fake seam; served `/mcp` answers a real `initialize`), `tests/mcp/registration.test.ts`
+(the artifact lists the server), `tests/mcp/transports.test.ts` (serve/404 + `handleHttpRequest`), and
+the GATED `tests/integration/mcp-transport-live.itest.ts` (spawns the BUILT bundle over stdio,
+`initialize` + `tools/list`, build-aware skip-if-missing, no DeepLake token needed).

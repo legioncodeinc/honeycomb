@@ -30,7 +30,10 @@ import {
 import {
 	type BoundTransport,
 	bindAllTransports,
+	connectAllTransports,
 	createDefaultTransportBinder,
+	type ServedHttp,
+	serveStreamableHttp,
 	type TransportBinder,
 } from "./transports.js";
 import { CONDITIONAL_TOOL_NAMES, TOOL_NAMES, TOOL_SPECS } from "./tools.js";
@@ -106,6 +109,106 @@ function isDaemonSeam(v: DaemonApiSeam | CreateMcpServerOptions | undefined): v 
 	return v !== undefined && typeof (v as DaemonApiSeam).call === "function";
 }
 
+/** Options for {@link startMcpServer}. Extends {@link CreateMcpServerOptions}. */
+export interface StartMcpServerOptions extends CreateMcpServerOptions {
+	/**
+	 * Whether to ALSO serve the streamable-HTTP `/mcp` endpoint (default `false`). The
+	 * common case — a harness spawning `node mcp/bundle/server.js` — wants stdio ONLY,
+	 * so HTTP serving is opt-in (the daemon owns the HTTP `/mcp` request stream in the
+	 * in-process case). When `true`, a loopback `node:http` server is stood up.
+	 */
+	readonly serveHttp?: boolean;
+	/** The loopback port for the `/mcp` endpoint when `serveHttp` is true (default 0). */
+	readonly httpPort?: number;
+}
+
+/** A running MCP server: the constructed handle + the live transports + a graceful close. */
+export interface RunningMcpServer {
+	/** The constructed server handle (registry, tools, both bound transports). */
+	readonly handle: McpServerHandle;
+	/** The served streamable-HTTP endpoint, when `serveHttp` was requested. */
+	readonly http?: ServedHttp;
+	/** Stop serving: close the HTTP socket (if any). The process owns the stdio channel. */
+	close(): Promise<void>;
+}
+
+/**
+ * START the MCP server (PRD-021e e-AC-1 / e-AC-2). This is the call 019d defined but
+ * never made: it constructs the server via {@link createMcpServer}, then CONNECTS a
+ * transport so the server answers a REAL `initialize` handshake and returns the unified
+ * `honeycomb_` tool list. The bundle entry invokes this (see the main-entry guard at the
+ * foot of this module), which is what flips `mcp/bundle/server.js` from "imports clean"
+ * to "actually serves".
+ *
+ * ── ONE McpServer ↔ ONE TRANSPORT (the SDK rule) ────────────────────────────
+ * The MCP SDK's `Protocol` allows ONE transport per server (`server.connect` throws
+ * "Already connected to a transport" on a second call). 019d's `bindAllTransports`
+ * binds BOTH transports to one server as a CONSTRUCTION-equivalence seam (same registry
+ * → same handlers → same daemon routing — tested without ever connecting). The LIVE
+ * bind must honor the SDK rule, so:
+ *   - stdio connects to the PRIMARY handle's server (the path a harness uses when it
+ *     spawns the bundle), and
+ *   - when `serveHttp` is requested, a SECOND independent server is constructed over the
+ *     SAME daemon seam + actor + graph flag (identical tool surface — equivalent in,
+ *     equivalent out, e-AC-5/d-AC-6) and ITS streamable-HTTP transport is connected +
+ *     served at `/mcp`.
+ * Both servers register the byte-for-byte same `honeycomb_` contract; the split is a
+ * transport-ownership detail, not a contract change.
+ */
+export async function startMcpServer(opts: StartMcpServerOptions = {}): Promise<RunningMcpServer> {
+	const handle = createMcpServer(opts);
+
+	// e-AC-1: connect the stdio transport to the primary server (the live bind 019d deferred).
+	await handle.transports.stdio.connect();
+
+	let http: ServedHttp | undefined;
+	let httpHandle: McpServerHandle | undefined;
+	if (opts.serveHttp === true) {
+		// Independent server (SDK one-transport-per-server rule) with the IDENTICAL surface.
+		httpHandle = createMcpServer(opts);
+		await httpHandle.transports.http.connect();
+		http = await serveStreamableHttp(httpHandle.transports.http, { port: opts.httpPort });
+	}
+
+	let closed = false;
+	return {
+		handle,
+		http,
+		async close(): Promise<void> {
+			if (closed) return;
+			closed = true;
+			if (http !== undefined) await http.close();
+		},
+	};
+}
+
+/**
+ * Whether this module is being executed directly as the MCP-server entry (the bundled
+ * `mcp/bundle/server.js`), as opposed to imported by a test or another module. Only the
+ * direct-execution path auto-starts the server; importing the module never owns stdio.
+ * Mirrors the daemon's `isMainEntry` posture (`src/daemon/index.ts`).
+ */
+function isMainEntry(): boolean {
+	const entry = process.argv[1];
+	if (typeof entry !== "string" || entry.length === 0) return false;
+	try {
+		return import.meta.url === new URL(`file://${entry}`).href || import.meta.url.endsWith("/server.js");
+	} catch {
+		return false;
+	}
+}
+
+// Production auto-start: ONLY when run as the main entry (the bundled MCP binary), never
+// on import (a test imports `startMcpServer`/`createMcpServer` without owning stdio). The
+// bundle answers `initialize` over stdio — the path a harness uses when it spawns it.
+if (isMainEntry()) {
+	startMcpServer().catch((err: unknown) => {
+		const message = err instanceof Error ? err.message : String(err);
+		process.stderr.write(`[honeycomb] mcp server failed to start: ${message}\n`);
+		process.exitCode = 1;
+	});
+}
+
 export { CONDITIONAL_TOOL_NAMES, TOOL_NAMES };
 
 export {
@@ -155,7 +258,12 @@ export {
 export {
 	bindAllTransports,
 	type BoundTransport,
+	type BoundTransports,
+	connectAllTransports,
 	createDefaultTransportBinder,
+	type ServedHttp,
+	type ServeStreamableHttpOptions,
+	serveStreamableHttp,
 	type TransportBinder,
 	type TransportKind,
 } from "./transports.js";

@@ -15,6 +15,7 @@ import {
 	type BoundTransport,
 	createFakeDaemonApiSeam,
 	createMcpServer,
+	serveStreamableHttp,
 	type TransportBinder,
 	type TransportKind,
 } from "../../mcp/src/index.js";
@@ -85,5 +86,31 @@ describe("d-AC-6: HTTP and stdio both route through the same daemon-backed serve
 		expect(handle.transports.stdio.kind).toBe("stdio");
 		expect(typeof handle.transports.http.connect).toBe("function");
 		expect(typeof handle.transports.stdio.connect).toBe("function");
+	});
+});
+
+describe("e-AC-1: the default binder's HTTP transport can SERVE /mcp over loopback", () => {
+	it("e-AC-1 the default HTTP BoundTransport exposes handleHttpRequest; stdio does not", () => {
+		const daemon = createFakeDaemonApiSeam();
+		const handle = createMcpServer({ daemon, actor: ACTOR });
+		// The default HTTP transport carries the serve hook (so a node:http server can route
+		// /mcp into it); stdio does not (it owns the process stdin/stdout instead).
+		expect(typeof handle.transports.http.handleHttpRequest).toBe("function");
+		expect(handle.transports.stdio.handleHttpRequest).toBeUndefined();
+	});
+
+	it("e-AC-1 serveStreamableHttp binds loopback only and 404s a non-/mcp path", async () => {
+		const daemon = createFakeDaemonApiSeam();
+		const handle = createMcpServer({ daemon, actor: ACTOR });
+		await handle.transports.http.connect();
+		const served = await serveStreamableHttp(handle.transports.http, { port: 0 });
+		try {
+			expect(served.host).toBe("127.0.0.1");
+			expect(served.port).toBeGreaterThan(0);
+			const res = await fetch(`http://127.0.0.1:${served.port}/not-mcp`);
+			expect(res.status).toBe(404);
+		} finally {
+			await served.close();
+		}
 	});
 });

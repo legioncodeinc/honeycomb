@@ -138,3 +138,30 @@ export async function launchDashboard(
 	const source = options.source ?? createDaemonDashboardDataSource(options);
 	return renderDashboard(source);
 }
+
+/** The URL path the daemon serves the viewable dashboard HOST page at (PRD-021d FR-3 / d-AC-3). */
+export const DASHBOARD_HOST_PATH = "/dashboard" as const;
+
+/** The result of opening the dashboard host: the viewable URL + a probed connectivity state. */
+export interface OpenDashboardResult {
+	/** The viewable dashboard host URL the operator opens (e.g. `http://127.0.0.1:3850/dashboard`). */
+	readonly url: string;
+	/** The probed connectivity (so the verb can warn when the daemon is down before opening). */
+	readonly connectivity: Connectivity;
+}
+
+/**
+ * Resolve the viewable dashboard host URL (PRD-021d FR-3 / FR-5 / d-AC-3) the `honeycomb dashboard`
+ * verb (021b) opens. The daemon serves the rendered 020b view layer at `/dashboard` (see the daemon
+ * `mountDashboardHost`); this returns that URL plus a connectivity probe so the verb can surface the
+ * 020b daemon-down state (d-AC-5) BEFORE handing the URL to a browser opener. The verb owns the
+ * actual "open a browser" side effect (and the TUI fallback via {@link launchDashboard}); this stays
+ * a pure resolver so it is testable behind the injected `fetch` seam.
+ */
+export async function openDashboard(
+	options: LaunchDashboardOptions & { readonly source?: DashboardDataSource } = {},
+): Promise<OpenDashboardResult> {
+	const source = options.source ?? createDaemonDashboardDataSource(options);
+	const connectivity = await source.probe();
+	return { url: `${daemonBaseUrl(options)}${DASHBOARD_HOST_PATH}`, connectivity };
+}

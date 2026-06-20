@@ -30,6 +30,8 @@ export { ClaudeCodeConnector, type ClaudeCodeConnectorOptions } from "./claude-c
 
 export { CursorConnector, type CursorConnectorOptions } from "./cursor.js";
 
+export { createNodeConnectorFs } from "./node-fs.js";
+
 export {
 	connectorMain,
 	type ConnectorCommandDeps,

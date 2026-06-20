@@ -82,3 +82,22 @@ export {
 } from "./session-end.js";
 
 export { CONTEXT_ENDPOINT, createContextRenderer } from "./context-renderer.js";
+
+// ── PRD-021c production seams (c-AC-1 / c-AC-2) ─────────────────────────────────
+export {
+	ACTOR_HEADER,
+	createDaemonHookClient,
+	type DaemonHookClientOptions,
+	ORG_HEADER,
+	RUNTIME_PATH_HEADER,
+	SESSION_HEADER,
+	WORKSPACE_HEADER,
+} from "./daemon-client.js";
+
+export {
+	createCredentialReader,
+	type CredentialReaderOptions,
+	CREDENTIALS_DIR_NAME,
+	CREDENTIALS_FILE_NAME,
+	ENV_TOKEN,
+} from "./credential-reader.js";

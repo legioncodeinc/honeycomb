@@ -11,6 +11,22 @@
 
 export * from "./shared/index.js";
 
+// ── PRD-021c shared hook runtime (c-AC-5 / c-AC-6) ──────────────────────────────
+export {
+	createHookRuntime,
+	type HookEventOutcome,
+	type HookRuntime,
+	type HookRuntimeOptions,
+	type NativeHookEvent,
+} from "./runtime.js";
+
+// ── PRD-021c shared hook-binary stdin driver (c-AC-5 / c-AC-6) ──────────────────
+export {
+	type BinaryIo,
+	runHookBinary,
+	type RunHookBinaryOptions,
+} from "./binary.js";
+
 export {
 	type CliFallback,
 	CONTEXT_CHANNELS,

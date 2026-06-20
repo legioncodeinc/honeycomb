@@ -53,7 +53,24 @@ export {
 export {
 	createDaemonDashboardDataSource,
 	daemonBaseUrl,
+	DASHBOARD_HOST_PATH,
 	type FetchLike,
 	launchDashboard,
 	type LaunchDashboardOptions,
+	openDashboard,
+	type OpenDashboardResult,
 } from "./launch.js";
+
+// ── PRD-021d: the viewable-host HTML serializer + the live-log follow-client (d-AC-3 / d-AC-4)
+export { escapePageHtml, LIVE_LOG_SLOT_ID, renderDashboardPage } from "./html.js";
+
+export {
+	buildLiveLogPanel,
+	type FollowLogsOptions,
+	followLogs,
+	formatLogLine,
+	LIVE_LOG_EMPTY,
+	type LogRecord,
+	parseLogFrame,
+	type StreamFetchLike,
+} from "./logs.js";
