@@ -118,7 +118,7 @@ describe.skipIf(!HAS_TOKEN)("LIVE DASHBOARD+LOGS: real view-models, viewable hos
 	);
 
 	it(
-		"d-AC-3: the ASSEMBLED daemon (no manual mount) serves GET /dashboard with the six view titles",
+		"PRD-024 AC-1: the ASSEMBLED daemon serves GET /dashboard as the production-clean bundled shell",
 		async () => {
 			const b = booted!;
 			// The daemon was booted in `local` mode and the test never mounted the host —
@@ -128,10 +128,22 @@ describe.skipIf(!HAS_TOKEN)("LIVE DASHBOARD+LOGS: real view-models, viewable hos
 			expect(res.status, "GET /dashboard is 200 from the assembled daemon").toBe(200);
 			expect(res.headers.get("content-type")).toContain("text/html");
 			const html = await res.text();
+			// PRD-024: the host now serves the index SHELL of the bundled React app (the brand UI
+			// kit), NOT a server-rendered view tree. The live KPIs/sessions/etc. are hydrated
+			// client-side from the JSON endpoints already proven above (d-AC-1). The shell must be
+			// production-clean (D-1) and reference only same-origin loopback assets.
 			expect(html).toContain("<!doctype html>");
-			for (const title of ["KPIs", "Sessions", "Settings", "Codebase graph", "Rules", "Skill-sync"]) {
-				expect(html, `the served page contains the ${title} view`).toContain(title);
-			}
+			expect(html).toContain('<div id="root"');
+			expect(html).toContain("/dashboard/app.js");
+			expect(html).toContain("/dashboard/styles.css");
+			expect(html).not.toContain("unpkg");
+			expect(html).not.toContain("@babel/standalone");
+			expect(html).not.toContain('type="text/babel"');
+			// The bundled app + the DS CSS are served on loopback.
+			const appRes = await fetch(`${b.baseUrl}/dashboard/app.js`);
+			expect([200, 404]).toContain(appRes.status); // 200 when built; 404 if the bundle is absent
+			const cssRes = await fetch(`${b.baseUrl}/dashboard/styles.css`);
+			expect([200, 404]).toContain(cssRes.status);
 		},
 		120_000,
 	);

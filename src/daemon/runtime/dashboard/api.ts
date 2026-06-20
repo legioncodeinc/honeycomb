@@ -36,6 +36,7 @@ import type { Context } from "hono";
 import { sLiteral, sqlIdent } from "../../storage/sql.js";
 import { isOk, type StorageRow } from "../../storage/result.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
+import { resolveScopeOrLocalDefault } from "../scope.js";
 import type {
 	GraphView,
 	KpisView,
@@ -50,6 +51,16 @@ import type { Daemon } from "../server.js";
 export interface MountDashboardOptions {
 	/** The storage client the view reads run through (never a raw fetch). */
 	readonly storage: StorageQuery;
+	/**
+	 * The daemon's configured default tenancy scope, threaded from the composition root
+	 * (PRD-022). In LOCAL mode a dashboard request with no `x-honeycomb-org` header falls back
+	 * to this single configured tenant (the dashboard web app is a loopback thin client — like
+	 * the SDK/MCP — and need not know the org GUID). ABSENT (a unit-constructed daemon) → pure
+	 * header-only resolution (the prior fail-closed behaviour). NEVER consulted outside local mode.
+	 *
+	 * Mirrors {@link import("../memories/api.js").MountMemoriesOptions.defaultScope}.
+	 */
+	readonly defaultScope?: QueryScope;
 }
 
 /**
@@ -102,18 +113,6 @@ export const DASHBOARD_GROUPS = Object.freeze({
 	 */
 	skills: "/api/diagnostics",
 } as const);
-
-/**
- * Resolve the per-request tenancy scope from the `x-honeycomb-*` headers (the same tenancy
- * the rest of the daemon reads). Returns `null` when no org is present → the handler 400s
- * (fail-closed; an unscoped request never falls back to a broad read).
- */
-export function resolveScope(c: Context): QueryScope | null {
-	const org = c.req.header("x-honeycomb-org");
-	if (org === undefined || org.length === 0) return null;
-	const workspace = c.req.header("x-honeycomb-workspace");
-	return workspace !== undefined && workspace.length > 0 ? { org, workspace } : { org };
-}
 
 /** Number coercion that never returns NaN/undefined for a count column. */
 function toNum(value: unknown): number {
@@ -245,6 +244,12 @@ const NO_ORG_BODY = { error: "bad_request", reason: "x-honeycomb-org header is r
  */
 export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions): void {
 	const storage = options.storage;
+	// Scope precedence (PRD-022): header → (local-mode) injected default → null/400. The
+	// fallback fires ONLY in local mode with a `defaultScope`; team/hybrid stay fail-closed.
+	// Header ALWAYS wins (the cross-tenant guard in scope.ts is unchanged). A unit-constructed
+	// daemon (no injected default) keeps the prior pure header-only 400 behaviour.
+	const resolveScope = (c: Context): QueryScope | null =>
+		resolveScopeOrLocalDefault(c, daemon.config.mode, options.defaultScope);
 
 	const kpis = daemon.group(DASHBOARD_GROUPS.kpis);
 	if (kpis !== undefined) {

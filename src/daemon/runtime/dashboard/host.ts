@@ -1,151 +1,176 @@
 /**
- * The viewable dashboard HOST route — PRD-021d (FR-3 / FR-5 / d-AC-3).
+ * The viewable dashboard HOST route — PRD-021d (FR-3) re-skinned to the brand UI kit by
+ * PRD-024 Wave 2 (AC-1 production-clean bundle).
  *
- * d-AC-3 asks the daemon to SERVE the canonical 020b view layer as a real, viewable page
- * (not just a JSON data contract). This module is the single named step the daemon
- * assembly calls AFTER `createDaemon(...)` to attach `GET /dashboard` onto the
- * already-mounted root group — mirroring `mountDashboardApi`. It builds a DAEMON-SIDE
- * {@link DashboardDataSource} (reading the live storage directly via the shared view
- * fetchers in `api.ts`, allowed because this lives under `src/daemon/`), runs the 020b
- * {@link renderDashboard} orchestrator, and serializes the resulting `ViewBlock` tree to a
- * standalone HTML page via {@link renderDashboardPage}. The page is pointed at the live
- * daemon data, so opening it shows real KPIs/sessions/etc.
+ * ── What changed in PRD-024 ──────────────────────────────────────────────────
+ *   `GET /dashboard` no longer server-renders the 020b `ViewBlock` tree as a static HTML
+ *   page. It now serves the INDEX SHELL of a real React app — the faithful re-creation of
+ *   `assets/ui_kits/dashboard/index.html`, bundled production-clean by esbuild
+ *   (`src/dashboard/web/main.tsx` → `daemon/dashboard-app.js`). The shell is `<div id="root">`
+ *   plus a `<link>` to the design-system CSS and a `<script>` to the bundled app; the app then
+ *   hydrates ITSELF from the daemon's live endpoints (kpis/sessions/recall/logs/health/dream).
  *
- * ── Connectivity + empty states are FREE (d-AC-5 / d-AC-6) ────────────────────
- *   The host calls the SAME `renderDashboard` the thin client uses, so a daemon-down probe
- *   yields the 020b connectivity banner alone and a not-built graph / empty session list
- *   yields the 020b empty-state block — no reinvention. Here the probe is in-process: the
- *   daemon serving the page IS up, so `probe()` reports reachable and the views render; the
- *   daemon-down banner is exercised by the thin-client path (`launchDashboard`) and tested
- *   directly against `renderDashboard`.
+ *   This is exactly what D-1 demands: NO `unpkg`/CDN React, NO in-browser `@babel/standalone`,
+ *   NO `type="text/babel"`. The shell references ONLY same-origin loopback assets the host
+ *   serves, and carries NO token/secret (D-4) — the app reads only what the daemon chooses to
+ *   serve over loopback.
  *
- * ── Why daemon-side (not the loopback thin client) ───────────────────────────
- *   The host serves the page FROM the daemon, so it reads storage in-process rather than
- *   dialing itself over loopback (which would be a needless round trip and a chicken-and-egg
- *   during boot). The thin-client `createDaemonDashboardDataSource` (020b `launch.ts`) is for
- *   an EXTERNAL caller (the CLI/webview); this in-process source is the host's own reader.
+ * ── The four routes this seam registers (all under the unprotected root group) ──
+ *   GET /dashboard                    → the index shell (this module's {@link renderShell})
+ *   GET /dashboard/app.js             → the esbuild bundle (React + ReactDOM + the app)
+ *   GET /dashboard/styles.css         → the concatenated design-system CSS
+ *   GET /dashboard/honeycomb-mark.svg → the brand mark
  *
- * ── Deferred assembly (D-1 / D-7) ────────────────────────────────────────────
- *   The production daemon assembly (021a) calls `mountDashboardHost(daemon, { storage })`
- *   once. Constructed-and-tested here against a fake `StorageQuery`; importing the daemon
- *   does not auto-invoke it.
+ * ── LOCAL-MODE ONLY (D-4 / security F-1) ─────────────────────────────────────
+ *   `assembleSeams` fires this seam ONLY when `daemon.config.mode === "local"` (the
+ *   single-user loopback dogfood target). In team/hybrid the route is never mounted, so a
+ *   tenant's KPIs/sessions HTML is never served without auth. This module does not re-check
+ *   the mode (the composition root owns the gate), but it never reads a secret to render.
  */
 
-import {
-	type Connectivity,
-	type DashboardData,
-	type DashboardDataSource,
-	reachable,
-} from "../../../dashboard/contracts.js";
-import { renderDashboard } from "../../../dashboard/dashboard.js";
-import { renderDashboardPage } from "../../../dashboard/html.js";
-import type { QueryScope, StorageQuery } from "../../storage/client.js";
+import { createWebAssets, type WebAssets } from "./web-assets.js";
+import type { StorageQuery } from "../../storage/client.js";
 import type { Daemon } from "../server.js";
-import {
-	buildSettingsView,
-	type DashboardSettingsConfig,
-	fetchGraphView,
-	fetchKpisView,
-	fetchRulesView,
-	fetchSessionsView,
-	fetchSkillSyncView,
-} from "./api.js";
 
 /** The route the viewable dashboard host is served at (FR-3). */
 export const DASHBOARD_HOST_PATH = "/dashboard" as const;
 
+/** The same-origin path the host serves the bundled app JS at. */
+export const DASHBOARD_APP_PATH = "/dashboard/app.js" as const;
+
+/** The same-origin path the host serves the concatenated design-system CSS at. */
+export const DASHBOARD_CSS_PATH = "/dashboard/styles.css" as const;
+
+/** The same-origin path the host serves the brand mark at. */
+export const DASHBOARD_LOGO_PATH = "/dashboard/honeycomb-mark.svg" as const;
+
+/**
+ * The same-origin path prefix the host serves the brand fonts under. The served DS CSS's
+ * `@font-face` URLs are rewritten to this prefix (see `web-assets.ts` `rewriteFontUrls`) so the
+ * browser fetches `/dashboard/fonts/<file>` instead of the unserved on-disk `../logos/fonts/<file>`.
+ * The `:name` is matched against a FIXED allow-list in `web-assets.ts` `font()` — anything not in
+ * the six known filenames 404s (no attacker-controlled path component).
+ */
+export const DASHBOARD_FONT_PATH = "/dashboard/fonts/:name" as const;
+
+/** The base path (relative to `/dashboard`) the app resolves the logo under. */
+const ASSET_BASE = "/dashboard" as const;
+
 /** The root route group the host attaches to (already mounted, UNPROTECTED, in `server.ts`). */
 export const DASHBOARD_HOST_GROUP = "/" as const;
 
-/** Resolve the daemon's own tenancy scope for the in-process host read. */
-export interface HostScopeResolver {
-	/** The org/workspace the host reads under. */
-	resolve(): QueryScope;
-}
-
 /** Options for {@link mountDashboardHost}. */
 export interface MountDashboardHostOptions {
-	/** The live storage client the daemon-side data source reads through (never a raw fetch). */
-	readonly storage: StorageQuery;
 	/**
-	 * The scope the in-process host reads under. Defaults to {@link envHostScope} (the same
-	 * `HONEYCOMB_DEEPLAKE_ORG`/`WORKSPACE` the composition root resolves the daemon scope from).
-	 * A test injects a fixed scope.
+	 * The live storage client. ACCEPTED for seam-signature compatibility with the composition
+	 * root (`assembleSeams` passes `{ storage }`), but the shell no longer reads storage to
+	 * render — the bundled app hydrates itself from the daemon's HTTP endpoints. Kept optional
+	 * so a test can mount the host with no storage.
 	 */
-	readonly scope?: HostScopeResolver;
+	readonly storage?: StorageQuery;
+	/**
+	 * The web-asset reader (the CSS/logo/bundle source). Defaults to {@link createWebAssets}
+	 * (resolve the repo `assets/` + the bundle beside the daemon). A test injects a fixture
+	 * reader so the host suite never depends on the real tree or a built bundle.
+	 */
+	readonly assets?: WebAssets;
 }
 
 /**
- * The default host scope: read `HONEYCOMB_DEEPLAKE_ORG` / `HONEYCOMB_DEEPLAKE_WORKSPACE`
- * from env (the daemon's own partition, the same source `assemble.ts` uses). Falls back to
- * the benign loopback `{ org: "local", workspace: "default" }` when env is unset (a test /
- * bare assembly), so the host never throws building its scope.
+ * The static layout CSS the UI kit declares inline in `index.html` (`.wrap`, `.grid2`,
+ * `.kpirow`, `.mem-enter`, `.col`). Ported verbatim so the served page lays out exactly like
+ * the kit. The DS TOKENS + component styles come from the linked `/dashboard/styles.css`; this
+ * is only the page's own grid/animation rules.
  */
-export const envHostScope: HostScopeResolver = {
-	resolve(): QueryScope {
-		const org = process.env.HONEYCOMB_DEEPLAKE_ORG;
-		const workspace = process.env.HONEYCOMB_DEEPLAKE_WORKSPACE;
-		if (org !== undefined && org.length > 0) {
-			return workspace !== undefined && workspace.length > 0 ? { org, workspace } : { org };
-		}
-		return { org: "local", workspace: "default" };
-	},
-};
+const LAYOUT_CSS = [
+	"body { margin: 0; background: var(--bg-canvas); min-height: 100vh; }",
+	".wrap { max-width: 1180px; margin: 0 auto; padding: 28px 28px 48px; }",
+	".grid2 { display: grid; grid-template-columns: 1.15fr 1fr; gap: 16px; }",
+	"@media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }",
+	".kpirow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }",
+	"@media (max-width: 720px) { .kpirow { grid-template-columns: repeat(2, 1fr); } }",
+	".mem-enter { opacity: 1; }",
+	"@media (prefers-reduced-motion: no-preference) {",
+	"  .mem-enter { animation: memIn var(--dur-base) var(--ease-out) both; }",
+	"  @keyframes memIn { from { transform: translateY(10px); } to { transform: none; } }",
+	"}",
+	".col { display: flex; flex-direction: column; gap: 16px; }",
+].join("\n");
 
 /**
- * Build the DAEMON-SIDE {@link DashboardDataSource} (d-AC-3). `probe()` always reports
- * reachable — the daemon serving the page IS up (an in-process read needs no loopback
- * round trip). `fetchAll()` reads the six views directly through the shared fetchers, so
- * the served page draws the SAME rows the JSON endpoints serve. Exported so a test drives
- * the source against a fake `StorageQuery` without the route.
+ * Build the index SHELL HTML (AC-1). It is a COMPLETE page: doctype, head with the DS CSS
+ * `<link>` + the inline layout CSS, a `<div id="root">` (the app mounts here) carrying the
+ * asset base, and the bundled-app `<script type="module">`. NO inline data, NO token/secret,
+ * NO CDN/Babel reference — the bundle is same-origin loopback. The app self-hydrates.
  */
-export function createDaemonSideDataSource(
-	storage: StorageQuery,
-	scope: QueryScope,
-	settings: DashboardSettingsConfig,
-	hostUrl: string,
-): DashboardDataSource {
-	return {
-		async probe(): Promise<Connectivity> {
-			// The host serves the page from inside the running daemon, so it is reachable by
-			// construction. The daemon-DOWN banner is the thin-client path's concern (d-AC-5),
-			// exercised against `renderDashboard` directly.
-			return reachable(hostUrl);
-		},
-		async fetchAll(): Promise<DashboardData> {
-			const [kpis, sessions, graph, rules, skillSync] = await Promise.all([
-				fetchKpisView(storage, scope),
-				fetchSessionsView(storage, scope),
-				fetchGraphView(storage, scope),
-				fetchRulesView(storage, scope),
-				fetchSkillSyncView(storage, scope),
-			]);
-			return { kpis, sessions, settings: buildSettingsView(scope, settings), graph, rules, skillSync };
-		},
-	};
+export function renderShell(): string {
+	return [
+		"<!doctype html>",
+		'<html lang="en">',
+		"<head>",
+		'<meta charset="utf-8">',
+		'<meta name="viewport" content="width=device-width, initial-scale=1">',
+		"<title>Honeycomb — Dashboard</title>",
+		`<link rel="stylesheet" href="${DASHBOARD_CSS_PATH}">`,
+		`<link rel="icon" href="${DASHBOARD_LOGO_PATH}">`,
+		`<style>${LAYOUT_CSS}</style>`,
+		"</head>",
+		"<body>",
+		`<div id="root" data-asset-base="${ASSET_BASE}"></div>`,
+		`<script type="module" src="${DASHBOARD_APP_PATH}"></script>`,
+		"</body>",
+		"</html>",
+	].join("\n");
 }
 
 /**
- * Attach the viewable dashboard host onto the daemon's already-mounted root group
- * (d-AC-3 / FR-3 / FR-5). Registers `GET /dashboard`, which builds the daemon-side data
- * source, runs the 020b `renderDashboard`, and returns the serialized HTML page. Call ONCE
- * after `createDaemon(...)`. If the root group is not mounted (unknown daemon shape) the
- * attach is a no-op. The route is unprotected (the root group carries no permission
- * middleware) — `local` single-user loopback is the dogfood target (D-3).
+ * Attach the viewable dashboard host onto the daemon's already-mounted root group (FR-3),
+ * re-skinned to serve the bundled brand UI kit (PRD-024 Wave 2). Registers the shell route
+ * plus the three static-asset routes (app JS, CSS, logo). Call ONCE after `createDaemon(...)`;
+ * `assembleSeams` fires it LOCAL-MODE ONLY (security F-1). If the root group is not mounted the
+ * attach is a no-op. The shell carries no secret/token; the asset routes serve only the DS
+ * CSS/logo + the bundle (a not-yet-built bundle 404s rather than 500s).
  */
-export function mountDashboardHost(daemon: Daemon, options: MountDashboardHostOptions): void {
+export function mountDashboardHost(daemon: Daemon, options: MountDashboardHostOptions = {}): void {
 	const root = daemon.group(DASHBOARD_HOST_GROUP);
 	if (root === undefined) return;
 
-	const storage = options.storage;
-	const scopeResolver = options.scope ?? envHostScope;
-	const settings: DashboardSettingsConfig = { mode: daemon.config.mode, port: daemon.config.port };
-	const hostUrl = `http://${daemon.config.host}:${daemon.config.port}${DASHBOARD_HOST_PATH}`;
+	const assets = options.assets ?? createWebAssets();
 
-	root.get(DASHBOARD_HOST_PATH, async (c) => {
-		const scope = scopeResolver.resolve();
-		const source = createDaemonSideDataSource(storage, scope, settings, hostUrl);
-		const rendered = await renderDashboard(source);
-		return c.html(renderDashboardPage(rendered));
+	// GET /dashboard — the index shell (the app mounts into #root and self-hydrates).
+	root.get(DASHBOARD_HOST_PATH, (c) => c.html(renderShell()));
+
+	// GET /dashboard/app.js — the esbuild bundle (React + ReactDOM + the dashboard app).
+	root.get(DASHBOARD_APP_PATH, (c) => {
+		const asset = assets.appJs();
+		if (asset === null) return c.text("dashboard bundle not built", 404);
+		return c.body(asset.body, 200, { "content-type": asset.contentType });
+	});
+
+	// GET /dashboard/styles.css — the concatenated design-system CSS.
+	root.get(DASHBOARD_CSS_PATH, (c) => {
+		const asset = assets.css();
+		if (asset === null) return c.text("dashboard styles unavailable", 404);
+		return c.body(asset.body, 200, { "content-type": asset.contentType });
+	});
+
+	// GET /dashboard/honeycomb-mark.svg — the brand mark.
+	root.get(DASHBOARD_LOGO_PATH, (c) => {
+		const asset = assets.logo();
+		if (asset === null) return c.text("dashboard logo unavailable", 404);
+		return c.body(asset.body, 200, { "content-type": asset.contentType });
+	});
+
+	// GET /dashboard/fonts/<file> — the brand fonts (Inter + JetBrains Mono). The DS CSS's
+	// `@font-face` URLs are rewritten to this route. `:name` is allow-listed in `font()` (only the
+	// six known filenames resolve; anything else — incl. traversal — 404s). Fonts carry no secret,
+	// so they need no token; a long-lived immutable cache-control since the bytes are content-stable.
+	root.get(DASHBOARD_FONT_PATH, (c) => {
+		const asset = assets.font(c.req.param("name"));
+		if (asset === null) return c.text("dashboard font not found", 404);
+		return c.body(asset.body, 200, {
+			"content-type": asset.contentType,
+			"cache-control": "public, max-age=31536000, immutable",
+		});
 	});
 }
