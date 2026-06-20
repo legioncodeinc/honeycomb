@@ -66,3 +66,95 @@ describe("PRD-020a a-AC-3 — storage verbs route through the daemon (never Deep
 		expect(res.exitCode).toBe(1);
 	});
 });
+
+describe("PRD-023 dogfood — `recall` RENDERS the daemon's hits (not just `recall: ok`)", () => {
+	const RECALL_KEY = "POST /api/memories/recall";
+
+	it("renders each hit's source + id + a readable snippet of text", async () => {
+		const daemon = createFakeDaemonClient({
+			responses: {
+				[RECALL_KEY]: {
+					status: 200,
+					body: {
+						hits: [
+							{ source: "memory", id: "mem-1", text: "We chose Deep Lake for the vector store." },
+							{ source: "sessions", id: "sess-9", text: "The daemon owns all SQL; the CLI dispatches intent." },
+						],
+						sources: ["memory", "sessions"],
+						degraded: false,
+					},
+				},
+			},
+		});
+		const lines: string[] = [];
+		const deps: CommandDeps = { daemon, out: (l) => lines.push(l) };
+
+		const res = await runStorageVerb("recall", ["why", "deep", "lake"], deps);
+		expect(res.exitCode).toBe(0);
+
+		const stdout = lines.join("\n");
+		// NOT the old discarded-body behavior.
+		expect(stdout).not.toContain("recall: ok");
+		// The hit ids AND their text are rendered.
+		expect(stdout).toContain("mem-1");
+		expect(stdout).toContain("sess-9");
+		expect(stdout).toContain("We chose Deep Lake for the vector store.");
+		expect(stdout).toContain("The daemon owns all SQL");
+		// The source tag is shown per hit.
+		expect(stdout).toContain("[memory]");
+		expect(stdout).toContain("[sessions]");
+	});
+
+	it("surfaces the `(lexical fallback)` marker when the daemon reports degraded recall", async () => {
+		const daemon = createFakeDaemonClient({
+			responses: {
+				[RECALL_KEY]: {
+					status: 200,
+					body: { hits: [{ source: "memory", id: "m1", text: "lexical-only hit" }], degraded: true },
+				},
+			},
+		});
+		const lines: string[] = [];
+		const deps: CommandDeps = { daemon, out: (l) => lines.push(l) };
+		await runStorageVerb("recall", ["anything"], deps);
+		expect(lines.join("\n")).toContain("(lexical fallback)");
+	});
+
+	it("--json prints the raw JSON body (machine-readable), not the human render", async () => {
+		const body = { hits: [{ source: "memory", id: "j1", text: "json hit" }], sources: ["memory"], degraded: false };
+		const daemon = createFakeDaemonClient({ responses: { [RECALL_KEY]: { status: 200, body } } });
+		const lines: string[] = [];
+		const deps: CommandDeps = { daemon, out: (l) => lines.push(l) };
+
+		// `true` is the threaded `--json` global flag.
+		await runStorageVerb("recall", ["q"], deps, true);
+
+		const stdout = lines.join("\n");
+		// The raw JSON round-trips to the same object.
+		expect(JSON.parse(stdout)).toEqual(body);
+		// No human-render tags leaked into the JSON output.
+		expect(stdout).not.toContain("[memory] j1");
+	});
+
+	it("an empty result prints a clean `no memories found` line", async () => {
+		const daemon = createFakeDaemonClient({
+			responses: { [RECALL_KEY]: { status: 200, body: { hits: [], sources: [], degraded: false } } },
+		});
+		const lines: string[] = [];
+		const deps: CommandDeps = { daemon, out: (l) => lines.push(l) };
+
+		await runStorageVerb("recall", ["nothing", "matches"], deps);
+
+		const stdout = lines.join("\n");
+		expect(stdout).toContain('no memories found for "nothing matches"');
+		expect(stdout).not.toContain("recall: ok");
+	});
+
+	it("the OTHER storage verbs keep the unchanged `<verb>: ok` render", async () => {
+		const daemon = createFakeDaemonClient();
+		const lines: string[] = [];
+		const deps: CommandDeps = { daemon, out: (l) => lines.push(l) };
+		await runStorageVerb("remember", ["a", "fact"], deps);
+		expect(lines.join("\n")).toContain("remember: ok");
+	});
+});

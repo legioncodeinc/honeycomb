@@ -29,6 +29,12 @@ export default defineConfig({
 		environment: "node",
 		include: ["tests/**/*.test.ts"],
 		exclude: ["tests/integration/**"],
+		// GLOBAL HOME ISOLATION (data-loss guard): runs in every worker BEFORE any test,
+		// redirecting os.homedir() to a throwaway temp dir so credentialsPath() /
+		// legacyCredentialsPath() can never resolve to the REAL ~/.deeplake (or ~/.honeycomb).
+		// A test that exercises a destructive auth path (e.g. `logout` → unlinkSync) thus
+		// only ever deletes temp space. See tests/setup/isolate-home.ts for the full rationale.
+		setupFiles: ["tests/setup/isolate-home.ts"],
 		coverage: {
 			provider: "v8",
 			include: ["src/**/*.ts"],
