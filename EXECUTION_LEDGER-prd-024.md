@@ -291,3 +291,43 @@ font route serves the allow-listed woff2/ttf with the right content-type + immut
 and traversal names 404; the served CSS contains `/dashboard/fonts/` and NOT `../logos/fonts/`. All
 gates green: `npm run ci` = **0** (1784 passed / 5 skipped), `npm run build` = **0**, `npm run
 audit:sql` = **0**, `npm run audit:openclaw` = **0**, `tests/daemon/storage/invariant.test.ts` = **0**.
+
+### Post-merge UX fixes (Wave 3)
+
+post-merge UX fixes — Sessions panel paginated to 5/page; `windowsHide:true` added to all
+child-process spawns (Windows console-window flash).
+
+- **Sessions panel pagination** — `SessionsPanel` (`src/dashboard/web/panels.tsx`) rendered every
+  row of the up-to-200-row wire fetch (a giant scrolling list in the live browser). Now it holds a
+  `React.useState` page index and slices to a 5-row page (`PAGE_SIZE = 5`); the header eyebrow keeps
+  the TOTAL (`${total} captured`) while the `Panel` `right` slot carries compact `‹`/`›` kit-styled
+  buttons (transparent bg, `--border-default`, `--radius-md`, mono, `--text-secondary`) + a mono
+  `"{start}–{end} of {total}"` label (e.g. `1–5 of 200`). `‹` disabled on the first page, `›` on the
+  last; controls hidden entirely when `sessions.length ≤ 5`; the `No sessions captured yet.` empty
+  state is unchanged. The wire fetch was also lowered `LIMIT 200 → 50` in
+  `src/daemon/runtime/dashboard/api.ts` `fetchSessionsView` (the KPI sessionCount comes from a
+  separate `COUNT(*)`, so the displayed total is unaffected; no existing test asserted the limit).
+  Covered by the new `tests/dashboard/web/panels.test.tsx` (>5 → 5 rows + range label + `›` advances;
+  ≤5 → no controls, all render; 0 → empty state); the existing `app.test.tsx` (2 sessions) is
+  unchanged and still green.
+- **`windowsHide:true` on every child-process spawn** — added to every background/captured-stdio
+  spawn so no transient console window flashes on Windows: `src/cli/runtime.ts:158` (detached
+  daemon `spawn`), `src/daemon/runtime/skillify/miner.ts:546` (gate `spawn`),
+  `src/daemon/runtime/summaries/worker.ts:464` (summary `spawn`),
+  `src/daemon/runtime/auth/deeplake-issuer.ts:360/362/364` (browser-open `open`/`rundll32`/`xdg-open`
+  `execFileSync` — the `rundll32` one is the Windows flash; the browser still opens),
+  `src/daemon/runtime/codebase/discovery.ts:131` (`git ls-files` `execFileSync`),
+  `src/daemon/runtime/secrets/store.ts:134/142` (machine-id `ioreg`/`reg query` `execFileSync`),
+  `src/daemon/runtime/secrets/exec.ts:159` (`systemSpawner` secret-exec `spawn`), and
+  `src/cli/health-probes.ts:44/45` (`where`/`which` `spawnSync`). No existing spawn-option test
+  asserted the full options object (the miner/summaries/exec tests assert command/args/env/behaviour,
+  not the literal), so all stayed green.
+- **Gates** (exact exit codes): `npm run ci` = **0** (typecheck + jscpd dup + 1789 passed / 5 skipped
+  + audit:sql; one isolated pre-existing flake in `exec.test.ts` b-AC-5 — a real 150ms-timeout spawn
+  race, load-dependent and orthogonal to `windowsHide`, verified by reverting the exec.ts change and
+  reproducing/clearing the flake on the untouched baseline — clears on rerun), `npm run build` = **0**
+  (1 daemon + 1 dashboard-web + 5 hook-harness + 1 OpenClaw + 1 MCP + 4 SDK + 1 CLI + 1 embed-daemon @
+  0.1.0), `npm run audit:sql` = **0**, `npm run audit:openclaw` = **0**,
+  `tests/daemon/storage/invariant.test.ts` = **0** (3/3). New `panels.test.tsx` is NOT gitignored
+  (`git check-ignore` → exit 1, committable); no `.agents`/`.codex`/`.claude`/`.cursor`/`AGENTS.md`
+  touched.

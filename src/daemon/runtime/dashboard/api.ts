@@ -159,7 +159,9 @@ export async function fetchSessionsView(storage: StorageQuery, scope: QueryScope
 	const rows = await selectRows(
 		storage,
 		`SELECT ${sqlIdent("id")}, ${sqlIdent("project")}, ${sqlIdent("creation_date")}, ${sqlIdent("path")} ` +
-			`FROM "${tbl}" ORDER BY ${sqlIdent("creation_date")} DESC LIMIT 200`,
+			// The dashboard paginates 5 rows/page client-side, so a saner cap than 200 is plenty; the
+		// KPI sessionCount comes from a separate COUNT(*) query, so the displayed total is unaffected.
+		`FROM "${tbl}" ORDER BY ${sqlIdent("creation_date")} DESC LIMIT 50`,
 		scope,
 	);
 	const sessions = rows.map((r) => ({

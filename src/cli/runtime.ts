@@ -159,6 +159,9 @@ export function buildDaemonLifecycle(client: DaemonClient): DaemonLifecycle {
 				detached: true,
 				stdio: "ignore",
 				env: process.env,
+				// Hide the transient console window on Windows — a detached daemon spawn is never
+				// an interactive terminal the user needs to see.
+				windowsHide: true,
 			});
 			// Let the daemon outlive this CLI process (b-AC-2: `start` brings it up and returns).
 			child.unref();

@@ -357,11 +357,12 @@ export function defaultBrowserOpener(url: string): boolean {
 	}
 	try {
 		if (process.platform === "darwin") {
-			execFileSync("open", [safeUrl], { stdio: "ignore", timeout: 5000 });
+			execFileSync("open", [safeUrl], { stdio: "ignore", timeout: 5000, windowsHide: true });
 		} else if (process.platform === "win32") {
-			execFileSync("rundll32", ["url.dll,FileProtocolHandler", safeUrl], { stdio: "ignore", timeout: 5000 });
+			// `windowsHide` suppresses the transient rundll32 console flash; the browser still opens.
+			execFileSync("rundll32", ["url.dll,FileProtocolHandler", safeUrl], { stdio: "ignore", timeout: 5000, windowsHide: true });
 		} else {
-			execFileSync("xdg-open", [safeUrl], { stdio: "ignore", timeout: 5000 });
+			execFileSync("xdg-open", [safeUrl], { stdio: "ignore", timeout: 5000, windowsHide: true });
 		}
 		return true;
 	} catch {

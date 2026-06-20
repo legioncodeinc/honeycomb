@@ -69,15 +69,77 @@ const AGENT_DOT: Record<string, string> = {
 	openclaw: "var(--verified)",
 };
 
-/** The captured-sessions table (ported from `components.jsx` `SessionsPanel`). AC-2 empty state. */
-export function SessionsPanel({ sessions }: { sessions: readonly SessionRowWire[] }): React.JSX.Element {
+/** How many session rows the panel shows per page (the live wire fetches far more than this). */
+const PAGE_SIZE = 5;
+
+/**
+ * A compact, unobtrusive page-control button matching the kit (transparent bg, default border,
+ * mono, secondary text). Disabled when there is no page in that direction.
+ */
+function PageButton({ label, onClick, disabled }: { label: string; onClick: () => void; disabled: boolean }): React.JSX.Element {
 	return (
-		<Panel title="Sessions" eyebrow={`${sessions.length} captured`}>
-			{sessions.length === 0 ? (
+		<button
+			type="button"
+			onClick={onClick}
+			disabled={disabled}
+			style={{
+				width: 22,
+				height: 22,
+				padding: 0,
+				background: "transparent",
+				border: "1px solid var(--border-default)",
+				borderRadius: "var(--radius-md)",
+				color: "var(--text-secondary)",
+				fontFamily: "var(--font-mono)",
+				fontSize: 12,
+				lineHeight: 1,
+				cursor: disabled ? "default" : "pointer",
+				opacity: disabled ? 0.4 : 1,
+			}}
+		>
+			{label}
+		</button>
+	);
+}
+
+/**
+ * The captured-sessions table (ported from `components.jsx` `SessionsPanel`). AC-2 empty state.
+ *
+ * The wire ships up to a few hundred captured sessions, so the panel paginates client-side and
+ * renders at most {@link PAGE_SIZE} rows per page (no giant scrolling list). The header eyebrow
+ * keeps showing the TOTAL captured count; the `right` slot carries the `‹` / `›` controls + a
+ * mono `"{start}–{end} of {total}"` label, hidden entirely when there are ≤ PAGE_SIZE sessions.
+ */
+export function SessionsPanel({ sessions }: { sessions: readonly SessionRowWire[] }): React.JSX.Element {
+	const total = sessions.length;
+	const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+	const [page, setPage] = React.useState(0);
+	// Clamp the page in case `sessions` shrinks beneath the current page on a re-render.
+	const safePage = Math.min(page, pageCount - 1);
+	const start = safePage * PAGE_SIZE;
+	const pageRows = sessions.slice(start, start + PAGE_SIZE);
+	// 1-based, inclusive display range (e.g. `1–5 of 200`); `0 of 0` never shows (empty state below).
+	const rangeStart = total === 0 ? 0 : start + 1;
+	const rangeEnd = Math.min(start + PAGE_SIZE, total);
+
+	const controls =
+		total > PAGE_SIZE ? (
+			<span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+				<PageButton label="‹" onClick={() => setPage((p) => Math.max(0, p - 1))} disabled={safePage === 0} />
+				<span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-tertiary)", whiteSpace: "nowrap" }}>
+					{rangeStart}–{rangeEnd} of {total}
+				</span>
+				<PageButton label="›" onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))} disabled={safePage >= pageCount - 1} />
+			</span>
+		) : undefined;
+
+	return (
+		<Panel title="Sessions" eyebrow={`${total} captured`} right={controls}>
+			{total === 0 ? (
 				<EmptyRow>No sessions captured yet.</EmptyRow>
 			) : (
 				<div style={{ display: "flex", flexDirection: "column" }}>
-					{sessions.map((s, i) => (
+					{pageRows.map((s, i) => (
 						<div
 							key={s.sessionId || i}
 							style={{
