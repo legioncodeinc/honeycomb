@@ -73,6 +73,7 @@ export interface VerbSpec {
 export const VERB_TABLE: readonly VerbSpec[] = Object.freeze([
 	{ verb: "setup", cls: "local", summary: "detect assistants, wire hooks, bring up the daemon" },
 	{ verb: "status", cls: "local", summary: "daemon connectivity + login + D1–D5 environment health" },
+	{ verb: "daemon", cls: "local", summary: "start | stop | status the loopback daemon (3850)" },
 	{ verb: "dashboard", cls: "local", summary: "launch the daemon-served dashboard (020b)" },
 	{ verb: "remember", cls: "storage", summary: "write a memory through the daemon" },
 	{ verb: "recall", cls: "storage", summary: "recall memories through the daemon" },
@@ -343,6 +344,14 @@ export interface CommandDeps {
 	 * dispatcher requires it for the passthrough verbs and a test injects a recording fake.
 	 */
 	readonly auth?: AuthPassthrough;
+	/**
+	 * The daemon process-lifecycle seam (021b b-AC-2 / b-AC-3). Drives `daemon start|stop|status`
+	 * and ensure-running-on-demand (a storage verb auto-starts a down daemon). Optional so a plain
+	 * handler test still type-checks; the bin assembly binds the real spawn-based impl and a test
+	 * injects a recording fake. Typed as `unknown` here to keep `contracts.ts` free of an import
+	 * cycle with `daemon.ts`; the dispatcher narrows it to `DaemonLifecycle` at the call site.
+	 */
+	readonly lifecycle?: unknown;
 }
 
 /**

@@ -75,3 +75,12 @@ export {
 	runHookCommand,
 	runUpdateCommand,
 } from "./local-handlers.js";
+
+export {
+	type DaemonLifecycle,
+	type DaemonStatus,
+	type DaemonVerbDeps,
+	ensureDaemonRunning,
+	parseDaemonArgs,
+	runDaemonCommand,
+} from "./daemon.js";

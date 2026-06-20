@@ -34,12 +34,34 @@ export interface RunningDaemon {
 export async function startDaemon(daemon: Daemon): Promise<RunningDaemon> {
 	await daemon.startServices();
 
+	// Capture the ACTUAL bound port from the serve listener callback. When
+	// `config.port` is 0 (an EPHEMERAL port — the gated live itest uses this so it
+	// never clobbers a real daemon on 3850), the OS picks a free port and reports it
+	// here. The bind is awaited so a failure (EADDRINUSE) rejects loudly with the real
+	// cause; services are stopped before re-throwing so a failed start leaves nothing
+	// dangling.
 	let server: ReturnType<typeof serve>;
+	let boundPort: number = daemon.config.port;
 	try {
-		server = serve({
-			fetch: daemon.app.fetch,
-			hostname: daemon.config.host,
-			port: daemon.config.port,
+		server = await new Promise<ReturnType<typeof serve>>((resolve, reject) => {
+			let handle: ReturnType<typeof serve>;
+			try {
+				handle = serve(
+					{
+						fetch: daemon.app.fetch,
+						hostname: daemon.config.host,
+						port: daemon.config.port,
+					},
+					(info: { port: number }) => {
+						boundPort = info.port;
+						resolve(handle);
+					},
+				);
+				// Surface a synchronous/asynchronous listen error (e.g. EADDRINUSE) as a reject.
+				handle.on?.("error", (err: unknown) => reject(err));
+			} catch (err: unknown) {
+				reject(err);
+			}
 		});
 	} catch (err: unknown) {
 		// Roll back the started services so a bind failure is clean, then surface
@@ -50,7 +72,7 @@ export async function startDaemon(daemon: Daemon): Promise<RunningDaemon> {
 	}
 
 	return {
-		address: { host: daemon.config.host, port: daemon.config.port },
+		address: { host: daemon.config.host, port: boundPort },
 		async close(): Promise<void> {
 			await new Promise<void>((resolve, reject) => {
 				server.close((err?: unknown) => {

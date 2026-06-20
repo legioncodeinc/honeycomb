@@ -31,6 +31,12 @@ import { parseSessionsArgs, runSessionsCommand } from "./sessions.js";
 import { runStorageVerb } from "./storage-handlers.js";
 import { runStatusCommand, type StatusDeps } from "./status.js";
 import { type LocalDeps, runConnectorVerb, runDashboardCommand, runHookCommand, runUpdateCommand } from "./local-handlers.js";
+import {
+	type DaemonLifecycle,
+	type DaemonVerbDeps,
+	ensureDaemonRunning,
+	runDaemonCommand,
+} from "./daemon.js";
 import { HONEYCOMB_VERSION, PRODUCT_SLUG } from "../shared/constants.js";
 
 /** The recognized global-flag tokens (FR-1). A per-command flag is left for the handler. */
@@ -75,8 +81,39 @@ export function usageText(): string {
 	return lines.join("\n");
 }
 
-/** Route a `storage` verb to its handler (sessions has its own paired-delete module). */
-function dispatchStorage(inv: CommandInvocation, deps: CommandDeps): Promise<CommandResult> {
+/** Narrow the opaque `deps.lifecycle` to the {@link DaemonLifecycle} seam (or `undefined`). */
+function lifecycleOf(deps: CommandDeps): DaemonLifecycle | undefined {
+	return deps.lifecycle as DaemonLifecycle | undefined;
+}
+
+/** The deps the `daemon` verb + ensure-running run against (the HTTP seam + the lifecycle seam). */
+function daemonVerbDeps(deps: CommandDeps): DaemonVerbDeps {
+	const lifecycle = lifecycleOf(deps);
+	return {
+		daemon: deps.daemon,
+		...(lifecycle !== undefined ? { lifecycle } : {}),
+		...(deps.out !== undefined ? { out: deps.out } : {}),
+	};
+}
+
+/**
+ * Route a `storage` verb to its handler (sessions has its own paired-delete module). Ensure-running
+ * on demand FIRST (b-AC-3): if the daemon is down, auto-start it (idempotent via the 021a PID/lock)
+ * so the verb completes rather than failing with ECONNREFUSED. When no lifecycle seam is bound
+ * (a plain handler test) the storage verb proceeds unchanged — `ensureDaemonRunning` is a no-op
+ * beyond the reachability probe.
+ */
+async function dispatchStorage(inv: CommandInvocation, deps: CommandDeps): Promise<CommandResult> {
+	// b-AC-3: best-effort auto-start. Only attempt when a lifecycle seam is bound; otherwise leave
+	// the existing fake-driven handler tests (no lifecycle) completely unchanged.
+	if (lifecycleOf(deps) !== undefined) {
+		const reachable = await ensureDaemonRunning(daemonVerbDeps(deps));
+		if (!reachable) {
+			const out = deps.out ?? ((line: string): void => console.log(line));
+			out(`error: ${inv.verb} could not reach the daemon on 127.0.0.1:3850 (auto-start failed).`);
+			return { exitCode: 1 };
+		}
+	}
 	if (inv.verb === "sessions") {
 		return runSessionsCommand(parseSessionsArgs(inv.argv), deps);
 	}
@@ -94,6 +131,8 @@ function dispatchLocal(inv: CommandInvocation, deps: LocalDeps & StatusDeps): Pr
 			return runDashboardCommand(deps);
 		case "status":
 			return runStatusCommand(deps);
+		case "daemon":
+			return runDaemonCommand(inv.argv, daemonVerbDeps(deps));
 		case "hook":
 			return runHookCommand(inv.argv, deps);
 		case "update":

@@ -34,12 +34,32 @@ import type { Context } from "hono";
 import { sLiteral, sqlIdent } from "../../storage/sql.js";
 import { isOk, type StorageRow } from "../../storage/result.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
+import type {
+	GraphView,
+	KpisView,
+	RulesView,
+	SessionsView,
+	SettingsView,
+	SkillSyncView,
+} from "../../../dashboard/contracts.js";
 import type { Daemon } from "../server.js";
 
 /** Options for {@link mountDashboardApi}. */
 export interface MountDashboardOptions {
 	/** The storage client the view reads run through (never a raw fetch). */
 	readonly storage: StorageQuery;
+}
+
+/**
+ * The runtime config the settings view exposes (mode + port). The host route (d-AC-3) and
+ * the `/api/diagnostics/settings` handler both build the {@link SettingsView} from this +
+ * the per-request scope, so the daemon-served HTML page and the JSON endpoint agree.
+ */
+export interface DashboardSettingsConfig {
+	/** The deployment mode (`local` | `team` | `hybrid`). */
+	readonly mode: string;
+	/** The daemon listen port. */
+	readonly port: number;
 }
 
 /**
@@ -73,7 +93,7 @@ export const DASHBOARD_GROUPS = Object.freeze({
  * the rest of the daemon reads). Returns `null` when no org is present → the handler 400s
  * (fail-closed; an unscoped request never falls back to a broad read).
  */
-function resolveScope(c: Context): QueryScope | null {
+export function resolveScope(c: Context): QueryScope | null {
 	const org = c.req.header("x-honeycomb-org");
 	if (org === undefined || org.length === 0) return null;
 	const workspace = c.req.header("x-honeycomb-workspace");
@@ -97,143 +117,174 @@ async function selectRows(storage: StorageQuery, sql: string, scope: QueryScope)
 	return isOk(result) ? result.rows : [];
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// View fetchers — the SINGLE source of each view's storage read (jscpd discipline).
+// Both the HTTP handlers (`mountDashboardApi`) and the daemon-served host route
+// (`host.ts` / d-AC-3) call these, so the HTML page and the JSON endpoints read
+// EXACTLY the same rows with the same guarded SQL. Each returns the 020b view-model.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Fetch the KPIs view (FR-1 / d-AC-1): memory + session counts; savings is a real metric (0 until its pipeline lands). */
+export async function fetchKpisView(storage: StorageQuery, scope: QueryScope): Promise<KpisView> {
+	const memTbl = sqlIdent("memory");
+	const sessTbl = sqlIdent("sessions");
+	const [memRows, sessRows] = await Promise.all([
+		selectRows(storage, `SELECT COUNT(*) AS n FROM "${memTbl}"`, scope),
+		selectRows(storage, `SELECT COUNT(*) AS n FROM "${sessTbl}"`, scope),
+	]);
+	return {
+		memoryCount: toNum(memRows[0]?.n),
+		sessionCount: toNum(sessRows[0]?.n),
+		estimatedSavings: 0,
+	};
+}
+
+/** Fetch the sessions view (FR-1 / d-AC-1): captured sessions + project/date metadata, newest first. */
+export async function fetchSessionsView(storage: StorageQuery, scope: QueryScope): Promise<SessionsView> {
+	const tbl = sqlIdent("sessions");
+	const rows = await selectRows(
+		storage,
+		`SELECT ${sqlIdent("id")}, ${sqlIdent("project")}, ${sqlIdent("creation_date")}, ${sqlIdent("path")} ` +
+			`FROM "${tbl}" ORDER BY ${sqlIdent("creation_date")} DESC LIMIT 200`,
+		scope,
+	);
+	const sessions = rows.map((r) => ({
+		sessionId: toStr(r.id),
+		project: toStr(r.project),
+		startedAt: toStr(r.creation_date),
+		eventCount: 0,
+		status: "captured",
+	}));
+	return { sessions };
+}
+
+/** Build the settings view (FR-1 / d-AC-1): active org/workspace + the exposed runtime config. */
+export function buildSettingsView(scope: QueryScope, config: DashboardSettingsConfig): SettingsView {
+	return {
+		orgId: scope.org,
+		orgName: scope.org,
+		workspace: scope.workspace ?? "default",
+		settings: { mode: config.mode, port: String(config.port) },
+	};
+}
+
+/** Fetch the graph view (FR-1 / d-AC-1 / d-AC-6): the latest codebase snapshot, or `built:false` empty-state. */
+export async function fetchGraphView(storage: StorageQuery, scope: QueryScope): Promise<GraphView> {
+	const tbl = sqlIdent("codebase");
+	const rows = await selectRows(
+		storage,
+		`SELECT ${sqlIdent("snapshot_jsonb")}, ${sqlIdent("node_count")}, ${sqlIdent("edge_count")} ` +
+			`FROM "${tbl}" WHERE ${sqlIdent("org_id")} = ${sLiteral(scope.org)} ` +
+			`ORDER BY ${sqlIdent("schema_version")} DESC LIMIT 1`,
+		scope,
+	);
+	if (rows.length === 0) return { built: false, nodes: [], edges: [] };
+	const snapshot = parseSnapshot(rows[0]?.snapshot_jsonb);
+	return { built: true, nodes: snapshot.nodes, edges: snapshot.edges };
+}
+
+/** Fetch the rules view (FR-1 / d-AC-1): the org-wide rules, active flag from `status`. */
+export async function fetchRulesView(storage: StorageQuery, scope: QueryScope): Promise<RulesView> {
+	const tbl = sqlIdent("rules");
+	const rows = await selectRows(
+		storage,
+		`SELECT ${sqlIdent("id")}, ${sqlIdent("name")}, ${sqlIdent("status")} ` +
+			`FROM "${tbl}" ORDER BY ${sqlIdent("version")} DESC LIMIT 500`,
+		scope,
+	);
+	const rules = rows.map((r) => ({
+		id: toStr(r.id),
+		title: toStr(r.name),
+		active: toStr(r.status) === "active",
+	}));
+	return { rules };
+}
+
+/** Fetch the skill-sync view (FR-1 / d-AC-1): pulled + shared team skills and their sync state. */
+export async function fetchSkillSyncView(storage: StorageQuery, scope: QueryScope): Promise<SkillSyncView> {
+	const tbl = sqlIdent("skills");
+	const rows = await selectRows(
+		storage,
+		`SELECT ${sqlIdent("name")}, ${sqlIdent("scope")}, ${sqlIdent("visibility")} ` +
+			`FROM "${tbl}" ORDER BY ${sqlIdent("version")} DESC LIMIT 500`,
+		scope,
+	);
+	const skills = rows.map((r) => ({
+		name: toStr(r.name),
+		scope: toStr(r.scope),
+		syncState: toStr(r.visibility) === "global" ? "shared" : "pulled",
+	}));
+	return { skills };
+}
+
+/** The 400 body a dashboard handler returns when the request carries no resolvable org (fail-closed). */
+const NO_ORG_BODY = { error: "bad_request", reason: "x-honeycomb-org header is required" } as const;
+
 /**
  * Attach the dashboard data handlers onto the daemon's already-mounted route groups (the
  * 020b daemon-side seam). Registers one read handler per view, each reading through
- * `options.storage` with guarded SQL and returning the matching 020b view-model. Call ONCE
- * after `createDaemon(...)`. A request with no resolvable tenancy 400s (fail-closed). If a
- * group is not mounted (unknown daemon shape) the attach for that view is skipped.
+ * `options.storage` with guarded SQL (via the shared view fetchers) and returning the
+ * matching 020b view-model. Call ONCE after `createDaemon(...)`. A request with no
+ * resolvable tenancy 400s (fail-closed). If a group is not mounted (unknown daemon shape)
+ * the attach for that view is skipped.
  */
 export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions): void {
 	const storage = options.storage;
 
 	const kpis = daemon.group(DASHBOARD_GROUPS.kpis);
 	if (kpis !== undefined) {
-		// KPIs (FR-2): memory volume, session counts, savings. Counts come from the engine
-		// tables; savings is a derived org metric (0 until the savings pipeline lands — a
-		// real number, never a fabricated one).
 		kpis.get("/", async (c) => {
 			const scope = resolveScope(c);
-			if (scope === null) return c.json({ error: "bad_request", reason: "x-honeycomb-org header is required" }, 400);
-			const memTbl = sqlIdent("memory");
-			const sessTbl = sqlIdent("sessions");
-			const [memRows, sessRows] = await Promise.all([
-				selectRows(storage, `SELECT COUNT(*) AS n FROM "${memTbl}"`, scope),
-				selectRows(storage, `SELECT COUNT(*) AS n FROM "${sessTbl}"`, scope),
-			]);
-			return c.json({
-				memoryCount: toNum(memRows[0]?.n),
-				sessionCount: toNum(sessRows[0]?.n),
-				estimatedSavings: 0,
-			});
+			if (scope === null) return c.json(NO_ORG_BODY, 400);
+			return c.json(await fetchKpisView(storage, scope));
 		});
 	}
 
 	const sessions = daemon.group(DASHBOARD_GROUPS.sessions);
 	if (sessions !== undefined) {
-		// Sessions (FR-3): captured sessions + metadata (project / dates / event-counts / status).
 		// Served at `/sessions` under the diagnostics group (full `/api/diagnostics/sessions`).
 		sessions.get("/sessions", async (c) => {
 			const scope = resolveScope(c);
-			if (scope === null) return c.json({ error: "bad_request", reason: "x-honeycomb-org header is required" }, 400);
-			const tbl = sqlIdent("sessions");
-			const rows = await selectRows(
-				storage,
-				`SELECT ${sqlIdent("id")}, ${sqlIdent("project")}, ${sqlIdent("creation_date")}, ${sqlIdent("path")} ` +
-					`FROM "${tbl}" ORDER BY ${sqlIdent("creation_date")} DESC LIMIT 200`,
-				scope,
-			);
-			const list = rows.map((r) => ({
-				sessionId: toStr(r.id),
-				project: toStr(r.project),
-				startedAt: toStr(r.creation_date),
-				eventCount: 0,
-				status: "captured",
-			}));
-			return c.json({ sessions: list });
+			if (scope === null) return c.json(NO_ORG_BODY, 400);
+			return c.json(await fetchSessionsView(storage, scope));
 		});
 	}
 
 	const settings = daemon.group(DASHBOARD_GROUPS.settings);
 	if (settings !== undefined) {
-		// Settings (FR-4): active org + workspace config. Served off the diagnostics group at
-		// `/settings` (full path `/api/diagnostics/settings`) so it doesn't collide with the
-		// 020d notifications handler on the same group.
+		// Served off the diagnostics group at `/settings` so it does not collide with the 020d
+		// notifications handler on the same group (full path `/api/diagnostics/settings`).
 		settings.get("/settings", (c) => {
 			const scope = resolveScope(c);
-			if (scope === null) return c.json({ error: "bad_request", reason: "x-honeycomb-org header is required" }, 400);
-			return c.json({
-				orgId: scope.org,
-				orgName: scope.org,
-				workspace: scope.workspace ?? "default",
-				settings: { mode: daemon.config.mode, port: String(daemon.config.port) },
-			});
+			if (scope === null) return c.json(NO_ORG_BODY, 400);
+			return c.json(buildSettingsView(scope, { mode: daemon.config.mode, port: daemon.config.port }));
 		});
 	}
 
 	const graph = daemon.group(DASHBOARD_GROUPS.graph);
 	if (graph !== undefined) {
-		// Graph (FR-5 / a-AC-3 / a-AC-6): the latest codebase snapshot for the workspace. When
-		// no snapshot exists, return `built: false` (the empty-state flag the dashboard renders
-		// as the `honeycomb graph build` prompt, NOT an error).
 		graph.get("/", async (c) => {
 			const scope = resolveScope(c);
-			if (scope === null) return c.json({ error: "bad_request", reason: "x-honeycomb-org header is required" }, 400);
-			const tbl = sqlIdent("codebase");
-			const rows = await selectRows(
-				storage,
-				`SELECT ${sqlIdent("snapshot_jsonb")}, ${sqlIdent("node_count")}, ${sqlIdent("edge_count")} ` +
-					`FROM "${tbl}" WHERE ${sqlIdent("org_id")} = ${sLiteral(scope.org)} ` +
-					`ORDER BY ${sqlIdent("schema_version")} DESC LIMIT 1`,
-				scope,
-			);
-			if (rows.length === 0) return c.json({ built: false, nodes: [], edges: [] });
-			const snapshot = parseSnapshot(rows[0]?.snapshot_jsonb);
-			return c.json({ built: true, nodes: snapshot.nodes, edges: snapshot.edges });
+			if (scope === null) return c.json(NO_ORG_BODY, 400);
+			return c.json(await fetchGraphView(storage, scope));
 		});
 	}
 
 	const rules = daemon.group(DASHBOARD_GROUPS.rules);
 	if (rules !== undefined) {
-		// Rules (FR-6 / a-AC-4): the org-wide rules from the `rules` table, active first.
 		rules.get("/", async (c) => {
 			const scope = resolveScope(c);
-			if (scope === null) return c.json({ error: "bad_request", reason: "x-honeycomb-org header is required" }, 400);
-			const tbl = sqlIdent("rules");
-			const rows = await selectRows(
-				storage,
-				`SELECT ${sqlIdent("id")}, ${sqlIdent("name")}, ${sqlIdent("status")} ` +
-					`FROM "${tbl}" ORDER BY ${sqlIdent("version")} DESC LIMIT 500`,
-				scope,
-			);
-			const list = rows.map((r) => ({
-				id: toStr(r.id),
-				title: toStr(r.name),
-				active: toStr(r.status) === "active",
-			}));
-			return c.json({ rules: list });
+			if (scope === null) return c.json(NO_ORG_BODY, 400);
+			return c.json(await fetchRulesView(storage, scope));
 		});
 	}
 
 	const skills = daemon.group(DASHBOARD_GROUPS.skills);
 	if (skills !== undefined) {
-		// Skill-sync (FR-6): pulled + shared team skills and their sync state.
 		skills.get("/", async (c) => {
 			const scope = resolveScope(c);
-			if (scope === null) return c.json({ error: "bad_request", reason: "x-honeycomb-org header is required" }, 400);
-			const tbl = sqlIdent("skills");
-			const rows = await selectRows(
-				storage,
-				`SELECT ${sqlIdent("name")}, ${sqlIdent("scope")}, ${sqlIdent("visibility")} ` +
-					`FROM "${tbl}" ORDER BY ${sqlIdent("version")} DESC LIMIT 500`,
-				scope,
-			);
-			const list = rows.map((r) => ({
-				name: toStr(r.name),
-				scope: toStr(r.scope),
-				syncState: toStr(r.visibility) === "global" ? "shared" : "pulled",
-			}));
-			return c.json({ skills: list });
+			if (scope === null) return c.json(NO_ORG_BODY, 400);
+			return c.json(await fetchSkillSyncView(storage, scope));
 		});
 	}
 }

@@ -1,35 +1,38 @@
 /**
- * Unified `honeycomb` CLI entry root — PRD-020a (FR-1 / FR-2 / a-AC-1).
+ * Unified `honeycomb` CLI entry root — PRD-020a (FR-1 / FR-2) + PRD-021b (b-AC-1..6).
  *
- * Thin client only: imports the unified dispatcher (`src/commands`) + the real loopback
- * `DaemonClient`, never the daemon core or any DeepLake path. `src/commands` is a
- * NON_DAEMON_ROOT (D-2), so the storage-import invariant holds by construction. PRD-001b bundles
- * this to the CLI artifact with a Node hash-bang.
+ * Thin client only: imports the unified dispatcher (`src/commands`) + the CLI-side composition root
+ * (`./runtime`), never the daemon core or any DeepLake path. `src/commands` + `src/cli` are
+ * NON_DAEMON_ROOTs (D-2), so the storage-import invariant holds by construction. PRD-001b bundles
+ * this to `bundle/cli.js` with a Node hash-bang.
  *
- * `main` parses global flags, resolves the verb, and routes through {@link dispatch}: storage
- * verbs reach the daemon through the `DaemonClient` seam; `org`/`workspace`/`login`/`logout`
- * pass through to the auth dispatcher; local verbs run the connector/dashboard/status handlers.
+ * `main` parses global flags, resolves the verb, and routes through {@link dispatch} with the FULLY
+ * BOUND {@link RuntimeDeps} (021b):
+ *   - storage verbs reach the daemon through the real loopback `DaemonClient` (b-AC-1) and
+ *     auto-start a down daemon on demand (b-AC-3);
+ *   - `daemon start|stop|status` drives the daemon lifecycle (b-AC-2);
+ *   - `org`/`workspace`/`login`/`logout` pass through to the auth dispatcher with the REAL device
+ *     flow + drift heal (b-AC-4);
+ *   - `setup`/`connect`/`uninstall` run the 019a connector engine; `dashboard` launches 020b;
+ *     `status` reports the real 020d D1–D5 health (b-AC-5).
  *
- * ── Honest deferral (D-7) ─────────────────────────────────────────────────────
- * The handler-specific seams (the auth passthrough, the 020d health source + 011b drift heal for
- * `status`, the 019a connector engine for setup/connect/uninstall, the 020b dashboard launcher)
- * are wired by the daemon-assembly step that owns the credential + the concrete sources. THIS
- * entry constructs the dispatcher + the real loopback `DaemonClient` (so storage verbs dispatch
- * for real) and leaves the handler seams unbound, so a verb whose seam is not yet wired prints an
- * honest "not wired in this build" line rather than pretending. The bin is NOT claimed
- * live-wired end to end.
+ * ── No deferred-assembly stub path remains (b-AC-6) ───────────────────────────
+ * Every seam the 020a dispatcher consumes is bound by {@link buildRuntimeDeps}. A dispatched verb
+ * always reaches a real handler; the honest-deferral stub strings the 020a scaffold printed are
+ * gone from the live CLI path.
  */
 
-import { createDispatcher, createLoopbackDaemonClient, type CommandDeps } from "../commands/index.js";
+import { createDispatcher } from "../commands/index.js";
+import { buildRuntimeDeps } from "./runtime.js";
 
-/** Entry point (FR-1): parse global flags → route to the matching handler → return the exit code. */
+/** Entry point (FR-1 / b-AC-6): parse global flags → route to the matching BOUND handler. */
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
 	const dispatcher = createDispatcher();
 	const inv = dispatcher.parse(argv);
-	// The real loopback daemon seam — a thin fetch to 127.0.0.1:3850 (no DeepLake path). The
-	// per-handler seams (auth/health/drift/connector/dashboard) are bound by the deferred bin
-	// assembly that owns the credential; here a verb needing an unbound seam reports it honestly.
-	const deps: CommandDeps = { daemon: createLoopbackDaemonClient() };
+	// The fully-bound runtime deps (021b): the real loopback daemon client, the daemon lifecycle,
+	// the auth passthrough (real device flow), the 019a connector engine, the 020b dashboard
+	// launcher, and the 020d D1–D5 health source. No seam is left as an honest stub.
+	const deps = buildRuntimeDeps();
 	const result = await dispatcher.dispatch(inv, deps);
 	return result.exitCode;
 }

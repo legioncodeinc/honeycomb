@@ -264,6 +264,12 @@ export interface HookCredential {
 	readonly token?: string;
 	/** The resolved org, if present. */
 	readonly org?: string;
+	/**
+	 * The resolved workspace, if present (PRD-021c additive). The transport stamps it on
+	 * `x-honeycomb-workspace` + `metadata.workspace`; absent it, the `default` sentinel
+	 * resolves server-side. Mirrors the daemon-side `Credentials.workspace`.
+	 */
+	readonly workspace?: string;
 	/** The actor label (e.g. a user/agent id) for actor-header stamping. */
 	readonly actor?: string;
 }
