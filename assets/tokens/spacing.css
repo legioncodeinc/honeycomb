@@ -1,0 +1,48 @@
+/* ============================================================
+   Honeycomb — Spacing, radii, elevation, motion
+   4px base unit; every value a multiple of 4. Five-step radius
+   ladder. Subtle elevation only (no decorative shadows). Brief,
+   disciplined motion. Inherited from Legion Code.
+   ============================================================ */
+
+:root {
+  /* ---- Spacing (4px base) --------------------------------------- */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-8:  32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-20: 80px;
+  --space-24: 96px;
+
+  /* ---- Radii ---------------------------------------------------- */
+  --radius-sm:   4px;    /* chips, tags                            */
+  --radius-md:   8px;    /* buttons, inputs                        */
+  --radius-lg:   12px;   /* cards                                  */
+  --radius-xl:   16px;   /* hero / panels                          */
+  --radius-2xl:  20px;
+  --radius-full: 9999px; /* avatars, dots                          */
+
+  /* ---- Elevation (subtle; cards carry border, not shadow) ------- */
+  --shadow-sm:  0 1px 2px 0 rgba(0,0,0,0.45);
+  --shadow-md:  0 4px 12px -2px rgba(0,0,0,0.55);
+  --shadow-lg:  0 12px 32px -6px rgba(0,0,0,0.65);
+  /* honey glow — the ONE expressive shadow, for the active comb /
+     a focused recall hit. Use sparingly. */
+  --glow-honey: 0 0 0 1px var(--honey-border), 0 8px 28px -10px rgba(247,168,35,0.5);
+  --glow-dream: 0 0 0 1px var(--dream-border), 0 8px 28px -10px rgba(139,124,240,0.5);
+  --ring-focus: 0 0 0 2px var(--bg-canvas), 0 0 0 4px var(--honey);
+
+  /* ---- Motion --------------------------------------------------- */
+  --ease-out:    cubic-bezier(0.2, 0.8, 0.2, 1);   /* @kind other */
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);   /* @kind other */
+  --dur-fast:    120ms;   /* @kind other */
+  --dur-base:    200ms;   /* @kind other */
+  --dur-slow:    400ms;   /* @kind other */
+  --dur-dream:   900ms;   /* @kind other */
+}

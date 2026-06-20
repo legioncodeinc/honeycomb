@@ -1,0 +1,5 @@
+<svg width="320" height="80" viewBox="0 0 320 80" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Honeycomb">
+  <path d="M40 12 L66 27 L66 57 L40 72 L14 57 L14 27 Z" fill="none" stroke="#F7A823" stroke-width="5" stroke-linejoin="round"></path>
+  <path d="M40 32 L52 39 L52 53 L40 60 L28 53 L28 39 Z" fill="#F7A823"></path>
+  <text x="86" y="51" font-family="Inter, system-ui, sans-serif" font-size="34" font-weight="700" letter-spacing="-1" fill="#F7F3EC">honeycomb</text>
+</svg>

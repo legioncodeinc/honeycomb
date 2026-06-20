@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<!-- @template name="Honeycomb Dashboard" description="Daemon-served dashboard scaffold — recall bar, KPIs, recalled memories, sessions. Built from Honeycomb DS components." -->
+<helmet>
+  <script src="./ds-base.js"></script>
+</helmet>
+
+<div style="min-height:100vh;background:#0C0A07;font-family:'Inter',system-ui,sans-serif">
+  <div style="max-width:1180px;margin:0 auto;padding:28px 28px 48px">
+
+    <!-- header -->
+    <header style="display:flex;align-items:center;gap:16px;margin-bottom:22px">
+      <img src="../../logos/honeycomb-mark.svg" width="34" height="34" alt="">
+      <div style="display:flex;flex-direction:column">
+        <span style="font-weight:700;font-size:19px;letter-spacing:-0.03em;color:#F7F3EC;line-height:1.1">honeycomb</span>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#877E6C">{{ orgName }} · {{ workspace }}</span>
+      </div>
+      <span style="flex:1"></span>
+      <div style="display:flex;align-items:center;gap:8px;height:36px;padding:0 12px;background:#1E1A11;border:1px solid #322B1E;border-radius:8px">
+        <span style="width:8px;height:8px;border-radius:50%;background:#3DDC97"></span>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#ADA28F">daemon :3850</span>
+      </div>
+      <x-import component-from-global-scope="HoneycombDesignSystem_d60529.Button" variant="dream" hint-size="120px,40px">Dream now</x-import>
+    </header>
+
+    <!-- recall bar -->
+    <div style="display:flex;gap:10px;margin-bottom:18px">
+      <div style="flex:1">
+        <x-import component-from-global-scope="HoneycombDesignSystem_d60529.Input" mono="{{ true }}" size="lg" placeholder="recall…  e.g. how do we deploy" hint-size="100%,48px"></x-import>
+      </div>
+      <x-import component-from-global-scope="HoneycombDesignSystem_d60529.Button" variant="primary" size="lg" hint-size="120px,48px">Recall</x-import>
+    </div>
+
+    <!-- recalled memories -->
+    <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:22px">
+      <sc-for list="{{ memories }}" as="m" hint-placeholder-count="3">
+        <x-import component-from-global-scope="HoneycombDesignSystem_d60529.MemoryCard"
+          memory-key="{{ m.memoryKey }}" snippet="{{ m.snippet }}" source="{{ m.source }}"
+          score="{{ m.score }}" scope="{{ m.scope }}" verified="{{ m.verified }}"
+          hint-size="100%,96px"></x-import>
+      </sc-for>
+    </div>
+
+    <!-- KPIs -->
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:22px">
+      <sc-for list="{{ kpis }}" as="k" hint-placeholder-count="4">
+        <x-import component-from-global-scope="HoneycombDesignSystem_d60529.Kpi"
+          label="{{ k.label }}" value="{{ k.value }}" unit="{{ k.unit }}"
+          delta="{{ k.delta }}" accent="{{ k.accent }}" hint-size="100%,96px"></x-import>
+      </sc-for>
+    </div>
+
+    <!-- sessions panel -->
+    <section style="background:#15120B;border:1px solid #322B1E;border-radius:12px;overflow:hidden">
+      <header style="display:flex;align-items:center;gap:10px;padding:13px 16px;border-bottom:1px solid #221E15">
+        <h2 style="font-size:16px;font-weight:600;color:#F7F3EC;margin:0;letter-spacing:-0.01em">Sessions</h2>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#877E6C">{{ sessionCount }} captured</span>
+      </header>
+      <div style="padding:8px 16px 12px">
+        <sc-for list="{{ sessions }}" as="s" hint-placeholder-count="4">
+          <div style="display:grid;grid-template-columns:84px 1fr auto auto;align-items:center;gap:12px;padding:10px 6px;border-top:1px solid #221E15">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;color:#F7A823">{{ s.sessionId }}</span>
+            <span style="font-size:13px;color:#ADA28F">{{ s.project }}</span>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#877E6C">{{ s.meta }}</span>
+            <x-import component-from-global-scope="HoneycombDesignSystem_d60529.Badge" tone="{{ s.tone }}" mono="{{ true }}" hint-size="100px,22px">{{ s.status }}</x-import>
+          </div>
+        </sc-for>
+      </div>
+    </section>
+
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  renderVals() {
+    const sessions = [
+      { sessionId: "a7f3c", project: "deeplake-core", meta: "14:32 · 48e", status: "summarized", tone: "verified" },
+      { sessionId: "b1e90", project: "deeplake-core", meta: "13:05 · 31e", status: "summarized", tone: "verified" },
+      { sessionId: "c4d22", project: "honeycomb",     meta: "11:48 · 67e", status: "captured",   tone: "neutral" },
+      { sessionId: "d8a17", project: "honeycomb",     meta: "10:12 · 22e", status: "summarized", tone: "verified" },
+    ];
+    return {
+      orgName: "Activeloop",
+      workspace: "deeplake-core",
+      sessionCount: sessions.length,
+      sessions,
+      kpis: [
+        { label: "Memories",     value: "1,284", unit: "",      delta: 12, accent: "honey" },
+        { label: "Sessions",     value: "312",   unit: "",      delta: 0,  accent: "neutral" },
+        { label: "Est. savings", value: "2.4",   unit: "M tok", delta: 8,  accent: "verified" },
+        { label: "Team skills",  value: "47",    unit: "",      delta: 0,  accent: "dream" },
+      ],
+      memories: [
+        { memoryKey: "deploy/prd-022", snippet: "We deploy from the prd-022 branch, never from main. CI gate must pass first.", source: "~/.honeycomb/memory/deploy.md", score: 0.94, scope: "team", verified: true },
+        { memoryKey: "auth/token-drift", snippet: "Heal a drifted org token before building the session-start context block — re-mint against the correct org.", source: "session a7f3c · cursor", score: 0.88, scope: "org", verified: true },
+        { memoryKey: "storage/escaping", snippet: "DeepLake query endpoint takes no bound params — hand-escape SQL. Writes are append-only, version-bumped.", source: "data/deeplake-storage.md", score: 0.79, scope: "team", verified: false },
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

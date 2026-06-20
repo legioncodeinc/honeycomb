@@ -1,0 +1,26 @@
+<svg width="160" height="160" viewBox="0 0 160 160" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Honeycomb">
+  <defs>
+    <radialGradient id="dCore" cx="0.5" cy="0.4" r="0.7">
+      <stop offset="0" stop-color="#FFD27A"/>
+      <stop offset="1" stop-color="#E0860C"/>
+    </radialGradient>
+  </defs>
+  <path d="M80 16 L135.4 48 L135.4 112 L80 144 L24.6 112 L24.6 48 Z" fill="none" stroke="#F7A823" stroke-width="8" stroke-linejoin="round"/>
+  <g stroke="#F7A823" stroke-width="2.4" stroke-opacity="0.55" stroke-linecap="round">
+    <path d="M80 80 L80 54"/>
+    <path d="M80 80 L102.5 67"/>
+    <path d="M80 80 L102.5 93"/>
+    <path d="M80 80 L80 106"/>
+    <path d="M80 80 L57.5 93"/>
+    <path d="M80 80 L57.5 67"/>
+  </g>
+  <g fill="#F7A823">
+    <circle cx="80" cy="54" r="5"/>
+    <circle cx="102.5" cy="67" r="5"/>
+    <circle cx="102.5" cy="93" r="5"/>
+    <circle cx="80" cy="106" r="5"/>
+    <circle cx="57.5" cy="93" r="5"/>
+    <circle cx="57.5" cy="67" r="5"/>
+  </g>
+  <circle cx="80" cy="80" r="11" fill="url(#dCore)" stroke="#FFD27A" stroke-width="1.5"/>
+</svg>

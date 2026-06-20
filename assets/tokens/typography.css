@@ -1,0 +1,38 @@
+/* ============================================================
+   Honeycomb — Typography tokens
+   Inter for UI + prose. JetBrains Mono is the TEXTURE OF TRUST:
+   every memory key, recall query, session id, hash, file path,
+   token count, and timestamp is set in mono. Modular 1.25 scale,
+   16px base. Inherited from Legion Code.
+   ============================================================ */
+
+:root {
+  /* ---- Families ------------------------------------------------- */
+  --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
+
+  /* ---- Type scale (size / line-height) -------------------------- */
+  --text-xs:   12px;   --lh-xs:   16px;
+  --text-sm:   14px;   --lh-sm:   20px;
+  --text-base: 16px;   --lh-base: 24px;
+  --text-lg:   18px;   --lh-lg:   28px;
+  --text-xl:   20px;   --lh-xl:   28px;
+  --text-2xl:  24px;   --lh-2xl:  32px;
+  --text-3xl:  30px;   --lh-3xl:  38px;
+  --text-4xl:  36px;   --lh-4xl:  44px;
+  --text-5xl:  48px;   --lh-5xl:  56px;
+  --text-6xl:  60px;   --lh-6xl:  68px;
+  --text-7xl:  76px;   --lh-7xl:  82px;
+
+  /* ---- Weights -------------------------------------------------- */
+  --weight-regular:  400;
+  --weight-medium:   500;
+  --weight-semibold: 600;
+  --weight-bold:     700;
+
+  /* ---- Tracking ------------------------------------------------- */
+  --tracking-tight:   -0.03em;   /* display + headings            */
+  --tracking-snug:    -0.01em;
+  --tracking-normal:   0;
+  --tracking-wide:     0.08em;    /* mono eyebrows / labels        */
+}

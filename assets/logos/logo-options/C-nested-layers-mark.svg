@@ -1,0 +1,11 @@
+<svg width="160" height="160" viewBox="0 0 160 160" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Honeycomb">
+  <defs>
+    <linearGradient id="cCell" x1="80" y1="56" x2="80" y2="104" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFC04D"/>
+      <stop offset="1" stop-color="#E0860C"/>
+    </linearGradient>
+  </defs>
+  <path d="M80 16 L135.4 48 L135.4 112 L80 144 L24.6 112 L24.6 48 Z" fill="none" stroke="#F7A823" stroke-width="8" stroke-linejoin="round"/>
+  <path d="M80 36 L118.1 58 L118.1 102 L80 124 L41.9 102 L41.9 58 Z" fill="none" stroke="#F7A823" stroke-width="5" stroke-opacity="0.6" stroke-linejoin="round"/>
+  <path d="M80 56 L100.8 68 L100.8 92 L80 104 L59.2 92 L59.2 68 Z" fill="url(#cCell)" stroke="#FFD27A" stroke-width="1.5" stroke-linejoin="round"/>
+</svg>

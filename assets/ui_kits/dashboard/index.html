@@ -1,0 +1,159 @@
+<!-- @dsCard group="Dashboard" viewport="1280x900" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Honeycomb — Dashboard</title>
+<link rel="stylesheet" href="../../styles.css">
+<link rel="icon" href="../../logos/honeycomb-mark.svg">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<script src="data.js"></script>
+<script type="text/babel" src="components.jsx"></script>
+<style>
+  body { margin: 0; background: var(--bg-canvas); min-height: 100vh; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 28px 28px 48px; }
+  .grid2 { display: grid; grid-template-columns: 1.15fr 1fr; gap: 16px; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+  .kpirow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  @media (max-width: 720px) { .kpirow { grid-template-columns: repeat(2, 1fr); } }
+  .mem-enter { opacity: 1; }
+  @media (prefers-reduced-motion: no-preference) {
+    .mem-enter { animation: memIn var(--dur-base) var(--ease-out) both; }
+    @keyframes memIn { from { transform: translateY(10px); } to { transform: none; } }
+  }
+  .col { display: flex; flex-direction: column; gap: 16px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { Button, Badge, Input, Kpi, MemoryCard } = window.HoneycombDesignSystem_d60529;
+const { SessionsPanel, RulesPanel, SkillSyncPanel, GraphCanvas, LiveLog, ConnectivityBanner } = window;
+const D = window.HC_DATA;
+
+function Header({ settings, daemonUp, onToggleDaemon, dreaming, onDream }) {
+  return (
+    <header style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 22 }}>
+      <img src="../../logos/honeycomb-mark.svg" width="34" height="34" alt="" />
+      <div style={{ display: "flex", flexDirection: "column" }}>
+        <span style={{ fontWeight: 700, fontSize: 19, letterSpacing: "-0.03em", color: "var(--text-primary)", lineHeight: 1.1 }}>honeycomb</span>
+        <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-tertiary)" }}>
+          {settings.orgName} · {settings.workspace}
+        </span>
+      </div>
+      <span style={{ flex: 1 }} />
+      <button onClick={onToggleDaemon} title="Toggle daemon (demo)" style={{
+        display: "flex", alignItems: "center", gap: 8, height: 36, padding: "0 12px",
+        background: "var(--bg-elevated)", border: "1px solid var(--border-default)",
+        borderRadius: "var(--radius-md)", cursor: "pointer",
+      }}>
+        <span style={{ width: 8, height: 8, borderRadius: "50%", background: daemonUp ? "var(--verified)" : "var(--severity-critical)" }} />
+        <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-secondary)" }}>
+          {daemonUp ? "daemon :3850" : "offline"}
+        </span>
+      </button>
+      <Button variant="dream" onClick={onDream} disabled={dreaming}>
+        {dreaming ? "dreaming…" : "Dream now"}
+      </Button>
+    </header>
+  );
+}
+
+function RecallBar({ onRecall, query, setQuery }) {
+  return (
+    <div style={{ display: "flex", gap: 10, marginBottom: 18 }}>
+      <div style={{ flex: 1 }}>
+        <Input mono size="lg" value={query} placeholder="recall…  e.g. how do we deploy"
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") onRecall(); }} />
+      </div>
+      <Button variant="primary" size="lg" onClick={onRecall}>Recall</Button>
+    </div>
+  );
+}
+
+function App() {
+  const [daemonUp, setDaemonUp] = React.useState(true);
+  const [dreaming, setDreaming] = React.useState(false);
+  const [query, setQuery] = React.useState("how do we deploy");
+  const [results, setResults] = React.useState(D.memories);
+  const [recallNonce, setRecallNonce] = React.useState(1);
+  const [log, setLog] = React.useState(D.log);
+
+  const recall = () => {
+    setResults(D.memories);
+    setRecallNonce((n) => n + 1);
+    setLog((l) => [`${time()}  recall    "${query}" → ${D.memories.length} hits · 0.94 top`, ...l].slice(0, 6));
+  };
+
+  const dream = () => {
+    setDreaming(true);
+    setLog((l) => [`${time()}  dreaming  consolidating graph · 128k tok budget`, ...l].slice(0, 6));
+    setTimeout(() => {
+      setDreaming(false);
+      setLog((l) => [`${time()}  dreaming  3 merges · 1 supersede · graph sharper`, ...l].slice(0, 6));
+    }, 4200);
+  };
+
+  function time() {
+    const d = new Date();
+    return d.toTimeString().slice(0, 8);
+  }
+
+  const kpis = D.kpis;
+
+  return (
+    <div className="wrap">
+      <Header settings={D.settings} daemonUp={daemonUp} dreaming={dreaming}
+        onToggleDaemon={() => setDaemonUp((v) => !v)} onDream={dream} />
+
+      {!daemonUp ? (
+        <ConnectivityBanner url={D.settings.daemonUrl} onRetry={() => setDaemonUp(true)} />
+      ) : (
+        <>
+          <RecallBar onRecall={recall} query={query} setQuery={setQuery} />
+
+          {/* recall results */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 22 }} key={recallNonce}>
+            {results.map((m, i) => (
+              <div className="mem-enter" style={{ animationDelay: `${i * 55}ms` }} key={m.memoryKey}>
+                <MemoryCard {...m} dreaming={dreaming && i === 1} />
+              </div>
+            ))}
+          </div>
+
+          {/* KPIs */}
+          <div className="kpirow" style={{ marginBottom: 22 }}>
+            <Kpi label="Memories" value={kpis.memoryCount.toLocaleString()} delta={12} />
+            <Kpi label="Sessions" value={kpis.sessionCount} accent="neutral" />
+            <Kpi label="Est. savings" value={kpis.estimatedSavings} unit="tok" accent="verified" delta={8} />
+            <Kpi label="Team skills" value={kpis.skills} accent="dream" />
+          </div>
+
+          {/* main grid */}
+          <div className="grid2" style={{ marginBottom: 16 }}>
+            <div className="col">
+              <SessionsPanel sessions={D.sessions} />
+              <RulesPanel rules={D.rules} />
+            </div>
+            <div className="col">
+              <GraphCanvas graph={D.graph} dreaming={dreaming} />
+              <SkillSyncPanel skills={D.skills} />
+            </div>
+          </div>
+
+          <LiveLog lines={log} />
+        </>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

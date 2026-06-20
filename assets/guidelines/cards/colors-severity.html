@@ -1,0 +1,21 @@
+<!-- @dsCard group="Colors" viewport="700x150" name="Severity" subtitle="Semantic only — success doubles as verified / source-backed" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../../styles.css">
+<style>
+  body { margin: 0; padding: 24px; background: var(--bg-canvas); display: flex; gap: 12px; }
+  .sev { flex: 1; border-radius: var(--radius-md); padding: 12px; border: 1px solid; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; margin-bottom: 28px; }
+  .n { font-family: var(--font-mono); font-size: 12px; font-weight: 600; }
+  .h { font-family: var(--font-mono); font-size: 11px; }
+</style>
+</head>
+<body>
+  <div class="sev" style="background:var(--severity-critical-bg); border-color:var(--severity-critical)"><div class="dot" style="background:var(--severity-critical)"></div><div class="n" style="color:var(--severity-critical)">critical</div><div class="h" style="color:var(--text-tertiary)">#FF5C63</div></div>
+  <div class="sev" style="background:var(--severity-warning-bg); border-color:var(--severity-warning)"><div class="dot" style="background:var(--severity-warning)"></div><div class="n" style="color:var(--severity-warning)">warning</div><div class="h" style="color:var(--text-tertiary)">#FFC24B</div></div>
+  <div class="sev" style="background:var(--severity-info-bg); border-color:var(--severity-info)"><div class="dot" style="background:var(--severity-info)"></div><div class="n" style="color:var(--severity-info)">info</div><div class="h" style="color:var(--text-tertiary)">#5FA8FF</div></div>
+  <div class="sev" style="background:var(--severity-success-bg); border-color:var(--severity-success)"><div class="dot" style="background:var(--severity-success)"></div><div class="n" style="color:var(--severity-success)">verified</div><div class="h" style="color:var(--text-tertiary)">#3DDC97</div></div>
+</body>
+</html>

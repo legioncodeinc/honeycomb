@@ -1,0 +1,32 @@
+/* ============================================================
+   Honeycomb — Webfonts
+   Inter (UI + prose) and JetBrains Mono (the texture of trust:
+   memory keys, recall queries, hashes, file paths, timestamps).
+   Both inherited from the parent Legion Code brand.
+   ============================================================ */
+
+/* ---- Inter — variable (opsz + wght axes) ---------------------- */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('../logos/fonts/Inter-VariableFont_opsz_wght.ttf') format('truetype-variations'),
+       url('../logos/fonts/Inter-VariableFont_opsz_wght.ttf') format('truetype');
+  font-variation-settings: 'opsz' 16;
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('../logos/fonts/Inter-Italic-VariableFont_opsz_wght.ttf') format('truetype-variations'),
+       url('../logos/fonts/Inter-Italic-VariableFont_opsz_wght.ttf') format('truetype');
+  font-variation-settings: 'opsz' 16;
+}
+
+/* ---- JetBrains Mono — local static cuts ----------------------- */
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 400; font-display: swap; src: url('../logos/fonts/JetBrainsMono-Regular.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 500; font-display: swap; src: url('../logos/fonts/JetBrainsMono-Medium.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 600; font-display: swap; src: url('../logos/fonts/JetBrainsMono-SemiBold.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 700; font-display: swap; src: url('../logos/fonts/JetBrainsMono-Bold.woff2') format('woff2'); }

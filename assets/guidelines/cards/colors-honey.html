@@ -1,0 +1,33 @@
+<!-- @dsCard group="Colors" viewport="700x250" name="Brand — Honey amber" subtitle="The one brand hue. Scarcity rule: one saturated region per view." -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../../styles.css">
+<style>
+  body { margin: 0; padding: 24px; background: var(--bg-canvas); display: flex; flex-direction: column; gap: 16px; }
+  .states { display: flex; gap: 12px; }
+  .st { flex: 1; height: 84px; border-radius: var(--radius-md); display: flex; flex-direction: column; justify-content: flex-end; padding: 10px; }
+  .n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; }
+  .scale { display: flex; gap: 0; border-radius: var(--radius-md); overflow: hidden; }
+  .cell { flex: 1; height: 56px; display: flex; align-items: flex-end; justify-content: center; padding-bottom: 6px; font-family: var(--font-mono); font-size: 10px; color: var(--honey-on); }
+</style>
+</head>
+<body>
+  <div class="states">
+    <div class="st" style="background:var(--honey)"><span class="n" style="color:var(--honey-on)">honey</span></div>
+    <div class="st" style="background:var(--honey-hover)"><span class="n" style="color:var(--honey-on)">hover</span></div>
+    <div class="st" style="background:var(--honey-pressed)"><span class="n" style="color:var(--honey-on)">pressed</span></div>
+    <div class="st" style="background:var(--honey-subtle); border:1px solid var(--honey-border)"><span class="n" style="color:var(--honey)">subtle 12%</span></div>
+  </div>
+  <div class="scale">
+    <div class="cell" style="background:var(--honey-50); color:#1A1206">50</div>
+    <div class="cell" style="background:var(--honey-100); color:#1A1206">100</div>
+    <div class="cell" style="background:var(--honey-200); color:#1A1206">200</div>
+    <div class="cell" style="background:var(--honey-300); color:#1A1206">300</div>
+    <div class="cell" style="background:var(--honey-400)">400</div>
+    <div class="cell" style="background:var(--honey-500)">500</div>
+    <div class="cell" style="background:var(--honey-600); color:#FFE9C2">600</div>
+  </div>
+</body>
+</html>
