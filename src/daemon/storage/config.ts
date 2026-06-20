@@ -18,6 +18,8 @@
 
 import { z } from "zod";
 
+import { DEFAULT_DEEPLAKE_API_URL, loadDiskCredentials } from "../runtime/auth/credentials-store.js";
+
 /** Default per-statement timeout when `HONEYCOMB_QUERY_TIMEOUT_MS` is unset. */
 export const DEFAULT_QUERY_TIMEOUT_MS = 10_000;
 
@@ -104,6 +106,108 @@ export function envCredentialProvider(env: NodeJS.ProcessEnv = process.env): Cre
 			};
 		},
 	};
+}
+
+/**
+ * Options for {@link deeplakeCredentialsFileProvider} / {@link defaultCredentialProvider},
+ * injectable so a test points the file read at a temp HOME without touching the real
+ * `~/.deeplake` (PRD-023 AC-7, deterministic). All optional.
+ */
+export interface CredentialsFileProviderOptions {
+	/** Override the SHARED `~/.deeplake` credentials dir (tests). */
+	readonly dir?: string;
+	/** Override the legacy `~/.honeycomb` dir for the read-fallback (tests). */
+	readonly legacyDir?: string;
+	/** Injectable env (defaults to `process.env`) so the `HONEYCOMB_TOKEN` rule is testable. */
+	readonly env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * The SHARED-FILE credential provider (PRD-023 D-3 / AC-7). Reads the shared
+ * `~/.deeplake/credentials.json` (Hivemind shape, with legacy `~/.honeycomb`
+ * read-fallback) via {@link loadDiskCredentials} and maps it onto the storage config
+ * record:
+ *
+ *   { endpoint ← apiUrl, token, org ← orgId, workspace ← workspaceId }
+ *
+ * `apiUrl` defaults to {@link DEFAULT_DEEPLAKE_API_URL} when the file omits it (a
+ * legacy file has no `apiUrl`), so a file-only resolve still yields a valid endpoint.
+ * `queryTimeoutMs` / `traceSql` are NOT credential fields — they are env-only tuning
+ * knobs, so this provider leaves them undefined (the schema applies its defaults).
+ *
+ * A MISSING file or a file MISSING keys yields UNDEFINED fields — never a throw. The
+ * zod `resolveStorageConfig` is the single fail-closed validation gate (so a file with
+ * no token resolves to `{ token: undefined }` → a `StorageConfigError`, not a silent
+ * pass). The token is NEVER logged here (D-4).
+ */
+export function deeplakeCredentialsFileProvider(options: CredentialsFileProviderOptions = {}): CredentialProvider {
+	return {
+		read(): Record<string, unknown> {
+			const env = options.env ?? process.env;
+			const disk = loadDiskCredentials(options.dir, env, options.legacyDir);
+			if (disk === null) {
+				// No usable file → all-undefined record; the schema fails closed if this is
+				// the only provider and nothing supplies the required fields.
+				return {
+					endpoint: undefined,
+					token: undefined,
+					org: undefined,
+					workspace: undefined,
+				};
+			}
+			return {
+				// `apiUrl` is the DeepLake base URL; a legacy file omits it → the canonical default.
+				endpoint: disk.apiUrl !== undefined && disk.apiUrl.length > 0 ? disk.apiUrl : DEFAULT_DEEPLAKE_API_URL,
+				token: disk.token,
+				org: disk.orgId,
+				workspace: disk.workspaceId,
+			};
+		},
+	};
+}
+
+/**
+ * The DAEMON DEFAULT credential provider (PRD-023 D-3 / AC-7): ENV-OVER-FILE, merged
+ * PER FIELD. A present `HONEYCOMB_DEEPLAKE_*` env value WINS over the shared file's
+ * field; an absent (undefined) env value falls back to the file's value. This is the
+ * provider the daemon assembly uses by default so that:
+ *   - after `honeycomb login` (or a seeded shared file) with NO env, the file supplies
+ *     all four of `{ endpoint, token, org, workspace }` and the daemon connects (AC-7);
+ *   - any `HONEYCOMB_DEEPLAKE_*` override still wins per-field (the escape hatch).
+ *
+ * The tuning knobs (`queryTimeoutMs`, `traceSql`) come from the ENV provider only — the
+ * file carries no tuning knobs — so they pass through whatever the env provider read.
+ * Missing-everywhere fields stay undefined and the zod schema fails closed on the
+ * required ones. The token is NEVER logged here (D-4).
+ */
+export function defaultCredentialProvider(options: CredentialsFileProviderOptions = {}): CredentialProvider {
+	const env = options.env ?? process.env;
+	const envProvider = envCredentialProvider(env);
+	const fileProvider = deeplakeCredentialsFileProvider(options);
+	return {
+		read(): Record<string, unknown> {
+			const fromEnv = envProvider.read();
+			const fromFile = fileProvider.read();
+			// Per-field merge: env wins when present (not undefined), else the file's value.
+			// `mergeField` treats only `undefined` as "absent" so an explicit empty string in
+			// the env still wins (and is then rejected by the zod min(1) gate, fail-closed) —
+			// never silently widened to the file's value.
+			return {
+				endpoint: mergeField(fromEnv.endpoint, fromFile.endpoint),
+				token: mergeField(fromEnv.token, fromFile.token),
+				org: mergeField(fromEnv.org, fromFile.org),
+				workspace: mergeField(fromEnv.workspace, fromFile.workspace),
+				// Tuning knobs are env-only (the file carries none).
+				queryTimeoutMs: fromEnv.queryTimeoutMs,
+				traceSql: fromEnv.traceSql,
+			};
+		},
+	};
+}
+
+/** Pick the env value when it is present (not undefined), else the file value (D-3). */
+function mergeField(envValue: unknown, fileValue: unknown): unknown {
+	return envValue !== undefined ? envValue : fileValue;
 }
 
 /**

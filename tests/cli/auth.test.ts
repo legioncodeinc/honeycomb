@@ -1,16 +1,18 @@
 /**
- * PRD-011b — `honeycomb login` / `logout` CLI (each AC-named).
+ * PRD-023 Wave 2 — `honeycomb login` / `logout` CLI (each AC-named).
  *
- * Verification posture: a FAKE TokenIssuer + a temp credentials dir + a fake clock +
- * a no-wait sleeper. No real auth server, no real `~/.honeycomb`, no real wall clock.
- * The CLI imports NO daemon/storage path (invariant.test.ts enforces it separately).
+ * Verification posture: the CLI's login flows are injected via `flows` (a fake `deviceFlow` /
+ * `tokenLogin`) OR via a fake `fetch` + recorder `openBrowser` + no-wait `sleep` so the REAL
+ * deeplake-issuer flows run with no network and no browser. A temp credentials dir + a fixed clock +
+ * an injected env keep the real `~/.deeplake`, wall clock, and env untouched. The CLI imports NO
+ * daemon/storage path (invariant.test.ts enforces that separately).
  *
- * b-AC-1 `login` runs the device flow, gets a long-lived org-bound token, and writes
- *        credentials.json 0600 (dir 0700) — WITHOUT ever printing the bearer token.
- * b-AC-3 a missing/malformed credentials.json means "not logged in" → `login` is the
- *        prompt-to-log-in path; `logout` reports it cleanly and succeeds.
- * b-AC-6 `logout` with no file → prints "Not logged in." + SUCCESS (not error); with
- *        a file → removes it.
+ * AC-1 `login` (device flow): runs the flow, writes the shared file in Hivemind shape, prints the
+ *      identity WITHOUT the token.
+ * AC-2 `login --token <key>` / `HONEYCOMB_TOKEN=<key> login`: skip the browser, validate via /me,
+ *      save the file; an invalid token → non-zero exit, NO file, NO token in output.
+ * AC-6 `logout`: removes the shared + legacy file; exit 0 when absent; never throws.
+ * D-4: a grep of captured stdout asserts the token string NEVER appears.
  */
 
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -19,113 +21,129 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+	type AuthFetch,
+	type AuthFetchResponse,
+	type BrowserOpener,
 	type Clock,
-	type Credentials,
-	type MintedToken,
+	type DiskCredentials,
 	type Sleeper,
 	FILE_MODE,
-	createFakeTokenIssuer,
 	credentialsPath,
-	encodeStubToken,
-	saveCredentials,
+	legacyCredentialsPath,
+	saveDiskCredentials,
 } from "../../src/daemon/runtime/auth/index.js";
-import { type AuthResult, runAuthCommand } from "../../src/cli/auth.js";
+import { type AuthResult, parseAuthArgs, runAuthCommand } from "../../src/cli/auth.js";
 
 const IS_POSIX = process.platform !== "win32";
-const FIXED = "2026-06-17T12:00:00.000Z";
+const FIXED = "2026-06-20T12:00:00.000Z";
+const LONG_LIVED_TOKEN = "dl-cli-longlived-CCC333";
+const AUTH0_TOKEN = "dl-cli-auth0-DDD444";
 
 function clock(): Clock {
 	return { now: () => FIXED };
 }
-
 const noWait: Sleeper = (): Promise<void> => Promise.resolve();
-
-function minted(org: string, over: Record<string, unknown> = {}): MintedToken {
-	const claims = { org, workspace: "default", agentId: "agent-1", ...over };
-	return { token: encodeStubToken(claims), claims };
-}
-
-function seedCreds(dir: string, over: Partial<Credentials> = {}): Credentials {
-	return saveCredentials(
-		{
-			token: encodeStubToken({ org: "acme" }),
-			orgId: "acme",
-			orgName: "Acme Inc",
-			workspace: "backend",
-			agentId: "agent-1",
-			savedAt: "2020-01-01T00:00:00.000Z",
-			...over,
-		},
-		dir,
-		clock(),
-	);
-}
 
 function captured(): { out: (l: string) => void; lines: string[] } {
 	const lines: string[] = [];
 	return { out: (l: string) => lines.push(l), lines };
 }
 
+function jsonResponse(status: number, body: unknown): AuthFetchResponse {
+	return {
+		ok: status >= 200 && status < 300,
+		status,
+		json: () => Promise.resolve(body),
+		text: () => Promise.resolve(typeof body === "string" ? body : JSON.stringify(body)),
+	};
+}
+
+/** A fake `fetch` routing the deeplake auth endpoints. `meStatus` lets a test force an invalid token. */
+function fakeFetch(opts: { meStatus?: number } = {}): AuthFetch {
+	return (url: string): Promise<AuthFetchResponse> => {
+		const path = url.replace(/^https?:\/\/[^/]+/, "");
+		if (path === "/auth/device/code") {
+			return Promise.resolve(
+				jsonResponse(200, {
+					device_code: "dev-code",
+					user_code: "WXYZ-1234",
+					verification_uri: "https://app.deeplake.ai/device",
+					verification_uri_complete: "https://app.deeplake.ai/device?code=WXYZ-1234",
+					expires_in: 900,
+					interval: 5,
+				}),
+			);
+		}
+		if (path === "/auth/device/token") return Promise.resolve(jsonResponse(200, { access_token: AUTH0_TOKEN }));
+		if (path === "/me") {
+			if (opts.meStatus !== undefined && opts.meStatus !== 200) return Promise.resolve(jsonResponse(opts.meStatus, "unauth"));
+			return Promise.resolve(jsonResponse(200, { id: "u-1", name: "Ada Lovelace", email: "ada@deeplake.ai" }));
+		}
+		if (path === "/organizations") return Promise.resolve(jsonResponse(200, [{ id: "org-acme", name: "Acme Inc" }]));
+		if (path === "/users/me/tokens") return Promise.resolve(jsonResponse(200, { token: { token: LONG_LIVED_TOKEN } }));
+		if (path === "/workspaces") return Promise.resolve(jsonResponse(200, { data: [] }));
+		return Promise.resolve(jsonResponse(404, "x"));
+	};
+}
+
+const openerNoop: BrowserOpener = () => true;
+
 let dir: string;
+let legacyDir: string;
 beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), "hc-auth-cli-"));
+	legacyDir = mkdtempSync(join(tmpdir(), "hc-auth-legacy-"));
 });
 afterEach(() => {
 	rmSync(dir, { recursive: true, force: true });
+	rmSync(legacyDir, { recursive: true, force: true });
 });
 
-describe("b-AC-1 login → device flow → org-bound token written 0600, token never printed", () => {
-	it("polls to a token, persists 0600, and confirms identity WITHOUT the token", async () => {
-		const token = minted("acme", { workspace: "backend", agentId: "agent-7" });
-		const issuer = createFakeTokenIssuer({
-			grant: {
-				deviceCode: "dev-1",
-				userCode: "WXYZ-1234",
-				verificationUri: "https://example.invalid/device",
-				interval: 5,
-			},
-			pollResults: ["pending", token],
-		});
+describe("AC-1 login → device flow → shared file (Hivemind shape, 0600); token never printed", () => {
+	it("runs the device flow, writes the Hivemind shape, and prints identity WITHOUT the token", async () => {
 		const cap = captured();
 		const res: AuthResult = await runAuthCommand(
 			{ command: "login" },
-			{ issuer, dir, clock: clock(), env: {}, out: cap.out, sleep: noWait },
+			{ dir, clock: clock(), env: {}, out: cap.out, fetch: fakeFetch(), sleep: noWait, openBrowser: openerNoop },
 		);
-
 		expect(res.exitCode).toBe(0);
 		expect(res.wrote).toBe(true);
-		const onDisk = JSON.parse(readFileSync(credentialsPath(dir), "utf8")) as Credentials;
-		expect(onDisk.orgId).toBe("acme");
-		expect(onDisk.token).toBe(token.token);
-		expect(onDisk.savedAt).toBe(FIXED); // server-stamped (b-AC-4)
+
+		const onDisk = JSON.parse(readFileSync(credentialsPath(dir), "utf8")) as DiskCredentials;
+		expect(onDisk.orgId).toBe("org-acme");
+		expect(onDisk.token).toBe(LONG_LIVED_TOKEN);
+		expect(onDisk.userName).toBe("Ada Lovelace");
+		expect(onDisk.savedAt).toBe(FIXED);
 
 		const text = cap.lines.join("\n");
-		// The verification URI + user code are shown; the bearer token is NEVER printed.
-		expect(text).toContain("https://example.invalid/device");
-		expect(text).toContain("WXYZ-1234");
-		expect(text).toContain("acme");
-		expect(text).not.toContain(token.token);
+		expect(text).toContain("WXYZ-1234"); // user code surfaced
+		expect(text).toContain("Ada Lovelace"); // identity printed
+		expect(text).not.toContain(LONG_LIVED_TOKEN); // D-4: token never printed
+		expect(text).not.toContain(AUTH0_TOKEN);
 	});
 
 	it.skipIf(!IS_POSIX)("writes the credentials file at 0600", async () => {
-		const issuer = createFakeTokenIssuer({ pollResults: [minted("acme")] });
 		await runAuthCommand(
 			{ command: "login" },
-			{ issuer, dir, clock: clock(), env: {}, out: () => {}, sleep: noWait },
+			{ dir, clock: clock(), env: {}, out: () => {}, fetch: fakeFetch(), sleep: noWait, openBrowser: openerNoop },
 		);
 		expect(statSync(credentialsPath(dir)).mode & 0o777).toBe(FILE_MODE);
 	});
 
-	it("exits non-zero (no write) when requestDeviceCode itself fails", async () => {
-		const issuer = {
-			requestDeviceCode: () => Promise.reject(new Error("issuer offline")),
-			pollToken: () => Promise.resolve("pending" as const),
-			reMint: () => Promise.reject(new Error("n/a")),
-		};
+	it("exits non-zero (no file) when the device flow fails — and prints no token", async () => {
 		const cap = captured();
 		const res = await runAuthCommand(
 			{ command: "login" },
-			{ issuer, dir, clock: clock(), env: {}, out: cap.out, sleep: noWait },
+			{
+				dir,
+				clock: clock(),
+				env: {},
+				out: cap.out,
+				flows: {
+					deviceFlow: () => Promise.reject(new Error("issuer offline")),
+					tokenLogin: () => Promise.reject(new Error("n/a")),
+				},
+			},
 		);
 		expect(res.exitCode).toBe(1);
 		expect(res.wrote).toBe(false);
@@ -134,45 +152,95 @@ describe("b-AC-1 login → device flow → org-bound token written 0600, token n
 	});
 });
 
-describe("b-AC-3 not-logged-in handling: login is the prompt path; logout reports cleanly", () => {
-	it("logout with a malformed file reports not-logged-in and does not error", async () => {
-		writeFileSync(credentialsPath(dir), "{ not json");
-		const issuer = createFakeTokenIssuer();
+describe("AC-2 headless login: HONEYCOMB_TOKEN / --token → validate /me → save (no browser)", () => {
+	it("HONEYCOMB_TOKEN skips the browser, validates, and writes the shared file", async () => {
 		const cap = captured();
 		const res = await runAuthCommand(
-			{ command: "logout" },
-			{ issuer, dir, clock: clock(), env: {}, out: cap.out },
-		);
-		// A malformed file is "not logged in" (loadCredentials → null) → SUCCESS.
-		expect(res.exitCode).toBe(0);
-		expect(cap.lines.join("\n").toLowerCase()).toContain("not logged in");
-	});
-});
-
-describe("b-AC-6 logout with no file → 'Not logged in.' + SUCCESS; with a file → removes it", () => {
-	it("prints 'Not logged in.' and exits SUCCESS when no credentials file exists", async () => {
-		const issuer = createFakeTokenIssuer();
-		const cap = captured();
-		const res = await runAuthCommand(
-			{ command: "logout" },
-			{ issuer, dir, clock: clock(), env: {}, out: cap.out },
-		);
-		expect(res.exitCode).toBe(0); // SUCCESS, not an error (b-AC-6)
-		expect(res.wrote).toBe(false);
-		expect(cap.lines.join("\n")).toContain("Not logged in.");
-	});
-
-	it("removes the credentials file when one exists", async () => {
-		seedCreds(dir);
-		expect(existsSync(credentialsPath(dir))).toBe(true);
-		const issuer = createFakeTokenIssuer();
-		const cap = captured();
-		const res = await runAuthCommand(
-			{ command: "logout" },
-			{ issuer, dir, clock: clock(), env: {}, out: cap.out },
+			{ command: "login" },
+			{ dir, clock: clock(), env: { HONEYCOMB_TOKEN: LONG_LIVED_TOKEN }, out: cap.out, fetch: fakeFetch() },
 		);
 		expect(res.exitCode).toBe(0);
 		expect(res.wrote).toBe(true);
+		const onDisk = JSON.parse(readFileSync(credentialsPath(dir), "utf8")) as DiskCredentials;
+		expect(onDisk.token).toBe(LONG_LIVED_TOKEN);
+		expect(onDisk.userName).toBe("Ada Lovelace");
+		// The user code is NEVER shown on the headless path (no device code requested).
+		expect(cap.lines.join("\n")).not.toContain("WXYZ-1234");
+		expect(cap.lines.join("\n")).not.toContain(LONG_LIVED_TOKEN);
+	});
+
+	it("--token <key> (the explicit arg) takes the headless path", async () => {
+		const cap = captured();
+		const inv = parseAuthArgs(["login", "--token", LONG_LIVED_TOKEN]);
+		expect(inv).toEqual({ command: "login", token: LONG_LIVED_TOKEN });
+		const res = await runAuthCommand(inv, { dir, clock: clock(), env: {}, out: cap.out, fetch: fakeFetch() });
+		expect(res.exitCode).toBe(0);
+		expect(JSON.parse(readFileSync(credentialsPath(dir), "utf8")).token).toBe(LONG_LIVED_TOKEN);
+		expect(cap.lines.join("\n")).not.toContain(LONG_LIVED_TOKEN);
+	});
+
+	it("an invalid token (401 /me) → non-zero exit, NO file, NO token in output", async () => {
+		const cap = captured();
+		const res = await runAuthCommand(
+			{ command: "login", token: LONG_LIVED_TOKEN },
+			{ dir, clock: clock(), env: {}, out: cap.out, fetch: fakeFetch({ meStatus: 401 }) },
+		);
+		expect(res.exitCode).toBe(1);
+		expect(res.wrote).toBe(false);
 		expect(existsSync(credentialsPath(dir))).toBe(false);
+		expect(cap.lines.join("\n")).not.toContain(LONG_LIVED_TOKEN);
+		expect(cap.lines.join("\n").toLowerCase()).toContain("login failed");
+	});
+});
+
+describe("AC-6 logout: removes the shared + legacy file; exit 0 when absent; never throws", () => {
+	function seedShared(): void {
+		saveDiskCredentials(
+			{
+				token: "tok-shared",
+				orgId: "org-acme",
+				orgName: "Acme Inc",
+				userName: "ada",
+				workspaceId: "default",
+				apiUrl: "https://api.deeplake.ai",
+				savedAt: "",
+			},
+			dir,
+			clock(),
+		);
+	}
+
+	it("removes BOTH the shared and the legacy credentials file", async () => {
+		seedShared();
+		// Seed a legacy ~/.honeycomb file too (old Honeycomb shape).
+		writeFileSync(
+			legacyCredentialsPath(legacyDir),
+			JSON.stringify({
+				token: "tok-legacy",
+				orgId: "org-acme",
+				orgName: "Acme",
+				workspace: "backend",
+				agentId: "agent-1",
+				savedAt: "2020-01-01T00:00:00.000Z",
+			}),
+		);
+		expect(existsSync(credentialsPath(dir))).toBe(true);
+		expect(existsSync(legacyCredentialsPath(legacyDir))).toBe(true);
+
+		const cap = captured();
+		const res = await runAuthCommand({ command: "logout" }, { dir, legacyDir, clock: clock(), env: {}, out: cap.out });
+		expect(res.exitCode).toBe(0);
+		expect(res.wrote).toBe(true);
+		expect(existsSync(credentialsPath(dir))).toBe(false);
+		expect(existsSync(legacyCredentialsPath(legacyDir))).toBe(false);
+		expect(cap.lines.join("\n").toLowerCase()).toContain("removed");
+	});
+
+	it("exits 0 (SUCCESS) when neither file exists — never errors on a missing file", async () => {
+		const cap = captured();
+		const res = await runAuthCommand({ command: "logout" }, { dir, legacyDir, clock: clock(), env: {}, out: cap.out });
+		expect(res.exitCode).toBe(0);
+		expect(res.wrote).toBe(false);
+		expect(cap.lines.join("\n")).toContain("Not logged in.");
 	});
 });

@@ -32,11 +32,15 @@ import { buildRealTokenIssuer } from "../../src/cli/token-issuer.js";
 import { authMain } from "../../src/cli/auth.js";
 import {
 	type Credentials,
+	type DiskCredentials,
+	STUB_TOKEN_PREFIX,
 	credentialsPath,
 	deviceFlowLogin,
 	encodeStubToken,
 	loadCredentials,
+	loadDiskCredentials,
 	saveCredentials,
+	saveDiskCredentials,
 	systemClock,
 } from "../../src/daemon/runtime/auth/index.js";
 
@@ -193,20 +197,102 @@ describe("PRD-021b b-AC-4 — login writes 0600 + drift heal", () => {
 		expect(onDisk?.orgId).toBe("acme");
 	});
 
-	it("b-AC-4 the auth passthrough routes `login` to the real device flow", async () => {
-		// authMain with the bound local issuer writes a real credential to the temp dir.
-		const issuer = buildRealTokenIssuer({ HONEYCOMB_ORG_ID: "acme" } as NodeJS.ProcessEnv);
+	it("b-AC-4 the auth passthrough routes `login` to the PRD-023 device flow (injected)", async () => {
+		// PRD-023: authMain `login` now runs the real api.deeplake.ai device flow. We inject a fake
+		// `flows.deviceFlow` that writes a real disk credential to the temp dir — proving the CLI seam
+		// routes to the device flow and persists, without a network call.
 		const lines: string[] = [];
-		const result = await authMain(["login"], { issuer, dir, out: (l) => lines.push(l) });
+		const result = await authMain(["login"], {
+			dir,
+			out: (l) => lines.push(l),
+			flows: {
+				deviceFlow: async (d) =>
+					saveDiskCredentials(
+						{
+							token: "deeplake-real-token-xyz",
+							orgId: "acme",
+							orgName: "Acme Inc",
+							userName: "ada",
+							workspaceId: "default",
+							apiUrl: "https://api.deeplake.ai",
+							savedAt: "",
+						},
+						d.dir,
+						d.clock,
+					),
+				tokenLogin: async () => {
+					throw new Error("token login not exercised here");
+				},
+			},
+		});
 		expect(result.exitCode).toBe(0);
 		expect(result.wrote).toBe(true);
 		expect(loadCredentials(dir)?.orgId).toBe("acme");
 		// The bearer token is never printed.
-		expect(lines.join("\n")).not.toMatch(/hcmt\.v1\./);
+		expect(lines.join("\n")).not.toContain("deeplake-real-token-xyz");
 	});
 
-	it("b-AC-4 healDriftedOrgToken re-mints a token whose org claim disagrees with the active org", async () => {
-		// Seed a credential bound to org `old` in the temp dir, then heal toward active org `new`.
+	it("C-1 the drift healer NEVER stub-clobbers a REAL shared credential — it surfaces the drift instead", async () => {
+		// THE FOOTGUN (C-1): a REAL `~/.deeplake/credentials.json` (real `apiUrl`, an opaque real
+		// `api.deeplake.ai` bearer token — NOT the `hcmt.v1.` stub shape) bound to org `old`, with a
+		// drifted desired org `new` from the env override. The OLD behavior re-minted via the local
+		// STUB issuer and OVERWROTE the shared file with a stub token, silently breaking real DeepLake
+		// auth for BOTH Honeycomb and Hivemind. The fix: on a real-backend credential the healer must
+		// re-mint a real token via the real client (fix #1) OR leave the file intact and surface the
+		// drift (fix #2). We took fix #2, so the on-disk token MUST be byte-identical to the seeded real
+		// token and MUST NOT be the stub-encoded form.
+		const realToken = "deeplake-real-opaque-token-do-not-clobber";
+		const realDisk: DiskCredentials = {
+			token: realToken,
+			orgId: "old",
+			orgName: "Old Org",
+			userName: "ada",
+			workspaceId: "default",
+			apiUrl: "https://api.deeplake.ai", // the REAL backend — the shared credential.
+			savedAt: "",
+		};
+		saveDiskCredentials(realDisk, dir, systemClock);
+
+		process.env.HONEYCOMB_ORG_ID = "new";
+		try {
+			// The internal `Credentials` passed in mirrors the seeded disk record (its `apiUrl` is dropped
+			// by the in-memory shape; the healer re-reads the raw disk record to see the real `apiUrl`).
+			const seededInternal: Credentials = {
+				token: realToken,
+				orgId: "old",
+				orgName: "Old Org",
+				workspace: "default",
+				agentId: "default",
+				savedAt: "",
+			};
+			const drift = buildOrgDriftHealer(seededInternal, dir);
+			const outcome = await drift.heal();
+
+			// The heal NEVER re-mints/persists over a real-backend credential. An OPAQUE real token cannot
+			// be decoded offline (only `hcmt.v1.` stub tokens verify), so the drift is not even detectable
+			// here — but the guard still REFUSES to mint a stub: the outcome is a non-clobbering no-op
+			// (`aligned`), never `healed`. The hard guarantee is the on-disk invariant asserted below.
+			expect(outcome.kind).not.toBe("healed");
+
+			// THE INVARIANT: the shared file's token is UNCHANGED and is NOT a stub-minted token.
+			const afterDisk = loadDiskCredentials(dir);
+			expect(afterDisk).not.toBeNull();
+			expect(afterDisk?.token).toBe(realToken);
+			expect(afterDisk?.token.startsWith(STUB_TOKEN_PREFIX)).toBe(false);
+			// The org binding on disk is likewise untouched (no silent realignment over a stub).
+			expect(afterDisk?.orgId).toBe("old");
+			expect(afterDisk?.apiUrl).toBe("https://api.deeplake.ai");
+		} finally {
+			delete process.env.HONEYCOMB_ORG_ID;
+		}
+	});
+
+	it("C-1 a real-backend, VERIFIABLE token that drifts is surfaced — the shared file is not stub-clobbered", async () => {
+		// A verifiable (stub-shaped) token bound to org `old` persisted via `saveCredentials`, which
+		// writes the REAL `apiUrl` (`https://api.deeplake.ai`) into the shared file. Even though the
+		// token IS verifiable (so the drift is unambiguously detectable), the healer must NOT re-mint a
+		// fresh stub for `new` over the shared real-backend credential — it surfaces the drift and leaves
+		// the seeded token byte-for-byte intact.
 		const driftedToken = encodeStubToken({ org: "old", workspace: "default", agentId: "default" });
 		const drifted: Credentials = {
 			token: driftedToken,
@@ -216,13 +302,56 @@ describe("PRD-021b b-AC-4 — login writes 0600 + drift heal", () => {
 			agentId: "default",
 			savedAt: "",
 		};
-		saveCredentials(drifted, dir, systemClock);
+		saveCredentials(drifted, dir, systemClock); // writes apiUrl = https://api.deeplake.ai
 
-		// The healer's active org comes from the env override; set it to `new` so a drift is detected.
 		process.env.HONEYCOMB_ORG_ID = "new";
 		try {
 			const drift = buildOrgDriftHealer(drifted, dir);
 			const outcome = await drift.heal();
+			expect(outcome.kind).toBe("drift-surfaced");
+
+			// The on-disk token is the SEEDED `old`-bound token — NOT a re-minted `new`-bound stub.
+			const afterDisk = loadDiskCredentials(dir);
+			expect(afterDisk?.token).toBe(driftedToken);
+			// And explicitly NOT the stub form a re-mint for `new` would have produced.
+			const reMintedForNew = encodeStubToken({ org: "new", workspace: "default", agentId: "default" });
+			expect(afterDisk?.token).not.toBe(reMintedForNew);
+			expect(afterDisk?.orgId).toBe("old");
+		} finally {
+			delete process.env.HONEYCOMB_ORG_ID;
+		}
+	});
+
+	it("C-1 the LOCAL/stub heal path is preserved — a NON-real-backend credential still heals on drift", async () => {
+		// The guard is SCOPED to real-backend credentials. A genuinely local credential (a non-real
+		// `apiUrl`, e.g. a local single-user box) must still get the best-effort 011b heal: minting a
+		// stub over a stub is safe because there is no real shared credential at risk. This proves the
+		// fix did not kill the legitimate local-mode heal — only the clobber over real shared creds.
+		const localToken = encodeStubToken({ org: "old", workspace: "default", agentId: "default" });
+		const localDisk: DiskCredentials = {
+			token: localToken,
+			orgId: "old",
+			orgName: "old",
+			workspaceId: "default",
+			apiUrl: "http://127.0.0.1:9999", // a LOCAL/stub endpoint, NOT the real backend.
+			agentId: "default",
+			savedAt: "",
+		};
+		saveDiskCredentials(localDisk, dir, systemClock);
+
+		process.env.HONEYCOMB_ORG_ID = "new";
+		try {
+			const seededInternal: Credentials = {
+				token: localToken,
+				orgId: "old",
+				orgName: "old",
+				workspace: "default",
+				agentId: "default",
+				savedAt: "",
+			};
+			const drift = buildOrgDriftHealer(seededInternal, dir);
+			const outcome = await drift.heal();
+			// The local path still heals (the env override drives the active org to `new`).
 			expect(outcome.kind).toBe("healed");
 			expect(outcome.to).toBe("new");
 		} finally {

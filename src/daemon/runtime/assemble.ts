@@ -35,7 +35,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { CREDENTIALS_DIR_NAME, DIR_MODE } from "./auth/credentials-store.js";
+import { LEGACY_CREDENTIALS_DIR_NAME, DIR_MODE } from "./auth/credentials-store.js";
 import {
 	type AuthorizationPolicy,
 	type Authenticator,
@@ -75,6 +75,11 @@ import { isOk } from "../storage/result.js";
 export const LOCK_FILE_NAME = "daemon.lock";
 /** The PID filename under `~/.honeycomb/` (FR-8 / a-AC-6). */
 export const PID_FILE_NAME = "daemon.pid";
+
+// NOTE (PRD-023): the daemon RUNTIME dir (PID + lock) stays at `~/.honeycomb` — it is
+// Honeycomb-private process state, NOT a shared credential. Only the credentials file
+// moved to the shared `~/.deeplake` (D-1). So the runtime dir resolves via the LEGACY
+// dir name; the credentials store owns the `.deeplake` path independently.
 
 /** How often the cheap live `/health` probe refreshes the cached health bit (a-AC-4). */
 const DEFAULT_HEALTH_PROBE_INTERVAL_MS = 15_000;
@@ -203,7 +208,7 @@ export class DaemonAlreadyRunningError extends Error {
 
 /** Resolve the `~/.honeycomb` runtime dir (honoring a test override). */
 function resolveRuntimeDir(dir: string | undefined): string {
-	return dir ?? join(homedir(), CREDENTIALS_DIR_NAME);
+	return dir ?? join(homedir(), LEGACY_CREDENTIALS_DIR_NAME);
 }
 
 /** True when a process with `pid` is currently alive (signal 0 probes liveness). */
