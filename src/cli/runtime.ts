@@ -43,15 +43,19 @@ import { healthSourceFromCheck } from "../commands/status.js";
 
 import {
 	type Credentials,
+	DEFAULT_DEEPLAKE_API_URL,
 	credentialsPath,
 	healOrgDrift,
 	loadCredentials,
+	loadDiskCredentials,
 	systemClock,
+	verifyTokenClaims,
 } from "../daemon/runtime/auth/index.js";
 import { DAEMON_HOST, DAEMON_PORT } from "../shared/constants.js";
 
 import { authMain } from "./auth.js";
 import { orgMain } from "./org.js";
+import { whoamiMain } from "./whoami.js";
 import { buildRealTokenIssuer } from "./token-issuer.js";
 import { buildConnectorRunner } from "./connector-runner.js";
 import { buildStatusHealthSource } from "./health-probes.js";
@@ -190,22 +194,34 @@ export function buildDaemonLifecycle(client: DaemonClient): DaemonLifecycle {
 }
 
 /**
- * The auth-passthrough seam (FR-4 / b-AC-4). `org`/`workspace` forward to {@link orgMain};
- * `login`/`logout` forward to {@link authMain}. Both bind the REAL {@link TokenIssuer} so the device
- * flow actually runs and writes `~/.honeycomb/credentials.json` at 0600 (011b — not reimplemented).
+ * The auth-passthrough seam (FR-4 / b-AC-4 + PRD-023 Wave 3). Routes every tenancy verb:
+ *   - `login` / `logout` → {@link authMain}: the REAL PRD-023 `api.deeplake.ai` device flow /
+ *     headless token login (`HONEYCOMB_TOKEN` / `--token`), writing the SHARED
+ *     `~/.deeplake/credentials.json` at 0600 (real `fetch` + the validated browser opener defaulted in).
+ *   - `whoami` → {@link whoamiMain}: GET /me identity (AC-3) — user / org / workspace, never the token.
+ *   - `org` (`list`/`switch`) / `workspace` (`list`/`switch`/`use`) / `workspaces` → {@link orgMain}:
+ *     PRD-023 Wave 3 migrated these onto the REAL Wave-2 auth client (AC-4 / AC-5). The `org switch`
+ *     re-mint and the `org/workspace list` calls hit `api.deeplake.ai` directly; no stub issuer is
+ *     passed, so the real client (bound to the credential's `apiUrl`) is constructed on demand.
  */
 export function buildAuthPassthrough(): AuthPassthrough {
-	const issuer = buildRealTokenIssuer();
 	return {
 		async dispatch(args: readonly string[]): Promise<number> {
 			const verb = args[0] ?? "";
 			const tail = args.slice(1);
 			if (verb === "login" || verb === "logout") {
-				const result = await authMain([verb, ...tail], { issuer });
+				// PRD-023: login/logout use the real deeplake flows (real fetch + validated opener defaulted).
+				const result = await authMain([verb, ...tail]);
 				return result.exitCode;
 			}
-			// `org` / `workspace` route to the 011a tenancy dispatcher (re-mint / workspace set).
-			const result = await orgMain([verb, ...tail], { issuer });
+			if (verb === "whoami") {
+				// AC-3: GET /me identity. The real client is constructed from the credential's apiUrl.
+				const result = await whoamiMain(tail);
+				return result.exitCode;
+			}
+			// `org` / `workspace` / `workspaces` route to the tenancy dispatcher. PRD-023 Wave 3 drives
+			// the list/switch verbs through the REAL `api.deeplake.ai` client (no stub issuer needed).
+			const result = await orgMain([verb, ...tail]);
 			return result.exitCode;
 		},
 	};
@@ -216,12 +232,45 @@ export function buildAuthPassthrough(): AuthPassthrough {
  * the JWT, compare the `org_id` claim with the active org, re-mint on mismatch) — NOT reimplemented.
  * The active org is the credential's own org in local single-user mode; a drift only arises when an
  * env override (`HONEYCOMB_ORG_ID`) disagrees with the token claim. Best-effort: never throws.
+ *
+ * ── C-1 GUARD: never clobber the SHARED real credential with a locally-minted STUB ────────────
+ * PRD-023 made `~/.deeplake/credentials.json` a SHARED file (Honeycomb + Hivemind). In LOCAL
+ * single-user mode {@link buildRealTokenIssuer} returns the stub issuer (no `HONEYCOMB_AUTH_URL`),
+ * whose `reMint` mints a LOCAL stub token. If we let {@link healOrgDrift} re-mint through that stub
+ * on a drift, it would OVERWRITE the shared file's REAL `api.deeplake.ai` token with a stub —
+ * silently breaking real DeepLake auth for BOTH tools.
+ *
+ * The drift healer runs in the OFFLINE `status` path, so it cannot safely call the real Wave-2
+ * client (that would put a network round-trip in `status` — undesirable). So we GUARD instead
+ * (option #2): when the stored credential is bound to the REAL backend (its `apiUrl` is the
+ * canonical `https://api.deeplake.ai`) AND the active org drifts from the token's verified org, we
+ * REFUSE to run the stub healer — the shared file is left intact and the drift is SURFACED to the
+ * user (`honeycomb org switch <org>` re-mints a REAL token via the real client). The stub healer is
+ * only ever allowed to write in a LOCAL/stub context (no real `apiUrl`), never over real shared creds.
  */
 export function buildOrgDriftHealer(creds: Credentials | null, dir?: string): OrgDriftHealer {
 	const issuer = buildRealTokenIssuer();
 	const activeOrg = process.env.HONEYCOMB_ORG_ID ?? creds?.orgId ?? "local";
 	return {
 		async heal() {
+			// C-1: inspect the RAW disk credential (the in-memory `Credentials` drops `apiUrl`). When the
+			// stored credential targets the REAL backend, a stub re-mint here would clobber a real token
+			// over the shared file — so detect the drift WITHOUT minting and surface it instead.
+			const disk = loadDiskCredentials(dir);
+			if (disk !== null && isRealBackendCredential(disk.apiUrl)) {
+				const claims = verifyTokenClaims(disk.token);
+				const tokenOrg = claims?.org;
+				// A verifiable token whose org disagrees with the active org IS a drift — but on REAL
+				// shared creds we never re-mint via the stub. Leave the file untouched, surface the drift.
+				if (tokenOrg !== undefined && tokenOrg !== activeOrg) {
+					return { kind: "drift-surfaced", to: activeOrg };
+				}
+				// Aligned (or an unverifiable token we won't risk re-minting over): no write, no clobber.
+				return { kind: "aligned" };
+			}
+
+			// LOCAL/stub context (no real `apiUrl`): the existing best-effort heal is safe — it only ever
+			// mints + writes a stub over a stub, never over a real shared credential.
 			const outcome = await healOrgDrift({
 				issuer,
 				activeOrg,
@@ -232,6 +281,18 @@ export function buildOrgDriftHealer(creds: Credentials | null, dir?: string): Or
 			return { kind: outcome.kind };
 		},
 	};
+}
+
+/**
+ * C-1 — true when a stored credential's `apiUrl` points at the REAL DeepLake backend
+ * ({@link DEFAULT_DEEPLAKE_API_URL}, `https://api.deeplake.ai`), the trailing slash tolerated. A
+ * credential on the real backend MUST NOT be re-minted through the local STUB issuer (that would
+ * clobber the shared file). A missing/empty `apiUrl` is treated as NON-real (a legacy or local
+ * credential), so the local single-user heal path still runs for genuinely local creds.
+ */
+function isRealBackendCredential(apiUrl: string | undefined): boolean {
+	if (apiUrl === undefined || apiUrl.length === 0) return false;
+	return apiUrl.replace(/\/+$/, "") === DEFAULT_DEEPLAKE_API_URL;
 }
 
 /** The dashboard launcher seam (FR-4) — binds 020b's {@link launchDashboard} over the loopback daemon. */

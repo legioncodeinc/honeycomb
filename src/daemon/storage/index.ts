@@ -9,7 +9,12 @@
  */
 
 import { StorageClient, type StorageQuery } from "./client.js";
-import { type CredentialProvider, envCredentialProvider, resolveStorageConfig, type StorageConfig } from "./config.js";
+import {
+	type CredentialProvider,
+	defaultCredentialProvider,
+	resolveStorageConfig,
+	type StorageConfig,
+} from "./config.js";
 import { type DeepLakeTransport, HttpDeepLakeTransport } from "./transport.js";
 
 export {
@@ -20,7 +25,10 @@ export {
 } from "./client.js";
 export {
 	type CredentialProvider,
+	type CredentialsFileProviderOptions,
 	DEFAULT_QUERY_TIMEOUT_MS,
+	deeplakeCredentialsFileProvider,
+	defaultCredentialProvider,
 	envCredentialProvider,
 	redactToken,
 	resolveStorageConfig,
@@ -114,6 +122,13 @@ export {
  * is attempted. The transport defaults to the real HTTP transport but can be
  * injected (the fake transport in tests) so the client logic is verified
  * without a live endpoint.
+ *
+ * PRD-023 (D-3 / AC-7): the DEFAULT provider is now {@link defaultCredentialProvider}
+ * — ENV-OVER-FILE. With NO `HONEYCOMB_DEEPLAKE_*` env and a valid shared
+ * `~/.deeplake/credentials.json`, the file supplies `{ endpoint, token, org, workspace }`
+ * and the assembled daemon connects from it (the AC-7 spine); a present
+ * `HONEYCOMB_DEEPLAKE_*` value still wins per-field. Tests inject `options.provider`
+ * to bypass both (the override path is unchanged).
  */
 export function createStorageClient(
 	options: {
@@ -122,7 +137,7 @@ export function createStorageClient(
 		transport?: DeepLakeTransport;
 	} = {},
 ): StorageClient {
-	const provider = options.provider ?? envCredentialProvider();
+	const provider = options.provider ?? defaultCredentialProvider();
 	const config: StorageConfig = resolveStorageConfig(provider);
 	const transport: DeepLakeTransport = options.transport ?? new HttpDeepLakeTransport(config.endpoint, config.token);
 	return new StorageClient(transport, config);

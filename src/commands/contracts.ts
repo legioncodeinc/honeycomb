@@ -86,8 +86,10 @@ export const VERB_TABLE: readonly VerbSpec[] = Object.freeze([
 	{ verb: "sources", cls: "storage", summary: "connect/index/purge sources through the daemon" },
 	{ verb: "graph", cls: "storage", summary: "build/query the codebase graph through the daemon" },
 	{ verb: "goal", cls: "storage", summary: "manage goals/KPIs through the daemon" },
-	{ verb: "org", cls: "auth", summary: "switch org (passthrough to the auth dispatcher)" },
-	{ verb: "workspace", cls: "auth", summary: "use workspace (passthrough to the auth dispatcher)" },
+	{ verb: "whoami", cls: "auth", summary: "show the authenticated user, org, and workspace (GET /me)" },
+	{ verb: "org", cls: "auth", summary: "list/switch org (passthrough to the auth dispatcher)" },
+	{ verb: "workspace", cls: "auth", summary: "list/switch/use workspace (passthrough to the auth dispatcher)" },
+	{ verb: "workspaces", cls: "auth", summary: "list workspaces in the active org (alias of `workspace list`)" },
 	{ verb: "sessions", cls: "storage", summary: "list/prune captured sessions through the daemon" },
 	{ verb: "uninstall", cls: "local", summary: "reverse only Honeycomb's changes" },
 	{ verb: "update", cls: "local", summary: "self-update the CLI, daemon, and bundles" },
@@ -109,8 +111,18 @@ export function isStorageVerb(verb: string): boolean {
  * `honeycomb workspace use <ws>` are recognized by membership in this set and
  * forwarded verbatim to `src/cli/org.ts` / `src/cli/auth.ts` — the dispatcher does
  * NOT re-parse their subcommands. Login/logout are auth entry points too.
+ *
+ * PRD-023 Wave 3 (AC-3 / AC-5) adds `whoami` (GET /me identity) and `workspaces` (the single-word
+ * `workspace list` alias) — both are recognized here and forwarded verbatim to the auth dispatcher.
  */
-export const AUTH_SUBCOMMANDS: ReadonlySet<string> = new Set(["org", "workspace", "login", "logout"]);
+export const AUTH_SUBCOMMANDS: ReadonlySet<string> = new Set([
+	"org",
+	"workspace",
+	"workspaces",
+	"whoami",
+	"login",
+	"logout",
+]);
 
 /** True when a verb is an auth passthrough (FR-4). */
 export function isAuthPassthrough(verb: string): boolean {

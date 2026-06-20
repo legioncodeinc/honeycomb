@@ -14,7 +14,7 @@
  * + 0600/0700 perms (b-AC-1), POSIX-guarded.
  */
 
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -22,12 +22,16 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	type Clock,
 	type Credentials,
+	type DiskCredentials,
+	CREDENTIALS_FILE_NAME,
+	DEFAULT_DEEPLAKE_API_URL,
 	DIR_MODE,
 	FILE_MODE,
 	TenancyIntegrityError,
 	credentialsPath,
 	encodeStubToken,
 	loadCredentials,
+	loadDiskCredentials,
 	resolveTenancy,
 	saveCredentials,
 } from "../../../../src/daemon/runtime/auth/index.js";
@@ -188,5 +192,174 @@ describe("a-AC-5 a file whose orgId disagrees with the JWT org claim is REJECTED
 		const resolved = resolveTenancy(ok);
 		expect(resolved.org).toBe("acme");
 		expect(resolved.workspace).toBe("backend");
+	});
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// PRD-023 Wave 1 — the SHARED `~/.deeplake/credentials.json` spine (AC-7).
+// ════════════════════════════════════════════════════════════════════════════
+
+/** Write a raw on-disk JSON blob at the credentials path (simulates another tool). */
+function writeRawFile(targetDir: string, json: unknown): void {
+	mkdirSync(targetDir, { recursive: true });
+	writeFileSync(join(targetDir, CREDENTIALS_FILE_NAME), JSON.stringify(json, null, 2));
+}
+
+describe("AC-7 save→load round-trips the Hivemind on-disk shape at ~/.deeplake", () => {
+	it("writes Hivemind's exact on-disk shape (workspaceId, apiUrl, +additive agentId)", () => {
+		saveCredentials(credsFor("acme", { workspace: "backend", agentId: "agent-7" }), dir, fixedClock("2026-06-20T00:00:00.000Z"));
+		const onDisk = JSON.parse(readFileSync(credentialsPath(dir), "utf8")) as Record<string, unknown>;
+		// The cross-tool fields Hivemind reads.
+		expect(onDisk.token).toBe(tokenForOrg("acme"));
+		expect(onDisk.orgId).toBe("acme");
+		expect(onDisk.orgName).toBe("acme Inc");
+		expect(onDisk.workspaceId).toBe("backend"); // workspace → workspaceId on disk
+		expect(onDisk.apiUrl).toBe(DEFAULT_DEEPLAKE_API_URL);
+		expect(onDisk.savedAt).toBe("2026-06-20T00:00:00.000Z");
+		// The internal `workspace`/`agentId` names are NOT on disk; `agentId` IS (additive).
+		expect(onDisk.workspace).toBeUndefined();
+		expect(onDisk.agentId).toBe("agent-7");
+	});
+
+	it("round-trips through the adapter: saved internal shape loads back identical", () => {
+		const saved = saveCredentials(
+			credsFor("acme", { workspace: "backend", agentId: "agent-7" }),
+			dir,
+			fixedClock("2026-06-20T00:00:00.000Z"),
+		);
+		const loaded = loadCredentials(dir, {});
+		expect(loaded).not.toBeNull();
+		expect(loaded?.token).toBe(saved.token);
+		expect(loaded?.orgId).toBe("acme");
+		expect(loaded?.orgName).toBe("acme Inc");
+		expect(loaded?.workspace).toBe("backend"); // workspaceId → workspace on load
+		expect(loaded?.agentId).toBe("agent-7");
+	});
+});
+
+describe("AC-7 cross-tool read: a file written in Hivemind's EXACT shape loads correctly", () => {
+	it("reads a Hivemind-written file (no agentId; userName present)", () => {
+		// Exactly what `hivemind login` writes — note: NO `agentId`, but `userName` + `apiUrl`.
+		const hivemindFile: DiskCredentials & { userName: string } = {
+			token: tokenForOrg("acme"),
+			orgId: "acme",
+			orgName: "Acme Inc",
+			userName: "alice",
+			workspaceId: "research",
+			apiUrl: "https://api.deeplake.ai",
+			savedAt: "2026-06-19T10:00:00.000Z",
+		};
+		writeRawFile(dir, hivemindFile);
+		const loaded = loadCredentials(dir, {});
+		expect(loaded).not.toBeNull();
+		expect(loaded?.token).toBe(hivemindFile.token);
+		expect(loaded?.orgId).toBe("acme");
+		expect(loaded?.orgName).toBe("Acme Inc");
+		expect(loaded?.workspace).toBe("research"); // workspaceId → workspace
+		// A Hivemind file has no agentId → defaults to the `default` sentinel.
+		expect(loaded?.agentId).toBe("default");
+	});
+
+	it("rejects a Hivemind-shape file missing the load-bearing token/orgId (malformed → null)", () => {
+		writeRawFile(dir, { orgId: "acme", workspaceId: "research", savedAt: "x" }); // no token
+		expect(loadCredentials(dir, {})).toBeNull();
+	});
+});
+
+describe("AC-7 / D-1 legacy ~/.honeycomb read-fallback (new writes land in ~/.deeplake)", () => {
+	let legacyDir: string;
+	beforeEach(() => {
+		legacyDir = mkdtempSync(join(tmpdir(), "hc-legacy-"));
+	});
+	afterEach(() => {
+		rmSync(legacyDir, { recursive: true, force: true });
+	});
+
+	it("falls back to the legacy file when ~/.deeplake is absent, adapting the old shape", () => {
+		// The OLD Honeycomb shape: `workspace`/`agentId`, no `workspaceId`/`apiUrl`/`userName`.
+		const legacyFile = {
+			token: tokenForOrg("acme"),
+			orgId: "acme",
+			orgName: "Acme Inc",
+			workspace: "backend",
+			agentId: "agent-9",
+			savedAt: "2025-01-01T00:00:00.000Z",
+		};
+		writeRawFile(legacyDir, legacyFile);
+		// `dir` (the shared ~/.deeplake) has NO file → fallback to legacyDir.
+		const loaded = loadCredentials(dir, {}, legacyDir);
+		expect(loaded).not.toBeNull();
+		expect(loaded?.orgId).toBe("acme");
+		expect(loaded?.workspace).toBe("backend");
+		expect(loaded?.agentId).toBe("agent-9");
+	});
+
+	it("prefers the shared ~/.deeplake file over the legacy file when BOTH exist", () => {
+		writeRawFile(legacyDir, {
+			token: tokenForOrg("legacy-org"),
+			orgId: "legacy-org",
+			orgName: "Legacy",
+			workspace: "old-ws",
+			agentId: "legacy-agent",
+			savedAt: "2025-01-01T00:00:00.000Z",
+		});
+		saveCredentials(credsFor("acme", { workspace: "backend" }), dir, fixedClock("2026-06-20T00:00:00.000Z"));
+		const loaded = loadCredentials(dir, {}, legacyDir);
+		expect(loaded?.orgId).toBe("acme"); // the shared file wins
+		expect(loaded?.workspace).toBe("backend");
+	});
+
+	it("new writes ALWAYS land in ~/.deeplake (the shared dir), never the legacy dir", () => {
+		saveCredentials(credsFor("acme", { workspace: "backend" }), dir, fixedClock("2026-06-20T00:00:00.000Z"));
+		// The shared file exists; the legacy file was never written.
+		const onDisk = JSON.parse(readFileSync(credentialsPath(dir), "utf8")) as Record<string, unknown>;
+		expect(onDisk.workspaceId).toBe("backend");
+		expect(() => readFileSync(join(legacyDir, CREDENTIALS_FILE_NAME), "utf8")).toThrow();
+	});
+});
+
+describe("AC-7 loadDiskCredentials exposes the raw disk shape (apiUrl/workspaceId) for the provider", () => {
+	it("returns apiUrl + workspaceId from a Hivemind-written file", () => {
+		writeRawFile(dir, {
+			token: tokenForOrg("acme"),
+			orgId: "acme",
+			orgName: "Acme Inc",
+			userName: "alice",
+			workspaceId: "research",
+			apiUrl: "https://custom.deeplake.example",
+			savedAt: "2026-06-19T10:00:00.000Z",
+		});
+		const disk = loadDiskCredentials(dir, {});
+		expect(disk).not.toBeNull();
+		expect(disk?.apiUrl).toBe("https://custom.deeplake.example");
+		expect(disk?.workspaceId).toBe("research");
+		expect(disk?.orgId).toBe("acme");
+	});
+
+	it("up-converts a legacy file (workspace → workspaceId, no apiUrl)", () => {
+		const legacyDir = mkdtempSync(join(tmpdir(), "hc-legacy2-"));
+		try {
+			writeRawFile(legacyDir, {
+				token: tokenForOrg("acme"),
+				orgId: "acme",
+				orgName: "Acme Inc",
+				workspace: "backend",
+				agentId: "agent-9",
+				savedAt: "2025-01-01T00:00:00.000Z",
+			});
+			const disk = loadDiskCredentials(dir, {}, legacyDir);
+			expect(disk?.workspaceId).toBe("backend");
+			expect(disk?.apiUrl).toBeUndefined(); // legacy file has no apiUrl
+		} finally {
+			rmSync(legacyDir, { recursive: true, force: true });
+		}
+	});
+
+	it("applies the HONEYCOMB_TOKEN env override to the raw disk shape too (b-AC-5 parity)", () => {
+		saveCredentials(credsFor("acme"), dir, fixedClock("2026-06-20T00:00:00.000Z"));
+		const envToken = tokenForOrg("acme", { agentId: "from-env" });
+		const disk = loadDiskCredentials(dir, { HONEYCOMB_TOKEN: envToken });
+		expect(disk?.token).toBe(envToken);
+		expect(disk?.orgId).toBe("acme");
 	});
 });

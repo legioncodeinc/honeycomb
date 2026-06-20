@@ -138,6 +138,34 @@ the real create/hash/revoke; Wave 1 scaffolds the shape (it may use the existing
 `hashApiKey`/`api_keys` builders directly for the smoke). Do NOT run it locally (no
 creds) — the orchestrator runs it.
 
+## PRD-023 Wave 2 — the REAL api.deeplake.ai auth client + login (`deeplake-issuer.ts`)
+
+`deeplake-issuer.ts` is the concrete adapter that fills the auth seam against the SHARED backend
+Hivemind speaks (`api.deeplake.ai`), so one login authenticates BOTH tools (the shared
+`~/.deeplake/credentials.json`, D-1). It ports `hivemind/src/commands/auth.ts` VERBATIM.
+
+- **Reusable auth client** — `createDeeplakeAuthClient({ apiUrl, fetch?, sleep?, maxRetries? })` →
+  `getMe(token, orgId?)` (`GET /me`), `listOrgs(token)` (`GET /organizations`),
+  `listWorkspaces(token, orgId?)` (`GET /workspaces`, tolerates `{data:[...]}`),
+  `reMint(token, orgId)` (`POST /users/me/tokens` → the long-lived org-bound token string),
+  `requestDeviceCode()` / `pollDeviceToken(deviceCode)`. Retries 429/5xx with backoff; throws a
+  REDACTED `AuthHttpError` (status + truncated body, never the token). **Wave 3 (whoami / org /
+  workspace) consumes THIS.**
+- **Login flows** — `loginWithDeviceFlow(deps)` (AC-1) and `loginWithToken(token, deps)` (AC-2) both
+  write the full Hivemind disk shape (`userName` + authenticated `apiUrl`) via the new
+  `saveDiskCredentials` store helper (0600). The device flow prints the user code + URI, opens ONLY
+  the VALIDATED `verification_uri_complete` (https-only — `validateVerificationUrl` /
+  `defaultBrowserOpener`, ported from Hivemind's `openBrowser`), polls, mints, validates `/me`.
+- **Seams (so tests never hit the network/browser)** — `fetch` (`AuthFetch`), `openBrowser`
+  (`BrowserOpener`), `sleep` (`Sleeper`) are all injectable. `apiUrl` resolves from
+  `HONEYCOMB_DEEPLAKE_ENDPOINT` → else `DEFAULT_DEEPLAKE_API_URL`.
+- **`src/cli/auth.ts`** routes `login` (device flow, or headless when `--token`/`HONEYCOMB_TOKEN`
+  is present) and `logout` (removes the shared **and** legacy file; exit 0 when absent) through these
+  flows. The token is NEVER printed; login prints org / workspace / user only (D-4).
+
+The PRD-011/021 stub `deviceFlowLogin` + `createFakeTokenIssuer` in `device-flow.ts` / `contracts.ts`
+are UNTOUCHED — they remain the stub-token path for those PRDs. PRD-023 login uses the real adapter.
+
 ## Daemon assembly is DEFERRED (D-9)
 
 Wave 1 is constructed-and-tested, not wired into the running daemon:

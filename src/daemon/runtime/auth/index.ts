@@ -40,26 +40,64 @@ export {
 	verifyTokenClaims,
 } from "./contracts.js";
 
-// ── The CredentialsStore (0600 file + env rules + integrity gate) ────────────
+// ── The CredentialsStore (SHARED 0600 ~/.deeplake file + env rules + integrity gate) ──
 export {
 	type Clock,
+	type DiskCredentials,
 	type ResolvedTenancy,
 	CREDENTIALS_DIR_NAME,
 	CREDENTIALS_FILE_NAME,
+	DEFAULT_DEEPLAKE_API_URL,
 	DEFAULT_WORKSPACE,
 	DIR_MODE,
 	ENV_ORG_ID,
 	ENV_TOKEN,
 	ENV_WORKSPACE_ID,
 	FILE_MODE,
+	LEGACY_CREDENTIALS_DIR_NAME,
 	TenancyIntegrityError,
 	credentialsDir,
 	credentialsPath,
+	legacyCredentialsPath,
 	loadCredentials,
+	loadDiskCredentials,
 	resolveTenancy,
 	saveCredentials,
+	saveDiskCredentials,
 	systemClock,
 } from "./credentials-store.js";
+
+// ── PRD-023 Wave 2: the REAL api.deeplake.ai auth client + device-flow login ──
+// The reusable auth client (getMe/listOrgs/listWorkspaces/reMint + device-flow) Wave 3 consumes,
+// plus the AC-1 device-flow / AC-2 headless login flows that write the shared `~/.deeplake` file.
+export {
+	type AuthFetch,
+	type AuthFetchRequestInit,
+	type AuthFetchResponse,
+	type BrowserOpener,
+	type DeeplakeAuthClient,
+	type DeeplakeAuthClientOptions,
+	type DeviceCodeResponse,
+	type DeviceFlowLoginDeps,
+	type DeviceFlowReporter as DeeplakeDeviceFlowReporter,
+	type DeviceTokenResponse,
+	type LoginDeps,
+	type MeResponse,
+	type OrgRow,
+	type WorkspaceRow,
+	AuthHttpError,
+	DEFAULT_MAX_POLLS as DEEPLAKE_DEFAULT_MAX_POLLS,
+	DEFAULT_MAX_RETRIES,
+	ENV_DEEPLAKE_ENDPOINT,
+	ENV_HEADLESS_TOKEN,
+	ENV_ORG_ID as ENV_DEEPLAKE_ORG_ID,
+	createDeeplakeAuthClient,
+	defaultBrowserOpener,
+	loginWithDeviceFlow,
+	loginWithToken,
+	resolveApiUrl,
+	validateVerificationUrl,
+} from "./deeplake-issuer.js";
 
 // ── 011a request-scope tenancy resolution ───────────────────────────────────
 export {
