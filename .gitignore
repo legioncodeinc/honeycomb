@@ -116,3 +116,8 @@ otherhive-v1/
 .stryker-tmp*/
 /reports/mutation/
 stryker.log
+# PRD-021: `src/daemon/runtime/logs/` is a REAL source module (the daemon's /api/logs
+# handler), and its mirror test dir — NOT runtime log output. The bare `logs` rule above
+# (Node template) is too broad and silently swallowed them. Un-ignore these source paths.
+!src/daemon/runtime/logs/
+!tests/daemon/runtime/logs/
