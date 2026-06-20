@@ -1,4 +1,12 @@
-# Honeycomb
+<p align="center">
+  <a href="https://github.com/legioncodeinc"><img src="assets/legion-code.svg" alt="Legion Code" height="76"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://activeloop.ai"><img src="assets/activeloop.svg" alt="Activeloop Deep Lake" height="76"></a>
+</p>
+
+<h1 align="center">Honeycomb</h1>
+
+<p align="center"><strong>A <a href="https://github.com/legioncodeinc">Legion Code</a> &times; <a href="https://activeloop.ai">Activeloop</a> collaboration</strong></p>
 
 > Shared memory for your AI coding agents — what one harness learns, the others recall.
 
@@ -7,11 +15,20 @@
 [![Node](https://img.shields.io/badge/node-%E2%89%A522-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![Powered by Deep Lake](https://img.shields.io/badge/powered%20by-Activeloop%20Deep%20Lake-ff5a1f)](https://activeloop.ai)
 
-**Built by [Legion Code Inc](https://github.com/legioncodeinc) · Powered by [Activeloop Deep Lake](https://activeloop.ai)**
-
 AI coding agents forget. They forget across sessions, and they forget across tools — a decision you reached in Claude Code is invisible to Cursor the next morning. Honeycomb gives your agents one shared, persistent memory: a local daemon captures what happens on every turn and serves it back to any harness that asks. Learn something once, recall it everywhere.
 
 > **Status:** v0.1.0, pre-release. Capture-to-recall is proven end-to-end against live Deep Lake. Local single-user mode is first-class; semantic embeddings and team mode are opt-in / in hardening (see [Status & roadmap](#status--roadmap)).
+
+---
+
+## Built together: Legion Code &times; Activeloop
+
+Honeycomb is a collaboration between **[Legion Code Inc](https://github.com/legioncodeinc)** and **[Activeloop](https://activeloop.ai)** — an agent-memory product paired with the data infrastructure built to make it possible.
+
+- **Activeloop** brings **[Deep Lake](https://activeloop.ai)**, the database for AI: a versioned, multi-modal store with native vector + columnar indexing and hybrid lexical + semantic search. It is the substrate Honeycomb's memory lives in — and the reason recall can scale from a single session to an organization's entire history.
+- **Legion Code** brings **Honeycomb**: the daemon architecture, the six-harness integrations, and the capture → summarize → recall pipeline that turns Deep Lake into a shared brain your coding agents read and write on every turn.
+
+Neither half stands alone. Deep Lake gives the memories somewhere durable and queryable to live; Honeycomb gives every harness one consistent way to write to and recall from it — so what one agent learns survives a closed session, a switched tool, and a new teammate.
 
 ---
 

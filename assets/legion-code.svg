@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Legion Code">
+  <title>Legion Code</title>
+  <rect width="512" height="512" rx="112" fill="#F2F4F5"/>
+  <path d="M150 150 h84 v160 h150 v84 H150 Z" fill="#080A0C"/>
+  <rect x="150" y="150" width="84" height="58" fill="#21A565"/>
+</svg>
