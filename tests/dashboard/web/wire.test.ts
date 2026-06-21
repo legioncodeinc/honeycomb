@@ -17,7 +17,15 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { createWireClient, DASHBOARD_SESSION_HEADERS, HealthBodySchema, HealthReasonsSchema } from "../../../src/dashboard/web/wire.js";
+import {
+	createWireClient,
+	DASHBOARD_SESSION_HEADERS,
+	EMPTY_VAULT_SETTINGS,
+	HealthBodySchema,
+	HealthReasonsSchema,
+	SecretNamesSchema,
+	VaultSettingsSchema,
+} from "../../../src/dashboard/web/wire.js";
 
 /** Lowercase a HeadersInit (object | Headers | array) into a flat record for assertion. */
 function headerRecord(init: RequestInit | undefined): Record<string, string> {
@@ -225,5 +233,124 @@ describe("PRD-029: health() threads the per-subsystem reasons through the IO bou
 		const parsed = HealthBodySchema.parse({ status: "ok", reasons: { storage: "Bearer sk-secret-123", embeddings: "on", schema: "ok" } });
 		expect(parsed.reasons?.storage).toBe("reachable"); // the smuggled string is dropped, not surfaced
 		expect(JSON.stringify(parsed)).not.toContain("sk-secret-123");
+	});
+});
+
+describe("PRD-032c: the wire client threads /api/settings (GET+POST) + names-only /api/secrets defensively", () => {
+	/** A fetch mock that records (url, init) and routes settings/secrets paths to canned bodies. */
+	function vaultFetch(opts: { settings?: unknown; secrets?: unknown; postStatus?: number } = {}): {
+		fetchImpl: typeof fetch;
+		calls: { url: string; init?: RequestInit }[];
+	} {
+		const calls: { url: string; init?: RequestInit }[] = [];
+		const settings = opts.settings ?? {
+			settings: { activeProvider: "anthropic", activeModel: "claude-opus-4-8", "dreaming.enabled": true },
+			catalog: [{ id: "anthropic", label: "Anthropic", models: ["claude-sonnet-4-6", "claude-opus-4-8"], openEnded: false }],
+		};
+		const secrets = opts.secrets ?? { names: ["ANTHROPIC_API_KEY", "DEEPLAKE_TOKEN"] };
+		const postStatus = opts.postStatus ?? 201;
+		const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+			const url = typeof input === "string" ? input : input.toString();
+			calls.push({ url, init });
+			const json = (body: unknown, status = 200): Response =>
+				new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+			// POST /api/settings/:key — the write. Echo an ok body at the configured status.
+			if (url.includes("/api/settings/") && init?.method === "POST") return json({ ok: postStatus < 300 }, postStatus);
+			if (url.endsWith("/api/settings") || url.includes("/api/settings?")) return json(settings);
+			if (url.endsWith("/api/secrets") || url.includes("/api/secrets?")) return json(secrets);
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch;
+		return { fetchImpl, calls };
+	}
+
+	it("vaultSettings() GETs /api/settings and parses { settings, catalog } through zod", async () => {
+		const { fetchImpl, calls } = vaultFetch();
+		const out = await createWireClient({ fetchImpl }).vaultSettings();
+		expect(out.settings["activeProvider"]).toBe("anthropic");
+		expect(out.settings["activeModel"]).toBe("claude-opus-4-8");
+		expect(out.settings["dreaming.enabled"]).toBe(true);
+		expect(out.catalog).toHaveLength(1);
+		expect(out.catalog[0]?.models).toContain("claude-opus-4-8");
+		// It hit the settings GET (no method = GET) with the session headers.
+		const getCall = calls.find((c) => c.url.endsWith("/api/settings"));
+		expect(getCall).toBeTruthy();
+		const headers = headerRecord(getCall?.init);
+		expect(headers["x-honeycomb-runtime-path"]).toBe("plugin");
+		expect(headers["x-honeycomb-session"]).toBeTruthy();
+	});
+
+	it("a malformed /api/settings body degrades to the empty view — never a throw", async () => {
+		const { fetchImpl } = vaultFetch({ settings: { settings: "not-an-object", catalog: "nope" } });
+		const out = await createWireClient({ fetchImpl }).vaultSettings();
+		// Each field `.catch()`es to its empty default; the panel renders its empty state.
+		expect(out).toEqual(EMPTY_VAULT_SETTINGS);
+	});
+
+	it("a totally absent /api/settings (404) → the empty vault-settings view (safe default)", async () => {
+		const fetchImpl = vi.fn(async (): Promise<Response> => new Response("nope", { status: 404 })) as unknown as typeof fetch;
+		const out = await createWireClient({ fetchImpl }).vaultSettings();
+		expect(out).toEqual(EMPTY_VAULT_SETTINGS);
+	});
+
+	it("setSetting() POSTs /api/settings/:key with a JSON { value } body + session headers", async () => {
+		const { fetchImpl, calls } = vaultFetch();
+		const ok = await createWireClient({ fetchImpl }).setSetting("activeProvider", "openai");
+		expect(ok).toBe(true);
+		const postCall = calls.find((c) => c.url.includes("/api/settings/activeProvider") && c.init?.method === "POST");
+		expect(postCall, "the POST hit /api/settings/activeProvider").toBeTruthy();
+		// The body carries the value (a scalar) the Wave-1 handler reads.
+		expect(JSON.parse(String(postCall?.init?.body))).toEqual({ value: "openai" });
+		// The non-tenant session headers ride the POST (the protected group requires them).
+		const headers = headerRecord(postCall?.init);
+		expect(headers["x-honeycomb-runtime-path"]).toBe("plugin");
+		expect(headers["x-honeycomb-session"]).toBeTruthy();
+		expect(headers["content-type"]).toBe("application/json");
+		// It does NOT forge a tenant org.
+		expect(headers["x-honeycomb-org"]).toBeUndefined();
+	});
+
+	it("setSetting() encodes a dotted dashboard key into a single safe path segment", async () => {
+		const { fetchImpl, calls } = vaultFetch();
+		await createWireClient({ fetchImpl }).setSetting("dreaming.enabled", false);
+		const postCall = calls.find((c) => c.init?.method === "POST");
+		// The dotted key is encodeURIComponent'd; it remains a single segment under /api/settings/.
+		expect(postCall?.url).toContain("/api/settings/dreaming.enabled");
+		expect(JSON.parse(String(postCall?.init?.body))).toEqual({ value: false });
+	});
+
+	it("setSetting() returns false on a rejected write (daemon 400) without throwing", async () => {
+		const { fetchImpl } = vaultFetch({ postStatus: 400 });
+		const ok = await createWireClient({ fetchImpl }).setSetting("activeModel", "not-a-real-model");
+		expect(ok).toBe(false);
+	});
+
+	it("setSetting() returns false on a network error (never throws into the caller)", async () => {
+		const fetchImpl = vi.fn(async (): Promise<Response> => {
+			throw new Error("ECONNREFUSED");
+		}) as unknown as typeof fetch;
+		const ok = await createWireClient({ fetchImpl }).setSetting("activeProvider", "anthropic");
+		expect(ok).toBe(false);
+	});
+
+	it("secretNames() returns the NAMES list only (presence) — never a value", async () => {
+		const { fetchImpl } = vaultFetch();
+		const names = await createWireClient({ fetchImpl }).secretNames();
+		expect(names).toEqual(["ANTHROPIC_API_KEY", "DEEPLAKE_TOKEN"]);
+		// The body shape is names-only by construction — no `value`/`values` key exists to leak.
+		const parsed = SecretNamesSchema.parse({ names: ["X"], values: { X: "sk-leak" } });
+		expect(parsed).toEqual({ names: ["X"] }); // an extra `values` is stripped, never surfaced
+		expect(JSON.stringify(parsed)).not.toContain("sk-leak");
+	});
+
+	it("a malformed /api/secrets body → an empty name list (every provider reads 'not set')", async () => {
+		const { fetchImpl } = vaultFetch({ secrets: { names: "boom" } });
+		const names = await createWireClient({ fetchImpl }).secretNames();
+		expect(names).toEqual([]);
+	});
+
+	it("VaultSettingsSchema only accepts SCALAR setting values (a structured value is not surfaced as-is)", () => {
+		// The class stores scalars; a stray object value `.catch()`es to "" rather than riding through.
+		const parsed = VaultSettingsSchema.parse({ settings: { weird: { nested: "obj" } }, catalog: [] });
+		expect(parsed.settings["weird"]).toBe("");
 	});
 });

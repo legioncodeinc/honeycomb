@@ -82,6 +82,15 @@ export {
 } from "./maintenance.js";
 
 export {
+	coerceSettingValue,
+	parseSettingsCliArgs,
+	runSettingsVerb,
+	SETTINGS_ENDPOINT,
+	type SettingsCliInvocation,
+	type SettingValue,
+} from "./settings.js";
+
+export {
 	type ConnectorRunner,
 	type ConnectorVerbArgs,
 	type ConnectorVerbResult,

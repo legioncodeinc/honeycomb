@@ -87,6 +87,7 @@ const ROUTE_GROUPS: readonly RouteGroupSpec[] = Object.freeze([
 	{ path: "/api/graph", protect: true, session: false },
 	{ path: "/api/ontology", protect: true, session: false },
 	{ path: "/api/secrets", protect: true, session: false },
+	{ path: "/api/settings", protect: true, session: false },
 	{ path: "/api/org", protect: true, session: false },
 	{ path: "/api/workspace", protect: true, session: false },
 	{ path: "/api/diagnostics", protect: true, session: false },

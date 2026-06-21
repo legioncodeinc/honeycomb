@@ -40,6 +40,10 @@ export const ENDPOINTS = Object.freeze({
 	logs: "/api/logs",
 	health: "/health",
 	dream: "/api/diagnostics/dream",
+	// PRD-032c — the vault `setting`-class surface (Wave 1 `vault/api.ts`) + the names-only
+	// secrets surface (PRD-012a `secrets/api.ts`, used ONLY for presence, never a value).
+	vaultSettings: "/api/settings",
+	secrets: "/api/secrets",
 } as const);
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -233,6 +237,62 @@ export interface HealthProbe {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PRD-032c — the vault `setting`-class surface (`GET`/`POST /api/settings`) + the
+// curated provider→model catalog. Every field defaults so a partial/malformed payload
+// degrades to a safe empty state, NEVER a throw into React (AC-5 defensive parsing).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * One provider entry in the catalog `GET /api/settings` returns — MIRRORS the Wave-1
+ * `ProviderEntry` in `src/daemon/runtime/vault/catalog.ts` (D-6). `models` is the curated,
+ * ordered model list (`models[0]` is the selector default); `openEnded` marks OpenRouter,
+ * whose model id is a free-form passthrough (the panel renders a text input for it).
+ */
+export const ProviderEntrySchema = z.object({
+	id: z.string().catch(""),
+	label: z.string().catch(""),
+	models: z.array(z.string()).catch([]),
+	openEnded: z.boolean().catch(false),
+});
+export type ProviderEntryWire = z.infer<typeof ProviderEntrySchema>;
+
+/**
+ * A single `setting` value on the wire — the vault `setting` class stores a JSON SCALAR
+ * (string | number | boolean), so the panel renders exactly those. A non-scalar (a future
+ * structured setting) would register its own class; here a bad value `.catch()`es to a
+ * harmless empty string so the panel never throws.
+ */
+export const SettingValueWireSchema = z.union([z.string(), z.number(), z.boolean()]).catch("");
+export type SettingValueWire = z.infer<typeof SettingValueWireSchema>;
+
+/**
+ * The `GET /api/settings` body the Wave-1 daemon serves: `{ settings, catalog }`. `settings`
+ * is the current key→value map of the `setting` class (the active provider/model + the
+ * dreaming toggle + dashboard prefs); `catalog` is the static provider→model list. NO secret
+ * is in this body by construction (the surface reads only the `setting` class). Each field
+ * `.catch()`es to an empty default so a partial body degrades to "nothing selected".
+ */
+export const VaultSettingsSchema = z.object({
+	settings: z.record(z.string(), SettingValueWireSchema).catch({}),
+	catalog: z.array(ProviderEntrySchema).catch([]),
+});
+export type VaultSettingsWire = z.infer<typeof VaultSettingsSchema>;
+
+/**
+ * The `GET /api/secrets` body (PRD-012a, names-only) — `{ names: string[] }`. The panel reads
+ * this ONLY to show a provider key's PRESENCE ("set ✓" / "not set") by name; there is NO
+ * value-returning route and the panel never asks for one (AC-5 / D-4). A malformed body
+ * `.catch()`es to an empty name list (every provider reads as "not set", never a throw).
+ */
+export const SecretNamesSchema = z.object({
+	names: z.array(z.string()).catch([]),
+});
+export type SecretNamesWire = z.infer<typeof SecretNamesSchema>;
+
+/** The empty vault-settings view the panel shows before the first load (or on failure). */
+export const EMPTY_VAULT_SETTINGS: VaultSettingsWire = Object.freeze({ settings: {}, catalog: [] });
+
+// ─────────────────────────────────────────────────────────────────────────────
 // The typed fetch client. Every method validates its payload through zod, so the
 // React tree never sees an untyped/garbage value (AC-2 empty states are free).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -312,6 +372,21 @@ export interface WireClient {
 	logs(limit?: number): Promise<LogRecordWire[]>;
 	health(): Promise<HealthProbe>;
 	dream(): Promise<DreamAck>;
+	/** PRD-032c — read the vault `setting` class + the provider→model catalog (`GET /api/settings`). */
+	vaultSettings(): Promise<VaultSettingsWire>;
+	/**
+	 * PRD-032c — write one `setting`-class record through the daemon (`POST /api/settings/:key`).
+	 * Returns `true` iff the daemon accepted the write (2xx); the caller re-reads to reflect the
+	 * PERSISTED value (it never trusts a local-only toggle). The panel NEVER opens the vault
+	 * directly — every write goes through this loopback endpoint (PRD-020b posture).
+	 */
+	setSetting(key: string, value: SettingValueWire): Promise<boolean>;
+	/**
+	 * PRD-032c — read the names-only secret list (`GET /api/secrets`) for provider-key PRESENCE
+	 * ("set ✓" / "not set") ONLY. There is no value-returning route; this returns NAMES, never a
+	 * value (D-4 / AC-5).
+	 */
+	secretNames(): Promise<string[]>;
 }
 
 /** The empty/zero KPIs the UI shows before the first load resolves (or on failure). */
@@ -423,6 +498,35 @@ export function createWireClient(options: WireClientOptions = {}): WireClient {
 			} catch {
 				return { triggered: false, status: "skipped", reason: "unavailable" };
 			}
+		},
+		async vaultSettings(): Promise<VaultSettingsWire> {
+			// GET the `setting` class + catalog; a malformed/absent body degrades to the empty
+			// view (nothing selected, no catalog) so the panel renders its empty state, never throws.
+			return (await getJson(fetchImpl, url(ENDPOINTS.vaultSettings), VaultSettingsSchema)) ?? EMPTY_VAULT_SETTINGS;
+		},
+		async setSetting(key: string, value: SettingValueWire): Promise<boolean> {
+			try {
+				// POST /api/settings/:key with a JSON `{ value }` body — the Wave-1 handler's shape.
+				// The key is path-encoded so a `dashboard.*` dotted key (or any caller key) is a safe
+				// single path segment. The panel only ever sends its own known keys.
+				const res = await fetchImpl(url(`${ENDPOINTS.vaultSettings}/${encodeURIComponent(key)}`), {
+					method: "POST",
+					headers: { "content-type": "application/json", accept: "application/json", ...DASHBOARD_SESSION_HEADERS },
+					body: JSON.stringify({ value }),
+				});
+				// The daemon answers 201 on a successful write; any non-2xx (400 invalid value,
+				// 502 store failure) reads as "not accepted" so the caller does not optimistically
+				// reflect an un-persisted change — it re-reads and shows whatever actually persisted.
+				return res.ok;
+			} catch {
+				return false;
+			}
+		},
+		async secretNames(): Promise<string[]> {
+			// Names-only (D-4): the panel uses this purely for provider-key PRESENCE. A failure
+			// degrades to an empty list → every provider shows "not set" (never a throw, never a value).
+			const v = await getJson(fetchImpl, url(ENDPOINTS.secrets), SecretNamesSchema);
+			return v?.names ?? [];
 		},
 	};
 }

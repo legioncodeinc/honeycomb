@@ -124,5 +124,7 @@ stryker.log
 
 # Daemon runtime state — machine-local, never commit
 .secrets/
+.vault/
+.settings/
 .daemon/
 .smoke-daemon-bundle/

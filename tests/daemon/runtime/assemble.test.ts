@@ -11,7 +11,7 @@
  * 503 (unreachable). The PID/lock guard is exercised against a temp `~/.honeycomb`.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -21,12 +21,25 @@ import { type RuntimeConfig } from "../../../src/daemon/runtime/config.js";
 import { createRequestLogger } from "../../../src/daemon/runtime/logger.js";
 import {
 	type SeamFns,
+	type VaultSettingsReader,
 	DaemonAlreadyRunningError,
 	LOCK_FILE_NAME,
 	PID_FILE_NAME,
 	acquireSingleInstanceLock,
 	assembleDaemon,
 } from "../../../src/daemon/runtime/assemble.js";
+import { VaultStore } from "../../../src/daemon/runtime/vault/store.js";
+import { createVaultRegistry } from "../../../src/daemon/runtime/vault/registry.js";
+import type { SettingResult } from "../../../src/daemon/runtime/vault/store.js";
+import type { SettingValue } from "../../../src/daemon/runtime/vault/registry.js";
+import type { SecretScope } from "../../../src/daemon/runtime/secrets/contracts.js";
+import { createFakeMachineKeyProvider } from "../../../src/daemon/runtime/secrets/contracts.js";
+import {
+	CREDENTIALS_DIR_NAME,
+	CREDENTIALS_FILE_NAME,
+	ENV_TOKEN,
+} from "../../../src/daemon/runtime/auth/credentials-store.js";
+import { DEEPLAKE_TOKEN_NAME } from "../../../src/daemon/runtime/vault/migrate.js";
 import { noopFileWatcherService } from "../../../src/daemon/runtime/services/file-watcher.js";
 import { noopJobQueueService } from "../../../src/daemon/runtime/services/job-queue.js";
 import {
@@ -894,5 +907,395 @@ describe("PRD-026 AC-W the daemon-resident dreaming worker is gated on config.en
 		});
 		await expect(assembled.start()).resolves.toBeUndefined();
 		await assembled.shutdown();
+	});
+});
+
+describe("PRD-032d AC-6 the inference provider/model + dreaming flag are VAULT-DRIVEN (vault-first, agent.yaml/env fallback)", () => {
+	/**
+	 * A fake vault `setting`-class reader (the narrow `VaultSettingsReader` surface). A map of
+	 * `key → SettingValue` is the stored vault; a missing key resolves `not_found`. Records every
+	 * key read so a test proves assembly CONSULTED the vault. NEVER touches the real workspace.
+	 */
+	function fakeVault(settings: Record<string, SettingValue>): {
+		vault: VaultSettingsReader;
+		reads: string[];
+	} {
+		const reads: string[] = [];
+		const vault: VaultSettingsReader = {
+			async getSetting(key: string, _scope: SecretScope): Promise<SettingResult> {
+				reads.push(key);
+				if (Object.hasOwn(settings, key)) {
+					return { ok: true, value: settings[key] as SettingValue };
+				}
+				return { ok: false, reason: "not_found" };
+			},
+		};
+		return { vault, reads };
+	}
+
+	/** A fixed dreaming-config provider so the ENV gate is driven WITHOUT touching process.env. */
+	function dreamingProvider(over: { enabled?: unknown } = {}): DreamingConfigProvider {
+		return {
+			read(): RawDreamingConfig {
+				return { enabled: over.enabled, tokenThreshold: 1, maxInputTokens: 1, backfillOnFirstRun: false };
+			},
+		};
+	}
+
+	/** A recording fake dreaming worker (the DreamingJobWorker contract). */
+	function recordingWorker(): { worker: DreamingJobWorker; calls: { start: number; stop: number } } {
+		const calls = { start: 0, stop: 0 };
+		const worker: DreamingJobWorker = {
+			async runOnce(): Promise<boolean> {
+				return false;
+			},
+			start(): void {
+				calls.start += 1;
+			},
+			stop(): void {
+				calls.stop += 1;
+			},
+		};
+		return { worker, calls };
+	}
+
+	// ── d-AC-2: dreaming-enabled is VAULT-FIRST ──────────────────────────────────
+
+	it("d-AC-2: vault dreaming.enabled=true (env UNSET) → the worker IS started (no HONEYCOMB_DREAMING_ENABLED needed)", async () => {
+		const { worker, calls } = recordingWorker();
+		const { vault } = fakeVault({ "dreaming.enabled": true });
+		const assembled = assembleDaemon({
+			config: cfg({ mode: "local" }),
+			storage: fakeStorage(OK_RESULT),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+			embedSupervisor: noopEmbedSupervisor,
+			dreamingWorker: worker,
+			// The env says OFF (enabled:false); the vault says ON — the vault must WIN.
+			dreamingConfigProvider: dreamingProvider({ enabled: false }),
+			vault,
+		});
+		await assembled.start();
+		try {
+			expect(calls.start, "vault dreaming.enabled=true starts the worker even with env OFF").toBe(1);
+		} finally {
+			await assembled.shutdown();
+		}
+		expect(calls.stop).toBe(1);
+	});
+
+	it("d-AC-2 precedence: vault dreaming.enabled=false WINS over env enabled=true (vault-first)", async () => {
+		const { worker, calls } = recordingWorker();
+		const { vault } = fakeVault({ "dreaming.enabled": false });
+		const assembled = assembleDaemon({
+			config: cfg({ mode: "local" }),
+			storage: fakeStorage(OK_RESULT),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+			embedSupervisor: noopEmbedSupervisor,
+			dreamingWorker: worker,
+			// The env says ON; the vault says OFF — vault-first means the worker stays OFF.
+			dreamingConfigProvider: dreamingProvider({ enabled: true }),
+			vault,
+		});
+		await assembled.start();
+		try {
+			expect(calls.start, "a vault dreaming.enabled=false disables dreaming even when env is true").toBe(0);
+		} finally {
+			await assembled.shutdown();
+		}
+	});
+
+	it("d-AC-3: NO vault dreaming setting + env unset → the worker is NOT started (env fallback, no regression)", async () => {
+		const { worker, calls } = recordingWorker();
+		// An empty vault → the dreaming decision falls back to the env (enabled:false here).
+		const { vault } = fakeVault({});
+		const assembled = assembleDaemon({
+			config: cfg({ mode: "local" }),
+			storage: fakeStorage(OK_RESULT),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+			embedSupervisor: noopEmbedSupervisor,
+			dreamingWorker: worker,
+			dreamingConfigProvider: dreamingProvider({ enabled: false }),
+			vault,
+		});
+		await assembled.start();
+		try {
+			expect(calls.start, "an empty vault falls back to the env gate (OFF) — no worker").toBe(0);
+		} finally {
+			await assembled.shutdown();
+		}
+	});
+
+	it("d-AC-3: NO vault dreaming setting + env enabled=true → the worker IS started (env fallback preserved)", async () => {
+		const { worker, calls } = recordingWorker();
+		const { vault } = fakeVault({});
+		const assembled = assembleDaemon({
+			config: cfg({ mode: "local" }),
+			storage: fakeStorage(OK_RESULT),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+			embedSupervisor: noopEmbedSupervisor,
+			dreamingWorker: worker,
+			// Empty vault → env decides; env says ON → the worker starts (PRD-026 behavior intact).
+			dreamingConfigProvider: dreamingProvider({ enabled: true }),
+			vault,
+		});
+		await assembled.start();
+		try {
+			expect(calls.start, "an empty vault preserves the HONEYCOMB_DREAMING_ENABLED env fallback").toBe(1);
+		} finally {
+			await assembled.shutdown();
+		}
+		expect(calls.stop).toBe(1);
+	});
+
+	// ── d-AC-1: provider/model is VAULT-DRIVEN — assembly CONSULTS the vault ──────
+
+	it("d-AC-1: with dreaming enabled the assembly READS the vault provider/model keys (vault is consulted before the model build)", async () => {
+		// The REAL dreaming build runs (no injected worker), pointed at a missing agent.yaml so the
+		// model degrades to the no-op client (never a throw). The vault carries a valid catalog pair;
+		// we prove assembly READ `activeProvider` + `activeModel` (the override-resolution path runs).
+		const { vault, reads } = fakeVault({
+			"dreaming.enabled": true,
+			activeProvider: "anthropic",
+			activeModel: "claude-opus-4-8",
+		});
+		const assembled = assembleDaemon({
+			config: cfg({ mode: "local" }),
+			storage: fakeStorage(OK_RESULT),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+			embedSupervisor: noopEmbedSupervisor,
+			// No injected worker → the REAL build path runs, reaching the provider/model override read.
+			agentConfigPath: join(runtimeDir, "no-such-agent.yaml"),
+			dreamingConfigProvider: dreamingProvider({ enabled: false }), // vault drives the gate ON.
+			vault,
+		});
+		await expect(assembled.start()).resolves.toBeUndefined();
+		try {
+			// The daemon booted (model degraded to no-op, fail-soft) AND the vault was consulted for the
+			// provider/model selection — proving the override-resolution path ran (d-AC-1 / FR-1).
+			expect(reads).toContain("activeProvider");
+			expect(reads).toContain("activeModel");
+			const res = await assembled.daemon.app.request("/health");
+			expect(res.status).toBe(200);
+		} finally {
+			await assembled.shutdown();
+		}
+	});
+
+	// ── mountSettingsApi fired once + fail-soft boot ─────────────────────────────
+
+	it("AC-6: mountSettingsApi is fired — GET /api/settings responds on the assembled daemon (CLI/dashboard surface is live)", async () => {
+		// Inject a REAL VaultStore over a temp dir + fake machine-key so the settings mount fires and
+		// the route is reachable in-process. The route group is protect:true; in local mode the
+		// permission middleware is open, so a request reaches the handler.
+		const vaultBase = mkdtempSync(join(tmpdir(), "honeycomb-vault-"));
+		const realVault = new VaultStore({
+			baseDir: vaultBase,
+			machineKey: createFakeMachineKeyProvider("machine-settings"),
+			registry: createVaultRegistry(),
+		});
+		// Seed one setting so the GET list is non-empty (and proves the handler reads the store).
+		await realVault.setSetting("dreaming.enabled", true, { org: "local", workspace: "default" });
+		const assembled = assembleDaemon({
+			config: cfg({ mode: "local" }),
+			storage: fakeStorage(OK_RESULT),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+			embedSupervisor: noopEmbedSupervisor,
+			vault: realVault,
+		});
+		try {
+			const res = await assembled.daemon.app.request("/api/settings", {
+				method: "GET",
+				headers: { "x-honeycomb-org": "local", "x-honeycomb-workspace": "default" },
+			});
+			// The mount fired: the route resolves (200) and returns the catalog + the seeded setting.
+			expect(res.status).toBe(200);
+			const body = (await res.json()) as { settings: Record<string, unknown>; catalog: unknown[] };
+			expect(body.catalog.length).toBeGreaterThan(0);
+			expect(body.settings["dreaming.enabled"]).toBe(true);
+		} finally {
+			rmSync(vaultBase, { recursive: true, force: true });
+		}
+	});
+
+	it("AC-6 fail-soft: an empty/absent vault still boots the daemon cleanly (a vault read never blocks boot)", async () => {
+		// An empty fake vault: every getSetting is not_found. Provider/model + dreaming fall back; the
+		// daemon must boot + serve /health + shut down without error (the wire-back is fail-soft).
+		const { vault } = fakeVault({});
+		const assembled = assembleDaemon({
+			config: cfg({ mode: "local" }),
+			storage: fakeStorage(OK_RESULT),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+			embedSupervisor: noopEmbedSupervisor,
+			dreamingConfigProvider: dreamingProvider({ enabled: true }),
+			agentConfigPath: join(runtimeDir, "no-such-agent.yaml"),
+			vault,
+		});
+		await expect(assembled.start()).resolves.toBeUndefined();
+		try {
+			const res = await assembled.daemon.app.request("/health");
+			expect(res.status).toBe(200);
+		} finally {
+			await assembled.shutdown();
+		}
+	});
+});
+
+describe("PRD-032a AC-3 boot WIRING: start() invokes the DeepLake-token vault migration (live, non-destructive)", () => {
+	/**
+	 * THE boot-wiring proof for AC-3 (032d): the migration FUNCTION is unit-tested in the vault
+	 * suite; here we prove the daemon's `start()` actually CALLS it. We inject a REAL
+	 * {@link VaultStore} over a temp base dir + a fake machine-key + the real registry so the
+	 * `start()` guard `vault instanceof VaultStore` is satisfied and the migration block runs.
+	 *
+	 * The creds source is driven HERMETICALLY: the boot migration uses the DEFAULT reader
+	 * (`systemDeeplakeCredsReader` → `loadDiskCredentials()` → `~/.deeplake/credentials.json` via
+	 * `os.homedir()`). To keep the read off the real user home we point `USERPROFILE` (win32) AND
+	 * `HOME` (posix) at a per-test temp dir, seed a structurally-valid `DiskCredentials` under it
+	 * (or NOT, for the no-creds case), clear `HONEYCOMB_TOKEN` so the env-token rule never masks
+	 * the seeded file token, and RESTORE the env after each test. No network, no real `~/.deeplake`,
+	 * fully deterministic.
+	 *
+	 * The daemon's resolved scope for an injected fake `storage` with NO provider is the
+	 * `{ org: "local", workspace: "default" }` default (`resolveDaemonTenancy` step (c)), so the
+	 * boot migration writes under `secretScopeFromQueryScope({ org: "local", workspace: "default" })`
+	 * = `{ org: "local", workspace: "default" }` — the SAME scope we read the vault back with.
+	 */
+	const BOOT_SCOPE: SecretScope = { org: "local", workspace: "default" };
+	const SEEDED_TOKEN = "dl-boot-wired-token-abc123";
+
+	/** A temp HOME the seeded `~/.deeplake/credentials.json` lives under (per test). */
+	let homeDir: string;
+	/** A temp base dir the real VaultStore writes its records under (per test). */
+	let vaultBase: string;
+	/** The saved env we restore in afterEach so the global isolate-home redirect is preserved. */
+	let prevUserProfile: string | undefined;
+	let prevHome: string | undefined;
+	let prevToken: string | undefined;
+
+	/** Build the REAL VaultStore over the temp base dir + a fixed fake machine-key + the registry. */
+	function realVault(): VaultStore {
+		return new VaultStore({
+			baseDir: vaultBase,
+			machineKey: createFakeMachineKeyProvider("machine-boot-migration"),
+			registry: createVaultRegistry(),
+			clock: { now: () => "2026-06-21T00:00:00.000Z" },
+		});
+	}
+
+	/** Seed a structurally-valid `DiskCredentials` at `<homeDir>/.deeplake/credentials.json`. */
+	function seedCreds(token: string): string {
+		const dir = join(homeDir, CREDENTIALS_DIR_NAME);
+		mkdirSync(dir, { recursive: true });
+		const file = join(dir, CREDENTIALS_FILE_NAME);
+		// `isDiskCredentials` requires a non-empty `token` + `orgId`; `savedAt` is carried for a
+		// structurally-complete record (the loader tolerates it as a string).
+		const creds = {
+			token,
+			orgId: "71f2566d-OSPRY",
+			orgName: "OSPRY",
+			workspaceId: "default",
+			apiUrl: "https://api.deeplake.ai",
+			savedAt: "2026-06-21T00:00:00.000Z",
+		};
+		writeFileSync(file, `${JSON.stringify(creds, null, 2)}\n`, { encoding: "utf8" });
+		return file;
+	}
+
+	beforeEach(() => {
+		homeDir = mkdtempSync(join(tmpdir(), "honeycomb-boot-home-"));
+		vaultBase = mkdtempSync(join(tmpdir(), "honeycomb-boot-vault-"));
+		// Relocate the home `os.homedir()` resolves so the default creds reader NEVER touches the
+		// real `~/.deeplake`. Both vars are set: win32 reads USERPROFILE, POSIX reads HOME.
+		prevUserProfile = process.env.USERPROFILE;
+		prevHome = process.env.HOME;
+		prevToken = process.env[ENV_TOKEN];
+		process.env.USERPROFILE = homeDir;
+		process.env.HOME = homeDir;
+		// Clear the env-token override so `loadDiskCredentials` trusts the SEEDED file token (the env
+		// rule would otherwise replace it and the assertion would be vacuous).
+		delete process.env[ENV_TOKEN];
+	});
+
+	afterEach(() => {
+		// Restore the env EXACTLY (so the global isolate-home redirect resumes for later suites).
+		if (prevUserProfile === undefined) delete process.env.USERPROFILE;
+		else process.env.USERPROFILE = prevUserProfile;
+		if (prevHome === undefined) delete process.env.HOME;
+		else process.env.HOME = prevHome;
+		if (prevToken === undefined) delete process.env[ENV_TOKEN];
+		else process.env[ENV_TOKEN] = prevToken;
+		rmSync(homeDir, { recursive: true, force: true });
+		rmSync(vaultBase, { recursive: true, force: true });
+	});
+
+	it("AC-3 boot COPIES the DeepLake token into the vault (the migration FIRED) and leaves the plaintext creds BYTE-UNCHANGED", async () => {
+		const credsFile = seedCreds(SEEDED_TOKEN);
+		// Capture the plaintext bytes BEFORE boot so we can prove the migration is non-destructive.
+		const before = readFileSync(credsFile);
+
+		const vault = realVault();
+		const assembled = assembleDaemon({
+			config: cfg({ mode: "local" }),
+			storage: fakeStorage(OK_RESULT),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+			embedSupervisor: noopEmbedSupervisor,
+			// The REAL VaultStore satisfies the `vault instanceof VaultStore` guard → the boot
+			// migration block runs against it.
+			vault,
+		});
+
+		await assembled.start();
+		try {
+			// PROOF the migration FIRED: read the COPIED token back via the store's INTERNAL secret
+			// resolver under the daemon's resolved boot scope — it equals the seeded token.
+			const inVault = await vault.getSecretValue(DEEPLAKE_TOKEN_NAME, BOOT_SCOPE);
+			expect(inVault.ok).toBe(true);
+			expect(inVault.ok && inVault.value).toBe(SEEDED_TOKEN);
+		} finally {
+			await assembled.shutdown();
+		}
+
+		// NON-DESTRUCTIVE (D-3): the migration COPIES — it never writes the plaintext creds file.
+		// The bytes are identical and the file still exists.
+		expect(existsSync(credsFile)).toBe(true);
+		const after = readFileSync(credsFile);
+		expect(after.equals(before)).toBe(true);
+	});
+
+	it("AC-3 fail-soft: with NO ~/.deeplake/credentials.json the daemon still boots and the vault has NO DEEPLAKE_TOKEN (no_creds no-op)", async () => {
+		// Point HOME at a dir with NO `.deeplake/credentials.json` (we seed nothing): the default
+		// reader returns null → the migration is a `no_creds` NO-OP, never an error, never a write.
+		expect(existsSync(join(homeDir, CREDENTIALS_DIR_NAME, CREDENTIALS_FILE_NAME))).toBe(false);
+
+		const vault = realVault();
+		const assembled = assembleDaemon({
+			config: cfg({ mode: "local" }),
+			storage: fakeStorage(OK_RESULT),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+			embedSupervisor: noopEmbedSupervisor,
+			vault,
+		});
+
+		// The daemon boots cleanly even though there are no creds to migrate (fail-soft).
+		await expect(assembled.start()).resolves.toBeUndefined();
+		try {
+			// No creds → the migration was a no-op → the vault holds NO DEEPLAKE_TOKEN record.
+			const inVault = await vault.getSecretValue(DEEPLAKE_TOKEN_NAME, BOOT_SCOPE);
+			expect(inVault.ok).toBe(false);
+			// And the daemon is genuinely up (the boot completed past the migration block).
+			const res = await assembled.daemon.app.request("/health");
+			expect(res.status).toBe(200);
+		} finally {
+			await assembled.shutdown();
+		}
 	});
 });
