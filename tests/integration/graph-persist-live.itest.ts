@@ -33,6 +33,9 @@ import {
 	createStorageClient,
 	envCredentialProvider,
 	isOk,
+	minRowCount,
+	type QueryResult,
+	readConverged,
 	resolveStorageConfig,
 	type StorageClient,
 	sqlIdent,
@@ -77,47 +80,53 @@ const liveLogger = {
 };
 
 /**
- * How many times a verification SCAN is polled, unioning the distinct values it
- * observes. WHY this is needed (and is NOT a determinism crutch in the stage): this
- * backend serves a bare scan (`SELECT col FROM tbl …`) from segments of differing
- * freshness that flap NON-MONOTONICALLY, so a SINGLE immediate scan of just-written
- * rows can return a STALE subset (live evidence: a first pass that durably wrote 3
- * entities read back only `['hivemind']` on one scan, all 3 on another). This is the
- * same fact that forced `services/job-queue.ts`'s `discoverIds` to UNION a polled
- * `SELECT DISTINCT id` scan. A scan can MISS a row on a stale segment but never
- * INVENTS one, so unioning the distinct values across a few polls converges UP to the
- * durable truth — it can only turn a false-absent into the true-present, never
- * fabricate a row. The STAGE's writes are already durable + idempotent (proven by the
- * fast by-id idempotency probe); this helper fixes a genuinely-wrong TEST assumption:
- * that one bare scan sees every durably-written row. The exact-count assertions are
- * preserved — convergence makes them MEANINGFUL rather than flaky.
+ * Read a verification SCAN to convergence THROUGH the shared `readConverged` seam
+ * (PRD-028), returning the distinct string values of `column` in the converged result.
  *
- * NOTE the budget is exhausted in full (no early "size stopped growing" break): the
- * flap can serve the SAME stale segment on two consecutive polls, so a stable size
- * across two reads is NOT proof the full set was seen — only the union over the whole
- * budget reliably surfaces every segment. A scan never invents a row, so over-polling
- * only ever adds true rows; it cannot over-count.
+ * WHY a convergence read is needed (and is NOT a determinism crutch in the stage): this
+ * backend serves a bare scan (`SELECT col FROM tbl …`) from segments of differing
+ * freshness that flap NON-MONOTONICALLY, so a SINGLE immediate scan of just-written rows
+ * can return a STALE subset (live evidence: a first pass that durably wrote 3 entities
+ * read back only `['hivemind']` on one scan, all 3 on another). The STAGE's writes are
+ * already durable + idempotent (proven by the fast by-id idempotency probe); this read
+ * fixes a genuinely-wrong TEST assumption: that one bare scan sees every durably-written
+ * row.
+ *
+ * The bespoke union-poll this replaced is now the ONE shared seam: `readConverged` polls
+ * `query` (jittered backoff, bounded budget) until the predicate holds — here
+ * `minRowCount(expected)`, "a single segment served at least the `expected` durable
+ * rows". A scan never INVENTS a row, so once one poll sees `expected` rows that segment
+ * is the durable truth (no need to union across polls). The caller then asserts the
+ * EXACT distinct count on the converged result — the exact-count assertions are
+ * preserved; convergence makes them MEANINGFUL rather than flaky. On budget exhaustion
+ * the seam returns the LAST real (under-reporting) read, so a genuine shortfall still
+ * surfaces as a failing exact-count assertion rather than a hang.
  */
-const SCAN_POLLS = 20;
-
-/**
- * Poll a single-column scan {@link SCAN_POLLS} times and return the UNION of the
- * distinct string values observed across ALL polls. A scan never invents a row, so the
- * union is the true durable set, not an over-count.
- */
-async function scanDistinct(store: StorageClient, sql: string, column: string, s: QueryScope): Promise<Set<string>> {
+function distinctOf(result: QueryResult, column: string): Set<string> {
 	const seen = new Set<string>();
-	for (let poll = 0; poll < SCAN_POLLS; poll++) {
-		const res = await store.query(sql, s);
-		if (isOk(res)) {
-			for (const row of res.rows) {
-				const v = row[column];
-				if (typeof v === "string") seen.add(v);
-				else if (v !== undefined && v !== null) seen.add(String(v));
-			}
-		}
+	if (!isOk(result)) return seen;
+	for (const row of result.rows) {
+		const v = row[column];
+		if (typeof v === "string") seen.add(v);
+		else if (v !== undefined && v !== null) seen.add(String(v));
 	}
 	return seen;
+}
+
+/**
+ * Read `sql` to convergence on at least `expected` rows (the durable row count this scan
+ * must reach), then return the distinct values of `column` from the converged result.
+ * Replaces the hand-rolled union-poll with the shared `readConverged` seam.
+ */
+async function convergeDistinct(
+	store: StorageClient,
+	sql: string,
+	column: string,
+	s: QueryScope,
+	expected: number,
+): Promise<Set<string>> {
+	const result = await readConverged(store, sql, s, minRowCount(expected));
+	return distinctOf(result, column);
 }
 
 describe.skipIf(!HAS_TOKEN)("live graph-persist smoke (opt-in, real backend, idempotency check)", () => {
@@ -204,10 +213,11 @@ describe.skipIf(!HAS_TOKEN)("live graph-persist smoke (opt-in, real backend, ide
 
 		await persistGraphEntities(storageProxy, scope, enabledConfig(), MEMORY_ID, triples, liveLogger);
 
-		// Verify: read back the entities from the throwaway table. The scan is
-		// POLL-CONVERGENT (see scanDistinct) because a single immediate bare scan of
-		// just-written rows can return a stale subset on this backend.
-		const names = await scanDistinct(storage, `SELECT name FROM "${sqlIdent(TBL_ENTITIES)}"`, "name", scope);
+		// Verify: read back the entities from the throwaway table. The read is
+		// CONVERGENT via `readConverged` (see convergeDistinct) because a single immediate
+		// bare scan of just-written rows can return a stale subset on this backend. Converge
+		// on the 3 durable entity rows, then assert the exact distinct set.
+		const names = await convergeDistinct(storage, `SELECT name FROM "${sqlIdent(TBL_ENTITIES)}"`, "name", scope, 3);
 		// 3 distinct canonical entity names: "livedaemon", "liveport", "hivemind".
 		expect(names).toContain("livedaemon");
 		expect(names).toContain("liveport");
@@ -217,25 +227,27 @@ describe.skipIf(!HAS_TOKEN)("live graph-persist smoke (opt-in, real backend, ide
 
 		// Verify: a dependency edge persisted (the prior raw-insert never created this
 		// table; the heal-aware insert does). Two triples → two distinct dep edges.
-		const depIds = await scanDistinct(storage, `SELECT id FROM "${sqlIdent(TBL_DEPS)}"`, "id", scope);
+		const depIds = await convergeDistinct(storage, `SELECT id FROM "${sqlIdent(TBL_DEPS)}"`, "id", scope, 2);
 		expect(depIds.size, "two dependency edges persisted").toBe(2);
 
 		// Verify: mentions for the memory id exist. 3 distinct entities → 3 distinct
 		// mention links (deduped by entity_id + memory_id; "livedaemon" appears in
 		// both triples but mentions once for this memory).
-		const mentionMemIds = await scanDistinct(
+		const mentionMemIds = await convergeDistinct(
 			storage,
 			`SELECT memory_id FROM "${sqlIdent(TBL_MENTIONS)}" WHERE memory_id = ${sLiteral(MEMORY_ID)}`,
 			"memory_id",
 			scope,
+			1,
 		);
 		expect(mentionMemIds.has(MEMORY_ID), "mention rows for the memory id exist").toBe(true);
 
-		const mentionIds = await scanDistinct(
+		const mentionIds = await convergeDistinct(
 			storage,
 			`SELECT id FROM "${sqlIdent(TBL_MENTIONS)}" WHERE memory_id = ${sLiteral(MEMORY_ID)}`,
 			"id",
 			scope,
+			3,
 		);
 		expect(mentionIds.size, "exactly 3 distinct mention links (one per distinct entity)").toBe(3);
 	});
@@ -276,24 +288,27 @@ describe.skipIf(!HAS_TOKEN)("live graph-persist smoke (opt-in, real backend, ide
 		// scan drove a duplicate insert), which is why this test failed before the fix.
 		// The counts below are therefore FIRM equalities, not caveat-logged soft checks.
 
-		// Entity count is still exactly 3 (no new versions, no duplicate names).
-		const names = await scanDistinct(storage, `SELECT name FROM "${sqlIdent(TBL_ENTITIES)}"`, "name", scope);
+		// Entity count is still exactly 3 (no new versions, no duplicate names). Converge on
+		// the 3 durable rows, then assert the set did not GROW (idempotency: a scan never
+		// invents a row, so once 3 are seen, >3 would be a real duplicate and fail here).
+		const names = await convergeDistinct(storage, `SELECT name FROM "${sqlIdent(TBL_ENTITIES)}"`, "name", scope, 3);
 		expect(names).toContain("livedaemon");
 		expect(names).toContain("liveport");
 		expect(names).toContain("hivemind");
 		expect(names.size, "still exactly 3 canonical entities after second pass").toBe(3);
 
 		// Dependency edges did not grow (still 2 distinct deterministic edge ids).
-		const depIds = await scanDistinct(storage, `SELECT id FROM "${sqlIdent(TBL_DEPS)}"`, "id", scope);
+		const depIds = await convergeDistinct(storage, `SELECT id FROM "${sqlIdent(TBL_DEPS)}"`, "id", scope, 2);
 		expect(depIds.size, "no new dependency edges on second pass").toBe(2);
 
 		// Mention links did not grow (still 3 distinct deterministic mention ids for
 		// this memory — no new mention for a previously-seen (memory_id, entity_id)).
-		const mentionIds = await scanDistinct(
+		const mentionIds = await convergeDistinct(
 			storage,
 			`SELECT id FROM "${sqlIdent(TBL_MENTIONS)}" WHERE memory_id = ${sLiteral(MEMORY_ID)}`,
 			"id",
 			scope,
+			3,
 		);
 		expect(mentionIds.size, "no new mention links on second pass").toBe(3);
 	});

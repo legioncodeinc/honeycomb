@@ -117,6 +117,33 @@ export {
 	type VectorSearchArgs,
 } from "./vector.js";
 
+// ── PRD-028: read-your-writes convergence seam ─────────────────────────────
+export {
+	type ConvergeBudget,
+	type ConvergeBudgetOverride,
+	type ConvergeBudgetProvider,
+	type ConvergeClock,
+	type ConvergeTraceSink,
+	DEFAULT_CONVERGE_BACKOFF_BASE_MS,
+	DEFAULT_CONVERGE_BACKOFF_CAP_MS,
+	DEFAULT_CONVERGE_BUDGET,
+	DEFAULT_CONVERGE_MAX_ATTEMPTS,
+	DEFAULT_CONVERGE_MAX_WALL_CLOCK_MS,
+	envConvergeBudgetProvider,
+	minRowCount,
+	minVersion,
+	type RawConvergeBudget,
+	readConverged,
+	type ReadConvergedOptions,
+	type ReadWatermark,
+	resolveConvergeBudget,
+	rowPresent,
+	type SleepFn as ConvergeSleepFn,
+	watermarkOf,
+	watermarkPredicate,
+	type WatermarkPredicateOptions,
+} from "./converge.js";
+
 // ── PRD-030: storage-level version-history compaction ──────────────────────
 export {
 	assertVersionBumpedTable,

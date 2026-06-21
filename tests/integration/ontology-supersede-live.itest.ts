@@ -27,6 +27,9 @@ import {
 	createStorageClient,
 	envCredentialProvider,
 	isOk,
+	minRowCount,
+	type QueryResult,
+	readConverged,
 	resolveStorageConfig,
 	type QueryScope,
 	type StorageClient,
@@ -48,35 +51,48 @@ const RUN_ID = runId();
 const TBL_ATTRS = `ci_onto_${RUN_ID}_attrs`;
 
 /**
- * Poll a scan and resolve the CURRENT STATE per id = the HIGHEST-`version` row seen for
- * each id (the append-only reader convention — `supersede.ts`'s `readCurrentStateById`).
+ * Read a scan to convergence THROUGH the shared `readConverged` seam (PRD-028), then
+ * resolve the CURRENT STATE per id = the HIGHEST-`version` row in the converged result
+ * (the append-only reader convention — `supersede.ts`'s `readCurrentStateById`).
  *
  * The supersede mark is an APPEND, so an attribute id can have MULTIPLE physical rows on
  * disk (its original active version + its superseded version). Counting raw rows by
- * status is therefore wrong; the current state of an id is its highest-version row. We
- * poll because this backend serves a scan from segments of differing freshness — a scan
- * can MISS a durably-written row but never INVENTS one, so polling + keeping the highest
- * version per id converges UP to the durable current state.
+ * status is therefore wrong; the current state of an id is its highest-version row.
+ *
+ * The wait is now the ONE shared seam, not a hand-rolled poll loop: `readConverged` polls
+ * `query` (bounded budget, jittered backoff) until `minRowCount(expectedRows)` holds — "a
+ * single segment served at least the `expectedRows` durable rows this slot must reach". A
+ * scan can MISS a durably-written row on a stale segment but never INVENTS one, so once
+ * one poll returns `expectedRows` that segment IS the durable truth. The highest-version-
+ * per-id reduction then runs on the converged result. On budget exhaustion the seam
+ * returns the last real (under-reporting) read, so a genuine shortfall surfaces as a
+ * failing assertion, never a hang.
  */
-const SCAN_POLLS = 20;
-async function scanRows(store: StorageQuery, sql: string, s: QueryScope): Promise<Record<string, unknown>[]> {
+function reduceHighestVersionPerId(result: QueryResult): Record<string, unknown>[] {
 	const byId = new Map<string, Record<string, unknown>>();
 	const ver = (row: Record<string, unknown>): number => {
 		const n = typeof row.version === "number" ? row.version : Number(row.version);
 		return Number.isFinite(n) ? n : 0;
 	};
-	for (let poll = 0; poll < SCAN_POLLS; poll++) {
-		const res = await store.query(sql, s);
-		if (isOk(res)) {
-			for (const row of res.rows as Record<string, unknown>[]) {
-				const id = String(row.id ?? "");
-				if (id === "") continue;
-				const prev = byId.get(id);
-				if (!prev || ver(row) >= ver(prev)) byId.set(id, row); // keep the highest version
-			}
+	if (isOk(result)) {
+		for (const row of result.rows as Record<string, unknown>[]) {
+			const id = String(row.id ?? "");
+			if (id === "") continue;
+			const prev = byId.get(id);
+			if (!prev || ver(row) >= ver(prev)) byId.set(id, row); // keep the highest version
 		}
 	}
 	return [...byId.values()];
+}
+
+async function scanRows(
+	store: StorageQuery,
+	sql: string,
+	s: QueryScope,
+	expectedRows: number,
+): Promise<Record<string, unknown>[]> {
+	const result = await readConverged(store, sql, s, minRowCount(expectedRows));
+	return reduceHighestVersionPerId(result);
 }
 
 describe.skipIf(!HAS_TOKEN)("live ontology supersede smoke (opt-in, real backend)", () => {
@@ -148,6 +164,7 @@ describe.skipIf(!HAS_TOKEN)("live ontology supersede smoke (opt-in, real backend
 			storage,
 			`SELECT id, version, status, content FROM "${sqlIdent(TBL_ATTRS)}" WHERE claim_key = ${sLiteral(slotClaimKey("asp-live", slot))}`,
 			scope,
+			2,
 		);
 		expect(rows.length, "two version rows on disk").toBe(2);
 
