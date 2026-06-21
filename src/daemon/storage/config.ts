@@ -153,6 +153,7 @@ export function deeplakeCredentialsFileProvider(options: CredentialsFileProvider
 					token: undefined,
 					org: undefined,
 					workspace: undefined,
+					orgName: undefined,
 				};
 			}
 			return {
@@ -161,6 +162,10 @@ export function deeplakeCredentialsFileProvider(options: CredentialsFileProvider
 				token: disk.token,
 				org: disk.orgId,
 				workspace: disk.workspaceId,
+				// The friendly org name (display only) — NOT a storage-config field (the zod
+				// schema strips it). Carried so the daemon's settings view can show "OSPRY"
+				// instead of the org GUID. Never load-bearing for the connection.
+				orgName: disk.orgName,
 			};
 		},
 	};
@@ -197,6 +202,10 @@ export function defaultCredentialProvider(options: CredentialsFileProviderOption
 				token: mergeField(fromEnv.token, fromFile.token),
 				org: mergeField(fromEnv.org, fromFile.org),
 				workspace: mergeField(fromEnv.workspace, fromFile.workspace),
+				// The friendly org name is a file-only display field (the env provider carries
+				// none) — passed through from the file so the daemon's settings view can show it.
+				// The zod storage-config schema strips it; it is never part of the connection.
+				orgName: fromFile.orgName,
 				// Tuning knobs are env-only (the file carries none).
 				queryTimeoutMs: fromEnv.queryTimeoutMs,
 				traceSql: fromEnv.traceSql,

@@ -32,6 +32,7 @@ import { noopJobQueueService } from "../../../src/daemon/runtime/services/job-qu
 import { noopRuntimePathService } from "../../../src/daemon/runtime/middleware/runtime-path.js";
 import type { StorageClient } from "../../../src/daemon/storage/client.js";
 import type { QueryResult } from "../../../src/daemon/storage/result.js";
+import { fakeCredentialRecord, stubProvider } from "../../helpers/fake-deeplake.js";
 
 /** A resolved config for the assembly without touching env. */
 function cfg(over: Partial<RuntimeConfig> = {}): RuntimeConfig {
@@ -512,6 +513,111 @@ describe("a-AC-6 the PID/lock guard prevents a double-bind", () => {
 		const written = Number.parseInt(readFileSync(reacquired.lockPath, "utf8").trim(), 10);
 		expect(written).toBe(process.pid);
 		expect(written).not.toBe(DEAD_PID);
+	});
+});
+
+describe("fix/daemon-scope-from-credentials: the daemon's default scope comes from the SAME creds the client connected with", () => {
+	/**
+	 * Capturing seams that record the `defaultScope` + `orgName` the composition root threads
+	 * into the dashboard + data mounts. This is how we prove `resolveDaemonScope`/the tenancy
+	 * resolver fed the seams the credentials' org — NOT the `"local"` placeholder — and that the
+	 * storage client and the scope used the SAME resolved creds (no split).
+	 */
+	function capturingSeams(): {
+		seams: SeamFns;
+		captured: { dashboardScope?: QueryScope; dashboardOrgName?: string; memoriesScope?: QueryScope };
+	} {
+		const captured: { dashboardScope?: QueryScope; dashboardOrgName?: string; memoriesScope?: QueryScope } = {};
+		const noop = (() => {}) as never;
+		const seams: SeamFns = {
+			attachHooks: (() => ({ register() {}, recordTurn() {} })) as SeamFns["attachHooks"],
+			mountDashboard: ((_daemon, options) => {
+				captured.dashboardScope = options.defaultScope;
+				captured.dashboardOrgName = options.orgName;
+			}) as SeamFns["mountDashboard"],
+			mountNotifications: noop,
+			attachPrune: noop,
+			mountLogs: noop,
+			mountDashboardHost: noop,
+			mountMemories: ((_daemon, options) => {
+				captured.memoriesScope = options.defaultScope;
+			}) as SeamFns["mountMemories"],
+			mountVfs: noop,
+			mountProductData: noop,
+			mountDream: noop,
+		};
+		return { seams, captured };
+	}
+
+	it("with an injected credential provider (orgId/workspaceId/orgName) and NO env → scope is {org,workspace}, NOT 'local', and orgName is the friendly name", () => {
+		// The reproduction shape: a plain login, no env vars. The provider yields the real org
+		// from `~/.deeplake/credentials.json`; the daemon's default scope must be THAT org.
+		const provider = stubProvider(
+			fakeCredentialRecord({ org: "71f2566d-OSPRY", workspace: "default", orgName: "OSPRY" }),
+		);
+		const { seams, captured } = capturingSeams();
+		// No env override (the bug repro). The fake storage keeps the deterministic health bit, but
+		// the PROVIDER (not the fake client) is what feeds the scope — proving the two share one source.
+		delete process.env.HONEYCOMB_DEEPLAKE_ORG;
+		delete process.env.HONEYCOMB_DEEPLAKE_WORKSPACE;
+		assembleDaemon({
+			config: cfg({ mode: "local" }),
+			storage: fakeStorage(OK_RESULT),
+			provider,
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+			seams,
+		});
+		// The scope threaded into BOTH the dashboard view AND the data mounts is the creds' org —
+		// never the `"local"` placeholder (the bug). Same object value proves a single resolved source.
+		expect(captured.dashboardScope).toEqual({ org: "71f2566d-OSPRY", workspace: "default" });
+		expect(captured.memoriesScope).toEqual({ org: "71f2566d-OSPRY", workspace: "default" });
+		// The friendly orgName reaches the settings view (so the header shows "OSPRY", not the GUID).
+		expect(captured.dashboardOrgName).toBe("OSPRY");
+	});
+
+	it("with the env vars SET, env WINS over the file (the override + live-itest path is preserved)", () => {
+		const provider = stubProvider(
+			fakeCredentialRecord({ org: "file-org", workspace: "file-ws", orgName: "FileOrg" }),
+		);
+		const { seams, captured } = capturingSeams();
+		process.env.HONEYCOMB_DEEPLAKE_ORG = "env-org";
+		process.env.HONEYCOMB_DEEPLAKE_WORKSPACE = "env-ws";
+		try {
+			assembleDaemon({
+				config: cfg({ mode: "local" }),
+				storage: fakeStorage(OK_RESULT),
+				provider,
+				logger: createRequestLogger({ silent: true }),
+				runtimeDir,
+				seams,
+			});
+		} finally {
+			delete process.env.HONEYCOMB_DEEPLAKE_ORG;
+			delete process.env.HONEYCOMB_DEEPLAKE_WORKSPACE;
+		}
+		// Env overrides the file per-field — the escape hatch and the live-itest path still win.
+		expect(captured.dashboardScope).toEqual({ org: "env-org", workspace: "env-ws" });
+		// orgName is a file-only display field (env carries none) — still the file's friendly name.
+		expect(captured.dashboardOrgName).toBe("FileOrg");
+	});
+
+	it("with NO creds + NO env (injected fake client, no provider) → {org:'local', workspace:'default'} (the deterministic suite is unchanged)", () => {
+		const { seams, captured } = capturingSeams();
+		delete process.env.HONEYCOMB_DEEPLAKE_ORG;
+		delete process.env.HONEYCOMB_DEEPLAKE_WORKSPACE;
+		// No `provider` injected + a fake `storage` → no creds at all → the benign loopback fallback.
+		assembleDaemon({
+			config: cfg({ mode: "local" }),
+			storage: fakeStorage(OK_RESULT),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+			seams,
+		});
+		expect(captured.dashboardScope).toEqual({ org: "local", workspace: "default" });
+		expect(captured.memoriesScope).toEqual({ org: "local", workspace: "default" });
+		// No creds → no friendly name; the settings view falls back to the scope org (handled in api.ts).
+		expect(captured.dashboardOrgName).toBeUndefined();
 	});
 });
 
