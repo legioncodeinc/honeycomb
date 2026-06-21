@@ -15,6 +15,17 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Nightly run of the live-DeepLake integration suite. The suite only fires on
+  # `push` (merges to main), so a real backend can regress between merges and go
+  # unnoticed for days; a scheduled run catches drift on the real org without
+  # waiting for the next merge. 07:00 UTC is deliberately off-peak — roughly
+  # 23:00–00:00 US Pacific / 02:00–03:00 US Eastern — so it never contends with
+  # the working-hours push/PR CI load, and it lands on a fresh free-tier minute
+  # budget for the day. Still skip-safe: a scheduled run with no token (or on a
+  # fork, where scheduled workflows do not run anyway) hits the same
+  # `gate`→`has_token=false` path and SKIPS the integration job, staying green.
+  schedule:
+    - cron: '0 7 * * *'
 
 # Cancel a superseded run on the same ref (a force-push or a new commit on a PR)
 # so CI minutes are not spent on a stale commit.
@@ -144,7 +155,15 @@ jobs:
     name: Live DeepLake integration (gated)
     runs-on: ubuntu-latest
     needs: [quality-gate, gate]
-    if: ${{ github.event_name == 'push' && needs.gate.outputs.has_token == 'true' }}
+    # Runs on a merge to main (`push`) AND on the nightly `schedule`. In BOTH
+    # cases the `gate`→`has_token` guard is preserved verbatim: the live suite
+    # only runs when the HONEYCOMB_DEEPLAKE_TOKEN secret is present. A no-token
+    # run — a fork, the secret unset, or a scheduled run that somehow lacks the
+    # secret — resolves `has_token` to `false`, so this job is SKIPPED (never
+    # failed) and the workflow stays green. The `gate` job carries no job-level
+    # `if:`, so it runs on every trigger (push, pull_request, schedule) and its
+    # `has_token` output is always available to this `needs`-dependent job.
+    if: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && needs.gate.outputs.has_token == 'true' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4.2.2
