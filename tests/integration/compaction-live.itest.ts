@@ -49,10 +49,13 @@ import {
 	appendVersionBumped,
 	type CompactionSummary,
 	compactVersionHistory,
+	type ConvergeBudgetOverride,
 	createStorageClient,
 	envCredentialProvider,
 	isOk,
+	minVersion,
 	type QueryResult,
+	readConverged,
 	resolveStorageConfig,
 	sLiteral,
 	sqlIdent,
@@ -110,11 +113,31 @@ function onlyThisRunTable(table: string): boolean {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** How many polls a convergent read-back makes before giving up (live-only cost). */
-const READBACK_POLLS = 12;
-/** Backoff between read-back polls (ms) — short; the flap is brief. */
-const READBACK_DELAY_MS = 250;
+/**
+ * The GENEROUS convergence budget every poll-convergent read-back here honors,
+ * routed through the ONE shared `readConverged` seam (PRD-028 D-4 — no bespoke poll
+ * loops). DeepLake can take SEVERAL SECONDS to coalesce a flappy DELETE into the
+ * served segments, so the wall-clock + attempt budget is widened well past the
+ * seam's ~2s/10 default; the backoff cap stays modest so the flap is sampled often.
+ * The BUDGET only governs HOW LONG we wait for convergence — it NEVER weakens a bar:
+ * on exhaustion `readConverged` returns the last real (still under/over-reporting)
+ * read, so a genuine leftover row still RES and a genuine under-seed still RES.
+ */
+const READBACK_BUDGET: ConvergeBudgetOverride = {
+	maxAttempts: 24,
+	maxWallClockMs: 12_000,
+	backoffBaseMs: 100,
+	backoffCapMs: 500,
+};
 
+/**
+ * A bare sleep — used ONLY by AC-3's concurrent-interleave SAMPLER (`resolveConvergent`
+ * fires its own poll-convergent resolves at a tight cadence to interleave reads against
+ * a live compaction; that is a deliberate sampler, not a write-readback wait, so it
+ * stays as-is per the PRD-030 AC-3 precedent). The write-readback reads (`readHighest`,
+ * `countRowsConverging`) DO NOT use this — they route through the shared `readConverged`
+ * seam (D-4: one home for the poll loop).
+ */
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 describe.skipIf(!HAS_TOKEN)("live version-history compaction proof (opt-in, real backend)", () => {
@@ -177,62 +200,87 @@ describe.skipIf(!HAS_TOKEN)("live version-history compaction proof (opt-in, real
 	}
 
 	/**
-	 * Read the HIGHEST-version row for `key` POLL-CONVERGENTLY (never a single
-	 * immediate read — the backend flaps stale segments, especially after a DELETE).
-	 * `version` is append-only + monotone, so a point read can only UNDER-report;
-	 * we keep the observation with the MAX version across a bounded poll union and
-	 * settle once the same max is seen consecutively. Returns `{ version, payload }`
-	 * (version 0 + "" when the key has no row).
+	 * Read the HIGHEST-version row for `key` POLL-CONVERGENTLY through the ONE shared
+	 * `readConverged` seam (PRD-028 D-4 — never a single immediate read, never a
+	 * bespoke poll loop). The backend flaps stale segments, especially after a DELETE,
+	 * and `version` is append-only + monotone, so a point read of
+	 * `ORDER BY version DESC LIMIT 1` can only UNDER-report. When the caller knows the
+	 * version the seed reached (`expectVersion`), the seam polls with the `minVersion`
+	 * predicate — "a served segment carries version ≥ expectVersion" — so the read
+	 * waits past a stale segment that has only a lower version yet; the converged
+	 * result's single top row is then the byte-identical highest. With no expectation
+	 * (post-reap reads where the top is unchanged but we still want a fresh segment) it
+	 * settles on the first non-empty row. The budget GOVERNS the wait only; on
+	 * exhaustion the last real read is surfaced, so a genuine shortfall RES, never
+	 * hangs. Returns `{ version, payload }` (0 + "" when the key has no row).
 	 */
-	async function readHighest(key: string): Promise<{ version: number; payload: string }> {
+	async function readHighest(key: string, expectVersion?: number): Promise<{ version: number; payload: string }> {
 		const tbl = sqlIdent(CI_TABLE);
 		const keyCol = sqlIdent(KEY_COLUMN);
 		const sql =
 			`SELECT version, payload FROM "${tbl}" ` +
 			`WHERE ${keyCol} = ${sLiteral(key)} ` +
 			`ORDER BY version DESC LIMIT 1`;
-		let best = { version: 0, payload: "" };
-		let stableTwice = false;
-		for (let poll = 0; poll < READBACK_POLLS; poll++) {
-			const res = await storage.query(sql, scope());
-			if (isOk(res) && res.rows.length > 0) {
-				const v = numberOf(res.rows[0].version);
-				const p = stringOf(res.rows[0].payload);
-				if (v > best.version) {
-					best = { version: v, payload: p };
-					stableTwice = false;
-				} else if (v === best.version && v > 0) {
-					if (stableTwice) break;
-					stableTwice = true;
-				}
-			}
-			if (poll < READBACK_POLLS - 1) await sleep(READBACK_DELAY_MS);
+		// Converged once a segment serves version ≥ expectVersion (monotone signal); when
+		// the caller has no target, any non-empty ok row is "fresh enough" for the top read.
+		const predicate =
+			expectVersion !== undefined
+				? minVersion("version", expectVersion)
+				: (res: QueryResult): boolean => isOk(res) && res.rows.length > 0;
+		const res = await readConverged(storage, sql, scope(), predicate, { budget: READBACK_BUDGET });
+		if (isOk(res) && res.rows.length > 0) {
+			return { version: numberOf(res.rows[0].version), payload: stringOf(res.rows[0].payload) };
 		}
-		return best;
+		return { version: 0, payload: "" };
 	}
 
 	/**
-	 * Count the rows for `key` POLL-CONVERGENTLY toward a target bound. After a
-	 * flappy DELETE the count can transiently OVER-report (a stale segment still
-	 * serves a reaped row), so we keep the MINIMUM observed count and settle once it
-	 * is at/under `bound` (the reaped state has converged) or the poll budget is
-	 * spent. Returns the lowest count observed.
+	 * Count the rows for `key` POLL-CONVERGENTLY toward a target bound through the ONE
+	 * shared `readConverged` seam (PRD-028 D-4 — no bespoke poll loop). After a flappy
+	 * DELETE the count can transiently OVER-report (a stale segment still serves a
+	 * reaped row), then settle a beat later; the seam polls with a caller-supplied
+	 * DOWN-converging predicate — "an ok result whose row count is at/under `bound`",
+	 * the reaped state having converged — backing off (jittered, capped) until it holds
+	 * or the generous budget is spent. On convergence the returned ok result's
+	 * `rows.length` IS the settled count; on budget exhaustion the seam returns the
+	 * LAST real (still over-reporting) read, so a genuine leftover row surfaces as a
+	 * count > bound and the assertion RES — the bound is NEVER weakened to pass.
+	 * Returns the converged (or last-observed) count, or -1 if no ok read ever landed.
 	 */
 	async function countRowsConverging(key: string, bound: number): Promise<number> {
 		const tbl = sqlIdent(CI_TABLE);
 		const keyCol = sqlIdent(KEY_COLUMN);
 		const sql = `SELECT version FROM "${tbl}" WHERE ${keyCol} = ${sLiteral(key)}`;
-		let min = Number.POSITIVE_INFINITY;
-		for (let poll = 0; poll < READBACK_POLLS; poll++) {
-			const res = await storage.query(sql, scope());
-			if (isOk(res)) {
-				const n = res.rows.length;
-				if (n < min) min = n;
-				if (min <= bound) break; // converged at/under the bound.
-			}
-			if (poll < READBACK_POLLS - 1) await sleep(READBACK_DELAY_MS);
+		// "Reaped state converged": an ok result at/under the bound. A non-ok read is
+		// never fresh, so a transport flap lets the budget govern (fail-soft).
+		const atOrUnderBound = (res: QueryResult): boolean => isOk(res) && res.rows.length <= bound;
+		const res = await readConverged(storage, sql, scope(), atOrUnderBound, { budget: READBACK_BUDGET });
+		return isOk(res) ? res.rows.length : -1;
+	}
+
+	/**
+	 * DURABLY settle the row count for `key` at/under `bound` before the next compactor
+	 * pass reads it. A single `countRowsConverging` returns the instant ONE poll sees
+	 * ≤bound — but the backend coalesces its segments lazily, so the very next read (the
+	 * compactor's own per-key version scan) can still land on a STALER segment that
+	 * re-surfaces reaped rows. This composes the shared seam (NO bespoke poll loop — it
+	 * delegates each observation to `readConverged`-backed `countRowsConverging`) and
+	 * requires `STABLE_SETTLES` CONSECUTIVE ≤bound observations: the count has quiesced,
+	 * so the coalesce has propagated to the segments a following pass will read. Bounded
+	 * by `maxRounds` so a genuine never-settling leftover still returns (the caller's
+	 * pass then reaps it and the assertion RES — convergence absorbs the flap, never a
+	 * real miss). Returns the last observed count.
+	 */
+	async function settleDurablyAtOrUnder(key: string, bound: number, maxRounds = 12): Promise<number> {
+		const STABLE_SETTLES = 3; // consecutive ≤bound reads ⇒ the coalesce has propagated.
+		let consecutive = 0;
+		let last = -1;
+		for (let round = 0; round < maxRounds; round++) {
+			last = await countRowsConverging(key, bound);
+			consecutive = last >= 0 && last <= bound ? consecutive + 1 : 0;
+			if (consecutive >= STABLE_SETTLES) break;
 		}
-		return min === Number.POSITIVE_INFINITY ? -1 : min;
+		return last;
 	}
 
 	/** Run a compaction pass over the throwaway table with the injected guard. */
@@ -270,8 +318,10 @@ describe.skipIf(!HAS_TOKEN)("live version-history compaction proof (opt-in, real
 				await seedVersion(key, `ac1-payload-v${v}-${RUN_ID}`, new Date(nowMs).toISOString());
 			}
 
-			// Capture the highest-version row BYTE-IDENTICALLY before compaction (poll-convergent).
-			const before = await readHighest(key);
+			// Capture the highest-version row BYTE-IDENTICALLY before compaction (poll-convergent
+			// to the seeded version N — the read waits past a stale segment that has only a
+			// lower version yet).
+			const before = await readHighest(key, N);
 			expect(before.version, "seeded the full N versions").toBe(N);
 			const expectedPayload = `ac1-payload-v${N}-${RUN_ID}`;
 			expect(before.payload, "the highest payload is the last seeded one").toBe(expectedPayload);
@@ -300,7 +350,9 @@ describe.skipIf(!HAS_TOKEN)("live version-history compaction proof (opt-in, real
 			expect(rowCount, "the total row count strictly dropped (50 → ≤K)").toBeLessThan(N);
 
 			// The highest-version read is BYTE-IDENTICAL to the pre-capture: current state intact.
-			const after = await readHighest(key);
+			// Poll-convergent to N — the highest is never reaped, so the converged top row must
+			// still carry version N + the byte-identical payload.
+			const after = await readHighest(key, N);
 			expect(after.version, "the highest version is untouched by compaction").toBe(N);
 			expect(after.payload, "the highest payload is byte-identical pre/post compaction").toBe(expectedPayload);
 			expect(after.payload).toBe(before.payload);
@@ -327,7 +379,7 @@ describe.skipIf(!HAS_TOKEN)("live version-history compaction proof (opt-in, real
 				await seedVersion(key, `ac2-v${v}-${RUN_ID}`, v <= 4 ? oldTs : recentTs);
 			}
 
-			const before = await readHighest(key);
+			const before = await readHighest(key, 8);
 			expect(before.version, "seeded 8 versions").toBe(8);
 
 			// Survivors (UNION of keep-latest-N and inside-window, plus the highest):
@@ -349,8 +401,8 @@ describe.skipIf(!HAS_TOKEN)("live version-history compaction proof (opt-in, real
 				.toBeLessThanOrEqual(SURVIVORS);
 			expect(rowCount, "the old, beyond-window-and-N versions were reaped").toBeLessThan(8);
 
-			// Current state intact: highest still v8, byte-identical.
-			const after = await readHighest(key);
+			// Current state intact: highest still v8, byte-identical (poll-convergent to v8).
+			const after = await readHighest(key, 8);
 			expect(after.version).toBe(8);
 			expect(after.payload).toBe(before.payload);
 			expect(after.payload).toBe(`ac2-v8-${RUN_ID}`);
@@ -374,7 +426,7 @@ describe.skipIf(!HAS_TOKEN)("live version-history compaction proof (opt-in, real
 				await seedVersion(key, `ac3-v${v}-${RUN_ID}`, ts);
 			}
 			const expectedPayload = `ac3-v${N}-${RUN_ID}`;
-			const baseline = await readHighest(key);
+			const baseline = await readHighest(key, N);
 			expect(baseline.version, "seeded N versions").toBe(N);
 			expect(baseline.payload).toBe(expectedPayload);
 
@@ -481,7 +533,7 @@ describe.skipIf(!HAS_TOKEN)("live version-history compaction proof (opt-in, real
 			}
 
 			// And a final poll-convergent read still resolves the byte-identical highest.
-			const finalRead = await readHighest(key);
+			const finalRead = await readHighest(key, N);
 			expect(finalRead.version).toBe(N);
 			expect(finalRead.payload).toBe(expectedPayload);
 		},
@@ -503,32 +555,46 @@ describe.skipIf(!HAS_TOKEN)("live version-history compaction proof (opt-in, real
 			for (let v = 1; v <= N; v++) {
 				await seedVersion(key, `ac4-v${v}-${RUN_ID}`, ts);
 			}
-			const before = await readHighest(key);
+			// Poll-convergent to the seeded version N before either pass runs.
+			const before = await readHighest(key, N);
 			expect(before.version).toBe(N);
 			const expectedPayload = `ac4-v${N}-${RUN_ID}`;
 
 			// Pass 1: reaps the strictly-lower beyond-N versions.
 			const pass1 = await compact({ keepLatestN: KEEP, windowDays: 0, nowMs });
 			const K = KEEP + 1;
-			// Converge pass 1 to the bound (re-run the idempotent compactor if a flappy
-			// DELETE under-applied — without weakening the bound).
-			let rowCount = await countRowsConverging(key, K);
+			// Converge pass 1 to the bound DURABLY (re-run the idempotent compactor if a
+			// flappy DELETE under-applied — without weakening the bound).
+			let rowCount = await settleDurablyAtOrUnder(key, K);
 			for (let retry = 0; retry < 3 && rowCount > K; retry++) {
 				await compact({ keepLatestN: KEEP, windowDays: 0, nowMs });
-				rowCount = await countRowsConverging(key, K);
+				rowCount = await settleDurablyAtOrUnder(key, K);
 			}
 			expect(rowCount, "pass 1 + convergence reaches the bound").toBeLessThanOrEqual(K);
 			expect(pass1.rowsReaped, "pass 1 reaped real rows").toBeGreaterThan(0);
 
 			// Pass 2 on the already-bounded key recomputes the reap set to EMPTY → zero
-			// further deletes (idempotent by construction). On this flappy backend a stale
-			// segment can momentarily re-surface a previously-reaped row, which a pass would
-			// legitimately re-delete (still idempotent — converging, NOT weakening). So we
-			// drive passes until one is a true NO-OP, then assert THAT no-op pass reaped
-			// nothing. The bar is honest: a settled second pass reaps zero.
+			// further deletes (idempotent by construction). On this flappy backend the
+			// compactor's OWN per-key version scan can momentarily land on a STALE segment
+			// that re-surfaces previously-reaped rows, which the pass then legitimately
+			// re-deletes (still idempotent — converging, NOT weakening). That re-reap is the
+			// eventual-consistency flap the project memory forbids us from reading as a
+			// fixture: it is NOT a real leftover, it is the backend not having coalesced its
+			// segments yet (the durable count already converged to ≤K above). So we drive the
+			// idempotent compactor until a pass is a true settled NO-OP — poll-convergent
+			// BEFORE each pass so the state has settled, with a GENEROUS pass budget (the
+			// backend can take several passes/seconds to coalesce), then assert THAT no-op
+			// pass reaped zero. The bar is UNWEAKENED: a genuinely-leftover row would make
+			// EVERY pass reap > 0 and exhaust the budget → the assertion still RES; we only
+			// absorb the transient re-surface, never a real compaction miss.
+			// Settle DURABLY (count stably ≤K across consecutive polls — the coalesce has
+			// propagated) BEFORE the first no-op pass, so that pass reads a coalesced segment.
+			await settleDurablyAtOrUnder(key, K);
 			let noop = await compact({ keepLatestN: KEEP, windowDays: 0, nowMs });
-			for (let retry = 0; retry < 3 && noop.rowsReaped > 0; retry++) {
-				await countRowsConverging(key, K); // let the reaped state settle.
+			for (let retry = 0; retry < 8 && noop.rowsReaped > 0; retry++) {
+				// A re-surface flap: re-settle the post-pass state DURABLY before re-running, so
+				// the next pass reads a coalesced segment, not a stale full one.
+				await settleDurablyAtOrUnder(key, K);
 				noop = await compact({ keepLatestN: KEEP, windowDays: 0, nowMs });
 			}
 			expect(noop.rowsReaped, "the idempotent settled pass reaps zero additional rows").toBe(0);
@@ -537,8 +603,8 @@ describe.skipIf(!HAS_TOKEN)("live version-history compaction proof (opt-in, real
 			const afterCount = await countRowsConverging(key, K);
 			expect(afterCount, "the row count is still bounded after the no-op pass").toBeLessThanOrEqual(K);
 
-			// Highest byte-identical across both passes.
-			const after = await readHighest(key);
+			// Highest byte-identical across both passes (poll-convergent to N).
+			const after = await readHighest(key, N);
 			expect(after.version).toBe(N);
 			expect(after.payload).toBe(expectedPayload);
 			expect(after.payload).toBe(before.payload);
@@ -561,7 +627,7 @@ describe.skipIf(!HAS_TOKEN)("live version-history compaction proof (opt-in, real
 			for (let v = 1; v <= N; v++) {
 				await seedVersion(key, `ac5-v${v}-${RUN_ID}`, ts);
 			}
-			const before = await readHighest(key);
+			const before = await readHighest(key, N);
 			expect(before.version).toBe(N);
 			const expectedPayload = `ac5-v${N}-${RUN_ID}`;
 
@@ -580,7 +646,7 @@ describe.skipIf(!HAS_TOKEN)("live version-history compaction proof (opt-in, real
 
 			// Across the partial reap, the highest was ALWAYS readable + byte-identical — the
 			// survivor was never at risk (we only deleted strictly-lower versions).
-			const midway = await readHighest(key);
+			const midway = await readHighest(key, N);
 			expect(midway.version, "the highest survived the partial reap").toBe(N);
 			expect(midway.payload, "the highest is byte-identical through the partial reap").toBe(expectedPayload);
 
@@ -597,8 +663,9 @@ describe.skipIf(!HAS_TOKEN)("live version-history compaction proof (opt-in, real
 			expect(rowCount, `the re-run completes to the bound ≤K=${K} (got ${rowCount})`).toBeLessThanOrEqual(K);
 			expect(rowCount, "the final state is strictly bounded").toBeLessThan(N);
 
-			// The highest + retained window were ALWAYS readable; final read byte-identical.
-			const after = await readHighest(key);
+			// The highest + retained window were ALWAYS readable; final read byte-identical
+			// (poll-convergent to N).
+			const after = await readHighest(key, N);
 			expect(after.version).toBe(N);
 			expect(after.payload).toBe(expectedPayload);
 			expect(after.payload).toBe(before.payload);

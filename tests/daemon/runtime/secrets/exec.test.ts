@@ -25,7 +25,7 @@
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
 	createFakeMachineKeyProvider,
@@ -267,10 +267,16 @@ describe("b-AC-5 a job exceeding its timeout is killed → terminal + redacted p
 		if (!res.ok) return;
 		await runner.waitFor(res.jobId);
 
+		expect(runner.getStatus(res.jobId, SCOPE)?.status).toBe("timed_out");
+		expect(runner.getStatus(res.jobId, SCOPE)?.timedOut).toBe(true);
+		// The partial output it DID emit before the kill is present but REDACTED. Under parallel
+		// load the killed child's buffered stdout is drained slightly after the job settles, so
+		// POLL the redacted status (a bounded waitFor) rather than reading it at a fixed instant —
+		// the assertion intent is unchanged (the partial IS captured + carries the marker).
+		await vi.waitFor(() => {
+			expect(runner.getStatus(res.jobId, SCOPE)?.stdout).toContain("partial:");
+		});
 		const view = runner.getStatus(res.jobId, SCOPE);
-		expect(view?.status).toBe("timed_out");
-		expect(view?.timedOut).toBe(true);
-		// The partial output it DID emit before the kill is present but REDACTED.
 		expect(view?.stdout).toContain("partial:");
 		expect(view?.stdout).not.toContain(SECRET);
 		auditHasNoSecret(audit.events);
