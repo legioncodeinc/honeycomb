@@ -17,7 +17,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { createWireClient, DASHBOARD_SESSION_HEADERS } from "../../../src/dashboard/web/wire.js";
+import { createWireClient, DASHBOARD_SESSION_HEADERS, HealthBodySchema, HealthReasonsSchema } from "../../../src/dashboard/web/wire.js";
 
 /** Lowercase a HeadersInit (object | Headers | array) into a flat record for assertion. */
 function headerRecord(init: RequestInit | undefined): Record<string, string> {
@@ -164,5 +164,66 @@ describe("PRD-027 AC-4: recall() carries the ENGINE score in ENGINE order (no `1
 		expect(memories[0]?.score).toBe(0);
 		expect(memories[0]?.kind).toBe("memory");
 		expect(memories[0]?.secondary).toBe(false);
+	});
+});
+
+describe("PRD-029: health() threads the per-subsystem reasons through the IO boundary defensively", () => {
+	/** A fetch mock answering /health with a given body + HTTP status; everything else 404s. */
+	function healthFetch(body: BodyInit | null, status = 200): typeof fetch {
+		return vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url.endsWith("/health")) return new Response(body, { status, headers: { "content-type": "application/json" } });
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch;
+	}
+
+	it("a local /health body with reasons → { up:true, reasons:{…} } parsed through zod", async () => {
+		const client = createWireClient({
+			fetchImpl: healthFetch(JSON.stringify({ status: "ok", pipeline: "ok", reasons: { storage: "reachable", embeddings: "off", schema: "ok" } })),
+		});
+		const probe = await client.health();
+		expect(probe.up).toBe(true);
+		expect(probe.reasons).toEqual({ storage: "reachable", embeddings: "off", schema: "ok" });
+	});
+
+	it("a public body WITHOUT reasons (mode-gated) → { up:true, reasons:null } — no throw", async () => {
+		const client = createWireClient({ fetchImpl: healthFetch(JSON.stringify({ status: "ok", pipeline: "ok" })) });
+		const probe = await client.health();
+		expect(probe.up).toBe(true);
+		expect(probe.reasons).toBeNull();
+	});
+
+	it("an EMPTY body (the 503-degraded / bare-200 path) → reasons:null, up tracks res.ok", async () => {
+		// Degraded daemon: 503 + empty body. `up` is false (res.ok), reasons null (json() throws, caught).
+		const down = createWireClient({ fetchImpl: healthFetch("", 503) });
+		const downProbe = await down.health();
+		expect(downProbe.up).toBe(false);
+		expect(downProbe.reasons).toBeNull();
+		// Healthy daemon, but an empty 200 body (pre-029 servers): up true, reasons null, still no throw.
+		const up = createWireClient({ fetchImpl: healthFetch("", 200) });
+		const upProbe = await up.health();
+		expect(upProbe.up).toBe(true);
+		expect(upProbe.reasons).toBeNull();
+	});
+
+	it("a malformed reasons block degrades each field to its HEALTHY default (no throw into React)", () => {
+		// An unknown enum value / wrong type for a field `.catch()`es to the healthy literal.
+		const parsed = HealthReasonsSchema.parse({ storage: "weird", embeddings: 42, schema: null });
+		expect(parsed).toEqual({ storage: "reachable", embeddings: "on", schema: "ok" });
+	});
+
+	it("a network error → { up:false, reasons:null }", async () => {
+		const fetchImpl = vi.fn(async (): Promise<Response> => {
+			throw new Error("ECONNREFUSED");
+		}) as unknown as typeof fetch;
+		const probe = await createWireClient({ fetchImpl }).health();
+		expect(probe).toEqual({ up: false, reasons: null });
+	});
+
+	it("AC-5: the reasons schema is a CLOSED enum set — it cannot carry a free-form secret string", () => {
+		// A body trying to smuggle a token into a reason field is rejected → healthy default, never echoed.
+		const parsed = HealthBodySchema.parse({ status: "ok", reasons: { storage: "Bearer sk-secret-123", embeddings: "on", schema: "ok" } });
+		expect(parsed.reasons?.storage).toBe("reachable"); // the smuggled string is dropped, not surfaced
+		expect(JSON.stringify(parsed)).not.toContain("sk-secret-123");
 	});
 });

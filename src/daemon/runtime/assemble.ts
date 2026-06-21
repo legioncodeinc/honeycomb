@@ -83,8 +83,10 @@ import {
 } from "../storage/config.js";
 import type { QueryScope, StorageClient } from "../storage/client.js";
 import { isOk } from "../storage/result.js";
-import { type EmbedAttachment, createEmbedAttachment } from "./services/embed-client.js";
+import { type EmbedAttachment, createEmbedAttachment, resolveEmbedClientOptions } from "./services/embed-client.js";
 import { type EmbedSupervisor, createEmbedSupervisor } from "./services/embed-supervisor.js";
+import { type HealthDetail, buildHealthDetail } from "./health.js";
+import { mountDiagnosticsHealthApi } from "./diagnostics-health.js";
 
 /**
  * The inference-config filename the daemon reads its `inference:` block from (PRD-026
@@ -185,6 +187,17 @@ export interface AssembleDaemonOptions {
 	 */
 	readonly embedSupervisor?: EmbedSupervisor;
 	/**
+	 * Whether the REAL embedder is wired, for the PRD-029 `/health` `reasons.embeddings`
+	 * signal (AC-2). Production leaves it UNSET → the composition root derives it from the
+	 * embed seam: when the real `createEmbedAttachment` is built it reads
+	 * `resolveEmbedClientOptions().enabled` (the `HONEYCOMB_EMBEDDINGS` opt-out), and when a
+	 * test injects a fake {@link embed} it defaults to `false` (the hermetic no-op reports
+	 * `off`). A test sets this explicitly to drive the `on`/`off` reason deterministically
+	 * without touching `process.env`. Reflects the embed-seam state KNOWN AT ASSEMBLY (D-4);
+	 * it is NOT a live probe.
+	 */
+	readonly embeddingsEnabled?: boolean;
+	/**
 	 * The filesystem path to the `inference:` config (`agent.yaml`) the daemon builds its
 	 * real {@link ModelClient} from (PRD-026 AC-T). Defaults to `agent.yaml` under
 	 * `$HONEYCOMB_WORKSPACE` (the daemon's cwd when unset) — the SAME base the `.secrets/`
@@ -246,6 +259,14 @@ export interface SeamFns {
 	 * `local`, gated in team/hybrid). Fail-soft — a mount error never crashes the daemon.
 	 */
 	readonly mountCompact: typeof mountCompactApi;
+	/**
+	 * The protected per-subsystem health detail — `GET /api/diagnostics/health` (PRD-029 /
+	 * AC-3). Fires UNCONDITIONALLY: its `/api/diagnostics` group is already `protect:true`, so
+	 * the full `reasons` detail it exposes is gated in team/hybrid (open in local) — exactly
+	 * the D-2 surface for the topology that the public `/health` withholds from an
+	 * unauthenticated remote.
+	 */
+	readonly mountDiagnosticsHealth: typeof mountDiagnosticsHealthApi;
 }
 
 /** The REAL seam functions (the production wiring). */
@@ -261,6 +282,7 @@ export const defaultSeamFns: SeamFns = {
 	mountProductData: mountProductDataApi,
 	mountDream: mountDreamApi,
 	mountCompact: mountCompactApi,
+	mountDiagnosticsHealth: mountDiagnosticsHealthApi,
 };
 
 /** An assembled, fully-wired daemon plus the composition root's lifecycle controls. */
@@ -438,6 +460,7 @@ export function assembleSeams(
 	defaultScope: QueryScope,
 	orgName: string | undefined,
 	embed: EmbedAttachment,
+	healthDetail: () => HealthDetail,
 	seams: SeamFns = defaultSeamFns,
 ): void {
 	// The daemon's configured default tenancy scope (the single LOCAL tenant) is RESOLVED ONCE
@@ -514,7 +537,10 @@ export function assembleSeams(
 	//    null and the row lands lexically (NULL vector), still recallable via the lexical
 	//    arm. This replaces the PRD-004 501 scaffold: after this, `honeycomb recall`/
 	//    `remember`, the SDK `recall()`, and the MCP `memory_search` reach a REAL handler.
-	seams.mountMemories(daemon, { storage, defaultScope, embed: embed.client });
+	// PRD-029 (AC-4): thread the daemon's ring-buffer logger so a recall that runs DEGRADED
+	// (lexical fallback) emits one structured `recall.degraded` event (mode + arm coverage;
+	// no secret). Threaded here only — the recall HANDLER owns the emit; the engine is unchanged.
+	seams.mountMemories(daemon, { storage, defaultScope, embed: embed.client, logger: daemon.logger });
 
 	// 8. The /memory/* VFS browse reads (022b). cat / grep / ls / find / classify attach
 	//    onto the already-mounted `/memory` SESSION group; `recallConfig` defaults to the
@@ -559,6 +585,15 @@ export function assembleSeams(
 		const reason = err instanceof Error ? err.message : String(err);
 		process.stderr.write(`honeycomb: compaction route mount failed (non-fatal): ${reason}\n`);
 	}
+
+	// 12. The protected per-subsystem health detail — `GET /api/diagnostics/health` (PRD-029 /
+	//     AC-3 / D-2). Attaches onto the same already-mounted, protected `/api/diagnostics`
+	//     group (NO `server.ts` edit), so it inherits the dashboard JSON views' auth/RBAC (open
+	//     in `local`, gated in team/hybrid). It serves the FULL {@link HealthDetail} (status +
+	//     `reasons`) — the topology the PUBLIC `/health` withholds from an unauthenticated remote
+	//     in team/hybrid. A synchronous read of the cached health bit + assembly-known embed
+	//     state (the `healthDetail` thunk) — NO new probe (D-4).
+	seams.mountDiagnosticsHealth(daemon, { healthDetail });
 }
 
 /**
@@ -775,6 +810,20 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	let healthBit: PipelineStatus = "ok";
 	const pipelineProbe = (): PipelineStatus => healthBit;
 
+	// ── PRD-029 (AC-2): the structured `/health` detail. The `embeddings` reason reflects
+	// the embed-seam state KNOWN AT ASSEMBLY (D-4), NOT a probe: when a test injects a fake
+	// `embed`, default to `false` (the hermetic no-op reports `off`); otherwise read the
+	// `HONEYCOMB_EMBEDDINGS` opt-out via `resolveEmbedClientOptions().enabled` (the same flag
+	// the real `createEmbedAttachment` honours). An explicit `embeddingsEnabled` option wins
+	// (a deterministic test drive). The `storage` reason is derived from the SAME cached
+	// `healthBit` the coarse probe maintains; `schema` stays best-effort `ok` (no cheap
+	// always-on missing-table signal at the health seam — conservative, never a false
+	// `missing_table`). The thunk reads live state on each call, so a probe flip to `degraded`
+	// is reflected on the next `/health` read.
+	const embeddingsEnabled =
+		options.embeddingsEnabled ?? (options.embed !== undefined ? false : resolveEmbedClientOptions().enabled);
+	const healthDetail = (): HealthDetail => buildHealthDetail({ status: healthBit, embeddingsEnabled });
+
 	const { authenticator, policy } = authForMode(config.mode, storage, scope);
 
 	const createOptions: CreateDaemonOptions = {
@@ -785,6 +834,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		logger,
 		services,
 		pipelineProbe,
+		healthDetail,
 	};
 	const daemon = createDaemon(createOptions);
 
@@ -800,7 +850,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// ── a-AC-2 / d-AC-1: fire the seams EXACTLY ONCE, after construction (the four core
 	// seams + the /api/logs reader always; the /dashboard host local-mode only per security
 	// F-1; PLUS the three data-API seams — memories/vfs/product-data — always, 022d).
-	assembleSeams(daemon, storage, scope, daemonOrgName, embed, options.seams ?? defaultSeamFns);
+	assembleSeams(daemon, storage, scope, daemonOrgName, embed, healthDetail, options.seams ?? defaultSeamFns);
 
 	// ── The cached-health refresher: a cheap connectivity round trip on an interval,
 	// updating the bit `/health` reads. Unref'd so it never keeps the process alive.

@@ -189,6 +189,49 @@ export const DreamAckSchema = z.object({
 });
 export type DreamAck = z.infer<typeof DreamAckSchema>;
 
+/**
+ * The PRD-029 per-subsystem `/health` `reasons` block (D-2 render). This MIRRORS the
+ * Wave-1 daemon contract `HealthReasons` in `src/daemon/runtime/health.ts` verbatim — a
+ * closed enum per subsystem, NO secret (D-5: no token/org/endpoint/header rides these,
+ * only subsystem names + coarse states). The dashboard is LOCAL-mode so the daemon's
+ * `/health` body carries this block; on a non-local public body it is absent (the strip
+ * renders nothing — handled at the call site by a `null` reasons).
+ *
+ * Each field `.catch()`es to its HEALTHY value so a malformed/partial `reasons` degrades
+ * to "looks ok" rather than throwing into React — the body crosses the untyped IO boundary
+ * exactly like every other endpoint here. An UNKNOWN enum value (a future daemon adds a
+ * state) also `.catch()`es to the healthy default, never a throw.
+ */
+export const HealthReasonsSchema = z.object({
+	storage: z.enum(["reachable", "unreachable"]).catch("reachable"),
+	embeddings: z.enum(["on", "off"]).catch("on"),
+	schema: z.enum(["ok", "missing_table"]).catch("ok"),
+});
+export type HealthReasonsWire = z.infer<typeof HealthReasonsSchema>;
+
+/**
+ * The `/health` body the daemon serves (the coarse bit + the additive PRD-029 `reasons`).
+ * `reasons` is OPTIONAL — absent on the mode-gated public team/hybrid body, present in
+ * local (which the dashboard always is). The whole body `.catch()`es a bad shape so a
+ * malformed `/health` degrades to "no reasons" (coarse pill only), never a throw.
+ *
+ * NOTE the coarse liveness the app's view-swap keys off (`daemonUp`) comes from the HTTP
+ * `res.ok` (a 503-on-degraded still parses a body), NOT from this `status` field — so the
+ * reasons are purely ADDITIVE render data and never change the existing up/down behaviour.
+ */
+export const HealthBodySchema = z.object({
+	status: z.string().catch("ok"),
+	reasons: HealthReasonsSchema.optional(),
+});
+
+/** The result of a `/health` probe: coarse liveness + the parsed per-subsystem reasons (or null). */
+export interface HealthProbe {
+	/** Daemon liveness — `true` iff the HTTP response was ok (drives the view-swap, unchanged). */
+	readonly up: boolean;
+	/** The per-subsystem reasons (PRD-029), or `null` when the body omits/malforms them. */
+	readonly reasons: HealthReasonsWire | null;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // The typed fetch client. Every method validates its payload through zod, so the
 // React tree never sees an untyped/garbage value (AC-2 empty states are free).
@@ -267,7 +310,7 @@ export interface WireClient {
 	graph(): Promise<GraphWire>;
 	recall(query: string): Promise<{ memories: RecalledMemory[]; degraded: boolean }>;
 	logs(limit?: number): Promise<LogRecordWire[]>;
-	health(): Promise<boolean>;
+	health(): Promise<HealthProbe>;
 	dream(): Promise<DreamAck>;
 }
 
@@ -349,12 +392,27 @@ export function createWireClient(options: WireClientOptions = {}): WireClient {
 			const v = await getJson(fetchImpl, url(`${ENDPOINTS.logs}?limit=${limit}`), LogsResponseSchema);
 			return v?.records ?? [];
 		},
-		async health(): Promise<boolean> {
+		async health(): Promise<HealthProbe> {
 			try {
 				const res = await fetchImpl(url(ENDPOINTS.health), { headers: { accept: "application/json", ...DASHBOARD_SESSION_HEADERS } });
-				return res.ok;
+				// Liveness is the HTTP status (a 503-on-degraded still has a parseable body);
+				// the existing view-swap keys off this `up` flag, unchanged (PRD-029 is additive).
+				const up = res.ok;
+				// Parse the body for the additive PRD-029 `reasons`. Every failure mode — a
+				// non-JSON body (the bare "" the 503 path and some 200s send), a malformed shape,
+				// an absent `reasons` (the mode-gated public body) — degrades to `null` reasons
+				// (coarse pill only), NEVER a throw. The IO boundary is fully defended.
+				let reasons: HealthReasonsWire | null = null;
+				try {
+					const body: unknown = await res.json();
+					const parsed = HealthBodySchema.safeParse(body);
+					reasons = parsed.success ? parsed.data.reasons ?? null : null;
+				} catch {
+					reasons = null;
+				}
+				return { up, reasons };
 			} catch {
-				return false;
+				return { up: false, reasons: null };
 			}
 		},
 		async dream(): Promise<DreamAck> {

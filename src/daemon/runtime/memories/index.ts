@@ -9,6 +9,7 @@
 // ── The mount seam (022d calls this) ─────────────────────────────────────────
 export {
 	MEMORIES_GROUP,
+	RECALL_DEGRADED_EVENT,
 	type MountMemoriesOptions,
 	mountMemoriesApi,
 	resolveMemoryScope,

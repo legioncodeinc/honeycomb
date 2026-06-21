@@ -51,6 +51,7 @@ import { z } from "zod";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import type { Daemon } from "../server.js";
 import type { EmbedClient } from "../services/embed-client.js";
+import type { RequestLogger } from "../logger.js";
 import { resolveScopeFromHeaders, resolveScopeOrLocalDefault } from "../scope.js";
 import { recallMemories, type MemoryRecallResult } from "./recall.js";
 import { getMemory, listMemories, resolveListLimit } from "./reads.js";
@@ -63,6 +64,13 @@ import {
 
 /** The route group the memories API attaches to (already mounted in `server.ts`). */
 export const MEMORIES_GROUP = "/api/memories" as const;
+
+/**
+ * The structured event name emitted when a recall runs DEGRADED (PRD-029 / AC-4). A fixed,
+ * greppable identifier — distinct from the pipeline's `decision.recall_degraded` — so the
+ * dashboard live-log panel (Wave 2) and a test can filter on exactly this line.
+ */
+export const RECALL_DEGRADED_EVENT = "recall.degraded" as const;
 
 /** Options for {@link mountMemoriesApi}. Mirrors {@link import("../dashboard/api.js").MountDashboardOptions}. */
 export interface MountMemoriesOptions {
@@ -82,6 +90,14 @@ export interface MountMemoriesOptions {
 	 * fail-closed behaviour). NEVER consulted outside local mode.
 	 */
 	readonly defaultScope?: QueryScope;
+	/**
+	 * The daemon's ring-buffer logger (PRD-029 / AC-4). When supplied, a recall that runs
+	 * DEGRADED (embeddings off/unreachable → BM25/ILIKE lexical fallback) emits ONE structured
+	 * `recall.degraded` event capturing the degraded MODE + the arm coverage — subsystem state
+	 * ONLY, never the query text/token/org/header (D-5). ABSENT (a unit-constructed mount) → no
+	 * event (the prior behaviour). The composition root threads `daemon.logger`.
+	 */
+	readonly logger?: RequestLogger;
 }
 
 // ── Zod request schemas (a-AC-5 / FR-6) ──────────────────────────────────────
@@ -167,6 +183,25 @@ function recallResponse(result: MemoryRecallResult): {
 }
 
 /**
+ * Emit the structured `recall.degraded` event (PRD-029 / AC-4) when — and ONLY when — a
+ * recall ran DEGRADED (the lexical BM25/ILIKE fallback, embeddings off/unreachable). The
+ * fields are SUBSYSTEM STATE ONLY (D-5): a fixed `mode: "lexical_fallback"` tag plus the arm
+ * coverage (`sources` — the distinct table/arm NAMES like `memories`/`sessions`). It carries
+ * NO query text, token, org GUID, or header value — the recall result exposes none of those,
+ * and we forward only the two coarse fields. A non-degraded recall logs NOTHING.
+ */
+function logDegradedRecall(logger: RequestLogger | undefined, result: MemoryRecallResult): void {
+	if (logger === undefined || !result.degraded) return;
+	logger.event(RECALL_DEGRADED_EVENT, {
+		// The degraded MODE: recall fell back to the lexical arms (no semantic `<#>` cosine).
+		mode: "lexical_fallback",
+		// The arm coverage — the distinct arm names that surfaced a hit (`memories`/`memory`/
+		// `sessions`). Plain subsystem names; never row content or a secret.
+		sources: result.sources,
+	});
+}
+
+/**
  * Attach the `/api/memories/*` handlers onto the daemon's already-mounted
  * `/api/memories` route group (the 022a mount seam). Mirrors `mountDashboardApi`:
  * every handler resolves the request scope (fail-closed 400), zod-validates the
@@ -204,6 +239,10 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 			{ query: parsed.data.query, scope, ...(parsed.data.limit !== undefined ? { limit: parsed.data.limit } : {}) },
 			{ storage, ...(options.embed !== undefined ? { embed: options.embed } : {}) },
 		);
+		// PRD-029 (AC-4): when this recall ran DEGRADED (lexical fallback), emit one
+		// structured `recall.degraded` event with the mode + arm coverage. No-op otherwise
+		// and when no logger is wired. Secret-free by construction (see logDegradedRecall).
+		logDegradedRecall(options.logger, result);
 		return c.json(recallResponse(result));
 	});
 

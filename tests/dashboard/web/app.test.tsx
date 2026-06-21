@@ -281,6 +281,120 @@ describe("PRD-024 AC-5: ConnectivityBanner on /health-down + Retry restores", ()
 	});
 });
 
+describe("PRD-029 AC-1: the recall 'lexical fallback' badge renders ONLY on degraded:true", () => {
+	/**
+	 * A mock fetch whose recall response carries the given `degraded` flag and whose `/health`
+	 * returns a body with the given `reasons` (so a single mock drives both the badge + the strip).
+	 */
+	function degradationFetch(opts: { recallDegraded: boolean; reasons?: unknown }): typeof fetch {
+		return vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+			const url = typeof input === "string" ? input : input.toString();
+			const json = (body: unknown, status = 200): Response =>
+				new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+			if (url.endsWith("/health")) return json({ status: "ok", pipeline: "ok", uptimeMs: 1, version: "x", ...(opts.reasons !== undefined ? { reasons: opts.reasons } : {}) });
+			if (url.includes("/api/diagnostics/settings")) return json(PAYLOADS.settings);
+			if (url.includes("/api/diagnostics/kpis")) return json(PAYLOADS.kpis);
+			if (url.includes("/api/diagnostics/sessions")) return json(PAYLOADS.sessions);
+			if (url.includes("/api/diagnostics/rules")) return json(PAYLOADS.rules);
+			if (url.includes("/api/diagnostics/skills")) return json(PAYLOADS.skills);
+			if (url.includes("/api/graph")) return json(PAYLOADS.graph);
+			if (url.includes("/api/logs")) return json(PAYLOADS.logs);
+			if (url.includes("/api/memories/recall")) {
+				expect(init?.method, "recall is a POST").toBe("POST");
+				return json({ hits: [{ source: "memories", id: "h1", text: "a hit", score: 0.3, kind: "memory", secondary: false }], sources: ["memories"], degraded: opts.recallDegraded });
+			}
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch;
+	}
+
+	/** Click the Recall button + flush the async recall round-trip. */
+	async function clickRecall(): Promise<void> {
+		const recallBtn = [...container.querySelectorAll("button")].find((b) => b.textContent === "Recall");
+		expect(recallBtn, "the Recall button exists").toBeTruthy();
+		await act(async () => {
+			recallBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+		});
+		await act(async () => {
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+	}
+
+	it("degraded:true → the 'lexical fallback' badge IS in the DOM after a recall", async () => {
+		await mountApp(degradationFetch({ recallDegraded: true }));
+		// No recall yet → no badge (it only appears after a degraded recall).
+		expect((container.textContent ?? "").toLowerCase()).not.toContain("lexical fallback");
+		await clickRecall();
+		expect((container.textContent ?? "").toLowerCase()).toContain("lexical fallback");
+	});
+
+	it("degraded:false → NO 'lexical fallback' badge even after a recall (semantic ran)", async () => {
+		await mountApp(degradationFetch({ recallDegraded: false }));
+		await clickRecall();
+		// The recall rendered its hit, but the degraded badge is absent.
+		expect(container.textContent ?? "").toContain("a hit");
+		expect((container.textContent ?? "").toLowerCase()).not.toContain("lexical fallback");
+	});
+});
+
+describe("PRD-029 D-2: the per-subsystem health strip renders the /health reasons", () => {
+	function degradationFetch(opts: { recallDegraded: boolean; reasons?: unknown }): typeof fetch {
+		return vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+			const url = typeof input === "string" ? input : input.toString();
+			const json = (body: unknown, status = 200): Response =>
+				new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+			if (url.endsWith("/health")) return json({ status: "ok", pipeline: "ok", uptimeMs: 1, version: "x", ...(opts.reasons !== undefined ? { reasons: opts.reasons } : {}) });
+			if (url.includes("/api/diagnostics/settings")) return json(PAYLOADS.settings);
+			if (url.includes("/api/diagnostics/kpis")) return json(PAYLOADS.kpis);
+			if (url.includes("/api/diagnostics/sessions")) return json(PAYLOADS.sessions);
+			if (url.includes("/api/diagnostics/rules")) return json(PAYLOADS.rules);
+			if (url.includes("/api/diagnostics/skills")) return json(PAYLOADS.skills);
+			if (url.includes("/api/graph")) return json(PAYLOADS.graph);
+			if (url.includes("/api/logs")) return json(PAYLOADS.logs);
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch;
+	}
+
+	it("a degraded subsystem (embeddings off, storage unreachable) renders that subsystem's degraded state", async () => {
+		await mountApp(degradationFetch({ recallDegraded: false, reasons: { storage: "unreachable", embeddings: "off", schema: "ok" } }));
+		const strip = container.querySelector('[data-testid="health-strip"]');
+		expect(strip, "the health strip rendered").not.toBeNull();
+		const text = strip?.textContent ?? "";
+		// The strip NAMES each subsystem + its state — the degraded ones surface their down state.
+		expect(text).toContain("storage: unreachable");
+		expect(text).toContain("semantic: off");
+		expect(text).toContain("schema: ok");
+	});
+
+	it("all-ok reasons → the strip shows every subsystem healthy", async () => {
+		await mountApp(degradationFetch({ recallDegraded: false, reasons: { storage: "reachable", embeddings: "on", schema: "ok" } }));
+		const text = container.querySelector('[data-testid="health-strip"]')?.textContent ?? "";
+		expect(text).toContain("storage: reachable");
+		expect(text).toContain("semantic: on");
+		expect(text).toContain("schema: ok");
+	});
+
+	it("absent reasons (mode-gated public body) → the strip renders NOTHING (defensive)", async () => {
+		await mountApp(degradationFetch({ recallDegraded: false }));
+		// No `reasons` in the /health body → the strip is not in the DOM; the coarse header pill stands alone.
+		expect(container.querySelector('[data-testid="health-strip"]')).toBeNull();
+		// The header pill (coarse liveness) still renders.
+		expect(container.textContent ?? "").toContain("daemon :3850");
+	});
+
+	it("AC-5: the badge + strip render ONLY subsystem names/states — no token/org/header leaks", async () => {
+		await mountApp(degradationFetch({ recallDegraded: false, reasons: { storage: "unreachable", embeddings: "off", schema: "missing_table" } }));
+		const text = (container.textContent ?? "").toLowerCase();
+		// The closed-enum render carries NO secret: no token/credential/org GUID/header value.
+		for (const needle of ["token", "secret", "bearer", "authorization", "password", "x-honeycomb", "org_", "credential"]) {
+			expect(text, `no "${needle}" in the rendered degradation payload`).not.toContain(needle);
+		}
+		// What IS rendered is only the subsystem names + closed states.
+		expect(text).toContain("storage: unreachable");
+		expect(text).toContain("schema: missing_table");
+	});
+});
+
 describe("PRD-024 AC-6: Dream now POSTs /api/diagnostics/dream and reflects the ack", () => {
 	it("an enqueued ack pulses + logs the consolidation", async () => {
 		const mockFetch = makeMockFetch({ dream: PAYLOADS.dreamEnqueued });
