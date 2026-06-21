@@ -57,6 +57,7 @@ import { attachHooksHandlers } from "./capture/attach.js";
 import { mountDashboardApi } from "./dashboard/api.js";
 import { mountDashboardHost } from "./dashboard/host.js";
 import { mountDreamApi } from "./dreaming/api.js";
+import { mountCompactApi } from "./maintenance/compact-api.js";
 import { mountLogsApi } from "./logs/api.js";
 import { mountNotificationsApi } from "./notifications/api.js";
 import { attachSessionsPrune } from "./sessions/prune.js";
@@ -238,6 +239,13 @@ export interface SeamFns {
 	 * the same auth/RBAC as the dashboard's JSON views (open in `local`, gated in team/hybrid).
 	 */
 	readonly mountDream: typeof mountDreamApi;
+	/**
+	 * The standalone version-history COMPACTION trigger — `POST /api/diagnostics/compact`
+	 * (PRD-030 / D-2 PRIMARY). Fires UNCONDITIONALLY: its `/api/diagnostics` group is already
+	 * `protect:true`, so it inherits the same auth/RBAC as the dashboard's JSON views (open in
+	 * `local`, gated in team/hybrid). Fail-soft — a mount error never crashes the daemon.
+	 */
+	readonly mountCompact: typeof mountCompactApi;
 }
 
 /** The REAL seam functions (the production wiring). */
@@ -252,6 +260,7 @@ export const defaultSeamFns: SeamFns = {
 	mountVfs: mountVfsApi,
 	mountProductData: mountProductDataApi,
 	mountDream: mountDreamApi,
+	mountCompact: mountCompactApi,
 };
 
 /** An assembled, fully-wired daemon plus the composition root's lifecycle controls. */
@@ -533,6 +542,23 @@ export function assembleSeams(
 	//     (the same single local tenant the data-API mounts use). When the queue is the no-op stub
 	//     (a bare `createDaemon`), the handler fails soft to a clean `{ triggered: false }` ack.
 	seams.mountDream(daemon, { storage, defaultScope, enqueuer: daemon.services.queue });
+
+	// 11. The standalone version-history COMPACTION trigger — `POST /api/diagnostics/compact`
+	//     (PRD-030 / D-2 PRIMARY). Attaches onto the same already-mounted, protected
+	//     `/api/diagnostics` group (NO `server.ts` edit), so it inherits the dashboard JSON
+	//     views' auth/RBAC (open in `local`, gated in team/hybrid). It runs the Wave-1
+	//     version-history compactor over the allow-listed version-bumped tables under the
+	//     daemon's `defaultScope` — the standalone maintenance path that runs REGARDLESS of
+	//     premium dreaming. FAIL-SOFT: the mount resolves the retention config (which could
+	//     throw on a malformed `HONEYCOMB_COMPACTION_*` knob) and registers the route; we wrap
+	//     it so a mount/config error degrades to "no compaction route this run" rather than
+	//     crashing the daemon (the standalone job is best-effort, never load-bearing for boot).
+	try {
+		seams.mountCompact(daemon, { storage, defaultScope });
+	} catch (err: unknown) {
+		const reason = err instanceof Error ? err.message : String(err);
+		process.stderr.write(`honeycomb: compaction route mount failed (non-fatal): ${reason}\n`);
+	}
 }
 
 /**
