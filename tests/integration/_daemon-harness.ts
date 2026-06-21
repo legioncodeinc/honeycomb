@@ -32,6 +32,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import type { Hono } from "hono";
+
 import { type RuntimeConfig } from "../../src/daemon/runtime/config.js";
 import { createRequestLogger } from "../../src/daemon/runtime/logger.js";
 import {
@@ -40,7 +42,8 @@ import {
 } from "../../src/daemon/runtime/assemble.js";
 import { startDaemon as startDaemonListener } from "../../src/daemon/runtime/listen.js";
 import { createStorageClient } from "../../src/daemon/storage/index.js";
-import type { StorageClient } from "../../src/daemon/storage/client.js";
+import type { QueryOptions, QueryScope, StorageClient } from "../../src/daemon/storage/client.js";
+import { ok, type QueryResult } from "../../src/daemon/storage/result.js";
 
 /** Options for {@link bootTestDaemon}. All optional with live-safe defaults. */
 export interface BootTestDaemonOptions {
@@ -128,4 +131,138 @@ export async function bootTestDaemon(options: BootTestDaemonOptions = {}): Promi
 			rmSync(runtimeDir, { recursive: true, force: true });
 		},
 	};
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// PLAIN-CI FAKE-STORAGE VARIANT — PRD-031 Wave A (D-1 / D-2 / D-5).
+//
+// The live `bootTestDaemon` above is UNCHANGED (Wave B reuses it verbatim). This
+// is the ADDITIVE sibling: it assembles the SAME daemon through the SAME
+// `assembleDaemon` → `assembleSeams` path (every seam in real order, behind the
+// REAL middleware chain), but backs it with an INJECTED scriptable fake
+// `StorageQuery` and returns the assembled Hono `app` so a test drives it via
+// `app.request(...)`. No token, no network, no port-bind, no PID/lock — so the
+// route-collision (AC-1) and header-gap (AC-2) bug CLASSES run in PLAIN CI on
+// every PR. The load-bearing point is that this is the FULLY-ASSEMBLED app, not a
+// hand-mounted single handler: the collision/header classes only surface when the
+// real seams fire in real order behind the real middleware (D-1).
+//
+// Why it does NOT call `assembled.start()`: `app.request(...)` exercises the Hono
+// router + middleware + handlers in-process WITHOUT a socket, exactly as
+// `server.ts` documents ("the app is exercised in-process via `app.request(...)`
+// — no socket is bound in tests"). The services (queue/watcher/embed) are
+// CONSTRUCTED (cheap, hermetic) but never STARTED, so there is no timer, no child
+// process, and no `~/.honeycomb` lock to clean up. The fake storage answers every
+// statement synchronously, so no async warmup is needed either.
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * A SQL-aware responder for the fake storage: given the statement + the resolved
+ * scope, return the {@link QueryResult} the storage call should produce. A test
+ * scripts this to make a recall arm surface deterministic rows (`ok([...])`) or a
+ * sibling arm degrade (a `query_error`). The default (when no responder is passed)
+ * is `ok([])` for EVERY statement — every read is empty, every health probe is ok —
+ * which is the hermetic floor a router/header test needs.
+ */
+export type FakeStorageResponder = (sql: string, scope: QueryScope) => QueryResult;
+
+/** A statement recorded by the fake storage, for post-hoc assertions. */
+export interface FakeStorageRequest {
+	readonly sql: string;
+	readonly scope: QueryScope;
+}
+
+/**
+ * A scriptable fake {@link StorageQuery} (also structurally a {@link StorageClient}
+ * for the parts `assembleDaemon` touches: `query`, `connect`, `endpoint`). It NEVER
+ * opens a socket and NEVER reads a credential — every call is answered by the
+ * injected {@link FakeStorageResponder} (default: `ok([])`). Each statement is
+ * recorded on `requests` so a test can assert the partition scope that reached the
+ * "wire" without a live backend.
+ */
+export interface FakeStorage extends StorageClient {
+	/** Every statement issued through this fake, in order. */
+	readonly requests: FakeStorageRequest[];
+}
+
+/** Build a scriptable fake storage client (no token, no network). */
+export function createFakeStorage(responder?: FakeStorageResponder): FakeStorage {
+	const requests: FakeStorageRequest[] = [];
+	const answer: FakeStorageResponder = responder ?? ((): QueryResult => ok([], 1));
+	const fake = {
+		get endpoint(): string {
+			return "https://fake.honeycomb.invalid";
+		},
+		requests,
+		async query(sql: string, scope: QueryScope, _opts: QueryOptions = {}): Promise<QueryResult> {
+			void _opts;
+			requests.push({ sql, scope });
+			return answer(sql, scope);
+		},
+		async connect(scope: QueryScope): Promise<QueryResult> {
+			return this.query("SELECT 1", scope);
+		},
+	};
+	return fake as unknown as FakeStorage;
+}
+
+/** Options for {@link assembleTestDaemonApp}. */
+export interface AssembleTestDaemonAppOptions {
+	/**
+	 * The deployment mode. Defaults to `local` (the loopback single-user dogfood
+	 * target): the permission middleware is open, so a data route reaches its handler
+	 * without a real authenticator — exactly the surface AC-1/AC-2 exercise.
+	 */
+	readonly mode?: RuntimeConfig["mode"];
+	/**
+	 * The fake storage responder. Defaults to `ok([])` for every statement. Pass one to
+	 * make a recall arm surface deterministic rows (so the handler-reached case is
+	 * unambiguous) or a sibling arm degrade.
+	 */
+	readonly responder?: FakeStorageResponder;
+	/** Inject a pre-built fake storage (overrides `responder`). Defaults to a fresh one. */
+	readonly storage?: FakeStorage;
+}
+
+/** The fully-assembled fake-storage daemon: the Hono app + the fake + lifecycle controls. */
+export interface AssembledTestDaemonApp {
+	/** The fully-assembled Hono app. Drive it via `app.request(...)` — no socket is bound. */
+	readonly app: Hono;
+	/** The assembled daemon (the app + wired services + lifecycle controls). Never started here. */
+	readonly assembled: AssembledDaemon;
+	/** The injected fake storage (assert on `storage.requests` after a request). */
+	readonly storage: FakeStorage;
+}
+
+/**
+ * Assemble the REAL daemon (via {@link assembleDaemon} → `assembleSeams`, every seam
+ * in real order behind the real middleware) backed by a FAKE {@link StorageQuery},
+ * and return its Hono `app` for `app.request(...)` drive — NO token, NO network, NO
+ * port-bind (PRD-031 Wave A / D-1 / D-2). This is the additive sibling of
+ * {@link bootTestDaemon}: same assembly, but hermetic + in-process so the
+ * route-collision (AC-1) and header-gap (AC-2) bug classes run in PLAIN CI.
+ *
+ * The composition root resolves the daemon's own tenancy to the `{ org: "local",
+ * workspace: "default" }` fallback here (no provider injected with a fake storage —
+ * `assembleDaemon` leaves the scope at the deterministic default), so in `local`
+ * mode a data request with no `x-honeycomb-org` resolves to that single tenant. The
+ * caller does NOT call `start()` — `app.request(...)` needs no socket, no lock, and
+ * no started services. There is nothing to tear down.
+ */
+export function assembleTestDaemonApp(options: AssembleTestDaemonAppOptions = {}): AssembledTestDaemonApp {
+	const storage = options.storage ?? createFakeStorage(options.responder);
+	const config: RuntimeConfig = {
+		host: "127.0.0.1",
+		port: 0, // ephemeral / unused — no socket is bound.
+		mode: options.mode ?? "local",
+		widened: false,
+	};
+	const assembled = assembleDaemon({
+		config,
+		// Inject the FAKE storage: no provider is resolved, so the daemon scope falls
+		// through to the deterministic `{ org: "local", workspace: "default" }` default.
+		storage: storage as unknown as StorageClient,
+		logger: createRequestLogger({ silent: true }),
+	});
+	return { app: assembled.daemon.app, assembled, storage };
 }
