@@ -35,6 +35,11 @@ import {
 	noopEmbedSupervisor,
 } from "../../../src/daemon/runtime/services/embed-supervisor.js";
 import { noopRuntimePathService } from "../../../src/daemon/runtime/middleware/runtime-path.js";
+import type {
+	DreamingConfigProvider,
+	RawDreamingConfig,
+} from "../../../src/daemon/runtime/dreaming/config.js";
+import type { DreamingJobWorker } from "../../../src/daemon/runtime/dreaming/worker.js";
 import type { StorageClient } from "../../../src/daemon/storage/client.js";
 import type { QueryResult } from "../../../src/daemon/storage/result.js";
 import { fakeCredentialRecord, stubProvider } from "../../helpers/fake-deeplake.js";
@@ -715,5 +720,139 @@ describe("PRD-025 AC-1/D-6 the embed supervisor is wired into the daemon lifecyc
 			if (prev === undefined) delete process.env.HONEYCOMB_EMBEDDINGS;
 			else process.env.HONEYCOMB_EMBEDDINGS = prev;
 		}
+	});
+});
+
+describe("PRD-026 AC-W the daemon-resident dreaming worker is gated on config.enabled (default OFF)", () => {
+	/** A fixed dreaming-config provider so the gate is driven WITHOUT touching process.env. */
+	function dreamingProvider(over: { enabled?: unknown } = {}): DreamingConfigProvider {
+		return {
+			read(): RawDreamingConfig {
+				return {
+					enabled: over.enabled,
+					// Tiny numeric knobs so resolveDreamingConfig clamps cleanly.
+					tokenThreshold: 1,
+					maxInputTokens: 1,
+					backfillOnFirstRun: false,
+				};
+			},
+		};
+	}
+
+	/** A recording fake dreaming worker that satisfies the DreamingJobWorker contract. */
+	function recordingWorker(): { worker: DreamingJobWorker; calls: { start: number; stop: number } } {
+		const calls = { start: 0, stop: 0 };
+		const worker: DreamingJobWorker = {
+			async runOnce(): Promise<boolean> {
+				return false;
+			},
+			start(): void {
+				calls.start += 1;
+			},
+			stop(): void {
+				calls.stop += 1;
+			},
+		};
+		return { worker, calls };
+	}
+
+	it("AC-W: with enabled:FALSE the worker is NOT started (the default-OFF gate holds)", async () => {
+		const { worker, calls } = recordingWorker();
+		const assembled = assembleDaemon({
+			config: cfg({ mode: "local" }),
+			storage: fakeStorage(OK_RESULT),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+			embedSupervisor: noopEmbedSupervisor,
+			// Inject the recording worker BUT a disabled config provider: the gate must keep
+			// `start()` from ever firing (in production the heavy bits are never even built).
+			dreamingWorker: worker,
+			dreamingConfigProvider: dreamingProvider({ enabled: false }),
+		});
+		await assembled.start();
+		try {
+			expect(calls.start, "a disabled dreaming loop never starts the worker").toBe(0);
+		} finally {
+			await assembled.shutdown();
+		}
+		// Stop is a no-op when never started (the worker was never wired into the lifecycle).
+		expect(calls.stop).toBe(0);
+	});
+
+	it("AC-W: with enabled:TRUE the worker IS started, and shutdown stops it (lifecycle-owned)", async () => {
+		const { worker, calls } = recordingWorker();
+		const assembled = assembleDaemon({
+			config: cfg({ mode: "local" }),
+			storage: fakeStorage(OK_RESULT),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+			embedSupervisor: noopEmbedSupervisor,
+			dreamingWorker: worker,
+			dreamingConfigProvider: dreamingProvider({ enabled: true }),
+		});
+		await assembled.start();
+		expect(calls.start, "an enabled dreaming loop starts the worker exactly once").toBe(1);
+		await assembled.shutdown();
+		expect(calls.stop, "a clean shutdown stops the dreaming worker").toBe(1);
+	});
+
+	it("AC-W: injecting `null` as the worker constructs NOTHING — the daemon boots clean (no throw)", async () => {
+		// `null` is the "no worker constructed when disabled" shape: the build step is skipped
+		// entirely. The daemon must still start + serve + shut down without error.
+		const assembled = assembleDaemon({
+			config: cfg({ mode: "local" }),
+			storage: fakeStorage(OK_RESULT),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+			embedSupervisor: noopEmbedSupervisor,
+			dreamingWorker: null,
+			dreamingConfigProvider: dreamingProvider({ enabled: true }),
+		});
+		await expect(assembled.start()).resolves.toBeUndefined();
+		const res = await assembled.daemon.app.request("/health");
+		expect(res.status).toBe(200);
+		await assembled.shutdown();
+	});
+
+	it("AC-T/AC-W: with NO agent.yaml AND enabled:TRUE the daemon still boots (model degrades to noop, no throw)", async () => {
+		// The end-to-end fail-soft proof for AC-T: enabled dreaming + the REAL (un-injected)
+		// worker build, but the inference config path points at a file that does not exist.
+		// `buildInferenceModelClient` returns the no-op client (never throws), the real worker
+		// is constructed + started, and the daemon boots cleanly. The worker leases an empty
+		// (fake) queue and runs nothing — no live model call, exactly Wave-1c's scope.
+		const missingAgentYaml = join(runtimeDir, "no-such-agent.yaml");
+		const assembled = assembleDaemon({
+			config: cfg({ mode: "local" }),
+			storage: fakeStorage(OK_RESULT),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+			embedSupervisor: noopEmbedSupervisor,
+			// No `dreamingWorker` injected → the REAL build path runs (model client + trigger +
+			// worker), proving the production wiring boots without an agent.yaml or a key.
+			agentConfigPath: missingAgentYaml,
+			dreamingConfigProvider: dreamingProvider({ enabled: true }),
+		});
+		await expect(assembled.start()).resolves.toBeUndefined();
+		try {
+			const res = await assembled.daemon.app.request("/health");
+			expect(res.status).toBe(200);
+		} finally {
+			await assembled.shutdown();
+		}
+	});
+
+	it("AC-W: a malformed/non-bool enabled knob degrades to OFF (never prevents the daemon booting)", async () => {
+		// BoolFlag coerces a non-bool to false, so the gate is closed and the daemon boots with
+		// no worker — the point is start() NEVER throws out of the dreaming wiring (fail-soft).
+		const assembled = assembleDaemon({
+			config: cfg({ mode: "local" }),
+			storage: fakeStorage(OK_RESULT),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+			embedSupervisor: noopEmbedSupervisor,
+			dreamingConfigProvider: dreamingProvider({ enabled: "not-a-bool" }),
+		});
+		await expect(assembled.start()).resolves.toBeUndefined();
+		await assembled.shutdown();
 	});
 });

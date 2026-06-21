@@ -67,6 +67,13 @@ import { mountVfsApi } from "./vfs/api.js";
 import { mountProductDataApi } from "./product/index.js";
 import { type SecretsApiDeps } from "./secrets/api.js";
 import { SecretsStore, createMachineKeyProvider } from "./secrets/store.js";
+import type { SecretScope } from "./secrets/contracts.js";
+
+import { buildInferenceModelClient } from "./inference/model-client-factory.js";
+import type { ModelClient } from "./pipeline/model-client.js";
+import { resolveDreamingConfig } from "./dreaming/config.js";
+import { createDreamingTrigger } from "./dreaming/trigger.js";
+import { createDreamingWorker, type DreamingJobWorker } from "./dreaming/worker.js";
 
 import { createStorageClient } from "../storage/index.js";
 import {
@@ -77,6 +84,17 @@ import type { QueryScope, StorageClient } from "../storage/client.js";
 import { isOk } from "../storage/result.js";
 import { type EmbedAttachment, createEmbedAttachment } from "./services/embed-client.js";
 import { type EmbedSupervisor, createEmbedSupervisor } from "./services/embed-supervisor.js";
+
+/**
+ * The inference-config filename the daemon reads its `inference:` block from (PRD-026
+ * AC-T). It lives at the WORKSPACE ROOT — `$HONEYCOMB_WORKSPACE` (the same base dir the
+ * `.secrets/` store + the secrets API resolve under, defaulting to the daemon's cwd) — so
+ * the file the operator edits, the `.secrets/` dir the `${ANTHROPIC_API_KEY}` ref resolves
+ * against, and the daemon all agree on ONE location. The file is OPTIONAL: when absent (or
+ * lacking an `inference:` block) `buildInferenceModelClient` degrades to the no-op client
+ * and the daemon boots cleanly with dreaming/inference simply unavailable. It carries NO
+ * secret — only the `${SECRET_REF}` reference (an inline key is rejected at parse). */
+export const AGENT_CONFIG_FILE_NAME = "agent.yaml";
 
 /** The single-instance lock filename under `~/.honeycomb/` (FR-8 / a-AC-6). */
 export const LOCK_FILE_NAME = "daemon.lock";
@@ -165,6 +183,31 @@ export interface AssembleDaemonOptions {
 	 * recording stub) so the assembly never spawns a real process. Production never sets this.
 	 */
 	readonly embedSupervisor?: EmbedSupervisor;
+	/**
+	 * The filesystem path to the `inference:` config (`agent.yaml`) the daemon builds its
+	 * real {@link ModelClient} from (PRD-026 AC-T). Defaults to `agent.yaml` under
+	 * `$HONEYCOMB_WORKSPACE` (the daemon's cwd when unset) — the SAME base the `.secrets/`
+	 * store resolves the `${ANTHROPIC_API_KEY}` ref under. A test points it at a temp file
+	 * (or a path that does not exist) to drive the no-op degrade deterministically. Absent /
+	 * unparseable → the no-op model client (never a throw).
+	 */
+	readonly agentConfigPath?: string;
+	/**
+	 * The dreaming `memory.dreaming` config provider seam (PRD-026 AC-W gate). Defaults to
+	 * the env provider ({@link resolveDreamingConfig}'s default), so `enabled` is OFF unless
+	 * `HONEYCOMB_DREAMING_ENABLED=true`/`1`. A test injects a fixed provider to drive the
+	 * `enabled:true` / `enabled:false` worker-start gate WITHOUT touching `process.env`.
+	 */
+	readonly dreamingConfigProvider?: Parameters<typeof resolveDreamingConfig>[0];
+	/**
+	 * The pre-built dreaming worker, injectable for testing (AC-W). Production leaves it
+	 * unset → the composition root builds the REAL worker from the daemon's scope + storage +
+	 * model + queue WHEN `config.enabled`. A test injects a recording fake to assert
+	 * `start()`/`stop()` are called exactly when the gate says so, without a live queue.
+	 * When `null` is injected the build step is skipped entirely (the "no worker constructed
+	 * when disabled" assertion). Production never sets this.
+	 */
+	readonly dreamingWorker?: DreamingJobWorker | null;
 }
 
 /**
@@ -526,6 +569,124 @@ function resolveProductDataDeps(
 	return { storage, secrets, defaultScope };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// The daemon-resident dreaming WORKER wiring (PRD-026 AC-W + AC-T) — gated OFF.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The default workspace base dir the daemon resolves filesystem state under
+ * (`$HONEYCOMB_WORKSPACE`, defaulting to the daemon's cwd). This is the SINGLE source the
+ * `.secrets/` store (PRD-012a), the secrets API mount ({@link resolveProductDataDeps}), and
+ * the inference {@link AGENT_CONFIG_FILE_NAME} all resolve under, so the `agent.yaml` the
+ * operator edits and the `.secrets/` dir its `${ANTHROPIC_API_KEY}` ref decrypts from agree
+ * on ONE root. Read at most once at assembly.
+ */
+function resolveWorkspaceBaseDir(): string {
+	return process.env.HONEYCOMB_WORKSPACE ?? process.cwd();
+}
+
+/**
+ * Resolve the path the daemon reads its `inference:` block from (PRD-026 AC-T): the
+ * injected override when a test supplies one, else `agent.yaml` under the workspace root.
+ * Returned as a path so {@link buildInferenceModelClient} loads it lazily (and degrades to
+ * the no-op client when the file or block is absent — never a throw).
+ */
+function resolveAgentConfigPath(options: AssembleDaemonOptions): string {
+	return options.agentConfigPath ?? join(resolveWorkspaceBaseDir(), AGENT_CONFIG_FILE_NAME);
+}
+
+/**
+ * Lift the daemon's resolved {@link QueryScope} (`{ org, workspace? }`) onto the
+ * {@link SecretScope} the inference secret resolver decrypts the `${ANTHROPIC_API_KEY}` ref
+ * under. The org rides through unchanged; an absent `workspace` defaults to `"default"`,
+ * matching the no-creds tenancy fallback ({@link resolveDaemonTenancy} step (c)). THIS is
+ * the scope the operator/smoker MUST store the Anthropic key under for the resolver to find
+ * it — it is the daemon's OWN tenancy, never a per-request identity.
+ */
+function secretScopeFromQueryScope(scope: QueryScope): SecretScope {
+	return { org: scope.org, workspace: scope.workspace ?? "default" };
+}
+
+/**
+ * Build the gated dreaming subsystem (AC-W + AC-T) — the real inference {@link ModelClient}
+ * + the real {@link DreamingTrigger} + the {@link DreamingJobWorker} — and return the worker
+ * to START, or `null` when dreaming is disabled.
+ *
+ * ── Fail-soft is the whole contract (D-1) ────────────────────────────────────
+ * Nothing here may prevent the daemon from booting. The dreaming config is resolved inside a
+ * try/catch (a fat-fingered `HONEYCOMB_DREAMING_*` knob degrades to "disabled", never a
+ * throw); when disabled NONE of the heavy bits (model client, trigger, worker) are even
+ * constructed. The model client is built via {@link buildInferenceModelClient}, which NEVER
+ * throws — an absent/unparseable `agent.yaml` yields the no-op client, so the worker simply
+ * produces zero-mutation passes until the operator adds the `inference:` block + key.
+ *
+ * ── The pendingTerminal probe choice (FR-6) ──────────────────────────────────
+ * The trigger's single-pending guard wants a probe that resolves a `dreaming` job's terminal
+ * state from `memory_jobs`. The public {@link JobQueueService} interface exposes NO
+ * status-by-id read (only enqueue/lease/complete/fail) — the converging `resolveCurrent`
+ * read is private. So we DO NOT pass a `pendingTerminal` and the trigger applies its
+ * documented conservative default: never report terminal, i.e. never enqueue a SECOND pass on
+ * a guess. The worker clears `pending_job_id` itself on a completed pass (via
+ * `recordPassComplete`), so a finished pass un-wedges the scope through the normal path; only
+ * a hard-crashed pass would wait for a later mechanism, which is the safe posture.
+ *
+ * @returns the constructed-but-NOT-started worker when `enabled`, else `null`.
+ */
+async function buildGatedDreamingWorker(
+	options: AssembleDaemonOptions,
+	storage: StorageClient,
+	scope: QueryScope,
+	queue: DaemonServices["queue"],
+): Promise<DreamingJobWorker | null> {
+	// Resolve the gate fail-soft FIRST: a malformed dreaming-config knob must NEVER take the
+	// daemon down — treat it as disabled (the false-safe default the schema already documents).
+	let config: ReturnType<typeof resolveDreamingConfig>;
+	try {
+		config = resolveDreamingConfig(options.dreamingConfigProvider);
+	} catch {
+		return null;
+	}
+
+	// GATE (D-1, default OFF): the gate is checked BEFORE any worker is returned — even an
+	// INJECTED test worker is NOT started when disabled (the gate is the contract, not the
+	// injection). When disabled, construct NOTHING heavy — no model client, no trigger, no
+	// worker. Re-enabling later resumes from the accumulated counter.
+	if (!config.enabled) {
+		return null;
+	}
+
+	// Past the gate (enabled): an explicit test override replaces the real build (a recording
+	// fake to assert start/stop, or `null` to assert "enabled but no worker constructed").
+	// Production leaves it unset → the real build below runs.
+	if (options.dreamingWorker !== undefined) {
+		return options.dreamingWorker;
+	}
+
+	// The real inference ModelClient (AC-T). Never throws — degrades to the no-op client when
+	// no `agent.yaml`/`inference:` block/key is present yet (so enabling dreaming before the
+	// key exists boots cleanly and yields empty, zero-mutation passes).
+	const secretsStore = new SecretsStore({
+		baseDir: resolveWorkspaceBaseDir(),
+		machineKey: createMachineKeyProvider(),
+	});
+	const model: ModelClient = await buildInferenceModelClient({
+		scope: secretScopeFromQueryScope(scope),
+		secretsStore,
+		config: resolveAgentConfigPath(options),
+	});
+
+	// The REAL PRD-009a trigger: its `readState` feeds the worker's first-run backfill rule
+	// and its additive `recordPassComplete` is the runner's append-only state-update seam. It
+	// reuses the daemon's OWN durable queue as the enqueuer — no second dreaming subsystem.
+	// No `pendingTerminal` probe is passed (see the JSDoc above): the queue exposes no public
+	// status-by-id read, so the trigger applies its conservative never-terminal default.
+	const trigger = createDreamingTrigger({ storage, scope, config, enqueuer: queue });
+
+	// The consumer: leases ONLY `["dreaming"]`, runs the runner with the real model + the 008c
+	// apply (inside the runner) + the append-only state update, completes/fails the job.
+	return createDreamingWorker({ queue, storage, scope, config, model, trigger });
+}
+
 /**
  * The composition root (a-AC-1..6 / FR-1..10). Constructs the live storage client,
  * resolves the daemon scope, builds the real services, composes the auth gates for the
@@ -631,6 +792,11 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 
 	let started = false;
 	let locked = false;
+	// PRD-026 AC-W: the daemon-resident dreaming worker. Built + started ONLY when
+	// `resolveDreamingConfig().enabled` (default OFF), inside `start()` AFTER the queue is up,
+	// and stopped in `shutdown()`. Null until/unless the gate opens — a disabled daemon never
+	// constructs the heavy bits (model client, trigger, worker).
+	let dreamingWorker: DreamingJobWorker | null = null;
 
 	return {
 		daemon,
@@ -656,12 +822,37 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 
 			// Start the daemon's real services (queue → watcher → runtime-path).
 			await daemon.startServices();
+
+			// ── PRD-026 AC-W: build + start the dreaming worker, GATED on `config.enabled`
+			// (default OFF). It is built AFTER `startServices()` so it leases from a started
+			// queue. The build is FAIL-SOFT: a dreaming-config error or a missing inference
+			// config degrades to `null` (disabled) / the no-op model client — it must NEVER
+			// prevent the daemon from booting, so any error here is swallowed into "no worker"
+			// rather than propagated. When the gate is closed, `buildGatedDreamingWorker`
+			// returns null and we start nothing.
+			try {
+				dreamingWorker = await buildGatedDreamingWorker(options, storage, scope, daemon.services.queue);
+				dreamingWorker?.start();
+			} catch (err: unknown) {
+				// A dreaming wiring failure is surfaced to stderr (never silently swallowed) but is
+				// NOT fatal: the daemon is already up and serving; dreaming simply stays off this
+				// run. We narrow the error to a message so a thrown non-Error still reports cleanly.
+				// stderr is the documented daemon log channel (logger.ts) and carries no secret here
+				// — `buildGatedDreamingWorker` resolves the key only inside the router's local scope.
+				const reason = err instanceof Error ? err.message : String(err);
+				process.stderr.write(`honeycomb: dreaming worker start failed (non-fatal): ${reason}\n`);
+				dreamingWorker = null;
+			}
 		},
 
 		async shutdown(): Promise<void> {
-			// a-AC-5: graceful shutdown — stop the refresher, drain the services, and
-			// remove the lock so no stale lock survives. Idempotent + never throws on a
-			// missing lock.
+			// a-AC-5: graceful shutdown — stop the dreaming worker + the refresher, drain the
+			// services, and remove the lock so no stale lock survives. Idempotent + never throws
+			// on a missing lock.
+			if (dreamingWorker !== null) {
+				dreamingWorker.stop();
+				dreamingWorker = null;
+			}
 			if (probeTimer !== null) {
 				clearInterval(probeTimer);
 				probeTimer = null;

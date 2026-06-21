@@ -88,3 +88,20 @@ export {
 	type RouterDeps,
 	RouterModelClient,
 } from "./router.js";
+// ── Real Anthropic Messages transport (PRD-026 AC-T; the only non-fake transport) ─
+export {
+	ANTHROPIC_MESSAGES_URL,
+	ANTHROPIC_VERSION,
+	type AnthropicTransportDeps,
+	createAnthropicTransport,
+	DEFAULT_MAX_TOKENS,
+	type FetchLike,
+	type FetchResponseLike,
+	toAnthropicBody,
+} from "./transport-anthropic.js";
+// ── Inference-backed ModelClient factory (PRD-026 AC-T; the assembly swap) ────
+export {
+	buildInferenceModelClient,
+	type InferenceConfigSource,
+	type InferenceModelClientDeps,
+} from "./model-client-factory.js";

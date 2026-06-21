@@ -69,14 +69,20 @@ function runId(): string {
 const RUN_ID = runId();
 const CI_TABLE = `ci_dreaming_${RUN_ID}`;
 
-/** A fake queue that records enqueues + hands back a synthetic id (no real job needed). */
+/**
+ * A fake queue that records enqueues + hands back a synthetic id (no real job
+ * needed). Each recorded call carries the id the enqueue RETURNED (`returnedId`),
+ * so a test can assert the counter's `pending_job_id` matches the id the trigger
+ * actually wrote.
+ */
 class RecordingQueue implements DreamingJobEnqueuer {
-	readonly calls: { kind: string; payload: Record<string, unknown> }[] = [];
+	readonly calls: { kind: string; payload: Record<string, unknown>; returnedId: string }[] = [];
 	private seq = 0;
 	async enqueue(job: { kind: string; payload: Record<string, unknown> }): Promise<string> {
-		this.calls.push(job);
 		this.seq += 1;
-		return `ci-job-${RUN_ID}-${this.seq}`;
+		const returnedId = `ci-job-${RUN_ID}-${this.seq}`;
+		this.calls.push({ ...job, returnedId });
+		return returnedId;
 	}
 }
 
@@ -145,12 +151,67 @@ describe.skipIf(!HAS_TOKEN)("live dreaming_state counter smoke (opt-in, real bac
 
 		const result = await trigger.checkAndEnqueueDreaming(scope);
 		expect(result.decision).toBe("enqueued");
+		// EXACTLY ONE enqueue across the threshold crossing (a-AC-2).
 		expect(queue.calls).toHaveLength(1);
 
+		// The enqueued job carries the right `{ mode, agentId, ... }` dreaming payload
+		// (the runner reads these back off the queue, so the shape is load-bearing).
+		const job = queue.calls[0];
+		expect(job.kind).toBe("dreaming");
+		expect(job.payload.mode).toBe("incremental");
+		expect(job.payload.agentId).toBe(scope.agentId);
+		expect(typeof job.payload.tokensAtEnqueue).toBe("number");
+
 		// 180 - 100 = 80 carried forward (NOT lost, NOT hard-zeroed). The live
-		// poll-convergent read must settle on the post-reset highest version.
+		// poll-convergent read must settle on the post-reset highest version — proof
+		// the reset SUBTRACTS the threshold rather than zeroing (the interleaved 50
+		// accrues toward the next pass, the live-only concurrent-write check).
 		const state = await trigger.readState(scope);
 		expect(state.tokensSinceLastPass).toBe(80);
+		// The pending guard is now armed — the same job id we just enqueued.
+		expect(state.pendingJobId).toBe(job.returnedId);
 		expect(state.pendingJobId).not.toBe("");
+	});
+
+	it("a 2nd tick while pending_job_id is set enqueues NOTHING (single-pending guard, a-AC-2 / a-AC-3)", async () => {
+		// Fresh agent scope so the pending guard is exercised in isolation. No terminal
+		// probe is injected, so a set `pending_job_id` reads as NOT terminal — the
+		// conservative posture the live daemon's maintenance loop relies on between the
+		// enqueue and the runner clearing the guard.
+		const scope: DreamingScope = { agentId: `ci-agent-${RUN_ID}-c` };
+		const queue = new RecordingQueue();
+		const trigger = createDreamingTrigger({
+			storage,
+			scope: { org, workspace },
+			config: DreamingConfigSchema.parse({ enabled: true, tokenThreshold: 100 }),
+			enqueuer: queue,
+			tableName: CI_TABLE,
+		});
+
+		// Cross the threshold → exactly ONE enqueue, pending guard armed.
+		await trigger.incrementDreamingCounter(scope, 250); // 250 ≥ 100.
+		const first = await trigger.checkAndEnqueueDreaming(scope);
+		expect(first.decision).toBe("enqueued");
+		expect(queue.calls).toHaveLength(1);
+
+		// The pending guard is live (poll-convergent read settles on the armed row).
+		const armed = await trigger.readState(scope);
+		expect(armed.pendingJobId).not.toBe("");
+		// The counter is STILL over threshold (250 - 100 = 150 ≥ 100) — so the ONLY thing
+		// stopping a second enqueue is the single-pending guard, not the threshold.
+		expect(armed.tokensSinceLastPass).toBe(150);
+
+		// SECOND tick while pending and over threshold → the guard short-circuits BEFORE
+		// the threshold check: NO new enqueue, decision `skipped`/`pending`.
+		const second = await trigger.checkAndEnqueueDreaming(scope);
+		expect(second.decision).toBe("skipped");
+		expect(second.reason).toBe("pending");
+		// The enqueuer call count is STILL 1 — the guard held across the live round-trip.
+		expect(queue.calls).toHaveLength(1);
+
+		// And the counter is untouched by the skipped tick (no second reset).
+		const afterSkip = await trigger.readState(scope);
+		expect(afterSkip.tokensSinceLastPass).toBe(150);
+		expect(afterSkip.pendingJobId).toBe(armed.pendingJobId);
 	});
 });

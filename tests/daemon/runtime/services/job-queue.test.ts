@@ -468,6 +468,89 @@ describe("b-AC-5 a fresh service over the same state resumes queued + reaps dang
 	});
 });
 
+describe("PRD-026 lease(kinds) kind filter — a kind-specialized worker never touches foreign jobs", () => {
+	it("lease(['dreaming']) returns only a dreaming job and leaves other kinds queued", async () => {
+		const { queue, store } = makeQueue();
+		// A mixed queue: a summary, a dreaming, and a skillify job (capture enqueues all three).
+		const summaryId = await queue.enqueue({ kind: "summary", payload: {} });
+		const dreamingId = await queue.enqueue({ kind: "dreaming", payload: { mode: "incremental" } });
+		const skillifyId = await queue.enqueue({ kind: "skillify", payload: {} });
+
+		// The kind-filtered lease returns ONLY the dreaming job.
+		const leased = await queue.lease(["dreaming"]);
+		expect(leased).not.toBeNull();
+		expect(leased?.id).toBe(dreamingId);
+		expect(leased?.kind).toBe("dreaming");
+
+		// The foreign kinds are untouched — still queued for their own workers.
+		expect(store.current(summaryId)?.status).toBe("queued");
+		expect(store.current(skillifyId)?.status).toBe("queued");
+		// And only the dreaming job advanced to leased.
+		expect(store.current(dreamingId)?.status).toBe("leased");
+	});
+
+	it("lease(['dreaming']) over a queue with NO dreaming job returns null and leases nothing", async () => {
+		const { queue, store } = makeQueue();
+		const summaryId = await queue.enqueue({ kind: "summary", payload: {} });
+		const skillifyId = await queue.enqueue({ kind: "skillify", payload: {} });
+
+		// No dreaming job present → the dreaming worker finds nothing leasable.
+		expect(await queue.lease(["dreaming"])).toBeNull();
+		// The foreign jobs were never grabbed (and so never walked toward dead).
+		expect(store.current(summaryId)?.status).toBe("queued");
+		expect(store.current(skillifyId)?.status).toBe("queued");
+	});
+
+	it("an unfiltered lease() still leases ANY kind (existing callers are unchanged)", async () => {
+		const { queue } = makeQueue();
+		const summaryId = await queue.enqueue({ kind: "summary", payload: {} });
+
+		// The default (no kinds) leases the only job regardless of kind — zero behaviour change.
+		const leased = await queue.lease();
+		expect(leased?.id).toBe(summaryId);
+		expect(leased?.kind).toBe("summary");
+	});
+
+	it("the filter accepts a multi-kind set (lease the oldest matching kind)", async () => {
+		const { queue, store } = makeQueue();
+		const summaryId = await queue.enqueue({ kind: "summary", payload: {} });
+		await queue.enqueue({ kind: "dreaming", payload: { mode: "incremental" } });
+
+		// A worker that handles both summary + dreaming leases the OLDEST of the two (summary).
+		const leased = await queue.lease(["summary", "dreaming"]);
+		expect(leased?.id).toBe(summaryId);
+		expect(store.current(summaryId)?.status).toBe("leased");
+	});
+
+	it("an EMPTY kinds array leases nothing (distinct from undefined) and walks no job toward dead", async () => {
+		const { queue, store } = makeQueue();
+		// Jobs of every kind are present and leasable.
+		const summaryId = await queue.enqueue({ kind: "summary", payload: {} });
+		const dreamingId = await queue.enqueue({ kind: "dreaming", payload: { mode: "incremental" } });
+
+		// `[]` matches NO kind (`[].includes(type)` is always false) — the explicit
+		// empty filter must lease nothing, NOT degrade to the unfiltered "lease any"
+		// behaviour. The boundary that distinguishes `[]` from `undefined`.
+		expect(await queue.lease([])).toBeNull();
+
+		// Both jobs stay queued — an empty filter never grabs-and-fails a foreign job.
+		expect(store.current(summaryId)?.status).toBe("queued");
+		expect(store.current(dreamingId)?.status).toBe("queued");
+	});
+
+	it("a kind NOT present in the queue returns null and leaves every other kind queued", async () => {
+		const { queue, store } = makeQueue();
+		const summaryId = await queue.enqueue({ kind: "summary", payload: {} });
+		const skillifyId = await queue.enqueue({ kind: "skillify", payload: {} });
+
+		// Filtering for a kind that simply is not in the queue → nothing leasable, and
+		// the present kinds are untouched (the worker waits rather than walking a job).
+		expect(await queue.lease(["document"])).toBeNull();
+		expect(store.current(summaryId)?.status).toBe("queued");
+		expect(store.current(skillifyId)?.status).toBe("queued");
+	});
+});
+
 describe("b-AC-7 completed jobs purge past the window; dead jobs are retained longer", () => {
 	it("a done job aged past doneRetention is deleted while a dead job within deadRetention survives", async () => {
 		const clock = manualClock();

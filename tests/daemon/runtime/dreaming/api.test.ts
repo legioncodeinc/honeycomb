@@ -186,6 +186,68 @@ describe("AC-6 / D-4 security: fail-closed edge, no secret in the ack, fail-soft
 	});
 });
 
+describe("PRD-026 AC-1 — the ENABLEMENT config gate drives the ack (real trigger, env-resolved config)", () => {
+	/**
+	 * These cases drive the REAL {@link DreamingTrigger} the handler builds from
+	 * `resolveDreamingConfig()` (no injected fake decision) against the empty `fakeStorage`,
+	 * proving the `HONEYCOMB_DREAMING_ENABLED` master switch flows end-to-end into the ack:
+	 *   - enabled:false → the trigger's enabled gate fires → `{triggered:false,status:"skipped",reason:"disabled"}`.
+	 *   - enabled:true  → an empty counter is below threshold → `{triggered:true,status:"running"}` (the loop is
+	 *                     healthy, nothing to consolidate yet); the master switch is ON so it is NOT skipped.
+	 * The env is saved + restored so the toggle never leaks across tests.
+	 */
+	function withDreamingEnv<T>(value: string | undefined, fn: () => T): T {
+		const prev = process.env.HONEYCOMB_DREAMING_ENABLED;
+		if (value === undefined) delete process.env.HONEYCOMB_DREAMING_ENABLED;
+		else process.env.HONEYCOMB_DREAMING_ENABLED = value;
+		try {
+			return fn();
+		} finally {
+			if (prev === undefined) delete process.env.HONEYCOMB_DREAMING_ENABLED;
+			else process.env.HONEYCOMB_DREAMING_ENABLED = prev;
+		}
+	}
+
+	/** Mount the dream seam with the REAL trigger (no `trigger` override) + a real enqueuer. */
+	function daemonWithRealTrigger(): Daemon {
+		const daemon = createDaemon({ config: cfg(), storage: fakeStorage, logger: createRequestLogger({ silent: true }) });
+		// A real enqueuer so `available` is true and the handler builds the REAL trigger from
+		// the env-resolved dreaming config (the path under test). The fake storage returns an
+		// empty counter, so an enabled trigger reads "below threshold" and never enqueues.
+		const enqueuer = { async enqueue() { return "job-real"; } };
+		mountDreamApi(daemon, { storage: fakeStorage, defaultScope: DEFAULT_SCOPE, enqueuer });
+		return daemon;
+	}
+
+	it("AC-1 enabled:false → the config gate returns {triggered:false,status:'skipped',reason:'disabled'}", async () => {
+		const daemon = withDreamingEnv("false", () => daemonWithRealTrigger());
+		const { status, ack } = await postDream(daemon);
+		expect(status).toBe(202);
+		expect(ack).toEqual({ triggered: false, status: "skipped", reason: "disabled" });
+	});
+
+	it("AC-1 enabled:true (below threshold) → {triggered:true,status:'running'} — the loop is on but nothing new is queued", async () => {
+		const daemon = withDreamingEnv("true", () => daemonWithRealTrigger());
+		const { status, ack } = await postDream(daemon);
+		expect(status).toBe(202);
+		expect(ack.triggered).toBe(true);
+		expect(ack.status).toBe("running");
+		// The master switch is ON, so the ack is NOT the disabled `skipped` shape.
+		expect(ack.status).not.toBe("skipped");
+	});
+
+	it("AC-1 / AC-6 the enablement ack carries NO token/secret in ANY config state", async () => {
+		for (const value of ["true", "false"]) {
+			const daemon = withDreamingEnv(value, () => daemonWithRealTrigger());
+			const res = await daemon.app.request("/api/diagnostics/dream", { method: "POST" });
+			const raw = await res.text();
+			expect(raw).not.toMatch(/token|secret|bearer|authorization|x-honeycomb/i);
+			// Only the decision + a short machine reason — never the internal job id.
+			expect(raw).not.toMatch(/job-real/);
+		}
+	});
+});
+
 describe("AC-6 mounting is fail-safe", () => {
 	it("mountDreamApi is a no-op when the /api/diagnostics group is not mounted (unknown daemon shape)", () => {
 		// A daemon-shaped object whose group() always returns undefined: the mount must not throw.

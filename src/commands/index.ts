@@ -68,6 +68,13 @@ export {
 } from "./storage-handlers.js";
 
 export {
+	DREAM_ENDPOINT,
+	type DreamCliInvocation,
+	parseDreamCliArgs,
+	runDreamVerb,
+} from "./dream.js";
+
+export {
 	type ConnectorRunner,
 	type ConnectorVerbArgs,
 	type ConnectorVerbResult,

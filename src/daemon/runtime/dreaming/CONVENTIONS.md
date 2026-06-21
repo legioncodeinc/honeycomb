@@ -136,11 +136,124 @@ A DETERMINISTIC id + a POLL-CONVERGENT highest-version read (the trigger's
 `memory_jobs`). Reuse the pattern; do not single-shot a by-id read on the live
 backend — a single read can land on a stale segment and under-report the version.
 
-## Daemon assembly is DEFERRED
+## The daemon-resident worker (PRD-026, `worker.ts`)
 
-Wave 1 is constructed-and-tested, not wired into the running daemon. The queue
-handler that leases a `dreaming` job and invokes the runner with the mode-selected
-strategy — plus the maintenance-loop tick calling `checkAndEnqueueDreaming` and the
-summary-writer calling `incrementDreamingCounter` — land when 009b/009c are filled and
-the assembly step runs. Keep every export's signature stable so assembly is a pure
-wiring step.
+PRD-009 left a gap: nothing in the LIVE daemon CONSUMES a `dreaming` job. The trigger
+enqueues and the runner can run, but no harness leased a `dreaming` job and invoked the
+runner. PRD-026 Wave 1 Track B fills that with `worker.ts` — `createDreamingWorker(deps)`
+→ a `DreamingJobWorker` modelled on `pipeline/stage-worker.ts` (same `runOnce()` /
+`start()` / `stop()` shape, overlap guard, injected `setTimer`/`clearTimer`).
+
+`runOnce()`:
+
+1. `queue.lease(["dreaming"])` — the additive kind filter (below). `null` → return false.
+2. `parseDreamingJobPayload(leased.payload)`. A malformed payload → `queue.fail(id, …)`,
+   return true (NEVER a silent `complete` of a job we never ran).
+3. Select the strategy by mode (D-4): `compaction` when `mode === "compaction"` OR the
+   first-run backfill rule (`shouldEnterCompaction(config, lastPassAt)`, resolving
+   `last_pass_at` via the injected trigger's `readState`) fires; else `incremental`.
+   `maxInputTokens` is threaded from the resolved `memory.dreaming` config.
+4. Construct the runner (injected `ModelClient`, the `{org,workspace}` scope, the
+   strategy, the state-updater) and `await runner.runPass(job)`.
+5. On success `queue.complete(id)`; on throw `queue.fail(id, message)` — the stage-worker
+   try/catch shape (`dreaming.worker.*` events), never a swallowed error.
+
+The worker holds NO provider/SQL knowledge: the model is the injected 006 `ModelClient`,
+every write goes through the runner's `submitProposal` + the trigger's append-only path,
+and it issues NO direct SQL (`audit:sql` clean).
+
+### The kind-filtered lease (`services/job-queue.ts`)
+
+`JobQueueService.lease(kinds?: readonly string[])` is ADDITIVE: omitting `kinds` leases
+ANY kind (existing callers unchanged); supplying `["dreaming"]` leases ONLY a dreaming
+job, leaving `summary` / `skillify` jobs queued for their own worker. Without this, a
+generic lease would grab a foreign job, fail to parse it, and `fail()` it — walking a
+legit job toward `dead`. The filter threads into `selectLeasable` (filter `states` by
+`kinds.includes(s.type)`).
+
+### The state-updater wiring (additive trigger method)
+
+The runner's `DreamingStateUpdater.recordPassComplete(agentId, passAt)` is the b-AC-5
+seam. The worker builds it from the trigger via a NARROW, ADDITIVE public method added to
+`DreamingTrigger`: `recordPassComplete(scope, passAt)` — it reads the current state and
+appends a version that stamps `last_pass_at = passAt` and clears `pending_job_id`,
+reusing the trigger's existing `appendVersion` (the SAME path the terminal-clear takes),
+never a new in-place write. The worker's `DreamingTriggerSeam` dep exposes just
+`readState` + `recordPassComplete`; the worker adapts `(agentId, passAt)` onto
+`(scope, passAt)`.
+
+## Enablement — operator guide (PRD-026, D-1)
+
+The dreaming loop is a PREMIUM tier: it makes real model calls (the `memory_dreaming`
+workload), so the SHIPPED default stays **OFF**. Turning it on is ONE knob, but read
+the posture below before flipping it for a fleet.
+
+### The enable knob
+
+```bash
+# Off (the shipped default) — the counter still accumulates, but NO pass is queued
+# and the daemon-resident worker is never even constructed.
+HONEYCOMB_DREAMING_ENABLED=false   # or simply unset
+
+# On — the gated worker is built + started at assembly (it leases ONLY ["dreaming"]),
+# the trigger enqueues at threshold, and a real consolidation pass runs.
+HONEYCOMB_DREAMING_ENABLED=true
+```
+
+Sibling tuning knobs (all clamp-and-default, never fatal on a typo — see `config.ts`):
+
+| Env var | Default | Effect |
+|---|---|---|
+| `HONEYCOMB_DREAMING_ENABLED` | `false` | Master switch. OFF → counter grows, nothing queued, worker not built. |
+| `HONEYCOMB_DREAMING_TOKEN_THRESHOLD` | `100000` | Tokens-since-last-pass that queues a pass; the reset SUBTRACTS this (FR-5). |
+| `HONEYCOMB_DREAMING_MAX_INPUT_TOKENS` | `128000` | Input budget a pass's payload is sampled to (compaction). |
+| `HONEYCOMB_DREAMING_BACKFILL_ON_FIRST_RUN` | `true` | First run with no prior pass enters compaction (full graph) not incremental. |
+
+When ON, the real pass ALSO needs the inference model wired: an `agent.yaml`
+`inference:` block at the workspace root with the `memory_dreaming` workload, plus the
+`ANTHROPIC_API_KEY` stored in the machine-bound `.secrets/` store and referenced as
+`${ANTHROPIC_API_KEY}` (PRD-026 AC-T). Absent the key, the daemon still boots cleanly:
+`buildInferenceModelClient` degrades to the no-op client and dreaming yields empty,
+zero-mutation passes (never a failed job, never a crash).
+
+### Triggering a pass manually
+
+The automatic trigger is the maintenance-loop tick at threshold. To force one NOW:
+
+```bash
+# Enqueue a pass on the loopback daemon (the diagnostics "Dream now" seam).
+honeycomb dream trigger
+
+# Ask for a full-graph COMPACTION pass (vs the steady-state incremental).
+honeycomb dream trigger --compact
+```
+
+`honeycomb dream trigger` POSTs to `POST /api/diagnostics/dream` through the loopback
+daemon client (the same actor/scope headers every CLI verb stamps). The ack is the
+decision only — `enqueued` (a pass was queued), `running` (a pass is already in flight
+or the counter is below threshold), or `skipped` + `disabled` (the master switch is
+off, pointing you back at `HONEYCOMB_DREAMING_ENABLED=true`). The ack carries NO token
+or secret (AC-6).
+
+### The default-flip posture (D-1)
+
+> **The shipped default stays OFF until the AC-5 live proof exists; ON is then a one-line flip.**
+
+Flipping the SHIPPED default ON (so a fresh install dreams without an explicit knob) is
+licensed ONLY by the AC-5 behavioral proof:
+`tests/integration/dreaming-consolidation-live.itest.ts` — a real pass, against live
+DeepLake with the real model, that consolidates a seeded messy graph (dups merge or a
+merge proposal goes pending; stale claim superseded; junk archived/pending) WITHOUT
+losing anything source-backed, with the measured before/after delta recorded in the
+itest output. Until that artifact exists, leaving the default OFF protects a free-tier
+user from surprise model spend. The knob above is the opt-in in the meantime.
+
+## Daemon assembly is DEFERRED (the Wave-1c bee, NOT this one)
+
+The worker is CONSTRUCTED-AND-TESTED here; it is NOT wired into the running daemon by
+this module. The Wave-1c daemon-assembly bee edits `assemble.ts` to construct AND start
+the worker ONLY when `resolveDreamingConfig().enabled` (default OFF), stop it in
+teardown, and wire the trigger's `pendingTerminal` probe + the maintenance-loop tick /
+summary-writer counter calls. `createDreamingWorker` does NOT decide enablement.
+Constructing the worker has no side effects until `start()` / `runOnce()` runs. Keep
+every export's signature stable so assembly is a pure wiring step.
