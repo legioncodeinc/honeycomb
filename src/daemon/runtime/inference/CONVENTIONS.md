@@ -157,3 +157,55 @@ Wave 1 is constructed-and-tested, not wired into the running daemon:
   via `mountInferenceGateway` when 010c is filled and the assembly step runs.
 
 Keep every export's signature stable so the assembly is a pure wiring step.
+
+## The real Anthropic transport + the ModelClient factory (PRD-026 AC-T)
+
+Wave 1 shipped ONLY the fake transport. PRD-026 adds the real HTTP body + the
+assembly swap, packaged so the Wave-1c assembly bee calls ONE function.
+
+### `transport-anthropic.ts` — `createAnthropicTransport(deps?)`
+
+The real `ProviderTransport` against `https://api.anthropic.com/v1/messages`.
+
+- `execute(call)` POSTs with headers `x-api-key: <call.apiKey>`,
+  `anthropic-version: 2023-06-01`, `content-type: application/json`. The
+  OpenAI-shaped internal request is reshaped via the pure `toAnthropicBody`:
+  `role:"system"` messages hoist to the top-level `system` string (newline-joined),
+  the rest become `messages:[{role:"user"|"assistant",content}]`, and `max_tokens`
+  is ALWAYS sent (`request.maxTokens ?? DEFAULT_MAX_TOKENS = 4096`), `model` from
+  `target.model`. The success body is zod-validated at the boundary
+  (`AnthropicMessagesResponseSchema`); the `content[]` `type:"text"` blocks are
+  joined into `ProviderResult.output`.
+- `stream(call)` is a THIN wrapper: a non-stream execute yielding one terminal
+  `ProviderChunk` carrying the full text (the dreaming path consumes a whole
+  completion, not a token stream). The seam shape is preserved so a real SSE body
+  can replace it later without touching the router.
+- **Error mapping (load-bearing):** a non-2xx response THROWS
+  `new ProviderError(status, "<short status string>")` — exactly the shape
+  `router.ts`'s `providerStatus(err)` reads. So 401 → expire-account, other
+  4xx/5xx → next-target fallback, identical to the fake. A network failure → 503; a
+  malformed body → 502. The key and the response body NEVER appear in a thrown
+  message or any log.
+- **Seams:** `fetch` (default `globalThis.fetch`) and `baseUrl` (default the
+  Anthropic endpoint) are injectable — tests inject a fake fetch (NO real network),
+  and an OpenAI-compatible/OpenRouter transport can reuse the reshaping by
+  overriding `baseUrl`.
+
+### `model-client-factory.ts` — `buildInferenceModelClient(deps)`
+
+`deps = { scope, secretsStore, config, history? }` where `config` is a resolved
+`InferenceConfig` OR a path to load `agent.yaml` from. Constructs
+`createSecretResolver(secretsStore, scope)` + `createAnthropicTransport()` +
+`createInferenceRouter(...)` and returns `new RouterModelClient(router)` typed as the
+006 `ModelClient`. Returns `noopModelClient` (NEVER throws) when the config is
+absent, empty, non-routable (no accounts/workloads), or even malformed — a daemon
+without inference configured runs recall on lexical fallback and dreaming is simply
+unavailable. `history` defaults to `noopRoutingHistoryStore` so the factory stays
+storage-free (telemetry wiring is a separate assembly step).
+
+**Wave-1c assembly note:** call `await buildInferenceModelClient({ scope,
+secretsStore, config })` and inject the result wherever `noopModelClient` is today
+(stages + the dreaming runner). `config` should be the daemon's resolved
+`InferenceConfig` (or the `agent.yaml` path). No `agent.yaml` exists yet — the
+factory degrades to no-op until one is created, so wiring it is safe before the
+config lands.

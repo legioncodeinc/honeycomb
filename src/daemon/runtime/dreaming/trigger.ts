@@ -320,6 +320,28 @@ export class DreamingTrigger {
 	}
 
 	/**
+	 * Record a COMPLETED pass for a scope (b-AC-5): stamp `last_pass_at = passAt` and
+	 * CLEAR `pending_job_id`, carrying the counter (`tokens_since_last_pass`) forward
+	 * unchanged. Append-only version-bump (the SAME path `checkAndEnqueueDreaming`'s
+	 * terminal-clear takes), never an in-place UPDATE.
+	 *
+	 * This is the seam the dreaming RUNNER's {@link DreamingStateUpdater} adapter calls
+	 * on a successful pass (the worker constructs that adapter from this method). It is
+	 * additive and narrow — it does NOT re-implement the counter write, it reuses the
+	 * trigger's existing `appendVersion` so the append-only counter mechanic lives in
+	 * ONE place. The `agent_id` conjunct keeps the read+write inside the scope's agent
+	 * ring (a-AC-6).
+	 */
+	async recordPassComplete(scope: DreamingScope, passAt: string): Promise<void> {
+		const state = await this.readState(scope);
+		await this.appendVersion(state, scope, {
+			tokensSinceLastPass: state.tokensSinceLastPass,
+			lastPassAt: passAt,
+			pendingJobId: "",
+		});
+	}
+
+	/**
 	 * The maintenance-tick check (FR-3 / FR-4 / FR-5 / FR-6 / a-AC-2 / a-AC-3 / a-AC-4).
 	 *
 	 * For the given scope:

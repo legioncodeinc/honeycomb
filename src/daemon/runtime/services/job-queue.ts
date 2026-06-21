@@ -109,8 +109,17 @@ export interface LeasedJob {
 export interface JobQueueService extends DaemonService {
 	/** Enqueue a job for durable, retried background processing; returns its id. */
 	enqueue(job: JobInput): Promise<string>;
-	/** Lease the next runnable job, or `null` when nothing is leasable. */
-	lease(): Promise<LeasedJob | null>;
+	/**
+	 * Lease the next runnable job, or `null` when nothing is leasable.
+	 *
+	 * `kinds` is an OPTIONAL kind filter: when supplied, only a job whose `type`
+	 * column is in `kinds` is leasable — every other queued/failed job is left
+	 * untouched. Omitting it (the default) leases ANY kind, so existing callers are
+	 * byte-identical. The filter exists so a kind-specialized worker (e.g. the
+	 * dreaming worker) NEVER leases — and then `fail()`s — a foreign kind it cannot
+	 * run, which would otherwise walk a legit `summary`/`skillify` job to dead.
+	 */
+	lease(kinds?: readonly string[]): Promise<LeasedJob | null>;
 	/** Mark a leased job complete (`status='done'`). */
 	complete(id: string): Promise<void>;
 	/** Mark a leased job failed; the queue applies backoff / dead semantics. */
@@ -430,12 +439,12 @@ class DeepLakeJobQueueService implements JobQueueService {
 	 * storage `connection_error`/`timeout` PAUSES leasing (returns `null`) — a
 	 * connectivity blip is never a job failure (impl-note).
 	 */
-	async lease(): Promise<LeasedJob | null> {
+	async lease(kinds?: readonly string[]): Promise<LeasedJob | null> {
 		const owner = this.cfg.owner;
 		const tried = new Set<string>();
 
 		for (let attempt = 0; attempt < LEASE_CANDIDATE_TRIES; attempt++) {
-			const candidate = await this.selectLeasable(tried);
+			const candidate = await this.selectLeasable(tried, kinds);
 			if (candidate === null) return null; // nothing leasable (after exclusions).
 			tried.add(candidate.id);
 
@@ -485,13 +494,22 @@ class DeepLakeJobQueueService implements JobQueueService {
 	 * `next_run_at` has passed), skipping any id in `exclude`. Resolves CANDIDATES
 	 * via {@link discoverIds} (highest-version-per-id), filters to the leasable ones,
 	 * and returns the oldest by `next_run_at` then `created_at`.
+	 *
+	 * When `kinds` is supplied, a candidate is leasable ONLY when its `type` is in
+	 * that set — a foreign-kind job is never selected, so it stays queued for its own
+	 * worker rather than being leased and failed here. Undefined `kinds` leases any
+	 * kind (the default, behaviour-preserving for existing callers).
 	 */
-	private async selectLeasable(exclude: ReadonlySet<string>): Promise<JobState | null> {
+	private async selectLeasable(
+		exclude: ReadonlySet<string>,
+		kinds?: readonly string[],
+	): Promise<JobState | null> {
 		const nowIso = this.nowIso();
 		const states = await this.discoverIds();
 		const leasable = states.filter(
 			(s) =>
 				!exclude.has(s.id) &&
+				(kinds === undefined || kinds.includes(s.type)) &&
 				(s.status === JOB_QUEUED || s.status === JOB_FAILED) &&
 				s.nextRunAt !== "" &&
 				s.nextRunAt <= nowIso,
@@ -806,7 +824,7 @@ export const noopJobQueueService: JobQueueService = {
 	async enqueue(): Promise<string> {
 		return "noop-job";
 	},
-	async lease(): Promise<LeasedJob | null> {
+	async lease(_kinds?: readonly string[]): Promise<LeasedJob | null> {
 		return null;
 	},
 	async complete(): Promise<void> {

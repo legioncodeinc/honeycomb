@@ -75,6 +75,7 @@ export const VERB_TABLE: readonly VerbSpec[] = Object.freeze([
 	{ verb: "status", cls: "local", summary: "daemon connectivity + login + D1–D5 environment health" },
 	{ verb: "daemon", cls: "local", summary: "start | stop | status the loopback daemon (3850)" },
 	{ verb: "dashboard", cls: "local", summary: "launch the daemon-served dashboard (020b)" },
+	{ verb: "dream", cls: "storage", summary: "trigger a dreaming consolidation pass on the daemon (009/026)" },
 	{ verb: "remember", cls: "storage", summary: "write a memory through the daemon" },
 	{ verb: "recall", cls: "storage", summary: "recall memories through the daemon" },
 	{ verb: "agent", cls: "storage", summary: "run an agent turn through the daemon" },
