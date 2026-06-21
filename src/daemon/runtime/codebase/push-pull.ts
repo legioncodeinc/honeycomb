@@ -36,7 +36,7 @@
  */
 
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
-import { type HealTarget, withHeal } from "../../storage/heal.js";
+import { classifyFailure, type HealTarget, tableExists, withHeal } from "../../storage/heal.js";
 import { isOk, type QueryResult, type StorageRow } from "../../storage/result.js";
 import { sLiteral, sqlIdent } from "../../storage/sql.js";
 import { buildInsert, type RowValues, val } from "../../storage/writes.js";
@@ -251,19 +251,28 @@ async function selectByIdentity(
 	target: HealTarget,
 	identity: SnapshotIdentity,
 ): Promise<IdentitySelect> {
+	// READ-PATH GUARD: probe the catalog first. A not-yet-created `codebase` table
+	// is ABSENT here — we never issue the SELECT against it, so the backend never
+	// logs a 42P01. The table is created later on the INSERT (the WRITE path via
+	// `withHeal`), never from this read. A `null` probe (could-not-determine) fails
+	// open and falls through to the read.
+	if ((await tableExists(ctx.storage, target.table, ctx.scope)) === false) {
+		return { kind: "absent" };
+	}
+
 	const tbl = sqlIdent(target.table);
 	const shaCol = sqlIdent("snapshot_sha256");
 	const sql = `SELECT ${shaCol} FROM "${tbl}" WHERE ${identityWhere(identity)} LIMIT 1`;
 
 	const polls = ctx.verifyPolls ?? PUSH_VERIFY_POLLS;
 	for (let poll = 0; poll < polls; poll++) {
-		const res = await runHealed(ctx, target, sql);
-		if (!isOk(res)) {
-			// A query_error/connection_error/timeout is a storage failure → c-AC-4.
-			return { kind: "error", message: errMessage(res) };
-		}
-		if (res.rows.length > 0) {
-			const stored = (res.rows[0] as StorageRow).snapshot_sha256;
+		const read = await bareRead(ctx, sql);
+		// A query_error/connection_error/timeout is a storage failure → c-AC-4.
+		if (read.kind === "error") return { kind: "error", message: read.message };
+		// The table vanished/raced past the probe → absent, never create from a read.
+		if (read.kind === "absent") return { kind: "absent" };
+		if (read.rows.length > 0) {
+			const stored = (read.rows[0] as StorageRow).snapshot_sha256;
 			return { kind: "present", storedSha256: typeof stored === "string" ? stored : String(stored ?? "") };
 		}
 	}
@@ -276,11 +285,13 @@ async function countIdentityRows(ctx: PushPullContext, target: HealTarget, ident
 	const shaCol = sqlIdent("snapshot_sha256");
 	const sql = `SELECT ${shaCol} FROM "${tbl}" WHERE ${identityWhere(identity)}`;
 
+	// This runs only AFTER a successful INSERT, so the table exists; a bare read
+	// (never healing) is correct and keeps the re-verify off the create path.
 	const polls = ctx.verifyPolls ?? PUSH_VERIFY_POLLS;
 	let maxSeen = 0;
 	for (let poll = 0; poll < polls; poll++) {
-		const res = await runHealed(ctx, target, sql);
-		if (isOk(res) && res.rows.length > maxSeen) maxSeen = res.rows.length;
+		const read = await bareRead(ctx, sql);
+		if (read.kind === "rows" && read.rows.length > maxSeen) maxSeen = read.rows.length;
 	}
 	return maxSeen;
 }
@@ -300,14 +311,39 @@ async function insertSnapshotRow(
 }
 
 /**
- * Run a statement heal-aware: a missing-table/missing-column `query_error` triggers
- * a targeted heal + ONE retry (PRD-002c `withHeal`). This is what lets a live itest
- * route the canonical `codebase` name to a per-run throwaway table NATIVELY — the
- * heal CREATEs the physical table on the first push touch — and matches the daemon's
- * production self-heal path. Any non-schema failure returns unhealed (→ c-AC-4).
+ * Run a WRITE heal-aware: a missing-table/missing-column `query_error` triggers a
+ * targeted heal + ONE retry (PRD-002c `withHeal`). Reserved for the INSERT path —
+ * a missing `codebase` table is CREATEd lazily on the first write, which is also
+ * what lets a live itest route the canonical name to a per-run throwaway table
+ * NATIVELY (the heal CREATEs it on the first push INSERT). READS must NOT use this
+ * — they use {@link bareRead} behind the {@link tableExists} probe so a read never
+ * emits a backend 42P01 nor provokes a CREATE. Any non-schema failure returns
+ * unhealed (→ c-AC-4).
  */
 function runHealed(ctx: PushPullContext, target: HealTarget, sql: string): Promise<QueryResult> {
 	return withHeal(ctx.storage, target, ctx.scope, () => ctx.storage.query(sql, ctx.scope));
+}
+
+/** The outcome of a single non-healing read (PRD-002c read-path guard). */
+type BareRead =
+	| { readonly kind: "rows"; readonly rows: StorageRow[] }
+	| { readonly kind: "absent" }
+	| { readonly kind: "error"; readonly message: string };
+
+/**
+ * Run ONE read statement that NEVER heals and NEVER creates. A `missing-table`
+ * failure — a race or a catalog/data drift that slipped past the
+ * {@link tableExists} probe — maps to `absent`, so a read can never provoke a
+ * CREATE the way `runHealed`/`withHeal` would (creation belongs to the write
+ * path). Any other failure surfaces as `error` (→ best-effort `failed`, c-AC-4).
+ */
+async function bareRead(ctx: PushPullContext, sql: string): Promise<BareRead> {
+	const res = await ctx.storage.query(sql, ctx.scope);
+	if (isOk(res)) return { kind: "rows", rows: res.rows };
+	if (res.kind === "query_error" && classifyFailure(res.message) === "missing-table") {
+		return { kind: "absent" };
+	}
+	return { kind: "error", message: errMessage(res) };
 }
 
 /** Extract the (already-redacted) message from a non-ok result. */
@@ -486,6 +522,14 @@ async function selectFreshestForHead(
 	target: HealTarget,
 	identity: SnapshotIdentity,
 ): Promise<FreshestSelect> {
+	// READ-PATH GUARD: pull is a PURE read and must never create the table. Probe
+	// the catalog first; a not-yet-created `codebase` table is `absent` (→
+	// not-found) with NO SELECT issued and NO 42P01 logged. `null` fails open →
+	// read anyway.
+	if ((await tableExists(ctx.storage, target.table, ctx.scope)) === false) {
+		return { kind: "absent" };
+	}
+
 	const tbl = sqlIdent(target.table);
 	const shaCol = sqlIdent("snapshot_sha256");
 	const jsonbCol = sqlIdent("snapshot_jsonb");
@@ -497,10 +541,11 @@ async function selectFreshestForHead(
 	const polls = ctx.verifyPolls ?? PUSH_VERIFY_POLLS;
 	let best: { snapshotJsonb: unknown; claimedSha256: string; createdAt: string } | null = null;
 	for (let poll = 0; poll < polls; poll++) {
-		const res = await runHealed(ctx, target, sql);
-		if (!isOk(res)) return { kind: "error", message: errMessage(res) };
-		if (res.rows.length === 0) continue;
-		const r = res.rows[0] as StorageRow;
+		const read = await bareRead(ctx, sql);
+		if (read.kind === "error") return { kind: "error", message: read.message };
+		if (read.kind === "absent") return { kind: "absent" };
+		if (read.rows.length === 0) continue;
+		const r = read.rows[0] as StorageRow;
 		const createdAt = typeof r.created_at === "string" ? r.created_at : String(r.created_at ?? "");
 		if (best === null || createdAt >= best.createdAt) {
 			best = {

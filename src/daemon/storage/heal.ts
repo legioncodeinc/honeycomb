@@ -33,6 +33,7 @@ import {
 	buildAddColumnSql,
 	buildCreateTableSql,
 	buildIntrospectionSql,
+	buildTableExistsSql,
 	type ColumnDef,
 } from "./schema.js";
 
@@ -124,6 +125,27 @@ export async function healColumns(
 		throw new HealFailure(`ALTER ADD COLUMN "${target.table}"."${col.name}" failed`, res);
 	}
 	return { missing, altered };
+}
+
+/**
+ * Probe whether a table exists via the Postgres catalog WITHOUT touching the
+ * table itself (PRD-002c read-path guard). The companion to `withHeal`: where
+ * `withHeal` CREATES a missing table on a failed WRITE, this lets a READ decide
+ * "the table is absent" cheaply and SILENTLY — `information_schema.tables`
+ * returns zero rows for a not-yet-created table, so the backend never logs a
+ * `relation "<t>" does not exist` (42P01) the way a bare SELECT against the
+ * table would. A read uses this to skip the SELECT entirely; creation stays on
+ * the write path so a read never provokes a CREATE.
+ *
+ * Returns `true`/`false` when the catalog answered, or `null` when the probe
+ * itself failed (connection/timeout/query error) — "could not determine".
+ * Callers FAIL OPEN on `null` (proceed with the read) so a transient catalog
+ * blip never wrongly reports a live table as absent.
+ */
+export async function tableExists(client: StorageQuery, tableName: string, scope: QueryScope): Promise<boolean | null> {
+	const res = await client.query(buildTableExistsSql(tableName, scope.workspace ?? ""), scope);
+	if (!isOk(res)) return null;
+	return res.rows.length > 0;
 }
 
 /** Run the introspection SELECT and collect the present column names (lowercased). */
