@@ -30,6 +30,7 @@ import { ROUTING_HISTORY_TABLES } from "./routing-history.js"; // PRD-010 (routi
 import { RUNTIME_JOBS_TABLES } from "./runtime-jobs.js"; // PRD-004b (durable job queue)
 import { SESSIONS_SUMMARIES_TABLES } from "./sessions-summaries.js"; // PRD-003c (implemented)
 import { SOURCES_TABLES } from "./sources.js"; // PRD-013a (source-artifact + document tables)
+import { SYNCED_ASSETS_TABLES } from "./synced-assets.js"; // PRD-033a (asset-sync substrate)
 import { TENANCY_TABLES } from "./tenancy.js"; // PRD-003e (stub)
 import { type CatalogTable } from "./types.js";
 
@@ -48,6 +49,7 @@ export const CATALOG: readonly CatalogTable[] = Object.freeze([
 	...DREAMING_STATE_TABLES,
 	...ROUTING_HISTORY_TABLES,
 	...SOURCES_TABLES,
+	...SYNCED_ASSETS_TABLES,
 ]);
 
 /** The write-pattern registry over the whole catalog (table → pattern → primitive). */
@@ -132,3 +134,13 @@ export {
 	PROVENANCE_COLUMNS,
 	SOURCES_TABLES,
 } from "./sources.js";
+export {
+	buildCurrentAssetVersionSql,
+	SYNCED_ASSET_TYPES,
+	SYNCED_ASSETS_COLUMNS,
+	SYNCED_ASSETS_TABLE,
+	SYNCED_ASSETS_TABLES,
+	type SyncedAssetType,
+	TOMBSTONE_FALSE,
+	TOMBSTONE_TRUE,
+} from "./synced-assets.js";
