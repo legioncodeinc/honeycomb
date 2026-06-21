@@ -107,6 +107,23 @@ class InMemoryApiKeys {
 	};
 }
 
+/**
+ * The `api_keys` columns whose stored value is a numeric scalar (BIGINT). EVERY other
+ * column — `id`, `key_hash`, `role`, dates, etc. — is TEXT and MUST round-trip as a
+ * STRING, even when its characters happen to be all digits.
+ *
+ * ── Why this is type-driven, not value-shape-driven (the de-flake) ───────────
+ * `id` is `randomBytes(8).toString("hex")` — a 16-hex-char handle that is ALL DIGITS
+ * ~1 in 1.8k creations. The previous `coerce` numberified any all-digit token by its
+ * SHAPE, so such an `id` (e.g. `"0123456789012345"` or a value > 2^53) became a Number
+ * and lost its leading zero / precision; the by-id lookup (`String(row.id) === id`)
+ * then missed, the row read as absent, and the authenticator returned `null` for a
+ * VALID key — an ~1-in-12k non-deterministic flake. DeepLake stores by COLUMN TYPE,
+ * not by value shape, so the fake now mirrors that: only the BIGINT columns coerce to
+ * Number; TEXT columns (including an all-digit `id`) stay strings and always match.
+ */
+const API_KEYS_NUMERIC_COLUMNS = new Set(["revoked", "version"]);
+
 /** Parse `INSERT INTO "api_keys" (a, b) VALUES ('x', 1)` into a row object. */
 function parseInsert(sql: string): StorageRow {
 	const m = /\(([^)]*)\)\s*VALUES\s*\((.*)\)\s*$/is.exec(sql);
@@ -115,14 +132,29 @@ function parseInsert(sql: string): StorageRow {
 	const vals = splitValues(m[2]);
 	const row: StorageRow = {};
 	cols.forEach((c, i) => {
-		row[c] = vals[i];
+		// Coerce by COLUMN TYPE (as the backend does): a BIGINT column → Number, every
+		// TEXT column → the verbatim string. An all-digit TEXT `id` therefore never
+		// numberifies (which would drop a leading zero or lose >2^53 precision and break
+		// the by-id lookup — the de-flaked non-determinism).
+		row[c] = API_KEYS_NUMERIC_COLUMNS.has(c) ? toNumber(vals[i]) : vals[i];
 	});
 	return row;
 }
 
-/** Split a VALUES list on top-level commas, honoring single-quoted literals. */
-function splitValues(raw: string): unknown[] {
-	const out: unknown[] = [];
+/** Coerce a captured BIGINT token to a number; a non-numeric token is left as-is. */
+function toNumber(value: unknown): unknown {
+	if (typeof value !== "string") return value;
+	return /^-?\d+(\.\d+)?$/.test(value) ? Number(value) : value;
+}
+
+/**
+ * Split a VALUES list on top-level commas, honoring single-quoted literals. Each token
+ * is returned as the (unquoted) STRING it was written as; numeric coercion is applied
+ * later by COLUMN TYPE in {@link parseInsert}, never by the value's shape here — so an
+ * all-digit TEXT value is never silently turned into a Number.
+ */
+function splitValues(raw: string): string[] {
+	const out: string[] = [];
 	let buf = "";
 	let inStr = false;
 	for (let i = 0; i < raw.length; i++) {
@@ -139,21 +171,14 @@ function splitValues(raw: string): unknown[] {
 		} else if (ch === "'") {
 			inStr = true;
 		} else if (ch === ",") {
-			out.push(coerce(buf.trim()));
+			out.push(buf.trim());
 			buf = "";
 		} else {
 			buf += ch;
 		}
 	}
-	if (buf.trim().length > 0 || out.length > 0) out.push(coerce(buf.trim(), buf));
+	if (buf.trim().length > 0 || out.length > 0) out.push(buf.trim());
 	return out;
-}
-
-/** Coerce a captured token: a bare number → number, else the (already unquoted) string. */
-function coerce(token: string, rawWhenEmpty?: string): unknown {
-	if (token === "" && rawWhenEmpty !== undefined) return "";
-	if (/^-?\d+(\.\d+)?$/.test(token)) return Number(token);
-	return token;
 }
 
 function makeStorage(table: InMemoryApiKeys): StorageQuery {

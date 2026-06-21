@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Daemon } from "../../../../src/daemon/runtime/server.js";
 import { mountKpisApi, KPIS_GROUP } from "../../../../src/daemon/runtime/kpis/api.js";
+import { collapseLatestPerKey, type KeyedRow } from "../../../../src/daemon/runtime/product/keyed-engine.js";
 import { makeKeyedDaemon } from "../product/_keyed-harness.js";
 
 const HEADERS = { "x-honeycomb-org": "acme", "x-honeycomb-workspace": "backend", "content-type": "application/json" };
@@ -59,6 +60,59 @@ describe("PRD-022c /api/kpis", () => {
 			});
 		}
 		expect(table.rows).toHaveLength(3);
+	});
+
+	it("c-AC-2 GET collapses a DUPLICATE physical row (eventual-consistency upsert race) to ONE logical row, latest value", async () => {
+		// Reproduce the DeepLake eventual-consistency artifact: a second same-key POST whose
+		// key-probe SELECT raced a stale segment INSERTed a SECOND physical row instead of
+		// updating in place. Both rows are durable on disk — no read poll can make 2 → 1.
+		// Project memory: "the backend flaps stale segments; every live read-back must poll
+		// until convergence". The honest fix is the READ: collapse to the highest-updated_at
+		// row per key. We seed the duplicate directly (the in-memory fake never races, so we
+		// model the durable two-row state the live backend leaves behind).
+		const { app, table } = buildApp();
+		table.rows.push({
+			key: "p95-latency",
+			value: "320",
+			target: "",
+			status: "open",
+			unit: "ms",
+			agent_id: "default",
+			visibility: "global",
+			created_at: "2026-06-21T00:00:00.000Z",
+			updated_at: "2026-06-21T00:00:00.000Z",
+		});
+		table.rows.push({
+			key: "p95-latency",
+			value: "180",
+			target: "",
+			status: "open",
+			unit: "ms",
+			agent_id: "default",
+			visibility: "global",
+			created_at: "2026-06-21T00:00:01.000Z",
+			updated_at: "2026-06-21T00:00:01.000Z", // the later write
+		});
+		expect(table.rows.filter((r) => r.key === "p95-latency")).toHaveLength(2); // two PHYSICAL rows on disk.
+
+		const get = await app.request("/api/kpis", { headers: HEADERS });
+		const body = (await get.json()) as { kpis: Array<{ key: string; value: string }> };
+		const matching = body.kpis.filter((k) => k.key === "p95-latency");
+		// The READ collapses the duplicate to ONE logical row — the latest write wins.
+		expect(matching).toHaveLength(1);
+		expect(matching[0]?.value).toBe("180");
+	});
+
+	it("collapseLatestPerKey keeps the highest-updated_at row per key (distinct keys preserved)", () => {
+		const rows: KeyedRow[] = [
+			{ key: "k1", value: "old", target: "", status: "open", unit: "", updatedAt: "2026-01-01T00:00:00.000Z" },
+			{ key: "k1", value: "new", target: "", status: "open", unit: "", updatedAt: "2026-01-02T00:00:00.000Z" },
+			{ key: "k2", value: "only", target: "", status: "open", unit: "", updatedAt: "2026-01-01T00:00:00.000Z" },
+		];
+		const collapsed = collapseLatestPerKey(rows);
+		expect(collapsed).toHaveLength(2); // one row per distinct key.
+		expect(collapsed.find((r) => r.key === "k1")?.value).toBe("new"); // latest write wins.
+		expect(collapsed.find((r) => r.key === "k2")?.value).toBe("only"); // a single-row key is untouched.
 	});
 
 	it("c-AC-6 malformed body + missing org are both rejected at the edge", async () => {
