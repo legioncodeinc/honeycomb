@@ -75,6 +75,13 @@ export {
 } from "./dream.js";
 
 export {
+	MAINTENANCE_COMPACT_ENDPOINT,
+	type MaintenanceCliInvocation,
+	parseMaintenanceCliArgs,
+	runMaintenanceVerb,
+} from "./maintenance.js";
+
+export {
 	type ConnectorRunner,
 	type ConnectorVerbArgs,
 	type ConnectorVerbResult,

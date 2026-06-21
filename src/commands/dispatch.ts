@@ -29,6 +29,7 @@ import {
 } from "./contracts.js";
 import { parseSessionsArgs, runSessionsCommand } from "./sessions.js";
 import { runDreamVerb } from "./dream.js";
+import { runMaintenanceVerb } from "./maintenance.js";
 import { runStorageVerb } from "./storage-handlers.js";
 import { runStatusCommand, type StatusDeps } from "./status.js";
 import { type LocalDeps, runConnectorVerb, runDashboardCommand, runHookCommand, runUpdateCommand } from "./local-handlers.js";
@@ -122,6 +123,11 @@ async function dispatchStorage(inv: CommandInvocation, deps: CommandDeps): Promi
 	// `/api/<verb>` storage convention — so it has its own thin-client handler (PRD-026 D-3).
 	if (inv.verb === "dream") {
 		return runDreamVerb(inv.argv, deps);
+	}
+	// `maintenance` hits the diagnostics compaction trigger (`/api/diagnostics/compact`), not the
+	// `/api/<verb>` storage convention — so it has its own thin-client handler (PRD-030 D-2).
+	if (inv.verb === "maintenance") {
+		return runMaintenanceVerb(inv.argv, deps);
 	}
 	// `recall` renders the daemon's hits; `--json` (the global flag) switches it to the raw JSON body.
 	return runStorageVerb(inv.verb, inv.argv, deps, inv.flags.json);

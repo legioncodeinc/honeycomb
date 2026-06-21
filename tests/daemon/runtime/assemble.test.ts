@@ -84,6 +84,7 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 		mountVfs: 0,
 		mountProductData: 0,
 		mountDream: 0,
+		mountCompact: 0,
 	} as Record<keyof SeamFns, number>;
 	const seams: SeamFns = {
 		attachHooks: ((daemon) => {
@@ -171,6 +172,18 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 				daemon.services.queue,
 			);
 		}) as SeamFns["mountDream"],
+		// ── The PRD-030 standalone COMPACTION trigger seam the composition root fires. ──
+		mountCompact: ((daemon, options) => {
+			calls.mountCompact += 1;
+			order.push("mountCompact");
+			expect(typeof daemon.group).toBe("function");
+			// The compactor route is wired with the live storage client (the version-history reap).
+			expect(options.storage).toBeDefined();
+			// PRD-030 D-2: the daemon's default tenancy scope is threaded so the compaction pass
+			// runs over the single local tenant's version-bumped tables.
+			expect(options.defaultScope, "compact trigger receives the threaded default scope").toBeDefined();
+			expect(options.defaultScope?.org).toBeTruthy();
+		}) as SeamFns["mountCompact"],
 	};
 	return { seams, calls };
 }
@@ -212,8 +225,10 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 		expect(calls.mountProductData).toBe(1);
 		// PRD-024 / AC-6: the "Dream now" trigger fires once and only once.
 		expect(calls.mountDream).toBe(1);
+		// PRD-030 / D-2: the standalone compaction trigger fires once and only once.
+		expect(calls.mountCompact).toBe(1);
 		// Deterministic order: the 021 seams, then the 022 data seams (memories → vfs → product),
-		// then the PRD-024 dream trigger last.
+		// then the PRD-024 dream trigger, then the PRD-030 compaction trigger last.
 		expect(order).toEqual([
 			"attachHooks",
 			"mountDashboard",
@@ -225,6 +240,7 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 			"mountVfs",
 			"mountProductData",
 			"mountDream",
+			"mountCompact",
 		]);
 	});
 
@@ -246,6 +262,9 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 		// PRD-024 / AC-6: the dream trigger also fires unconditionally — its /api/diagnostics
 		// group is protect:true, so it inherits auth/RBAC and is NOT mode-gated (fires in team too).
 		expect(calls.mountDream).toBe(1);
+		// PRD-030 / D-2: the standalone compaction trigger also fires unconditionally (same
+		// protected /api/diagnostics group; fires in team too).
+		expect(calls.mountCompact).toBe(1);
 		// The /dashboard host stays local-only (security F-1) even though the data seams fire.
 		expect(calls.mountDashboardHost).toBe(0);
 	});
@@ -563,6 +582,7 @@ describe("fix/daemon-scope-from-credentials: the daemon's default scope comes fr
 			mountVfs: noop,
 			mountProductData: noop,
 			mountDream: noop,
+			mountCompact: noop,
 		};
 		return { seams, captured };
 	}

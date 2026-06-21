@@ -117,6 +117,33 @@ export {
 	type VectorSearchArgs,
 } from "./vector.js";
 
+// ── PRD-030: storage-level version-history compaction ──────────────────────
+export {
+	assertVersionBumpedTable,
+	COMPACTABLE_VERSION_BUMPED_TABLES,
+	compactVersionHistory,
+	type CompactionClock,
+	CompactionConfigError,
+	type CompactionConfigProvider,
+	type CompactionLogger,
+	type CompactionOptions,
+	CompactionRefusedError,
+	type CompactionRetention,
+	CompactionRetentionSchema,
+	type CompactionSummary,
+	computeReapSet,
+	createVersionCompactor,
+	DEFAULT_KEEP_LATEST_N,
+	DEFAULT_TIMESTAMP_COLUMN,
+	DEFAULT_VERSION_COLUMN,
+	DEFAULT_WINDOW_DAYS,
+	envCompactionConfigProvider,
+	isVersionBumpedTable,
+	type RawCompactionConfig,
+	resolveCompactionConfig,
+	type VersionRow,
+} from "./compaction.js";
+
 /**
  * Build the storage client, failing closed on bad config (FR-2 / a-AC-3).
  *
