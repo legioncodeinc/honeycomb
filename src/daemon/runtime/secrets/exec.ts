@@ -550,7 +550,10 @@ export class SecretExecRunner {
 		this.audit.record(this.ev("exec_started", job, "ok"));
 		const child = this.spawner.spawn(request.command, request.args ?? [], env);
 
-		// 3) Capture + redact streamingly (chunk-boundary safe).
+		// 3) Capture + redact streamingly (chunk-boundary safe). The `end` events on these
+		//    streams are the SYNCHRONIZATION POINT for "all output collected" — see
+		//    awaitChildWithTimeout, which waits for them so a killed child's buffered PARTIAL
+		//    output is fully drained into the redactor BEFORE the job settles (b-AC-5).
 		child.stdout.on("data", (d: Buffer) => job.stdout.push(d.toString("utf8")));
 		child.stderr.on("data", (d: Buffer) => job.stderr.push(d.toString("utf8")));
 
@@ -568,6 +571,17 @@ export class SecretExecRunner {
 	 * Await the child's exit, enforcing the timeout. On exit before the deadline: terminal
 	 * `succeeded`/`failed` by exit code. On the deadline: mark `timed_out`, SIGTERM, then
 	 * SIGKILL after the grace, and resolve with redacted PARTIAL output (b-AC-5 / FR-9).
+	 *
+	 * ── Why we wait for the STREAMS, not just the process `close` ────────────────
+	 * The process-level `close` event and the stdout/stderr `data` events are delivered on
+	 * SEPARATE emitters. When a child is KILLED with output still buffered (the b-AC-5
+	 * timeout path: it wrote `partial:…` then was SIGKILLed), the process `close` can win
+	 * the event-loop race against the final pending `data` callback — so `flush()`/the
+	 * status read would see an EMPTY buffer. Under parallel CPU contention (Windows CI) that
+	 * window widens into an intermittent failure. The robust fix: settle only once the
+	 * process has closed AND both stdio streams have emitted `end` (fully drained). The
+	 * stream `end` is the true "all output collected" barrier; resolving on it makes the
+	 * captured partial output deterministic regardless of scheduling jitter.
 	 */
 	private awaitChildWithTimeout(
 		child: ChildProcessWithoutNullStreams,
@@ -576,7 +590,23 @@ export class SecretExecRunner {
 	): Promise<void> {
 		return new Promise<void>((resolve) => {
 			let settled = false;
-			const finish = (): void => {
+			// The settle barrier: the process must have closed AND both stdio streams must have
+			// fully drained (`end`). Only when all three are true is the captured output final.
+			let processClosed = false;
+			let stdoutEnded = false;
+			let stderrEnded = false;
+
+			const settle = (): void => {
+				if (settled) return;
+				if (!(processClosed && stdoutEnded && stderrEnded)) return;
+				settled = true;
+				clearTimeout(timer);
+				clearTimeout(killTimer);
+				resolve();
+			};
+
+			// The spawn/exec error path (e.g. ENOENT) has NO streams to drain — resolve at once.
+			const settleNow = (): void => {
 				if (settled) return;
 				settled = true;
 				clearTimeout(timer);
@@ -594,7 +624,7 @@ export class SecretExecRunner {
 				try {
 					child.kill("SIGTERM");
 				} catch {
-					// already dead — the `close` handler will resolve.
+					// already dead — the `close`/stream-`end` handlers will resolve.
 				}
 				killTimer = setTimeout(() => {
 					try {
@@ -605,22 +635,43 @@ export class SecretExecRunner {
 				}, this.killGraceMs);
 			}, timeoutMs);
 
+			// Drain barriers: once a stream emits `end`, every `data` it will ever emit has been
+			// delivered to the redactor. `error` on a stream also ends our wait for it (a torn
+			// pipe on kill must not hang the settle).
+			child.stdout.on("end", () => {
+				stdoutEnded = true;
+				settle();
+			});
+			child.stdout.on("error", () => {
+				stdoutEnded = true;
+				settle();
+			});
+			child.stderr.on("end", () => {
+				stderrEnded = true;
+				settle();
+			});
+			child.stderr.on("error", () => {
+				stderrEnded = true;
+				settle();
+			});
+
 			child.on("error", () => {
-				// Spawn/exec error (e.g. ENOENT). Terminal failure; no value at risk.
+				// Spawn/exec error (e.g. ENOENT). Terminal failure; no value at risk. No streams
+				// will ever flow, so do NOT wait on their `end` — resolve immediately.
 				if (!isTerminal(job.status)) job.status = "failed";
-				finish();
+				settleNow();
 			});
 
 			child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
 				job.exitCode = code;
 				job.signal = signal;
-				if (job.timedOut) {
-					// Stays `timed_out` (terminal) with whatever partial output was captured.
-					finish();
-					return;
+				if (!job.timedOut) {
+					job.status = code === 0 ? "succeeded" : "failed";
 				}
-				job.status = code === 0 ? "succeeded" : "failed";
-				finish();
+				// Stays `timed_out` (terminal) with whatever partial output was captured when the
+				// deadline fired. Either way, settle ONLY once the streams have also drained.
+				processClosed = true;
+				settle();
 			});
 		});
 	}
