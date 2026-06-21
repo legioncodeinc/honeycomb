@@ -1,0 +1,209 @@
+name: Release
+
+# The npm-publish workflow for honeycomb. It runs the SAME full gate as ci.yaml
+# (npm run ci + build + audit:openclaw + pack:check) and then publishes the
+# package to the public npm registry with provenance.
+#
+# DRAFT STATUS (read RELEASING.md before going public): the package is still
+# `private: true` and named `honeycomb` (a name already owned by someone else on
+# the public registry). This workflow is wired so a maintainer can go public with
+# a few deliberate switches, but it FAILS CLOSED until those switches are flipped:
+#   * the publishability preflight aborts if `private` is still true OR if the
+#     name is the taken unscoped `honeycomb` — so a stray tag push cannot publish
+#     a broken or duplicate package by accident.
+#   * a real `npm publish` only happens when NPM_TOKEN is set AND this is not a
+#     dry run; otherwise the job runs the gate + `npm publish --dry-run` and stays
+#     green (mirrors ci.yaml's gated-integration pattern: skip, don't fail).
+#
+# Two ways in:
+#   * push a version tag `vX.Y.Z` -> a real publish attempt (still gated as above).
+#   * workflow_dispatch with dry_run -> rehearse the whole pipeline without
+#     publishing. `dry_run` defaults to TRUE so the manual button is safe by
+#     default — a maintainer must opt IN to a real publish.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Rehearse only: run the gate + `npm publish --dry-run`, never publish for real.'
+        type: boolean
+        required: false
+        default: true
+
+# Cancel a superseded manual rehearse on the same ref. Tag pushes are unique
+# refs, so in practice this only coalesces repeated workflow_dispatch runs.
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+# Least privilege (mirrors ci.yaml principle #7), scoped UP only for what a
+# publish needs:
+#   * contents: write  — ONLY to create the GitHub Release for the pushed tag.
+#   * id-token: write  — the OIDC token npm provenance signs against, so the
+#                        published package carries a verifiable supply-chain
+#                        attestation (`npm publish --provenance`). Without this
+#                        scope provenance generation fails.
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    name: Publish honeycomb to npm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+
+      # registry-url is what wires `npm publish` (and provenance) to the public
+      # npm registry and makes setup-node write the NODE_AUTH_TOKEN line into
+      # .npmrc. One pinned Node major — the publish surface does not need the
+      # full engine matrix (that canary lives on ci.yaml's quality-gate).
+      - name: Setup Node
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: '22.x'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+
+      - name: Install (npm ci)
+        run: npm ci
+
+      # ── The FULL gate, identical recipe to ci.yaml. A release must clear the
+      # same bar as a PR before any tarball is built. ──────────────────────────
+      - name: Quality gate (typecheck + dup + test + audit:sql)
+        run: npm run ci
+
+      - name: Build (tsc + esbuild bundles)
+        run: npm run build
+
+      - name: Audit OpenClaw bundle (ClawHub rules)
+        run: npm run audit:openclaw
+
+      - name: Pack-check (tarball secret/forbidden-file + required-file scan)
+        run: npm run pack:check
+
+      # ── Tag-vs-package.json version guard. ───────────────────────────────────
+      # On a tag push the pushed tag `vX.Y.Z` MUST equal package.json's version
+      # (which sync-versions has already propagated into every manifest). A
+      # mismatch means the tag and the artifact disagree — abort with a clear
+      # message rather than publish a mislabeled package. Skipped on
+      # workflow_dispatch (no tag ref to compare).
+      - name: Guard — pushed tag matches package.json version
+        if: ${{ github.ref_type == 'tag' }}
+        run: |
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "package.json version: $PKG_VERSION"
+          echo "pushed tag:           $GITHUB_REF_NAME (-> $TAG_VERSION)"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Tag/version mismatch: tag '$GITHUB_REF_NAME' implies version '$TAG_VERSION' but package.json is '$PKG_VERSION'. Bump package.json (npm version) and re-tag so the tag and the published artifact agree."
+            exit 1
+          fi
+          echo "OK — tag and package.json agree on $PKG_VERSION"
+
+      # ── Publishability preflight — FAILS CLOSED. ─────────────────────────────
+      # This is the guard that keeps the DRAFT from ever publishing a broken or
+      # duplicate package. It aborts (before any publish) if EITHER:
+      #   * `private: true` is still set — the deliberate "don't publish yet"
+      #     guard in package.json is intact, so this is not a real go-public; OR
+      #   * `name` is the unscoped `honeycomb` — that name is already owned by a
+      #     third party on the public registry; a publish under it is impossible
+      #     (403) or, worse, wrong. Going public requires a SCOPED name
+      #     (@<scope>/honeycomb) — see RELEASING.md.
+      # The maintainer flips both switches (remove private, set the scoped name)
+      # as documented in RELEASING.md; until then this step stops the line.
+      - name: Preflight — publishability (private + name guard)
+        run: |
+          PKG_PRIVATE="$(node -p "require('./package.json').private === true")"
+          PKG_NAME="$(node -p "require('./package.json').name")"
+          echo "name:    $PKG_NAME"
+          echo "private: $PKG_PRIVATE"
+          FAIL=0
+          if [ "$PKG_PRIVATE" = "true" ]; then
+            echo "::error::package.json still has \`private: true\` — this is the deliberate don't-publish-yet guard. Remove it (see RELEASING.md) before going public."
+            FAIL=1
+          fi
+          if [ "$PKG_NAME" = "honeycomb" ]; then
+            echo "::error::package.json name is the unscoped \`honeycomb\`, which is already taken on the public npm registry. Rename to a scoped name (e.g. @legioncodeinc/honeycomb) and add publishConfig.access=public — see RELEASING.md."
+            FAIL=1
+          fi
+          if [ "$FAIL" = "1" ]; then
+            echo "Refusing to publish: the go-public switches in RELEASING.md have not all been flipped."
+            exit 1
+          fi
+          echo "OK — package is publishable (not private, scoped name)."
+
+      # ── Token gate. ──────────────────────────────────────────────────────────
+      # secrets are not allowed in a job/step `if:`, so read NPM_TOKEN in a run
+      # step and emit a boolean. Empty token (before the secret is set, or on a
+      # fork) -> publish=false -> the publish step does a --dry-run and the job
+      # stays GREEN (skip, don't fail — same pattern as ci.yaml's secret gate).
+      - name: Token gate
+        id: token
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "$NPM_TOKEN" ]; then
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Decide dry-run vs real publish in one place. A real publish requires ALL:
+      #   * a token is present, AND
+      #   * this is not a workflow_dispatch dry_run.
+      # On a tag push `inputs.dry_run` is empty, so the only gate is the token.
+      - name: Resolve publish mode
+        id: mode
+        env:
+          HAS_TOKEN: ${{ steps.token.outputs.has_token }}
+          DRY_RUN_INPUT: ${{ github.event.inputs.dry_run }}
+        run: |
+          if [ "$HAS_TOKEN" = "true" ] && [ "$DRY_RUN_INPUT" != "true" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "Mode: REAL publish (token present, not a dry run)."
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Mode: DRY-RUN (token=$HAS_TOKEN, dry_run_input=$DRY_RUN_INPUT) — running npm publish --dry-run, not publishing."
+          fi
+
+      # ── Publish. ─────────────────────────────────────────────────────────────
+      # `prepack` (= npm run build) runs again inside `npm publish`, so the
+      # tarball is always built from the just-checked-out tree.
+      #   --provenance   : emit the OIDC supply-chain attestation (needs the
+      #                    id-token: write permission above).
+      #   --access public: scoped packages default to restricted; this publishes
+      #                    them public. (Also set via publishConfig in
+      #                    package.json when going public — belt and suspenders.)
+      # NODE_AUTH_TOKEN is the .npmrc auth var setup-node wired to registry-url.
+      - name: Publish (real)
+        if: ${{ steps.mode.outputs.publish == 'true' }}
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # Rehearse: same command minus the real upload. Runs whenever we are NOT in
+      # real-publish mode (dry_run input, or no token yet) so the pipeline is
+      # exercised end-to-end and stays green before secrets exist.
+      - name: Publish (dry-run rehearsal)
+        if: ${{ steps.mode.outputs.publish != 'true' }}
+        run: npm publish --provenance --access public --dry-run
+        env:
+          # Harmless when empty; present so the dry-run exercises the same auth
+          # path the real publish takes.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # ── GitHub Release. ──────────────────────────────────────────────────────
+      # Only on a real tag push AND only after a real publish — a dry-run or a
+      # tokenless rehearsal should not mint a Release. Uses the pinned official
+      # action; contents: write (above) is the scope this needs.
+      - name: Create GitHub Release
+        if: ${{ github.ref_type == 'tag' && steps.mode.outputs.publish == 'true' }}
+        uses: softprops/action-gh-release@v2.4.1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true

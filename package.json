@@ -2,6 +2,11 @@
   "name": "honeycomb",
   "version": "0.1.0",
   "private": true,
+  "//go-public": "DRAFT — see RELEASING.md. To publish: (a) rename to a SCOPED name (the unscoped `honeycomb` is taken on npm), (b) uncomment the publishConfig below, (c) remove `private: true`, (d) set the NPM_TOKEN repo secret. Until then release.yaml's preflight fails closed.",
+  "//publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "description": "Honeycomb monorepo foundation: a long-lived daemon plus thin clients for six coding harnesses, the unified honeycomb CLI, the MCP server, and the embed daemon.",
   "type": "module",
   "//build-order": "Fixed dependency direction enforced by import direction under one tsc pass: (1) core = src/shared + src/daemon-client, (2) connector-base = src/daemon, (3) plugins/native = embeddings, (4) connectors = harnesses/* + mcp + src/cli, (5) assembled distribution = esbuild per-target bundles (PRD-001b). tsc compiles the whole graph in one pass; dependents never import upward, so the single tsc invocation respects this order. PRD-001b appends '&& node esbuild.config.mjs' to the build script; that seam is intentional.",
