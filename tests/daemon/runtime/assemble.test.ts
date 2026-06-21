@@ -85,6 +85,7 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 		mountProductData: 0,
 		mountDream: 0,
 		mountCompact: 0,
+		mountDiagnosticsHealth: 0,
 	} as Record<keyof SeamFns, number>;
 	const seams: SeamFns = {
 		attachHooks: ((daemon) => {
@@ -184,6 +185,18 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 			expect(options.defaultScope, "compact trigger receives the threaded default scope").toBeDefined();
 			expect(options.defaultScope?.org).toBeTruthy();
 		}) as SeamFns["mountCompact"],
+		// ── The PRD-029 protected per-subsystem health-detail seam the composition root fires. ──
+		mountDiagnosticsHealth: ((daemon, options) => {
+			calls.mountDiagnosticsHealth += 1;
+			order.push("mountDiagnosticsHealth");
+			expect(typeof daemon.group).toBe("function");
+			// The protected health detail is wired with the structured-detail thunk: a synchronous
+			// read of the cached health bit + assembly-known embed state (no probe — PRD-029 D-4).
+			expect(typeof options.healthDetail, "diagnostics-health receives the detail thunk").toBe("function");
+			const detail = options.healthDetail();
+			expect(detail.status, "the thunk yields the coarse status").toBeDefined();
+			expect(detail.reasons, "the protected surface carries the full per-subsystem reasons").toBeDefined();
+		}) as SeamFns["mountDiagnosticsHealth"],
 	};
 	return { seams, calls };
 }
@@ -227,8 +240,10 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 		expect(calls.mountDream).toBe(1);
 		// PRD-030 / D-2: the standalone compaction trigger fires once and only once.
 		expect(calls.mountCompact).toBe(1);
+		// PRD-029 / AC-3: the protected per-subsystem health detail fires once and only once.
+		expect(calls.mountDiagnosticsHealth).toBe(1);
 		// Deterministic order: the 021 seams, then the 022 data seams (memories → vfs → product),
-		// then the PRD-024 dream trigger, then the PRD-030 compaction trigger last.
+		// then the PRD-024 dream trigger, the PRD-030 compaction trigger, then the PRD-029 health detail.
 		expect(order).toEqual([
 			"attachHooks",
 			"mountDashboard",
@@ -241,6 +256,7 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 			"mountProductData",
 			"mountDream",
 			"mountCompact",
+			"mountDiagnosticsHealth",
 		]);
 	});
 
@@ -265,6 +281,9 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 		// PRD-030 / D-2: the standalone compaction trigger also fires unconditionally (same
 		// protected /api/diagnostics group; fires in team too).
 		expect(calls.mountCompact).toBe(1);
+		// PRD-029 / AC-3: the protected health detail also fires unconditionally (same protected
+		// /api/diagnostics group; fires in team too — the full reasons gate behind its auth).
+		expect(calls.mountDiagnosticsHealth).toBe(1);
 		// The /dashboard host stays local-only (security F-1) even though the data seams fire.
 		expect(calls.mountDashboardHost).toBe(0);
 	});
@@ -583,6 +602,7 @@ describe("fix/daemon-scope-from-credentials: the daemon's default scope comes fr
 			mountProductData: noop,
 			mountDream: noop,
 			mountCompact: noop,
+			mountDiagnosticsHealth: noop,
 		};
 		return { seams, captured };
 	}

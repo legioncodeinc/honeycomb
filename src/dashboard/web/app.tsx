@@ -20,7 +20,7 @@
 
 import React from "react";
 
-import { Button, Input, Kpi, MemoryCard } from "./primitives.js";
+import { Badge, Button, Input, Kpi, MemoryCard } from "./primitives.js";
 import { ConnectivityBanner, GraphCanvas, LiveLog, RulesPanel, SessionsPanel, SkillSyncPanel } from "./panels.js";
 import {
 	createWireClient,
@@ -29,6 +29,7 @@ import {
 	EMPTY_SETTINGS,
 	formatLogLine,
 	type GraphWire,
+	type HealthReasonsWire,
 	type KpisWire,
 	type RecalledMemory,
 	type RuleRowWire,
@@ -139,6 +140,65 @@ function RecallBar({
 }
 
 /**
+ * The PRD-029 "lexical fallback" badge (AC-1). Rendered ONLY when the recall response carried
+ * `degraded: true` (embeddings off/absent → the engine fell back to lexical BM25/ILIKE). It
+ * renders subsystem STATE only — the single closed flag, NO token/org/header (AC-5) — using the
+ * kit's `Badge` primitive in the `warning` tone so a degraded recall is honestly visible. When
+ * `degraded` is false the caller renders nothing (no badge), so this component is unconditional.
+ */
+function LexicalFallbackBadge(): React.JSX.Element {
+	// The `Badge` primitive takes no `title`, so the hover hint rides a wrapping span.
+	return (
+		<span title="recall fell back to lexical (embeddings off) — semantic ranking unavailable" style={{ display: "inline-flex" }}>
+			<Badge tone="warning" mono dot>
+				lexical fallback
+			</Badge>
+		</span>
+	);
+}
+
+/** The display label + degraded predicate for one subsystem chip in {@link HealthStrip}. */
+const SUBSYSTEMS: readonly { readonly key: keyof HealthReasonsWire; readonly label: string; readonly degraded: (r: HealthReasonsWire) => boolean }[] = [
+	{ key: "storage", label: "storage", degraded: (r) => r.storage === "unreachable" },
+	{ key: "embeddings", label: "semantic", degraded: (r) => r.embeddings === "off" },
+	{ key: "schema", label: "schema", degraded: (r) => r.schema === "missing_table" },
+];
+
+/**
+ * The PRD-029 per-subsystem health strip (D-2 render). Reads the `/health` `reasons` block and
+ * renders one small chip per subsystem — `storage`, `semantic` (embeddings), `schema` — with its
+ * coarse state, tinting a degraded subsystem (storage unreachable / embeddings off / a missing
+ * table) `critical` and a healthy one `verified`. When `reasons` is `null` (the mode-gated public
+ * body, which the LOCAL dashboard never gets — defensive) the whole strip renders NOTHING; the
+ * coarse header pill carries liveness alone.
+ *
+ * AC-5: every chip renders a subsystem NAME + a closed-enum STATE only — there is no token, org,
+ * endpoint, or header in the rendered payload (the `reasons` shape is closed string literals).
+ */
+function HealthStrip({ reasons }: { reasons: HealthReasonsWire | null }): React.JSX.Element | null {
+	if (reasons === null) return null;
+	return (
+		<div
+			data-testid="health-strip"
+			style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 18, flexWrap: "wrap" }}
+		>
+			<span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-tertiary)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+				subsystems
+			</span>
+			{SUBSYSTEMS.map((s) => {
+				const down = s.degraded(reasons);
+				const state = String(reasons[s.key]);
+				return (
+					<Badge key={s.key} tone={down ? "critical" : "verified"} mono dot>
+						{s.label}: {state}
+					</Badge>
+				);
+			})}
+		</div>
+	);
+}
+
+/**
  * The live dashboard app. On mount it hydrates every view from the daemon (AC-2), then runs a
  * health poll (AC-5) and a log poll (AC-4). Recall (AC-3) and Dream (AC-6) hit the live routes.
  * All polling is cleared on unmount.
@@ -148,6 +208,9 @@ export function App({ client, assetBase = "assets" }: AppProps = {}): React.JSX.
 
 	// ── view state (hydrated from the wire) ──
 	const [daemonUp, setDaemonUp] = React.useState(true);
+	// PRD-029 D-2 (render): the per-subsystem `/health` reasons (null until the first probe
+	// resolves, or when the mode-gated public body omits them — the strip then renders nothing).
+	const [healthReasons, setHealthReasons] = React.useState<HealthReasonsWire | null>(null);
 	const [settings, setSettings] = React.useState<SettingsWire>(EMPTY_SETTINGS);
 	const [kpis, setKpis] = React.useState<KpisWire>(EMPTY_KPIS);
 	const [sessions, setSessions] = React.useState<readonly SessionRowWire[]>([]);
@@ -161,6 +224,9 @@ export function App({ client, assetBase = "assets" }: AppProps = {}): React.JSX.
 	const [recallBusy, setRecallBusy] = React.useState(false);
 	const [recalled, setRecalled] = React.useState(false);
 	const [recallNonce, setRecallNonce] = React.useState(0);
+	// PRD-029 AC-1: the recall response's `degraded` flag (true → lexical BM25/ILIKE fallback).
+	// Drives the "lexical fallback" badge near the recall results. Only meaningful once recalled.
+	const [recallDegraded, setRecallDegraded] = React.useState(false);
 
 	// ── log + dream state (AC-4 / AC-6) ──
 	const [logLines, setLogLines] = React.useState<readonly string[]>([]);
@@ -217,9 +283,11 @@ export function App({ client, assetBase = "assets" }: AppProps = {}): React.JSX.
 	React.useEffect(() => {
 		let alive = true;
 		const tick = async (): Promise<void> => {
-			const up = await wire.health();
+			const { up, reasons } = await wire.health();
 			if (!alive) return;
 			setDaemonUp(up);
+			// PRD-029 D-2 (render): surface the per-subsystem reasons for the health strip.
+			setHealthReasons(reasons);
 			// When health recovers after a down spell, re-hydrate the views.
 			if (up) void hydrate();
 		};
@@ -236,9 +304,11 @@ export function App({ client, assetBase = "assets" }: AppProps = {}): React.JSX.
 		const q = query.trim();
 		if (q === "" || recallBusy) return;
 		setRecallBusy(true);
-		const { memories } = await wire.recall(q);
+		const { memories, degraded } = await wire.recall(q);
 		setResults(memories);
 		setRecalled(true);
+		// PRD-029 AC-1: remember whether the engine ran degraded (lexical fallback) for the badge.
+		setRecallDegraded(degraded);
 		setRecallNonce((n) => n + 1);
 		const top = memories.length > 0 ? ` · ${memories[0]?.score.toFixed(2)} top` : "";
 		pushNote(`recall    "${q}" → ${memories.length} hits${top}`);
@@ -275,8 +345,9 @@ export function App({ client, assetBase = "assets" }: AppProps = {}): React.JSX.
 					url={daemonUrl}
 					onRetry={() => {
 						// Retry re-probes immediately; a reachable result restores the view + re-hydrates.
-						void wire.health().then((up) => {
+						void wire.health().then(({ up, reasons }) => {
 							setDaemonUp(up);
+							setHealthReasons(reasons);
 							if (up) void hydrate();
 						});
 					}}
@@ -289,6 +360,10 @@ export function App({ client, assetBase = "assets" }: AppProps = {}): React.JSX.
 		<div className="wrap">
 			<Header settings={settings} daemonUp={daemonUp} dreaming={dreaming} onDream={dream} assetBase={assetBase} />
 
+			{/* PRD-029 D-2 (render): the per-subsystem health strip, reading the /health reasons.
+			    Renders nothing when reasons are absent (non-local public body — defensive). */}
+			<HealthStrip reasons={healthReasons} />
+
 			{/* KPIs (AC-2) — metrics sit at the top, right under the header */}
 			<div className="kpirow" style={{ marginBottom: 22 }}>
 				<Kpi label="Memories" value={kpis.memoryCount.toLocaleString()} accent="honey" />
@@ -298,6 +373,18 @@ export function App({ client, assetBase = "assets" }: AppProps = {}): React.JSX.
 			</div>
 
 			<RecallBar query={query} setQuery={setQuery} onRecall={recall} busy={recallBusy} />
+
+			{/* PRD-029 AC-1: the "lexical fallback" badge sits on the recall results header, shown
+			    ONLY when the LAST recall ran degraded (embeddings off → lexical BM25/ILIKE). When
+			    the recall ran with semantic ranking (degraded:false), NO badge renders. */}
+			{recalled && recallDegraded && (
+				<div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+					<span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-tertiary)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+						recall
+					</span>
+					<LexicalFallbackBadge />
+				</div>
+			)}
 
 			{/* recall results (AC-3) */}
 			<div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 22 }} key={recallNonce}>

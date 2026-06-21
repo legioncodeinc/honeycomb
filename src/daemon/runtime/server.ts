@@ -44,6 +44,7 @@ import {
 import { type FileWatcherService, noopFileWatcherService } from "./services/file-watcher.js";
 import { type JobQueueService, noopJobQueueService } from "./services/job-queue.js";
 import { type EmbedSupervisor, noopEmbedSupervisor } from "./services/embed-supervisor.js";
+import { type HealthDetail, publicHealthDetail } from "./health.js";
 
 /**
  * The route-group surface (FR-2). Each entry is mounted as a scaffolded sub-app.
@@ -166,6 +167,19 @@ export interface CreateDaemonOptions {
 	 * testable without a live failure.
 	 */
 	readonly pipelineProbe?: () => "ok" | "degraded" | "unconfigured";
+	/**
+	 * The structured `/health` DETAIL seam (PRD-029 AC-2 / AC-3 / D-3, additive). Returns
+	 * the {@link HealthDetail} — the coarse `status` PLUS per-subsystem `reasons` (storage
+	 * reachability / embeddings on-off / schema) — read from the SAME cached state the
+	 * coarse probe maintains (D-4: no new probe). When supplied, the `/health` body adds the
+	 * mode-gated `reasons` block: in `local` mode `/health` includes `reasons`; in
+	 * `team`/`hybrid` the PUBLIC `/health` returns the coarse bit ONLY (no internal topology
+	 * to an unauthenticated remote — AC-3) and the full detail lives on the protected
+	 * `/api/diagnostics/health` surface. ABSENT (a bare `createDaemon` / the 004a suite) →
+	 * the pre-029 coarse `/health` body, UNCHANGED. The composition root supplies the real
+	 * thunk built over the health bit + the assembly-known embed state.
+	 */
+	readonly healthDetail?: () => HealthDetail;
 }
 
 /** The constructed daemon: the Hono app plus the wired services + accessors. */
@@ -214,6 +228,8 @@ export function createDaemon(options: CreateDaemonOptions = {}): Daemon {
 	};
 	const storage = options.storage;
 	const pipelineProbe = options.pipelineProbe ?? ((): PipelineStatus => coarsePipelineStatus(storage));
+	// PRD-029: the structured-detail seam (additive). Absent → the pre-029 coarse body.
+	const healthDetail = options.healthDetail;
 	const startedAt = Date.now();
 
 	// The mode is read through a thunk so every mounted middleware reflects the
@@ -299,12 +315,20 @@ export function createDaemon(options: CreateDaemonOptions = {}): Daemon {
 		// Storage-unavailable degrades /health to non-200 while the process stays
 		// up, so a client distinguishes daemon-down from storage-down (impl note).
 		const status = pipeline === "degraded" ? 503 : 200;
+		// PRD-029 (AC-2/AC-3): the coarse body is UNCHANGED (`status`/`pipeline`/`uptimeMs`/
+		// `version` + the 503 gate); the structured `reasons` block is layered on ADDITIVELY
+		// and MODE-GATED. `publicHealthDetail` includes `reasons` in `local` and strips it on
+		// the PUBLIC team/hybrid body (status-only — no topology to an unauthenticated remote;
+		// the full detail rides the protected `/api/diagnostics/health` surface). When the
+		// detail seam is unset (bare daemon / 004a suite), the body stays the pre-029 shape.
+		const detail = healthDetail !== undefined ? publicHealthDetail(healthDetail(), config.mode) : undefined;
 		return c.json(
 			{
 				status: pipeline === "degraded" ? "degraded" : "ok",
 				uptimeMs: Date.now() - startedAt,
 				version: HONEYCOMB_VERSION,
 				pipeline,
+				...(detail?.reasons !== undefined ? { reasons: detail.reasons } : {}),
 			},
 			status,
 		);
