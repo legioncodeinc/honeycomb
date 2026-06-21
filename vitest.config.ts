@@ -27,7 +27,10 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
 	test: {
 		environment: "node",
-		include: ["tests/**/*.test.ts"],
+		// `.test.ts` is the bulk of the suite; `.test.tsx` is the PRD-024 dashboard web-app
+		// DOM suite (it mounts React into jsdom via a per-file `@vitest-environment jsdom`
+		// docblock — the default env stays `node` for every other test).
+		include: ["tests/**/*.test.ts", "tests/**/*.test.tsx"],
 		exclude: ["tests/integration/**"],
 		// GLOBAL HOME ISOLATION (data-loss guard): runs in every worker BEFORE any test,
 		// redirecting os.homedir() to a throwaway temp dir so credentialsPath() /

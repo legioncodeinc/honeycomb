@@ -134,6 +134,7 @@ function readOsMachineId(): string | null {
 			const out = execFileSync("ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"], {
 				encoding: "utf8",
 				timeout: 4000,
+				windowsHide: true,
 			});
 			const m = out.match(/"IOPlatformUUID"\s*=\s*"([^"]+)"/);
 			return m && m[1] ? m[1] : null;
@@ -142,7 +143,8 @@ function readOsMachineId(): string | null {
 			const out = execFileSync(
 				"reg",
 				["query", "HKLM\\SOFTWARE\\Microsoft\\Cryptography", "/v", "MachineGuid"],
-				{ encoding: "utf8", timeout: 4000 },
+				// Hide the transient console window on Windows (background machine-id probe).
+				{ encoding: "utf8", timeout: 4000, windowsHide: true },
 			);
 			const m = out.match(/MachineGuid\s+REG_SZ\s+([A-Za-z0-9-]+)/);
 			return m && m[1] ? m[1] : null;

@@ -156,7 +156,7 @@ export const systemSpawner: Spawner = {
 		// CRITICAL (no-shell): a command + args ARRAY with `shell: false`. The command is the
 		// executable; each arg is passed verbatim and is NEVER re-parsed by `/bin/sh`, so a
 		// hostile arg (`; rm -rf /`) is an inert argument string, not a new command.
-		return spawn(command, [...args], { shell: false, env }) as ChildProcessWithoutNullStreams;
+		return spawn(command, [...args], { shell: false, env, windowsHide: true }) as ChildProcessWithoutNullStreams;
 	},
 };
 

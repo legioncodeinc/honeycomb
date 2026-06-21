@@ -543,7 +543,7 @@ export const systemGateSpawner: GateSpawner = {
 		return new Promise<string>((resolve, reject) => {
 			// CRITICAL (no-shell): command + args ARRAY, `shell:false`. Each arg is passed
 			// verbatim and is NEVER re-parsed by `/bin/sh`, so a hostile arg is inert.
-			const child = spawn(spec.command, [...spec.args], { shell: false });
+			const child = spawn(spec.command, [...spec.args], { shell: false, windowsHide: true });
 			let stdout = "";
 			let settled = false;
 			const finish = (fn: () => void): void => {

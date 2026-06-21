@@ -134,6 +134,8 @@ function defaultGitLsFiles(repoRoot: string): string | null {
 			// Bound output so a giant repo cannot exhaust the buffer.
 			maxBuffer: 256 * 1024 * 1024,
 			stdio: ["ignore", "pipe", "ignore"],
+			// Hide the transient console window on Windows (background git probe, not interactive).
+			windowsHide: true,
 		});
 		return out.toString("utf8");
 	} catch {

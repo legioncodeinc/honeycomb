@@ -56,6 +56,7 @@ import { type CreateDaemonOptions, type Daemon, type DaemonServices, createDaemo
 import { attachHooksHandlers } from "./capture/attach.js";
 import { mountDashboardApi } from "./dashboard/api.js";
 import { mountDashboardHost } from "./dashboard/host.js";
+import { mountDreamApi } from "./dreaming/api.js";
 import { mountLogsApi } from "./logs/api.js";
 import { mountNotificationsApi } from "./notifications/api.js";
 import { attachSessionsPrune } from "./sessions/prune.js";
@@ -153,6 +154,12 @@ export interface SeamFns {
 	readonly mountVfs: typeof mountVfsApi;
 	/** The product-data surface — goals/kpis/skills/rules (+secrets) (022c). Fires UNCONDITIONALLY. */
 	readonly mountProductData: typeof mountProductDataApi;
+	/**
+	 * The "Dream now" trigger — `POST /api/diagnostics/dream` (PRD-024 / AC-6). Fires
+	 * UNCONDITIONALLY: its `/api/diagnostics` group is already `protect:true`, so it inherits
+	 * the same auth/RBAC as the dashboard's JSON views (open in `local`, gated in team/hybrid).
+	 */
+	readonly mountDream: typeof mountDreamApi;
 }
 
 /** The REAL seam functions (the production wiring). */
@@ -166,6 +173,7 @@ export const defaultSeamFns: SeamFns = {
 	mountMemories: mountMemoriesApi,
 	mountVfs: mountVfsApi,
 	mountProductData: mountProductDataApi,
+	mountDream: mountDreamApi,
 };
 
 /** An assembled, fully-wired daemon plus the composition root's lifecycle controls. */
@@ -352,8 +360,10 @@ export function assembleSeams(daemon: Daemon, storage: StorageClient, seams: Sea
 	//    021d/021e fill their handlers. This seam is written so those land cleanly.
 	seams.attachHooks(daemon, { storage, queue: daemon.services.queue });
 
-	// 2. The dashboard data API (020b) — the six daemon-served view-models.
-	seams.mountDashboard(daemon, { storage });
+	// 2. The dashboard data API (020b) — the six daemon-served view-models. Threads the
+	//    LOCAL default scope so the dashboard web app (a loopback thin client that sends no
+	//    `x-honeycomb-org`) resolves the single local tenant instead of 400ing (PRD-024 Wave 3).
+	seams.mountDashboard(daemon, { storage, defaultScope });
 
 	// 3. The backend notifications API (020d) — the org's pending notifications.
 	seams.mountNotifications(daemon, { storage });
@@ -415,6 +425,19 @@ export function assembleSeams(daemon: Daemon, storage: StorageClient, seams: Sea
 	//    yet constructible here; the goal is NOT mounted (it falls through to the 501
 	//    scaffold) rather than wired with a fake (D-1, never fake a dep).
 	seams.mountProductData(daemon, resolveProductDataDeps(storage, defaultScope));
+
+	// 10. The "Dream now" trigger — `POST /api/diagnostics/dream` (PRD-024 / AC-6 backend).
+	//     Attaches onto the already-mounted, protected `/api/diagnostics` group (the dashboard's
+	//     group), so there is NO `server.ts` edit and it inherits the same auth/RBAC the JSON
+	//     dashboard views enforce (open in `local`, gated in team/hybrid). It kicks the REAL
+	//     PRD-009 Dreaming loop via the 009a trigger seam, injected the daemon's OWN durable job
+	//     queue (`daemon.services.queue`) as the enqueuer — NOT a second dreaming subsystem. The
+	//     handler is NON-BLOCKING: the trigger only ENQUEUES a `dreaming` job (the consolidation
+	//     pass is run later by the queue worker via the 009b/009c runner) and returns a 202 ack.
+	//     The `defaultScope` is the daemon's tenancy partition the dreaming counter lives under
+	//     (the same single local tenant the data-API mounts use). When the queue is the no-op stub
+	//     (a bare `createDaemon`), the handler fails soft to a clean `{ triggered: false }` ack.
+	seams.mountDream(daemon, { storage, defaultScope, enqueuer: daemon.services.queue });
 }
 
 /**

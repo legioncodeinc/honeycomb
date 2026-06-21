@@ -463,6 +463,7 @@ export const systemSummarySpawner: SummarySpawner = {
 			// its own capture (a-AC-2 / FR-9).
 			const child = spawn(spec.command, [...spec.args], {
 				shell: false,
+				windowsHide: true,
 				env: {
 					...process.env,
 					[WIKI_WORKER_ENV]: "1",

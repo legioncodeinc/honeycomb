@@ -41,8 +41,8 @@ function probeCli(): ProbeOutcome {
 function probeCursorAgent(): ProbeOutcome {
 	try {
 		const probe = process.platform === "win32"
-			? spawnSync("where", ["cursor-agent"], { stdio: "ignore" })
-			: spawnSync("which", ["cursor-agent"], { stdio: "ignore" });
+			? spawnSync("where", ["cursor-agent"], { stdio: "ignore", windowsHide: true })
+			: spawnSync("which", ["cursor-agent"], { stdio: "ignore", windowsHide: true });
 		const ok = probe.status === 0;
 		return ok ? { ok: true, detail: "on PATH" } : { ok: false, detail: "cursor-agent not on PATH" };
 	} catch (err) {

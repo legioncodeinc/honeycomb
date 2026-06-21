@@ -72,6 +72,7 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 		mountMemories: 0,
 		mountVfs: 0,
 		mountProductData: 0,
+		mountDream: 0,
 	} as Record<keyof SeamFns, number>;
 	const seams: SeamFns = {
 		attachHooks: ((daemon) => {
@@ -143,6 +144,22 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 				expect(options.defaultScope, "product-data receives the threaded default scope").toBeDefined();
 				expect(options.defaultScope?.org).toBeTruthy();
 		}) as SeamFns["mountProductData"],
+		// ── The "Dream now" trigger seam (PRD-024 / AC-6) the composition root fires. ──
+		mountDream: ((daemon, options) => {
+			calls.mountDream += 1;
+			order.push("mountDream");
+			expect(typeof daemon.group).toBe("function");
+			// The trigger is wired with the live storage client (the dreaming_state counter).
+			expect(options.storage).toBeDefined();
+			// PRD-024: the daemon's default tenancy scope is threaded so the dreaming counter
+			// runs for the single local tenant a loopback dashboard button targets.
+			expect(options.defaultScope, "dream trigger receives the threaded default scope").toBeDefined();
+			expect(options.defaultScope?.org).toBeTruthy();
+			// The enqueuer is the daemon's OWN durable job queue (no second dreaming subsystem).
+			expect(options.enqueuer, "dream trigger reuses the daemon's job queue as the enqueuer").toBe(
+				daemon.services.queue,
+			);
+		}) as SeamFns["mountDream"],
 	};
 	return { seams, calls };
 }
@@ -159,7 +176,7 @@ afterEach(() => {
 });
 
 describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after construction", () => {
-	it("in LOCAL mode fires all nine seams (logs + dashboard-host + the three data seams) each exactly once, in order", () => {
+	it("in LOCAL mode fires all ten seams (logs + dashboard-host + the three data seams + the dream trigger) each exactly once, in order", () => {
 		const order: string[] = [];
 		const { seams, calls } = recordingSeams(order);
 		assembleDaemon({
@@ -182,7 +199,10 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 		expect(calls.mountMemories).toBe(1);
 		expect(calls.mountVfs).toBe(1);
 		expect(calls.mountProductData).toBe(1);
-		// Deterministic order: the 021 seams, then the 022 data seams (memories → vfs → product).
+		// PRD-024 / AC-6: the "Dream now" trigger fires once and only once.
+		expect(calls.mountDream).toBe(1);
+		// Deterministic order: the 021 seams, then the 022 data seams (memories → vfs → product),
+		// then the PRD-024 dream trigger last.
 		expect(order).toEqual([
 			"attachHooks",
 			"mountDashboard",
@@ -193,6 +213,7 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 			"mountMemories",
 			"mountVfs",
 			"mountProductData",
+			"mountDream",
 		]);
 	});
 
@@ -211,6 +232,9 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 		expect(calls.mountMemories).toBe(1);
 		expect(calls.mountVfs).toBe(1);
 		expect(calls.mountProductData).toBe(1);
+		// PRD-024 / AC-6: the dream trigger also fires unconditionally — its /api/diagnostics
+		// group is protect:true, so it inherits auth/RBAC and is NOT mode-gated (fires in team too).
+		expect(calls.mountDream).toBe(1);
 		// The /dashboard host stays local-only (security F-1) even though the data seams fire.
 		expect(calls.mountDashboardHost).toBe(0);
 	});
