@@ -21,6 +21,31 @@
  * idempotent (FR-9 / c-AC-6). Every identifier passes `sqlIdent` via the
  * `schema.ts` builders (FR-8 / c-AC-7).
  *
+ * ──────────────────────────────────────────────────────────────────────────
+ * TRANSIENT-FLAP RESILIENCE (fix/heal-introspection-transient-resilience)
+ * ──────────────────────────────────────────────────────────────────────────
+ * The heal's `information_schema` introspection SELECT is a READ against the
+ * same DeepLake backend that flaps stale segments / transient 5xx under load
+ * (the documented eventual-consistency posture). A single non-ok introspection
+ * read must NOT turn a legitimate write into a hard failure:
+ *
+ *   1. `readColumnSet` RETRIES the introspection a bounded number of times when
+ *      the failure is TRANSIENT (`connection_error` / `timeout`, or a 5xx-shaped
+ *      `query_error`) — mirroring the trigger/job-queue `RESOLVE_POLLS` posture.
+ *      A NON-transient `query_error` (permission/syntax) still throws IMMEDIATELY
+ *      (the anti-mask rule: a credentials/syntax fault never masquerades as a
+ *      recoverable gap, and never pays pointless retries). The deterministic fake
+ *      settles on the first attempt, so only the live flap pays the retry cost.
+ *
+ *   2. When the introspection STILL can't complete after retries, `HealFailure`
+ *      is tagged `phase: "introspection"`. `withHeal` treats that as "could not
+ *      determine the schema, but the write is the source of truth" and proceeds
+ *      to its single write retry anyway rather than 500ing — for the missing-TABLE
+ *      path the table was just CREATEd with the full ColumnDef so the retry
+ *      succeeds; for missing-COLUMN the retry's own result is the honest answer.
+ *      A `phase: "alter"` HealFailure (a real column genuinely could not be
+ *      ADDed) is a true schema problem, not a flap, and STILL propagates.
+ *
  * The engine consumes the Wave-1 `StorageQuery` (`query(sql, scope, opts)` →
  * `QueryResult`): it branches on `result.kind`, never on a thrown shape. It is
  * the table catalog's job (PRD-003) to supply the ColumnDef array per table; the
@@ -29,6 +54,7 @@
 
 import type { QueryScope, StorageQuery } from "./client.js";
 import { isOk, type QueryResult, type StorageRow } from "./result.js";
+import { setTimeout as delay } from "node:timers/promises";
 import {
 	buildAddColumnSql,
 	buildCreateTableSql,
@@ -122,7 +148,7 @@ export async function healColumns(
 			const recheck = await readColumnSet(client, introspectSql, scope);
 			if (recheck.has(col.name.toLowerCase())) continue;
 		}
-		throw new HealFailure(`ALTER ADD COLUMN "${target.table}"."${col.name}" failed`, res);
+		throw new HealFailure(`ALTER ADD COLUMN "${target.table}"."${col.name}" failed`, res, "alter");
 	}
 	return { missing, altered };
 }
@@ -148,32 +174,100 @@ export async function tableExists(client: StorageQuery, tableName: string, scope
 	return res.rows.length > 0;
 }
 
-/** Run the introspection SELECT and collect the present column names (lowercased). */
-async function readColumnSet(client: StorageQuery, introspectSql: string, scope: QueryScope): Promise<Set<string>> {
-	const res = await client.query(introspectSql, scope);
-	if (!isOk(res)) {
-		throw new HealFailure("information_schema introspection failed", res);
-	}
-	const present = new Set<string>();
-	for (const row of res.rows as StorageRow[]) {
-		const v = row.column_name;
-		if (typeof v === "string") present.add(v.toLowerCase());
-	}
-	return present;
+/**
+ * How many times the introspection SELECT is attempted before giving up. The
+ * first attempt is not a "retry"; the budget covers the original call plus its
+ * bounded re-reads under a transient flap. Mirrors the trigger/job-queue
+ * `RESOLVE_POLLS` rationale: the deterministic fake settles on the first attempt,
+ * so this is a live-only cost.
+ */
+const INTROSPECTION_ATTEMPTS = 5;
+
+/** Backoff between introspection retries (ms). Short — the flap is brief. */
+const INTROSPECTION_RETRY_DELAY_MS = 50;
+
+/**
+ * Is this non-ok introspection result a TRANSIENT backend flap (worth a retry),
+ * as opposed to a deterministic rejection (permission/syntax — never retry)?
+ *
+ * Transient: a dropped/refused socket (`connection_error`), a `timeout`, or a
+ * `query_error` whose HTTP status is 5xx (the backend itself faulted mid-request
+ * — the stale-segment / transient-5xx flap). A `query_error` with a 4xx status
+ * or no status (a genuine statement rejection: permission, syntax, bad relation)
+ * is NON-transient and must surface immediately — retrying it only burns balance
+ * and masks the real fault (anti-mask rule).
+ */
+function isTransientResult(res: QueryResult): boolean {
+	if (res.kind === "connection_error" || res.kind === "timeout") return true;
+	if (res.kind === "query_error") return res.status !== undefined && res.status >= 500 && res.status < 600;
+	return false;
 }
 
 /**
+ * Run the introspection SELECT and collect the present column names (lowercased).
+ *
+ * On a TRANSIENT non-ok result (see `isTransientResult`) the read is retried up
+ * to `INTROSPECTION_ATTEMPTS` total, with a short backoff, so a brief backend
+ * flap during heal does not abort the heal. A NON-transient non-ok result
+ * (permission/syntax) throws IMMEDIATELY with no retries — preserving the
+ * anti-mask rule. If every attempt flaps transiently, the final `HealFailure` is
+ * tagged `phase: "introspection"` so `withHeal` can tell "couldn't determine the
+ * schema" apart from a genuine ALTER failure and fall back to the write retry.
+ */
+async function readColumnSet(client: StorageQuery, introspectSql: string, scope: QueryScope): Promise<Set<string>> {
+	let last: QueryResult | undefined;
+	for (let attempt = 1; attempt <= INTROSPECTION_ATTEMPTS; attempt++) {
+		const res = await client.query(introspectSql, scope);
+		if (isOk(res)) {
+			const present = new Set<string>();
+			for (const row of res.rows as StorageRow[]) {
+				const v = row.column_name;
+				if (typeof v === "string") present.add(v.toLowerCase());
+			}
+			return present;
+		}
+		last = res;
+		// Deterministic rejection (permission/syntax/4xx): surface now, never retry.
+		if (!isTransientResult(res)) {
+			throw new HealFailure("information_schema introspection failed", res, "introspection");
+		}
+		// Transient flap: back off and re-read, unless this was the last attempt.
+		if (attempt < INTROSPECTION_ATTEMPTS) await delay(INTROSPECTION_RETRY_DELAY_MS);
+	}
+	// Exhausted the budget on a persistent transient flap. Tagged "introspection"
+	// so `withHeal` falls back to the write retry rather than 500ing.
+	throw new HealFailure("information_schema introspection failed", last as QueryResult, "introspection");
+}
+
+/**
+ * Which heal step produced a `HealFailure`. The discriminator lets `withHeal`
+ * tell a transient "couldn't introspect" apart from a genuine "couldn't ALTER":
+ *   - `"introspection"` — the `information_schema` SELECT could not complete
+ *     (after the bounded transient retries, or a non-transient rejection). When
+ *     this is a transient flap, the write itself is the source of truth, so
+ *     `withHeal` falls back to its single write retry rather than failing.
+ *   - `"alter"` — an `ALTER ADD COLUMN` genuinely failed (the column could not
+ *     be added). A real schema problem that always propagates.
+ */
+export type HealPhase = "introspection" | "alter";
+
+/**
  * A heal step (introspection or ALTER) itself failed with a non-recoverable
- * result. Carries the underlying `QueryResult` so a caller can inspect it.
+ * result. Carries the underlying `QueryResult` so a caller can inspect it, plus
+ * a `phase` discriminator so `withHeal` can distinguish an introspection flap
+ * (fall back to the write retry) from a genuine ALTER failure (propagate).
  * Thrown rather than returned because a failed heal is exceptional — the normal
  * paths return a `QueryResult` union.
  */
 export class HealFailure extends Error {
 	readonly result: QueryResult;
-	constructor(message: string, result: QueryResult) {
+	/** Which heal step failed — see `HealPhase`. */
+	readonly phase: HealPhase;
+	constructor(message: string, result: QueryResult, phase: HealPhase) {
 		super(message);
 		this.name = "HealFailure";
 		this.result = result;
+		this.phase = phase;
 	}
 }
 
@@ -201,16 +295,37 @@ export async function withHeal(
 	const failure = classifyFailure(first.message);
 	if (failure === "other") return first; // permission/syntax/etc — rethrow unchanged.
 
+	// missing-table: CREATE first (then column-heal the fresh table). missing-column:
+	// column-heal in place. Either way the column heal is run through the tolerant
+	// wrapper: an introspection FLAP must NOT abort the write — for missing-table
+	// the table was just CREATEd with the full ColumnDef so the retry succeeds; for
+	// missing-column the retry's own result is the honest answer. A genuine ALTER
+	// failure (phase "alter") still propagates.
 	if (failure === "missing-table") {
 		const created = await client.query(buildCreateTableSql(target.table, target.columns), scope);
 		if (!isOk(created)) return created; // could not create — surface it, do not loop.
-		await healColumns(client, target, scope); // bring a freshly-created table fully up to schema.
-	} else {
-		// missing-column
-		await healColumns(client, target, scope);
 	}
+	await healColumnsTolerant(client, target, scope);
 
 	// Exactly one retry. Whatever this returns — ok, or a second failure — is the
 	// final answer; we never enter a second heal/retry cycle (c-AC-4).
 	return runWrite();
+}
+
+/**
+ * Run `healColumns`, but SWALLOW a `phase: "introspection"` `HealFailure` so a
+ * transient `information_schema` flap during heal does not turn a legitimate
+ * write into a 500 (fix/heal-introspection-transient-resilience). The write
+ * retry in `withHeal` is the source of truth in that case. A `phase: "alter"`
+ * failure (a real column could not be added) and any non-`HealFailure` error
+ * (e.g. a `sqlIdent` rejection on a bad table name — preserves c-AC-7) STILL
+ * propagate untouched.
+ */
+async function healColumnsTolerant(client: StorageQuery, target: HealTarget, scope: QueryScope): Promise<void> {
+	try {
+		await healColumns(client, target, scope);
+	} catch (err) {
+		if (err instanceof HealFailure && err.phase === "introspection") return; // flap → fall back to write retry.
+		throw err; // genuine ALTER failure, or a non-heal error (sqlIdent guard): propagate.
+	}
 }
