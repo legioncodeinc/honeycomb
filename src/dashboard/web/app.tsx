@@ -2,7 +2,7 @@
  * The dashboard APP — PRD-024 Wave 2 (AC-1..AC-6).
  *
  * This is the live, daemon-served re-creation of `assets/ui_kits/dashboard/index.html`'s
- * `App` — same layout (header → recall bar → memory cards → KPI row → 2-col grid → live log
+ * `App` — same layout (header → KPI row → recall bar → memory cards → 2-col grid → live log
  * → connectivity banner), same DS tokens, same panels — but every value is hydrated from the
  * daemon's LIVE endpoints through {@link createWireClient} (D-2, no canned `data.js`), and
  * the interactions hit the REAL routes:
@@ -289,6 +289,14 @@ export function App({ client, assetBase = "assets" }: AppProps = {}): React.JSX.
 		<div className="wrap">
 			<Header settings={settings} daemonUp={daemonUp} dreaming={dreaming} onDream={dream} assetBase={assetBase} />
 
+			{/* KPIs (AC-2) — metrics sit at the top, right under the header */}
+			<div className="kpirow" style={{ marginBottom: 22 }}>
+				<Kpi label="Memories" value={kpis.memoryCount.toLocaleString()} accent="honey" />
+				<Kpi label="Sessions" value={kpis.sessionCount} accent="neutral" />
+				<Kpi label="Est. savings" value={kpis.estimatedSavings.toLocaleString()} unit="tok" accent="verified" />
+				<Kpi label="Team skills" value={skills.length} accent="dream" />
+			</div>
+
 			<RecallBar query={query} setQuery={setQuery} onRecall={recall} busy={recallBusy} />
 
 			{/* recall results (AC-3) */}
@@ -302,14 +310,6 @@ export function App({ client, assetBase = "assets" }: AppProps = {}): React.JSX.
 								<MemoryCard {...m} dreaming={dreaming && i === 1} />
 							</div>
 						))}
-			</div>
-
-			{/* KPIs (AC-2) */}
-			<div className="kpirow" style={{ marginBottom: 22 }}>
-				<Kpi label="Memories" value={kpis.memoryCount.toLocaleString()} accent="honey" />
-				<Kpi label="Sessions" value={kpis.sessionCount} accent="neutral" />
-				<Kpi label="Est. savings" value={kpis.estimatedSavings.toLocaleString()} unit="tok" accent="verified" />
-				<Kpi label="Team skills" value={skills.length} accent="dream" />
 			</div>
 
 			{/* main grid (AC-2) */}
