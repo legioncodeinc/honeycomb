@@ -101,6 +101,14 @@ jobs:
       - name: Build (win32 paths)
         run: npm run build
 
+      # Load-smoke the BUILT daemon bundle. The Vitest suite assembles the daemon
+      # in-process and never imports the esbuild bundle, so a bundle-only break
+      # (e.g. a transitively-bundled CJS dep doing a dynamic `require` the ESM
+      # bundle can't run) ships green and only surfaces on `honeycomb daemon start`.
+      # This asserts `daemon/index.js` loads without a bundling/module error.
+      - name: Smoke — daemon bundle loads
+        run: npm run smoke:daemon-bundle
+
       - name: Test
         run: npm run test
 

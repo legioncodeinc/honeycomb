@@ -121,3 +121,8 @@ stryker.log
 # (Node template) is too broad and silently swallowed them. Un-ignore these source paths.
 !src/daemon/runtime/logs/
 !tests/daemon/runtime/logs/
+
+# Daemon runtime state — machine-local, never commit
+.secrets/
+.daemon/
+.smoke-daemon-bundle/
