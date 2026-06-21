@@ -113,6 +113,18 @@ await build({
   outdir: "daemon",
   external: DAEMON_EXTERNAL,
   define: VERSION_DEFINE,
+  // ESM-bundle require shim. A transitively-bundled CJS dependency (`yaml`, pulled
+  // in by the inference-config loader `loadInferenceConfigFromYaml` that the daemon
+  // assembly calls to read `agent.yaml`) performs a dynamic `require("process")`.
+  // In an `format: "esm"` bundle esbuild replaces an unresolved `require` with a
+  // shim that THROWS ("Dynamic require of X is not supported") — UNLESS a real
+  // `require` is in scope, which the shim then uses. Define one via createRequire so
+  // the bundled CJS dep loads node builtins at runtime instead of crashing the
+  // daemon at startup. (In-process itests assemble the daemon directly and never hit
+  // the bundle, so only the real `daemon start` path exercised this — caught by dogfood.)
+  banner: {
+    js: "import { createRequire as __cr } from 'node:module'; const require = __cr(import.meta.url);",
+  },
 });
 stampEsm("daemon");
 
