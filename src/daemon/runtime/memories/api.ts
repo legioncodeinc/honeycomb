@@ -185,7 +185,11 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 	const resolveScope = (c: Context): QueryScope | null =>
 		resolveScopeOrLocalDefault(c, daemon.config.mode, options.defaultScope);
 
-	// ── a-AC-2: POST /api/memories/recall → recall engine (no 501). ─────────────
+	// ── a-AC-2 + PRD-025 AC-3: POST /api/memories/recall → recall engine (no 501). ─
+	// The embed seam is threaded so recall can reach the `<#>` cosine path: when
+	// present + the query embeds to a 768-dim vector, recall runs the semantic arm and
+	// reports `degraded: false`; otherwise it degrades to the lexical arms (`degraded:
+	// true`). The daemon defaults `embed` to the real client (D-1 default-on).
 	group.post("/recall", async (c) => {
 		const scope = resolveScope(c);
 		if (scope === null) return c.json(NO_ORG_BODY, 400);
@@ -193,7 +197,7 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 		if (!parsed.success) return zodError(c, parsed.error);
 		const result = await recallMemories(
 			{ query: parsed.data.query, scope, ...(parsed.data.limit !== undefined ? { limit: parsed.data.limit } : {}) },
-			{ storage },
+			{ storage, ...(options.embed !== undefined ? { embed: options.embed } : {}) },
 		);
 		return c.json(recallResponse(result));
 	});

@@ -40,10 +40,13 @@
  * fail→null+logged+capture still succeeds; non-768→rejected→null; non-blocking).
  * The capture handler is verified independently in 005a against the no-op default.
  *
- * ── Enable toggle (005b) ──────────────────────────────────────────────────────
- * `HONEYCOMB_EMBEDDINGS=true` (or `1`) enables embedding; any other value (including
- * unset) leaves embeddings disabled (b-AC-2). This mirrors the `HONEYCOMB_*` env
- * convention used by the storage config (`HONEYCOMB_DEEPLAKE_*`, `HONEYCOMB_TRACE_SQL`).
+ * ── Enable toggle (PRD-025 D-1: DEFAULT-ON / opt-OUT) ─────────────────────────
+ * Embeddings are ENABLED by default for a fresh user. `HONEYCOMB_EMBEDDINGS` is an
+ * opt-OUT switch: UNSET or `true`/`1` → ENABLED; an EXPLICIT `false`/`0` → disabled
+ * (clean lexical-only). Any other value is treated as the default (enabled) — only a
+ * deliberate `false`/`0` turns semantic recall off. This INVERTS the prior 005b
+ * default (unset → off); the null-on-failure contract below is unchanged. Mirrors the
+ * `HONEYCOMB_*` env convention used by the storage config (`HONEYCOMB_DEEPLAKE_*`).
  *
  * ── Embed daemon URL (005b) ───────────────────────────────────────────────────
  * `HONEYCOMB_EMBED_URL` controls where the embed daemon is reachable (default:
@@ -154,15 +157,19 @@ export interface EmbedClientOptions {
 }
 
 /**
- * Resolve {@link EmbedClientOptions} from the environment (005b).
+ * Resolve {@link EmbedClientOptions} from the environment (PRD-025 D-1: default-on).
  *
- * - `HONEYCOMB_EMBEDDINGS=true` or `=1` enables embedding; anything else → disabled (b-AC-2).
+ * - `HONEYCOMB_EMBEDDINGS` is opt-OUT: UNSET or `true`/`1` → ENABLED; an EXPLICIT
+ *   `false`/`0` → disabled. Any other value falls back to the default (enabled) — only
+ *   a deliberate `false`/`0` turns embeddings off (D-1 / AC-1). Whitespace + case are
+ *   tolerated (` FALSE ` reads as off) so a sloppy env value still degrades cleanly.
  * - `HONEYCOMB_EMBED_URL` overrides the base URL (default {@link DEFAULT_EMBED_URL}).
  * - `HONEYCOMB_EMBED_TIMEOUT_MS` overrides the timeout (default {@link DEFAULT_EMBED_TIMEOUT_MS}).
  */
 export function resolveEmbedClientOptions(env: NodeJS.ProcessEnv = process.env): EmbedClientOptions {
-	const raw = env.HONEYCOMB_EMBEDDINGS ?? "";
-	const enabled = raw === "true" || raw === "1";
+	// D-1: default-on. Only an explicit `false`/`0` disables; unset / anything else → enabled.
+	const raw = (env.HONEYCOMB_EMBEDDINGS ?? "").trim().toLowerCase();
+	const enabled = !(raw === "false" || raw === "0");
 	const url = env.HONEYCOMB_EMBED_URL ?? DEFAULT_EMBED_URL;
 	const rawTimeout = Number(env.HONEYCOMB_EMBED_TIMEOUT_MS);
 	const timeoutMs = Number.isFinite(rawTimeout) && rawTimeout > 0 ? Math.trunc(rawTimeout) : DEFAULT_EMBED_TIMEOUT_MS;

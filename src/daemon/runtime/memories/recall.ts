@@ -34,11 +34,18 @@
  * Recall still fails-soft OVERALL: every arm failing yields an empty result, never
  * a 500.
  *
- * Embeddings are OFF for the data-API proof (ledger D-4): this is the BM25/ILIKE
- * lexical arm — the silent fallback the recall pipeline is built to degrade to.
- * The `<#>` cosine semantic path lights up when embeddings are on, which is a
- * separate follow-up; recall NEVER errors when embeddings are off, it degrades to
- * lexical (`degraded: true`).
+ * ── The semantic arm (PRD-025 AC-3: the `<#>` cosine path ships lit) ──────────
+ * When an {@link EmbedClient} is injected AND the query embeds to a real 768-dim
+ * vector, recall ALSO runs the `<#>` cosine arm over `memories.content_embedding`
+ * and `sessions.message_embedding` via the EXISTING `vectorSearch` engine
+ * (`src/daemon/storage/vector.ts` — NOT forked here, D-5), hydrates the matched
+ * rows' text, and MERGES those hits with the lexical arms (deduped). In that case
+ * `degraded` is `false` — the honest "semantic recall ran" signal. When embeddings
+ * are off / unavailable / the query embed returns null (daemon down / timeout /
+ * wrong-dim), recall runs the BM25/ILIKE lexical arms ONLY and `degraded` is `true`
+ * — the graceful fallback (D-4). Recall NEVER throws and NEVER hangs on the embed
+ * path: a null embed simply means lexical-only. Ranking/fusion of the two arms is
+ * PRD-027; here the bar is the semantic arm RUNS and `degraded` tells the truth.
  *
  * ── Tenancy ──────────────────────────────────────────────────────────────────
  * Every arm runs under the per-request {@link QueryScope} (org/workspace), which
@@ -55,8 +62,10 @@
  */
 
 import { isOk, type StorageRow } from "../../storage/result.js";
-import { sqlIdent, sqlLike } from "../../storage/sql.js";
+import { sLiteral, sqlIdent, sqlLike } from "../../storage/sql.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
+import { EMBEDDING_DIMS, type ScoredId, vectorSearch } from "../../storage/vector.js";
+import type { EmbedClient } from "../services/embed-client.js";
 
 /** The default number of recall hits returned when the caller supplies no limit. */
 export const DEFAULT_RECALL_LIMIT = 20;
@@ -83,9 +92,12 @@ export interface MemoryRecallResult {
 	/** The distinct arms that surfaced at least one hit (the hybrid-coverage signal). */
 	readonly sources: RecallSource[];
 	/**
-	 * True when recall ran the lexical (BM25/ILIKE) arm only — the silent fallback
-	 * (embeddings off). Always true in the data-API proof (ledger D-4); the semantic
-	 * `<#>` path flips this false when embeddings are on (a separate follow-up).
+	 * The HONEST semantic-vs-lexical signal (PRD-025 AC-3 / D-4): `false` when the
+	 * `<#>` cosine semantic arm actually RAN (embeddings available + the query
+	 * embedded to a 768-dim vector); `true` on genuine fallback — embeddings off, no
+	 * embed client injected, the embed daemon unreachable, a per-call timeout, or the
+	 * query embed returning null/wrong-dim — in which case recall ran the BM25/ILIKE
+	 * lexical arms only.
 	 */
 	readonly degraded: boolean;
 }
@@ -169,14 +181,25 @@ function cell(value: unknown): string {
 	return value === undefined || value === null ? "" : String(value);
 }
 
-/** Map the merged per-arm result rows into typed hits + the distinct-source set. */
+/**
+ * Map the merged per-arm result rows into typed hits + the distinct-source set,
+ * DEDUPED by `source+id` (PRD-025 AC-3). The merge places the semantic arm's hits
+ * first, then the lexical arms; a memory surfaced by BOTH the `<#>` arm and a lexical
+ * arm appears ONCE (the first — i.e. semantic — occurrence wins). This is plain
+ * arm-COMBINATION, not ranking/fusion (PRD-027 owns ranking). Capped at `limit`.
+ */
 function shapeHits(rows: StorageRow[], limit: number): { hits: MemoryRecallHit[]; sources: RecallSource[] } {
 	const hits: MemoryRecallHit[] = [];
 	const sourceSet = new Set<RecallSource>();
+	const seen = new Set<string>();
 	for (const row of rows) {
 		if (hits.length >= limit) break;
 		const source = readSource(row.source);
-		hits.push({ source, id: cell(row.id), text: cell(row.text) });
+		const id = cell(row.id);
+		const key = `${source} ${id}`;
+		if (seen.has(key)) continue; // dedup a memory surfaced by both the semantic + lexical arm.
+		seen.add(key);
+		hits.push({ source, id, text: cell(row.text) });
 		sourceSet.add(source);
 	}
 	return { hits, sources: [...sourceSet] };
@@ -186,6 +209,14 @@ function shapeHits(rows: StorageRow[], limit: number): { hits: MemoryRecallHit[]
 export interface MemoryRecallDeps {
 	/** The DeepLake storage client (daemon-only). Recall reads ONLY through this. */
 	readonly storage: StorageQuery;
+	/**
+	 * The embed seam (PRD-025 AC-3). When present AND the query embeds to a real
+	 * 768-dim vector, recall runs the `<#>` cosine semantic arm via {@link vectorSearch}
+	 * and sets `degraded: false`. ABSENT (or returning null) → lexical-only, `degraded:
+	 * true`. The daemon defaults this to the real `createEmbedAttachment(...).client`
+	 * (D-1 default-on); a unit test injects a fake to drive both branches deterministically.
+	 */
+	readonly embed?: EmbedClient;
 }
 
 /** A recall request as it enters the adapter (the zod-validated, scoped body). */
@@ -212,23 +243,175 @@ async function runArm(sql: string, request: MemoryRecallRequest, deps: MemoryRec
 }
 
 /**
- * Run the lexical cross-table recall for `request.query`, scoped to
- * `request.scope`. Returns the surfaced hits, the arms that produced them, and
- * the `degraded` fallback flag. Never throws for the expected failure modes: an
- * arm's storage error yields no rows for that arm (the route still answers 200,
- * not a 500), every arm failing yields an empty result, and an empty query yields
- * an empty result without a query.
+ * One semantic-arm spec: which table + columns the `<#>` cosine match runs over,
+ * and the {@link RecallSource} tag the merged hits carry. Mirrors the per-table
+ * lexical arms (`memories`/`sessions`) so the semantic + lexical hits share an id
+ * space and dedup cleanly.
+ */
+interface SemanticArmSpec {
+	/** The {@link RecallSource} tag the hydrated hits carry. */
+	readonly source: Extract<RecallSource, "memories" | "sessions">;
+	/** The bare table identifier (`memories` / `sessions`). */
+	readonly table: string;
+	/** The id/grouping column the lexical counterpart keys on (`id` / `path`). */
+	readonly idColumn: string;
+	/** The nullable `FLOAT4[]` embedding column (`content_embedding` / `message_embedding`). */
+	readonly embeddingColumn: string;
+	/** The text column hydrated for the hit (`content` / `message`). */
+	readonly textColumn: string;
+	/** Extra WHERE conjunct for the hydration SELECT (e.g. soft-delete exclusion), or "". */
+	readonly hydrateFilter: string;
+}
+
+/** The two semantic arms — kept facts + raw turns. (`memory` summaries carry no embedding column.) */
+const SEMANTIC_ARMS: readonly SemanticArmSpec[] = [
+	{
+		source: "memories",
+		table: "memories",
+		idColumn: "id",
+		embeddingColumn: "content_embedding",
+		textColumn: "content",
+		// Exclude soft-deleted rows, mirroring the lexical memories arm.
+		hydrateFilter: `AND ${sqlIdent("is_deleted")} = 0`,
+	},
+	{
+		source: "sessions",
+		table: "sessions",
+		idColumn: "path",
+		embeddingColumn: "message_embedding",
+		textColumn: "message",
+		hydrateFilter: "",
+	},
+];
+
+/**
+ * Build the hydration SELECT for a semantic arm: given the scored ids the `<#>`
+ * match returned, fetch `(source, id, text)` for those ids so the semantic hit
+ * carries text like the lexical arms. Every id routes through `sLiteral` and every
+ * identifier through `sqlIdent` (audit:sql-safe). The `vectorSearch` engine returns
+ * IDs+score only by design (e-AC-4), so the text is hydrated here in ONE guarded
+ * statement rather than re-running the vector match.
+ */
+function buildSemanticHydrateSql(spec: SemanticArmSpec, ids: readonly string[]): string {
+	const tbl = sqlIdent(spec.table);
+	const idCol = sqlIdent(spec.idColumn);
+	const textCol = sqlIdent(spec.textColumn);
+	const sourceLit = sLiteral(spec.source);
+	const inList = ids.map((id) => sLiteral(id)).join(", ");
+	const filterClause = spec.hydrateFilter === "" ? "" : ` ${spec.hydrateFilter}`;
+	return (
+		`SELECT ${sourceLit} AS source, ${idCol} AS id, ${textCol}::text AS text ` +
+		`FROM "${tbl}" ` +
+		`WHERE ${idCol} IN (${inList})${filterClause}`
+	);
+}
+
+/**
+ * Run ONE semantic arm: embed-vector → `<#>` cosine match (the EXISTING
+ * {@link vectorSearch}, D-5) → hydrate the matched ids' text. Tolerant exactly like
+ * the lexical `runArm`: a missing/failing table (fresh partition, no embedding
+ * column yet) yields no hits for that arm rather than failing the recall. Returns
+ * the hydrated hits ordered by descending cosine score.
+ */
+async function runSemanticArm(
+	spec: SemanticArmSpec,
+	queryVector: readonly number[],
+	request: MemoryRecallRequest,
+	deps: MemoryRecallDeps,
+	limit: number,
+): Promise<MemoryRecallHit[]> {
+	let scored: ScoredId[];
+	try {
+		// vectorSearch validates the dim (asserts 768) + over-fetches; the org/workspace
+		// partition rides the QueryScope, so the in-row scope filter is empty here.
+		const recall = await vectorSearch(deps.storage, request.scope, {
+			table: spec.table,
+			idColumn: spec.idColumn,
+			embeddingColumn: spec.embeddingColumn,
+			queryVector,
+			scope: {},
+			limit,
+		});
+		scored = recall.ids;
+	} catch {
+		// A missing embedding column / table or any query error degrades THIS arm to
+		// empty — never fails the whole recall (the per-arm tolerance, mirrors runArm).
+		return [];
+	}
+	if (scored.length === 0) return [];
+
+	// Hydrate the matched ids' text in one guarded statement, then re-order to the
+	// cosine ranking the vector match produced (the IN-list read order is unspecified).
+	const ids = scored.map((s) => s.id).filter((id) => id !== "");
+	if (ids.length === 0) return [];
+	const hydrated = await runArm(buildSemanticHydrateSql(spec, ids), request, deps);
+	const textById = new Map<string, string>();
+	for (const row of hydrated) textById.set(cell(row.id), cell(row.text));
+
+	const hits: MemoryRecallHit[] = [];
+	const seen = new Set<string>();
+	for (const s of scored) {
+		if (seen.has(s.id)) continue;
+		const text = textById.get(s.id);
+		if (text === undefined) continue; // hydration miss (eventual consistency) — skip.
+		seen.add(s.id);
+		hits.push({ source: spec.source, id: s.id, text });
+	}
+	return hits;
+}
+
+/**
+ * Embed the query + run BOTH semantic arms (PRD-025 AC-3). Returns `null` when the
+ * semantic path could NOT run — no embed client, or the query embed returned null
+ * (embeddings off / daemon unreachable / timeout / wrong-dim) — which is the signal
+ * to fall back to lexical-only with `degraded: true`. Returns the merged semantic
+ * hits (possibly empty) when the arms DID run — `degraded: false`, because "ran and
+ * found nothing semantically" is still an honest non-degraded recall.
+ */
+async function runSemanticArms(
+	request: MemoryRecallRequest,
+	deps: MemoryRecallDeps,
+	limit: number,
+): Promise<MemoryRecallHit[] | null> {
+	if (deps.embed === undefined) return null; // no semantic seam → lexical-only.
+
+	let queryVector: readonly number[] | null;
+	try {
+		queryVector = await deps.embed.embed(request.query);
+	} catch {
+		// The embed-client contract is null-on-failure, but guard an unexpected throw:
+		// a flaky embed daemon degrades recall to lexical, never throws into the route.
+		queryVector = null;
+	}
+	// Null (off/unreachable/timeout) OR a wrong-dim vector (defense in depth; the
+	// client already dim-guards) → the semantic arm cannot run → fall back to lexical.
+	if (queryVector === null || queryVector.length !== EMBEDDING_DIMS) return null;
+
+	const armHits = await Promise.all(SEMANTIC_ARMS.map((spec) => runSemanticArm(spec, queryVector!, request, deps, limit)));
+	return armHits.flat();
+}
+
+/**
+ * Run the cross-table recall for `request.query`, scoped to `request.scope`.
+ * Returns the surfaced hits, the arms that produced them, and the HONEST `degraded`
+ * flag (PRD-025 AC-3). Never throws for the expected failure modes: an arm's storage
+ * error yields no rows for that arm (the route still answers 200, not a 500), every
+ * arm failing yields an empty result, and an empty query yields an empty result.
  *
- * Each of the three tables a memory can live in — `memories`, `memory`, `sessions`
- * — is queried as its OWN guarded statement and the rows are merged in arm order
- * (memories → memory → sessions). A missing/failing SIBLING arm degrades to empty
- * for that arm only (`runArm`), so a fresh partition where only `memories` exists
- * still surfaces the `memories` hit — the live dogfood regression. The merged union
- * is then capped at the overall clamped limit.
+ * THE TWO BRANCHES (degraded tells the truth):
+ *  - SEMANTIC ran: an {@link EmbedClient} is injected AND the query embedded to a
+ *    768-dim vector → the `<#>` cosine arms run via the EXISTING {@link vectorSearch}
+ *    (D-5) and their hits are merged AHEAD of the lexical arms (deduped by source+id).
+ *    `degraded` is `false`.
+ *  - LEXICAL fallback: no embed client, or the embed returned null (off / daemon
+ *    unreachable / timeout / wrong-dim) → only the BM25/ILIKE arms run, `degraded`
+ *    is `true`.
  *
- * `degraded` is always true here — the data-API proof runs the BM25/ILIKE lexical
- * arm (embeddings off, ledger D-4). The flag is surfaced end-to-end so a caller
- * can see that recall ran lexical-only rather than semantic.
+ * The lexical arms ALWAYS run (the resilient floor): each of `memories`/`memory`/
+ * `sessions` is its OWN guarded statement, a missing/failing SIBLING degrades to
+ * empty for that arm only (`runArm`) — the live dogfood regression. The merged
+ * union (semantic first when present, then lexical, in arm order) is capped at the
+ * overall clamped limit. Arm-COMBINATION only — RANKING/fusion is PRD-027.
  */
 export async function recallMemories(
 	request: MemoryRecallRequest,
@@ -237,20 +420,38 @@ export async function recallMemories(
 	const term = request.query.trim();
 	const limit = resolveRecallLimit(request.limit);
 	if (term === "") {
+		// An empty query embeds to nothing meaningful; report the lexical floor honestly.
 		return { hits: [], sources: [], degraded: true };
 	}
 
-	// Each arm is bounded by the overall limit so a single arm cannot starve the
-	// merge; the merge then caps the union at the overall limit. Arms run as
-	// SEPARATE guarded queries so a missing sibling table (fresh partition) degrades
-	// that arm to empty rather than failing the whole recall.
-	const armRows = await Promise.all([
+	// Run the semantic arms (embed-query → `<#>`) and the lexical arms concurrently.
+	// The semantic path returns null when it could not run (→ degraded:true); the
+	// lexical arms always run (the resilient floor). Each lexical arm is bounded by the
+	// overall limit so a single arm cannot starve the merge.
+	const [semanticHits, memoriesRows, memoryRows, sessionsRows] = await Promise.all([
+		runSemanticArms(request, deps, limit),
 		runArm(buildMemoriesArmSql(term, limit), request, deps),
 		runArm(buildMemoryArmSql(term, limit), request, deps),
 		runArm(buildSessionsArmSql(term, limit), request, deps),
 	]);
-	// Merge in arm order (memories → memory → sessions); shapeHits caps at the limit.
-	const merged = [...armRows[0], ...armRows[1], ...armRows[2]];
+
+	// PRD-025 AC-3: `degraded` is HONEST — false iff the semantic arm actually ran.
+	const degraded = semanticHits === null;
+
+	// Merge order: semantic hits FIRST (when present), then the lexical arms in arm
+	// order (memories → memory → sessions). shapeHits dedups by source+id and caps at
+	// the limit. This is arm-COMBINATION, not ranking/fusion (PRD-027 owns ranking).
+	const merged: StorageRow[] = [
+		...(semanticHits ?? []).map(hitToRow),
+		...memoriesRows,
+		...memoryRows,
+		...sessionsRows,
+	];
 	const { hits, sources } = shapeHits(merged, limit);
-	return { hits, sources, degraded: true };
+	return { hits, sources, degraded };
+}
+
+/** Project a typed semantic hit back into the {@link StorageRow} shape `shapeHits` consumes. */
+function hitToRow(hit: MemoryRecallHit): StorageRow {
+	return { source: hit.source, id: hit.id, text: hit.text };
 }

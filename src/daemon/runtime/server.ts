@@ -43,6 +43,7 @@ import {
 } from "./middleware/runtime-path.js";
 import { type FileWatcherService, noopFileWatcherService } from "./services/file-watcher.js";
 import { type JobQueueService, noopJobQueueService } from "./services/job-queue.js";
+import { type EmbedSupervisor, noopEmbedSupervisor } from "./services/embed-supervisor.js";
 
 /**
  * The route-group surface (FR-2). Each entry is mounted as a scaffolded sub-app.
@@ -112,6 +113,12 @@ export interface DaemonServices {
 	readonly watcher: FileWatcherService;
 	/** The runtime-path claim service (004d). */
 	readonly runtimePath: RuntimePathService;
+	/**
+	 * The embed-daemon supervisor (PRD-025 Wave 2 / D-6). Spawns + health-checks +
+	 * crash-restarts the embed daemon child, warming it OFF the turn path. Defaults
+	 * to the inert {@link noopEmbedSupervisor}; `assembleDaemon` swaps in the real one.
+	 */
+	readonly embed: EmbedSupervisor;
 }
 
 /** Options for building the daemon. Everything is injectable for testability. */
@@ -203,6 +210,7 @@ export function createDaemon(options: CreateDaemonOptions = {}): Daemon {
 		queue: options.services?.queue ?? noopJobQueueService,
 		watcher: options.services?.watcher ?? noopFileWatcherService,
 		runtimePath: options.services?.runtimePath ?? noopRuntimePathService,
+		embed: options.services?.embed ?? noopEmbedSupervisor,
 	};
 	const storage = options.storage;
 	const pipelineProbe = options.pipelineProbe ?? ((): PipelineStatus => coarsePipelineStatus(storage));
@@ -364,9 +372,17 @@ export function createDaemon(options: CreateDaemonOptions = {}): Daemon {
 			await services.queue.start();
 			await services.watcher.start();
 			await services.runtimePath.start();
+			// PRD-025 D-6: the embed supervisor starts LAST. Its `start()` spawns the embed
+			// child + waits (bounded) for liveness, then warms in the BACKGROUND (D-3) — the
+			// warm wait is never awaited here, so daemon readiness is never blocked on a cold
+			// model. A never-starting child leaves recall on the lexical path (degraded), not hung.
+			await services.embed.start();
 		},
 		async stopServices(): Promise<void> {
 			// Stop in reverse order; each stop is awaited for a graceful drain.
+			// PRD-025 D-6: tear the embed child down FIRST so a clean daemon shutdown also
+			// drains the supervised embed process (no orphaned child).
+			await services.embed.stop();
 			await services.runtimePath.stop();
 			await services.watcher.stop();
 			await services.queue.stop();

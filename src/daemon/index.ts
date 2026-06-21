@@ -63,6 +63,12 @@ export {
 } from "./runtime/middleware/runtime-path.js";
 export { type FileWatcherService, noopFileWatcherService } from "./runtime/services/file-watcher.js";
 export { type JobInput, type JobQueueService, type LeasedJob, noopJobQueueService } from "./runtime/services/job-queue.js";
+export {
+	type EmbedSupervisor,
+	type EmbedSupervisorDeps,
+	createEmbedSupervisor,
+	noopEmbedSupervisor,
+} from "./runtime/services/embed-supervisor.js";
 export type { DaemonService } from "./runtime/services/types.js";
 export { type RunningDaemon, startDaemon as startDaemonListener } from "./runtime/listen.js";
 

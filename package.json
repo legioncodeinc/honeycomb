@@ -42,6 +42,7 @@
     "embeddings/embed-daemon.js",
     ".claude-plugin",
     "scripts/ensure-tree-sitter.mjs",
+    "scripts/ensure-embed-deps.mjs",
     "README.md"
   ],
   "scripts": {
@@ -67,8 +68,9 @@
     "mutation:state": "stryker run stryker/state.json",
     "pack:check": "node scripts/pack-check.mjs",
     "rebuild:native": "node scripts/ensure-tree-sitter.mjs",
+    "ensure:embed-deps": "node scripts/ensure-embed-deps.mjs",
     "ci": "npm run typecheck && npm run dup && npm run test && npm run audit:sql",
-    "postinstall": "node scripts/ensure-tree-sitter.mjs",
+    "postinstall": "node scripts/ensure-tree-sitter.mjs && node scripts/ensure-embed-deps.mjs",
     "prepack": "npm run build"
   },
   "devDependencies": {
@@ -113,5 +115,9 @@
     "web-tree-sitter": "^0.22.6",
     "yaml": "^2.9.0",
     "zod": "^4.4.3"
+  },
+  "//optionalDependencies": "PRD-025 D-2: the embedding RUNTIME (@huggingface/transformers + its ONNX native runtime, ~600 MB with the nomic-embed-text-v1.5 model acquired at first-run) ships as an OPTIONAL dependency, NOT in the `files` allowlist. This keeps the published @deeplake/hivemind tarball LEAN (the model is downloaded + cached on the daemon's first warmup, not packed — AC-7) and keeps `npm i` fast for everyone; a `--no-optional` / slimmed / offline install simply runs recall on the BM25/ILIKE lexical fallback (no quality cliff — D-4). The embed daemon dynamic-imports this only at warmup, so the bundle + CI never require it.",
+  "optionalDependencies": {
+    "@huggingface/transformers": "^3.8.1"
   }
 }
