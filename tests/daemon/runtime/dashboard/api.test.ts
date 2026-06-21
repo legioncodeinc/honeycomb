@@ -24,7 +24,7 @@ import type { TransportRequest } from "../../../../src/daemon/storage/transport.
 import { type RuntimeConfig } from "../../../../src/daemon/runtime/config.js";
 import { createRequestLogger } from "../../../../src/daemon/runtime/logger.js";
 import { createDaemon } from "../../../../src/daemon/runtime/server.js";
-import { mountDashboardApi } from "../../../../src/daemon/runtime/dashboard/api.js";
+import { buildSettingsView, mountDashboardApi } from "../../../../src/daemon/runtime/dashboard/api.js";
 import { FakeDeepLakeTransport, fakeCredentialRecord, stubProvider } from "../../../helpers/fake-deeplake.js";
 
 const ORG = "fake-org";
@@ -256,5 +256,46 @@ describe("PRD-024 Wave 3 local-mode default-scope fallback (the dashboard-panel 
 		const settings = (await res.json()) as { orgId: string; workspace: string };
 		expect(settings.orgId).toBe(ORG); // header org, NOT the default
 		expect(settings.workspace).toBe(WORKSPACE);
+	});
+});
+
+describe("fix/daemon-scope-from-credentials: the settings view exposes the friendly orgName", () => {
+	const SCOPE = { org: "71f2566d-OSPRY", workspace: "default" } as const;
+	const SETTINGS_CONFIG = { mode: "local", port: 3850 } as const;
+
+	it("buildSettingsView returns the friendly orgName when the daemon resolved one from creds", () => {
+		const view = buildSettingsView(SCOPE, SETTINGS_CONFIG, "OSPRY");
+		// orgId stays the (GUID) scope org; orgName is the human name so the header shows "OSPRY".
+		expect(view.orgId).toBe(SCOPE.org);
+		expect(view.orgName).toBe("OSPRY");
+		expect(view.workspace).toBe("default");
+	});
+
+	it("buildSettingsView falls back to the scope org when no orgName is provided (tests / no creds)", () => {
+		// Unchanged behaviour for a unit-constructed daemon / a login with no orgName on disk.
+		const view = buildSettingsView(SCOPE, SETTINGS_CONFIG);
+		expect(view.orgName).toBe(SCOPE.org);
+		const blank = buildSettingsView(SCOPE, SETTINGS_CONFIG, "");
+		expect(blank.orgName).toBe(SCOPE.org);
+	});
+
+	it("the /api/diagnostics/settings handler threads the mount's orgName into the view", async () => {
+		// End-to-end through the mount: a request resolving to the local default tenant shows the
+		// friendly orgName the composition root threaded in, NOT the org id.
+		const { daemon, storage } = makeDaemonMode(true, cfg());
+		mountDashboardApi(daemon, { storage, defaultScope: SCOPE, orgName: "OSPRY" });
+		const res = await daemon.app.request("/api/diagnostics/settings", {}); // no org header → local default
+		expect(res.status).toBe(200);
+		const settings = (await res.json()) as { orgId: string; orgName: string };
+		expect(settings.orgId).toBe(SCOPE.org);
+		expect(settings.orgName).toBe("OSPRY");
+	});
+
+	it("without an injected orgName the handler still falls back to the scope org (unchanged)", async () => {
+		const { daemon, storage } = makeDaemonMode(true, cfg());
+		mountDashboardApi(daemon, { storage, defaultScope: SCOPE });
+		const res = await daemon.app.request("/api/diagnostics/settings", {});
+		const settings = (await res.json()) as { orgId: string; orgName: string };
+		expect(settings.orgName).toBe(SCOPE.org);
 	});
 });

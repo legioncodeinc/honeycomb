@@ -69,6 +69,10 @@ import { type SecretsApiDeps } from "./secrets/api.js";
 import { SecretsStore, createMachineKeyProvider } from "./secrets/store.js";
 
 import { createStorageClient } from "../storage/index.js";
+import {
+	type CredentialProvider,
+	defaultCredentialProvider,
+} from "../storage/config.js";
 import type { QueryScope, StorageClient } from "../storage/client.js";
 import { isOk } from "../storage/result.js";
 
@@ -105,6 +109,17 @@ export interface AssembleDaemonOptions {
 	 * object so the deterministic bits run without a live DeepLake.
 	 */
 	readonly storage?: StorageClient;
+	/**
+	 * The credential provider the daemon resolves its OWN tenancy scope (`{ org, workspace }`)
+	 * and friendly `orgName` from — the SAME provider {@link createStorageClient} connects
+	 * through (env-over-file, {@link defaultCredentialProvider}). Defaults to that provider so
+	 * a plain `honeycomb login` (NO env) resolves the real org from `~/.deeplake/credentials.json`
+	 * instead of the `"local"` placeholder. A unit test that injects a fake {@link storage}
+	 * leaves this unset → no creds → the deterministic `{ org: "local", workspace: "default" }`
+	 * fallback (the suite is unchanged). A test may inject a fake provider to drive the scope
+	 * deterministically without env or a real file.
+	 */
+	readonly provider?: CredentialProvider;
 	/** The request logger. Defaults to the stderr JSON-lines + ring-buffer logger. */
 	readonly logger?: RequestLogger;
 	/**
@@ -345,13 +360,23 @@ function authForMode(
  * protected route group (`/api/memories`, `/memory`, `/api/goals`…), so there is no
  * `server.ts` edit and the fire order among them is unconstrained.
  */
-export function assembleSeams(daemon: Daemon, storage: StorageClient, seams: SeamFns = defaultSeamFns): void {
-	// The daemon's configured default tenancy scope (the single LOCAL tenant). Threaded into
-	// the three data-API mounts as `defaultScope` so a loopback thin client (SDK/MCP) that
-	// carries NO `x-honeycomb-org` header resolves to this tenant in local mode (PRD-022).
-	// In team/hybrid the data handlers ignore it (the fallback fires ONLY in local mode), so
-	// threading it unconditionally is safe — tenancy is never loosened outside local.
-	const defaultScope = resolveDaemonScope(storage);
+export function assembleSeams(
+	daemon: Daemon,
+	storage: StorageClient,
+	defaultScope: QueryScope,
+	orgName: string | undefined,
+	seams: SeamFns = defaultSeamFns,
+): void {
+	// The daemon's configured default tenancy scope (the single LOCAL tenant) is RESOLVED ONCE
+	// at the composition root (`assembleDaemon`) from the SAME credential source the storage
+	// client connected through, then THREADED in here — never re-resolved independently. (The
+	// prior split, where the storage client read `~/.deeplake` but the scope re-read env, was
+	// the bug: a plain login with no env resolved the scope to the `"local"` placeholder while
+	// the client connected to the real org.) It is threaded into the three data-API mounts as
+	// `defaultScope` so a loopback thin client (SDK/MCP) that carries NO `x-honeycomb-org`
+	// header resolves to this tenant in local mode (PRD-022). In team/hybrid the data handlers
+	// ignore it (the fallback fires ONLY in local mode), so threading it unconditionally is safe
+	// — tenancy is never loosened outside local.
 
 	// 1. /api/hooks/* capture (019b). The capture write enqueues per-turn cues into the
 	//    REAL durable queue (a-AC-3 service), heals the `sessions` table lazily.
@@ -363,7 +388,7 @@ export function assembleSeams(daemon: Daemon, storage: StorageClient, seams: Sea
 	// 2. The dashboard data API (020b) — the six daemon-served view-models. Threads the
 	//    LOCAL default scope so the dashboard web app (a loopback thin client that sends no
 	//    `x-honeycomb-org`) resolves the single local tenant instead of 400ing (PRD-024 Wave 3).
-	seams.mountDashboard(daemon, { storage, defaultScope });
+	seams.mountDashboard(daemon, { storage, defaultScope, orgName });
 
 	// 3. The backend notifications API (020d) — the org's pending notifications.
 	seams.mountNotifications(daemon, { storage });
@@ -491,14 +516,25 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// ── a-AC-1: construct the LIVE storage client. This is the ONLY production code
 	// that imports `daemon/storage` to get a live client; allowed because this file is
 	// inside `src/daemon/` (the composition root, D-2). A test injects a fake client.
-	const storage = options.storage ?? createStorageClient();
+	//
+	// Resolve the credential PROVIDER ONCE here so the storage client AND the daemon's own
+	// tenancy scope are derived from the SAME source — they can never disagree (the prior
+	// split, where the client read `~/.deeplake` but the scope re-read env, was the bug).
+	// When a test injects a fake `storage`, there is no live provider and no creds to read,
+	// so the scope falls through to the `"local"` default (the deterministic suite is
+	// unchanged). When the real client is built, it connects THROUGH this very provider.
+	const provider: CredentialProvider | undefined =
+		options.storage !== undefined ? options.provider : (options.provider ?? defaultCredentialProvider());
+	const storage = options.storage ?? createStorageClient(provider !== undefined ? { provider } : {});
 
-	// The daemon's own tenancy partition: the org/workspace the storage config resolved.
-	// `createStorageClient` validated config fail-closed, so `endpoint` is set, but the
-	// org/workspace are not exposed on the client surface — re-resolve them cheaply from
-	// the same provider so the queue + probe run under the right scope. An injected fake
-	// client may not carry config; fall back to a benign loopback scope in that case.
-	const scope = resolveDaemonScope(storage);
+	// The daemon's own tenancy partition + friendly org name: resolved from the SAME
+	// credential provider the storage client connected through (env-over-file), with env as
+	// an override and `"local"` ONLY as the true no-creds fallback (a fake client / no env).
+	// The queue + health probe run under this scope; the dashboard settings view shows the
+	// friendly `orgName`.
+	const tenancy = resolveDaemonTenancy(provider);
+	const scope = tenancy.scope;
+	const daemonOrgName = tenancy.orgName;
 
 	// ── a-AC-3: the three REAL services replace the no-op stubs.
 	const services: Partial<DaemonServices> = {
@@ -535,7 +571,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// ── a-AC-2 / d-AC-1: fire the seams EXACTLY ONCE, after construction (the four core
 	// seams + the /api/logs reader always; the /dashboard host local-mode only per security
 	// F-1; PLUS the three data-API seams — memories/vfs/product-data — always, 022d).
-	assembleSeams(daemon, storage, options.seams ?? defaultSeamFns);
+	assembleSeams(daemon, storage, scope, daemonOrgName, options.seams ?? defaultSeamFns);
 
 	// ── The cached-health refresher: a cheap connectivity round trip on an interval,
 	// updating the bit `/health` reads. Unref'd so it never keeps the process alive.
@@ -600,25 +636,68 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	};
 }
 
+/** The daemon's own resolved tenancy: the scope its queue + probe run under, plus the
+ * friendly org name the dashboard settings view shows (display-only, may be undefined). */
+interface DaemonTenancy {
+	/** The partition the queue rows + the `SELECT 1` probe carry — never a request's authorized tenancy. */
+	readonly scope: QueryScope;
+	/** The human-readable org name from the credentials (e.g. "OSPRY"); `undefined` when no creds. */
+	readonly orgName: string | undefined;
+}
+
 /**
- * Resolve the daemon's tenancy scope (`{ org, workspace }`) for the queue + health
- * probe. The storage client does not expose its config's org/workspace, so re-resolve
- * them from the same env provider the live client used. An injected fake client (tests)
- * has no env config; fall back to a benign single-user loopback scope so the
- * deterministic bits run without env. The scope is only the partition the queue rows +
- * the `SELECT 1` probe carry — never a tenancy a request is authorized against.
+ * Resolve the daemon's OWN tenancy (`{ org, workspace }` + friendly `orgName`) from the
+ * SAME credential provider the storage client connected through (env-over-file), so the
+ * daemon's default scope can NEVER disagree with the org the client actually authenticated
+ * against. (The prior implementation re-read `HONEYCOMB_DEEPLAKE_ORG` from the env ONLY and
+ * fell back to the `"local"` placeholder — so a plain `honeycomb login` with NO env left the
+ * client connected to the real org while the scope said `"local"`, degrading `/health` and
+ * breaking recall. THAT split was the bug.)
+ *
+ * Precedence (matching `resolveStorageConfig`'s env-over-file merge):
+ *   (a) `HONEYCOMB_DEEPLAKE_ORG` / `_WORKSPACE` env if set — the explicit override + the
+ *       live-itest path that exports them (preserved exactly);
+ *   (b) else the resolved credentials' `org` (← `orgId`) + `workspace` (← `workspaceId`) from
+ *       `~/.deeplake/credentials.json` via the SAME `provider` the storage client used;
+ *   (c) else `{ org: "local", workspace: "default" }` — the TRUE no-creds fallback (an
+ *       injected fake client in unit tests has no provider, so the deterministic suite is
+ *       unchanged).
+ *
+ * `provider` is the resolved credential provider (or `undefined` for a fake-client assembly
+ * with no provider injected → the `"local"` fallback). It is read at most ONCE here; the
+ * record is the un-validated raw config (the same `read()` the storage config validates),
+ * carrying `org` / `workspace` / `orgName`. No token is read or logged here.
  */
-function resolveDaemonScope(storage: StorageClient): QueryScope {
-	// The real client carries an `endpoint` getter but not org/workspace; re-resolve from
-	// env. In tests the env is unset, so this throws — caught to fall back to loopback.
-	void storage;
-	const org = process.env.HONEYCOMB_DEEPLAKE_ORG;
-	const workspace = process.env.HONEYCOMB_DEEPLAKE_WORKSPACE;
-	if (org !== undefined && org.length > 0) {
-		return workspace !== undefined && workspace.length > 0 ? { org, workspace } : { org };
+function resolveDaemonTenancy(provider: CredentialProvider | undefined): DaemonTenancy {
+	// (a) Env override wins, exactly as before — preserves the explicit escape hatch and the
+	//     live-itest path that exports `HONEYCOMB_DEEPLAKE_ORG`/`_WORKSPACE`.
+	const envOrg = process.env.HONEYCOMB_DEEPLAKE_ORG;
+	const envWorkspace = process.env.HONEYCOMB_DEEPLAKE_WORKSPACE;
+
+	// (b) The resolved credentials from the SAME provider the client connected through. `read()`
+	//     applies the env-over-file merge already, so this single source agrees with the client.
+	const record = provider !== undefined ? provider.read() : {};
+	const fileOrg = asNonEmptyString(record.org);
+	const fileWorkspace = asNonEmptyString(record.workspace);
+	const orgName = asNonEmptyString(record.orgName);
+
+	const org =
+		envOrg !== undefined && envOrg.length > 0 ? envOrg : fileOrg;
+	const workspace =
+		envWorkspace !== undefined && envWorkspace.length > 0 ? envWorkspace : fileWorkspace;
+
+	if (org !== undefined) {
+		// A workspace is optional on the scope (the client defaults it to the config workspace);
+		// thread it when we resolved one so the partition matches the storage client.
+		const scope: QueryScope = workspace !== undefined ? { org, workspace } : { org };
+		return { scope, orgName };
 	}
-	// Fail-soft default for a fake-client / no-env assembly (tests). A live assembly
-	// always has `HONEYCOMB_DEEPLAKE_ORG` set (the storage config resolved fail-closed on
-	// it), so this fallback never applies in production.
-	return { org: "local", workspace: "default" };
+
+	// (c) No creds at all (fake client / no env) → the deterministic single-user loopback scope.
+	return { scope: { org: "local", workspace: "default" }, orgName: undefined };
+}
+
+/** Narrow an unknown provider-record field to a non-empty string, else `undefined`. */
+function asNonEmptyString(value: unknown): string | undefined {
+	return typeof value === "string" && value.length > 0 ? value : undefined;
 }

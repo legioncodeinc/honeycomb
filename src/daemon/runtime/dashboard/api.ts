@@ -61,6 +61,13 @@ export interface MountDashboardOptions {
 	 * Mirrors {@link import("../memories/api.js").MountMemoriesOptions.defaultScope}.
 	 */
 	readonly defaultScope?: QueryScope;
+	/**
+	 * The friendly org name (e.g. "OSPRY") resolved from the daemon's credentials at the
+	 * composition root, threaded so the settings view shows the human name instead of the org
+	 * GUID. ABSENT (a unit-constructed daemon / no creds) → the settings view falls back to the
+	 * scope's org id (the prior behaviour). Display-only; never a tenancy decision.
+	 */
+	readonly orgName?: string;
 }
 
 /**
@@ -174,11 +181,22 @@ export async function fetchSessionsView(storage: StorageQuery, scope: QueryScope
 	return { sessions };
 }
 
-/** Build the settings view (FR-1 / d-AC-1): active org/workspace + the exposed runtime config. */
-export function buildSettingsView(scope: QueryScope, config: DashboardSettingsConfig): SettingsView {
+/**
+ * Build the settings view (FR-1 / d-AC-1): active org/workspace + the exposed runtime config.
+ *
+ * `orgName` is the friendly credentials org name (e.g. "OSPRY") when the daemon resolved one
+ * from `~/.deeplake/credentials.json`; it falls back to the scope's org id when absent (a
+ * unit-constructed daemon / no creds) so the field is never empty. `orgId` is always the scope
+ * org. Display-only — neither value loosens tenancy.
+ */
+export function buildSettingsView(
+	scope: QueryScope,
+	config: DashboardSettingsConfig,
+	orgName?: string,
+): SettingsView {
 	return {
 		orgId: scope.org,
-		orgName: scope.org,
+		orgName: orgName !== undefined && orgName.length > 0 ? orgName : scope.org,
 		workspace: scope.workspace ?? "default",
 		settings: { mode: config.mode, port: String(config.port) },
 	};
@@ -281,7 +299,9 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 		settings.get("/settings", (c) => {
 			const scope = resolveScope(c);
 			if (scope === null) return c.json(NO_ORG_BODY, 400);
-			return c.json(buildSettingsView(scope, { mode: daemon.config.mode, port: daemon.config.port }));
+			return c.json(
+				buildSettingsView(scope, { mode: daemon.config.mode, port: daemon.config.port }, options.orgName),
+			);
 		});
 	}
 
