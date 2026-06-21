@@ -122,6 +122,69 @@ describe("AC-T factory: routable config → working RouterModelClient", () => {
 		expect(body.messages).toEqual([{ role: "user", content: "consolidate the graph" }]);
 	});
 
+	it("PRD-032d d-AC-1: a vault provider/model override WINS over the agent.yaml target (vault-driven selection)", async () => {
+		// The committed `agent.yaml` config selects `claude-sonnet-4-6` (routableConfig). The vault
+		// `setting` selected `claude-opus-4-8`. With the override fed to the factory, the router must
+		// call the OVERRIDE model — proving the vault wins over agent.yaml — while the credential STILL
+		// resolves through the same `${SECRET_REF}` (the override never touches `apiKeyRef`, FR-2).
+		const store = makeStore();
+		const stored = await store.setSecret("ANTHROPIC_API_KEY", "sk-ant-secret-KEY", SCOPE);
+		expect(stored.ok).toBe(true);
+
+		const seen: { apiKey: string; body: string }[] = [];
+		globalThis.fetch = (async (_url: string, init: { headers: Record<string, string>; body: string }) => {
+			seen.push({ apiKey: init.headers["x-api-key"] ?? "", body: init.body });
+			return {
+				status: 200,
+				ok: true,
+				text: async () => JSON.stringify({ content: [{ type: "text", text: "OPUS-OUTPUT" }] }),
+			};
+		}) as unknown as typeof globalThis.fetch;
+
+		const client = await buildInferenceModelClient({
+			scope: SCOPE,
+			secretsStore: store,
+			config: routableConfig(), // agent.yaml says sonnet…
+			providerModelOverride: { provider: "anthropic", model: "claude-opus-4-8" }, // …vault says opus.
+		});
+		expect(client).not.toBe(noopModelClient);
+
+		const output = await client.complete("memory_dreaming", "consolidate the graph");
+		expect(output).toBe("OPUS-OUTPUT");
+		expect(seen).toHaveLength(1);
+		// The vault model — NOT the agent.yaml `claude-sonnet-4-6` — reached the provider call.
+		const body = JSON.parse(seen[0]?.body ?? "{}") as { model: string };
+		expect(body.model).toBe("claude-opus-4-8");
+		// FR-2: the credential still resolved through the `${SECRET_REF}` secret path (unchanged).
+		expect(seen[0]?.apiKey).toBe("sk-ant-secret-KEY");
+	});
+
+	it("PRD-032d d-AC-3: NO override → the agent.yaml target stands (no regression)", async () => {
+		// Absent a vault override, the committed `agent.yaml` selection (`claude-sonnet-4-6`) is used
+		// verbatim — the wire-back never regresses an install with no vault setting.
+		const store = makeStore();
+		await store.setSecret("ANTHROPIC_API_KEY", "sk-ant-secret-KEY", SCOPE);
+		const seen: { body: string }[] = [];
+		globalThis.fetch = (async (_url: string, init: { headers: Record<string, string>; body: string }) => {
+			seen.push({ body: init.body });
+			return {
+				status: 200,
+				ok: true,
+				text: async () => JSON.stringify({ content: [{ type: "text", text: "SONNET-OUTPUT" }] }),
+			};
+		}) as unknown as typeof globalThis.fetch;
+
+		const client = await buildInferenceModelClient({
+			scope: SCOPE,
+			secretsStore: store,
+			config: routableConfig(),
+			// no providerModelOverride.
+		});
+		await client.complete("memory_dreaming", "go");
+		const body = JSON.parse(seen[0]?.body ?? "{}") as { model: string };
+		expect(body.model).toBe("claude-sonnet-4-6");
+	});
+
 	it("rejects (no usable output) when the secret is missing, never falling back to noop silently", async () => {
 		// A routable config but NO stored secret → the resolver rejects inside the router's
 		// executeWithFallback; the chain exhausts and complete() rejects. The stage wrapper

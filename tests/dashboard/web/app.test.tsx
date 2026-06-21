@@ -437,3 +437,227 @@ describe("PRD-024 AC-6: Dream now POSTs /api/diagnostics/dream and reflects the 
 		expect(btnAfter?.textContent).toContain("Dream now");
 	});
 });
+
+describe("PRD-032c AC-5: the vault Settings panel (provider→model + dreaming toggle, no secret value)", () => {
+	/** The curated catalog the Wave-1 `GET /api/settings` returns (mirrors vault/catalog.ts). */
+	const CATALOG = [
+		{ id: "anthropic", label: "Anthropic", models: ["claude-sonnet-4-6", "claude-opus-4-8"], openEnded: false },
+		{ id: "openai", label: "OpenAI", models: ["gpt-4o", "gpt-4o-mini", "gpt-4.1"], openEnded: false },
+		{ id: "openrouter", label: "OpenRouter", models: ["anthropic/claude-sonnet-4.6"], openEnded: true },
+	];
+
+	/**
+	 * A stateful mock daemon for the settings surface: it holds an in-memory `setting` map +
+	 * secret-name list, answers `GET /api/settings` with `{ settings, catalog }`, persists a
+	 * `POST /api/settings/:key`, and answers `GET /api/secrets` with names only. This lets a test
+	 * assert that a write PERSISTS and a reload reflects it (AC-2 / AC-3) — the fake stands in for
+	 * the Wave-1 vault, with NO live backend. It records every POST for assertion.
+	 */
+	function settingsDaemon(opts: { settings?: Record<string, unknown>; secretNames?: string[] } = {}): {
+		fetchImpl: typeof fetch;
+		posts: { key: string; value: unknown }[];
+		store: Record<string, unknown>;
+	} {
+		const store: Record<string, unknown> = { ...(opts.settings ?? {}) };
+		const secretNames = opts.secretNames ?? [];
+		const posts: { key: string; value: unknown }[] = [];
+		const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+			const url = typeof input === "string" ? input : input.toString();
+			const json = (body: unknown, status = 200): Response =>
+				new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+			if (url.endsWith("/health")) return new Response("", { status: 200 });
+			if (url.includes("/api/diagnostics/settings")) return json(PAYLOADS.settings);
+			if (url.includes("/api/diagnostics/kpis")) return json(PAYLOADS.kpis);
+			if (url.includes("/api/diagnostics/sessions")) return json(PAYLOADS.sessions);
+			if (url.includes("/api/diagnostics/rules")) return json(PAYLOADS.rules);
+			if (url.includes("/api/diagnostics/skills")) return json(PAYLOADS.skills);
+			if (url.includes("/api/graph")) return json(PAYLOADS.graph);
+			if (url.includes("/api/logs")) return json(PAYLOADS.logs);
+			// POST /api/settings/:key — persist the value into the in-memory store.
+			if (url.includes("/api/settings/") && init?.method === "POST") {
+				const key = decodeURIComponent(url.split("/api/settings/")[1]?.split("?")[0] ?? "");
+				const value = (JSON.parse(String(init.body)) as { value: unknown }).value;
+				store[key] = value;
+				posts.push({ key, value });
+				return json({ ok: true, key, value }, 201);
+			}
+			if (url.endsWith("/api/settings") || url.includes("/api/settings?")) return json({ settings: store, catalog: CATALOG });
+			if (url.endsWith("/api/secrets") || url.includes("/api/secrets?")) return json({ names: secretNames });
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch;
+		return { fetchImpl, posts, store };
+	}
+
+	/** Find a `<select>` by its aria-label. */
+	function selectByLabel(label: string): HTMLSelectElement | null {
+		return container.querySelector(`select[aria-label="${label}"]`);
+	}
+
+	/** Drive a `<select>` change event to a value (jsdom). */
+	async function pickSelect(sel: HTMLSelectElement, value: string): Promise<void> {
+		await act(async () => {
+			sel.value = value;
+			sel.dispatchEvent(new Event("change", { bubbles: true }));
+		});
+		await act(async () => {
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+	}
+
+	it("AC-5: renders the provider list from the catalog GET /api/settings returns", async () => {
+		const { fetchImpl } = settingsDaemon();
+		await mountApp(fetchImpl);
+		// The Settings panel + its provider select are present.
+		expect(container.textContent ?? "").toContain("Settings");
+		const providerSel = selectByLabel("provider");
+		expect(providerSel, "the provider select rendered").not.toBeNull();
+		const optionLabels = [...(providerSel?.options ?? [])].map((o) => o.textContent);
+		expect(optionLabels).toContain("Anthropic");
+		expect(optionLabels).toContain("OpenAI");
+		expect(optionLabels).toContain("OpenRouter");
+	});
+
+	it("AC-2: picking a provider populates THAT provider's catalog models; picking a model POSTs it", async () => {
+		const { fetchImpl, posts, store } = settingsDaemon();
+		await mountApp(fetchImpl);
+
+		// Pick OpenAI → the provider write persists, and the model select shows OpenAI's models.
+		const providerSel = selectByLabel("provider");
+		expect(providerSel).not.toBeNull();
+		await pickSelect(providerSel as HTMLSelectElement, "openai");
+		expect(posts.some((p) => p.key === "activeProvider" && p.value === "openai")).toBe(true);
+		expect(store["activeProvider"]).toBe("openai");
+
+		// The model select now lists OpenAI's catalog models (gpt-4o…), not Anthropic's.
+		const modelSel = selectByLabel("model");
+		expect(modelSel, "the model select rendered after a provider was chosen").not.toBeNull();
+		const modelLabels = [...(modelSel?.options ?? [])].map((o) => o.value);
+		expect(modelLabels).toContain("gpt-4o");
+		expect(modelLabels).not.toContain("claude-opus-4-8");
+
+		// Pick a model → the active provider/model setting persists.
+		await pickSelect(modelSel as HTMLSelectElement, "gpt-4o");
+		expect(posts.some((p) => p.key === "activeModel" && p.value === "gpt-4o")).toBe(true);
+		expect(store["activeModel"]).toBe("gpt-4o");
+	});
+
+	it("AC-3: the dreaming toggle POSTs dreaming.enabled; a reload shows the persisted value", async () => {
+		const { fetchImpl, posts, store } = settingsDaemon();
+		await mountApp(fetchImpl);
+
+		// The toggle starts off (no persisted value). Click it → it POSTs dreaming.enabled = true.
+		const toggle = container.querySelector('button[aria-label="dreaming"]');
+		expect(toggle, "the dreaming toggle rendered").not.toBeNull();
+		expect(toggle?.getAttribute("aria-checked")).toBe("false");
+		await act(async () => {
+			toggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+		});
+		await act(async () => {
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+
+		// The write persisted to the vault `setting` class.
+		expect(posts.some((p) => p.key === "dreaming.enabled" && p.value === true)).toBe(true);
+		expect(store["dreaming.enabled"]).toBe(true);
+		// On the re-read (the save re-hydrates from GET /api/settings), the toggle reflects ON.
+		const toggleAfter = container.querySelector('button[aria-label="dreaming"]');
+		expect(toggleAfter?.getAttribute("aria-checked")).toBe("true");
+	});
+
+	it("AC-3 reload: a freshly-mounted panel reflects the PERSISTED dreaming + provider/model", async () => {
+		// Seed the daemon as if a prior session already persisted these — a fresh mount must show them.
+		const { fetchImpl } = settingsDaemon({
+			settings: { activeProvider: "anthropic", activeModel: "claude-opus-4-8", "dreaming.enabled": true },
+		});
+		await mountApp(fetchImpl);
+		const providerSel = selectByLabel("provider");
+		const modelSel = selectByLabel("model");
+		expect(providerSel?.value).toBe("anthropic");
+		expect(modelSel?.value).toBe("claude-opus-4-8");
+		expect(container.querySelector('button[aria-label="dreaming"]')?.getAttribute("aria-checked")).toBe("true");
+	});
+
+	it("AC-5: a provider key shows 'key set ✓' / 'not set' by NAME — never a secret value", async () => {
+		// ANTHROPIC_API_KEY present; the active provider is anthropic → the badge shows "key set ✓".
+		const { fetchImpl } = settingsDaemon({
+			settings: { activeProvider: "anthropic", activeModel: "claude-opus-4-8" },
+			secretNames: ["ANTHROPIC_API_KEY"],
+		});
+		await mountApp(fetchImpl);
+		const panelText = container.textContent ?? "";
+		expect(panelText).toContain("key set ✓");
+		// No secret VALUE anywhere in the DOM — only names/states are ever rendered (D-4 / AC-5).
+		for (const needle of ["sk-", "bearer", "secret", "token", "password", "anthropic_api_key", "authorization"]) {
+			expect(panelText.toLowerCase()).not.toContain(needle);
+		}
+	});
+
+	it("AC-5: a provider with no stored key shows 'not set' (presence only, still no value)", async () => {
+		// openai active, but no OPENAI_API_KEY in the names list → "not set".
+		const { fetchImpl } = settingsDaemon({
+			settings: { activeProvider: "openai", activeModel: "gpt-4o" },
+			secretNames: ["ANTHROPIC_API_KEY"], // a DIFFERENT provider's key — openai is still "not set"
+		});
+		await mountApp(fetchImpl);
+		expect(container.textContent ?? "").toContain("not set");
+	});
+
+	it("D-6: OpenRouter renders a FREE-FORM model input (passthrough), not a closed select", async () => {
+		const { fetchImpl, posts } = settingsDaemon({ settings: { activeProvider: "openrouter" } });
+		await mountApp(fetchImpl);
+		// No closed model <select> for the open-ended provider — a text input instead.
+		expect(selectByLabel("model")).toBeNull();
+		const modelInput = container.querySelector('input[aria-label="model"]') as HTMLInputElement | null;
+		expect(modelInput, "the OpenRouter free-form model input rendered").not.toBeNull();
+		// Type a free-form id and commit on Enter → it POSTs the passthrough model. We set the value
+		// through React's native value setter so the controlled `onChange` fires (React 18 intercepts
+		// a bare `.value =`), then dispatch the input event.
+		await act(async () => {
+			if (modelInput) {
+				const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+				setter?.call(modelInput, "deepseek/deepseek-chat");
+				modelInput.dispatchEvent(new Event("input", { bubbles: true }));
+			}
+		});
+		await act(async () => {
+			await Promise.resolve();
+		});
+		await act(async () => {
+			modelInput?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+		});
+		await act(async () => {
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		expect(posts.some((p) => p.key === "activeModel" && p.value === "deepseek/deepseek-chat")).toBe(true);
+	});
+
+	it("AC-5 defensive: an absent /api/settings (no vault) → the panel renders its empty state, no crash", async () => {
+		// The daemon serves diagnostics but 404s the vault settings + secrets endpoints.
+		const fetchImpl = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+			const url = typeof input === "string" ? input : input.toString();
+			const json = (body: unknown): Response => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+			if (url.endsWith("/health")) return new Response("", { status: 200 });
+			if (url.includes("/api/diagnostics/settings")) return json(PAYLOADS.settings);
+			if (url.includes("/api/diagnostics/kpis")) return json(PAYLOADS.kpis);
+			if (url.includes("/api/diagnostics/sessions")) return json(PAYLOADS.sessions);
+			if (url.includes("/api/diagnostics/rules")) return json(PAYLOADS.rules);
+			if (url.includes("/api/diagnostics/skills")) return json(PAYLOADS.skills);
+			if (url.includes("/api/graph")) return json(PAYLOADS.graph);
+			if (url.includes("/api/logs")) return json(PAYLOADS.logs);
+			return new Response("not found", { status: 404 }); // settings + secrets 404
+		}) as unknown as typeof fetch;
+		await mountApp(fetchImpl);
+		// The panel still renders (provider select with just the placeholder option), no throw.
+		expect(container.textContent ?? "").toContain("Settings");
+		const providerSel = selectByLabel("provider");
+		expect(providerSel).not.toBeNull();
+		// Only the "— select —" placeholder (the catalog was empty).
+		expect([...(providerSel?.options ?? [])]).toHaveLength(1);
+	});
+});

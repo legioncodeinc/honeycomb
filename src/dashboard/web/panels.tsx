@@ -17,7 +17,7 @@
 import React from "react";
 
 import { Badge, type BadgeTone } from "./primitives.js";
-import type { GraphWire, LogRecordWire, RuleRowWire, SessionRowWire, SkillRowWire } from "./wire.js";
+import type { GraphWire, LogRecordWire, ProviderEntryWire, RuleRowWire, SessionRowWire, SettingValueWire, SkillRowWire } from "./wire.js";
 
 // ── Panel shell ────────────────────────────────────────────────────────────────
 
@@ -311,6 +311,247 @@ export function LiveLog({ lines }: { lines: readonly string[] }): React.JSX.Elem
 				)}
 			</div>
 		</Panel>
+	);
+}
+
+// ── Settings (PRD-032c — the vault settings panel) ───────────────────────────────
+
+/** The vault setting keys this panel reads/writes (mirrors the Wave-1 `KNOWN_SETTING_KEYS`). */
+export const SETTING_KEY = Object.freeze({
+	activeProvider: "activeProvider",
+	activeModel: "activeModel",
+	dreamingEnabled: "dreaming.enabled",
+} as const);
+
+/**
+ * The provider→key-name mapping for the names-only PRESENCE badge (D-4 / AC-5). A provider's
+ * API key lives in the secret class under this conventional NAME (e.g. `ANTHROPIC_API_KEY`);
+ * the panel reads `GET /api/secrets` (NAMES only) and shows "set ✓" iff the name is present.
+ * It NEVER reads or renders the value — there is no value-returning route.
+ */
+export const PROVIDER_KEY_NAME: Record<string, string> = Object.freeze({
+	anthropic: "ANTHROPIC_API_KEY",
+	openai: "OPENAI_API_KEY",
+	openrouter: "OPENROUTER_API_KEY",
+});
+
+/** A styled native `<select>` matching the DS tokens (the kit has no Select primitive). */
+function Select({
+	value,
+	onChange,
+	options,
+	ariaLabel,
+}: {
+	value: string;
+	onChange: (v: string) => void;
+	options: readonly { value: string; label: string }[];
+	ariaLabel: string;
+}): React.JSX.Element {
+	return (
+		<select
+			aria-label={ariaLabel}
+			value={value}
+			onChange={(e) => onChange(e.target.value)}
+			style={{
+				height: 36,
+				padding: "0 10px",
+				background: "var(--bg-surface)",
+				border: "1px solid var(--border-default)",
+				borderRadius: "var(--radius-md)",
+				color: "var(--text-primary)",
+				fontFamily: "var(--font-mono)",
+				fontSize: 13,
+				minWidth: 180,
+			}}
+		>
+			{options.map((o) => (
+				<option key={o.value} value={o.value}>
+					{o.label}
+				</option>
+			))}
+		</select>
+	);
+}
+
+/**
+ * A small on/off toggle (the kit has no Toggle primitive). Renders a pill button whose label +
+ * tone reflect the boolean; clicking flips it. Used for the dreaming on/off flag (FR-3).
+ */
+function Toggle({ on, onToggle, ariaLabel }: { on: boolean; onToggle: () => void; ariaLabel: string }): React.JSX.Element {
+	return (
+		<button
+			type="button"
+			role="switch"
+			aria-checked={on}
+			aria-label={ariaLabel}
+			onClick={onToggle}
+			style={{
+				display: "inline-flex",
+				alignItems: "center",
+				gap: 8,
+				height: 36,
+				padding: "0 14px",
+				background: on ? "var(--dream-subtle)" : "var(--bg-elevated)",
+				border: `1px solid ${on ? "var(--dream-border)" : "var(--border-default)"}`,
+				borderRadius: "var(--radius-full)",
+				color: on ? "var(--dream)" : "var(--text-secondary)",
+				fontFamily: "var(--font-mono)",
+				fontSize: 12,
+				fontWeight: 600,
+				cursor: "pointer",
+			}}
+		>
+			<span style={{ width: 8, height: 8, borderRadius: "50%", background: on ? "var(--dream)" : "var(--text-disabled)" }} />
+			{on ? "on" : "off"}
+		</button>
+	);
+}
+
+/** One labeled row in the settings panel (a left label + a right control). */
+function SettingRow({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }): React.JSX.Element {
+	return (
+		<div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 6px", flexWrap: "wrap" }}>
+			<div style={{ display: "flex", flexDirection: "column", minWidth: 120 }}>
+				<span style={{ fontSize: 14, color: "var(--text-primary)" }}>{label}</span>
+				{hint && <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-tertiary)" }}>{hint}</span>}
+			</div>
+			<span style={{ flex: 1 }} />
+			{children}
+		</div>
+	);
+}
+
+/** Props for {@link SettingsPanel}. */
+export interface SettingsPanelProps {
+	/** The curated provider→model catalog (from `GET /api/settings`). */
+	readonly catalog: readonly ProviderEntryWire[];
+	/** The current persisted settings (key→value) from the vault. */
+	readonly settings: Readonly<Record<string, SettingValueWire>>;
+	/** The secret NAMES present (from `GET /api/secrets`) — for key presence only, never a value. */
+	readonly secretNames: readonly string[];
+	/**
+	 * Persist one setting through the daemon, then re-read. Returns the daemon's accept flag.
+	 * The panel calls this for every change; the parent re-hydrates so the rendered value is the
+	 * PERSISTED vault value, not a local-only toggle (FR-3 / FR-4 / AC-5).
+	 */
+	readonly onSave: (key: string, value: SettingValueWire) => Promise<boolean>;
+}
+
+/**
+ * The PRD-032c Settings panel (AC-5). Renders, from daemon-served `setting`-class data:
+ *   - a PROVIDER select (Anthropic / OpenAI / OpenRouter from the catalog);
+ *   - a MODEL control populated from THAT provider's catalog models — a `<select>` for a
+ *     closed-list provider, a free-form text input for OpenRouter (`openEnded`, D-6);
+ *   - a dreaming on/off toggle;
+ *   - a names-only provider-key PRESENCE badge ("set ✓" / "not set") — NO secret value.
+ *
+ * Every write goes through `onSave` (the daemon `/api/settings` POST); the panel never opens
+ * the vault directly and holds no storage logic (PRD-020b posture). On (re)load the controls
+ * reflect the PERSISTED `settings`/`secretNames` props the parent hydrated from the daemon —
+ * this component is controlled by those props, not by a local-only optimistic toggle.
+ */
+export function SettingsPanel({ catalog, settings, secretNames, onSave }: SettingsPanelProps): React.JSX.Element {
+	// The persisted values (controlled by the daemon-hydrated props). A select/toggle/input edit
+	// fires `onSave`; the parent re-reads and the new props flow back in — so what renders is
+	// always the persisted vault value (AC-5: reload reflects the persisted setting).
+	const activeProvider = String(settings[SETTING_KEY.activeProvider] ?? "");
+	const activeModel = String(settings[SETTING_KEY.activeModel] ?? "");
+	const dreamingOn = settings[SETTING_KEY.dreamingEnabled] === true || settings[SETTING_KEY.dreamingEnabled] === "true";
+
+	// The chosen provider's catalog entry (drives the model control). A provider not in the
+	// catalog (or none chosen) → no entry → an empty model list (the panel still renders).
+	const providerEntry = catalog.find((p) => p.id === activeProvider);
+
+	// A pending text buffer for the OpenRouter free-form model input (committed on blur/Enter),
+	// so typing does not POST on every keystroke. Seeded from the persisted model.
+	const [modelDraft, setModelDraft] = React.useState(activeModel);
+	React.useEffect(() => setModelDraft(activeModel), [activeModel]);
+
+	const providerOptions = [
+		{ value: "", label: "— select —" },
+		...catalog.map((p) => ({ value: p.id, label: p.label || p.id })),
+	];
+	const modelOptions = [
+		{ value: "", label: "— select —" },
+		...(providerEntry?.models ?? []).map((m) => ({ value: m, label: m })),
+	];
+
+	// Picking a provider writes `activeProvider`. We do NOT auto-write a model here — the Wave-1
+	// API rejects `activeModel` until a provider is stored, and the user picks the model next.
+	const onPickProvider = (v: string): void => {
+		void onSave(SETTING_KEY.activeProvider, v);
+	};
+	const onPickModel = (v: string): void => {
+		if (v.length === 0) return;
+		void onSave(SETTING_KEY.activeModel, v);
+	};
+	const commitOpenRouterModel = (): void => {
+		const v = modelDraft.trim();
+		if (v.length > 0 && v !== activeModel) void onSave(SETTING_KEY.activeModel, v);
+	};
+
+	return (
+		<Panel title="Settings" eyebrow="provider · model · dreaming">
+			<div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+				{/* Provider selector */}
+				<SettingRow label="Provider" hint="inference provider">
+					<Select ariaLabel="provider" value={activeProvider} onChange={onPickProvider} options={providerOptions} />
+					{activeProvider.length > 0 && <ProviderKeyBadge provider={activeProvider} secretNames={secretNames} />}
+				</SettingRow>
+
+				{/* Model selector — a `<select>` for a closed list, a free-form input for OpenRouter */}
+				<SettingRow label="Model" hint={providerEntry?.openEnded ? "free-form id" : "from catalog"}>
+					{providerEntry === undefined ? (
+						<span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-tertiary)" }}>pick a provider first</span>
+					) : providerEntry.openEnded ? (
+						<input
+							aria-label="model"
+							type="text"
+							value={modelDraft}
+							placeholder="vendor/model"
+							onChange={(e) => setModelDraft(e.target.value)}
+							onBlur={commitOpenRouterModel}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") commitOpenRouterModel();
+							}}
+							style={{
+								height: 36,
+								padding: "0 10px",
+								background: "var(--bg-surface)",
+								border: "1px solid var(--border-default)",
+								borderRadius: "var(--radius-md)",
+								color: "var(--text-primary)",
+								fontFamily: "var(--font-mono)",
+								fontSize: 13,
+								minWidth: 200,
+							}}
+						/>
+					) : (
+						<Select ariaLabel="model" value={activeModel} onChange={onPickModel} options={modelOptions} />
+					)}
+				</SettingRow>
+
+				{/* Dreaming toggle */}
+				<SettingRow label="Dreaming" hint="background consolidation">
+					<Toggle ariaLabel="dreaming" on={dreamingOn} onToggle={() => void onSave(SETTING_KEY.dreamingEnabled, !dreamingOn)} />
+				</SettingRow>
+			</div>
+		</Panel>
+	);
+}
+
+/**
+ * The provider-key PRESENCE badge (AC-5). Shows "key set ✓" when the provider's conventional
+ * key NAME is in `secretNames`, "not set" otherwise. It renders NAMES/STATE only — never the
+ * secret value (there is no value-returning route, and this component is given only names).
+ */
+function ProviderKeyBadge({ provider, secretNames }: { provider: string; secretNames: readonly string[] }): React.JSX.Element {
+	const keyName = PROVIDER_KEY_NAME[provider];
+	const present = keyName !== undefined && secretNames.includes(keyName);
+	return (
+		<Badge tone={present ? "verified" : "neutral"} mono dot>
+			{present ? "key set ✓" : "not set"}
+		</Badge>
 	);
 }
 

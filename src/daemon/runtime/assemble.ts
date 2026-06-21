@@ -70,7 +70,14 @@ import { type SecretsApiDeps } from "./secrets/api.js";
 import { SecretsStore, createMachineKeyProvider } from "./secrets/store.js";
 import type { SecretScope } from "./secrets/contracts.js";
 
-import { buildInferenceModelClient } from "./inference/model-client-factory.js";
+// ── The vault `setting` class (PRD-032d / AC-6) — assembly READS provider/model + dreaming ──
+import { VaultStore } from "./vault/store.js";
+import { createVaultRegistry } from "./vault/registry.js";
+import { mountSettingsApi } from "./vault/api.js";
+import { isValidProviderModel, providerEntry } from "./vault/catalog.js";
+import { migrateDeeplakeToken } from "./vault/migrate.js";
+
+import { buildInferenceModelClient, type ProviderModelOverride } from "./inference/model-client-factory.js";
 import type { ModelClient } from "./pipeline/model-client.js";
 import { resolveDreamingConfig } from "./dreaming/config.js";
 import { createDreamingTrigger } from "./dreaming/trigger.js";
@@ -222,7 +229,28 @@ export interface AssembleDaemonOptions {
 	 * when disabled" assertion). Production never sets this.
 	 */
 	readonly dreamingWorker?: DreamingJobWorker | null;
+	/**
+	 * The machine-bound vault store the daemon READS the `setting` class from (PRD-032d /
+	 * AC-6) — the active provider/model selection + the `dreaming.enabled` flag. Production
+	 * leaves it UNSET → the composition root constructs the REAL {@link VaultStore} over the
+	 * SAME workspace base dir + machine-key + daemon scope the secrets store uses (so the
+	 * vault, the `.secrets/` records, and the `${SECRET_REF}` resolver all agree on ONE
+	 * location). A test injects a FAKE vault store (a `getSetting`-shaped stub) to drive the
+	 * vault-wins / fallback precedence WITHOUT touching the real workspace. When a fake
+	 * `storage` is injected and this is unset, the vault read is simply skipped (the deterministic
+	 * suite is unchanged — every vault read fails soft to the `agent.yaml`/env fallback).
+	 */
+	readonly vault?: VaultSettingsReader;
 }
+
+/**
+ * The narrow READ surface the composition root needs from the vault `setting` class (AC-6) —
+ * the single method `getSetting`, structurally satisfied by the real {@link VaultStore}. A
+ * test injects a tiny fake of just this shape; production passes the real store. Keeping the
+ * dep to this one method (not the whole store) is what lets a test drive the precedence with a
+ * three-line stub.
+ */
+export type VaultSettingsReader = Pick<VaultStore, "getSetting">;
 
 /**
  * The mount/attach seam functions the composition root fires once (a-AC-2). The four
@@ -668,6 +696,105 @@ function secretScopeFromQueryScope(scope: QueryScope): SecretScope {
 	return { org: scope.org, workspace: scope.workspace ?? "default" };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// The vault `setting`-class READ path (PRD-032d / AC-6) — vault wins, fail-soft.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The `setting`-class keys the wire-back READS (AC-6). These are the SAME keys the CLI (032b)
+ * + dashboard (032c) WRITE via `/api/settings` (the catalog-validated `activeProvider` /
+ * `activeModel`, and the dreaming toggle `dreaming.enabled`) — single-sourced so a setting
+ * written by a surface is the setting assembly reads. The wire-back is READ-ONLY (D-5): it
+ * never writes a setting and never generates `agent.yaml`.
+ */
+export const VAULT_PROVIDER_KEY = "activeProvider" as const;
+export const VAULT_MODEL_KEY = "activeModel" as const;
+export const VAULT_DREAMING_ENABLED_KEY = "dreaming.enabled" as const;
+
+/**
+ * Construct the daemon's vault `setting`-class READER (AC-6), reusing the SAME workspace base
+ * dir + machine-key provider the secrets store uses and a fresh default registry (the built-in
+ * `secret` + `setting` classes). This is the ONE place assembly builds the vault; it is shared
+ * by the `/api/settings` mount and the provider/model + dreaming reads, so the surface the
+ * CLI/dashboard write through and the source assembly reads are byte-identical. Pure
+ * construction — no IO until a `getSetting` call. A test injects {@link AssembleDaemonOptions.vault}
+ * to bypass this entirely.
+ */
+function buildVaultStore(): VaultStore {
+	return new VaultStore({
+		baseDir: resolveWorkspaceBaseDir(),
+		machineKey: createMachineKeyProvider(),
+		registry: createVaultRegistry(),
+	});
+}
+
+/**
+ * READ the vault-driven provider/model SELECTION (AC-6 / FR-1), fail-soft. Returns a
+ * {@link ProviderModelOverride} ONLY when BOTH `activeProvider` and `activeModel` are present
+ * in the `setting` class AND the pair validates against the catalog (the same gate the API
+ * applied on write — defense in depth). Absent either key, an unreadable vault, or a pair the
+ * catalog rejects → `undefined` (the `agent.yaml` selection stands, no regression). NEVER
+ * throws: any vault/decrypt error degrades to `undefined`.
+ */
+async function readProviderModelOverride(
+	vault: VaultSettingsReader | undefined,
+	scope: SecretScope,
+): Promise<ProviderModelOverride | undefined> {
+	if (vault === undefined) return undefined;
+	try {
+		const provRes = await vault.getSetting(VAULT_PROVIDER_KEY, scope);
+		const modelRes = await vault.getSetting(VAULT_MODEL_KEY, scope);
+		if (!provRes.ok || !modelRes.ok) return undefined;
+		const provider = String(provRes.value);
+		const model = String(modelRes.value);
+		// Catalog-validate the pair (an unknown provider, or a model not in a closed-list
+		// provider's catalog, is ignored rather than fed to the router).
+		if (providerEntry(provider) === undefined) return undefined;
+		if (!isValidProviderModel(provider, model)) return undefined;
+		return { provider, model };
+	} catch {
+		// A malformed/undecryptable vault setting must never block boot — fall back to agent.yaml.
+		return undefined;
+	}
+}
+
+/**
+ * Resolve the EFFECTIVE dreaming-enabled flag (AC-6 / FR-3 / d-AC-2), VAULT-FIRST. Precedence:
+ *   1. the vault `setting` `dreaming.enabled` when PRESENT + readable → it WINS (a vault
+ *      `true` enables dreaming WITHOUT `HONEYCOMB_DREAMING_ENABLED`; a vault `false` disables
+ *      it even when the env says true — vault-first is the documented precedence);
+ *   2. else the env-resolved `resolveDreamingConfig().enabled` (the `HONEYCOMB_DREAMING_ENABLED`
+ *      fallback, PRD-026 behavior preserved).
+ * Returns the boolean to gate on, plus whether the vault decided it (for clarity at the call
+ * site). NEVER throws: an unreadable/missing vault setting yields `decidedByVault: false` and
+ * the caller uses the env fallback.
+ */
+async function readVaultDreamingEnabled(
+	vault: VaultSettingsReader | undefined,
+	scope: SecretScope,
+): Promise<{ decidedByVault: boolean; enabled: boolean }> {
+	if (vault === undefined) return { decidedByVault: false, enabled: false };
+	try {
+		const res = await vault.getSetting(VAULT_DREAMING_ENABLED_KEY, scope);
+		if (!res.ok) return { decidedByVault: false, enabled: false };
+		// The `setting` value schema is a scalar; coerce a string/number/boolean to a bool the
+		// same way the env BoolFlag does (`true`/`1` → true) so a dashboard-written string or a
+		// CLI-written boolean both behave.
+		const enabled = coerceSettingBool(res.value);
+		return { decidedByVault: true, enabled };
+	} catch {
+		return { decidedByVault: false, enabled: false };
+	}
+}
+
+/** Coerce a scalar `setting` value (boolean | number | string) to a boolean (`true`/`1` → true). */
+function coerceSettingBool(value: unknown): boolean {
+	if (typeof value === "boolean") return value;
+	if (typeof value === "number") return value === 1;
+	if (typeof value === "string") return value === "true" || value === "1";
+	return false;
+}
+
 /**
  * Build the gated dreaming subsystem (AC-W + AC-T) — the real inference {@link ModelClient}
  * + the real {@link DreamingTrigger} + the {@link DreamingJobWorker} — and return the worker
@@ -698,8 +825,9 @@ async function buildGatedDreamingWorker(
 	storage: StorageClient,
 	scope: QueryScope,
 	queue: DaemonServices["queue"],
+	vault: VaultSettingsReader | undefined,
 ): Promise<DreamingJobWorker | null> {
-	// Resolve the gate fail-soft FIRST: a malformed dreaming-config knob must NEVER take the
+	// Resolve the env gate fail-soft FIRST: a malformed dreaming-config knob must NEVER take the
 	// daemon down — treat it as disabled (the false-safe default the schema already documents).
 	let config: ReturnType<typeof resolveDreamingConfig>;
 	try {
@@ -708,11 +836,19 @@ async function buildGatedDreamingWorker(
 		return null;
 	}
 
+	// PRD-032d / AC-6 (d-AC-2): the dreaming-enabled decision is VAULT-FIRST. When the vault
+	// `setting` `dreaming.enabled` is present it WINS (a vault `true` enables dreaming WITHOUT
+	// the env var; a vault `false` disables it even when the env says true). Absent a vault
+	// setting we fall back to the env-resolved `config.enabled` (PRD-026 behavior preserved).
+	// This read is fail-soft — an unreadable vault degrades to the env fallback, never a throw.
+	const vaultDreaming = await readVaultDreamingEnabled(vault, secretScopeFromQueryScope(scope));
+	const effectiveEnabled = vaultDreaming.decidedByVault ? vaultDreaming.enabled : config.enabled;
+
 	// GATE (D-1, default OFF): the gate is checked BEFORE any worker is returned — even an
 	// INJECTED test worker is NOT started when disabled (the gate is the contract, not the
 	// injection). When disabled, construct NOTHING heavy — no model client, no trigger, no
 	// worker. Re-enabling later resumes from the accumulated counter.
-	if (!config.enabled) {
+	if (!effectiveEnabled) {
 		return null;
 	}
 
@@ -723,9 +859,16 @@ async function buildGatedDreamingWorker(
 		return options.dreamingWorker;
 	}
 
+	// PRD-032d / AC-6 (d-AC-1): READ the vault-driven provider/model SELECTION. When present +
+	// catalog-valid, it WINS over the committed `agent.yaml` (fed as an additive override to the
+	// factory below); absent, the `agent.yaml` selection stands. Fail-soft (→ undefined).
+	const providerModelOverride = await readProviderModelOverride(vault, secretScopeFromQueryScope(scope));
+
 	// The real inference ModelClient (AC-T). Never throws — degrades to the no-op client when
 	// no `agent.yaml`/`inference:` block/key is present yet (so enabling dreaming before the
-	// key exists boots cleanly and yields empty, zero-mutation passes).
+	// key exists boots cleanly and yields empty, zero-mutation passes). The vault provider/model
+	// override (when set) wins over the `agent.yaml` selection; the `${SECRET_REF}` credential
+	// still resolves through the `secret` class unchanged (FR-2 — the key is never inlined).
 	const secretsStore = new SecretsStore({
 		baseDir: resolveWorkspaceBaseDir(),
 		machineKey: createMachineKeyProvider(),
@@ -734,6 +877,7 @@ async function buildGatedDreamingWorker(
 		scope: secretScopeFromQueryScope(scope),
 		secretsStore,
 		config: resolveAgentConfigPath(options),
+		...(providerModelOverride !== undefined ? { providerModelOverride } : {}),
 	});
 
 	// The REAL PRD-009a trigger: its `readState` feeds the worker's first-run backfill rule
@@ -852,6 +996,31 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// F-1; PLUS the three data-API seams — memories/vfs/product-data — always, 022d).
 	assembleSeams(daemon, storage, scope, daemonOrgName, embed, healthDetail, options.seams ?? defaultSeamFns);
 
+	// ── PRD-032d / AC-6: construct the daemon's vault `setting`-class READER ONCE, over the
+	// SAME workspace base dir + machine-key + daemon scope the secrets store uses (so the vault,
+	// the `.secrets/` records, and the `${SECRET_REF}` resolver all agree on ONE location). A
+	// test injects a fake reader (`options.vault`); production builds the real {@link VaultStore}.
+	// When a fake `storage` is injected with NO `vault`, the read path is skipped — the vault is
+	// only built for the REAL assembly so the deterministic suite never touches the workspace.
+	const vault: VaultSettingsReader | undefined =
+		options.vault ?? (options.storage === undefined ? buildVaultStore() : undefined);
+
+	// ── PRD-032d / AC-6: FIRE the Wave-1 `/api/settings` mount ONCE so the CLI/dashboard
+	// settings surface is LIVE against this daemon. FAIL-SOFT: a vault/settings construction or
+	// mount error must NEVER crash the daemon — the settings surface simply stays unmounted this
+	// run (it falls through to the 501 scaffold), exactly the posture the data-API mounts use.
+	// It mounts the `setting` class ONLY (the registry's posture gate rejects any `secret` read),
+	// so no secret value can cross this surface (AC-8). Production mounts the REAL store; a test
+	// with an injected reader that is also a full {@link VaultStore} mounts it too.
+	if (vault !== undefined && vault instanceof VaultStore) {
+		try {
+			mountSettingsApi(daemon, { store: vault });
+		} catch (err: unknown) {
+			const reason = err instanceof Error ? err.message : String(err);
+			process.stderr.write(`honeycomb: settings API mount failed (non-fatal): ${reason}\n`);
+		}
+	}
+
 	// ── The cached-health refresher: a cheap connectivity round trip on an interval,
 	// updating the bit `/health` reads. Unref'd so it never keeps the process alive.
 	let probeTimer: ReturnType<typeof setInterval> | null = null;
@@ -899,6 +1068,34 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// Start the daemon's real services (queue → watcher → runtime-path).
 			await daemon.startServices();
 
+				// ── PRD-032a / AC-3: COPY the shared DeepLake login token into the vault as the
+				// `secret`-class `DEEPLAKE_TOKEN` record, ONCE per boot — the LIVE wiring of the
+				// migration. NON-DESTRUCTIVE by construction: it READS `~/.deeplake/credentials.json`
+				// (via `loadDiskCredentials`) and WRITES only the vault — ZERO writes to the plaintext
+				// file, which stays BYTE-UNCHANGED + authoritative for the shared login (D-3). It runs
+				// AFTER `startServices()` so it NEVER gates the storage connection (which keeps reading
+				// the authoritative plaintext file, env-over-file — the vault is an ADDITIVE cache, not
+				// a replacement). Idempotent: a re-boot refreshes the vault copy from the file so a token
+				// rotation is picked up. FAIL-SOFT: a `no_creds` no-op (CI / not-logged-in) or a vault
+				// write error must NEVER prevent the daemon from booting — the login still resolves from
+				// env/file. Only the REAL vault (a full `VaultStore`) migrates; an injected fake reader /
+				// the fake-storage suite skips it (the deterministic suite is untouched).
+				if (vault instanceof VaultStore) {
+					try {
+						const migrated = await migrateDeeplakeToken(vault, secretScopeFromQueryScope(scope));
+						if (!migrated.ok) {
+							// A vault write failure is surfaced (never silently swallowed) but is NOT fatal:
+							// the plaintext file is untouched and the login still resolves from env/file.
+							process.stderr.write(
+								`honeycomb: DeepLake-token vault migration failed (non-fatal): ${migrated.reason}\n`,
+							);
+						}
+					} catch (err: unknown) {
+						const reason = err instanceof Error ? err.message : String(err);
+						process.stderr.write(`honeycomb: DeepLake-token vault migration failed (non-fatal): ${reason}\n`);
+					}
+				}
+
 			// ── PRD-026 AC-W: build + start the dreaming worker, GATED on `config.enabled`
 			// (default OFF). It is built AFTER `startServices()` so it leases from a started
 			// queue. The build is FAIL-SOFT: a dreaming-config error or a missing inference
@@ -907,7 +1104,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// rather than propagated. When the gate is closed, `buildGatedDreamingWorker`
 			// returns null and we start nothing.
 			try {
-				dreamingWorker = await buildGatedDreamingWorker(options, storage, scope, daemon.services.queue);
+				dreamingWorker = await buildGatedDreamingWorker(options, storage, scope, daemon.services.queue, vault);
 				dreamingWorker?.start();
 			} catch (err: unknown) {
 				// A dreaming wiring failure is surfaced to stderr (never silently swallowed) but is

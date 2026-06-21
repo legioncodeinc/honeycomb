@@ -21,12 +21,13 @@
 import React from "react";
 
 import { Badge, Button, Input, Kpi, MemoryCard } from "./primitives.js";
-import { ConnectivityBanner, GraphCanvas, LiveLog, RulesPanel, SessionsPanel, SkillSyncPanel } from "./panels.js";
+import { ConnectivityBanner, GraphCanvas, LiveLog, RulesPanel, SessionsPanel, SettingsPanel, SkillSyncPanel } from "./panels.js";
 import {
 	createWireClient,
 	EMPTY_GRAPH,
 	EMPTY_KPIS,
 	EMPTY_SETTINGS,
+	EMPTY_VAULT_SETTINGS,
 	formatLogLine,
 	type GraphWire,
 	type HealthReasonsWire,
@@ -35,7 +36,9 @@ import {
 	type RuleRowWire,
 	type SessionRowWire,
 	type SettingsWire,
+	type SettingValueWire,
 	type SkillRowWire,
+	type VaultSettingsWire,
 	type WireClient,
 } from "./wire.js";
 
@@ -217,6 +220,9 @@ export function App({ client, assetBase = "assets" }: AppProps = {}): React.JSX.
 	const [rules, setRules] = React.useState<readonly RuleRowWire[]>([]);
 	const [skills, setSkills] = React.useState<readonly SkillRowWire[]>([]);
 	const [graph, setGraph] = React.useState<GraphWire>(EMPTY_GRAPH);
+	// PRD-032c: the vault `setting` class + catalog, and the names-only secret list (presence only).
+	const [vaultSettings, setVaultSettings] = React.useState<VaultSettingsWire>(EMPTY_VAULT_SETTINGS);
+	const [secretNames, setSecretNames] = React.useState<readonly string[]>([]);
 
 	// ── recall state (AC-3) ──
 	const [query, setQuery] = React.useState("how do we deploy");
@@ -240,15 +246,18 @@ export function App({ client, assetBase = "assets" }: AppProps = {}): React.JSX.
 		setNotes((prev) => [`${clockPrefix()}  ${text}`, ...prev].slice(0, MAX_LOG_LINES));
 	}, []);
 
-	/** Hydrate the six diagnostics views from the live endpoints (AC-2). */
+	/** Hydrate the diagnostics views + the PRD-032c vault settings from the live endpoints (AC-2 / AC-5). */
 	const hydrate = React.useCallback(async (): Promise<void> => {
-		const [s, k, sess, r, sk, g] = await Promise.all([
+		const [s, k, sess, r, sk, g, vs, sn] = await Promise.all([
 			wire.settings(),
 			wire.kpis(),
 			wire.sessions(),
 			wire.rules(),
 			wire.skills(),
 			wire.graph(),
+			// PRD-032c — the vault `setting` class + catalog, and the names-only secret list.
+			wire.vaultSettings(),
+			wire.secretNames(),
 		]);
 		setSettings(s);
 		setKpis(k);
@@ -256,7 +265,28 @@ export function App({ client, assetBase = "assets" }: AppProps = {}): React.JSX.
 		setRules(r);
 		setSkills(sk);
 		setGraph(g);
+		setVaultSettings(vs);
+		setSecretNames(sn);
 	}, [wire]);
+
+	/**
+	 * PRD-032c (AC-5): persist one vault `setting` through the daemon, then RE-READ so the panel
+	 * reflects the PERSISTED value (never a local-only optimistic toggle). The write goes through
+	 * the wire `/api/settings` POST (PRD-020b — the panel never opens the vault directly); on a
+	 * rejected write (the daemon 400s an invalid value) we still re-read, so the UI shows the
+	 * unchanged persisted value rather than a phantom local edit. Returns the daemon accept flag.
+	 */
+	const saveSetting = React.useCallback(
+		async (key: string, value: SettingValueWire): Promise<boolean> => {
+			const ok = await wire.setSetting(key, value);
+			// Re-read the `setting` class (+ secret names) so the panel renders the persisted truth.
+			const [vs, sn] = await Promise.all([wire.vaultSettings(), wire.secretNames()]);
+			setVaultSettings(vs);
+			setSecretNames(sn);
+			return ok;
+		},
+		[wire],
+	);
 
 	// AC-2: hydrate once on mount.
 	React.useEffect(() => {
@@ -407,6 +437,10 @@ export function App({ client, assetBase = "assets" }: AppProps = {}): React.JSX.
 				</div>
 				<div className="col">
 					<GraphCanvas graph={graph} dreaming={dreaming} />
+					{/* PRD-032c (AC-5): the vault Settings panel — provider→model selector + dreaming
+					    toggle + names-only key presence. Every write goes through the daemon
+					    `/api/settings` (saveSetting), and the panel reflects the PERSISTED vault value. */}
+					<SettingsPanel catalog={vaultSettings.catalog} settings={vaultSettings.settings} secretNames={secretNames} onSave={saveSetting} />
 					<SkillSyncPanel skills={skills} />
 				</div>
 			</div>
