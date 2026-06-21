@@ -72,10 +72,60 @@ export const DEFAULT_RECALL_LIMIT = 20;
 /** The hard ceiling on recall hits (a fat-fingered limit is clamped, never honored). */
 export const MAX_RECALL_LIMIT = 200;
 
+/**
+ * The reciprocal-rank-fusion constant `k` (PRD-027 D-1). RRF fuses each arm's RANKED
+ * list by `score(doc) = Σ_arms weight_arm / (k + rank_arm(doc))`, with `rank` 1-based.
+ * `k=60` is the well-trodden hybrid-search default (Cormack et al.): large enough that
+ * the difference between rank 1 and rank 2 is gentle (no single arm dominates on a thin
+ * lead), small enough that top ranks still separate. Named + tunable; the eval harness
+ * (PRD-027 W2) is the instrument for re-tuning it on the golden set, never a vibe.
+ */
+export const RRF_K = 60;
+
+/**
+ * The arm-CLASS weights (PRD-027 D-3 / AC-2) folded into each arm's RRF contribution so
+ * DISTILLED `[memory]` hits outrank RAW `[sessions]` dumps. A distilled arm contributes
+ * its full reciprocal rank; a raw `sessions` arm contributes a FRACTION, so a raw turn
+ * needs a materially stronger rank signal (or corroboration across arms) to outrank a
+ * clean distilled fact.
+ *
+ * THE MATH (why `0.4` makes a raw dump lose a head-to-head): with `k=60`, a rank-1
+ * distilled hit scores `1.0 / (60 + 1) = 0.016393`. A rank-1 raw session hit scores only
+ * `0.4 / (60 + 1) = 0.006557` — well below the distilled rank-1. In fact a raw session at
+ * rank 1 (`0.006557`) sits below a distilled hit as deep as rank ~100 (`1/160 = 0.00625`
+ * is comparable), so within any realistic recall window a distilled fact that ALSO matched
+ * the query always ranks above the raw dump. The raw row is never dropped — it is tagged
+ * `secondary` and ordered beneath the distilled hits. Tunable; eval-gated like `RRF_K`.
+ */
+export const ARM_CLASS_WEIGHT: Readonly<Record<RecallKind, number>> = {
+	memory: 1.0,
+	session: 0.4,
+};
+
+/** The provenance class for an arm/source (D-3): `sessions` → raw `session`; else distilled `memory`. */
+export function kindOfSource(source: RecallSource): RecallKind {
+	return source === "sessions" ? "session" : "memory";
+}
+
 /** Which table/arm surfaced a recall hit. */
 export type RecallSource = "memories" | "memory" | "sessions";
 
-/** One recalled hit: the arm that surfaced it, a grouping id/path, and the matched text. */
+/**
+ * The provenance CLASS of a hit (PRD-027 D-3 / AC-2). `memory` = a DISTILLED hit
+ * (a kept fact from the `memories` arm or a session summary from the `memory` arm);
+ * `session` = a RAW captured-turn dump from the `sessions` arm. Distilled hits rank
+ * above raw dumps via the arm-class weight folded into the fused RRF score, and raw
+ * `session` hits are tagged `secondary: true` so the surface can demote them to a
+ * drill-down. The class is derived from the {@link RecallSource}: `memories`/`memory`
+ * → `memory`; `sessions` → `session`.
+ */
+export type RecallKind = "memory" | "session";
+
+/**
+ * One recalled hit: the arm that surfaced it, a grouping id/path, the matched text,
+ * and (PRD-027) a REAL fused relevance `score` plus its provenance class. Hits are
+ * ordered by `score` DESC — never arm order, never a client-side fabrication.
+ */
 export interface MemoryRecallHit {
 	/** The table/arm that surfaced this hit. */
 	readonly source: RecallSource;
@@ -83,11 +133,25 @@ export interface MemoryRecallHit {
 	readonly id: string;
 	/** The matched text (the fact content, the summary, or the raw turn). */
 	readonly text: string;
+	/**
+	 * The fused relevance score (PRD-027 D-1, AC-1). Reciprocal-rank fusion across the
+	 * per-arm ranked lists, with the {@link RecallKind} arm-class weight folded in (D-3).
+	 * Higher = more relevant; the result is ordered by this DESC. NOT a cosine, NOT a
+	 * client fake — a comparable fused rank signal.
+	 */
+	readonly score: number;
+	/** The provenance class (D-3): a distilled `memory` vs a raw `session` dump. */
+	readonly kind: RecallKind;
+	/**
+	 * `true` for a raw `session` dump (drill-down/secondary, D-3 / AC-2); `false` for a
+	 * distilled `memory` hit. The surface renders `secondary` hits demoted, never dropped.
+	 */
+	readonly secondary: boolean;
 }
 
 /** The result of a recall: the surfaced hits, the arms that produced them, and the fallback flag. */
 export interface MemoryRecallResult {
-	/** The surfaced hits, ordered by arm then by storage order. */
+	/** The surfaced hits, ordered by fused RRF `score` DESC (PRD-027 D-1) — never arm order. */
 	readonly hits: MemoryRecallHit[];
 	/** The distinct arms that surfaced at least one hit (the hybrid-coverage signal). */
 	readonly sources: RecallSource[];
@@ -188,21 +252,83 @@ function cell(value: unknown): string {
  * arm appears ONCE (the first — i.e. semantic — occurrence wins). This is plain
  * arm-COMBINATION, not ranking/fusion (PRD-027 owns ranking). Capped at `limit`.
  */
-function shapeHits(rows: StorageRow[], limit: number): { hits: MemoryRecallHit[]; sources: RecallSource[] } {
+function fuseHits(arms: readonly RankedArm[], limit: number): { hits: MemoryRecallHit[]; sources: RecallSource[] } {
+	const docs = new Map<string, FusedDoc>();
+	for (const arm of arms) {
+		arm.entries.forEach((entry, index) => {
+			const rank = index + 1; // 1-based rank: the arm's own order IS the rank signal.
+			const kind = kindOfSource(entry.source);
+			const contribution = ARM_CLASS_WEIGHT[kind] / (RRF_K + rank);
+			const docKey = fusionKey(entry.source, entry.id);
+			const existing = docs.get(docKey);
+			if (existing === undefined) {
+				docs.set(docKey, { source: entry.source, id: entry.id, text: entry.text, score: contribution });
+			} else {
+				existing.score += contribution; // corroboration across arms accumulates.
+				if (existing.text === "" && entry.text !== "") existing.text = entry.text;
+			}
+		});
+	}
+
+	const ordered = [...docs.values()].sort((a, b) => {
+		if (b.score !== a.score) return b.score - a.score; // fused score DESC (the ranking).
+		const ka = kindOfSource(a.source);
+		const kb = kindOfSource(b.source);
+		if (ka !== kb) return ka === "memory" ? -1 : 1; // tie-break: distilled before raw.
+		return a.id < b.id ? -1 : a.id > b.id ? 1 : 0; // final deterministic tie-break.
+	});
+
 	const hits: MemoryRecallHit[] = [];
 	const sourceSet = new Set<RecallSource>();
-	const seen = new Set<string>();
-	for (const row of rows) {
+	for (const doc of ordered) {
 		if (hits.length >= limit) break;
-		const source = readSource(row.source);
-		const id = cell(row.id);
-		const key = `${source} ${id}`;
-		if (seen.has(key)) continue; // dedup a memory surfaced by both the semantic + lexical arm.
-		seen.add(key);
-		hits.push({ source, id, text: cell(row.text) });
-		sourceSet.add(source);
+		const kind = kindOfSource(doc.source);
+		hits.push({
+			source: doc.source,
+			id: doc.id,
+			text: doc.text,
+			score: doc.score,
+			kind,
+			secondary: kind === "session",
+		});
+		sourceSet.add(doc.source);
 	}
 	return { hits, sources: [...sourceSet] };
+}
+
+/** One element of a single arm's RANKED list (D-1): the arm's order is the rank signal. */
+interface RankedArmEntry {
+	readonly source: RecallSource;
+	readonly id: string;
+	readonly text: string;
+}
+
+/** A single arm's ranked list (1-based rank = array index + 1). */
+interface RankedArm {
+	readonly entries: readonly RankedArmEntry[];
+}
+
+/** A doc accumulating its fused RRF score across arms, keyed by `source+id` (D-1/AC-3). */
+interface FusedDoc {
+	source: RecallSource;
+	id: string;
+	text: string;
+	score: number;
+}
+
+/** The fusion identity for a doc: `source+id` (cross-arm dedup key, AC-3). */
+function fusionKey(source: RecallSource, id: string): string {
+	return `${source} ${id}`;
+}
+
+/** Map raw arm result rows into ranked entries in storage order (the lexical rank signal). */
+function rowsToRankedArm(rows: readonly StorageRow[]): RankedArm {
+	const entries: RankedArmEntry[] = rows.map((row) => ({
+		source: readSource(row.source),
+		id: cell(row.id),
+		text: cell(row.text),
+	}));
+	return { entries };
 }
 
 /** Construction deps for {@link recallMemories}. */
@@ -310,8 +436,10 @@ function buildSemanticHydrateSql(spec: SemanticArmSpec, ids: readonly string[]):
  * Run ONE semantic arm: embed-vector → `<#>` cosine match (the EXISTING
  * {@link vectorSearch}, D-5) → hydrate the matched ids' text. Tolerant exactly like
  * the lexical `runArm`: a missing/failing table (fresh partition, no embedding
- * column yet) yields no hits for that arm rather than failing the recall. Returns
- * the hydrated hits ordered by descending cosine score.
+ * column yet) yields no entries for that arm rather than failing the recall. Returns
+ * the hydrated entries ordered by descending cosine score — that cosine ORDER IS the
+ * arm's rank signal RRF consumes (PRD-027 D-1); the raw cosine value is not carried,
+ * only the rank.
  */
 async function runSemanticArm(
 	spec: SemanticArmSpec,
@@ -319,7 +447,7 @@ async function runSemanticArm(
 	request: MemoryRecallRequest,
 	deps: MemoryRecallDeps,
 	limit: number,
-): Promise<MemoryRecallHit[]> {
+): Promise<RankedArmEntry[]> {
 	let scored: ScoredId[];
 	try {
 		// vectorSearch validates the dim (asserts 768) + over-fetches; the org/workspace
@@ -348,31 +476,32 @@ async function runSemanticArm(
 	const textById = new Map<string, string>();
 	for (const row of hydrated) textById.set(cell(row.id), cell(row.text));
 
-	const hits: MemoryRecallHit[] = [];
+	const entries: RankedArmEntry[] = [];
 	const seen = new Set<string>();
 	for (const s of scored) {
 		if (seen.has(s.id)) continue;
 		const text = textById.get(s.id);
 		if (text === undefined) continue; // hydration miss (eventual consistency) — skip.
 		seen.add(s.id);
-		hits.push({ source: spec.source, id: s.id, text });
+		entries.push({ source: spec.source, id: s.id, text });
 	}
-	return hits;
+	return entries;
 }
 
 /**
  * Embed the query + run BOTH semantic arms (PRD-025 AC-3). Returns `null` when the
  * semantic path could NOT run — no embed client, or the query embed returned null
  * (embeddings off / daemon unreachable / timeout / wrong-dim) — which is the signal
- * to fall back to lexical-only with `degraded: true`. Returns the merged semantic
- * hits (possibly empty) when the arms DID run — `degraded: false`, because "ran and
- * found nothing semantically" is still an honest non-degraded recall.
+ * to fall back to lexical-only with `degraded: true`. Returns ONE {@link RankedArm}
+ * per semantic table (each in its own cosine ranking, the RRF rank signal) when the
+ * arms DID run — `degraded: false`, because "ran and found nothing semantically" is
+ * still an honest non-degraded recall (the returned arrays may be empty).
  */
 async function runSemanticArms(
 	request: MemoryRecallRequest,
 	deps: MemoryRecallDeps,
 	limit: number,
-): Promise<MemoryRecallHit[] | null> {
+): Promise<RankedArm[] | null> {
 	if (deps.embed === undefined) return null; // no semantic seam → lexical-only.
 
 	let queryVector: readonly number[] | null;
@@ -387,8 +516,11 @@ async function runSemanticArms(
 	// client already dim-guards) → the semantic arm cannot run → fall back to lexical.
 	if (queryVector === null || queryVector.length !== EMBEDDING_DIMS) return null;
 
-	const armHits = await Promise.all(SEMANTIC_ARMS.map((spec) => runSemanticArm(spec, queryVector!, request, deps, limit)));
-	return armHits.flat();
+	const armEntries = await Promise.all(
+		SEMANTIC_ARMS.map((spec) => runSemanticArm(spec, queryVector!, request, deps, limit)),
+	);
+	// Each semantic table is its OWN ranked arm so RRF sees its cosine ranking distinctly.
+	return armEntries.map((entries) => ({ entries }));
 }
 
 /**
@@ -401,17 +533,18 @@ async function runSemanticArms(
  * THE TWO BRANCHES (degraded tells the truth):
  *  - SEMANTIC ran: an {@link EmbedClient} is injected AND the query embedded to a
  *    768-dim vector → the `<#>` cosine arms run via the EXISTING {@link vectorSearch}
- *    (D-5) and their hits are merged AHEAD of the lexical arms (deduped by source+id).
- *    `degraded` is `false`.
+ *    (D-5) and contribute their cosine-ranked lists to the RRF fusion. `degraded` is `false`.
  *  - LEXICAL fallback: no embed client, or the embed returned null (off / daemon
  *    unreachable / timeout / wrong-dim) → only the BM25/ILIKE arms run, `degraded`
  *    is `true`.
  *
  * The lexical arms ALWAYS run (the resilient floor): each of `memories`/`memory`/
  * `sessions` is its OWN guarded statement, a missing/failing SIBLING degrades to
- * empty for that arm only (`runArm`) — the live dogfood regression. The merged
- * union (semantic first when present, then lexical, in arm order) is capped at the
- * overall clamped limit. Arm-COMBINATION only — RANKING/fusion is PRD-027.
+ * empty for that arm only (`runArm`) — the live dogfood regression. PRD-027: every
+ * arm (semantic + lexical) is a RANKED list; {@link fuseHits} fuses them with RRF +
+ * the arm-class weight (distilled `[memory]` above raw `[sessions]`), dedups cross-arm
+ * near-dups by `source+id`, and orders by fused `score` DESC — capped at the limit.
+ * An empty/missing arm contributes nothing, preserving the per-arm fail-soft (AC-7).
  */
 export async function recallMemories(
 	request: MemoryRecallRequest,
@@ -427,8 +560,8 @@ export async function recallMemories(
 	// Run the semantic arms (embed-query → `<#>`) and the lexical arms concurrently.
 	// The semantic path returns null when it could not run (→ degraded:true); the
 	// lexical arms always run (the resilient floor). Each lexical arm is bounded by the
-	// overall limit so a single arm cannot starve the merge.
-	const [semanticHits, memoriesRows, memoryRows, sessionsRows] = await Promise.all([
+	// overall limit so a single arm cannot starve the fusion.
+	const [semanticArms, memoriesRows, memoryRows, sessionsRows] = await Promise.all([
 		runSemanticArms(request, deps, limit),
 		runArm(buildMemoriesArmSql(term, limit), request, deps),
 		runArm(buildMemoryArmSql(term, limit), request, deps),
@@ -436,22 +569,19 @@ export async function recallMemories(
 	]);
 
 	// PRD-025 AC-3: `degraded` is HONEST — false iff the semantic arm actually ran.
-	const degraded = semanticHits === null;
+	const degraded = semanticArms === null;
 
-	// Merge order: semantic hits FIRST (when present), then the lexical arms in arm
-	// order (memories → memory → sessions). shapeHits dedups by source+id and caps at
-	// the limit. This is arm-COMBINATION, not ranking/fusion (PRD-027 owns ranking).
-	const merged: StorageRow[] = [
-		...(semanticHits ?? []).map(hitToRow),
-		...memoriesRows,
-		...memoryRows,
-		...sessionsRows,
+	// PRD-027 D-1/D-2/D-3: assemble every arm as a RANKED list, then fuse with RRF +
+	// the arm-class weight, dedup, and order by fused score. The semantic arms (one per
+	// table, each cosine-ranked) come first, then the three lexical arms in their storage
+	// order. A null semantic path contributes no arms (lexical-only); a missing lexical
+	// sibling is simply an empty arm (per-arm fail-soft, AC-7) that contributes nothing.
+	const arms: RankedArm[] = [
+		...(semanticArms ?? []),
+		rowsToRankedArm(memoriesRows),
+		rowsToRankedArm(memoryRows),
+		rowsToRankedArm(sessionsRows),
 	];
-	const { hits, sources } = shapeHits(merged, limit);
+	const { hits, sources } = fuseHits(arms, limit);
 	return { hits, sources, degraded };
-}
-
-/** Project a typed semantic hit back into the {@link StorageRow} shape `shapeHits` consumes. */
-function hitToRow(hit: MemoryRecallHit): StorageRow {
-	return { source: hit.source, id: hit.id, text: hit.text };
 }

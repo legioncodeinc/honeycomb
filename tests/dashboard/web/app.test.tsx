@@ -55,11 +55,15 @@ const PAYLOADS = {
 		edges: [],
 	},
 	recall: {
+		// PRD-027 Wave 1: the engine returns hits ALREADY ranked DESC by the fused RRF `score`,
+		// each carrying its provenance `kind`/`secondary`. The client renders the ENGINE score +
+		// ENGINE order verbatim (AC-4) — it does NOT fabricate `1 - i*0.06`. The distilled
+		// `[memory]` fact (score 0.42) leads; the raw `[sessions]` drill-down (0.17) trails.
 		hits: [
-			{ source: "memories", id: "deploy/prd-022", text: "We deploy from the prd-022 branch, never from main." },
-			{ source: "memory", id: "auth/token-drift", text: "Heal a drifted org token before the session-start block." },
+			{ source: "memories", id: "deploy/prd-022", text: "We deploy from the prd-022 branch, never from main.", score: 0.42, kind: "memory", secondary: false },
+			{ source: "sessions", id: "auth/token-drift", text: "Heal a drifted org token before the session-start block.", score: 0.17, kind: "session", secondary: true },
 		],
-		sources: ["memories", "memory"],
+		sources: ["memories", "sessions"],
 		degraded: true,
 	},
 	logs: {
@@ -207,10 +211,15 @@ describe("PRD-024 AC-3: Recall posts /api/memories/recall and renders memory car
 		});
 
 		const text = container.textContent ?? "";
-		// The recalled memory keys + a derived score render as MemoryCards.
+		// The recalled memory keys render as MemoryCards.
 		expect(text).toContain("deploy/prd-022");
 		expect(text).toContain("We deploy from the prd-022 branch");
-		expect(text).toContain("1.00"); // top hit's derived score
+		// PRD-027 AC-4: the ENGINE score renders (not the old fabricated `1 - i*0.06`).
+		// The top hit's engine score is 0.42 (NOT 1.00); the second hit's is 0.17.
+		expect(text).toContain("0.42"); // top hit's ENGINE score (MemoryCard renders score.toFixed(2))
+		expect(text).toContain("0.17"); // second hit's ENGINE score
+		// The fabrication is GONE: the first card no longer shows the synthetic 1.00 top score.
+		expect(text).not.toContain("1.00");
 		// The POST hit the recall endpoint.
 		expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("/api/memories/recall"), expect.objectContaining({ method: "POST" }));
 	});
