@@ -38,4 +38,27 @@ if (hits.length) {
   for (const h of hits) console.error("  " + h);
   process.exit(1);
 }
-console.log(`pack-check OK — ${entries.length} files, no forbidden patterns`);
+
+// Required runtime files: a publish that DROPS any of these from the `files`
+// allowlist ships a broken package (the daemon-served dashboard reads its CSS,
+// fonts, and logo from `assets/` at runtime — see `web-assets.ts`; an install
+// missing them renders the dashboard unstyled / 404s the fonts). This positive
+// check catches that regression, which the forbidden-only scan above cannot.
+const REQUIRED = [
+  /(^|\/)bundle\/cli\.js$/, // the `honeycomb` bin
+  /(^|\/)daemon\/index\.js$/, // the daemon entry the CLI spawns
+  /(^|\/)daemon\/dashboard-app\.js$/, // the bundled dashboard web app
+  /(^|\/)assets\/styles\.css$/, // resolveAssetsDir() locator
+  /(^|\/)assets\/tokens\/base\.css$/, // the DS token CSS the dashboard serves
+  /(^|\/)assets\/logos\/honeycomb-mark\.svg$/, // the brand mark the header renders
+  /(^|\/)assets\/logos\/fonts\/JetBrainsMono-Regular\.woff2$/, // a brand font (proves fonts/ shipped)
+];
+const missing = REQUIRED.filter((rx) => !entries.some((p) => rx.test(p)));
+if (missing.length) {
+  console.error("Refusing to publish — required runtime files missing from tarball:");
+  for (const m of missing) console.error("  " + String(m));
+  console.error("  (widen package.json's `files` allowlist — the install would be broken)");
+  process.exit(1);
+}
+
+console.log(`pack-check OK — ${entries.length} files, no forbidden patterns, all required runtime files present`);
