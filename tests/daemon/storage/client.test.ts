@@ -7,7 +7,12 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { isReadStatement, isTransientResult } from "../../../src/daemon/storage/client.js";
+import {
+	isAbsoluteUpdate,
+	isReadStatement,
+	isTransientResult,
+	statementRetryability,
+} from "../../../src/daemon/storage/client.js";
 import { StorageConfigError } from "../../../src/daemon/storage/config.js";
 import { createStorageClient } from "../../../src/daemon/storage/index.js";
 import { DEEPLAKE_ORG_HEADER } from "../../../src/daemon/storage/transport.js";
@@ -298,10 +303,13 @@ describe("bounded read-only transient-retry layer (fix/heal-introspection-transi
 		expect(fake.requests).toHaveLength(4);
 	});
 
-	it("a WRITE that transient-fails → returns the failure on the FIRST attempt (no retry — write-safety)", async () => {
+	it("an INSERT that transient-fails → returns the failure on the FIRST attempt (no retry — NEVER double-insert)", async () => {
 		const fake = new FakeDeepLakeTransport();
-		// A 502 on an INSERT is transient AT THE WIRE, but a write is NEVER retried
-		// here (a retried append risks a duplicate). It must surface on attempt 1.
+		// A 502 on an INSERT is transient AT THE WIRE, but an INSERT is NEVER retried
+		// here: the wire is at-least-once, so the 502'd write may have LANDED, and a
+		// retry would create a DUPLICATE row (the version-bumped-append failure mode —
+		// two rows at the same logical version inflate counts). It must surface on
+		// attempt 1; the success behind it must NOT be consumed.
 		fake.enqueueQueryError("502 <html>bad gateway</html>", 502);
 		fake.enqueueRows([{ id: "would-be-duplicate" }]); // must NOT be consumed.
 		const client = clientWith(fake);
@@ -312,11 +320,11 @@ describe("bounded read-only transient-retry layer (fix/heal-introspection-transi
 		expect(fake.requests).toHaveLength(1); // exactly one attempt — no retry.
 	});
 
-	it("an UPDATE/DELETE/ALTER transient failure also surfaces on the first attempt", async () => {
+	it("an unsafe write (ALTER / CREATE / MERGE) transient failure surfaces on the FIRST attempt (not idempotent here)", async () => {
 		for (const sql of [
-			"UPDATE memory SET v = 1",
-			"DELETE FROM memory WHERE id = 'x'",
 			'ALTER TABLE "memory" ADD COLUMN c TEXT',
+			"CREATE TABLE memory (id TEXT)",
+			"MERGE INTO memory USING src ON memory.id = src.id WHEN MATCHED THEN UPDATE SET v = 1",
 		]) {
 			const fake = new FakeDeepLakeTransport();
 			fake.enqueueQueryError("500 internal", 500);
@@ -325,8 +333,80 @@ describe("bounded read-only transient-retry layer (fix/heal-introspection-transi
 
 			const result = await client.query(sql, { org: "o" });
 			expect(result.kind).toBe("query_error");
-			expect(fake.requests).toHaveLength(1);
+			expect(fake.requests).toHaveLength(1); // never retried — not provably idempotent.
 		}
+	});
+
+	it("a DELETE that transient-fails (502) twice then succeeds → RETRIES and lands ok (the compaction-reap fix)", async () => {
+		const fake = new FakeDeepLakeTransport();
+		// The compaction REAP is a guarded DELETE. DELETE is idempotent (re-running
+		// leaves the same rows gone), so a 502 storm on it MUST be retried so the reap
+		// completes — exactly the compaction AC-1/AC-4 "rows did not converge" fix.
+		fake.enqueueQueryError("502 <html>bad gateway</html>", 502);
+		fake.enqueueQueryError("502 <html>bad gateway</html>", 502);
+		fake.enqueueRows([]); // the eventual successful DELETE.
+		const client = clientWith(fake);
+
+		const result = await client.query("DELETE FROM skills WHERE skill_id = 's1' AND version IN (1, 2)", { org: "o" });
+		expect(result.kind).toBe("ok");
+		expect(fake.requests).toHaveLength(3); // retried past both flaps — the reap completed.
+	});
+
+	it("a keyed-upsert UPDATE (absolute SET) that transient-fails then succeeds → RETRIES (the /api/kpis fix)", async () => {
+		const fake = new FakeDeepLakeTransport();
+		// The `/api/kpis` upsert UPDATEs an existing key with a deterministic absolute
+		// SET — re-running lands the byte-identical row, so it is idempotent and safe to
+		// retry. A 502 on it must be absorbed, not surfaced.
+		fake.enqueueQueryError("502 bad gateway", 502);
+		fake.enqueueRows([]);
+		const client = clientWith(fake);
+
+		const sql = "UPDATE \"kpis\" SET value = 'revenue', target = '100', updated_at = '2026-06-21' WHERE key = 'mrr'";
+		const result = await client.query(sql, { org: "o" });
+		expect(result.kind).toBe("ok");
+		expect(fake.requests).toHaveLength(2); // retried past the flap — the upsert landed.
+	});
+
+	it("a query_error (the api-keys storm class) on an idempotent DELETE with a transient 5xx status is retried", async () => {
+		const fake = new FakeDeepLakeTransport();
+		// The api-keys revoke failure surfaced as a transient backend `query_error`. On
+		// an idempotent statement carrying a transient 5xx status it must be retried;
+		// only the deterministic-rejection query_error (next test) fails fast.
+		fake.enqueueQueryError("query_error: 503 service unavailable", 503);
+		fake.enqueueRows([]);
+		const client = clientWith(fake);
+
+		const result = await client.query("DELETE FROM api_keys WHERE id = 'k1'", { org: "o" });
+		expect(result.kind).toBe("ok");
+		expect(fake.requests).toHaveLength(2);
+	});
+
+	it("a deterministic SQL error on an idempotent DELETE (non-transient) FAILS FAST — no retry", async () => {
+		const fake = new FakeDeepLakeTransport();
+		// A real SQL/logic error (400 syntax, a no-status opaque rejection) is NOT a
+		// transient transport flap. Even on an idempotent DELETE it must surface on
+		// attempt 1 — never retried (retrying a real error masks it + burns balance).
+		fake.enqueueQueryError("400 syntax error at or near 'WHEER'", 400);
+		fake.enqueueRows([]); // must NOT be consumed.
+		const client = clientWith(fake);
+
+		const result = await client.query("DELETE FROM skills WHEER id = 'x'", { org: "o" });
+		expect(result.kind).toBe("query_error");
+		if (result.kind === "query_error") expect(result.status).toBe(400);
+		expect(fake.requests).toHaveLength(1); // failed fast — a real SQL error is never retried.
+	});
+
+	it("a relative-mutation UPDATE (col = col + 1) is NOT retried — re-running would double-apply", async () => {
+		const fake = new FakeDeepLakeTransport();
+		// A counter increment reads the column to compute the new value, so a second
+		// apply DIVERGES (over-counts). It is correctly classified unsafe → no retry.
+		fake.enqueueQueryError("502 bad gateway", 502);
+		fake.enqueueRows([]); // must NOT be consumed.
+		const client = clientWith(fake);
+
+		const result = await client.query('UPDATE "dreaming_state" SET counter = counter + 1 WHERE id = \'d\'', { org: "o" });
+		expect(result.kind).toBe("query_error");
+		expect(fake.requests).toHaveLength(1); // a relative mutation is never retried.
 	});
 
 	it("a data-modifying CTE (WITH … INSERT) is treated as a write — surfaces on the first attempt", async () => {
@@ -467,5 +547,62 @@ describe("isReadStatement / isTransientResult unit guards", () => {
 		}
 		expect(isTransientResult({ kind: "query_error", message: "x" })).toBe(false); // no status
 		expect(isTransientResult({ kind: "ok", rows: [], durationMs: 1 })).toBe(false);
+	});
+});
+
+describe("statementRetryability — idempotency tagging by statement shape", () => {
+	it("tags reads (SELECT / read-only WITH) as 'read'", () => {
+		expect(statementRetryability("SELECT 1")).toBe("read");
+		expect(statementRetryability("  \n select * from t")).toBe("read");
+		expect(statementRetryability("-- c\nSELECT 1")).toBe("read");
+		expect(statementRetryability("WITH x AS (SELECT 1) SELECT * FROM x")).toBe("read");
+	});
+
+	it("tags DELETE and deterministic-absolute UPDATE as 'idempotent-write' (safe to retry)", () => {
+		expect(statementRetryability("DELETE FROM t WHERE id = 'x'")).toBe("idempotent-write");
+		expect(statementRetryability("DELETE FROM skills WHERE skill_id = 's' AND version IN (1, 2)")).toBe("idempotent-write");
+		expect(statementRetryability("UPDATE t SET a = 1")).toBe("idempotent-write");
+		expect(statementRetryability('UPDATE "kpis" SET value = \'v\', target = \'t\' WHERE key = \'k\'')).toBe("idempotent-write");
+		expect(statementRetryability('UPDATE "api_keys" SET revoked = 1 WHERE id = \'k\'')).toBe("idempotent-write");
+		// A column name appearing INSIDE a string literal value is data, not a self-reference.
+		expect(statementRetryability("UPDATE t SET note = 'the note column matters' WHERE id = 'x'")).toBe("idempotent-write");
+	});
+
+	it("tags INSERT and every non-provably-idempotent statement as 'unsafe-write' (NEVER retried)", () => {
+		expect(statementRetryability("INSERT INTO t VALUES (1)")).toBe("unsafe-write");
+		expect(statementRetryability("CREATE TABLE t (id TEXT)")).toBe("unsafe-write");
+		expect(statementRetryability('ALTER TABLE "t" ADD COLUMN c TEXT')).toBe("unsafe-write");
+		expect(statementRetryability("DROP TABLE t")).toBe("unsafe-write");
+		expect(statementRetryability("TRUNCATE t")).toBe("unsafe-write");
+		expect(statementRetryability("MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET v = 1")).toBe("unsafe-write");
+		expect(statementRetryability("WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x")).toBe("unsafe-write");
+		expect(statementRetryability("")).toBe("unsafe-write"); // unknown shape → unsafe.
+		// A RELATIVE mutation (reads its own prior value) is NOT idempotent → unsafe.
+		expect(statementRetryability("UPDATE t SET counter = counter + 1 WHERE id = 'd'")).toBe("unsafe-write");
+		expect(statementRetryability("UPDATE t SET log = log || 'more' WHERE id = 'd'")).toBe("unsafe-write");
+	});
+});
+
+describe("isAbsoluteUpdate — relative-mutation guard", () => {
+	it("recognizes deterministic absolute SETs as idempotent", () => {
+		expect(isAbsoluteUpdate("UPDATE T SET A = 1")).toBe(true);
+		expect(isAbsoluteUpdate("UPDATE T SET A = 1, B = 'X' WHERE ID = 'K'")).toBe(true);
+		// A literal containing another column's name is data, not a self-reference.
+		expect(isAbsoluteUpdate("UPDATE T SET NOTE = 'NOTE TEXT' WHERE ID = 'X'")).toBe(true);
+		// A comma inside a function call is not a SET-list separator.
+		expect(isAbsoluteUpdate("UPDATE T SET A = COALESCE('X', 'Y') WHERE ID = 'K'")).toBe(true);
+	});
+
+	it("rejects relative mutations (the RHS reads the assigned column) as non-idempotent", () => {
+		expect(isAbsoluteUpdate("UPDATE T SET COUNTER = COUNTER + 1")).toBe(false);
+		expect(isAbsoluteUpdate("UPDATE T SET N = N - 1 WHERE ID = 'X'")).toBe(false);
+		expect(isAbsoluteUpdate("UPDATE T SET LOG = LOG || 'MORE'")).toBe(false);
+		// A multi-assignment where ONE arm is relative demotes the whole statement.
+		expect(isAbsoluteUpdate("UPDATE T SET A = 1, COUNTER = COUNTER + 1 WHERE ID = 'X'")).toBe(false);
+	});
+
+	it("fails safe (false) when the SET list cannot be cleanly parsed", () => {
+		expect(isAbsoluteUpdate("UPDATE T WHERE ID = 'X'")).toBe(false); // no SET
+		expect(isAbsoluteUpdate("UPDATE T SET BADCLAUSE WHERE ID = 'X'")).toBe(false); // no '='
 	});
 });

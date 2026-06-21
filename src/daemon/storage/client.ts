@@ -66,44 +66,68 @@ function summarizeSql(sql: string, maxLen = 220): string {
 	return compact.length > maxLen ? `${compact.slice(0, maxLen)}...` : compact;
 }
 
-// ── Bounded read-only transient-retry layer ────────────────────────────────
+// ── Bounded transient-retry layer (reads + IDEMPOTENT writes) ───────────────
 //
 // The transport (transport.ts) issues ONE request and does NOT retry — its
 // JSDoc says "the daemon adds a Semaphore/retry layer on top". This is that
 // retry layer. The DeepLake backend flaps under load (stale segments, transient
-// 5xx, connection resets — the documented eventual-consistency posture), and a
-// single flap on a READ would otherwise surface straight to the caller and red a
-// test. We retry, but ONLY where it is provably safe:
+// 5xx like the 502/query_error storm, connection resets — the documented
+// eventual-consistency posture), and a single flap would otherwise surface
+// straight to the caller and red a test. We retry, but ONLY where it is provably
+// safe — retryability is classified by STATEMENT (the {@link statementRetryability}
+// idempotency tag), never guessed:
 //
-//   1. READS ONLY. A write retried on a transient failure risks a duplicate
-//      append (the wire is at-least-once: the backend may have applied the write
-//      before the socket dropped). Writes are made resilient elsewhere — heal +
-//      the job-queue backoff + the append-only / highest-version-per-id
-//      convergence — so this layer NEVER retries a write.
+//   1. READS (`SELECT` / read-only `WITH`) — always safe to re-issue: a re-read
+//      has no side effect.
 //
-//   2. TRANSIENT FAILURES ONLY. A `connection_error` / `timeout`, or a
-//      `query_error` whose HTTP status is a transient code (429/500/502/503/504),
-//      is a backend flap worth a re-read. A `query_error` that is a SCHEMA/CLIENT
-//      fault (missing-table 42P01, missing-column, syntax, permission, any other
-//      4xx) passes through UNCHANGED on the first try — heal.ts classifies on
-//      those and MUST see them immediately (the anti-mask rule). Retrying them
-//      only burns Activeloop balance and masks the real fault.
+//   2. IDEMPOTENT WRITES (`DELETE`, and `UPDATE` with a deterministic absolute
+//      SET) — safe to re-issue. The wire is at-least-once (an ambiguous 502 may
+//      have landed the write before the socket dropped), but re-running an
+//      idempotent write CONVERGES to the same final state: a `DELETE … WHERE`
+//      re-applied leaves the same rows gone (the compaction reap, retention
+//      purge, job-queue dequeue), and a deterministic-key `UPDATE … SET col =
+//      <value>` (the keyed `/api/kpis` upsert, a revoke `SET revoked = 1`, an
+//      embed attach) re-applied lands the byte-identical row. Re-running cannot
+//      create a duplicate or a divergent row, so a transient flap on one of these
+//      is retried with the SAME bounded backoff the read path uses.
+//
+//   3. NON-IDEMPOTENT WRITES (`INSERT`, and anything we cannot positively prove
+//      idempotent) — NEVER retried here. An `INSERT` has no unique-key / ON
+//      CONFLICT guard on this backend, so a blind retry after an ambiguous 502
+//      risks a DUPLICATE row — exactly the version-bumped-append failure mode
+//      (two rows at the same logical version inflate counts and can break a
+//      "one row" assertion). The version-bumped append (`appendVersionBumped`)
+//      reads MAX(version) then INSERTs N+1; that read-then-insert is inherently
+//      non-idempotent under a blind retry, so it stays SINGLE-ATTEMPT at this
+//      layer (option (a) of the hardening plan). Its resilience comes from the
+//      job-level auto-retry + the de-dup-by-highest-version reads every consumer
+//      already performs — NEVER from a storage-layer retry that could double-
+//      insert a version.
+//
+//   In ALL cases, a TRANSIENT failure is the only thing retried. A
+//   `connection_error` / `timeout`, or a `query_error` whose HTTP status is a
+//   transient code (429/500/502/503/504, the 502/query_error storm class), is a
+//   backend flap. A `query_error` that is a real SQL/logic fault (missing-table
+//   42P01, missing-column, syntax, permission, any other 4xx, or an opaque no-
+//   status rejection) passes through UNCHANGED on the first try — heal.ts
+//   classifies on those and MUST see them immediately (the anti-mask rule), and a
+//   deterministic SQL error must fail fast, never be retried.
 //
 // The fake transport in tests settles on attempt 1 (it returns an ok / a
 // non-transient error), so the retry path is a LIVE-ONLY cost and the existing
-// classification + "no retry" tests are unaffected.
+// classification tests are unaffected.
 
 /** HTTP statuses that mark a `query_error` as a transient backend flap. */
 const TRANSIENT_STATUSES: ReadonlySet<number> = new Set([429, 500, 502, 503, 504]);
 
-/** Total attempts for a retryable read (1 original + up to 3 retries). */
-const READ_RETRY_ATTEMPTS = 4;
+/** Total attempts for a retryable statement (1 original + up to 3 retries). */
+const RETRY_ATTEMPTS = 4;
 
 /** Base backoff before the first retry (ms). Short — the flap is brief. */
-const READ_RETRY_BASE_MS = 50;
+const RETRY_BASE_MS = 50;
 
 /** Backoff ceiling (ms). Exponential growth is capped here so the budget stays tight. */
-const READ_RETRY_MAX_MS = 1_000;
+const RETRY_MAX_MS = 1_000;
 
 /** A sleep seam so a test can inject a no-op clock and stay fast + deterministic. */
 export type SleepFn = (ms: number) => Promise<void>;
@@ -112,29 +136,138 @@ export type SleepFn = (ms: number) => Promise<void>;
 const realSleep: SleepFn = (ms) => delay(ms);
 
 /**
- * Is this statement a READ (safe to retry on a transient flap) as opposed to a
- * data-modifying statement (NEVER retried at this layer)?
+ * How a statement may be retried under a transient flap. Classified by the
+ * statement SHAPE — never guessed — so a retry decision is auditable:
  *
- * Conservative by construction: only a statement whose first significant keyword
- * is `SELECT` or `WITH` is a candidate, and a `WITH` is downgraded to a write if
- * it contains ANY top-level data-modifying keyword (a `WITH ... INSERT` /
- * data-modifying CTE). Anything we cannot positively prove is a read — an empty
- * string, an `INSERT`/`UPDATE`/`DELETE`/`ALTER`/`CREATE`/`DROP`/`MERGE`, or an
- * unrecognized shape — is treated as a write (no retry). When in doubt, do not
- * retry: a missed retry only costs one extra live flap; a wrong retry risks a
- * duplicate append.
+ *   - `"read"`           — a `SELECT` / read-only `WITH`. No side effect; always
+ *                          safe to re-issue.
+ *   - `"idempotent-write"` — a `DELETE`, or a deterministic-absolute-SET `UPDATE`.
+ *                          Re-running converges to the same final state, so it is
+ *                          safe to re-issue on a transient flap (the keyed upsert,
+ *                          the compaction reap, a revoke).
+ *   - `"unsafe-write"`   — an `INSERT`, or ANY statement we cannot positively
+ *                          prove is one of the above (an empty string, a `MERGE`,
+ *                          a `CREATE`/`ALTER`/`DROP`, a relative-mutation UPDATE,
+ *                          an unrecognized shape). NEVER retried — a re-issue could
+ *                          duplicate or diverge a row.
+ */
+export type StatementRetryability = "read" | "idempotent-write" | "unsafe-write";
+
+/**
+ * Classify a statement's retryability by its SHAPE (the idempotency tag the retry
+ * loop branches on). Conservative by construction — the default for anything not
+ * positively proven safe is `"unsafe-write"`:
+ *
+ *   - `SELECT` → `"read"`.
+ *   - `WITH …` → `"read"` UNLESS it contains a data-modifying keyword anywhere
+ *     (a data-modifying CTE), in which case it is `"unsafe-write"` (we never try
+ *     to prove a CTE's embedded write is idempotent — too subtle; fail safe).
+ *   - `DELETE …` → `"idempotent-write"`. A `DELETE … WHERE` re-applied leaves the
+ *     same rows gone; re-running after an ambiguous 502 converges, never duplicates.
+ *   - `UPDATE …` → `"idempotent-write"` ONLY when the SET is a deterministic
+ *     ABSOLUTE assignment (`SET col = <value>, …`). A RELATIVE mutation
+ *     (`SET col = col + 1`, a `||` concat) is NOT idempotent — re-running would
+ *     double the effect — so it is demoted to `"unsafe-write"`. {@link isAbsoluteUpdate}
+ *     proves the absolute shape; anything it cannot prove fails safe.
+ *   - everything else (`INSERT`, `MERGE`/`UPSERT`, `CREATE`/`ALTER`/`DROP`/
+ *     `TRUNCATE`, empty, unrecognized) → `"unsafe-write"`.
+ *
+ * When in doubt, do not retry: a missed retry costs one extra live flap; a wrong
+ * retry risks a duplicate/divergent row.
+ */
+export function statementRetryability(sql: string): StatementRetryability {
+	const normalized = stripLeadingNoise(sql).toUpperCase();
+	if (normalized.startsWith("SELECT")) return "read";
+	if (normalized.startsWith("WITH")) {
+		// A CTE is a read UNLESS it drives a data-modifying statement. Any
+		// data-modifying keyword anywhere (word-boundary matched so it is the
+		// keyword, not an identifier substring) demotes it — and we never try to
+		// prove a CTE write idempotent, so a data-modifying CTE is always unsafe.
+		const modifies = /\b(INSERT|UPDATE|DELETE|MERGE|UPSERT|ALTER|CREATE|DROP|TRUNCATE)\b/.test(normalized);
+		return modifies ? "unsafe-write" : "read";
+	}
+	if (normalized.startsWith("DELETE")) return "idempotent-write";
+	if (normalized.startsWith("UPDATE")) return isAbsoluteUpdate(normalized) ? "idempotent-write" : "unsafe-write";
+	// INSERT, MERGE/UPSERT, CREATE/ALTER/DROP/TRUNCATE, empty, unrecognized — never retried.
+	return "unsafe-write";
+}
+
+/**
+ * Is an UPPER-CASED `UPDATE` statement a deterministic ABSOLUTE assignment (safe
+ * to re-issue) rather than a RELATIVE mutation (a re-issue would double-apply)?
+ *
+ * An absolute SET overwrites each column with a fixed expression that does not
+ * read the column's own prior value, so re-running lands the byte-identical row.
+ * A RELATIVE mutation reads the column to compute the new value (`col = col + 1`,
+ * `col = col - 1`, `col = col || 'x'`), so a second apply diverges. We prove the
+ * absolute shape by SCANNING the SET-list: for each `<col> = <expr>` assignment,
+ * the right-hand expression must NOT reference the assigned column. Conservative —
+ * if we cannot cleanly parse the SET list, we report `false` (treat as unsafe).
+ *
+ * The SET list is everything between `SET` and the first `WHERE` (or end of
+ * statement). Assignments split on top-level commas; a comma inside parentheses
+ * (a function-call arg list) is not a separator.
+ */
+export function isAbsoluteUpdate(upperSql: string): boolean {
+	const setIdx = upperSql.indexOf(" SET ");
+	if (setIdx === -1) return false;
+	const afterSet = upperSql.slice(setIdx + 5);
+	const whereIdx = afterSet.search(/\bWHERE\b/);
+	const setList = whereIdx === -1 ? afterSet : afterSet.slice(0, whereIdx);
+
+	for (const assignment of splitTopLevel(setList)) {
+		const eq = assignment.indexOf("=");
+		if (eq === -1) return false; // not a recognizable assignment → fail safe.
+		const col = assignment.slice(0, eq).trim().replace(/^"|"$/g, "").trim();
+		const expr = assignment.slice(eq + 1);
+		if (col === "") return false;
+		// A RELATIVE mutation references the assigned column on the right-hand side
+		// (`col = col + 1`). Match the bare column name on a word boundary in the
+		// expression; if present, the assignment reads its own prior value → unsafe.
+		// First STRIP single-quoted string literals from the expression: a column name
+		// appearing INSIDE a literal value (`SET note = 'note text'`) is data, never a
+		// self-reference, so it must not falsely demote an absolute assignment to unsafe.
+		// Quotes are already doubled by the SQL-escape floor, so a `''` pair inside a
+		// literal is consumed as part of that literal by the non-greedy scan.
+		const exprNoLiterals = expr.replace(/'(?:[^']|'')*'/g, "");
+		const colPattern = new RegExp(`\\b${escapeRegExp(col)}\\b`);
+		if (colPattern.test(exprNoLiterals.replace(/"/g, ""))) return false;
+	}
+	return true;
+}
+
+/** Split a SET list on TOP-LEVEL commas (commas inside `(...)` are not separators). */
+function splitTopLevel(setList: string): string[] {
+	const parts: string[] = [];
+	let depth = 0;
+	let current = "";
+	for (const ch of setList) {
+		if (ch === "(") depth++;
+		else if (ch === ")") depth = Math.max(0, depth - 1);
+		if (ch === "," && depth === 0) {
+			parts.push(current);
+			current = "";
+			continue;
+		}
+		current += ch;
+	}
+	if (current.trim() !== "") parts.push(current);
+	return parts;
+}
+
+/** Escape a string for safe interpolation into a `RegExp` body. */
+function escapeRegExp(s: string): string {
+	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Is this statement a READ (safe to retry on a transient flap)? Retained as the
+ * public predicate for callers that only need the read/not-read distinction; it
+ * is the `"read"` arm of {@link statementRetryability}. The retry loop itself uses
+ * the richer three-way tag so it can ALSO retry an idempotent write.
  */
 export function isReadStatement(sql: string): boolean {
-	const normalized = stripLeadingNoise(sql).toUpperCase();
-	if (normalized.startsWith("SELECT")) return true;
-	if (normalized.startsWith("WITH")) {
-		// A CTE is a read UNLESS it drives a data-modifying statement. Be
-		// conservative: any data-modifying keyword anywhere in the statement
-		// (matched on a word boundary so it is the keyword, not a substring of an
-		// identifier) demotes it to a write.
-		return !/\b(INSERT|UPDATE|DELETE|MERGE|UPSERT|ALTER|CREATE|DROP|TRUNCATE)\b/.test(normalized);
-	}
-	return false;
+	return statementRetryability(sql) === "read";
 }
 
 /**
@@ -185,7 +318,7 @@ export function isTransientResult(result: QueryResult): boolean {
 
 /** Exponential backoff with jitter, capped at the ceiling. `attempt` is 1-based. */
 function backoffMs(attempt: number): number {
-	const exp = Math.min(READ_RETRY_BASE_MS * 2 ** (attempt - 1), READ_RETRY_MAX_MS);
+	const exp = Math.min(RETRY_BASE_MS * 2 ** (attempt - 1), RETRY_MAX_MS);
 	// Full jitter over [0, exp] de-correlates concurrent retriers so a fleet of
 	// workers doesn't re-stampede the backend in lockstep.
 	return Math.floor(Math.random() * exp);
@@ -230,33 +363,37 @@ export class StorageClient {
 	 * programmer errors (e.g. a missing scope, which TypeScript already
 	 * prevents).
 	 *
-	 * READS get a bounded transient-retry on top (see the helpers above): a
-	 * `SELECT`/`WITH` that fails with a transient flap (connection/timeout/5xx) is
-	 * re-issued up to {@link READ_RETRY_ATTEMPTS} times with jittered backoff,
-	 * since the DeepLake backend flaps stale segments under load. A WRITE is NEVER
-	 * retried here (a retried append risks a duplicate — at-least-once), and a
-	 * NON-transient `query_error` (missing-table/column, syntax, permission) is
-	 * returned UNCHANGED on the first attempt so heal still classifies it
-	 * immediately (the anti-mask rule). The retry is invisible to callers: they
-	 * still get one final `QueryResult` — a success after a retry, or the last
-	 * failure if every attempt flapped. The retry BUDGET is separate from the
-	 * per-statement timeout: each attempt gets its own fresh timeout/abort.
+	 * READS and IDEMPOTENT WRITES get a bounded transient-retry on top (see the
+	 * helpers above): a `SELECT`/read-only `WITH`, a `DELETE`, or a deterministic-
+	 * absolute-SET `UPDATE` that fails with a transient flap (connection/timeout/
+	 * 5xx — the 502/query_error storm class) is re-issued up to
+	 * {@link RETRY_ATTEMPTS} times with jittered backoff, since the DeepLake backend
+	 * flaps stale segments under load and re-running one of these CONVERGES (a read
+	 * has no effect; an idempotent write lands the same final state). An
+	 * `INSERT`/non-idempotent write is NEVER retried here (a retried append risks a
+	 * duplicate — at-least-once), and a NON-transient `query_error` (missing-table/
+	 * column, syntax, permission) is returned UNCHANGED on the first attempt so heal
+	 * still classifies it immediately (the anti-mask rule). The retry is invisible
+	 * to callers: they still get one final `QueryResult` — a success after a retry,
+	 * or the last failure if every attempt flapped. The retry BUDGET is separate
+	 * from the per-statement timeout: each attempt gets its own fresh timeout/abort.
 	 */
 	async query(sql: string, scope: QueryScope, opts: QueryOptions = {}): Promise<QueryResult> {
-		// Only a provable read is retry-eligible. Everything else runs exactly once.
-		if (!isReadStatement(sql)) return this.attemptOnce(sql, scope, opts);
+		// Classify by statement shape. Only a read or a PROVABLY-idempotent write is
+		// retry-eligible; an INSERT / unsafe-write runs exactly once (no duplicate risk).
+		if (statementRetryability(sql) === "unsafe-write") return this.attemptOnce(sql, scope, opts);
 
 		let last: QueryResult | undefined;
-		for (let attempt = 1; attempt <= READ_RETRY_ATTEMPTS; attempt++) {
+		for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
 			const result = await this.attemptOnce(sql, scope, opts);
 			// Success, or a deterministic (non-transient) failure → final answer now.
 			// A non-transient query_error (42P01 / syntax / permission) MUST surface
 			// on attempt 1 so heal sees it — never retried.
 			if (isOk(result) || !isTransientResult(result)) return result;
 			last = result;
-			// Transient flap: back off (jittered) and re-read, unless that was the
+			// Transient flap: back off (jittered) and re-issue, unless that was the
 			// last attempt — in which case we fall through and return `last`.
-			if (attempt < READ_RETRY_ATTEMPTS) await this.sleep(backoffMs(attempt));
+			if (attempt < RETRY_ATTEMPTS) await this.sleep(backoffMs(attempt));
 		}
 		// Every attempt flapped transiently; surface the last failure, no loop.
 		return last as QueryResult;

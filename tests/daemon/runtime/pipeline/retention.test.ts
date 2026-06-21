@@ -95,11 +95,18 @@ class InMemoryTables {
 	/** Statements observed, for order/assertion (mirror of fake.requests, parsed). */
 	readonly ops: string[] = [];
 	/**
-	 * When > 0, the next this-many memories-DELETEs are dropped (the row is NOT
-	 * removed and a `connection_error` is surfaced) — simulating an interruption /
-	 * a backend that did not actually remove the row (the D-8 reality). The sweep
-	 * treats a non-ok delete as "not purged this run" and the row stays selectable
-	 * next run, so re-running is idempotent without double-purge.
+	 * When > 0, the next this-many memories-DELETEs are SILENTLY dropped: the
+	 * statement returns `ok` but the row is NOT removed — the genuine D-8 reality
+	 * on this backend (an eventual-consistency store ACKNOWLEDGES the delete yet a
+	 * stale segment keeps serving the row a beat later). This is deliberately an
+	 * OK-but-didn't-remove drop, NOT a transient `connection_error`: a reported
+	 * transport flap on an idempotent DELETE is now retried IN-PASS by the storage
+	 * client (the write-retry hardening), so it would complete within one sweep and
+	 * could never model a cross-sweep leftover. A SILENT non-removal reports success
+	 * (so the storage layer cannot know to retry it — and correctly does not), which
+	 * is exactly the leftover the NEXT sweep must re-select and re-purge. The sweep
+	 * therefore re-runs idempotently (set-based on tombstone state) with no double-
+	 * purge: the already-gone row is never re-deleted, the still-present one is.
 	 */
 	dropNextMemoryDeletes = 0;
 
@@ -192,9 +199,15 @@ class InMemoryTables {
 		if (tbl === "memories") {
 			if (this.dropNextMemoryDeletes > 0) {
 				this.dropNextMemoryDeletes -= 1;
-				// The backend "did not remove the row" (D-8) — surface a non-ok result
-				// without splicing, so the row stays selectable for the next sweep.
-				throw new TransportError("connection", "simulated interruption (row not removed)");
+				// SILENT D-8 drop: report success (return ok by NOT throwing) but do NOT
+				// splice the row, so the tombstone stays selectable for the next sweep.
+				// We still record the issued op so the count reflects the attempt. Because
+				// the result is `ok`, the storage client's idempotent-write retry does NOT
+				// fire (it cannot know the row was not removed) — the cross-sweep re-run is
+				// what reclaims it, which is the property under test (e-AC-2 / FR-4).
+				const droppedId = this.eq(sql, "id");
+				this.ops.push(`del-mem:${droppedId}`);
+				return;
 			}
 			const id = this.eq(sql, "id");
 			this.memories = this.memories.filter((r) => r.id !== id);

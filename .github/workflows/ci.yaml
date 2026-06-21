@@ -180,23 +180,25 @@ jobs:
       # The live suite runs the REAL round-trips against a REAL DeepLake org, so
       # it inherits the backend's transient flakiness (502s, connection resets,
       # stale segments that converge a beat later). The code paths are hardened
-      # for this (storage-client read-retry, poll-convergent read-backs), but an
-      # inherently-flaky real-backend suite should not red main on a single
-      # one-off flap. So this STEP — and ONLY this step (the strict quality-gate,
-      # windows-smoke, and secret-gate jobs stay zero-retry) — gets exactly ONE
-      # auto-retry: run the suite; if it exits non-zero, wait a few seconds and
-      # run it once more. The step passes if EITHER attempt passes. A genuine
-      # (non-transient) failure fails both attempts and still reds the job —
-      # this absorbs a flap, it does not paper over a real regression. We do NOT
-      # use `continue-on-error` (that would hide real failures); after two
-      # failures the loop exits non-zero and the job fails honestly. Bash is the
-      # shell because this job runs on ubuntu-latest.
-      - name: Run live integration smoke (1 auto-retry on transient flap)
+      # for this (storage-client read + idempotent-write retry, poll-convergent
+      # read-backs), but an inherently-flaky real-backend suite should not red main
+      # on a transient backend storm. So this STEP — and ONLY this step (the strict
+      # quality-gate, windows-smoke, and secret-gate jobs stay zero-retry) — gets a
+      # bounded auto-retry: run the suite; if it exits non-zero, wait a few seconds
+      # and run it again, up to THREE attempts (2 retries). The step passes if ANY
+      # attempt passes. The extra (third) attempt absorbs a storm that outlasts two
+      # tries — a brief 502 window that has not coalesced by the second run still
+      # gets a third shot. A genuine (non-transient) failure fails ALL THREE attempts
+      # and still reds the job — this absorbs a flap, it does not paper over a real
+      # regression. We do NOT use `continue-on-error` (that would hide real
+      # failures); after the last attempt the loop exits non-zero and the job fails
+      # honestly. Bash is the shell because this job runs on ubuntu-latest.
+      - name: Run live integration smoke (2 auto-retries on transient flap)
         shell: bash
         run: |
           set -uo pipefail
           attempt=1
-          max_attempts=2
+          max_attempts=3
           while true; do
             echo "::group::Live integration attempt ${attempt}/${max_attempts}"
             set +e
