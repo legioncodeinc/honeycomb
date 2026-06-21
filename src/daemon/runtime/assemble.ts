@@ -75,6 +75,8 @@ import {
 } from "../storage/config.js";
 import type { QueryScope, StorageClient } from "../storage/client.js";
 import { isOk } from "../storage/result.js";
+import { type EmbedAttachment, createEmbedAttachment } from "./services/embed-client.js";
+import { type EmbedSupervisor, createEmbedSupervisor } from "./services/embed-supervisor.js";
 
 /** The single-instance lock filename under `~/.honeycomb/` (FR-8 / a-AC-6). */
 export const LOCK_FILE_NAME = "daemon.lock";
@@ -145,6 +147,24 @@ export interface AssembleDaemonOptions {
 	 * module graph (the repo's DI-over-mock posture). Production never sets this.
 	 */
 	readonly seams?: SeamFns;
+	/**
+	 * The embed seam wired into the store + capture paths (PRD-025 AC-2). Defaults to the
+	 * REAL `createEmbedAttachment({ storage })` resolved from `resolveEmbedClientOptions`
+	 * (D-1 default-on) — so a fresh daemon stores + captures with a real 768-dim vector when
+	 * embeddings are available, and falls back to a NULL vector (lexical) when not, never a
+	 * throw. A unit test injects a FAKE attachment (e.g. a no-op or a deterministic stub) to
+	 * keep the assembly hermetic. Production never sets this.
+	 */
+	readonly embed?: EmbedAttachment;
+	/**
+	 * The embed-daemon SUPERVISOR wired into the daemon lifecycle (PRD-025 Wave 2 / D-6).
+	 * Defaults to the REAL {@link createEmbedSupervisor} — so a fresh daemon spawns,
+	 * health-checks, and crash-restarts the embed daemon child (warming it OFF the turn
+	 * path, D-3), and an explicit `HONEYCOMB_EMBEDDINGS=false`/`0` makes it inert (D-1
+	 * opt-out, no child spawned). A unit test injects a FAKE supervisor (e.g. a no-op or a
+	 * recording stub) so the assembly never spawns a real process. Production never sets this.
+	 */
+	readonly embedSupervisor?: EmbedSupervisor;
 }
 
 /**
@@ -365,6 +385,7 @@ export function assembleSeams(
 	storage: StorageClient,
 	defaultScope: QueryScope,
 	orgName: string | undefined,
+	embed: EmbedAttachment,
 	seams: SeamFns = defaultSeamFns,
 ): void {
 	// The daemon's configured default tenancy scope (the single LOCAL tenant) is RESOLVED ONCE
@@ -383,7 +404,11 @@ export function assembleSeams(
 	//    NOTE (021c): the context + session-end hook endpoints are NOT attached here yet
 	//    — 021c attaches them onto the same already-mounted `/api/hooks` group and
 	//    021d/021e fill their handlers. This seam is written so those land cleanly.
-	seams.attachHooks(daemon, { storage, queue: daemon.services.queue });
+	//    PRD-025 AC-2: the capture embed seam is the REAL `createEmbedAttachment` (D-1
+	//    default-on), so a captured turn lands a non-NULL 768-dim `message_embedding`
+	//    when embeddings are available; when not, the embedder returns null and the row
+	//    lands lexically (NULL vector) — never a throw (the 005b null-on-failure floor).
+	seams.attachHooks(daemon, { storage, queue: daemon.services.queue, embed });
 
 	// 2. The dashboard data API (020b) — the six daemon-served view-models. Threads the
 	//    LOCAL default scope so the dashboard web app (a loopback thin client that sends no
@@ -431,11 +456,13 @@ export function assembleSeams(
 
 	// 7. The /api/memories/* data API (022a). Recall + store + get/list + reason-gated
 	//    modify/forget land on the already-mounted, protected `/api/memories` SESSION
-	//    group. `embed` defaults to the no-op (embeddings off, ledger D-4) — the stored
-	//    row stays lexically recallable via the BM25/ILIKE fallback. This replaces the
-	//    PRD-004 501 scaffold: after this, `honeycomb recall`/`remember`, the SDK
-	//    `recall()`, and the MCP `memory_search` reach a REAL handler (no 501).
-	seams.mountMemories(daemon, { storage, defaultScope });
+	//    group. PRD-025 AC-2: the store `embed` seam is the REAL `createEmbedAttachment`
+	//    client (D-1 default-on) — a deliberately-stored memory lands a non-NULL 768-dim
+	//    `content_embedding` when embeddings are available; when not, the embedder returns
+	//    null and the row lands lexically (NULL vector), still recallable via the lexical
+	//    arm. This replaces the PRD-004 501 scaffold: after this, `honeycomb recall`/
+	//    `remember`, the SDK `recall()`, and the MCP `memory_search` reach a REAL handler.
+	seams.mountMemories(daemon, { storage, defaultScope, embed: embed.client });
 
 	// 8. The /memory/* VFS browse reads (022b). cat / grep / ls / find / classify attach
 	//    onto the already-mounted `/memory` SESSION group; `recallConfig` defaults to the
@@ -545,6 +572,12 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			gitSync: { enabled: false },
 		}),
 		runtimePath: createRuntimePathService(),
+		// PRD-025 D-6: the daemon OWNS the embed daemon. The supervisor spawns + health-checks
+		// + crash-restarts the embed child, warming it OFF the turn path (D-3). It reads the
+		// SAME `HONEYCOMB_EMBEDDINGS` opt-out the embed client does, so an explicit `false`/`0`
+		// makes it inert (no child) and unset/on spawns with zero config (D-1). A test injects a
+		// fake supervisor so the hermetic assembly never spawns a real process.
+		embed: options.embedSupervisor ?? createEmbedSupervisor(),
 	};
 
 	// ── a-AC-4: the cached health bit. A cheap background `SELECT 1` refreshes a coarse
@@ -568,10 +601,19 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	};
 	const daemon = createDaemon(createOptions);
 
+	// ── PRD-025 AC-2: the embed seam wired into the store + capture paths. Default to the
+	// REAL `{ client, attacher }` pair (D-1 default-on, resolved from the env), built ONCE
+	// here and threaded into BOTH the capture handler (the full attachment) and the memories
+	// store path (its `client`). A test injects a fake attachment to keep assembly hermetic.
+	// `createEmbedAttachment` reads `resolveEmbedClientOptions()` when no options are passed,
+	// so unset → enabled; an explicit `HONEYCOMB_EMBEDDINGS=false`/`0` → a null-returning
+	// client (clean lexical-only). The attacher writes through the same live storage client.
+	const embed = options.embed ?? createEmbedAttachment({ storage });
+
 	// ── a-AC-2 / d-AC-1: fire the seams EXACTLY ONCE, after construction (the four core
 	// seams + the /api/logs reader always; the /dashboard host local-mode only per security
 	// F-1; PLUS the three data-API seams — memories/vfs/product-data — always, 022d).
-	assembleSeams(daemon, storage, scope, daemonOrgName, options.seams ?? defaultSeamFns);
+	assembleSeams(daemon, storage, scope, daemonOrgName, embed, options.seams ?? defaultSeamFns);
 
 	// ── The cached-health refresher: a cheap connectivity round trip on an interval,
 	// updating the bit `/health` reads. Unref'd so it never keeps the process alive.

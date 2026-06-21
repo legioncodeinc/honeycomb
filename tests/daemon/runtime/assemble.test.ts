@@ -29,6 +29,11 @@ import {
 } from "../../../src/daemon/runtime/assemble.js";
 import { noopFileWatcherService } from "../../../src/daemon/runtime/services/file-watcher.js";
 import { noopJobQueueService } from "../../../src/daemon/runtime/services/job-queue.js";
+import {
+	type EmbedSupervisor,
+	createEmbedSupervisor,
+	noopEmbedSupervisor,
+} from "../../../src/daemon/runtime/services/embed-supervisor.js";
 import { noopRuntimePathService } from "../../../src/daemon/runtime/middleware/runtime-path.js";
 import type { StorageClient } from "../../../src/daemon/storage/client.js";
 import type { QueryResult } from "../../../src/daemon/storage/result.js";
@@ -407,6 +412,9 @@ describe("a-AC-4 /health performs a live storage probe → 200 reachable, 503 un
 			storage: fakeStorage(OK_RESULT),
 			logger: createRequestLogger({ silent: true }),
 			runtimeDir,
+			// PRD-025: inject the inert embed supervisor so the hermetic assembly never spawns
+			// a real embed child when start() runs (the real supervisor is covered separately).
+			embedSupervisor: noopEmbedSupervisor,
 		});
 		// start() primes the cached health bit with one SELECT 1 (here: ok).
 		await assembled.start();
@@ -428,6 +436,7 @@ describe("a-AC-4 /health performs a live storage probe → 200 reachable, 503 un
 			storage: fakeStorage(ERR_RESULT),
 			logger: createRequestLogger({ silent: true }),
 			runtimeDir,
+			embedSupervisor: noopEmbedSupervisor,
 		});
 		await assembled.start();
 		try {
@@ -450,6 +459,7 @@ describe("a-AC-5 graceful shutdown drains services and removes the lock (no stal
 			storage: fakeStorage(OK_RESULT),
 			logger: createRequestLogger({ silent: true }),
 			runtimeDir,
+			embedSupervisor: noopEmbedSupervisor,
 		});
 		const stopSpy = vi.spyOn(assembled.daemon, "stopServices");
 		await assembled.start();
@@ -471,6 +481,7 @@ describe("a-AC-5 graceful shutdown drains services and removes the lock (no stal
 			storage: fakeStorage(OK_RESULT),
 			logger: createRequestLogger({ silent: true }),
 			runtimeDir,
+			embedSupervisor: noopEmbedSupervisor,
 		});
 		await assembled.start();
 		await assembled.shutdown();
@@ -485,6 +496,7 @@ describe("a-AC-6 the PID/lock guard prevents a double-bind", () => {
 			storage: fakeStorage(OK_RESULT),
 			logger: createRequestLogger({ silent: true }),
 			runtimeDir,
+			embedSupervisor: noopEmbedSupervisor,
 		});
 		await first.start();
 		try {
@@ -495,6 +507,7 @@ describe("a-AC-6 the PID/lock guard prevents a double-bind", () => {
 				storage: fakeStorage(OK_RESULT),
 				logger: createRequestLogger({ silent: true }),
 				runtimeDir,
+				embedSupervisor: noopEmbedSupervisor,
 			});
 			await expect(second.start()).rejects.toBeInstanceOf(DaemonAlreadyRunningError);
 		} finally {
@@ -634,5 +647,73 @@ describe("a-AC-1 assembleDaemon constructs against the live storage client surfa
 		expect(typeof assembled.daemon.group).toBe("function");
 		// /api/status reports the catalog the daemon was built with (no live probe).
 		expect(assembled.daemon.config.widened).toBe(true);
+	});
+});
+
+describe("PRD-025 AC-1/D-6 the embed supervisor is wired into the daemon lifecycle", () => {
+	/** A recording fake supervisor that satisfies the EmbedSupervisor contract. */
+	function recordingSupervisor(): { svc: EmbedSupervisor; calls: { start: number; stop: number } } {
+		const calls = { start: 0, stop: 0 };
+		const svc: EmbedSupervisor = {
+			live: false,
+			warm: false,
+			disabled: false,
+			restarts: 0,
+			start(): void {
+				calls.start += 1;
+			},
+			stop(): void {
+				calls.stop += 1;
+			},
+			async restart(): Promise<void> {
+				/* recorded elsewhere */
+			},
+		};
+		return { svc, calls };
+	}
+
+	it("AC-1: the assembled daemon exposes the embed supervisor as a wired service", () => {
+		const { svc } = recordingSupervisor();
+		const assembled = assembleDaemon({
+			config: cfg(),
+			storage: fakeStorage(OK_RESULT),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+			embedSupervisor: svc,
+		});
+		// The injected supervisor IS the daemon's `embed` service (not the inert stub) — proof
+		// the composition root threads it into DaemonServices so the daemon OWNS it (D-6).
+		expect(assembled.daemon.services.embed).toBe(svc);
+	});
+
+	it("D-6: startServices starts the embed supervisor, stopServices stops it (lifecycle-owned)", async () => {
+		const { svc, calls } = recordingSupervisor();
+		const assembled = assembleDaemon({
+			config: cfg(),
+			storage: fakeStorage(OK_RESULT),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+			embedSupervisor: svc,
+		});
+		// start() runs the daemon lifecycle (which calls startServices → embed.start()).
+		await assembled.start();
+		expect(calls.start).toBe(1);
+		// A clean daemon shutdown drains the embed child (stopServices → embed.stop()).
+		await assembled.shutdown();
+		expect(calls.stop).toBe(1);
+	});
+
+	it("D-1: the default real supervisor is INERT under HONEYCOMB_EMBEDDINGS=false (no child spawned)", () => {
+		const prev = process.env.HONEYCOMB_EMBEDDINGS;
+		process.env.HONEYCOMB_EMBEDDINGS = "false";
+		try {
+			// Construct the REAL supervisor via its factory. With the opt-out set it reports
+			// itself disabled and never spawns — so constructing it here touches no process.
+			const supervisor = createEmbedSupervisor();
+			expect(supervisor.disabled).toBe(true);
+		} finally {
+			if (prev === undefined) delete process.env.HONEYCOMB_EMBEDDINGS;
+			else process.env.HONEYCOMB_EMBEDDINGS = prev;
+		}
 	});
 });

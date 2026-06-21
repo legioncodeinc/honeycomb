@@ -27,8 +27,31 @@ import {
 	recallMemories,
 	resolveRecallLimit,
 } from "../../../../src/daemon/runtime/memories/recall.js";
+import { EMBEDDING_DIMS } from "../../../../src/daemon/storage/vector.js";
+import type { EmbedClient } from "../../../../src/daemon/runtime/services/embed-client.js";
 
 const SCOPE: QueryScope = { org: "fake-org", workspace: "fake-ws" };
+
+/** A valid 768-dim query vector for the semantic-arm tests. */
+const VALID_QUERY_VECTOR: readonly number[] = new Array(EMBEDDING_DIMS).fill(0.05) as number[];
+
+/** An EmbedClient that returns a fixed vector (or null) — the recall semantic seam. */
+function fakeEmbed(result: readonly number[] | null): EmbedClient {
+	return {
+		async embed(): Promise<readonly number[] | null> {
+			return result;
+		},
+	};
+}
+
+/** An EmbedClient that throws — proves recall guards an unexpected embed throw (→ lexical). */
+function throwingEmbed(): EmbedClient {
+	return {
+		async embed(): Promise<readonly number[] | null> {
+			throw new Error("embed daemon exploded");
+		},
+	};
+}
 
 /** Which arm a per-arm recall statement targets, read from its `'…' AS source` tag. */
 function armOf(sql: string): "memories" | "memory" | "sessions" | "other" {
@@ -242,5 +265,191 @@ describe("resolveRecallLimit clamps the caller limit into [1, MAX]", () => {
 	it("honors and truncates an in-range limit", () => {
 		expect(resolveRecallLimit(15)).toBe(15);
 		expect(resolveRecallLimit(15.9)).toBe(15);
+	});
+});
+
+// ── PRD-025 AC-3 — the `<#>` cosine arm runs + `degraded` tells the truth ────────
+
+/** Classify which kind of statement recall emitted, for the semantic-path fake. */
+function kindOf(sql: string): "vector" | "hydrate" | "memories" | "memory" | "sessions" | "other" {
+	// The vector arm: the `<#>` cosine operator, no `AS source` tag (IDs+score only).
+	if (sql.includes("<#>")) return "vector";
+	// The hydration SELECT: tagged with `AS source` AND keyed by an `IN (...)` id list.
+	if (/AS\s+source/i.test(sql) && /\bIN\s*\(/i.test(sql)) return "hydrate";
+	if (/'memories'\s+AS\s+source/i.test(sql)) return "memories";
+	if (/'memory'\s+AS\s+source/i.test(sql)) return "memory";
+	if (/'sessions'\s+AS\s+source/i.test(sql)) return "sessions";
+	return "other";
+}
+
+/** Which table a vector / hydrate statement targets, read from its `FROM "<tbl>"`. */
+function tableOf(sql: string): "memories" | "sessions" | "other" {
+	if (/FROM\s+"memories"/i.test(sql)) return "memories";
+	if (/FROM\s+"sessions"/i.test(sql)) return "sessions";
+	return "other";
+}
+
+/**
+ * A fake storage for the SEMANTIC path: it answers the `<#>` vector arm with scored
+ * ids per table, the hydration SELECT with the matched rows' text, and the three
+ * lexical arms with caller-supplied rows. Records every statement for assertions.
+ */
+function semanticStorage(opts: {
+	vector?: { memories?: StorageRow[]; sessions?: StorageRow[] };
+	hydrate?: { memories?: StorageRow[]; sessions?: StorageRow[] };
+	lexical?: { memories?: QueryResult; memory?: QueryResult; sessions?: QueryResult };
+}): { storage: StorageQuery; sqls: string[] } {
+	const sqls: string[] = [];
+	const storage: StorageQuery = {
+		async query(sql: string, _scope: QueryScope, _opts?: QueryOptions): Promise<QueryResult> {
+			sqls.push(sql);
+			const kind = kindOf(sql);
+			const table = tableOf(sql);
+			if (kind === "vector") return ok((opts.vector?.[table === "other" ? "memories" : table]) ?? [], 0);
+			if (kind === "hydrate") return ok((opts.hydrate?.[table === "other" ? "memories" : table]) ?? [], 0);
+			if (kind === "memories") return opts.lexical?.memories ?? ok([], 0);
+			if (kind === "memory") return opts.lexical?.memory ?? ok([], 0);
+			if (kind === "sessions") return opts.lexical?.sessions ?? ok([], 0);
+			return ok([], 0);
+		},
+	};
+	return { storage, sqls };
+}
+
+describe("AC-3 recall runs the `<#>` cosine arm and reports `degraded` honestly", () => {
+	it("SEMANTIC RAN → degraded:false: the `<#>` arm surfaces a lexical-MISS memory", async () => {
+		// The captured memory shares NO surface token with the query — a pure lexical miss —
+		// but the semantic `<#>` arm returns it by cosine. degraded MUST be false.
+		const { storage, sqls } = semanticStorage({
+			vector: { memories: [{ id: "mem-sem-1", score: 0.92 }] },
+			hydrate: { memories: [{ source: "memories", id: "mem-sem-1", text: "the build is timing out on the pack step" }] },
+			lexical: { memories: ok([], 0), memory: ok([], 0), sessions: ok([], 0) },
+		});
+
+		const result = await recallMemories(
+			{ query: "CI keeps failing during publish", scope: SCOPE },
+			{ storage, embed: fakeEmbed(VALID_QUERY_VECTOR) },
+		);
+
+		expect(result.degraded, "the semantic arm ran → not degraded").toBe(false);
+		expect(result.hits.map((h) => h.id)).toContain("mem-sem-1");
+		expect(result.hits.find((h) => h.id === "mem-sem-1")?.text).toContain("pack step");
+		expect(result.sources).toContain("memories");
+		// The `<#>` cosine arm was actually issued (proves it reached vectorSearch).
+		expect(sqls.some((s) => s.includes("<#>"))).toBe(true);
+	});
+
+	it("SEMANTIC RAN over sessions too → a captured turn surfaces by cosine, degraded:false", async () => {
+		const { storage } = semanticStorage({
+			vector: { sessions: [{ id: "conversations/s1", score: 0.81 }] },
+			hydrate: {
+				sessions: [{ source: "sessions", id: "conversations/s1", text: "the build is timing out on the pack step" }],
+			},
+		});
+
+		const result = await recallMemories(
+			{ query: "CI keeps failing during publish", scope: SCOPE },
+			{ storage, embed: fakeEmbed(VALID_QUERY_VECTOR) },
+		);
+
+		expect(result.degraded).toBe(false);
+		expect(result.hits.some((h) => h.source === "sessions" && h.id === "conversations/s1")).toBe(true);
+	});
+
+	it("FALLBACK (embed returns null) → degraded:true, lexical-only, no `<#>` arm issued", async () => {
+		const { storage, sqls } = semanticStorage({
+			lexical: { memories: ok([{ source: "memories", id: "mem-lex-1", text: "a widget fact" }], 0) },
+		});
+
+		const result = await recallMemories(
+			{ query: "widget", scope: SCOPE },
+			{ storage, embed: fakeEmbed(null) }, // off / unreachable / timeout → null.
+		);
+
+		expect(result.degraded, "embed null → genuine fallback").toBe(true);
+		expect(result.hits.map((h) => h.id)).toEqual(["mem-lex-1"]);
+		// No `<#>` statement was issued — the cosine arm short-circuits on a null embed.
+		expect(sqls.some((s) => s.includes("<#>"))).toBe(false);
+	});
+
+	it("FALLBACK (no embed client injected) → degraded:true (the lexical floor is unchanged)", async () => {
+		const { storage, sqls } = semanticStorage({
+			lexical: { memories: ok([{ source: "memories", id: "mem-lex-2", text: "another fact" }], 0) },
+		});
+
+		const result = await recallMemories({ query: "fact", scope: SCOPE }, { storage });
+
+		expect(result.degraded).toBe(true);
+		expect(result.hits.map((h) => h.id)).toEqual(["mem-lex-2"]);
+		expect(sqls.some((s) => s.includes("<#>"))).toBe(false);
+	});
+
+	it("FALLBACK (embed THROWS) → recall never throws, degrades to lexical, degraded:true", async () => {
+		const { storage } = semanticStorage({
+			lexical: { memories: ok([{ source: "memories", id: "mem-lex-3", text: "resilient fact" }], 0) },
+		});
+
+		const result = await recallMemories(
+			{ query: "resilient", scope: SCOPE },
+			{ storage, embed: throwingEmbed() },
+		);
+
+		expect(result.degraded).toBe(true);
+		expect(result.hits.map((h) => h.id)).toEqual(["mem-lex-3"]);
+	});
+
+	it("AC-6 defense-in-depth: a wrong-dim query vector is NOT run as a semantic arm → degraded:true", async () => {
+		// The embed-client already dim-guards, but recall double-checks: a non-768 vector
+		// reaching recall must NOT be sent to the `<#>` arm — it degrades to lexical.
+		const wrongDim = new Array(512).fill(0.1) as number[];
+		const { storage, sqls } = semanticStorage({
+			lexical: { memories: ok([{ source: "memories", id: "mem-lex-4", text: "dim guard fact" }], 0) },
+		});
+
+		const result = await recallMemories(
+			{ query: "dim guard", scope: SCOPE },
+			{ storage, embed: fakeEmbed(wrongDim) },
+		);
+
+		expect(result.degraded, "a wrong-dim vector never runs the semantic arm").toBe(true);
+		expect(sqls.some((s) => s.includes("<#>")), "no `<#>` arm for a malformed vector").toBe(false);
+		expect(result.hits.map((h) => h.id)).toEqual(["mem-lex-4"]);
+	});
+
+	it("SEMANTIC RAN but found nothing → still degraded:false (honest: it ran, it just missed)", async () => {
+		// Empty vector results + empty lexical → the semantic arm RAN (degraded false) even
+		// though no hit surfaced. "Ran and missed" is not a degrade.
+		const { storage } = semanticStorage({ vector: {}, hydrate: {}, lexical: {} });
+
+		const result = await recallMemories(
+			{ query: "nothing matches", scope: SCOPE },
+			{ storage, embed: fakeEmbed(VALID_QUERY_VECTOR) },
+		);
+
+		expect(result.degraded).toBe(false);
+		expect(result.hits).toEqual([]);
+	});
+
+	it("merges semantic hits AHEAD of lexical hits, deduped by source+id", async () => {
+		// The same memory id is surfaced by BOTH the semantic and lexical arms; it appears ONCE.
+		const { storage } = semanticStorage({
+			vector: { memories: [{ id: "dup-mem", score: 0.9 }] },
+			hydrate: { memories: [{ source: "memories", id: "dup-mem", text: "shared fact" }] },
+			lexical: {
+				memories: ok([{ source: "memories", id: "dup-mem", text: "shared fact" }], 0),
+				memory: ok([], 0),
+				sessions: ok([{ source: "sessions", id: "sess/9", text: "a raw turn" }], 0),
+			},
+		});
+
+		const result = await recallMemories(
+			{ query: "shared", scope: SCOPE },
+			{ storage, embed: fakeEmbed(VALID_QUERY_VECTOR) },
+		);
+
+		expect(result.degraded).toBe(false);
+		// dup-mem appears exactly once; the sessions lexical hit also surfaces.
+		expect(result.hits.filter((h) => h.id === "dup-mem")).toHaveLength(1);
+		expect(result.hits.some((h) => h.id === "sess/9")).toBe(true);
 	});
 });

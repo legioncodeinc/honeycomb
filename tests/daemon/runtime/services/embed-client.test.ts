@@ -182,10 +182,10 @@ describe("b-AC-1 enabled → 768-dim vector returned by EmbedClient.embed()", ()
 	});
 });
 
-describe("b-AC-2 disabled → embed() returns null, no UPDATE issued", () => {
-	it("returns null immediately when HONEYCOMB_EMBEDDINGS is not set (default disabled)", async () => {
+describe("PRD-025 D-1 default-on: unset → enabled; explicit false/0 → disabled", () => {
+	it("AC-1: enables by default when HONEYCOMB_EMBEDDINGS is UNSET (default-on inversion)", () => {
 		const opts = resolveEmbedClientOptions({});
-		expect(opts.enabled).toBe(false);
+		expect(opts.enabled).toBe(true);
 	});
 
 	it("resolveEmbedClientOptions enables when HONEYCOMB_EMBEDDINGS=true", () => {
@@ -196,6 +196,25 @@ describe("b-AC-2 disabled → embed() returns null, no UPDATE issued", () => {
 	it("resolveEmbedClientOptions enables when HONEYCOMB_EMBEDDINGS=1", () => {
 		const opts = resolveEmbedClientOptions({ HONEYCOMB_EMBEDDINGS: "1" });
 		expect(opts.enabled).toBe(true);
+	});
+
+	it("AC-1: an EXPLICIT HONEYCOMB_EMBEDDINGS=false disables (opt-OUT)", () => {
+		const opts = resolveEmbedClientOptions({ HONEYCOMB_EMBEDDINGS: "false" });
+		expect(opts.enabled).toBe(false);
+	});
+
+	it("AC-1: an EXPLICIT HONEYCOMB_EMBEDDINGS=0 disables (opt-OUT)", () => {
+		const opts = resolveEmbedClientOptions({ HONEYCOMB_EMBEDDINGS: "0" });
+		expect(opts.enabled).toBe(false);
+	});
+
+	it("AC-1: whitespace/case around the explicit off value still disables ( FALSE )", () => {
+		expect(resolveEmbedClientOptions({ HONEYCOMB_EMBEDDINGS: " FALSE " }).enabled).toBe(false);
+		expect(resolveEmbedClientOptions({ HONEYCOMB_EMBEDDINGS: " 0 " }).enabled).toBe(false);
+	});
+
+	it("AC-1: an unrecognized value falls back to the default (enabled)", () => {
+		expect(resolveEmbedClientOptions({ HONEYCOMB_EMBEDDINGS: "maybe" }).enabled).toBe(true);
 	});
 
 	it("embed() returns null when disabled — no HTTP call, no UPDATE", async () => {
