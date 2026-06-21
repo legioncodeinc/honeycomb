@@ -23,6 +23,9 @@ import {
 	createStorageClient,
 	envCredentialProvider,
 	isOk,
+	minRowCount,
+	type QueryResult,
+	readConverged,
 	resolveStorageConfig,
 	type QueryScope,
 	type StorageClient,
@@ -45,36 +48,45 @@ const TBL_PROPOSALS = `ci_cp_${RUN_ID}_proposals`;
 const TBL_ATTRS = `ci_cp_${RUN_ID}_attrs`;
 
 /**
- * Poll a scan and resolve the CURRENT STATE per id = the HIGHEST-`version` row seen for
- * each id (the append-only reader convention — `supersede.ts`'s `readCurrentStateById`).
+ * Read a scan to convergence THROUGH the shared `readConverged` seam (PRD-028), then
+ * resolve the CURRENT STATE per id = the HIGHEST-`version` row in the converged result
+ * (the append-only reader convention — `supersede.ts`'s `readCurrentStateById`).
  *
  * A claim.add applies as a single version-1 row, but the supersede path is append-only
  * (a marked id has multiple physical rows), so resolving the highest version per id is
- * the correct current-state read across the whole apply surface. We poll because this
- * backend serves a scan from segments of differing freshness — a scan can MISS a
- * durably-written row but never INVENTS one, so polling + keeping the highest version
- * per id converges UP to the durable current state. Rows with no `version` column
- * projected collapse to a single current row per id (version treated as 0).
+ * the correct current-state read across the whole apply surface. The wait is now the ONE
+ * shared seam: `readConverged` polls until `minRowCount(expectedRows)` holds — a scan can
+ * MISS a durably-written row on a stale segment but never INVENTS one, so once one poll
+ * returns `expectedRows` that segment IS the durable truth. The highest-version-per-id
+ * reduction then runs on the converged result (rows with no `version` projected collapse
+ * to a single current row per id, version treated as 0). On budget exhaustion the seam
+ * returns the last real read, so a shortfall surfaces as a failing assertion, never a hang.
  */
-const SCAN_POLLS = 20;
-async function scanRows(store: StorageQuery, sql: string, s: QueryScope): Promise<Record<string, unknown>[]> {
+function reduceHighestVersionPerId(result: QueryResult): Record<string, unknown>[] {
 	const byId = new Map<string, Record<string, unknown>>();
 	const ver = (row: Record<string, unknown>): number => {
 		const n = typeof row.version === "number" ? row.version : Number(row.version);
 		return Number.isFinite(n) ? n : 0;
 	};
-	for (let poll = 0; poll < SCAN_POLLS; poll++) {
-		const res = await store.query(sql, s);
-		if (isOk(res)) {
-			for (const row of res.rows as Record<string, unknown>[]) {
-				const id = String(row.id ?? "");
-				if (id === "") continue;
-				const prev = byId.get(id);
-				if (!prev || ver(row) >= ver(prev)) byId.set(id, row); // keep the highest version
-			}
+	if (isOk(result)) {
+		for (const row of result.rows as Record<string, unknown>[]) {
+			const id = String(row.id ?? "");
+			if (id === "") continue;
+			const prev = byId.get(id);
+			if (!prev || ver(row) >= ver(prev)) byId.set(id, row); // keep the highest version
 		}
 	}
 	return [...byId.values()];
+}
+
+async function scanRows(
+	store: StorageQuery,
+	sql: string,
+	s: QueryScope,
+	expectedRows: number,
+): Promise<Record<string, unknown>[]> {
+	const result = await readConverged(store, sql, s, minRowCount(expectedRows));
+	return reduceHighestVersionPerId(result);
 }
 
 describe.skipIf(!HAS_TOKEN)("live ontology control-plane apply smoke (opt-in, real backend)", () => {
@@ -145,6 +157,7 @@ describe.skipIf(!HAS_TOKEN)("live ontology control-plane apply smoke (opt-in, re
 			storage,
 			`SELECT id, operation, status, evidence FROM "${sqlIdent(TBL_PROPOSALS)}" WHERE status = ${sLiteral("applied")}`,
 			scope,
+			1,
 		);
 		expect(proposals.length, "an applied proposal row").toBeGreaterThanOrEqual(1);
 		expect(proposals.some((r) => String(r.operation) === "claim.add")).toBe(true);
@@ -155,6 +168,7 @@ describe.skipIf(!HAS_TOKEN)("live ontology control-plane apply smoke (opt-in, re
 			storage,
 			`SELECT id, content, status, memory_id FROM "${sqlIdent(TBL_ATTRS)}" WHERE memory_id = ${sLiteral("mem-live-cp")}`,
 			scope,
+			1,
 		);
 		expect(attrs.length, "the applied attribute row").toBeGreaterThanOrEqual(1);
 		expect(attrs.some((r) => String(r.status) === "active")).toBe(true);

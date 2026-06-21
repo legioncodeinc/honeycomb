@@ -57,15 +57,19 @@ import {
 	createStorageClient,
 	envCredentialProvider,
 	isOk,
+	minRowCount,
 	type QueryResult,
-	readLatestVersion,
+	readConverged,
 	resolveStorageConfig,
 	type RowValues,
+	rowPresent,
 	serializeFloat4Array,
 	sLiteral,
 	sqlIdent,
 	type StorageClient,
 	val,
+	watermarkOf,
+	watermarkPredicate,
 } from "../../src/daemon/storage/index.js";
 import { contentHash, MEMORIES_COLUMNS, NOT_SOFT_DELETED } from "../../src/daemon/storage/catalog/index.js";
 import type { HealTarget } from "../../src/daemon/storage/heal.js";
@@ -162,23 +166,40 @@ describe.skipIf(!HAS_TOKEN)("live controlled-writes smoke (opt-in, real backend)
 		if (!isOk(res)) console.warn(`[ci-cleanup] could not drop ${CI_TABLE} in ${workspace}: ${describeResult(res)}`);
 	});
 
-	/**
-	 * Probe the throwaway table for an existing row with `content_hash = <hash>` — the
-	 * stage's SELECT-before-INSERT dedup, pointed at the CI table (the catalog's own
-	 * `buildDedupCheckSql` is memories-bound, so the probe is built here through the
-	 * SAME exported `sqlIdent`/`sLiteral` helpers). Returns the existing id or null.
-	 */
-	async function dedupProbe(hash: string, scope: { org: string; workspace: string }): Promise<string | null> {
+	/** The dedup-probe SELECT: rows on the throwaway table whose `content_hash = <hash>`. */
+	function dedupSql(hash: string): string {
 		const tbl = sqlIdent(CI_TABLE);
 		const hashCol = sqlIdent("content_hash");
 		const idCol = sqlIdent("id");
-		const sql = `SELECT ${idCol} FROM "${tbl}" WHERE ${hashCol} = ${sLiteral(hash)} LIMIT 1`;
-		const res = await storage.query(sql, scope);
+		return `SELECT ${idCol} FROM "${tbl}" WHERE ${hashCol} = ${sLiteral(hash)}`;
+	}
+
+	/**
+	 * Probe the throwaway table for an existing row with `content_hash = <hash>` — the
+	 * stage's SELECT-before-INSERT dedup, pointed at the CI table. A SINGLE immediate
+	 * read: used ONLY for the pre-write ABSENCE check (there is no write yet to converge
+	 * on, so one read is correct — the hash is genuinely absent before the first ADD).
+	 * Returns the existing id or null.
+	 */
+	async function dedupProbeOnce(hash: string, scope: { org: string; workspace: string }): Promise<string | null> {
+		const res = await storage.query(`${dedupSql(hash)} LIMIT 1`, scope);
 		if (isOk(res) && res.rows.length > 0) {
 			const id = res.rows[0].id;
 			return typeof id === "string" ? id : String(id ?? "");
 		}
 		return null;
+	}
+
+	/**
+	 * The version-reader SELECT for a key: the highest-version row by id (the
+	 * `readLatestVersion` shape, ORDER BY version DESC). Read THROUGH `readConverged` so
+	 * the just-written row is awaited to convergence on this stale-flapping backend.
+	 */
+	function latestByIdSql(id: string): string {
+		const tbl = sqlIdent(CI_TABLE);
+		const idCol = sqlIdent("id");
+		const verCol = sqlIdent("version");
+		return `SELECT * FROM "${tbl}" WHERE ${idCol} = ${sLiteral(id)} ORDER BY ${verCol} DESC`;
 	}
 
 	it("1. ADD writes one real memories row (dedup-miss → version-1 append), read back by id", async () => {
@@ -189,8 +210,9 @@ describe.skipIf(!HAS_TOKEN)("live controlled-writes smoke (opt-in, real backend)
 		const normalized = content.toLowerCase();
 		const hash = contentHash(normalized);
 
-		// Dedup-MISS: the fresh per-run hash is absent before the write.
-		expect(await dedupProbe(hash, scope), "fresh hash must be absent before the first ADD").toBeNull();
+		// Dedup-MISS: the fresh per-run hash is absent before the write (a single read is
+		// correct here — there is no write yet to converge on).
+		expect(await dedupProbeOnce(hash, scope), "fresh hash must be absent before the first ADD").toBeNull();
 
 		// Append the row — version-1 on the lazily-healed CI table (the stage's ADD path).
 		const { result, version } = await appendVersionBumped(storage, ciTarget, scope, {
@@ -201,8 +223,15 @@ describe.skipIf(!HAS_TOKEN)("live controlled-writes smoke (opt-in, real backend)
 		expect(result.kind, `ADD insert must succeed: ${describeResult(result)}`).toBe("ok");
 		expect(version, "the first appended version of a memory is 1").toBe(1);
 
-		// Read it back by id through the version reader — the highest version is the row.
-		const back = await readLatestVersion(storage, ciTarget, scope, "id", id);
+		// Read it back by id THROUGH `readConverged` — the highest-version-by-id shape, but
+		// the read POLLS to convergence against the write's watermark (id + version) so a
+		// stale segment never reads back the just-written row as absent.
+		const back = await readConverged(
+			storage,
+			latestByIdSql(id),
+			scope,
+			watermarkPredicate(watermarkOf(id, version), { idColumn: "id", versionColumn: "version" }),
+		);
 		expect(back.kind, `read-back must succeed: ${describeResult(back)}`).toBe("ok");
 		expect(isOk(back) && back.rows.length, "exactly the row we wrote is readable by id").toBeGreaterThanOrEqual(1);
 		if (isOk(back)) {
@@ -220,19 +249,20 @@ describe.skipIf(!HAS_TOKEN)("live controlled-writes smoke (opt-in, real backend)
 		const normalized = content.toLowerCase();
 		const hash = contentHash(normalized);
 
-		// Dedup-HIT: the hash written in scenario 1 is now present. The stage returns the
-		// existing id and emits NO INSERT (c-AC-2). We assert the probe SEES the prior row.
-		const existing = await dedupProbe(hash, scope);
+		// Dedup-HIT: the hash written in scenario 1 is now present. This is a read-your-
+		// writes ACROSS tests (scenario 1 wrote it), so the probe POLLS to convergence
+		// THROUGH `readConverged` — a stale segment must not read the prior row as absent.
+		// The predicate is `content_hash` present; the count assertion below confirms it.
+		const probed = await readConverged(storage, dedupSql(hash), scope, rowPresent("content_hash", hash));
+		const existing = isOk(probed) && probed.rows.length > 0 ? String(probed.rows[0].id ?? "") : null;
 		expect(existing, "the prior ADD's content_hash must be found on the dedup probe").not.toBeNull();
 
 		// Because the probe hit, the stage would NOT insert. Prove the backend agrees:
 		// the hash still resolves to exactly one row (no second writer doubled it), and a
-		// NEW id was never appended for this hash.
-		const tbl = sqlIdent(CI_TABLE);
-		const hashCol = sqlIdent("content_hash");
-		const idCol = sqlIdent("id");
-		const countSql = `SELECT ${idCol} FROM "${tbl}" WHERE ${hashCol} = ${sLiteral(hash)}`;
-		const rows = await storage.query(countSql, scope);
+		// NEW id was never appended for this hash. The convergence target is "≥1 row"
+		// (the prior write landing); the EXACTLY-ONE assertion then holds on the converged
+		// result (over-counting is impossible — no duplicate was written).
+		const rows = await readConverged(storage, dedupSql(hash), scope, minRowCount(1));
 		expect(rows.kind, `count probe must succeed: ${describeResult(rows)}`).toBe("ok");
 		if (isOk(rows)) {
 			expect(rows.rows.length, "exactly one row for the deduped content_hash").toBe(1);
@@ -281,8 +311,15 @@ describe.skipIf(!HAS_TOKEN)("live controlled-writes smoke (opt-in, real backend)
 		// append-only version-bump buys on this backend: MAX(version) converges.
 		expect(bump.version, "the bumped version is N+1 over the seed").toBe(2);
 
-		// readLatestVersion reads the HIGHEST version row — the corrected content.
-		const latest = await readLatestVersion(storage, ciTarget, scope, "id", id);
+		// Read the HIGHEST version row THROUGH `readConverged` — the highest-version-by-id
+		// shape, polled to convergence against the v2 watermark (version ≥ 2) so the read
+		// never lands on a segment that has only the v1 row yet.
+		const latest = await readConverged(
+			storage,
+			latestByIdSql(id),
+			scope,
+			watermarkPredicate(watermarkOf(id, bump.version), { idColumn: "id", versionColumn: "version" }),
+		);
 		expect(latest.kind, `latest read must succeed: ${describeResult(latest)}`).toBe("ok");
 		if (isOk(latest)) {
 			expect(latest.rows.length).toBeGreaterThanOrEqual(1);

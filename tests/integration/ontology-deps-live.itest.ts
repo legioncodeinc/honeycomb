@@ -30,6 +30,9 @@ import {
 	createStorageClient,
 	envCredentialProvider,
 	isOk,
+	minRowCount,
+	type QueryResult,
+	readConverged,
 	resolveStorageConfig,
 	type QueryScope,
 	type StorageClient,
@@ -52,71 +55,49 @@ const RUN_ID = runId();
 const TBL_ATTRS = `ci_deps_${RUN_ID}_attrs`;
 
 /**
- * Poll a scan and resolve the CURRENT STATE per id = the HIGHEST-`version` row seen for
- * each id (the append-only reader convention — `supersede.ts`'s `readCurrentStateById`).
- *
- * The supersede mark is an APPEND, so an attribute id can have MULTIPLE physical rows on
- * disk (its original active version + its superseded version). Counting raw rows by
- * status is therefore wrong; the current state of an id is its highest-version row. We
- * poll because this backend serves a scan from segments of differing freshness — a scan
- * can MISS a durably-written row but never INVENTS one, so polling + keeping the highest
- * version per id converges UP to the durable current state.
- *
- * ── Poll-convergent, not a fixed burst (project memory) ──────────────────────
- * Project memory: "the backend flaps stale segments; every live read-back must poll until
- * convergence, never a single immediate read." A fixed burst of N back-to-back queries with
- * NO inter-poll delay can complete in under a second — well before the segment serving a
- * just-written row warms up (the `<#>`/scalar lag is ~15-30s on this backend), so the whole
- * budget is exhausted while the row is still invisible and the union comes back EMPTY (the
- * observed b-AC-5/D-7 flake: a durably-seeded constraint read back as 0 rows). So we poll
- * WITH a delay and converge on an EXPECTED id-count: we keep unioning the highest-version
- * row per id until at least `expectedIds` distinct ids are seen, then exhaust a short
- * confirm tail so a later-arriving extra version is not missed. A scan never invents a row,
- * so the union can only converge UP — never an over-count. When `expectedIds` is omitted we
- * fall back to the original full-budget burst (used where 0 is a valid converged answer).
+ * Resolve the CURRENT STATE per id = the HIGHEST-`version` row in a result (the append-
+ * only reader convention — `supersede.ts`'s `readCurrentStateById`). The supersede mark
+ * is an APPEND, so an attribute id can have MULTIPLE physical rows on disk (its original
+ * active version + its superseded version); the current state of an id is its
+ * highest-version row. Pure over the converged result.
  */
-const SCAN_POLLS = 20;
-const SCAN_DELAY_MS = 500;
-function sleep(ms: number): Promise<void> {
-	return new Promise((r) => setTimeout(r, ms));
-}
-async function scanRows(
-	store: StorageQuery,
-	sql: string,
-	s: QueryScope,
-	expectedIds?: number,
-): Promise<Record<string, unknown>[]> {
+function reduceHighestVersionPerId(result: QueryResult): Record<string, unknown>[] {
 	const byId = new Map<string, Record<string, unknown>>();
 	const ver = (row: Record<string, unknown>): number => {
 		const n = typeof row.version === "number" ? row.version : Number(row.version);
 		return Number.isFinite(n) ? n : 0;
 	};
-	const onePass = async (): Promise<void> => {
-		const res = await store.query(sql, s);
-		if (isOk(res)) {
-			for (const row of res.rows as Record<string, unknown>[]) {
-				const id = String(row.id ?? "");
-				if (id === "") continue;
-				const prev = byId.get(id);
-				if (!prev || ver(row) >= ver(prev)) byId.set(id, row); // keep the highest version
-			}
+	if (isOk(result)) {
+		for (const row of result.rows as Record<string, unknown>[]) {
+			const id = String(row.id ?? "");
+			if (id === "") continue;
+			const prev = byId.get(id);
+			if (!prev || ver(row) >= ver(prev)) byId.set(id, row); // keep the highest version
 		}
-	};
-	for (let poll = 0; poll < SCAN_POLLS; poll++) {
-		await onePass();
-		// Convergence gate: once the expected distinct-id count is met, run a short confirm
-		// tail (a few more polls) so a later-arriving version is folded in, then stop. With no
-		// expectation, fall through and exhaust the full budget (0 is a valid answer there).
-		if (expectedIds !== undefined && byId.size >= expectedIds) {
-			for (let confirm = 0; confirm < 3; confirm++) {
-				await sleep(SCAN_DELAY_MS);
-				await onePass();
-			}
-			break;
-		}
-		await sleep(SCAN_DELAY_MS);
 	}
 	return [...byId.values()];
+}
+
+/**
+ * Read a scan to convergence THROUGH the shared `readConverged` seam (PRD-028), then
+ * resolve the highest-version row per id. The wait is the ONE shared seam, not a
+ * hand-rolled poll loop: `readConverged` polls `query` (bounded budget, jittered backoff)
+ * until `minRowCount(expectedRows)` holds — "a single segment served at least the
+ * `expectedRows` durable rows this slot must reach". A scan can MISS a durably-written row
+ * on a stale segment but never INVENTS one, so once one poll returns `expectedRows` that
+ * segment IS the durable truth (project memory: never a single immediate read — the seam
+ * absorbs the ~15-30s warm-up flap via its budget). On exhaustion the seam returns the
+ * last real (under-reporting) read, so a genuine shortfall surfaces as a failing
+ * assertion, never a hang.
+ */
+async function scanRows(
+	store: StorageQuery,
+	sql: string,
+	s: QueryScope,
+	expectedRows: number,
+): Promise<Record<string, unknown>[]> {
+	const result = await readConverged(store, sql, s, minRowCount(expectedRows));
+	return reduceHighestVersionPerId(result);
 }
 
 describe.skipIf(!HAS_TOKEN)("live 008b deps supersede-on-conflict smoke (opt-in, real backend)", () => {
@@ -202,8 +183,9 @@ describe.skipIf(!HAS_TOKEN)("live 008b deps supersede-on-conflict smoke (opt-in,
 
 		// 3. Read back: two version rows on disk (full history — b-AC-2); one active (v2),
 		//    one superseded (v1).
-		// Poll-convergent: TWO distinct attribute ids are durably written (v1 superseded +
-		// v2 active). Converge on 2 ids (project memory: never a single immediate read).
+		// Convergent via `readConverged`: TWO distinct attribute ids are durably written
+		// (v1 superseded + v2 active). Converge on 2 rows (project memory: never a single
+		// immediate read — the seam's budget absorbs the warm-up flap).
 		const rows = await scanRows(
 			storage,
 			`SELECT id, version, status, content FROM "${sqlIdent(TBL_ATTRS)}" WHERE claim_key = ${sLiteral(slotClaimKey("asp-live", slot))}`,
@@ -254,19 +236,26 @@ describe.skipIf(!HAS_TOKEN)("live 008b deps supersede-on-conflict smoke (opt-in,
 		expect(attempt, "a constraint is never auto-superseded").toBeNull();
 
 		// Read back: still exactly ONE row, still active — the constraint chain is intact.
-		// Poll-convergent: ONE durable constraint id was seeded (the D-7 exemption appended
-		// nothing). Converge on 1 id so the scan does not burst through its budget before the
-		// segment serving the seed warms up (project memory: never a single immediate read —
-		// the earlier no-delay burst could exhaust the budget while the seed was still stale,
-		// reading back 0). The confirm tail proves NO second row arrived (the exemption held).
-		const rows = await scanRows(
-			storage,
-			`SELECT id, version, status, content FROM "${sqlIdent(TBL_ATTRS)}" WHERE claim_key = ${sLiteral(slotClaimKey("asp-live", slot))}`,
-			scope,
-			1,
-		);
+		// FIRST, converge on the seeded row THROUGH `readConverged` (read-your-writes: the
+		// seeded constraint must be visible — never a single immediate read, the seam's
+		// budget absorbs the warm-up flap).
+		const slotSql = `SELECT id, version, status, content FROM "${sqlIdent(TBL_ATTRS)}" WHERE claim_key = ${sLiteral(slotClaimKey("asp-live", slot))}`;
+		const rows = await scanRows(storage, slotSql, scope, 1);
 		expect(rows.length, "the constraint slot still has exactly one row").toBe(1);
 		expect(String(rows[0].status)).toBe("active");
 		expect(String(rows[0].content)).toBe("the deploy is allowed");
+
+		// THEN, a bounded ABSENCE-PROOF re-read. This is NOT a read-convergence loop (the
+		// seeded row already converged above) — it is the OPPOSITE concern: prove the D-7
+		// exemption appended NOTHING by giving any wrongly-appended 2nd row time to surface.
+		// `readConverged` cannot express "wait for a row that must NOT exist", so this stays
+		// a deliberate, bounded confirm re-read: a couple of spaced reads, the row count must
+		// never grow past one. (Left intentionally per AC-4: a genuinely-different reason to
+		// re-read, not a hand-rolled poll-until-present.)
+		for (let confirm = 0; confirm < 3; confirm++) {
+			await new Promise((r) => setTimeout(r, 500));
+			const recheck = reduceHighestVersionPerId(await storage.query(slotSql, scope));
+			expect(recheck.length, "no second row ever appears (the exemption held)").toBe(1);
+		}
 	});
 });
