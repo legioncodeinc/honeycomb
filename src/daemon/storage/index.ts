@@ -18,11 +18,14 @@ import {
 import { type DeepLakeTransport, HttpDeepLakeTransport } from "./transport.js";
 
 export {
+	isAbsoluteUpdate,
 	isReadStatement,
 	isTransientResult,
 	type QueryOptions,
 	type QueryScope,
 	type SleepFn,
+	type StatementRetryability,
+	statementRetryability,
 	StorageClient,
 	type StorageQuery,
 } from "./client.js";

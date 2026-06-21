@@ -336,13 +336,19 @@ describe.skipIf(!HAS_TOKEN)("live version-history compaction proof (opt-in, real
 			const K = KEEP + 1;
 
 			// Poll-convergent: the row count must drop to at/under the bound. DeepLake DELETE
-			// is flappy, so if it has not fully converged we re-run the IDEMPOTENT compactor
-			// (it recomputes the reap set + re-deletes whatever a prior flappy DELETE left) —
-			// we DO NOT weaken the ≤K bar.
-			let rowCount = await countRowsConverging(key, K);
+			// is flappy AND its read side coalesces segments lazily — the reaped count can
+			// keep over-reporting for several seconds after the DELETE has genuinely landed
+			// (AC-4/AC-5 prove the reap completes). So we settle DURABLY (require consecutive
+			// stable ≤K observations — the coalesce has propagated, mirroring AC-4's
+			// `settleDurablyAtOrUnder`) and, if it still has not converged, re-run the
+			// IDEMPOTENT compactor (it recomputes the reap set + re-deletes whatever a prior
+			// flappy DELETE left). We DO NOT weaken the ≤K bar: a genuine leftover row makes
+			// every settle exhaust and the assertion RES; this only absorbs the read-side
+			// coalesce lag the project-memory note forbids reading as a fixture.
+			let rowCount = await settleDurablyAtOrUnder(key, K);
 			for (let retry = 0; retry < 3 && rowCount > K; retry++) {
 				await compact({ keepLatestN: KEEP, windowDays: 0, nowMs });
-				rowCount = await countRowsConverging(key, K);
+				rowCount = await settleDurablyAtOrUnder(key, K);
 			}
 			expect(rowCount, `rows for the key must converge to ≤K=${K} (got ${rowCount})`).toBeLessThanOrEqual(K);
 
