@@ -31,6 +31,7 @@ import { parseSessionsArgs, runSessionsCommand } from "./sessions.js";
 import { runDreamVerb } from "./dream.js";
 import { runMaintenanceVerb } from "./maintenance.js";
 import { runSettingsVerb } from "./settings.js";
+import { runAssetVerb } from "./asset.js";
 import { runStorageVerb } from "./storage-handlers.js";
 import { runStatusCommand, type StatusDeps } from "./status.js";
 import { type LocalDeps, runConnectorVerb, runDashboardCommand, runHookCommand, runUpdateCommand } from "./local-handlers.js";
@@ -134,6 +135,12 @@ async function dispatchStorage(inv: CommandInvocation, deps: CommandDeps): Promi
 	// not the `/api/<verb>` storage convention — so it has its own thin-client handler (PRD-032b).
 	if (inv.verb === "settings") {
 		return runSettingsVerb(inv.argv, deps);
+	}
+	// `asset` drives the tier×style lattice: the publish/tombstone side hits the `/api/assets`
+	// group via the loopback asset-sync API, and the LOCAL `.honeycomb/registry.json` is read/
+	// written directly — its own thin-client handler (PRD-033b), not the `/api/<verb>` convention.
+	if (inv.verb === "asset") {
+		return runAssetVerb(inv.argv, deps);
 	}
 	// `recall` renders the daemon's hits; `--json` (the global flag) switches it to the raw JSON body.
 	return runStorageVerb(inv.verb, inv.argv, deps, inv.flags.json);

@@ -1,0 +1,155 @@
+/**
+ * PRD-033a — The asset registry: `.honeycomb/registry.json` (FR-1 / a-AC-1 / D-2).
+ *
+ * The SINGLE SOURCE OF TRUTH for every substrate-managed artifact's tier, style,
+ * harness, version, identity, hashes, provenance, and device set. It EVOLVES the
+ * skillify pull manifest's shape (adds tier/style/3-hashes/`honeycomb_id`/device-
+ * set) but COEXISTS with it — D-2: the skillify pull manifest
+ * (`~/.honeycomb/state/skillify/pull-manifest.json`) is left UNTOUCHED; this
+ * registry is a NEW, separate file (`.honeycomb/registry.json`) that never
+ * migrates or deletes it.
+ *
+ * The store mirrors `createPullManifestStore` (the proven thin-client pattern):
+ *   - `read()`   — every entry, EMPTY on a missing/garbled file (never throws).
+ *   - `upsert()` — keyed by `honeycombId` (a re-record replaces the prior entry).
+ *   - `remove()` — drop the entry for a `honeycombId`.
+ *   - the write is ATOMIC (temp file + rename) so a crash mid-write never leaves a
+ *     truncated registry that the next read would treat as empty and silently lose.
+ *
+ * Pure + local (D-6): filesystem-only under an INJECTABLE base dir. It records
+ * LOCAL bookkeeping (what tier/style/hashes an artifact is at on THIS machine),
+ * not team state, so it opens NO DeepLake connection — mirroring `manifest.ts` /
+ * `watermark.ts`.
+ */
+
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import { z } from "zod";
+
+import { STYLES, TIERS } from "./contracts.js";
+import { SYNCED_ASSET_TYPES } from "../../storage/catalog/synced-assets.js";
+
+/**
+ * One artifact's registry entry (FR-1 / a-AC-1). Zod-validated on read so a
+ * hand-edited or partially-written file coerces to a usable record (or is dropped)
+ * rather than crashing the daemon.
+ *
+ *   identity:   assetType, harness, honeycombId
+ *   placement:  tier, style
+ *   version:    version (monotonic intent/order — distinct from the hashes, FR-5)
+ *   hashes:     lastSyncedHash / localHash / remoteHash (3-way-merge data, FR-6)
+ *   provenance: author, org, workspace
+ *   audience:   deviceSet (the Device-tier device_ids this artifact addresses)
+ *   source:     sourcePath (the on-disk path the artifact was registered from — re-read
+ *               on a PROMOTE so the publish carries the artifact's CURRENT bytes, F-3)
+ *
+ * `sourcePath` is ADDITIVE + OPTIONAL: an entry written before this field (or one where
+ * the path is genuinely unknown) simply omits it. A promotion then fails CLEARLY rather
+ * than publishing an empty blob (the CLI tells the user to re-register or pass the path).
+ */
+export const RegistryEntrySchema = z.object({
+	assetType: z.enum(SYNCED_ASSET_TYPES),
+	harness: z.string(),
+	tier: z.enum(TIERS),
+	style: z.enum(STYLES),
+	version: z.number().int().nonnegative(),
+	honeycombId: z.string().min(1),
+	lastSyncedHash: z.string(),
+	localHash: z.string(),
+	remoteHash: z.string(),
+	author: z.string(),
+	org: z.string(),
+	workspace: z.string(),
+	deviceSet: z.array(z.string()),
+	/**
+	 * The absolute on-disk path the artifact was registered from — the agent FILE or the
+	 * skill DIRECTORY. Re-read on a PROMOTE so the publish carries the artifact's CURRENT
+	 * native bytes (F-3). Optional so pre-existing entries (and tests) stay valid.
+	 */
+	sourcePath: z.string().optional(),
+});
+
+/** One artifact's registry entry (FR-1 / a-AC-1) — the inferred type of the schema. */
+export type RegistryEntry = z.infer<typeof RegistryEntrySchema>;
+
+/** The on-disk registry store keyed by `honeycombId`. Mirrors {@link PullManifestStore}. */
+export interface AssetRegistryStore {
+	/** Every recorded entry (EMPTY on a missing/garbled file — never throws). */
+	read(): readonly RegistryEntry[];
+	/** Upsert one entry, keyed by `honeycombId` (a re-record replaces the prior entry). */
+	upsert(entry: RegistryEntry): void;
+	/** Remove the entry for `honeycombId`. Returns the removed entry, or `null`. */
+	remove(honeycombId: string): RegistryEntry | null;
+}
+
+/** The default `.honeycomb` base dir under the user's home (mirrors the device store). */
+export function defaultRegistryBaseDir(homeDir: string = homedir()): string {
+	return join(homeDir, ".honeycomb");
+}
+
+/** The registry file name under the base dir. */
+const REGISTRY_FILE = "registry.json";
+
+/**
+ * Build a filesystem {@link AssetRegistryStore} rooted at `baseDir` (default
+ * `~/.honeycomb`). A test injects a temp dir so no real `~` is touched. Entries
+ * are keyed by `honeycombId`; an `upsert` with a known id replaces the record.
+ * Mirrors `createPullManifestStore`, with an ATOMIC write (temp + rename) so a
+ * crash mid-write can never truncate the registry.
+ */
+export function createAssetRegistryStore(baseDir: string = defaultRegistryBaseDir()): AssetRegistryStore {
+	const filePath = join(baseDir, REGISTRY_FILE);
+
+	const readAll = (): RegistryEntry[] => {
+		try {
+			const parsed = JSON.parse(readFileSync(filePath, "utf-8")) as unknown;
+			if (!Array.isArray(parsed)) return [];
+			return parsed.map(normalizeEntry).filter((e): e is RegistryEntry => e !== null);
+		} catch {
+			return [];
+		}
+	};
+
+	const writeAll = (entries: readonly RegistryEntry[]): void => {
+		mkdirSync(dirname(filePath), { recursive: true });
+		// Atomic write: serialize to a sibling temp file, then rename over the target.
+		// rename(2) is atomic on the same filesystem, so a reader never sees a partial file.
+		const tmp = `${filePath}.tmp-${process.pid}`;
+		writeFileSync(tmp, `${JSON.stringify(entries, null, 2)}\n`, "utf-8");
+		renameSync(tmp, filePath);
+	};
+
+	return {
+		read(): readonly RegistryEntry[] {
+			return readAll();
+		},
+
+		upsert(entry: RegistryEntry): void {
+			const normalized = normalizeEntry(entry);
+			if (normalized === null) return;
+			const entries = readAll().filter((e) => e.honeycombId !== normalized.honeycombId);
+			entries.push(normalized);
+			writeAll(entries);
+		},
+
+		remove(honeycombId: string): RegistryEntry | null {
+			const entries = readAll();
+			const target = entries.find((e) => e.honeycombId === honeycombId) ?? null;
+			if (target === null) return null;
+			writeAll(entries.filter((e) => e.honeycombId !== honeycombId));
+			return target;
+		},
+	};
+}
+
+/**
+ * Coerce an untrusted registry record into a valid {@link RegistryEntry}, or
+ * `null` when unusable. Uses the zod schema (the single validation authority); a
+ * record that fails validation is dropped rather than throwing, so one bad entry
+ * never poisons the whole registry read.
+ */
+function normalizeEntry(raw: unknown): RegistryEntry | null {
+	const result = RegistryEntrySchema.safeParse(raw);
+	return result.success ? result.data : null;
+}

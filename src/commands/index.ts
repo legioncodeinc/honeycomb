@@ -91,6 +91,14 @@ export {
 } from "./settings.js";
 
 export {
+	ASSETS_ENDPOINT,
+	type AssetCliDeps,
+	type AssetCliInvocation,
+	parseAssetCliArgs,
+	runAssetVerb,
+} from "./asset.js";
+
+export {
 	type ConnectorRunner,
 	type ConnectorVerbArgs,
 	type ConnectorVerbResult,

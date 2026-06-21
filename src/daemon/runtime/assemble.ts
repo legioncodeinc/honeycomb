@@ -77,6 +77,11 @@ import { mountSettingsApi } from "./vault/api.js";
 import { isValidProviderModel, providerEntry } from "./vault/catalog.js";
 import { migrateDeeplakeToken } from "./vault/migrate.js";
 
+// ── The asset-sync substrate `/api/assets` mount (PRD-033c / D-6) ──
+import { mountAssetsApi } from "./assets/api.js";
+import { type TrustedTableProbe } from "./assets/sync.js";
+import { CATALOG } from "../storage/catalog/index.js";
+
 import { buildInferenceModelClient, type ProviderModelOverride } from "./inference/model-client-factory.js";
 import type { ModelClient } from "./pipeline/model-client.js";
 import { resolveDreamingConfig } from "./dreaming/config.js";
@@ -720,6 +725,19 @@ export const VAULT_DREAMING_ENABLED_KEY = "dreaming.enabled" as const;
  * construction — no IO until a `getSetting` call. A test injects {@link AssembleDaemonOptions.vault}
  * to bypass this entirely.
  */
+/**
+ * The trusted-table probe the `/api/assets` pull consults BEFORE its SELECT (PRD-033c
+ * FR-7). The daemon's known-table set IS the in-memory `CATALOG` (no live round-trip),
+ * so this resolves the table names synchronously from the catalog — `synced_assets` is
+ * a member, so the production pull never skips on a catalog-known table; the skip path
+ * exists for symmetry with the thin-client trusted-table list (a fresh workspace where
+ * the physical table is not yet healed is handled by the engine's fail-soft empty read).
+ */
+function catalogTrustedTableProbe(): TrustedTableProbe {
+	const names = CATALOG.map((t) => t.name);
+	return { tables: () => Promise.resolve(names) };
+}
+
 function buildVaultStore(): VaultStore {
 	return new VaultStore({
 		baseDir: resolveWorkspaceBaseDir(),
@@ -1019,6 +1037,30 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			const reason = err instanceof Error ? err.message : String(err);
 			process.stderr.write(`honeycomb: settings API mount failed (non-fatal): ${reason}\n`);
 		}
+	}
+
+	// ── PRD-033c / FR-1/FR-2/FR-6: FIRE the `/api/assets` mount ONCE so the asset-sync
+	// substrate (publish/pull/tombstone) is LIVE against this daemon — the ONLY DeepLake path
+	// for synced assets (D-6). It builds the engine over the SAME live storage client + the
+	// catalog `synced_assets` table (lazy-create + heal on first publish), threading the
+	// daemon's `defaultScope` so a loopback thin client that carries no tenancy resolves the
+	// single local tenant (mirrors the data-API mounts). The trusted-table probe is derived
+	// from CATALOG so the pull's table-absent skip is consistent with the rest of the daemon.
+	// FAIL-SOFT: a mount error must NEVER crash the daemon — the surface simply stays unmounted
+	// this run (it falls through to the 501 scaffold), exactly the posture the other mounts use.
+	try {
+		mountAssetsApi(daemon, {
+			sync: { storage, trustedTables: catalogTrustedTableProbe() },
+			defaultScope: scope,
+			// PRD-033 SECURITY: thread the deployment mode so the handlers take tenancy
+			// (org/workspace/author) from the VALIDATED Identity in team/hybrid — never the
+			// request body — closing the cross-tenant publish/pull/tombstone forge. In local
+			// mode the body + defaultScope fallback applies (single-user loopback).
+			mode: config.mode,
+		});
+	} catch (err: unknown) {
+		const reason = err instanceof Error ? err.message : String(err);
+		process.stderr.write(`honeycomb: assets API mount failed (non-fatal): ${reason}\n`);
 	}
 
 	// ── The cached-health refresher: a cheap connectivity round trip on an interval,
