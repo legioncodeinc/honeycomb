@@ -504,3 +504,115 @@ describe("c-AC-6 commit-ordering (older commit checked out → pull, not local-n
 		expect(outcome.kind).toBe("pulled");
 	});
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// READ-PATH GUARD (PRD-002c) — a read against a not-yet-created `codebase` table
+// must NEVER issue a SELECT against it (which the backend logs as 42P01) and must
+// NEVER create it from the read. Creation stays on the WRITE (INSERT) path.
+//
+// Regression for the production 42P01 storm: the codebase push/pull reads were
+// routed through `withHeal`, so the very first SELECT against an absent table hit
+// the backend as `relation "codebase" does not exist` (logged) BEFORE the heal
+// created it. The fix probes `information_schema.tables` first and skips the read
+// when the table is absent.
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * A catalog-aware fake that models table EXISTENCE explicitly. The existence
+ * probe (`information_schema.tables`) is answered from `exists`; a SELECT against
+ * the `codebase` table while it does NOT exist models the backend 42P01 — the
+ * branch the fix must make unreachable. An INSERT/CREATE flips `exists` true.
+ */
+class CatalogFake {
+	readonly statements: string[] = [];
+	rows: FakeRow[] = [];
+	constructor(public exists: boolean) {}
+
+	async query(sql: string, _scope: QueryScope): Promise<QueryResult> {
+		this.statements.push(sql);
+		const head = sql.trimStart().slice(0, 6).toUpperCase();
+		if (head.startsWith("SELECT")) {
+			if (/information_schema\.tables/i.test(sql)) {
+				return ok(this.exists ? [{ "1": 1 } as StorageRow] : [], 1);
+			}
+			// A real read against the table. If the table is absent this is the
+			// backend 42P01 — the WHOLE POINT of the fix is that this never runs.
+			if (!this.exists) return queryError('relation "codebase" does not exist', 500);
+			if (/ORDER BY/i.test(sql)) {
+				const sorted = [...this.rows].sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+				return ok(sorted.slice(0, 1), 1);
+			}
+			if (/LIMIT 1/i.test(sql)) return ok(this.rows.slice(0, 1), 1);
+			return ok([...this.rows], 1);
+		}
+		if (head.startsWith("INSERT")) {
+			this.exists = true;
+			this.rows.push(parseInsertRow(sql));
+			return ok([], 1);
+		}
+		if (head.startsWith("CREATE")) {
+			this.exists = true;
+			return ok([], 1);
+		}
+		return ok([], 1);
+	}
+
+	/** SELECTs that touch the real table (the ones that would 42P01 on an absent table). */
+	tableSelects(): string[] {
+		return this.statements.filter((s) => /SELECT/i.test(s) && /FROM "codebase"/.test(s));
+	}
+
+	probeCount(): number {
+		return this.statements.filter((s) => /information_schema\.tables/i.test(s)).length;
+	}
+
+	createCount(): number {
+		return this.statements.filter((s) => s.trimStart().toUpperCase().startsWith("CREATE")).length;
+	}
+
+	firstIndex(pred: (s: string) => boolean): number {
+		return this.statements.findIndex(pred);
+	}
+}
+
+describe("read-path guard (a read never SELECTs — nor creates — an absent table)", () => {
+	it("pull against an ABSENT table → not-found, probes the catalog, issues NO table SELECT and NO CREATE", async () => {
+		const store = new CatalogFake(false);
+
+		const outcome = await pullSnapshot(IDENTITY, ctxFor(store), { headCommit: IDENTITY.commit });
+
+		expect(outcome.kind, "an absent table is a clean miss, not a failure").toBe("not-found");
+		expect(store.probeCount(), "the read consults information_schema first").toBeGreaterThan(0);
+		expect(store.tableSelects(), "NO SELECT is issued against the absent table (the 42P01 source)").toHaveLength(0);
+		expect(store.createCount(), "a read must NEVER create the table").toBe(0);
+	});
+
+	it("pull against a PRESENT table → reads it (probe says exists, then the table SELECT runs)", async () => {
+		const { snapshot, sha256 } = await realSnapshot();
+		const store = new CatalogFake(true);
+		seedRow(store, snapshot, sha256);
+
+		const outcome = await pullSnapshot(IDENTITY, ctxFor(store), { headCommit: IDENTITY.commit });
+
+		expect(outcome.kind).toBe("pulled");
+		expect(store.tableSelects().length, "a present table IS read").toBeGreaterThan(0);
+	});
+
+	it("push against an ABSENT table → inserts, with NO pre-INSERT SELECT against the table", async () => {
+		const { snapshot, sha256 } = await realSnapshot();
+		const store = new CatalogFake(false);
+
+		const outcome = await pushSnapshot(snapshot, sha256, IDENTITY, ctxFor(store));
+
+		expect(outcome.kind, "a fresh push inserts the row").toBe("inserted");
+		// The create stays on the WRITE path: any table SELECT (the post-insert
+		// re-verify) only happens AFTER the INSERT, never before it as a probe.
+		const firstInsert = store.firstIndex((s) => s.trimStart().toUpperCase().startsWith("INSERT"));
+		const firstTableSelect = store.firstIndex((s) => /SELECT/i.test(s) && /FROM "codebase"/.test(s));
+		expect(firstInsert, "the push must INSERT").toBeGreaterThanOrEqual(0);
+		expect(
+			firstTableSelect === -1 || firstTableSelect > firstInsert,
+			"no SELECT against the table precedes the INSERT (no 42P01 probe)",
+		).toBe(true);
+	});
+});

@@ -130,6 +130,25 @@ export function buildIntrospectionSql(tableName: string, workspace: string): str
 }
 
 /**
+ * Render the catalog existence probe for one table in one workspace (PRD-002c
+ * read-path guard). Reads `information_schema.tables` — Postgres' OWN catalog,
+ * never the table itself — so a not-yet-created table comes back as ZERO rows
+ * instead of a backend `relation "<t>" does not exist` (42P01). That is what lets
+ * a read decide "the table is absent" WITHOUT issuing a SELECT against it (and
+ * WITHOUT the backend logging a 42P01). Both the table and the workspace are
+ * VALUES here (they filter rows in the catalog view, they are not interpolated as
+ * identifiers), so they route through `sqlStr`, exactly like
+ * {@link buildIntrospectionSql}.
+ */
+export function buildTableExistsSql(tableName: string, workspace: string): string {
+	return (
+		"SELECT 1 FROM information_schema.tables " +
+		`WHERE table_name = '${sqlStr(tableName)}' ` +
+		`AND table_schema = '${sqlStr(workspace)}' LIMIT 1`
+	);
+}
+
+/**
  * Render one `ALTER TABLE "<table>" ADD COLUMN <name> <sql>` (FR-4). NEVER
  * `IF NOT EXISTS`: DeepLake returns HTTP 500 (not 409) on a duplicate add, so
  * `IF NOT EXISTS` does not save you — the add-only-missing DIFF in `heal.ts` is
