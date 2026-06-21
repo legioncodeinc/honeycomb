@@ -19,11 +19,14 @@ import { describe, expect, it } from "vitest";
 import type { QueryScope, StorageQuery, QueryOptions } from "../../../../src/daemon/storage/client.js";
 import { ok, queryError, type QueryResult, type StorageRow } from "../../../../src/daemon/storage/result.js";
 import {
+	ARM_CLASS_WEIGHT,
 	DEFAULT_RECALL_LIMIT,
 	MAX_RECALL_LIMIT,
+	RRF_K,
 	buildMemoriesArmSql,
 	buildMemoryArmSql,
 	buildSessionsArmSql,
+	kindOfSource,
 	recallMemories,
 	resolveRecallLimit,
 } from "../../../../src/daemon/runtime/memories/recall.js";
@@ -141,7 +144,8 @@ describe("recallMemories runs the three arms resiliently (per-arm fail-soft)", (
 
 		const result = await recallMemories({ query: "widgets", scope: SCOPE, limit: 10 }, { storage });
 
-		// memories arm (2) then sessions arm (1), merged in arm order.
+		// RRF: the two distilled memories (weight 1.0) outrank the raw session (weight 0.4),
+		// and within the memories arm rank order is preserved (mem-1 r1, mem-2 r2).
 		expect(result.hits.map((h) => h.source)).toEqual(["memories", "memories", "sessions"]);
 		expect(result.hits.map((h) => h.id)).toEqual(["mem-1", "mem-2", "sess/1"]);
 		// Distinct-source set reflects exactly the arms that surfaced a hit.
@@ -162,7 +166,7 @@ describe("recallMemories runs the three arms resiliently (per-arm fail-soft)", (
 		expect(result.sources).toEqual(["memories", "memory", "sessions"]);
 	});
 
-	it("the merged union is capped at the overall (clamped) limit, not the per-arm sum", async () => {
+	it("the fused result is capped at the overall (clamped) limit, not the per-arm sum", async () => {
 		const many = Array.from({ length: 5 }, (_, i) => memoriesRow(`mem-${i}`, `widgets ${i}`));
 		const { storage } = fakeStorage({
 			memories: ok(many, 1),
@@ -172,9 +176,16 @@ describe("recallMemories runs the three arms resiliently (per-arm fail-soft)", (
 
 		const result = await recallMemories({ query: "widgets", scope: SCOPE, limit: 3 }, { storage });
 
+		// PRD-027: RRF orders by fused score. memories[mem-0] (rank1, 1/61) ties the memory
+		// summary sum/1 (rank1, weight 1.0, 1/61); the id tie-break puts mem-0 first, then
+		// sum/1, then memories[mem-1] (rank2, 1/62). The raw session (weight 0.4) never makes
+		// the top-3. Capped at 3 — the distilled facts/summary, never the per-arm sum of 7.
 		expect(result.hits).toHaveLength(3);
-		// First-three are all from the memories arm (merge order), so only memories surfaced.
-		expect(result.sources).toEqual(["memories"]);
+		expect(result.hits.map((h) => h.id)).toEqual(["mem-0", "sum/1", "mem-1"]);
+		expect(result.sources).toEqual(["memories", "memory"]);
+		// No raw session in the top-3, and every hit carries a real numeric score.
+		expect(result.hits.every((h) => h.source !== "sessions")).toBe(true);
+		expect(result.hits.every((h) => typeof h.score === "number" && h.score > 0)).toBe(true);
 	});
 
 	it("an empty query short-circuits to empty without issuing any arm query", async () => {
@@ -451,5 +462,175 @@ describe("AC-3 recall runs the `<#>` cosine arm and reports `degraded` honestly"
 		// dup-mem appears exactly once; the sessions lexical hit also surfaces.
 		expect(result.hits.filter((h) => h.id === "dup-mem")).toHaveLength(1);
 		expect(result.hits.some((h) => h.id === "sess/9")).toBe(true);
+	});
+});
+
+// ── PRD-027 — RRF ranking + provenance-forward shaping (AC-1 / AC-2 / AC-3 / AC-7) ──
+
+/** The single-arm RRF contribution for a hit of `kind` at 1-based `rank` (the math under test). */
+function rrf(kind: "memory" | "session", rank: number): number {
+	return ARM_CLASS_WEIGHT[kind] / (RRF_K + rank);
+}
+
+describe("AC-1 — real fused `score`, real RRF order (not arm order, not client-fake)", () => {
+	it("a semantic-strong hit and a lexical-strong hit fuse to the order the RRF math predicts", async () => {
+		// Two DISTINCT distilled memories. `mem-sem` is the semantic arm's rank-1 (cosine) AND
+		// the lexical `memories` arm's rank-2; `mem-lex` is the lexical arm's rank-1 only.
+		// RRF math (k=60, both distilled so weight 1.0):
+		//   mem-sem = 1/(60+1) [semantic r1] + 1/(60+2) [lexical r2] = 0.0163934 + 0.0161290 = 0.0325224
+		//   mem-lex = 1/(60+1) [lexical r1]                                                   = 0.0163934
+		// → mem-sem (corroborated by BOTH arms) ranks ABOVE mem-lex. Arm order alone (lexical
+		//   first = mem-lex) would have inverted this — proving the order is fused, not arm-order.
+		const { storage } = semanticStorage({
+			vector: { memories: [{ id: "mem-sem", score: 0.95 }] },
+			hydrate: { memories: [{ source: "memories", id: "mem-sem", text: "semantic-strong fact" }] },
+			lexical: {
+				memories: ok(
+					[
+						{ source: "memories", id: "mem-lex", text: "lexical-strong fact" },
+						{ source: "memories", id: "mem-sem", text: "semantic-strong fact" },
+					],
+					0,
+				),
+				memory: ok([], 0),
+				sessions: ok([], 0),
+			},
+		});
+
+		const result = await recallMemories(
+			{ query: "fact", scope: SCOPE },
+			{ storage, embed: fakeEmbed(VALID_QUERY_VECTOR) },
+		);
+
+		const expectedSem = rrf("memory", 1) + rrf("memory", 2);
+		const expectedLex = rrf("memory", 1);
+		// Order matches the fused math: mem-sem above mem-lex.
+		expect(result.hits.map((h) => h.id)).toEqual(["mem-sem", "mem-lex"]);
+		// The emitted scores ARE the fused RRF values (a real, comparable relevance score).
+		expect(result.hits[0]?.score).toBeCloseTo(expectedSem, 10);
+		expect(result.hits[1]?.score).toBeCloseTo(expectedLex, 10);
+		// Descending — the surface renders engine order off this score.
+		expect(result.hits[0]!.score).toBeGreaterThan(result.hits[1]!.score);
+	});
+
+	it("every hit carries a numeric score and a provenance kind; kindOfSource is the mapping", () => {
+		expect(kindOfSource("memories")).toBe("memory");
+		expect(kindOfSource("memory")).toBe("memory");
+		expect(kindOfSource("sessions")).toBe("session");
+	});
+});
+
+describe("AC-2 — provenance shaping: distilled [memory] facts above raw [sessions] dumps", () => {
+	it("a distilled fact and a raw session dump both match → the fact ranks ABOVE the dump, which is tagged secondary", async () => {
+		// Both match at lexical rank 1 in their own arm. The arm-class weight is the whole story:
+		//   distilled fact  = 1.0/(60+1) = 0.0163934
+		//   raw session     = 0.4/(60+1) = 0.0065574  (materially weaker — needs a stronger signal)
+		// → the distilled fact outranks the raw dump even though both were each arm's top hit.
+		const { storage } = fakeStorage({
+			memories: ok([memoriesRow("mem-fact", "the deploy uses blue-green cutover")], 1),
+			memory: ok([], 1),
+			sessions: ok([sessionsRow("sess/raw", "raw turn: the deploy uses blue-green cutover")], 1),
+		});
+
+		const result = await recallMemories({ query: "deploy", scope: SCOPE }, { storage });
+
+		expect(result.hits.map((h) => h.id)).toEqual(["mem-fact", "sess/raw"]);
+		// The distilled fact ranks first and scores strictly higher than the raw dump.
+		expect(result.hits[0]!.score).toBeGreaterThan(result.hits[1]!.score);
+		// The raw session row is TAGGED secondary/session (drill-down), never dropped.
+		const fact = result.hits.find((h) => h.id === "mem-fact")!;
+		const dump = result.hits.find((h) => h.id === "sess/raw")!;
+		expect(fact.kind).toBe("memory");
+		expect(fact.secondary).toBe(false);
+		expect(dump.kind).toBe("session");
+		expect(dump.secondary).toBe(true);
+	});
+
+	it("a raw session at lexical rank-1 still loses to a distilled fact buried deeper in its arm", async () => {
+		// Even a distilled fact at rank 3 (1.0/63 = 0.015873) outranks a raw session at rank 1
+		// (0.4/61 = 0.006557) — the weight makes a raw dump need a MATERIALLY stronger signal.
+		const facts = [
+			memoriesRow("mem-a", "deploy fact a"),
+			memoriesRow("mem-b", "deploy fact b"),
+			memoriesRow("mem-c", "deploy fact c"),
+		];
+		const { storage } = fakeStorage({
+			memories: ok(facts, 1),
+			memory: ok([], 1),
+			sessions: ok([sessionsRow("sess/raw", "deploy raw turn")], 1),
+		});
+
+		const result = await recallMemories({ query: "deploy", scope: SCOPE }, { storage });
+
+		// All three distilled facts rank above the single raw session dump.
+		expect(result.hits.map((h) => h.id)).toEqual(["mem-a", "mem-b", "mem-c", "sess/raw"]);
+		expect(result.hits[3]!.secondary).toBe(true);
+		expect(rrf("memory", 3)).toBeGreaterThan(rrf("session", 1)); // the governing inequality.
+	});
+});
+
+describe("AC-3 — cross-arm near-duplicates collapse to one, best fused score + provenance kept", () => {
+	it("a memory surfaced by the semantic AND the lexical arm appears ONCE, keeping the summed (best) score and its source", async () => {
+		const { storage } = semanticStorage({
+			vector: { memories: [{ id: "dup", score: 0.9 }] },
+			hydrate: { memories: [{ source: "memories", id: "dup", text: "the shared distilled fact" }] },
+			lexical: {
+				memories: ok([{ source: "memories", id: "dup", text: "the shared distilled fact" }], 0),
+				memory: ok([], 0),
+				sessions: ok([], 0),
+			},
+		});
+
+		const result = await recallMemories(
+			{ query: "shared", scope: SCOPE },
+			{ storage, embed: fakeEmbed(VALID_QUERY_VECTOR) },
+		);
+
+		// Collapsed to ONE hit.
+		const dups = result.hits.filter((h) => h.id === "dup");
+		expect(dups).toHaveLength(1);
+		// The survivor keeps the BEST (summed-across-arms) fused score — strictly more than a
+		// single-arm contribution — and its source + provenance class.
+		const survivor = dups[0]!;
+		expect(survivor.source).toBe("memories");
+		expect(survivor.kind).toBe("memory");
+		expect(survivor.score).toBeCloseTo(rrf("memory", 1) + rrf("memory", 1), 10);
+		expect(survivor.score).toBeGreaterThan(rrf("memory", 1));
+	});
+});
+
+describe("AC-7 — ranking/shaping preserve the per-arm fail-soft (missing sibling → empty arm, no 500)", () => {
+	it("a missing sibling arm contributes nothing to the fusion; the surviving arms still rank, degraded honest", async () => {
+		// Fresh-partition shape: only `memories` exists; `memory` + `sessions` reject as missing.
+		// Under RRF the missing arms are empty lists that contribute nothing — the memories hit
+		// still ranks and carries a real score; no throw, degraded honest (lexical-only here).
+		const { storage } = fakeStorage({
+			memories: ok([memoriesRow("mem-1", "a fact about widgets")], 1),
+			memory: relationMissing("memory"),
+			sessions: relationMissing("sessions"),
+		});
+
+		const result = await recallMemories({ query: "widgets", scope: SCOPE }, { storage });
+
+		expect(result.hits).toHaveLength(1);
+		expect(result.hits[0]?.id).toBe("mem-1");
+		expect(result.hits[0]?.score).toBeCloseTo(rrf("memory", 1), 10);
+		expect(result.hits[0]?.kind).toBe("memory");
+		expect(result.sources).toEqual(["memories"]);
+		expect(result.degraded).toBe(true);
+	});
+
+	it("every arm failing still yields an empty fused result (no throw, degraded honest)", async () => {
+		const { storage } = fakeStorage({
+			memories: relationMissing("memories"),
+			memory: relationMissing("memory"),
+			sessions: relationMissing("sessions"),
+		});
+
+		const result = await recallMemories({ query: "anything", scope: SCOPE }, { storage });
+
+		expect(result.hits).toEqual([]);
+		expect(result.sources).toEqual([]);
+		expect(result.degraded).toBe(true);
 	});
 });

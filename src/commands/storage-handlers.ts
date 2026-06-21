@@ -135,6 +135,11 @@ interface RecallHit {
 	readonly id?: string;
 	/** The recalled text — truncated for readability in the human render. */
 	readonly text?: string;
+	/**
+	 * The ENGINE's fused RRF relevance score (PRD-027 Wave 1). Rendered per hit; the CLI
+	 * NEVER invents a score (D-4 / AC-4). Optional so an older daemon (pre-score) still renders.
+	 */
+	readonly score?: number;
 }
 
 /** The shape the daemon returns for a `recall` (parsed defensively — every field is optional). */
@@ -172,7 +177,10 @@ function asRecallBody(body: unknown): RecallResponseBody {
  * memories. Now:
  *   - `--json` → the raw JSON body verbatim (machine-readable; the existing global flag);
  *   - empty hits → a clean `no memories found for "<query>"`;
- *   - otherwise → one line per hit (`[source] id` + a truncated snippet of `text`), and a
+ *   - otherwise → one line per hit (`[source] id  (score)` + a truncated snippet of `text`),
+ *     rendered in the ENGINE order (the daemon already returns the hits ranked DESC by the
+ *     fused RRF relevance — distilled `[memory]` facts above raw `[sessions]` drill-downs — so
+ *     this loop iterates them verbatim, NEVER re-sorting and NEVER inventing a score), and a
  *     `(lexical fallback)` marker when `degraded` is true so the user knows recall ran without
  *     semantic embeddings.
  * The OTHER storage verbs keep the unchanged `<verb>: ok` render — only `recall` is special-cased.
@@ -191,11 +199,14 @@ function renderRecall(query: string, res: DaemonResponse, json: boolean, out: Ou
 	if (parsed.degraded === true) {
 		out("(lexical fallback)");
 	}
+	// Render in the engine's ranked order — no client-side sort. Distilled `[memory]` hits
+	// already precede raw `[sessions]` drill-downs because the engine fused + ordered them.
 	for (const hit of hits) {
 		const origin = hit.source !== undefined && hit.source.length > 0 ? hit.source : "memory";
 		const id = hit.id !== undefined && hit.id.length > 0 ? hit.id : "(no id)";
+		const score = typeof hit.score === "number" ? `(${hit.score.toFixed(2)})  ` : "";
 		const body = typeof hit.text === "string" && hit.text.length > 0 ? snippet(hit.text) : "(no text)";
-		out(`[${origin}] ${id}  ${body}`);
+		out(`[${origin}] ${id}  ${score}${body}`);
 	}
 }
 

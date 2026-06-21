@@ -70,15 +70,18 @@ describe("PRD-020a a-AC-3 — storage verbs route through the daemon (never Deep
 describe("PRD-023 dogfood — `recall` RENDERS the daemon's hits (not just `recall: ok`)", () => {
 	const RECALL_KEY = "POST /api/memories/recall";
 
-	it("renders each hit's source + id + a readable snippet of text", async () => {
+	it("renders each hit's source + id + ENGINE score + a readable snippet, in ENGINE order", async () => {
+		// PRD-027 Wave 1: the engine returns hits ALREADY ranked DESC by the fused RRF `score`,
+		// distilled `[memory]` facts ahead of raw `[sessions]` drill-downs. The CLI renders the
+		// ENGINE score + ENGINE order verbatim (AC-4) — it never invents a score and never re-sorts.
 		const daemon = createFakeDaemonClient({
 			responses: {
 				[RECALL_KEY]: {
 					status: 200,
 					body: {
 						hits: [
-							{ source: "memory", id: "mem-1", text: "We chose Deep Lake for the vector store." },
-							{ source: "sessions", id: "sess-9", text: "The daemon owns all SQL; the CLI dispatches intent." },
+							{ source: "memory", id: "mem-1", text: "We chose Deep Lake for the vector store.", score: 0.51, kind: "memory", secondary: false },
+							{ source: "sessions", id: "sess-9", text: "The daemon owns all SQL; the CLI dispatches intent.", score: 0.19, kind: "session", secondary: true },
 						],
 						sources: ["memory", "sessions"],
 						degraded: false,
@@ -103,6 +106,15 @@ describe("PRD-023 dogfood — `recall` RENDERS the daemon's hits (not just `reca
 		// The source tag is shown per hit.
 		expect(stdout).toContain("[memory]");
 		expect(stdout).toContain("[sessions]");
+		// AC-4: the ENGINE score is rendered per hit (no client-side score invention).
+		expect(stdout).toContain("(0.51)");
+		expect(stdout).toContain("(0.19)");
+		// AC-4: the rendered ORDER is the engine order — the distilled `[memory]` line precedes
+		// the raw `[sessions]` drill-down line (the daemon ranked them; the CLI preserved it).
+		const memLine = lines.findIndex((l) => l.includes("mem-1"));
+		const sessLine = lines.findIndex((l) => l.includes("sess-9"));
+		expect(memLine).toBeGreaterThanOrEqual(0);
+		expect(sessLine).toBeGreaterThan(memLine);
 	});
 
 	it("surfaces the `(lexical fallback)` marker when the daemon reports degraded recall", async () => {

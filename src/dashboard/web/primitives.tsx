@@ -325,6 +325,10 @@ export interface MemoryCardProps {
 	scope?: string;
 	verified?: boolean;
 	dreaming?: boolean;
+	/** Provenance class from the recall engine (PRD-027): distilled `memory` vs raw `session`. */
+	kind?: "memory" | "session";
+	/** `true` iff a drill-down raw session row — the card visually demotes it (dim + a tag). */
+	secondary?: boolean;
 	style?: React.CSSProperties;
 }
 
@@ -337,6 +341,8 @@ export function MemoryCard({
 	scope = "personal",
 	verified = false,
 	dreaming = false,
+	kind,
+	secondary = false,
 	style,
 }: MemoryCardProps): React.JSX.Element {
 	const accent = dreaming ? "var(--dream)" : verified ? "var(--verified)" : "var(--honey)";
@@ -351,6 +357,9 @@ export function MemoryCard({
 				border: "1px solid var(--border-default)",
 				borderRadius: "var(--radius-lg)",
 				transition: "border-color var(--dur-base) var(--ease-out)",
+				// PRD-027 AC-4: a raw-session drill-down hit is visually demoted (dimmed) below
+				// the distilled facts the engine ranked above it — the score+order are the engine's.
+				opacity: secondary ? 0.72 : 1,
 				...style,
 			}}
 		>
@@ -384,6 +393,9 @@ export function MemoryCard({
 					</span>
 					{verified && !dreaming && (
 						<span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--verified)", flex: "none" }}>✓ verified</span>
+					)}
+					{(secondary || kind === "session") && !dreaming && (
+						<span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-tertiary)", flex: "none" }}>session</span>
 					)}
 					{dreaming && <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--dream)", flex: "none" }}>dreaming…</span>}
 				</div>

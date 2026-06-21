@@ -152,7 +152,12 @@ function zodError(c: Context, error: z.ZodError): Response {
 	);
 }
 
-/** Serialize a recall result for the HTTP response. */
+/**
+ * Serialize a recall result for the HTTP response. The hits are forwarded VERBATIM —
+ * including the PRD-027 fused `score`, provenance `kind` (distilled `memory` vs raw
+ * `session`), and the `secondary` drill-down flag — so the dashboard/CLI render the
+ * ENGINE's relevance score + order (D-4 repoints the client off its `1 - i*0.06` fake).
+ */
 function recallResponse(result: MemoryRecallResult): {
 	hits: MemoryRecallResult["hits"];
 	sources: string[];

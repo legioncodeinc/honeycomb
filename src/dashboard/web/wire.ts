@@ -119,15 +119,29 @@ export type SkillRowWire = z.infer<typeof SkillRowSchema>;
 
 /**
  * One recall hit on the wire — the `/api/memories/recall` response shape from
- * `src/daemon/runtime/memories/recall.ts` (`{ source, id, text }` per hit). The kit's
- * `MemoryCard` wants `{ memoryKey, snippet, source, score, scope, verified }`; we MAP the
- * wire hit to those props in {@link recall} (the wire has no score/scope/verified, so they
- * are derived honestly: id→memoryKey, text→snippet, the arm name→scope hint).
+ * `src/daemon/runtime/memories/recall.ts`. PRD-027 Wave 1 made the hit carry a REAL
+ * `{ source, id, text, score, kind, secondary }`: `score` is the fused RRF relevance
+ * (the engine already emits hits ranked DESC by it), `kind` is the provenance class
+ * (`"memory"` distilled vs `"session"` raw dump), and `secondary` is `true` iff the hit
+ * is a drill-down raw session row. The client renders the ENGINE score + ENGINE order —
+ * it NEVER fabricates a score (D-4 / AC-4 removed the old `1 - i*0.06` synthesis).
+ *
+ * The score/kind/secondary fields `.catch()` to safe defaults so an OLDER daemon that
+ * predates Wave 1 (no score on the wire) still renders (degrade gracefully). The LIVE
+ * daemon now always sends them. The kit's `MemoryCard` wants
+ * `{ memoryKey, snippet, source, score, scope, verified }`; we MAP the wire hit to those
+ * props in {@link recall} (id→memoryKey, text→snippet, ENGINE `score`→score, the arm name→
+ * scope hint, `kind`/`secondary`→the distilled-vs-drill-down demotion).
  */
 export const RecallHitSchema = z.object({
 	source: z.string().catch(""),
 	id: z.string().catch(""),
 	text: z.string().catch(""),
+	// PRD-027 Wave 1 (AC-4): the ENGINE's fused relevance + provenance. `.catch()` defaults
+	// keep an older daemon (pre-score) renderable — a missing score degrades to 0, not a throw.
+	score: z.number().catch(0),
+	kind: z.enum(["memory", "session"]).catch("memory"),
+	secondary: z.boolean().catch(false),
 });
 export const RecallResponseSchema = z.object({
 	hits: z.array(RecallHitSchema).catch([]),
@@ -140,9 +154,14 @@ export interface RecalledMemory {
 	readonly memoryKey: string;
 	readonly snippet: string;
 	readonly source: string;
+	/** The ENGINE's fused RRF relevance score (NOT a client fabrication — PRD-027 AC-4). */
 	readonly score: number;
 	readonly scope: string;
 	readonly verified: boolean;
+	/** Provenance class from the engine: distilled `"memory"` vs raw-dump `"session"`. */
+	readonly kind: "memory" | "session";
+	/** `true` iff a drill-down raw session row (the card visually demotes these). */
+	readonly secondary: boolean;
 }
 
 /** One `/api/logs` record (the `RequestLogRecord` the ring buffer serves; no secret in it). */
@@ -305,15 +324,21 @@ export function createWireClient(options: WireClientOptions = {}): WireClient {
 				if (!res.ok) return { memories: [], degraded: true };
 				const parsed = RecallResponseSchema.safeParse(await res.json());
 				if (!parsed.success) return { memories: [], degraded: true };
+				// The engine already returns hits RANKED DESC by the fused RRF score (distilled
+				// `[memory]` facts above raw `[sessions]` drill-downs). We render them in THAT
+				// order verbatim — NO client-side re-sort — and carry the ENGINE `score` through
+				// (PRD-027 AC-4 deleted the old `1 - i*0.06` fabrication). `kind`/`secondary` ride
+				// along so the card can demote raw session rows. `scope`/`verified` stay derived
+				// honestly from the arm name.
 				const memories = parsed.data.hits.map((h, i) => ({
-					// id → memoryKey, text → snippet, arm → source label. The wire carries no
-					// score/verified; derive an honest descending rank and the verified=team flag.
 					memoryKey: h.id !== "" ? h.id : `hit-${i + 1}`,
 					snippet: h.text,
 					source: h.source,
-					score: Math.max(0, 1 - i * 0.06),
+					score: h.score,
 					scope: scopeForSource(h.source),
 					verified: h.source === "memories",
+					kind: h.kind,
+					secondary: h.secondary,
 				}));
 				return { memories, degraded: parsed.data.degraded };
 			} catch {
