@@ -150,8 +150,47 @@ jobs:
       - name: Install (npm ci)
         run: npm ci
 
-      - name: Run live integration smoke
-        run: npm run test:integration
+      # The live suite runs the REAL round-trips against a REAL DeepLake org, so
+      # it inherits the backend's transient flakiness (502s, connection resets,
+      # stale segments that converge a beat later). The code paths are hardened
+      # for this (storage-client read-retry, poll-convergent read-backs), but an
+      # inherently-flaky real-backend suite should not red main on a single
+      # one-off flap. So this STEP — and ONLY this step (the strict quality-gate,
+      # windows-smoke, and secret-gate jobs stay zero-retry) — gets exactly ONE
+      # auto-retry: run the suite; if it exits non-zero, wait a few seconds and
+      # run it once more. The step passes if EITHER attempt passes. A genuine
+      # (non-transient) failure fails both attempts and still reds the job —
+      # this absorbs a flap, it does not paper over a real regression. We do NOT
+      # use `continue-on-error` (that would hide real failures); after two
+      # failures the loop exits non-zero and the job fails honestly. Bash is the
+      # shell because this job runs on ubuntu-latest.
+      - name: Run live integration smoke (1 auto-retry on transient flap)
+        shell: bash
+        run: |
+          set -uo pipefail
+          attempt=1
+          max_attempts=2
+          while true; do
+            echo "::group::Live integration attempt ${attempt}/${max_attempts}"
+            set +e
+            npm run test:integration
+            status=$?
+            set -e
+            echo "::endgroup::"
+            if [ "$status" -eq 0 ]; then
+              if [ "$attempt" -gt 1 ]; then
+                echo "Live integration passed on attempt ${attempt} (a transient backend flap was absorbed)."
+              fi
+              exit 0
+            fi
+            if [ "$attempt" -ge "$max_attempts" ]; then
+              echo "Live integration failed on all ${max_attempts} attempts (last exit ${status}) — this is a genuine failure, not a flap." >&2
+              exit "$status"
+            fi
+            echo "::warning::Live integration attempt ${attempt} failed (exit ${status}); retrying once after a short backoff. The failed attempt's output is preserved above."
+            attempt=$((attempt + 1))
+            sleep 10
+          done
         env:
           HONEYCOMB_DEEPLAKE_ENDPOINT: ${{ secrets.HONEYCOMB_DEEPLAKE_ENDPOINT }}
           HONEYCOMB_DEEPLAKE_TOKEN: ${{ secrets.HONEYCOMB_DEEPLAKE_TOKEN }}

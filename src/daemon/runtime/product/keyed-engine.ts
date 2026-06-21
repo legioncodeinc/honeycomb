@@ -132,10 +132,27 @@ function rowToView(r: StorageRow): KeyedRow {
 }
 
 /**
- * Read every keyed row for the scoped tenant, newest-updated first (c-AC-1 read). Builds
- * the SELECT through `sqlIdent`; no value is interpolated (the scope partition isolates
- * the tenant). A non-ok result yields `[]` (fail-soft — an empty list, never a throw past
- * the handler boundary).
+ * Read every keyed row for the scoped tenant, newest-updated first (c-AC-1 read), then
+ * COLLAPSE to one logical row per `key` — the latest write (highest `updated_at`) wins.
+ * Builds the SELECT through `sqlIdent`; no value is interpolated (the scope partition
+ * isolates the tenant). A non-ok result yields `[]` (fail-soft — an empty list, never a
+ * throw past the handler boundary).
+ *
+ * ── Why the per-key collapse (c-AC-2 under DeepLake eventual consistency) ─────
+ * `goals`/`kpis` are written `updateOrInsertByKey` (SELECT-by-key → UPDATE if present,
+ * else INSERT) to keep ONE physical row per logical key. But DeepLake is eventually
+ * consistent SEGMENT-by-segment (project memory: "every live read-back must poll until
+ * convergence, never a single immediate read"): a rapid second POST's key-probe SELECT can
+ * land on a STALE segment that does not yet show the first INSERT, so it INSERTs a SECOND
+ * physical row instead of updating in place. That duplicate is durable — no amount of read
+ * polling makes 2 physical rows become 1, because both genuinely exist on disk. The honest
+ * fix is therefore in the READ: present the logical view by reducing to the highest-
+ * `updated_at` row per key (the same highest-version-per-id reduction the append-only
+ * tables use in `auth/api-keys.ts#listKeys` / `ontology/supersede.ts`, here keyed on
+ * `updated_at` since `goals`/`kpis` carry no `version` column). A stale read still
+ * under-reports rows but never invents one, and the latest-write-wins collapse yields
+ * exactly the current value for each key. The `updateOrInsertByKey` duplicate is the
+ * documented small-team v1 trade-off (storage/writes.ts FR-4); the read absorbs it.
  */
 async function readScopedRows(storage: StorageQuery, table: string, scope: QueryScope): Promise<KeyedRow[]> {
 	const tbl = sqlIdent(table);
@@ -145,7 +162,27 @@ async function readScopedRows(storage: StorageQuery, table: string, scope: Query
 		`FROM "${tbl}" ORDER BY ${sqlIdent("updated_at")} DESC LIMIT 500`;
 	const res = await storage.query(sql, scope);
 	if (!isOk(res)) return [];
-	return (res.rows as StorageRow[]).map(rowToView);
+	return collapseLatestPerKey((res.rows as StorageRow[]).map(rowToView));
+}
+
+/**
+ * Reduce a flat row list to one logical row per `key`, keeping the row with the highest
+ * `updatedAt` (latest write wins). This makes the read robust to the rare duplicate
+ * physical row `updateOrInsertByKey` leaves behind when a second POST's key-probe SELECT
+ * raced a stale DeepLake segment (see {@link readScopedRows}). Order is preserved as
+ * first-seen so a single-row-per-key table reads identically to before.
+ */
+export function collapseLatestPerKey(rows: readonly KeyedRow[]): KeyedRow[] {
+	const currentByKey = new Map<string, KeyedRow>();
+	for (const row of rows) {
+		const prev = currentByKey.get(row.key);
+		// Keep the latest write per key. `updatedAt` is an ISO-8601 string, so a lexical
+		// compare is chronological; `>=` lets a later equal-timestamp row win (stable choice).
+		if (prev === undefined || row.updatedAt >= prev.updatedAt) {
+			currentByKey.set(row.key, row);
+		}
+	}
+	return [...currentByKey.values()];
 }
 
 /**

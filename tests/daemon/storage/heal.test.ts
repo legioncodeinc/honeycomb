@@ -200,6 +200,121 @@ describe("PRD-002c lazy schema healing", () => {
 		expect(classifyFailure(undefined)).toBe("other");
 	});
 
+	it("introspection transient-fails once then succeeds → heal completes (missing-column)", async () => {
+		// The information_schema SELECT flaps with a transient 503 on its first
+		// attempt, then succeeds on the bounded retry — so the column diff still
+		// runs and the missing column is ALTERed in. Proves readColumnSet retries
+		// transient failures rather than throwing on the first flap.
+		let introspectAttempts = 0;
+		const altered: string[] = [];
+		let insertAttempts = 0;
+		const fake = new FakeDeepLakeTransport((req) => {
+			if (/^INSERT/.test(req.sql)) {
+				insertAttempts++;
+				if (insertAttempts === 1) throw new TransportError("query", 'column "version" does not exist', 400);
+				return [];
+			}
+			if (/information_schema\.columns/.test(req.sql)) {
+				introspectAttempts++;
+				// First introspection read flaps (transient 5xx); second succeeds.
+				if (introspectAttempts === 1) throw new TransportError("query", "503: upstream segment unavailable", 503);
+				return [{ column_name: "id" }, { column_name: "path" }];
+			}
+			if (/^ALTER TABLE/.test(req.sql)) {
+				altered.push(req.sql);
+				return [];
+			}
+			return [];
+		});
+		const client = createStorageClient({ transport: fake, provider: stubProvider(fakeCredentialRecord()) });
+
+		const res = await withHeal(client, TARGET, SCOPE, () =>
+			client.query(`INSERT INTO "memory" (id) VALUES ('x')`, SCOPE),
+		);
+		expect(res.kind).toBe("ok");
+		expect(introspectAttempts).toBe(2); // flapped once, retried, then succeeded.
+		expect(altered.length).toBe(1); // the diff still ran and added the missing column.
+		expect(altered[0]).toMatch(/ADD COLUMN version BIGINT/);
+	});
+
+	it("introspection transient-fails persistently → withHeal still does the write retry (missing-table, no throw)", async () => {
+		// The table is missing → CREATE TABLE succeeds with the full ColumnDef.
+		// Every introspection read then flaps transiently (connection error) and
+		// never recovers. withHeal must NOT surface a 500: it falls back to the
+		// single write retry, which succeeds against the freshly-created table.
+		let introspectAttempts = 0;
+		let insertAttempts = 0;
+		let created = false;
+		const fake = new FakeDeepLakeTransport((req) => {
+			if (/^INSERT/.test(req.sql)) {
+				insertAttempts++;
+				if (insertAttempts === 1) throw new TransportError("query", 'relation "memory" does not exist', 404);
+				return []; // retry succeeds — the table now exists.
+			}
+			if (/^CREATE TABLE/.test(req.sql)) {
+				created = true;
+				return [];
+			}
+			if (/information_schema\.columns/.test(req.sql)) {
+				introspectAttempts++;
+				// Persistent transient flap — never settles.
+				throw new TransportError("connection", "ECONNRESET");
+			}
+			return [];
+		});
+		const client = createStorageClient({ transport: fake, provider: stubProvider(fakeCredentialRecord()) });
+
+		const res = await withHeal(client, TARGET, SCOPE, () =>
+			client.query(`INSERT INTO "memory" (id) VALUES ('x')`, SCOPE),
+		);
+		// No throw to the caller; the write retry is the honest answer.
+		expect(res.kind).toBe("ok");
+		expect(created).toBe(true);
+		expect(insertAttempts).toBe(2); // original + one retry, exactly.
+		expect(introspectAttempts).toBeGreaterThan(1); // it retried the flap before giving up.
+	});
+
+	it("a genuine ALTER failure still propagates HealFailure (not swallowed as a flap)", async () => {
+		// Introspection succeeds and reports `version` missing; the ALTER then fails
+		// with a NON-"already exists" error. That is a real schema problem (phase
+		// "alter"), not an introspection flap, so withHeal must let it propagate.
+		const fake = new FakeDeepLakeTransport((req) => {
+			if (/^INSERT/.test(req.sql)) throw new TransportError("query", 'column "version" does not exist', 400);
+			if (/information_schema\.columns/.test(req.sql)) return [{ column_name: "id" }, { column_name: "path" }];
+			if (/^ALTER TABLE/.test(req.sql)) {
+				throw new TransportError("query", "permission denied to alter table memory", 403);
+			}
+			return [];
+		});
+		const client = createStorageClient({ transport: fake, provider: stubProvider(fakeCredentialRecord()) });
+
+		await expect(
+			withHeal(client, TARGET, SCOPE, () => client.query(`INSERT INTO "memory" (id) VALUES ('x')`, SCOPE)),
+		).rejects.toMatchObject({ name: "HealFailure", phase: "alter" });
+	});
+
+	it("a non-transient introspection query_error (permission) throws immediately, no pointless retries", async () => {
+		// The introspection SELECT is rejected with a 403 permission error — a
+		// deterministic, NON-transient failure. readColumnSet must throw on the
+		// FIRST attempt (phase "introspection") with no retries; here that surfaces
+		// through healColumns directly (not via withHeal's tolerant wrapper).
+		let introspectAttempts = 0;
+		const fake = new FakeDeepLakeTransport((req) => {
+			if (/information_schema\.columns/.test(req.sql)) {
+				introspectAttempts++;
+				throw new TransportError("query", "permission denied for relation information_schema.columns", 403);
+			}
+			return [];
+		});
+		const client = createStorageClient({ transport: fake, provider: stubProvider(fakeCredentialRecord()) });
+
+		await expect(healColumns(client, TARGET, SCOPE)).rejects.toMatchObject({
+			name: "HealFailure",
+			phase: "introspection",
+		});
+		expect(introspectAttempts).toBe(1); // exactly one attempt — no retry on a deterministic rejection.
+	});
+
 	it("withHeal never heals a connection or timeout result (only query_error)", async () => {
 		const client = clientWith((req) => {
 			if (/^INSERT/.test(req.sql)) throw new TransportError("connection", "ECONNREFUSED");

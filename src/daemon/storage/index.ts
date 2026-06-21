@@ -8,7 +8,7 @@
  * 3850), never by importing this module (a-AC-5).
  */
 
-import { StorageClient, type StorageQuery } from "./client.js";
+import { type SleepFn, StorageClient, type StorageQuery } from "./client.js";
 import {
 	type CredentialProvider,
 	defaultCredentialProvider,
@@ -18,8 +18,11 @@ import {
 import { type DeepLakeTransport, HttpDeepLakeTransport } from "./transport.js";
 
 export {
+	isReadStatement,
+	isTransientResult,
 	type QueryOptions,
 	type QueryScope,
+	type SleepFn,
 	StorageClient,
 	type StorageQuery,
 } from "./client.js";
@@ -135,12 +138,17 @@ export function createStorageClient(
 		provider?: CredentialProvider;
 		/** Inject a transport (e.g. the fake) instead of the real HTTP one. */
 		transport?: DeepLakeTransport;
+		/**
+		 * Inject the read-retry backoff clock (tests). Defaults to the real timer;
+		 * a test passes a no-op so the bounded backoff is instant and deterministic.
+		 */
+		sleep?: SleepFn;
 	} = {},
 ): StorageClient {
 	const provider = options.provider ?? defaultCredentialProvider();
 	const config: StorageConfig = resolveStorageConfig(provider);
 	const transport: DeepLakeTransport = options.transport ?? new HttpDeepLakeTransport(config.endpoint, config.token);
-	return new StorageClient(transport, config);
+	return new StorageClient(transport, config, options.sleep);
 }
 
 /** Re-export the structural query contract Wave 2 codes against. */
