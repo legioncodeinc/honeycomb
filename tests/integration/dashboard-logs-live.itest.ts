@@ -39,9 +39,11 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { createStorageClient, type StorageClient } from "../../src/daemon/storage/index.js";
 import { mountDashboardHost } from "../../src/daemon/runtime/dashboard/host.js";
 import { mountLogsApi } from "../../src/daemon/runtime/logs/api.js";
 import { type BootedTestDaemon, bootTestDaemon } from "./_daemon-harness.js";
+import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
 
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
 
@@ -55,8 +57,17 @@ function tenancyHeaders(): Record<string, string> {
 
 describe.skipIf(!HAS_TOKEN)("LIVE DASHBOARD+LOGS: real view-models, viewable host, ring-buffer logs", () => {
 	let booted: BootedTestDaemon | null = null;
+	/**
+	 * A live storage client built from the SAME default (env) provider the assembled daemon
+	 * resolves its scope from — retained ONLY for the infra-skip preflight's `connect()` probe
+	 * (PRD-034a FR-4). A sustained backend outage then NEUTRAL-skips instead of red-ing the
+	 * dashboard/logs view-model proof on DeepLake weather.
+	 */
+	let probeStorage: StorageClient;
 
 	beforeAll(async () => {
+		// A standalone probe client (the daemon makes its own internally); same default provider.
+		probeStorage = createStorageClient();
 		// Boot the REAL assembled daemon against live DeepLake on an ephemeral port, in
 		// `local` mode. The live storage client resolves its creds from `HONEYCOMB_DEEPLAKE_*`
 		// via the storage layer. CRITICAL: this itest does NOT mount any seam itself.
@@ -80,7 +91,14 @@ describe.skipIf(!HAS_TOKEN)("LIVE DASHBOARD+LOGS: real view-models, viewable hos
 
 	it(
 		"d-AC-1: the six dashboard data endpoints serve real view-models from live DeepLake",
-		async () => {
+		async ({ skip }) => {
+			// INFRA-DEGRADED preflight (PRD-034a FR-4 / a-AC-3): a scoped liveness probe through a
+			// storage client resolved from the SAME env provider the daemon uses. If the backend is
+			// sustained-down (the probe flaps transient AFTER the client's retry), resolve NEUTRAL
+			// via a SKIP + the run-level sentinel rather than red-ing the dashboard view-model proof
+			// on DeepLake weather. A non-transient failure (real defect) or an ok probe continues.
+			await neutralizeIfInfraDegraded("dashboard-logs-live:preflight", () => probeStorage.connect({ org: ORG, workspace: WORKSPACE }), skip);
+
 			expect(booted, "the daemon booted against live DeepLake").not.toBeNull();
 			const b = booted!;
 			const h = tenancyHeaders();

@@ -66,6 +66,7 @@ import {
 } from "../../src/daemon/storage/index.js";
 import type { ColumnDef } from "../../src/daemon/storage/schema.js";
 import type { HealTarget } from "../../src/daemon/storage/heal.js";
+import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
 
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
 
@@ -153,7 +154,15 @@ describe.skipIf(!HAS_TOKEN)("CHAOS live: N concurrent appendVersionBumped writer
 
 	it(
 		`fires ${WRITERS} concurrent writers at ONE id; every write lands, max converges monotonically (no lost update)`,
-		async () => {
+		async ({ skip }) => {
+			// INFRA-DEGRADED preflight (PRD-034a FR-4 / a-AC-3): if the backend is sustained-down
+			// (a liveness probe flaps transient AFTER the client's retry), resolve NEUTRAL via a
+			// SKIP + the run-level sentinel rather than red-ing the no-lost-update invariant on
+			// DeepLake weather. A non-transient failure (real defect) or an ok probe continues to
+			// the strict count/monotonicity invariants with full teeth — a genuine lost update on a
+			// HEALTHY backend still REDs.
+			await neutralizeIfInfraDegraded("deeplake-concurrent-writers-chaos:preflight", () => storage.connect(scope), skip);
+
 			const id = `conc_${RUN_ID}`;
 			const now = "2026-06-19T00:00:00.000Z";
 

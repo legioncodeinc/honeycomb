@@ -66,6 +66,7 @@ import { runCapture } from "../../src/hooks/shared/index.js";
 import type { CaptureGateEnv, HookCoreDeps, HookSessionMeta } from "../../src/hooks/shared/index.js";
 
 import { createDaemonHookClient } from "../composition/daemon-hook-client.js";
+import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
 
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
 
@@ -134,7 +135,13 @@ describe.skipIf(!HAS_TOKEN)("LIVE COMPOSITION: real hook → real core → real 
 
 	it(
 		"normalizes + captures one real sessions row through the full real chain, reads it back by path (poll-convergent), and a second runtime path 409s",
-		async () => {
+		async ({ skip }) => {
+			// INFRA-DEGRADED preflight (PRD-034a FR-4 / a-AC-3): if the backend is sustained-down
+			// (a liveness probe flaps transient AFTER the client's retry), resolve NEUTRAL via a
+			// SKIP + the run-level sentinel rather than red-ing the composition round-trip on
+			// DeepLake weather. A non-transient failure (real defect) or an ok probe continues.
+			await neutralizeIfInfraDegraded("hook-capture-roundtrip-live:preflight", () => storage.connect({ org, workspace }), skip);
+
 			// Borrow the single-sourced SESSIONS_COLUMNS under a throwaway table name so the
 			// live write never touches a real `sessions`. The capture handler lazily heals
 			// the table into existence on the first INSERT (FR-7).

@@ -44,6 +44,7 @@ import {
 } from "../../src/daemon/storage/index.js";
 import { mountMemoriesApi } from "../../src/daemon/runtime/memories/index.js";
 import { bootTestDaemon, type BootedTestDaemon } from "./_daemon-harness.js";
+import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
 
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
 
@@ -106,7 +107,14 @@ describe.skipIf(!HAS_TOKEN)("PRD-022a /api/memories store→recall over HTTP (li
 
 	it(
 		"a-AC-3 + a-AC-2: a stored memory is recalled over HTTP by the wired engines",
-		async () => {
+		async ({ skip }) => {
+			// INFRA-DEGRADED preflight (PRD-034a FR-4 / a-AC-3): if the backend is sustained-down
+			// (a liveness probe flaps transient AFTER the client's retry), resolve NEUTRAL via a
+			// SKIP + the run-level sentinel rather than red-ing the store→recall-over-HTTP proof
+			// on DeepLake weather. A non-transient failure (real defect) or an ok probe continues
+			// to the strict correctness assertions (incl. the a-AC-6 no-session 400) with full teeth.
+			await neutralizeIfInfraDegraded("memories-api-live:preflight", () => storage.connect(scope), skip);
+
 			// ── a-AC-6: the session group rejects a request with no x-honeycomb-session. ──
 			const noSession = await fetch(`${booted.baseUrl}/api/memories/recall`, {
 				method: "POST",

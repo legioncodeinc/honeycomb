@@ -61,6 +61,7 @@ import {
 	MEMORY_INDEX_PATH,
 	synthesizeMemoryIndex,
 } from "../../src/daemon/runtime/summaries/index.js";
+import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
 
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
 
@@ -116,7 +117,13 @@ describe.skipIf(!HAS_TOKEN)("live synthesis smoke (opt-in, real backend, MEMORY.
 		if (!isOk(res)) console.warn(`[ci-cleanup] could not drop ${TBL_MEMORY}: ${JSON.stringify(res)}`);
 	});
 
-	it("writes 2 summaries → synthesizes → reads MEMORY.md back (poll-convergent) linking BOTH; re-synthesis does not double", async () => {
+	it("writes 2 summaries → synthesizes → reads MEMORY.md back (poll-convergent) linking BOTH; re-synthesis does not double", async ({ skip }) => {
+		// INFRA-DEGRADED preflight (PRD-034a FR-4 / a-AC-3): if the backend is sustained-down
+		// (a liveness probe flaps transient AFTER the client's retry), resolve NEUTRAL via a
+		// SKIP + the run-level sentinel rather than red-ing the synthesis proof on DeepLake
+		// weather. A non-transient failure (real defect) or an ok probe continues with full teeth.
+		await neutralizeIfInfraDegraded("synthesis-live:preflight", () => storage.connect(scope), skip);
+
 		const summaryStore = createSummaryStore(storage, scope, resolveTable);
 		const pathA = summaryPath(SESSION_A);
 		const pathB = summaryPath(SESSION_B);

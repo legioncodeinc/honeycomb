@@ -71,6 +71,7 @@ import { createSummaryStore, type SummaryRow, summaryPath } from "../../src/daem
 import { type LogsResponse } from "../../src/daemon/runtime/logs/api.js";
 
 import { bootTestDaemon, type BootedTestDaemon } from "./_daemon-harness.js";
+import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
 
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
 
@@ -202,7 +203,16 @@ describe.skipIf(!HAS_TOKEN)("GOLDEN PATH 021f: capture → summary → cross-ses
 
 	it(
 		"proves the whole thesis: a real turn is captured, summarized, recalled cross-session, and visible — all live",
-		async () => {
+		async ({ skip }) => {
+			// INFRA-DEGRADED preflight (PRD-034a FR-4 / a-AC-3): if the backend is sustained-down
+			// (a liveness probe flaps transient AFTER the client's retry), resolve NEUTRAL via a
+			// SKIP + the run-level sentinel rather than red-ing the whole golden-path thesis on
+			// DeepLake weather. A non-transient failure (real defect) or an ok probe continues to
+			// the strict correctness assertions below with full teeth. (The summary-write boundary
+			// at f-AC-2 carries a SECOND probe — a `{written:false}` domain failure is confirmed
+			// backend-transient before it neutralizes, so a real wiring regression still REDs.)
+			await neutralizeIfInfraDegraded("golden-path-live:preflight", () => storage.connect(scope), skip);
+
 			// ── f-AC-1 CAPTURE ──────────────────────────────────────────────────────────
 			// The PRODUCTION transport over REAL loopback HTTP, tenancy from the PRODUCTION reader.
 			const credentials = createCredentialReader({ dir: credDir, env: {} });
@@ -292,6 +302,23 @@ describe.skipIf(!HAS_TOKEN)("GOLDEN PATH 021f: capture → summary → cross-ses
 			await summaryStore.writePlaceholder(sPath, "ci-021f-agent");
 			await summaryStore.removePlaceholder(sPath);
 			const summaryWrite = await summaryStore.writeSummary(summaryRowValue);
+			// f-AC-2 boolean-op boundary (PRD-034a FR-4 / a-AC-3): `writeSummary` returns a DOMAIN
+			// boolean, not a storage QueryResult — a bare `written:false` cannot be classified
+			// transient-vs-real directly. Under backend weather the summary `memory`-row APPEND can
+			// transiently fail → `{written:false}` → this assertion would hard-RED on infra. So on a
+			// reported failure we run a LIGHTWEIGHT PROBE through the live storage client (a trivial
+			// `SELECT 1`) and feed THAT QueryResult to `neutralizeIfInfraDegraded`: if the probe shows
+			// the backend is transiently degraded, the run NEUTRAL-skips (sentinel + SKIP); otherwise
+			// the probe is ok/non-transient and we fall through to the strict assertion — a genuine
+			// lost write on a HEALTHY backend still REDs (the teeth stay). We do NOT neutralize purely
+			// on the domain `false`.
+			if (!summaryWrite.written) {
+				await neutralizeIfInfraDegraded(
+					"golden-path-live:f-AC-2:summary-write-probe",
+					() => storage.query("SELECT 1", scope),
+					skip,
+				);
+			}
 			expect(summaryWrite.written, "f-AC-2: the summary worker's `memory` row was written").toBe(true);
 
 			// Read the `memory` summary row back POLL-CONVERGENTLY through the ONE shared

@@ -57,6 +57,7 @@ import {
 	type Rows,
 	type VfsScope,
 } from "../../src/daemon-client/vfs/index.js";
+import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
 
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
 
@@ -151,7 +152,13 @@ describe.skipIf(!HAS_TOKEN)("live VFS goal-dispatch smoke (opt-in, real backend,
 		if (!isOk(res)) console.warn(`[ci-cleanup] could not drop ${TBL_GOALS}: ${JSON.stringify(res)}`);
 	});
 
-	it("a goal VFS path → classify → SELECT-before-INSERT round-trip → poll-convergent read", async () => {
+	it("a goal VFS path → classify → SELECT-before-INSERT round-trip → poll-convergent read", async ({ skip }) => {
+		// INFRA-DEGRADED preflight (PRD-034a FR-4 / a-AC-3): if the backend is sustained-down
+		// (a liveness probe flaps transient AFTER the client's retry), resolve NEUTRAL via a
+		// SKIP + the run-level sentinel rather than red-ing the goal-dispatch round-trip on
+		// DeepLake weather. A non-transient failure (real defect) or an ok probe continues.
+		await neutralizeIfInfraDegraded("vfs-goal-dispatch-live:preflight", () => storage.connect(scope), skip);
+
 		// 1) A VFS goal path classifies as a goal AND decomposes to its keyed parts (the seam's
 		//    dispatch decision + the SELECT-before-INSERT key the flush builds).
 		const goalPath = "goal/alice/opened/g-live-1.md";

@@ -81,6 +81,7 @@ import type { ColumnDef } from "../../src/daemon/storage/schema.js";
 import { EMBEDDING_DIMS } from "../../src/daemon/storage/vector.js";
 import { MEMORIES_VERSION_COLUMN } from "../../src/daemon/runtime/pipeline/controlled-writes.js";
 import { recallMemories } from "../../src/daemon/runtime/memories/index.js";
+import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
 
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
 
@@ -198,7 +199,15 @@ describe.skipIf(!HAS_TOKEN)("live missing-sibling-table heal class (AC-3, opt-in
 
 	it(
 		"AC-3: recall surfaces the `memories` hit and does NOT 500 when `memory`/`sessions` siblings are absent",
-		async () => {
+		async ({ skip }) => {
+			// INFRA-DEGRADED preflight (PRD-034a FR-4 / a-AC-3): if the backend is sustained-down
+			// (a liveness probe flaps transient AFTER the client's retry), resolve NEUTRAL via a
+			// SKIP + the run-level sentinel rather than red-ing the missing-sibling-heal proof on
+			// DeepLake weather. The probe is a bare scoped `SELECT 1` (no table), so it never
+			// interferes with the deliberately-absent SIBLING tables this AC depends on. A
+			// non-transient failure (real defect) or an ok probe continues with full teeth.
+			await neutralizeIfInfraDegraded("missing-table-heal-live:preflight", () => storage.connect(scope), skip);
+
 			// ── Seed the LONE existing arm: one `memories` row carrying the unique term. The
 			// version-bumped append lazily heals (CREATE TABLE IF NOT EXISTS) the throwaway
 			// `memories` table from the single-sourced ColumnDef array — exactly the store's

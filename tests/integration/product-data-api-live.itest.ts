@@ -34,9 +34,10 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { createStorageClient } from "../../src/daemon/storage/index.js";
+import { createStorageClient, type StorageClient } from "../../src/daemon/storage/index.js";
 import { mountProductDataApi } from "../../src/daemon/runtime/product/index.js";
 import { type BootedTestDaemon, bootTestDaemon } from "./_daemon-harness.js";
+import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
 
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
 
@@ -51,6 +52,8 @@ const HEADERS = {
 
 describe.skipIf(!HAS_TOKEN)("LIVE PRODUCT-DATA: /api/goals upsert+read, /api/kpis existing-key-updates over HTTP", () => {
 	let booted: BootedTestDaemon | null = null;
+	/** The shared live storage client — retained for the infra-skip preflight probe (PRD-034a FR-4). */
+	let probeStorage: StorageClient;
 	// A per-run suffix so reruns never collide and the upsert proof is unambiguous.
 	const run = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 	const goalKey = `itest-goal-${run}`;
@@ -60,6 +63,7 @@ describe.skipIf(!HAS_TOKEN)("LIVE PRODUCT-DATA: /api/goals upsert+read, /api/kpi
 		// One live storage client, shared with the booted daemon AND the seam mount, so the
 		// reads/writes go through the same partition the daemon health-probed.
 		const storage = createStorageClient();
+		probeStorage = storage;
 		booted = await bootTestDaemon({ mode: "local", storage });
 		// Fire the product-data seam onto the booted daemon (in production 022d does this in
 		// assembleSeams; here we wire it directly so the route answers over HTTP).
@@ -78,7 +82,14 @@ describe.skipIf(!HAS_TOKEN)("LIVE PRODUCT-DATA: /api/goals upsert+read, /api/kpi
 
 	it(
 		"c-AC-1 POST /api/goals lands a goal and GET /api/goals returns it",
-		async () => {
+		async ({ skip }) => {
+			// INFRA-DEGRADED preflight (PRD-034a FR-4 / a-AC-3): a scoped liveness probe through
+			// the shared storage client. If the backend is sustained-down (the probe flaps
+			// transient AFTER the client's retry), resolve NEUTRAL via a SKIP + the run-level
+			// sentinel rather than red-ing the goals/kpis upsert proof on DeepLake weather. A
+			// non-transient failure (real defect) or an ok probe continues with full teeth.
+			await neutralizeIfInfraDegraded("product-data-api-live:preflight", () => probeStorage.connect({ org: ORG, workspace: WORKSPACE }), skip);
+
 			expect(booted, "the daemon booted against live DeepLake").not.toBeNull();
 			const b = booted!;
 

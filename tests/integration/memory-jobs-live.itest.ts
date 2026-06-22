@@ -78,6 +78,7 @@ import {
 	type JobQueueClock,
 	type JobQueueService,
 } from "../../src/daemon/runtime/services/job-queue.js";
+import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
 
 // ── The gate. Resolved ONCE so the describe block shares the same decision. ──
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
@@ -171,7 +172,13 @@ describe.skipIf(!HAS_TOKEN)("live memory_jobs queue smoke (opt-in, real backend)
 		return { queue, clock };
 	}
 
-	it("1. enqueue → lease → complete round-trips on a real backend (lazy-create heals the table)", async () => {
+	it("1. enqueue → lease → complete round-trips on a real backend (lazy-create heals the table)", async ({ skip }) => {
+		// INFRA-DEGRADED preflight (PRD-034a FR-4 / a-AC-3): if the backend is sustained-down
+		// (a liveness probe flaps transient AFTER the client's retry), resolve NEUTRAL via a
+		// SKIP + the run-level sentinel rather than red-ing the queue round-trip on DeepLake
+		// weather. A non-transient failure (real defect) or an ok probe continues with full teeth.
+		await neutralizeIfInfraDegraded("memory-jobs-live:preflight", () => storage.connect({ org, workspace }), skip);
+
 		const { queue } = await freshQueue("complete");
 		const id = await queue.enqueue({ kind: "live-distill", payload: { hello: "world" } });
 		expect(id).not.toBe("");

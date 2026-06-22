@@ -56,6 +56,7 @@ import {
 } from "../../src/daemon/storage/catalog/tenancy.js";
 import type { StorageRow } from "../../src/daemon/storage/result.js";
 import type { HealTarget } from "../../src/daemon/storage/heal.js";
+import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
 
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
 
@@ -222,8 +223,15 @@ describe.skipIf(!HAS_TOKEN)("live api-key lifecycle smoke (opt-in, real backend)
 		if (!isOk(res)) console.warn(`[ci-cleanup] could not drop ${CI_TABLE} in ${workspace}: ${describeResult(res)}`);
 	});
 
-	it("a key looked up by its keyid scrypt-verifies; the stored row carries NO plaintext/secret", async () => {
+	it("a key looked up by its keyid scrypt-verifies; the stored row carries NO plaintext/secret", async ({ skip }) => {
 		const scope = { org, workspace };
+		// INFRA-DEGRADED preflight (PRD-034a FR-4 / a-AC-3): if the backend is sustained-down
+		// (a liveness probe flaps transient AFTER the client's retry), resolve NEUTRAL via a
+		// SKIP + the run-level sentinel rather than red-ing the api-key lifecycle proof on
+		// DeepLake weather. A non-transient failure (real defect) or an ok probe continues to
+		// the strict scrypt/no-plaintext assertions with full teeth.
+		await neutralizeIfInfraDegraded("api-keys-live:preflight", () => storage.connect(scope), skip);
+
 		// The SAME lookup-by-id path the 011d authenticator validates a presented key with.
 		const ok = await pollAuthenticate(storage, KEY_LIVE_ID, SECRET_LIVE, scope);
 		expect(ok).toBe(true);
