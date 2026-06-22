@@ -50,7 +50,7 @@ const REQUIRED = [
   /(^|\/)daemon\/dashboard-app\.js$/, // the bundled dashboard web app
   /(^|\/)assets\/styles\.css$/, // resolveAssetsDir() locator
   /(^|\/)assets\/tokens\/base\.css$/, // the DS token CSS the dashboard serves
-  /(^|\/)assets\/logos\/honeycomb-mark\.svg$/, // the brand mark the header renders
+  /(^|\/)assets\/logos\/honeycomb-memory-cluster\.svg$/, // the brand mark the header renders
   /(^|\/)assets\/logos\/fonts\/JetBrainsMono-Regular\.woff2$/, // a brand font (proves fonts/ shipped)
 ];
 const missing = REQUIRED.filter((rx) => !entries.some((p) => rx.test(p)));

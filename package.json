@@ -26,7 +26,7 @@
     "daemon",
     "assets/styles.css",
     "assets/tokens",
-    "assets/logos/honeycomb-mark.svg",
+    "assets/logos/honeycomb-memory-cluster.svg",
     "assets/logos/fonts",
     "harnesses/claude-code/bundle",
     "harnesses/claude-code/.claude-plugin",

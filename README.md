@@ -1,10 +1,12 @@
 <p align="center">
-  <a href="https://github.com/legioncodeinc"><img src="assets/legion-code.png" alt="Legion Code" height="80"></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://activeloop.ai"><img src="assets/activeloop.png" alt="Activeloop Deep Lake" height="80"></a>
+  <img src="assets/logos/honeycomb-memory-cluster-wordmark.svg" alt="Honeycomb" height="72">
 </p>
 
-<h1 align="center">Honeycomb</h1>
+<p align="center">
+  <a href="https://github.com/legioncodeinc"><img src="assets/legion-code.png" alt="Legion Code" height="56"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://activeloop.ai"><img src="assets/activeloop.png" alt="Activeloop Deep Lake" height="56"></a>
+</p>
 
 <p align="center"><strong>A <a href="https://github.com/legioncodeinc">Legion Code</a> &times; <a href="https://activeloop.ai">Activeloop</a> collaboration</strong></p>
 

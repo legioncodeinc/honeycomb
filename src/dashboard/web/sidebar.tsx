@@ -184,7 +184,7 @@ export function Sidebar({
 		>
 			{/* Brand chrome — mark + wordmark + org/workspace sub-line (mirrors the old Header). */}
 			<div style={{ display: "flex", alignItems: "center", gap: 10, paddingLeft: collapsed ? 0 : 2, justifyContent: collapsed ? "center" : "flex-start" }}>
-				<img src={`${assetBase}/honeycomb-mark.svg`} width={collapsed ? 28 : 34} height={collapsed ? 28 : 34} alt="" style={{ flex: "none" }} />
+				<img src={`${assetBase}/honeycomb-memory-cluster.svg`} width={collapsed ? 28 : 34} height={collapsed ? 28 : 34} alt="" style={{ flex: "none" }} />
 				{!collapsed && (
 					<div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
 						<span style={{ fontWeight: 700, fontSize: 19, letterSpacing: "-0.03em", color: "var(--text-primary)", lineHeight: 1.1 }}>honeycomb</span>

@@ -61,7 +61,7 @@ describe("037a AC-1: brand chrome — mark + wordmark + org/workspace sub-line",
 	it("renders the mark img, the honeycomb wordmark, and the identity sub-line", () => {
 		mountSidebar();
 		const img = container.querySelector("img");
-		expect(img?.getAttribute("src")).toBe("/dashboard/honeycomb-mark.svg");
+		expect(img?.getAttribute("src")).toBe("/dashboard/honeycomb-memory-cluster.svg");
 		const text = container.textContent ?? "";
 		expect(text).toContain("honeycomb");
 		expect(text).toContain("Activeloop · deeplake-core");
