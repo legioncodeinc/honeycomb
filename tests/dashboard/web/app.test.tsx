@@ -56,6 +56,13 @@ const PAYLOADS = {
 		degraded: true,
 	},
 	logs: { records: [{ time: "2026-06-20T14:32:08.000Z", method: "GET", path: "/api/diagnostics/kpis", status: 200 }], count: 1 },
+	// PRD-038c: the harness registry/telemetry backbone the home harness strip reads (wire.harnesses()).
+	harnesses: {
+		harnesses: [
+			{ name: "claude-code", installed: true, active: true, lastSeen: "2026-06-20T14:31:00.000Z", turnsCaptured: 7, runtimePath: "legacy", capabilities: { name: "claude-code", runtimePath: "legacy", contextChannel: "model-only", hostCli: { bin: "claude", args: ["-p"] }, lifecycleEvents: [] } },
+			{ name: "codex", installed: false, active: false, lastSeen: null, turnsCaptured: 0, runtimePath: "legacy", capabilities: { name: "codex", runtimePath: "legacy", contextChannel: "model-only", hostCli: { bin: "codex", args: [] }, lifecycleEvents: [] } },
+		],
+	},
 	dreamEnqueued: { triggered: true, status: "enqueued" },
 	dreamSkipped: { triggered: false, status: "skipped", reason: "disabled" },
 };
@@ -73,6 +80,7 @@ function makeMockFetch(opts: { healthOk?: boolean; dream?: unknown } = {}): type
 		if (url.includes("/api/diagnostics/settings")) return json(PAYLOADS.settings);
 		if (url.includes("/api/diagnostics/rules")) return json(PAYLOADS.rules);
 		if (url.includes("/api/diagnostics/skills")) return json(PAYLOADS.skills);
+		if (url.includes("/api/diagnostics/harnesses")) return json(PAYLOADS.harnesses);
 		if (url.includes("/api/diagnostics/dream")) return json(dream, 202);
 		if (url.includes("/api/graph")) return json(PAYLOADS.graph);
 		if (url.includes("/api/memories/recall")) {
@@ -163,6 +171,12 @@ describe("037b AC-5: Dashboard route parity — the monolithic content renders i
 		// The kit's grid container classes are present.
 		expect(container.querySelector(".kpirow")).not.toBeNull();
 		expect(container.querySelector(".grid2")).not.toBeNull();
+		// PRD-038: the Dashboard route now reads as three ordered area landmarks.
+		const areas = [...container.querySelectorAll("[data-area]")].map((el) => el.getAttribute("data-area"));
+		expect(areas).toEqual(["kpi-band", "recall-area", "harness-area"]);
+		// The harness strip surfaces the INSTALLED harness (claude-code), not the uninstalled (codex).
+		expect(container.querySelector('[data-testid="harness-tile-claude-code"]')).not.toBeNull();
+		expect(container.querySelector('[data-testid="harness-tile-codex"]')).toBeNull();
 	});
 
 	it("recall POSTs /api/memories/recall and renders the hits with the ENGINE score", async () => {
@@ -254,6 +268,7 @@ describe("037 AC-6 / 037b AC-6: daemon-down swaps the CONTENT for the banner; si
 			if (url.includes("/api/diagnostics/sessions")) return json(PAYLOADS.sessions);
 			if (url.includes("/api/diagnostics/rules")) return json(PAYLOADS.rules);
 			if (url.includes("/api/diagnostics/skills")) return json(PAYLOADS.skills);
+			if (url.includes("/api/diagnostics/harnesses")) return json(PAYLOADS.harnesses);
 			if (url.includes("/api/graph")) return json(PAYLOADS.graph);
 			if (url.includes("/api/logs")) return json(PAYLOADS.logs);
 			if (url.endsWith("/api/settings")) return json({ settings: {}, catalog: [] });
@@ -329,6 +344,7 @@ describe("PRD-029 D-2 (parity): the per-subsystem health strip still renders on 
 			if (url.includes("/api/diagnostics/sessions")) return json(PAYLOADS.sessions);
 			if (url.includes("/api/diagnostics/rules")) return json(PAYLOADS.rules);
 			if (url.includes("/api/diagnostics/skills")) return json(PAYLOADS.skills);
+			if (url.includes("/api/diagnostics/harnesses")) return json(PAYLOADS.harnesses);
 			if (url.includes("/api/graph")) return json(PAYLOADS.graph);
 			if (url.includes("/api/logs")) return json(PAYLOADS.logs);
 			if (url.endsWith("/api/settings")) return json({ settings: {}, catalog: [] });

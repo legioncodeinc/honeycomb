@@ -1,23 +1,32 @@
 /**
- * The DASHBOARD page — PRD-037b D-6 (the lift-and-shift).
+ * The DASHBOARD page — the zoned home (PRD-038, re-laying the PRD-037b lift-and-shift).
  *
- * This is the CURRENT `app.tsx` BODY moved VERBATIM onto the Dashboard route: KPI row → per-subsystem
- * health strip → recall bar → recalled-memory cards → 2-col grid (Sessions/Rules | Graph/Settings/
- * Skill-sync) → live log. ZERO content change (D-6 forbids reorganizing here — that is PRD-038's job;
- * 037 only changes WHERE this renders, never WHAT). The page hydrates from the SHARED `wire` the shell
- * passes via {@link PageProps} (it does NOT call `createWireClient` — the shell builds ONE), and reads
- * the shell-owned `dreaming` flag for the graph/card pulse (D-5: the "Dream now" action + the
- * org/workspace identity + the coarse daemon pill + the daemon-down swap all moved UP to the shell, so
- * this page renders NO header of its own).
+ * PRD-037 lifted the old `app.tsx` body onto this route VERBATIM. PRD-038 reorganizes that body into
+ * three named AREA landmarks so the home reads as zones, not one undifferentiated scroll (parent
+ * D-1 / AC-1):
+ *   1. `<section data-area="kpi-band">`     — the per-subsystem health strip + the four headline KPIs
+ *                                             (Memories, Turns, Est. savings, Team skills — 038a).
+ *   2. `<section data-area="recall-area">`  — the recall bar + recalled-memory cards + the PRD-029
+ *                                             lexical-fallback badge, the centerpiece (038b, moved
+ *                                             VERBATIM — same `wire.recall` POST, same render).
+ *   3. `<section data-area="harness-area">` — the {@link HarnessStrip} (wired-in chips + per-harness
+ *                                             KPI tiles + a short-tail `/api/logs` stream — 038c),
+ *                                             then the existing 2-col grid + the full live log,
+ *                                             reorganized into the zone (kept, not dropped).
  *
- * Every value is hydrated from the daemon's live endpoints through the wire client (the same zod
- * boundary the old app used); every visual value is an existing `var(--…)` DS token.
+ * Behavior is UNCHANGED — recall, polling, and the KPI/grid panels are MOVED into the areas, not
+ * rebuilt (parent D-2/D-3/D-4). The page hydrates from the SHARED `wire` the shell passes via
+ * {@link PageProps} (it never calls `createWireClient` — the shell builds ONE) and reads the
+ * shell-owned `dreaming` flag (D-6: the "Dream now" action, the identity, the coarse daemon pill, and
+ * the daemon-down swap live in the shell, so this page renders NO header of its own). Every visual
+ * value is an existing `var(--…)` DS token; no new token, primitive, or daemon route (AC-7/AC-8).
  */
 
 import React from "react";
 
 import { Badge, Button, Input, Kpi, MemoryCard } from "../primitives.js";
 import { GraphCanvas, LiveLog, RulesPanel, SessionsPanel, SettingsPanel, SkillSyncPanel } from "../panels.js";
+import { HarnessStrip } from "../harness-strip.js";
 import type { PageProps } from "../page-frame.js";
 import {
 	EMPTY_GRAPH,
@@ -25,6 +34,7 @@ import {
 	EMPTY_VAULT_SETTINGS,
 	formatLogLine,
 	type GraphWire,
+	type HarnessStatusWire,
 	type HealthReasonsWire,
 	type KpisWire,
 	type RecalledMemory,
@@ -39,8 +49,12 @@ import {
 const LOG_POLL_MS = 2500;
 /** How often the health poll probes `/health` for the per-subsystem strip reasons (ms). */
 const HEALTH_POLL_MS = 5000;
+/** How often the harness-strip poll re-reads `/api/diagnostics/harnesses` for last-seen recency (ms). */
+const HARNESS_POLL_MS = 5000;
 /** How many recent log lines the panel keeps. */
 const MAX_LOG_LINES = 8;
+/** The short-tail cap for the harness-area live stream — tighter than the full log (038c-AC-2 / OQ-4). */
+const MAX_STREAM_LINES = 5;
 
 /** The local-clock prefix for a client-originated log line (recall notes). */
 function clockPrefix(): string {
@@ -147,6 +161,9 @@ export function DashboardPage({ wire, dreaming = false }: PageProps): React.JSX.
 	const [vaultSettings, setVaultSettings] = React.useState<VaultSettingsWire>(EMPTY_VAULT_SETTINGS);
 	const [secretNames, setSecretNames] = React.useState<readonly string[]>([]);
 
+	// ── harness-area state (038c) — the PRD-039 registry/telemetry backbone (`wire.harnesses()`) ──
+	const [harnesses, setHarnesses] = React.useState<readonly HarnessStatusWire[]>([]);
+
 	// ── recall state (AC-3) ──
 	const [query, setQuery] = React.useState("how do we deploy");
 	const [results, setResults] = React.useState<readonly RecalledMemory[]>([]);
@@ -238,6 +255,23 @@ export function DashboardPage({ wire, dreaming = false }: PageProps): React.JSX.
 		};
 	}, [wire]);
 
+	// 038c: poll the PRD-039 harness registry/telemetry for the wired-in strip + per-harness tiles.
+	// A light poll keeps last-seen recency fresh; stops on unmount. A failure degrades to [] (wire-safe).
+	React.useEffect(() => {
+		let alive = true;
+		const tick = async (): Promise<void> => {
+			const rows = await wire.harnesses();
+			if (!alive) return;
+			setHarnesses(rows);
+		};
+		void tick();
+		const id = setInterval(() => void tick(), HARNESS_POLL_MS);
+		return () => {
+			alive = false;
+			clearInterval(id);
+		};
+	}, [wire]);
+
 	// AC-3: recall → POST /api/memories/recall → render the hits as MemoryCards.
 	const recall = React.useCallback(async (): Promise<void> => {
 		const q = query.trim();
@@ -256,59 +290,77 @@ export function DashboardPage({ wire, dreaming = false }: PageProps): React.JSX.
 	// The live-log feed merges client notes (recall) ahead of the polled daemon lines.
 	const feed = React.useMemo(() => [...notes, ...logLines].slice(0, MAX_LOG_LINES), [notes, logLines]);
 
+	// 038c-AC-2: the harness-area short-tail stream — the SAME polled /api/logs lines, capped tighter
+	// than the full log. `/api/logs` carries no per-line harness field (c-OQ-3), so it is unlabeled.
+	const streamLines = React.useMemo(() => logLines.slice(0, MAX_STREAM_LINES), [logLines]);
+
 	return (
 		<>
-			{/* PRD-029 D-2 (render): the per-subsystem health strip, reading the /health reasons. */}
-			<HealthStrip reasons={healthReasons} />
+			{/* ── AREA 1: the top KPI band (038a) ─────────────────────────────────────────────────── */}
+			<section data-area="kpi-band" aria-label="Key metrics" style={{ marginBottom: 22 }}>
+				{/* PRD-029 D-2 (render): the per-subsystem health strip, reading the /health reasons. */}
+				<HealthStrip reasons={healthReasons} />
 
-			{/* KPIs (AC-2) — metrics sit at the top of the page content */}
-			<div className="kpirow" style={{ marginBottom: 22 }}>
-				<Kpi label="Memories" value={kpis.memoryCount.toLocaleString()} accent="honey" />
-				<Kpi label="Turns" value={kpis.turnCount || kpis.sessionCount} accent="neutral" />
-				<Kpi label="Est. savings" value={kpis.estimatedSavings.toLocaleString()} unit="tok" accent="verified" />
-				<Kpi label="Team skills" value={kpis.teamSkillCount} accent="dream" />
-			</div>
-
-			<RecallBar query={query} setQuery={setQuery} onRecall={recall} busy={recallBusy} />
-
-			{/* PRD-029 AC-1: the "lexical fallback" badge — shown ONLY when the LAST recall ran degraded. */}
-			{recalled && recallDegraded && (
-				<div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
-					<span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-tertiary)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
-						recall
-					</span>
-					<LexicalFallbackBadge />
+				{/* The four headline KPIs (038a-AC-2/AC-3) — corrected Turns/Est. savings/Team skills. */}
+				<div className="kpirow">
+					<Kpi label="Memories" value={kpis.memoryCount.toLocaleString()} accent="honey" />
+					<Kpi label="Turns" value={kpis.turnCount || kpis.sessionCount} accent="neutral" />
+					<Kpi label="Est. savings" value={kpis.estimatedSavings.toLocaleString()} unit="tok" accent="verified" />
+					<Kpi label="Team skills" value={kpis.teamSkillCount} accent="dream" />
 				</div>
-			)}
+			</section>
 
-			{/* recall results (AC-3) */}
-			<div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 22 }} key={recallNonce}>
-				{results.length === 0
-					? recalled && (
-							<div style={{ padding: "10px 4px", fontSize: 13, color: "var(--text-tertiary)" }}>No memories matched that query.</div>
-						)
-					: results.map((m, i) => (
-							<div className="mem-enter" style={{ animationDelay: `${i * 55}ms` }} key={m.memoryKey}>
-								<MemoryCard {...m} dreaming={dreaming && i === 1} />
-							</div>
-						))}
-			</div>
+			{/* ── AREA 2: the center recall area (038b) — moved VERBATIM, restyled placement only ──── */}
+			<section data-area="recall-area" aria-label="Memory search" style={{ marginBottom: 22 }}>
+				<RecallBar query={query} setQuery={setQuery} onRecall={recall} busy={recallBusy} />
 
-			{/* main grid (AC-2) */}
-			<div className="grid2" style={{ marginBottom: 16 }}>
-				<div className="col">
-					<SessionsPanel sessions={sessions} />
-					<RulesPanel rules={rules} />
+				{/* PRD-029 AC-1: the "lexical fallback" badge — shown ONLY when the LAST recall ran degraded. */}
+				{recalled && recallDegraded && (
+					<div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+						<span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-tertiary)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+							recall
+						</span>
+						<LexicalFallbackBadge />
+					</div>
+				)}
+
+				{/* recall results (038b-AC-2/AC-3) */}
+				<div style={{ display: "flex", flexDirection: "column", gap: 10 }} key={recallNonce}>
+					{results.length === 0
+						? recalled && (
+								<div style={{ padding: "10px 4px", fontSize: 13, color: "var(--text-tertiary)" }}>No memories matched that query.</div>
+							)
+						: results.map((m, i) => (
+								<div className="mem-enter" style={{ animationDelay: `${i * 55}ms` }} key={m.memoryKey}>
+									<MemoryCard {...m} dreaming={dreaming && i === 1} />
+								</div>
+							))}
 				</div>
-				<div className="col">
-					<GraphCanvas graph={graph} dreaming={dreaming} />
-					<SettingsPanel catalog={vaultSettings.catalog} settings={vaultSettings.settings} secretNames={secretNames} onSave={saveSetting} />
-					<SkillSyncPanel skills={skills} />
-				</div>
-			</div>
+			</section>
 
-			{/* live log (AC-4) */}
-			<LiveLog lines={feed} />
+			{/* ── AREA 3: the harness area (038c) — the strip, then the retained 2-col grid + live log ── */}
+			<section data-area="harness-area" aria-label="Harnesses and activity">
+				{/* The wired-in chips + per-harness KPI tiles + short-tail stream (038c). */}
+				<div style={{ marginBottom: 16 }}>
+					<HarnessStrip harnesses={harnesses} streamLines={streamLines} />
+				</div>
+
+				{/* The existing 2-col grid — kept, reorganized into the zone (parent: retain the panels). */}
+				<div className="grid2" style={{ marginBottom: 16 }}>
+					<div className="col">
+						<SessionsPanel sessions={sessions} />
+						<RulesPanel rules={rules} />
+					</div>
+					<div className="col">
+						<GraphCanvas graph={graph} dreaming={dreaming} />
+						<SettingsPanel catalog={vaultSettings.catalog} settings={vaultSettings.settings} secretNames={secretNames} onSave={saveSetting} />
+						<SkillSyncPanel skills={skills} />
+					</div>
+				</div>
+
+				{/* the full live log (AC-4) */}
+				<LiveLog lines={feed} />
+			</section>
 		</>
 	);
 }

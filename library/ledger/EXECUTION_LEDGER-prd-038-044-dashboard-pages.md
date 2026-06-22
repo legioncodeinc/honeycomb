@@ -23,8 +23,8 @@ All bees: `typescript-node-worker-bee` / **opus** (dashboard React + daemon endp
 
 | PRD | Page | ACs | Status |
 |---|---|---|---|
-| 039 | Harnesses (telemetry + overview + detail) | 23 (8+5+5+5) | IN PROGRESS |
-| 038 | Dashboard home (KPI areas + recall + harness strip) | tbd | OPEN |
+| 039 | Harnesses (telemetry + overview + detail) | 23 (8+5+5+5) | ✅ VERIFIED · merged #72 |
+| 038 | Dashboard home (KPI areas + recall + harness strip) | 23 (8+5+5+5) | ✅ VERIFIED — shipping |
 | 040 | Memories (add/edit/compact/dream/watch/search) | tbd | OPEN |
 | 041 | Graph (full codebase graph) | tbd | OPEN |
 | 042 | Sync (skills + agents view/promote/control) | tbd | OPEN |
