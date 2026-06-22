@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { DEFAULT_ROUTE, matchRoute, ROUTES, type RouteEntry, type SubItem } from "../../../src/dashboard/web/registry.js";
 import { Sidebar } from "../../../src/dashboard/web/sidebar.js";
+import { MemoriesPage } from "../../../src/dashboard/web/pages/memories.js";
 import type { PageProps } from "../../../src/dashboard/web/page-frame.js";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -40,6 +41,12 @@ describe("037c AC-2: ROUTES lists the seven static entries in nav order", () => 
 			expect(typeof r.component, `${r.label} has a component`).toBe("function");
 			expect(r.icon, `${r.label} has an icon`).toBeTruthy();
 		}
+	});
+
+	it("PRD-040: the Memories entry mounts the REAL MemoriesPage (not the coming-soon placeholder)", () => {
+		const memories = ROUTES.find((r) => r.route === "/memories");
+		expect(memories, "the Memories entry exists").toBeDefined();
+		expect(memories?.component, "Memories routes to the real PRD-040 page").toBe(MemoriesPage);
 	});
 });
 

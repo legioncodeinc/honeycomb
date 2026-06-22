@@ -29,7 +29,19 @@ export const DEFAULT_LIST_LIMIT = 50;
 /** The hard ceiling on a `memory_list` page. */
 export const MAX_LIST_LIMIT = 500;
 
-/** A read-model of a single memory row the get/list handlers serialize. */
+/**
+ * A read-model of a single memory row the get/list handlers serialize.
+ *
+ * ── PRD-040 OQ-1: the additive detail-metadata widen ─────────────────────────
+ * The original shape (`id`/`type`/`content`/`confidence`/`agentId`/`createdAt`/
+ * `updatedAt`) is unchanged. PRD-040a's detail view needs the row's SCOPE
+ * (`visibility`), PROVENANCE (`sourceType`/`sourceId`), `version`, and whether the
+ * row is semantically indexed (`hasEmbedding`, derived from `content_embedding IS
+ * NOT NULL`). Those five fields are ADDED here, OPTIONAL by design so an older/thin
+ * client (or a daemon serving the pre-widen shape) still parses — the dashboard
+ * wire schema `.catch()`-defaults each. No secret rides this shape: every field is a
+ * scope tag, a provenance string, a version number, or a boolean.
+ */
 export interface MemoryRecord {
 	/** The `memories.id`. */
 	readonly id: string;
@@ -45,6 +57,16 @@ export interface MemoryRecord {
 	readonly createdAt: string;
 	/** The ISO last-update timestamp. */
 	readonly updatedAt: string;
+	/** PRD-040 OQ-1: the memory's scope visibility (`global`/`org`/…). Optional (additive). */
+	readonly visibility?: string;
+	/** PRD-040 OQ-1: the provenance `source_type` (e.g. `session`). Optional (additive). */
+	readonly sourceType?: string;
+	/** PRD-040 OQ-1: the provenance `source_id`. Optional (additive). */
+	readonly sourceId?: string;
+	/** PRD-040 OQ-1: the row's version on the append-only version-bumped table. Optional (additive). */
+	readonly version?: number;
+	/** PRD-040 OQ-1: whether the row is semantically indexed (`content_embedding IS NOT NULL`). Optional. */
+	readonly hasEmbedding?: boolean;
 }
 
 /** Construction deps for the read adapters. */
@@ -72,7 +94,13 @@ function toStr(value: unknown): string {
 	return value === undefined || value === null ? "" : String(value);
 }
 
-/** The select column list shared by get + list. */
+/**
+ * The select column list shared by get + list. PRD-040 OQ-1 widens it additively with the
+ * detail-metadata columns (`visibility`/`source_type`/`source_id`/`version`) and a DERIVED
+ * `has_embedding` boolean — `content_embedding IS NOT NULL`, computed server-side so the heavy
+ * 768-dim FLOAT4[] vector is NEVER pulled over the wire (only its presence bit). Every column +
+ * the derived alias route through `sqlIdent` (no hand-quoted identifier — `audit:sql` clean).
+ */
 const SELECT_COLS = [
 	sqlIdent("id"),
 	sqlIdent("type"),
@@ -82,9 +110,24 @@ const SELECT_COLS = [
 	sqlIdent("is_deleted"),
 	sqlIdent("created_at"),
 	sqlIdent("updated_at"),
+	// PRD-040 OQ-1 additive metadata.
+	sqlIdent("visibility"),
+	sqlIdent("source_type"),
+	sqlIdent("source_id"),
+	sqlIdent("version"),
+	// Derived embedding-presence bit — never selects the vector itself, only `IS NOT NULL`.
+	`(${sqlIdent("content_embedding")} IS NOT NULL) AS ${sqlIdent("has_embedding")}`,
 ].join(", ");
 
-/** Map a `memories` row into the read-model. */
+/** Boolean coercion tolerant of the DB's 0/1, "t"/"f", and native boolean encodings. */
+function toBool(value: unknown): boolean {
+	if (typeof value === "boolean") return value;
+	if (typeof value === "number") return value !== 0;
+	const s = String(value ?? "").toLowerCase();
+	return s === "true" || s === "t" || s === "1";
+}
+
+/** Map a `memories` row into the read-model (PRD-040 OQ-1: with the additive metadata fields). */
 function shapeRecord(row: StorageRow): MemoryRecord {
 	return {
 		id: toStr(row.id),
@@ -94,6 +137,12 @@ function shapeRecord(row: StorageRow): MemoryRecord {
 		agentId: toStr(row.agent_id),
 		createdAt: toStr(row.created_at),
 		updatedAt: toStr(row.updated_at),
+		// PRD-040 OQ-1 additive metadata for the detail view (scope/provenance/version/embedding).
+		visibility: toStr(row.visibility),
+		sourceType: toStr(row.source_type),
+		sourceId: toStr(row.source_id),
+		version: toNum(row.version),
+		hasEmbedding: toBool(row.has_embedding),
 	};
 }
 
