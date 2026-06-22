@@ -350,6 +350,47 @@ function requestOnce(url: URL, timeoutMs: number, maxBytes: number, allowLoopbac
 }
 
 /**
+ * Strip every `<script>` / `<style>` element (and its body) from HTML.
+ *
+ * Robust to the end-tag variants a naive `<\/script>` misses: whitespace before
+ * the `>` (`</script >`, `</script\n>`), case (`</SCRIPT>`), and the UNCLOSED case
+ * — a `<script>` with NO end tag is dropped through end-of-input so its body can
+ * never leak into the indexed text. (CodeQL `js/bad-tag-filter`: the close-tag
+ * pattern must tolerate `\s*` before `>` and must not depend on a close tag being
+ * present.)
+ */
+function stripElement(input: string, tag: "script" | "style"): string {
+	// Open tag → (lazy body → close tag) OR (rest of input when there is no close).
+	const re = new RegExp(`<${tag}\\b[^>]*>(?:[\\s\\S]*?<\\/${tag}\\s*>|[\\s\\S]*$)`, "gi");
+	return input.replace(re, " ");
+}
+
+/** Named/numeric HTML entities decoded in this path. */
+const HTML_ENTITIES: Record<string, string> = {
+	"&nbsp;": " ",
+	"&lt;": "<",
+	"&gt;": ">",
+	"&quot;": '"',
+	"&#39;": "'",
+	"&apos;": "'",
+	// `&amp;` is in the SAME map so it is decoded in the SAME single pass — never a
+	// second pass over already-decoded output. This is the fix for the double-unescape:
+	// `&amp;lt;` → the regex matches `&amp;` first (leftmost) → "&", then the scanner
+	// resumes AFTER it at "lt;" (a bare word, not an entity) → literal "&lt;", NOT "<".
+	"&amp;": "&",
+};
+
+// One alternation over all entity spellings; case-insensitive for the named ones.
+// A single left-to-right pass means the replacer output is never re-scanned, so no
+// entity can be produced and then decoded again (CodeQL `js/double-escaping`).
+const HTML_ENTITY_RE = /&nbsp;|&lt;|&gt;|&quot;|&#39;|&apos;|&amp;/gi;
+
+/** Decode the supported entities in a single non-re-scanning pass. */
+function decodeEntities(input: string): string {
+	return input.replace(HTML_ENTITY_RE, (match) => HTML_ENTITIES[match.toLowerCase()] ?? match);
+}
+
+/**
  * Collapse fetched bytes to indexable text. HTML is reduced to its text content
  * (scripts/styles stripped, tags removed, entities decompressed for the common few),
  * everything else is decoded as UTF-8. Bounded + dependency-free — recall indexes
@@ -360,17 +401,10 @@ export function bytesToText(body: Buffer, contentType: string): string {
 	if (!/\b(?:text\/html|application\/xhtml\+xml)\b/i.test(contentType) && !/^\s*<!doctype html|^\s*<html/i.test(raw)) {
 		return raw;
 	}
-	return raw
-		.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
-		.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+	const stripped = stripElement(stripElement(raw, "script"), "style")
 		.replace(/<\/(?:p|div|li|h[1-6]|br|tr|section|article)>/gi, "\n")
-		.replace(/<[^>]+>/g, " ")
-		.replace(/&nbsp;/gi, " ")
-		.replace(/&amp;/gi, "&")
-		.replace(/&lt;/gi, "<")
-		.replace(/&gt;/gi, ">")
-		.replace(/&quot;/gi, '"')
-		.replace(/&#39;|&apos;/gi, "'")
+		.replace(/<[^>]+>/g, " ");
+	return decodeEntities(stripped)
 		.replace(/[ \t]+\n/g, "\n")
 		.replace(/\n{3,}/g, "\n\n")
 		.replace(/[ \t]{2,}/g, " ")
@@ -380,8 +414,11 @@ export function bytesToText(body: Buffer, contentType: string): string {
 /** Extract a `<title>` from HTML for the document title, or "" when absent. */
 function extractTitle(body: Buffer, contentType: string): string {
 	if (!/\b(?:text\/html|application\/xhtml\+xml)\b/i.test(contentType)) return "";
-	const m = /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(body.toString("utf8"));
-	return m ? m[1].replace(/\s+/g, " ").trim() : "";
+	// Tolerate whitespace before the close `>` (`</title >`, `</title\n>`) — same
+	// end-tag robustness as the script/style strip (CodeQL `js/bad-tag-filter`).
+	const m = /<title\b[^>]*>([\s\S]*?)<\/title\s*>/i.exec(body.toString("utf8"));
+	// Decode entities through the SAME single-pass decoder (no double-unescape).
+	return m ? decodeEntities(m[1]).replace(/\s+/g, " ").trim() : "";
 }
 
 /**

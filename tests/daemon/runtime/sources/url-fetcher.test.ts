@@ -287,5 +287,89 @@ describe("PRD-045 W1 — SSRF-safe URL document fetcher", () => {
 			const text = bytesToText(Buffer.from("plain text\nbody"), "text/plain");
 			expect(text).toBe("plain text\nbody");
 		});
+
+		// --- CodeQL js/bad-tag-filter regression: end-tag whitespace / case / unclosed ---
+
+		it("strips a script whose end tag has trailing whitespace (</script >) — body does NOT leak", () => {
+			const html = "<html><body><script>leak_ws()</script ><p>kept</p></body></html>";
+			const text = bytesToText(Buffer.from(html), "text/html");
+			expect(text).not.toContain("leak_ws()");
+			expect(text).toContain("kept");
+		});
+
+		it("strips a script whose end tag has a newline + uppercase (</SCRIPT\\n>)", () => {
+			const html = "<html><body><script>leak_nl()</SCRIPT\n><p>kept</p></body></html>";
+			const text = bytesToText(Buffer.from(html), "text/html");
+			expect(text).not.toContain("leak_nl()");
+			expect(text).toContain("kept");
+		});
+
+		it("strips a script whose end tag has a tab (</script\\t>)", () => {
+			const html = "<html><body><script>leak_tab()</script\t><p>kept</p></body></html>";
+			const text = bytesToText(Buffer.from(html), "text/html");
+			expect(text).not.toContain("leak_tab()");
+			expect(text).toContain("kept");
+		});
+
+		it("strips a style whose end tag has trailing whitespace (</style >)", () => {
+			const html = "<html><head><style>.leak{color:red}</style ></head><body><p>kept</p></body></html>";
+			const text = bytesToText(Buffer.from(html), "text/html");
+			expect(text).not.toContain(".leak");
+			expect(text).not.toContain("color:red");
+			expect(text).toContain("kept");
+		});
+
+		it("does NOT leak an UNCLOSED <script> body (no end tag at all)", () => {
+			const html = "<html><body><p>before</p><script>unclosed_leak()";
+			const text = bytesToText(Buffer.from(html), "text/html");
+			expect(text).not.toContain("unclosed_leak()");
+			expect(text).toContain("before");
+		});
+
+		it("does NOT leak an UNCLOSED <style> body (no end tag at all)", () => {
+			const html = "<html><head><style>.unclosed{display:none}";
+			const text = bytesToText(Buffer.from(html), "text/html");
+			expect(text).not.toContain(".unclosed");
+			expect(text).not.toContain("display:none");
+		});
+
+		// --- CodeQL js/double-escaping regression: entity decode is single-pass ---
+
+		it("decodes &amp;lt; to the LITERAL text &lt; (NOT < — no double-unescape)", () => {
+			const text = bytesToText(Buffer.from("<html><body><p>&amp;lt;</p></body></html>"), "text/html");
+			expect(text).toBe("&lt;");
+			expect(text).not.toBe("<");
+		});
+
+		it("decodes &amp;amp; to &amp; (NOT & — no double-unescape)", () => {
+			const text = bytesToText(Buffer.from("<html><body><p>&amp;amp;</p></body></html>"), "text/html");
+			expect(text).toBe("&amp;");
+			expect(text).not.toBe("&");
+		});
+
+		it("decodes &amp;gt; to the literal &gt; (NOT > — no double-unescape)", () => {
+			const text = bytesToText(Buffer.from("<html><body><p>&amp;gt;</p></body></html>"), "text/html");
+			expect(text).toBe("&gt;");
+		});
+
+		it("still decodes the normal single entities (&amp;→&, &lt;→<, &gt;→>, &nbsp;→space)", () => {
+			const text = bytesToText(
+				Buffer.from("<html><body><p>a&amp;b &lt;c&gt; d&nbsp;e</p></body></html>"),
+				"text/html",
+			);
+			expect(text).toContain("a&b");
+			expect(text).toContain("<c>");
+			expect(text).toContain("d e");
+		});
+
+		it("decodes &quot; and &#39;/&apos; correctly", () => {
+			const text = bytesToText(
+				Buffer.from("<html><body><p>&quot;q&quot; &#39;a&#39; &apos;b&apos;</p></body></html>"),
+				"text/html",
+			);
+			expect(text).toContain('"q"');
+			expect(text).toContain("'a'");
+			expect(text).toContain("'b'");
+		});
 	});
 });
