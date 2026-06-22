@@ -24,7 +24,7 @@ import type { TransportRequest } from "../../../../src/daemon/storage/transport.
 import { type RuntimeConfig } from "../../../../src/daemon/runtime/config.js";
 import { createRequestLogger } from "../../../../src/daemon/runtime/logger.js";
 import { createDaemon } from "../../../../src/daemon/runtime/server.js";
-import { buildSettingsView, fetchKpisView, fetchSkillSyncView, mountDashboardApi } from "../../../../src/daemon/runtime/dashboard/api.js";
+import { buildSettingsView, fetchKpisView, fetchMemoryGraphView, fetchSkillSyncView, mountDashboardApi } from "../../../../src/daemon/runtime/dashboard/api.js";
 import type { QueryScope, StorageQuery } from "../../../../src/daemon/storage/client.js";
 import type { QueryResult, StorageRow } from "../../../../src/daemon/storage/result.js";
 import type { LocalAssetInventory } from "../../../../src/dashboard/contracts.js";
@@ -86,6 +86,19 @@ function responder(graphBuilt: boolean) {
 		}
 		if (/FROM\s+"rules"/i.test(sql)) return [{ id: "r1", name: "Use ESM", status: "active" }];
 		if (/FROM\s+"skills"/i.test(sql)) return [{ name: "deeplake-recall", scope: "team", visibility: "global" }];
+		// PRD-041b: the memory-graph reads. `graphBuilt` reuses the flag to toggle a populated vs empty
+		// ontology — built → two entities + one dependency edge between them; empty → no rows (built:false).
+		if (/FROM\s+"entities"/i.test(sql)) {
+			if (!graphBuilt) return [];
+			return [
+				{ id: "e1", name: "Mario", type: "entity" },
+				{ id: "e2", name: "Honeycomb", type: "entity" },
+			];
+		}
+		if (/FROM\s+"entity_dependencies"/i.test(sql)) {
+			if (!graphBuilt) return [];
+			return [{ source_entity_id: "e1", target_entity_id: "e2", type: "depends_on" }];
+		}
 		return [];
 	};
 }
@@ -450,6 +463,122 @@ describe("PRD-036b: skill-sync view is the union (installed ∪ synced) with hon
 			throw new Error("scanner blew up");
 		});
 		expect(view.skills).toEqual([{ name: "deeplake-recall", scope: "team", syncState: "shared" }]);
+	});
+});
+
+describe("PRD-041b: fetchMemoryGraphView serves the memory-graph view-model (GraphView-shaped, fail-soft)", () => {
+	it("AC-1: a populated ontology → built:true with entities→nodes (ontology kind) + dependency edges", async () => {
+		const storage = fakeStorage((sql) => {
+			if (/FROM\s+"entities"/i.test(sql))
+				return [
+					{ id: "e1", name: "Mario", type: "entity" },
+					{ id: "e2", name: "Honeycomb", type: "entity" },
+				];
+			if (/FROM\s+"entity_dependencies"/i.test(sql))
+				return [{ source_entity_id: "e1", target_entity_id: "e2", type: "depends_on" }];
+			return [];
+		});
+		const view = await fetchMemoryGraphView(storage, SCOPE_OK);
+		expect(view.built).toBe(true);
+		expect(view.nodes).toEqual([
+			{ id: "e1", label: "Mario", kind: "entity" },
+			{ id: "e2", label: "Honeycomb", kind: "entity" },
+		]);
+		// The dependency relation rides the edge `kind` (depends_on) — no special-casing.
+		expect(view.edges).toEqual([{ from: "e1", to: "e2", kind: "depends_on" }]);
+	});
+
+	it("AC-4: an EMPTY ontology → the honest built:false empty state (not an error, not a faked graph)", async () => {
+		const storage = fakeStorage(() => []); // no entities, no dependencies
+		const view = await fetchMemoryGraphView(storage, SCOPE_OK);
+		expect(view.built).toBe(false);
+		expect(view.nodes).toHaveLength(0);
+		expect(view.edges).toHaveLength(0);
+	});
+
+	it("AC-2: a forced storage error fails soft to built:false (never a throw)", async () => {
+		const storage = fakeStorage((sql) => {
+			if (/FROM\s+"entities"/i.test(sql)) return "error";
+			return [];
+		});
+		const view = await fetchMemoryGraphView(storage, SCOPE_OK);
+		expect(view.built).toBe(false);
+		expect(view.nodes).toHaveLength(0);
+	});
+
+	it("a dependency edge with a missing endpoint is dropped (no half-edge)", async () => {
+		const storage = fakeStorage((sql) => {
+			if (/FROM\s+"entities"/i.test(sql)) return [{ id: "e1", name: "Mario", type: "entity" }];
+			// e2 is not in the entity set → this edge must be filtered out.
+			if (/FROM\s+"entity_dependencies"/i.test(sql))
+				return [{ source_entity_id: "e1", target_entity_id: "e2", type: "depends_on" }];
+			return [];
+		});
+		const view = await fetchMemoryGraphView(storage, SCOPE_OK);
+		expect(view.built).toBe(true);
+		expect(view.nodes).toHaveLength(1);
+		expect(view.edges).toHaveLength(0);
+	});
+
+	it("AC-2: the read uses guarded SQL (sqlIdent identifiers) and carries NO org_id predicate (engine table)", async () => {
+		const seen: string[] = [];
+		const storage = fakeStorage((sql) => {
+			seen.push(sql);
+			if (/FROM\s+"entities"/i.test(sql)) return [{ id: "e1", name: "Mario", type: "entity" }];
+			return [];
+		});
+		await fetchMemoryGraphView(storage, SCOPE_OK);
+		const entitiesSql = seen.find((s) => /FROM\s+"entities"/i.test(s)) ?? "";
+		// Identifiers are double-quoted (sqlIdent floor); the engine tables have no org_id column, so
+		// the read must NOT filter by org_id (scope isolation rides storage.query(sql, scope)).
+		expect(entitiesSql).toContain('FROM "entities"');
+		expect(entitiesSql.toLowerCase()).not.toContain("org_id");
+	});
+});
+
+describe("PRD-041b: GET /api/diagnostics/memory-graph endpoint (mirrors /api/graph)", () => {
+	it("AC-1/AC-3: AFTER attach returns the memory-graph view-model (built:true) for a populated ontology", async () => {
+		const { daemon, storage } = makeDaemon(true);
+		mountDashboardApi(daemon, { storage });
+		const res = await daemon.app.request("/api/diagnostics/memory-graph", { headers: headers() });
+		expect(res.status).toBe(200);
+		const json = (await res.json()) as { built: boolean; nodes: unknown[]; edges: unknown[] };
+		expect(json.built).toBe(true);
+		expect(json.nodes).toHaveLength(2);
+		expect(json.edges).toHaveLength(1);
+	});
+
+	it("AC-4: returns the honest built:false empty state (200) when the ontology is empty", async () => {
+		const { daemon, storage } = makeDaemon(false);
+		mountDashboardApi(daemon, { storage });
+		const res = await daemon.app.request("/api/diagnostics/memory-graph", { headers: headers() });
+		expect(res.status).toBe(200); // NOT an error
+		const json = (await res.json()) as { built: boolean; nodes: unknown[] };
+		expect(json.built).toBe(false);
+		expect(json.nodes).toHaveLength(0);
+	});
+
+	it("BEFORE attach: the diagnostics group answers the 501 scaffold for the memory-graph path", async () => {
+		const { daemon } = makeDaemon(true);
+		const res = await daemon.app.request("/api/diagnostics/memory-graph", { headers: headers() });
+		expect(res.status).toBe(501);
+	});
+
+	it("AC-6: no secret rides the response — only entity/edge graph text (grep the body)", async () => {
+		const { daemon, storage } = makeDaemon(true);
+		mountDashboardApi(daemon, { storage });
+		const body = await (await daemon.app.request("/api/diagnostics/memory-graph", { headers: headers() })).text();
+		// The body is graph text only (ids/labels/kinds). No token/secret/credential field by construction.
+		expect(body.toLowerCase()).not.toContain("token");
+		expect(body.toLowerCase()).not.toContain("secret");
+		expect(body.toLowerCase()).not.toContain("api_key");
+	});
+
+	it("fail-closed: a request with no resolvable org 400s (mirrors /api/graph)", async () => {
+		const { daemon, storage } = makeDaemon(true);
+		mountDashboardApi(daemon, { storage });
+		const res = await daemon.app.request("/api/diagnostics/memory-graph", {});
+		expect(res.status).toBe(400);
 	});
 });
 

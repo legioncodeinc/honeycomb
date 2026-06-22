@@ -215,7 +215,7 @@ describe("037b AC-2/AC-3/AC-4: client-side routing — swap without reload, deep
 		await mountShell(makeMockFetch());
 		// On the Dashboard route the recall bar is present.
 		expect(container.textContent ?? "").toContain("Recall");
-		// Click the Graph nav item → the outlet swaps to the Graph placeholder; the recall bar is gone.
+		// Click the Graph nav item → the outlet swaps to the REAL PRD-041 Graph page; the recall bar is gone.
 		const graphItem = container.querySelector('[data-route="/graph"]');
 		await act(async () => {
 			graphItem?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -224,11 +224,17 @@ describe("037b AC-2/AC-3/AC-4: client-side routing — swap without reload, deep
 			window.dispatchEvent(new HashChangeEvent("hashchange"));
 		});
 		await act(async () => {
+			// Flush the Graph page's fetch-on-mount (it hydrates the codebase graph from the wire).
+			await Promise.resolve();
 			await Promise.resolve();
 		});
 		const text = container.textContent ?? "";
 		expect(window.location.hash).toBe("#/graph");
-		expect(text).toContain("coming soon · owned by PRD-041"); // the Graph placeholder content
+		// PRD-041 replaced the ComingSoon placeholder: the real Graph page renders its source toggle
+		// (Codebase ↔ Memory) and its `<source> · N nodes · M edges` eyebrow.
+		expect(text).not.toContain("coming soon · owned by PRD-041");
+		expect(container.querySelector('[data-testid="source-codebase"]'), "the real Graph page is mounted").not.toBeNull();
+		expect(text).toContain("codebase ·");
 		expect(text).not.toContain("Recall"); // the Dashboard body is no longer mounted
 		// The sidebar (the seven items) is STILL mounted — only the content region swapped.
 		expect(container.querySelectorAll("[data-route]")).toHaveLength(7);

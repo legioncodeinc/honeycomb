@@ -26,7 +26,7 @@ All bees: `typescript-node-worker-bee` / **opus** (dashboard React + daemon endp
 | 039 | Harnesses (telemetry + overview + detail) | 23 (8+5+5+5) | ✅ VERIFIED · merged #72 |
 | 038 | Dashboard home (KPI areas + recall + harness strip) | 23 (8+5+5+5) | ✅ VERIFIED — shipping |
 | 040 | Memories (add/edit/compact/dream/watch/search) | 21 (5+5+6+5) | ✅ VERIFIED — shipping |
-| 041 | Graph (full codebase graph) | tbd | OPEN |
+| 041 | Graph (full codebase graph + memory-graph foundation) | 17 (4+7+6) | ✅ VERIFIED — shipping |
 | 042 | Sync (skills + agents view/promote/control) | tbd | OPEN |
 | 043 | Logs (SQLite persistence + history + turns) | tbd | OPEN |
 | 044 | Settings (DeepLake auth + API keys + search mode) | tbd | OPEN |
