@@ -1,12 +1,14 @@
 # Three-Tier Memory Strategy (prime once, zoom on demand)
 
-> Category: Ai | Version: 1.0 | Date: June 2026 | Status: Strategy — PROPOSED, not built
+> Category: Ai | Version: 1.1 | Date: June 2026 | Status: Strategy — CORE BUILT (PRD-046, merged #77); extensions proposed
 
 A design strategy for layering a **3-tier "zoom" memory** on top of Honeycomb's existing Deep Lake
 store so a coding agent (Claude Code, Cursor) can be *primed once per session* with a tiny index of
 distilled memory and then *resolve deeper on demand*. This is the conceptual anchor for a set of
-sibling strategy docs. **It describes a target design, not shipped behavior** — read the "Current
-state" sections before assuming any of it exists.
+sibling strategy docs. **As of PRD-046 ([#77](https://github.com/legioncodeinc/honeycomb/pull/77),
+merged 2026-06-22) the CORE is SHIPPED** — Tier-1 keys, the prime endpoint, resolve/mine, and the
+CC/Cursor SessionStart hooks all exist (see the §3 table). What remains proposed: PRD-045c/d (richer
+dedup/recency), the durable-key sharpener, and GraphRAG ([`graphrag-followon.md`](graphrag-followon.md)).
 
 **Related:**
 - [`session-priming-architecture.md`](session-priming-architecture.md) — the push/pull mechanism + harness wiring
@@ -77,8 +79,8 @@ three tables that correspond almost exactly to the three zoom levels. The work i
 | Tier | Honeycomb table | Key column(s) | What it holds | Current state |
 |---|---|---|---|---|
 | **Tier 3 — RAW** | `sessions` | `path`, `message` (JSONB), `message_embedding FLOAT4[]` | One row per captured turn (prompt / tool-call / response), append-only | **Live.** The capture hook writes it every turn. |
-| **Tier 2 — SUMMARY** | `memory` | `path`, `summary`, `description`, `summary_embedding` | One distilled session summary per session | **Built + shipped (PRD-017 _Completed_), but not yet wired into the live daemon.** The summary worker (017a) and the `/MEMORY.md` synthesis (017b) are full, QA-passed implementations (15/15 ACs); but `runSummaryWorker` is invoked *nowhere* in the live daemon (deferred assembly — `server.ts`/`assemble.ts` mount no summary job), so summaries aren't produced on a live trigger until that wiring lands. **Not a stub** (an earlier draft said so — corrected). |
-| **Tier 1 — KEY** | *none yet* | — | A ≤1-sentence keyworded headline per session/fact, used as the index | **Does not exist.** The genuinely new piece this strategy adds. |
+| **Tier 2 — SUMMARY** | `memory` | `path`, `summary`, `description`, `summary_embedding` | One distilled session summary per session | **Live (PRD-046a).** The PRD-017 summary worker is now mounted in the daemon and fires on session-end + periodic triggers; 046b added the version-bumped `/MEMORY.md` refresh. |
+| **Tier 1 — KEY** | `memory.key` / `memories.key` | `key` | A ≤1-sentence keyworded headline per session/fact, used as the index | **Built (PRD-046b).** A `key` column on both tables, generated inside the summary gate (episodic). Durable-fact keys currently fall back to `content`; a dedicated durable-key sharpener is a follow-up. |
 
 A fourth table, `memories`, holds distilled *facts* (user/pipeline-curated, column `content`,
 `content_embedding`) — durable truths rather than per-session episodes. In this model `memories` is a

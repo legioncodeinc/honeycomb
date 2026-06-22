@@ -1,6 +1,6 @@
 # PRD-046b — Tier-1 key index
 
-> Status: backlog · Parent: PRD-046 · Wave: W1 · Type: M
+> Status: completed (merged #77, 2026-06-22) · Parent: PRD-046 · Wave: W1 · Type: M
 > Goal: produce the new artifact the prime needs — a ≤1-sentence, keyword-dense KEY per distilled
 > summary/fact, plus a refreshable index of those keys — reusing PRD-017b synthesis output where
 > possible so we sharpen rather than rebuild.

@@ -1,6 +1,6 @@
 # PRD-046d — Claude Code + Cursor SessionStart hooks
 
-> Status: backlog · Parent: PRD-046 · Wave: W2 · Type: M
+> Status: completed (merged #77, 2026-06-22) · Parent: PRD-046 · Wave: W2 · Type: M
 > Goal: deliver the prime to the agent — a SessionStart hook in Claude Code and Cursor that fetches the
 > digest (046c) once per session and injects it as session context. Start with these two harnesses; the
 > others follow the same shape later.

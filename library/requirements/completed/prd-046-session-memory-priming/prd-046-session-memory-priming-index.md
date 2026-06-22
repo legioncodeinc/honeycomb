@@ -1,6 +1,6 @@
 # PRD-046 — Session Memory Priming (prime once, resolve on demand)
 
-> Status: backlog · Owner: `/the-smoker` · Type: L (multi-feature)
+> Status: completed (merged #77, 2026-06-22) · Owner: `/the-smoker` · Type: L (multi-feature)
 > Goal: at the start of every coding session (Claude Code, Cursor to start), push the agent a tiny,
 > recency-aware INDEX of Honeycomb's distilled memory (Tier-1 keys), and let the agent RESOLVE deeper
 > (key → summary → raw) or MINE (semantic search) on demand — so a fresh session starts oriented

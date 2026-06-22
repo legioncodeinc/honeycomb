@@ -83,6 +83,7 @@ import {
 import { type ColumnDef } from "../../storage/schema.js";
 import { EMBEDDING_DIMS, serializeFloat4Array } from "../../storage/vector.js";
 import type { EmbedClient } from "../services/embed-client.js";
+import { deriveDurableKey } from "../summaries/key.js";
 
 /** A minimal structured-log sink for controlled-write events (flagged/skipped/etc). */
 export interface ControlledWriteLogger {
@@ -547,6 +548,13 @@ function buildMemoryRow(args: MemoryRowArgs): RowValues {
 		["id", val.str(args.id)],
 		["type", val.str(args.input.factType ?? "fact")],
 		["content", val.text(args.input.content)],
+		// PRD-046b (deferred durable-key generator): populate the DURABLE Tier-1 `key` — a
+		// sharp ≤1-sentence, secret-scrubbed, grounded headline derived DETERMINISTICALLY
+		// from the fact's content (a durable fact is already distilled, so no second gate
+		// pass). A blank derivation lands `''`, and the prime keeps its legacy `content`
+		// fallback for that un-keyed row. UPDATE re-derives from the new content; DELETE's
+		// empty content yields `''` (a tombstone is never primed anyway, `is_deleted = 1`).
+		["key", val.text(deriveDurableKey(args.input.content))],
 		["normalized_content", val.text(args.input.normalizedContent)],
 		["content_hash", val.str(args.hash)],
 		["confidence", val.num(clampConfidence(args.input.factConfidence))],

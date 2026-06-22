@@ -1,6 +1,6 @@
 # PRD-046a — Wire + trigger the summary worker in the live daemon
 
-> Status: backlog · Parent: PRD-046 · Wave: W0 · Type: S
+> Status: completed (merged #77, 2026-06-22) · Parent: PRD-046 · Wave: W0 · Type: S
 > Goal: make PRD-017's already-built per-session summary worker actually run on a live daemon, so
 > Tier-2 `memory` summaries land on real triggers. This is the foundational unblock — every later
 > slice (keys, prime) depends on summaries existing.

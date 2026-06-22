@@ -76,12 +76,14 @@ export {
 // ── PRD-046b Tier-1 KEY derivation (the grounded two-step distillation, folded into the gate) ──
 export {
 	buildStructuredSummaryPrompt,
+	deriveDurableKey,
 	deriveKeyFromExtraction,
 	type Extraction,
 	ExtractionSchema,
 	extractJsonObject,
 	type GroundedSummary,
 	isKeyGrounded,
+	isKeyGroundedInText,
 	MAX_KEY_CHARS,
 	parseSummaryGate,
 	SUMMARY_GATE_INSTRUCTIONS,

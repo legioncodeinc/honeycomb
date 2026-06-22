@@ -72,6 +72,24 @@ describe("PRD-046b b-AC-4 — assembling a prime is a pure SQL skim (NO generati
 		const durable = keys.find((k) => k.source === "durable");
 		expect(durable?.key).toBe("the legacy fact body with no derived key");
 	});
+
+	it("PRD-046 durable-key: a KEYED fact surfaces its real `key`, NOT the `content` fallback", async () => {
+		// A freshly stored fact now carries a derived durable key (the deferred 046b generator).
+		// The prime must surface that sharp key, not fall through to the raw content body.
+		const sharpKey = "DeepLake reads are eventually consistent — always poll to convergence";
+		const rawContent = "DeepLake reads are eventually consistent so a single immediate read can see a stale segment; always poll to convergence before asserting.";
+		const { storage: s } = storage((req) => {
+			if (/FROM\s+"memories"/i.test(req.sql)) {
+				return [{ key: sharpKey, id: "mem-keyed", content: rawContent }];
+			}
+			return [];
+		});
+		const keys = await skimPrimeKeys({ storage: s, scope: SCOPE });
+		const durable = keys.find((k) => k.source === "durable");
+		// The REAL key takes precedence — the prime lists the sharp headline, not the long content.
+		expect(durable?.key).toBe(sharpKey);
+		expect(durable?.key).not.toBe(rawContent);
+	});
 });
 
 describe("PRD-046b b-AC-5 — both sources, scoped; the skim carries the tenant partition", () => {

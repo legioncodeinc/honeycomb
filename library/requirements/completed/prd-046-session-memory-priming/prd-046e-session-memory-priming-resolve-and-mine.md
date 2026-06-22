@@ -1,6 +1,6 @@
 # PRD-046e — Resolve + mine tools (the pull path)
 
-> Status: backlog · Parent: PRD-046 · Wave: W1 · Type: S
+> Status: completed (merged #77, 2026-06-22) · Parent: PRD-046 · Wave: W1 · Type: S
 > Goal: give the agent the two pull tools the prime points it at — `hivemind_read` that ZOOMS a key
 > down the tiers (key → summary → raw), and `hivemind_search` that MINES via hybrid recall — so the
 > agent can act on the primed index on any turn.

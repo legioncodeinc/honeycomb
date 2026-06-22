@@ -1,6 +1,6 @@
 # PRD-046c — Prime digest service
 
-> Status: backlog · Parent: PRD-046 · Wave: W1 · Type: M
+> Status: completed (merged #77, 2026-06-22) · Parent: PRD-046 · Wave: W1 · Type: M
 > Goal: assemble the session-start prime — a compact, token-bounded, recency-aware index of Tier-1
 > keys (recent timestream + durable facts), scoped to the repo/agent — that the SessionStart hooks
 > (046d) inject. This is the "push the index" half of the design.

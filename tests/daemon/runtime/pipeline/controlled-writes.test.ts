@@ -502,10 +502,13 @@ describe("FR-10/FR-11: every write threads scope + routes through escaping helpe
 		// The embedded quote is doubled (escaped), so it cannot close the literal early.
 		expect(sql).toContain("Robert'')");
 		// The security property is INERTNESS, not a payload occurrence count. The content
-		// legitimately lands in TWO columns (`content` + `normalized_content`), so the
-		// payload string appears once per column — both copies escaped, both inert.
+		// legitimately lands in THREE columns (`content` + `key` + `normalized_content`):
+		// the durable-key generator (PRD-046) derives `key` from the content too, and the
+		// terminator-free payload has no sentence break so its whole (escaped) text lands in
+		// `key` as well. The payload string therefore appears once per column — all three
+		// copies escaped, all inert.
 		const dropCount = sql.match(/DROP TABLE/g)?.length ?? 0;
-		expect(dropCount).toBe(2); // one per column the content is written to
+		expect(dropCount).toBe(3); // content + key + normalized_content, each escaped
 		// Prove inertness directly: the attacker's close-literal-then-new-statement
 		// sequence `'); ` never appears UNescaped. The payload's `Robert');` becomes
 		// `Robert'');` (doubled quote), so the literal never closes early and no second
@@ -663,6 +666,61 @@ describe("dedup probe failure: missing-table/column tolerated → INSERT; genuin
 			applyControlledWrite(input(), SCOPE, deps(storage, config(), embed)),
 		).rejects.toThrow(/controlled-write dedup probe failed/);
 		expect(requests.some((r) => isInsert(r.sql))).toBe(false);
+	});
+});
+
+// ── PRD-046 deferred durable-key generator (memories.key on the write path) ───────
+
+describe("PRD-046: an ADD populates the durable Tier-1 `key` column (sharp, grounded, redacted)", () => {
+	/** Pull the (column, value) entry for `key` out of an INSERT's column→value map. */
+	function keyValueOf(sql: string): string | undefined {
+		const compact = sql.replace(/\s+/g, " ");
+		const colsVals = compact.match(/\(([^)]*)\)\s+VALUES\s+\(([^)]*)\)/i);
+		if (colsVals === null) return undefined;
+		const colNames = (colsVals[1] ?? "").split(",").map((c) => c.trim());
+		// VALUES can contain commas inside quoted literals; the durable fixtures below are
+		// comma-free in their content so a positional split is unambiguous here.
+		const colVals = (colsVals[2] ?? "").split(",").map((c) => c.trim());
+		const idx = colNames.indexOf("key");
+		return idx >= 0 ? colVals[idx] : undefined;
+	}
+
+	it("writes a non-empty, keyword-forward durable key derived from the fact content", async () => {
+		const { storage, requests } = storageWith(noRows);
+		const out = await applyControlledWrite(
+			input({
+				content: "DeepLake reads are eventually consistent — always poll to convergence",
+				normalizedContent: "deeplake reads are eventually consistent always poll to convergence",
+			}),
+			SCOPE,
+			deps(storage, config(), recordingEmbed()),
+		);
+		expect(out.action).toBe("inserted");
+		const insert = requests.find((r) => isInsert(r.sql));
+		expect(insert).toBeDefined();
+		// The `key` column is present on the row and carries the derived headline (escaped literal).
+		const compact = (insert?.sql ?? "").replace(/\s+/g, " ");
+		expect(/\bkey\b/.test(compact)).toBe(true);
+		const keyVal = keyValueOf(insert?.sql ?? "");
+		expect(keyVal).toBeDefined();
+		expect(keyVal).toContain("eventually consistent");
+	});
+
+	it("REDACTION: a secret in the fact content never reaches the durable key column (b-AC-5 floor)", async () => {
+		const { storage, requests } = storageWith(noRows);
+		const secretFact = "set api_key=sk_live_ABCDEF0123456789XYZ on the daemon client";
+		const out = await applyControlledWrite(
+			input({ content: secretFact, normalizedContent: secretFact }),
+			SCOPE,
+			deps(storage, config(), recordingEmbed()),
+		);
+		expect(out.action).toBe("inserted");
+		const insert = requests.find((r) => isInsert(r.sql));
+		const sql = insert?.sql ?? "";
+		// The credential never lands in the INSERT (not in `key`, not in `content` either —
+		// but the security-relevant assertion is the key the prime would surface).
+		expect(keyValueOf(sql)).not.toContain("sk_live_ABCDEF0123456789XYZ");
+		expect(keyValueOf(sql)).toContain("[REDACTED]");
 	});
 });
 

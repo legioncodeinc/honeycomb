@@ -1,6 +1,6 @@
 # PRD-046f — Prime eval (prove it, or pull it)
 
-> Status: backlog · Parent: PRD-046 · Wave: W2 · Type: M
+> Status: completed (merged #77, 2026-06-22) · Parent: PRD-046 · Wave: W2 · Type: M
 > Goal: measure that priming actually changes the agent's retrieval/behavior versus a cold start. A
 > prime the agent ignores is worse than no prime (it costs tokens for nothing), so this slice makes the
 > value testable and gives the kill criterion teeth.

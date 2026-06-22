@@ -1,6 +1,6 @@
 # Session Priming Architecture (push the index, pull the detail)
 
-> Category: Ai | Version: 1.0 | Date: June 2026 | Status: Strategy — PROPOSED, not built
+> Category: Ai | Version: 1.1 | Date: June 2026 | Status: Strategy — CORE BUILT (PRD-046, merged #77); extensions proposed
 
 How a coding agent gets *primed* with Honeycomb memory: a tiny index pushed once at session start,
 and a pull-on-demand resolve/search path the agent drives itself. Covers the cadence (session, not

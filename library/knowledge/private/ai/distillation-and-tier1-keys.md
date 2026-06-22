@@ -1,6 +1,6 @@
 # Distillation and the Tier-1 Key (the make-or-break)
 
-> Category: Ai | Version: 1.0 | Date: June 2026 | Status: Strategy — PROPOSED, not built
+> Category: Ai | Version: 1.1 | Date: June 2026 | Status: Strategy — CORE BUILT (PRD-046, merged #77); extensions proposed
 
 The quality of the 3-tier zoom memory is gated almost entirely by one thing: how good the distilled
 keys and summaries are. This doc defines the Tier-1 *key* (the new artifact), the grounded
