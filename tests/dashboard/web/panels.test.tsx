@@ -128,10 +128,11 @@ describe("SessionsPanel without pagination (≤5 sessions → no controls)", () 
 	});
 });
 
-describe("SessionsPanel empty state (0 sessions → unchanged empty row)", () => {
+describe("SessionsPanel empty state (0 turns → unchanged empty row)", () => {
 	it("shows the empty state and no controls", () => {
 		mount([]);
-		expect(container.textContent ?? "").toContain("No sessions captured yet.");
+		// PRD-035a: the empty captured-turns panel reads "No turns captured yet."
+		expect(container.textContent ?? "").toContain("No turns captured yet.");
 		expect(container.textContent ?? "").toContain("0 captured");
 		expect(pageButton("‹")).toBeUndefined();
 		expect(pageButton("›")).toBeUndefined();

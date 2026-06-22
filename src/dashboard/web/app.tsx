@@ -397,9 +397,13 @@ export function App({ client, assetBase = "assets" }: AppProps = {}): React.JSX.
 			{/* KPIs (AC-2) — metrics sit at the top, right under the header */}
 			<div className="kpirow" style={{ marginBottom: 22 }}>
 				<Kpi label="Memories" value={kpis.memoryCount.toLocaleString()} accent="honey" />
-				<Kpi label="Sessions" value={kpis.sessionCount} accent="neutral" />
+				{/* PRD-035a: "Turns" (each captured harness turn is one `sessions` row). Reads the honest
+				    `turnCount`, falling back to `sessionCount` if an older daemon omits it. */}
+				<Kpi label="Turns" value={kpis.turnCount || kpis.sessionCount} accent="neutral" />
 				<Kpi label="Est. savings" value={kpis.estimatedSavings.toLocaleString()} unit="tok" accent="verified" />
-				<Kpi label="Team skills" value={skills.length} accent="dream" />
+				{/* PRD-036c: the "Team skills" KPI binds to the DEFINED team-shared count from the daemon,
+				    NOT the unioned panel array's `.length` (which includes local-only disk skills). */}
+				<Kpi label="Team skills" value={kpis.teamSkillCount} accent="dream" />
 			</div>
 
 			<RecallBar query={query} setQuery={setQuery} onRecall={recall} busy={recallBusy} />

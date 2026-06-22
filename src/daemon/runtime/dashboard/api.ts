@@ -40,11 +40,18 @@ import { resolveScopeOrLocalDefault } from "../scope.js";
 import type {
 	GraphView,
 	KpisView,
+	LocalAssetInventory,
 	RulesView,
 	SessionsView,
 	SettingsView,
+	SkillSyncRow,
 	SkillSyncView,
 } from "../../../dashboard/contracts.js";
+import { scanInstalledAssets } from "./installed-assets.js";
+import {
+	SYNCED_ASSETS_TABLE,
+	TOMBSTONE_FALSE,
+} from "../../storage/catalog/synced-assets.js";
 import type { Daemon } from "../server.js";
 
 /** Options for {@link mountDashboardApi}. */
@@ -119,6 +126,13 @@ export const DASHBOARD_GROUPS = Object.freeze({
 	 * product-data data-access API; this dashboard VIEW-MODEL yields to it, under diagnostics.
 	 */
 	skills: "/api/diagnostics",
+	/**
+	 * Installed-assets inventory (PRD-036a) — the on-disk skill/agent scan, served off the
+	 * diagnostics group at `/installed-assets` (full path `/api/diagnostics/installed-assets`).
+	 * READ-ONLY filesystem walk; tenancy-independent (no org header required). PRD-036b calls
+	 * the underlying `scanInstalledAssets` IN-PROCESS, not over this HTTP surface.
+	 */
+	installedAssets: "/api/diagnostics",
 } as const);
 
 /** Number coercion that never returns NaN/undefined for a count column. */
@@ -145,19 +159,96 @@ async function selectRows(storage: StorageQuery, sql: string, scope: QueryScope)
 // EXACTLY the same rows with the same guarded SQL. Each returns the 020b view-model.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Fetch the KPIs view (FR-1 / d-AC-1): memory + session counts; savings is a real metric (0 until its pipeline lands). */
+/**
+ * The chars-per-token divisor used to estimate token counts from text length (PRD-035b OQ-2).
+ *
+ * A documented, cheap constant: English text averages ~4 characters per token across common BPE
+ * tokenizers, so `tokens ≈ chars / 4` is a good-enough estimate for a headline KPI labeled
+ * "Est. savings". We deliberately do NOT call a real tokenizer per request — that would be far too
+ * expensive for a single dashboard number, and the value is explicitly an ESTIMATE.
+ */
+const CHARS_PER_TOKEN = 4;
+
+/**
+ * Fetch the KPIs view (FR-1 / d-AC-1): memory + turn counts, the real estimated-savings metric
+ * (PRD-035b), and the team-shared skill count (PRD-036c).
+ *
+ * `turnCount` (PRD-035a) carries the SAME value as `sessionCount` — both come from the one
+ * `COUNT(*) FROM "sessions"` below — under the presentation-honest name the dashboard renders
+ * ("Turns"). The `sessions` DeepLake table is NOT renamed (a schema concern, out of scope — 035a D-3).
+ *
+ * `estimatedSavings` (PRD-035b) replaces the old hardcoded `0`. It is the memory-corpus token proxy
+ * (the ledger decision): the total distilled context the corpus can serve, approximated as
+ * `Σ tokens(memory content) ≈ Σ LENGTH(content) / CHARS_PER_TOKEN` over the org's stored memories.
+ * Every recalled-and-injected memory is context the agent did NOT have to re-derive, so the corpus's
+ * total token mass is a coarse "context available to be reused" estimate (035b D-1 fallback formula).
+ * It is computed by ONE additional guarded aggregate (`SUM(LENGTH(content))`) through the same
+ * `selectRows` fail-soft seam — no N+1 — and the divide-by-constant happens in TS so we do not lean
+ * on backend integer-division semantics. The KPI reads `0` ONLY when the corpus is genuinely empty
+ * (no memories → SUM is NULL → `toNum` → 0) or on a storage error (`selectRows` returns `[]`), never
+ * a stub.
+ *
+ * `teamSkillCount` (PRD-036c) counts the skills actually SHARED with the team: the current-version,
+ * non-tombstone `asset_type='skill'` rows in the `synced_assets` substrate (publishing to the
+ * substrate IS sharing). It binds the "Team skills" KPI to a DEFINED count rather than an incidental
+ * panel-array `.length` (036c D-2), so local-only disk skills never inflate it (036c D-1). The
+ * COUNT(DISTINCT honeycomb_id) over non-tombstone rows is name-independent and cheap; a missing
+ * `synced_assets` table / storage error fails soft to `0`.
+ */
 export async function fetchKpisView(storage: StorageQuery, scope: QueryScope): Promise<KpisView> {
-	const memTbl = sqlIdent("memory");
+	// The distilled-fact table is `memories` (PRD-003a `catalog/memories.ts`), not `memory` —
+	// a stale singular here silently returned 0 for the Memories KPI against the real backend.
+	const memTbl = sqlIdent("memories");
 	const sessTbl = sqlIdent("sessions");
-	const [memRows, sessRows] = await Promise.all([
+	const [memRows, sessRows, savingsRows, teamSkillRows] = await Promise.all([
 		selectRows(storage, `SELECT COUNT(*) AS n FROM "${memTbl}"`, scope),
 		selectRows(storage, `SELECT COUNT(*) AS n FROM "${sessTbl}"`, scope),
+		selectRows(storage, buildEstimatedSavingsSql(), scope),
+		selectRows(storage, buildTeamSkillCountSql(), scope),
 	]);
+	const sessionCount = toNum(sessRows[0]?.n);
+	// 035b: chars → tokens via the documented divisor. SUM is NULL on an empty corpus → toNum → 0.
+	const estimatedSavings = Math.floor(toNum(savingsRows[0]?.chars) / CHARS_PER_TOKEN);
 	return {
 		memoryCount: toNum(memRows[0]?.n),
-		sessionCount: toNum(sessRows[0]?.n),
-		estimatedSavings: 0,
+		// 035a: same value, two names — `sessionCount` kept (additive), `turnCount` is what the UI reads.
+		sessionCount,
+		turnCount: sessionCount,
+		estimatedSavings,
+		teamSkillCount: toNum(teamSkillRows[0]?.n),
 	};
+}
+
+/**
+ * Build the PRD-035b estimated-savings aggregate: the total character length of the memory corpus's
+ * distilled `content`, which `fetchKpisView` divides by {@link CHARS_PER_TOKEN} to estimate tokens.
+ * The `memories` table is the distilled-fact store (PRD-003a `catalog/memories.ts`); `content` is its
+ * human-readable summary text. Identifiers go through `sqlIdent` (the PRD-002b floor) — no value is
+ * interpolated. A single `SUM` aggregate (no per-row N+1); NULL on an empty corpus.
+ */
+function buildEstimatedSavingsSql(): string {
+	const tbl = sqlIdent("memories");
+	const col = sqlIdent("content");
+	return `SELECT SUM(LENGTH(${col})) AS chars FROM "${tbl}"`;
+}
+
+/**
+ * Build the PRD-036c team-shared skill count: the number of distinct skills currently published
+ * (non-tombstone) to the `synced_assets` substrate. We count DISTINCT `honeycomb_id` over the
+ * latest non-tombstone `asset_type='skill'` rows — publishing to the substrate is what "sharing with
+ * the team" means, so this is the honest "Team skills" number. Identifiers via `sqlIdent`, the
+ * tombstone/asset-type values via `sLiteral` (PRD-002b). Local-only disk skills are not in
+ * `synced_assets`, so they cannot inflate this count (036c D-1).
+ */
+function buildTeamSkillCountSql(): string {
+	const tbl = sqlIdent(SYNCED_ASSETS_TABLE);
+	const idCol = sqlIdent("honeycomb_id");
+	const typeCol = sqlIdent("asset_type");
+	const tombCol = sqlIdent("tombstone");
+	return (
+		`SELECT COUNT(DISTINCT ${idCol}) AS n FROM "${tbl}" ` +
+		`WHERE ${typeCol} = ${sLiteral("skill")} AND ${tombCol} = ${sLiteral(TOMBSTONE_FALSE)}`
+	);
 }
 
 /** Fetch the sessions view (FR-1 / d-AC-1): captured sessions + project/date metadata, newest first. */
@@ -234,21 +325,85 @@ export async function fetchRulesView(storage: StorageQuery, scope: QueryScope): 
 	return { rules };
 }
 
-/** Fetch the skill-sync view (FR-1 / d-AC-1): pulled + shared team skills and their sync state. */
-export async function fetchSkillSyncView(storage: StorageQuery, scope: QueryScope): Promise<SkillSyncView> {
+/** The `local` sync state for a skill found on disk but absent from the team substrate (PRD-036b). */
+const LOCAL_SYNC_STATE = "local" as const;
+
+/** Normalize a skill name to its union key (case-insensitive, trimmed) — the 036b collision key (OQ-2). */
+function normalizeSkillKey(name: string): string {
+	return name.trim().toLowerCase();
+}
+
+/**
+ * Fetch the skill-sync view (FR-1 / d-AC-1 / PRD-036b): the UNION of locally-installed skills and
+ * team-synced skills, each row carrying an honest `syncState`.
+ *
+ * Today this read returned ONLY the team-synced rows, so the panel showed 0 on a workspace with an
+ * empty substrate even when 27 skills sit on disk. PRD-036b merges the 036a local inventory in:
+ *
+ *   1. Read the team-synced rows. The SUBSTRATE OF RECORD is `synced_assets` (PRD-033), but those
+ *      rows are keyed by an opaque `honeycomb_id` and carry NO human `name` to union on — so the
+ *      named substrate source the union keys against is the legacy `skills` table (which has `name`
+ *      + `visibility` → `shared`/`pulled`). This honors "prefer synced_assets, treat `skills` as
+ *      fallback": `synced_assets` drives the team-shared COUNT (the KPI, `buildTeamSkillCountSql`),
+ *      while the named `skills` rows supply the panel's synced half (036b implementation note, OQ-1).
+ *   2. Call the 036a scanner IN-PROCESS (D-4 — not over HTTP; both run in the daemon) for the local
+ *      disk skills → candidate `local` rows.
+ *   3. UNION by normalized `name` (D-1 / OQ-2). On a collision the SUBSTRATE STATE WINS (a skill both
+ *      on disk and synced shows as shared/synced/pulled, never `local`) — the more-informative team
+ *      state is what the user cares about. A name only on disk → `local`; a name only in the
+ *      substrate → its existing state. Exactly one row per logical skill (no double-count).
+ *
+ * Fail-soft (D-4 / b-AC-6): a discovery error degrades to the substrate-only view (today's
+ * behaviour) — `scanInstalledAssets` is itself fail-soft (returns an empty inventory, never throws),
+ * and `selectRows` fails soft to `[]`, so this fetcher never crashes or 500s the panel. As a belt-
+ * and-braces guard, the scan is additionally wrapped so even a thrown scanner degrades to empty.
+ *
+ * The `scan` parameter is INJECTABLE (additive, defaults to the real {@link scanInstalledAssets}) so
+ * a daemon-side test can drive the union deterministically with a fake/temp-dir scanner without
+ * walking the real `process.cwd()` (036b implementation note).
+ */
+export async function fetchSkillSyncView(
+	storage: StorageQuery,
+	scope: QueryScope,
+	scan: () => Promise<LocalAssetInventory> = scanInstalledAssets,
+): Promise<SkillSyncView> {
 	const tbl = sqlIdent("skills");
-	const rows = await selectRows(
-		storage,
-		`SELECT ${sqlIdent("name")}, ${sqlIdent("scope")}, ${sqlIdent("visibility")} ` +
-			`FROM "${tbl}" ORDER BY ${sqlIdent("version")} DESC LIMIT 500`,
-		scope,
-	);
-	const skills = rows.map((r) => ({
-		name: toStr(r.name),
-		scope: toStr(r.scope),
-		syncState: toStr(r.visibility) === "global" ? "shared" : "pulled",
-	}));
-	return { skills };
+	const [substrateRows, inventory] = await Promise.all([
+		selectRows(
+			storage,
+			`SELECT ${sqlIdent("name")}, ${sqlIdent("scope")}, ${sqlIdent("visibility")} ` +
+				`FROM "${tbl}" ORDER BY ${sqlIdent("version")} DESC LIMIT 500`,
+			scope,
+		),
+		// D-4: the 036a discovery is fail-soft (empty inventory on any error), so its skills half
+		// degrades the union to substrate-only rather than failing the panel. The catch is a second
+		// guard in case an injected scanner throws — the panel still renders the substrate view.
+		scan().catch((): LocalAssetInventory => ({ skills: [], agents: [] })),
+	]);
+
+	// Start the union from the SUBSTRATE rows (their state is authoritative on a collision — D-1).
+	const merged = new Map<string, SkillSyncRow>();
+	for (const r of substrateRows) {
+		const name = toStr(r.name);
+		const key = normalizeSkillKey(name);
+		if (key === "") continue;
+		merged.set(key, {
+			name,
+			scope: toStr(r.scope),
+			syncState: toStr(r.visibility) === "global" ? "shared" : "pulled",
+		});
+	}
+
+	// Fold in the local disk skills: a name NOT already in the substrate becomes a `local` row; a
+	// name already present is left UNTOUCHED (substrate state wins → no double-count — D-1 / b-AC-2).
+	for (const asset of inventory.skills) {
+		const key = normalizeSkillKey(asset.name);
+		if (key === "" || merged.has(key)) continue;
+		merged.set(key, { name: asset.name, scope: asset.scope, syncState: LOCAL_SYNC_STATE });
+	}
+
+	// Stable output: substrate rows keep their substrate order first, then local-only by insertion.
+	return { skills: [...merged.values()] };
 }
 
 /** The 400 body a dashboard handler returns when the request carries no resolvable org (fail-closed). */
@@ -335,6 +490,40 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 			return c.json(await fetchSkillSyncView(storage, scope));
 		});
 	}
+
+	// PRD-036a — the installed-assets inventory: a READ-ONLY on-disk skill/agent scan,
+	// served at `/installed-assets` under the diagnostics group. Tenancy-INDEPENDENT (the
+	// scan walks the filesystem, not storage), so it needs no org header — auth/RBAC is
+	// still inherited from the protected diagnostics group. A short TTL cache (D-1) keeps
+	// repeated dashboard refreshes from re-walking the tree each time. The scan is fail-soft
+	// (degrades to an empty inventory), so this handler never 500s.
+	const installedAssets = daemon.group(DASHBOARD_GROUPS.installedAssets);
+	if (installedAssets !== undefined) {
+		const inventoryCache = createInventoryCache();
+		installedAssets.get("/installed-assets", async (c) => {
+			return c.json(await inventoryCache());
+		});
+	}
+}
+
+/** The TTL for the installed-assets inventory cache (PRD-036a D-1). */
+const INSTALLED_ASSETS_TTL_MS = 5_000;
+
+/**
+ * Build a memoizing reader for the installed-assets inventory: it runs
+ * {@link scanInstalledAssets} (project-root only by default, D-1) and caches the
+ * result for {@link INSTALLED_ASSETS_TTL_MS}, so repeated dashboard refreshes share
+ * one filesystem walk. Each `mountDashboardApi` call gets its own cache instance.
+ */
+function createInventoryCache(): () => Promise<LocalAssetInventory> {
+	let cached: { value: LocalAssetInventory; at: number } | undefined;
+	return async (): Promise<LocalAssetInventory> => {
+		const now = Date.now();
+		if (cached !== undefined && now - cached.at < INSTALLED_ASSETS_TTL_MS) return cached.value;
+		const value = await scanInstalledAssets();
+		cached = { value, at: now };
+		return value;
+	};
 }
 
 /** The codebase-snapshot graph shape persisted in `snapshot_jsonb`. */

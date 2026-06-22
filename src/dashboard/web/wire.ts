@@ -55,7 +55,13 @@ export const ENDPOINTS = Object.freeze({
 export const KpisSchema = z.object({
 	memoryCount: z.number().catch(0),
 	sessionCount: z.number().catch(0),
+	// PRD-035a: the honest "Turns" count (same value as `sessionCount`). `.catch(0)` tolerance so an
+	// OLD daemon payload that carries only `sessionCount` degrades safely (the app falls back to it).
+	turnCount: z.number().catch(0),
 	estimatedSavings: z.number().catch(0),
+	// PRD-036c: the team-shared skill count the "Team skills" KPI binds to. `.catch(0)` so an older
+	// payload without it reads 0 rather than throwing into React.
+	teamSkillCount: z.number().catch(0),
 });
 export type KpisWire = z.infer<typeof KpisSchema>;
 
@@ -390,7 +396,7 @@ export interface WireClient {
 }
 
 /** The empty/zero KPIs the UI shows before the first load resolves (or on failure). */
-export const EMPTY_KPIS: KpisWire = { memoryCount: 0, sessionCount: 0, estimatedSavings: 0 };
+export const EMPTY_KPIS: KpisWire = { memoryCount: 0, sessionCount: 0, turnCount: 0, estimatedSavings: 0, teamSkillCount: 0 };
 
 /** The empty settings the header shows before the first load resolves. */
 export const EMPTY_SETTINGS: SettingsWire = { orgId: "", orgName: "", workspace: "", settings: {} };
