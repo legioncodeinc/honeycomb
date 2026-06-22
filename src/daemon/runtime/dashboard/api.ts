@@ -260,25 +260,124 @@ function buildTeamSkillCountSql(): string {
 	);
 }
 
-/** Fetch the sessions view (FR-1 / d-AC-1): captured sessions + project/date metadata, newest first. */
-export async function fetchSessionsView(storage: StorageQuery, scope: QueryScope): Promise<SessionsView> {
+/** The default sessions page size when no `?limit=` is given (the legacy dashboard-panel cap). */
+export const DEFAULT_SESSIONS_LIMIT = 50;
+/** The hard ceiling on a browsable-turns page (PRD-043c — a higher bound than the panel's 50). */
+export const MAX_SESSIONS_LIMIT = 500;
+
+/**
+ * PRD-043c — options for a BROWSABLE turns history over {@link fetchSessionsView}. ADDITIVE: when
+ * omitted, the fetcher behaves EXACTLY as the legacy dashboard-panel read (newest 50, no cursor),
+ * so the existing `SessionsPanel`/`wire.sessions()` are unchanged. When provided, the read pages on
+ * a stable `(creation_date, id)` cursor for the Logs page's Turns section (FR-3).
+ *
+ * NOTE (project memory — DeepLake eventual consistency): a freshly-captured turn may not be
+ * immediately readable from a stale segment. This paged read makes NO single-immediate-read
+ * assumption — a caller reading back a just-written turn must poll until convergence. The page
+ * surface tolerates a row appearing one refresh later (it is append-only and newest-first).
+ */
+export interface SessionsPageOptions {
+	/** Page size, clamped to `[1, MAX_SESSIONS_LIMIT]`. Defaults to {@link DEFAULT_SESSIONS_LIMIT}. */
+	readonly limit?: number;
+	/** Page strictly OLDER than this `(creation_date, id)` cursor (exclusive). */
+	readonly before?: { readonly creationDate: string; readonly id: string };
+}
+
+/** A page of captured turns plus the cursor for the next (older) page (PRD-043c FR-3). */
+export interface SessionsPage extends SessionsView {
+	/** The opaque cursor to fetch the next older page, or `null` when this is the last page. */
+	readonly nextCursor: string | null;
+}
+
+/** Clamp a raw `?limit=` to `[1, MAX_SESSIONS_LIMIT]`, defaulting a missing/garbage value. */
+export function resolveSessionsLimit(raw: string | undefined): number {
+	if (raw === undefined || raw.length === 0) return DEFAULT_SESSIONS_LIMIT;
+	const n = Number.parseInt(raw, 10);
+	if (!Number.isFinite(n) || n <= 0) return DEFAULT_SESSIONS_LIMIT;
+	return Math.min(n, MAX_SESSIONS_LIMIT);
+}
+
+/** Encode a turns cursor `(creation_date, id)` to an opaque base64url token. */
+export function encodeSessionsCursor(cursor: { creationDate: string; id: string }): string {
+	return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+/** Decode a turns cursor token, or `undefined` on any malformed/garbage value (fail-safe). */
+export function decodeSessionsCursor(token: string | undefined): { creationDate: string; id: string } | undefined {
+	if (token === undefined || token === "") return undefined;
+	try {
+		const parsed: unknown = JSON.parse(Buffer.from(token, "base64url").toString("utf8"));
+		if (typeof parsed === "object" && parsed !== null) {
+			const cd = (parsed as { creationDate?: unknown }).creationDate;
+			const id = (parsed as { id?: unknown }).id;
+			if (typeof cd === "string" && typeof id === "string" && cd !== "" && id !== "") return { creationDate: cd, id };
+		}
+		return undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Fetch the sessions view (FR-1 / d-AC-1): captured TURNS + project/date metadata, NEWEST FIRST.
+ * The read still targets the `sessions` table BY NAME via `sqlIdent("sessions")` (PRD-043c AC-3 /
+ * PRD-035a D-3 — the table is not renamed; only the UI label says "Turns"). It surfaces METADATA
+ * ONLY (id/project/creation_date) — never a transcript/body/JSONB column (043c D-4 / AC-5).
+ *
+ * PRD-043c ADDITIVE PAGING: with no `options`, this returns the legacy newest-50 panel view
+ * (`fetchSessionsView(storage, scope)` is unchanged for every existing caller). With `options`, it
+ * pages on a stable `(creation_date, id)` cursor and returns a {@link SessionsPage} with a
+ * `nextCursor`. Every value rides through `sLiteral`; the table/column identifiers through
+ * `sqlIdent` — audit:sql safe.
+ */
+export async function fetchSessionsView(
+	storage: StorageQuery,
+	scope: QueryScope,
+	options?: SessionsPageOptions,
+): Promise<SessionsPage> {
 	const tbl = sqlIdent("sessions");
+	const idCol = sqlIdent("id");
+	const projCol = sqlIdent("project");
+	const dateCol = sqlIdent("creation_date");
+	const pathCol = sqlIdent("path");
+	const limit = options?.limit !== undefined ? Math.min(Math.max(1, options.limit), MAX_SESSIONS_LIMIT) : DEFAULT_SESSIONS_LIMIT;
+	// Fetch one extra row to know whether an older page exists (the cursor sentinel).
+	const fetchLimit = limit + 1;
+
+	// Cursor predicate (page strictly OLDER than the last-seen row): newest-first ordering is
+	// `(creation_date DESC, id DESC)`, so "older" is `creation_date < cd OR (creation_date = cd AND
+	// id < cdId)`. Every value is a `sLiteral` (no raw interpolation) — audit:sql safe.
+	let cursorClause = "";
+	const before = options?.before;
+	if (before !== undefined) {
+		const cd = sLiteral(before.creationDate);
+		const cid = sLiteral(before.id);
+		cursorClause = ` WHERE (${dateCol} < ${cd} OR (${dateCol} = ${cd} AND ${idCol} < ${cid}))`;
+	}
+
 	const rows = await selectRows(
 		storage,
-		`SELECT ${sqlIdent("id")}, ${sqlIdent("project")}, ${sqlIdent("creation_date")}, ${sqlIdent("path")} ` +
-			// The dashboard paginates 5 rows/page client-side, so a saner cap than 200 is plenty; the
-		// KPI sessionCount comes from a separate COUNT(*) query, so the displayed total is unaffected.
-		`FROM "${tbl}" ORDER BY ${sqlIdent("creation_date")} DESC LIMIT 50`,
+		`SELECT ${idCol}, ${projCol}, ${dateCol}, ${pathCol} ` +
+			`FROM "${tbl}"${cursorClause} ORDER BY ${dateCol} DESC, ${idCol} DESC LIMIT ${fetchLimit}`,
 		scope,
 	);
-	const sessions = rows.map((r) => ({
+	const hasMore = rows.length > limit;
+	const pageRows = hasMore ? rows.slice(0, limit) : rows;
+	const sessions = pageRows.map((r) => ({
 		sessionId: toStr(r.id),
 		project: toStr(r.project),
 		startedAt: toStr(r.creation_date),
+		// `eventCount` stays the placeholder 0 (OQ-3 — a real per-turn count defers to a coordinated
+		// PRD-035 read change). The contract carries what it carries; the page renders it honestly.
 		eventCount: 0,
 		status: "captured",
 	}));
-	return { sessions };
+	const lastRow = pageRows[pageRows.length - 1];
+	const nextCursor =
+		hasMore && lastRow !== undefined
+			? encodeSessionsCursor({ creationDate: toStr(lastRow.creation_date), id: toStr(lastRow.id) })
+			: null;
+	return { sessions, nextCursor };
 }
 
 /**
@@ -537,10 +636,16 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 	const sessions = daemon.group(DASHBOARD_GROUPS.sessions);
 	if (sessions !== undefined) {
 		// Served at `/sessions` under the diagnostics group (full `/api/diagnostics/sessions`).
+		// PRD-043c: ADDITIVE browsable-history paging — `?limit=` (clamped) + `?cursor=` page the
+		// captured turns newest-first. With no params the legacy newest-50 panel view is returned
+		// (the existing dashboard `SessionsPanel` is unchanged); the Turns section on the Logs page
+		// passes the params for deeper history + a `nextCursor` to load older windows.
 		sessions.get("/sessions", async (c) => {
 			const scope = resolveScope(c);
 			if (scope === null) return c.json(NO_ORG_BODY, 400);
-			return c.json(await fetchSessionsView(storage, scope));
+			const limit = resolveSessionsLimit(c.req.query("limit"));
+			const before = decodeSessionsCursor(c.req.query("cursor"));
+			return c.json(await fetchSessionsView(storage, scope, before !== undefined ? { limit, before } : { limit }));
 		});
 	}
 

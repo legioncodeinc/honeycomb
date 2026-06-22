@@ -71,16 +71,37 @@ export interface RequestLogger {
 export const DEFAULT_LOG_BUFFER_SIZE = 500;
 
 /**
+ * The durable write-through seam the logger tees each record into IN ADDITION to the in-memory
+ * ring buffer + stderr (PRD-043a FR-2). It is the narrow `appendRequest`/`appendEvent` subset of
+ * the SQLite {@link import("./logs/log-store.js").LogStore} — declared HERE (not imported) so the
+ * logger stays driver-free and pure: when no store is injected, the logger behaves EXACTLY as
+ * before (the PRD-021d/029 suites pass unchanged — AC-3). Both methods are fail-soft by contract
+ * (a store error is swallowed inside the store, never thrown into the request path — AC-4).
+ */
+export interface LogWriteThrough {
+	/** Persist one completed request record (in addition to the ring buffer). Fail-soft. */
+	appendRequest(record: RequestLogRecord): void;
+	/** Persist one subsystem-event record (in addition to the ring buffer). Fail-soft. */
+	appendEvent(record: EventLogRecord): void;
+}
+
+/**
  * The default request logger: writes each record as one JSON line to stderr AND
  * retains the last `bufferSize` records in a ring buffer for `/api/logs`. A
  * `silent` option suppresses the stderr write (used in tests so the suite output
  * stays clean) while still buffering, so log assertions don't depend on stderr.
+ *
+ * PRD-043a (FR-2): an OPTIONAL `store` write-through seam tees each record into the durable
+ * SQLite store too. When ABSENT (the default — every existing call site + the PRD-021d/029 unit
+ * suites), the logger is the pure ring-buffer-and-stderr logger it always was (AC-3). The store's
+ * own writes are fail-soft, so a persistence failure NEVER changes the snapshot/stream behaviour.
  */
 export function createRequestLogger(
-	options: { bufferSize?: number; silent?: boolean } = {},
+	options: { bufferSize?: number; silent?: boolean; store?: LogWriteThrough } = {},
 ): RequestLogger {
 	const bufferSize = options.bufferSize ?? DEFAULT_LOG_BUFFER_SIZE;
 	const silent = options.silent ?? false;
+	const store = options.store;
 	const buffer: RequestLogRecord[] = [];
 	// PRD-029: a SEPARATE ring buffer for structured subsystem events, so the per-request
 	// snapshot (`recent` / `/api/logs`) is unchanged and the two never crowd each other out.
@@ -93,6 +114,8 @@ export function createRequestLogger(
 			if (!silent) {
 				process.stderr.write(`${JSON.stringify({ kind: "request", ...record })}\n`);
 			}
+			// PRD-043a FR-2: write through to the durable store (fail-soft inside the store).
+			store?.appendRequest(record);
 		},
 		recent(limit?: number): RequestLogRecord[] {
 			if (limit === undefined || limit >= buffer.length) return [...buffer];
@@ -107,6 +130,8 @@ export function createRequestLogger(
 				// distinguishes them. The fields are caller-scrubbed to subsystem state (D-5).
 				process.stderr.write(`${JSON.stringify({ kind: "event", ...record })}\n`);
 			}
+			// PRD-043a FR-2: write through to the durable store (fail-soft inside the store).
+			store?.appendEvent(record);
 		},
 		recentEvents(limit?: number): EventLogRecord[] {
 			if (limit === undefined || limit >= events.length) return [...events];

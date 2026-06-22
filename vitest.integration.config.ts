@@ -67,6 +67,11 @@ class InfraDegradedReporter implements Reporter {
 export default defineConfig({
 	test: {
 		environment: "node",
+		// PRD-043a: thread `--experimental-sqlite` to the worker processes so the live itests can
+		// open the durable log store on Node 22.x (a harmless no-op on 24/25), matching the unit run.
+		poolOptions: {
+			forks: { execArgv: ["--experimental-sqlite"] },
+		},
 		include: ["tests/integration/**/*.itest.ts"],
 		// The default reporter PLUS the infra-degraded surfacer (D-2): on a sustained
 		// backend outage the suite writes a sentinel marker and this reporter prints the

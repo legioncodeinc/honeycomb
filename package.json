@@ -96,7 +96,7 @@
     "vitest": "^3.2.6"
   },
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.5.0"
   },
   "//peerDependencies": "PRD-019e: react powers @honeycomb/sdk/react; ai powers @honeycomb/sdk/vercel. Both are OPTIONAL peers (peerDependenciesMeta) so the core entry stays dependency-free for Node/Bun/browser. The core client (.) pulls in NEITHER.",
   "peerDependencies": {

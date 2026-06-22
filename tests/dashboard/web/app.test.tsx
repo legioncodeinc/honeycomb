@@ -244,7 +244,11 @@ describe("037b AC-2/AC-3/AC-4: client-side routing — swap without reload, deep
 		window.location.hash = "#/logs";
 		await mountShell(makeMockFetch());
 		const text = container.textContent ?? "";
-		expect(text).toContain("coming soon · owned by PRD-043"); // the Logs placeholder
+		// PRD-043: the Logs route now mounts the REAL Logs page (request log + turns), not a
+		// placeholder — assert its distinctive surfaces (the Requests/Turns tabs + the live tail).
+		expect(text).toContain("Requests");
+		expect(text).toContain("Turns");
+		expect(text).toContain("Live tail");
 		// The Logs nav item is the single active one.
 		const active = [...container.querySelectorAll('[data-active="true"]')];
 		expect(active).toHaveLength(1);

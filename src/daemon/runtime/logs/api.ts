@@ -40,6 +40,15 @@ import { streamSSE } from "hono/streaming";
 
 import type { RequestLogger, RequestLogRecord } from "../logger.js";
 import type { Daemon } from "../server.js";
+import {
+	DEFAULT_HISTORY_LIMIT,
+	decodeCursor,
+	type HistoryPage,
+	type HistoryQuery,
+	type LogStore,
+	MAX_HISTORY_LIMIT,
+	NULL_LOG_STORE,
+} from "./log-store.js";
 
 /** The route group the logs API attaches to (already mounted + protected in `server.ts`). */
 export const LOGS_GROUP = "/api/logs" as const;
@@ -67,6 +76,14 @@ export interface MountLogsOptions {
 	readonly streamPollMs?: number;
 	/** The SSE keepalive interval (ms). Defaults to {@link DEFAULT_STREAM_KEEPALIVE_MS}. */
 	readonly streamKeepaliveMs?: number;
+	/**
+	 * PRD-043a (FR-3): the durable log store that backs `GET /api/logs/history`. Defaults to the
+	 * {@link NULL_LOG_STORE} no-op — so a unit-constructed mount (and the existing PRD-021d suite)
+	 * gets a history endpoint that returns an empty page rather than 404, never a throw. Production
+	 * injects the real SQLite store from the daemon assembly. The existing `GET /api/logs` snapshot
+	 * + `/api/logs/stream` SSE tail keep reading the in-memory ring buffer UNCHANGED (D-3).
+	 */
+	readonly store?: LogStore;
 }
 
 /** The JSON envelope `GET /api/logs` returns: the records plus the total buffered. */
@@ -75,6 +92,18 @@ export interface LogsResponse {
 	readonly records: readonly RequestLogRecord[];
 	/** How many records were returned (the page size). */
 	readonly count: number;
+}
+
+/** The JSON envelope `GET /api/logs/history` returns (PRD-043a FR-3): a page + the next cursor. */
+export interface LogsHistoryResponse {
+	/** The persisted request records for this page, NEWEST FIRST. */
+	readonly records: readonly RequestLogRecord[];
+	/** How many records were returned (the page size). */
+	readonly count: number;
+	/** The opaque cursor to fetch the next (older) page, or `null` when this is the last page. */
+	readonly nextCursor: string | null;
+	/** Whether the durable store actually persists (false → history unavailable, in-memory only). */
+	readonly persistent: boolean;
 }
 
 /**
@@ -89,6 +118,64 @@ export function resolveLimit(raw: string | undefined): number {
 	return Math.min(n, MAX_LOGS_LIMIT);
 }
 
+/** True iff a string is a valid ISO-8601 instant (`Date.parse` succeeds) — used to reject garbage. */
+function isIsoInstant(raw: string): boolean {
+	return raw.length > 0 && !Number.isNaN(Date.parse(raw));
+}
+
+/**
+ * Parse + validate the `/api/logs/history` query params into a {@link HistoryQuery} (PRD-043a FR-4),
+ * mirroring {@link resolveLimit}'s clamp discipline. The fixed, validated filter set:
+ *   - `?since=` / `?until=` — ISO-8601 instants; a non-parseable value is IGNORED (never thrown).
+ *   - `?status=` — an exact code (`404`) or a status CLASS (`5xx`/`4xx`/`2xx`); garbage is ignored.
+ *   - `?path=` — an exact-or-prefix path string (the store does a prefix LIKE on the bound value).
+ *   - `?org=` — an exact org match.
+ *   - `?limit=` — clamped to `[1, MAX_HISTORY_LIMIT]` exactly like `resolveLimit`.
+ *   - `?cursor=` — an opaque pagination cursor; a malformed cursor is ignored (→ newest page).
+ * Unknown/garbage params are simply not represented in the result (ignored), never a 400 — the
+ * endpoint always returns a well-formed page.
+ */
+export function resolveHistoryQuery(params: {
+	since?: string;
+	until?: string;
+	status?: string;
+	path?: string;
+	org?: string;
+	limit?: string;
+	cursor?: string;
+}): HistoryQuery {
+	const limitRaw = params.limit;
+	let limit = DEFAULT_HISTORY_LIMIT;
+	if (limitRaw !== undefined && limitRaw.length > 0) {
+		const n = Number.parseInt(limitRaw, 10);
+		if (Number.isFinite(n) && n > 0) limit = Math.min(n, MAX_HISTORY_LIMIT);
+	}
+
+	const query: {
+		-readonly [K in keyof HistoryQuery]: HistoryQuery[K];
+	} = { limit };
+	if (params.since !== undefined && isIsoInstant(params.since)) query.since = params.since;
+	if (params.until !== undefined && isIsoInstant(params.until)) query.until = params.until;
+	const status = parseStatusFilter(params.status);
+	if (status !== undefined) query.status = status;
+	if (params.path !== undefined && params.path.length > 0) query.path = params.path;
+	if (params.org !== undefined && params.org.length > 0) query.org = params.org;
+	const cursor = decodeCursor(params.cursor);
+	if (cursor !== undefined) query.cursor = cursor;
+	return query;
+}
+
+/** Parse a `?status=` value into an exact code or a class (`5xx`), or `undefined` for garbage. */
+function parseStatusFilter(raw: string | undefined): HistoryQuery["status"] {
+	if (raw === undefined || raw.length === 0) return undefined;
+	// Class form: `5xx` / `4XX` / `2xx` → the hundreds bucket.
+	const cls = /^([1-5])xx$/i.exec(raw);
+	if (cls !== null && cls[1] !== undefined) return { kind: "class", hundreds: Number.parseInt(cls[1], 10) };
+	// Exact form: a 3-digit HTTP status code.
+	if (/^[1-5]\d{2}$/.test(raw)) return { kind: "exact", code: Number.parseInt(raw, 10) };
+	return undefined;
+}
+
 /**
  * Attach the `/api/logs` read handlers onto the daemon's already-mounted `/api/logs`
  * route group (d-AC-2 / FR-2). Registers the JSON snapshot (`GET /`) and the SSE follow
@@ -101,15 +188,43 @@ export function mountLogsApi(daemon: Daemon, options: MountLogsOptions): void {
 	if (logs === undefined) return;
 
 	const logger = options.logger;
+	const store = options.store ?? NULL_LOG_STORE;
 	const pollMs = options.streamPollMs ?? DEFAULT_STREAM_POLL_MS;
 	const keepaliveMs = options.streamKeepaliveMs ?? DEFAULT_STREAM_KEEPALIVE_MS;
 
 	// ── GET /api/logs — the JSON snapshot (newest last), bounded by ?limit=. The
 	// records are RequestLogRecords verbatim: no token, no header, no body (logger.ts).
+	// UNCHANGED by PRD-043a — it still reads the in-memory ring buffer (D-3).
 	logs.get("/", (c) => {
 		const limit = resolveLimit(c.req.query("limit"));
 		const records = logger.recent(limit);
 		const body: LogsResponse = { records, count: records.length };
+		return c.json(body);
+	});
+
+	// ── GET /api/logs/history — the DURABLE, filterable, paginated history (PRD-043a FR-3).
+	// Reads the SQLite store (NOT the ring buffer), so it survives restarts; NEWEST FIRST. It
+	// inherits the `/api/logs` group's auth/RBAC + local-gate (already `protect:true` in
+	// `server.ts` — no new gate). The records are RequestLogRecords verbatim: no token/header/body
+	// (the store's table shape cannot hold a secret — FR-7 / AC-6). A non-persistent store (the
+	// fail-soft no-op) returns an empty page with `persistent:false`, never a 404 or a throw.
+	logs.get("/history", (c) => {
+		const query = resolveHistoryQuery({
+			since: c.req.query("since"),
+			until: c.req.query("until"),
+			status: c.req.query("status"),
+			path: c.req.query("path"),
+			org: c.req.query("org"),
+			limit: c.req.query("limit"),
+			cursor: c.req.query("cursor"),
+		});
+		const page: HistoryPage = store.queryRequests(query);
+		const body: LogsHistoryResponse = {
+			records: page.records,
+			count: page.records.length,
+			nextCursor: page.nextCursor,
+			persistent: store.persistent,
+		};
 		return c.json(body);
 	});
 

@@ -93,6 +93,17 @@ function tenancyHeaders(creds: Credentials | null): Record<string, string> {
 	return headers;
 }
 
+/**
+ * Node flags the spawned daemon process is launched with (PRD-043a). `--experimental-sqlite`
+ * unlocks the built-in `node:sqlite` (`DatabaseSync`) the durable log store uses on Node 22.x (the
+ * `engines` floor; the module landed in 22.5.0). It is flag-free on Node 24/25, where the flag is
+ * ACCEPTED AS A HARMLESS NO-OP — so passing it unconditionally keeps production persistence green
+ * across the whole supported Node matrix without a version branch. The store itself is fail-soft
+ * (an unavailable `node:sqlite` degrades to in-memory), so a Node that somehow rejects the flag
+ * still boots — the daemon just runs without log history.
+ */
+const DAEMON_NODE_FLAGS: readonly string[] = ["--experimental-sqlite"];
+
 /** Resolve the bundled `daemon/index.js` entry the lifecycle spawns (b-AC-2). */
 function resolveDaemonEntry(): string {
 	// In the published package the CLI runs from `bundle/cli.js`; the daemon bundle is the sibling
@@ -155,7 +166,7 @@ export function buildDaemonLifecycle(client: DaemonClient): DaemonLifecycle {
 			if (await client.ping()) return { started: false, alreadyRunning: true };
 
 			const entry = resolveDaemonEntry();
-			const child = spawn(process.execPath, [entry], {
+			const child = spawn(process.execPath, [...DAEMON_NODE_FLAGS, entry], {
 				detached: true,
 				stdio: "ignore",
 				env: process.env,

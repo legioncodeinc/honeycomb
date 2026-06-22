@@ -339,6 +339,54 @@ export const LogsResponseSchema = z.object({
 });
 export type LogRecordWire = z.infer<typeof LogRecordSchema>;
 
+/**
+ * PRD-043a/043b — `GET /api/logs/history` body: the durable, filterable, paginated request-log
+ * history (newest first) + the next-page cursor. MIRRORS the daemon `LogsHistoryResponse`
+ * (`src/daemon/runtime/logs/api.ts`). Reuses the SAME secret-free {@link LogRecordSchema} as the
+ * live snapshot, so the history table and the live tail share ONE row shape and never drift. Every
+ * field `.catch()`-defaults so a partial/older payload degrades to a safe empty page (never a throw
+ * into React). `nextCursor` is null on the last page; `persistent:false` means history is
+ * unavailable (the store could not open — the page shows its honest empty/unavailable state).
+ */
+export const LogsHistoryResponseSchema = z.object({
+	records: z.array(LogRecordSchema).catch([]),
+	count: z.number().catch(0),
+	nextCursor: z.string().nullable().catch(null),
+	persistent: z.boolean().catch(false),
+});
+export type LogsHistoryWire = z.infer<typeof LogsHistoryResponseSchema>;
+
+/** The fixed, validated filter set the Logs history table drives the `/api/logs/history` query with. */
+export interface LogsHistoryFilters {
+	/** Lower time bound (inclusive), ISO-8601. */
+	readonly since?: string;
+	/** Upper time bound (inclusive), ISO-8601. */
+	readonly until?: string;
+	/** Exact status (`404`) or a class (`5xx`/`4xx`/`2xx`). */
+	readonly status?: string;
+	/** Path exact-or-prefix filter. */
+	readonly path?: string;
+	/** Org/harness filter (exact). */
+	readonly org?: string;
+	/** Page size (clamped daemon-side to `MAX_HISTORY_LIMIT`). */
+	readonly limit?: number;
+	/** The opaque pagination cursor (page strictly before this — older window). */
+	readonly cursor?: string;
+}
+
+/**
+ * PRD-043c — `GET /api/diagnostics/sessions` (paged) body: the browsable captured-TURNS history +
+ * the next-page cursor. Reuses the SAME {@link SessionRowSchema} as the legacy sessions view (so the
+ * Turns list and the dashboard panel share one row shape). Every field `.catch()`-defaults so a
+ * partial/older daemon payload (one WITHOUT `nextCursor`) degrades to a safe page with no further
+ * cursor, never a throw. The page LABELS these "Turns" (PRD-035a); the storage table stays `sessions`.
+ */
+export const TurnsHistoryResponseSchema = z.object({
+	sessions: z.array(SessionRowSchema).catch([]),
+	nextCursor: z.string().nullable().catch(null),
+});
+export type TurnsHistoryWire = z.infer<typeof TurnsHistoryResponseSchema>;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PRD-039 — the harness registry + last-seen telemetry (the data backbone). Mirrors
 // `src/daemon/runtime/dashboard/harness-api.ts` (`HarnessStatus`) + the folded 039c
@@ -672,6 +720,23 @@ export interface WireClient {
 	 */
 	logsStream(onRecord: (record: LogRecordWire) => void): () => void;
 	/**
+	 * PRD-043a/043b — read the DURABLE, filterable, paginated request-log history
+	 * (`GET /api/logs/history`, newest first). Reuses the SAME secret-free `LogRecordWire` shape as
+	 * {@link logs}, so the history table and the live tail share one row renderer. A malformed/absent
+	 * body degrades to an empty page (`{ records: [], nextCursor: null, persistent: false }`) so the
+	 * page renders its honest empty/unavailable state, never a throw. `filters` map 1:1 to the
+	 * daemon's validated query params; an undefined filter is simply omitted.
+	 */
+	logsHistory(filters?: LogsHistoryFilters): Promise<LogsHistoryWire>;
+	/**
+	 * PRD-043c — read the browsable captured-TURNS history (`GET /api/diagnostics/sessions`, paged,
+	 * newest first). Returns the turn rows + a `nextCursor` for the next older page. Labeled "Turns"
+	 * on the page (PRD-035a); the storage table stays `sessions`. A malformed/absent body degrades to
+	 * an empty page so the page renders its honest empty state, never a throw. The daemon reads turns
+	 * from DeepLake (eventual consistency) — a freshly captured turn may appear one refresh later.
+	 */
+	turnsHistory(opts?: { limit?: number; cursor?: string }): Promise<TurnsHistoryWire>;
+	/**
 	 * PRD-039a — read the harness registry + last-seen telemetry (the data backbone). Returns the
 	 * six canonical `HarnessStatus` rows the Harnesses page (039b/039c) renders; a failure degrades
 	 * to an empty list (the page shows its honest empty/zero state, never a throw). No second source —
@@ -722,6 +787,33 @@ export const EMPTY_SETTINGS: SettingsWire = { orgId: "", orgName: "", workspace:
 
 /** The empty graph (renders the kit's "no graph built" empty-state). */
 export const EMPTY_GRAPH: GraphWire = { built: false, nodes: [], edges: [] };
+
+/** The empty log-history page the table shows before the first load (or on failure / unavailable store). */
+export const EMPTY_LOGS_HISTORY: LogsHistoryWire = Object.freeze({ records: [], count: 0, nextCursor: null, persistent: false });
+
+/** The empty turns-history page the Turns section shows before the first load (or on failure). */
+export const EMPTY_TURNS_HISTORY: TurnsHistoryWire = Object.freeze({ sessions: [], nextCursor: null });
+
+/**
+ * Build the `/api/logs/history` query string from the SET filters only (an undefined filter is
+ * omitted so the daemon applies its default). Every value is `encodeURIComponent`-escaped so a
+ * path/org/cursor with special characters is a safe single query value (never a query injection).
+ */
+export function buildHistoryQueryString(filters: LogsHistoryFilters): string {
+	const parts: string[] = [];
+	const add = (key: string, value: string | number | undefined): void => {
+		if (value === undefined || value === "") return;
+		parts.push(`${key}=${encodeURIComponent(String(value))}`);
+	};
+	add("since", filters.since);
+	add("until", filters.until);
+	add("status", filters.status);
+	add("path", filters.path);
+	add("org", filters.org);
+	add("limit", filters.limit);
+	add("cursor", filters.cursor);
+	return parts.length > 0 ? `?${parts.join("&")}` : "";
+}
 
 /**
  * Build the typed wire client (AC-2..AC-6). The `origin` is prefixed onto every path so the
@@ -861,6 +953,21 @@ export function createWireClient(options: WireClientOptions = {}): WireClient {
 					// Closing an already-closed/errored EventSource must never throw into unmount.
 				}
 			};
+		},
+		async logsHistory(filters: LogsHistoryFilters = {}): Promise<LogsHistoryWire> {
+			// Build the query string from only the SET filters (an undefined filter is omitted, so the
+			// daemon applies its default). A malformed/absent body degrades to the empty page.
+			const qs = buildHistoryQueryString(filters);
+			const v = await getJson(fetchImpl, url(`${ENDPOINTS.logs}/history${qs}`), LogsHistoryResponseSchema);
+			return v ?? EMPTY_LOGS_HISTORY;
+		},
+		async turnsHistory(opts: { limit?: number; cursor?: string } = {}): Promise<TurnsHistoryWire> {
+			const parts: string[] = [];
+			if (opts.limit !== undefined) parts.push(`limit=${encodeURIComponent(String(opts.limit))}`);
+			if (opts.cursor !== undefined && opts.cursor !== "") parts.push(`cursor=${encodeURIComponent(opts.cursor)}`);
+			const qs = parts.length > 0 ? `?${parts.join("&")}` : "";
+			const v = await getJson(fetchImpl, url(`${ENDPOINTS.sessions}${qs}`), TurnsHistoryResponseSchema);
+			return v ?? EMPTY_TURNS_HISTORY;
 		},
 		async harnesses(): Promise<HarnessStatusWire[]> {
 			// GET the six canonical harness statuses; a malformed/absent body degrades to the empty
