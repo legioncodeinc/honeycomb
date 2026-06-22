@@ -21,7 +21,11 @@ import type { TransportRequest } from "../../../../src/daemon/storage/transport.
 import { type RuntimeConfig } from "../../../../src/daemon/runtime/config.js";
 import { createRequestLogger } from "../../../../src/daemon/runtime/logger.js";
 import { createDaemon } from "../../../../src/daemon/runtime/server.js";
-import { mountMemoriesApi } from "../../../../src/daemon/runtime/memories/index.js";
+import { mountMemoriesApi, type VaultSettingsReader } from "../../../../src/daemon/runtime/memories/index.js";
+import { EMBEDDING_DIMS } from "../../../../src/daemon/storage/vector.js";
+import type { EmbedClient } from "../../../../src/daemon/runtime/services/embed-client.js";
+import type { SecretScope } from "../../../../src/daemon/runtime/secrets/contracts.js";
+import type { SettingResult } from "../../../../src/daemon/runtime/vault/store.js";
 import { createFakeAuthenticator } from "../../../../src/daemon/runtime/auth/contracts.js";
 import { createRbacPolicy } from "../../../../src/daemon/runtime/auth/rbac.js";
 import { resolvePipelineConfig } from "../../../../src/daemon/runtime/pipeline/config.js";
@@ -417,5 +421,133 @@ describe("PRD-022 local-mode default-scope fallback (the SDK/MCP 400 regression 
 		const recallArm = fake.requests.find((r) => /\bAS\s+source\b/i.test(r.sql));
 		expect(recallArm?.org).toBe(ORG);
 		expect(recallArm?.org).not.toBe(DEFAULT_SCOPE.org);
+	});
+});
+
+// ── PRD-044c — the LIVE /api/memories/recall path READS recallMode + honors it ────────────────
+
+/** A 768-dim query vector for the live recall-mode handler tests. */
+const VALID_QUERY_VECTOR: readonly number[] = new Array(EMBEDDING_DIMS).fill(0.05) as number[];
+
+/** A fixed-vector EmbedClient so the handler's semantic arm WOULD run unless recallMode gates it. */
+function fakeEmbed(result: readonly number[] | null): EmbedClient {
+	return {
+		async embed(): Promise<readonly number[] | null> {
+			return result;
+		},
+	};
+}
+
+/**
+ * A fake vault `getSetting` reader: returns `{ ok:true, value }` for the `recallMode` key when
+ * `value` is set, else `{ ok:false, reason:"not_found" }` (the UNSET case). Records every read so a
+ * test can prove the handler consulted the vault at recall time. Structurally a {@link VaultSettingsReader}.
+ */
+function fakeVault(value: string | null): { vault: VaultSettingsReader; reads: string[] } {
+	const reads: string[] = [];
+	const vault: VaultSettingsReader = {
+		async getSetting(key: string, _scope: SecretScope): Promise<SettingResult> {
+			reads.push(key);
+			if (key === "recallMode" && value !== null) return { ok: true, value };
+			return { ok: false, reason: "not_found" };
+		},
+	};
+	return { vault, reads };
+}
+
+/**
+ * A SQL-aware responder that answers BOTH the lexical `memories` arm AND the semantic `<#>` cosine
+ * arm (+ its hydration SELECT). With a valid embed injected, the semantic arm WOULD surface
+ * `mem-sem` and report `degraded:false` — UNLESS `recallMode:"keyword"` gates it off, in which case
+ * only the lexical `mem-lex` surfaces and `<#>` is never issued. This is the seam that makes the
+ * keyword-vs-default contrast observable over HTTP.
+ */
+function recallModeResponder(term: string) {
+	return (req: TransportRequest): Record<string, unknown>[] => {
+		const sql = req.sql;
+		// The lexical `memories` arm (always runs — the resilient floor).
+		if (/'memories'\s+AS\s+source/i.test(sql) && sql.includes(term)) {
+			return [{ source: "memories", id: "mem-lex", text: `a lexical fact about ${term}` }];
+		}
+		// The semantic `<#>` cosine arm → a scored id (only reached when the semantic arm runs).
+		if (sql.includes("<#>")) return [{ id: "mem-sem", score: 0.93 }];
+		// The hydration SELECT (`AS source` + `IN (...)`) → the matched semantic row's text.
+		if (/AS\s+source/i.test(sql) && /\bIN\s*\(/i.test(sql)) {
+			return [{ source: "memories", id: "mem-sem", text: `a semantic-only hit about ${term}` }];
+		}
+		return [];
+	};
+}
+
+function makeRecallModeDaemon(term: string) {
+	const fake = new FakeDeepLakeTransport(recallModeResponder(term));
+	const storage = createStorageClient({ transport: fake, provider: stubProvider(fakeCredentialRecord()) });
+	const daemon = createDaemon({ config: cfg(), storage, logger: createRequestLogger({ silent: true }) });
+	return { daemon, storage, fake };
+}
+
+describe("PRD-044c — /api/memories/recall reads the recallMode setting and honors it on the LIVE path", () => {
+	it("recallMode='keyword' persisted → handler reads it; response is keyword-gated (NO `<#>`, degraded:false)", async () => {
+		const term = "modeterm";
+		const { daemon, storage, fake } = makeRecallModeDaemon(term);
+		const { vault, reads } = fakeVault("keyword");
+		// Embeddings ARE available (a valid embed) — only the keyword MODE suppresses the semantic arm.
+		mountMemoriesApi(daemon, { storage, embed: fakeEmbed(VALID_QUERY_VECTOR), vault });
+
+		const res = await daemon.app.request("/api/memories/recall", {
+			method: "POST",
+			headers: headers(),
+			body: JSON.stringify({ query: term }),
+		});
+		expect(res.status).toBe(200);
+		const json = (await res.json()) as { hits: { id: string }[]; degraded: boolean };
+
+		// The handler consulted the vault for the recall mode AT RECALL TIME.
+		expect(reads).toContain("recallMode");
+		// The keyword gate: NO `<#>` cosine arm was ever issued to storage.
+		expect(fake.requests.some((r) => r.sql.includes("<#>")), "keyword mode issues NO `<#>` arm").toBe(false);
+		// An intentional lexical run is NOT degraded (PRD-029 coherence).
+		expect(json.degraded).toBe(false);
+		// Only the lexical hit surfaces; the semantic-only id never appears (the arm never ran).
+		expect(json.hits.some((h) => h.id === "mem-lex")).toBe(true);
+		expect(json.hits.some((h) => h.id === "mem-sem")).toBe(false);
+	});
+
+	it("recallMode UNSET (key not found) → behavior unchanged: the semantic `<#>` arm RUNS (degraded:false)", async () => {
+		const term = "modeterm";
+		const { daemon, storage, fake } = makeRecallModeDaemon(term);
+		const { vault } = fakeVault(null); // the key is not set → fail-soft to today's behavior.
+		mountMemoriesApi(daemon, { storage, embed: fakeEmbed(VALID_QUERY_VECTOR), vault });
+
+		const res = await daemon.app.request("/api/memories/recall", {
+			method: "POST",
+			headers: headers(),
+			body: JSON.stringify({ query: term }),
+		});
+		expect(res.status).toBe(200);
+		const json = (await res.json()) as { hits: { id: string }[]; degraded: boolean };
+
+		// UNSET → the default path: the `<#>` cosine arm WAS issued (the semantic arm ran).
+		expect(fake.requests.some((r) => r.sql.includes("<#>")), "default path issues the `<#>` arm").toBe(true);
+		expect(json.degraded).toBe(false);
+		// The semantic-only hit surfaces — proving the arm ran on the default path.
+		expect(json.hits.some((h) => h.id === "mem-sem")).toBe(true);
+	});
+
+	it("NO vault wired at all → unchanged behavior (the semantic arm runs; no vault read attempted)", async () => {
+		// A unit-constructed mount with no vault must behave EXACTLY as today (the deterministic floor).
+		const term = "modeterm";
+		const { daemon, storage, fake } = makeRecallModeDaemon(term);
+		mountMemoriesApi(daemon, { storage, embed: fakeEmbed(VALID_QUERY_VECTOR) }); // no vault.
+
+		const res = await daemon.app.request("/api/memories/recall", {
+			method: "POST",
+			headers: headers(),
+			body: JSON.stringify({ query: term }),
+		});
+		expect(res.status).toBe(200);
+		const json = (await res.json()) as { degraded: boolean };
+		expect(fake.requests.some((r) => r.sql.includes("<#>"))).toBe(true);
+		expect(json.degraded).toBe(false);
 	});
 });

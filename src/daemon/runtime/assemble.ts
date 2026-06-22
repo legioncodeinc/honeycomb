@@ -36,6 +36,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { LEGACY_CREDENTIALS_DIR_NAME, DIR_MODE } from "./auth/credentials-store.js";
+import { mountAuthStatusApi } from "./auth/status-api.js";
 import {
 	type AuthorizationPolicy,
 	type Authenticator,
@@ -582,6 +583,7 @@ export function assembleSeams(
 	installedHarnesses: ReadonlySet<string>,
 	logStore: LogStore,
 	seams: SeamFns = defaultSeamFns,
+	vault?: VaultSettingsReader,
 ): void {
 	// The daemon's configured default tenancy scope (the single LOCAL tenant) is RESOLVED ONCE
 	// at the composition root (`assembleDaemon`) from the SAME credential source the storage
@@ -664,7 +666,16 @@ export function assembleSeams(
 	// PRD-029 (AC-4): thread the daemon's ring-buffer logger so a recall that runs DEGRADED
 	// (lexical fallback) emits one structured `recall.degraded` event (mode + arm coverage;
 	// no secret). Threaded here only — the recall HANDLER owns the emit; the engine is unchanged.
-	seams.mountMemories(daemon, { storage, defaultScope, embed: embed.client, logger: daemon.logger });
+	// PRD-044c: thread the vault `setting`-class READER so the LIVE recall handler reads the
+	// user-selected `recallMode` at recall time and honors it (`keyword` → lexical-only, NOT degraded).
+	// Present-only spread — an absent vault (the deterministic suite) leaves the read path UNSET (no-op).
+	seams.mountMemories(daemon, {
+		storage,
+		defaultScope,
+		embed: embed.client,
+		logger: daemon.logger,
+		...(vault !== undefined ? { vault } : {}),
+	});
 
 	// 7b. The session-priming PRIME digest (PRD-046c): `GET /api/memories/prime` attaches onto the
 	//    SAME `/api/memories` SESSION group, inheriting its auth/RBAC + session gate. The prime is a
@@ -1229,6 +1240,17 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				? detectInstalledHarnesses()
 				: new Set<string>());
 
+	// ── PRD-032d / AC-6: construct the daemon's vault `setting`-class READER ONCE, over the
+	// SAME workspace base dir + machine-key + daemon scope the secrets store uses (so the vault,
+	// the `.secrets/` records, and the `${SECRET_REF}` resolver all agree on ONE location). A
+	// test injects a fake reader (`options.vault`); production builds the real {@link VaultStore}.
+	// When a fake `storage` is injected with NO `vault`, the read path is skipped — the vault is
+	// only built for the REAL assembly so the deterministic suite never touches the workspace.
+	// Built BEFORE `assembleSeams` so the same reader threads into the `/api/memories/recall` mount
+	// (PRD-044c: the LIVE recall path reads the `recallMode` setting at recall time).
+	const vault: VaultSettingsReader | undefined =
+		options.vault ?? (options.storage === undefined ? buildVaultStore() : undefined);
+
 	// ── a-AC-2 / d-AC-1: fire the seams EXACTLY ONCE, after construction (the four core
 	// seams + the /api/logs reader always; the /dashboard host local-mode only per security
 	// F-1; PLUS the three data-API seams — memories/vfs/product-data — always, 022d).
@@ -1243,16 +1265,8 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		installedHarnesses,
 		logStore,
 		options.seams ?? defaultSeamFns,
+		vault,
 	);
-
-	// ── PRD-032d / AC-6: construct the daemon's vault `setting`-class READER ONCE, over the
-	// SAME workspace base dir + machine-key + daemon scope the secrets store uses (so the vault,
-	// the `.secrets/` records, and the `${SECRET_REF}` resolver all agree on ONE location). A
-	// test injects a fake reader (`options.vault`); production builds the real {@link VaultStore}.
-	// When a fake `storage` is injected with NO `vault`, the read path is skipped — the vault is
-	// only built for the REAL assembly so the deterministic suite never touches the workspace.
-	const vault: VaultSettingsReader | undefined =
-		options.vault ?? (options.storage === undefined ? buildVaultStore() : undefined);
 
 	// ── PRD-032d / AC-6: FIRE the Wave-1 `/api/settings` mount ONCE so the CLI/dashboard
 	// settings surface is LIVE against this daemon. FAIL-SOFT: a vault/settings construction or
@@ -1269,6 +1283,21 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			process.stderr.write(`honeycomb: settings API mount failed (non-fatal): ${reason}\n`);
 		}
 	}
+
+		// PRD-044a: FIRE the `/api/auth/status` read-model mount ONCE so the Settings page can read
+		// the daemon's REDACTED DeepLake-auth identity. It attaches onto the already-mounted,
+		// protected `/api/auth` group (NO `server.ts` edit -- the group is declared there with no
+		// handlers). The handler is GATED to local mode (OQ-3) + carries NO token by construction
+		// (the body has no `token` field). It resolves credentials via the SAME `loadCredentials`
+		// path the daemon connects through (the real shared `~/.deeplake/credentials.json`), so a
+		// `honeycomb login` reflects here on the page's next poll. FAIL-SOFT: a mount error must
+		// NEVER crash the daemon -- the surface stays unmounted this run, the posture the others use.
+		try {
+			mountAuthStatusApi(daemon);
+		} catch (err: unknown) {
+			const reason = err instanceof Error ? err.message : String(err);
+			process.stderr.write(`honeycomb: auth status API mount failed (non-fatal): ${reason}\n`);
+		}
 
 	// ── PRD-033c / FR-1/FR-2/FR-6: FIRE the `/api/assets` mount ONCE so the asset-sync
 	// substrate (publish/pull/tombstone) is LIVE against this daemon — the ONLY DeepLake path

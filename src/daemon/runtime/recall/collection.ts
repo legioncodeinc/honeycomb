@@ -89,6 +89,21 @@ export const emptyHintSource: HintSource = {
 	},
 };
 
+/**
+ * The user-selected recall mode (PRD-044c). The daemon reads the `recallMode` vault `setting`
+ * at recall time and threads it here; the closed enum is validated daemon-side
+ * (`vault/api.ts` `isValidRecallMode`, fail-closed). UNDEFINED is the default — it preserves
+ * today's PRD-025 runtime decision EXACTLY (the behavior-neutral ship): the vector arm runs
+ * whenever a usable query vector exists, and the silent lexical fallback sets `degraded` as
+ * before. An explicit mode OVERRIDES that decision:
+ *   - `keyword` → SKIP the vector arm even when embeddings are on (lexical FTS only); `degraded`
+ *     is NOT set — this is an intentional lexical run, not a fallback (PRD-029 coherence).
+ *   - `semantic` → run the vector arm; when no usable query vector exists, fall back to lexical
+ *     and set `degraded: true` EXACTLY as today (PRD-025 D-4).
+ *   - `hybrid` → run BOTH arms (the current default behavior when embeddings are on).
+ */
+export type RecallMode = "keyword" | "semantic" | "hybrid";
+
 /** Collection deps (a superset of the phase deps + the hint source seam). */
 export interface CollectionDeps {
 	/** Run every channel query through this — never a raw fetch. */
@@ -103,6 +118,11 @@ export interface CollectionDeps {
 	readonly hints?: HintSource;
 	/** Optional structured-log sink (surfaces the silent-fallback degrade). */
 	readonly logger?: RecallLogger;
+	/**
+	 * The user-selected {@link RecallMode} (PRD-044c). UNDEFINED preserves the PRD-025 runtime
+	 * default (behavior-neutral); an explicit mode gates the vector channel (see {@link RecallMode}).
+	 */
+	readonly recallMode?: RecallMode;
 }
 
 /**
@@ -239,28 +259,44 @@ export async function collectCandidates(query: RecallQuery, deps: CollectionDeps
 	);
 	channelInputs.push({ channel: "fts", ids: toScoredIds(ftsResult) });
 
-	// 3. Vector channel — only with a usable 768-dim vector; over-fetch (a-AC-2 / a-AC-3).
-	const queryVector = await computeQueryVector(query.query, deps);
+	// 3. Vector channel — gated by the user-selected recall mode (PRD-044c), then by a usable
+	//    768-dim vector (a-AC-2 / a-AC-3). The mode RESOLVES which arms run:
+	//      · `keyword`              → the vector arm is SKIPPED even when embeddings are on, and
+	//                                 `degraded` stays FALSE — this is an intentional lexical run,
+	//                                 NOT a fallback, so the PRD-029 "lexical fallback" badge must
+	//                                 not show (AC-3 fallback-vs-mode coherence).
+	//      · `semantic` / `hybrid`  → the vector arm RUNS when a usable query vector exists; when it
+	//                                 does not (embeddings off/unreachable/wrong-dim), recall falls
+	//                                 back to lexical and sets `degraded: true` EXACTLY as today.
+	//      · UNDEFINED (default)    → byte-for-byte today's PRD-025 behavior (run the vector arm
+	//                                 whenever a vector exists; degrade otherwise) — behavior-neutral.
 	let degraded = false;
-	if (queryVector === null) {
-		// Silent BM25/ILIKE fallback: no usable query vector → lexical-only. Surface
-		// the degrade so a recall the operator expected semantic is observable.
-		degraded = true;
-		deps.logger?.event("recall.collect_degraded", { reason: "no_query_vector" });
+	if (deps.recallMode === "keyword") {
+		// Intentional lexical-only run (NOT a degraded fallback). The vector arm is never built —
+		// no embed call, no `<#>` statement — and `degraded` stays false (AC-3).
+		deps.logger?.event("recall.collect_keyword_only", { mode: "keyword" });
 	} else {
-		const vectorResult = await deps.storage.query(
-			buildVectorSearchSql({
-				table: MEMORIES_TABLE,
-				idColumn: ID_COLUMN,
-				embeddingColumn: EMBEDDING_COLUMN,
-				queryVector,
-				scope: scopeFilter,
-				limit: config.channelLimit,
-				overFetchMultiplier: config.overFetchMultiplier, // D-1: 3x (a-AC-2).
-			}),
-			{ org: deps.scope.org, workspace: deps.scope.workspace },
-		);
-		channelInputs.push({ channel: "vector", ids: toScoredIds(vectorResult) });
+		const queryVector = await computeQueryVector(query.query, deps);
+		if (queryVector === null) {
+			// Silent BM25/ILIKE fallback: a `semantic`/`hybrid`/default run wanted the vector arm
+			// but had no usable query vector → lexical-only, `degraded: true` (PRD-025 D-4 / PRD-029).
+			degraded = true;
+			deps.logger?.event("recall.collect_degraded", { reason: "no_query_vector" });
+		} else {
+			const vectorResult = await deps.storage.query(
+				buildVectorSearchSql({
+					table: MEMORIES_TABLE,
+					idColumn: ID_COLUMN,
+					embeddingColumn: EMBEDDING_COLUMN,
+					queryVector,
+					scope: scopeFilter,
+					limit: config.channelLimit,
+					overFetchMultiplier: config.overFetchMultiplier, // D-1: 3x (a-AC-2).
+				}),
+				{ org: deps.scope.org, workspace: deps.scope.workspace },
+			);
+			channelInputs.push({ channel: "vector", ids: toScoredIds(vectorResult) });
+		}
 	}
 
 	// 4. Hints channel — capped so a memory can't ride in on hints alone (a-AC-4).

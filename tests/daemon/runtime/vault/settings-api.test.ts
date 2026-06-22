@@ -13,7 +13,7 @@ import { Hono } from "hono";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createFakeMachineKeyProvider } from "../../../../src/daemon/runtime/secrets/contracts.js";
-import { mountSettingsGroup, SETTINGS_GROUP } from "../../../../src/daemon/runtime/vault/api.js";
+import { isKnownSettingKey, isValidRecallMode, mountSettingsGroup, RECALL_MODES, SETTINGS_GROUP } from "../../../../src/daemon/runtime/vault/api.js";
 import {
 	defaultModelFor,
 	isValidProviderModel,
@@ -160,5 +160,44 @@ describe("D-6 catalog is single-sourced + curated", () => {
 		expect(isValidProviderModel("openrouter", "anything/at-all")).toBe(true);
 		expect(isValidProviderModel("nope", "x")).toBe(false);
 		expect(defaultModelFor("anthropic")).toBe("claude-sonnet-4-6");
+	});
+});
+
+describe("PRD-044c recallMode — closed-enum, fail-closed validation", () => {
+	it("accepts each of keyword | semantic | hybrid and persists it", async () => {
+		for (const mode of ["keyword", "semantic", "hybrid"]) {
+			const post = await app.request("/api/settings/recallMode", {
+				method: "POST",
+				headers: JSON_HEADERS,
+				body: JSON.stringify({ value: mode }),
+			});
+			expect(post.status).toBe(201);
+			const get = await app.request("/api/settings/recallMode", { headers: HEADERS });
+			expect(get.status).toBe(200);
+			expect((await get.json()).value).toBe(mode);
+		}
+	});
+
+	it("rejects a garbage recallMode value (fail-closed, 400)", async () => {
+		const res = await app.request("/api/settings/recallMode", {
+			method: "POST",
+			headers: JSON_HEADERS,
+			body: JSON.stringify({ value: "fuzzy" }),
+		});
+		expect(res.status).toBe(400);
+	});
+
+	it("recallMode is a KNOWN setting key (the allow-list admits it)", () => {
+		expect(isKnownSettingKey("recallMode")).toBe(true);
+		expect(isValidRecallMode("hybrid")).toBe(true);
+		expect(isValidRecallMode("nonsense")).toBe(false);
+		expect(RECALL_MODES).toEqual(["keyword", "semantic", "hybrid"]);
+	});
+
+	it("UNSET recallMode is simply absent from the settings list (the default-preserving path)", async () => {
+		const res = await app.request("/api/settings", { headers: HEADERS });
+		const body = await res.json();
+		// Nothing wrote recallMode in this case → it is not present (the page reads "" → default).
+		expect(body.settings.recallMode).toBeUndefined();
 	});
 });

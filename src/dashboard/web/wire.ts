@@ -66,6 +66,9 @@ export const ENDPOINTS = Object.freeze({
 	// secrets surface (PRD-012a `secrets/api.ts`, used ONLY for presence, never a value).
 	vaultSettings: "/api/settings",
 	secrets: "/api/secrets",
+	// PRD-044a — the REDACTED DeepLake auth-status read-model (`auth/status-api.ts`). Metadata
+	// only (org/workspace/agent/source/savedAt/expiresAt) — NO token by construction.
+	authStatus: "/api/auth/status",
 } as const);
 
 /** PRD-040a — the default first-page size the Memories list requests (the daemon clamps to 500). */
@@ -558,6 +561,49 @@ export type SecretNamesWire = z.infer<typeof SecretNamesSchema>;
 export const EMPTY_VAULT_SETTINGS: VaultSettingsWire = Object.freeze({ settings: {}, catalog: [] });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PRD-044a — the REDACTED `/api/auth/status` read-model (the Settings page auth
+// section). Every field `.catch()`-defaults so a partial/failed payload degrades to
+// a DISCONNECTED status (never a throw into React). THE SCHEMA HAS NO `token` FIELD
+// BY CONSTRUCTION — a token in the body is IGNORED by the schema (D-3, the token is
+// sacred). `expiresAt` is optional: present only when a real `TokenClaims.exp` exists.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The `GET /api/auth/status` body the auth section reads (PRD-044a). Metadata ONLY: org id +
+ * name, workspace, agent, the credentials `source` (`env` | `file` | `none`), `savedAt`, and an
+ * optional `expiresAt`. There is deliberately NO `token` field — zod drops any extra `token` key
+ * in the body, so a token can never reach React even if a buggy daemon sent one. Every field
+ * `.catch()`-defaults to a disconnected-safe value (AC-4: degrade, never throw).
+ */
+export const AuthStatusSchema = z.object({
+	connected: z.boolean().catch(false),
+	orgId: z.string().catch(""),
+	orgName: z.string().catch(""),
+	workspace: z.string().catch(""),
+	agentId: z.string().catch(""),
+	source: z.enum(["env", "file", "none"]).catch("none"),
+	savedAt: z.string().catch(""),
+	// Present ONLY when a real token `exp` exists; absent → the section shows "expiry unknown"
+	// (never a fabricated date). `.optional()` so an absent field is honestly undefined.
+	expiresAt: z.number().optional(),
+});
+export type AuthStatusWire = z.infer<typeof AuthStatusSchema>;
+
+/**
+ * The honest disconnected status the auth section shows before the first load, on any failure,
+ * or when no credentials resolve (AC-4). Never a blank panel, never a fabricated org.
+ */
+export const DISCONNECTED_AUTH_STATUS: AuthStatusWire = Object.freeze({
+	connected: false,
+	orgId: "",
+	orgName: "",
+	workspace: "",
+	agentId: "",
+	source: "none",
+	savedAt: "",
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // The typed fetch client. Every method validates its payload through zod, so the
 // React tree never sees an untyped/garbage value (AC-2 empty states are free).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -777,6 +823,25 @@ export interface WireClient {
 	 * value (D-4 / AC-5).
 	 */
 	secretNames(): Promise<string[]>;
+	/**
+	 * PRD-044b — WRITE-ONLY store a provider key (`POST /api/secrets/:name` with a `{ value }`
+	 * body). Returns `true` iff the daemon accepted the write (2xx); any non-2xx (400 invalid
+	 * name/value, 502 store failure) reads as "not accepted". The value is sent in the body and
+	 * NEVER echoed back (the daemon's 201 carries the NAME only). The caller RE-READS
+	 * {@link secretNames} on success so the presence badge reflects the persisted truth — mirroring
+	 * the `setSetting` re-read pattern. THERE IS NO `getSecret` METHOD, and none is ever added: a
+	 * stored key cannot be read back through any wire method (the load-bearing AC-3 invariant).
+	 */
+	setSecret(name: string, value: string): Promise<boolean>;
+	/**
+	 * PRD-044a — read the REDACTED DeepLake auth STATUS (`GET /api/auth/status`). Returns the
+	 * daemon's real connected identity (org/workspace/agent/source/savedAt + optional `expiresAt`)
+	 * or an honest disconnected status. The body carries NO token (the schema has no token field
+	 * by construction); a malformed/absent/failed read degrades to {@link DISCONNECTED_AUTH_STATUS}
+	 * (never a throw into React — AC-4). Re-callable on focus/poll so a CLI `honeycomb login`
+	 * reflects here.
+	 */
+	authStatus(): Promise<AuthStatusWire>;
 }
 
 /** The empty/zero KPIs the UI shows before the first load resolves (or on failure). */
@@ -1053,6 +1118,34 @@ export function createWireClient(options: WireClientOptions = {}): WireClient {
 			// degrades to an empty list → every provider shows "not set" (never a throw, never a value).
 			const v = await getJson(fetchImpl, url(ENDPOINTS.secrets), SecretNamesSchema);
 			return v?.names ?? [];
+		},
+		async setSecret(name: string, value: string): Promise<boolean> {
+			try {
+				// POST /api/secrets/:name with a JSON `{ value }` body — the secrets handler's shape.
+				// The name is path-encoded so a conventional key name is one safe segment (the daemon
+				// also validates `[A-Za-z0-9_.-]+`, traversal-proof). The value rides the body and is
+				// NEVER echoed: the daemon's 201 returns the NAME only, so nothing here reads a value
+				// back (AC-3 write-only). We deliberately do NOT parse/return the response body — a
+				// boolean accept is all the caller needs (it re-reads `secretNames` for presence).
+				const res = await fetchImpl(url(`${ENDPOINTS.secrets}/${encodeURIComponent(name)}`), {
+					method: "POST",
+					headers: { "content-type": "application/json", accept: "application/json", ...DASHBOARD_SESSION_HEADERS },
+					body: JSON.stringify({ value }),
+				});
+				// 2xx (the daemon answers 201) → accepted; any non-2xx (400 invalid name/value, 502
+				// store failure) reads as "not accepted" so the caller surfaces "not accepted" and the
+				// input is NOT cleared on a rejected write.
+				return res.ok;
+			} catch {
+				// A network error → not accepted (never a throw into React).
+				return false;
+			}
+		},
+		async authStatus(): Promise<AuthStatusWire> {
+			// GET the redacted auth status; a malformed/absent/failed body degrades to the
+			// disconnected status so the section renders its honest "Not connected" state (never a
+			// throw — AC-4). The schema has NO token field, so a token in the body is dropped.
+			return (await getJson(fetchImpl, url(ENDPOINTS.authStatus), AuthStatusSchema)) ?? DISCONNECTED_AUTH_STATUS;
 		},
 	};
 }
