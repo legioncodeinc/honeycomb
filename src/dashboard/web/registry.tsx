@@ -31,7 +31,7 @@ import React from "react";
 
 import { DashboardPage } from "./pages/dashboard.js";
 import { GraphPage } from "./pages/graph.js";
-import { HarnessesPage } from "./pages/harnesses.js";
+import { HarnessesPage, resolveHarnessSubItems } from "./pages/harnesses.js";
 import { LogsPage } from "./pages/logs.js";
 import { MemoriesPage } from "./pages/memories.js";
 import { SettingsPage } from "./pages/settings.js";
@@ -174,7 +174,10 @@ const SettingsIcon = (
  */
 export const ROUTES: readonly RouteEntry[] = [
 	{ route: "/", label: "Dashboard", icon: DashboardIcon, component: DashboardPage },
-	{ route: "/harnesses", label: "Harnesses", icon: HarnessesIcon, component: HarnessesPage },
+	// PRD-039 (D-6): the `#/harnesses` route is the STATIC top-level entry; its per-harness sub-entries
+	// (`#/harnesses/<name>`) are the 037c DYNAMIC group, resolved at render from 039a's live harness
+	// list (`resolveHarnessSubItems`). The parent's OQ-3 answer: 039a IS the dynamic data source.
+	{ route: "/harnesses", label: "Harnesses", icon: HarnessesIcon, component: HarnessesPage, dynamic: { resolve: resolveHarnessSubItems } },
 	{ route: "/memories", label: "Memories", icon: MemoriesIcon, component: MemoriesPage },
 	{ route: "/graph", label: "Graph", icon: GraphIcon, component: GraphPage },
 	{ route: "/sync", label: "Sync", icon: SyncIcon, component: SyncPage },
