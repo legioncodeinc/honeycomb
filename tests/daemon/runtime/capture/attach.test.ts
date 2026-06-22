@@ -105,4 +105,64 @@ describe("PRD-019b attachHooksHandlers wires /api/hooks/* onto the route group",
 		// The append-only INSERT reached the wire (one sessions row).
 		expect(fake.requests.some((r) => /^\s*INSERT\s+INTO\s+"sessions"/i.test(r.sql))).toBe(true);
 	});
+
+	// PRD-046a (FINAL trigger): session-end enqueues a `summary` final job into memory_jobs.
+	it("FINAL trigger: POST /api/hooks/session-end enqueues a summary final job (sessionId+path+userName)", async () => {
+		const fake = new FakeDeepLakeTransport(responder());
+		const storage = createStorageClient({ transport: fake, provider: stubProvider(fakeCredentialRecord()) });
+		const queue = new RecordingQueue();
+		const daemon = createDaemon({
+			config: cfg(),
+			storage,
+			logger: createRequestLogger({ silent: true }),
+			services: { runtimePath: createRuntimePathService() },
+		});
+		attachHooksHandlers(daemon, { storage, queue });
+
+		const res = await daemon.app.request("/api/hooks/session-end", {
+			method: "POST",
+			headers: sessionHeaders(),
+			body: JSON.stringify({
+				intents: ["mark-ended", "record-usage", "skillify"],
+				meta: { sessionId: "sess-1", path: "conversations/sess-1", agentId: "claude-code" },
+			}),
+		});
+		// The ack still composes the lifecycle (PRD-021c).
+		expect(res.status).toBe(200);
+		expect(((await res.json()) as Record<string, unknown>).ok).toBe(true);
+
+		// The FINAL trigger enqueued exactly one summary job with the session identity.
+		const summaryJobs = queue.enqueued.filter((j) => j.kind === "summary");
+		expect(summaryJobs).toHaveLength(1);
+		expect(summaryJobs[0].payload).toMatchObject({
+			sessionId: "sess-1",
+			path: "conversations/sess-1",
+			userName: ORG, // resolved from the x-honeycomb-org header
+			agentId: "claude-code",
+			triggerKind: "final",
+			reason: "SessionEnd",
+		});
+	});
+
+	// FINAL trigger is fail-soft: a session-end with no usable meta still acks and enqueues nothing.
+	it("FINAL trigger: a session-end with no sessionId/path acks 200 and enqueues no summary job", async () => {
+		const fake = new FakeDeepLakeTransport(responder());
+		const storage = createStorageClient({ transport: fake, provider: stubProvider(fakeCredentialRecord()) });
+		const queue = new RecordingQueue();
+		const daemon = createDaemon({
+			config: cfg(),
+			storage,
+			logger: createRequestLogger({ silent: true }),
+			services: { runtimePath: createRuntimePathService() },
+		});
+		attachHooksHandlers(daemon, { storage, queue });
+
+		const res = await daemon.app.request("/api/hooks/session-end", {
+			method: "POST",
+			headers: sessionHeaders(),
+			body: JSON.stringify({ intents: ["mark-ended"] }), // no meta
+		});
+		expect(res.status).toBe(200);
+		expect(queue.enqueued.filter((j) => j.kind === "summary")).toHaveLength(0);
+	});
 });

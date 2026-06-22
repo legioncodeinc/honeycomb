@@ -213,15 +213,26 @@ export interface SummaryGenCli {
 }
 
 /**
- * Build a deterministic FAKE {@link SummaryGenCli} that returns a fixed markdown
- * body (the test double — there is no host CLI in this env). 017a's own tests drive
- * the real shell-out's args-array + env (a-AC-2) through the lower-level spawner
- * seam; the worker-level tests use this fake.
+ * Build a deterministic FAKE {@link SummaryGenCli} that returns a fixed body (the test
+ * double — there is no host CLI in this env). 017a's own tests drive the real
+ * shell-out's args-array + env (a-AC-2) through the lower-level spawner seam; the
+ * worker-level tests use this fake.
+ *
+ * PRD-046b: the worker now expects the STRUCTURED gate object `{ extraction, summary,
+ * key }`. To keep the existing 017a worker-level callers (which pass bare markdown)
+ * working, a plain (non-JSON) `body` is WRAPPED into a valid structured envelope whose
+ * `summary` is that markdown verbatim — so a caller asserting on the summary body is
+ * unaffected, and the parser/grounding path is exercised. A `body` that is ALREADY a
+ * JSON object is returned as-is, so a 046b test can drive a hand-crafted gate response
+ * (e.g. a confabulation fixture).
  */
-export function createFakeSummaryGenCli(markdown: string): SummaryGenCli {
+export function createFakeSummaryGenCli(body: string): SummaryGenCli {
+	const trimmed = body.trim();
+	const isJsonObject = trimmed.startsWith("{");
+	const out = isJsonObject ? body : JSON.stringify({ extraction: {}, summary: body, key: "" });
 	return {
 		async run(): Promise<string> {
-			return markdown;
+			return out;
 		},
 	};
 }
@@ -266,6 +277,12 @@ export interface SummaryRow {
 	readonly path: string;
 	/** The AI-written markdown summary body (→ `summary`). */
 	readonly summary: string;
+	/**
+	 * The Tier-1 KEY — a ≤1-sentence, keyword-dense headline derived from the GROUNDED
+	 * summary (→ `memory.key`, PRD-046b b-AC-2). The prime (046c) skims this with a pure
+	 * SQL select, NO generation at read time (b-AC-4). Empty when no key was derivable.
+	 */
+	readonly key: string;
 	/** A short excerpt for listings (→ `description`). */
 	readonly description: string;
 	/** The 768-dim embedding of the markdown, or NULL when embedding failed (a-AC-5). */

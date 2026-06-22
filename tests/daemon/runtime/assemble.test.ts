@@ -94,6 +94,7 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 		mountLogs: 0,
 		mountDashboardHost: 0,
 		mountMemories: 0,
+		mountMemoriesPrime: 0,
 		mountVfs: 0,
 		mountProductData: 0,
 		mountDream: 0,
@@ -148,6 +149,17 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 				expect(options.defaultScope, "memories receives the threaded default scope").toBeDefined();
 				expect(options.defaultScope?.org).toBeTruthy();
 		}) as SeamFns["mountMemories"],
+		// ── The session-priming PRIME digest seam (PRD-046c) the composition root fires. ──
+		mountMemoriesPrime: ((daemon, options) => {
+			calls.mountMemoriesPrime += 1;
+			order.push("mountMemoriesPrime");
+			expect(typeof daemon.group).toBe("function");
+			// The prime skim runs through the same live storage client …
+			expect(options.storage).toBeDefined();
+			// … and receives the threaded default scope (local-mode no-org loopback resolves).
+			expect(options.defaultScope, "prime receives the threaded default scope").toBeDefined();
+			expect(options.defaultScope?.org).toBeTruthy();
+		}) as SeamFns["mountMemoriesPrime"],
 		mountVfs: ((daemon, options) => {
 			calls.mountVfs += 1;
 			order.push("mountVfs");
@@ -282,6 +294,7 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 			"mountLogs",
 			"mountDashboardHost",
 			"mountMemories",
+			"mountMemoriesPrime",
 			"mountVfs",
 			"mountProductData",
 			"mountDream",

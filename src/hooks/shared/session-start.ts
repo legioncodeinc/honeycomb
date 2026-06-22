@@ -66,7 +66,23 @@ export async function runSessionStart(input: HookInput, deps: SessionStartDeps):
 
 	// Step 6: render the rules/goals context block (READ-ONLY, fail-soft — the
 	// renderer absorbs its own errors and returns "" on failure, FR-10).
-	const additionalContext = await safe(() => deps.context.render({ meta, credential }), "");
+	const contextBlock = await safe(() => deps.context.render({ meta, credential }), "");
+
+	// Step 6.5 (PRD-046d / d-AC-1..5): fetch the session-start memory prime ONCE
+	// (d-AC-3 — this is the session-start branch; per-turn capture never primes) and
+	// append it to the context block. READ-ONLY + fail-soft: the renderer absorbs its
+	// own errors and a cold (`empty:true`) repo yields "", so an unreachable daemon or
+	// an empty scope contributes NOTHING and never blocks/errors session-start (d-AC-4).
+	// The hook does NO assembly — it injects 046c's already-bounded digest verbatim
+	// (d-AC-5). When no prime seam is wired, this is a no-op (prior behaviour unchanged).
+	const primeBlock = deps.prime !== undefined
+		? await safe(() => (deps.prime as NonNullable<typeof deps.prime>).render({ meta, credential }), "")
+		: "";
+
+	// The injected `additionalContext` is the rendered rules/goals block plus the prime
+	// digest, joined when both are present so neither is lost. Either alone is returned
+	// as-is; both empty omits `additionalContext` entirely.
+	const additionalContext = joinBlocks(contextBlock, primeBlock);
 
 	// Step 7: pull team/org skills. Fail-soft.
 	await safeVoid(() => seams.autoPullSkills(credential));
@@ -78,6 +94,18 @@ export async function runSessionStart(input: HookInput, deps: SessionStartDeps):
 	return additionalContext === ""
 		? { ok: true }
 		: { ok: true, additionalContext };
+}
+
+/**
+ * Join the rules/goals context block and the 046d prime digest into one
+ * `additionalContext` payload. Either-empty returns the other unchanged; both-empty
+ * returns `""` (the caller omits `additionalContext`); both-present are separated by a
+ * blank line so the two blocks stay legible to the model.
+ */
+function joinBlocks(context: string, prime: string): string {
+	if (context === "") return prime;
+	if (prime === "") return context;
+	return `${context}\n\n${prime}`;
 }
 
 /** Run a producing step, returning `fallback` if it throws (fail-soft, FR-10). */

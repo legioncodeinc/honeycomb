@@ -59,6 +59,7 @@ import {
 import {
 	createSynthesisStore,
 	MEMORY_INDEX_PATH,
+	refreshMemoryIndex,
 	synthesizeMemoryIndex,
 } from "../../src/daemon/runtime/summaries/index.js";
 import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
@@ -83,6 +84,7 @@ function summaryRow(session: SummarySession, body: string): SummaryRow {
 	return {
 		path: summaryPath(session),
 		summary: body,
+		key: body.replace(/^#+\s*/, "").slice(0, 80),
 		description: body.slice(0, 80),
 		embedding: null,
 		author: "ci-user",
@@ -200,5 +202,60 @@ describe.skipIf(!HAS_TOKEN)("live synthesis smoke (opt-in, real backend, MEMORY.
 			await new Promise((r) => setTimeout(r, 250));
 		}
 		expect(count, "exactly one MEMORY.md index row at the path").toBe(1);
+	});
+
+	it("PRD-046b b-AC-1: a refresh after a NEW summary lands version-bumps /MEMORY.md (higher version links both), no in-place UPDATE", async ({ skip }) => {
+		await neutralizeIfInfraDegraded("synthesis-live:refresh-preflight", () => storage.connect(scope), skip);
+
+		const summaryStore = createSummaryStore(storage, scope, resolveTable);
+		const synthStore = createSynthesisStore(storage, scope, resolveTable);
+		// Use distinct sessions so this test is independent of the first `it`'s rows.
+		const sessC: SummarySession = { sessionId: `ci-c-${RUN_ID}`, userName: "ci-ref", path: `ci/conv/c/${RUN_ID}` };
+		const sessD: SummarySession = { sessionId: `ci-d-${RUN_ID}`, userName: "ci-ref", path: `ci/conv/d/${RUN_ID}` };
+		const pathC = summaryPath(sessC);
+		const pathD = summaryPath(sessD);
+
+		const writeUntilVisible = async (session: SummarySession, p: string, body: string): Promise<void> => {
+			const visibleSql =
+				`SELECT ${sqlIdent("path")} FROM "${sqlIdent(TBL_MEMORY)}" ` +
+				`WHERE ${sqlIdent("path")} = ${sLiteral(p)} ` +
+				`AND ${sqlIdent("description")} != ${sLiteral("in progress")} LIMIT 1`;
+			for (let attempt = 0; attempt < 8; attempt++) {
+				await summaryStore.writeSummary(summaryRow(session, body));
+				for (let poll = 0; poll < 8; poll++) {
+					const res = await storage.query(visibleSql, scope);
+					if (isOk(res) && res.rows.length > 0) return;
+					await new Promise((r) => setTimeout(r, 400));
+				}
+			}
+			throw new Error(`summary at ${p} never became durably visible`);
+		};
+
+		// First summary lands → REFRESH the index (version-bumped). Then a SECOND summary lands →
+		// REFRESH again: the re-synthesis must NOT be a no-op — it appends a HIGHER version that
+		// links BOTH summaries (the documented /MEMORY.md refresh fix).
+		await writeUntilVisible(sessC, pathC, "## session C — keyed the summary");
+		const first = await refreshMemoryIndex({ store: synthStore });
+		expect(first.version, "first refresh writes version ≥ 1").toBeGreaterThanOrEqual(1);
+
+		await writeUntilVisible(sessD, pathD, "## session D — added durable keys");
+		// Poll the refresh until the highest-version index links BOTH (read converges UP).
+		let refreshedVersion = first.version;
+		let linksBoth = false;
+		for (let poll = 0; poll < 20 && !linksBoth; poll++) {
+			const r = await refreshMemoryIndex({ store: synthStore });
+			refreshedVersion = Math.max(refreshedVersion, r.version);
+			const current = await synthStore.readLatestVersionedRow(MEMORY_INDEX_PATH);
+			linksBoth = Boolean(current && current.summary.includes(pathC) && current.summary.includes(pathD));
+			if (!linksBoth) await new Promise((res) => setTimeout(res, 400));
+		}
+		// NOT a no-op: the index refreshed to a HIGHER version than the first write.
+		expect(refreshedVersion, "refresh version-bumped past the first").toBeGreaterThan(first.version);
+		expect(linksBoth, "highest-version MEMORY.md links BOTH summaries after the refresh").toBe(true);
+
+		// The current index is the HIGHEST-version row, and there are MULTIPLE physical versions
+		// on disk (append-only history) — never an in-place UPDATE.
+		const current = await synthStore.readLatestVersionedRow(MEMORY_INDEX_PATH);
+		expect(current?.version, "current index is the highest version").toBeGreaterThan(1);
 	});
 });

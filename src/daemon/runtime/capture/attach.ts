@@ -43,6 +43,7 @@ import type { StorageQuery } from "../../storage/client.js";
 import type { Daemon } from "../server.js";
 import type { JobQueueService } from "../services/job-queue.js";
 import type { EmbedAttachment } from "../services/embed-client.js";
+import { SUMMARY_JOB_KIND } from "../summaries/index.js";
 import {
 	type CaptureHandler,
 	type CaptureLogger,
@@ -123,7 +124,12 @@ export function attachHooksHandlers(daemon: Daemon, options: AttachHooksOptions)
 		throw new Error(`attachHooksHandlers: route group "${HOOKS_GROUP}" is not scaffolded`);
 	}
 	const contextHandler = options.contextHandler ?? defaultContextHandler;
-	const sessionEndHandler = options.sessionEndHandler ?? defaultSessionEndHandler;
+	// PRD-046a (FINAL trigger): the default session-end handler enqueues a `summary` FINAL
+	// job into the SAME durable `memory_jobs` queue (the daemon-owned signal — the hook
+	// SIGNALS, the daemon-resident summary worker runs the gate). 021d/021e may replace the
+	// whole handler with the real mark+usage+skillify body; until then this defaulted body
+	// keeps the lifecycle composing AND fires the final summary trigger.
+	const sessionEndHandler = options.sessionEndHandler ?? makeSessionEndHandler(options.queue, options.logger);
 	group.post(CONTEXT_PATH, (c) => contextHandler(c));
 	group.post(SESSION_END_PATH, (c) => sessionEndHandler(c));
 
@@ -141,11 +147,78 @@ function defaultContextHandler(c: Context): Response {
 }
 
 /**
- * The defaulted `/api/hooks/session-end` handler (c-AC-3). Acknowledges the
- * mark-ended + usage + skillify intents with status 200, so the session-end core's
- * call SUCCEEDS and the lifecycle composes. 021d/021e replace this with the real
- * server-side mark + usage + skillify work.
+ * The session metadata a final-trigger enqueue needs, pulled from the session-end body's
+ * `meta` (the {@link HookSessionMeta} the shim forwarded). All optional — a missing
+ * `sessionId`/`path` simply means no final job is enqueued (the ack still succeeds).
  */
-function defaultSessionEndHandler(c: Context): Response {
-	return c.json({ ok: true }, 200);
+interface SessionEndMeta {
+	readonly sessionId?: unknown;
+	readonly path?: unknown;
+	readonly agentId?: unknown;
+}
+
+/** Narrow an unknown field to a non-empty string, else `undefined`. */
+function nonEmptyStr(value: unknown): string | undefined {
+	return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Build the defaulted `/api/hooks/session-end` handler (PRD-021c c-AC-3 + PRD-046a FINAL
+ * trigger). It acknowledges the mark-ended + usage + skillify intents with status 200 (so
+ * the session-end core's call SUCCEEDS and the lifecycle composes — 021d/021e replace the
+ * body with the real server-side work), AND enqueues a `summary` FINAL job into the
+ * durable `memory_jobs` queue so the daemon-resident summary worker summarizes the
+ * just-ended session (PRD-046a a-AC-2). The hook SIGNALS; the daemon owns the worker.
+ *
+ * The enqueue is FAIL-SOFT and NON-BLOCKING: a malformed body, a missing `sessionId`/
+ * `path`, or a queue error never fails the session-end ack (the ack is the hook's
+ * fast-exit contract; the summary is best-effort, never load-bearing for the turn).
+ * The session identity (`sessionId`/`path`/`agentId`) is read from the body's `meta`;
+ * the operator name (`userName`) from the `x-honeycomb-org` header (the resolved tenant),
+ * matching the summary worker's `scope.org` fallback.
+ */
+function makeSessionEndHandler(queue: JobQueueService, logger?: CaptureLogger): HookEndpointHandler {
+	return async (c: Context): Promise<Response> => {
+		// Read the session identity off the body's `meta`, fail-soft — a non-JSON or
+		// shapeless body still acks (the lifecycle composes) and simply skips the enqueue.
+		let meta: SessionEndMeta = {};
+		try {
+			const body = (await c.req.json()) as { meta?: SessionEndMeta } | undefined;
+			if (body !== undefined && body !== null && typeof body === "object" && body.meta !== undefined) {
+				meta = body.meta;
+			}
+		} catch {
+			// A bodyless / non-JSON session-end POST is valid (the ack does not require one).
+		}
+
+		const sessionId = nonEmptyStr(meta.sessionId);
+		const path = nonEmptyStr(meta.path);
+		const agentId = nonEmptyStr(meta.agentId);
+		const userName = nonEmptyStr(c.req.header("x-honeycomb-org"));
+
+		// Enqueue the FINAL summary job only when we have the lock key + the event-fetch
+		// grouping key (a meaningless summary has neither). Never await/block the ack.
+		if (sessionId !== undefined && path !== undefined) {
+			try {
+				await queue.enqueue({
+					kind: SUMMARY_JOB_KIND,
+					payload: {
+						sessionId,
+						path,
+						...(userName !== undefined ? { userName } : {}),
+						...(agentId !== undefined ? { agentId } : {}),
+						triggerKind: "final",
+						reason: "SessionEnd",
+						count: 0,
+					},
+				});
+			} catch (err: unknown) {
+				// A queue error must NEVER fail the session-end ack — surface it, do not throw.
+				const reason = err instanceof Error ? err.message : String(err);
+				logger?.event("summary.final_trigger.enqueue_failed", { sessionId, reason });
+			}
+		}
+
+		return c.json({ ok: true }, 200);
+	};
 }

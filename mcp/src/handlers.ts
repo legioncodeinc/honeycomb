@@ -242,6 +242,29 @@ export const HANDLERS: Readonly<Record<string, ToolHandler>> = {
 	honeycomb_code_impact: async (args, actor, daemon) =>
 		route(daemon, actor, "POST", "/api/code/impact", rec(args)),
 
+	// ── Prime-pull cluster (PRD-046e) — zoom + mine ─────────────────────────────
+	// `hivemind_read`: zoom a primed ref to Tier-2 (depth=1) or Tier-3 (depth=2).
+	// Routes to GET /api/memories/resolve — a deterministic SELECT by id/path, NOT
+	// a recall/search call. The daemon enforces the SQL guards + scope.
+	hivemind_read: async (args, actor, daemon) => {
+		const a = rec(args);
+		const ref = encodeURIComponent(String(a.ref ?? ""));
+		const depth = String(a.depth ?? "1");
+		const source = String(a.source ?? "episodic");
+		const turnsParam = typeof a.turns === "number" && a.turns > 0 ? `&turns=${Math.trunc(a.turns)}` : "";
+		return route(
+			daemon,
+			actor,
+			"GET",
+			`/api/memories/resolve?ref=${ref}&depth=${depth}&source=${source}${turnsParam}`,
+		);
+	},
+	// `hivemind_search`: mine via the existing hybrid RRF recall engine (lexical + semantic,
+	// `degraded` honest). Routes to POST /api/memories/recall — same endpoint as memory_search,
+	// but this tool is explicitly the "mining" tool the prime footer points at (046e AC-3).
+	hivemind_search: async (args, actor, daemon) =>
+		route(daemon, actor, "POST", "/api/memories/recall", rec(args)),
+
 	// ── Secrets cluster (FR-8 / d-AC-2) — value-safe ─────────────────────────
 	secret_list: async (args, actor, daemon) => {
 		const body = await route(

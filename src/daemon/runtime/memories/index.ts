@@ -15,6 +15,15 @@ export {
 	resolveMemoryScope,
 } from "./api.js";
 
+// ── Prime-digest endpoint (PRD-046c) ─────────────────────────────────────────
+export {
+	type MountMemoriesPrimeOptions,
+	type PrimeResponse,
+	PrimeResponseSchema,
+	buildPrimeForScope,
+	mountMemoriesPrimeApi,
+} from "./prime.js";
+
 // ── Recall adapter (a-AC-2) ──────────────────────────────────────────────────
 export {
 	DEFAULT_RECALL_LIMIT,
@@ -57,3 +66,19 @@ export {
 	listMemories,
 	resolveListLimit,
 } from "./reads.js";
+
+// ── Resolve adapter (PRD-046e) ────────────────────────────────────────────────
+export {
+	DEFAULT_RESOLVE_TURNS,
+	MAX_RESOLVE_TURNS,
+	type DurableFactRow,
+	type EpisodicSummaryRow,
+	type ResolveRefDeps,
+	type ResolveResult,
+	type SessionTurnRow,
+	buildDurableDepth1Sql,
+	buildEpisodicDepth1Sql,
+	buildSessionDepth2Sql,
+	deriveSessionPath,
+	resolveRef,
+} from "./resolve.js";

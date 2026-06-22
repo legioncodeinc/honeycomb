@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 import { createStorageClient } from "../../../../src/daemon/storage/index.js";
-import { buildCreateTableSql, validateColumnDefs } from "../../../../src/daemon/storage/schema.js";
+import { buildAddColumnSql, buildCreateTableSql, validateColumnDefs } from "../../../../src/daemon/storage/schema.js";
 import { EMBEDDING_DIMS } from "../../../../src/daemon/storage/vector.js";
 import { appendOnlyInsert, updateOrInsertByKey, val } from "../../../../src/daemon/storage/writes.js";
 import { CATALOG, REGISTRY, healTargetFor } from "../../../../src/daemon/storage/catalog/index.js";
@@ -151,6 +151,42 @@ describe("PRD-003c sessions/summaries catalog", () => {
 		// A transcript summary in `memory` survives a `sessions` prune because it
 		// lives in a separate table at a `transcripts/<session>` path.
 		expect(isTranscriptPath(transcriptPath("s9"))).toBe(true);
+	});
+
+	it("b-AC-4/b-AC-5 (PRD-046b): the Tier-1 `key` column is additive + heal-compatible on memory AND memories", () => {
+		// The key column lives on BOTH memory (episodic summaries) and memories (durable facts),
+		// so the prime can skim keys from each source (b-AC-5). Both are TEXT NOT NULL DEFAULT ''
+		// — the load-bearing heal-safety property: an `ALTER TABLE ADD COLUMN … NOT NULL` on a
+		// POPULATED table only works with a DEFAULT (the empty string backfills existing rows).
+		const memKey = colSql(MEMORY_COLUMNS, "key");
+		const durKey = colSql(MEMORIES_COLUMNS, "key");
+		expect(memKey).toBe("TEXT NOT NULL DEFAULT ''");
+		expect(durKey).toBe("TEXT NOT NULL DEFAULT ''");
+		// The whole array still validates (the load-time guard rejects a NOT-NULL-without-DEFAULT).
+		expect(() => validateColumnDefs("memory", MEMORY_COLUMNS)).not.toThrow();
+		expect(() => validateColumnDefs("memories", MEMORIES_COLUMNS)).not.toThrow();
+		// The heal ALTER carries the exact additive column SQL (what `healMissingColumns` emits).
+		const memDef = MEMORY_COLUMNS.find((c) => c.name === "key")!;
+		expect(buildAddColumnSql("memory", memDef)).toBe(`ALTER TABLE "memory" ADD COLUMN key TEXT NOT NULL DEFAULT ''`);
+		const durDef = MEMORIES_COLUMNS.find((c) => c.name === "key")!;
+		expect(buildAddColumnSql("memories", durDef)).toBe(
+			`ALTER TABLE "memories" ADD COLUMN key TEXT NOT NULL DEFAULT ''`,
+		);
+		// And the CREATE TABLE carries the key column from the single ColumnDef source.
+		expect(buildCreateTableSql("memory", MEMORY_COLUMNS)).toMatch(/\bkey TEXT NOT NULL DEFAULT ''/);
+		expect(buildCreateTableSql("memories", MEMORIES_COLUMNS)).toMatch(/\bkey TEXT NOT NULL DEFAULT ''/);
+	});
+
+	it("b-AC-1 (PRD-046b): the `version` column is additive + heal-compatible on memory (index refresh)", () => {
+		// The /MEMORY.md index REFRESH version-bumps (append at version N+1), so memory carries a
+		// `version` column. BIGINT NOT NULL DEFAULT 0 — heal-safe (0 backfills existing summary
+		// rows, which stay version 0; only the synthesized index/head rows bump).
+		expect(colSql(MEMORY_COLUMNS, "version")).toBe("BIGINT NOT NULL DEFAULT 0");
+		expect(() => validateColumnDefs("memory", MEMORY_COLUMNS)).not.toThrow();
+		const verDef = MEMORY_COLUMNS.find((c) => c.name === "version")!;
+		expect(buildAddColumnSql("memory", verDef)).toBe(
+			`ALTER TABLE "memory" ADD COLUMN version BIGINT NOT NULL DEFAULT 0`,
+		);
 	});
 
 	it("c-AC-7 first write to sessions or memory creates from the ColumnDef array and retries once", async () => {

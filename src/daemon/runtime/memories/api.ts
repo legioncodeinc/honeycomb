@@ -61,6 +61,13 @@ import {
 	storeMemory,
 	type MemoryWriteDeps,
 } from "./store.js";
+import {
+	DEFAULT_RESOLVE_TURNS,
+	MAX_RESOLVE_TURNS,
+	resolveRef,
+	type ResolveResult,
+} from "./resolve.js";
+import type { KeySource } from "../summaries/prime-keys.js";
 
 /** The route group the memories API attaches to (already mounted in `server.ts`). */
 export const MEMORIES_GROUP = "/api/memories" as const;
@@ -274,6 +281,41 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 		return c.json({ memories });
 	});
 
+	// ── e-AC-1: GET /api/memories/resolve → depth-zoom by ref (PRD-046e). ─────────
+	// MUST be registered BEFORE GET /:id — Hono matches routes in order and "resolve"
+	// is a literal segment that would otherwise be captured as the :id parameter.
+	group.get("/resolve", async (c) => {
+		const scope = resolveScope(c);
+		if (scope === null) return c.json(NO_ORG_BODY, 400);
+
+		const ref = c.req.query("ref") ?? "";
+		if (ref.trim() === "") return c.json({ error: "bad_request", reason: "ref is required" }, 400);
+
+		const rawDepth = parseQueryInt(c.req.query("depth"));
+		const depth: 1 | 2 = rawDepth === 2 ? 2 : 1;
+
+		const rawSource = c.req.query("source");
+		const source: KeySource = rawSource === "durable" ? "durable" : "episodic";
+
+		const rawTurns = parseQueryInt(c.req.query("turns"));
+		const turnLimit = rawTurns !== undefined
+			? Math.max(1, Math.min(Math.trunc(rawTurns), MAX_RESOLVE_TURNS))
+			: DEFAULT_RESOLVE_TURNS;
+
+		const result: ResolveResult = await resolveRef(ref, depth, source, scope, { storage }, turnLimit);
+		if (!result.found) {
+			return c.json({ found: false, ref, depth, source }, 200);
+		}
+		// Shape result as a plain serializable object (ResolveResult is a discriminated union).
+		if (result.depth === 1) {
+			return c.json({ found: true, ref, depth: 1, source: result.source, row: result.row }, 200);
+		}
+		if (result.source === "episodic") {
+			return c.json({ found: true, ref, depth: 2, source: "episodic", turns: result.turns, turnLimit }, 200);
+		}
+		return c.json({ found: true, ref, depth: 2, source: "durable", row: result.row }, 200);
+	});
+
 	// ── FR-4: GET /api/memories/:id → get one memory by id. ─────────────────────
 	group.get("/:id", async (c) => {
 		const scope = resolveScope(c);
@@ -320,6 +362,7 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 		);
 		return c.json({ id: result.outcome.memoryId ?? null, action: result.outcome.action, audited: result.audited });
 	});
+
 }
 
 /** Parse a `?limit=` query param into a number, or `undefined` when absent/non-numeric. */

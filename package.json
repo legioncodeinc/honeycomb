@@ -60,6 +60,8 @@
     "smoke:login": "node scripts/login-smoke.mjs",
     "smoke:data-api": "node scripts/dogfood-acceptance-smoke.mjs",
     "eval:recall": "node scripts/eval-recall.mjs",
+    "eval:prime": "node scripts/eval-prime.mjs",
+    "bench:hybrid": "node scripts/bench-hybrid.mjs",
     "deeplake:stress": "node scripts/deeplake-stress.mjs",
     "audit:openclaw": "node scripts/audit-openclaw-bundle.mjs",
     "audit:sql": "node scripts/audit-sql-safety.mjs",

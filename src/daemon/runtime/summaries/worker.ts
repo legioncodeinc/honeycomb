@@ -61,6 +61,7 @@ import { buildInsert, selectBeforeInsert, val, type RowValues } from "../../stor
 // REUSE skillify's redaction at the mine boundary so a transcript secret never lands
 // in a summary (SECURITY — security-worker-bee, PRD-017 Wave 3). Imported, not forked.
 import { redactSecrets } from "../skillify/miner.js";
+import { buildStructuredSummaryPrompt, parseSummaryGate } from "./key.js";
 import type { EmbedClient } from "../services/embed-client.js";
 import {
 	DEFAULT_WORKER_CONFIG,
@@ -212,10 +213,11 @@ export function createSummaryStore(
 		return phys === MEMORY_TABLE ? canonical : { ...canonical, table: phys };
 	};
 
-	/** Build the `RowValues` for a `memory` row from a path + body + excerpt + embedding. */
+	/** Build the `RowValues` for a `memory` row from a path + body + excerpt + key + embedding. */
 	const rowValuesFor = (args: {
 		path: string;
 		summary: string;
+		key: string;
 		description: string;
 		embedding: readonly number[] | null;
 		author: string;
@@ -233,6 +235,10 @@ export function createSummaryStore(
 			["filename", val.str(filenameOf(args.path))],
 			["summary", val.text(args.summary)],
 			["summary_embedding", val.raw(embeddingLit)],
+			// PRD-046b b-AC-2/b-AC-4: the Tier-1 key, written alongside the summary so the
+			// prime reads it with a pure SQL skim (no generation at read time). `val.text`
+			// (→ `eLiteral`) so an escape-bearing headline is body-safe.
+			["key", val.text(args.key)],
 			["author", val.str(args.author)],
 			["agent", val.str(args.author)],
 			["description", val.text(args.description)],
@@ -252,6 +258,7 @@ export function createSummaryStore(
 				row: rowValuesFor({
 					path,
 					summary: "",
+					key: "",
 					description: IN_PROGRESS_MARKER,
 					embedding: null,
 					author,
@@ -301,6 +308,7 @@ export function createSummaryStore(
 				rowValuesFor({
 					path: row.path,
 					summary: row.summary,
+					key: row.key,
 					description: row.description,
 					embedding: row.embedding,
 					author: row.author,
@@ -403,29 +411,36 @@ function parseEnvelope(message: unknown): CaptureEnvelope | null {
 }
 
 /**
- * Build the gate prompt from the fetched events (a-AC-1 / a-AC-2). Renders each event
- * as a labelled `[<kind>] <text>` line in `creation_date` order, SCRUBBING each text
- * with `redactSecrets` so a pasted credential never reaches the gate prompt or the
- * generated summary (SECURITY, PRD-017). The render is deterministic so the gate
- * prompt is reproducible in tests.
+ * Render the fetched events into the labelled, SCRUBBED, ordered body the gate prompt
+ * carries (a-AC-1 / a-AC-2 / b-AC-5). Each event becomes a `[<kind>] <text>` line in
+ * `creation_date` order, with each text run through `redactSecrets` so a pasted
+ * credential never reaches the gate prompt, the summary, OR the Tier-1 key (the
+ * deterministic floor that does not depend on the gate model omitting the secret).
+ * Deterministic so the prompt is reproducible in tests.
  */
-export function buildSummaryPrompt(session: SummarySession, events: readonly SessionEvent[]): string {
-	const header =
-		"You are a session-summary writer. Collapse the conversation below into a concise " +
-		"wiki-style markdown summary: what the user wanted, what was decided, what changed, " +
-		"and any follow-ups. Write ONLY the markdown summary — no preamble.\n\n" +
-		`Session: ${session.sessionId}\nEvents:\n`;
-	const body = events
+export function renderScrubbedEvents(events: readonly SessionEvent[]): string {
+	return events
 		.map((e) => {
 			const env = parseEnvelope(e.message);
 			const kind = env?.event?.kind ?? "event";
 			const text = typeof env?.event?.text === "string" ? env.event.text : "";
-			// Scrub at the boundary — the deterministic floor that does not depend on the
-			// gate model omitting the secret.
 			return `[${kind}] ${redactSecrets(text)}`;
 		})
 		.join("\n");
-	return `${header}${body}\n`;
+}
+
+/**
+ * Build the STRUCTURED gate prompt from the fetched events (a-AC-1 / a-AC-2 / PRD-046b
+ * b-AC-2). Folds the Tier-1 KEY derivation into the EXISTING gate pass: the gate emits
+ * ONE JSON object `{ extraction, summary, key }` in the two-step grounded order
+ * (structured extraction FIRST, then the grounded narrative, then the key derived from
+ * the grounded facts), so there is NO second LLM round-trip. The events are scrubbed +
+ * ordered by {@link renderScrubbedEvents}; {@link buildStructuredSummaryPrompt} prepends
+ * the grounded-distillation instructions. The worker parses the response with
+ * {@link parseSummaryGate}.
+ */
+export function buildSummaryPrompt(session: SummarySession, events: readonly SessionEvent[]): string {
+	return buildStructuredSummaryPrompt(session.sessionId, renderScrubbedEvents(events));
 }
 
 /** The host-CLI invocation matrix (FR-8). Command + args ARRAY — no shell. */
@@ -625,31 +640,38 @@ export async function runSummaryWorker(
 			return { ran: false, reason: "no_events" };
 		}
 
-		// a-AC-1 / a-AC-2: run the host-CLI gate over the scrubbed, ordered events. A
-		// throw (timeout / crash) or empty markdown → remove the placeholder, write
+		// a-AC-1 / a-AC-2 / b-AC-2 / b-AC-3: run the host-CLI gate over the scrubbed,
+		// ordered events. The gate emits ONE structured JSON object `{ extraction,
+		// summary, key }` (structured extraction FIRST → grounded narrative → key derived
+		// from the grounded facts), parsed + grounded by `parseSummaryGate`. A throw
+		// (timeout / crash) or an unparseable / empty body → remove the placeholder, write
 		// nothing. The gate's own subprocess sets WIKI_WORKER=1 + CAPTURE=false.
-		let markdown: string;
+		let gateOutput: string;
 		try {
-			markdown = (await deps.gate.run(buildSummaryPrompt(session, events))).trim();
+			gateOutput = await deps.gate.run(buildSummaryPrompt(session, events));
 		} catch {
 			await deps.store.removePlaceholder(path);
 			return { ran: false, reason: "gate_failed" };
 		}
-		if (markdown === "") {
+		const grounded = parseSummaryGate(gateOutput);
+		if (grounded === null) {
 			await deps.store.removePlaceholder(path);
 			return { ran: false, reason: "gate_failed" };
 		}
+		const markdown = grounded.summary;
 
 		// a-AC-5: embed the markdown → the 768-dim summary_embedding. A THROW is
 		// NON-FATAL: store NULL, the write STILL succeeds.
 		const embedding = await embedNonFatal(deps.embed, markdown);
 
-		// a-AC-1 / a-AC-6: clear the placeholder, then write the summary row via
-		// SELECT-before-INSERT keyed on `path` (exactly once, NEVER an in-place UPDATE).
+		// a-AC-1 / a-AC-6 / b-AC-2: clear the placeholder, then write the summary row via
+		// SELECT-before-INSERT keyed on `path` (exactly once, NEVER an in-place UPDATE),
+		// carrying the GROUNDED Tier-1 key alongside the Tier-2 summary.
 		await deps.store.removePlaceholder(path);
 		const row: SummaryRow = {
 			path,
 			summary: markdown,
+			key: grounded.key,
 			description: excerptOf(markdown),
 			embedding,
 			author,

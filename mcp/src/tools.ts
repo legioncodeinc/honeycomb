@@ -1,8 +1,8 @@
 /**
  * The unified `honeycomb_` tool surface — PRD-019d Wave 1 (names + arg-schema placeholders).
  *
- * Lists the ~25 tools the MCP server registers (FR-3..FR-8), grouped by cluster,
- * each with a STRICT `zod/v3` arg-schema PLACEHOLDER. The placeholders pin the arg
+ * Lists the ~27 tools the MCP server registers (FR-3..FR-8 + PRD-046e pull path), grouped
+ * by cluster, each with a STRICT `zod/v3` arg-schema PLACEHOLDER. The placeholders pin the arg
  * NAMES + required fields so the harness renders correct signatures and unknown args
  * are rejected (FR-10); Wave 2 fills the field types + wires each handler through the
  * daemon seam. `.strict()` is the unknown-arg rejection mechanism (d-AC-1 / FR-10).
@@ -14,6 +14,12 @@
  *
  * The `codebase` cluster is registered CONDITIONALLY (only after `honeycomb graph
  * build`, FR-7 / d-AC-4); it is listed here so Wave 2 knows the exact set to gate.
+ *
+ * PRD-046e (the pull half of session-memory priming):
+ *   - `hivemind_read` — zoom a primed key's ref down to Tier-2 summary (depth=1) or
+ *     Tier-3 raw turns (depth=2). A deterministic SELECT by id/path, NOT a search.
+ *   - `hivemind_search` — mine via the existing hybrid RRF recall (lexical + semantic,
+ *     `degraded` honest). Routes to `POST /api/memories/recall`.
  */
 
 import { type ToolArgSchema, type ToolCluster, z } from "./contracts.js";
@@ -59,6 +65,26 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
 	// session_search can infer parent lineage from a child session key (d-AC-5).
 	{ name: "session_search", cluster: "sessions", argSchema: args({ query: z.string(), sessionKey: opt }) },
 	{ name: "session_bypass", cluster: "sessions", argSchema: args({ sessionId: z.string() }) },
+
+	// ── Prime-pull cluster (PRD-046e) — the pull half of session-memory priming ─
+	// `hivemind_read` — zoom a ref from the prime's index down to Tier-2 (depth=1)
+	// or Tier-3 (depth=2). `ref` is the opaque id from the prime response. `source`
+	// tells which table the ref lives in ("episodic" = memory, "durable" = memories).
+	// `depth` and `source` are optional (default depth=1, source=episodic). `turns`
+	// caps the number of raw session turns at depth=2 (bounded by MAX_RESOLVE_TURNS).
+	{
+		name: "hivemind_read",
+		cluster: "memory",
+		argSchema: args({ ref: z.string(), depth: opt, source: opt, turns: opt }),
+	},
+	// `hivemind_search` — mine memory via the existing hybrid RRF recall engine
+	// (lexical ILIKE + `<#>` cosine semantic, fused with RRF, `degraded` honest).
+	// Routes to `POST /api/memories/recall` — the WIRED recall, NOT a new engine.
+	{
+		name: "hivemind_search",
+		cluster: "memory",
+		argSchema: args({ query: z.string(), limit: opt }),
+	},
 
 	// ── Goals / KPIs cluster (FR-6) ──────────────────────────────────────────
 	{ name: "honeycomb_goal_add", cluster: "goals-kpis", argSchema: args({ goal: z.string() }) },

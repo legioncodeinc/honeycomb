@@ -13,12 +13,15 @@ export {
 	createFakeContextRenderer,
 	createFakeCredentialReader,
 	createFakeDaemonHookClient,
+	createFakePrimeRenderer,
 	createFakeSessionStartSeams,
 	createFakeSummaryLock,
 	createFakeVfsIntercept,
 	createNoopSessionStartSeams,
 	type ContextRenderer,
 	type ContextRenderRequest,
+	type PrimeRenderer,
+	type PrimeRenderRequest,
 	type CredentialReader,
 	type DaemonHookClient,
 	type DaemonHookRequest,
@@ -82,6 +85,14 @@ export {
 } from "./session-end.js";
 
 export { CONTEXT_ENDPOINT, createContextRenderer } from "./context-renderer.js";
+
+// ── PRD-046d session-start memory prime (d-AC-1..5) ─────────────────────────────
+export {
+	createPrimeRenderer,
+	DEFAULT_PRIME_TIMEOUT_MS,
+	type PrimeRendererOptions,
+	PRIME_PATH,
+} from "./prime-renderer.js";
 
 // ── PRD-021c production seams (c-AC-1 / c-AC-2) ─────────────────────────────────
 export {
