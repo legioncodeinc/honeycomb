@@ -54,6 +54,7 @@ import { createJobQueueService } from "./services/job-queue.js";
 import { type CreateDaemonOptions, type Daemon, type DaemonServices, createDaemon } from "./server.js";
 
 import { attachHooksHandlers } from "./capture/attach.js";
+import { mountGraphApi } from "./codebase/api.js";
 import { mountDashboardApi } from "./dashboard/api.js";
 import { mountDashboardHost } from "./dashboard/host.js";
 import { mountDreamApi } from "./dreaming/api.js";
@@ -300,6 +301,20 @@ export interface SeamFns {
 	 * unauthenticated remote.
 	 */
 	readonly mountDiagnosticsHealth: typeof mountDiagnosticsHealthApi;
+	/**
+	 * The codebase-graph build + read surface — `POST /api/graph/build` + `GET /api/graph`
+	 * (PRD-014 assembly wiring, CONVENTIONS §11). Fires UNCONDITIONALLY: its `/api/graph` group
+	 * is already `protect:true` in `server.ts`, so it inherits the dashboard JSON views' auth/RBAC
+	 * (open in `local`, gated in team/hybrid). This is the seam that turns the build 501 into a
+	 * real end-to-end build (discover → extract → snapshot → push). Fail-soft — a mount error
+	 * never crashes the daemon.
+	 *
+	 * OPTIONAL on the seam record so a pre-existing recording-fake `SeamFns` (the PRD-021/022
+	 * assemble suites, which predate this seam) stays type-compatible WITHOUT editing those
+	 * out-of-scope tests; `assembleSeams` fires it only when present (it is always present in
+	 * {@link defaultSeamFns}, i.e. production), inside the same fail-soft try/catch.
+	 */
+	readonly mountGraph?: typeof mountGraphApi;
 }
 
 /** The REAL seam functions (the production wiring). */
@@ -316,6 +331,7 @@ export const defaultSeamFns: SeamFns = {
 	mountDream: mountDreamApi,
 	mountCompact: mountCompactApi,
 	mountDiagnosticsHealth: mountDiagnosticsHealthApi,
+	mountGraph: mountGraphApi,
 };
 
 /** An assembled, fully-wired daemon plus the composition root's lifecycle controls. */
@@ -494,6 +510,7 @@ export function assembleSeams(
 	orgName: string | undefined,
 	embed: EmbedAttachment,
 	healthDetail: () => HealthDetail,
+	workspaceDir: string,
 	seams: SeamFns = defaultSeamFns,
 ): void {
 	// The daemon's configured default tenancy scope (the single LOCAL tenant) is RESOLVED ONCE
@@ -627,6 +644,28 @@ export function assembleSeams(
 	//     in team/hybrid. A synchronous read of the cached health bit + assembly-known embed
 	//     state (the `healthDetail` thunk) — NO new probe (D-4).
 	seams.mountDiagnosticsHealth(daemon, { healthDetail });
+
+	// 13. The codebase-graph build + read surface — `POST /api/graph/build` + `GET /api/graph`
+	//     (PRD-014 assembly wiring, CONVENTIONS §11). Attaches onto the already-mounted, protected
+	//     `/api/graph` group (NO `server.ts` edit), so it inherits the dashboard JSON views'
+	//     auth/RBAC (open in `local`, gated in team/hybrid). This is the DEFERRED daemon-assembly
+	//     seam the codebase worker (014a/b/c) needed: the build pipeline (discover → tree-sitter
+	//     extract → snapshot → push) was built + tested but never INVOKED by the live daemon, so
+	//     `honeycomb graph build` 501'd. Firing it here turns the 501 into a real end-to-end build
+	//     — the local snapshot is authoritative and the cloud push runs best-effort through THIS
+	//     storage client (the only DeepLake path), honoring the 014c SELECT-before-INSERT drift
+	//     semantics. The `workspaceDir` is the daemon's watched workspace (the checkout to graph);
+	//     `defaultScope` lets a loopback thin client resolve the single local tenant. FAIL-SOFT: a
+	//     mount error must NEVER crash the daemon — the surface stays unmounted this run (falls
+	//     through to the 501 scaffold), exactly the posture the other mounts use.
+	if (seams.mountGraph !== undefined) {
+		try {
+			seams.mountGraph(daemon, { storage, defaultScope, workspaceDir });
+		} catch (err: unknown) {
+			const reason = err instanceof Error ? err.message : String(err);
+			process.stderr.write(`honeycomb: graph API mount failed (non-fatal): ${reason}\n`);
+		}
+	}
 }
 
 /**
@@ -1012,7 +1051,16 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// ── a-AC-2 / d-AC-1: fire the seams EXACTLY ONCE, after construction (the four core
 	// seams + the /api/logs reader always; the /dashboard host local-mode only per security
 	// F-1; PLUS the three data-API seams — memories/vfs/product-data — always, 022d).
-	assembleSeams(daemon, storage, scope, daemonOrgName, embed, healthDetail, options.seams ?? defaultSeamFns);
+	assembleSeams(
+		daemon,
+		storage,
+		scope,
+		daemonOrgName,
+		embed,
+		healthDetail,
+		options.workspaceDir ?? process.cwd(),
+		options.seams ?? defaultSeamFns,
+	);
 
 	// ── PRD-032d / AC-6: construct the daemon's vault `setting`-class READER ONCE, over the
 	// SAME workspace base dir + machine-key + daemon scope the secrets store uses (so the vault,
