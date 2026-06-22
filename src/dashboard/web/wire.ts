@@ -37,6 +37,11 @@ export const ENDPOINTS = Object.freeze({
 	skills: "/api/diagnostics/skills",
 	graph: "/api/graph",
 	recall: "/api/memories/recall",
+	// PRD-040 — the memory-management surface. `memories` is BOTH the list (GET /api/memories)
+	// and the store (POST /api/memories) endpoint; `getMemory`/`modify`/`forget` are built by
+	// appending `/:id`[`/modify`|`/forget`] to it. `compact` is the version-history reaper trigger.
+	memories: "/api/memories",
+	compact: "/api/diagnostics/compact",
 	logs: "/api/logs",
 	// PRD-039a — the harness registry + last-seen telemetry endpoint (the data backbone the
 	// Harnesses page 039b/039c reads). Served under the diagnostics group (`/api/diagnostics/harnesses`).
@@ -48,6 +53,9 @@ export const ENDPOINTS = Object.freeze({
 	vaultSettings: "/api/settings",
 	secrets: "/api/secrets",
 } as const);
+
+/** PRD-040a — the default first-page size the Memories list requests (the daemon clamps to 500). */
+export const DEFAULT_MEMORY_LIST_LIMIT = 50 as const;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Zod schemas — mirror `src/dashboard/contracts.ts` (D-5) over the WIRE truth.
@@ -176,6 +184,82 @@ export interface RecalledMemory {
 	/** `true` iff a drill-down raw session row (the card visually demotes these). */
 	readonly secondary: boolean;
 }
+
+/**
+ * PRD-040 — one memory row on the wire. MIRRORS the daemon read-model
+ * `src/daemon/runtime/memories/reads.ts` `MemoryRecord` (the original thin shape PLUS the
+ * OQ-1 additive detail metadata). Every field `.catch()`-defaults so a partial/older payload —
+ * a daemon serving only the thin `{ id, type, content, confidence, agentId, createdAt,
+ * updatedAt }`, or a malformed body — degrades to a safe value rather than throwing into React.
+ * The five OQ-1 fields (`visibility`/`sourceType`/`sourceId`/`version`/`hasEmbedding`) are
+ * `.catch()`-defaulted EXACTLY so an older/thin daemon still renders the detail view (with those
+ * fields blank/false). No secret rides this shape — scope tag, provenance, a version, a boolean.
+ */
+export const MemoryRecordSchema = z.object({
+	id: z.string().catch(""),
+	type: z.string().catch(""),
+	content: z.string().catch(""),
+	confidence: z.number().catch(0),
+	agentId: z.string().catch(""),
+	createdAt: z.string().catch(""),
+	updatedAt: z.string().catch(""),
+	// OQ-1 additive metadata — `.catch()`-defaulted so the thin shape still parses.
+	visibility: z.string().catch(""),
+	sourceType: z.string().catch(""),
+	sourceId: z.string().catch(""),
+	version: z.number().catch(0),
+	hasEmbedding: z.boolean().catch(false),
+});
+export type MemoryRecordWire = z.infer<typeof MemoryRecordSchema>;
+
+/** `GET /api/memories` body: `{ memories: MemoryRecord[] }`. A bad shape degrades to `[]`. */
+export const MemoryListResponseSchema = z.object({
+	memories: z.array(MemoryRecordSchema).catch([]),
+});
+
+/** `GET /api/memories/:id` body: `{ memory: MemoryRecord }`. A 404 is handled at the call site (→ null). */
+export const MemoryGetResponseSchema = z.object({
+	memory: MemoryRecordSchema,
+});
+
+/** `POST /api/memories` (store) ack: `{ id, action }` (201). `id` is null when the daemon dedup-skips. */
+export const StoreAckSchema = z.object({
+	id: z.string().nullable().catch(null),
+	action: z.string().catch(""),
+});
+export type StoreAckWire = z.infer<typeof StoreAckSchema>;
+
+/** `POST /api/memories/:id/modify` + `/forget` ack: `{ id, action, audited }`. */
+export const WriteAckSchema = z.object({
+	id: z.string().nullable().catch(null),
+	action: z.string().catch(""),
+	audited: z.boolean().catch(false),
+});
+export type WriteAckWire = z.infer<typeof WriteAckSchema>;
+
+/**
+ * PRD-040c — one per-table compaction summary on the wire, MIRRORING the daemon
+ * `CompactTableResult` (`src/daemon/runtime/maintenance/compact-api.ts`): the table name + the
+ * reap counts + an `errored` count (>0 ⇒ "attempted, not completed"). Every field `.catch()`es
+ * so a partial body still renders. No secret — table names + integer counts only.
+ */
+export const CompactTableResultSchema = z.object({
+	table: z.string().catch(""),
+	keysScanned: z.number().catch(0),
+	keysCompacted: z.number().catch(0),
+	rowsReaped: z.number().catch(0),
+	keysSkipped: z.number().catch(0),
+	errored: z.number().catch(0),
+});
+export type CompactTableResultWire = z.infer<typeof CompactTableResultSchema>;
+
+/** `POST /api/diagnostics/compact` body: `{ ok, summaries, skippedTables }`. Degrades to an empty summary. */
+export const CompactSummarySchema = z.object({
+	ok: z.boolean().catch(false),
+	summaries: z.array(CompactTableResultSchema).catch([]),
+	skippedTables: z.array(z.string()).catch([]),
+});
+export type CompactSummaryWire = z.infer<typeof CompactSummarySchema>;
 
 /** One `/api/logs` record (the `RequestLogRecord` the ring buffer serves; no secret in it). */
 export const LogRecordSchema = z.object({
@@ -420,6 +504,33 @@ async function getJson<T>(
 	}
 }
 
+/**
+ * POST a JSON body + zod-parse the response, returning the parsed value or `null` on any non-2xx /
+ * network / parse failure. The single shared writer for the PRD-040 mutations (add/modify/forget/
+ * compact) so the four call sites do not duplicate the fetch+guard boilerplate (jscpd discipline).
+ * Every request stamps the session headers; no `any` crosses the boundary (the body is `unknown`).
+ */
+async function postJson<T>(
+	fetchImpl: FetchLike,
+	url: string,
+	body: unknown,
+	schema: z.ZodType<T>,
+): Promise<T | null> {
+	try {
+		const res = await fetchImpl(url, {
+			method: "POST",
+			headers: { "content-type": "application/json", accept: "application/json", ...DASHBOARD_SESSION_HEADERS },
+			body: JSON.stringify(body),
+		});
+		if (!res.ok) return null;
+		const parsed = schema.safeParse(await res.json());
+		return parsed.success ? parsed.data : null;
+	} catch {
+		// A network error / abort / non-JSON body → null; the caller surfaces "save failed" + re-reads.
+		return null;
+	}
+}
+
 /** The arm name → a human scope hint for a recalled memory (honest, derived from the wire). */
 function scopeForSource(source: string): string {
 	if (source === "memories") return "team";
@@ -441,6 +552,42 @@ export interface WireClient {
 	skills(): Promise<SkillRowWire[]>;
 	graph(): Promise<GraphWire>;
 	recall(query: string): Promise<{ memories: RecalledMemory[]; degraded: boolean }>;
+	/**
+	 * PRD-040a — list the scoped tenant's memories (`GET /api/memories`, newest-first). `limit`
+	 * bumps for "load more" (the daemon clamps to `MAX_LIST_LIMIT` 500). A malformed/absent body
+	 * degrades to `[]` (the page renders its honest empty state). Stamps the session headers.
+	 */
+	listMemories(limit?: number): Promise<MemoryRecordWire[]>;
+	/**
+	 * PRD-040a — read one memory by id (`GET /api/memories/:id`). Returns `null` on a 404 (the id is
+	 * unknown OR forgotten → the page renders "this memory was forgotten") or any failure.
+	 */
+	getMemory(id: string): Promise<MemoryRecordWire | null>;
+	/**
+	 * PRD-040b — add a memory (`POST /api/memories`, store). Returns the `{ id, action }` ack, or
+	 * `null` on a non-2xx / network failure (the caller surfaces "save failed" and re-reads). The
+	 * page never optimistically renders the input — it re-lists after the ack.
+	 */
+	addMemory(input: { content: string; type?: string; agentId?: string }): Promise<StoreAckWire | null>;
+	/**
+	 * PRD-040b — edit a memory (`POST /api/memories/:id/modify`, version-bumped + reason-gated).
+	 * The `reason` is REQUIRED (the daemon rejects an empty one). Returns the `{ id, action,
+	 * audited }` ack, or `null` on a non-2xx / network failure (the caller re-reads the unchanged
+	 * persisted value). NEVER a hard-update — the daemon appends a new version.
+	 */
+	modifyMemory(id: string, input: { content: string; reason: string; agentId?: string }): Promise<WriteAckWire | null>;
+	/**
+	 * PRD-040b — forget a memory (`POST /api/memories/:id/forget`, reason-gated soft-delete → a
+	 * tombstone version). Returns the ack, or `null` on failure. The page gates this behind a confirm.
+	 */
+	forgetMemory(id: string, input: { reason: string }): Promise<WriteAckWire | null>;
+	/**
+	 * PRD-040c — trigger version-history compaction (`POST /api/diagnostics/compact`). The optional
+	 * `table` selects ONE allow-listed table (omitted ⇒ all). Returns the per-table summary, or
+	 * `null` on failure ("compaction unavailable"). The page sends only a KNOWN table name or none —
+	 * the daemon matches it against the allow-list, so no attacker-controlled identifier rides this.
+	 */
+	compact(table?: string): Promise<CompactSummaryWire | null>;
 	logs(limit?: number): Promise<LogRecordWire[]>;
 	/**
 	 * PRD-039a — read the harness registry + last-seen telemetry (the data backbone). Returns the
@@ -541,6 +688,43 @@ export function createWireClient(options: WireClientOptions = {}): WireClient {
 			} catch {
 				return { memories: [], degraded: true };
 			}
+		},
+		async listMemories(limit = DEFAULT_MEMORY_LIST_LIMIT): Promise<MemoryRecordWire[]> {
+			// GET the scoped tenant's memories (newest-first); a malformed/absent body degrades to []
+			// so the page renders its honest empty state. The daemon clamps `limit` to MAX_LIST_LIMIT.
+			const v = await getJson(fetchImpl, url(`${ENDPOINTS.memories}?limit=${limit}`), MemoryListResponseSchema);
+			return v?.memories ?? [];
+		},
+		async getMemory(id: string): Promise<MemoryRecordWire | null> {
+			// A 404 (unknown OR forgotten id) → null via getJson's non-ok guard; the page renders the
+			// honest "forgotten" state. The id is path-encoded so it is one safe segment.
+			const v = await getJson(fetchImpl, url(`${ENDPOINTS.memories}/${encodeURIComponent(id)}`), MemoryGetResponseSchema);
+			return v?.memory ?? null;
+		},
+		async addMemory(input: { content: string; type?: string; agentId?: string }): Promise<StoreAckWire | null> {
+			// POST the store body (content + optional type/agent); the daemon's zod is the source of
+			// truth (a 400 → null here, surfaced as "save failed"). The caller re-LISTS after a 201.
+			const body: Record<string, string> = { content: input.content };
+			if (input.type !== undefined) body.type = input.type;
+			if (input.agentId !== undefined) body.agentId = input.agentId;
+			return postJson(fetchImpl, url(ENDPOINTS.memories), body, StoreAckSchema);
+		},
+		async modifyMemory(id: string, input: { content: string; reason: string; agentId?: string }): Promise<WriteAckWire | null> {
+			// POST content + the REQUIRED reason → a version-bumped, audited edit (never a hard-update).
+			// A non-2xx (e.g. an empty reason the client should have caught) → null; the caller re-reads.
+			const body: Record<string, string> = { content: input.content, reason: input.reason };
+			if (input.agentId !== undefined) body.agentId = input.agentId;
+			return postJson(fetchImpl, url(`${ENDPOINTS.memories}/${encodeURIComponent(id)}/modify`), body, WriteAckSchema);
+		},
+		async forgetMemory(id: string, input: { reason: string }): Promise<WriteAckWire | null> {
+			// POST the required reason → a reason-gated soft-delete (a tombstone version). null on failure.
+			return postJson(fetchImpl, url(`${ENDPOINTS.memories}/${encodeURIComponent(id)}/forget`), { reason: input.reason }, WriteAckSchema);
+		},
+		async compact(table?: string): Promise<CompactSummaryWire | null> {
+			// POST the optional `{ table }` selector (omitted ⇒ all allow-listed tables). The daemon
+			// matches it against its allow-list, so the page sends only a known name — no attacker SQL.
+			const body = table !== undefined && table !== "" ? { table } : {};
+			return postJson(fetchImpl, url(ENDPOINTS.compact), body, CompactSummarySchema);
 		},
 		async logs(limit = 40): Promise<LogRecordWire[]> {
 			const v = await getJson(fetchImpl, url(`${ENDPOINTS.logs}?limit=${limit}`), LogsResponseSchema);
