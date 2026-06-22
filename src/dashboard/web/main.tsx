@@ -20,7 +20,13 @@ import { Shell } from "./app.js";
 function mount(): void {
 	const root = document.getElementById("root");
 	if (root === null) return;
-	const assetBase = root.getAttribute("data-asset-base") ?? "assets";
+	// Sanitize the DOM-read base path before it flows into any asset `src` (e.g. the sidebar
+	// mark `<img>`). Only a safe relative path is allowed — letters/digits/`. _ - /` — so a value
+	// carrying a scheme (`javascript:`) or markup meta-characters can never reach a URL/HTML sink.
+	// The host (not the user) sets `data-asset-base`, but this hard barrier closes the DOM-text→sink
+	// taint flow by construction (CodeQL js/xss-through-dom) and fails safe to the default.
+	const rawAssetBase = root.getAttribute("data-asset-base") ?? "assets";
+	const assetBase = /^[A-Za-z0-9._/-]*$/.test(rawAssetBase) ? rawAssetBase : "assets";
 	// PRD-037b: render the multi-page <Shell> (sidebar + routed outlet) instead of the old single
 	// <App>. Same #root + data-asset-base contract; the esbuild entry + host shell HTML are untouched.
 	createRoot(root).render(
