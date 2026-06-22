@@ -41,6 +41,7 @@ import type {
 	GraphView,
 	KpisView,
 	LocalAssetInventory,
+	MemoryGraphView,
 	RulesView,
 	SessionsView,
 	SettingsView,
@@ -114,6 +115,14 @@ export const DASHBOARD_GROUPS = Object.freeze({
 	settings: "/api/diagnostics",
 	/** Graph view-model (FR-5 / a-AC-6 empty-state). Product-data does NOT claim `/api/graph`, so this stays. */
 	graph: "/api/graph",
+	/**
+	 * Memory-graph view-model (PRD-041b D-2 / OQ-5) — the knowledge graph of memories/entities, served
+	 * at `GET /api/memory-graph` off the diagnostics group (full path `/api/diagnostics/memory-graph`).
+	 * MIRRORS the codebase graph's `built` contract: `built:false` empty state until the PRD-008 ontology
+	 * tables are populated. Attached under the already-mounted, protected diagnostics group exactly like
+	 * the other dashboard view-models — no new group, no `server.ts` edit.
+	 */
+	memoryGraph: "/api/diagnostics",
 	/**
 	 * Rules view-model (FR-6 / a-AC-4) — served off the diagnostics group at `/rules` (full path
 	 * `/api/diagnostics/rules`). The canonical `/api/rules` resource path is owned by the PRD-022
@@ -308,6 +317,94 @@ export async function fetchGraphView(storage: StorageQuery, scope: QueryScope): 
 	return { built: true, nodes: snapshot.nodes, edges: snapshot.edges };
 }
 
+/**
+ * The cap on memory-graph nodes/edges a single read returns (PRD-041b). A defensive bound so a large
+ * populated ontology never ships an unbounded payload to the page; mirrors the codebase graph's
+ * single-snapshot read being inherently bounded. The page renders whatever the endpoint returns.
+ */
+const MEMORY_GRAPH_LIMIT = 500;
+
+/**
+ * Fetch the MEMORY-GRAPH view (PRD-041b — FR-2 / AC-2). MIRRORS {@link fetchGraphView}: a guarded,
+ * fail-soft read that returns a {@link MemoryGraphView} (the `GraphView` shape the dashboard
+ * `GraphCanvas` already renders) or the honest `{ built: false, nodes: [], edges: [] }` empty state.
+ *
+ * ── NOW (the foundation) ─────────────────────────────────────────────────────
+ *   It reads the PRD-008 ontology tables through the injected {@link StorageQuery} with the SAME
+ *   guarded-SQL discipline as every other fetcher here (`sqlIdent` for identifiers, no interpolated
+ *   value — these are static SELECTs, so there is no `sLiteral` value to bind): `entities` →
+ *   {@link import("../../../dashboard/contracts.js").GraphNode}s (id, label=`name`, kind=ontology
+ *   `type`) and `entity_dependencies` → {@link import("../../../dashboard/contracts.js").GraphEdge}s
+ *   (from=`source_entity_id`, to=`target_entity_id`, kind=edge `type`). The `entities`/`entity_dependencies`
+ *   tables are ENGINE tables scoped by the storage partition (no `org_id` column — knowledge-graph.ts
+ *   D-2), so the read carries NO `org_id` predicate; scope isolation rides `storage.query(sql, scope)`.
+ *
+ * ── built:false is the honest empty state (AC-4) ─────────────────────────────
+ *   PRD-008 is In-Work: the ontology tables may be empty or (on an older schema) absent. `selectRows`
+ *   fails soft to `[]` on ANY non-ok result (a missing table → an empty read, never a throw), so an
+ *   empty/absent graph yields `built: false` and the page renders the "no memory graph yet" state. The
+ *   graph is `built: true` ONLY when at least one real entity row exists — never a faked/stub graph.
+ *
+ * ── DEFERRED until PRD-008 data lands (Open Questions, not silent stubs) ──────
+ *   Which ontology objects become nodes (entities only vs +aspects/attributes — OQ-1), edge-threshold
+ *   visibility (OQ-3), and supersession/provenance affordances (OQ-4) all defer until real rows exist.
+ *   This foundation renders entities-as-nodes + dependency-edges, which is provable against an empty graph.
+ *
+ * No secret rides the response by construction: entity name/type + edge type are graph text, never a
+ * token/credential. The labels are rendered as React TEXT by the page (XSS-safe — 041b D-6).
+ */
+export async function fetchMemoryGraphView(storage: StorageQuery, scope: QueryScope): Promise<MemoryGraphView> {
+	const [entityRows, edgeRows] = await Promise.all([
+		selectRows(storage, buildMemoryEntitiesSql(), scope),
+		selectRows(storage, buildMemoryDependenciesSql(), scope),
+	]);
+	// built:false ONLY when there are no entities — an empty/absent ontology renders the honest empty
+	// state, never a faked graph (AC-4 / AC-5). Edges without entities cannot stand alone as a graph.
+	if (entityRows.length === 0) return { built: false, nodes: [], edges: [] };
+	const nodes = entityRows.map((r) => ({
+		id: toStr(r.id),
+		// `name` is the human label; fall back to the id when an entity has no name yet.
+		label: toStr(r.name) !== "" ? toStr(r.name) : toStr(r.id),
+		// The ontology `type` is the node kind (entity / aspect / attribute / …) — drives the legend.
+		kind: toStr(r.type),
+	}));
+	// Only edges whose BOTH endpoints are present in the node set render (mirrors the canvas, which
+	// skips an edge with a missing endpoint) — a dangling dependency never draws a half-edge.
+	const ids = new Set(nodes.map((n) => n.id));
+	const edges = edgeRows
+		.map((r) => ({ from: toStr(r.source_entity_id), to: toStr(r.target_entity_id), kind: toStr(r.type) }))
+		.filter((e) => ids.has(e.from) && ids.has(e.to));
+	return { built: true, nodes, edges };
+}
+
+/**
+ * Build the memory-graph ENTITIES read (PRD-041b): the `entities` ontology table → nodes. Identifiers
+ * route through `sqlIdent` (the PRD-002b floor); NO value is interpolated (a static projection +
+ * ORDER BY + LIMIT), so there is no `sLiteral` to bind. Newest-first by `updated_at` so a bounded read
+ * surfaces the freshest entities first.
+ */
+function buildMemoryEntitiesSql(): string {
+	const tbl = sqlIdent("entities");
+	return (
+		`SELECT ${sqlIdent("id")}, ${sqlIdent("name")}, ${sqlIdent("type")} ` +
+		`FROM "${tbl}" ORDER BY ${sqlIdent("updated_at")} DESC LIMIT ${MEMORY_GRAPH_LIMIT}`
+	);
+}
+
+/**
+ * Build the memory-graph DEPENDENCIES read (PRD-041b): the `entity_dependencies` ontology table →
+ * edges. Identifiers route through `sqlIdent`; NO value is interpolated. Newest-first by `created_at`
+ * (the append-only edge table has no `updated_at`). The page shows entity-to-entity dependency edges
+ * as the foundation's first edge kind (OQ-1); threshold-gating (OQ-3) defers until real edges exist.
+ */
+function buildMemoryDependenciesSql(): string {
+	const tbl = sqlIdent("entity_dependencies");
+	return (
+		`SELECT ${sqlIdent("source_entity_id")}, ${sqlIdent("target_entity_id")}, ${sqlIdent("type")} ` +
+		`FROM "${tbl}" ORDER BY ${sqlIdent("created_at")} DESC LIMIT ${MEMORY_GRAPH_LIMIT}`
+	);
+}
+
 /** Fetch the rules view (FR-1 / d-AC-1): the org-wide rules, active flag from `status`. */
 export async function fetchRulesView(storage: StorageQuery, scope: QueryScope): Promise<RulesView> {
 	const tbl = sqlIdent("rules");
@@ -466,6 +563,19 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 			const scope = resolveScope(c);
 			if (scope === null) return c.json(NO_ORG_BODY, 400);
 			return c.json(await fetchGraphView(storage, scope));
+		});
+	}
+
+	// PRD-041b (D-2 / OQ-5) — the MEMORY-GRAPH read, served at `/memory-graph` off the diagnostics
+	// group (full `/api/diagnostics/memory-graph`), MIRRORING the codebase graph above. Same scope
+	// resolution, same fail-closed 400, same `built` contract — `built:false` until the PRD-008
+	// ontology is populated. No new group, no `server.ts` edit; it inherits the group's auth/RBAC.
+	const memoryGraph = daemon.group(DASHBOARD_GROUPS.memoryGraph);
+	if (memoryGraph !== undefined) {
+		memoryGraph.get("/memory-graph", async (c) => {
+			const scope = resolveScope(c);
+			if (scope === null) return c.json(NO_ORG_BODY, 400);
+			return c.json(await fetchMemoryGraphView(storage, scope));
 		});
 	}
 

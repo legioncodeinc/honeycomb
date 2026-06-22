@@ -245,7 +245,15 @@ export function SkillSyncPanel({ skills }: { skills: readonly SkillRowWire[] }):
 
 // ── Codebase graph ───────────────────────────────────────────────────────────
 
-const KIND_COLOR: Record<string, string> = { file: "var(--honey)", function: "var(--severity-info)", class: "var(--dream)" };
+/**
+ * The node-kind → fill-color map (D-5). Keyed by the snapshot's `node.kind` values; an unknown kind
+ * falls back to `--text-tertiary` at the render site. Exported so the PRD-041 full-page Graph page
+ * reuses the EXACT same legend swatches the mini-widget draws (no second color map to drift).
+ */
+export const KIND_COLOR: Record<string, string> = { file: "var(--honey)", function: "var(--severity-info)", class: "var(--dream)" };
+
+/** The fallback fill for a node whose `kind` is not in {@link KIND_COLOR} (shared by both canvases). */
+export const KIND_COLOR_FALLBACK = "var(--text-tertiary)" as const;
 
 /** The canvas viewBox extent — the layout fits node positions inside this box (D-5: bounded widget). */
 const GRAPH_VIEW = { width: 540, height: 200 } as const;
@@ -271,7 +279,7 @@ function NodeDetail({ node, neighbors }: { node: GraphWire["nodes"][number]; nei
 			}}
 		>
 			<div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-				<span style={{ width: 8, height: 8, borderRadius: "50%", background: KIND_COLOR[node.kind] ?? "var(--text-tertiary)", flex: "none" }} />
+				<span style={{ width: 8, height: 8, borderRadius: "50%", background: KIND_COLOR[node.kind] ?? KIND_COLOR_FALLBACK, flex: "none" }} />
 				<span style={{ fontSize: 14, color: "var(--text-primary)" }}>{node.label}</span>
 				<Badge tone="neutral" mono>
 					{node.kind || "node"}
@@ -360,7 +368,7 @@ export function GraphCanvas({ graph, dreaming }: { graph: GraphWire; dreaming: b
 							}}
 						>
 							{isSelected && <circle cx={p.x} cy={p.y} r="11" fill="none" stroke="var(--honey)" strokeWidth="1.5" />}
-							<circle cx={p.x} cy={p.y} r={isSelected ? 9 : 7} fill={isPulsing ? "var(--dream)" : KIND_COLOR[n.kind] ?? "var(--text-tertiary)"}>
+							<circle cx={p.x} cy={p.y} r={isSelected ? 9 : 7} fill={isPulsing ? "var(--dream)" : KIND_COLOR[n.kind] ?? KIND_COLOR_FALLBACK}>
 								{isPulsing && <animate attributeName="opacity" values="0.5;1;0.5" dur="0.9s" repeatCount="indefinite" />}
 							</circle>
 							<text x={p.x + 12} y={p.y + 4} fontFamily="var(--font-mono)" fontSize="11" fill="var(--text-secondary)">

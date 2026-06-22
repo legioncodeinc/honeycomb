@@ -36,6 +36,11 @@ export const ENDPOINTS = Object.freeze({
 	rules: "/api/diagnostics/rules",
 	skills: "/api/diagnostics/skills",
 	graph: "/api/graph",
+	// PRD-041b — the memory-graph view-model (the knowledge graph of memories/entities). Served off
+	// the diagnostics group (`/api/diagnostics/memory-graph`), mirroring `/api/graph`. Returns the SAME
+	// `GraphView` shape so the existing `GraphCanvas` renders it unchanged; `built:false` until PRD-008
+	// data is populated (the page shows its honest "no memory graph yet" empty state).
+	memoryGraph: "/api/diagnostics/memory-graph",
 	recall: "/api/memories/recall",
 	// PRD-040 — the memory-management surface. `memories` is BOTH the list (GET /api/memories)
 	// and the store (POST /api/memories) endpoint; `getMemory`/`modify`/`forget` are built by
@@ -551,6 +556,14 @@ export interface WireClient {
 	rules(): Promise<RuleRowWire[]>;
 	skills(): Promise<SkillRowWire[]>;
 	graph(): Promise<GraphWire>;
+	/**
+	 * PRD-041b — read the MEMORY-GRAPH view-model (`GET /api/diagnostics/memory-graph`). Returns the
+	 * SAME `GraphWire` shape as {@link graph} (the memory graph is a `GraphView`-shaped source), so the
+	 * page feeds it to the SAME `GraphCanvas`. A malformed/absent body — or a `built:false` empty graph
+	 * while PRD-008 data is unpopulated — degrades to {@link EMPTY_GRAPH} so the page renders its honest
+	 * "no memory graph yet" empty state, never a throw. Validated through the shared `GraphSchema`.
+	 */
+	memoryGraph(): Promise<GraphWire>;
 	recall(query: string): Promise<{ memories: RecalledMemory[]; degraded: boolean }>;
 	/**
 	 * PRD-040a — list the scoped tenant's memories (`GET /api/memories`, newest-first). `limit`
@@ -657,6 +670,12 @@ export function createWireClient(options: WireClientOptions = {}): WireClient {
 		},
 		async graph(): Promise<GraphWire> {
 			return (await getJson(fetchImpl, url(ENDPOINTS.graph), GraphSchema)) ?? EMPTY_GRAPH;
+		},
+		async memoryGraph(): Promise<GraphWire> {
+			// Same shape as the codebase graph (a `GraphView`-shaped source) — validated through the
+			// shared GraphSchema. A failure / `built:false` empty graph degrades to EMPTY_GRAPH so the
+			// page renders the honest "no memory graph yet" state (never a throw).
+			return (await getJson(fetchImpl, url(ENDPOINTS.memoryGraph), GraphSchema)) ?? EMPTY_GRAPH;
 		},
 		async recall(query: string): Promise<{ memories: RecalledMemory[]; degraded: boolean }> {
 			try {

@@ -134,6 +134,35 @@ export interface GraphView {
 	readonly edges: readonly GraphEdge[];
 }
 
+/**
+ * THE MEMORY-GRAPH VIEW-MODEL (PRD-041b — D-1 / FR-1 / AC-1). The knowledge graph of memories and
+ * entities (PRD-008 ontology), shaped IDENTICALLY to {@link GraphView} so the SAME dashboard
+ * `GraphCanvas` + pure `layout(...)` render it unchanged — it is a documented, greppable alias of the
+ * `GraphView` shape, NOT a structural fork. The mapping (when data exists): PRD-008 `entities` →
+ * {@link GraphNode}s whose `kind` carries the ontology kind (entity / aspect / attribute); PRD-008
+ * `entity_dependencies` (and later supersession / mention) → {@link GraphEdge}s whose `kind` carries
+ * the relation (`depends_on` / `supersedes` / `mentions` / …).
+ *
+ * ── NOW (the foundation this PRD ships — provable end-to-end against an EMPTY graph) ──
+ *   - this documented view-model contract (the named type below);
+ *   - a daemon endpoint (`GET /api/memory-graph`, `fetchMemoryGraphView`) that serves it for the
+ *     active scope, returning the honest `{ built: false, nodes: [], edges: [] }` empty state when
+ *     the PRD-008 ontology tables are empty/absent — the SAME `built` contract {@link GraphView} uses;
+ *   - the Codebase ↔ Memory toggle + shared rendering (the same canvas draws either source).
+ *
+ * ── DEFERRED until PRD-008 (In-Work) data is populated/served — each is an Open Question, NOT a stub ──
+ *   - populating real entities/edges (the endpoint returns `built: false` until rows exist — OQ-2);
+ *   - which ontology objects become nodes (entities only, or also aspects/attributes — OQ-1);
+ *   - ontology-kind-specific legend/iconography;
+ *   - supersession-lineage affordances (showing a claim's superseded history) + the provenance UI
+ *     (the graph "is never authoritative on its own" — PRD-008 / D-5 / OQ-4);
+ *   - edge-threshold tuning for which `depends_on` edges are visible/traversable (PRD-008 AC-3 / OQ-3).
+ *
+ * The implementation contains NO stub that fakes a populated graph — the foundation is honest about
+ * the empty state and never implies a memory graph exists when it does not (041b AC-5).
+ */
+export type MemoryGraphView = GraphView;
+
 /** One org-wide rule in the rules view (FR-6 / a-AC-4). */
 export interface RuleRow {
 	/** The rule id. */
