@@ -8,7 +8,7 @@
  * `.claude/agents/` agents.
  */
 
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -200,7 +200,14 @@ describe("PRD-036a scanInstalledAssets — real repo project root", () => {
 		return join(here, "..", "..", "..", "..");
 	}
 
-	it("a-AC-1: pointed at this repo, returns the real .claude/skills/ skills (count > 0)", async () => {
+	// `.claude/` is local tooling (gitignored, never checked in), so it is PRESENT in a working
+	// checkout but ABSENT in a clean CI clone. These two tests prove the scanner against the real
+	// on-disk `<name>/SKILL.md` layout when it exists, and skip (not fail) when it does not — the
+	// portable detection/dedupe/extraction logic is fully covered by the temp-dir fixtures above.
+	const hasLocalSkills = existsSync(join(repoRoot(), ".claude", "skills"));
+	const hasLocalAgents = existsSync(join(repoRoot(), ".claude", "agents"));
+
+	it.skipIf(!hasLocalSkills)("a-AC-1: pointed at this repo, returns the real .claude/skills/ skills (count > 0)", async () => {
 		const inv = await scanInstalledAssets({ projectRoot: repoRoot() });
 		expect(inv.skills.length).toBeGreaterThan(0);
 		// Each carries a name + the claude-code harness, and at least one is a known repo skill.
@@ -209,7 +216,7 @@ describe("PRD-036a scanInstalledAssets — real repo project root", () => {
 		expect(inv.skills.some((s) => s.name === "library-stinger")).toBe(true);
 	});
 
-	it("a-AC-2: pointed at this repo, returns the real .claude/agents/ agents (count > 0)", async () => {
+	it.skipIf(!hasLocalAgents)("a-AC-2: pointed at this repo, returns the real .claude/agents/ agents (count > 0)", async () => {
 		const inv = await scanInstalledAssets({ projectRoot: repoRoot() });
 		expect(inv.agents.length).toBeGreaterThan(0);
 		expect(inv.agents.every((a) => a.assetType === "agent" && a.name.length > 0)).toBe(true);
