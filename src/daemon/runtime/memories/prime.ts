@@ -60,7 +60,7 @@ export interface MountMemoriesPrimeOptions {
 	 */
 	readonly defaultScope?: QueryScope;
 	/**
-	 * The default budget knobs (token ceiling + per-list caps + the PRD-045c/d seams). Optional —
+	 * The default budget knobs (token ceiling + per-list caps + the PRD-047c/d seams). Optional —
 	 * the assembler defaults each. A per-request `?maxTokens` / `?limit` override is layered on
 	 * top of these at the handler.
 	 */

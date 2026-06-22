@@ -163,7 +163,7 @@ Because this is the make-or-break, it needs a measurable bar, not taste:
   (the anti-hallucination guarantee).
 - **Self-containment:** can the key be understood with zero surrounding context months later?
 
-These tie into the PRD-045f eval discipline — prove the keys earn their place rather than assuming it.
+These tie into the PRD-047f eval discipline — prove the keys earn their place rather than assuming it.
 
 ---
 

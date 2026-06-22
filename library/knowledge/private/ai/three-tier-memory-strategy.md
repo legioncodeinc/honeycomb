@@ -7,7 +7,7 @@ store so a coding agent (Claude Code, Cursor) can be *primed once per session* w
 distilled memory and then *resolve deeper on demand*. This is the conceptual anchor for a set of
 sibling strategy docs. **As of PRD-046 ([#77](https://github.com/legioncodeinc/honeycomb/pull/77),
 merged 2026-06-22) the CORE is SHIPPED** — Tier-1 keys, the prime endpoint, resolve/mine, and the
-CC/Cursor SessionStart hooks all exist (see the §3 table). What remains proposed: PRD-045c/d (richer
+CC/Cursor SessionStart hooks all exist (see the §3 table). What remains proposed: PRD-047c/d (richer
 dedup/recency), the durable-key sharpener, and GraphRAG ([`graphrag-followon.md`](graphrag-followon.md)).
 
 **Related:**
@@ -18,7 +18,7 @@ dedup/recency), the durable-key sharpener, and GraphRAG ([`graphrag-followon.md`
 - [`graphrag-followon.md`](graphrag-followon.md) — the approved later add
 - [`retrieval.md`](retrieval.md) — how recall works today (the substrate this builds on)
 - [`memory-pipeline.md`](memory-pipeline.md) · [`session-capture.md`](session-capture.md) · [`wiki-summary-workers.md`](wiki-summary-workers.md)
-- [`../../../requirements/in-work/prd-045-retrieval-quality-upgrades/prd-045-retrieval-quality-upgrades-index.md`](../../../requirements/in-work/prd-045-retrieval-quality-upgrades/prd-045-retrieval-quality-upgrades-index.md)
+- [`../../../requirements/in-work/prd-047-retrieval-quality-upgrades/prd-047-retrieval-quality-upgrades-index.md`](../../../requirements/in-work/prd-047-retrieval-quality-upgrades/prd-047-retrieval-quality-upgrades-index.md)
 
 ---
 
@@ -124,21 +124,21 @@ vector-only store.
 
 ---
 
-## 6. How this relates to the in-flight retrieval work (PRD-045)
+## 6. How this relates to the in-flight retrieval work (PRD-047)
 
-This strategy sits *on top of* the recall engine, not instead of it. PRD-045 hardens the recall path
+This strategy sits *on top of* the recall engine, not instead of it. PRD-047 hardens the recall path
 the resolve/mine calls depend on:
 
-- **045a (closed):** the native `deeplake_hybrid_record` operator was benchmarked and rejected (it
+- **047a (closed):** the native `deeplake_hybrid_record` operator was benchmarked and rejected (it
   returns degenerate constant-zero scores); the engine keeps post-query RRF. The 3-tier mining path
   therefore rides RRF, which measured recall@5 ≈ 0.72–0.78 live. See
   [`deeplake-hybrid-record-operator-report.md`](deeplake-hybrid-record-operator-report.md).
-- **045b reranker / 045c semantic dedup / 045d recency dampening / 045e MMR / 045f graded-nDCG eval**
+- **047b reranker / 047c semantic dedup / 047d recency dampening / 047e MMR / 047f graded-nDCG eval**
   all improve the mining and the prime: dedup keeps the index from showing the same fact five times;
   recency dampening makes the "recent timestream" prime fresh-biased without forgetting durable
   facts; the eval harness is how priming gets *proven* rather than vibed.
 
-The 3-tier prime is best thought of as **PRD-045's consumer**: it turns a good recall engine into a
+The 3-tier prime is best thought of as **PRD-047's consumer**: it turns a good recall engine into a
 session-level capability the agent actually feels.
 
 ---

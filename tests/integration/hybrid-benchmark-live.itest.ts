@@ -1,6 +1,6 @@
 /**
  * ╔══════════════════════════════════════════════════════════════════════════╗
- * ║  PRD-045 W0 — native `deeplake_hybrid_record` vs post-query RRF (LIVE A/B). ║
+ * ║  PRD-047 W0 — native `deeplake_hybrid_record` vs post-query RRF (LIVE A/B). ║
  * ╠══════════════════════════════════════════════════════════════════════════╣
  * ║  The decision instrument PRD-027 D-1 deferred: run the SAME committed       ║
  * ║  golden set through BOTH recall implementations against the SAME warm live  ║
@@ -106,7 +106,7 @@ function fmt(m: AggregateMetrics): string {
 	);
 }
 
-describe.skipIf(!HAS_TOKEN)("PRD-045 native-hybrid vs RRF benchmark (live, gated)", () => {
+describe.skipIf(!HAS_TOKEN)("PRD-047 native-hybrid vs RRF benchmark (live, gated)", () => {
 	let booted: BootedTestDaemon;
 	let storage: StorageClient;
 	let scope: QueryScope;

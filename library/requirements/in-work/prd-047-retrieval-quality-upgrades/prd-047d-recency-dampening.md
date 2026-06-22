@@ -1,6 +1,6 @@
-# PRD-045d — Recency dampening
+# PRD-047d — Recency dampening
 
-> Status: backlog · Parent: PRD-045 · Wave: W1 · Type: S
+> Status: backlog · Parent: PRD-047 · Wave: W1 · Type: S
 > Goal: agent memory goes stale faster than documents. Demote old hits with a multiplicative
 > age-decay on the fused score so last week's fact can outrank a six-month-old one — without ever
 > DROPPING a durable fact by age.
@@ -44,4 +44,4 @@ ordering while keeping old-but-durable facts recallable.
 
 ## Dependencies
 - `src/daemon/runtime/recall/config.ts` (the recency knob — already defined), `recall.ts` (final
-  ordering), the row timestamp columns, PRD-045f (the metric instrument).
+  ordering), the row timestamp columns, PRD-047f (the metric instrument).

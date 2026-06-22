@@ -1,6 +1,6 @@
-# PRD-045e — Token-budget + MMR context assembly
+# PRD-047e — Token-budget + MMR context assembly
 
-> Status: backlog · Parent: PRD-045 · Wave: W2 · Type: M
+> Status: backlog · Parent: PRD-047 · Wave: W2 · Type: M
 > Goal: replace the bare fixed top-k at the injection boundary with a token-BUDGETED, diversity-aware
 > (MMR) selection — so recall fills a context window with maximum non-redundant signal instead of
 > "5 paraphrases of one fact".
@@ -19,7 +19,7 @@ useful facts. This is the "after the candidates come back" gap, the last mile of
   fine; exactness is not required for budgeting).
 - Apply MMR over the (deduped, reranked) candidates when selecting into the budget:
   `select argmax [ λ·rel(d) − (1−λ)·max_{s∈selected} sim(d,s) ]`, λ a tuned knob, `sim` the
-  candidate-embedding cosine already available. Diversity layered ON TOP of dedup (045c) — dedup
+  candidate-embedding cosine already available. Diversity layered ON TOP of dedup (047c) — dedup
   removes near-identical; MMR spreads the rest.
 - Keep the existing row-`limit` API working (budget mode is additive/opt-in), so no surface breaks.
 
@@ -45,6 +45,6 @@ useful facts. This is the "after the candidates come back" gap, the last mile of
   surface (agent inject, dashboard, CLI) sets its own budget — those policies are their own work.
 
 ## Dependencies
-- `recall.ts` (assembly / final selection — runs after 045b rerank + 045c dedup), candidate
+- `recall.ts` (assembly / final selection — runs after 047b rerank + 047c dedup), candidate
   embeddings (cosine for MMR `sim`), `resolveRecallLimit` (the existing limit path this extends),
-  PRD-045c (dedup — MMR assumes near-identical already collapsed), PRD-045f (the metric instrument).
+  PRD-047c (dedup — MMR assumes near-identical already collapsed), PRD-047f (the metric instrument).

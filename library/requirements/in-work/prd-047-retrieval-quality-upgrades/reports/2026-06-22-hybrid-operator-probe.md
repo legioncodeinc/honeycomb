@@ -1,10 +1,10 @@
-# PRD-045a — live operator probe (partial decision input)
+# PRD-047a — live operator probe (partial decision input)
 
 > Date: 2026-06-22 · Scope: de-risk the native-hybrid premise before the full recall@k A/B.
 
 ## What was tested
 A throwaway live probe (since deleted) connected to live DeepLake with the developer's
-`~/.deeplake/credentials.json` creds and ran `buildHybridArmSql` (the PRD-045a `hybrid-recall.ts`
+`~/.deeplake/credentials.json` creds and ran `buildHybridArmSql` (the PRD-047a `hybrid-recall.ts`
 builder) against the `memories` table with a synthetic unit 768-dim vector — no embed daemon
 needed, because the question was OPERATOR AVAILABILITY + SQL VALIDITY, not recall quality.
 
@@ -19,7 +19,7 @@ needed, because the question was OPERATOR AVAILABILITY + SQL VALIDITY, not recal
   a null `content_embedding` and is excluded by the `ARRAY_LENGTH(content_embedding,1) > 0` guard.
 
 ## Verdict (partial)
-The biggest unknown behind PRD-045a — "does the native operator even exist / does our SQL run on
+The biggest unknown behind PRD-047a — "does the native operator even exist / does our SQL run on
 the live engine?" — is **answered YES**. The native-hybrid path is viable; adoption now hinges
 purely on the recall@k / MRR comparison vs RRF.
 

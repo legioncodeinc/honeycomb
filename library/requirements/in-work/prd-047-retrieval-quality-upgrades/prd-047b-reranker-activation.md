@@ -1,8 +1,8 @@
-# PRD-045b — Reranker activation
+# PRD-047b — Reranker activation
 
-> Status: backlog · Parent: PRD-045 · Wave: W1 · Type: M
+> Status: backlog · Parent: PRD-047 · Wave: W1 · Type: M
 > Goal: consume the reranker that is already CONFIGURED but never CALLED. RRF fuses ranks and throws
-> away score magnitude; a rerank on the top-k recovers it. Highest quality-per-effort win in PRD-045
+> away score magnitude; a rerank on the top-k recovers it. Highest quality-per-effort win in PRD-047
 > because the plumbing is half-built.
 
 ## Why
@@ -30,7 +30,7 @@ where the right memory is in the top-k but not at the top (the MRR lever).
   candidate set with known embeddings (deterministic reorder).
 - **b-AC-2 — Timeout keeps order.** A reranker that exceeds the 300ms budget yields the pre-rerank
   (RRF) order, never a partial/blank reorder. Unit-tested with an injected slow clock.
-- **b-AC-3 — Measured non-regression (ideally a lift).** On the graded golden set (045f), rerank
+- **b-AC-3 — Measured non-regression (ideally a lift).** On the graded golden set (047f), rerank
   does not drop recall@5 and does not drop nDCG@10/MRR below `baseline − ε`; the expectation is an
   MRR/nDCG lift (the magnitude RRF discarded). Recorded in `reports/`.
 - **b-AC-4 — Fallback + fail-soft intact.** The silent lexical fallback (`degraded`) and per-arm
@@ -38,7 +38,7 @@ where the right memory is in the top-k but not at the top (the MRR lever).
 
 ## Risks / Out of scope
 - **Risk — cosine rerank ≈ the semantic arm signal.** Re-cosine-ing may add little over the `<#>`
-  arm's own ranking. Mitigated by measuring on 045f's nDCG; if the lift is ~0, fall through to the
+  arm's own ranking. Mitigated by measuring on 047f's nDCG; if the lift is ~0, fall through to the
   `llm` strategy or drop rerank to `none` by default (the eval decides, not assumption).
 - **Out of scope — training/hosting a cross-encoder.** The `llm` strategy reuses the existing
   inference router; no new model training here.
@@ -46,4 +46,4 @@ where the right memory is in the top-k but not at the top (the MRR lever).
 ## Dependencies
 - `src/daemon/runtime/recall/config.ts` (the reranker config — already defined), `recall.ts`
   (`fuseHits` output is the rerank input), `src/daemon/storage/vector.ts` (cosine), the query embed
-  (already computed for the semantic arm), PRD-045f (the nDCG instrument that proves the lift).
+  (already computed for the semantic arm), PRD-047f (the nDCG instrument that proves the lift).

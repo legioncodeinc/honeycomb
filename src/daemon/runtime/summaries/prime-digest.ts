@@ -18,7 +18,7 @@
  * `skimPrimeKeys` already returns the episodic keys NEWEST-FIRST (its `ORDER BY
  * last_update_date DESC`) and the durable keys by `updated_at DESC`. We preserve that order:
  * the recent list is the episodic keys in skim order (newest first), the durable list is the
- * durable keys regardless of age. The richer PRD-045d recency dampener is NOT built yet —
+ * durable keys regardless of age. The richer PRD-047d recency dampener is NOT built yet —
  * {@link RecencyRanker} is the seam it plugs into; the default is the identity order the skim
  * already produced (a basic inline recency, honestly labelled).
  *
@@ -33,7 +33,7 @@
  * No key appears twice across the two lists. The default {@link KeyDeduper} is a basic
  * normalized-text match (lowercased, whitespace-collapsed, punctuation-trimmed); a recent key
  * that duplicates a durable one is dropped from the recent list (durable wins — it is the
- * always-true fact). PRD-045c semantic dedup composes in here later via the same seam.
+ * always-true fact). PRD-047c semantic dedup composes in here later via the same seam.
  */
 
 import type { PrimedKey } from "./prime-keys.js";
@@ -82,10 +82,10 @@ export function estimatePrimeTokens(text: string): number {
 }
 
 /**
- * A recency ranker seam (PRD-045d). Given the recent (episodic) keys in skim order
+ * A recency ranker seam (PRD-047d). Given the recent (episodic) keys in skim order
  * (already newest-first), return them in the order the prime should list them. The DEFAULT is
  * the identity — the skim's `ORDER BY last_update_date DESC` IS the basic inline recency this
- * Wave ships; PRD-045d swaps in an age-weighted dampener WITHOUT touching the assembler.
+ * Wave ships; PRD-047d swaps in an age-weighted dampener WITHOUT touching the assembler.
  */
 export type RecencyRanker = (recent: readonly PrimedKey[]) => readonly PrimedKey[];
 
@@ -93,9 +93,9 @@ export type RecencyRanker = (recent: readonly PrimedKey[]) => readonly PrimedKey
 export const identityRecencyRanker: RecencyRanker = (recent) => recent;
 
 /**
- * A dedup seam (PRD-045c). Returns a stable normalization KEY for a primed key's text; two keys
+ * A dedup seam (PRD-047c). Returns a stable normalization KEY for a primed key's text; two keys
  * with the same normalized key are duplicates. The DEFAULT is a basic normalized-text match;
- * PRD-045c swaps in semantic (near-duplicate) dedup WITHOUT touching the assembler.
+ * PRD-047c swaps in semantic (near-duplicate) dedup WITHOUT touching the assembler.
  */
 export type KeyDeduper = (key: PrimedKey) => string;
 
@@ -115,9 +115,9 @@ export interface PrimeDigestBudget {
 	readonly recentLimit?: number;
 	/** The pre-budget cap on durable entries (default {@link DEFAULT_DURABLE_LIMIT}). */
 	readonly durableLimit?: number;
-	/** The recency ranker seam (PRD-045d). Defaults to {@link identityRecencyRanker}. */
+	/** The recency ranker seam (PRD-047d). Defaults to {@link identityRecencyRanker}. */
 	readonly recencyRanker?: RecencyRanker;
-	/** The dedup seam (PRD-045c). Defaults to {@link normalizedTextDeduper}. */
+	/** The dedup seam (PRD-047c). Defaults to {@link normalizedTextDeduper}. */
 	readonly deduper?: KeyDeduper;
 }
 
@@ -242,9 +242,9 @@ function dedupLists(
  * Assemble the prime digest from the Tier-1 keys a single {@link skimPrimeKeys} call returned
  * (PRD-046c). This is a PURE transform — NO storage, NO LLM/gate/vector call (c-AC-5). It:
  *   1. splits the flat skim into recent (episodic) + durable lists,
- *   2. applies the recency ranker (PRD-045d seam; default = the skim's newest-first order),
+ *   2. applies the recency ranker (PRD-047d seam; default = the skim's newest-first order),
  *   3. caps each list to its pre-budget limit,
- *   4. dedups across the two lists (PRD-045c seam; default = normalized-text, durable wins),
+ *   4. dedups across the two lists (PRD-047c seam; default = normalized-text, durable wins),
  *   5. trims to the token budget by dropping whole low-priority entries (never mid-key), and
  *   6. renders the header + sections + footer.
  *
@@ -263,11 +263,11 @@ export function assemblePrimeDigest(keys: readonly PrimedKey[], budget: PrimeDig
 	const durableKeys = keys.filter((k) => k.source === "durable");
 	const empty = episodic.length === 0 && durableKeys.length === 0;
 
-	// 2–3. Rank recent (PRD-045d seam), then cap each list to its pre-budget headline limit.
+	// 2–3. Rank recent (PRD-047d seam), then cap each list to its pre-budget headline limit.
 	const rankedRecent = recencyRanker(episodic).slice(0, Math.max(0, recentLimit)).map(toEntry);
 	const cappedDurable = durableKeys.slice(0, Math.max(0, durableLimit)).map(toEntry);
 
-	// 4. Dedup across the two lists (PRD-045c seam; durable wins a cross-list collision).
+	// 4. Dedup across the two lists (PRD-047c seam; durable wins a cross-list collision).
 	const deduped = dedupLists(rankedRecent, cappedDurable, deduper);
 
 	// 5. Trim to the token budget by dropping whole low-priority entries (never mid-key).

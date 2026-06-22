@@ -1,6 +1,6 @@
-# PRD-045c — Semantic / near-duplicate dedup
+# PRD-047c — Semantic / near-duplicate dedup
 
-> Status: backlog · Parent: PRD-045 · Wave: W1 · Type: M
+> Status: backlog · Parent: PRD-047 · Wave: W1 · Type: M
 > Goal: stop the same fact from filling the top-k. Today dedup is `source+id` only, so one fact
 > stored as a memory + a summary + several raw session turns surfaces multiple times. Collapse
 > near-duplicates by embedding similarity, keeping the highest-provenance copy.
@@ -14,7 +14,7 @@ shuffles run-to-run (`eval/recall-baseline.json` `//wave3` note). That workaroun
 the ENGINE should collapse near-duplicates so the surface shows distinct facts, not paraphrases.
 
 ## What (scope)
-- After fusion (and after rerank, 045b), collapse hits whose embeddings exceed a similarity
+- After fusion (and after rerank, 047b), collapse hits whose embeddings exceed a similarity
   threshold (~0.9, tuned on the eval) into ONE, keeping the highest-PROVENANCE copy by class order
   `memories` (kept fact) > `memory` (summary) > `sessions` (raw turn) — and the higher fused score
   within a class. The dropped copies are removed from the result, not merely demoted.
@@ -44,6 +44,6 @@ the ENGINE should collapse near-duplicates so the surface shows distinct facts, 
   recall; collapsing duplicates at STORE time (or reaping clones) is separate.
 
 ## Dependencies
-- `recall.ts` (`fuseHits` / post-rerank output), candidate embeddings (045b hydration),
+- `recall.ts` (`fuseHits` / post-rerank output), candidate embeddings (047b hydration),
   `src/daemon/storage/vector.ts` (cosine), PRD-017 (summaries — the `memory` provenance tier is most
-  useful once real summaries exist), PRD-045f (the metric that proves neutral-or-better).
+  useful once real summaries exist), PRD-047f (the metric that proves neutral-or-better).

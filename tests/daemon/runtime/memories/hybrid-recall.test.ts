@@ -1,5 +1,5 @@
 /**
- * PRD-045 W0 — native-hybrid recall (the `deeplake_hybrid_record` bench candidate).
+ * PRD-047 W0 — native-hybrid recall (the `deeplake_hybrid_record` bench candidate).
  *
  * Verification posture (mirrors recall.test.ts): `hybridRecall` + `buildHybridArmSql`
  * are exercised against a FAKE `StorageQuery` keyed off which arm the SQL targets
