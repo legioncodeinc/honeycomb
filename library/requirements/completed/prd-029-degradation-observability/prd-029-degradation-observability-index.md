@@ -1,8 +1,14 @@
 # PRD-029 — Degradation observability (surface the silent fallbacks)
 
-> Status: backlog · Owner: `/the-smoker` · Type: S/M (feature)
+> Status: completed · Owner: `/the-smoker` · Type: S/M (feature)
 > Goal: make the engine's degradation modes VISIBLE — in recall responses, in `/health`, and on the
 > dashboard — instead of degrading silently with no signal to the operator.
+
+> **Reconciliation (2026-06-22):** this PRD was implemented in an earlier wave (the structured `/health`
+> `reasons`, the dashboard `HealthStrip` + `LexicalFallbackBadge`, the `recall.degraded` structured log) but
+> never got a QA report and was left in `in-work`. Re-audited + closed out this date: security re-confirmed
+> CLEAN, quality **PASS 6/6 ACs** — reports in `reports/2026-06-22-*`. Moved to `completed`. See
+> `library/ledger/EXECUTION_LEDGER-prd-026-029.md`.
 
 ## Why
 The engine degrades silently. With embeddings off, recall falls back to lexical BM25/ILIKE; a
