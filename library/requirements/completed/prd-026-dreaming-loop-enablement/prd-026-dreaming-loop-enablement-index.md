@@ -1,10 +1,15 @@
 # PRD-026 — Dreaming loop enablement + live validation (turn it ON, prove it consolidates)
 
-> Status: backlog · Owner: `/the-smoker` · Type: M (feature)
+> Status: completed · Owner: `/the-smoker` · Type: M (feature)
 > Goal: turn the PRD-009 Dreaming consolidation loop ON (trivially enableable, with run-away guards) and
 > PROVE end-to-end, against live DeepLake, that a real pass actually consolidates — duplicates merged, stale
 > claims superseded, junk pruned — WITHOUT losing source-backed memory. Enablement + safety + measurement,
 > not a re-architecture.
+
+> **Reconciliation (2026-06-22):** this PRD was implemented in an earlier wave (the `HONEYCOMB_DREAMING_ENABLED`
+> enablement gate + the `dreaming-counter-live` / `dreaming-consolidation-live` itests) but never got a QA
+> report and was left in `in-work`. Re-audited + closed out this date: security CLEAN, quality **PASS 6/6 ACs**
+> — reports in `reports/2026-06-22-*`. Moved to `completed`. See `library/ledger/EXECUTION_LEDGER-prd-026-029.md`.
 
 ## Why
 

@@ -14,13 +14,15 @@ git history + PR descriptions hold the per-run event logs.
 
 | Tier | PRDs | Count |
 |---|---|---|
-| **completed/** | 001–025, 027, 028, 030, 031, 032, 033, 034, 035, 036 | 34 |
-| **in-work/** | **026** (dreaming-loop-enablement), **029** (degradation-observability) | 2 |
+| **completed/** | 001–036 (all) | 36 |
+| **in-work/** | — (none) | 0 |
 | **backlog/** | 037–044 (dashboard mini-site: nav-shell + 7 pages) | 8 |
 
-Only **026** and **029** remain genuinely incomplete — both lack a QA report (never run through the
-close-out loop). Everything else has a pass-class QA verdict (CLEAN TO SHIP / PASS / VERIFIED /
-PASS-WITH-FINDINGS) and is shipped on `main`.
+**`in-work/` is now empty.** PRD-026 + PRD-029 (the last two) were closed out 2026-06-22 — both were
+already implemented in earlier waves and only lacked a QA report; re-audited, security CLEAN, quality
+**PASS 6/6 each**, moved to `completed`. See [`EXECUTION_LEDGER-prd-026-029.md`](./EXECUTION_LEDGER-prd-026-029.md).
+Every completed PRD has a pass-class QA verdict and is shipped on `main`. The remaining work is the
+backlog dashboard mini-site (037–044).
 
 ## Recent `/the-smoker` runs
 
