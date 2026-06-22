@@ -1,9 +1,18 @@
 # PRD-013: Sources and Documents
 
-> **Status:** Completed
+> **Status:** Completed (code shipped) — ⚠ NOT LIVE; close-out tracked in [PRD-045e](../../in-work/prd-045-daemon-wiring-closeout/prd-045e-daemon-wiring-closeout-sources-documents.md)
 > **Priority:** P1
 > **Effort:** L
 > **Schema changes:** Additive
+
+---
+
+> **⚠ Not live (2026-06-22 daemon-wiring audit).** `/api/sources` is deliberately deferred at the composition
+> root (`resolveProductDataDeps` omits it, `assemble.ts:732-749`) → 501 scaffold; `honeycomb sources` reaches the
+> 501; `/api/documents` 501s without a worker (`sources/api.ts:218-225`); the Obsidian/Discord/GitHub providers
+> are instantiated nowhere (dead code). Wiring close-out:
+> [PRD-045e](../../in-work/prd-045-daemon-wiring-closeout/prd-045e-daemon-wiring-closeout-sources-documents.md).
+> Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../../in-work/prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
 
 ---
 

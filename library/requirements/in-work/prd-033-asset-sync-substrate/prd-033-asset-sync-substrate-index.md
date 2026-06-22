@@ -1,9 +1,18 @@
 # PRD-033: Asset Sync Substrate
 
-> **Status:** Completed
+> **Status:** In Work (reopened 2026-06-22)
 > **Priority:** P2
 > **Effort:** L
 > **Schema changes:** Additive
+
+---
+
+> **⚠ Reopened 2026-06-22 — partial implementation.** A daemon-wiring liveness audit found this PRD only
+> partially live; moved back to `in-work/`. See
+> [`../prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md`](../prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
+> **Remaining:** `/api/assets` + the `honeycomb asset` CLI are live, but the session-start asset auto-pull is
+> dead code (`daemon-client/assets/install.ts:258` is never called; `session-start.ts:72` auto-pulls only
+> skills). Coordinate the shared session-start seam fix with [PRD-045g](../prd-045-daemon-wiring-closeout/prd-045g-daemon-wiring-closeout-team-skill-sharing.md).
 
 ---
 

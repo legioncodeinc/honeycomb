@@ -1,9 +1,18 @@
 # PRD-006: Memory Pipeline
 
-> **Status:** Completed
+> **Status:** Completed (code shipped) — ⚠ NOT LIVE; close-out tracked in [PRD-045a](../../in-work/prd-045-daemon-wiring-closeout/prd-045a-daemon-wiring-closeout-memory-pipeline.md)
 > **Priority:** P0
 > **Effort:** XL
 > **Schema changes:** Additive
+
+---
+
+> **⚠ Not live (2026-06-22 daemon-wiring audit).** The five-stage pipeline engine is built + tested, but the
+> daemon never constructs a worker for it and capture never enqueues pipeline jobs — `assemble.ts` builds only
+> the dreaming worker (`:1265`); capture enqueues only `summary`/`skillify` cues
+> (`capture/capture-handler.ts:268-275`). The deliverable is unreachable at runtime. Wiring close-out:
+> [PRD-045a](../../in-work/prd-045-daemon-wiring-closeout/prd-045a-daemon-wiring-closeout-memory-pipeline.md).
+> Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../../in-work/prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
 
 ---
 

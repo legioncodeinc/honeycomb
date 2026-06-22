@@ -1,9 +1,18 @@
 # PRD-016: Skillify
 
-> **Status:** Completed
+> **Status:** Completed (code shipped) — ⚠ NOT LIVE (mining); close-out tracked in [PRD-045f](../../in-work/prd-045-daemon-wiring-closeout/prd-045f-daemon-wiring-closeout-skillify-mining.md)
 > **Priority:** P1
 > **Effort:** M
 > **Schema changes:** Additive
+
+---
+
+> **⚠ Not live — mining (2026-06-22 daemon-wiring audit).** Skillify jobs are enqueued (`session-end.ts:112`,
+> `capture/turn-counters.ts:150`) but no worker leases `["skillify"]` (the dreaming worker leases only
+> `["dreaming"]`), so the miner never runs; the `skillify pull` CLI verb is unregistered (`src/cli/skillify.ts:19`).
+> `/api/skills` read is live. Wiring close-out:
+> [PRD-045f](../../in-work/prd-045-daemon-wiring-closeout/prd-045f-daemon-wiring-closeout-skillify-mining.md).
+> Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../../in-work/prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
 
 ---
 

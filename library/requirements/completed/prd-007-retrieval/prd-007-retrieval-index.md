@@ -1,9 +1,18 @@
 # PRD-007: Retrieval
 
-> **Status:** Completed
+> **Status:** Completed (code shipped) — ⚠ PARTIALLY LIVE; close-out tracked in [PRD-045b](../../in-work/prd-045-daemon-wiring-closeout/prd-045b-daemon-wiring-closeout-retrieval-engine.md)
 > **Priority:** P0
 > **Effort:** XL
 > **Schema changes:** None
+
+---
+
+> **⚠ Partially live (2026-06-22 daemon-wiring audit).** Live recall works via `recallMemories` (lexical+vector
+> RRF, `memories/recall.ts:549`), but the engineered five-phase `RecallEngine` (authorization boundary /
+> currentness / confidence gate — AC-2/3/4) has zero production callers and no-op phase defaults
+> (`recall/engine.ts:121-124,149`). Decision/close-out (wire vs de-scope):
+> [PRD-045b](../../in-work/prd-045-daemon-wiring-closeout/prd-045b-daemon-wiring-closeout-retrieval-engine.md).
+> Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../../in-work/prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
 
 ---
 

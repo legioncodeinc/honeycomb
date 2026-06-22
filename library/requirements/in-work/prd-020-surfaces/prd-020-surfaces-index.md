@@ -1,9 +1,17 @@
 # PRD-020: Surfaces
 
-> **Status:** Completed
+> **Status:** In Work (reopened 2026-06-22)
 > **Priority:** P1
 > **Effort:** L
 > **Schema changes:** None
+
+---
+
+> **⚠ Reopened 2026-06-22 — partial implementation.** A daemon-wiring liveness audit found this PRD only
+> partially live; moved back to `in-work/`. See
+> [`../prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md`](../prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
+> **Remaining:** the CLI, dashboard data API, and notifications are live, but the Cursor extension UI (020c) is
+> an unbuilt source shell (`harnesses/cursor/extension/` — no manifest, esbuild entry, or installer).
 
 ---
 
