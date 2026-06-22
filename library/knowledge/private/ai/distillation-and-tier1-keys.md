@@ -1,6 +1,6 @@
 # Distillation and the Tier-1 Key (the make-or-break)
 
-> Category: Ai | Version: 1.0 | Date: June 2026 | Status: Strategy — PROPOSED, not built
+> Category: Ai | Version: 1.1 | Date: June 2026 | Status: Strategy — CORE BUILT (PRD-046, merged #77); extensions proposed
 
 The quality of the 3-tier zoom memory is gated almost entirely by one thing: how good the distilled
 keys and summaries are. This doc defines the Tier-1 *key* (the new artifact), the grounded
@@ -163,7 +163,7 @@ Because this is the make-or-break, it needs a measurable bar, not taste:
   (the anti-hallucination guarantee).
 - **Self-containment:** can the key be understood with zero surrounding context months later?
 
-These tie into the PRD-045f eval discipline — prove the keys earn their place rather than assuming it.
+These tie into the PRD-047f eval discipline — prove the keys earn their place rather than assuming it.
 
 ---
 

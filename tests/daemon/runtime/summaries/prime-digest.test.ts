@@ -143,7 +143,7 @@ describe("PRD-046c c-AC-3 — recency-weighted newest-first; durable present reg
 		expect(digest.durable.map((e) => e.ref)).toContain("d_old");
 	});
 
-	it("a custom RecencyRanker (the PRD-045d seam) reorders recent without touching durable", () => {
+	it("a custom RecencyRanker (the PRD-047d seam) reorders recent without touching durable", () => {
 		const keys: PrimedKey[] = [
 			episodic("session A", "rA"),
 			episodic("session B", "rB"),

@@ -1,19 +1,19 @@
-# PRD-045f — Graded relevance + nDCG eval upgrade
+# PRD-047f — Graded relevance + nDCG eval upgrade
 
-> Status: backlog · Parent: PRD-045 · Wave: W0 · Type: S
+> Status: backlog · Parent: PRD-047 · Wave: W0 · Type: S
 > Goal: make rank-ORDER improvements measurable. Today the golden set is binary (relevance 1) and
 > the gate is recall@5 / MRR; a reranker or recency change that improves ORDERING within the top-k
 > can be invisible to a binary metric. Land graded relevance + nDCG FIRST so every later wave
-> (045b/c/d/e) has an instrument that can see what it changed.
+> (047b/c/d/e) has an instrument that can see what it changed.
 
 ## Why
 `src/eval/metrics.ts` already computes nDCG@10 (`ndcgAtK`, `idealDcgAtK`) and `aggregateMetrics`
 already reports it — but the golden set (`eval/recall-golden.json`) carries `relevance: 1` on every
 pair (binary), so nDCG collapses toward a binary signal and is NOT part of the gate
-(`gateAgainstBaseline` enforces recall@5 + MRR only). The reranker (045b), recency (045d), and MMR
-(045e) waves all change ORDER, not just presence — without graded relevance + a gated nDCG, their
+(`gateAgainstBaseline` enforces recall@5 + MRR only). The reranker (047b), recency (047d), and MMR
+(047e) waves all change ORDER, not just presence — without graded relevance + a gated nDCG, their
 wins are unprovable and could even regress unnoticed. This wave is cheap (the math exists) and
-unblocks the measurement story for the rest of PRD-045.
+unblocks the measurement story for the rest of PRD-047.
 
 ## What (scope)
 - Add graded `relevance` (e.g. 3 = the exact target, 2 = a strongly-related fact, 1 = tangentially

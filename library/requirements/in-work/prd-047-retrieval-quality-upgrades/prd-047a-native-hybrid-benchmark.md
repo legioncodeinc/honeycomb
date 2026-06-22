@@ -1,6 +1,6 @@
-# PRD-045a — Native `deeplake_hybrid_record` vs RRF: benchmark + adoption gate
+# PRD-047a — Native `deeplake_hybrid_record` vs RRF: benchmark + adoption gate
 
-> Status: CLOSED — decision recorded (keep RRF) · Parent: PRD-045 · Wave: W0 · Type: S
+> Status: CLOSED — decision recorded (keep RRF) · Parent: PRD-047 · Wave: W0 · Type: S
 > Goal: settle PRD-027 D-1's deferred question with NUMBERS — does DeepLake's native hybrid
 > operator tie-or-beat the post-query RRF the engine ships, on the committed golden set? Adopt
 > native hybrid iff it does; otherwise keep RRF and record why.

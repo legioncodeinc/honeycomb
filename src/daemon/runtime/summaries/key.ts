@@ -42,6 +42,8 @@
 
 import { z } from "zod";
 
+import { redactSecrets } from "../skillify/miner.js";
+
 /** Max length of a Tier-1 key (a headline, not a paragraph). A longer key is truncated. */
 export const MAX_KEY_CHARS = 200;
 
@@ -232,19 +234,39 @@ const GROUNDING_ALLOW = new Set<string>([
 ]);
 
 /**
- * Is `key` GROUNDED in the extraction (b-AC-3)? True iff every significant token in the
- * key is either (a) present in the extraction facts, or (b) an allowed connective/verb.
- * A key that introduces a NOUN absent from the extraction is NOT grounded — the gate
- * confabulated, and the caller falls back to a key derived purely from the extraction.
+ * Token-set grounding core: is every significant token in `key` either present in the
+ * `corpus` token set or an allowed connective/verb? The single grounding rule both the
+ * episodic ({@link isKeyGrounded}) and durable ({@link isKeyGroundedInText}) paths share,
+ * so the anti-confabulation floor is derived ONCE and never forks.
  */
-export function isKeyGrounded(key: string, extraction: Extraction): boolean {
-	const corpus = extractionTokens(extraction);
+function isGroundedInTokens(key: string, corpus: ReadonlySet<string>): boolean {
 	for (const tok of significantTokens(key)) {
 		if (corpus.has(tok)) continue;
 		if (GROUNDING_ALLOW.has(tok)) continue;
 		return false;
 	}
 	return true;
+}
+
+/**
+ * Is `key` GROUNDED in the extraction (b-AC-3)? True iff every significant token in the
+ * key is either (a) present in the extraction facts, or (b) an allowed connective/verb.
+ * A key that introduces a NOUN absent from the extraction is NOT grounded — the gate
+ * confabulated, and the caller falls back to a key derived purely from the extraction.
+ */
+export function isKeyGrounded(key: string, extraction: Extraction): boolean {
+	return isGroundedInTokens(key, extractionTokens(extraction));
+}
+
+/**
+ * Is `key` GROUNDED in a raw `content` string (the DURABLE-fact grounding floor, 046b
+ * b-AC-3 ported to facts)? A `memories` fact is ALREADY a distilled, curated truth, so
+ * its own `content` is the grounding corpus — a durable key may invent no noun the fact
+ * does not already assert. Same rule as {@link isKeyGrounded}, with the content tokens as
+ * the corpus instead of an extraction's. Used to PROVE a derived durable key is honest.
+ */
+export function isKeyGroundedInText(key: string, content: string): boolean {
+	return isGroundedInTokens(key, significantTokens(content));
 }
 
 /** Collapse to one line and cap at {@link MAX_KEY_CHARS} (a key is a headline). */
@@ -315,4 +337,53 @@ export function parseSummaryGate(raw: string): GroundedSummary | null {
 	if (key === "") key = oneLineKey(summary.replace(/^#+\s*/gm, ""));
 
 	return { summary, key, extraction };
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// DURABLE-fact key — the deferred 046b durable-key generator (PRD-046).
+//
+// 046b sharpened the EPISODIC key (`memory.key`, derived inside the summary gate) but
+// left the DURABLE-fact key (`memories.key`) unpopulated, so the prime fell back to the
+// fact's `content`. This closes that gap. A `memories` fact is ALREADY a short, distilled,
+// curated truth — so the durable key is derived DETERMINISTICALLY (no second LLM/gate
+// round-trip): scrub secrets, take the first sentence, collapse + cap to a one-line
+// headline. It is grounded BY CONSTRUCTION (a slice of the fact's own content invents no
+// noun the content does not assert), and {@link isKeyGroundedInText} proves it.
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Take the first sentence of a (single-line) body: everything up to the first sentence
+ * terminator (`.`/`!`/`?` followed by whitespace or end), so a multi-sentence fact yields
+ * just its headline clause. Falls back to the whole body when there is no terminator. The
+ * terminator is dropped so the cap/one-line step owns the final shape.
+ */
+function firstSentence(text: string): string {
+	const m = text.match(/^(.*?[.!?])(?:\s|$)/);
+	const head = m ? m[1].replace(/[.!?]+$/, "") : text;
+	return head.trim();
+}
+
+/**
+ * Derive the DURABLE Tier-1 key for a `memories` fact (the deferred 046b durable-key
+ * generator). DETERMINISTIC by design — a durable fact is already distilled, so a sharp
+ * key is a cheap derivation, not a second gate pass:
+ *
+ *   1. {@link redactSecrets} — the SAME deterministic floor the summary worker uses, so no
+ *      secret/PII can ever land in a durable key (the security pass relied on this floor
+ *      for the prime). Applied FIRST, before any token sees the value.
+ *   2. {@link firstSentence} — a fact's lead clause is its headline; the rest is detail.
+ *   3. {@link oneLineKey} — collapse whitespace + cap at {@link MAX_KEY_CHARS}.
+ *
+ * The result is GROUNDED by construction: it is a redacted slice of the fact's own
+ * `content`, so it can introduce no noun the content does not already assert
+ * (provable via {@link isKeyGroundedInText}). Returns `""` when the content is blank or
+ * collapses to nothing after redaction — the write path then leaves `key` empty and the
+ * prime keeps its legacy `content` fallback for that (un-keyed) row.
+ */
+export function deriveDurableKey(content: string): string {
+	if (typeof content !== "string") return "";
+	const safe = redactSecrets(content);
+	const oneLine = safe.replace(/\s+/g, " ").trim();
+	if (oneLine === "") return "";
+	return oneLineKey(firstSentence(oneLine));
 }

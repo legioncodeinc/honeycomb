@@ -2,7 +2,7 @@
  * Native DeepLake hybrid recall — the PRD-027 D-1 **option (c) bench candidate**.
  *
  * ════════════════════════════════════════════════════════════════════════════
- * BENCH-ONLY (PRD-045 W0). This module is the SECOND recall implementation kept
+ * BENCH-ONLY (PRD-047 W0). This module is the SECOND recall implementation kept
  * deliberately UNWIRED: it is NOT mounted on any `/api/memories/*` route and the
  * live engine ({@link recallMemories} in `recall.ts`) is untouched. It exists so the
  * existing recall-eval harness (`src/eval/golden.ts`, `npm run eval:recall`) can A/B

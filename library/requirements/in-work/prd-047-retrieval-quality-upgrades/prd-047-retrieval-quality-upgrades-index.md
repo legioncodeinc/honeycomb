@@ -1,4 +1,4 @@
-# PRD-045 — Retrieval quality upgrades (native hybrid, rerank, dedup, recency, assembly)
+# PRD-047 — Retrieval quality upgrades (native hybrid, rerank, dedup, recency, assembly)
 
 > Status: in-work · Owner: `/the-smoker` · Type: L (multi-feature)
 > Goal: take the recall engine from a strong-but-bare hybrid+RRF floor (PRD-025/027) to a
@@ -47,12 +47,12 @@ quality-per-effort wins land early:
 
 | Sub-PRD | Wave | Deliverable | Confidence |
 |---|---|---|---|
-| **045a** | W0 | Native `deeplake_hybrid_record` vs RRF **benchmark + adoption gate** | built (slice landed) |
-| **045f** | W0 | **Graded relevance + nDCG** eval upgrade (so rank-order changes are measurable) | high |
-| **045b** | W1 | **Reranker activation** (consume the scaffolded cosine/LLM reranker on top-k) | high |
-| **045c** | W1 | **Semantic / near-duplicate dedup** (collapse by embedding similarity, keep top provenance) | high |
-| **045d** | W1 | **Recency dampening** (age-decay multiplier on the fused score) | high |
-| **045e** | W2 | **Token-budget + MMR context assembly** (diversity-aware, budget-bounded result set) | medium |
+| **047a** | W0 | Native `deeplake_hybrid_record` vs RRF **benchmark + adoption gate** | built (slice landed) |
+| **047f** | W0 | **Graded relevance + nDCG** eval upgrade (so rank-order changes are measurable) | high |
+| **047b** | W1 | **Reranker activation** (consume the scaffolded cosine/LLM reranker on top-k) | high |
+| **047c** | W1 | **Semantic / near-duplicate dedup** (collapse by embedding similarity, keep top provenance) | high |
+| **047d** | W1 | **Recency dampening** (age-decay multiplier on the fused score) | high |
+| **047e** | W2 | **Token-budget + MMR context assembly** (diversity-aware, budget-bounded result set) | medium |
 
 Each sub-PRD lands behind the PRD-027 eval: a change that drops recall@5 / MRR below
 `baseline − ε` FAILS, and a quality change must show a measured, non-regressing improvement (or
@@ -61,7 +61,7 @@ de-duplicated top-k).
 
 ## Design alternatives + recommendation (per wave)
 
-### 045a — native hybrid vs RRF (the deferred PRD-027 D-1 A/B)
+### 047a — native hybrid vs RRF (the deferred PRD-027 D-1 A/B)
 Three fusion options were named in PRD-027 D-1: (a) weighted-sum, (b) RRF (shipped), (c) the
 DB's native `deeplake_hybrid_record`. **RECOMMENDED: run (c) against (b) on the golden set
 before adopting.** The benchmark slice is built (`hybrid-recall.ts` + `hybrid-benchmark-live.itest.ts`
@@ -70,7 +70,7 @@ on recall@5 / MRR at ≤ the code surface — because then DeepLake's signature 
 its keep AND we delete the TS rank-bookkeeping. If it loses, that is itself a strong signal about
 whether the store fits the data, and we keep RRF.
 
-### 045b — where the reranker runs
+### 047b — where the reranker runs
 - **(a) embedding-cosine rerank** (the configured default) — re-score the top-k by raw cosine of
   the (already-embedded) query against candidate embeddings. Cheap, no extra model, recovers the
   magnitude RRF discards.
@@ -79,110 +79,110 @@ whether the store fits the data, and we keep RRF.
 (b) behind the existing `reranker: "llm"` strategy as a measured follow-up. Either way the
 300ms-timeout keep-order fallback already specified stays.
 
-### 045c — dedup granularity
+### 047c — dedup granularity
 - **(a) exact content hash** — collapse byte-identical text. Misses paraphrases.
 - **(b) embedding-cosine cluster** — collapse hits whose embeddings exceed a similarity
   threshold (~0.9), keeping the highest-provenance copy (memory > summary > session).
 **RECOMMENDED: (b)**, threshold tuned on the golden set; it is the direct fix for the
 near-duplicate crowding the eval already works around.
 
-### 045d — recency model
+### 047d — recency model
 - **(a) hard recency cutoff** — drop old rows. Lossy; forgets durable facts.
 - **(b) multiplicative age-decay** on the fused score (half-life tunable). Demotes stale rows
   without dropping them.
 **RECOMMENDED: (b)**, half-life a tuned knob, eval-gated — never a hard cutoff.
 
-### 045e — assembly
+### 047e — assembly
 - **(a) fixed top-k** (today). Simple; redundant.
 - **(b) token budget + MMR** — fill a token budget with maximal marginal relevance, trading a
   little pure relevance for diversity.
 **RECOMMENDED: (b)**, with the token budget as the surface's contract and MMR λ tuned on the eval.
 
 ## Decisions
-- **D-1 — Native hybrid is ADOPTED ONLY ON EVIDENCE (045a). RESOLVED 2026-06-22: NOT adopted —
+- **D-1 — Native hybrid is ADOPTED ONLY ON EVIDENCE (047a). RESOLVED 2026-06-22: NOT adopted —
   keep RRF.** The live A/B ran: native `deeplake_hybrid_record` returned a degenerate constant-zero
   score (random ordering, recall@5 0.14–0.17 vs RRF 0.72–0.78, weight-insensitive). It executes but
   does not rank as wired. RRF stays the default; the native path is deferred pending an
   operator-contract investigation (does it need a registered hybrid/BM25 index?). This closes
   PRD-027 D-1's deferred fast-follow WITH A MEASURED NO. See
-  [045a's decision report](reports/2026-06-22-hybrid-benchmark-decision.md).
-- **D-2 — The reranker is a real stage, not a stub (045b).** `recall.ts` consumes the configured
+  [047a's decision report](reports/2026-06-22-hybrid-benchmark-decision.md).
+- **D-2 — The reranker is a real stage, not a stub (047b).** `recall.ts` consumes the configured
   reranker on the top-k, preserving the timeout keep-order fallback already specified.
-- **D-3 — Dedup is semantic, not just `source+id` (045c).** Near-duplicate hits collapse by
+- **D-3 — Dedup is semantic, not just `source+id` (047c).** Near-duplicate hits collapse by
   embedding similarity, keeping the highest-provenance copy.
-- **D-4 — Recency is a multiplicative dampener, never a cutoff (045d).** Old facts are demoted,
+- **D-4 — Recency is a multiplicative dampener, never a cutoff (047d).** Old facts are demoted,
   never dropped.
-- **D-5 — Assembly is token-budgeted + diversity-aware (045e).** MMR over a token budget replaces
+- **D-5 — Assembly is token-budgeted + diversity-aware (047e).** MMR over a token budget replaces
   the bare top-k at the injection boundary.
-- **D-6 — Everything is eval-gated (045f).** Graded relevance + nDCG land FIRST so every later
+- **D-6 — Everything is eval-gated (047f).** Graded relevance + nDCG land FIRST so every later
   wave's ordering change is measurable, not a vibe. No wave merges that regresses the committed
   baseline.
 - **D-7 — The silent lexical fallback is PRESERVED.** Degraded recall beats a 500 for an agent
   turn; `degraded: true` stays the honest signal. No wave may turn a fallback into a throw.
 
 ## Acceptance criteria
-- **AC-1 — Native-hybrid A/B is run + recorded (045a).** `npm run bench:hybrid` runs both recall
+- **AC-1 — Native-hybrid A/B is run + recorded (047a).** `npm run bench:hybrid` runs both recall
   paths on the golden set against live DeepLake + the embed daemon and emits a `[045 receipt]`
   metrics line per path + the delta. The adoption decision (adopt / keep RRF) is recorded in
-  045a's report with the measured numbers. The benchmark asserts BOTH paths ran, never a winner.
-- **AC-2 — Reranker is consumed (045b).** A recall with `reranker: "embedding-cosine"` reorders
+  047a's report with the measured numbers. The benchmark asserts BOTH paths ran, never a winner.
+- **AC-2 — Reranker is consumed (047b).** A recall with `reranker: "embedding-cosine"` reorders
   the top-k by the rerank score; a rerank timeout keeps the prior order (the configured
   fallback). Measured: rerank does not regress recall@5 / MRR on the golden set (and ideally
   lifts MRR). Unit-tested + eval-checked.
-- **AC-3 — Semantic dedup collapses near-duplicates (045c).** Given a fact present as a memory +
+- **AC-3 — Semantic dedup collapses near-duplicates (047c).** Given a fact present as a memory +
   a summary + N raw session turns, recall returns ONE hit (highest provenance), and the eval's
   relevance-class stability workaround is no longer load-bearing. Unit-tested on a near-dup
   fixture; measured neutral-or-better on the golden set.
-- **AC-4 — Recency demotes stale rows (045d).** Two equally-relevant hits of different age order
+- **AC-4 — Recency demotes stale rows (047d).** Two equally-relevant hits of different age order
   newest-first under the dampener; no row is dropped by age. Unit-tested; eval-gated.
-- **AC-5 — Assembly is budget + diversity aware (045e).** Recall fills a token budget with an MMR
+- **AC-5 — Assembly is budget + diversity aware (047e).** Recall fills a token budget with an MMR
   selection; a result set of near-paraphrases is diversified vs the fixed-top-k baseline.
   Unit-tested; measured on the golden set.
-- **AC-6 — Eval upgraded to graded + nDCG (045f).** The golden set carries graded relevance and
-  the harness reports nDCG@10 as a gating-eligible metric, so rank-order improvements (045b/d/e)
+- **AC-6 — Eval upgraded to graded + nDCG (047f).** The golden set carries graded relevance and
+  the harness reports nDCG@10 as a gating-eligible metric, so rank-order improvements (047b/d/e)
   are visible. Baseline re-committed against the stabilized, graded eval.
 - **AC-7 — Gates green + fallback intact.** `npm run ci` / `build` / `audit:sql` / `audit:openclaw`
   stay green; the per-arm fail-soft + silent lexical fallback (`degraded`) are preserved across
   every wave; no secret/PII in any new fixture or output (grep-proven).
 
 ## Risks / Out of scope
-- **Risk — native hybrid is a black box.** Adopting `deeplake_hybrid_record` (045a) trades the
+- **Risk — native hybrid is a black box.** Adopting `deeplake_hybrid_record` (047a) trades the
   transparent, per-arm-testable RRF for an engine-internal scorer. Mitigated by D-1: adopt only on
   measured parity-or-better, and keep the RRF path in tree as the reference/fallback.
 - **Risk — over-tuning to the golden set.** Every knob here (rerank, dedup threshold, recency
   half-life, MMR λ) can be gamed to ~36 pairs. Mitigated by growing the set from real dogfood
   misses (PRD-027 D-5) and keeping the lexical-miss pairs load-bearing.
 - **Risk — eventual-consistency flakiness.** Every live measurement polls to convergence (the
-  two-phase barrier 045a reuses), never a single read (project memory).
+  two-phase barrier 047a reuses), never a single read (project memory).
 - **Out of scope — turning embeddings on / the embed runtime.** PRD-025 owns that; this PRD ranks,
   shapes, and measures its output.
 - **Out of scope — the summarization layer (PRD-017).** Embedding distilled summaries instead of
   raw `sessions.message` noise is the single biggest recall lift available, but it is owned by
-  PRD-017 (wiki-summaries), currently a Wave-2 stub. This PRD COORDINATES with 017 (045c's
+  PRD-017 (wiki-summaries), currently a Wave-2 stub. This PRD COORDINATES with 017 (047c's
   provenance ordering assumes summaries exist) but does not re-spec it — see Dependencies.
 - **Out of scope — query rewriting / expansion / HyDE.** A measure-gated Tier-3 experiment: it
   helps terse queries and hurts well-formed ones, so it must be A/B'd on the (graded) eval before
-  any commit. Deferred to a fast-follow once 045f lands the instrument; NOT built on faith here.
+  any commit. Deferred to a fast-follow once 047f lands the instrument; NOT built on faith here.
 
 ## Dependencies
 - **PRD-027 (the instrument).** The golden set, the metrics, `runEval`, and the committed baseline
-  are the gate every wave passes through. 045f extends 027's metrics with graded relevance + nDCG.
+  are the gate every wave passes through. 047f extends 027's metrics with graded relevance + nDCG.
 - **PRD-025 (the semantic arm).** All of this ranks/shapes the `<#>` output 025 turns on.
-- **PRD-017 (wiki-summaries, coupled).** 045c's provenance ordering (memory > summary > session)
+- **PRD-017 (wiki-summaries, coupled).** 047c's provenance ordering (memory > summary > session)
   and the recall quality ceiling both improve materially once 017 lands real distilled summaries
-  to embed instead of raw turns. Sequence: 017 lands summaries → 045c/e benefit; 045 does not
+  to embed instead of raw turns. Sequence: 017 lands summaries → 047c/e benefit; 045 does not
   block on 017 but flags it as the highest-leverage adjacent work.
 - **The recall engine + config** — `src/daemon/runtime/memories/recall.ts` (RRF fusion, `fuseHits`,
-  the hit shape), `src/daemon/runtime/memories/hybrid-recall.ts` (045a candidate, built),
-  `src/daemon/runtime/recall/config.ts` (the scaffolded reranker + recency knobs 045b/d consume),
+  the hit shape), `src/daemon/runtime/memories/hybrid-recall.ts` (047a candidate, built),
+  `src/daemon/runtime/recall/config.ts` (the scaffolded reranker + recency knobs 047b/d consume),
   `src/daemon/storage/vector.ts` (the `<#>` cosine + `deeplake_hybrid_record` operator).
 - **DeepLake eventual consistency.** Every live eval/benchmark polls to embedding convergence,
   never a single immediate read (project memory).
 
 ## Sub-PRD index
-- [045a — Native-hybrid benchmark + adoption gate](prd-045a-native-hybrid-benchmark.md) (W0, **CLOSED: keep RRF** — native operator scored degenerate-zero, see [report](reports/2026-06-22-hybrid-benchmark-decision.md))
-- [045f — Graded relevance + nDCG eval upgrade](prd-045f-graded-relevance-ndcg-eval.md) (W0)
-- [045b — Reranker activation](prd-045b-reranker-activation.md) (W1)
-- [045c — Semantic / near-duplicate dedup](prd-045c-semantic-dedup.md) (W1)
-- [045d — Recency dampening](prd-045d-recency-dampening.md) (W1)
-- [045e — Token-budget + MMR context assembly](prd-045e-context-assembly-token-budget-mmr.md) (W2)
+- [047a — Native-hybrid benchmark + adoption gate](prd-047a-native-hybrid-benchmark.md) (W0, **CLOSED: keep RRF** — native operator scored degenerate-zero, see [report](reports/2026-06-22-hybrid-benchmark-decision.md))
+- [047f — Graded relevance + nDCG eval upgrade](prd-047f-graded-relevance-ndcg-eval.md) (W0)
+- [047b — Reranker activation](prd-047b-reranker-activation.md) (W1)
+- [047c — Semantic / near-duplicate dedup](prd-047c-semantic-dedup.md) (W1)
+- [047d — Recency dampening](prd-047d-recency-dampening.md) (W1)
+- [047e — Token-budget + MMR context assembly](prd-047e-context-assembly-token-budget-mmr.md) (W2)

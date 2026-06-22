@@ -15,9 +15,11 @@ import { describe, expect, it } from "vitest";
 
 import {
 	buildStructuredSummaryPrompt,
+	deriveDurableKey,
 	deriveKeyFromExtraction,
 	type Extraction,
 	isKeyGrounded,
+	isKeyGroundedInText,
 	MAX_KEY_CHARS,
 	parseSummaryGate,
 	SUMMARY_GATE_INSTRUCTIONS,
@@ -153,5 +155,65 @@ describe("PRD-046b b-AC-3 — keys are grounded: no fact absent from the structu
 		const grounded = parseSummaryGate(fenced);
 		expect(grounded).not.toBeNull();
 		expect(grounded!.key).toContain("key column");
+	});
+});
+
+describe("PRD-046 deferred durable-key generator — deriveDurableKey (memories.key on the write path)", () => {
+	it("derives a non-empty, ≤1-sentence, keyword-forward key from a distilled fact", () => {
+		const content =
+			"All SQL values must route through sqlStr/sqlLike/sqlIdent; raw interpolation fails audit:sql.";
+		const key = deriveDurableKey(content);
+		expect(key.length).toBeGreaterThan(0);
+		// One line, within the cap.
+		expect(key).not.toContain("\n");
+		expect(key.length).toBeLessThanOrEqual(MAX_KEY_CHARS);
+		// Keyword-forward: it carries the operative identifiers, not a bland topic.
+		expect(key).toMatch(/sqlStr|sqlLike|sqlIdent/);
+	});
+
+	it("takes the FIRST sentence of a multi-sentence fact (a headline, not the whole body)", () => {
+		const content =
+			"DeepLake reads are eventually consistent — always poll to convergence. Never do a single read. There is more detail after.";
+		const key = deriveDurableKey(content);
+		// Only the lead clause survives; the trailing sentences are dropped.
+		expect(key).toContain("eventually consistent");
+		expect(key).not.toContain("single read");
+		expect(key).not.toContain("more detail");
+		expect(key).not.toContain("\n");
+	});
+
+	it("is GROUNDED by construction: it invents no token absent from the fact content (b-AC-3)", () => {
+		const content = "Switched recall fusion to RRF; native deeplake_hybrid_record returns all-zero scores.";
+		const key = deriveDurableKey(content);
+		// A durable key derived from the content can never confabulate — every token is in it.
+		expect(isKeyGroundedInText(key, content)).toBe(true);
+	});
+
+	it("isKeyGroundedInText REJECTS a confabulated token absent from the fact content", () => {
+		const content = "Tuned the recall ranking weights to improve precision.";
+		// A key that smuggles in an un-asserted noun ("Kubernetes") is NOT grounded in the fact.
+		expect(isKeyGroundedInText("Kubernetes autoscaler tuned the recall ranking", content)).toBe(false);
+		// A key built only from the fact's own nouns IS grounded.
+		expect(isKeyGroundedInText("recall ranking precision tuned", content)).toBe(true);
+	});
+
+	it("caps an over-long fact body to MAX_KEY_CHARS with an ellipsis", () => {
+		const longFact = `${"a".repeat(MAX_KEY_CHARS + 50)} trailing`;
+		const key = deriveDurableKey(longFact);
+		expect(key.length).toBeLessThanOrEqual(MAX_KEY_CHARS + 1); // +1 for the ellipsis glyph
+		expect(key.endsWith("…")).toBe(true);
+	});
+
+	it("REDACTION: a secret in the fact content never reaches the durable key (b-AC-5 floor)", () => {
+		const content = "Configured the client with api_key=sk_live_ABCDEF0123456789XYZ for the daemon.";
+		const key = deriveDurableKey(content);
+		// The credential value is scrubbed before it can land in a key.
+		expect(key).not.toContain("sk_live_ABCDEF0123456789XYZ");
+		expect(key).toContain("[REDACTED]");
+	});
+
+	it("a blank / whitespace-only fact yields an empty key (the prime keeps its content fallback)", () => {
+		expect(deriveDurableKey("")).toBe("");
+		expect(deriveDurableKey("   \n  ")).toBe("");
 	});
 });

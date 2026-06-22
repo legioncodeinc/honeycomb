@@ -1,12 +1,14 @@
 # Three-Tier Memory Strategy (prime once, zoom on demand)
 
-> Category: Ai | Version: 1.0 | Date: June 2026 | Status: Strategy — PROPOSED, not built
+> Category: Ai | Version: 1.1 | Date: June 2026 | Status: Strategy — CORE BUILT (PRD-046, merged #77); extensions proposed
 
 A design strategy for layering a **3-tier "zoom" memory** on top of Honeycomb's existing Deep Lake
 store so a coding agent (Claude Code, Cursor) can be *primed once per session* with a tiny index of
 distilled memory and then *resolve deeper on demand*. This is the conceptual anchor for a set of
-sibling strategy docs. **It describes a target design, not shipped behavior** — read the "Current
-state" sections before assuming any of it exists.
+sibling strategy docs. **As of PRD-046 ([#77](https://github.com/legioncodeinc/honeycomb/pull/77),
+merged 2026-06-22) the CORE is SHIPPED** — Tier-1 keys, the prime endpoint, resolve/mine, and the
+CC/Cursor SessionStart hooks all exist (see the §3 table). What remains proposed: PRD-047c/d (richer
+dedup/recency), the durable-key sharpener, and GraphRAG ([`graphrag-followon.md`](graphrag-followon.md)).
 
 **Related:**
 - [`session-priming-architecture.md`](session-priming-architecture.md) — the push/pull mechanism + harness wiring
@@ -16,7 +18,7 @@ state" sections before assuming any of it exists.
 - [`graphrag-followon.md`](graphrag-followon.md) — the approved later add
 - [`retrieval.md`](retrieval.md) — how recall works today (the substrate this builds on)
 - [`memory-pipeline.md`](memory-pipeline.md) · [`session-capture.md`](session-capture.md) · [`wiki-summary-workers.md`](wiki-summary-workers.md)
-- [`../../../requirements/in-work/prd-045-retrieval-quality-upgrades/prd-045-retrieval-quality-upgrades-index.md`](../../../requirements/in-work/prd-045-retrieval-quality-upgrades/prd-045-retrieval-quality-upgrades-index.md)
+- [`../../../requirements/in-work/prd-047-retrieval-quality-upgrades/prd-047-retrieval-quality-upgrades-index.md`](../../../requirements/in-work/prd-047-retrieval-quality-upgrades/prd-047-retrieval-quality-upgrades-index.md)
 
 ---
 
@@ -77,8 +79,8 @@ three tables that correspond almost exactly to the three zoom levels. The work i
 | Tier | Honeycomb table | Key column(s) | What it holds | Current state |
 |---|---|---|---|---|
 | **Tier 3 — RAW** | `sessions` | `path`, `message` (JSONB), `message_embedding FLOAT4[]` | One row per captured turn (prompt / tool-call / response), append-only | **Live.** The capture hook writes it every turn. |
-| **Tier 2 — SUMMARY** | `memory` | `path`, `summary`, `description`, `summary_embedding` | One distilled session summary per session | **Built + shipped (PRD-017 _Completed_), but not yet wired into the live daemon.** The summary worker (017a) and the `/MEMORY.md` synthesis (017b) are full, QA-passed implementations (15/15 ACs); but `runSummaryWorker` is invoked *nowhere* in the live daemon (deferred assembly — `server.ts`/`assemble.ts` mount no summary job), so summaries aren't produced on a live trigger until that wiring lands. **Not a stub** (an earlier draft said so — corrected). |
-| **Tier 1 — KEY** | *none yet* | — | A ≤1-sentence keyworded headline per session/fact, used as the index | **Does not exist.** The genuinely new piece this strategy adds. |
+| **Tier 2 — SUMMARY** | `memory` | `path`, `summary`, `description`, `summary_embedding` | One distilled session summary per session | **Live (PRD-046a).** The PRD-017 summary worker is now mounted in the daemon and fires on session-end + periodic triggers; 046b added the version-bumped `/MEMORY.md` refresh. |
+| **Tier 1 — KEY** | `memory.key` / `memories.key` | `key` | A ≤1-sentence keyworded headline per session/fact, used as the index | **Built (PRD-046b).** A `key` column on both tables, generated inside the summary gate (episodic). Durable-fact keys currently fall back to `content`; a dedicated durable-key sharpener is a follow-up. |
 
 A fourth table, `memories`, holds distilled *facts* (user/pipeline-curated, column `content`,
 `content_embedding`) — durable truths rather than per-session episodes. In this model `memories` is a
@@ -122,21 +124,21 @@ vector-only store.
 
 ---
 
-## 6. How this relates to the in-flight retrieval work (PRD-045)
+## 6. How this relates to the in-flight retrieval work (PRD-047)
 
-This strategy sits *on top of* the recall engine, not instead of it. PRD-045 hardens the recall path
+This strategy sits *on top of* the recall engine, not instead of it. PRD-047 hardens the recall path
 the resolve/mine calls depend on:
 
-- **045a (closed):** the native `deeplake_hybrid_record` operator was benchmarked and rejected (it
+- **047a (closed):** the native `deeplake_hybrid_record` operator was benchmarked and rejected (it
   returns degenerate constant-zero scores); the engine keeps post-query RRF. The 3-tier mining path
   therefore rides RRF, which measured recall@5 ≈ 0.72–0.78 live. See
   [`deeplake-hybrid-record-operator-report.md`](deeplake-hybrid-record-operator-report.md).
-- **045b reranker / 045c semantic dedup / 045d recency dampening / 045e MMR / 045f graded-nDCG eval**
+- **047b reranker / 047c semantic dedup / 047d recency dampening / 047e MMR / 047f graded-nDCG eval**
   all improve the mining and the prime: dedup keeps the index from showing the same fact five times;
   recency dampening makes the "recent timestream" prime fresh-biased without forgetting durable
   facts; the eval harness is how priming gets *proven* rather than vibed.
 
-The 3-tier prime is best thought of as **PRD-045's consumer**: it turns a good recall engine into a
+The 3-tier prime is best thought of as **PRD-047's consumer**: it turns a good recall engine into a
 session-level capability the agent actually feels.
 
 ---

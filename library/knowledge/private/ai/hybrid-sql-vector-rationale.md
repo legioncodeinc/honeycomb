@@ -1,6 +1,6 @@
 # Why Hybrid (SQL + Vector) Makes the Zoom Memory Doable
 
-> Category: Ai | Version: 1.0 | Date: June 2026 | Status: Strategy — PROPOSED, not built
+> Category: Ai | Version: 1.1 | Date: June 2026 | Status: Strategy — CORE BUILT (PRD-046, merged #77); extensions proposed
 
 Why Honeycomb's Deep Lake substrate (SQL *and* vector in one store) is a genuinely better fit for the
 3-tier zoom memory than a vector-only store — and what each half of the hybrid is responsible for.
@@ -12,7 +12,7 @@ Grounded in the recall behavior measured this cycle. **Design rationale, not a b
 - [`prior-art-owls-roost-crosswalk.md`](prior-art-owls-roost-crosswalk.md) — the vector-only system this contrasts with
 - [`retrieval.md`](retrieval.md) — the live recall engine
 - [`deeplake-hybrid-record-operator-report.md`](deeplake-hybrid-record-operator-report.md) — the native-operator finding
-- [`../../../requirements/in-work/prd-045-retrieval-quality-upgrades/prd-045-retrieval-quality-upgrades-index.md`](../../../requirements/in-work/prd-045-retrieval-quality-upgrades/prd-045-retrieval-quality-upgrades-index.md)
+- [`../../../requirements/in-work/prd-047-retrieval-quality-upgrades/prd-047-retrieval-quality-upgrades-index.md`](../../../requirements/in-work/prd-047-retrieval-quality-upgrades/prd-047-retrieval-quality-upgrades-index.md)
 
 ---
 
@@ -95,7 +95,7 @@ A grounded caveat for any future agent, because it was settled with live measure
   recall@5 ≈ 0.72–0.78.
 - **Deep Lake's *native* `deeplake_hybrid_record` operator does NOT work for us and must not be used.**
   Benchmarked live, it returns a constant `0` score for every row (degenerate ordering → near-random
-  recall@5 ≈ 0.14–0.17), independent of weight or vector-literal format. PRD-045a closed with "keep
+  recall@5 ≈ 0.14–0.17), independent of weight or vector-literal format. PRD-047a closed with "keep
   RRF." Full report: [`deeplake-hybrid-record-operator-report.md`](deeplake-hybrid-record-operator-report.md).
 
 So "hybrid" here means **SQL for structure + vector for similarity, fused in our own RRF** — *not* the
@@ -118,4 +118,4 @@ is *more* doable than the prior system it is modeled on — the owner's intuitio
 
 | Date | Version | Change |
 |------|---------|--------|
-| 2026-06 | 1.0 | Initial rationale for the SQL+vector division of labor; grounded in the PRD-045a operator finding. |
+| 2026-06 | 1.0 | Initial rationale for the SQL+vector division of labor; grounded in the PRD-047a operator finding. |

@@ -1,14 +1,14 @@
 # PRD-046f — Prime eval (prove it, or pull it)
 
-> Status: backlog · Parent: PRD-046 · Wave: W2 · Type: M
+> Status: completed (merged #77, 2026-06-22) · Parent: PRD-046 · Wave: W2 · Type: M
 > Goal: measure that priming actually changes the agent's retrieval/behavior versus a cold start. A
 > prime the agent ignores is worse than no prime (it costs tokens for nothing), so this slice makes the
 > value testable and gives the kill criterion teeth.
 
 ## Why
 Every other slice is an assertion until this one measures it. The same discipline that killed the
-native hybrid operator (PRD-045a) applies: do not trust "it feels smarter." Honeycomb already has a
-recall-eval harness (PRD-045f graded relevance + nDCG, built on `src/eval/`) — this slice extends it
+native hybrid operator (PRD-047a) applies: do not trust "it feels smarter." Honeycomb already has a
+recall-eval harness (PRD-047f graded relevance + nDCG, built on `src/eval/`) — this slice extends it
 from "is the right memory retrievable" to "does priming change what the agent does." See
 `session-priming-architecture.md` §8.
 
@@ -23,8 +23,8 @@ from "is the right memory retrievable" to "does priming change what the agent do
   - **convergence** — faster arrival at the right file/decision;
   - **grounded reference** — the agent references a primed memory without being told it.
 - **A gate:** a committed bar; a change that drops the primed-vs-cold delta below `bar − ε` fails, the
-  same way PRD-045's recall baseline gates.
-- **Reuse the 045f machinery** (`src/eval/` metrics, the golden/scenario loader, the gated-live itest
+  same way PRD-047's recall baseline gates.
+- **Reuse the 047f machinery** (`src/eval/` metrics, the golden/scenario loader, the gated-live itest
   pattern) rather than a parallel harness.
 
 ## Acceptance criteria
@@ -47,10 +47,10 @@ from "is the right memory retrievable" to "does priming change what the agent do
   an `ε` tolerance like the recall eval.
 - **Risk — overfitting to the scenarios.** Grow the set from real dogfood (a session where priming
   obviously would/ wouldn't have helped), same as the recall golden set.
-- **Out of scope — the prime/keys/hooks themselves** (046a–d); **recall ranking eval** (PRD-045f, reused
+- **Out of scope — the prime/keys/hooks themselves** (046a–d); **recall ranking eval** (PRD-047f, reused
   not replaced).
 
 ## Dependencies
 - **046a–046d** (there must be a working prime to measure).
-- **PRD-045f** — the eval harness (`src/eval/`, metrics, gated-live-itest pattern) this extends.
+- **PRD-047f** — the eval harness (`src/eval/`, metrics, gated-live-itest pattern) this extends.
 - DeepLake eventual consistency — live scenarios poll to convergence before scoring.

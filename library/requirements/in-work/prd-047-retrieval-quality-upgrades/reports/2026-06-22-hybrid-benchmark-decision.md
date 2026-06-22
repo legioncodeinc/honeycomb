@@ -1,4 +1,4 @@
-# PRD-045a — native-hybrid vs RRF: benchmark DECISION (a-AC-3)
+# PRD-047a — native-hybrid vs RRF: benchmark DECISION (a-AC-3)
 
 > Date: 2026-06-22 · Run: live, workspace `default`, embed daemon `nomic-embed-text-v1.5` (768-dim).
 > **Decision: KEEP RRF. Do NOT adopt `deeplake_hybrid_record` as currently invocable.**
@@ -63,10 +63,10 @@ as assumed? Re-run `npm run bench:hybrid` after any fix — the harness + score-
 tree. Until then, `hybrid-recall.ts` stays as the UNWIRED reference candidate; nothing in the live
 recall path changed.
 
-## Effect on PRD-045
-- **045a: CLOSED — decision recorded (keep RRF).** No production wiring of native hybrid.
-- The rest of PRD-045 (045b reranker, 045c dedup, 045d recency, 045e MMR, 045f graded eval) is
+## Effect on PRD-047
+- **047a: CLOSED — decision recorded (keep RRF).** No production wiring of native hybrid.
+- The rest of PRD-047 (047b reranker, 047c dedup, 047d recency, 047e MMR, 047f graded eval) is
   UNAFFECTED — those improve the RRF path and never depended on native hybrid winning.
 - Bonus signal: in the cleaner `default` workspace, RRF scored recall@5 ≈ 0.72–0.78, ABOVE the
   committed `honeycomb_ci` baseline (0.583) — consistent with fewer near-duplicate clones, and
-  extra motivation for 045c (semantic dedup).
+  extra motivation for 047c (semantic dedup).

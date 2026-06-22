@@ -53,13 +53,13 @@ transfer strongly; several *implementation choices* are wrong for Honeycomb beca
 | Owl's Roost idea | Honeycomb disposition | Why |
 |---|---|---|
 | Two-step grounded summary (JSON facts → narrative) | **TRANSFER** | The anti-hallucination guarantee is domain-independent. Port it to PRD-017 + the Tier-1 key derivation. See distillation doc. |
-| Temporal decay (age multiplier; semantic ages slowly) | **TRANSFER (already in flight)** | This is exactly PRD-045d recency dampening. The "recent timestream" prime is age-weighted; durable facts age slowly. |
+| Temporal decay (age multiplier; semantic ages slowly) | **TRANSFER (already in flight)** | This is exactly PRD-047d recency dampening. The "recent timestream" prime is age-weighted; durable facts age slowly. |
 | Cold-start graceful degradation | **TRANSFER** | A fresh repo / new agent has no memory; the prime must degrade to "nothing yet" cleanly, never error — matches Honeycomb's existing `degraded` recall posture. |
 | Three *zoom* levels of detail | **TRANSFER (re-framed)** | Honeycomb's tiers are zoom levels (key→summary→raw), not age buckets — see below. |
 | Tier-1 = Valkey working memory | **DROP** | The harness (Claude Code / Cursor) already owns live working memory + compaction. Honeycomb must not rebuild it. Honeycomb's "Tier 1" is an *index*, not working memory. |
 | Compaction at 40 turns / status machine | **DROP (mostly)** | That is the harness's job for a coding agent. Honeycomb captures turns and distills at session boundaries, not via a 40-turn in-memory compactor it owns. |
 | Qdrant vector-only + payload-pointer resolution | **DROP** | Deep Lake's SQL side does key resolution as a join; no payload-pointer scheme. See hybrid-rationale doc. |
-| Cohere rerank-v3.5 as the reranker | **ADAPT** | Reranking is right (PRD-045b), but Honeycomb reranks via its own configured reranker (embedding-cosine default / LLM), not a Cohere dependency. |
+| Cohere rerank-v3.5 as the reranker | **ADAPT** | Reranking is right (PRD-047b), but Honeycomb reranks via its own configured reranker (embedding-cosine default / LLM), not a Cohere dependency. |
 | GraphRAG behind a flag | **ADAPT → approved follow-on** | Relational multi-hop is valuable later; Honeycomb has its own graph substrate. See graphrag-followon doc. |
 
 ---

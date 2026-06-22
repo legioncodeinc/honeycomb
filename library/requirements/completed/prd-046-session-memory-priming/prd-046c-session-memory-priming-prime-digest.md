@@ -1,6 +1,6 @@
 # PRD-046c — Prime digest service
 
-> Status: backlog · Parent: PRD-046 · Wave: W1 · Type: M
+> Status: completed (merged #77, 2026-06-22) · Parent: PRD-046 · Wave: W1 · Type: M
 > Goal: assemble the session-start prime — a compact, token-bounded, recency-aware index of Tier-1
 > keys (recent timestream + durable facts), scoped to the repo/agent — that the SessionStart hooks
 > (046d) inject. This is the "push the index" half of the design.
@@ -17,12 +17,12 @@ time — which is the efficiency argument for doing it every session. See
   that returns the assembled digest for a given scope (org/workspace/agent + repo/project).
 - **Two key lists:**
   - **Recent timestream** — the last N distilled sessions, newest first ("what were we just doing"),
-    **age-weighted via PRD-045d recency dampening**.
+    **age-weighted via PRD-047d recency dampening**.
   - **Durable facts** — the top M long-lived facts for this project ("what is always true here"), which
     age slowly (durable tier).
 - **Token budget.** The whole block is bounded (~300–800 tokens target); N/M are tuned to the budget,
   not fixed counts, so the prime never blows the window.
-- **Dedup.** No fact appears twice across the two lists or as near-duplicates (reuse PRD-045c semantic
+- **Dedup.** No fact appears twice across the two lists or as near-duplicates (reuse PRD-047c semantic
   dedup) — the index is distinct entries only.
 - **Each line is a key + opaque id** the resolve tool (046e) consumes, plus a one-line footer telling
   the agent how to expand (`hivemind_read`) or mine (`hivemind_search`).
@@ -35,7 +35,7 @@ time — which is the efficiency argument for doing it every session. See
 - **c-AC-2 — Token-bounded.** The digest respects the token budget; an over-long candidate set is
   trimmed (newest/most-durable kept), never truncated mid-key. Unit-tested at the budget boundary.
 - **c-AC-3 — Recency-weighted + durable-preserving.** Recent keys are ordered newest-first under the
-  PRD-045d dampener; durable facts are present regardless of age. Unit-tested with controlled timestamps.
+  PRD-047d dampener; durable facts are present regardless of age. Unit-tested with controlled timestamps.
 - **c-AC-4 — Deduped + scoped.** No duplicate/near-duplicate keys; every key is within the requested
   org/workspace/agent scope. Unit-tested.
 - **c-AC-5 — Cheap + cold-safe.** Assembling the prime issues only SQL skims (no LLM/gate/vector call
@@ -51,6 +51,6 @@ time — which is the efficiency argument for doing it every session. See
   (→ 046f).
 
 ## Dependencies
-- **046b** (the Tier-1 keys this skims), **PRD-045d** (recency dampening), **PRD-045c** (dedup).
+- **046b** (the Tier-1 keys this skims), **PRD-047d** (recency dampening), **PRD-047c** (dedup).
 - The recall/scope plumbing in `src/daemon/runtime/memories/` for the scoped SQL skim.
 - `session-priming-architecture.md` for the digest shape + token target.

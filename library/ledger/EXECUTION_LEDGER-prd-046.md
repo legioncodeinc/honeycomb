@@ -24,7 +24,7 @@ Ship:                     commit → push → PR → CI green
 | 046e resolve + mine | `typescript-node-worker-bee` | typescript-node-stinger | sonnet | MCP read-depth + search routing; bounded read-path work, balanced cost. |
 | 046c prime digest | `typescript-node-worker-bee` | typescript-node-stinger | opus | New scoped daemon endpoint, token-budget + recency/dedup composition. |
 | 046d harness hooks | `harness-integration-worker-bee` | harness-integration-stinger | opus | CC + Cursor SessionStart wiring across installers; cross-host contract care. |
-| 046f prime eval | `retrieval-worker-bee` | retrieval-stinger | opus | Extends the PRD-045f eval harness; behavioral A/B measurement. |
+| 046f prime eval | `retrieval-worker-bee` | retrieval-stinger | opus | Extends the PRD-047f eval harness; behavioral A/B measurement. |
 | close-out (security) | `security-worker-bee` | security-stinger | opus | Penultimate; SQL/PII/prompt-injection audit + remediate Critical/High. |
 | close-out (quality) | `quality-worker-bee` | quality-stinger | opus | Final; verify implementation vs PRD-046, write QA report. |
 
@@ -63,8 +63,8 @@ Ship:                     commit → push → PR → CI green
 |---|---|---|---|
 | c-AC-1 | Prime request returns recent-timestream + durable Tier-1 keys (with ids) for the scope; unit-tested | typescript-node | **VERIFIED** |
 | c-AC-2 | Token-bounded; over-long set trimmed (newest/durable kept), never mid-key truncation | typescript-node | **VERIFIED** |
-| c-AC-3 | Recency-weighted (045d) newest-first; durable facts present regardless of age | typescript-node | **VERIFIED** |
-| c-AC-4 | Deduped (045c) + scoped to org/ws/agent | typescript-node | **VERIFIED** |
+| c-AC-3 | Recency-weighted (047d) newest-first; durable facts present regardless of age | typescript-node | **VERIFIED** |
+| c-AC-4 | Deduped (047c) + scoped to org/ws/agent | typescript-node | **VERIFIED** |
 | c-AC-5 | Pure SQL skim (no gen at read); cold repo → honest empty, never error; `audit:sql` clean | typescript-node | **VERIFIED** |
 
 ### 046d — Claude Code + Cursor SessionStart hooks (Wave 2)
@@ -113,7 +113,7 @@ Ship:                     commit → push → PR → CI green
 
 ## Phase 3 — Ship
 - Single branch (`legion/tender-panini-57d188`) carries the PRD-046 implementation + its design basis
-  (the 6 `library/knowledge/private/ai/` strategy docs + the PRD-045 native-hybrid benchmark that
+  (the 6 `library/knowledge/private/ai/` strategy docs + the PRD-047 native-hybrid benchmark that
   decided "keep RRF" + the PRD-046 spec). One commit + one PR, transparently sectioned.
 
 ### 046f — Prime eval (Wave 2)
@@ -132,7 +132,7 @@ Ship:                     commit → push → PR → CI green
 > baseline — the intended advisory→enforced hand-off (same as PRD-027/045 started), not an incomplete AC.
 
 ## Blockers / notes
-- **Cross-PRD deps:** 046c references PRD-045c (dedup) / 045d (recency), which are not yet built (PRD-045 in-work). NOT a hard block — 046c ships a basic inline recency `ORDER BY` + simple dedup, and composes with the richer 045 features when they land. Logged, not BLOCKED.
+- **Cross-PRD deps:** 046c references PRD-047c (dedup) / 047d (recency), which are not yet built (PRD-047 in-work). NOT a hard block — 046c ships a basic inline recency `ORDER BY` + simple dedup, and composes with the richer 045 features when they land. Logged, not BLOCKED.
 - **MEMORY.md write-once:** the documented 017b limitation is fixed inside 046b (version-bump write).
 
 ## Wave log
@@ -165,7 +165,7 @@ Ship:                     commit → push → PR → CI green
   `mountMemories`) + a pure assembler (`src/daemon/runtime/summaries/prime-digest.ts`). Consumes 046b's
   `skimPrimeKeys` (no new raw SQL). Recent (newest-first) + durable lists, char/4 token budget with
   whole-entry trim (never mid-key), normalized-text dedup (durable wins), cold-scope honest-empty.
-  **Seams left for PRD-045d/c:** `RecencyRanker` + `KeyDeduper` injectable (default identity/normalized).
+  **Seams left for PRD-047d/c:** `RecencyRanker` + `KeyDeduper` injectable (default identity/normalized).
   No generation seam by construction (no embed/gate on this path). Independent verify: endpoint present;
   re-ran prime-digest (9) + prime (8) + assemble (37) tests → all pass; audit:sql clean. Bee full suite
   2403 pass / 6 skip, build + audit:openclaw exit 0.

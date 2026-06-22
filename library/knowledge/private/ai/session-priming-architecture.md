@@ -1,6 +1,6 @@
 # Session Priming Architecture (push the index, pull the detail)
 
-> Category: Ai | Version: 1.0 | Date: June 2026 | Status: Strategy — PROPOSED, not built
+> Category: Ai | Version: 1.1 | Date: June 2026 | Status: Strategy — CORE BUILT (PRD-046, merged #77); extensions proposed
 
 How a coding agent gets *primed* with Honeycomb memory: a tiny index pushed once at session start,
 and a pull-on-demand resolve/search path the agent drives itself. Covers the cadence (session, not
@@ -106,9 +106,9 @@ Durable:
 To expand any item, call hivemind_read(<id>); to search memory, hivemind_search(<query>).
 ```
 
-Recency vs durability is exactly where **PRD-045d recency dampening** plugs in: the recent list is
+Recency vs durability is exactly where **PRD-047d recency dampening** plugs in: the recent list is
 age-weighted, the durable list deliberately ages slowly (the "semantic facts age slowly" idea from
-the prior art). The prime should be deduped (PRD-045c) so the same fact never appears twice.
+the prior art). The prime should be deduped (PRD-047c) so the same fact never appears twice.
 
 ---
 
@@ -180,7 +180,7 @@ keeps the prime consistent with how Honeycomb already behaves.
 Priming must be measured, not asserted. The same discipline that killed the native hybrid operator
 applies here: build a small eval that asks *does priming change what the agent retrieves and does,
 versus a cold start?* Candidate signals — fewer redundant searches, faster convergence on the right
-file/decision, the agent referencing a primed key without being told. The PRD-045f graded-nDCG eval
+file/decision, the agent referencing a primed key without being told. The PRD-047f graded-nDCG eval
 harness is the natural instrument to extend. A prime that the agent ignores is worse than no prime
 (it costs tokens for nothing), so the kill criterion must be real.
 

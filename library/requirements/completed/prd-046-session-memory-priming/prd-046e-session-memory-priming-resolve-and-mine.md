@@ -1,6 +1,6 @@
 # PRD-046e — Resolve + mine tools (the pull path)
 
-> Status: backlog · Parent: PRD-046 · Wave: W1 · Type: S
+> Status: completed (merged #77, 2026-06-22) · Parent: PRD-046 · Wave: W1 · Type: S
 > Goal: give the agent the two pull tools the prime points it at — `hivemind_read` that ZOOMS a key
 > down the tiers (key → summary → raw), and `hivemind_search` that MINES via hybrid recall — so the
 > agent can act on the primed index on any turn.
@@ -14,7 +14,7 @@ retrieval engine.
 
 Critically, resolution is a **SQL join by id/path**, not a search — which is exactly why Deep Lake's
 SQL+vector store fits (see `hybrid-sql-vector-rationale.md`). The native `deeplake_hybrid_record`
-operator is NOT used (degenerate zero scores, PRD-045a); mining uses the existing post-query RRF.
+operator is NOT used (degenerate zero scores, PRD-047a); mining uses the existing post-query RRF.
 
 ## What (scope)
 - **Resolve depth on `hivemind_read`.** Given a Tier-1 key's id/path, support a `depth`:
@@ -23,7 +23,7 @@ operator is NOT used (degenerate zero scores, PRD-045a); mining uses the existin
   Each step is a guarded `SELECT … WHERE id/path = …` — a deterministic lookup, not a re-search.
 - **Confirm/route mining via `hivemind_search`.** The search tool calls the recall engine
   (`src/daemon/runtime/memories/recall.ts`): hybrid lexical + `<#>` semantic, fused with RRF, with the
-  silent lexical fallback preserved. No change to ranking (that is PRD-045's territory).
+  silent lexical fallback preserved. No change to ranking (that is PRD-047's territory).
 - **Tenancy.** Every resolve/search rides the org/workspace/agent scope, same as all recall today.
 
 ## Acceptance criteria
@@ -41,7 +41,7 @@ operator is NOT used (degenerate zero scores, PRD-045a); mining uses the existin
 ## Risks / Out of scope
 - **Risk — resolve fanning out.** A depth-2 resolve could pull a large raw session. Bound it (a turn
   limit / pagination) so a zoom never dumps an unbounded transcript into context.
-- **Out of scope — ranking/rerank/dedup of recall** (PRD-045b/c), **the prime assembly** (046c), **the
+- **Out of scope — ranking/rerank/dedup of recall** (PRD-047b/c), **the prime assembly** (046c), **the
   hooks** (046d).
 
 ## Dependencies

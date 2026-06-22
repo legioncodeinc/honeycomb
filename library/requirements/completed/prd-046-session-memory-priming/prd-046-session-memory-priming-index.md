@@ -1,6 +1,6 @@
 # PRD-046 — Session Memory Priming (prime once, resolve on demand)
 
-> Status: backlog · Owner: `/the-smoker` · Type: L (multi-feature)
+> Status: completed (merged #77, 2026-06-22) · Owner: `/the-smoker` · Type: L (multi-feature)
 > Goal: at the start of every coding session (Claude Code, Cursor to start), push the agent a tiny,
 > recency-aware INDEX of Honeycomb's distilled memory (Tier-1 keys), and let the agent RESOLVE deeper
 > (key → summary → raw) or MINE (semantic search) on demand — so a fresh session starts oriented
@@ -41,7 +41,7 @@ Six slices, sequenced so the foundational wiring lands first and the agent-facin
 | **046e** | W1 | **Resolve + mine tools** — `hivemind_read` zoom depth (key→summary→raw) + `hivemind_search` mining |
 | **046c** | W1 | **Prime digest service** — recency-aware index (recent timestream + durable facts), scoped, token-bounded |
 | **046d** | W2 | **SessionStart hooks** — Claude Code + Cursor inject the digest once per session |
-| **046f** | W2 | **Prime eval** — measure that priming changes retrieval/behavior vs cold start (extend PRD-045f) |
+| **046f** | W2 | **Prime eval** — measure that priming changes retrieval/behavior vs cold start (extend PRD-047f) |
 
 GraphRAG (relational multi-hop) is explicitly a **separate, later PRD** — see Out of scope.
 
@@ -82,14 +82,14 @@ as a later optimization (not in scope here).
   discipline (structured extraction → narrative → key) to prevent hallucinated history.
 - **D-4 — Resolve = SQL join; mine = RRF recall (046e).** Zoom (key→summary→raw) is a deterministic
   `hivemind_read` by id/path; mining is the existing hybrid recall via `hivemind_search`. The native
-  `deeplake_hybrid_record` operator is NOT used (it returns degenerate zero scores — PRD-045a).
+  `deeplake_hybrid_record` operator is NOT used (it returns degenerate zero scores — PRD-047a).
 - **D-5 — The prime is recency-aware and deduped (046c).** Recent timestream keys are age-weighted
-  (PRD-045d recency dampening); durable facts age slowly; the digest is deduped (PRD-045c) so no fact
+  (PRD-047d recency dampening); durable facts age slowly; the digest is deduped (PRD-047c) so no fact
   appears twice; the whole block is token-bounded (~300–800 tokens).
 - **D-6 — Reuse the session-start hook pattern (046d).** The prime is delivered the same way skill
   propagation already is — a session-start hook calling the daemon — for Claude Code and Cursor first.
 - **D-7 — Prove it or pull it (046f).** Priming must measurably change retrieval/behavior vs a cold
-  start; a prime the agent ignores is worse than none. Extend the PRD-045f eval harness; the kill
+  start; a prime the agent ignores is worse than none. Extend the PRD-047f eval harness; the kill
   criterion is real.
 - **D-8 — Do not own working memory.** The harness owns live in-session turns + compaction; Honeycomb
   owns the persistent tiers (Summary, Raw) and the index over them (Key). No Valkey-style tier here.
@@ -113,7 +113,7 @@ as a later optimization (not in scope here).
   "nothing yet" on a cold repo (never an error). Verified per harness.
 - **AC-6 — Priming is proven (046f).** An eval shows the primed agent changes retrieval/behavior vs a
   cold start (e.g. fewer redundant searches, faster convergence, references a primed key) on a
-  committed scenario set; a regression below the bar fails. Built on the PRD-045f harness.
+  committed scenario set; a regression below the bar fails. Built on the PRD-047f harness.
 - **AC-7 — Gates green + boundaries held.** `npm run ci` / `build` / `audit:sql` / `audit:openclaw`
   stay green; the silent lexical fallback + per-arm fail-soft of recall are preserved; no working-memory
   tier is added; no secret/PII in any digest, key, or fixture (grep-proven).
@@ -132,14 +132,14 @@ as a later optimization (not in scope here).
   [`graphrag-followon.md`](../../../knowledge/private/ai/graphrag-followon.md).
 - **Out of scope — the harness's working memory.** CC/Cursor own live turns + compaction; not rebuilt.
 - **Out of scope — turning embeddings on / the embed runtime (PRD-025) and the recall ranking internals
-  (PRD-045).** This PRD consumes them; it does not re-derive them. The native hybrid operator is dead
-  (PRD-045a) and not used.
+  (PRD-047).** This PRD consumes them; it does not re-derive them. The native hybrid operator is dead
+  (PRD-047a) and not used.
 
 ## Dependencies
 - **PRD-017 (wiki-summaries, `Completed`) — the Tier-2 substrate.** 046a mounts its already-built
   worker; 046b reuses its `/MEMORY.md` + `description`. Verified built-but-not-wired this cycle.
-- **PRD-045 (retrieval quality upgrades).** The prime composes with 045c (dedup), 045d (recency
-  dampening), 045f (eval harness); the mining path rides 045's RRF recall (045a closed: keep RRF).
+- **PRD-047 (retrieval quality upgrades).** The prime composes with 047c (dedup), 047d (recency
+  dampening), 047f (eval harness); the mining path rides 045's RRF recall (047a closed: keep RRF).
 - **PRD-025 (the semantic arm)** for the `<#>` recall the mining path uses.
 - **The MCP server + harness installers** — `hivemind_search`/`hivemind_read`/`hivemind_index`, the
   Claude Code SessionStart hook, `src/cli/install-cursor.ts` (Cursor 1.7 hooks), and the skill
