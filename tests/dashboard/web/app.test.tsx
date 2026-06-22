@@ -30,7 +30,9 @@ import { createWireClient } from "../../../src/dashboard/web/wire.js";
 /** The representative wire payloads (the WIRE truth, not the canned data.js). */
 const PAYLOADS = {
 	settings: { orgId: "org_8f3a21", orgName: "Activeloop", workspace: "deeplake-core", settings: { mode: "local", port: "3850" } },
-	kpis: { memoryCount: 1284, sessionCount: 312, estimatedSavings: 2400000 },
+	// PRD-035a: `turnCount` mirrors `sessionCount` (the honest "Turns" name). PRD-036c: `teamSkillCount`
+	// is the DEFINED team-shared count the KPI binds to (distinct from the skills array length).
+	kpis: { memoryCount: 1284, sessionCount: 312, turnCount: 312, estimatedSavings: 2400000, teamSkillCount: 5 },
 	sessions: {
 		sessions: [
 			{ sessionId: "a7f3c", project: "deeplake-core", startedAt: "14:32", eventCount: 48, status: "summarized" },
@@ -141,9 +143,10 @@ describe("PRD-024 AC-1: the UI-kit layout renders on the DS tokens", () => {
 		expect(text).toContain("Dream now");
 		// Recall bar (the primary action button).
 		expect(text).toContain("Recall");
-		// The 4 KPI tiles.
+		// The 4 KPI tiles. PRD-035a: the captured-turns KPI + panel read "Turns", never "Sessions".
 		expect(text).toContain("Memories");
-		expect(text).toContain("Sessions");
+		expect(text).toContain("Turns");
+		expect(text).not.toContain("Sessions");
 		expect(text).toContain("Est. savings");
 		expect(text).toContain("Team skills");
 		// The 2-col grid panels.
@@ -164,7 +167,11 @@ describe("PRD-024 AC-2: KPIs/sessions/rules/skills come from the LIVE endpoints 
 		const text = container.textContent ?? "";
 		// KPI values from the mocked /api/diagnostics/kpis (1284 → "1,284").
 		expect(text).toContain("1,284");
+		// PRD-035a: the "Turns" KPI renders the turnCount (312).
 		expect(text).toContain("312");
+		// PRD-036c: the "Team skills" KPI renders the DEFINED teamSkillCount (5), NOT the skills
+		// array length (2). The number is sourced from the count, never the panel array.
+		expect(text).toContain("5");
 		// Sessions from the mocked endpoint.
 		expect(text).toContain("a7f3c");
 		expect(text).toContain("deeplake-core");
@@ -187,7 +194,8 @@ describe("PRD-024 AC-2: KPIs/sessions/rules/skills come from the LIVE endpoints 
 		}) as unknown as typeof fetch;
 		await mountApp(emptyFetch);
 		const text = container.textContent ?? "";
-		expect(text).toContain("No sessions captured yet.");
+		// PRD-035a: the empty captured-turns panel reads "No turns captured yet.", not "sessions".
+		expect(text).toContain("No turns captured yet.");
 		expect(text).toContain("No skills synced.");
 		// Graph not built → the kit's build prompt.
 		expect(text).toContain("honeycomb graph build");

@@ -24,7 +24,10 @@ import type { TransportRequest } from "../../../../src/daemon/storage/transport.
 import { type RuntimeConfig } from "../../../../src/daemon/runtime/config.js";
 import { createRequestLogger } from "../../../../src/daemon/runtime/logger.js";
 import { createDaemon } from "../../../../src/daemon/runtime/server.js";
-import { buildSettingsView, mountDashboardApi } from "../../../../src/daemon/runtime/dashboard/api.js";
+import { buildSettingsView, fetchKpisView, fetchSkillSyncView, mountDashboardApi } from "../../../../src/daemon/runtime/dashboard/api.js";
+import type { QueryScope, StorageQuery } from "../../../../src/daemon/storage/client.js";
+import type { QueryResult, StorageRow } from "../../../../src/daemon/storage/result.js";
+import type { LocalAssetInventory } from "../../../../src/dashboard/contracts.js";
 import { FakeDeepLakeTransport, fakeCredentialRecord, stubProvider } from "../../../helpers/fake-deeplake.js";
 
 const ORG = "fake-org";
@@ -58,7 +61,13 @@ function makeDaemonMode(graphBuilt: boolean, config: RuntimeConfig) {
 function responder(graphBuilt: boolean) {
 	return (req: TransportRequest): Record<string, unknown>[] => {
 		const sql = req.sql;
-		if (/FROM\s+"memory"/i.test(sql)) return [{ n: 42 }];
+		// PRD-035b: the estimated-savings aggregate (SUM(LENGTH(content)) FROM "memories"). Seed a
+		// non-zero character total so the KPI computes a real non-zero token estimate.
+		if (/SUM\(LENGTH/i.test(sql) && /FROM\s+"memories"/i.test(sql)) return [{ chars: 4000 }];
+		// PRD-036c: the team-shared skill count (COUNT(DISTINCT honeycomb_id) FROM "synced_assets").
+		if (/FROM\s+"synced_assets"/i.test(sql)) return [{ n: 3 }];
+		// The Memories KPI count (COUNT(*) FROM "memories" — the real table name, not "memory").
+		if (/COUNT\(\*\).*FROM\s+"memories"/i.test(sql)) return [{ n: 42 }];
 		if (/COUNT\(\*\).*FROM\s+"sessions"/i.test(sql)) return [{ n: 7 }];
 		if (/FROM\s+"sessions"/i.test(sql))
 			return [{ id: "sess-1", project: "honeycomb", creation_date: "2026-06-18", path: "conversations/sess-1" }];
@@ -103,7 +112,12 @@ describe("PRD-020b mountDashboardApi wires the six dashboard read handlers", () 
 		const json = (await res.json()) as Record<string, number>;
 		expect(json.memoryCount).toBe(42);
 		expect(json.sessionCount).toBe(7);
-		expect(json.estimatedSavings).toBe(0);
+		// PRD-035a: turnCount mirrors the session-row count under the honest name.
+		expect(json.turnCount).toBe(7);
+		// PRD-035b: 4000 chars / 4 chars-per-token = 1000 estimated tokens saved (real, non-zero).
+		expect(json.estimatedSavings).toBe(1000);
+		// PRD-036c: the team-shared skill count from the synced_assets substrate.
+		expect(json.teamSkillCount).toBe(3);
 	});
 
 	it("PRD-022 collision: the dashboard does NOT claim /api/kpis (left to product-data)", async () => {
@@ -183,6 +197,23 @@ describe("PRD-020b mountDashboardApi wires the six dashboard read handlers", () 
 		mountDashboardApi(daemon, { storage });
 		const res = await daemon.app.request("/api/diagnostics/kpis", {});
 		expect(res.status).toBe(400);
+	});
+
+	it("PRD-036a: /api/diagnostics/installed-assets returns the LocalAssetInventory (no org header required)", async () => {
+		// BEFORE the attach, the diagnostics group answers the 501 scaffold for this path.
+		const before = makeDaemon(true);
+		const pre = await before.daemon.app.request("/api/diagnostics/installed-assets", { headers: headers() });
+		expect(pre.status).toBe(501);
+
+		// AFTER the attach the scan endpoint is LIVE. It is tenancy-INDEPENDENT (a filesystem walk,
+		// not a storage read), so it returns 200 even with NO org header — unlike the storage views.
+		const { daemon, storage } = makeDaemon(true);
+		mountDashboardApi(daemon, { storage });
+		const res = await daemon.app.request("/api/diagnostics/installed-assets", {}); // NO x-honeycomb-org
+		expect(res.status).toBe(200);
+		const json = (await res.json()) as { skills: unknown[]; agents: unknown[] };
+		expect(Array.isArray(json.skills)).toBe(true);
+		expect(Array.isArray(json.agents)).toBe(true);
 	});
 });
 
@@ -297,5 +328,150 @@ describe("fix/daemon-scope-from-credentials: the settings view exposes the frien
 		const res = await daemon.app.request("/api/diagnostics/settings", {});
 		const settings = (await res.json()) as { orgId: string; orgName: string };
 		expect(settings.orgName).toBe(SCOPE.org);
+	});
+});
+
+// ── Shared fakes for the focused fetcher suites (PRD-035b / PRD-036b) ──────────
+
+const SCOPE_OK = { org: "fake-org", workspace: "fake-ws" } as const satisfies QueryScope;
+
+/** A fake StorageQuery that maps a SQL predicate → canned rows (an ok result); `[]` if no match. */
+function fakeStorage(route: (sql: string) => StorageRow[] | "error"): StorageQuery {
+	return {
+		async query(sql: string): Promise<QueryResult> {
+			const out = route(sql);
+			if (out === "error") return { kind: "query_error", message: "forced storage error", status: 500 };
+			return { kind: "ok", rows: out, durationMs: 1 };
+		},
+	};
+}
+
+/** Build a `LocalAssetInventory` of skill names (each a `local` disk skill) for the union tests. */
+function localInventory(...names: string[]): LocalAssetInventory {
+	return {
+		skills: names.map((name) => ({
+			name,
+			description: "",
+			assetType: "skill" as const,
+			scope: "repository",
+			sourceHarnesses: ["claude-code"],
+			paths: [`/repo/.claude/skills/${name}/SKILL.md`],
+		})),
+		agents: [],
+	};
+}
+
+describe("PRD-035b: estimated-savings is a real, explainable, fail-soft metric", () => {
+	it("b-AC-1: seeded memory corpus → a real non-zero token estimate (chars / 4)", async () => {
+		// 4000 chars of distilled `content` → 1000 estimated tokens saved.
+		const storage = fakeStorage((sql) => {
+			if (/FROM\s+"memories"/i.test(sql)) return [{ chars: 4000 }];
+			return [];
+		});
+		const view = await fetchKpisView(storage, SCOPE_OK);
+		expect(view.estimatedSavings).toBe(1000);
+	});
+
+	it("b-AC-2: a genuinely-empty corpus → 0 via the empty path (SUM is NULL), not a hardcode", async () => {
+		// An empty `memories` table makes SUM(LENGTH(content)) return NULL → toNum → 0.
+		const storage = fakeStorage((sql) => {
+			if (/FROM\s+"memories"/i.test(sql)) return [{ chars: null }];
+			return [];
+		});
+		const view = await fetchKpisView(storage, SCOPE_OK);
+		expect(view.estimatedSavings).toBe(0);
+	});
+
+	it("b-AC-5: a forced storage error on the savings query → 0 (fail-soft), no throw", async () => {
+		const storage = fakeStorage((sql) => {
+			if (/FROM\s+"memories"/i.test(sql)) return "error";
+			return [];
+		});
+		// The whole fetcher must resolve (never reject) and the savings degrade to 0.
+		const view = await fetchKpisView(storage, SCOPE_OK);
+		expect(view.estimatedSavings).toBe(0);
+	});
+});
+
+describe("PRD-036b: skill-sync view is the union (installed ∪ synced) with honest state", () => {
+	it("b-AC-1/b-AC-3: local disk skills render as `local`; synced rows keep their state", async () => {
+		const storage = fakeStorage((sql) => {
+			if (/FROM\s+"skills"/i.test(sql)) return [{ name: "deeplake-recall", scope: "team", visibility: "global" }];
+			return [];
+		});
+		const view = await fetchSkillSyncView(storage, SCOPE_OK, async () => localInventory("local-only-skill"));
+		const byName = new Map(view.skills.map((s) => [s.name, s.syncState]));
+		expect(byName.get("deeplake-recall")).toBe("shared"); // substrate state preserved
+		expect(byName.get("local-only-skill")).toBe("local"); // disk-only → local
+	});
+
+	it("b-AC-2: a skill both on disk AND in the substrate appears once, with the substrate state", async () => {
+		const storage = fakeStorage((sql) => {
+			if (/FROM\s+"skills"/i.test(sql)) return [{ name: "shared-skill", scope: "team", visibility: "global" }];
+			return [];
+		});
+		// The disk inventory includes the same name (case-insensitive) — it must NOT double-count.
+		const view = await fetchSkillSyncView(storage, SCOPE_OK, async () => localInventory("Shared-Skill"));
+		const matches = view.skills.filter((s) => s.name.toLowerCase() === "shared-skill");
+		expect(matches).toHaveLength(1);
+		expect(matches[0]?.syncState).toBe("shared"); // substrate wins, never `local`
+	});
+
+	it("b-AC-3: empty substrate + disk skills → the union shows the local skills (not '0 / No skills synced')", async () => {
+		const storage = fakeStorage(() => []); // empty `skills` table
+		const view = await fetchSkillSyncView(storage, SCOPE_OK, async () => localInventory("alpha", "beta", "gamma"));
+		expect(view.skills).toHaveLength(3);
+		expect(view.skills.every((s) => s.syncState === "local")).toBe(true);
+	});
+
+	it("b-AC-4: a synced-only workspace (no extra local skills) renders exactly as before", async () => {
+		const storage = fakeStorage((sql) => {
+			if (/FROM\s+"skills"/i.test(sql))
+				return [
+					{ name: "s-shared", scope: "team", visibility: "global" },
+					{ name: "s-pulled", scope: "personal", visibility: "local" },
+				];
+			return [];
+		});
+		const view = await fetchSkillSyncView(storage, SCOPE_OK, async () => ({ skills: [], agents: [] }));
+		expect(view.skills).toEqual([
+			{ name: "s-shared", scope: "team", syncState: "shared" },
+			{ name: "s-pulled", scope: "personal", syncState: "pulled" },
+		]);
+	});
+
+	it("b-AC-6: a discovery error degrades to the substrate-only view (no crash)", async () => {
+		const storage = fakeStorage((sql) => {
+			if (/FROM\s+"skills"/i.test(sql)) return [{ name: "deeplake-recall", scope: "team", visibility: "global" }];
+			return [];
+		});
+		// The injected scanner throws — the fetcher must still resolve to the substrate-only view.
+		const view = await fetchSkillSyncView(storage, SCOPE_OK, async () => {
+			throw new Error("scanner blew up");
+		});
+		expect(view.skills).toEqual([{ name: "deeplake-recall", scope: "team", syncState: "shared" }]);
+	});
+});
+
+describe("PRD-036c: the Team-skills KPI counts only team-shared substrate skills", () => {
+	it("c-AC-1/c-AC-3: teamSkillCount comes from the synced_assets count; local/pulled do not inflate it", async () => {
+		// The substrate count query returns 2 shared skills; the local disk skills (via the union, a
+		// SEPARATE concern) must NOT change this KPI — it reads the defined count, not an array length.
+		const storage = fakeStorage((sql) => {
+			if (/FROM\s+"synced_assets"/i.test(sql)) return [{ n: 2 }];
+			if (/FROM\s+"memories"/i.test(sql)) return [{ chars: 0 }];
+			return [];
+		});
+		const view = await fetchKpisView(storage, SCOPE_OK);
+		expect(view.teamSkillCount).toBe(2);
+	});
+
+	it("c-AC-2: nothing shared → the KPI is 0 (honest), independent of any local disk skills", async () => {
+		const storage = fakeStorage((sql) => {
+			if (/FROM\s+"synced_assets"/i.test(sql)) return [{ n: 0 }];
+			return [];
+		});
+		const view = await fetchKpisView(storage, SCOPE_OK);
+		expect(view.teamSkillCount).toBe(0);
 	});
 });

@@ -16,6 +16,7 @@
 
 import React from "react";
 
+import { layout, neighborsOf } from "./graph-layout.js";
 import { Badge, type BadgeTone } from "./primitives.js";
 import type { GraphWire, LogRecordWire, ProviderEntryWire, RuleRowWire, SessionRowWire, SettingValueWire, SkillRowWire } from "./wire.js";
 
@@ -134,9 +135,9 @@ export function SessionsPanel({ sessions }: { sessions: readonly SessionRowWire[
 		) : undefined;
 
 	return (
-		<Panel title="Sessions" eyebrow={`${total} captured`} right={controls}>
+		<Panel title="Turns" eyebrow={`${total} captured`} right={controls}>
 			{total === 0 ? (
-				<EmptyRow>No sessions captured yet.</EmptyRow>
+				<EmptyRow>No turns captured yet.</EmptyRow>
 			) : (
 				<div style={{ display: "flex", flexDirection: "column" }}>
 					{pageRows.map((s, i) => (
@@ -199,7 +200,10 @@ export function RulesPanel({ rules }: { rules: readonly RuleRowWire[] }): React.
 
 // ── Skill-sync ───────────────────────────────────────────────────────────────
 
-const SYNC_TONE: Record<string, BadgeTone> = { shared: "verified", pulled: "honey", pending: "warning" };
+// PRD-036b: `local` (a skill on disk but not shared with the team) reads in a NEUTRAL/muted tone so
+// the badge is honest — it is present, but not a verified/synced team asset. `synced` mirrors
+// `shared` (both are team-substrate states). Unknown states fall back to `neutral` at the call site.
+const SYNC_TONE: Record<string, BadgeTone> = { shared: "verified", synced: "verified", pulled: "honey", pending: "warning", local: "neutral" };
 
 /** The skill-sync panel (ported from `components.jsx` `SkillSyncPanel`). AC-2 empty state. */
 export function SkillSyncPanel({ skills }: { skills: readonly SkillRowWire[] }): React.JSX.Element {
@@ -229,23 +233,64 @@ export function SkillSyncPanel({ skills }: { skills: readonly SkillRowWire[] }):
 
 // ── Codebase graph ───────────────────────────────────────────────────────────
 
-const NODE_POS: Record<string, { x: number; y: number }> = {
-	daemon: { x: 60, y: 40 },
-	capture: { x: 200, y: 28 },
-	recall: { x: 200, y: 120 },
-	pipeline: { x: 330, y: 70 },
-	store: { x: 460, y: 110 },
-	dreaming: { x: 360, y: 160 },
-};
 const KIND_COLOR: Record<string, string> = { file: "var(--honey)", function: "var(--severity-info)", class: "var(--dream)" };
 
+/** The canvas viewBox extent — the layout fits node positions inside this box (D-5: bounded widget). */
+const GRAPH_VIEW = { width: 540, height: 200 } as const;
+
 /**
- * The codebase-graph canvas (ported from `components.jsx` `GraphCanvas`). When the wire's
- * `graph.built` is false, renders the kit's `honeycomb graph build` empty-state prompt
- * (AC-2). When built, lays the known nodes out (positions fall back gracefully so a node
- * with no fixed position is skipped, as in the kit). `dreaming` pulses the `dreaming` node.
+ * The in-panel node-detail surface (D-3 / OQ-3): a compact block below the canvas that shows the
+ * SELECTED node's `id`, `kind`, `label`, and its neighbor labels. Rendered only when a node is
+ * selected. Pure presentation — selection state lives in {@link GraphCanvas}.
+ */
+function NodeDetail({ node, neighbors }: { node: GraphWire["nodes"][number]; neighbors: readonly string[] }): React.JSX.Element {
+	return (
+		<div
+			data-testid="graph-node-detail"
+			style={{
+				marginTop: 12,
+				padding: "10px 12px",
+				background: "var(--bg-elevated)",
+				border: "1px solid var(--border-subtle)",
+				borderRadius: "var(--radius-md)",
+				display: "flex",
+				flexDirection: "column",
+				gap: 4,
+			}}
+		>
+			<div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+				<span style={{ width: 8, height: 8, borderRadius: "50%", background: KIND_COLOR[node.kind] ?? "var(--text-tertiary)", flex: "none" }} />
+				<span style={{ fontSize: 14, color: "var(--text-primary)" }}>{node.label}</span>
+				<Badge tone="neutral" mono>
+					{node.kind || "node"}
+				</Badge>
+			</div>
+			<span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-tertiary)", wordBreak: "break-all" }}>{node.id}</span>
+			<span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-secondary)" }}>
+				{neighbors.length === 0 ? "no neighbors" : `neighbors: ${neighbors.join(", ")}`}
+			</span>
+		</div>
+	);
+}
+
+/**
+ * The codebase-graph canvas (PRD-035c). When the wire's `graph.built` is false, renders the kit's
+ * `honeycomb graph build` empty-state prompt UNCHANGED (FR-7 / AC-5). When built, it computes a
+ * deterministic position per node via {@link layout} (NOT a hardcoded id map — the old `NODE_POS`
+ * keyed on six fixed ids that real file-path / symbol ids never matched, so every node was skipped
+ * and the canvas was blank), then draws ONE mark per node (FR-1) and every edge whose endpoints
+ * exist (FR-3). So the "N nodes · M edges" eyebrow matches what is drawn (FR-4 / AC-6).
+ *
+ * Nodes are clickable (D-3 / FR-5): a click selects a node (highlight ring + larger radius, FR-6)
+ * and renders the {@link NodeDetail} block with the node's id/kind/label and its neighbors; clicking
+ * the selected node again — or clicking empty canvas — clears the selection. `dreaming` re-expresses
+ * the old id-specific pulse HONESTLY (OQ-2): with no hardcoded `"dreaming"` node in real data, it
+ * pulses the selected/active node (or the first node as a stable panel-level indicator while no node
+ * is selected), only while a real dream pass is active.
  */
 export function GraphCanvas({ graph, dreaming }: { graph: GraphWire; dreaming: boolean }): React.JSX.Element {
+	const [selected, setSelected] = React.useState<string | null>(null);
+
 	if (!graph.built) {
 		return (
 			<Panel title="Codebase graph">
@@ -256,23 +301,55 @@ export function GraphCanvas({ graph, dreaming }: { graph: GraphWire; dreaming: b
 			</Panel>
 		);
 	}
+
+	// Computed positions for EVERY node (D-1) — keyed by real id, so an arbitrary-id snapshot draws.
+	const positions = layout(graph.nodes, graph.edges, GRAPH_VIEW);
+	// The selected node still present in the current snapshot (clears defensively if it vanished).
+	const selectedNode = selected !== null ? graph.nodes.find((n) => n.id === selected) ?? null : null;
+	const selectedNeighborIds = selectedNode !== null ? neighborsOf(selectedNode.id, graph.edges) : [];
+	// Map neighbor ids → their labels for the detail surface (fall back to the id when unlabeled).
+	const selectedNeighborLabels = selectedNeighborIds.map((id) => graph.nodes.find((n) => n.id === id)?.label || id);
+	// The node the dream pulse rides (OQ-2): the selected node, else the first node as a stable indicator.
+	const pulseId = dreaming ? (selectedNode?.id ?? graph.nodes[0]?.id ?? null) : null;
+
+	// Clicking a node toggles selection; clicking empty canvas clears it.
+	const onPick = (id: string): void => setSelected((cur) => (cur === id ? null : id));
+
 	return (
 		<Panel title="Codebase graph" eyebrow={`${graph.nodes.length} nodes · ${graph.edges.length} edges`}>
-			<svg viewBox="0 0 540 200" style={{ width: "100%", height: 200, display: "block" }}>
+			<svg
+				viewBox={`0 0 ${GRAPH_VIEW.width} ${GRAPH_VIEW.height}`}
+				style={{ width: "100%", height: 200, display: "block" }}
+				onClick={() => setSelected(null)}
+			>
 				{graph.edges.map((e, i) => {
-					const a = NODE_POS[e.from];
-					const b = NODE_POS[e.to];
-					if (!a || !b) return null;
+					const a = positions.get(e.from);
+					const b = positions.get(e.to);
+					if (a === undefined || b === undefined) return null;
 					return <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="var(--border-strong)" strokeWidth="1.5" />;
 				})}
 				{graph.nodes.map((n) => {
-					const p = NODE_POS[n.id];
-					if (!p) return null;
-					const isDream = dreaming && n.id === "dreaming";
+					const p = positions.get(n.id);
+					if (p === undefined) return null;
+					const isSelected = n.id === selected;
+					const isPulsing = n.id === pulseId;
 					return (
-						<g key={n.id}>
-							<circle cx={p.x} cy={p.y} r="7" fill={isDream ? "var(--dream)" : KIND_COLOR[n.kind] ?? "var(--text-tertiary)"}>
-								{isDream && <animate attributeName="opacity" values="0.5;1;0.5" dur="0.9s" repeatCount="indefinite" />}
+						<g
+							key={n.id}
+							role="button"
+							tabIndex={0}
+							aria-label={`node ${n.label}`}
+							aria-pressed={isSelected}
+							style={{ cursor: "pointer" }}
+							onClick={(ev) => {
+								// Stop the canvas-level clear so a node click selects rather than deselects.
+								ev.stopPropagation();
+								onPick(n.id);
+							}}
+						>
+							{isSelected && <circle cx={p.x} cy={p.y} r="11" fill="none" stroke="var(--honey)" strokeWidth="1.5" />}
+							<circle cx={p.x} cy={p.y} r={isSelected ? 9 : 7} fill={isPulsing ? "var(--dream)" : KIND_COLOR[n.kind] ?? "var(--text-tertiary)"}>
+								{isPulsing && <animate attributeName="opacity" values="0.5;1;0.5" dur="0.9s" repeatCount="indefinite" />}
 							</circle>
 							<text x={p.x + 12} y={p.y + 4} fontFamily="var(--font-mono)" fontSize="11" fill="var(--text-secondary)">
 								{n.label}
@@ -281,6 +358,7 @@ export function GraphCanvas({ graph, dreaming }: { graph: GraphWire; dreaming: b
 					);
 				})}
 			</svg>
+			{selectedNode !== null && <NodeDetail node={selectedNode} neighbors={selectedNeighborLabels} />}
 		</Panel>
 	);
 }
