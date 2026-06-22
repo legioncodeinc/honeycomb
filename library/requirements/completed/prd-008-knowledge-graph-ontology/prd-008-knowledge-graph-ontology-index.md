@@ -1,9 +1,18 @@
 # PRD-008: Knowledge Graph and Ontology
 
-> **Status:** Completed
+> **Status:** Completed (code shipped) — ⚠ PARTIALLY LIVE; close-out tracked in [PRD-045c](../../in-work/prd-045-daemon-wiring-closeout/prd-045c-daemon-wiring-closeout-ontology-surface.md)
 > **Priority:** P1
 > **Effort:** L
 > **Schema changes:** Additive
+
+---
+
+> **⚠ Partially live (2026-06-22 daemon-wiring audit).** The inline entity linker `inlineLinkMemory`
+> (`ontology/entity-model.ts:506`) has zero callers (AC-1 unreachable), and there is no `/api/ontology/*` mount
+> (falls through to the 501 scaffold). Control-plane apply/supersession run only via the dormant dreaming runner
+> (`dreaming/runner.ts:284`). Wiring close-out:
+> [PRD-045c](../../in-work/prd-045-daemon-wiring-closeout/prd-045c-daemon-wiring-closeout-ontology-surface.md).
+> Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../../in-work/prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
 
 ---
 

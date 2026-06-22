@@ -1,9 +1,18 @@
 # PRD-009: Dreaming Loop
 
-> **Status:** Completed
+> **Status:** Completed (code shipped) — ⚠ WIRED BUT DORMANT (default OFF); close-out tracked in [PRD-045d](../../in-work/prd-045-daemon-wiring-closeout/prd-045d-daemon-wiring-closeout-dreaming-activation.md)
 > **Priority:** P2
 > **Effort:** L
 > **Schema changes:** Additive
+
+---
+
+> **⚠ Wired but dormant (2026-06-22 daemon-wiring audit).** The worker is fully wired (`buildGatedDreamingWorker`
+> `assemble.ts:926`, started `:1265-1266`) but gated OFF by default (needs `HONEYCOMB_DREAMING_ENABLED` or the
+> vault `dreaming.enabled` setting). Its dormancy strands the only live consumers of PRD-008 apply + PRD-010
+> router. Default-posture decision + end-to-end live proof:
+> [PRD-045d](../../in-work/prd-045-daemon-wiring-closeout/prd-045d-daemon-wiring-closeout-dreaming-activation.md).
+> Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../../in-work/prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
 
 ---
 

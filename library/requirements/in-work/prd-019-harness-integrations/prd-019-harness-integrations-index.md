@@ -1,9 +1,18 @@
 # PRD-019: Harness Integrations
 
-> **Status:** Completed
+> **Status:** In Work (reopened 2026-06-22)
 > **Priority:** P0
 > **Effort:** XL
 > **Schema changes:** None
+
+---
+
+> **⚠ Reopened 2026-06-22 — partial implementation.** A daemon-wiring liveness audit found this PRD only
+> partially live; moved back to `in-work/`. See
+> [`../prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md`](../prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
+> **Remaining:** only Claude Code is fully wired; Codex/Cursor are partial and Hermes/pi/OpenClaw are
+> built-not-wired; the registry registers only `claude-code` + `cursor` (`src/cli/connector-runner.ts:55-70`)
+> and MCP-server-via-install is met for no harness.
 
 ---
 
