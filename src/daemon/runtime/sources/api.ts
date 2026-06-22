@@ -47,7 +47,7 @@ import {
 	type SourceLifecycleDeps,
 	type SourceRegistry,
 } from "./lifecycle.js";
-import type { DocumentWorker } from "./document-worker.js";
+import { type DocumentWorker, isBlockedUrlError } from "./document-worker.js";
 
 /** The route groups the sources API attaches to (FR-2). */
 export const SOURCES_GROUP = "/api/sources" as const;
@@ -248,7 +248,18 @@ export function mountDocumentsApi(group: Hono, deps: SourcesApiDeps): void {
 				501,
 			);
 		}
-		const submitted = await worker.submit({ url, org: scope.org, workspace: scope.workspace ?? "default" });
+		let submitted;
+		try {
+			submitted = await worker.submit({ url, org: scope.org, workspace: scope.workspace ?? "default" });
+		} catch (err: unknown) {
+			// A BLOCKED url (SSRF guard: bad scheme, private/loopback/metadata address, too
+			// many redirects) is a CALLER error → a clear 400, not a 5xx stack. The message
+			// names the reason class only (never an internal IP), so it leaks no topology.
+			if (isBlockedUrlError(err)) {
+				return c.json({ error: "bad_request", reason: "document url is not allowed" }, 400);
+			}
+			throw err; // a genuine server fault still surfaces as a 500 (caught by the daemon).
+		}
 		// `deduped` true → the identical URL returned the existing record (b-AC-1).
 		return c.json({ documentId: submitted.documentId, status: submitted.status, deduped: submitted.deduped }, 202);
 	});

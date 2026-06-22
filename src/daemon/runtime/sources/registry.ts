@@ -51,7 +51,8 @@ import {
 } from "./contracts.js";
 import { SourceArtifactStore, type SourceRegistry } from "./lifecycle.js";
 import type { ProviderResolver, SourcesApiDeps } from "./api.js";
-import { createDocumentWorker } from "./document-worker.js";
+import { createDocumentWorker, type DocumentContentFetcher } from "./document-worker.js";
+import { createUrlDocumentFetcher } from "./url-fetcher.js";
 import { createObsidianProvider, type ObsidianConfig } from "./providers/obsidian.js";
 import { createDiscordProvider } from "./providers/discord.js";
 import { createGithubProvider } from "./providers/github.js";
@@ -337,6 +338,13 @@ export interface SourcesApiDepsOptions {
 	readonly embed: EmbedClient;
 	/** Optional canonical→physical table resolver (identity in prod; a live itest injects a per-run prefix). */
 	readonly resolveTable?: (canonical: string) => string;
+	/**
+	 * The document content fetcher (the extract step). Defaults to the REAL SSRF-safe
+	 * {@link createUrlDocumentFetcher} so `POST /api/documents` ingests the FETCHED body
+	 * (not the URL string — QA W1). A test injects an in-process fake so it never hits
+	 * the network; the live daemon uses the default.
+	 */
+	readonly fetcher?: DocumentContentFetcher;
 }
 
 /**
@@ -358,11 +366,17 @@ export interface SourcesApiDepsOptions {
 export function buildSourcesApiDeps(options: SourcesApiDepsOptions): SourcesApiDeps {
 	const { storage, scope, queue, embed, resolveTable } = options;
 	const registry = new DeeplakeSourceRegistry(storage, scope, resolveTable);
+	// QA W1 fix: inject the REAL SSRF-safe URL fetcher so the document worker chunks the
+	// FETCHED body (not the URL string). A test injects a fake; the daemon uses the real
+	// one. The fetcher validates scheme + blocks private/loopback/metadata addresses at
+	// connect time, caps size + timeout, and re-validates redirects — see url-fetcher.ts.
+	const fetcher = options.fetcher ?? createUrlDocumentFetcher();
 	const documentWorker = createDocumentWorker({
 		storage,
 		scope,
 		queue,
 		embed,
+		fetcher,
 		...(resolveTable !== undefined ? { resolveTable } : {}),
 	});
 	return {

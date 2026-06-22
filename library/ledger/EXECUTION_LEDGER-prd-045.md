@@ -93,7 +93,14 @@ fresh read) that flips DONE → VERIFIED. Implementers do not grade their own ho
 
 ## Close-out
 - **Security (security-worker-bee, opus):** 1 HIGH — cross-tenant BOLA on newly-live `/api/sources`+`/api/documents` (`sources/api.ts:67` trusted `x-honeycomb-org` w/o identity cross-check) → **FIXED in place** (`api.ts:84` `getRequestIdentity` guard) + regression test. All other surfaces clean; audit:sql OK; 2746 passed. Flagged pre-existing latent variant on `/api/secrets|notifications|vault` (NOT branch-introduced, out of PRD-045 scope → follow-up task).
-- **Quality (quality-worker-bee):** PENDING (runs after security per close-out order).
+- **Quality (quality-worker-bee):** PASS-WITH-NITS — no Blocker/High; all parent + sub ACs verified genuinely complete (invocation-site checks); ci green 2746 passed. Report: `reports/2026-06-22-qa-report.md`. Two warnings raised → user decisions below.
+- **User decisions on QA warnings (2026-06-22):**
+  - **W1 (document fetcher):** DONE — real SSRF-safe `createUrlDocumentFetcher` wired at `registry.ts:373`; fetched body ingested (not URL string); re-audited.
+  - **W2 (pipeline default-OFF):** DONE — accepted + documented (045a "Default posture & enable mechanism" + PRD-006 banner W3 fix); enable via `HONEYCOMB_PIPELINE_*` flags.
+- **Security re-audit (fetcher delta, security-worker-bee, opus):** 1 CRITICAL — SSRF bypass via IPv4-mapped-IPv6 hextet form (`[::ffff:169.254.169.254]`→`::ffff:a9fe:a9fe` slipped dotted-decimal regex → metadata reachable) → **FIXED in place** (`extractMappedV4`, `url-fetcher.ts:167`) + regression tests. All 7 SSRF checks verified safe.
+- **Quality re-verify (quality-worker-bee, opus):** PASS-WITH-NITS, **ready to ship**. W1 genuinely met (real body ingest + SSRF-safe), W2 accurate, Critical SSRF + High BOLA re-verified fixed. Found W3 (PRD-006 banner overstated default) → **FIXED by orchestrator**. Gate: 249 files / 2795 passed / 7 skipped, audit:sql OK.
+
+## FINAL STATUS: all 39 criteria DONE/VERIFIED · security clean (1 High + 1 Critical remediated) · quality PASS · gate green. Ready to ship.
 
 ---
 

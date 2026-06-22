@@ -91,20 +91,33 @@ describe("PRD-045e — Sources + Documents surface is LIVE on the assembled daem
 		});
 	});
 
-	// ── e-AC-3: POST /api/documents ingests through the wired worker (no 501). ──
-	describe("e-AC-3 — POST /api/documents ingests through the wired document worker (no 501)", () => {
-		it("POST /api/documents submits a URL → 202 with an id + status (NOT the 501 scaffold)", async () => {
+	// ── e-AC-3 + PRD-045 W1: POST /api/documents ingests through the wired worker (no 501),
+	//    AND the worker runs the REAL SSRF-safe URL fetcher (NOT the echo stub). ──
+	describe("e-AC-3 / W1 — POST /api/documents ingests through the wired SSRF-safe fetcher (no 501)", () => {
+		it("W1: a private/metadata URL is BLOCKED with a clean 400 — proving the REAL fetcher is wired, not the echo stub", async () => {
+			// The echo stub (the W1 bug) would have returned 202/`done` chunking the URL string;
+			// the REAL fetcher's guard rejects a metadata literal-IP SYNCHRONOUSLY (no network) →
+			// the API maps it to a 400. So a 400 here is the deterministic proof the composition
+			// root injected the real SSRF-safe fetcher. No public-internet access in this test.
 			const res = await net.app.request("/api/documents", {
 				method: "POST",
 				headers: HEADERS,
-				body: JSON.stringify({ url: "https://example.com/045e/doc" }),
+				body: JSON.stringify({ url: "http://169.254.169.254/latest/meta-data/" }),
 			});
-			expect(res.status, "the document worker is wired → 202, not 501").toBe(202);
-			const body = (await res.json()) as { documentId?: string; status?: string; error?: string };
-			expect(body.error, "did NOT fall through to the not_implemented scaffold").toBeUndefined();
-			expect(body.documentId, "a deterministic document id was assigned").toBeTypeOf("string");
-			// The worker runs its synchronous ingest lifecycle to a terminal state.
-			expect(["queued", "done"]).toContain(body.status);
+			expect(res.status, "the real fetcher's SSRF guard blocks a metadata URL → 400").toBe(400);
+			const body = (await res.json()) as { error?: string; reason?: string };
+			expect(body.error).toBe("bad_request");
+			// The 400 reason names no internal IP (no topology leak through the assembled API).
+			expect(JSON.stringify(body)).not.toContain("169.254.169.254");
+		});
+
+		it("W1: a file: URL is BLOCKED with a 400 (no local-file-disclosure via the document path)", async () => {
+			const res = await net.app.request("/api/documents", {
+				method: "POST",
+				headers: HEADERS,
+				body: JSON.stringify({ url: "file:///etc/passwd" }),
+			});
+			expect(res.status).toBe(400);
 		});
 
 		it("POST /api/documents with no url → 400 (the handler validates, not a 501)", async () => {
