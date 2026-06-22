@@ -87,7 +87,7 @@ function makeMockFetch(opts: { healthOk?: boolean; dream?: unknown } = {}): type
 }
 
 let container: HTMLDivElement;
-let root: Root;
+let root: Root | undefined;
 
 beforeEach(() => {
 	window.location.hash = "";
@@ -96,7 +96,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	act(() => root.unmount());
+	// Guard: a test may fail before `mountShell()` assigns `root`; an unconditional unmount would throw
+	// in teardown and MASK the real failing assertion.
+	if (root !== undefined) act(() => root.unmount());
+	root = undefined;
 	container.remove();
 	window.location.hash = "";
 	vi.restoreAllMocks();

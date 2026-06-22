@@ -1,0 +1,17 @@
+<svg width="160" height="160" viewBox="0 0 160 160" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Honeycomb">
+  <defs>
+    <linearGradient id="bCell" x1="80" y1="59" x2="80" y2="101" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFC04D"/>
+      <stop offset="1" stop-color="#E0860C"/>
+    </linearGradient>
+  </defs>
+  <g stroke="#F7A823" stroke-width="5.5" stroke-linejoin="round" fill="none" stroke-opacity="0.85">
+    <path d="M 147.1 80 L 135.1 100.8 L 111.1 100.8 L 99.1 80 L 111.1 59.2 L 135.1 59.2 Z"/>
+    <path d="M 125.5 117.3 L 113.5 138.1 L 89.5 138.1 L 77.5 117.3 L 89.5 96.5 L 113.5 96.5 Z"/>
+    <path d="M 82.5 117.3 L 70.5 138.1 L 46.5 138.1 L 34.5 117.3 L 46.5 96.5 L 70.5 96.5 Z"/>
+    <path d="M 60.9 80 L 48.9 100.8 L 24.9 100.8 L 12.9 80 L 24.9 59.2 L 48.9 59.2 Z"/>
+    <path d="M 82.5 42.7 L 70.5 63.5 L 46.5 63.5 L 34.5 42.7 L 46.5 21.9 L 70.5 21.9 Z"/>
+    <path d="M 125.5 42.7 L 113.5 63.5 L 89.5 63.5 L 77.5 42.7 L 89.5 21.9 L 113.5 21.9 Z"/>
+  </g>
+  <path d="M 104 80 L 92 100.8 L 68 100.8 L 56 80 L 68 59.2 L 92 59.2 Z" fill="url(#bCell)" stroke="#FFD27A" stroke-width="1.5" stroke-linejoin="round"/>
+</svg>

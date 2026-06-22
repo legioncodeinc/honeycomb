@@ -100,15 +100,20 @@ export function Shell({ client, assetBase = "assets" }: ShellProps = {}): React.
 		void hydrateIdentity();
 	}, [hydrateIdentity]);
 
-	// D-5: the shell owns the /health LIVENESS poll + the daemon-down swap. On recovery, re-hydrate the
-	// identity (the active page re-hydrates itself on remount). Cleared on unmount.
+	// Track the previous liveness so identity re-hydration fires ONLY on a down→up recovery (the mount
+	// effect already hydrates once) — not on every healthy 5s tick. Null = no probe resolved yet.
+	const prevDaemonUpRef = React.useRef<boolean | null>(null);
+
+	// D-5: the shell owns the /health LIVENESS poll + the daemon-down swap. On RECOVERY (down→up) re-hydrate
+	// the identity (the active page re-hydrates itself on remount). Cleared on unmount.
 	React.useEffect(() => {
 		let alive = true;
 		const tick = async (): Promise<void> => {
 			const { up } = await wire.health();
 			if (!alive) return;
 			setDaemonUp(up);
-			if (up) void hydrateIdentity();
+			if (up && prevDaemonUpRef.current === false) void hydrateIdentity();
+			prevDaemonUpRef.current = up;
 		};
 		void tick();
 		const id = setInterval(() => void tick(), HEALTH_POLL_MS);
@@ -132,20 +137,36 @@ export function Shell({ client, assetBase = "assets" }: ShellProps = {}): React.
 		return () => mq.removeEventListener("change", onChange);
 	}, []);
 
+	// A SYNCHRONOUS in-flight guard for the dream action: `setDreaming(true)` is async, so a render-state
+	// guard alone leaves a race window where a rapid second activation fires `wire.dream()` twice. The ref
+	// flips immediately; the reset timer is tracked so it can be cleared on unmount.
+	const dreamInFlightRef = React.useRef(false);
+	const dreamResetTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+	React.useEffect(() => {
+		return () => {
+			if (dreamResetTimerRef.current !== null) clearTimeout(dreamResetTimerRef.current);
+		};
+	}, []);
+
 	// D-5: the "Dream now" action, relocated into the shell chrome. POST the Wave-1 trigger; reflect
 	// the 202 ack by pulsing the active page's graph/cards (`dreaming` flows down via PageProps).
 	const dream = React.useCallback(async (): Promise<void> => {
-		if (dreaming) return;
+		if (dreamInFlightRef.current) return; // synchronous re-entry guard (no double POST on rapid clicks)
+		dreamInFlightRef.current = true;
 		setDreaming(true);
 		const ack = await wire.dream();
 		if (ack.triggered) {
 			// A real pass was queued: pulse briefly while it streams into the live log, then settle.
-			setTimeout(() => setDreaming(false), 4200);
+			dreamResetTimerRef.current = setTimeout(() => {
+				setDreaming(false);
+				dreamInFlightRef.current = false;
+			}, 4200);
 		} else {
 			// Honestly reflect the skip (disabled / unavailable) — no fake forever spinner.
 			setDreaming(false);
+			dreamInFlightRef.current = false;
 		}
-	}, [dreaming, wire]);
+	}, [wire]);
 
 	const identity = `${settings.orgName || settings.orgId || "local"} · ${settings.workspace || "default"}`;
 
