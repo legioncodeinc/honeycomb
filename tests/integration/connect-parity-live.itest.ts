@@ -53,6 +53,7 @@ import {
 	defaultCredentialProvider,
 	type QueryScope,
 	resolveStorageConfig,
+	type StorageClient,
 } from "../../src/daemon/storage/index.js";
 import {
 	credentialsPath,
@@ -63,6 +64,7 @@ import {
 } from "../../src/daemon/runtime/auth/index.js";
 import { createLoopbackDaemonClient, type DaemonClient } from "../../src/commands/index.js";
 import { bootTestDaemon, type BootedTestDaemon } from "./_daemon-harness.js";
+import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
 
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
 
@@ -95,6 +97,13 @@ describe.skipIf(!HAS_TOKEN)("PRD-023 AC-8 connect-parity: env-stripped, file-onl
 	let booted: BootedTestDaemon;
 	let client: DaemonClient;
 	let scope: QueryScope;
+	/**
+	 * The file-only storage client the daemon connected with — RETAINED only so the
+	 * AC-8 preflight can issue a scoped `connect()` liveness probe through the SAME
+	 * file-resolved connection. Classifying that probe is how a sustained backend
+	 * outage NEUTRAL-skips instead of red-ing the file-only connect proof (PRD-034a FR-4).
+	 */
+	let probeStorage: StorageClient;
 	/** The TEMP creds dir — the seeded shared file lives here, never the real `~/.deeplake`. */
 	let credDir: string;
 	/** The org/workspace the seeded file carries (read back for the scope + assertions). */
@@ -149,7 +158,9 @@ describe.skipIf(!HAS_TOKEN)("PRD-023 AC-8 connect-parity: env-stripped, file-onl
 		// Inject that file-only storage client into the assembled daemon (mirror how
 		// data-api-assembled-live.itest.ts injects `createStorageClient({ provider })`). The
 		// assembly fires the data seams; this client carries the file-resolved connection.
-		booted = await bootTestDaemon({ mode: "local", storage: createStorageClient({ provider }) });
+		// We retain the SAME file-only client for the AC-8 infra-skip preflight probe.
+		probeStorage = createStorageClient({ provider });
+		booted = await bootTestDaemon({ mode: "local", storage: probeStorage });
 
 		// Drive the requests through the REAL CLI loopback client: it stamps the session-group
 		// headers (runtime-path + synthetic session) for /api/memories automatically.
@@ -167,7 +178,16 @@ describe.skipIf(!HAS_TOKEN)("PRD-023 AC-8 connect-parity: env-stripped, file-onl
 
 	it(
 		"AC-8: the file-only assembled daemon (NO env) stores then recalls a memory live over HTTP",
-		async () => {
+		async ({ skip }) => {
+			// INFRA-DEGRADED preflight (PRD-034a FR-4 / a-AC-3): a scoped liveness probe through
+			// the SAME file-resolved storage client the daemon connected with. If the backend is
+			// sustained-down (the probe flaps transient AFTER the client's retry), resolve NEUTRAL
+			// via a SKIP + the run-level sentinel rather than red-ing the file-only connect proof on
+			// DeepLake weather. A non-transient failure (a genuine bad/absent file-resolved
+			// credential) or an ok probe continues to the strict store→recall assertions with full
+			// teeth — so an AC-8 connect REGRESSION still REDs.
+			await neutralizeIfInfraDegraded("connect-parity-live:preflight", () => probeStorage.connect(scope), skip);
+
 			// ── AC-8 core: STORE through the CLI client (it stamps the session headers). ──
 			// The daemon connected FROM THE SEEDED FILE (env stripped). A 201 here is the
 			// file-only connect proof: with no env, the file supplied endpoint/token/org/workspace.

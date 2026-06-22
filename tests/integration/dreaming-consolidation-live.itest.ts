@@ -81,6 +81,7 @@ import { DreamingConfigSchema } from "../../src/daemon/runtime/dreaming/config.j
 import { DREAMING_JOB_KIND } from "../../src/daemon/runtime/dreaming/contracts.js";
 import { createDreamingTrigger } from "../../src/daemon/runtime/dreaming/trigger.js";
 import { createDreamingWorker } from "../../src/daemon/runtime/dreaming/worker.js";
+import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
 
 /** BOTH gates: live DeepLake AND a real Anthropic key. Either absent → SKIP cleanly. */
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
@@ -322,7 +323,15 @@ describe.skipIf(!GATED)("PRD-026 live dreaming consolidation proof (AC-3/AC-4/AC
 
 	it(
 		"a real dreaming pass consolidates the seeded graph without losing source-backed memory (AC-3/AC-4/AC-5)",
-		async () => {
+		async ({ skip }) => {
+			// INFRA-DEGRADED preflight (PRD-034a FR-4 / a-AC-3): if the DeepLake backend is
+			// sustained-down (a liveness probe flaps transient AFTER the client's retry), resolve
+			// NEUTRAL via a SKIP + the run-level sentinel rather than red-ing the dreaming-pass
+			// proof on DeepLake weather. A non-transient failure (real defect) or an ok probe
+			// continues with full teeth. (This classifies storage-transience only; a model error
+			// is out of scope for the infra-skip seam and still surfaces.)
+			await neutralizeIfInfraDegraded("dreaming-consolidation-live:preflight", () => storage.connect(scope), skip);
+
 			// ── 1. Seed the messy graph in the isolated agent ring, poll for durability. ──
 			await seedMessyGraph();
 			const seedConverged = await pollUntil(async () => {

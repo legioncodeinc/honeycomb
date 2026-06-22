@@ -58,6 +58,7 @@ import {
 import { mountMemoriesApi } from "../../src/daemon/runtime/memories/index.js";
 import { recallMemories } from "../../src/daemon/runtime/memories/recall.js";
 import { bootTestDaemon, type BootedTestDaemon } from "./_daemon-harness.js";
+import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
 
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
 
@@ -184,8 +185,14 @@ describe.skipIf(!HAS_TOKEN)("PRD-025 semantic recall on by default (live, gated)
 
 	it(
 		"AC-2: a stored memory lands a non-NULL 768-dim content_embedding (poll-convergent read-back)",
-		async () => {
+		async ({ skip }) => {
 			if (!embedReady) return; // skip cleanly when the embed daemon is unavailable.
+
+			// INFRA-DEGRADED preflight (PRD-034a FR-4 / a-AC-3): if the backend is sustained-down
+			// (a liveness probe flaps transient AFTER the client's retry), resolve NEUTRAL via a
+			// SKIP + the run-level sentinel rather than red-ing the semantic-recall proof on
+			// DeepLake weather. A non-transient failure (real defect) or an ok probe continues.
+			await neutralizeIfInfraDegraded("semantic-recall-live:preflight", () => storage.connect(scope), skip);
 
 			const storeRes = await fetch(`${booted.baseUrl}/api/memories`, {
 				method: "POST",

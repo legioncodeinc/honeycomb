@@ -57,6 +57,7 @@ import {
 	val,
 	vectorSearch,
 } from "../../src/daemon/storage/index.js";
+import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
 
 // ── The gate. Resolved ONCE so every describe shares the same decision. ──────
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
@@ -132,8 +133,17 @@ describe.skipIf(!HAS_TOKEN)("live DeepLake smoke (opt-in, real backend)", () => 
 		}
 	});
 
-	it("1. connect() — a trivial scoped SELECT 1 round-trips", async () => {
-		const res = await client.connect({ org, workspace });
+	it("1. connect() — a trivial scoped SELECT 1 round-trips", async ({ skip }) => {
+		// INFRA-DEGRADED preflight (PRD-034a FR-4 / a-AC-3): the connect probe IS this test's
+		// operation. If the backend is sustained-down (the probe flaps transient AFTER the
+		// client's retry), resolve NEUTRAL via a SKIP + the run-level sentinel rather than red-ing
+		// the smoke on DeepLake weather. A non-transient failure (a real 401/403/400 wiring defect)
+		// is returned UNCHANGED and the strict `isOk` assertion below still REDs (the teeth stay).
+		const res = await neutralizeIfInfraDegraded(
+			"deeplake-live:preflight",
+			() => client.connect({ org, workspace }),
+			skip,
+		);
 		expect(isOk(res), `connect failed: ${describeResult(res)}`).toBe(true);
 	});
 

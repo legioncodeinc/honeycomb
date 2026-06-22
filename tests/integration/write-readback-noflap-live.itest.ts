@@ -72,6 +72,7 @@ import type { HealTarget } from "../../src/daemon/storage/heal.js";
 import type { ColumnDef } from "../../src/daemon/storage/schema.js";
 import { EMBEDDING_DIMS } from "../../src/daemon/storage/vector.js";
 import { MEMORIES_VERSION_COLUMN } from "../../src/daemon/runtime/pipeline/controlled-writes.js";
+import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
 
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
 
@@ -168,7 +169,13 @@ describe.skipIf(!HAS_TOKEN)("live non-flaky write→read-back (PRD-031 AC-5 test
 
 	it(
 		`writes N=${N} fresh rows and ALWAYS reads each back through readConverged — WATERMARK predicate, zero flap`,
-		async () => {
+		async ({ skip }) => {
+			// INFRA-DEGRADED preflight (PRD-034a FR-4 / a-AC-3): if the backend is sustained-down
+			// (a liveness probe flaps transient AFTER the client's retry), resolve NEUTRAL via a
+			// SKIP + the run-level sentinel rather than red-ing the no-flap proof on DeepLake
+			// weather. A non-transient failure (real defect) or an ok probe continues with full teeth.
+			await neutralizeIfInfraDegraded("write-readback-noflap-live:preflight", () => storage.connect(scope), skip);
+
 			const attemptCounts: number[] = [];
 			let misses = 0;
 

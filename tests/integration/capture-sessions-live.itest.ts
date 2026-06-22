@@ -41,6 +41,7 @@ import { createRequestLogger } from "../../src/daemon/runtime/logger.js";
 import { createDaemon } from "../../src/daemon/runtime/server.js";
 import { createRuntimePathService } from "../../src/daemon/runtime/middleware/runtime-path.js";
 import { createCaptureHandler } from "../../src/daemon/runtime/capture/capture-handler.js";
+import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
 
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
 
@@ -83,7 +84,13 @@ describe.skipIf(!HAS_TOKEN)("live sessions capture smoke (opt-in, real backend)"
 		if (!isOk(res)) console.warn(`[ci-cleanup] could not drop ${CI_TABLE} in ${workspace}`);
 	});
 
-	it("POST capture → one real sessions row written + read back by path", async () => {
+	it("POST capture → one real sessions row written + read back by path", async ({ skip }) => {
+		// INFRA-DEGRADED preflight (PRD-034a FR-4 / a-AC-3): if the backend is sustained-down
+		// (a liveness probe flaps transient AFTER the client's retry), resolve NEUTRAL via a
+		// SKIP + the run-level sentinel rather than red-ing the capture round-trip on DeepLake
+		// weather. A non-transient failure (real defect) or an ok probe continues with full teeth.
+		await neutralizeIfInfraDegraded("capture-sessions-live:preflight", () => storage.connect({ org, workspace }), skip);
+
 		// Borrow the single-sourced SESSIONS_COLUMNS under a throwaway table name so
 		// the live write never touches a real `sessions`. The capture handler lazily
 		// heals the table into existence on the first INSERT (FR-7).

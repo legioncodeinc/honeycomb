@@ -70,6 +70,7 @@ import {
  */
 const RECALL_BUDGET: ConvergeBudgetOverride = { maxAttempts: 24, maxWallClockMs: 20_000, backoffBaseMs: 150, backoffCapMs: 1_000 };
 import { MEMORIES_COLUMNS, NOT_SOFT_DELETED, SOFT_DELETED } from "../../src/daemon/storage/catalog/index.js";
+import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
 
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
 
@@ -168,7 +169,13 @@ describe.skipIf(!HAS_TOKEN)("live retention purge smoke (opt-in, real backend â€
 		return isOk(res) ? res.rows.length : -1;
 	}
 
-	it("1. a TOMBSTONE removes a row from recall on the real backend (the D-8 mechanism)", async () => {
+	it("1. a TOMBSTONE removes a row from recall on the real backend (the D-8 mechanism)", async ({ skip }) => {
+		// INFRA-DEGRADED preflight (PRD-034a FR-4 / a-AC-3): if the backend is sustained-down
+		// (a liveness probe flaps transient AFTER the client's retry), resolve NEUTRAL via a
+		// SKIP + the run-level sentinel rather than red-ing the seed/tombstone proof on DeepLake
+		// weather. A non-transient failure (real defect) or an ok probe continues with full teeth.
+		await neutralizeIfInfraDegraded("retention-live:preflight", () => storage.connect({ org, workspace }), skip);
+
 		const id = `tomb-${RUN_ID}-1`;
 		await seedMemory(id, { updatedAt: "2020-01-01T00:00:00.000Z", importance: 0.9 });
 

@@ -54,6 +54,7 @@ import {
 } from "../../src/daemon/runtime/sources/index.js";
 import type { EmbedClient } from "../../src/daemon/runtime/services/embed-client.js";
 import type { JobInput, JobQueueService, LeasedJob } from "../../src/daemon/runtime/services/job-queue.js";
+import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
 
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
 
@@ -140,7 +141,13 @@ describe.skipIf(!HAS_TOKEN)("live document-worker smoke (opt-in, real backend, d
 		}
 	});
 
-	it("submit → done; identical URL → dedup (b-AC-1); remove → doc + chunks soft-deleted (b-AC-5)", async () => {
+	it("submit → done; identical URL → dedup (b-AC-1); remove → doc + chunks soft-deleted (b-AC-5)", async ({ skip }) => {
+		// INFRA-DEGRADED preflight (PRD-034a FR-4 / a-AC-3): if the backend is sustained-down
+		// (a liveness probe flaps transient AFTER the client's retry), resolve NEUTRAL via a
+		// SKIP + the run-level sentinel rather than red-ing the submit/dedup/soft-delete proof
+		// on DeepLake weather. A non-transient failure (real defect) or an ok probe continues.
+		await neutralizeIfInfraDegraded("document-worker-live:preflight", () => storage.connect(scope), skip);
+
 		// Route the canonical table names to per-run throwaway tables NATIVELY via the
 		// worker's `resolveTable` seam — the heal CREATEs the physical throwaway table
 		// directly (the proven recall-authz/graph-persist/sources-purge isolation

@@ -73,6 +73,7 @@ import {
 	type GoldenSet,
 } from "../../src/eval/golden.js";
 import { bootTestDaemon, type BootedTestDaemon } from "./_daemon-harness.js";
+import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
 
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
 
@@ -367,8 +368,14 @@ describe.skipIf(!HAS_TOKEN)("PRD-027 recall-eval harness (live, gated)", () => {
 
 	it(
 		"AC-5: seeds the golden set, runs recall per query, and emits recall@k / MRR / nDCG + a per-query report",
-		async () => {
+		async ({ skip }) => {
 			if (!embedReady) return; // skip cleanly when the embed daemon is unavailable.
+
+			// INFRA-DEGRADED preflight (PRD-034a FR-4 / a-AC-3): if the backend is sustained-down
+			// (a liveness probe flaps transient AFTER the client's retry), resolve NEUTRAL via a
+			// SKIP + the run-level sentinel rather than red-ing the eval harness on DeepLake
+			// weather. A non-transient failure (real defect) or an ok probe continues.
+			await neutralizeIfInfraDegraded("recall-eval-live:preflight", () => storage.connect(scope), skip);
 
 			await seedGolden();
 			expect(expectedIds.size, "every golden pair seeded a memory id").toBe(GOLDEN.pairs.length);

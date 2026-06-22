@@ -42,9 +42,11 @@ import {
 	envCredentialProvider,
 	type QueryScope,
 	resolveStorageConfig,
+	type StorageClient,
 } from "../../src/daemon/storage/index.js";
 import { createLoopbackDaemonClient, type DaemonClient } from "../../src/commands/index.js";
 import { bootTestDaemon, type BootedTestDaemon } from "./_daemon-harness.js";
+import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
 
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
 
@@ -65,6 +67,13 @@ describe.skipIf(!HAS_TOKEN)("PRD-022d assembled-daemon store→recall over HTTP 
 	let scope: QueryScope;
 	/** The tenancy headers the CLI client carries; the session/runtime-path headers it stamps itself. */
 	let tenancyHeaders: Record<string, string>;
+	/**
+	 * The assembled daemon's storage client — RETAINED only so the infra-skip preflight can
+	 * issue a scoped `connect()` liveness probe through the SAME connection. Classifying that
+	 * probe is how a sustained backend outage NEUTRAL-skips instead of red-ing the assembled
+	 * store→recall proof on DeepLake weather (PRD-034a FR-4).
+	 */
+	let probeStorage: StorageClient;
 
 	beforeAll(async () => {
 		// Resolve the token's authorized tenancy from the env provider — the SAME scope the
@@ -83,7 +92,8 @@ describe.skipIf(!HAS_TOKEN)("PRD-022d assembled-daemon store→recall over HTTP 
 		// Boot the REAL assembled daemon against live DeepLake on an ephemeral port. The
 		// assembly FIRES the three data seams (d-AC-1) — we do NOT mount anything manually.
 		// That is the whole point of 022d: the seams are wired into assembleDaemon.
-		booted = await bootTestDaemon({ mode: "local", storage: createStorageClient({ provider }) });
+		probeStorage = createStorageClient({ provider });
+		booted = await bootTestDaemon({ mode: "local", storage: probeStorage });
 
 		// Drive the requests through the REAL CLI loopback client (d-AC-2/3): it stamps the
 		// session-group headers (runtime-path + synthetic session) automatically for /api/memories.
@@ -100,7 +110,15 @@ describe.skipIf(!HAS_TOKEN)("PRD-022d assembled-daemon store→recall over HTTP 
 
 	it(
 		"d-AC-1 + d-AC-2/3: the assembled daemon stores then recalls a memory over HTTP via the CLI client",
-		async () => {
+		async ({ skip }) => {
+			// INFRA-DEGRADED preflight (PRD-034a FR-4 / a-AC-3): a scoped liveness probe through
+			// the assembled daemon's storage client. If the backend is sustained-down (the probe
+			// flaps transient AFTER the client's retry), resolve NEUTRAL via a SKIP + the run-level
+			// sentinel rather than red-ing the assembled store→recall proof on DeepLake weather. A
+			// non-transient failure (real defect) or an ok probe continues to the strict d-AC-1/3/5
+			// assertions (incl. the no-session 400 edge check) with full teeth.
+			await neutralizeIfInfraDegraded("data-api-assembled-live:preflight", () => probeStorage.connect(scope), skip);
+
 			// ── d-AC-5: a request with NO session header is STILL 400'd at the edge after wiring.
 			// (Drive a raw fetch WITHOUT the client so the session header is absent.)
 			const noSession = await fetch(`${booted.baseUrl}/api/memories/recall`, {

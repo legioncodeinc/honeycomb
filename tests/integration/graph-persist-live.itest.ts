@@ -46,6 +46,7 @@ import type { QueryScope } from "../../src/daemon/storage/client.js";
 import { PipelineConfigSchema, type PipelineConfig } from "../../src/daemon/runtime/pipeline/config.js";
 import type { EntityTriple } from "../../src/daemon/runtime/pipeline/contracts.js";
 import { persistGraphEntities } from "../../src/daemon/runtime/pipeline/graph-persist.js";
+import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
 
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
 
@@ -162,7 +163,13 @@ describe.skipIf(!HAS_TOKEN)("live graph-persist smoke (opt-in, real backend, ide
 		}
 	});
 
-	it("first pass: persists entities, dependencies, and mentions to real DeepLake", async () => {
+	it("first pass: persists entities, dependencies, and mentions to real DeepLake", async ({ skip }) => {
+		// INFRA-DEGRADED preflight (PRD-034a FR-4 / a-AC-3): if the backend is sustained-down
+		// (a liveness probe flaps transient AFTER the client's retry), resolve NEUTRAL via a
+		// SKIP + the run-level sentinel rather than red-ing the graph-persist proof on DeepLake
+		// weather. A non-transient failure (real defect) or an ok probe continues with full teeth.
+		await neutralizeIfInfraDegraded("graph-persist-live:preflight", () => storage.connect(scope), skip);
+
 		// We use throwaway table names. The graph-persist stage resolves HealTargets
 		// from the catalog (`healTargetFor`), which uses the canonical table names
 		// (`entities`, `entity_dependencies`, `memory_entity_mentions`).
