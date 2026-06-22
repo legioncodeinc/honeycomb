@@ -109,3 +109,21 @@ export {
 	handleGraphVfs,
 	inMemoryHandleStore,
 } from "./query.js";
+
+// ── The `/api/graph/*` mount seam — daemon-assembly wiring (CONVENTIONS §11) ──
+export {
+	defaultGraphBaseDir,
+	GRAPH_GROUP,
+	loadFreshestLocalSnapshot,
+	type MountGraphOptions,
+	mountGraphApi,
+} from "./api.js";
+
+// ── Snapshot-identity resolution (the build's identity tuple) ─────────────────
+export {
+	defaultGitProbe,
+	type GitProbe,
+	repoSlugFromOrigin,
+	type ResolveIdentityOptions,
+	resolveSnapshotIdentity,
+} from "./identity.js";

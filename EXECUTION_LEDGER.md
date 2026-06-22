@@ -1,128 +1,49 @@
-# EXECUTION LEDGER — /the-smoker
+# EXECUTION LEDGER — /the-smoker (gap tracks)
 
-**Scope:** PRD-035 (dashboard-data-fixes) + PRD-036 (skill-asset-discovery), broken-first. PRD-037 follows if these land clean.
-**Branch:** `legion/unruffled-robinson-230bc4` · **Started:** 2026-06-22
-**Status legend:** OPEN · IN PROGRESS · DONE (impl + tests green) · VERIFIED (independent close-out) · BLOCKED
+**Scope:** Fix the genuine functional gaps surfaced by the in-work QA audit, as 3 parallel file-disjoint tracks → per-PRD PRs.
+**Base branch:** `fix/gap-tracks` off `origin/main` (2eb0349) · **Started:** 2026-06-22
+**Status:** OPEN · IN PROGRESS · DONE (impl + targeted tests) · VERIFIED (independent + close-out) · BLOCKED
 
-> Both PRD folders moved `backlog/ → in-work/` at start. (Prior PRD-001 ledger content lives in PR #1 + that PRD's `reports/`.)
+## Tracks (parallel — disjoint file trees)
 
-## File-contention map (why the waves are shaped this way)
+| Track | PRD | Defect | Owner bee / model | Files (exclusive) |
+|---|---|---|---|---|
+| **T1** | PRD-014 | `graph build` → daemon **501**: build worker built+tested (28/28) but daemon-assembly wiring DEFERRED | typescript-node-worker-bee / opus | `src/daemon/runtime/codebase/**`, `assemble.ts`, graph route/command wiring, `tests/daemon/runtime/codebase/`, `tests/integration/` |
+| **T2** | PRD-030 | **Critical (AC-6 reopened):** `COMPACTABLE_KEY_COLUMNS` maps `epistemic_assertions→claim_key` but writer keys by `id` → silent no-op in prod | deeplake-dataset-worker-bee / opus | `src/daemon/storage/compaction*.ts`, catalog ColumnDef (if centralizing), `tests/daemon/storage/` |
+| **T3** | PRD-027 | recall returns hits in **arm order, not relevance order**, with placeholder scores (never executed) | retrieval-worker-bee / opus | `src/daemon/runtime/recall/**`, `tests/daemon/runtime/recall/` |
 
-| File | Touched by |
-|---|---|
-| `src/daemon/runtime/dashboard/api.ts` | 035b (fetchKpisView), 036a (new endpoint), 036b (fetchSkillSyncView), 036c (fetchKpisView) |
-| `src/dashboard/web/app.tsx` | 035a (KPI label), 036c (KPI value) |
-| `src/dashboard/web/panels.tsx` | 035a (SessionsPanel), 035c (GraphCanvas), 036b (SkillSyncPanel) |
-| `src/dashboard/contracts.ts` | 035a (turnCount), 036a (DiscoveredAsset), 036b (SkillSyncRow), 036c (teamSkillCount) |
-| `src/dashboard/web/wire.ts` | 035a, 036b, 036c |
-
-Rule of engagement: **no two concurrently-running agents edit the same file.** Disjoint work parallelizes; contended work sequences.
-
-## Wave plan
-
-- **Wave 1 (parallel — file-disjoint):**
-  - `Agent-Graph` (035c) — `panels.tsx` GraphCanvas + new `graph-layout.ts` + test. Model: **opus**.
-  - `Agent-Scanner` (036a) — new `installed-assets.ts` scanner + `api.ts` endpoint + `contracts.ts` `DiscoveredAsset` + test. Model: **opus**.
-  - Disjoint: Graph owns `panels.tsx`+new file; Scanner owns `api.ts`+new file+`contracts.ts`. No shared file.
-- **Wave 2 (after Wave 1 VERIFIED — owns the contended core, single agent):**
-  - `Agent-ViewModel` (035a + 035b + 036b + 036c) — `fetchKpisView`/`fetchSkillSyncView` (api.ts), `app.tsx` KPI row, `panels.tsx` SessionsPanel+SkillSyncPanel, `contracts.ts`+`wire.ts` fields. Consumes 036a scanner for the union. Model: **opus**.
-- **Close-out:** `security-worker-bee` (security-stinger) → `quality-worker-bee` (quality-stinger). Model: **opus**.
-
-```
-Wave 1 [Graph ∥ Scanner] ──► Wave 2 [ViewModel] ──► Close-out [security ──► quality] ──► Ship (commit/push/PR/CI)
-```
-
-> Model rubric note: the matrix lists Cursor-spawnable slugs (gpt-5.5, etc.) not available in this harness. Mapped to available tiers — all implementation + close-out Bees on **opus** (P0 correctness, React+daemon TS, layout algorithm, data-source reasoning; rubric row `claude-opus-4-8-thinking-high` = reasoning + code quality 10/10).
+Disjoint check: only T1 touches `assemble.ts`; T2 = storage/compaction; T3 = recall. No shared file → safe to run on one tree concurrently. Each bee runs TARGETED tests only; orchestrator runs the integrated `npm run ci` once after all land. No bee commits — orchestrator splits to 3 per-PR branches off main after close-out.
 
 ## Ledger
 
-### Wave 1 — Agent-Graph (035c) — typescript-node-worker-bee
+| ID | Track | Criterion | Status |
+|---|---|---|---|
+| T1-1 | 014 | `graph build` no longer 501 — daemon invokes the existing worker end-to-end | OPEN |
+| T1-2 | 014 | A build writes a snapshot to the `codebase` table; `/api/graph` then returns `built:true` w/ real nodes/edges | OPEN |
+| T1-3 | 014 | Integration/daemon test proves the wired path; all existing 28 PRD-014 unit tests preserved | OPEN |
+| T2-1 | 030 | `epistemic_assertions` key column corrected to match its real writer (`id`) | OPEN |
+| T2-2 | 030 | Guard test: each compactable table's key column == its writer's keyColumn literal (silent-no-op → test failure) | OPEN |
+| T2-3 | 030 | AC-6 satisfied; existing compaction tests preserved | OPEN |
+| T3-1 | 027 | Recall hits ordered by RELEVANCE (not arm order), real scores per PRD-027 | OPEN |
+| T3-2 | 027 | PRD-027 ranking ACs met with tests (honest scope report if eval harness is XL) | OPEN |
+| GATE | all | integrated `npm run ci` green | OPEN |
+| SEC | all | security-worker-bee: Crit/High remediated across the 3 diffs | OPEN |
+| QA | all | quality-worker-bee: verified vs PRD-014/030/027 | OPEN |
 
-| ID | Criterion | Status |
-|---|---|---|
-| 035c-AC1 | Built graph draws ALL nodes + ALL edges (no silent skips) | OPEN |
-| 035c-AC2 | Real arbitrary-string ids render (not the 6 legacy keys) | OPEN |
-| 035c-AC3 | Click node → detail (id/kind/label/neighbors) matches edges | OPEN |
-| 035c-AC4 | Click selected/away clears selection | OPEN |
-| 035c-AC5 | `built:false` empty state still shows `honeycomb graph build` | OPEN |
-| 035c-AC6 | "N nodes · M edges" header equals drawn counts | OPEN |
-| 035c-AC7 | DOM/unit test (arbitrary ids) asserts render+click+empty; ci green | OPEN |
-| 035-AC3/4/5 | (parent) renders / interactive / empty-state preserved | OPEN |
+## Event log
 
-### Wave 1 — Agent-Scanner (036a) — typescript-node-worker-bee
-
-| ID | Criterion | Status |
-|---|---|---|
-| 036a-AC1 | Finds this repo's 27 `.claude/skills/` skills (via `<name>/SKILL.md`) | OPEN |
-| 036a-AC2 | Finds `.claude/agents/` files as `assetType:"agent"` | OPEN |
-| 036a-AC3 | Each asset carries name/description/scope/sourceHarnesses/paths/assetType | OPEN |
-| 036a-AC4 | Dedupe: skill under two roots → once, both harnesses+paths | OPEN |
-| 036a-AC5 | Fail-soft: missing/empty root → empty, no throw; unreadable skipped | OPEN |
-| 036a-AC6 | Injectable roots; Vitest temp dirs (no real home scan) | OPEN |
-| 036-AC1 | (parent) Discovery returns 27 skills + agents, not 0 | OPEN |
-
-### Wave 2 — Agent-ViewModel (035a/035b/036b/036c) — typescript-node-worker-bee
-
-| ID | Criterion | Status |
-|---|---|---|
-| 035a-AC1 | KPI labeled "Turns" | OPEN |
-| 035a-AC2 | Panel titled "Turns" + matching eyebrow/empty copy | OPEN |
-| 035a-AC3 | Count value unchanged (sessions row count) | OPEN |
-| 035a-AC4 | `sessions` table name untouched | OPEN |
-| 035a-AC5 | No user-facing "Sessions" meaning captured turns (grep) | OPEN |
-| 035a-AC6 | PRD-024 DOM tests updated to "Turns"; ci green | OPEN |
-| 035b-AC1 | Savings non-zero with seeded data | OPEN |
-| 035b-AC2 | `0` only via genuinely-empty path | OPEN |
-| 035b-AC3 | Explainable: formula documented at site | OPEN |
-| 035b-AC4 | Single cheap guarded aggregate, no N+1 | OPEN |
-| 035b-AC5 | Storage error → `0` fail-soft, no throw | OPEN |
-| 035b-AC6 | Vitest: non-zero/0-empty/0-error; ci green | OPEN |
-| 036b-AC1 | Union: local→`local`, synced keep state | OPEN |
-| 036b-AC2 | No double-count (substrate state wins) | OPEN |
-| 036b-AC3 | This repo → ~27 `local` rows, not "No skills synced." | OPEN |
-| 036b-AC4 | Synced-only workspace unchanged | OPEN |
-| 036b-AC5 | syncState docs `local`; SYNC_TONE local tone; schema passes; ci green | OPEN |
-| 036b-AC6 | Discovery failure → substrate-only view, no crash | OPEN |
-| 036c-AC1 | KPI counts team-shared, documented, defined source | OPEN |
-| 036c-AC2 | This repo: KPI=true shared (0) while panel lists 27 local | OPEN |
-| 036c-AC3 | Sharing increments; pulled/local don't inflate | OPEN |
-| 036c-AC4 | Test asserts count on mixed fixture; ci green | OPEN |
-| 035-AC1/2/6 | (parent) Turns / savings / ci green + no secret + tests updated | OPEN |
-| 036-AC2/3/4/5 | (parent) union / KPI / additive-no-regress / backbone stable | OPEN |
-
-## Close-out
-
-| ID | Criterion | Status |
-|---|---|---|
-| SEC | security-worker-bee: OWASP/PII/SQL-into-DeepLake/secret-exposure; Crit+High remediated | OPEN |
-| QA | quality-worker-bee: implementation verified vs PRD-035 + PRD-036 | OPEN |
-| CI | `npm run ci` green locally; GitHub Actions green | OPEN |
-
-## Decisions taken (PRD Open-Question defaults — not blockers)
-
-- 035b OQ-1: **memory-corpus proxy** (∑ tokens of `memory` summary text, ~4 chars/token) — works from existing data, no schema change. Documented at site.
-- 035c OQ-1: **deterministic radial/grid** layout, extracted as pure exported `layout(...)`.
-- 036a OQ-1: scan **project root only** by default (no global `~` walk).
-- 036b OQ-1: synced substrate of record = **`synced_assets`** (PRD-033); `skills` table legacy fallback.
-- 036c OQ-1: count **`shared`/`synced`** only (not `pulled`).
-
-## Watchdog / event log
-
-- Recon complete; both PRDs read; roster + model matrix loaded. Folders moved to in-work. Ledger initialized.
-- **Wave 1 dispatched** (parallel, file-disjoint): Agent-Graph (035c) + Agent-Scanner (036a), both typescript-node-worker-bee/opus, armed with typescript-node-stinger.
-- Both returned DONE. **Orchestrator independent verify from repo root:** `npm run ci` exit 0 — 211 files / 2302 passed / 7 skipped / 0 failed; typecheck + jscpd + vitest + audit:sql all clean. Structural: `NODE_POS` map deleted (only doc-comment refs remain); `graph-layout.ts` exports pure `layout()`+`neighborsOf()`; `installed-assets.ts` exports `scanInstalledAssets()`; `GET /api/diagnostics/installed-assets` wired in mountDashboardApi; `DiscoveredAsset`/`LocalAssetInventory` in contracts.ts; file ownership respected (no overlap). `graph-canvas.test.tsx` 12 pass; installed-assets suite passes. → **035c-AC1..7 + 036a-AC1..6 + parent 035-AC3/4/5 + 036-AC1 flipped to VERIFIED.**
-- Note: Agent-Scanner spawned a background task to harden two PRE-EXISTING timing flakes (`secrets/exec.test.ts`, `sources/api.test.ts`) — not in our scope; both passed in this gate run. Reconcile any stray edits at ship time.
-- **Wave 2 dispatched:** Agent-ViewModel (035a+035b+036b+036c), typescript-node-worker-bee/opus, armed.
-- Wave 2 returned DONE. **Orchestrator independent verify:** structural greps confirm — KPI `label="Turns"` reads `turnCount||sessionCount`; `Team skills` reads `kpis.teamSkillCount` (not `skills.length`); SessionsPanel title "Turns" + "No turns captured yet."; `SYNC_TONE` has `local:neutral`+`synced`; hardcoded `estimatedSavings:0` REMOVED, replaced by `floor(SUM(LENGTH(content))/CHARS_PER_TOKEN)` over the `memories` table (col `content`), documented; `fetchSkillSyncView` calls `scanInstalledAssets()` in-process with injectable `scan` param; `teamSkillCount` via `buildTeamSkillCountSql` (DISTINCT honeycomb_id, non-tombstone skill rows in `synced_assets`); Wave 1 preserved (installed-assets endpoint + GraphCanvas intact). Contracts additive (`turnCount`/`teamSkillCount` added, `sessionCount` kept, schemas `.catch`-tolerant). → **035a-AC1..6 + 035b-AC1..6 + 036b-AC1..6 + 036c-AC1..4 + all parent roll-ups flipped to VERIFIED.**
-- **Gate:** full `npm run ci` = 2311/2319 pass, 7 skip, **1 fail = `tests/daemon/runtime/secrets/exec.test.ts`** — a PRE-EXISTING flake (stdout-drain vs kill race) in a file WE DID NOT MODIFY (git status clean for it); passes 16/16 in isolation ×2; already documented on main (commit e21cadb "de-flake main — exec stdout-drain race"). NOT a regression from PRD-035/036; all dashboard + savings/union/KPI test files pass deterministically. Treated as known non-blocking flake per the smoker's one-retry rule.
-- **All 38 implementation ACs VERIFIED.** Unlocking close-out: security → quality.
-- **Close-out 1 — security-worker-bee (opus, security-stinger):** CLEAN — 0 Critical / 0 High / 0 Medium / 1 Low. No code edits needed. Verified SQL guards on all new aggregates + union (`audit:sql` clean), scanner is path-traversal/symlink-safe (Dirent.isDirectory/isFile skip symlinks; roots server-controlled), no secret/PII/credential in served payloads, frontmatter rendered as inert text, tenancy fail-closed preserved. **Low-1 (record only):** `GET /api/diagnostics/installed-assets` returns absolute `paths` disclosing OS username — behind auth, UI doesn't consume it; recommend repo-relative paths / drop `paths` when PRD-036b/042 wire it. → SEC = VERIFIED. Reports: both PRD `reports/2026-06-22-security-report.md`.
-- **Close-out 2 — quality-worker-bee (opus, quality-stinger):** **PASS / PASS** — PRD-035 18/18 ACs, PRD-036 16/16 ACs. Zero Critical/Warning; only non-blocking suggestions (panel empty-state copy polish; absolute-paths field = security Low-1). Full plan-item→AC traceability tables produced. Confirmed the exec.test flake is unrelated. → QA = VERIFIED.
-- **Opportunistic fix (beyond ACs, same bug-class as PRD-035):** QA surfaced a PRE-EXISTING bug in the very function we edited — `fetchKpisView` counted the **Memories** KPI via `sqlIdent("memory")` (singular) but the real table is `memories` (our 035b savings query already used the correct name). The Memories KPI was silently 0 against the real backend. Fixed `api.ts:199` `"memory"→"memories"` + updated the test fake's matchers (COUNT-vs-SUM specificity, dropped stale `"memory"` line). Dashboard suites 146/146 green after.
-- **Final gate:** dashboard + daemon-dashboard suites **146/146 deterministic green** across every run. Full `npm run ci` green EXCEPT the two KNOWN pre-existing load-flakes — `secrets/exec.test.ts` + `sources/api.test.ts` — both UNMODIFIED by this diff (git-clean), both **23/23 in isolation**, documented on main (e21cadb/ae2febd). NOT regressions; non-blocking per the smoker flake rule.
-- **SEC = VERIFIED · QA = VERIFIED · all 38 ACs VERIFIED.** Close-out clean. → Phase 3 Ship.
-- **Ship:** commit `93c9dff` (impl + lifecycle moves + reports + ledger; `.scan-output/` audit scratch left untracked). PR #64 (docs) was already squash-MERGED, so opened a fresh **PR #65** for the implementation.
-- **CI monitor (PR #65):** Quality gate (Node 22/24) + Windows smoke FAILED at ~1m — root cause = the 036a real-repo scanner tests (`a-AC-1`/`a-AC-2`) assert against `.claude/skills`+`.claude/agents`, which are **gitignored local tooling absent in CI's clean clone** → returned 0. NOT a flake, NOT a product bug (the scanner works against a real workspace; the test's data just isn't in the repo). Fixed `e4b2b4c`: guarded both with `it.skipIf(dir-absent)` — they assert locally, skip in CI; portable detection stays covered by the temp-dir fixtures. typecheck + scanner suite green locally. Re-monitoring.
-- **CI GREEN (PR #65):** Quality gate Node 22.x + 24.x PASS, Windows smoke PASS, Secret gate PASS, CodeQL + Analyze ×3 PASS; live/stress jobs gated-skipped as expected. No flakes recurred. PR #65 = MERGEABLE / **CLEAN**.
-- **RUN COMPLETE — core mandate.** 100% of PRD-035 + PRD-036, all 38 ACs VERIFIED, security + quality close-out clean, shipped to PR #65 with green CI. Folders stay in `in-work/` until #65 merges, then move to `completed/`.
-- **Next (per run args): PRD-037 (dashboard-nav-shell) — gated on 035/036 landing clean, which they have.** Holding for user direction on PR structure (same branch vs fresh PR after #65 merges) since 037 is a large foundation refactor of the same files.
+- Audit established the gaps; user chose: start Tracks 1-3 (fix functions), per-PRD PRs.
+- Base `fix/gap-tracks` off main; running daemon stopped (avoid :3850 collision in T1 itests).
+- Dispatching T1/T2/T3 implementation bees in parallel.
+- **Returned:**
+  - **T1 (PRD-014) — REAL FIX, DONE.** Built `mountGraphApi` seam (`src/daemon/runtime/codebase/api.ts` + `identity.ts`), wired into `assembleDaemon()` step 13 (`assemble.ts`), re-exported (`codebase/index.ts`). `POST /api/graph/build` now runs `buildAggregateSnapshot→finalizeSnapshot→writeSnapshotAtomic→pushSnapshot`; 501→200, snapshot persisted, `/api/graph` reads `built:true`. +10 tests (api 4 incl. 501→200 proof, identity 6). All 88 existing PRD-014 tests preserved.
+  - **T2 (PRD-030) — ALREADY FIXED on main (stale QA).** `epistemic_assertions: "id"` already correct in `maintenance/compact-api.ts:108` + writer-cross-check guard test already present; bee verified via writer trace (`recordAssertion` keyColumn:"id") + proved guard bites. Net-zero code. The "NOT VERIFIED Critical" QA report (2026-06-17) is stale.
+  - **T3 (PRD-027) — ALREADY MERGED (#48, 405efcf), stale index.** RRF fusion (`RRF_K=60`, `fuseHits`) live in `memories/recall.ts`; arm-order defect absent. Bee correctly identified the ranking lives in `memories/recall.ts` (PRD-027's real target), NOT `recall/**` (the separate unwired PRD-007 engine), and STOPPED rather than edit out of bounds. Net-zero code.
+- **Integrated gate (T1):** `npm run ci` green — 213 files, 2323 passed, 6 skipped, 0 failed; typecheck + audit:sql clean; no flakes. → T1-1/T1-2/T1-3 DONE.
+- **Net:** only T1 is a code change to ship. T2/T3 = docs-out-of-sync (lifecycle/status), not code gaps. Close-out (security→quality) on the T1 diff next; then ship T1 PR; then reconcile 030/027 (+re-check 026/029) docs.
+- **T1 close-out — security-worker-bee (opus):** 0 Crit / 0 High / 1 Medium (FIXED in-session: git-OID validation on snapshot `commit` for path-safety defense-in-depth + 2 tests). Verified git probes use `execFileSync` fixed-argv (no shell injection), SQL guarded, tenancy fail-closed, errors contained. `audit:sql` + `ci` green. Flagged out-of-scope: transitive `tmp` npm-audit High (unrelated → dependency-audit-worker-bee). Report: `prd-014/reports/2026-06-22-security-report.md`. → SEC VERIFIED.
+- **T1 close-out — quality-worker-bee (opus):** **PASS-WITH-FINDINGS.** 501→200 proven (bare daemon 501 baseline → wired 200 built:true, snapshot persisted, real worker invoked, 014c push semantics honored, no stub/mock-to-pass); wired into production `assembleSeams` step 13. 2 non-blocking Warnings: (W1) assemble suite didn't assert prod FIRES the seam; (W2) richer CLI verbs (diff/history/init/pull) not wired. Report: `prd-014/reports/2026-06-22-qa-report.md`. → QA VERIFIED (findings non-blocking).
+- **W1 closed by orchestrator:** added `mountGraph` to `recordingSeams` + `expect(calls.mountGraph).toBe(1)` + order-array entry in `assemble.test.ts` — production firing now proven. assemble+codebase suites 137 green.
+- **Final gate:** `npm run ci` green — 213 files, **2325 passed**, 6 skipped, 0 failed; typecheck + audit:sql clean.
+- **W2 (CLI verbs diff/history/init/pull) = documented follow-up** — out of scope for "make graph build work"; the `graph build` endpoint + CLI→endpoint mapping are closed.
+- T1 ready to ship as its own PR (PRD-014 graph-build wiring). T2/T3/026/029 docs reconciliation tracked as a separate follow-up.

@@ -99,6 +99,7 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 		mountDream: 0,
 		mountCompact: 0,
 		mountDiagnosticsHealth: 0,
+		mountGraph: 0,
 	} as Record<keyof SeamFns, number>;
 	const seams: SeamFns = {
 		attachHooks: ((daemon) => {
@@ -210,6 +211,19 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 			expect(detail.status, "the thunk yields the coarse status").toBeDefined();
 			expect(detail.reasons, "the protected surface carries the full per-subsystem reasons").toBeDefined();
 		}) as SeamFns["mountDiagnosticsHealth"],
+		// ── The PRD-014 codebase-graph build/read seam the composition root fires (deferred wiring closed). ──
+		mountGraph: ((daemon, options) => {
+			calls.mountGraph += 1;
+			order.push("mountGraph");
+			expect(typeof daemon.group).toBe("function");
+			// The graph build/read endpoints are wired with the live storage client (the codebase-table push).
+			expect(options.storage, "graph seam receives the live storage client").toBeDefined();
+			// PRD-022: the daemon's default tenancy scope is threaded so a no-org loopback build resolves.
+			expect(options.defaultScope, "graph seam receives the threaded default scope").toBeDefined();
+			expect(options.defaultScope?.org).toBeTruthy();
+			// PRD-014: the watched workspace (the checkout to graph) is threaded so the build knows what to walk.
+			expect(options.workspaceDir, "graph seam receives the workspace dir to build from").toBeTruthy();
+		}) as SeamFns["mountGraph"],
 	};
 	return { seams, calls };
 }
@@ -255,8 +269,11 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 		expect(calls.mountCompact).toBe(1);
 		// PRD-029 / AC-3: the protected per-subsystem health detail fires once and only once.
 		expect(calls.mountDiagnosticsHealth).toBe(1);
+		// PRD-014: the production composition root fires the graph build/read seam (deferred wiring closed).
+		expect(calls.mountGraph).toBe(1);
 		// Deterministic order: the 021 seams, then the 022 data seams (memories → vfs → product),
-		// then the PRD-024 dream trigger, the PRD-030 compaction trigger, then the PRD-029 health detail.
+		// then the PRD-024 dream trigger, the PRD-030 compaction trigger, the PRD-029 health detail,
+		// and finally the PRD-014 graph seam.
 		expect(order).toEqual([
 			"attachHooks",
 			"mountDashboard",
@@ -270,6 +287,7 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 			"mountDream",
 			"mountCompact",
 			"mountDiagnosticsHealth",
+			"mountGraph",
 		]);
 	});
 
