@@ -78,7 +78,7 @@ function Header({
 }): React.JSX.Element {
 	return (
 		<header style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 22 }}>
-			<img src={`${assetBase}/honeycomb-mark.svg`} width={34} height={34} alt="" />
+			<img src={`${assetBase}/honeycomb-memory-cluster.svg`} width={34} height={34} alt="" />
 			<div style={{ display: "flex", flexDirection: "column" }}>
 				<span style={{ fontWeight: 700, fontSize: 19, letterSpacing: "-0.03em", color: "var(--text-primary)", lineHeight: 1.1 }}>honeycomb</span>
 				<span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-tertiary)" }}>

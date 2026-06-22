@@ -8,7 +8,7 @@
  *   GET /dashboard                  → the index SHELL (`<div id="root">` + <link> + <script>)
  *   GET /dashboard/app.js           → the esbuild bundle (React+ReactDOM+the app, build-time JSX)
  *   GET /dashboard/styles.css       → the concatenated DS CSS (tokens + base, no @import chain)
- *   GET /dashboard/honeycomb-mark.svg → the brand mark
+ *   GET /dashboard/honeycomb-memory-cluster.svg → the brand mark
  *
  * This module owns LOCATING those source assets on disk and reading them. It lives under
  * `src/daemon/` (it does Node `fs` IO) and is the ONLY place the host touches the filesystem.
@@ -34,7 +34,7 @@ import { fileURLToPath } from "node:url";
 const CSS_FILES = ["tokens/fonts.css", "tokens/colors.css", "tokens/typography.css", "tokens/spacing.css", "tokens/base.css"] as const;
 
 /** The design-system logo the header renders. */
-const LOGO_FILE = "logos/honeycomb-mark.svg";
+const LOGO_FILE = "logos/honeycomb-memory-cluster.svg";
 
 /**
  * The on-disk dir (under `assets/`) the brand fonts live in, and the FIXED allow-list of the

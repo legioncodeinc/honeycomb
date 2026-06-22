@@ -19,7 +19,7 @@
  *   GET /dashboard                    → the index shell (this module's {@link renderShell})
  *   GET /dashboard/app.js             → the esbuild bundle (React + ReactDOM + the app)
  *   GET /dashboard/styles.css         → the concatenated design-system CSS
- *   GET /dashboard/honeycomb-mark.svg → the brand mark
+ *   GET /dashboard/honeycomb-memory-cluster.svg → the brand mark
  *
  * ── LOCAL-MODE ONLY (D-4 / security F-1) ─────────────────────────────────────
  *   `assembleSeams` fires this seam ONLY when `daemon.config.mode === "local"` (the
@@ -42,7 +42,7 @@ export const DASHBOARD_APP_PATH = "/dashboard/app.js" as const;
 export const DASHBOARD_CSS_PATH = "/dashboard/styles.css" as const;
 
 /** The same-origin path the host serves the brand mark at. */
-export const DASHBOARD_LOGO_PATH = "/dashboard/honeycomb-mark.svg" as const;
+export const DASHBOARD_LOGO_PATH = "/dashboard/honeycomb-memory-cluster.svg" as const;
 
 /**
  * The same-origin path prefix the host serves the brand fonts under. The served DS CSS's
@@ -154,7 +154,7 @@ export function mountDashboardHost(daemon: Daemon, options: MountDashboardHostOp
 		return c.body(asset.body, 200, { "content-type": asset.contentType });
 	});
 
-	// GET /dashboard/honeycomb-mark.svg — the brand mark.
+	// GET /dashboard/honeycomb-memory-cluster.svg — the brand mark.
 	root.get(DASHBOARD_LOGO_PATH, (c) => {
 		const asset = assets.logo();
 		if (asset === null) return c.text("dashboard logo unavailable", 404);
