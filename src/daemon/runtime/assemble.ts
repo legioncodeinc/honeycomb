@@ -56,6 +56,8 @@ import { type CreateDaemonOptions, type Daemon, type DaemonServices, createDaemo
 
 import { attachHooksHandlers } from "./capture/attach.js";
 import { mountGraphApi } from "./codebase/api.js";
+import { mountOntologyApi } from "./ontology/api.js";
+import { mountSkillPropagationApi } from "./skillify/propagation-api.js";
 import { mountDashboardApi } from "./dashboard/api.js";
 import { mountHarnessApi } from "./dashboard/harness-api.js";
 import { mountSyncApi } from "./dashboard/sync-mount.js";
@@ -401,6 +403,40 @@ export interface SeamFns {
 	 * try/catch.
 	 */
 	readonly mountSync?: typeof mountSyncApi;
+	/**
+	 * The knowledge-graph / ontology READ + reason-gated MUTATION surface — `GET
+	 * /api/ontology/{entities,edges,claims,assertions}` + `POST /api/ontology/proposals`
+	 * (PRD-045c, closing the PRD-008 daemon-wiring gap). Attaches onto the already-mounted,
+	 * protected `/api/ontology` group (server.ts:88; NO `server.ts` edit), so it inherits the
+	 * dashboard JSON views' auth/RBAC (open in `local`, gated in team/hybrid). This is the seam
+	 * that turns the ontology 501 scaffold into a LIVE read surface (no 501) and gives the
+	 * control-plane apply a live, dreaming-INDEPENDENT mutation path. The `/api/ontology` group
+	 * has a SINGLE owner — no other mount registers any `/api/ontology/*` path — so there is no
+	 * route collision (cf. the latent `/api/graph` double-registration the audit flagged).
+	 *
+	 * OPTIONAL on the seam record (like {@link mountGraph}/{@link mountHarness}/{@link mountSync})
+	 * so a pre-existing recording-fake `SeamFns` stays type-compatible WITHOUT editing those
+	 * out-of-scope suites; `assembleSeams` fires it only when present (always present in
+	 * {@link defaultSeamFns}, i.e. production), inside a fail-soft try/catch.
+	 */
+	readonly mountOntology?: typeof mountOntologyApi;
+	/**
+	 * The team skill-sharing PUBLISH + PULL surface — `POST /api/skills` (versioned publish) +
+	 * `POST /api/skills/{pull,scope,unpull,force}` (PRD-045g, closing the PRD-018 daemon-wiring
+	 * gap). Attaches onto the already-mounted, protected `/api/skills` group (server.ts:83; NO
+	 * `server.ts` edit), so it inherits the dashboard JSON views' auth/RBAC (open in `local`,
+	 * gated in team/hybrid). This is the seam that turns the never-mounted publish endpoint +
+	 * the unmounted `POST /api/skills/pull` (the CLI dispatch target) into REAL routes — a
+	 * republish lands a versioned row (g-AC-1) and a pull runs the real team pull + cross-harness
+	 * symlink fan-out (g-AC-5). NO collision with `GET /api/skills` (owned by `mountProductData`):
+	 * this registers only POST verbs onto the same group.
+	 *
+	 * OPTIONAL on the seam record (like {@link mountOntology}) so a pre-existing recording-fake
+	 * `SeamFns` stays type-compatible WITHOUT editing those out-of-scope suites; `assembleSeams`
+	 * fires it only when present (always present in {@link defaultSeamFns}, i.e. production),
+	 * inside a fail-soft try/catch.
+	 */
+	readonly mountSkillPropagation?: typeof mountSkillPropagationApi;
 }
 
 /** The REAL seam functions (the production wiring). */
@@ -421,6 +457,8 @@ export const defaultSeamFns: SeamFns = {
 	mountGraph: mountGraphApi,
 	mountHarness: mountHarnessApi,
 	mountSync: mountSyncApi,
+	mountOntology: mountOntologyApi,
+	mountSkillPropagation: mountSkillPropagationApi,
 };
 
 /** An assembled, fully-wired daemon plus the composition root's lifecycle controls. */
@@ -830,6 +868,47 @@ export function assembleSeams(
 		} catch (err: unknown) {
 			const reason = err instanceof Error ? err.message : String(err);
 			process.stderr.write(`honeycomb: sync API mount failed (non-fatal): ${reason}\n`);
+		}
+	}
+
+	// 16. The knowledge-graph / ontology READ + reason-gated MUTATION surface — `GET
+	//     /api/ontology/{entities,edges,claims,assertions}` + `POST /api/ontology/proposals`
+	//     (PRD-045c, closing the PRD-008 daemon-wiring gap). Attaches onto the already-mounted,
+	//     protected `/api/ontology` group (server.ts:88; NO `server.ts` edit), so it inherits the
+	//     dashboard JSON views' auth/RBAC (open in `local`, gated in team/hybrid). This turns the
+	//     ontology 501 scaffold into a LIVE read surface (c-AC-2) and gives the control-plane apply
+	//     a live mutation path INDEPENDENT of the dormant dreaming runner (c-AC-4). The `/api/ontology`
+	//     group has a SINGLE owner — no other mount registers any `/api/ontology/*` path — so there is
+	//     no route collision (cf. the latent `/api/graph` double-registration the audit flagged).
+	//     FAIL-SOFT (c-AC-5): a mount error must NEVER crash the daemon — the surface stays unmounted
+	//     this run (falls through to the 501 scaffold), exactly the posture the other mounts use.
+	if (seams.mountOntology !== undefined) {
+		try {
+			seams.mountOntology(daemon, { storage, defaultScope });
+		} catch (err: unknown) {
+			const reason = err instanceof Error ? err.message : String(err);
+			process.stderr.write(`honeycomb: ontology API mount failed (non-fatal): ${reason}\n`);
+		}
+	}
+
+	// 17. The team skill-sharing PUBLISH + PULL surface — `POST /api/skills` (versioned publish) +
+	//     `POST /api/skills/{pull,scope,unpull,force}` (PRD-045g, closing the PRD-018 daemon-wiring
+	//     gap). Attaches onto the already-mounted, protected `/api/skills` group (server.ts:83; NO
+	//     `server.ts` edit), so it inherits the dashboard JSON views' auth/RBAC (open in `local`,
+	//     gated in team/hybrid). PRD-018 BUILT `createSkillPublishEndpoint` + the thin-client pull +
+	//     symlink fan-out but NEVER mounted an HTTP route, so a republish could not land via the
+	//     daemon (g-AC-1) and the CLI's `POST /api/skills/pull` hit an UNMOUNTED path (g-AC-5). Firing
+	//     this turns both into REAL routes: publish lands a versioned row; pull runs the real team
+	//     pull + cross-harness symlink fan-out into the detected agent roots (idempotent + fail-soft).
+	//     NO collision with `GET /api/skills` (owned by `mountProductData` step 9): this registers
+	//     ONLY POST verbs onto the same group. FAIL-SOFT: a mount error must NEVER crash the daemon —
+	//     the surface stays unmounted this run (the CLI pull falls back to the 501/404 scaffold).
+	if (seams.mountSkillPropagation !== undefined) {
+		try {
+			seams.mountSkillPropagation(daemon, { storage, defaultScope });
+		} catch (err: unknown) {
+			const reason = err instanceof Error ? err.message : String(err);
+			process.stderr.write(`honeycomb: skill propagation API mount failed (non-fatal): ${reason}\n`);
 		}
 	}
 }

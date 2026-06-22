@@ -70,6 +70,18 @@ function serializeEntities(entities: readonly EntityTriple[]): Array<Record<stri
 	return entities.map((e) => ({ source: e.source, relationship: e.relationship, target: e.target }));
 }
 
+/**
+ * Read the memory content text off a job payload (PRD-045c). The controlled-write job carries
+ * the committed memory text under `content` (with `normalized_content` as a fallback); `""`
+ * when neither is a string. Forwarded to the graph-persist stage so its inline linker has text
+ * to scan for proper-noun mentions.
+ */
+function readContentText(payload: Record<string, unknown>): string {
+	if (typeof payload.content === "string") return payload.content;
+	if (typeof payload.normalized_content === "string") return payload.normalized_content;
+	return "";
+}
+
 /** Read the entity triples that rode along on an upstream job's payload. */
 function readForwardedEntities(payload: Record<string, unknown>): EntityTriple[] {
 	const raw = payload.entities;
@@ -173,6 +185,10 @@ export function controlledWriteFanOut(
 				...scopeEnvelope(job.scope),
 				memoryId: outcome.memoryId,
 				entities: serializeEntities(entities),
+				// PRD-045c: forward the committed memory's content so the graph-persist stage's
+				// inline linker (c-AC-1) can scan it for proper-noun mentions to link to the
+				// just-created entities. The controlled-write job carries it as `content`.
+				content: readContentText(job.payload),
 			},
 		});
 	};

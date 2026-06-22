@@ -36,19 +36,21 @@ fresh read) that flips DONE → VERIFIED. Implementers do not grade their own ho
 ### PRD-045c — Ontology linker + `/api/ontology` (closes 008) · Owner: typescript-node-worker-bee · Model: opus · Depends: 045a
 | ID | Criterion | Status |
 |---|---|---|
-| c-AC-1 | `inlineLinkMemory` invoked on a live write path; cite the call site (pipeline graph-persist and/or capture). | OPEN |
-| c-AC-2 | `mountOntologyApi` fired in `assemble.ts` (cite line); `/api/ontology/*` returns real data (no 501). | OPEN |
-| c-AC-3 | Live itest: a captured/processed memory yields a linked entity readable via `/api/ontology`. | OPEN |
-| c-AC-4 | Append-only supersession applies on a live path; a superseded claim is observably tombstoned (not deleted). | OPEN |
-| c-AC-5 | Fail-soft mount + invocation (a mount/link error never crashes the daemon). | OPEN |
+| c-AC-1 | `inlineLinkMemory` invoked on a live write path; cite the call site (pipeline graph-persist and/or capture). | DONE — `graph-persist.ts:470` via `createGraphPersistHandler` `:521`; content forwarded through fan-out (per-turn, not capture path) |
+| c-AC-2 | `mountOntologyApi` fired in `assemble.ts` (cite line); `/api/ontology/*` returns real data (no 501). | DONE — fired `assemble.ts:868` (`seams.mountOntology`), fail-soft; `ontology/api.ts` serves entities/edges/claims/assertions + proposals |
+| c-AC-3 | Live itest: a captured/processed memory yields a linked entity readable via `/api/ontology`. | DONE — `ontology-surface-live.itest.ts` (gated) + deterministic assembled proof (`ontology-surface-assembled.test.ts`) |
+| c-AC-4 | Append-only supersession applies on a live path; a superseded claim is observably tombstoned (not deleted). | DONE — `POST /api/ontology/proposals`→`submitProposal`→`supersedeClaim` (append+mark); active-only read filter; tested |
+| c-AC-5 | Fail-soft mount + invocation (a mount/link error never crashes the daemon). | DONE — mount try/catch `assemble.ts:866-873`; reads→`[]` on non-ok; linker throw non-fatal in graph-persist |
+
+> **045c→045d:** linker + control-plane apply use deterministic IDs + presence-probe → idempotent; 045d's dreaming runner must keep calling `submitProposal`/`supersedeClaim`/`inlineLinkMemory` (never raw inserts) → no double-write. Dreaming apply path left intact.
 
 ### PRD-045d — Dreaming-loop activation + proof (closes 009) · Owner: typescript-node-worker-bee · Model: opus · Depends: 045a, 045c
 | ID | Criterion | Status |
 |---|---|---|
-| d-AC-1 | Recorded default-posture decision + exact enable mechanism (env + vault) documented. | OPEN |
-| d-AC-2 | Token-gated live itest proves an enabled pass runs to completion (enqueue → lease → model → apply → state). | OPEN |
-| d-AC-3 | With dreaming OFF, `POST /api/diagnostics/dream` acks cleanly (`{triggered:false}`/queued), no crash. | OPEN |
-| d-AC-4 | Coordination check: dreaming apply + 045a graph-persist do not double-write the same edge. | OPEN |
+| d-AC-1 | Recorded default-posture decision + exact enable mechanism (env + vault) documented. | DONE — D-045d-1 stay OFF+opt-in (pipeline=primary writer, dreaming=consolidator); enable via `HONEYCOMB_DREAMING_ENABLED` or vault `dreaming.enabled` (vault wins) |
+| d-AC-2 | Token-gated live itest proves an enabled pass runs to completion (enqueue → lease → model → apply → state). | DONE — `dreaming-activation-assembled-live.itest.ts` (gated on token+key, skip-safe; flips gate via injected provider, asserts `last_pass_at` advance) |
+| d-AC-3 | With dreaming OFF, `POST /api/diagnostics/dream` acks cleanly (`{triggered:false}`/queued), no crash. | DONE — `dream-trigger-assembled.test.ts` deterministic: 202 `{triggered:false,reason:"disabled"}`, nothing enqueued |
+| d-AC-4 | Coordination check: dreaming apply + 045a graph-persist do not double-write the same edge. | DONE — `dream-coordination-nodoublewrite.test.ts`: shared stateful store, both paths + interleaved×3 → exactly one row per edge (deterministic IDs) |
 
 ### PRD-045e — Sources + Documents surface (closes 013) · Owner: typescript-node-worker-bee · Model: opus
 | ID | Criterion | Status |
@@ -72,22 +74,22 @@ fresh read) that flips DONE → VERIFIED. Implementers do not grade their own ho
 ### PRD-045g — Team Skill Sharing (closes 018) · Owner: retrieval-worker-bee · Model: sonnet · Depends: 045f
 | ID | Criterion | Status |
 |---|---|---|
-| g-AC-1 | Publish endpoint mounted (cite the seam); `POST /api/skills/*` accepts a versioned publish (no 501). | OPEN |
-| g-AC-2 | `SessionStartDeps` built WITH the real `autoPull` seam (cite `runtime.ts:198` fix); auto-pull idempotent + fail-soft. | OPEN |
-| g-AC-3 | Live itest end-to-end: workspace A mines+publishes (045f) → workspace/harness B auto-pulls on session start. | OPEN |
-| g-AC-4 | Skill CLI verbs registered in `VERB_TABLE`; the duplicate `src/cli/skill.ts` impl removed or merged. | OPEN |
-| g-AC-5 | Cross-harness symlink fan-out runs on pull and is idempotent. | OPEN |
+| g-AC-1 | Publish endpoint mounted (cite the seam); `POST /api/skills/*` accepts a versioned publish (no 501). | DONE — `mountSkillPropagationApi` (`skillify/propagation-api.ts`) fired `assemble.ts:908`; `POST /` publish→`{published,version}` |
+| g-AC-2 | `SessionStartDeps` built WITH the real `autoPull` seam (cite `runtime.ts:198` fix); auto-pull idempotent + fail-soft. | DONE — real seam injected `runtime.ts:191` (`createSessionStartSeams`, line had drifted from PRD's :198); time-budgeted (5s abort), kill-switch, fail-soft |
+| g-AC-3 | Live itest end-to-end: workspace A mines+publishes (045f) → workspace/harness B auto-pulls on session start. | DONE — `skill-publish-autopull-e2e.itest.ts` deterministic (assembled daemon + real auto-pull) + token-gated live |
+| g-AC-4 | Skill CLI verbs registered in `VERB_TABLE`; the duplicate `src/cli/skill.ts` impl removed or merged. | DONE — `skill`+`skillify` in VERB_TABLE→`buildSkillRequest`; dead `src/cli/skill.ts`+`src/cli/skillify.ts` deleted |
+| g-AC-5 | Cross-harness symlink fan-out runs on pull and is idempotent. | DONE — `POST /api/skills/pull`→real pull engine→`fanOutSymlinks` into agent roots; re-pull writes 0 (decideAction), tested |
 
 ### PRD-045 index (roll-up + reconciliation) · Owner: library-worker-bee (AC-7/AC-1 docs) + close-out
 | ID | Criterion | Status |
 |---|---|---|
-| AC-1 | Each of 006/007/008/009/013/016/018 has a cited runtime invocation site in `src/` (no test-only reachability). | OPEN |
-| AC-2 | A captured turn observably processed by the memory pipeline (extraction produces facts), live itest (045a). | OPEN |
-| AC-3 | `/api/ontology/*` (045c), `/api/sources` + `/api/documents` (045e) return real data (no 501) on a real daemon. | OPEN |
-| AC-4 | A dreaming pass runs to completion when enabled (045d). | OPEN |
-| AC-5 | A session-end mines a skill (045f), published + pulled by a second workspace/harness (045g), end-to-end. | OPEN |
-| AC-6 | Retrieval shaping phases on the live recall path or formally de-scoped, PRD-007 reconciled (045b). | OPEN |
-| AC-7 | Each affected Completed PRD index carries an accurate reconciliation note; no `Status:` overstates runtime reality. | OPEN |
+| AC-1 | Each of 006/007/008/009/013/016/018 has a cited runtime invocation site in `src/` (no test-only reachability). | DONE — invocation sites cited per sub-PRD (pipeline worker, recall RRF, ontology mount/linker, dreaming gate, sources mount, skillify worker, publish/auto-pull) |
+| AC-2 | A captured turn observably processed by the memory pipeline (extraction produces facts), live itest (045a). | DONE — 045a |
+| AC-3 | `/api/ontology/*` (045c), `/api/sources` + `/api/documents` (045e) return real data (no 501) on a real daemon. | DONE — 045c + 045e |
+| AC-4 | A dreaming pass runs to completion when enabled (045d). | DONE — 045d |
+| AC-5 | A session-end mines a skill (045f), published + pulled by a second workspace/harness (045g), end-to-end. | DONE — 045f + 045g e2e itest |
+| AC-6 | Retrieval shaping phases on the live recall path or formally de-scoped, PRD-007 reconciled (045b). | DONE — 045b de-scope + PRD-007 reconciled |
+| AC-7 | Each affected Completed PRD index carries an accurate reconciliation note; no `Status:` overstates runtime reality. | IN PROGRESS — Wave 7 library reconciliation pass (006/008/009/013/016/018 index banners; 007 done by 045b) |
 
 ---
 
