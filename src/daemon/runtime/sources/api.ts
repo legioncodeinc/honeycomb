@@ -40,6 +40,7 @@
 import type { Context, Hono } from "hono";
 
 import type { QueryScope } from "../../storage/client.js";
+import { getRequestIdentity } from "../middleware/permission.js";
 import { parseSourceConfig, type SourceConfig, type SourceProvider } from "./contracts.js";
 import {
 	createSourceLifecycle,
@@ -63,11 +64,25 @@ export interface SourceScopeResolver {
 	resolve(c: Context): QueryScope | null;
 }
 
-/** The default header-based scope resolver (mirrors secrets/api's resolver). */
+/**
+ * The default header-based scope resolver.
+ *
+ * ── Cross-tenant guard (PRD-022 security; mirrors `scope.ts` `resolveScopeFromHeaders`) ──
+ * In team/hybrid the permission middleware has already AUTHENTICATED the request and stamped
+ * the VALIDATED {@link import("../auth/contracts.js").Identity} onto the context. These
+ * handlers partition storage by the `x-honeycomb-org` HEADER, so without a cross-check an
+ * authenticated caller for org A could forge `x-honeycomb-org: orgB` and list/add/delete
+ * org B's sources + documents. When a validated Identity is present, the resolved org MUST
+ * equal `identity.org`; a mismatch returns `null` → the handler fails closed (400). In local
+ * mode no Identity is stamped, so the prior pure-header behaviour is unchanged.
+ */
 export const headerScopeResolver: SourceScopeResolver = {
 	resolve(c: Context): QueryScope | null {
 		const org = c.req.header("x-honeycomb-org");
 		if (org === undefined || org.length === 0) return null;
+		// A forged org header can never cross the token's own org boundary (PRD-022).
+		const identity = getRequestIdentity(c);
+		if (identity !== undefined && org !== identity.org) return null;
 		const workspace = c.req.header("x-honeycomb-workspace");
 		const ws = workspace !== undefined && workspace.length > 0 ? workspace : "default";
 		return { org, workspace: ws };

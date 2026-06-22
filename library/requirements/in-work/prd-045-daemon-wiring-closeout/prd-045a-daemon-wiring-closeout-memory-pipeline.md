@@ -1,6 +1,6 @@
 # PRD-045a: Wire the Memory Pipeline worker (closes PRD-006)
 
-> **Status:** Draft
+> **Status:** Completed
 > **Parent:** [PRD-045](./prd-045-daemon-wiring-closeout-index.md)
 > **Closes gap in:** PRD-006 Memory Pipeline
 > **Priority:** P0

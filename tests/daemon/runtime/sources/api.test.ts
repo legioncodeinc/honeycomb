@@ -164,6 +164,62 @@ describe("PRD-013a /api/sources", () => {
 	});
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SECURITY REGRESSION (security-worker-bee / PRD-022 cross-tenant guard): when the
+// permission middleware has stamped a VALIDATED Identity (team/hybrid), a forged
+// `x-honeycomb-org` header that disagrees with the token's own org MUST fail closed.
+// Stand in a stamping middleware (what the real permission middleware does) and prove
+// a header-forged tenancy can never cross the token's boundary onto the sources surface.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const IDENTITY_CONTEXT_KEY = "honeycombIdentity" as const;
+const TOKEN_IDENTITY = { org: "token-org", workspace: "token-ws", agentId: "token-actor", role: "write" };
+
+/** Build the sources mount stamping a fixed validated Identity (mirrors permission mw). */
+function buildAuthedSources(identity: Record<string, unknown>) {
+	const store = new FakeArtifactStore();
+	const queue = fakeQueue();
+	const registry = fakeRegistry();
+	const provider = createFakeSourceProvider([artifact("src-1", "a.md")]);
+	const deps = { storage: store, queue, registry, providers: providerResolver(provider), discoveryPollDelayMs: 0 };
+	const root = new Hono();
+	const sources = new Hono();
+	sources.use("*", async (c, next) => {
+		c.set(IDENTITY_CONTEXT_KEY, identity);
+		await next();
+	});
+	mountSourcesApi(sources, deps);
+	root.route(SOURCES_GROUP, sources);
+	return { app: root, registry };
+}
+
+describe("PRD-022 SECURITY: /api/sources tenancy cross-check against the validated Identity", () => {
+	it("a forged x-honeycomb-org that disagrees with the token's org fails closed (400) — no cross-tenant read", async () => {
+		const { app } = buildAuthedSources(TOKEN_IDENTITY);
+		const res = await app.request("/api/sources", {
+			method: "GET",
+			// The token binds org=token-org; the caller forges a DIFFERENT org header.
+			headers: { "x-honeycomb-org": "victim-org", "content-type": "application/json" },
+		});
+		expect(res.status).toBe(400);
+	});
+
+	it("an org header that MATCHES the token's org is honored (no regression for the legitimate caller)", async () => {
+		const { app, registry } = buildAuthedSources(TOKEN_IDENTITY);
+		await app.request("/api/sources", {
+			method: "POST",
+			headers: { "x-honeycomb-org": "token-org", "x-honeycomb-workspace": "token-ws", "content-type": "application/json" },
+			body: JSON.stringify({ kind: "document" }),
+		});
+		const res = await app.request("/api/sources", {
+			method: "GET",
+			headers: { "x-honeycomb-org": "token-org", "content-type": "application/json" },
+		});
+		expect(res.status).toBe(200);
+		expect(await registry.list()).toContain("src-1");
+	});
+});
+
 describe("PRD-013a /api/documents", () => {
 	it("POST /api/documents with NO worker wired returns an honest 501 (013b)", async () => {
 		const { app } = buildApp({ withWorker: false });

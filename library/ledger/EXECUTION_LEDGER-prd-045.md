@@ -89,7 +89,11 @@ fresh read) that flips DONE → VERIFIED. Implementers do not grade their own ho
 | AC-4 | A dreaming pass runs to completion when enabled (045d). | DONE — 045d |
 | AC-5 | A session-end mines a skill (045f), published + pulled by a second workspace/harness (045g), end-to-end. | DONE — 045f + 045g e2e itest |
 | AC-6 | Retrieval shaping phases on the live recall path or formally de-scoped, PRD-007 reconciled (045b). | DONE — 045b de-scope + PRD-007 reconciled |
-| AC-7 | Each affected Completed PRD index carries an accurate reconciliation note; no `Status:` overstates runtime reality. | IN PROGRESS — Wave 7 library reconciliation pass (006/008/009/013/016/018 index banners; 007 done by 045b) |
+| AC-7 | Each affected Completed PRD index carries an accurate reconciliation note; no `Status:` overstates runtime reality. | DONE — 6 Completed indexes (006/008/009/013/016/018) reconciled + 007 verified; 5 sub-PRD statuses flipped; parent index updated; no overstatement |
+
+## Close-out
+- **Security (security-worker-bee, opus):** 1 HIGH — cross-tenant BOLA on newly-live `/api/sources`+`/api/documents` (`sources/api.ts:67` trusted `x-honeycomb-org` w/o identity cross-check) → **FIXED in place** (`api.ts:84` `getRequestIdentity` guard) + regression test. All other surfaces clean; audit:sql OK; 2746 passed. Flagged pre-existing latent variant on `/api/secrets|notifications|vault` (NOT branch-introduced, out of PRD-045 scope → follow-up task).
+- **Quality (quality-worker-bee):** PENDING (runs after security per close-out order).
 
 ---
 

@@ -1,16 +1,18 @@
 # PRD-008: Knowledge Graph and Ontology
 
-> **Status:** Completed (code shipped) — ⚠ PARTIALLY LIVE; close-out tracked in [PRD-045c](../../in-work/prd-045-daemon-wiring-closeout/prd-045c-daemon-wiring-closeout-ontology-surface.md)
+> **Status:** Completed — NOW LIVE (closed by [PRD-045c](../../in-work/prd-045-daemon-wiring-closeout/prd-045c-daemon-wiring-closeout-ontology-surface.md))
 > **Priority:** P1
 > **Effort:** L
 > **Schema changes:** Additive
 
 ---
 
-> **⚠ Partially live (2026-06-22 daemon-wiring audit).** The inline entity linker `inlineLinkMemory`
-> (`ontology/entity-model.ts:506`) has zero callers (AC-1 unreachable), and there is no `/api/ontology/*` mount
-> (falls through to the 501 scaffold). Control-plane apply/supersession run only via the dormant dreaming runner
-> (`dreaming/runner.ts:284`). Wiring close-out:
+> **✅ Now live (2026-06-22 daemon-wiring close-out, PRD-045c).** The ontology surface is fully wired. `inlineLinkMemory`
+> (`ontology/entity-model.ts:506`) is now invoked on the live graph-persist path in the memory-pipeline
+> (PRD-045a/045c), so entities are linked as memories land without depending on the dreaming gate. `/api/ontology/*`
+> is mounted in `assemble.ts:868` (`mountOntologyApi`); the endpoint returns real entity/edge/assertion data (no 501).
+> Control-plane apply/supersession runs on a live path via the pipeline graph-persist stage (independent of dreaming),
+> with dreaming remaining an additional opt-in consolidation consumer. Closed by
 > [PRD-045c](../../in-work/prd-045-daemon-wiring-closeout/prd-045c-daemon-wiring-closeout-ontology-surface.md).
 > Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../../in-work/prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
 
