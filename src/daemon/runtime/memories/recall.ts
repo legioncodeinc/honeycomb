@@ -66,6 +66,7 @@ import { sLiteral, sqlIdent, sqlLike } from "../../storage/sql.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import { EMBEDDING_DIMS, type ScoredId, vectorSearch } from "../../storage/vector.js";
 import type { EmbedClient } from "../services/embed-client.js";
+import type { RecallMode } from "../vault/api.js";
 
 /** The default number of recall hits returned when the caller supplies no limit. */
 export const DEFAULT_RECALL_LIMIT = 20;
@@ -343,6 +344,21 @@ export interface MemoryRecallDeps {
 	 * (D-1 default-on); a unit test injects a fake to drive both branches deterministically.
 	 */
 	readonly embed?: EmbedClient;
+	/**
+	 * The user-selected recall mode (PRD-044c). The LIVE `/api/memories/recall` handler reads the
+	 * `recallMode` vault `setting` at recall time and threads it here; the closed enum is validated
+	 * daemon-side on write (`vault/api.ts` `isValidRecallMode`, fail-closed). It GATES the semantic
+	 * arm (see {@link recallMemories}):
+	 *   - `keyword`              → the `<#>` cosine arm is SKIPPED entirely (no embed call) and
+	 *                              `degraded` is FORCED `false` — an intentional lexical run is NOT a
+	 *                              degraded fallback (the PRD-029 fallback-vs-mode coherence rule).
+	 *   - `semantic` / `hybrid`  → run the semantic arm EXACTLY as today; `degraded` stays honest
+	 *                              (`semanticArms === null`). The lexical floor always runs, so both
+	 *                              yield vector+lexical — that is correct, not a fabricated difference.
+	 *   - UNSET (default)        → byte-for-byte today's PRD-025 behavior (run the semantic arm,
+	 *                              `degraded` honest) — a no-op for any caller that omits this.
+	 */
+	readonly recallMode?: RecallMode;
 }
 
 /** A recall request as it enters the adapter (the zod-validated, scoped body). */
@@ -557,19 +573,33 @@ export async function recallMemories(
 		return { hits: [], sources: [], degraded: true };
 	}
 
+	// PRD-044c: the user-selected `recallMode` GATES the semantic arm at recall time.
+	//   · `keyword`              → SKIP `runSemanticArms` entirely (no embed call, no `<#>`
+	//                              statement) — the semantic path is `null` by intent, NOT by
+	//                              failure. `degraded` is forced `false` below (an intentional
+	//                              lexical run is not a degraded fallback — PRD-029 coherence).
+	//   · `semantic`/`hybrid`    → run `runSemanticArms` exactly as today; `degraded` stays
+	//                              honest. (The lexical floor always runs, so both yield
+	//                              vector+lexical — correct and honest, no fabricated split.)
+	//   · UNSET (default)        → run `runSemanticArms` exactly as today (behavior-neutral).
+	const keywordOnly = deps.recallMode === "keyword";
+
 	// Run the semantic arms (embed-query → `<#>`) and the lexical arms concurrently.
 	// The semantic path returns null when it could not run (→ degraded:true); the
 	// lexical arms always run (the resilient floor). Each lexical arm is bounded by the
-	// overall limit so a single arm cannot starve the fusion.
+	// overall limit so a single arm cannot starve the fusion. In `keyword` mode the
+	// semantic arm is never invoked — it short-circuits to `null` before the await.
 	const [semanticArms, memoriesRows, memoryRows, sessionsRows] = await Promise.all([
-		runSemanticArms(request, deps, limit),
+		keywordOnly ? Promise.resolve(null) : runSemanticArms(request, deps, limit),
 		runArm(buildMemoriesArmSql(term, limit), request, deps),
 		runArm(buildMemoryArmSql(term, limit), request, deps),
 		runArm(buildSessionsArmSql(term, limit), request, deps),
 	]);
 
-	// PRD-025 AC-3: `degraded` is HONEST — false iff the semantic arm actually ran.
-	const degraded = semanticArms === null;
+	// `degraded` is HONEST (PRD-025 AC-3): false iff the semantic arm actually ran — EXCEPT in
+	// `keyword` mode, where an intentional lexical-only run is NOT a degraded fallback (PRD-044c /
+	// PRD-029), so it is forced `false` even though the semantic arm never ran.
+	const degraded = keywordOnly ? false : semanticArms === null;
 
 	// PRD-027 D-1/D-2/D-3: assemble every arm as a RANKED list, then fuse with RRF +
 	// the arm-class weight, dedup, and order by fused score. The semantic arms (one per

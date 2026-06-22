@@ -10,7 +10,9 @@
 export {
 	MEMORIES_GROUP,
 	RECALL_DEGRADED_EVENT,
+	RECALL_MODE_SETTING_KEY,
 	type MountMemoriesOptions,
+	type VaultSettingsReader,
 	mountMemoriesApi,
 	resolveMemoryScope,
 } from "./api.js";

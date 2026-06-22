@@ -54,6 +54,9 @@ import type { EmbedClient } from "../services/embed-client.js";
 import type { RequestLogger } from "../logger.js";
 import { resolveScopeFromHeaders, resolveScopeOrLocalDefault } from "../scope.js";
 import { recallMemories, type MemoryRecallResult } from "./recall.js";
+import { isValidRecallMode, type RecallMode } from "../vault/api.js";
+import type { VaultStore } from "../vault/store.js";
+import type { SecretScope } from "../secrets/contracts.js";
 import { getMemory, listMemories, resolveListLimit } from "./reads.js";
 import {
 	forgetMemory,
@@ -105,7 +108,29 @@ export interface MountMemoriesOptions {
 	 * event (the prior behaviour). The composition root threads `daemon.logger`.
 	 */
 	readonly logger?: RequestLogger;
+	/**
+	 * The vault `setting`-class READER (PRD-044c). When present, the `/api/memories/recall` handler
+	 * reads the user-selected `recallMode` setting AT RECALL TIME — under the SAME per-request scope
+	 * the recall runs (so read tenancy matches the settings-API write) — and threads it into
+	 * {@link recallMemories} to gate the semantic arm (`keyword` → lexical-only, not degraded). The
+	 * read is FAIL-SOFT: an absent reader, a missing/unset key, an undecryptable record, or any throw
+	 * is treated as UNSET → today's PRD-025 behavior is preserved EXACTLY. The composition root threads
+	 * the same real {@link VaultStore} the `/api/settings` surface writes through; a unit-constructed
+	 * mount omits it (the deterministic suite is unchanged). Narrowed to the single `getSetting` method.
+	 */
+	readonly vault?: VaultSettingsReader;
 }
+
+/**
+ * The narrow vault READ surface the recall handler needs (PRD-044c) — the single `getSetting`
+ * method, structurally satisfied by the real {@link VaultStore}. Mirrors `assemble.ts`'s
+ * `VaultSettingsReader` (kept local to avoid an `api → assemble` import cycle, since `assemble`
+ * imports this module). A test injects a three-line `getSetting`-shaped stub.
+ */
+export type VaultSettingsReader = Pick<VaultStore, "getSetting">;
+
+/** The vault `setting` key the recall mode is persisted under (PRD-044c). Matches `vault/api.ts`. */
+export const RECALL_MODE_SETTING_KEY = "recallMode" as const;
 
 // ── Zod request schemas (a-AC-5 / FR-6) ──────────────────────────────────────
 
@@ -208,6 +233,37 @@ function logDegradedRecall(logger: RequestLogger | undefined, result: MemoryReca
 	});
 }
 
+/** Map a recall {@link QueryScope} to the {@link SecretScope} the vault `setting` is partitioned under. */
+function secretScopeOf(scope: QueryScope): SecretScope {
+	// The settings-API write resolves `workspace` defaulting to "default" (`headerScopeResolver`);
+	// mirror that here so a recall under the same headers reads the SAME partition it was written to.
+	return { org: scope.org, workspace: scope.workspace ?? "default" };
+}
+
+/**
+ * READ the user-selected `recallMode` vault setting (PRD-044c) for `scope`, FAIL-SOFT. Returns a
+ * validated {@link RecallMode} ONLY when the reader is present, the key is set + readable, and the
+ * value passes the SAME closed-enum gate the settings API applied on write (`isValidRecallMode`,
+ * defense in depth). An ABSENT reader, a missing/unset key, an undecryptable record, an out-of-enum
+ * value, or ANY throw → `undefined` (UNSET) — preserving today's PRD-025 behavior EXACTLY. NEVER
+ * throws: a vault hiccup must never fail a recall, only fall back to the behavior-neutral default.
+ */
+async function readRecallMode(
+	vault: VaultSettingsReader | undefined,
+	scope: QueryScope,
+): Promise<RecallMode | undefined> {
+	if (vault === undefined) return undefined;
+	try {
+		const res = await vault.getSetting(RECALL_MODE_SETTING_KEY, secretScopeOf(scope));
+		if (!res.ok) return undefined;
+		const value = String(res.value);
+		return isValidRecallMode(value) ? value : undefined;
+	} catch {
+		// A malformed/undecryptable/missing vault setting must never fail recall — treat as UNSET.
+		return undefined;
+	}
+}
+
 /**
  * Attach the `/api/memories/*` handlers onto the daemon's already-mounted
  * `/api/memories` route group (the 022a mount seam). Mirrors `mountDashboardApi`:
@@ -242,9 +298,17 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 		if (scope === null) return c.json(NO_ORG_BODY, 400);
 		const parsed = RecallBodySchema.safeParse(await readJsonBody(c));
 		if (!parsed.success) return zodError(c, parsed.error);
+		// PRD-044c: read the user-selected `recallMode` setting AT RECALL TIME, under this request's
+		// scope, FAIL-SOFT (an unreadable/unset setting → undefined → today's behavior). Threaded into
+		// the engine deps to gate the semantic arm (`keyword` → lexical-only, NOT degraded).
+		const recallMode = await readRecallMode(options.vault, scope);
 		const result = await recallMemories(
 			{ query: parsed.data.query, scope, ...(parsed.data.limit !== undefined ? { limit: parsed.data.limit } : {}) },
-			{ storage, ...(options.embed !== undefined ? { embed: options.embed } : {}) },
+			{
+				storage,
+				...(options.embed !== undefined ? { embed: options.embed } : {}),
+				...(recallMode !== undefined ? { recallMode } : {}),
+			},
 		);
 		// PRD-029 (AC-4): when this recall ran DEGRADED (lexical fallback), emit one
 		// structured `recall.degraded` event with the mode + arm coverage. No-op otherwise

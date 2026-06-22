@@ -106,6 +106,18 @@ export {
 	resolveRequestTenancy,
 } from "./tenancy-resolution.js";
 
+// ── PRD-044a — the redacted `/api/auth/status` read-model (the Settings page auth section) ──
+export {
+	type AuthStatusApiDeps,
+	type AuthStatusBody,
+	type AuthStatusSource,
+	AUTH_GROUP,
+	DISCONNECTED_STATUS,
+	mountAuthStatusApi,
+	mountAuthStatusGroup,
+	resolveAuthStatus,
+} from "./status-api.js";
+
 // ── 011b device-flow login + drift heal + token authenticator ───────────────
 export {
 	type DeviceFlowDeps,

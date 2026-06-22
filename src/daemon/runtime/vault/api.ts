@@ -47,9 +47,27 @@ export const SETTINGS_GROUP = "/api/settings" as const;
  *   - `activeProvider` — a catalog provider id;
  *   - `activeModel`    — a model id, validated against the chosen `activeProvider`;
  *   - `dreaming.enabled` — the dreaming toggle (boolean);
+ *   - `recallMode`     — the recall-mode selector (PRD-044c): the CLOSED enum
+ *     `keyword | semantic | hybrid` (validated below, fail-closed). UNSET preserves the
+ *     PRD-025 runtime default (behavior-neutral), so the key exists to OPT IN to an explicit mode.
  *   - `dashboard.*`    — free-form scalar dashboard prefs (validated only by the class schema).
  */
-export const KNOWN_SETTING_KEYS = ["activeProvider", "activeModel", "dreaming.enabled"] as const;
+export const KNOWN_SETTING_KEYS = ["activeProvider", "activeModel", "dreaming.enabled", "recallMode"] as const;
+
+/**
+ * The closed `recallMode` enum (PRD-044c). The recall pipeline reads this `setting` at recall
+ * time and gates the channels: `keyword` → lexical FTS only (NOT degraded — an intentional
+ * lexical run), `semantic` → the vector arm (with the PRD-025 embeddings-off degraded fallback),
+ * `hybrid` → both arms. An UNSET key preserves today's PRD-025 runtime decision exactly.
+ */
+export const RECALL_MODES = ["keyword", "semantic", "hybrid"] as const;
+/** One recall mode drawn from the closed {@link RECALL_MODES} vocabulary. */
+export type RecallMode = (typeof RECALL_MODES)[number];
+
+/** Whether `value` is a valid {@link RecallMode} (fail-closed: anything else is rejected). */
+export function isValidRecallMode(value: string): value is RecallMode {
+	return (RECALL_MODES as readonly string[]).includes(value);
+}
 
 /** A dashboard-pref key prefix accepted as a free-form scalar setting. */
 export const DASHBOARD_PREF_PREFIX = "dashboard." as const;
@@ -212,6 +230,13 @@ async function validateSettingSemantics(
 		const provider = provRes.ok ? String(provRes.value) : "";
 		if (provider.length === 0) return "set activeProvider before activeModel";
 		if (!isValidProviderModel(provider, String(value))) return "model not in provider catalog";
+		return null;
+	}
+	if (key === "recallMode") {
+		// PRD-044c: fail-closed against the CLOSED enum, the same way `activeModel` is
+		// catalog-validated. Anything outside `keyword | semantic | hybrid` is rejected with a
+		// 400 — a caller cannot persist a garbage recall mode the pipeline would not understand.
+		if (!isValidRecallMode(String(value))) return "recallMode must be keyword, semantic, or hybrid";
 		return null;
 	}
 	return null;

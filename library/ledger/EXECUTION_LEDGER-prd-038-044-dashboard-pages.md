@@ -29,7 +29,7 @@ All bees: `typescript-node-worker-bee` / **opus** (dashboard React + daemon endp
 | 041 | Graph (full codebase graph + memory-graph foundation) | 17 (4+7+6) | ✅ VERIFIED — shipping |
 | 042 | Sync (skills + agents view/promote/control) | 24 (8+8a+7b+6c) | ✅ VERIFIED — shipping |
 | 043 | Logs (SQLite persistence + history + turns) | 25 (6+7a+6b+6c) | ✅ VERIFIED — shipping |
-| 044 | Settings (DeepLake auth + API keys + search mode) | tbd | OPEN |
+| 044 | Settings (DeepLake auth + API keys + search mode) | 21 (6+5a+5b+5c) | ✅ VERIFIED — shipping |
 
 ## PRD-039 ledger (23 ACs)
 
@@ -88,3 +88,40 @@ User decision (OQ-1): **`node:sqlite` (built-in)** over `better-sqlite3` — zer
 - **043 impl returned DONE** (one bee): `log-store.ts` (`node:sqlite` behind a seam, retention, cursor codec, fail-soft) + write-through `logger.ts` + `GET /api/logs/history` + `logs.tsx` (history table + collapsible live tail + Turns drill-down, shared `LogRow`) + additive paged `fetchSessionsView` + flag plumbing (engines, vitest execArgv, daemon spawn). Registry `/logs` was pre-wired by 037 (zero registry edit). Orchestrator verify: 64 focused + full ci green, deletion/asset safeguard clean.
 - **Close-out — security (opus): PASS, zero remediations.** All 7 focus items clean.
 - **Close-out — quality (opus): PASS-WITH-FINDINGS, 25/25** — W-1 fixed in-branch + regression. Re-verified: store suite 16/16, full ci green (audit:sql ran ⇒ vitest all-pass), audit:openclaw clean. → Phase 3 Ship.
+- **043 SHIPPED:** PR #79 merged squash+delete (main `c3d9859`); CI all-green incl. **Quality gate Node 22.x + 24.x + Windows smoke** (the node:sqlite `--experimental-sqlite` flag plumbing proven across the matrix). Lifecycle: 042+043 in-work/backlog→completed.
+
+## PRD-044 ledger (21 ACs — settings page; the security-heaviest + FINAL page)
+
+Resolved OQs: **OQ-1 → status-first + CLI hand-off** (mount `GET /api/auth/status` redacted; connect = honest `honeycomb login`/`HONEYCOMB_TOKEN` instructions + status re-read; NO in-page device-flow login this slice). OQ-2 expiry "unknown" when absent. OQ-3 Cohere KEY-only (catalog/router = PRD-010). 044c OQ-1 recallMode read at recall time; semantic-embeddings-off = degraded fallback (PRD-025); default distinct from hybrid; global setting.
+
+| ID | Criterion | Status |
+|---|---|---|
+| 044-AC1..6 | (index) three sections / auth truthful / keys write-only / recall mode selectable+persisted+honored / thin-client reused-wire / security+gate | ✅ VERIFIED |
+| 044a-AC1..5 | auth: status truthful (org/ws/agent/source/savedAt/expiry) / connect drives REAL flow (CLI hand-off) / source+expiry honest / **token NEVER exposed** (asserted absent) / thin-client | ✅ VERIFIED |
+| 044b-AC1..5 | keys: add/replace Anthropic·OpenAI·OpenRouter·Cohere via `POST /api/secrets/:name` / presence names-only / **no value-returning route, no `getSecret`** / reused wire / write-only inputs cleared | ✅ VERIFIED |
+| 044c-AC1..5 | recall: mode selectable+persisted+fail-closed / **LIVE recall honors it** / fallback coherence (keyword≠degraded) / inference migrated (reused not forked) / thin-client+security | ✅ VERIFIED |
+| 044-SEC | security-worker-bee: **PASS, zero findings** — the bearer token is redacted at 3 layers (read-model/zod-schema/page), keys write-only (no value route), `/api/auth/status` self-gates to local, recallMode read under the request's own scope + fail-soft, SQL guarded, no `dangerouslySetInnerHTML`. | ✅ VERIFIED |
+| 044-QA | quality-worker-bee: **PASS, 21/21** — the load-bearing **live-recall-honors-recallMode** wiring verified at 3 test layers (HTTP route / `recallMemories` engine / `collectCandidates` seam); token-absence asserted; `getSecret` absent; behavior-neutral default proven. Non-blocking cross-PRD note: PRD-038 home still renders a duplicate `SettingsPanel` (D-5 defers to the 038 reorg; panel reused-not-forked) → flagged as a follow-up task. | ✅ VERIFIED |
+| 044-CI | `npm run ci` (2741 passed, 6 skipped; flake isolated) + build + audit:sql + audit:openclaw green | ✅ VERIFIED |
+
+- Setup: branch `feat/prd-044-settings-page` rebuilt cleanly off latest main (`c3d9859`, includes the separately-merged PRD-046) after a branch-state recovery (a stray uncommitted lifecycle-mv on the stale 043 branch was undone; 044 branch recreated fresh; user confirmed "no bee running — take over"). Read PRD-044 index+a/b/c end-to-end; surfaced none additionally (OQs pre-resolved).
+- **044 impl returned DONE** (one bee): `status-api.ts` (`GET /api/auth/status` redacted, no token) + `ProviderKeysSection` (write-only + Cohere) + `recallMode` setting (KNOWN_SETTING_KEYS + fail-closed enum) wired into `collectCandidates` + the three-section page (zero registry edit — 037 pre-wired `/settings`). **Bee honestly flagged the live-path gap** (recallMode wired to `collectCandidates` but the live `/api/memories/recall` uses `recallMemories`).
+- **Live-recall gap CLOSED** (focused bee, my call — a dead toggle is the exact broken-UI class this run exists to fix): `memories/api.ts` reads `recallMode` at recall time (request-scoped, fail-soft, enum-validated) → gates `recallMemories` (`keyword`→skip semantic arm + `degraded:false`; `semantic`/`hybrid`→honest; UNSET→byte-for-byte today). Proven at HTTP + engine + seam layers; ci 2741 green.
+- **Close-out — security (opus): PASS, zero remediations.** Token sacred (3-layer redaction), keys write-only, recallMode scoped+fail-soft.
+- **Close-out — quality (opus): PASS, 21/21.** Live-recall wiring genuinely verified (not a dead toggle). → Phase 3 Ship.
+
+---
+
+## RUN COMPLETE — all 7 pages (038–044) shipped
+
+| PRD | Page | ACs | PR |
+|---|---|---|---|
+| 039 | Harnesses | 23 | #72 |
+| 038 | Dashboard home | 23 | (shipped) |
+| 040 | Memories | 21 | #74 |
+| 041 | Graph | 17 | #75 |
+| 042 | Sync | 24 | #76 |
+| 043 | Logs | 25 | #79 |
+| 044 | Settings | 21 | (shipping) |
+
+Every page: ONE coherent bee → security→quality close-out → per-PRD PR → CI-green → squash-merge. Sequential-with-merge kept the shared registry/wire/api seams conflict-free. Driver decision (043) surfaced to the user (`node:sqlite`). Integration gaps caught + closed in-run (039 a-AC-3 installed-set, 042 path-traversal+demote-authz, 043 W-1 LIKE-escape, 044 live-recall toggle). Total: **154 ACs across 7 pages.**

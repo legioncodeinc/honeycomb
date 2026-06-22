@@ -67,6 +67,7 @@ export {
 export {
 	type CollectionDeps,
 	type HintSource,
+	type RecallMode,
 	type ScoredId,
 	buildFtsSql,
 	collectCandidates,

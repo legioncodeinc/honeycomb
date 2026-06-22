@@ -419,6 +419,10 @@ export const SETTING_KEY = Object.freeze({
 	activeProvider: "activeProvider",
 	activeModel: "activeModel",
 	dreamingEnabled: "dreaming.enabled",
+	// PRD-044c: the recall-mode selector key. The closed enum `keyword | semantic | hybrid` is
+	// validated daemon-side (`vault/api.ts` `isValidRecallMode`, fail-closed); an UNSET key
+	// preserves the PRD-025 runtime default (the page's "default" option leaves it unset).
+	recallMode: "recallMode",
 } as const);
 
 /**
@@ -431,6 +435,10 @@ export const PROVIDER_KEY_NAME: Record<string, string> = Object.freeze({
 	anthropic: "ANTHROPIC_API_KEY",
 	openai: "OPENAI_API_KEY",
 	openrouter: "OPENROUTER_API_KEY",
+	// PRD-044b: Cohere joins the presence map KEY-ONLY (write-only vault + presence badge). The
+	// name is NEW (grep-confirmed: `COHERE_API_KEY` exists nowhere else). Adding Cohere to the
+	// model router/catalog (PROVIDER_CATALOG) is OUT of scope here — that is PRD-010 (OQ-1).
+	cohere: "COHERE_API_KEY",
 });
 
 /** A styled native `<select>` matching the DS tokens (the kit has no Select primitive). */

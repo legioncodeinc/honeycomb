@@ -25,6 +25,7 @@ import {
 	type HintSource,
 	type RecallConfig,
 	RecallConfigSchema,
+	type RecallMode,
 	type RecallQuery,
 	type ScoredId,
 	buildFtsSql,
@@ -99,6 +100,7 @@ function deps(args: {
 	config?: RecallConfig;
 	embed?: EmbedClient;
 	hints?: HintSource;
+	recallMode?: RecallMode;
 }): CollectionDeps {
 	return {
 		storage: args.storage,
@@ -106,6 +108,7 @@ function deps(args: {
 		config: args.config ?? recallConfig(),
 		embed: args.embed,
 		hints: args.hints,
+		recallMode: args.recallMode,
 	};
 }
 
@@ -319,5 +322,66 @@ describe("a-AC-7 per-channel provenance attached; no content row loaded", () => 
 			// Each SELECT projects `id AS id` + `... AS score` only — no `content AS`.
 			expect(req.sql).not.toMatch(/\bcontent\s+AS\b/i);
 		}
+	});
+});
+
+// ── PRD-044c — recallMode gates the vector channel (the daemon-side read seam) ────────────────
+
+describe("PRD-044c recallMode — channel gating + the behavior-neutral default", () => {
+	it("keyword → vector arm SKIPPED even with embeddings ON, and NOT degraded (AC-3 coherence)", async () => {
+		const { storage, fake } = makeStorage({ ftsRows: [{ id: "m1", score: 0.5 }], vectorRows: [{ id: "v1", score: 0.9 }] });
+		// Embeddings ARE on (a real 768-dim vector available), but keyword mode forces lexical-only.
+		const pool = await collectCandidates(
+			recallQuery(),
+			deps({ storage, embed: fakeEmbed(vec768()), recallMode: "keyword" }),
+		);
+		// No `<#>` vector statement was EVER emitted — the arm is skipped at the mode gate.
+		expect(fake.requests.some((r) => /<#>/.test(r.sql))).toBe(false);
+		// The lexical floor still returned its hit.
+		expect(pool.candidates.map((c) => c.id)).toContain("m1");
+		// CRITICAL: an intentional keyword run is NOT degraded (it is not a fallback — AC-3).
+		expect(pool.degraded).toBe(false);
+	});
+
+	it("semantic with embeddings OFF → degraded lexical fallback (matches PRD-025)", async () => {
+		const { storage, fake } = makeStorage({ ftsRows: [{ id: "m1", score: 0.5 }], vectorRows: [] });
+		// Embeddings off (no embed client) but the user explicitly chose semantic → degraded fallback.
+		const pool = await collectCandidates(recallQuery(), deps({ storage, recallMode: "semantic" }));
+		expect(fake.requests.some((r) => /<#>/.test(r.sql))).toBe(false);
+		expect(pool.candidates.map((c) => c.id)).toContain("m1");
+		// A semantic run that could not run its vector arm DOES set degraded (PRD-025 D-4 / AC-3).
+		expect(pool.degraded).toBe(true);
+	});
+
+	it("hybrid → runs BOTH arms when embeddings are on", async () => {
+		const { storage, fake } = makeStorage({ ftsRows: [{ id: "m1", score: 0.5 }], vectorRows: [{ id: "v1", score: 0.9 }] });
+		const pool = await collectCandidates(
+			recallQuery(),
+			deps({ storage, embed: fakeEmbed(vec768()), recallMode: "hybrid" }),
+		);
+		// Both the lexical ILIKE AND the `<#>` vector statements were emitted.
+		expect(fake.requests.some((r) => /ILIKE/i.test(r.sql))).toBe(true);
+		expect(fake.requests.some((r) => /<#>/.test(r.sql))).toBe(true);
+		expect(pool.candidates.map((c) => c.id).sort()).toEqual(["m1", "v1"]);
+		expect(pool.degraded).toBe(false);
+	});
+
+	it("UNSET (default) is byte-for-byte identical to today's PRD-025 behavior (the behavior-neutral proof)", async () => {
+		const storeA = makeStorage({ ftsRows: [{ id: "m1", score: 0.5 }], vectorRows: [{ id: "v1", score: 0.9 }] });
+		const storeB = makeStorage({ ftsRows: [{ id: "m1", score: 0.5 }], vectorRows: [{ id: "v1", score: 0.9 }] });
+		// No recallMode passed (undefined) vs the prior code path (which had no recallMode field at all).
+		const withDefault = await collectCandidates(recallQuery(), deps({ storage: storeA.storage, embed: fakeEmbed(vec768()) }));
+		const explicitUndefined = await collectCandidates(
+			recallQuery(),
+			deps({ storage: storeB.storage, embed: fakeEmbed(vec768()), recallMode: undefined }),
+		);
+		// Identical candidate set, identical degraded flag, identical SQL arm coverage — the ship is
+		// behavior-neutral until a user opts in.
+		expect(withDefault.candidates.map((c) => c.id).sort()).toEqual(explicitUndefined.candidates.map((c) => c.id).sort());
+		expect(withDefault.degraded).toBe(false);
+		expect(explicitUndefined.degraded).toBe(false);
+		// The default ran BOTH arms (the PRD-025 "semantic when embeddings on" decision).
+		expect(storeA.fake.requests.some((r) => /<#>/.test(r.sql))).toBe(true);
+		expect(storeA.fake.requests.some((r) => /ILIKE/i.test(r.sql))).toBe(true);
 	});
 });

@@ -465,6 +465,142 @@ describe("AC-3 recall runs the `<#>` cosine arm and reports `degraded` honestly"
 	});
 });
 
+// ── PRD-044c — the `recallMode` gate makes the user's Settings choice change LIVE recall ─────
+
+/** An EmbedClient that COUNTS its `embed` calls — proves `keyword` mode never invokes the seam. */
+function countingEmbed(result: readonly number[] | null): { embed: EmbedClient; calls: () => number } {
+	let n = 0;
+	return {
+		embed: {
+			async embed(): Promise<readonly number[] | null> {
+				n += 1;
+				return result;
+			},
+		},
+		calls: () => n,
+	};
+}
+
+describe("PRD-044c — recallMode gates the semantic arm on the engine the LIVE route uses", () => {
+	it("`keyword` → the semantic arm is NEVER invoked (no embed call, no `<#>`) AND degraded:false", async () => {
+		// Embeddings WOULD be available (a valid vector) — but `keyword` is an INTENTIONAL lexical
+		// run, so the embed seam must not even be touched and `degraded` must be false (not a fallback).
+		const probe = countingEmbed(VALID_QUERY_VECTOR);
+		const { storage, sqls } = semanticStorage({
+			vector: { memories: [{ id: "mem-sem-kw", score: 0.95 }] }, // would surface IF the arm ran.
+			hydrate: { memories: [{ source: "memories", id: "mem-sem-kw", text: "a semantic-only hit" }] },
+			lexical: { memories: ok([{ source: "memories", id: "mem-lex-kw", text: "a lexical fact" }], 0) },
+		});
+
+		const result = await recallMemories(
+			{ query: "anything", scope: SCOPE },
+			{ storage, embed: probe.embed, recallMode: "keyword" },
+		);
+
+		expect(probe.calls(), "keyword mode must NOT call embed").toBe(0);
+		expect(sqls.some((s) => s.includes("<#>")), "keyword mode issues NO `<#>` arm").toBe(false);
+		expect(result.degraded, "an intentional lexical run is NOT degraded (PRD-029 coherence)").toBe(false);
+		// Only the lexical hit surfaces; the semantic-only id never appears (the arm never ran).
+		expect(result.hits.map((h) => h.id)).toEqual(["mem-lex-kw"]);
+		expect(result.hits.some((h) => h.id === "mem-sem-kw")).toBe(false);
+	});
+
+	it("`semantic` → the `<#>` arm RUNS exactly as today; degraded stays honest (false when it ran)", async () => {
+		const probe = countingEmbed(VALID_QUERY_VECTOR);
+		const { storage, sqls } = semanticStorage({
+			vector: { memories: [{ id: "mem-sem-s", score: 0.9 }] },
+			hydrate: { memories: [{ source: "memories", id: "mem-sem-s", text: "a semantic hit" }] },
+		});
+
+		const result = await recallMemories(
+			{ query: "anything", scope: SCOPE },
+			{ storage, embed: probe.embed, recallMode: "semantic" },
+		);
+
+		expect(probe.calls(), "semantic mode calls embed").toBe(1);
+		expect(sqls.some((s) => s.includes("<#>")), "semantic mode issues the `<#>` arm").toBe(true);
+		expect(result.degraded, "the semantic arm ran → not degraded").toBe(false);
+		expect(result.hits.some((h) => h.id === "mem-sem-s")).toBe(true);
+	});
+
+	it("`hybrid` → the `<#>` arm RUNS (vector + lexical floor); degraded honest", async () => {
+		const probe = countingEmbed(VALID_QUERY_VECTOR);
+		const { storage, sqls } = semanticStorage({
+			vector: { memories: [{ id: "mem-sem-h", score: 0.88 }] },
+			hydrate: { memories: [{ source: "memories", id: "mem-sem-h", text: "a hybrid semantic hit" }] },
+			lexical: { memories: ok([{ source: "memories", id: "mem-lex-h", text: "a hybrid lexical hit" }], 0) },
+		});
+
+		const result = await recallMemories(
+			{ query: "anything", scope: SCOPE },
+			{ storage, embed: probe.embed, recallMode: "hybrid" },
+		);
+
+		expect(probe.calls(), "hybrid mode calls embed").toBe(1);
+		expect(sqls.some((s) => s.includes("<#>")), "hybrid mode issues the `<#>` arm").toBe(true);
+		expect(result.degraded).toBe(false);
+		// BOTH the vector and the lexical floor surface (the honest hybrid yield).
+		expect(result.hits.some((h) => h.id === "mem-sem-h")).toBe(true);
+		expect(result.hits.some((h) => h.id === "mem-lex-h")).toBe(true);
+	});
+
+	it("`semantic` mode with embeddings OFF → degraded:true (honest fallback, NOT forced false)", async () => {
+		// Proves `degraded` stays HONEST under semantic/hybrid: a null embed still degrades, exactly
+		// as today — only `keyword` forces degraded:false. (Coherence guard against over-reaching.)
+		const probe = countingEmbed(null); // off / unreachable → null.
+		const { storage, sqls } = semanticStorage({
+			lexical: { memories: ok([{ source: "memories", id: "mem-lex-off", text: "lexical floor" }], 0) },
+		});
+
+		const result = await recallMemories(
+			{ query: "anything", scope: SCOPE },
+			{ storage, embed: probe.embed, recallMode: "semantic" },
+		);
+
+		expect(probe.calls(), "semantic mode still tries the embed").toBe(1);
+		expect(sqls.some((s) => s.includes("<#>")), "a null embed issues no `<#>` arm").toBe(false);
+		expect(result.degraded, "semantic + embeddings-off is an HONEST degrade").toBe(true);
+		expect(result.hits.map((h) => h.id)).toEqual(["mem-lex-off"]);
+	});
+
+	it("UNSET (recallMode omitted) → byte-for-byte today's behavior (semantic runs, degraded honest)", async () => {
+		// The behavior-NEUTRAL proof: a caller that passes NO recallMode behaves EXACTLY as before —
+		// the semantic arm runs whenever a vector exists, and degraded === (semanticArms === null).
+		const probe = countingEmbed(VALID_QUERY_VECTOR);
+		const { storage, sqls } = semanticStorage({
+			vector: { memories: [{ id: "mem-sem-default", score: 0.9 }] },
+			hydrate: { memories: [{ source: "memories", id: "mem-sem-default", text: "default-path hit" }] },
+		});
+
+		const result = await recallMemories(
+			{ query: "anything", scope: SCOPE },
+			{ storage, embed: probe.embed }, // NO recallMode — the default path.
+		);
+
+		expect(probe.calls(), "the default path still calls embed (unchanged)").toBe(1);
+		expect(sqls.some((s) => s.includes("<#>")), "the default path issues the `<#>` arm (unchanged)").toBe(true);
+		expect(result.degraded, "default: degraded is the honest semanticArms===null").toBe(false);
+		expect(result.hits.some((h) => h.id === "mem-sem-default")).toBe(true);
+	});
+
+	it("UNSET + embeddings OFF → degraded:true, lexical-only (the unchanged D-4 fallback)", async () => {
+		const probe = countingEmbed(null);
+		const { storage, sqls } = semanticStorage({
+			lexical: { memories: ok([{ source: "memories", id: "mem-lex-default", text: "lexical default" }], 0) },
+		});
+
+		const result = await recallMemories(
+			{ query: "anything", scope: SCOPE },
+			{ storage, embed: probe.embed }, // NO recallMode.
+		);
+
+		expect(probe.calls()).toBe(1);
+		expect(sqls.some((s) => s.includes("<#>"))).toBe(false);
+		expect(result.degraded).toBe(true);
+		expect(result.hits.map((h) => h.id)).toEqual(["mem-lex-default"]);
+	});
+});
+
 // ── PRD-027 — RRF ranking + provenance-forward shaping (AC-1 / AC-2 / AC-3 / AC-7) ──
 
 /** The single-arm RRF contribution for a hit of `kind` at 1-based `rank` (the math under test). */
