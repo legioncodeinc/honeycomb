@@ -1,6 +1,6 @@
 # PRD-035 — Dashboard Data Fixes (Turns rename · real Est. savings · graph render)
 
-> **Status:** Backlog
+> **Status:** Completed
 > **Priority:** P0 (user-visible bugs in the live dashboard)
 > **Effort:** M
 > Goal: fix three broken, user-facing things in the daemon-served dashboard — the mislabeled

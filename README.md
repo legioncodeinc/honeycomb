@@ -104,9 +104,10 @@ Honeycomb ships thin clients for six coding harnesses:
 
 ## Interfaces
 
-Three ways to reach the same daemon and the same shared memory:
+Four ways to reach the same daemon and the same shared memory:
 
-- **CLI** — the unified `honeycomb` binary. Core verbs: `setup`, `status`, `daemon start|stop|status`, `remember`, `recall`, `sessions`, `skill`, `goal`, `sources`, `graph`. Run `honeycomb --help` for the full list.
+- **CLI** — the unified `honeycomb` binary. Core verbs: `setup`, `status`, `daemon start|stop|status`, `remember`, `recall`, `sessions`, `skill`, `goal`, `sources`, `graph`, `dashboard`. Run `honeycomb --help` for the full list.
+- **Dashboard** — a local web UI the daemon serves at **`http://127.0.0.1:3850/dashboard`**: KPIs (memories, turns, est. savings, team skills), memory recall, the codebase graph, captured turns, skill-sync, and settings, with a live request log. Open it with `honeycomb dashboard` (or browse to the URL while the daemon is up).
 - **MCP server** — a [Model Context Protocol](https://modelcontextprotocol.io) server (bundled to `mcp/bundle`) that exposes Honeycomb's memory tools to MCP-capable hosts.
 - **TypeScript SDK** — the `@honeycomb/sdk` client with framework subpath entries (`@honeycomb/sdk/react`, `@honeycomb/sdk/vercel`, `@honeycomb/sdk/openai`). The core entry is fetch-only and browser-safe; `react` and `ai` are optional peers.
 

@@ -23,7 +23,7 @@ contention-free.
 A Wave-2 Bee ADDS its body to its stub module + its own test; it does NOT edit any
 Wave-1 file, the catalog barrel, the trigger, the runner, or the OTHER Bee's stub.
 
-## Locked decisions (binding — D-1..D-6, see EXECUTION_LEDGER-prd-009.md)
+## Locked decisions (binding — D-1..D-6, see library/ledger/EXECUTION_LEDGER-prd-009.md)
 
 - **D-1** counter scope = per (org, workspace, agent_id). Org/workspace ride the
   `QueryScope` partition; `agent_id` is the inner key + the deterministic row id.
