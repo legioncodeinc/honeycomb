@@ -43,10 +43,13 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
+	type ConvergeBudgetOverride,
 	createStorageClient,
 	envCredentialProvider,
 	isOk,
+	type QueryResult,
 	type QueryScope,
+	readConverged,
 	resolveStorageConfig,
 	sLiteral,
 	sqlIdent,
@@ -87,6 +90,38 @@ const RUN_ID = runId();
  * the whole product thesis.
  */
 const RECALL_TERM = `honeycombdogfood${RUN_ID}`;
+
+/**
+ * The GENEROUS convergence budget the storage read-backs honor, routed through the ONE
+ * shared `readConverged` seam (PRD-028 D-4 — no bespoke poll loop; PRD-034a immediacy
+ * relaxation). f-AC-2's "the summary row is VISIBLE within a tight poll budget" was the
+ * impatient bar (a fixed 30-poll loop at 350ms): under backend latency the summary's
+ * SELECT-before-INSERT row had not coalesced into the served segments yet and the loop
+ * exhausted, red-ing a HEALTHY product. This budget (≈30s / 50 attempts) lets the row
+ * converge; it only governs HOW LONG we wait, never WHAT we assert (the row's content
+ * still must carry the recall term — correctness intact).
+ */
+const READBACK_BUDGET: ConvergeBudgetOverride = {
+	maxAttempts: 50,
+	maxWallClockMs: 30_000,
+	backoffBaseMs: 150,
+	backoffCapMs: 1_000,
+};
+
+/**
+ * The GENEROUS convergence budget the cross-session recall read honors (f-AC-3, the
+ * headline). The two recall arms — the raw `sessions` turn and the `memory` summary —
+ * land at slightly different freshness, so this budget gives BOTH room to surface
+ * before the both-arms predicate settles. Widened past the old fixed 40-poll loop so a
+ * HEALTHY hybrid recall is not red-ed by one arm being a beat behind; on exhaustion the
+ * last real read is surfaced so a genuine single-arm miss still RES (correctness intact).
+ */
+const RECALL_BUDGET: ConvergeBudgetOverride = {
+	maxAttempts: 50,
+	maxWallClockMs: 30_000,
+	backoffBaseMs: 150,
+	backoffCapMs: 1_000,
+};
 
 /** A native Claude-Code `UserPromptSubmit` envelope (the real native payload shape). */
 function userPromptSubmitEvent(prompt: string, sessionId: string, path: string) {
@@ -259,21 +294,24 @@ describe.skipIf(!HAS_TOKEN)("GOLDEN PATH 021f: capture → summary → cross-ses
 			const summaryWrite = await summaryStore.writeSummary(summaryRowValue);
 			expect(summaryWrite.written, "f-AC-2: the summary worker's `memory` row was written").toBe(true);
 
-			// Read the `memory` summary row back (poll-convergent).
+			// Read the `memory` summary row back POLL-CONVERGENTLY through the ONE shared
+			// `readConverged` seam (PRD-028 D-4; PRD-034a immediacy relaxation — no bespoke
+			// loop, generous budget). The summary write is a SELECT-before-INSERT; on this
+			// stale-flapping backend the just-written row may not be served on the first read.
+			// Converged once a NON-placeholder summary row is present (the worker's real row,
+			// not the "in progress" placeholder); the budget governs the wait, never the bar.
 			const summaryReadSql =
 				`SELECT ${sqlIdent("summary")} FROM "${sqlIdent("memory")}" ` +
 				`WHERE ${sqlIdent("path")} = ${sLiteral(sPath)} ` +
 				`AND ${sqlIdent("description")} != ${sLiteral("in progress")} ` +
 				`ORDER BY ${sqlIdent("creation_date")} DESC LIMIT 1`;
-			let summaryReadBack: string | null = null;
-			for (let poll = 0; poll < 30 && summaryReadBack === null; poll++) {
-				const res = await storage.query(summaryReadSql, scope);
-				if (isOk(res) && res.rows.length > 0) {
-					const v = res.rows[0]?.summary;
-					if (typeof v === "string") summaryReadBack = v;
-				}
-				if (summaryReadBack === null) await new Promise((r) => setTimeout(r, 350));
-			}
+			const summaryPresent = (res: QueryResult): boolean =>
+				isOk(res) && res.rows.some((r) => typeof r.summary === "string" && r.summary.length > 0);
+			const summaryRes = await readConverged(storage, summaryReadSql, scope, summaryPresent, { budget: READBACK_BUDGET });
+			const summaryReadBack: string | null =
+				isOk(summaryRes) && summaryRes.rows.length > 0 && typeof summaryRes.rows[0]?.summary === "string"
+					? (summaryRes.rows[0].summary as string)
+					: null;
 			expect(summaryReadBack, "f-AC-2: the `memory` summary row is visible on read-back").not.toBeNull();
 			expect(summaryReadBack, "f-AC-2: the summary captured the session's recall term").toContain(RECALL_TERM);
 
@@ -407,21 +445,25 @@ async function runCrossSessionRecall(
 
 	const hits: RecallHit[] = [];
 	const sources = new Set<"sessions" | "memory">();
-	// Poll until BOTH arms have surfaced (or the budget runs out) — the summary row and the
-	// raw turn land on this backend at slightly different freshness.
-	for (let poll = 0; poll < 40; poll++) {
-		const res = await storage.query(recallSql, scope);
-		if (isOk(res)) {
-			hits.length = 0;
-			sources.clear();
-			for (const row of res.rows) {
-				const source = String(row.source) === "memory" ? "memory" : "sessions";
-				hits.push({ source, path: String(row.path ?? ""), text: String(row.text ?? "") });
-				sources.add(source);
-			}
-			if (sources.has("sessions") && sources.has("memory")) break;
+	// Poll-convergent through the ONE shared `readConverged` seam (PRD-028 D-4; PRD-034a
+	// immediacy relaxation — no bespoke loop, generous budget). The summary row and the raw
+	// turn land on this backend at slightly different freshness, so converge until BOTH arms
+	// have surfaced. The predicate inspects the UNION ALL result for both source labels; on
+	// budget exhaustion `readConverged` returns the last real read so a genuine single-arm
+	// miss still surfaces (the caller's `sources.has(...)` assertion RES) — the bar is never
+	// weakened, only the fixed poll deadline is.
+	const bothArmsSurfaced = (res: QueryResult): boolean => {
+		if (!isOk(res)) return false;
+		const seen = new Set(res.rows.map((row) => (String(row.source) === "memory" ? "memory" : "sessions")));
+		return seen.has("sessions") && seen.has("memory");
+	};
+	const res = await readConverged(storage, recallSql, scope, bothArmsSurfaced, { budget: RECALL_BUDGET });
+	if (isOk(res)) {
+		for (const row of res.rows) {
+			const source = String(row.source) === "memory" ? "memory" : "sessions";
+			hits.push({ source, path: String(row.path ?? ""), text: String(row.text ?? "") });
+			sources.add(source);
 		}
-		await new Promise((r) => setTimeout(r, 350));
 	}
 	return { hits, sources };
 }

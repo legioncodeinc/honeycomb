@@ -49,15 +49,26 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
 	buildCreateTableSql,
+	type ConvergeBudgetOverride,
 	createStorageClient,
 	envCredentialProvider,
 	isOk,
 	type QueryResult,
+	readConverged,
 	resolveStorageConfig,
 	type StorageClient,
 	sLiteral,
 	sqlIdent,
 } from "../../src/daemon/storage/index.js";
+
+/**
+ * The GENEROUS convergence budget the recall-count read-backs honor (PRD-034a immediacy
+ * relaxation). Replaces the old bespoke 8-poll NO-BACKOFF loop (which spun instantly and
+ * could exhaust before the seed/tombstone coalesced) with a jittered, bounded wait that
+ * gives a HEALTHY backend room to converge. Governs HOW LONG only — the EXACT-count
+ * predicate keeps correctness strict.
+ */
+const RECALL_BUDGET: ConvergeBudgetOverride = { maxAttempts: 24, maxWallClockMs: 20_000, backoffBaseMs: 150, backoffCapMs: 1_000 };
 import { MEMORIES_COLUMNS, NOT_SOFT_DELETED, SOFT_DELETED } from "../../src/daemon/storage/catalog/index.js";
 
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
@@ -128,31 +139,33 @@ describe.skipIf(!HAS_TOKEN)("live retention purge smoke (opt-in, real backend �
 		expect(res.kind, `seed ${id}: ${describeResult(res)}`).toBe("ok");
 	}
 
-	/** One recall-shaped read: count live (NOT soft-deleted) rows for this id. */
-	async function recallOnce(id: string): Promise<number> {
-		const sql =
+	/** The recall-shaped SELECT: live (NOT soft-deleted) rows for this id. */
+	function recallSql(id: string): string {
+		return (
 			`SELECT ${sqlIdent("id")} FROM "${tbl()}" ` +
 			`WHERE ${sqlIdent("id")} = ${sLiteral(id)} ` +
 			`AND ${sqlIdent("agent_id")} = ${sLiteral(AGENT)} ` +
-			`AND ${sqlIdent("is_deleted")} = ${String(NOT_SOFT_DELETED)}`;
-		const res = await storage.query(sql, { org, workspace }, { timeoutMs: OP_TIMEOUT });
-		return isOk(res) ? res.rows.length : -1;
+			`AND ${sqlIdent("is_deleted")} = ${String(NOT_SOFT_DELETED)}`
+		);
 	}
 
 	/**
-	 * Recall-shaped read that CONVERGES on the expected count, robust to this
-	 * backend's segment-freshness flap (a read can be served from a stale segment;
-	 * mirrors the queue's bounded poll). Polls up to a few times and returns once it
-	 * observes `expected` (or after the poll budget) — so the not-recalled assertion
-	 * is not defeated by a single stale read of the pre-tombstone snapshot.
+	 * Recall-shaped read that CONVERGES on the EXACT expected count through the ONE shared
+	 * `readConverged` seam (PRD-028 D-4; PRD-034a immediacy relaxation — no bespoke loop, and
+	 * now with real jittered backoff so a slow coalesce on a HEALTHY backend is not red-ed).
+	 * Both directions matter: the pre-tombstone read converges UP to 1 (the seed landing), and
+	 * the post-tombstone read converges DOWN to 0 (the soft-delete coalescing into the served
+	 * segments). The predicate is the EXACT count — CORRECTNESS untouched: on budget exhaustion
+	 * the last real read is returned, so a tombstone that genuinely failed (count stuck at 1)
+	 * still RES, and a seed that genuinely never landed (count stuck at 0) still RES.
 	 */
 	async function recallById(id: string, expected: number): Promise<number> {
-		let last = -1;
-		for (let poll = 0; poll < 8; poll++) {
-			last = await recallOnce(id);
-			if (last === expected) return last;
-		}
-		return last;
+		const exactCount = (res: QueryResult): boolean => isOk(res) && res.rows.length === expected;
+		const res = await readConverged(storage, recallSql(id), { org, workspace }, exactCount, {
+			budget: RECALL_BUDGET,
+			queryTimeoutMs: OP_TIMEOUT,
+		});
+		return isOk(res) ? res.rows.length : -1;
 	}
 
 	it("1. a TOMBSTONE removes a row from recall on the real backend (the D-8 mechanism)", async () => {

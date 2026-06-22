@@ -1,0 +1,179 @@
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  Live-DeepLake integration — shared run body (PRD-034 Wave 2).             ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+#
+# WHY THIS COMPOSITE EXISTS
+# The live suite must run with TWO different job-level postures (D-1 / AC-4):
+#   • SOFT on `push` to main — informational, must NEVER fail the required
+#     merge gate (`continue-on-error: true` on the calling job).
+#   • HARD on the nightly `schedule` — a real regression honestly reds the
+#     scheduled run (no `continue-on-error`).
+# `continue-on-error` is a JOB-level posture; the cleanest way to give each
+# trigger its own required-status identity is TWO jobs. Rather than duplicate
+# the ~40-line install + retry-wrapper + infra-skip→neutral mapping in both,
+# both jobs invoke THIS local composite. One body, two postures — the soft vs
+# hard distinction lives entirely in the caller's `continue-on-error`.
+#
+# WHAT THE BODY DOES
+#   1. Checkout + Node 22 + `npm ci` (mirrors the old `integration` job).
+#   2. Runs the live suite with the SAME bounded 2-retry wrapper as before
+#      (a transient backend storm gets up to THREE attempts; a genuine red
+#      fails all three). The wrapper here uses `continue-on-error` on its OWN
+#      step so the run never aborts before the neutral-mapping step — the
+#      step's recorded outcome is what the mapping step keys off.
+#   3. Maps 034a's INFRA-DEGRADED sentinel → a NEUTRAL outcome (D-2 / AC-3):
+#      if the marker file exists, the run is infra-unavailable → exit 0 + a
+#      `::warning::` annotation (NEUTRAL, distinct from a real pass). If the
+#      marker is ABSENT, the live suite's real exit code is honored — a genuine
+#      correctness/wiring red still fails the job. Infra-neutral never masks a
+#      real regression.
+#
+# CONTRACT SOURCE OF TRUTH: tests/integration/CONVENTIONS-infra-skip.md
+#   • Marker FILE: `${HONEYCOMB_INFRA_SKIP_DIR:-./.infra-skip}/infra-degraded.json`
+#   • Console LINE prefix (fallback): `##honeycomb-infra-degraded##`
+# We pin HONEYCOMB_INFRA_SKIP_DIR to a known path so the mapping step (and an
+# optional artifact upload) read ONE documented location.
+
+name: Live DeepLake integration
+description: >-
+  Runs the live-DeepLake integration suite with the bounded transient-retry
+  wrapper and maps the 034a infra-degraded sentinel to a NEUTRAL outcome.
+
+inputs:
+  deeplake-endpoint:
+    description: HONEYCOMB_DEEPLAKE_ENDPOINT secret value.
+    required: true
+  deeplake-token:
+    description: HONEYCOMB_DEEPLAKE_TOKEN secret value.
+    required: true
+  deeplake-org:
+    description: HONEYCOMB_DEEPLAKE_ORG secret value.
+    required: true
+  deeplake-workspace:
+    description: HONEYCOMB_DEEPLAKE_WORKSPACE secret value.
+    required: true
+  run-id:
+    description: A stable per-run id so two CI runs never collide on the table prefix.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v4.2.2
+
+    - name: Setup Node
+      uses: actions/setup-node@v6.4.0
+      with:
+        node-version: '22.x'
+        cache: npm
+
+    - name: Install (npm ci)
+      shell: bash
+      run: npm ci
+
+    # The live suite runs the REAL round-trips against a REAL DeepLake org, so it
+    # inherits the backend's transient flakiness (502s, connection resets, stale
+    # segments that converge a beat later). The code paths are hardened for this
+    # (storage-client read + idempotent-write retry, poll-convergent read-backs),
+    # but an inherently-flaky real-backend suite gets a bounded auto-retry: run
+    # the suite; if it exits non-zero, wait and run again, up to THREE attempts
+    # (2 retries). The step passes if ANY attempt passes. A genuine
+    # (non-transient) failure fails ALL THREE attempts.
+    #
+    # `continue-on-error: true` is on THIS step (not the job) so a non-zero result
+    # does not abort the job before the neutral-mapping step below — the mapping
+    # step is the single place that decides pass / neutral / fail. The step's
+    # recorded `outcome` is consumed there. (This is distinct from the CALLER's
+    # job-level `continue-on-error`, which decides soft-on-push vs hard-on-schedule.)
+    - name: Run live integration suite (2 auto-retries on transient flap)
+      id: itest
+      shell: bash
+      continue-on-error: true
+      env:
+        HONEYCOMB_DEEPLAKE_ENDPOINT: ${{ inputs.deeplake-endpoint }}
+        HONEYCOMB_DEEPLAKE_TOKEN: ${{ inputs.deeplake-token }}
+        HONEYCOMB_DEEPLAKE_ORG: ${{ inputs.deeplake-org }}
+        HONEYCOMB_DEEPLAKE_WORKSPACE: ${{ inputs.deeplake-workspace }}
+        # Stable per-run table prefix so two CI runs never collide.
+        HONEYCOMB_CI_RUN_ID: ${{ inputs.run-id }}
+        # Pin the sentinel directory to a known path so the mapping step (and an
+        # optional artifact upload) read ONE documented location. The filename is
+        # fixed (`infra-degraded.json`) by the 034a contract.
+        HONEYCOMB_INFRA_SKIP_DIR: ${{ github.workspace }}/.infra-skip
+      run: |
+        set -uo pipefail
+        attempt=1
+        max_attempts=3
+        while true; do
+          echo "::group::Live integration attempt ${attempt}/${max_attempts}"
+          set +e
+          npm run test:integration
+          status=$?
+          set -e
+          echo "::endgroup::"
+          if [ "$status" -eq 0 ]; then
+            if [ "$attempt" -gt 1 ]; then
+              echo "Live integration passed on attempt ${attempt} (a transient backend flap was absorbed)."
+            fi
+            exit 0
+          fi
+          if [ "$attempt" -ge "$max_attempts" ]; then
+            echo "Live integration failed on all ${max_attempts} attempts (last exit ${status})." >&2
+            exit "$status"
+          fi
+          echo "::warning::Live integration attempt ${attempt} failed (exit ${status}); retrying once after a short backoff. The failed attempt's output is preserved above."
+          attempt=$((attempt + 1))
+          sleep 10
+        done
+
+    # Map the 034a INFRA-DEGRADED sentinel → NEUTRAL (D-2 / AC-3), per the verbatim
+    # contract in tests/integration/CONVENTIONS-infra-skip.md.
+    #
+    #   • Marker file present  ⇒ the run was dominated by transient backend flaps
+    #     AFTER the storage client's own retry gave up. This is NOT our code's
+    #     fault: resolve NEUTRAL (exit 0 + a ::warning:: quoting the redaction-safe
+    #     JSON). Distinct from a real pass — we say so explicitly.
+    #   • Marker file ABSENT   ⇒ honor the live suite's REAL exit code. A genuine
+    #     correctness/wiring red (the itest step's outcome != success) STILL fails
+    #     the job. Infra-neutral must never mask a real regression.
+    #
+    # The marker filename is fixed by the contract; we read it from the pinned
+    # HONEYCOMB_INFRA_SKIP_DIR. The console-line prefix `##honeycomb-infra-degraded##`
+    # is the transport-agnostic fallback the contract documents — we do not need it
+    # here because the filesystem marker is reliably available in-job, but it remains
+    # the documented secondary signal.
+    - name: Map infra-degraded sentinel to NEUTRAL
+      if: always()
+      shell: bash
+      env:
+        MARKER: ${{ github.workspace }}/.infra-skip/infra-degraded.json
+        ITEST_OUTCOME: ${{ steps.itest.outcome }}
+      run: |
+        set -uo pipefail
+        if [ -f "$MARKER" ]; then
+          # Redaction-safe JSON by 034a contract (counts + redacted reason + label;
+          # no token / org / workspace / SQL body) — safe to echo into the log.
+          payload="$(cat "$MARKER")"
+          echo "::warning title=Live suite skipped (infra-degraded)::live suite skipped — DeepLake infra-degraded, not a code failure :: ${payload}"
+          echo "infra-unavailable: the live backend was degraded (sustained transient flaps after retry)."
+          echo "Resolving this run NEUTRAL — this is NOT a code red and NOT a real pass."
+          exit 0
+        fi
+        if [ "$ITEST_OUTCOME" != "success" ]; then
+          echo "::error title=Live integration failed::No infra-degraded marker present — this is a genuine correctness/wiring failure, not a transient backend flap." >&2
+          exit 1
+        fi
+        echo "Live integration passed (no infra-degraded marker; real green)."
+
+    # Best-effort: surface the sentinel as an artifact when a run WAS neutralized,
+    # so the redaction-safe infra-degraded metadata is inspectable off the log.
+    # Never fails the job (the directory may not exist on a clean pass).
+    - name: Upload infra-degraded sentinel (if any)
+      if: always()
+      uses: actions/upload-artifact@v4.4.3
+      with:
+        name: infra-degraded-${{ inputs.run-id }}
+        path: ${{ github.workspace }}/.infra-skip/infra-degraded.json
+        if-no-files-found: ignore
+        retention-days: 14

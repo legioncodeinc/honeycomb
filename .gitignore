@@ -128,3 +128,13 @@ stryker.log
 .settings/
 .daemon/
 .smoke-daemon-bundle/
+
+# PRD-034a: the live-integration suite's run-level INFRA-DEGRADED sentinel marker
+# (tests/integration/_infra-skip.ts). Pure run-metadata the Wave-2 ci.yaml job reads
+# to map a sustained backend outage to a NEUTRAL conclusion — never committed.
+.infra-skip/
+
+# PRD-034b: the on-demand DeepLake stress harness's metrics report output
+# (scripts/deeplake-stress.mjs → ./.stress-report/<runId>.json). A local/CI
+# diagnostic artifact (uploaded by the Wave-2 workflow_dispatch job) — never committed.
+.stress-report/

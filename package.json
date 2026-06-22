@@ -60,6 +60,7 @@
     "smoke:login": "node scripts/login-smoke.mjs",
     "smoke:data-api": "node scripts/dogfood-acceptance-smoke.mjs",
     "eval:recall": "node scripts/eval-recall.mjs",
+    "deeplake:stress": "node scripts/deeplake-stress.mjs",
     "audit:openclaw": "node scripts/audit-openclaw-bundle.mjs",
     "audit:sql": "node scripts/audit-sql-safety.mjs",
     "mutation": "npm run mutation:sql && npm run mutation:prune && npm run mutation:normalize && npm run mutation:state",

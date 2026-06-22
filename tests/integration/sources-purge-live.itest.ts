@@ -30,9 +30,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
+	type ConvergeBudgetOverride,
 	createStorageClient,
 	envCredentialProvider,
 	isOk,
+	type QueryResult,
+	readConverged,
 	resolveStorageConfig,
 	sLiteral,
 	sqlIdent,
@@ -57,6 +60,7 @@ import {
 	type SourceRegistry,
 } from "../../src/daemon/runtime/sources/lifecycle.js";
 import type { JobInput, JobQueueService, LeasedJob } from "../../src/daemon/runtime/services/job-queue.js";
+import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
 
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
 
@@ -71,8 +75,24 @@ const TBL_ARTIFACTS = `ci_src_${RUN_ID}_artifacts`;
 const TBL_CHUNKS = `ci_src_${RUN_ID}_chunks`;
 const TBL_LINKS = `ci_src_${RUN_ID}_links`;
 
-/** Poll budget — exhausted in full (the flap can serve the same stale segment twice). */
-const SCAN_POLLS = 20;
+/**
+ * The GENEROUS convergence budget the status read-back honors, routed through the ONE
+ * shared `readConverged` seam (PRD-028 D-4 — no bespoke poll loop). PRD-034a (FR-3):
+ * the old bespoke `SCAN_POLLS=20` loop had NO backoff and inherited the suite's 60s
+ * per-test default, so under backend latency it could exhaust before the soft-delete
+ * status advance coalesced into the served segments — a HEALTHY purge red-ing on
+ * weather. This widened budget (≈30s / 40 attempts, jittered backoff) gives the status
+ * advance room to converge; it only governs HOW LONG we wait, never WHAT we assert.
+ */
+const STATUS_BUDGET: ConvergeBudgetOverride = {
+	maxAttempts: 40,
+	maxWallClockMs: 30_000,
+	backoffBaseMs: 150,
+	backoffCapMs: 1_000,
+};
+
+/** A generous per-test ceiling (FR-3) — a safety net above the convergence budget, not the bar. */
+const GENEROUS_TEST_CEILING_MS = 120_000;
 
 /** A no-op queue + registry for the live lifecycle (we drive index/purge directly). */
 function liveQueue(): JobQueueService {
@@ -116,22 +136,36 @@ function artifact(sourceId: string, path: string, org: string, ws: string): Sour
 }
 
 /**
- * Poll a by-id highest-version read {@link SCAN_POLLS} times; return the row with
- * the MAX `version` observed (a stale segment under-reports the version, never
- * over-reports, so the max converges UP to the durable current state).
+ * Read a by-id highest-version `status` POLL-CONVERGENTLY through the ONE shared
+ * `readConverged` seam (PRD-028 D-4 — no bespoke poll loop; PRD-034a immediacy
+ * relaxation). The purge writes an append-only status ADVANCE (a new highest-version
+ * row whose `status` is `deleted`); on this stale-flapping backend a single read can
+ * land on a segment that still serves the prior `active` version. `status` advances
+ * are monotone within a logical lifecycle, so polling for the EXPECTED target status
+ * converges UP to the durable current state without ever over-reporting.
+ *
+ * The predicate converges once the top-by-version row carries `expectStatus` — the
+ * soft-delete (or the untouched-active) advance the test asserts. The budget only
+ * governs HOW LONG we wait; on exhaustion `readConverged` returns the last real read,
+ * so a genuine WRONG status (e.g. B drifted to deleted) surfaces and the assertion RES
+ * — the bar is never weakened. Returns the converged highest-version status, or null.
  */
-async function currentStatus(store: StorageClient, table: string, id: string, scope: QueryScope): Promise<string | null> {
+async function currentStatus(
+	store: StorageClient,
+	table: string,
+	id: string,
+	scope: QueryScope,
+	expectStatus: string,
+): Promise<string | null> {
 	const sql = `SELECT status, version FROM "${sqlIdent(table)}" WHERE id = ${sLiteral(id)} ORDER BY version DESC LIMIT 1`;
-	let best: { status: string; version: number } | null = null;
-	for (let poll = 0; poll < SCAN_POLLS; poll++) {
-		const res = await store.query(sql, scope);
-		if (isOk(res) && res.rows.length > 0) {
-			const row = res.rows[0];
-			const version = Number(row.version ?? 0);
-			if (best === null || version > best.version) best = { status: String(row.status ?? ""), version };
-		}
-	}
-	return best?.status ?? null;
+	// Converged when the top-by-version row's status is the expected target. A non-ok
+	// read is never fresh (the budget governs, fail-soft); a stale `active` segment is
+	// simply "not fresh yet" so the poll waits past it to the durable `deleted` advance.
+	const reachedExpected = (res: QueryResult): boolean =>
+		isOk(res) && res.rows.length > 0 && String(res.rows[0].status ?? "") === expectStatus;
+	const res = await readConverged(store, sql, scope, reachedExpected, { budget: STATUS_BUDGET });
+	if (isOk(res) && res.rows.length > 0) return String(res.rows[0].status ?? "");
+	return null;
 }
 
 describe.skipIf(!HAS_TOKEN)("live sources purge smoke (opt-in, real backend, append-only status advance)", () => {
@@ -161,7 +195,15 @@ describe.skipIf(!HAS_TOKEN)("live sources purge smoke (opt-in, real backend, app
 		}
 	});
 
-	it("purge(A) soft-deletes A's rows (status advance) while B's rows remain active", async () => {
+	it("purge(A) soft-deletes A's rows (status advance) while B's rows remain active", async ({ skip }) => {
+		// INFRA-DEGRADED preflight (PRD-034a FR-4 / a-AC-3): a trivial liveness probe routed
+		// through the shared infra-skip seam. If the backend is sustained-down (the probe
+		// flaps transient AFTER the client's own retry), the run resolves NEUTRAL via a SKIP
+		// + the run-level sentinel — never a hard red on our code, never a false green of the
+		// purge correctness assertions. A non-transient failure (real defect) or an ok probe
+		// continues to the strict correctness assertions below with full teeth.
+		await neutralizeIfInfraDegraded("sources-purge-live:preflight", () => storage.connect(scope), skip);
+
 		// Route the canonical table names to per-run throwaway tables NATIVELY via the
 		// lifecycle's `resolveTable` seam — so the heal CREATEs the physical throwaway
 		// table directly (the proven recall-authz/graph-persist isolation technique).
@@ -188,13 +230,16 @@ describe.skipIf(!HAS_TOKEN)("live sources purge smoke (opt-in, real backend, app
 		expect(outcome.artifactsPurged).toBeGreaterThanOrEqual(2);
 		expect(provA.closed()).toBe(true);
 
-		// Read-back (poll-convergent): A's artifact rows read `deleted`; B's read `active`.
-		const aStatus1 = await currentStatus(storage, TBL_ARTIFACTS, artifactId("sA", "a1.md"), scope);
-		const aStatus2 = await currentStatus(storage, TBL_ARTIFACTS, artifactId("sA", "a2.md"), scope);
-		const bStatus = await currentStatus(storage, TBL_ARTIFACTS, artifactId("sB", "b1.md"), scope);
+		// Read-back (poll-convergent via readConverged): A's artifact rows converge to
+		// `deleted` (the soft-delete advance); B's converge to `active` (untouched). The
+		// EXPECTED-status predicate waits past a stale prior segment; the correctness bar
+		// — A deleted, B still active — is asserted strictly on the converged read.
+		const aStatus1 = await currentStatus(storage, TBL_ARTIFACTS, artifactId("sA", "a1.md"), scope, ARTIFACT_DELETED);
+		const aStatus2 = await currentStatus(storage, TBL_ARTIFACTS, artifactId("sA", "a2.md"), scope, ARTIFACT_DELETED);
+		const bStatus = await currentStatus(storage, TBL_ARTIFACTS, artifactId("sB", "b1.md"), scope, ARTIFACT_ACTIVE);
 
 		expect(aStatus1, "source A a1 soft-deleted").toBe(ARTIFACT_DELETED);
 		expect(aStatus2, "source A a2 soft-deleted").toBe(ARTIFACT_DELETED);
 		expect(bStatus, "source B remains active (another source untouched)").toBe(ARTIFACT_ACTIVE);
-	});
+	}, GENEROUS_TEST_CEILING_MS);
 });

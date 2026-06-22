@@ -38,10 +38,13 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
+	type ConvergeBudgetOverride,
 	createStorageClient,
 	envCredentialProvider,
 	isOk,
+	minVersion,
 	type QueryScope,
+	readConverged,
 	resolveStorageConfig,
 	sLiteral,
 	sqlIdent,
@@ -138,14 +141,18 @@ describe.skipIf(!HAS_TOKEN)("live skills-write smoke (opt-in, real backend, appe
 			`SELECT version FROM "${sqlIdent(TBL_SKILLS)}" ` +
 			`WHERE ${sqlIdent("id")} = ${sLiteral(id)} ` +
 			`ORDER BY version DESC`;
+		// Poll-convergent through the ONE shared `readConverged` seam (PRD-028 D-4; PRD-034a
+		// immediacy relaxation — no bespoke no-backoff loop). Converged once a segment serves
+		// version ≥ 2 (the v2 append landed); the budget is generous + jittered so a slow
+		// coalesce on a HEALTHY backend is not red-ed. The CORRECTNESS bar is untouched: the
+		// converged result must carry BOTH v1 (retained, append-only) and v2 (present).
+		const SKILLS_BUDGET: ConvergeBudgetOverride = { maxAttempts: 40, maxWallClockMs: 20_000, backoffBaseMs: 150, backoffCapMs: 1_000 };
+		const res = await readConverged(storage, countSql, scope, minVersion("version", 2), { budget: SKILLS_BUDGET });
 		const seen = new Set<number>();
-		for (let poll = 0; poll < 20; poll++) {
-			const res = await storage.query(countSql, scope);
-			if (isOk(res)) {
-				for (const row of res.rows) {
-					const n = Number(row.version);
-					if (Number.isFinite(n)) seen.add(n);
-				}
+		if (isOk(res)) {
+			for (const row of res.rows) {
+				const n = Number(row.version);
+				if (Number.isFinite(n)) seen.add(n);
 			}
 		}
 		expect(seen.has(1), "v1 retained on disk (append-only)").toBe(true);
