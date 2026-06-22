@@ -57,6 +57,7 @@ import { attachHooksHandlers } from "./capture/attach.js";
 import { mountGraphApi } from "./codebase/api.js";
 import { mountDashboardApi } from "./dashboard/api.js";
 import { mountHarnessApi } from "./dashboard/harness-api.js";
+import { mountSyncApi } from "./dashboard/sync-mount.js";
 import { detectInstalledHarnesses } from "./dashboard/harness-detect.js";
 import { mountDashboardHost } from "./dashboard/host.js";
 import { mountDreamApi } from "./dreaming/api.js";
@@ -341,6 +342,20 @@ export interface SeamFns {
 	 * {@link defaultSeamFns}, i.e. production), inside the same fail-soft try/catch.
 	 */
 	readonly mountHarness?: typeof mountHarnessApi;
+	/**
+	 * The Sync page data + action surface — `GET /api/diagnostics/assets` (the `installed ∪ synced`
+	 * union view-model) + `POST /api/diagnostics/sync/{promote,pull,demote,enable,disable}` (PRD-042).
+	 * Attaches onto the same already-mounted, protected `/api/diagnostics` group (NO `server.ts` edit),
+	 * so it inherits the dashboard JSON views' auth/RBAC (open in `local`, gated in team/hybrid). The
+	 * actions are the REAL substrate pipelines (publish/pull/tombstone via `createAssetSyncApi`) plus
+	 * the local install-target write — poll-convergent read-back, never an optimistic flip.
+	 *
+	 * OPTIONAL on the seam record (like {@link mountHarness}) so a pre-existing recording-fake `SeamFns`
+	 * stays type-compatible WITHOUT editing those out-of-scope suites; `assembleSeams` fires it only
+	 * when present (always present in {@link defaultSeamFns}, i.e. production), inside a fail-soft
+	 * try/catch.
+	 */
+	readonly mountSync?: typeof mountSyncApi;
 }
 
 /** The REAL seam functions (the production wiring). */
@@ -359,6 +374,7 @@ export const defaultSeamFns: SeamFns = {
 	mountDiagnosticsHealth: mountDiagnosticsHealthApi,
 	mountGraph: mountGraphApi,
 	mountHarness: mountHarnessApi,
+	mountSync: mountSyncApi,
 };
 
 /** An assembled, fully-wired daemon plus the composition root's lifecycle controls. */
@@ -710,6 +726,24 @@ export function assembleSeams(
 		} catch (err: unknown) {
 			const reason = err instanceof Error ? err.message : String(err);
 			process.stderr.write(`honeycomb: harness API mount failed (non-fatal): ${reason}\n`);
+		}
+	}
+
+	// 15. The Sync page data + action surface — `GET /api/diagnostics/assets` + `POST
+	//     /api/diagnostics/sync/{promote,pull,demote,enable,disable}` (PRD-042). Attaches onto the same
+	//     already-mounted, protected `/api/diagnostics` group (NO `server.ts` edit), so it inherits the
+	//     dashboard JSON views' auth/RBAC (open in `local`, gated in team/hybrid). The view-model is the
+	//     `installed ∪ synced` union (skills + agents); the actions invoke the REAL substrate pipelines
+	//     (publish/pull/tombstone via `createAssetSyncApi`) + the local install-target write, confirming
+	//     each on a poll-convergent read-back (never an optimistic flip). The `defaultScope` backfills a
+	//     loopback thin client's tenancy in local mode; team/hybrid take it from the validated Identity.
+	//     FAIL-SOFT: a mount error must NEVER crash the daemon — the surface stays unmounted this run.
+	if (seams.mountSync !== undefined) {
+		try {
+			seams.mountSync(daemon, { storage, defaultScope, mode: daemon.config.mode });
+		} catch (err: unknown) {
+			const reason = err instanceof Error ? err.message : String(err);
+			process.stderr.write(`honeycomb: sync API mount failed (non-fatal): ${reason}\n`);
 		}
 	}
 }

@@ -215,7 +215,7 @@ export function RulesPanel({ rules }: { rules: readonly RuleRowWire[] }): React.
 // PRD-036b: `local` (a skill on disk but not shared with the team) reads in a NEUTRAL/muted tone so
 // the badge is honest — it is present, but not a verified/synced team asset. `synced` mirrors
 // `shared` (both are team-substrate states). Unknown states fall back to `neutral` at the call site.
-const SYNC_TONE: Record<string, BadgeTone> = { shared: "verified", synced: "verified", pulled: "honey", pending: "warning", local: "neutral" };
+export const SYNC_TONE: Record<string, BadgeTone> = { shared: "verified", synced: "verified", pulled: "honey", pending: "warning", local: "neutral" };
 
 /** The skill-sync panel (ported from `components.jsx` `SkillSyncPanel`). AC-2 empty state. */
 export function SkillSyncPanel({ skills }: { skills: readonly SkillRowWire[] }): React.JSX.Element {
