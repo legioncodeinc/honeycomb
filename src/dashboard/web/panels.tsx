@@ -63,12 +63,24 @@ function EmptyRow({ children }: { children: React.ReactNode }): React.JSX.Elemen
 
 // ── Sessions ───────────────────────────────────────────────────────────────────
 
-const AGENT_DOT: Record<string, string> = {
+/**
+ * The shared per-harness colour language (PRD-039 OQ-4 — extended to ALL SIX). Keyed by the
+ * `sessions.agent` value the capture pipeline stamps; the Sessions panel tints each turn's dot by it
+ * and the Harnesses page (039b) reuses the SAME map so dots and the page agree. Wave-1 keyed only
+ * four; `hermes` + `pi` are added here so no captured harness renders an off-palette dot. Exported so
+ * the Harnesses page imports ONE source rather than re-deriving its own palette.
+ */
+export const AGENT_DOT: Record<string, string> = {
 	cursor: "var(--severity-info)",
 	"claude-code": "var(--honey)",
 	codex: "var(--dream)",
 	openclaw: "var(--verified)",
+	hermes: "var(--severity-warning)",
+	pi: "var(--severity-critical)",
 };
+
+/** The fallback dot colour for an unknown/empty agent (mirrors the Sessions panel's neutral dot). */
+export const AGENT_DOT_FALLBACK = "var(--text-tertiary)" as const;
 
 /** How many session rows the panel shows per page (the live wire fetches far more than this). */
 const PAGE_SIZE = 5;

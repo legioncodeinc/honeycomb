@@ -100,6 +100,7 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 		mountCompact: 0,
 		mountDiagnosticsHealth: 0,
 		mountGraph: 0,
+		mountHarness: 0,
 	} as Record<keyof SeamFns, number>;
 	const seams: SeamFns = {
 		attachHooks: ((daemon) => {
@@ -224,6 +225,19 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 			// PRD-014: the watched workspace (the checkout to graph) is threaded so the build knows what to walk.
 			expect(options.workspaceDir, "graph seam receives the workspace dir to build from").toBeTruthy();
 		}) as SeamFns["mountGraph"],
+		// ── The PRD-039a harness registry + last-seen telemetry seam the composition root fires. ──
+		mountHarness: ((daemon, options) => {
+			calls.mountHarness += 1;
+			order.push("mountHarness");
+			expect(typeof daemon.group).toBe("function");
+			// The telemetry endpoint is wired with the live storage client (the sessions GROUP BY).
+			expect(options.storage, "harness seam receives the live storage client").toBeDefined();
+			// PRD-022: the daemon's default tenancy scope is threaded so a no-org loopback read resolves.
+			expect(options.defaultScope, "harness seam receives the threaded default scope").toBeDefined();
+			expect(options.defaultScope?.org).toBeTruthy();
+			// PRD-039a a-AC-3 / OQ-1: the installed set is threaded (the cheap cached presence check).
+			expect(options.installedHarnesses, "harness seam receives the installed-harness set").toBeDefined();
+		}) as SeamFns["mountHarness"],
 	};
 	return { seams, calls };
 }
@@ -271,9 +285,11 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 		expect(calls.mountDiagnosticsHealth).toBe(1);
 		// PRD-014: the production composition root fires the graph build/read seam (deferred wiring closed).
 		expect(calls.mountGraph).toBe(1);
+		// PRD-039a: the harness registry + last-seen telemetry seam fires once and only once.
+		expect(calls.mountHarness).toBe(1);
 		// Deterministic order: the 021 seams, then the 022 data seams (memories → vfs → product),
 		// then the PRD-024 dream trigger, the PRD-030 compaction trigger, the PRD-029 health detail,
-		// and finally the PRD-014 graph seam.
+		// the PRD-014 graph seam, and finally the PRD-039a harness telemetry seam.
 		expect(order).toEqual([
 			"attachHooks",
 			"mountDashboard",
@@ -288,6 +304,7 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 			"mountCompact",
 			"mountDiagnosticsHealth",
 			"mountGraph",
+			"mountHarness",
 		]);
 	});
 
@@ -315,6 +332,9 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 		// PRD-029 / AC-3: the protected health detail also fires unconditionally (same protected
 		// /api/diagnostics group; fires in team too — the full reasons gate behind its auth).
 		expect(calls.mountDiagnosticsHealth).toBe(1);
+		// PRD-039a: the harness telemetry seam also fires unconditionally (same protected
+		// /api/diagnostics group; fires in team too — the activity GROUP BY gated behind its auth).
+		expect(calls.mountHarness).toBe(1);
 		// The /dashboard host stays local-only (security F-1) even though the data seams fire.
 		expect(calls.mountDashboardHost).toBe(0);
 	});

@@ -56,6 +56,8 @@ import { type CreateDaemonOptions, type Daemon, type DaemonServices, createDaemo
 import { attachHooksHandlers } from "./capture/attach.js";
 import { mountGraphApi } from "./codebase/api.js";
 import { mountDashboardApi } from "./dashboard/api.js";
+import { mountHarnessApi } from "./dashboard/harness-api.js";
+import { detectInstalledHarnesses } from "./dashboard/harness-detect.js";
 import { mountDashboardHost } from "./dashboard/host.js";
 import { mountDreamApi } from "./dreaming/api.js";
 import { mountCompactApi } from "./maintenance/compact-api.js";
@@ -172,6 +174,16 @@ export interface AssembleDaemonOptions {
 	 * a fuller wiring (021c) supplies the real per-harness destinations.
 	 */
 	readonly harnessTargets?: readonly HarnessTarget[];
+	/**
+	 * The set of canonical harness ids the daemon reports as INSTALLED/wired on the 039a telemetry
+	 * endpoint (a-AC-3 / OQ-1). Precedence at assembly: this explicit set wins; else the
+	 * {@link harnessTargets} names (the watcher's already-resolved wiring targets); else — for the
+	 * REAL production assembly only (no injected {@link storage}) — the cheap on-disk
+	 * {@link detectInstalledHarnesses} probe, so the live endpoint reflects what is actually wired
+	 * instead of an empty set. A unit test injects a fixed set (or relies on the empty-by-default path)
+	 * so the deterministic suite never touches the real home. Production leaves it UNSET.
+	 */
+	readonly installedHarnesses?: ReadonlySet<string>;
 	/** The workspace root the file watcher watches. Defaults to `process.cwd()`. */
 	readonly workspaceDir?: string;
 	/**
@@ -315,6 +327,20 @@ export interface SeamFns {
 	 * {@link defaultSeamFns}, i.e. production), inside the same fail-soft try/catch.
 	 */
 	readonly mountGraph?: typeof mountGraphApi;
+	/**
+	 * The harness registry + last-seen telemetry endpoint — `GET /api/diagnostics/harnesses`
+	 * (PRD-039a, the data backbone). Fires UNCONDITIONALLY: its `/api/diagnostics` group is already
+	 * `protect:true` in `server.ts`, so it inherits the dashboard JSON views' auth/RBAC (open in
+	 * `local`, gated in team/hybrid). It reports all six canonical harnesses every call (installed +
+	 * activity from the `sessions` GROUP BY), the single source the Harnesses page (039b/039c) and
+	 * PRD-038's home strip read (parent D-3). Fail-soft — a mount error never crashes the daemon.
+	 *
+	 * OPTIONAL on the seam record (like {@link mountGraph}) so a pre-existing recording-fake `SeamFns`
+	 * (the PRD-021/022 assemble suites that predate this seam) stays type-compatible WITHOUT editing
+	 * those out-of-scope tests; `assembleSeams` fires it only when present (always present in
+	 * {@link defaultSeamFns}, i.e. production), inside the same fail-soft try/catch.
+	 */
+	readonly mountHarness?: typeof mountHarnessApi;
 }
 
 /** The REAL seam functions (the production wiring). */
@@ -332,6 +358,7 @@ export const defaultSeamFns: SeamFns = {
 	mountCompact: mountCompactApi,
 	mountDiagnosticsHealth: mountDiagnosticsHealthApi,
 	mountGraph: mountGraphApi,
+	mountHarness: mountHarnessApi,
 };
 
 /** An assembled, fully-wired daemon plus the composition root's lifecycle controls. */
@@ -511,6 +538,7 @@ export function assembleSeams(
 	embed: EmbedAttachment,
 	healthDetail: () => HealthDetail,
 	workspaceDir: string,
+	installedHarnesses: ReadonlySet<string>,
 	seams: SeamFns = defaultSeamFns,
 ): void {
 	// The daemon's configured default tenancy scope (the single LOCAL tenant) is RESOLVED ONCE
@@ -664,6 +692,24 @@ export function assembleSeams(
 		} catch (err: unknown) {
 			const reason = err instanceof Error ? err.message : String(err);
 			process.stderr.write(`honeycomb: graph API mount failed (non-fatal): ${reason}\n`);
+		}
+	}
+
+	// 14. The harness registry + last-seen telemetry endpoint — `GET /api/diagnostics/harnesses`
+	//     (PRD-039a, the data backbone). Attaches onto the same already-mounted, protected
+	//     `/api/diagnostics` group (NO `server.ts` edit), so it inherits the dashboard JSON views'
+	//     auth/RBAC (open in `local`, gated in team/hybrid). It is the SINGLE source the Harnesses
+	//     page (039b/039c) AND PRD-038's home strip read (parent D-3): all six canonical harnesses
+	//     every call, `installed` from the daemon's known harness-sync target set (the cheap cached
+	//     presence check, OQ-1 — NOT a per-request spawn), activity from ONE guarded `sessions`
+	//     GROUP BY (fail-soft, never a 500). FAIL-SOFT: a mount error must NEVER crash the daemon —
+	//     the surface stays unmounted this run (falls through to the 501 scaffold).
+	if (seams.mountHarness !== undefined) {
+		try {
+			seams.mountHarness(daemon, { storage, defaultScope, installedHarnesses });
+		} catch (err: unknown) {
+			const reason = err instanceof Error ? err.message : String(err);
+			process.stderr.write(`honeycomb: harness API mount failed (non-fatal): ${reason}\n`);
 		}
 	}
 }
@@ -1048,6 +1094,27 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// client (clean lexical-only). The attacher writes through the same live storage client.
 	const embed = options.embed ?? createEmbedAttachment({ storage });
 
+	// ── PRD-039a (a-AC-3 / OQ-1): the daemon's known INSTALLED/wired harness set — the cheap
+	// cached presence check resolved ONCE here (NOT a per-request file walk or spawn). A harness
+	// reads `installed: true` on the telemetry endpoint independent of whether it has ever captured
+	// a turn. Precedence (highest first):
+	//   1. an explicit `options.installedHarnesses` (a test injects a fixed mix);
+	//   2. else the harness-sync `HarnessTarget` names the file watcher holds, WHEN any are supplied;
+	//   3. else — for the REAL production assembly only (no injected `storage`) — the cheap on-disk
+	//      `detectInstalledHarnesses()` probe (existsSync over each installer's marker), so the LIVE
+	//      endpoint reflects what is actually wired instead of the empty "wired nothing yet" set
+	//      (a-AC-3 was plumbed but starved in production — this feeds it).
+	// A unit assembly (injected `storage`, no targets, no explicit set) stays on the empty set, so the
+	// deterministic suite never touches the real home. The probe is fail-soft (a missing/unreadable
+	// marker → simply absent), so it can never crash the boot.
+	const installedHarnesses: ReadonlySet<string> =
+		options.installedHarnesses ??
+		(options.harnessTargets !== undefined && options.harnessTargets.length > 0
+			? new Set(options.harnessTargets.map((t) => t.name))
+			: options.storage === undefined
+				? detectInstalledHarnesses()
+				: new Set<string>());
+
 	// ── a-AC-2 / d-AC-1: fire the seams EXACTLY ONCE, after construction (the four core
 	// seams + the /api/logs reader always; the /dashboard host local-mode only per security
 	// F-1; PLUS the three data-API seams — memories/vfs/product-data — always, 022d).
@@ -1059,6 +1126,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		embed,
 		healthDetail,
 		options.workspaceDir ?? process.cwd(),
+		installedHarnesses,
 		options.seams ?? defaultSeamFns,
 	);
 

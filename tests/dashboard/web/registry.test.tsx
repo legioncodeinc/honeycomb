@@ -94,6 +94,26 @@ describe("037c AC-5: a dynamic entry's resolver returns N sub-items the sidebar 
 	});
 });
 
+describe("PRD-039 D-6: the real Harnesses entry carries the DYNAMIC per-harness resolver (037c contract)", () => {
+	it("the Harnesses ROUTES entry is a dynamic group resolving #/harnesses/<name> from the live list", () => {
+		const harnesses = ROUTES.find((r) => r.route === "/harnesses");
+		expect(harnesses, "the Harnesses entry exists").toBeDefined();
+		// PRD-039 makes the static top-level entry carry a dynamic CHILD resolver (parent D-6).
+		expect(harnesses?.dynamic, "Harnesses carries a dynamic group").toBeDefined();
+		const sub = harnesses?.dynamic?.resolve([
+			{ name: "claude-code" },
+			{ name: "cursor" },
+		]);
+		expect(sub?.map((s) => s.route)).toEqual(["/harnesses/claude-code", "/harnesses/cursor"]);
+		// The other six static entries remain plain (no dynamic group) — only Harnesses is dynamic.
+		for (const r of ROUTES) {
+			if (r.route !== "/harnesses") expect(r.dynamic, `${r.label} is a plain static entry`).toBeUndefined();
+		}
+		// A deep per-harness hash still resolves to the Harnesses PARENT (the page renders detail off the hash).
+		expect(matchRoute("/harnesses/cursor").route).toBe("/harnesses");
+	});
+});
+
 describe("037c AC-6: a one-entry plug-in appears in the nav + routes WITHOUT editing sidebar/router", () => {
 	it("a throwaway registry entry renders as a nav item and matchRoute routes to its component", () => {
 		// A throwaway page + entry — the kind PRDs 038-044 add. We do NOT touch sidebar.tsx/router.tsx.

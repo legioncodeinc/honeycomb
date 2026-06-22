@@ -38,6 +38,9 @@ export const ENDPOINTS = Object.freeze({
 	graph: "/api/graph",
 	recall: "/api/memories/recall",
 	logs: "/api/logs",
+	// PRD-039a — the harness registry + last-seen telemetry endpoint (the data backbone the
+	// Harnesses page 039b/039c reads). Served under the diagnostics group (`/api/diagnostics/harnesses`).
+	harnesses: "/api/diagnostics/harnesses",
 	health: "/health",
 	dream: "/api/diagnostics/dream",
 	// PRD-032c — the vault `setting`-class surface (Wave 1 `vault/api.ts`) + the names-only
@@ -190,6 +193,69 @@ export const LogsResponseSchema = z.object({
 	count: z.number().catch(0),
 });
 export type LogRecordWire = z.infer<typeof LogRecordSchema>;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRD-039 — the harness registry + last-seen telemetry (the data backbone). Mirrors
+// `src/daemon/runtime/dashboard/harness-api.ts` (`HarnessStatus`) + the folded 039c
+// capability descriptor. Every field defaults so a partial/malformed payload degrades
+// to a safe zeroed state, NEVER a throw into React (AC-8 defensive parsing). NO secret
+// rides this shape by construction — ids, booleans, a count, an ISO timestamp, statics.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Cursor's `cursor-agent` agents descriptor (039c) — present for Cursor, absent for Claude Code. */
+export const HarnessAgentsSchema = z.object({
+	kind: z.string().catch(""),
+	binary: z.string().catch(""),
+	fallbackBin: z.string().optional(),
+});
+
+/** One harness's host-CLI descriptor (mirrors the shim `HostCli`). */
+export const HarnessHostCliSchema = z.object({
+	bin: z.string().catch(""),
+	args: z.array(z.string()).catch([]),
+	fallbackBin: z.string().optional(),
+});
+
+/**
+ * The data-driven capability descriptor folded into each `HarnessStatus` server-side (039c / c-OQ-2).
+ * The OPTIONAL fields are the genuine shim divergences — a missing field omits that harness's panel
+ * on the detail page (c-AC-3), never a blank. Each field `.catch()`es so a partial body still renders.
+ */
+export const HarnessCapabilitiesSchema = z.object({
+	name: z.string().catch(""),
+	runtimePath: z.string().catch(""),
+	contextChannel: z.string().catch(""),
+	hostCli: HarnessHostCliSchema.catch({ bin: "", args: [] }),
+	lifecycleEvents: z.array(z.string()).catch([]),
+	agents: HarnessAgentsSchema.optional(),
+	workspaceRoots: z.boolean().optional(),
+	mcpRegistration: z.boolean().optional(),
+	contractedTools: z.boolean().optional(),
+	agentsMdContext: z.boolean().optional(),
+	userVisibleLogin: z.boolean().optional(),
+});
+export type HarnessCapabilitiesWire = z.infer<typeof HarnessCapabilitiesSchema>;
+
+/** One harness's status row (mirrors the daemon `HarnessStatus`). `lastSeen` is null when never seen. */
+export const HarnessStatusSchema = z.object({
+	name: z.string().catch(""),
+	installed: z.boolean().catch(false),
+	active: z.boolean().catch(false),
+	lastSeen: z.string().nullable().catch(null),
+	turnsCaptured: z.number().catch(0),
+	runtimePath: z.string().catch(""),
+	capabilities: HarnessCapabilitiesSchema.catch({
+		name: "",
+		runtimePath: "",
+		contextChannel: "",
+		hostCli: { bin: "", args: [] },
+		lifecycleEvents: [],
+	}),
+});
+export const HarnessStatusResponseSchema = z.object({
+	harnesses: z.array(HarnessStatusSchema).catch([]),
+});
+export type HarnessStatusWire = z.infer<typeof HarnessStatusSchema>;
 
 /** The Wave-1 Dream ack (`POST /api/diagnostics/dream` → 202 + this body). */
 export const DreamAckSchema = z.object({
@@ -376,6 +442,13 @@ export interface WireClient {
 	graph(): Promise<GraphWire>;
 	recall(query: string): Promise<{ memories: RecalledMemory[]; degraded: boolean }>;
 	logs(limit?: number): Promise<LogRecordWire[]>;
+	/**
+	 * PRD-039a — read the harness registry + last-seen telemetry (the data backbone). Returns the
+	 * six canonical `HarnessStatus` rows the Harnesses page (039b/039c) renders; a failure degrades
+	 * to an empty list (the page shows its honest empty/zero state, never a throw). No second source —
+	 * this is the SINGLE backbone (parent D-3).
+	 */
+	harnesses(): Promise<HarnessStatusWire[]>;
 	health(): Promise<HealthProbe>;
 	dream(): Promise<DreamAck>;
 	/** PRD-032c — read the vault `setting` class + the provider→model catalog (`GET /api/settings`). */
@@ -472,6 +545,12 @@ export function createWireClient(options: WireClientOptions = {}): WireClient {
 		async logs(limit = 40): Promise<LogRecordWire[]> {
 			const v = await getJson(fetchImpl, url(`${ENDPOINTS.logs}?limit=${limit}`), LogsResponseSchema);
 			return v?.records ?? [];
+		},
+		async harnesses(): Promise<HarnessStatusWire[]> {
+			// GET the six canonical harness statuses; a malformed/absent body degrades to the empty
+			// list so the page renders its honest empty/zero state (never a throw). Single backbone (D-3).
+			const v = await getJson(fetchImpl, url(ENDPOINTS.harnesses), HarnessStatusResponseSchema);
+			return v?.harnesses ?? [];
 		},
 		async health(): Promise<HealthProbe> {
 			try {
