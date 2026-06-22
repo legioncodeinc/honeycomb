@@ -339,6 +339,53 @@ export function createFakeContextRenderer(block = ""): ContextRenderer {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PrimeRenderer — the session-start memory prime (PRD-046d / d-AC-1..5)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The prime-render request: the scope/session the digest is fetched for. The
+ * renderer is READ-ONLY and ABSORBS its own errors (d-AC-4) — an unreachable daemon
+ * or a cold (`empty:true`) repo returns an empty digest, never a throw, so
+ * session-start never blocks and never errors the agent.
+ */
+export interface PrimeRenderRequest {
+	/** Session metadata (scope + session id) the digest is fetched for. */
+	readonly meta: HookSessionMeta;
+	/** The credential, when present (resolves the tenancy the prime is scoped to). */
+	readonly credential?: HookCredential;
+}
+
+/**
+ * The prime-render seam (PRD-046d / d-AC-1..5). Fetches the already-bounded session
+ * digest (046c's `GET /api/memories/prime`) ONCE at session start and returns the
+ * `digest` text verbatim — it does NO assembly itself (the daemon bounded it). The
+ * shim threads the returned block into the SAME `additionalContext` channel the
+ * context renderer uses, so the agent sees the Tier-1 index at turn one.
+ *
+ * Injected so a test drives session-start with a deterministic digest. The real impl
+ * does a fail-soft loopback `GET` — ANY failure (daemon down, timeout, non-200,
+ * `empty:true`) resolves to `""` (d-AC-4), never a throw.
+ */
+export interface PrimeRenderer {
+	/** Fetch + render the prime digest. Returns `""` on any error / cold repo (d-AC-4). */
+	render(req: PrimeRenderRequest): Promise<string>;
+}
+
+/**
+ * Build a {@link PrimeRenderer} fake that returns the supplied digest (default `""`,
+ * the cold-repo / unreachable case). A test asserts session-start threads the digest
+ * into {@link HookResult.additionalContext} (d-AC-1 / d-AC-2) and that an empty digest
+ * is omitted (d-AC-4).
+ */
+export function createFakePrimeRenderer(digest = ""): PrimeRenderer {
+	return {
+		async render(): Promise<string> {
+			return digest;
+		},
+	};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // HookCoreDeps — what every core module is constructed with (D-2 seam bundle)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -483,6 +530,15 @@ export interface SessionStartDeps extends HookCoreDeps {
 	 * the gate is permissive (capture enabled), matching the gate's own default.
 	 */
 	readonly captureEnv?: { readonly captureFlag?: string };
+	/**
+	 * The PRD-046d session-start memory prime. When supplied, session-start fetches the
+	 * 046c digest ONCE (d-AC-3) and appends it to the rendered `additionalContext`
+	 * (d-AC-1 / d-AC-2). ABSENT → no prime is fetched (the prior session-start behaviour
+	 * is unchanged), so a unit-constructed session-start stays inert. Fail-soft: a prime
+	 * failure or a cold (`empty:true`) repo contributes nothing and never breaks
+	 * session-start (d-AC-4).
+	 */
+	readonly prime?: PrimeRenderer;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

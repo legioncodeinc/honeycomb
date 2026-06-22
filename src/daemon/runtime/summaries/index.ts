@@ -38,6 +38,57 @@ export {
 	type WorkerConfig,
 } from "./contracts.js";
 
+// ── PRD-046b Tier-1 KEY READ path (the cheap, pure-SQL prime skim — NO generation at read) ──
+export {
+	buildDurableKeySkimSql,
+	buildEpisodicKeySkimSql,
+	DEFAULT_KEY_SKIM_LIMIT,
+	type KeySource,
+	MAX_KEY_SKIM_LIMIT,
+	MEMORIES_TABLE,
+	type PrimedKey,
+	type PrimeKeyReadDeps,
+	resolveKeySkimLimit,
+	skimPrimeKeys,
+} from "./prime-keys.js";
+
+// ── PRD-046c PRIME DIGEST assembler (token-bounded, recency-aware, deduped — pure transform) ──
+export {
+	assemblePrimeDigest,
+	DEFAULT_DURABLE_LIMIT,
+	DEFAULT_PRIME_MAX_TOKENS,
+	DEFAULT_RECENT_LIMIT,
+	estimatePrimeTokens,
+	identityRecencyRanker,
+	type KeyDeduper,
+	normalizedTextDeduper,
+	PRIME_EMPTY_MARKER,
+	PRIME_FOOTER,
+	PRIME_GUARD_CLOSE,
+	PRIME_GUARD_NOTICE,
+	PRIME_HEADER,
+	type PrimeDigest,
+	type PrimeDigestBudget,
+	type PrimeEntry,
+	type RecencyRanker,
+} from "./prime-digest.js";
+
+// ── PRD-046b Tier-1 KEY derivation (the grounded two-step distillation, folded into the gate) ──
+export {
+	buildStructuredSummaryPrompt,
+	deriveKeyFromExtraction,
+	type Extraction,
+	ExtractionSchema,
+	extractJsonObject,
+	type GroundedSummary,
+	isKeyGrounded,
+	MAX_KEY_CHARS,
+	parseSummaryGate,
+	SUMMARY_GATE_INSTRUCTIONS,
+	SummaryGateSchema,
+	type SummaryGateOutput,
+} from "./key.js";
+
 // ── 017a summary worker (FULL) ──
 export {
 	buildSummaryPrompt,
@@ -53,6 +104,7 @@ export {
 	fetchWithRetry,
 	IN_PROGRESS_MARKER,
 	MEMORY_TABLE,
+	renderScrubbedEvents,
 	runSummaryWorker,
 	SESSIONS_TABLE,
 	type Sleeper,
@@ -68,19 +120,39 @@ export {
 	WIKI_WORKER_ENV,
 } from "./worker.js";
 
+// ── 046a summary JOB worker (the deferred-assembly mount + trigger wiring) ──
+export {
+	createSummaryJobWorker,
+	parseSummaryJobPayload,
+	SUMMARY_JOB_KIND,
+	SummaryJobPayloadSchema,
+	type SummaryJobPayload,
+	type SummaryJobWorker,
+	type SummaryJobWorkerDeps,
+	type SummaryJobWorkerLogger,
+	summaryCliSpecFor,
+	type SummaryWorkerDepsFactory,
+	triggerFromPayload,
+} from "./job.js";
+
 // ── 017b synthesis (FULL — the team-facing wiki: MEMORY.md + thread heads) ──
+// ── PRD-046b: + the version-bumped /MEMORY.md REFRESH (refreshMemoryIndex / refreshRow). ──
 export {
 	createSynthesisStore,
 	DEFAULT_SYNTHESIS_AUTHOR,
+	type MemoryIndexRefreshResult,
 	type MemoryIndexResult,
 	MEMORY_INDEX_PATH,
+	refreshMemoryIndex,
 	renderMemoryIndex,
 	renderThreadHead,
 	type SummaryRecord,
 	synthesizeMemoryIndex,
 	synthesizeThreadHeads,
 	SYNTHESIS_DESCRIPTION_CHARS,
+	SYNTHESIS_RESOLVE_POLLS,
 	type SynthesisDeps,
+	type SynthesisRefreshOutcome,
 	type SynthesisStore,
 	type SynthesisWriteOutcome,
 	type SynthesizedRow,
@@ -88,4 +160,5 @@ export {
 	type ThreadHeadResult,
 	threadHeadPath,
 	threadKeyOf,
+	type VersionedSynthesizedRow,
 } from "./synthesis.js";

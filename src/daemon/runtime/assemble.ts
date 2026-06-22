@@ -67,7 +67,7 @@ import { mountNotificationsApi } from "./notifications/api.js";
 import { attachSessionsPrune } from "./sessions/prune.js";
 
 // ── Data-API mount seams (PRD-022a / 022b / 022c) the composition root fires (D-2 / d-AC-1) ──
-import { mountMemoriesApi } from "./memories/index.js";
+import { mountMemoriesApi, mountMemoriesPrimeApi } from "./memories/index.js";
 import { mountVfsApi } from "./vfs/api.js";
 import { mountProductDataApi } from "./product/index.js";
 import { type SecretsApiDeps } from "./secrets/api.js";
@@ -91,6 +91,9 @@ import type { ModelClient } from "./pipeline/model-client.js";
 import { resolveDreamingConfig } from "./dreaming/config.js";
 import { createDreamingTrigger } from "./dreaming/trigger.js";
 import { createDreamingWorker, type DreamingJobWorker } from "./dreaming/worker.js";
+
+// ── The PRD-046a summary-worker mount (the deferred-assembly seam PRD-017 left) ──
+import { createSummaryJobWorker, type SummaryJobWorker } from "./summaries/index.js";
 
 import { createStorageClient } from "../storage/index.js";
 import {
@@ -289,6 +292,16 @@ export interface SeamFns {
 	readonly mountDashboardHost: typeof mountDashboardHost;
 	/** The `/api/memories/*` data API (022a). Fires UNCONDITIONALLY — its group is a protected session group. */
 	readonly mountMemories: typeof mountMemoriesApi;
+	/**
+	 * The session-priming PRIME digest — `GET /api/memories/prime` (PRD-046c). Fires onto the same
+	 * `/api/memories` SESSION group, so it inherits the auth/RBAC + session gate. A pure SQL skim
+	 * (`skimPrimeKeys`) + a pure assembly — NO generation at read.
+	 *
+	 * OPTIONAL on the seam record (exactly like {@link mountGraph}) so a pre-existing recording-fake
+	 * `SeamFns` that predates this seam stays type-compatible WITHOUT editing those out-of-scope
+	 * tests; `assembleSeams` fires it only when present (always present in {@link defaultSeamFns}).
+	 */
+	readonly mountMemoriesPrime?: typeof mountMemoriesPrimeApi;
 	/** The `/memory/*` VFS browse reads (022b). Fires UNCONDITIONALLY — its group is a protected session group. */
 	readonly mountVfs: typeof mountVfsApi;
 	/** The product-data surface — goals/kpis/skills/rules (+secrets) (022c). Fires UNCONDITIONALLY. */
@@ -367,6 +380,7 @@ export const defaultSeamFns: SeamFns = {
 	mountLogs: mountLogsApi,
 	mountDashboardHost,
 	mountMemories: mountMemoriesApi,
+	mountMemoriesPrime: mountMemoriesPrimeApi,
 	mountVfs: mountVfsApi,
 	mountProductData: mountProductDataApi,
 	mountDream: mountDreamApi,
@@ -635,6 +649,15 @@ export function assembleSeams(
 	// (lexical fallback) emits one structured `recall.degraded` event (mode + arm coverage;
 	// no secret). Threaded here only — the recall HANDLER owns the emit; the engine is unchanged.
 	seams.mountMemories(daemon, { storage, defaultScope, embed: embed.client, logger: daemon.logger });
+
+	// 7b. The session-priming PRIME digest (PRD-046c): `GET /api/memories/prime` attaches onto the
+	//    SAME `/api/memories` SESSION group, inheriting its auth/RBAC + session gate. The prime is a
+	//    PURE SQL skim (`skimPrimeKeys`, 046b) + a pure token-bounded/deduped assembly — NO embed,
+	//    NO gate, NO vector at read time. A cold scope answers an honest empty digest, never a 500.
+	//    Guarded + present-only (like the graph seam) so an out-of-scope fake `SeamFns` is unaffected.
+	if (seams.mountMemoriesPrime !== undefined) {
+		seams.mountMemoriesPrime(daemon, { storage, defaultScope });
+	}
 
 	// 8. The /memory/* VFS browse reads (022b). cat / grep / ls / find / classify attach
 	//    onto the already-mounted `/memory` SESSION group; `recallConfig` defaults to the
@@ -1030,6 +1053,31 @@ async function buildGatedDreamingWorker(
 }
 
 /**
+ * Build the daemon-resident SUMMARY job worker (PRD-046a / a-AC-1) — the live CONSUMER of
+ * `summary` jobs PRD-017 left as a deferred-assembly seam. It leases ONLY `["summary"]`
+ * off the SAME durable `memory_jobs` queue, parses each cue back into a `SummarySession`,
+ * and drives the UNCHANGED `runSummaryWorker` with the real `{ lock, fetcher, gate, embed,
+ * store }` deps (a-AC-1). The gate is built over {@link systemSummarySpawner}, so the
+ * spawned subprocess carries the safety env (`HONEYCOMB_WIKI_WORKER=1` +
+ * `HONEYCOMB_CAPTURE=false` + the recursion guard) on the LIVE-assembled path (a-AC-4),
+ * and the worker's one shared per-session lock holds end-to-end (a-AC-3).
+ *
+ * Unlike dreaming (a premium gated tier), summaries are a CORE feature, so this worker is
+ * built + started UNCONDITIONALLY once the queue is up. Construction has no side effects
+ * until `start()`; the caller starts it after `startServices()` and stops it in shutdown.
+ * The `embed.client` is the daemon's real (or no-op) 768-dim embed client — a throw is
+ * non-fatal in the worker (a-AC-5).
+ */
+function buildSummaryWorker(
+	storage: StorageClient,
+	scope: QueryScope,
+	queue: DaemonServices["queue"],
+	embed: EmbedAttachment,
+): SummaryJobWorker {
+	return createSummaryJobWorker({ queue, storage, scope, embed: embed.client });
+}
+
+/**
  * The composition root (a-AC-1..6 / FR-1..10). Constructs the live storage client,
  * resolves the daemon scope, builds the real services, composes the auth gates for the
  * mode, wires the cached `/health` probe, builds the daemon, and fires the four seams
@@ -1234,6 +1282,10 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// and stopped in `shutdown()`. Null until/unless the gate opens — a disabled daemon never
 	// constructs the heavy bits (model client, trigger, worker).
 	let dreamingWorker: DreamingJobWorker | null = null;
+	// PRD-046a a-AC-1: the daemon-resident SUMMARY worker. Built + started UNCONDITIONALLY
+	// (summaries are a core feature, not a gated tier) inside `start()` AFTER the queue is
+	// up, and stopped in `shutdown()`. Null until `start()` runs.
+	let summaryWorker: SummaryJobWorker | null = null;
 
 	return {
 		daemon,
@@ -1259,6 +1311,21 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 
 			// Start the daemon's real services (queue → watcher → runtime-path).
 			await daemon.startServices();
+
+			// ── PRD-046a a-AC-1: build + start the SUMMARY worker, the live CONSUMER of
+			// `summary` jobs. It is built AFTER `startServices()` so it leases from a started
+			// queue. Summaries are a CORE feature (not gated like dreaming), so it starts
+			// UNCONDITIONALLY. FAIL-SOFT: a wiring failure is surfaced to stderr but must NEVER
+			// prevent the daemon from booting — the daemon is already up and serving; summaries
+			// simply stay unproduced this run rather than crashing the process.
+			try {
+				summaryWorker = buildSummaryWorker(storage, scope, daemon.services.queue, embed);
+				summaryWorker.start();
+			} catch (err: unknown) {
+				const reason = err instanceof Error ? err.message : String(err);
+				process.stderr.write(`honeycomb: summary worker start failed (non-fatal): ${reason}\n`);
+				summaryWorker = null;
+			}
 
 				// ── PRD-032a / AC-3: COPY the shared DeepLake login token into the vault as the
 				// `secret`-class `DEEPLAKE_TOKEN` record, ONCE per boot — the LIVE wiring of the
@@ -1317,6 +1384,11 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			if (dreamingWorker !== null) {
 				dreamingWorker.stop();
 				dreamingWorker = null;
+			}
+			// PRD-046a: stop the summary worker's poll loop (idempotent).
+			if (summaryWorker !== null) {
+				summaryWorker.stop();
+				summaryWorker = null;
 			}
 			if (probeTimer !== null) {
 				clearInterval(probeTimer);

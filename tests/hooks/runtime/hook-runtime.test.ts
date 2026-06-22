@@ -14,13 +14,16 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createClaudeCodeShim } from "../../../src/hooks/claude-code/shim.js";
 import { createCodexShim } from "../../../src/hooks/codex/shim.js";
+import { createCursorShim } from "../../../src/hooks/cursor/shim.js";
 import { createHookRuntime } from "../../../src/hooks/runtime.js";
 import { type BinaryIo, runHookBinary } from "../../../src/hooks/binary.js";
 import {
+	createFakePrimeRenderer,
 	type DaemonHookClient,
 	type DaemonHookRequest,
 	type DaemonHookResponse,
 	type HookSessionMeta,
+	type PrimeRenderer,
 } from "../../../src/hooks/shared/index.js";
 import {
 	createFakeClaimLock,
@@ -135,6 +138,177 @@ describe("c-AC-4 session-start: renders prior context via the renderer + drains 
 		);
 		expect(outcome.result.additionalContext).toBe("X");
 		expect(outcome.drain?.banner).toBeNull();
+	});
+});
+
+describe("PRD-046d session prime: the runtime injects the 046c digest at session-start for BOTH harnesses", () => {
+	/** A recording prime renderer — records each render call so once-per-session is provable. */
+	function recordingPrime(digest: string): PrimeRenderer & { renders: number } {
+		let renders = 0;
+		return {
+			get renders() {
+				return renders;
+			},
+			async render() {
+				renders++;
+				return digest;
+			},
+		};
+	}
+
+	it("d-AC-1: the Claude Code session-start injects the prime digest into additionalContext", async () => {
+		const { client } = recordingClient(200, { additionalContext: "" }); // no rules/goals block
+		const runtime = createHookRuntime({
+			daemon: client,
+			notifications: recordingPipeline(null),
+			prime: createFakePrimeRenderer("## Memory\n- decided X"),
+		});
+		const outcome = await runtime.runEvent(
+			createClaudeCodeShim(),
+			{ name: "SessionStart", payload: { source: "startup" } },
+			META,
+		);
+		expect(outcome.result.additionalContext).toBe("## Memory\n- decided X");
+	});
+
+	it("d-AC-2: the Cursor session-start injects the SAME prime digest (shared runtime, no per-harness fork)", async () => {
+		const { client } = recordingClient(200, { additionalContext: "" });
+		const runtime = createHookRuntime({
+			daemon: client,
+			notifications: recordingPipeline(null),
+			prime: createFakePrimeRenderer("## Memory\n- decided X"),
+		});
+		// Cursor's native session-start event is `sessionStart` (mapped by the cursor shim).
+		const outcome = await runtime.runEvent(
+			createCursorShim(),
+			{ name: "sessionStart", payload: { source: "startup" } },
+			META,
+		);
+		expect(outcome.result.additionalContext).toBe("## Memory\n- decided X");
+	});
+
+	it("d-AC-1: the prime is APPENDED to the rules/goals block when both are present", async () => {
+		const { client } = recordingClient(200, { additionalContext: "RULES: be concise." });
+		const runtime = createHookRuntime({
+			daemon: client,
+			notifications: recordingPipeline(null),
+			prime: createFakePrimeRenderer("## Memory\n- decided X"),
+		});
+		const outcome = await runtime.runEvent(
+			createClaudeCodeShim(),
+			{ name: "SessionStart", payload: { source: "startup" } },
+			META,
+		);
+		expect(outcome.result.additionalContext).toBe("RULES: be concise.\n\n## Memory\n- decided X");
+	});
+
+	it("d-AC-3: the prime renders ONCE at session-start and NOT on a per-turn capture", async () => {
+		const { client } = recordingClient(200, { additionalContext: "" });
+		const prime = recordingPrime("## Memory\n- decided X");
+		const runtime = createHookRuntime({ daemon: client, notifications: recordingPipeline(null), prime });
+
+		// Session-start → one prime render.
+		await runtime.runEvent(createClaudeCodeShim(), { name: "SessionStart", payload: { source: "startup" } }, META);
+		expect(prime.renders, "primed once at session-start").toBe(1);
+
+		// A subsequent per-turn capture event must NOT re-prime.
+		await runtime.runEvent(
+			createClaudeCodeShim(),
+			{ name: "UserPromptSubmit", payload: { prompt: "next turn" } },
+			META,
+		);
+		await runtime.runEvent(
+			createClaudeCodeShim(),
+			{ name: "PostToolUse", payload: { tool_name: "Read", tool_input: {} } },
+			META,
+		);
+		expect(prime.renders, "no re-prime on per-turn events").toBe(1);
+	});
+
+	it("d-AC-4: a cold-repo / unreachable prime ('') injects nothing and never errors session-start", async () => {
+		const { client } = recordingClient(200, { additionalContext: "RULES: be concise." });
+		const runtime = createHookRuntime({
+			daemon: client,
+			notifications: recordingPipeline(null),
+			prime: createFakePrimeRenderer(""), // daemon down / cold repo → empty digest
+		});
+		const outcome = await runtime.runEvent(
+			createCursorShim(),
+			{ name: "sessionStart", payload: { source: "startup" } },
+			META,
+		);
+		// The session starts normally with just the context block; no prime, no error.
+		expect(outcome.result.ok).toBe(true);
+		expect(outcome.result.additionalContext).toBe("RULES: be concise.");
+	});
+
+	it("d-AC-4: a THROWING prime renderer is absorbed — session-start still completes", async () => {
+		const { client } = recordingClient(200, { additionalContext: "RULES: be concise." });
+		const throwingPrime: PrimeRenderer = {
+			async render() {
+				throw new Error("prime exploded");
+			},
+		};
+		const runtime = createHookRuntime({
+			daemon: client,
+			notifications: recordingPipeline(null),
+			prime: throwingPrime,
+		});
+		const outcome = await runtime.runEvent(
+			createClaudeCodeShim(),
+			{ name: "SessionStart", payload: { source: "startup" } },
+			META,
+		);
+		expect(outcome.result.ok).toBe(true);
+		expect(outcome.result.additionalContext).toBe("RULES: be concise.");
+	});
+
+	it("d-AC-1: the prime digest reaches stdout through the Claude Code binary driver (the real channel)", async () => {
+		const out: string[] = [];
+		const io: BinaryIo = {
+			async readStdin() {
+				return JSON.stringify({ hook_event_name: "SessionStart", session_id: "s", source: "startup" });
+			},
+			writeStdout(text) {
+				out.push(text);
+			},
+		};
+		const { client } = recordingClient(200, { additionalContext: "" });
+		const runtime = createHookRuntime({
+			daemon: client,
+			notifications: recordingPipeline(null),
+			prime: createFakePrimeRenderer("## Memory\n- decided X"),
+		});
+		await runHookBinary({ shim: createClaudeCodeShim(), runtime, io });
+		expect(out).toHaveLength(1);
+		const envelope = JSON.parse(out[0]) as { channel: string; additionalContext: string };
+		expect(envelope.additionalContext).toBe("## Memory\n- decided X");
+	});
+
+	it("d-AC-2: the prime digest reaches stdout through the CURSOR binary driver (model-only additional_context)", async () => {
+		// This is the EXACT path the cursor bundle's `runCursorHook` runs: native cursor
+		// `sessionStart` JSON on stdin → cursor shim → runtime (prime fetch) → stdout envelope.
+		const out: string[] = [];
+		const io: BinaryIo = {
+			async readStdin() {
+				return JSON.stringify({ hook_event_name: "sessionStart", session_id: "s", source: "startup" });
+			},
+			writeStdout(text) {
+				out.push(text);
+			},
+		};
+		const { client } = recordingClient(200, { additionalContext: "" });
+		const runtime = createHookRuntime({
+			daemon: client,
+			notifications: recordingPipeline(null),
+			prime: createFakePrimeRenderer("## Memory\n- decided X"),
+		});
+		await runHookBinary({ shim: createCursorShim(), runtime, io });
+		expect(out).toHaveLength(1);
+		// Cursor lands context MODEL-ONLY (the shared `renderContext` channel envelope).
+		const envelope = JSON.parse(out[0]) as { channel: string; additionalContext: string };
+		expect(envelope.channel).toBe("model-only");
+		expect(envelope.additionalContext).toBe("## Memory\n- decided X");
 	});
 });
 

@@ -50,6 +50,12 @@ export const MEMORIES_COLUMNS = Object.freeze([
 	{ name: "id", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "type", sql: "TEXT NOT NULL DEFAULT 'fact'" },
 	{ name: "content", sql: "TEXT NOT NULL DEFAULT ''" },
+	// PRD-046b (b-AC-2/b-AC-4/b-AC-5): the DURABLE Tier-1 KEY — a ≤1-sentence,
+	// keyword-dense headline of the distilled fact so the prime (046c) skims durable
+	// keys with a pure SQL select, NO generation at read time. Additive, heal-compatible
+	// (NOT NULL DEFAULT ''); a fact with no derived key falls back to its `content` at
+	// read time, so an un-keyed legacy row is still primeable.
+	{ name: "key", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "normalized_content", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "content_hash", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "confidence", sql: "FLOAT4 NOT NULL DEFAULT 1.0" },

@@ -281,6 +281,11 @@ function minimalArgs(name: string): Record<string, unknown> {
 			return {};
 		case "secret_exec":
 			return { command: "echo hi" };
+		// PRD-046e pull path
+		case "hivemind_read":
+			return { ref: "/p" };
+		case "hivemind_search":
+			return { query: "q" };
 		default:
 			return {};
 	}

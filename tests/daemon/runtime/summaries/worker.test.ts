@@ -337,6 +337,7 @@ describe("PRD-017a summary worker", () => {
 		const outcome = await store.writeSummary({
 			path,
 			summary: "## the summary body",
+			key: "the summary body — written",
 			description: "the summary body",
 			embedding: null,
 			author: "alice",
@@ -382,6 +383,42 @@ describe("PRD-017a summary worker", () => {
 		const prompt = buildSummaryPrompt(SESSION, events);
 		expect(prompt).not.toContain(secret);
 		expect(prompt).toContain("[REDACTED]");
+	});
+
+	it("b-AC-5 (PRD-046b): a transcript secret reaches NEITHER the stored summary NOR the Tier-1 key", async () => {
+		// End-to-end: a secret-bearing transcript runs the full worker. The gate is scrubbed at
+		// the prompt boundary, and a (cooperative) gate that echoed a fact back can only ever see
+		// the scrubbed text — so neither the written summary body nor the Tier-1 key carries the
+		// secret. Drive a gate that returns a structured object referencing the scrubbed marker.
+		const secret = "sk-ant-abc123DEF456ghi789JKL012mno345";
+		const events: readonly SessionEvent[] = [
+			eventOf("user_message", `rotate the key ${secret} in the deploy config`, "2026-06-18T00:00:01Z"),
+		];
+		// The gate (cooperatively) emits a grounded object — it never saw the secret (scrubbed).
+		const gate = createFakeSummaryGenCli(
+			JSON.stringify({
+				extraction: { changes: ["rotated the deploy-config key (redacted)"] },
+				summary: "## Deploy\nRotated the deploy-config key (value redacted).",
+				key: "deploy-config key — rotated",
+			}),
+		);
+		const { store, rows } = recordingStore();
+		const { sleeper } = fakeSleeper();
+		const result = await runSummaryWorker(FINAL_TRIGGER, SESSION, {
+			lock: memoryLock(),
+			fetcher: fakeFetcher(events),
+			gate,
+			embed: fixedEmbed(),
+			store,
+			config: FAST_CONFIG,
+			sleeper,
+		});
+		expect(result.ran).toBe(true);
+		expect(rows).toHaveLength(1);
+		// GREP-CLEAN: the secret appears in NEITHER the stored summary NOR the Tier-1 key.
+		expect(rows[0]?.summary).not.toContain(secret);
+		expect(rows[0]?.key).not.toContain(secret);
+		expect(rows[0]?.key.length).toBeGreaterThan(0);
 	});
 
 	it("fetchWithRetry: retryLimit 0 → a single attempt, no backoff", async () => {

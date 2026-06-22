@@ -1,0 +1,7 @@
+{
+  "//": "PRD-046f f-AC-4 — the committed pull-through / redundant-search-reduction baseline the prime-eval gate enforces (baseline − ε, ε = EPSILON_PRIME in src/eval/prime.ts).",
+  "//placeholder": "ADVISORY until the first measured live baseline is committed (same posture as PRD-027/045: the gate computes the verdict + reasons but never FAILS a run while placeholder=true). To enforce: run `HONEYCOMB_EMBEDDINGS=true npm run eval:prime` against live DeepLake with the embed daemon up, read the `[046f receipt]` pull-through / search-reduction the itest logs, write the measured values AT-OR-BELOW the stable observed numbers here, and flip placeholder=false. The deterministic scenario set makes the COLD side fixed; the PRIMED side derives from the real assembled digest, so the only run-to-run movement is workspace churn shuffling a digest entry out under the token budget — ε=0.05 absorbs that.",
+  "pullThroughRate": 0.9,
+  "searchReductionMean": 1.5,
+  "placeholder": true
+}

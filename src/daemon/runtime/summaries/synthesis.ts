@@ -51,7 +51,7 @@ import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import { type HealTarget, withHeal } from "../../storage/heal.js";
 import { isOk, type StorageRow } from "../../storage/result.js";
 import { sLiteral, sqlIdent } from "../../storage/sql.js";
-import { buildInsert, val, type RowValues } from "../../storage/writes.js";
+import { appendVersionBumped, buildInsert, val, type RowValues } from "../../storage/writes.js";
 
 import {
 	IN_PROGRESS_MARKER,
@@ -69,6 +69,15 @@ export const MEMORY_INDEX_PATH = "/MEMORY.md" as const;
 export const THREAD_HEAD_PATH_PREFIX = "/threads/" as const;
 /** Max chars of the `description` excerpt stored on a synthesized row (mirrors the worker). */
 export const SYNTHESIS_DESCRIPTION_CHARS = 280;
+
+/**
+ * Poll budget for resolving the index/head row's current (highest-`version`) row
+ * (PRD-046b b-AC-1). Mirrors `dreaming/trigger.ts`'s `RESOLVE_POLLS`: a single by-path
+ * read can land on a stale segment and under-report the version; because versions are
+ * append-only and monotone, the MAX across a few polls converges UP to the truth. The
+ * deterministic fake settles on the first read, so this is a live-only cost.
+ */
+export const SYNTHESIS_RESOLVE_POLLS = 8;
 
 // ════════════════════════════════════════════════════════════════════════════
 // SummaryRecord — one per-session summary row the synthesis reads + links.
@@ -122,6 +131,28 @@ export interface SynthesisStore {
 	 * Returns whether this call wrote a fresh row.
 	 */
 	writeRow(row: SynthesizedRow): Promise<SynthesisWriteOutcome>;
+	/**
+	 * REFRESH a synthesized row by APPENDING it at the next `version` (PRD-046b b-AC-1).
+	 *
+	 * The 017b `writeRow` is write-once (SELECT-before-INSERT) so a re-synthesis after
+	 * new summaries land is a NO-OP — the documented `/MEMORY.md` refresh limitation.
+	 * This replaces that with the VERSION-BUMP discipline `ontology/supersede.ts` /
+	 * `dreaming/trigger.ts` use: read the current MAX(`version`) for the path, INSERT a
+	 * FRESH row at version N+1 carrying the re-rendered body. The current index is the
+	 * HIGHEST-version row (read by {@link readLatestVersionedRow}), so the index
+	 * REFRESHES as summaries land — and there is ZERO in-place UPDATE (the DeepLake
+	 * backend coalesces rapid by-key UPDATEs and never converges live). Returns the
+	 * version the refreshed row was written at.
+	 */
+	refreshRow(row: SynthesizedRow): Promise<SynthesisRefreshOutcome>;
+	/**
+	 * Read the CURRENT (highest-`version`) synthesized row at `path` (PRD-046b b-AC-1).
+	 * The reader convention paired with {@link refreshRow}: a re-synthesis appends a
+	 * higher version, so the current index/head is `ORDER BY version DESC LIMIT 1`.
+	 * Poll-convergent against the backend's segment-freshness flap. Returns `null` when
+	 * no row has landed yet.
+	 */
+	readLatestVersionedRow(path: string): Promise<VersionedSynthesizedRow | null>;
 }
 
 /** One synthesized `memory` row the store writes (b-AC-1 / b-AC-2). */
@@ -140,6 +171,22 @@ export interface SynthesizedRow {
 export interface SynthesisWriteOutcome {
 	/** True when this call inserted a fresh row; false when a real row already existed. */
 	readonly written: boolean;
+}
+
+/** The outcome of a {@link SynthesisStore.refreshRow} call (PRD-046b b-AC-1). */
+export interface SynthesisRefreshOutcome {
+	/** The `version` the refreshed row was appended at (N+1 over the prior highest). */
+	readonly version: number;
+}
+
+/** A synthesized row read back at its resolved `version` (PRD-046b b-AC-1). */
+export interface VersionedSynthesizedRow {
+	/** The row identity key — `/MEMORY.md` or `/threads/<threadKey>.md`. */
+	readonly path: string;
+	/** The rendered markdown body (← `summary`). */
+	readonly summary: string;
+	/** The highest version observed for the path (0 when no row exists yet). */
+	readonly version: number;
 }
 
 /** ISO timestamp for `creation_date` / `last_update_date`. */
@@ -245,6 +292,60 @@ export function createSynthesisStore(
 			// `written` reflects the ACTUAL INSERT result — returning `true` unconditionally
 			// would mask a failed INSERT (e.g. a missing column) as success (the worker lesson).
 			return { written: isOk(inserted) };
+		},
+
+		async refreshRow(row: SynthesizedRow): Promise<SynthesisRefreshOutcome> {
+			// PRD-046b b-AC-1: REFRESH by APPENDING at version N+1 (never an in-place UPDATE).
+			// `appendVersionBumped` reads the current MAX(version) for the path key and INSERTs
+			// a FRESH row at N+1, so a re-synthesis after new summaries land lands a HIGHER
+			// version that the highest-version read resolves as current — the index refreshes
+			// instead of being a write-once no-op. Heal-aware (a missing `version`/`key` column
+			// is ALTERed in on first write; the column-add is additive, NOT NULL DEFAULT).
+			//
+			// The per-version row carries the SAME columns the SBI row does (path/filename/
+			// summary/NULL embedding/author/agent/description), MINUS the version column which
+			// `appendVersionBumped` appends. The `keyColumn` is `path` so the version chain is
+			// keyed on the index/head identity.
+			const baseRow = rowValuesFor(row).filter(([name]) => name !== "version");
+			const { version } = await appendVersionBumped(storage, target(), scope, {
+				keyColumn: "path",
+				keyValue: row.path,
+				row: baseRow,
+			});
+			return { version };
+		},
+
+		async readLatestVersionedRow(path: string): Promise<VersionedSynthesizedRow | null> {
+			// PRD-046b b-AC-1: the current index/head is the HIGHEST-version row at the path.
+			// Poll-convergent against the backend's segment-freshness flap — a single read can
+			// under-report the version, but versions are append-only + monotone so the MAX
+			// across a few polls converges UP. The deterministic fake settles on the first read.
+			const tbl = sqlIdent(physical());
+			const pathCol = sqlIdent("path");
+			const summaryCol = sqlIdent("summary");
+			const versionCol = sqlIdent("version");
+			const sql =
+				`SELECT ${pathCol}, ${summaryCol}, ${versionCol} FROM "${tbl}" ` +
+				`WHERE ${pathCol} = ${sLiteral(path)} ` +
+				`ORDER BY ${versionCol} DESC LIMIT 1`;
+			let best: VersionedSynthesizedRow | null = null;
+			for (let poll = 0; poll < SYNTHESIS_RESOLVE_POLLS; poll++) {
+				const res = await withHeal(storage, target(), scope, () => storage.query(sql, scope));
+				if (isOk(res) && res.rows.length > 0) {
+					const r = res.rows[0] as StorageRow;
+					const rawV = r.version;
+					const v = typeof rawV === "number" ? rawV : Number(rawV);
+					const version = Number.isFinite(v) ? v : 0;
+					if (best === null || version > best.version) {
+						best = {
+							path: typeof r.path === "string" ? r.path : path,
+							summary: typeof r.summary === "string" ? r.summary : "",
+							version,
+						};
+					}
+				}
+			}
+			return best;
 		},
 	};
 }
@@ -385,6 +486,41 @@ export async function synthesizeMemoryIndex(deps: SynthesisDeps): Promise<Memory
 		author,
 	});
 	return { path: MEMORY_INDEX_PATH, written: outcome.written, linkedSummaries: summaries.length };
+}
+
+/** The result of {@link refreshMemoryIndex} (PRD-046b b-AC-1). */
+export interface MemoryIndexRefreshResult {
+	/** The index path refreshed (`/MEMORY.md`). */
+	readonly path: string;
+	/** The `version` the refreshed index row was appended at (N+1 over the prior highest). */
+	readonly version: number;
+	/** How many per-session summaries the refreshed index linked. */
+	readonly linkedSummaries: number;
+}
+
+/**
+ * REFRESH the tenant-scoped `/MEMORY.md` from the CURRENT per-session summaries (PRD-046b
+ * b-AC-1) — the version-bumped companion to {@link synthesizeMemoryIndex}.
+ *
+ * Where `synthesizeMemoryIndex` is write-once (SELECT-before-INSERT) and a re-synthesis is
+ * a no-op, THIS re-reads the summaries, re-renders the index, and APPENDS it at the next
+ * `version` via {@link SynthesisStore.refreshRow}. So as new summaries land and the mount
+ * re-runs synthesis, the index REFRESHES — the highest-version `/MEMORY.md` row reflects
+ * the latest corpus — with ZERO in-place UPDATE (the DeepLake by-key-UPDATE-never-converges
+ * trap). Reads + writes route through the daemon store (b-AC-3); the read is tenant-scoped
+ * so two tenants refresh two disjoint indexes (b-AC-6).
+ */
+export async function refreshMemoryIndex(deps: SynthesisDeps): Promise<MemoryIndexRefreshResult> {
+	const author = deps.author ?? DEFAULT_SYNTHESIS_AUTHOR;
+	const summaries = await deps.store.readSummaries();
+	const body = renderMemoryIndex(summaries);
+	const outcome = await deps.store.refreshRow({
+		path: MEMORY_INDEX_PATH,
+		summary: body,
+		description: excerpt(`MEMORY.md — ${summaries.length} session summaries`),
+		author,
+	});
+	return { path: MEMORY_INDEX_PATH, version: outcome.version, linkedSummaries: summaries.length };
 }
 
 // ════════════════════════════════════════════════════════════════════════════

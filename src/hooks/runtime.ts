@@ -54,12 +54,14 @@ import { createDaemonHookClient } from "./shared/daemon-client.js";
 import { createCredentialReader } from "./shared/credential-reader.js";
 import {
 	createContextRenderer,
+	createPrimeRenderer,
 	type CredentialReader,
 	type DaemonHookClient,
 	type HookCoreDeps,
 	type HookInput,
 	type HookResult,
 	type HookSessionMeta,
+	type PrimeRenderer,
 	runCapture,
 	runPreToolUse,
 	runSessionEnd,
@@ -81,6 +83,13 @@ export interface HookRuntimeOptions {
 	readonly credentials?: CredentialReader;
 	/** Inject the daemon client (tests). Defaults to the real loopback POST client. */
 	readonly daemon?: DaemonHookClient;
+	/**
+	 * Inject the session-start memory prime (tests / PRD-046d). Defaults to the REAL
+	 * loopback `GET /api/memories/prime` renderer (d-AC-1..5), fed tenancy by the same
+	 * credential reader. The runtime CALLS it on session-start; it never reimplements the
+	 * 046c digest. Fail-soft by construction — a down/cold daemon contributes nothing.
+	 */
+	readonly prime?: PrimeRenderer;
 	/**
 	 * Inject the notifications pipeline (tests / c-AC-4). Defaults to the REAL 020d
 	 * pipeline (real state + claim lock + a fail-soft daemon-backed source). The runtime
@@ -150,6 +159,10 @@ export function createHookRuntime(options: HookRuntimeOptions = {}): HookRuntime
 		options.daemon ?? createDaemonHookClient({ credentials, host, port, fetch: doFetch });
 	// c-AC-1/4: the real read-only context renderer (asks the daemon for the rules/goals block).
 	const context = createContextRenderer(daemon);
+	// PRD-046d (d-AC-1..5): the real session-start prime renderer — a fail-soft loopback
+	// `GET /api/memories/prime`, fed tenancy by the SAME credential reader. Injected on the
+	// session-start branch below; a down/cold daemon contributes nothing (d-AC-4).
+	const prime = options.prime ?? createPrimeRenderer({ credentials, host, port, fetch: doFetch });
 
 	const deps: HookCoreDeps = { daemon, credentials, context };
 
@@ -174,7 +187,7 @@ export function createHookRuntime(options: HookRuntimeOptions = {}): HookRuntime
 			if (input === undefined) {
 				return { result: { ok: true }, dropped: true };
 			}
-			return dispatchLifecycle(input, deps, captureEnv, notifications, summarySpawn);
+			return dispatchLifecycle(input, deps, captureEnv, notifications, summarySpawn, prime);
 		},
 	};
 }
@@ -191,11 +204,15 @@ async function dispatchLifecycle(
 	captureEnv: { captureFlag?: string },
 	notifications: NotificationsPipeline,
 	summarySpawn: SummarySpawn,
+	prime: PrimeRenderer,
 ): Promise<HookEventOutcome> {
 	try {
 		switch (input.event) {
 			case "session-start": {
-				const sessionDeps: SessionStartDeps = { ...deps, captureEnv };
+				// PRD-046d (d-AC-1..5): the prime is injected ONLY on the session-start branch
+				// (d-AC-3 — per-turn capture never primes). session-start appends the digest to
+				// the rules/goals `additionalContext`, fully fail-soft (d-AC-4).
+				const sessionDeps: SessionStartDeps = { ...deps, captureEnv, prime };
 				const result = await runSessionStart(input, sessionDeps);
 				// c-AC-4: drain the 020d notifications pipeline (call it; do not reimplement).
 				const drain = await drainNotificationsSoft(notifications);

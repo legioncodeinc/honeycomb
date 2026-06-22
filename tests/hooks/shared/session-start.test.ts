@@ -14,8 +14,10 @@ import {
 	createFakeContextRenderer,
 	createFakeCredentialReader,
 	createFakeDaemonHookClient,
+	createFakePrimeRenderer,
 	createFakeSessionStartSeams,
 	type HookInput,
+	type PrimeRenderer,
 	type SessionStartDeps,
 } from "../../../src/hooks/shared/contracts.js";
 import { runSessionStart } from "../../../src/hooks/shared/session-start.js";
@@ -118,6 +120,88 @@ describe("PRD-019b session-start core", () => {
 		const result = await runSessionStart(startInput(), d);
 		expect(result.ok).toBe(true);
 		expect(result.additionalContext).toBeUndefined(); // empty block → omitted
+	});
+
+	// ── PRD-046d: the session-start memory prime (d-AC-1/d-AC-2 at the core; d-AC-4) ──
+
+	it("d-AC-1/d-AC-2: the prime digest is APPENDED to the rendered context block", async () => {
+		const d: SessionStartDeps = {
+			daemon: createFakeDaemonHookClient(),
+			credentials: createFakeCredentialReader({ token: "t", org: "acme" }),
+			context: createFakeContextRenderer("## Rules\n- be kind"),
+			prime: createFakePrimeRenderer("## Memory\n- decided X"),
+			seams: createFakeSessionStartSeams(),
+		};
+		const result = await runSessionStart(startInput(), d);
+		// Both blocks are present, the prime after the rules block, separated by a blank line.
+		expect(result.additionalContext).toBe("## Rules\n- be kind\n\n## Memory\n- decided X");
+	});
+
+	it("d-AC-1/d-AC-2: the prime is injected even when there is no rules/goals context block", async () => {
+		const d: SessionStartDeps = {
+			daemon: createFakeDaemonHookClient(),
+			credentials: createFakeCredentialReader({ token: "t", org: "acme" }),
+			context: createFakeContextRenderer(""), // no rules/goals block
+			prime: createFakePrimeRenderer("## Memory\n- decided X"),
+			seams: createFakeSessionStartSeams(),
+		};
+		const result = await runSessionStart(startInput(), d);
+		expect(result.additionalContext).toBe("## Memory\n- decided X");
+	});
+
+	it("d-AC-4: a cold-repo / unreachable prime ('') contributes NOTHING — only the context block remains", async () => {
+		const d: SessionStartDeps = {
+			daemon: createFakeDaemonHookClient(),
+			credentials: createFakeCredentialReader({ token: "t", org: "acme" }),
+			context: createFakeContextRenderer("## Rules\n- be kind"),
+			prime: createFakePrimeRenderer(""), // cold repo / daemon down → no digest
+			seams: createFakeSessionStartSeams(),
+		};
+		const result = await runSessionStart(startInput(), d);
+		expect(result.additionalContext).toBe("## Rules\n- be kind");
+	});
+
+	it("d-AC-4: a THROWING prime renderer is absorbed — session-start still returns the context block", async () => {
+		const throwingPrime: PrimeRenderer = {
+			async render(): Promise<string> {
+				throw new Error("prime fetch exploded");
+			},
+		};
+		const d: SessionStartDeps = {
+			daemon: createFakeDaemonHookClient(),
+			credentials: createFakeCredentialReader({ token: "t", org: "acme" }),
+			context: createFakeContextRenderer("## Rules\n- be kind"),
+			prime: throwingPrime,
+			seams: createFakeSessionStartSeams(),
+		};
+		const result = await runSessionStart(startInput(), d);
+		expect(result.ok).toBe(true);
+		expect(result.additionalContext).toBe("## Rules\n- be kind");
+	});
+
+	it("d-AC-4: both empty (no context + cold prime) omits additionalContext entirely", async () => {
+		const d: SessionStartDeps = {
+			daemon: createFakeDaemonHookClient(),
+			credentials: createFakeCredentialReader(),
+			context: createFakeContextRenderer(""),
+			prime: createFakePrimeRenderer(""),
+			seams: createFakeSessionStartSeams(),
+		};
+		const result = await runSessionStart(startInput(), d);
+		expect(result.ok).toBe(true);
+		expect(result.additionalContext).toBeUndefined();
+	});
+
+	it("d-AC-3: with NO prime seam wired, session-start is unchanged (no prime, prior behaviour)", async () => {
+		const d: SessionStartDeps = {
+			daemon: createFakeDaemonHookClient(),
+			credentials: createFakeCredentialReader(),
+			context: createFakeContextRenderer("## Rules\n- be kind"),
+			seams: createFakeSessionStartSeams(),
+			// no `prime` — the absent-seam path is a no-op.
+		};
+		const result = await runSessionStart(startInput(), d);
+		expect(result.additionalContext).toBe("## Rules\n- be kind");
 	});
 
 	it("b-AC-6: the second runtime path is rejected with 409 (daemon enforces; core surfaces)", async () => {

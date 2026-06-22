@@ -22,6 +22,7 @@ import { createStorageClient } from "../../../../src/daemon/storage/index.js";
 import {
 	createSynthesisStore,
 	MEMORY_INDEX_PATH,
+	refreshMemoryIndex,
 	renderMemoryIndex,
 	type SummaryRecord,
 	synthesizeMemoryIndex,
@@ -57,10 +58,14 @@ function recordingStore(summaries: readonly SummaryRecord[]): {
 	store: SynthesisStore;
 	written: SynthesizedRow[];
 	writeCalls: string[];
+	versions: { path: string; summary: string; version: number }[];
 } {
 	const written: SynthesizedRow[] = [];
 	const writeCalls: string[] = [];
 	const present = new Set<string>();
+	// PRD-046b: an append-only version log per path (the version-bump refresh). Each
+	// `refreshRow` appends a row at the next version; `readLatestVersionedRow` reads the max.
+	const versions: { path: string; summary: string; version: number }[] = [];
 	const store: SynthesisStore = {
 		async readSummaries(): Promise<readonly SummaryRecord[]> {
 			// Mirror the real read's ordering (by path ascending) so the render is deterministic.
@@ -75,8 +80,22 @@ function recordingStore(summaries: readonly SummaryRecord[]): {
 			}
 			return { written: !already };
 		},
+		async refreshRow(row: SynthesizedRow) {
+			// Append at version N+1 over the prior highest for this path (NEVER an in-place edit).
+			const priorMax = versions
+				.filter((v) => v.path === row.path)
+				.reduce((m, v) => Math.max(m, v.version), 0);
+			const version = priorMax + 1;
+			versions.push({ path: row.path, summary: row.summary, version });
+			return { version };
+		},
+		async readLatestVersionedRow(path: string) {
+			const forPath = versions.filter((v) => v.path === path);
+			if (forPath.length === 0) return null;
+			return forPath.reduce((best, v) => (v.version > best.version ? v : best));
+		},
 	};
-	return { store, written, writeCalls };
+	return { store, written, writeCalls, versions };
 }
 
 describe("PRD-017b wiki synthesis", () => {
@@ -293,5 +312,88 @@ describe("PRD-017b wiki synthesis", () => {
 		expect(body).toContain("# MEMORY.md");
 		expect(body).toContain("No session summaries yet");
 		expect(body).not.toContain("/summaries/");
+	});
+});
+
+describe("PRD-046b b-AC-1 — /MEMORY.md REFRESHES (version-bumped) as new summaries land, never a no-op", () => {
+	it("a re-synthesis after a new summary lands writes a SECOND index at a HIGHER version (not a no-op)", async () => {
+		// Mutable corpus: starts with one summary, then a second lands before the re-synthesis.
+		const corpus: SummaryRecord[] = [summaryRecord("alice", "sess-1", "first session")];
+		const versions: { path: string; summary: string; version: number }[] = [];
+		const store: SynthesisStore = {
+			async readSummaries() {
+				return [...corpus].sort((a, b) => a.path.localeCompare(b.path));
+			},
+			async writeRow(): Promise<SynthesisWriteOutcome> {
+				return { written: true };
+			},
+			async refreshRow(row) {
+				const priorMax = versions.filter((v) => v.path === row.path).reduce((m, v) => Math.max(m, v.version), 0);
+				const version = priorMax + 1;
+				versions.push({ path: row.path, summary: row.summary, version });
+				return { version };
+			},
+			async readLatestVersionedRow(path) {
+				const forPath = versions.filter((v) => v.path === path);
+				if (forPath.length === 0) return null;
+				return forPath.reduce((best, v) => (v.version > best.version ? v : best));
+			},
+		};
+
+		// First refresh: version 1, links the one summary.
+		const first = await refreshMemoryIndex({ store });
+		expect(first.path).toBe(MEMORY_INDEX_PATH);
+		expect(first.version).toBe(1);
+		expect(first.linkedSummaries).toBe(1);
+
+		// A NEW summary lands, then a RE-SYNTHESIS runs (the mount fires it as summaries land).
+		corpus.push(summaryRecord("bob", "sess-2", "second session"));
+		const second = await refreshMemoryIndex({ store });
+
+		// NOT a no-op: the index was REWRITTEN at a HIGHER version, and the current
+		// (highest-version) index now links BOTH summaries.
+		expect(second.version).toBe(2);
+		expect(second.linkedSummaries).toBe(2);
+		const current = await store.readLatestVersionedRow(MEMORY_INDEX_PATH);
+		expect(current?.version).toBe(2);
+		expect(current?.summary).toContain("/summaries/alice/sess-1.md");
+		expect(current?.summary).toContain("/summaries/bob/sess-2.md");
+		// Both physical versions exist on disk (append-only history), never an in-place edit.
+		expect(versions.filter((v) => v.path === MEMORY_INDEX_PATH)).toHaveLength(2);
+	});
+
+	it("the REAL createSynthesisStore refresh APPENDS a version-bumped row — ZERO in-place UPDATE on memory", async () => {
+		// Drive the REAL store over a FakeDeepLakeTransport and inspect every statement: the
+		// refresh must read MAX(version), INSERT a fresh row, and emit NO `UPDATE "memory" SET`.
+		const fake = new FakeDeepLakeTransport((req) => {
+			const sql = req.sql;
+			// The tenant summary read → one summary so the index links something.
+			if (/SELECT/i.test(sql) && sql.includes("/summaries/") && /LIKE/i.test(sql)) {
+				return [{ path: "/summaries/alice/sess-1.md", description: "x", author: "alice" }];
+			}
+			// The MAX(version) read for the path → empty (first refresh) → version resolves to 1.
+			return [];
+		});
+		const storage = createStorageClient({ transport: fake, provider: stubProvider(fakeCredentialRecord()) });
+		const store = createSynthesisStore(storage, SCOPE);
+
+		const result = await refreshMemoryIndex({ store });
+		expect(result.version).toBe(1);
+		expect(result.linkedSummaries).toBe(1);
+
+		const statements = fake.requests.map((r) => r.sql);
+		// An INSERT INTO "memory" carrying the bumped version + the /MEMORY.md path.
+		expect(statements.some((s) => /INSERT\s+INTO\s+"memory"/i.test(s))).toBe(true);
+		expect(statements.some((s) => s.includes(MEMORY_INDEX_PATH))).toBe(true);
+		expect(statements.some((s) => /INSERT\s+INTO\s+"memory"/i.test(s) && /\bversion\b/i.test(s))).toBe(true);
+		// A MAX(version) read keyed on the path (ORDER BY version DESC) drives the bump.
+		expect(statements.some((s) => /SELECT/i.test(s) && /version/i.test(s) && /ORDER BY/i.test(s))).toBe(true);
+		// THE invariant: no in-place UPDATE of the memory table anywhere (b-AC-1 / no in-place UPDATE).
+		expect(statements.some((s) => /UPDATE\s+"memory"\s+SET/i.test(s)), "no in-place UPDATE on memory").toBe(false);
+		// Every statement carried the tenant scope (b-AC-6).
+		for (const req of fake.requests) {
+			expect(req.org).toBe(SCOPE.org);
+			expect(req.workspace).toBe(SCOPE.workspace);
+		}
 	});
 });

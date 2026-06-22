@@ -1,0 +1,118 @@
+{
+  "//": "PRD-046f f-AC-1 — the committed PRIME-SCENARIO SET. Hand-curated (seeded memory + a task) cases where a PRIMED agent (the session-start digest is available) should behave differently from a COLD one (no prime). Read eval/README-prime.md for how this runs and how to grow it.",
+  "//schema": "Each scenario: { key, targetMemoryText, distractorMemoryTexts[], task, coldSearchCount, primedResolveCount }. `key` is a stable slug; the harness uniquifies it per-run (key + RUN_ID) so a live seed reads ONLY this run's rows. `targetMemoryText` is the memory whose prior-session decision answers the `task`; it is STORED so its Tier-1 key lands in the prime digest. `distractorMemoryTexts` are other seeded memories in the same scope that share the digest but are NOT the answer (so pull-through is a real discrimination, not a trivial one-item list). `task` is the prompt the agent faces. `coldSearchCount` is the number of blind searches a COLD agent needs to reach the target with no prime (>= 1, hand-estimated from the task's keyword distance — a lexical-miss task costs more). `primedResolveCount` is the number of resolve calls a PRIMED agent needs when the digest already lists the target's key (normally 1 — one hivemind_read of the primed ref). The primed-vs-cold REDUNDANT-SEARCH delta is coldSearchCount - primedResolveCount; PULL-THROUGH is whether the target's ref appears in the primed digest (so the agent CAN resolve it without searching).",
+  "//no-secret": "PURELY SYNTHETIC engineering scenarios. NO tokens, NO API keys, NO emails, NO real hostnames/IPs, NO PII. `npm run audit:sql` does not scan eval/, so the no-secret bar here is the committed grep proof + the security pass. Keep it clean when you grow it.",
+  "//grow": "Grow from REAL dogfood (f-AC risk note): a session where priming OBVIOUSLY would have helped (the agent blind-searched for something a prior session had already decided) becomes a new scenario — capture the prior decision as `targetMemoryText`, the blind search count as `coldSearchCount`, and the task the agent faced. Keep the lexical-miss tasks (high coldSearchCount) — they are where the prime earns its tokens.",
+  "scenarios": [
+    {
+      "key": "p-retry-on-429",
+      "targetMemoryText": "we decided the integration suite wraps every storage call in a retry-on-429 backoff because the backend rate-limits bursts",
+      "distractorMemoryTexts": [
+        "the dashboard nav shell uses a hash router with a route registry",
+        "the readme wordmark was swapped to the memory-cluster mark"
+      ],
+      "task": "the pipeline tests are failing intermittently again — what did we decide to do about it",
+      "coldSearchCount": 3,
+      "primedResolveCount": 1
+    },
+    {
+      "key": "p-eventual-consistency-poll",
+      "targetMemoryText": "we decided every live read-back polls until the deeplake row converges because the backend serves stale segments right after a write",
+      "distractorMemoryTexts": [
+        "the cli install path detects the harness capability before wiring hooks",
+        "the jscpd duplication threshold is seven across the source tree"
+      ],
+      "task": "the row I just wrote is coming back stale on the next read — how are we supposed to handle that",
+      "coldSearchCount": 3,
+      "primedResolveCount": 1
+    },
+    {
+      "key": "p-embed-fallback-decision",
+      "targetMemoryText": "we decided recall degrades silently to BM25 lexical matching when the embed daemon is unreachable so search never errors",
+      "distractorMemoryTexts": [
+        "the prime digest is bounded to roughly eight hundred tokens",
+        "the mcp server pins zod v3 for its tool schemas"
+      ],
+      "task": "what happens to search if the vector model host is down — do we fail or keep going",
+      "coldSearchCount": 2,
+      "primedResolveCount": 1
+    },
+    {
+      "key": "p-soft-delete-tombstone",
+      "targetMemoryText": "we decided forgetting a memory writes a version-bumped tombstone and never an in-place delete so the history survives",
+      "distractorMemoryTexts": [
+        "the daemon binds loopback in local mode never a public interface",
+        "every child process spawn sets windowsHide true on windows"
+      ],
+      "task": "how did we agree to remove a fact without destroying its audit trail",
+      "coldSearchCount": 3,
+      "primedResolveCount": 1
+    },
+    {
+      "key": "p-rrf-k-sixty",
+      "targetMemoryText": "we decided reciprocal rank fusion runs at k equals sixty when merging the lexical and semantic recall arms",
+      "distractorMemoryTexts": [
+        "the codebase graph extracts symbols and imports with tree-sitter",
+        "the pack check scans the publish tarball for secrets"
+      ],
+      "task": "what constant did we settle on for fusing the two search signals into one ranking",
+      "coldSearchCount": 2,
+      "primedResolveCount": 1
+    },
+    {
+      "key": "p-session-header-gate",
+      "targetMemoryText": "we decided the memories route group requires an x-honeycomb-session header or the request is rejected with a four hundred before the handler",
+      "distractorMemoryTexts": [
+        "embeddings are on by default and only an explicit false turns them off",
+        "the rate limiter uses a sliding window with bounded eviction"
+      ],
+      "task": "my recall call keeps getting rejected before it reaches the handler — what header did we make mandatory",
+      "coldSearchCount": 3,
+      "primedResolveCount": 1
+    },
+    {
+      "key": "p-ephemeral-test-port",
+      "targetMemoryText": "we decided the live test daemon binds an ephemeral port so it never clobbers a developer instance already running",
+      "distractorMemoryTexts": [
+        "distilled memory hits outrank raw session dumps via an arm class weight",
+        "near duplicate hits across arms are deduped by a source plus id key"
+      ],
+      "task": "how do we keep the integration boot from fighting a server a developer already has up",
+      "coldSearchCount": 2,
+      "primedResolveCount": 1
+    },
+    {
+      "key": "p-tier1-key-column",
+      "targetMemoryText": "we decided the tier one key is stored as a column so assembling a prime is a pure sql skim with no llm call at read time",
+      "distractorMemoryTexts": [
+        "the cosine score is normalized to a zero to one range before ranking",
+        "the controlled writes engine is the only stage that mutates the memories table"
+      ],
+      "task": "why is the prime read cheap — did we avoid calling the model when we assemble it",
+      "coldSearchCount": 3,
+      "primedResolveCount": 1
+    },
+    {
+      "key": "p-dim-768-lock",
+      "targetMemoryText": "we decided embedding vectors must be exactly seven hundred sixty eight floats to match the float4 storage column",
+      "distractorMemoryTexts": [
+        "teammate mined skills fan out at session start through the pull modules",
+        "the test setup redirects the home directory to a throwaway temp dir"
+      ],
+      "task": "what length does the model output have to be so it fits the storage column",
+      "coldSearchCount": 2,
+      "primedResolveCount": 1
+    },
+    {
+      "key": "p-skillify-gate-verdict",
+      "targetMemoryText": "we decided the codify loop runs a keep merge skip verdict before a mined lesson is allowed to land as a skill file",
+      "distractorMemoryTexts": [
+        "writes are append-only with a version bump because the backend coalesces updates",
+        "a missing sibling table degrades that recall arm to empty instead of failing"
+      ],
+      "task": "how is a mined lesson approved before it becomes a skill in the catalog",
+      "coldSearchCount": 3,
+      "primedResolveCount": 1
+    }
+  ]
+}
