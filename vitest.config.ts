@@ -27,6 +27,14 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
 	test: {
 		environment: "node",
+		// PRD-043a: the durable log store uses the built-in `node:sqlite` (`DatabaseSync`), which
+		// requires `--experimental-sqlite` on Node 22.x (the engines floor; flag-free + a harmless
+		// no-op on 24/25). Pass it to the test WORKER processes via the fork pool's `execArgv` — the
+		// cross-platform way (an inline `NODE_OPTIONS=` shell prefix would break the Windows CI leg).
+		// This makes the AC-1 restart test actually persist under the flag on the 22.x leg.
+		poolOptions: {
+			forks: { execArgv: ["--experimental-sqlite"] },
+		},
 		// `.test.ts` is the bulk of the suite; `.test.tsx` is the PRD-024 dashboard web-app
 		// DOM suite (it mounts React into jsdom via a per-file `@vitest-environment jsdom`
 		// docblock — the default env stays `node` for every other test).

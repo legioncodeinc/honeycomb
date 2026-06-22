@@ -138,3 +138,7 @@ stryker.log
 # (scripts/deeplake-stress.mjs → ./.stress-report/<runId>.json). A local/CI
 # diagnostic artifact (uploaded by the Wave-2 workflow_dispatch job) — never committed.
 .stress-report/
+
+# Security-worker-bee close-out scratch dir (grep findings, npm-audit json, scan
+# summaries). A local audit artifact written during the security pass — never committed.
+.scan-output/

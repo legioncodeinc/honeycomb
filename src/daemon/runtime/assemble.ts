@@ -63,6 +63,7 @@ import { mountDashboardHost } from "./dashboard/host.js";
 import { mountDreamApi } from "./dreaming/api.js";
 import { mountCompactApi } from "./maintenance/compact-api.js";
 import { mountLogsApi } from "./logs/api.js";
+import { type LogStore, NULL_LOG_STORE, openLogStore } from "./logs/log-store.js";
 import { mountNotificationsApi } from "./notifications/api.js";
 import { attachSessionsPrune } from "./sessions/prune.js";
 
@@ -161,6 +162,16 @@ export interface AssembleDaemonOptions {
 	readonly provider?: CredentialProvider;
 	/** The request logger. Defaults to the stderr JSON-lines + ring-buffer logger. */
 	readonly logger?: RequestLogger;
+	/**
+	 * PRD-043a (FR-1/FR-2): the durable SQLite log store the logger writes through to and the
+	 * `/api/logs/history` endpoint reads. Production leaves it UNSET → the composition root opens
+	 * the REAL store under `$HONEYCOMB_WORKSPACE/.daemon/logs.db` for the REAL assembly only (no
+	 * injected {@link storage}), so the deterministic unit suite (which injects a fake `storage` and
+	 * no `logStore`) stays on the in-memory ring buffer and never touches disk. The open is fail-soft
+	 * (AC-4): an unavailable `node:sqlite` / open failure degrades to the {@link NULL_LOG_STORE} no-op.
+	 * A test injects a temp-dir / in-memory store to exercise persistence deterministically.
+	 */
+	readonly logStore?: LogStore;
 	/**
 	 * The `~/.honeycomb` directory the PID + lock files live in. Defaults to the real
 	 * home dir; a test points it at a temp dir so the guard never collides with a real
@@ -555,6 +566,7 @@ export function assembleSeams(
 	healthDetail: () => HealthDetail,
 	workspaceDir: string,
 	installedHarnesses: ReadonlySet<string>,
+	logStore: LogStore,
 	seams: SeamFns = defaultSeamFns,
 ): void {
 	// The daemon's configured default tenancy scope (the single LOCAL tenant) is RESOLVED ONCE
@@ -604,7 +616,11 @@ export function assembleSeams(
 	//    The record shape (`RequestLogRecord`) carries no token/header/body, so the read
 	//    cannot leak a secret (security audit, /api/logs token-leak proof). The logger the
 	//    handler reads is the daemon's own ring buffer.
-	seams.mountLogs(daemon, { logger: daemon.logger });
+	//    PRD-043a (FR-3): the durable store backs the additive `GET /api/logs/history` endpoint
+	//    attached onto the SAME group. `GET /api/logs` + `/api/logs/stream` are UNCHANGED — they
+	//    keep reading the in-memory ring buffer (D-3). The store is the no-op when persistence is
+	//    unavailable (fail-soft), so history degrades to an empty page, never a throw.
+	seams.mountLogs(daemon, { logger: daemon.logger, store: logStore });
 
 	// 6. The viewable /dashboard HTML host (021d / d-AC-3) — LOCAL-MODE ONLY (security F-1).
 	//    `mountDashboardHost` attaches `GET /dashboard` onto the UNPROTECTED root group
@@ -1039,7 +1055,23 @@ async function buildGatedDreamingWorker(
  */
 export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDaemon {
 	const config = options.config ?? resolveRuntimeConfig();
-	const logger = options.logger ?? createRequestLogger();
+	// ── PRD-043a (FR-1/FR-2): the durable SQLite log store. Built BEFORE the logger so it can be
+	// injected as the logger's write-through seam. Precedence:
+	//   1. an explicit `options.logStore` (a test injects a temp-dir / in-memory store);
+	//   2. else — for the REAL production assembly only (no injected `storage`) — open the real
+	//      store under `$HONEYCOMB_WORKSPACE/.daemon/logs.db` (fail-soft → NULL_LOG_STORE on an
+	//      unavailable `node:sqlite` or open failure, AC-4);
+	//   3. else (the deterministic unit suite: a fake `storage` and no `logStore`) the NULL no-op,
+	//      so the unit logger stays pure (the PRD-021d/029 suites pass unchanged — AC-3) and the
+	//      suite never touches disk.
+	const logStore: LogStore =
+		options.logStore ??
+		(options.storage === undefined ? openLogStore({ baseDir: resolveWorkspaceBaseDir() }) : NULL_LOG_STORE);
+	// The logger writes THROUGH the store in addition to the ring buffer + stderr (FR-2). When the
+	// caller injects its own `logger`, we respect it (its own store wiring, if any, stands); only the
+	// default logger gets the assembly's store. An injected logger from a unit test has no store, so
+	// nothing changes for that suite.
+	const logger = options.logger ?? createRequestLogger({ store: logStore });
 	const runtimeDir = resolveRuntimeDir(options.runtimeDir);
 	const probeIntervalMs = options.healthProbeIntervalMs ?? DEFAULT_HEALTH_PROBE_INTERVAL_MS;
 
@@ -1161,6 +1193,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		healthDetail,
 		options.workspaceDir ?? process.cwd(),
 		installedHarnesses,
+		logStore,
 		options.seams ?? defaultSeamFns,
 	);
 
@@ -1326,6 +1359,9 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				await daemon.stopServices();
 				started = false;
 			}
+			// PRD-043a: close the durable log store handle so no SQLite file handle leaks across a
+			// restart. Idempotent + never throws (the NULL no-op's close is a no-op).
+			logStore.close();
 			if (locked) {
 				releaseSingleInstanceLock(runtimeDir);
 				locked = false;

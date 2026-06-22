@@ -28,7 +28,7 @@ All bees: `typescript-node-worker-bee` / **opus** (dashboard React + daemon endp
 | 040 | Memories (add/edit/compact/dream/watch/search) | 21 (5+5+6+5) | ✅ VERIFIED — shipping |
 | 041 | Graph (full codebase graph + memory-graph foundation) | 17 (4+7+6) | ✅ VERIFIED — shipping |
 | 042 | Sync (skills + agents view/promote/control) | 24 (8+8a+7b+6c) | ✅ VERIFIED — shipping |
-| 043 | Logs (SQLite persistence + history + turns) | tbd | OPEN |
+| 043 | Logs (SQLite persistence + history + turns) | 25 (6+7a+6b+6c) | ✅ VERIFIED — shipping |
 | 044 | Settings (DeepLake auth + API keys + search mode) | tbd | OPEN |
 
 ## PRD-039 ledger (23 ACs)
@@ -68,3 +68,23 @@ All bees: `typescript-node-worker-bee` / **opus** (dashboard React + daemon endp
 - **042 impl returned DONE** (one bee): `sync-api.ts` (ONE generic asset-action engine keyed by `asset_type` over PRD-033c `createAssetSyncApi` + the PRD-036 union view) + `sync-mount.ts` (`GET /api/diagnostics/assets` + `POST /api/diagnostics/sync/{promote,pull,demote,enable,disable}`) + `asset-install-target.ts` (path-sanitized skill-dir/agent-file target); `sync.tsx` (skills/agents tabs + detail + actions + activity feed); wired into `assembleDaemon()` step 15.
 - **Close-out — security (opus): PASS after remediation** (3 findings all fixed in place — see 042-SEC). Re-ran audit:sql/openclaw/ci/build green. Flagged out-of-scope follow-up: `skillify/install-target.ts:74` has the identical latent dot-segment bug (trusted-input-only, not exploitable; defense-in-depth).
 - **Close-out — quality (opus): PASS-WITH-FINDINGS, 24/24** — 2 non-blocking Warnings → both CLOSED by a focused fix bee (see 042-QA). Independently re-verified: sync suites 41/41, full ci green (flake isolated), build + both audits clean, deletion/asset safeguard clean. → Phase 3 Ship.
+- **042 SHIPPED:** PR #76 merged squash+delete (main `e71f423`); CI all-green (CodeQL, Analyze ×3, Quality gate 22.x/24.x, Secret gate, Windows smoke). Lifecycle: 042 in-work→completed (on the 043 branch).
+
+## PRD-043 ledger (25 ACs — logs page; driver decision: `node:sqlite`)
+
+User decision (OQ-1): **`node:sqlite` (built-in)** over `better-sqlite3` — zero native dep, aligned with the repo's no-native-deps posture. Cost paid: engines `>=22.0.0`→`>=22.5.0`, `--experimental-sqlite` threaded via vitest `poolOptions.forks.execArgv` (both configs) + the daemon spawn (`DAEMON_NODE_FLAGS`, no-op on 24/25), fail-soft if the module is unavailable.
+
+| ID | Criterion | Status |
+|---|---|---|
+| 043a-AC1..7 | durable SQLite store: survives restart / filter+paginate `/api/logs/history` / write-through no-regression / fail-soft / bounded retention / no-secret schema / gate | ✅ VERIFIED |
+| 043b-AC1..6 | history page: history+live in one view (shared `LogRow`) / filters refetch / cursor paginate / DS+prod-clean / no-secret / gate | ✅ VERIFIED |
+| 043c-AC1..6 | turns drill-down: list+detail / DeepLake-sourced via `sqlIdent("sessions")` (additive paging, eventual-consistency tolerant) / "Turns" labeling / metadata-only / gate | ✅ VERIFIED |
+| 043-AC1..6 | (index) logs survive restart / queryable filters / page shows historical+live / turns browsable+drill / no-secret / security+gate | ✅ VERIFIED |
+| 043-SEC | security-worker-bee: **PASS, zero remediations** — bound params throughout, regex-validated status class, escaped LIKE, fail-closed cursor decode, secret-free-by-construction schema, hardcoded spawn flag, history inherits `/api/logs` auth+local-gate. | ✅ VERIFIED |
+| 043-QA | quality-worker-bee: **PASS-WITH-FINDINGS 25/25** — one Warning W-1 (path `LIKE` missing `ESCAPE '\'` → `escapeLikePrefix` dead, `_`/`%` over-match). **FIXED in-branch** (added `ESCAPE '\'`) + regression test (literal `_` no longer a wildcard). S-1/S-2 are plan-sanctioned deferrals (event_log UI, real eventCount). | ✅ VERIFIED |
+| 043-CI | `npm run ci` (2546 passed, 6 skipped; lone flake `sources/api.test.ts` 7/7 isolation) + build + audit:sql + audit:openclaw green | ✅ VERIFIED |
+
+- Setup: branch `feat/prd-043-logs-page` off main (`e71f423`). Read PRD-043 index+a/b/c end-to-end. **Surfaced OQ-1 (the one outward-facing dependency fork in the run) to the user → `node:sqlite`.** Resolved OQ-2..5 + 043b/c OQs (retention 100k rows+30d, prune-on-write+startup sweep, one logs.db/two tables, event_log persisted/UI-deferred, stacked live-tail+history keep-separate, additive paged sessions read).
+- **043 impl returned DONE** (one bee): `log-store.ts` (`node:sqlite` behind a seam, retention, cursor codec, fail-soft) + write-through `logger.ts` + `GET /api/logs/history` + `logs.tsx` (history table + collapsible live tail + Turns drill-down, shared `LogRow`) + additive paged `fetchSessionsView` + flag plumbing (engines, vitest execArgv, daemon spawn). Registry `/logs` was pre-wired by 037 (zero registry edit). Orchestrator verify: 64 focused + full ci green, deletion/asset safeguard clean.
+- **Close-out — security (opus): PASS, zero remediations.** All 7 focus items clean.
+- **Close-out — quality (opus): PASS-WITH-FINDINGS, 25/25** — W-1 fixed in-branch + regression. Re-verified: store suite 16/16, full ci green (audit:sql ran ⇒ vitest all-pass), audit:openclaw clean. → Phase 3 Ship.

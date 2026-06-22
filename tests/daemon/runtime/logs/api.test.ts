@@ -16,11 +16,18 @@ import { createRequestLogger, type RequestLogRecord } from "../../../../src/daem
 import { createDaemon } from "../../../../src/daemon/runtime/server.js";
 import {
 	DEFAULT_LOGS_LIMIT,
+	type LogsHistoryResponse,
 	type LogsResponse,
 	MAX_LOGS_LIMIT,
 	mountLogsApi,
+	resolveHistoryQuery,
 	resolveLimit,
 } from "../../../../src/daemon/runtime/logs/api.js";
+import {
+	DEFAULT_HISTORY_LIMIT,
+	MAX_HISTORY_LIMIT,
+	openLogStore,
+} from "../../../../src/daemon/runtime/logs/log-store.js";
 
 const ORG = "fake-org";
 
@@ -151,5 +158,124 @@ describe("PRD-021d mountLogsApi wires the /api/logs ring-buffer reads", () => {
 		expect(text).toContain("event: log");
 		expect(text).toContain("/api/hooks/capture/0");
 		expect(text).toContain("/api/hooks/capture/1");
+	});
+});
+
+describe("PRD-043a resolveHistoryQuery parses + clamps the filter set", () => {
+	it("clamps ?limit= to [1, MAX_HISTORY_LIMIT] and defaults a missing/garbage value", () => {
+		expect(resolveHistoryQuery({}).limit).toBe(DEFAULT_HISTORY_LIMIT);
+		expect(resolveHistoryQuery({ limit: "garbage" }).limit).toBe(DEFAULT_HISTORY_LIMIT);
+		expect(resolveHistoryQuery({ limit: "-5" }).limit).toBe(DEFAULT_HISTORY_LIMIT);
+		expect(resolveHistoryQuery({ limit: "25" }).limit).toBe(25);
+		expect(resolveHistoryQuery({ limit: "999999" }).limit).toBe(MAX_HISTORY_LIMIT);
+	});
+
+	it("parses status as an exact code or a class, ignoring garbage", () => {
+		expect(resolveHistoryQuery({ status: "404" }).status).toEqual({ kind: "exact", code: 404 });
+		expect(resolveHistoryQuery({ status: "5xx" }).status).toEqual({ kind: "class", hundreds: 5 });
+		expect(resolveHistoryQuery({ status: "2XX" }).status).toEqual({ kind: "class", hundreds: 2 });
+		expect(resolveHistoryQuery({ status: "nonsense" }).status).toBeUndefined();
+		expect(resolveHistoryQuery({ status: "999" }).status).toBeUndefined();
+	});
+
+	it("ignores a non-ISO since/until and keeps a valid one", () => {
+		expect(resolveHistoryQuery({ since: "not-a-date" }).since).toBeUndefined();
+		expect(resolveHistoryQuery({ since: "2026-06-20T00:00:00.000Z" }).since).toBe("2026-06-20T00:00:00.000Z");
+	});
+
+	it("ignores empty path/org and a malformed cursor", () => {
+		expect(resolveHistoryQuery({ path: "" }).path).toBeUndefined();
+		expect(resolveHistoryQuery({ org: "" }).org).toBeUndefined();
+		expect(resolveHistoryQuery({ cursor: "garbage$$$" }).cursor).toBeUndefined();
+	});
+});
+
+describe("PRD-043a GET /api/logs/history (FR-3)", () => {
+	it("AC-2: returns the persisted records (newest first), filterable + paginated", async () => {
+		const { daemon, logger } = makeDaemon(0);
+		const store = openLogStore({ memory: true });
+		// Write through the logger so the records land in BOTH the ring buffer and the store.
+		const loggerWithStore = createRequestLogger({ silent: true, store });
+		for (let i = 0; i < 5; i++) loggerWithStore.log(rec(i, { path: `/api/x/${i}`, status: i < 3 ? 200 : 500 }));
+		mountLogsApi(daemon, { logger, store });
+
+		const res = await daemon.app.request("/api/logs/history", { headers: headers() });
+		expect(res.status).toBe(200);
+		const json = (await res.json()) as LogsHistoryResponse;
+		expect(json.persistent).toBe(true);
+		expect(json.records).toHaveLength(5);
+		// Newest first.
+		expect(json.records[0]?.path).toBe("/api/x/4");
+
+		// Filter by 5xx class.
+		const fivexx = (await daemon.app
+			.request("/api/logs/history?status=5xx", { headers: headers() })
+			.then((r) => r.json())) as LogsHistoryResponse;
+		expect(fivexx.records).toHaveLength(2);
+		expect(fivexx.records.every((r) => r.status >= 500)).toBe(true);
+		store.close();
+	});
+
+	it("AC-3: write-through does NOT change the /api/logs snapshot (it still reads the ring buffer)", async () => {
+		// The daemon's ring-buffer logger AND a separate store; mountLogsApi reads the ring buffer for
+		// `/api/logs` and the store for `/api/logs/history`. The two are independent surfaces (D-3).
+		// (The daemon's request-logging middleware tees EACH HTTP request through this same logger —
+		// into both the ring buffer and the store — so the seeded records are the FIRST three, with
+		// later HTTP requests appended after; we assert on the seeded prefix, not a brittle exact count.)
+		const store = openLogStore({ memory: true });
+		const logger = createRequestLogger({ silent: true, store });
+		for (let i = 0; i < 3; i++) logger.log(rec(i));
+		const daemon = createDaemon({ config: cfg(), logger });
+		mountLogsApi(daemon, { logger, store });
+
+		// `/api/logs` still serves the ring buffer (newest LAST), unchanged shape — the snapshot read
+		// happens DURING the request, before that request is logged, so it sees exactly the 3 seeded.
+		const snap = (await daemon.app.request("/api/logs", { headers: headers() }).then((r) => r.json())) as LogsResponse;
+		expect(snap.count).toBe(3);
+		expect(snap.records.map((r) => r.path)).toEqual([
+			"/api/hooks/capture/0",
+			"/api/hooks/capture/1",
+			"/api/hooks/capture/2",
+		]); // newest LAST (ring buffer order), shape unchanged by the write-through
+		// The snapshot record carries EXACTLY the RequestLogRecord keys (write-through added no field).
+		const snapRecord = snap.records[0] as Record<string, unknown>;
+		expect(Object.keys(snapRecord).sort()).toEqual(
+			["durationMs", "method", "mode", "org", "path", "status", "time"].sort(),
+		);
+
+		// `/api/logs/history` serves the store (newest FIRST). The 3 seeded records are the OLDEST
+		// in the store; the `/api/logs` GET above was teed in after, so it leads — assert the seeded
+		// prefix is present in newest-first order rather than a brittle exact count.
+		const hist = (await daemon.app
+			.request("/api/logs/history", { headers: headers() })
+			.then((r) => r.json())) as LogsHistoryResponse;
+		const histPaths = hist.records.map((r) => r.path);
+		// The three seeded capture records are present, newest-of-them first within the seeded set.
+		expect(histPaths).toContain("/api/hooks/capture/0");
+		expect(histPaths).toContain("/api/hooks/capture/2");
+		expect(histPaths.indexOf("/api/hooks/capture/2")).toBeLessThan(histPaths.indexOf("/api/hooks/capture/0"));
+		store.close();
+	});
+
+	it("AC-4: with no store injected, history returns an empty page (persistent:false), never a 404", async () => {
+		const { daemon, logger } = makeDaemon(3);
+		mountLogsApi(daemon, { logger }); // no store → the NULL no-op
+		const res = await daemon.app.request("/api/logs/history", { headers: headers() });
+		expect(res.status).toBe(200);
+		const json = (await res.json()) as LogsHistoryResponse;
+		expect(json.persistent).toBe(false);
+		expect(json.records).toHaveLength(0);
+	});
+
+	it("AC-6 (no-secret): history records carry only RequestLogRecord fields", async () => {
+		const store = openLogStore({ memory: true });
+		const logger = createRequestLogger({ silent: true, store });
+		logger.log(rec(0));
+		const daemon = createDaemon({ config: cfg(), logger });
+		mountLogsApi(daemon, { logger, store });
+		const body = await daemon.app.request("/api/logs/history", { headers: headers() }).then((r) => r.text());
+		expect(body).not.toMatch(/authorization/i);
+		expect(body).not.toMatch(/bearer/i);
+		store.close();
 	});
 });
