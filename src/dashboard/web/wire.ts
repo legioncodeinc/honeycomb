@@ -48,9 +48,18 @@ export const ENDPOINTS = Object.freeze({
 	memories: "/api/memories",
 	compact: "/api/diagnostics/compact",
 	logs: "/api/logs",
+	// PRD-042c / PRD-021d — the Server-Sent-Events follow stream off the SAME ring buffer as `logs`.
+	// `GET /api/logs/stream` backfills the recent records then emits each NEW record (`event: "log"`,
+	// `data: JSON.stringify(record)`). The Sync activity feed FOLLOWS this tail (c-AC-2) instead of polling.
+	logsStream: "/api/logs/stream",
 	// PRD-039a — the harness registry + last-seen telemetry endpoint (the data backbone the
 	// Harnesses page 039b/039c reads). Served under the diagnostics group (`/api/diagnostics/harnesses`).
 	harnesses: "/api/diagnostics/harnesses",
+	// PRD-042 — the Sync page `installed ∪ synced` union view-model (skills + agents, each with state
+	// + detail). Served under the diagnostics group (`/api/diagnostics/assets`). The five write actions
+	// POST to `/api/diagnostics/sync/{promote,pull,demote,enable,disable}` (built off this base).
+	assets: "/api/diagnostics/assets",
+	syncAction: "/api/diagnostics/sync",
 	health: "/health",
 	dream: "/api/diagnostics/dream",
 	// PRD-032c — the vault `setting`-class surface (Wave 1 `vault/api.ts`) + the names-only
@@ -142,6 +151,53 @@ export const SkillsSchema = z.object({
 	skills: z.array(SkillRowSchema).catch([]),
 });
 export type SkillRowWire = z.infer<typeof SkillRowSchema>;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRD-042 — the Sync page union view-model (skills + agents) + the action acks.
+// Every field defaults so a partial/malformed payload degrades to a safe state,
+// NEVER a throw into React. NO secret rides these shapes by construction: no
+// `native` blob, no author email, no org GUID — only presentation-safe fields +
+// the `authoredByMe` boolean (the daemon derives it from the opaque author token).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** One union row on the wire (mirrors the daemon `AssetSyncRow`). State badges drive off `state`. */
+export const AssetSyncRowSchema = z.object({
+	assetType: z.enum(["skill", "agent"]).catch("skill"),
+	name: z.string().catch(""),
+	description: z.string().catch(""),
+	state: z.enum(["local", "pulled", "shared"]).catch("local"),
+	scope: z.string().catch(""),
+	sourceHarness: z.string().catch(""),
+	tier: z.string().catch(""),
+	style: z.string().catch(""),
+	version: z.number().catch(0),
+	honeycombId: z.string().catch(""),
+	// The page disables Demote when this is false (parent OQ-4) — the author TOKEN is never carried,
+	// only this boolean. `.catch(false)` so an older daemon (no field) reads "not author" (safe-closed).
+	authoredByMe: z.boolean().catch(false),
+});
+export type AssetSyncRowWire = z.infer<typeof AssetSyncRowSchema>;
+
+/** `GET /api/diagnostics/assets` → `{ skills, agents }`. A bad shape degrades to empty lists. */
+export const AssetSyncViewSchema = z.object({
+	skills: z.array(AssetSyncRowSchema).catch([]),
+	agents: z.array(AssetSyncRowSchema).catch([]),
+});
+export type AssetSyncViewWire = z.infer<typeof AssetSyncViewSchema>;
+
+/** A sync-action ack (mirrors the daemon `SyncActionResult`). Carries NO blob/secret — id/state/version. */
+export const SyncActionResultSchema = z.object({
+	ok: z.boolean().catch(false),
+	action: z.enum(["promote", "pull", "demote", "enable", "disable"]).catch("promote"),
+	assetType: z.enum(["skill", "agent"]).catch("skill"),
+	honeycombId: z.string().catch(""),
+	state: z.enum(["local", "pulled", "shared", ""]).catch(""),
+	version: z.number().catch(0),
+});
+export type SyncActionResultWire = z.infer<typeof SyncActionResultSchema>;
+
+/** The empty union view the page shows before the first load resolves (or on failure). */
+export const EMPTY_ASSET_SYNC_VIEW: AssetSyncViewWire = Object.freeze({ skills: [], agents: [] });
 
 /**
  * One recall hit on the wire — the `/api/memories/recall` response shape from
@@ -603,12 +659,42 @@ export interface WireClient {
 	compact(table?: string): Promise<CompactSummaryWire | null>;
 	logs(limit?: number): Promise<LogRecordWire[]>;
 	/**
+	 * PRD-042c / PRD-021d — FOLLOW the `/api/logs/stream` SSE tail (c-AC-2). Subscribes a browser
+	 * `EventSource` to the daemon's already-mounted log stream, parsing each `event: "log"` record
+	 * through {@link LogRecordSchema} and handing the validated record to `onRecord`. Returns an
+	 * unsubscribe function the caller MUST call on unmount (it closes the EventSource). The activity
+	 * feed BACKFILLS via {@link logs} first, then follows this tail — no client poll.
+	 *
+	 * DEGRADES SAFELY: in a non-browser env (jsdom test, SSR) where `EventSource` is unavailable, this
+	 * is a no-op that returns an inert unsubscribe — the caller keeps its snapshot and never crashes
+	 * (the SSE-record handling is exercised by injecting the parser directly in tests). No record
+	 * carries a secret by construction (logger.ts); this introduces none.
+	 */
+	logsStream(onRecord: (record: LogRecordWire) => void): () => void;
+	/**
 	 * PRD-039a — read the harness registry + last-seen telemetry (the data backbone). Returns the
 	 * six canonical `HarnessStatus` rows the Harnesses page (039b/039c) renders; a failure degrades
 	 * to an empty list (the page shows its honest empty/zero state, never a throw). No second source —
 	 * this is the SINGLE backbone (parent D-3).
 	 */
 	harnesses(): Promise<HarnessStatusWire[]>;
+	/**
+	 * PRD-042 — read the Sync page `installed ∪ synced` union view-model (`GET /api/diagnostics/assets`):
+	 * skills + agents, each with its honest state + presentation-safe detail. A malformed/absent body
+	 * degrades to {@link EMPTY_ASSET_SYNC_VIEW} (the page renders its honest empty state, never a throw).
+	 */
+	assetsView(): Promise<AssetSyncViewWire>;
+	/**
+	 * PRD-042 — run one Sync action (`POST /api/diagnostics/sync/{action}`). The daemon performs the REAL
+	 * pipeline (publish/pull/tombstone/install-toggle) and returns the CONVERGED result (poll-convergent
+	 * read-back). Returns the ack, or `null` on a non-2xx / network failure (the page re-reads the union
+	 * and reflects whatever actually persisted — never an optimistic flip). `input` carries the asset
+	 * kind + name (+ optional native/honeycombId for promote/pull/demote).
+	 */
+	syncAction(
+		action: "promote" | "pull" | "demote" | "enable" | "disable",
+		input: { assetType: "skill" | "agent"; name: string; native?: string; honeycombId?: string; harness?: string },
+	): Promise<SyncActionResultWire | null>;
 	health(): Promise<HealthProbe>;
 	dream(): Promise<DreamAck>;
 	/** PRD-032c — read the vault `setting` class + the provider→model catalog (`GET /api/settings`). */
@@ -749,11 +835,56 @@ export function createWireClient(options: WireClientOptions = {}): WireClient {
 			const v = await getJson(fetchImpl, url(`${ENDPOINTS.logs}?limit=${limit}`), LogsResponseSchema);
 			return v?.records ?? [];
 		},
+		logsStream(onRecord: (record: LogRecordWire) => void): () => void {
+			// FOLLOW the SSE tail (c-AC-2). Guard for the non-browser env (jsdom/SSR has no EventSource):
+			// degrade to an inert no-op so the page keeps its snapshot and tests never crash. The
+			// `event: "log"` records are parsed through the SAME zod schema as the snapshot, so a malformed
+			// frame is dropped (never thrown into React). The returned unsubscribe closes the stream.
+			const ES = (globalThis as { EventSource?: typeof EventSource }).EventSource;
+			if (ES === undefined) return () => {};
+			let source: EventSource;
+			try {
+				source = new ES(url(ENDPOINTS.logsStream));
+			} catch {
+				return () => {};
+			}
+			const handler = (ev: MessageEvent): void => {
+				const record = parseLogRecordEvent(ev.data);
+				if (record !== null) onRecord(record);
+			};
+			source.addEventListener("log", handler as EventListener);
+			return () => {
+				try {
+					source.removeEventListener("log", handler as EventListener);
+					source.close();
+				} catch {
+					// Closing an already-closed/errored EventSource must never throw into unmount.
+				}
+			};
+		},
 		async harnesses(): Promise<HarnessStatusWire[]> {
 			// GET the six canonical harness statuses; a malformed/absent body degrades to the empty
 			// list so the page renders its honest empty/zero state (never a throw). Single backbone (D-3).
 			const v = await getJson(fetchImpl, url(ENDPOINTS.harnesses), HarnessStatusResponseSchema);
 			return v?.harnesses ?? [];
+		},
+		async assetsView(): Promise<AssetSyncViewWire> {
+			// GET the union view-model; a malformed/absent body degrades to the empty view so the page
+			// renders its honest empty state (never a throw). No secret rides this shape (zod-validated).
+			return (await getJson(fetchImpl, url(ENDPOINTS.assets), AssetSyncViewSchema)) ?? EMPTY_ASSET_SYNC_VIEW;
+		},
+		async syncAction(
+			action: "promote" | "pull" | "demote" | "enable" | "disable",
+			input: { assetType: "skill" | "agent"; name: string; native?: string; honeycombId?: string; harness?: string },
+		): Promise<SyncActionResultWire | null> {
+			// POST the action body; the daemon performs the REAL pipeline + a poll-convergent read-back
+			// and returns the converged ack. A non-2xx → null (the caller re-reads the union — no
+			// optimistic flip). The body carries no secret; the daemon resolves tenancy from the session.
+			const body: Record<string, string> = { assetType: input.assetType, name: input.name };
+			if (input.native !== undefined) body.native = input.native;
+			if (input.honeycombId !== undefined && input.honeycombId !== "") body.honeycombId = input.honeycombId;
+			if (input.harness !== undefined && input.harness !== "") body.harness = input.harness;
+			return postJson(fetchImpl, url(`${ENDPOINTS.syncAction}/${action}`), body, SyncActionResultSchema);
 		},
 		async health(): Promise<HealthProbe> {
 			try {
@@ -820,6 +951,24 @@ export function createWireClient(options: WireClientOptions = {}): WireClient {
 }
 
 /**
+ * PRD-042c — parse one SSE `event: "log"` frame's `data` payload (a JSON-stringified
+ * {@link RequestLogRecord}) into a validated {@link LogRecordWire}, or `null` on any malformed /
+ * non-JSON / shape-mismatch frame. Validated through the SAME {@link LogRecordSchema} the snapshot
+ * uses, so the SSE tail and the backfill agree on the shape and a bad frame is DROPPED (never thrown
+ * into React). Exported so the page can drive the follow-handler deterministically in tests without a
+ * live EventSource. No secret rides a record by construction (logger.ts).
+ */
+export function parseLogRecordEvent(data: unknown): LogRecordWire | null {
+	if (typeof data !== "string") return null;
+	try {
+		const parsed = LogRecordSchema.safeParse(JSON.parse(data));
+		return parsed.success ? parsed.data : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
  * Format one `/api/logs` record into a single mono log line for the LiveLog panel. The
  * record carries NO token/secret/header (the logger redacts by construction); this
  * formatter introduces none either — it renders only time + method + path + status (AC-4).
@@ -828,4 +977,41 @@ export function formatLogLine(r: LogRecordWire): string {
 	const time = (r.time || "").slice(11, 19) || (r.time || "").slice(0, 8);
 	const status = r.status > 0 ? ` ${r.status}` : "";
 	return `${time}  ${r.method} ${r.path}${status}`.trimEnd();
+}
+
+/**
+ * PRD-042c — the `/api/logs` path prefix the Sync activity feed filters on. The Sync action POSTs
+ * land on `/api/diagnostics/sync/{promote,pull,demote,enable,disable}`, and the daemon's
+ * request-logging middleware records EACH (method + path + status, no secret) into the same
+ * `/api/logs` ring buffer the feed reads. Filtering on this prefix yields exactly the sync events
+ * (publish/pull/tombstone), newest first, with no parallel event store (D-6).
+ */
+export const SYNC_ACTIVITY_PATH = "/api/diagnostics/sync/" as const;
+
+/** True iff a `/api/logs` record is a Sync action event (its path is under {@link SYNC_ACTIVITY_PATH}). */
+export function isSyncActivityRecord(r: LogRecordWire): boolean {
+	return (r.path ?? "").startsWith(SYNC_ACTIVITY_PATH);
+}
+
+/**
+ * PRD-042c — the human action label for a Sync activity record's path (`promote` → "published",
+ * `pull` → "pulled", `demote` → "tombstoned"). The status code drives the success/failure flavor at
+ * the render site. No secret is in a record (logger.ts), so the formatted line is safe to render.
+ */
+export function syncActivityVerb(r: LogRecordWire): string {
+	const tail = (r.path ?? "").slice(SYNC_ACTIVITY_PATH.length).split("/")[0] ?? "";
+	switch (tail) {
+		case "promote":
+			return "published";
+		case "pull":
+			return "pulled";
+		case "demote":
+			return "tombstoned";
+		case "enable":
+			return "enabled";
+		case "disable":
+			return "disabled";
+		default:
+			return tail;
+	}
 }
