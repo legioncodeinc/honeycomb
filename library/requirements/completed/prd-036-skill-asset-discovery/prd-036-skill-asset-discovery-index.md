@@ -1,6 +1,6 @@
 # PRD-036: Skill & Asset Discovery (local skills are invisible — fix the count)
 
-> **Status:** Backlog
+> **Status:** Completed
 > **Priority:** P0
 > **Effort:** M
 
