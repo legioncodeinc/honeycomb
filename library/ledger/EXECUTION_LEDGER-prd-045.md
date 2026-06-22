@@ -100,7 +100,15 @@ fresh read) that flips DONE → VERIFIED. Implementers do not grade their own ho
 - **Security re-audit (fetcher delta, security-worker-bee, opus):** 1 CRITICAL — SSRF bypass via IPv4-mapped-IPv6 hextet form (`[::ffff:169.254.169.254]`→`::ffff:a9fe:a9fe` slipped dotted-decimal regex → metadata reachable) → **FIXED in place** (`extractMappedV4`, `url-fetcher.ts:167`) + regression tests. All 7 SSRF checks verified safe.
 - **Quality re-verify (quality-worker-bee, opus):** PASS-WITH-NITS, **ready to ship**. W1 genuinely met (real body ingest + SSRF-safe), W2 accurate, Critical SSRF + High BOLA re-verified fixed. Found W3 (PRD-006 banner overstated default) → **FIXED by orchestrator**. Gate: 249 files / 2795 passed / 7 skipped, audit:sql OK.
 
-## FINAL STATUS: all 39 criteria DONE/VERIFIED · security clean (1 High + 1 Critical remediated) · quality PASS · gate green. Ready to ship.
+## Ship
+- **PR:** [honeycomb#82](https://github.com/legioncodeinc/honeycomb/pull/82) · 5 commits on `legion/condescending-wilson-95d03a`.
+- **CI (PR #82):** CodeQL flagged 2 NEW HIGH alerts in the W1 fetcher (`url-fetcher.ts bytesToText`): `js/bad-tag-filter` (whitespace/unclosed end tags leaked script/style) + `js/double-escaping` (`&amp;lt;`→`<`) → **FIXED** (commit 04f7c38: `stripElement` + single-pass `decodeEntities`, +14 tests). CodeQL now **pass**.
+- **CI status: GREEN** — CodeQL ✅, Analyze actions/js-ts/python ✅, Quality gate Node 22.x+24.x ✅, Secret gate ✅, Windows smoke ✅. (CodeRabbit = non-blocking AI review.)
+
+## FINAL STATUS: all 39 criteria DONE/VERIFIED · security clean (1 High BOLA + 1 Critical SSRF + 2 High CodeQL remediated) · quality PASS · CI GREEN · PR #82 open.
+
+### Out-of-scope follow-up (flagged, not in this PR)
+- Pre-existing latent cross-tenant header-trust on `/api/secrets`, `/api/notifications`, `/api/vault` (same `headerScopeResolver` pattern as the fixed sources BOLA, but NOT newly wired by PRD-045). Spawned as a separate task for a dedicated security pass.
 
 ---
 
