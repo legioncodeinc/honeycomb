@@ -73,6 +73,8 @@ import { mountMemoriesApi, mountMemoriesPrimeApi } from "./memories/index.js";
 import { mountVfsApi } from "./vfs/api.js";
 import { mountProductDataApi } from "./product/index.js";
 import { type SecretsApiDeps } from "./secrets/api.js";
+import { type SourcesApiDeps } from "./sources/api.js";
+import { buildSourcesApiDeps } from "./sources/registry.js";
 import { SecretsStore, createMachineKeyProvider } from "./secrets/store.js";
 import type { SecretScope } from "./secrets/contracts.js";
 
@@ -90,12 +92,30 @@ import { CATALOG } from "../storage/catalog/index.js";
 
 import { buildInferenceModelClient, type ProviderModelOverride } from "./inference/model-client-factory.js";
 import type { ModelClient } from "./pipeline/model-client.js";
+import {
+	controlledWriteFanOut,
+	createPipelineHandlers,
+	createStageWorker,
+	decisionFanOut,
+	extractionFanOut,
+	noopModelClient,
+	type PipelineConfig,
+	resolvePipelineConfig,
+	type StageWorker,
+} from "./pipeline/index.js";
 import { resolveDreamingConfig } from "./dreaming/config.js";
 import { createDreamingTrigger } from "./dreaming/trigger.js";
 import { createDreamingWorker, type DreamingJobWorker } from "./dreaming/worker.js";
 
 // ── The PRD-046a summary-worker mount (the deferred-assembly seam PRD-017 left) ──
 import { createSummaryJobWorker, type SummaryJobWorker } from "./summaries/index.js";
+
+// ── The PRD-045f skillify-worker mount (the deferred-assembly seam PRD-016 left) ──
+import {
+	createSkillifyJobWorker,
+	defaultGateSpec,
+	type SkillifyJobWorker,
+} from "./skillify/worker.js";
 
 import { createStorageClient } from "../storage/index.js";
 import {
@@ -104,7 +124,7 @@ import {
 } from "../storage/config.js";
 import type { QueryScope, StorageClient } from "../storage/client.js";
 import { isOk } from "../storage/result.js";
-import { type EmbedAttachment, createEmbedAttachment, resolveEmbedClientOptions } from "./services/embed-client.js";
+import { type EmbedAttachment, type EmbedClient, createEmbedAttachment, resolveEmbedClientOptions } from "./services/embed-client.js";
 import { type EmbedSupervisor, createEmbedSupervisor } from "./services/embed-supervisor.js";
 import { type HealthDetail, buildHealthDetail } from "./health.js";
 import { mountDiagnosticsHealthApi } from "./diagnostics-health.js";
@@ -605,7 +625,17 @@ export function assembleSeams(
 	//    default-on), so a captured turn lands a non-NULL 768-dim `message_embedding`
 	//    when embeddings are available; when not, the embedder returns null and the row
 	//    lands lexically (NULL vector) — never a throw (the 005b null-on-failure floor).
-	seams.attachHooks(daemon, { storage, queue: daemon.services.queue, embed });
+	//    PRD-045a (a-AC-2): capture also enqueues the memory-pipeline ENTRY job
+	//    (`memory_extraction`) onto the SAME durable queue, so a captured turn enters
+	//    the extraction → decision → controlled-write → graph-persist pipeline. The
+	//    enqueue is fail-soft in the capture handler (a pipeline enqueue failure never
+	//    breaks the captured turn).
+	seams.attachHooks(daemon, {
+		storage,
+		queue: daemon.services.queue,
+		embed,
+		enqueuePipelineEntry: makePipelineEntryEnqueuer(daemon.services.queue),
+	});
 
 	// 2. The dashboard data API (020b) — the six daemon-served view-models. Threads the
 	//    LOCAL default scope so the dashboard web app (a loopback thin client that sends no
@@ -694,11 +724,17 @@ export function assembleSeams(
 
 	// 9. The product-data surface (022c): goals + kpis (read/upsert) + skills + rules
 	//    (read-only) always; PLUS the names-only `/api/secrets` engine (012), whose store
-	//    is cleanly constructible at the composition root. `/api/sources` (013) is DEFERRED
-	//    — see {@link resolveProductDataDeps} — because its registry/providers deps are not
-	//    yet constructible here; the goal is NOT mounted (it falls through to the 501
-	//    scaffold) rather than wired with a fake (D-1, never fake a dep).
-	seams.mountProductData(daemon, resolveProductDataDeps(storage, defaultScope));
+	//    is cleanly constructible at the composition root; PLUS — PRD-045e — the sources
+	//    registry + providers resolver + document worker, so `/api/sources` and
+	//    `/api/documents` go LIVE (e-AC-1/e-AC-2/e-AC-3) instead of the PRD-013 501 scaffold.
+	//    The sources deps reuse the daemon's OWN durable queue (`daemon.services.queue`,
+	//    NOT a second queue) and embed client. FAIL-SOFT (e-AC-5): building the sources deps
+	//    is wrapped so a registry/provider/worker construction error degrades to "no sources
+	//    surface this run" (the 501 scaffold) rather than crashing the daemon.
+	seams.mountProductData(
+		daemon,
+		resolveProductDataDeps(storage, defaultScope, daemon.services.queue, embed.client),
+	);
 
 	// 10. The "Dream now" trigger — `POST /api/diagnostics/dream` (PRD-024 / AC-6 backend).
 	//     Attaches onto the already-mounted, protected `/api/diagnostics` group (the dashboard's
@@ -806,19 +842,26 @@ export function assembleSeams(
  *   constructed from `$HONEYCOMB_WORKSPACE` (the workspace root the `.secrets/` dir lives
  *   under) + the real machine-key provider — both available at assembly. No value ever
  *   crosses the HTTP boundary (the API mounts no value-returning route by construction).
- * - `sources`: DEFERRED (NOT wired, NOT faked — D-1). The existing `mountSourcesApi` (013)
- *   needs a `registry` + a `providers` resolver that are not yet constructible at the
- *   composition root (they belong to the sources subsystem's own assembly, a follow-up).
- *   Omitting `sources` makes `mountProductDataApi` skip the `/api/sources` mount, so the
- *   group falls through to the 501 scaffold — the correct honest posture until the deps
- *   land. 022e does not depend on `/api/sources`.
+ * - `sources`: WIRED (PRD-045e — the deferred-assembly seam PRD-013 left). The existing
+ *   `mountSourcesApi` (013) + `mountDocumentsApi` (013b) need a `registry` + a `providers`
+ *   resolver + a document worker that are NOW constructible at the composition root via the
+ *   small assembly helper {@link buildSourcesApiDeps}: a durable `DeeplakeSourceRegistry`
+ *   (configs stored in the EXISTING `memory_artifacts` table — no new schema), the
+ *   `createSourceProviderResolver` (Obsidian live; Discord/GitHub fail-soft without creds),
+ *   and the REAL 013b document worker — all over the daemon's OWN storage + scope + durable
+ *   queue (reused, NOT a second queue). FAIL-SOFT (e-AC-5): a construction error degrades to
+ *   "no sources surface this run" (the 501 scaffold) rather than crashing the daemon, so the
+ *   sources wiring can never take the daemon down.
  */
 function resolveProductDataDeps(
 	storage: StorageClient,
 	defaultScope: QueryScope,
+	queue: DaemonServices["queue"],
+	embed: EmbedClient,
 ): {
 	storage: StorageClient;
 	secrets?: SecretsApiDeps;
+	sources?: SourcesApiDeps;
 	defaultScope: QueryScope;
 } {
 	// The secrets store base dir is the workspace root ($HONEYCOMB_WORKSPACE), defaulting to
@@ -827,9 +870,30 @@ function resolveProductDataDeps(
 	const secrets: SecretsApiDeps = {
 		store: new SecretsStore({ baseDir, machineKey: createMachineKeyProvider() }),
 	};
+
+	// PRD-045e: build the sources deps (registry + providers resolver + document worker)
+	// FAIL-SOFT. A construction throw must NEVER crash the daemon — degrade to no sources
+	// surface (the 501 scaffold) and surface the reason to stderr, the posture every other
+	// fail-soft mount uses. The registry + worker bind to the daemon's `defaultScope` (the
+	// single local-mode tenant); the API's header resolver still 400s fail-closed on a
+	// missing org, so cross-tenant access is rejected at the edge.
+	let sources: SourcesApiDeps | undefined;
+	try {
+		sources = buildSourcesApiDeps({ storage, scope: defaultScope, queue, embed });
+	} catch (err: unknown) {
+		const reason = err instanceof Error ? err.message : String(err);
+		process.stderr.write(`honeycomb: sources deps build failed (non-fatal): ${reason}\n`);
+		sources = undefined;
+	}
+
 	// `defaultScope` is threaded so goals/kpis/skills/rules apply the local-mode fallback
 	// (PRD-022); the secrets/sources sub-handlers carry their own header scope resolvers.
-	return { storage, secrets, defaultScope };
+	return {
+		storage,
+		secrets,
+		...(sources !== undefined ? { sources } : {}),
+		defaultScope,
+	};
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1105,6 +1169,131 @@ function buildSummaryWorker(
 }
 
 /**
+ * Build the memory-pipeline ENTRY enqueuer (PRD-045a a-AC-2). Returns the
+ * `enqueuePipelineEntry` callback the capture handler calls once per accepted turn:
+ * it enqueues ONE `memory_extraction` job carrying the captured text + the tenancy
+ * envelope (org/workspace/agent), the cheap entry of the entry-fan-out chain. The
+ * stage worker leases that job, runs extraction, and the fan-out advances the turn
+ * through decision → controlled-write → graph-persist. The enqueue throws only on a
+ * genuine queue failure; the capture handler wraps the call fail-soft (a-AC-2 +
+ * a-AC-5 — a pipeline enqueue failure never breaks the captured turn).
+ */
+function makePipelineEntryEnqueuer(
+	queue: DaemonServices["queue"],
+): (text: string, scope: QueryScope, agentId: string) => Promise<void> {
+	return async (text: string, scope: QueryScope, agentId: string): Promise<void> => {
+		await queue.enqueue({
+			kind: "memory_extraction",
+			payload: {
+				org: scope.org,
+				workspace: scope.workspace ?? "",
+				agent_id: agentId === "" ? "default" : agentId,
+				content: text,
+			},
+		});
+	};
+}
+
+/**
+ * Build the daemon-resident MEMORY-PIPELINE stage worker (PRD-045a a-AC-1) — the live
+ * CONSUMER PRD-006 shipped but never constructed. It leases the FIVE pipeline kinds
+ * (`memory_extraction` / `memory_decision` / `memory_controlled_write` /
+ * `memory_graph_persist` / `memory_retention`) off the SAME durable `memory_jobs`
+ * queue (NOT a second queue — a-AC reuse), runs the real {@link createPipelineHandlers}
+ * stage handlers, and CHAINS them with the fan-out enqueuers so a captured turn flows
+ * extraction → decision → controlled-write → graph-persist (a-AC-3 / a-AC-4).
+ *
+ * ── Model dependency is FAIL-SOFT, exactly like dreaming (constraint) ─────────
+ * Extraction + decision call the in-process {@link ModelClient}. The real
+ * router-backed client is built via {@link buildInferenceModelClient} (the 010
+ * router), which NEVER throws — it degrades to {@link noopModelClient} (zero-mutation
+ * empty passes) when no `agent.yaml`/`inference:` block/key is present. So a daemon
+ * with no model config still wires the pipeline; extraction simply yields zero facts
+ * and the chain produces no writes — a clean no-op, never a crash.
+ *
+ * The whole build is wrapped fail-soft by the caller (the `start()` try/catch), so a
+ * pipeline wiring failure surfaces to stderr but NEVER prevents the daemon from
+ * booting — the daemon is already up and serving (a-AC-5).
+ */
+async function buildPipelineWorker(
+	options: AssembleDaemonOptions,
+	storage: StorageClient,
+	scope: QueryScope,
+	queue: DaemonServices["queue"],
+	embed: EmbedAttachment,
+): Promise<StageWorker> {
+	// Resolve the pipeline config fail-soft: a malformed knob must NEVER take the daemon
+	// down — degrade to the schema's false-safe defaults (every stage gate defaults OFF,
+	// the conservative posture the pipeline config already documents).
+	let config: PipelineConfig;
+	try {
+		config = resolvePipelineConfig();
+	} catch {
+		config = resolvePipelineConfig({ read: () => ({}) });
+	}
+
+	// The real inference ModelClient (the 010 router). NEVER throws — degrades to the
+	// no-op client (empty, zero-mutation passes) when no `agent.yaml`/`inference:` block
+	// or key is present yet, exactly as the dreaming worker threads it. A build error is
+	// caught and degraded to the no-op so the pipeline still wires.
+	let model: ModelClient;
+	try {
+		const secretsStore = new SecretsStore({
+			baseDir: resolveWorkspaceBaseDir(),
+			machineKey: createMachineKeyProvider(),
+		});
+		model = await buildInferenceModelClient({
+			scope: secretScopeFromQueryScope(scope),
+			secretsStore,
+			config: resolveAgentConfigPath(options),
+		});
+	} catch {
+		model = noopModelClient;
+	}
+
+	const queryScope: QueryScope = scope;
+
+	// The real stage handlers, CHAINED via the fan-out enqueuers (045a). Each stage's
+	// optional forward seam is wired to enqueue the next stage's job onto the same queue.
+	const handlers = createPipelineHandlers({
+		extraction: { config, model, onResult: extractionFanOut(queue) },
+		decision: { storage, scope: queryScope, model, config, embed: embed.client, onDecisions: decisionFanOut(queue) },
+		controlledWrite: { storage, config, embed: embed.client, onOutcome: controlledWriteFanOut(queue) },
+		graphPersist: { storage, scope: queryScope, config },
+		retention: { storage, scope: queryScope, config },
+	});
+
+	return createStageWorker({ queue, handlers });
+}
+
+/**
+ * Build the daemon-resident SKILLIFY job worker (PRD-045f f-AC-1) — the live CONSUMER
+ * of `skillify` jobs capture enqueues when the per-turn threshold is crossed. It leases
+ * ONLY `["skillify"]` off the SAME durable `memory_jobs` queue, parses each cue into a
+ * `MineScope`, calls `mine()` (gate + lock), and calls `writeSkill()` (append-only row).
+ *
+ * Like summaries, skillify is a CORE feature (not a gated tier), so this worker is built +
+ * started UNCONDITIONALLY once the queue is up. The gate is built over `systemGateSpawner`
+ * (the host-CLI shell-out: `claude --print`), so the user's auth rides in the CLI's own
+ * credential store — NO API key is held by the daemon (f-AC-4). A gate timeout, bad exit
+ * code, or any throw routes to `queue.fail` (backoff + dead semantics); the daemon is NEVER
+ * crashed and capture is NEVER blocked (f-AC-4). Construction has no side effects until
+ * `start()`; the caller starts it after `startServices()` and stops it in shutdown.
+ */
+function buildSkillifyWorker(
+	storage: StorageClient,
+	scope: QueryScope,
+	queue: DaemonServices["queue"],
+): SkillifyJobWorker {
+	return createSkillifyJobWorker({
+		queue,
+		storage,
+		scope,
+		gateSpec: defaultGateSpec(),
+	});
+}
+
+/**
  * The composition root (a-AC-1..6 / FR-1..10). Constructs the live storage client,
  * resolves the daemon scope, builds the real services, composes the auth gates for the
  * mode, wires the cached `/health` probe, builds the daemon, and fires the four seams
@@ -1348,6 +1537,16 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// (summaries are a core feature, not a gated tier) inside `start()` AFTER the queue is
 	// up, and stopped in `shutdown()`. Null until `start()` runs.
 	let summaryWorker: SummaryJobWorker | null = null;
+	// PRD-045a a-AC-1: the daemon-resident MEMORY-PIPELINE worker — the live CONSUMER of the
+	// five pipeline job kinds PRD-006 shipped but never constructed. Built + started
+	// UNCONDITIONALLY (the per-stage gates inside the config decide what actually runs) inside
+	// `start()` AFTER the queue is up, and stopped in `shutdown()`. Null until `start()` runs.
+	let pipelineWorker: StageWorker | null = null;
+	// PRD-045f f-AC-1: the daemon-resident SKILLIFY worker — the live CONSUMER of `skillify`
+	// jobs capture enqueues when the turn-counter threshold is crossed. Built + started
+	// UNCONDITIONALLY (core feature, not gated) inside `start()` AFTER the queue is up, and
+	// stopped in `shutdown()`. Null until `start()` runs.
+	let skillifyWorker: SkillifyJobWorker | null = null;
 
 	return {
 		daemon,
@@ -1388,6 +1587,40 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				process.stderr.write(`honeycomb: summary worker start failed (non-fatal): ${reason}\n`);
 				summaryWorker = null;
 			}
+
+				// ── PRD-045a a-AC-1: build + start the MEMORY-PIPELINE worker, the live CONSUMER of
+				// the five pipeline job kinds (extraction → decision → controlled-write →
+				// graph-persist → retention). Built AFTER `startServices()` so it leases from a
+				// started queue, on the SAME durable `memory_jobs` queue capture enqueues the entry
+				// job into. FAIL-SOFT (a-AC-5): a wiring failure is surfaced to stderr but must NEVER
+				// prevent the daemon from booting — the daemon is already up and serving; the pipeline
+				// simply stays unconsumed this run rather than crashing the process. The model
+				// dependency degrades to the no-op client when no `agent.yaml`/`inference:` is present
+				// (zero-mutation passes), exactly as the dreaming worker does (constraint).
+				try {
+					pipelineWorker = await buildPipelineWorker(options, storage, scope, daemon.services.queue, embed);
+					pipelineWorker.start();
+				} catch (err: unknown) {
+					const reason = err instanceof Error ? err.message : String(err);
+					process.stderr.write(`honeycomb: memory-pipeline worker start failed (non-fatal): ${reason}\n`);
+					pipelineWorker = null;
+				}
+
+				// ── PRD-045f f-AC-1: build + start the SKILLIFY worker, the live CONSUMER of
+				// `skillify` jobs capture enqueues when the per-turn threshold is crossed. Built AFTER
+				// `startServices()` so it leases from a started queue, on the SAME durable `memory_jobs`
+				// queue capture enqueues into. FAIL-SOFT (f-AC-4): a wiring failure is surfaced to
+				// stderr but must NEVER prevent the daemon from booting — the daemon is already up and
+				// serving; skillify simply stays unconsumed this run rather than crashing the process.
+				// The gate shells out to the host CLI (Claude Code) — NO API key is held by the daemon.
+				try {
+					skillifyWorker = buildSkillifyWorker(storage, scope, daemon.services.queue);
+					skillifyWorker.start();
+				} catch (err: unknown) {
+					const reason = err instanceof Error ? err.message : String(err);
+					process.stderr.write(`honeycomb: skillify worker start failed (non-fatal): ${reason}\n`);
+					skillifyWorker = null;
+				}
 
 				// ── PRD-032a / AC-3: COPY the shared DeepLake login token into the vault as the
 				// `secret`-class `DEEPLAKE_TOKEN` record, ONCE per boot — the LIVE wiring of the
@@ -1451,6 +1684,16 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			if (summaryWorker !== null) {
 				summaryWorker.stop();
 				summaryWorker = null;
+			}
+			// PRD-045a a-AC-1: stop the memory-pipeline worker's poll loop (idempotent).
+			if (pipelineWorker !== null) {
+				pipelineWorker.stop();
+				pipelineWorker = null;
+			}
+			// PRD-045f f-AC-1: stop the skillify worker's poll loop (idempotent).
+			if (skillifyWorker !== null) {
+				skillifyWorker.stop();
+				skillifyWorker = null;
 			}
 			if (probeTimer !== null) {
 				clearInterval(probeTimer);

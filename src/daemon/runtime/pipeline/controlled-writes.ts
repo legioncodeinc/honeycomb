@@ -179,6 +179,14 @@ export interface ControlledWriteHandlerDeps {
 	 * Injected so a test asserts the exact inserted id.
 	 */
 	readonly newId?: () => string;
+	/**
+	 * Where controlled-writes hands its outcome to the next stage (006d graph-persist).
+	 * The daemon wires this to enqueue a `memory_graph_persist` job carrying the
+	 * committed `memoryId` + the extraction triples (the fan-out seam) so entity edges
+	 * link to the just-written memory; a test injects a recorder. Optional: when absent
+	 * the stage applies the write but does not fan out (the Wave-1 inert posture).
+	 */
+	readonly onOutcome?: (job: StageJob, outcome: ControlledWriteOutcome) => Promise<void> | void;
 }
 
 // ── D-7 contradiction heuristic ─────────────────────────────────────────────────
@@ -665,6 +673,7 @@ export function createControlledWriteHandler(deps?: ControlledWriteHandlerDeps):
 			agentId: parsed.agentId ?? job.scope.agentId,
 		};
 		const scope: QueryScope = { org: job.scope.org, workspace: job.scope.workspace };
-		await applyControlledWrite(input, scope, deps);
+		const outcome = await applyControlledWrite(input, scope, deps);
+		if (deps.onOutcome) await deps.onOutcome(job, outcome);
 	};
 }

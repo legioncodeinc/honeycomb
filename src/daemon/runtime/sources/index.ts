@@ -102,6 +102,16 @@ export {
 	type SubmitResult,
 } from "./document-worker.js";
 
+// ── The registry + provider resolver + assembly helper (PRD-045e) ────────────
+export {
+	buildSourcesApiDeps,
+	createSourceProviderResolver,
+	DeeplakeSourceRegistry,
+	SOURCE_CONFIG_KIND,
+	type SourcesApiDepsOptions,
+	sourceIdFor,
+} from "./registry.js";
+
 // ── 013c/d/e provider stubs (Wave 2 fills each) ──────────────────────────────
 export { createObsidianProvider } from "./providers/obsidian.js";
 export { createDiscordProvider } from "./providers/discord.js";

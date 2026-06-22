@@ -174,6 +174,14 @@ export interface DecisionHandlerDeps {
 	readonly candidateLimit?: number;
 	/** Optional structured-log sink for warnings. */
 	readonly logger?: DecisionLogger;
+	/**
+	 * Where decision hands its proposals to the next stage (006c controlled-writes).
+	 * The daemon wires this to enqueue one `memory_controlled_write` job per proposal
+	 * (the fan-out seam); a test injects a recorder to assert what would be enqueued.
+	 * Optional: when absent the stage computes + records proposals to history but does
+	 * not fan out (the Wave-1 inert posture). It NEVER writes `memories` (006c owns that).
+	 */
+	readonly onDecisions?: (job: StageJob, decisions: FactDecision[]) => Promise<void> | void;
 }
 
 /**
@@ -487,6 +495,7 @@ export function createDecisionHandler(deps?: DecisionHandlerDeps): StageHandler 
 	if (deps === undefined) return noopDecisionHandler;
 	return async (job: StageJob): Promise<void> => {
 		const facts = readFacts(job.payload);
-		await decideForFacts(facts, job, deps);
+		const decisions = await decideForFacts(facts, job, deps);
+		if (deps.onDecisions) await deps.onDecisions(job, decisions);
 	};
 }

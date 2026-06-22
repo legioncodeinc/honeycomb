@@ -11,10 +11,16 @@
  * The proof is structural: the workspace lives in the storage-path `QueryScope`
  * every `storage.query(sql, scope)` carries, NOT in the interpolated SQL. We resolve
  * the tenancy for workspace A and assert (1) the scope names A, and (2) the recall
- * authorization SQL the engine emits — built WITHOUT any per-call workspace filter —
- * contains no workspace token at all, so the only thing scoping it to A is the
- * partition the resolver produced. (The live partition isolation is additionally
+ * authorization clause the chokepoint emits — built WITHOUT any per-call workspace
+ * filter — contains no workspace token at all, so the only thing scoping it to A is
+ * the partition the resolver produced. (The live partition isolation is additionally
  * proven against a real backend by recall-authz-live.itest.ts.)
+ *
+ * ── PRD-045b de-scope note ───────────────────────────────────────────────────
+ * The dormant five-phase engine (and its `buildAuthorizationSql` re-query builder)
+ * was removed; the retained `buildScopeClause` is the inner-ring chokepoint, so the
+ * a-AC-2 assertion targets the compiled clause directly — it is the only inner-ring
+ * SQL, and the partition still never appears as a WHERE value.
  */
 
 import { describe, expect, it } from "vitest";
@@ -24,7 +30,7 @@ import {
 	encodeStubToken,
 	resolveRequestTenancy,
 } from "../../../../src/daemon/runtime/auth/index.js";
-import { buildAuthorizationSql, buildScopeClause } from "../../../../src/daemon/runtime/recall/index.js";
+import { buildScopeClause } from "../../../../src/daemon/runtime/recall/index.js";
 
 function credsFor(org: string, workspace: string): Credentials {
 	return {
@@ -80,24 +86,18 @@ describe("a-AC-2 cross-workspace reads are impossible even with the API filter r
 		expect(b.tenancy.scope.workspace).toBe("workspace-b");
 		expect(a.tenancy.scope.workspace).not.toBe(b.tenancy.scope.workspace);
 
-		// Build the recall authorization SQL the engine emits for agent A, with NO
-		// caller (API) filter at all — the deliberately-removed-filter case.
+		// Build the inner-ring authorization clause the chokepoint emits for agent A, with
+		// NO caller (API) filter at all — the deliberately-removed-filter case.
 		const clause = buildScopeClause({
 			agentId: "agent-a",
 			readPolicy: "isolated",
 			org: a.tenancy.scope.org,
 			workspace: a.tenancy.scope.workspace,
 		});
-		const sql = buildAuthorizationSql({
-			candidateIds: ["m1", "m2"],
-			clause,
-			filters: undefined,
-		});
-		expect(sql).not.toBeNull();
-		// The SQL names neither workspace — the partition is NOT a WHERE value. So even
+		// The clause names neither workspace — the partition is NOT a WHERE value. So even
 		// with the API filter removed, the statement cannot address workspace B; only
 		// the QueryScope partition decides which workspace's data the read touches.
-		expect(sql).not.toContain("workspace-a");
-		expect(sql).not.toContain("workspace-b");
+		expect(clause.sql).not.toContain("workspace-a");
+		expect(clause.sql).not.toContain("workspace-b");
 	});
 });

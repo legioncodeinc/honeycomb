@@ -111,7 +111,12 @@ function buildRecallRequest(argv: readonly string[]): DaemonRequest {
  * subcommand produces. NEVER builds SQL — the daemon does.
  */
 export function buildStorageRequest(verb: string, argv: readonly string[]): DaemonRequest {
-	if (verb === "skill") return buildSkillRequest(argv);
+	// PRD-045f f-AC-3: `skillify` dispatches through the SAME `/api/skills` group shape as `skill`
+	// — so `honeycomb skillify pull` ROUTES (`POST /api/skills/pull`) instead of falling through to
+	// the generic `/api/skillify`, a group the daemon never mounts (a dead route is not dispatch).
+	// 045g owns merging the duplicate `skill`/`skillify` CLI surfaces into one; here we only make
+	// the registered `skillify` verb route correctly onto the live skills group.
+	if (verb === "skill" || verb === "skillify") return buildSkillRequest(argv);
 	if (verb === "remember") return buildRememberRequest(argv);
 	if (verb === "recall") return buildRecallRequest(argv);
 

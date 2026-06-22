@@ -107,6 +107,15 @@ export interface SourcesApiDeps {
 	 * testable before 013b fills the worker internals.
 	 */
 	readonly documentWorker?: DocumentWorker;
+	/**
+	 * Delay (ms) between the lifecycle's purge-discovery polls (a DELETE soft-deletes by
+	 * scanning the source's ids — see `lifecycle.ts` `DISCOVERY_POLL_DELAY_MS`). Production
+	 * leaves it unset (the ~400ms spacing that spans the fresh-write propagation window). A
+	 * unit/integration test on the deterministic fake store passes `0` so the spaced polls do
+	 * not push a DELETE toward the vitest default timeout (the fake is authoritative on the
+	 * first poll, so the spacing is pure wall-clock waste there).
+	 */
+	readonly discoveryPollDelayMs?: number;
 }
 
 /** 400 for a request with no resolvable tenancy. */
@@ -126,6 +135,7 @@ function lifecycleFor(deps: SourcesApiDeps, scope: QueryScope) {
 		queue: deps.queue,
 		registry: deps.registry,
 		...(deps.logger !== undefined ? { logger: deps.logger } : {}),
+		...(deps.discoveryPollDelayMs !== undefined ? { discoveryPollDelayMs: deps.discoveryPollDelayMs } : {}),
 	});
 }
 

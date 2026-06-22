@@ -95,6 +95,11 @@ function buildApp(opts: { withWorker?: boolean } = {}) {
 		queue,
 		registry,
 		providers: providerResolver(provider),
+		// The fake store is authoritative on the first poll, so make the API DELETE path's
+		// purge-discovery scan use a 0ms inter-poll delay — otherwise the spaced ~400ms polls
+		// (production's fresh-write-propagation budget) push this hermetic DELETE toward the
+		// vitest default timeout under suite load (a latent flake on the default spacing).
+		discoveryPollDelayMs: 0,
 		...(opts.withWorker ? { documentWorker: createDocumentWorkerHarness() } : {}),
 	};
 	const root = new Hono();

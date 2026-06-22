@@ -80,6 +80,19 @@ describe("PRD-020a a-AC-1 — the unified dispatcher parses + routes", () => {
 		expect(daemon.calls[0]?.req.path).toBe("/api/memories/recall");
 	});
 
+	it("PRD-045f f-AC-3 `skillify pull` is REGISTERED and DISPATCHES through the daemon seam (not just a table row)", async () => {
+		const daemon = createFakeDaemonClient();
+		const deps: CommandDeps = { daemon, out: () => {} };
+		const d = createDispatcher();
+
+		// The verb resolves (registered) AND the dispatcher routes it as a storage verb to the
+		// live skills group — a dead-route or unknown-verb would never reach the daemon seam.
+		const res = await d.dispatch(d.parse(["skillify", "pull"]), deps);
+		expect(res.exitCode).toBe(0);
+		expect(daemon.calls).toHaveLength(1);
+		expect(daemon.calls[0]?.req.path).toBe("/api/skills/pull");
+	});
+
 	it("a-AC-1 an unknown command prints usage and exits non-zero", async () => {
 		const lines: string[] = [];
 		const deps: CommandDeps = { daemon: createFakeDaemonClient(), out: (l) => lines.push(l) };
