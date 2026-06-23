@@ -125,5 +125,11 @@
   "//optionalDependencies": "PRD-025 D-2: the embedding RUNTIME (@huggingface/transformers + its ONNX native runtime, ~600 MB with the nomic-embed-text-v1.5 model acquired at first-run) ships as an OPTIONAL dependency, NOT in the `files` allowlist. This keeps the published @deeplake/hivemind tarball LEAN (the model is downloaded + cached on the daemon's first warmup, not packed — AC-7) and keeps `npm i` fast for everyone; a `--no-optional` / slimmed / offline install simply runs recall on the BM25/ILIKE lexical fallback (no quality cliff — D-4). The embed daemon dynamic-imports this only at warmup, so the bundle + CI never require it.",
   "optionalDependencies": {
     "@huggingface/transformers": "^3.8.1"
+  },
+  "//overrides": "Dependabot transitive-devDependency remediation. All three are DEV-only and never ship (the `files` allowlist packs built bundles, not node_modules), so consumer risk is nil — these clear the dev/CI tree. tmp ^0.2.6 fixes GHSA-ph9p-34f9-6g65 (HIGH path traversal) + GHSA-52f5-9888-hmc6 (symlink write), reached only via @stryker-mutator/core -> @inquirer/prompts -> external-editor -> tmp (which calls only tmpNameSync, stable across the 0.0.33->0.2.x major). esbuild ^0.28.1 fixes GHSA-g7r4-m6w7-qqqr (Windows dev-server file read) in vitest's nested copy; the direct dep is already 0.28.1. @babel/core ^7.29.6 fixes GHSA-4x5r-pxfx-6jf8 (sourceMappingURL file read) under @stryker-mutator/instrumenter. Validated by npm run mutation (exercises tmp+babel) + npm run ci/build (exercises esbuild).",
+  "overrides": {
+    "tmp": "^0.2.6",
+    "esbuild": "^0.28.1",
+    "@babel/core": "^7.29.6"
   }
 }
