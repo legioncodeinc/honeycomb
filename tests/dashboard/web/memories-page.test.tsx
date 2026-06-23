@@ -8,7 +8,7 @@
  *   040b — add POSTs + re-lists; edit POSTs modify with a REQUIRED reason (empty reason can't submit);
  *          RE-READ-not-optimistic (the ack/persisted value differs from the form input → the re-read
  *          value shows); honest failure leaves the persisted value; forget is behind a confirm.
- *   040c — compact renders the per-table summary (incl. errored → "attempted, not completed"); dream
+ *   040c — compact renders the per-table summary (incl. errored → "attempted, not completed"); pollinate
  *          reflects the three ack shapes honestly (no spinner); watch polls + filters + stops.
  *   AC-5 — memory content is ESCAPED (no injected markup); no secret/token in any rendered line.
  *
@@ -22,7 +22,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MemoriesPage } from "../../../src/dashboard/web/pages/memories.js";
 import type { PageProps } from "../../../src/dashboard/web/page-frame.js";
-import type { CompactSummaryWire, DreamAck, LogRecordWire, MemoryRecordWire, RecalledMemory, WireClient } from "../../../src/dashboard/web/wire.js";
+import type { CompactSummaryWire, PollinateAck, LogRecordWire, MemoryRecordWire, RecalledMemory, WireClient } from "../../../src/dashboard/web/wire.js";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -54,7 +54,7 @@ function mockWire(opts: {
 	modifyAck?: { id: string | null; action: string; audited: boolean } | null;
 	forgetAck?: { id: string | null; action: string; audited: boolean } | null;
 	compact?: CompactSummaryWire | null;
-	dream?: DreamAck;
+	pollinate?: PollinateAck;
 	logs?: LogRecordWire[];
 } = {}): WireClient {
 	const listRows = opts.list ?? [];
@@ -73,7 +73,7 @@ function mockWire(opts: {
 		modifyMemory: vi.fn(async () => ("modifyAck" in opts ? opts.modifyAck : { id: "mem-1", action: "modified", audited: true })),
 		forgetMemory: vi.fn(async () => ("forgetAck" in opts ? opts.forgetAck : { id: "mem-1", action: "forgotten", audited: true })),
 		compact: vi.fn(async () => ("compact" in opts ? opts.compact : null)),
-		dream: vi.fn(async () => opts.dream ?? { triggered: true, status: "enqueued" }),
+		pollinate: vi.fn(async () => opts.pollinate ?? { triggered: true, status: "enqueued" }),
 		logs: vi.fn(async () => opts.logs ?? []),
 		harnesses: vi.fn(),
 		health: vi.fn(),
@@ -84,7 +84,7 @@ function mockWire(opts: {
 }
 
 function pageProps(wire: WireClient): PageProps {
-	return { wire, daemonUp: true, assetBase: "assets", dreaming: false };
+	return { wire, daemonUp: true, assetBase: "assets", pollinating: false };
 }
 
 let container: HTMLDivElement;
@@ -380,29 +380,29 @@ describe("040c-AC-1: compact behind a confirm renders the honest per-table summa
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 040c — dream (three honest ack shapes, no spinner)
+// 040c — pollinate (three honest ack shapes, no spinner)
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("040c-AC-2: dream reflects the three ack shapes honestly (no fake spinner)", () => {
-	async function dreamWith(ack: DreamAck): Promise<string> {
+describe("040c-AC-2: pollinate reflects the three ack shapes honestly (no fake spinner)", () => {
+	async function pollinateWith(ack: PollinateAck): Promise<string> {
 		if (root !== undefined) {
 			act(() => root?.unmount());
 			root = undefined;
 		}
-		const wire = mockWire({ list: [], dream: ack });
+		const wire = mockWire({ list: [], pollinate: ack });
 		await mountPage(wire);
-		await click(btn("Dream now"));
-		return container.querySelector('[data-testid="dream-note"]')?.textContent ?? "";
+		await click(btn("Pollinate now"));
+		return container.querySelector('[data-testid="pollinate-note"]')?.textContent ?? "";
 	}
 
 	it("enqueued → consolidating; running → already running; skipped → skipped · reason", async () => {
-		expect(await dreamWith({ triggered: true, status: "enqueued" })).toContain("consolidating");
-		expect(await dreamWith({ triggered: true, status: "running", reason: "in flight" })).toContain("already running");
-		const skipped = await dreamWith({ triggered: false, status: "skipped", reason: "disabled" });
+		expect(await pollinateWith({ triggered: true, status: "enqueued" })).toContain("consolidating");
+		expect(await pollinateWith({ triggered: true, status: "running", reason: "in flight" })).toContain("already running");
+		const skipped = await pollinateWith({ triggered: false, status: "skipped", reason: "disabled" });
 		expect(skipped).toContain("skipped");
 		expect(skipped).toContain("disabled");
-		// A !triggered ack never leaves a permanent "dreaming…" spinner — the button is enabled again.
-		expect(btn("Dream now")?.disabled).toBe(false);
+		// A !triggered ack never leaves a permanent "pollinating…" spinner — the button is enabled again.
+		expect(btn("Pollinate now")?.disabled).toBe(false);
 	});
 });
 
@@ -415,7 +415,7 @@ describe("040c-AC-3: watch polls /api/logs filtered to memory routes, and stops 
 		const logs: LogRecordWire[] = [
 			{ time: "2026-06-20T14:32:08.000Z", method: "GET", path: "/api/memories", status: 200 },
 			{ time: "2026-06-20T14:32:09.000Z", method: "GET", path: "/api/diagnostics/kpis", status: 200 }, // filtered OUT
-			{ time: "2026-06-20T14:32:10.000Z", method: "POST", path: "/api/diagnostics/dream", status: 202 },
+			{ time: "2026-06-20T14:32:10.000Z", method: "POST", path: "/api/diagnostics/pollinate", status: 202 },
 		];
 		const wire = mockWire({ list: [], logs });
 		await mountPage(wire);
@@ -423,7 +423,7 @@ describe("040c-AC-3: watch polls /api/logs filtered to memory routes, and stops 
 		const feed = container.querySelector('[data-testid="watch-feed"]');
 		expect(wire.logs).toHaveBeenCalled();
 		expect(feed?.textContent).toContain("/api/memories");
-		expect(feed?.textContent).toContain("/api/diagnostics/dream");
+		expect(feed?.textContent).toContain("/api/diagnostics/pollinate");
 		// The non-memory route is filtered out.
 		expect(feed?.textContent).not.toContain("/api/diagnostics/kpis");
 		// Stop clears the interval + the feed disappears.
@@ -437,14 +437,14 @@ describe("040c-AC-3: watch polls /api/logs filtered to memory routes, and stops 
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("AC-5: no token/secret renders anywhere on the page", () => {
-	it("no token/secret/bearer/authorization/password appears across list/detail/compact/dream/watch", async () => {
+	it("no token/secret/bearer/authorization/password appears across list/detail/compact/pollinate/watch", async () => {
 		const summary: CompactSummaryWire = { ok: true, summaries: [{ table: "skills", keysScanned: 1, keysCompacted: 1, rowsReaped: 1, keysSkipped: 0, errored: 0 }], skippedTables: [] };
 		const logs: LogRecordWire[] = [{ time: "2026-06-20T14:32:08.000Z", method: "GET", path: "/api/memories", status: 200 }];
-		const wire = mockWire({ list: [rec({ content: "a benign fact" })], compact: summary, dream: { triggered: true, status: "enqueued" }, logs });
+		const wire = mockWire({ list: [rec({ content: "a benign fact" })], compact: summary, pollinate: { triggered: true, status: "enqueued" }, logs });
 		await mountPage(wire);
 		await click(btn("Compact"));
 		await click(btn("Confirm compact"));
-		await click(btn("Dream now"));
+		await click(btn("Pollinate now"));
 		await click(btn("Watch"));
 		const text = (container.textContent ?? "").toLowerCase();
 		for (const needle of ["token", "secret", "bearer", "authorization", "password"]) {

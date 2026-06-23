@@ -6,7 +6,7 @@
 **Builds on:** PRD-003b graph catalog (`entities`, `entity_aspects`, `entity_attributes`, `entity_dependencies`, `memory_entity_mentions`, `epistemic_assertions`, `ontology_proposals` — ALL exist), PRD-002 `appendVersionBumped` + escaping, PRD-006d (the bulk graph WRITER — 008 owns the entity model + control plane, NOT the bulk extraction write), PRD-006 ModelClient seam (conflict-detection LLM fallback), PRD-007b consumes traversal. CLI stub `src/cli`. Live DeepLake wired.
 
 ## Verification posture
-Vitest: fake transport (assert version-bumped supersede SQL, edge threshold, slot keys, scope, escaping), fake model (conflict LLM fallback off by default). Opt-in LIVE: append-only supersession against real `entity_attributes` (highest-version read — the proven-reliable pattern), proposal apply. Out of scope: PRD-006d bulk write, PRD-007 traversal/shaping, the dreaming-loop reshaping.
+Vitest: fake transport (assert version-bumped supersede SQL, edge threshold, slot keys, scope, escaping), fake model (conflict LLM fallback off by default). Opt-in LIVE: append-only supersession against real `entity_attributes` (highest-version read — the proven-reliable pattern), proposal apply. Out of scope: PRD-006d bulk write, PRD-007 traversal/shaping, the pollinating-loop reshaping.
 
 ## Decisions (defaults)
 | # | Q | Decision |

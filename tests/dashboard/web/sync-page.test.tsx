@@ -74,7 +74,7 @@ function mockWire(view: AssetSyncViewWire, logs: LogRecordWire[] = []): WireClie
 		assetsView,
 		syncAction,
 		health: vi.fn(),
-		dream: vi.fn(),
+		pollinate: vi.fn(),
 		vaultSettings: vi.fn(),
 		setSetting: vi.fn(),
 		secretNames: vi.fn(),
@@ -89,7 +89,7 @@ function mockWire(view: AssetSyncViewWire, logs: LogRecordWire[] = []): WireClie
 }
 
 function pageProps(wire: WireClient): PageProps {
-	return { wire, daemonUp: true, assetBase: "assets", dreaming: false };
+	return { wire, daemonUp: true, assetBase: "assets", pollinating: false };
 }
 
 let container: HTMLDivElement;

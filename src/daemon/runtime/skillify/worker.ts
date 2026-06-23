@@ -9,7 +9,7 @@
  * advances the per-project watermark after every run — regardless of verdict (b-AC-2).
  *
  * ── Kind-filtered lease — NEVER touch a foreign job ──────────────────────────
- * Capture also enqueues `summary` / `dreaming` / pipeline jobs into the SAME
+ * Capture also enqueues `summary` / `pollinating` / pipeline jobs into the SAME
  * `memory_jobs` queue. A generic `lease()` would let this worker grab one of those,
  * fail to parse it, and walk a legit job toward `dead`. So this worker leases ONLY
  * `["skillify"]` (the additive `JobQueueService.lease(kinds)` filter, f-AC-1).
@@ -107,7 +107,7 @@ export function parseSkillifyJobPayload(candidate: unknown): SkillifyJobPayload 
  * The skillify job worker. Construct via {@link createSkillifyJobWorker}. Exposes
  * `runOnce()` (lease + run a single skillify job, the deterministic unit a test drives)
  * and `start()` / `stop()` (the continuous poll loop the daemon-assembly uses). Mirrors
- * the PRD-006 `StageWorker` + `DreamingJobWorker` shape (f-AC-1).
+ * the PRD-006 `StageWorker` + `PollinatingJobWorker` shape (f-AC-1).
  */
 export interface SkillifyJobWorker {
 	/**
@@ -126,7 +126,7 @@ export interface SkillifyJobWorker {
 // Construction deps + factory.
 // ════════════════════════════════════════════════════════════════════════════
 
-/** A minimal structured-log sink (mirrors the dreaming/summary worker loggers). */
+/** A minimal structured-log sink (mirrors the pollinating/summary worker loggers). */
 export interface SkillifyWorkerLogger {
 	/** Record a structured event (e.g. `skillify.worker.completed`, `skillify.worker.failed`). */
 	event(name: string, fields?: Record<string, unknown>): void;
@@ -268,7 +268,7 @@ class SkillifyJobWorkerImpl implements SkillifyJobWorker {
 	}
 
 	async runOnce(): Promise<boolean> {
-		// Lease ONLY a skillify job (the kind filter) — a foreign summary/dreaming/pipeline
+		// Lease ONLY a skillify job (the kind filter) — a foreign summary/pollinating/pipeline
 		// job is left queued for its own worker, never grabbed-and-failed here (f-AC-1). A
 		// THROW from lease() itself (no job to fail-route) must NOT reject runOnce() and become
 		// an unhandled rejection in the timer loop — degrade it to "nothing leased" (false).
@@ -367,7 +367,7 @@ class SkillifyJobWorkerImpl implements SkillifyJobWorker {
 	start(): void {
 		// Idempotent: a second start() while a timer is already live would overwrite `this.handle`
 		// and leak the first interval (stop() only clears the latest handle). Guard like the
-		// dreaming worker's start() so double-start is a no-op, not a timer leak.
+		// pollinating worker's start() so double-start is a no-op, not a timer leak.
 		if (this.handle !== undefined) return;
 		this.handle = this.setTimer(() => {
 			// Skip a tick if the previous lease+run is still in flight; never overlap.

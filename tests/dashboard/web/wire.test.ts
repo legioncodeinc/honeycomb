@@ -244,7 +244,7 @@ describe("PRD-032c: the wire client threads /api/settings (GET+POST) + names-onl
 	} {
 		const calls: { url: string; init?: RequestInit }[] = [];
 		const settings = opts.settings ?? {
-			settings: { activeProvider: "anthropic", activeModel: "claude-opus-4-8", "dreaming.enabled": true },
+			settings: { activeProvider: "anthropic", activeModel: "claude-opus-4-8", "pollinating.enabled": true },
 			catalog: [{ id: "anthropic", label: "Anthropic", models: ["claude-sonnet-4-6", "claude-opus-4-8"], openEnded: false }],
 		};
 		const secrets = opts.secrets ?? { names: ["ANTHROPIC_API_KEY", "DEEPLAKE_TOKEN"] };
@@ -268,7 +268,7 @@ describe("PRD-032c: the wire client threads /api/settings (GET+POST) + names-onl
 		const out = await createWireClient({ fetchImpl }).vaultSettings();
 		expect(out.settings["activeProvider"]).toBe("anthropic");
 		expect(out.settings["activeModel"]).toBe("claude-opus-4-8");
-		expect(out.settings["dreaming.enabled"]).toBe(true);
+		expect(out.settings["pollinating.enabled"]).toBe(true);
 		expect(out.catalog).toHaveLength(1);
 		expect(out.catalog[0]?.models).toContain("claude-opus-4-8");
 		// It hit the settings GET (no method = GET) with the session headers.
@@ -311,10 +311,10 @@ describe("PRD-032c: the wire client threads /api/settings (GET+POST) + names-onl
 
 	it("setSetting() encodes a dotted dashboard key into a single safe path segment", async () => {
 		const { fetchImpl, calls } = vaultFetch();
-		await createWireClient({ fetchImpl }).setSetting("dreaming.enabled", false);
+		await createWireClient({ fetchImpl }).setSetting("pollinating.enabled", false);
 		const postCall = calls.find((c) => c.init?.method === "POST");
 		// The dotted key is encodeURIComponent'd; it remains a single segment under /api/settings/.
-		expect(postCall?.url).toContain("/api/settings/dreaming.enabled");
+		expect(postCall?.url).toContain("/api/settings/pollinating.enabled");
 		expect(JSON.parse(String(postCall?.init?.body))).toEqual({ value: false });
 	});
 

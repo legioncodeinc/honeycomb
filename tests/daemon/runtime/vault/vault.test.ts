@@ -113,9 +113,9 @@ describe("AC-1 records of secret/setting/registered class → encrypted at 0600,
 
 	it.skipIf(!IS_POSIX)("writes the file at 0600 and the class dir at 0700 (POSIX)", async () => {
 		const store = makeStore();
-		await store.setSetting("dreaming.enabled", true, SCOPE);
+		await store.setSetting("pollinating.enabled", true, SCOPE);
 		const dir = join(base, VAULT_DIR_NAME, "setting", scopeSegment(SCOPE));
-		const file = join(dir, "dreaming.enabled");
+		const file = join(dir, "pollinating.enabled");
 		expect(statSync(file).mode & 0o777).toBe(SECRET_FILE_MODE);
 		expect(statSync(dir).mode & 0o777).toBe(SECRET_DIR_MODE);
 	});
@@ -170,8 +170,8 @@ describe("AC-2 secret value never returned via setting accessor; setting round-t
 		const s = await store.getSetting("activeProvider", SCOPE);
 		expect(s.ok && s.value).toBe("anthropic");
 
-		await store.setSetting("dreaming.enabled", true, SCOPE);
-		const b = await store.getSetting("dreaming.enabled", SCOPE);
+		await store.setSetting("pollinating.enabled", true, SCOPE);
+		const b = await store.getSetting("pollinating.enabled", SCOPE);
 		expect(b.ok && b.value).toBe(true);
 	});
 

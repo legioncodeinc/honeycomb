@@ -655,7 +655,7 @@ export function createInferenceRouter(deps: RouterDeps): InferenceRouter {
 export const MODEL_WORKLOAD_TO_INFERENCE: Readonly<Record<ModelWorkload, string>> = Object.freeze({
 	memory_extraction: "memory_extraction",
 	memory_decision: "memory_decision",
-	memory_dreaming: "memory_dreaming",
+	memory_pollinating: "memory_pollinating",
 });
 
 /**

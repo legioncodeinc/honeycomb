@@ -63,7 +63,7 @@ import { mountHarnessApi } from "./dashboard/harness-api.js";
 import { mountSyncApi } from "./dashboard/sync-mount.js";
 import { detectInstalledHarnesses } from "./dashboard/harness-detect.js";
 import { mountDashboardHost } from "./dashboard/host.js";
-import { mountDreamApi } from "./dreaming/api.js";
+import { mountPollinateApi } from "./pollinating/api.js";
 import { mountCompactApi } from "./maintenance/compact-api.js";
 import { mountLogsApi } from "./logs/api.js";
 import { type LogStore, NULL_LOG_STORE, openLogStore } from "./logs/log-store.js";
@@ -80,7 +80,7 @@ import { buildSourcesApiDeps } from "./sources/registry.js";
 import { SecretsStore, createMachineKeyProvider } from "./secrets/store.js";
 import type { SecretScope } from "./secrets/contracts.js";
 
-// ── The vault `setting` class (PRD-032d / AC-6) — assembly READS provider/model + dreaming ──
+// ── The vault `setting` class (PRD-032d / AC-6) — assembly READS provider/model + pollinating ──
 import { VaultStore } from "./vault/store.js";
 import { createVaultRegistry } from "./vault/registry.js";
 import { mountSettingsApi } from "./vault/api.js";
@@ -105,9 +105,9 @@ import {
 	resolvePipelineConfig,
 	type StageWorker,
 } from "./pipeline/index.js";
-import { resolveDreamingConfig } from "./dreaming/config.js";
-import { createDreamingTrigger } from "./dreaming/trigger.js";
-import { createDreamingWorker, type DreamingJobWorker } from "./dreaming/worker.js";
+import { resolvePollinatingConfig } from "./pollinating/config.js";
+import { createPollinatingTrigger } from "./pollinating/trigger.js";
+import { createPollinatingWorker, type PollinatingJobWorker } from "./pollinating/worker.js";
 
 // ── The PRD-046a summary-worker mount (the deferred-assembly seam PRD-017 left) ──
 import { createSummaryJobWorker, type SummaryJobWorker } from "./summaries/index.js";
@@ -138,7 +138,7 @@ import { mountDiagnosticsHealthApi } from "./diagnostics-health.js";
  * the file the operator edits, the `.secrets/` dir the `${ANTHROPIC_API_KEY}` ref resolves
  * against, and the daemon all agree on ONE location. The file is OPTIONAL: when absent (or
  * lacking an `inference:` block) `buildInferenceModelClient` degrades to the no-op client
- * and the daemon boots cleanly with dreaming/inference simply unavailable. It carries NO
+ * and the daemon boots cleanly with pollinating/inference simply unavailable. It carries NO
  * secret — only the `${SECRET_REF}` reference (an inline key is rejected at parse). */
 export const AGENT_CONFIG_FILE_NAME = "agent.yaml";
 
@@ -270,24 +270,24 @@ export interface AssembleDaemonOptions {
 	 */
 	readonly agentConfigPath?: string;
 	/**
-	 * The dreaming `memory.dreaming` config provider seam (PRD-026 AC-W gate). Defaults to
-	 * the env provider ({@link resolveDreamingConfig}'s default), so `enabled` is OFF unless
-	 * `HONEYCOMB_DREAMING_ENABLED=true`/`1`. A test injects a fixed provider to drive the
+	 * The pollinating `memory.pollinating` config provider seam (PRD-026 AC-W gate). Defaults to
+	 * the env provider ({@link resolvePollinatingConfig}'s default), so `enabled` is OFF unless
+	 * `HONEYCOMB_POLLINATING_ENABLED=true`/`1`. A test injects a fixed provider to drive the
 	 * `enabled:true` / `enabled:false` worker-start gate WITHOUT touching `process.env`.
 	 */
-	readonly dreamingConfigProvider?: Parameters<typeof resolveDreamingConfig>[0];
+	readonly pollinatingConfigProvider?: Parameters<typeof resolvePollinatingConfig>[0];
 	/**
-	 * The pre-built dreaming worker, injectable for testing (AC-W). Production leaves it
+	 * The pre-built pollinating worker, injectable for testing (AC-W). Production leaves it
 	 * unset → the composition root builds the REAL worker from the daemon's scope + storage +
 	 * model + queue WHEN `config.enabled`. A test injects a recording fake to assert
 	 * `start()`/`stop()` are called exactly when the gate says so, without a live queue.
 	 * When `null` is injected the build step is skipped entirely (the "no worker constructed
 	 * when disabled" assertion). Production never sets this.
 	 */
-	readonly dreamingWorker?: DreamingJobWorker | null;
+	readonly pollinatingWorker?: PollinatingJobWorker | null;
 	/**
 	 * The machine-bound vault store the daemon READS the `setting` class from (PRD-032d /
-	 * AC-6) — the active provider/model selection + the `dreaming.enabled` flag. Production
+	 * AC-6) — the active provider/model selection + the `pollinating.enabled` flag. Production
 	 * leaves it UNSET → the composition root constructs the REAL {@link VaultStore} over the
 	 * SAME workspace base dir + machine-key + daemon scope the secrets store uses (so the
 	 * vault, the `.secrets/` records, and the `${SECRET_REF}` resolver all agree on ONE
@@ -341,11 +341,11 @@ export interface SeamFns {
 	/** The product-data surface — goals/kpis/skills/rules (+secrets) (022c). Fires UNCONDITIONALLY. */
 	readonly mountProductData: typeof mountProductDataApi;
 	/**
-	 * The "Dream now" trigger — `POST /api/diagnostics/dream` (PRD-024 / AC-6). Fires
+	 * The "Pollinate now" trigger — `POST /api/diagnostics/pollinate` (PRD-024 / AC-6). Fires
 	 * UNCONDITIONALLY: its `/api/diagnostics` group is already `protect:true`, so it inherits
 	 * the same auth/RBAC as the dashboard's JSON views (open in `local`, gated in team/hybrid).
 	 */
-	readonly mountDream: typeof mountDreamApi;
+	readonly mountPollinate: typeof mountPollinateApi;
 	/**
 	 * The standalone version-history COMPACTION trigger — `POST /api/diagnostics/compact`
 	 * (PRD-030 / D-2 PRIMARY). Fires UNCONDITIONALLY: its `/api/diagnostics` group is already
@@ -410,7 +410,7 @@ export interface SeamFns {
 	 * protected `/api/ontology` group (server.ts:88; NO `server.ts` edit), so it inherits the
 	 * dashboard JSON views' auth/RBAC (open in `local`, gated in team/hybrid). This is the seam
 	 * that turns the ontology 501 scaffold into a LIVE read surface (no 501) and gives the
-	 * control-plane apply a live, dreaming-INDEPENDENT mutation path. The `/api/ontology` group
+	 * control-plane apply a live, pollinating-INDEPENDENT mutation path. The `/api/ontology` group
 	 * has a SINGLE owner — no other mount registers any `/api/ontology/*` path — so there is no
 	 * route collision (cf. the latent `/api/graph` double-registration the audit flagged).
 	 *
@@ -451,7 +451,7 @@ export const defaultSeamFns: SeamFns = {
 	mountMemoriesPrime: mountMemoriesPrimeApi,
 	mountVfs: mountVfsApi,
 	mountProductData: mountProductDataApi,
-	mountDream: mountDreamApi,
+	mountPollinate: mountPollinateApi,
 	mountCompact: mountCompactApi,
 	mountDiagnosticsHealth: mountDiagnosticsHealthApi,
 	mountGraph: mountGraphApi,
@@ -774,18 +774,18 @@ export function assembleSeams(
 		resolveProductDataDeps(storage, defaultScope, daemon.services.queue, embed.client),
 	);
 
-	// 10. The "Dream now" trigger — `POST /api/diagnostics/dream` (PRD-024 / AC-6 backend).
+	// 10. The "Pollinate now" trigger — `POST /api/diagnostics/pollinate` (PRD-024 / AC-6 backend).
 	//     Attaches onto the already-mounted, protected `/api/diagnostics` group (the dashboard's
 	//     group), so there is NO `server.ts` edit and it inherits the same auth/RBAC the JSON
 	//     dashboard views enforce (open in `local`, gated in team/hybrid). It kicks the REAL
-	//     PRD-009 Dreaming loop via the 009a trigger seam, injected the daemon's OWN durable job
-	//     queue (`daemon.services.queue`) as the enqueuer — NOT a second dreaming subsystem. The
-	//     handler is NON-BLOCKING: the trigger only ENQUEUES a `dreaming` job (the consolidation
+	//     PRD-009 Pollinating loop via the 009a trigger seam, injected the daemon's OWN durable job
+	//     queue (`daemon.services.queue`) as the enqueuer — NOT a second pollinating subsystem. The
+	//     handler is NON-BLOCKING: the trigger only ENQUEUES a `pollinating` job (the consolidation
 	//     pass is run later by the queue worker via the 009b/009c runner) and returns a 202 ack.
-	//     The `defaultScope` is the daemon's tenancy partition the dreaming counter lives under
+	//     The `defaultScope` is the daemon's tenancy partition the pollinating counter lives under
 	//     (the same single local tenant the data-API mounts use). When the queue is the no-op stub
 	//     (a bare `createDaemon`), the handler fails soft to a clean `{ triggered: false }` ack.
-	seams.mountDream(daemon, { storage, defaultScope, enqueuer: daemon.services.queue });
+	seams.mountPollinate(daemon, { storage, defaultScope, enqueuer: daemon.services.queue });
 
 	// 11. The standalone version-history COMPACTION trigger — `POST /api/diagnostics/compact`
 	//     (PRD-030 / D-2 PRIMARY). Attaches onto the same already-mounted, protected
@@ -793,7 +793,7 @@ export function assembleSeams(
 	//     views' auth/RBAC (open in `local`, gated in team/hybrid). It runs the Wave-1
 	//     version-history compactor over the allow-listed version-bumped tables under the
 	//     daemon's `defaultScope` — the standalone maintenance path that runs REGARDLESS of
-	//     premium dreaming. FAIL-SOFT: the mount resolves the retention config (which could
+	//     premium pollinating. FAIL-SOFT: the mount resolves the retention config (which could
 	//     throw on a malformed `HONEYCOMB_COMPACTION_*` knob) and registers the route; we wrap
 	//     it so a mount/config error degrades to "no compaction route this run" rather than
 	//     crashing the daemon (the standalone job is best-effort, never load-bearing for boot).
@@ -877,7 +877,7 @@ export function assembleSeams(
 	//     protected `/api/ontology` group (server.ts:88; NO `server.ts` edit), so it inherits the
 	//     dashboard JSON views' auth/RBAC (open in `local`, gated in team/hybrid). This turns the
 	//     ontology 501 scaffold into a LIVE read surface (c-AC-2) and gives the control-plane apply
-	//     a live mutation path INDEPENDENT of the dormant dreaming runner (c-AC-4). The `/api/ontology`
+	//     a live mutation path INDEPENDENT of the dormant pollinating runner (c-AC-4). The `/api/ontology`
 	//     group has a SINGLE owner — no other mount registers any `/api/ontology/*` path — so there is
 	//     no route collision (cf. the latent `/api/graph` double-registration the audit flagged).
 	//     FAIL-SOFT (c-AC-5): a mount error must NEVER crash the daemon — the surface stays unmounted
@@ -976,7 +976,7 @@ function resolveProductDataDeps(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// The daemon-resident dreaming WORKER wiring (PRD-026 AC-W + AC-T) — gated OFF.
+// The daemon-resident pollinating WORKER wiring (PRD-026 AC-W + AC-T) — gated OFF.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -1020,19 +1020,19 @@ function secretScopeFromQueryScope(scope: QueryScope): SecretScope {
 /**
  * The `setting`-class keys the wire-back READS (AC-6). These are the SAME keys the CLI (032b)
  * + dashboard (032c) WRITE via `/api/settings` (the catalog-validated `activeProvider` /
- * `activeModel`, and the dreaming toggle `dreaming.enabled`) — single-sourced so a setting
+ * `activeModel`, and the pollinating toggle `pollinating.enabled`) — single-sourced so a setting
  * written by a surface is the setting assembly reads. The wire-back is READ-ONLY (D-5): it
  * never writes a setting and never generates `agent.yaml`.
  */
 export const VAULT_PROVIDER_KEY = "activeProvider" as const;
 export const VAULT_MODEL_KEY = "activeModel" as const;
-export const VAULT_DREAMING_ENABLED_KEY = "dreaming.enabled" as const;
+export const VAULT_POLLINATING_ENABLED_KEY = "pollinating.enabled" as const;
 
 /**
  * Construct the daemon's vault `setting`-class READER (AC-6), reusing the SAME workspace base
  * dir + machine-key provider the secrets store uses and a fresh default registry (the built-in
  * `secret` + `setting` classes). This is the ONE place assembly builds the vault; it is shared
- * by the `/api/settings` mount and the provider/model + dreaming reads, so the surface the
+ * by the `/api/settings` mount and the provider/model + pollinating reads, so the surface the
  * CLI/dashboard write through and the source assembly reads are byte-identical. Pure
  * construction — no IO until a `getSetting` call. A test injects {@link AssembleDaemonOptions.vault}
  * to bypass this entirely.
@@ -1089,23 +1089,23 @@ async function readProviderModelOverride(
 }
 
 /**
- * Resolve the EFFECTIVE dreaming-enabled flag (AC-6 / FR-3 / d-AC-2), VAULT-FIRST. Precedence:
- *   1. the vault `setting` `dreaming.enabled` when PRESENT + readable → it WINS (a vault
- *      `true` enables dreaming WITHOUT `HONEYCOMB_DREAMING_ENABLED`; a vault `false` disables
+ * Resolve the EFFECTIVE pollinating-enabled flag (AC-6 / FR-3 / d-AC-2), VAULT-FIRST. Precedence:
+ *   1. the vault `setting` `pollinating.enabled` when PRESENT + readable → it WINS (a vault
+ *      `true` enables pollinating WITHOUT `HONEYCOMB_POLLINATING_ENABLED`; a vault `false` disables
  *      it even when the env says true — vault-first is the documented precedence);
- *   2. else the env-resolved `resolveDreamingConfig().enabled` (the `HONEYCOMB_DREAMING_ENABLED`
+ *   2. else the env-resolved `resolvePollinatingConfig().enabled` (the `HONEYCOMB_POLLINATING_ENABLED`
  *      fallback, PRD-026 behavior preserved).
  * Returns the boolean to gate on, plus whether the vault decided it (for clarity at the call
  * site). NEVER throws: an unreadable/missing vault setting yields `decidedByVault: false` and
  * the caller uses the env fallback.
  */
-async function readVaultDreamingEnabled(
+async function readVaultPollinatingEnabled(
 	vault: VaultSettingsReader | undefined,
 	scope: SecretScope,
 ): Promise<{ decidedByVault: boolean; enabled: boolean }> {
 	if (vault === undefined) return { decidedByVault: false, enabled: false };
 	try {
-		const res = await vault.getSetting(VAULT_DREAMING_ENABLED_KEY, scope);
+		const res = await vault.getSetting(VAULT_POLLINATING_ENABLED_KEY, scope);
 		if (!res.ok) return { decidedByVault: false, enabled: false };
 		// The `setting` value schema is a scalar; coerce a string/number/boolean to a bool the
 		// same way the env BoolFlag does (`true`/`1` → true) so a dashboard-written string or a
@@ -1126,20 +1126,20 @@ function coerceSettingBool(value: unknown): boolean {
 }
 
 /**
- * Build the gated dreaming subsystem (AC-W + AC-T) — the real inference {@link ModelClient}
- * + the real {@link DreamingTrigger} + the {@link DreamingJobWorker} — and return the worker
- * to START, or `null` when dreaming is disabled.
+ * Build the gated pollinating subsystem (AC-W + AC-T) — the real inference {@link ModelClient}
+ * + the real {@link PollinatingTrigger} + the {@link PollinatingJobWorker} — and return the worker
+ * to START, or `null` when pollinating is disabled.
  *
  * ── Fail-soft is the whole contract (D-1) ────────────────────────────────────
- * Nothing here may prevent the daemon from booting. The dreaming config is resolved inside a
- * try/catch (a fat-fingered `HONEYCOMB_DREAMING_*` knob degrades to "disabled", never a
+ * Nothing here may prevent the daemon from booting. The pollinating config is resolved inside a
+ * try/catch (a fat-fingered `HONEYCOMB_POLLINATING_*` knob degrades to "disabled", never a
  * throw); when disabled NONE of the heavy bits (model client, trigger, worker) are even
  * constructed. The model client is built via {@link buildInferenceModelClient}, which NEVER
  * throws — an absent/unparseable `agent.yaml` yields the no-op client, so the worker simply
  * produces zero-mutation passes until the operator adds the `inference:` block + key.
  *
  * ── The pendingTerminal probe choice (FR-6) ──────────────────────────────────
- * The trigger's single-pending guard wants a probe that resolves a `dreaming` job's terminal
+ * The trigger's single-pending guard wants a probe that resolves a `pollinating` job's terminal
  * state from `memory_jobs`. The public {@link JobQueueService} interface exposes NO
  * status-by-id read (only enqueue/lease/complete/fail) — the converging `resolveCurrent`
  * read is private. So we DO NOT pass a `pendingTerminal` and the trigger applies its
@@ -1150,29 +1150,29 @@ function coerceSettingBool(value: unknown): boolean {
  *
  * @returns the constructed-but-NOT-started worker when `enabled`, else `null`.
  */
-async function buildGatedDreamingWorker(
+async function buildGatedPollinatingWorker(
 	options: AssembleDaemonOptions,
 	storage: StorageClient,
 	scope: QueryScope,
 	queue: DaemonServices["queue"],
 	vault: VaultSettingsReader | undefined,
-): Promise<DreamingJobWorker | null> {
-	// Resolve the env gate fail-soft FIRST: a malformed dreaming-config knob must NEVER take the
+): Promise<PollinatingJobWorker | null> {
+	// Resolve the env gate fail-soft FIRST: a malformed pollinating-config knob must NEVER take the
 	// daemon down — treat it as disabled (the false-safe default the schema already documents).
-	let config: ReturnType<typeof resolveDreamingConfig>;
+	let config: ReturnType<typeof resolvePollinatingConfig>;
 	try {
-		config = resolveDreamingConfig(options.dreamingConfigProvider);
+		config = resolvePollinatingConfig(options.pollinatingConfigProvider);
 	} catch {
 		return null;
 	}
 
-	// PRD-032d / AC-6 (d-AC-2): the dreaming-enabled decision is VAULT-FIRST. When the vault
-	// `setting` `dreaming.enabled` is present it WINS (a vault `true` enables dreaming WITHOUT
+	// PRD-032d / AC-6 (d-AC-2): the pollinating-enabled decision is VAULT-FIRST. When the vault
+	// `setting` `pollinating.enabled` is present it WINS (a vault `true` enables pollinating WITHOUT
 	// the env var; a vault `false` disables it even when the env says true). Absent a vault
 	// setting we fall back to the env-resolved `config.enabled` (PRD-026 behavior preserved).
 	// This read is fail-soft — an unreadable vault degrades to the env fallback, never a throw.
-	const vaultDreaming = await readVaultDreamingEnabled(vault, secretScopeFromQueryScope(scope));
-	const effectiveEnabled = vaultDreaming.decidedByVault ? vaultDreaming.enabled : config.enabled;
+	const vaultPollinating = await readVaultPollinatingEnabled(vault, secretScopeFromQueryScope(scope));
+	const effectiveEnabled = vaultPollinating.decidedByVault ? vaultPollinating.enabled : config.enabled;
 
 	// GATE (D-1, default OFF): the gate is checked BEFORE any worker is returned — even an
 	// INJECTED test worker is NOT started when disabled (the gate is the contract, not the
@@ -1185,8 +1185,8 @@ async function buildGatedDreamingWorker(
 	// Past the gate (enabled): an explicit test override replaces the real build (a recording
 	// fake to assert start/stop, or `null` to assert "enabled but no worker constructed").
 	// Production leaves it unset → the real build below runs.
-	if (options.dreamingWorker !== undefined) {
-		return options.dreamingWorker;
+	if (options.pollinatingWorker !== undefined) {
+		return options.pollinatingWorker;
 	}
 
 	// PRD-032d / AC-6 (d-AC-1): READ the vault-driven provider/model SELECTION. When present +
@@ -1195,7 +1195,7 @@ async function buildGatedDreamingWorker(
 	const providerModelOverride = await readProviderModelOverride(vault, secretScopeFromQueryScope(scope));
 
 	// The real inference ModelClient (AC-T). Never throws — degrades to the no-op client when
-	// no `agent.yaml`/`inference:` block/key is present yet (so enabling dreaming before the
+	// no `agent.yaml`/`inference:` block/key is present yet (so enabling pollinating before the
 	// key exists boots cleanly and yields empty, zero-mutation passes). The vault provider/model
 	// override (when set) wins over the `agent.yaml` selection; the `${SECRET_REF}` credential
 	// still resolves through the `secret` class unchanged (FR-2 — the key is never inlined).
@@ -1212,14 +1212,14 @@ async function buildGatedDreamingWorker(
 
 	// The REAL PRD-009a trigger: its `readState` feeds the worker's first-run backfill rule
 	// and its additive `recordPassComplete` is the runner's append-only state-update seam. It
-	// reuses the daemon's OWN durable queue as the enqueuer — no second dreaming subsystem.
+	// reuses the daemon's OWN durable queue as the enqueuer — no second pollinating subsystem.
 	// No `pendingTerminal` probe is passed (see the JSDoc above): the queue exposes no public
 	// status-by-id read, so the trigger applies its conservative never-terminal default.
-	const trigger = createDreamingTrigger({ storage, scope, config, enqueuer: queue });
+	const trigger = createPollinatingTrigger({ storage, scope, config, enqueuer: queue });
 
-	// The consumer: leases ONLY `["dreaming"]`, runs the runner with the real model + the 008c
+	// The consumer: leases ONLY `["pollinating"]`, runs the runner with the real model + the 008c
 	// apply (inside the runner) + the append-only state update, completes/fails the job.
-	return createDreamingWorker({ queue, storage, scope, config, model, trigger });
+	return createPollinatingWorker({ queue, storage, scope, config, model, trigger });
 }
 
 /**
@@ -1232,7 +1232,7 @@ async function buildGatedDreamingWorker(
  * `HONEYCOMB_CAPTURE=false` + the recursion guard) on the LIVE-assembled path (a-AC-4),
  * and the worker's one shared per-session lock holds end-to-end (a-AC-3).
  *
- * Unlike dreaming (a premium gated tier), summaries are a CORE feature, so this worker is
+ * Unlike pollinating (a premium gated tier), summaries are a CORE feature, so this worker is
  * built + started UNCONDITIONALLY once the queue is up. Construction has no side effects
  * until `start()`; the caller starts it after `startServices()` and stops it in shutdown.
  * The `embed.client` is the daemon's real (or no-op) 768-dim embed client — a throw is
@@ -1282,7 +1282,7 @@ function makePipelineEntryEnqueuer(
  * stage handlers, and CHAINS them with the fan-out enqueuers so a captured turn flows
  * extraction → decision → controlled-write → graph-persist (a-AC-3 / a-AC-4).
  *
- * ── Model dependency is FAIL-SOFT, exactly like dreaming (constraint) ─────────
+ * ── Model dependency is FAIL-SOFT, exactly like pollinating (constraint) ─────────
  * Extraction + decision call the in-process {@link ModelClient}. The real
  * router-backed client is built via {@link buildInferenceModelClient} (the 010
  * router), which NEVER throws — it degrades to {@link noopModelClient} (zero-mutation
@@ -1313,7 +1313,7 @@ async function buildPipelineWorker(
 
 	// The real inference ModelClient (the 010 router). NEVER throws — degrades to the
 	// no-op client (empty, zero-mutation passes) when no `agent.yaml`/`inference:` block
-	// or key is present yet, exactly as the dreaming worker threads it. A build error is
+	// or key is present yet, exactly as the pollinating worker threads it. A build error is
 	// caught and degraded to the no-op so the pipeline still wires.
 	let model: ModelClient;
 	try {
@@ -1607,11 +1607,11 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 
 	let started = false;
 	let locked = false;
-	// PRD-026 AC-W: the daemon-resident dreaming worker. Built + started ONLY when
-	// `resolveDreamingConfig().enabled` (default OFF), inside `start()` AFTER the queue is up,
+	// PRD-026 AC-W: the daemon-resident pollinating worker. Built + started ONLY when
+	// `resolvePollinatingConfig().enabled` (default OFF), inside `start()` AFTER the queue is up,
 	// and stopped in `shutdown()`. Null until/unless the gate opens — a disabled daemon never
 	// constructs the heavy bits (model client, trigger, worker).
-	let dreamingWorker: DreamingJobWorker | null = null;
+	let pollinatingWorker: PollinatingJobWorker | null = null;
 	// PRD-046a a-AC-1: the daemon-resident SUMMARY worker. Built + started UNCONDITIONALLY
 	// (summaries are a core feature, not a gated tier) inside `start()` AFTER the queue is
 	// up, and stopped in `shutdown()`. Null until `start()` runs.
@@ -1654,7 +1654,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 
 			// ── PRD-046a a-AC-1: build + start the SUMMARY worker, the live CONSUMER of
 			// `summary` jobs. It is built AFTER `startServices()` so it leases from a started
-			// queue. Summaries are a CORE feature (not gated like dreaming), so it starts
+			// queue. Summaries are a CORE feature (not gated like pollinating), so it starts
 			// UNCONDITIONALLY. FAIL-SOFT: a wiring failure is surfaced to stderr but must NEVER
 			// prevent the daemon from booting — the daemon is already up and serving; summaries
 			// simply stay unproduced this run rather than crashing the process.
@@ -1675,7 +1675,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				// prevent the daemon from booting — the daemon is already up and serving; the pipeline
 				// simply stays unconsumed this run rather than crashing the process. The model
 				// dependency degrades to the no-op client when no `agent.yaml`/`inference:` is present
-				// (zero-mutation passes), exactly as the dreaming worker does (constraint).
+				// (zero-mutation passes), exactly as the pollinating worker does (constraint).
 				try {
 					pipelineWorker = await buildPipelineWorker(options, storage, scope, daemon.services.queue, embed);
 					pipelineWorker.start();
@@ -1729,35 +1729,35 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 					}
 				}
 
-			// ── PRD-026 AC-W: build + start the dreaming worker, GATED on `config.enabled`
+			// ── PRD-026 AC-W: build + start the pollinating worker, GATED on `config.enabled`
 			// (default OFF). It is built AFTER `startServices()` so it leases from a started
-			// queue. The build is FAIL-SOFT: a dreaming-config error or a missing inference
+			// queue. The build is FAIL-SOFT: a pollinating-config error or a missing inference
 			// config degrades to `null` (disabled) / the no-op model client — it must NEVER
 			// prevent the daemon from booting, so any error here is swallowed into "no worker"
-			// rather than propagated. When the gate is closed, `buildGatedDreamingWorker`
+			// rather than propagated. When the gate is closed, `buildGatedPollinatingWorker`
 			// returns null and we start nothing.
 			try {
-				dreamingWorker = await buildGatedDreamingWorker(options, storage, scope, daemon.services.queue, vault);
-				dreamingWorker?.start();
+				pollinatingWorker = await buildGatedPollinatingWorker(options, storage, scope, daemon.services.queue, vault);
+				pollinatingWorker?.start();
 			} catch (err: unknown) {
-				// A dreaming wiring failure is surfaced to stderr (never silently swallowed) but is
-				// NOT fatal: the daemon is already up and serving; dreaming simply stays off this
+				// A pollinating wiring failure is surfaced to stderr (never silently swallowed) but is
+				// NOT fatal: the daemon is already up and serving; pollinating simply stays off this
 				// run. We narrow the error to a message so a thrown non-Error still reports cleanly.
 				// stderr is the documented daemon log channel (logger.ts) and carries no secret here
-				// — `buildGatedDreamingWorker` resolves the key only inside the router's local scope.
+				// — `buildGatedPollinatingWorker` resolves the key only inside the router's local scope.
 				const reason = err instanceof Error ? err.message : String(err);
-				process.stderr.write(`honeycomb: dreaming worker start failed (non-fatal): ${reason}\n`);
-				dreamingWorker = null;
+				process.stderr.write(`honeycomb: pollinating worker start failed (non-fatal): ${reason}\n`);
+				pollinatingWorker = null;
 			}
 		},
 
 		async shutdown(): Promise<void> {
-			// a-AC-5: graceful shutdown — stop the dreaming worker + the refresher, drain the
+			// a-AC-5: graceful shutdown — stop the pollinating worker + the refresher, drain the
 			// services, and remove the lock so no stale lock survives. Idempotent + never throws
 			// on a missing lock.
-			if (dreamingWorker !== null) {
-				dreamingWorker.stop();
-				dreamingWorker = null;
+			if (pollinatingWorker !== null) {
+				pollinatingWorker.stop();
+				pollinatingWorker = null;
 			}
 			// PRD-046a: stop the summary worker's poll loop (idempotent).
 			if (summaryWorker !== null) {

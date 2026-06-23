@@ -63,10 +63,10 @@ afterEach(() => {
 });
 
 /** Mount the canvas with the given graph, flushing the initial render. */
-function mount(graph: GraphWire, dreaming = false): void {
+function mount(graph: GraphWire, pollinating = false): void {
 	act(() => {
 		root = createRoot(container);
-		root.render(<GraphCanvas graph={graph} dreaming={dreaming} />);
+		root.render(<GraphCanvas graph={graph} pollinating={pollinating} />);
 	});
 }
 

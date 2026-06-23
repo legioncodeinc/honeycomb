@@ -73,7 +73,7 @@ describe("AC-2 settings round-trip through the daemon (write → read equal)", (
 			headers: JSON_HEADERS,
 			body: JSON.stringify({ value: "anthropic" }),
 		});
-		await app.request("/api/settings/dreaming.enabled", {
+		await app.request("/api/settings/pollinating.enabled", {
 			method: "POST",
 			headers: JSON_HEADERS,
 			body: JSON.stringify({ value: true }),
@@ -82,7 +82,7 @@ describe("AC-2 settings round-trip through the daemon (write → read equal)", (
 		expect(res.status).toBe(200);
 		const body = await res.json();
 		expect(body.settings.activeProvider).toBe("anthropic");
-		expect(body.settings["dreaming.enabled"]).toBe(true);
+		expect(body.settings["pollinating.enabled"]).toBe(true);
 		expect(Array.isArray(body.catalog)).toBe(true);
 	});
 

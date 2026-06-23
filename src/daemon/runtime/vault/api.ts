@@ -46,13 +46,13 @@ export const SETTINGS_GROUP = "/api/settings" as const;
  * the `setting` class through the API. Each maps to a small typed value:
  *   - `activeProvider` — a catalog provider id;
  *   - `activeModel`    — a model id, validated against the chosen `activeProvider`;
- *   - `dreaming.enabled` — the dreaming toggle (boolean);
+ *   - `pollinating.enabled` — the pollinating toggle (boolean);
  *   - `recallMode`     — the recall-mode selector (PRD-044c): the CLOSED enum
  *     `keyword | semantic | hybrid` (validated below, fail-closed). UNSET preserves the
  *     PRD-025 runtime default (behavior-neutral), so the key exists to OPT IN to an explicit mode.
  *   - `dashboard.*`    — free-form scalar dashboard prefs (validated only by the class schema).
  */
-export const KNOWN_SETTING_KEYS = ["activeProvider", "activeModel", "dreaming.enabled", "recallMode"] as const;
+export const KNOWN_SETTING_KEYS = ["activeProvider", "activeModel", "pollinating.enabled", "recallMode"] as const;
 
 /**
  * The closed `recallMode` enum (PRD-044c). The recall pipeline reads this `setting` at recall

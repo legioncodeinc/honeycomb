@@ -2,7 +2,7 @@
  * The MEMORIES page — the full memory-management surface (PRD-040a/b/c).
  *
  * Mounts on the `#/memories` route inside the PRD-037 shell. It receives {@link PageProps} (the
- * SHARED `wire` — never `createWireClient` — plus `daemonUp`/`dreaming`) and renders inside
+ * SHARED `wire` — never `createWireClient` — plus `daemonUp`/`pollinating`) and renders inside
  * `<PageFrame eyebrow="memories">`. It is three concerns on one surface:
  *
  *   040a — BROWSE + SEARCH + VIEW. A paginated list from `GET /api/memories` (newest-first, honest
@@ -15,8 +15,8 @@
  *          POSTs `/api/memories/:id/modify` with content + a REQUIRED reason. After ANY write the
  *          page RE-READS (never optimistic) and — because DeepLake is eventually consistent —
  *          POLLS-until-convergence so the new version is visible. Forget is behind a confirm.
- *   040c — COMPACT + DREAM + WATCH. Compact (behind a confirm) POSTs `/api/diagnostics/compact` and
- *          renders the real per-table summary (errored>0 ⇒ "attempted, not completed"); Dream reuses
+ *   040c — COMPACT + POLLINATE + WATCH. Compact (behind a confirm) POSTs `/api/diagnostics/compact` and
+ *          renders the real per-table summary (errored>0 ⇒ "attempted, not completed"); Pollinate reuses
  *          the EXACT honest-ack logic (enqueued/running/skipped, no fake spinner); Watch toggles the
  *          `usePoll` log recipe filtered to memory routes.
  *
@@ -33,7 +33,7 @@ import { PageFrame, type PageProps } from "../page-frame.js";
 import {
 	formatLogLine,
 	type CompactSummaryWire,
-	type DreamAck,
+	type PollinateAck,
 	type MemoryRecordWire,
 	type RecalledMemory,
 } from "../wire.js";
@@ -49,7 +49,7 @@ const WATCH_POLL_MS = 2500;
 /** How many filtered watch lines to keep. */
 const MAX_WATCH_LINES = 12;
 /** The memory-relevant route prefixes Watch filters `/api/logs` records to (040c-AC-3). */
-const MEMORY_ROUTE_PREFIXES = ["/api/memories", "/api/diagnostics/dream", "/api/diagnostics/compact"] as const;
+const MEMORY_ROUTE_PREFIXES = ["/api/memories", "/api/diagnostics/pollinate", "/api/diagnostics/compact"] as const;
 
 /**
  * Re-read convergence budget (040b OQ-3): DeepLake is eventually consistent, so a re-read straight
@@ -204,7 +204,7 @@ function DetailView({ record, onClose, onEdit, onForget }: DetailViewProps): Rea
 					{record.type || "fact"}
 				</Badge>
 				{record.hasEmbedding && (
-					<Badge tone="dream" mono dot>
+					<Badge tone="pollinate" mono dot>
 						semantic
 					</Badge>
 				)}
@@ -373,7 +373,7 @@ function AddForm({ onAdd }: { onAdd: (content: string, type: string) => Promise<
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// The lifecycle cluster (040c): compact + dream + watch
+// The lifecycle cluster (040c): compact + pollinate + watch
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Render one per-table compaction summary line; errored>0 ⇒ "attempted, not completed". */
@@ -386,21 +386,21 @@ function compactLine(t: CompactSummaryWire["summaries"][number]): string {
 
 /** Props for {@link LifecyclePanel}. */
 interface LifecyclePanelProps {
-	readonly dreaming: boolean;
+	readonly pollinating: boolean;
 	readonly onCompact: () => Promise<CompactSummaryWire | null>;
-	readonly onDream: () => Promise<DreamAck>;
+	readonly onPollinate: () => Promise<PollinateAck>;
 	readonly watchLines: readonly string[];
 	readonly watching: boolean;
 	readonly onToggleWatch: () => void;
 }
 
-/** The lifecycle cluster (040c): compact (confirm + honest summary), dream (honest ack), watch (poll-filter). */
-function LifecyclePanel({ dreaming, onCompact, onDream, watchLines, watching, onToggleWatch }: LifecyclePanelProps): React.JSX.Element {
+/** The lifecycle cluster (040c): compact (confirm + honest summary), pollinate (honest ack), watch (poll-filter). */
+function LifecyclePanel({ pollinating, onCompact, onPollinate, watchLines, watching, onToggleWatch }: LifecyclePanelProps): React.JSX.Element {
 	const [confirmingCompact, setConfirmingCompact] = React.useState(false);
 	const [compactBusy, setCompactBusy] = React.useState(false);
 	const [summary, setSummary] = React.useState<CompactSummaryWire | null>(null);
-	const [dreamBusy, setDreamBusy] = React.useState(false);
-	const [dreamNote, setDreamNote] = React.useState("");
+	const [pollinateBusy, setPollinateBusy] = React.useState(false);
+	const [pollinateNote, setPollinateNote] = React.useState("");
 
 	const runCompact = async (): Promise<void> => {
 		if (compactBusy) return;
@@ -412,17 +412,17 @@ function LifecyclePanel({ dreaming, onCompact, onDream, watchLines, watching, on
 	};
 
 	// 040c-AC-2: the EXACT honest-ack logic (no fake spinner). enqueued/running → triggered note;
-	// skipped → "skipped · reason". Never a permanent dreaming state on a !triggered ack.
-	const runDream = async (): Promise<void> => {
-		if (dreamBusy) return;
-		setDreamBusy(true);
-		setDreamNote("");
-		const ack = await onDream();
-		setDreamBusy(false);
+	// skipped → "skipped · reason". Never a permanent pollinating state on a !triggered ack.
+	const runPollinate = async (): Promise<void> => {
+		if (pollinateBusy) return;
+		setPollinateBusy(true);
+		setPollinateNote("");
+		const ack = await onPollinate();
+		setPollinateBusy(false);
 		if (ack.triggered) {
-			setDreamNote(ack.status === "running" ? "already running" : "consolidating…");
+			setPollinateNote(ack.status === "running" ? "already running" : "consolidating…");
 		} else {
-			setDreamNote(`skipped · ${ack.reason ?? "unavailable"}`);
+			setPollinateNote(`skipped · ${ack.reason ?? "unavailable"}`);
 		}
 	};
 
@@ -471,12 +471,12 @@ function LifecyclePanel({ dreaming, onCompact, onDream, watchLines, watching, on
 				)}
 			</div>
 
-			{/* DREAM — honest ack (no fake spinner). */}
+			{/* POLLINATE — honest ack (no fake spinner). */}
 			<div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-				<Button variant="dream" onClick={() => void runDream()} disabled={dreamBusy || dreaming}>
-					{dreamBusy || dreaming ? "dreaming…" : "Dream now"}
+				<Button variant="pollinate" onClick={() => void runPollinate()} disabled={pollinateBusy || pollinating}>
+					{pollinateBusy || pollinating ? "pollinating…" : "Pollinate now"}
 				</Button>
-				{dreamNote !== "" && <span data-testid="dream-note" style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-tertiary)" }}>{dreamNote}</span>}
+				{pollinateNote !== "" && <span data-testid="pollinate-note" style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-tertiary)" }}>{pollinateNote}</span>}
 			</div>
 
 			{/* WATCH — poll-filter toggle. */}
@@ -516,10 +516,10 @@ function LifecyclePanel({ dreaming, onCompact, onDream, watchLines, watching, on
 
 /**
  * The Memories page (040a/b/c). Hydrates the browse list on mount from the shared `wire`, runs
- * search/detail/add/edit/forget/compact/dream/watch, and RE-READS (with poll-convergence) after
+ * search/detail/add/edit/forget/compact/pollinate/watch, and RE-READS (with poll-convergence) after
  * every write so the rendered value is the daemon-persisted truth, never optimistic.
  */
-export function MemoriesPage({ wire, dreaming = false }: PageProps): React.JSX.Element {
+export function MemoriesPage({ wire, pollinating = false }: PageProps): React.JSX.Element {
 	// ── browse list (040a) ──
 	const [records, setRecords] = React.useState<readonly MemoryRecordWire[]>([]);
 	const [limit, setLimit] = React.useState(LIST_STEP);
@@ -686,9 +686,9 @@ export function MemoriesPage({ wire, dreaming = false }: PageProps): React.JSX.E
 		[wire, reList, limit],
 	);
 
-	// ── compact + dream (040c) ──
+	// ── compact + pollinate (040c) ──
 	const onCompact = React.useCallback((): Promise<CompactSummaryWire | null> => wire.compact(), [wire]);
-	const onDream = React.useCallback((): Promise<DreamAck> => wire.dream(), [wire]);
+	const onPollinate = React.useCallback((): Promise<PollinateAck> => wire.pollinate(), [wire]);
 	const toggleWatch = React.useCallback((): void => {
 		setWatching((w) => !w);
 		setWatchLines([]);
@@ -770,7 +770,7 @@ export function MemoriesPage({ wire, dreaming = false }: PageProps): React.JSX.E
 								<div style={{ padding: "10px 4px", fontSize: 13, color: "var(--text-tertiary)" }}>No memories matched that query.</div>
 							) : (
 								hits.map((m, i) => (
-									<MemoryCard key={m.memoryKey} {...m} dreaming={dreaming && i === 1} />
+									<MemoryCard key={m.memoryKey} {...m} pollinating={pollinating && i === 1} />
 								))
 							)}
 						</div>
@@ -803,9 +803,9 @@ export function MemoriesPage({ wire, dreaming = false }: PageProps): React.JSX.E
 					<div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
 						<AddForm onAdd={onAdd} />
 						<LifecyclePanel
-							dreaming={dreaming}
+							pollinating={pollinating}
 							onCompact={onCompact}
-							onDream={onDream}
+							onPollinate={onPollinate}
 							watchLines={watchLines}
 							watching={watching}
 							onToggleWatch={toggleWatch}

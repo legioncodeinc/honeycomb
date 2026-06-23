@@ -11,7 +11,7 @@
  *         the presence badges include Cohere; NO secret value appears in the DOM (input cleared,
  *         never echoed).
  *   044c  the recall-mode select persists via setSetting + reflects the persisted value; the
- *         migrated provider/model/dreaming controls persist through setSetting.
+ *         migrated provider/model/pollinating controls persist through setSetting.
  *   AC-6  no token/secret value in the rendered DOM.
  */
 
@@ -96,7 +96,7 @@ function mockWire(opts: {
 		assetsView: vi.fn(),
 		syncAction: vi.fn(),
 		health: vi.fn(),
-		dream: vi.fn(),
+		pollinate: vi.fn(),
 		vaultSettings,
 		setSetting,
 		secretNames,
@@ -112,7 +112,7 @@ function mockWire(opts: {
 }
 
 function pageProps(wire: WireClient): PageProps {
-	return { wire, daemonUp: true, assetBase: "assets", dreaming: false };
+	return { wire, daemonUp: true, assetBase: "assets", pollinating: false };
 }
 
 let container: HTMLDivElement;
@@ -287,7 +287,7 @@ describe("044c recall mode + migrated inference", () => {
 		expect(select.value).toBe("");
 	});
 
-	it("the migrated provider/model/dreaming panel persists through setSetting", async () => {
+	it("the migrated provider/model/pollinating panel persists through setSetting", async () => {
 		const wire = mockWire({
 			vault: {
 				settings: { activeProvider: "anthropic", activeModel: "claude-sonnet-4-6" },
@@ -295,13 +295,13 @@ describe("044c recall mode + migrated inference", () => {
 			},
 		});
 		await mountPage(wire);
-		// The dreaming toggle is part of the migrated panel — clicking it persists dreaming.enabled.
-		const toggle = container.querySelector('[aria-label="dreaming"]') as HTMLButtonElement;
+		// The pollinating toggle is part of the migrated panel — clicking it persists pollinating.enabled.
+		const toggle = container.querySelector('[aria-label="pollinating"]') as HTMLButtonElement;
 		expect(toggle).not.toBeNull();
 		await act(async () => {
 			toggle.click();
 			await Promise.resolve();
 		});
-		expect(wire.setSetting).toHaveBeenCalledWith("dreaming.enabled", true);
+		expect(wire.setSetting).toHaveBeenCalledWith("pollinating.enabled", true);
 	});
 });

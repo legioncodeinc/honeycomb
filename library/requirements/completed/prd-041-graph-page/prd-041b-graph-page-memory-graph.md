@@ -52,7 +52,7 @@ data source is not yet available, exactly as the codebase graph does for `built:
   the codebase path is unchanged.
 - Editing the memory graph from the page (no create/supersede/apply-proposal from the UI). This is a read-only
   visualization; structural change stays in PRD-008's control plane.
-- Retrieval traversal / currentness shaping (PRD-007) and the dreaming loop's graph reshaping. Out of scope —
+- Retrieval traversal / currentness shaping (PRD-007) and the pollinating loop's graph reshaping. Out of scope —
   041b visualizes the graph, it does not query or reshape it for recall.
 - A bespoke memory-graph layout / canvas. The whole point is to reuse 041a's shared `GraphCanvas` +
   `layout(...)`; the memory graph is just another `GraphView`-shaped source.

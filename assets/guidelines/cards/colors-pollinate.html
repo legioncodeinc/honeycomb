@@ -1,0 +1,26 @@
+<!-- @dsCard group="Colors" viewport="700x160" name="Pollinate — Violet" subtitle="Reserved for the Pollinating consolidation loop & night states" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../../styles.css">
+<style>
+  body { margin: 0; padding: 24px; background: var(--bg-canvas); display: flex; align-items: center; gap: 20px; }
+  .states { display: flex; gap: 12px; flex: 1; }
+  .st { flex: 1; height: 84px; border-radius: var(--radius-md); display: flex; flex-direction: column; justify-content: flex-end; padding: 10px; }
+  .n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; }
+  .demo { width: 200px; height: 84px; border-radius: var(--radius-lg); border: 1px solid var(--pollinate-border); background: var(--pollinate-subtle); display: flex; align-items: center; gap: 10px; padding: 0 14px; }
+  .pulse { width: 14px; height: 14px; border-radius: 50%; background: var(--pollinate); box-shadow: var(--glow-pollinate); animation: p var(--dur-pollinate) var(--ease-in-out) infinite alternate; }
+  @keyframes p { from { opacity: .4; } to { opacity: 1; } }
+  .dtext { font-family: var(--font-mono); font-size: 12px; color: var(--pollinate); }
+</style>
+</head>
+<body>
+  <div class="states">
+    <div class="st" style="background:var(--pollinate)"><span class="n" style="color:var(--pollinate-on)">pollinate</span></div>
+    <div class="st" style="background:var(--pollinate-hover)"><span class="n" style="color:var(--pollinate-on)">hover</span></div>
+    <div class="st" style="background:var(--pollinate-subtle); border:1px solid var(--pollinate-border)"><span class="n" style="color:var(--pollinate)">subtle</span></div>
+  </div>
+  <div class="demo"><span class="pulse"></span><span class="dtext">pollinating…</span></div>
+</body>
+</html>

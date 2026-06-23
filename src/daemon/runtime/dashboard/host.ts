@@ -8,7 +8,7 @@
  *   `assets/ui_kits/dashboard/index.html`, bundled production-clean by esbuild
  *   (`src/dashboard/web/main.tsx` → `daemon/dashboard-app.js`). The shell is `<div id="root">`
  *   plus a `<link>` to the design-system CSS and a `<script>` to the bundled app; the app then
- *   hydrates ITSELF from the daemon's live endpoints (kpis/sessions/recall/logs/health/dream).
+ *   hydrates ITSELF from the daemon's live endpoints (kpis/sessions/recall/logs/health/pollinate).
  *
  *   This is exactly what D-1 demands: NO `unpkg`/CDN React, NO in-browser `@babel/standalone`,
  *   NO `type="text/babel"`. The shell references ONLY same-origin loopback assets the host

@@ -9,7 +9,7 @@
 
 The search-mode + inference-settings section of the Settings page. It adds a NEW control — a recall-mode selector
 (keyword vs semantic vs hybrid) — and folds in the EXISTING dashboard inference settings (the provider → model
-selector and the dreaming toggle) so they live on this page as the section's home.
+selector and the pollinating toggle) so they live on this page as the section's home.
 
 Today recall has no user-facing mode. The pipeline silently decides semantic-vs-lexical from whether embeddings are
 available: `collectCandidates` always runs the lexical FTS (BM25/ILIKE) arm, additionally runs the semantic `<#>`
@@ -19,9 +19,9 @@ cosine vector arm when a usable 768-dim query vector exists, and sets `degraded:
 `keyword` | `semantic` | `hybrid` — that the recall pipeline reads. The DEFAULT (unset) preserves today's PRD-025
 behavior exactly, so the selector changes nothing until a user picks a non-default mode.
 
-The provider → model selector and dreaming toggle already exist as the dashboard `SettingsPanel` (`panels.tsx`),
+The provider → model selector and pollinating toggle already exist as the dashboard `SettingsPanel` (`panels.tsx`),
 wired through `GET`/`POST /api/settings` and the `setting` class (`activeProvider`, `activeModel`,
-`dreaming.enabled`). This section is their new home: the panel migrates here, the home page sheds its in-grid copy
+`pollinating.enabled`). This section is their new home: the panel migrates here, the home page sheds its in-grid copy
 (coordinated with PRD-038's reorg), and the controls keep their exact persist-then-re-read contract.
 
 ## Goals
@@ -32,7 +32,7 @@ wired through `GET`/`POST /api/settings` and the `setting` class (`activeProvide
   `hybrid` runs both — with the embeddings-off interaction documented (below).
 - Preserve PRD-025 behavior by DEFAULT: an unset `recallMode` behaves exactly as today (semantic-by-default with the
   embeddings-off lexical fallback), so shipping the selector is behavior-neutral until a user opts in.
-- Migrate the existing provider → model selector and dreaming toggle onto this page as the inference settings, reusing
+- Migrate the existing provider → model selector and pollinating toggle onto this page as the inference settings, reusing
   `SETTING_KEY`, the provider catalog, and the persist-then-re-read pattern unchanged.
 - Document how `recallMode` composes with the embeddings-off lexical fallback (PRD-025 / PRD-029) so the chosen mode
   and the `degraded` signal stay coherent.
@@ -54,23 +54,23 @@ wired through `GET`/`POST /api/settings` and the `setting` class (`activeProvide
   error string), so semantic drift does not bury the literal match.
 - As a developer, I want semantic or hybrid recall for fuzzy natural-language questions, and I want to choose, so I
   control the recall behavior instead of it being decided silently by whether embeddings happen to be on.
-- As a developer, I want my provider, model, and dreaming settings on the same Settings page, so configuration lives in
+- As a developer, I want my provider, model, and pollinating settings on the same Settings page, so configuration lives in
   one place instead of in a panel buried in the dashboard grid.
 - As a developer, I want the chosen mode to persist and survive a reload, so I set it once.
 
 ## Implementation Notes
 
 - **Section component:** a `SearchAndInferenceSection` rendered by `src/dashboard/web/pages/settings.tsx`. It composes
-  the migrated `SettingsPanel` content (provider/model/dreaming) plus the new recall-mode `Select`, all on the DS
+  the migrated `SettingsPanel` content (provider/model/pollinating) plus the new recall-mode `Select`, all on the DS
   tokens via the existing primitives. It receives the injected `wire`, `vaultSettings`, and `secretNames`, and calls
   the existing `saveSetting` (persist-then-re-read) for every change.
 - **New setting key:** add `recallMode` to the known `setting` keys (`KNOWN_SETTING_KEYS` in
-  `src/daemon/runtime/vault/api.ts`, alongside `activeProvider`, `activeModel`, `dreaming.enabled`) and to the page's
+  `src/daemon/runtime/vault/api.ts`, alongside `activeProvider`, `activeModel`, `pollinating.enabled`) and to the page's
   `SETTING_KEY` map (`panels.tsx`). Its value is the closed enum `keyword | semantic | hybrid`; the daemon-side
   semantic validation (`validateSettingSemantics` in `vault/api.ts`) rejects any other value (fail-closed), the same
   way `activeModel` is validated against the catalog. The `setting` class scalar contract (string) holds.
 - **Wire:** no new wire method — `recallMode` persists through the existing `setSetting(key, value)` /
-  `vaultSettings()` surface (the same one `activeProvider`/`activeModel`/`dreaming.enabled` use). The selector is a
+  `vaultSettings()` surface (the same one `activeProvider`/`activeModel`/`pollinating.enabled` use). The selector is a
   controlled `<select>` whose value is `String(settings.recallMode ?? "")`, with an explicit "default" option that
   maps to leaving the key unset (preserving PRD-025 default).
 - **Daemon-side read (the consuming seam — OQ-1):** the recall pipeline reads `recallMode` where the channels are
@@ -90,7 +90,7 @@ wired through `GET`/`POST /api/settings` and the `setting` class (`activeProvide
   makes this explicit so the mode selector and the degraded badge never contradict each other.
 - **Migration coordination (D-5):** the existing in-grid `SettingsPanel` on the Dashboard home is removed as part of
   PRD-038's home reorg (or left until this page lands — coordinated, not duplicated). The component itself is REUSED
-  here (provider/model/dreaming render identically); only its mount location moves.
+  here (provider/model/pollinating render identically); only its mount location moves.
 
 ## Acceptance Criteria
 
@@ -105,7 +105,7 @@ wired through `GET`/`POST /api/settings` and the `setting` class (`activeProvide
 - [ ] **AC-3 — Fallback coherence.** An explicit `keyword` run does NOT set `degraded` and does NOT show the PRD-029
   "lexical fallback" badge; a `semantic`/`hybrid` run that cannot run its vector arm DOES set `degraded: true` and
   shows the badge. Unit-tested that the badge and the chosen mode never contradict.
-- [ ] **AC-4 — Inference settings migrated.** The provider → model selector and the dreaming toggle live on this page,
+- [ ] **AC-4 — Inference settings migrated.** The provider → model selector and the pollinating toggle live on this page,
   reuse `SETTING_KEY` + the provider catalog, persist through `/api/settings`, and reflect the persisted value on
   reload — no regression versus the dashboard `SettingsPanel` behavior. The home page does not also render a duplicate
   copy (coordinated with PRD-038).

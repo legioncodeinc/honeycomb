@@ -20,7 +20,7 @@
  */
 
 import { type HealTarget } from "../heal.js";
-import { DREAMING_STATE_TABLES } from "./dreaming-state.js"; // PRD-009a (dreaming token-budget counter)
+import { POLLINATING_STATE_TABLES } from "./pollinating-state.js"; // PRD-009a (pollinating token-budget counter)
 // ── The five group arrays. Wave 1 implemented a + c; b/d/e are wired stubs. ──
 import { KNOWLEDGE_GRAPH_TABLES } from "./knowledge-graph.js"; // PRD-003b (stub)
 import { MEMORIES_TABLES } from "./memories.js"; // PRD-003a (implemented)
@@ -46,7 +46,7 @@ export const CATALOG: readonly CatalogTable[] = Object.freeze([
 	...PRODUCT_TABLES,
 	...TENANCY_TABLES,
 	...RUNTIME_JOBS_TABLES,
-	...DREAMING_STATE_TABLES,
+	...POLLINATING_STATE_TABLES,
 	...ROUTING_HISTORY_TABLES,
 	...SOURCES_TABLES,
 	...SYNCED_ASSETS_TABLES,
@@ -116,7 +116,7 @@ export {
 	RUNTIME_JOBS_TABLES,
 } from "./runtime-jobs.js";
 export { TENANCY_TABLES } from "./tenancy.js";
-export { DREAMING_STATE_COLUMNS, DREAMING_STATE_TABLE, DREAMING_STATE_TABLES } from "./dreaming-state.js";
+export { POLLINATING_STATE_COLUMNS, POLLINATING_STATE_TABLE, POLLINATING_STATE_TABLES } from "./pollinating-state.js";
 export { ROUTING_HISTORY_COLUMNS, ROUTING_HISTORY_TABLE, ROUTING_HISTORY_TABLES } from "./routing-history.js";
 export {
 	ARTIFACT_ACTIVE,

@@ -5,7 +5,7 @@
  * This pins the contract between the file the daemon assembly reads
  * (`AGENT_CONFIG_FILE_NAME` under the workspace root) and the config parser: the
  * `inference:` block must load (no dangling cross-refs), expose the
- * `memory_dreaming` workload the dreaming runner calls, route to the
+ * `memory_pollinating` workload the pollinating runner calls, route to the
  * `claude-sonnet-4-6` target, and carry the `${ANTHROPIC_API_KEY}` secret REFERENCE
  * only — NEVER an inline key (the a-AC-4 floor). If the file drifts (a typo, an inline
  * key, a broken ref) this test fails before any live run.
@@ -33,13 +33,13 @@ describe("AC-T: the committed agent.yaml inference block", () => {
 		expect(cfg.workloads.length).toBeGreaterThan(0);
 	});
 
-	it("exposes the memory_dreaming workload routed to claude-sonnet-4-6", async () => {
+	it("exposes the memory_pollinating workload routed to claude-sonnet-4-6", async () => {
 		const cfg = await loadInferenceConfigFromYaml(AGENT_YAML);
 		if (cfg === null) throw new Error("agent.yaml did not parse");
-		const dreaming = cfg.workloads.find((w) => w.name === "memory_dreaming");
-		expect(dreaming, "the dreaming runner calls the memory_dreaming workload").toBeDefined();
+		const pollinating = cfg.workloads.find((w) => w.name === "memory_pollinating");
+		expect(pollinating, "the pollinating runner calls the memory_pollinating workload").toBeDefined();
 		// The workload's policy resolves to a target whose model is the sonnet snapshot.
-		const policy = cfg.policies.find((p) => p.id === dreaming?.policyRef);
+		const policy = cfg.policies.find((p) => p.id === pollinating?.policyRef);
 		expect(policy).toBeDefined();
 		const targetId = policy?.chain[0];
 		const target = cfg.targets.find((t) => t.id === targetId);

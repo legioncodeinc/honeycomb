@@ -72,7 +72,7 @@ export const SYNTHESIS_DESCRIPTION_CHARS = 280;
 
 /**
  * Poll budget for resolving the index/head row's current (highest-`version`) row
- * (PRD-046b b-AC-1). Mirrors `dreaming/trigger.ts`'s `RESOLVE_POLLS`: a single by-path
+ * (PRD-046b b-AC-1). Mirrors `pollinating/trigger.ts`'s `RESOLVE_POLLS`: a single by-path
  * read can land on a stale segment and under-report the version; because versions are
  * append-only and monotone, the MAX across a few polls converges UP to the truth. The
  * deterministic fake settles on the first read, so this is a live-only cost.
@@ -137,7 +137,7 @@ export interface SynthesisStore {
 	 * The 017b `writeRow` is write-once (SELECT-before-INSERT) so a re-synthesis after
 	 * new summaries land is a NO-OP — the documented `/MEMORY.md` refresh limitation.
 	 * This replaces that with the VERSION-BUMP discipline `ontology/supersede.ts` /
-	 * `dreaming/trigger.ts` use: read the current MAX(`version`) for the path, INSERT a
+	 * `pollinating/trigger.ts` use: read the current MAX(`version`) for the path, INSERT a
 	 * FRESH row at version N+1 carrying the re-rendered body. The current index is the
 	 * HIGHEST-version row (read by {@link readLatestVersionedRow}), so the index
 	 * REFRESHES as summaries land — and there is ZERO in-place UPDATE (the DeepLake

@@ -9,7 +9,7 @@
 
 ## Overview
 
-Before the router, inference was scattered: extraction picked its own model, synthesis picked another, interactive calls went straight to a harness, and there was no shared policy, fallback, or observability. The model and provider router pulls all of that into one place. The honeycomb daemon owns inference routing, and every workload (extraction, synthesis, interactive, dreaming) flows through one policy engine. Inference is declared in a top-level `inference:` block in `agent.yaml` where accounts hold credentials by secret reference, targets name a model with a privacy tier and capabilities, policies choose among targets, and workloads bind work to a policy. Hard gates block on privacy, capability, and context; strict, automatic, and hybrid modes pick the surviving target; and a fallback chain retries on 4xx/5xx. Harnesses reach the router as thin HTTP clients through a native inference API or an OpenAI-compatible gateway, and the daemon is the only thing that holds credentials or talks to DeepLake.
+Before the router, inference was scattered: extraction picked its own model, synthesis picked another, interactive calls went straight to a harness, and there was no shared policy, fallback, or observability. The model and provider router pulls all of that into one place. The honeycomb daemon owns inference routing, and every workload (extraction, synthesis, interactive, pollinating) flows through one policy engine. Inference is declared in a top-level `inference:` block in `agent.yaml` where accounts hold credentials by secret reference, targets name a model with a privacy tier and capabilities, policies choose among targets, and workloads bind work to a policy. Hard gates block on privacy, capability, and context; strict, automatic, and hybrid modes pick the surviving target; and a fallback chain retries on 4xx/5xx. Harnesses reach the router as thin HTTP clients through a native inference API or an OpenAI-compatible gateway, and the daemon is the only thing that holds credentials or talks to DeepLake.
 
 ## Goals
 
@@ -21,7 +21,7 @@ Before the router, inference was scattered: extraction picked its own model, syn
 ## Non-Goals
 
 - Defining the secrets subsystem that resolves account credentials (PRD-012).
-- Implementing the dreaming workload's stronger policy behavior (PRD-009 consumes the router).
+- Implementing the pollinating workload's stronger policy behavior (PRD-009 consumes the router).
 - A canonical top-level `models:` map, session/subscription account lifecycle, circuit breaking, and full cost telemetry (deferred to a later phase).
 
 ## Sub-features
@@ -60,6 +60,6 @@ Additive: native inference API (`/api/inference/status|history|explain|execute|s
 
 - [Model and Provider Router](../../../knowledge/private/ai/model-provider-router.md)
 - [Memory Pipeline](../../../knowledge/private/ai/memory-pipeline.md)
-- [Dreaming Loop](../../../knowledge/private/ai/dreaming-loop.md)
+- [Pollinating Loop](../../../knowledge/private/ai/pollinating-loop.md)
 - [Secrets](../../../knowledge/private/security/secrets.md)
 - [MCP and SDK](../../../knowledge/private/integrations/mcp-and-sdk.md)

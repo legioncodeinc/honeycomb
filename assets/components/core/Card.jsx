@@ -3,17 +3,17 @@ import React from "react";
 /**
  * Honeycomb surface Card. Background bg.elevated, 1px border, 12px
  * radius, no shadow (the brand uses border, not elevation, for cards).
- * Set `glow` to lift a single focused card with the honey/dream glow.
+ * Set `glow` to lift a single focused card with the honey/pollinate glow.
  */
 export function Card({ children, glow = "none", padding = 20, interactive = false, style, ...rest }) {
   const glows = {
     none: "none",
     honey: "var(--glow-honey)",
-    dream: "var(--glow-dream)",
+    pollinate: "var(--glow-pollinate)",
   };
   const borderColor =
     glow === "honey" ? "var(--honey-border)" :
-    glow === "dream" ? "var(--dream-border)" :
+    glow === "pollinate" ? "var(--pollinate-border)" :
     "var(--border-default)";
 
   return (

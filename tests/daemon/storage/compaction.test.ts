@@ -260,7 +260,7 @@ describe("version-bumped allow-list (D-6, fail-closed)", () => {
 	it("accepts a version-bumped table (skills) and rejects an append-only event table (sessions)", () => {
 		expect(isVersionBumpedTable("skills")).toBe(true);
 		expect(isVersionBumpedTable("rules")).toBe(true);
-		expect(isVersionBumpedTable("dreaming_state")).toBe(true);
+		expect(isVersionBumpedTable("pollinating_state")).toBe(true);
 		expect(isVersionBumpedTable("sessions")).toBe(false); // append-only → not compactable
 	});
 

@@ -73,7 +73,7 @@ function EmptyRow({ children }: { children: React.ReactNode }): React.JSX.Elemen
 export const AGENT_DOT: Record<string, string> = {
 	cursor: "var(--severity-info)",
 	"claude-code": "var(--honey)",
-	codex: "var(--dream)",
+	codex: "var(--pollinate)",
 	openclaw: "var(--verified)",
 	hermes: "var(--severity-warning)",
 	pi: "var(--severity-critical)",
@@ -250,7 +250,7 @@ export function SkillSyncPanel({ skills }: { skills: readonly SkillRowWire[] }):
  * falls back to `--text-tertiary` at the render site. Exported so the PRD-041 full-page Graph page
  * reuses the EXACT same legend swatches the mini-widget draws (no second color map to drift).
  */
-export const KIND_COLOR: Record<string, string> = { file: "var(--honey)", function: "var(--severity-info)", class: "var(--dream)" };
+export const KIND_COLOR: Record<string, string> = { file: "var(--honey)", function: "var(--severity-info)", class: "var(--pollinate)" };
 
 /** The fallback fill for a node whose `kind` is not in {@link KIND_COLOR} (shared by both canvases). */
 export const KIND_COLOR_FALLBACK = "var(--text-tertiary)" as const;
@@ -303,12 +303,12 @@ function NodeDetail({ node, neighbors }: { node: GraphWire["nodes"][number]; nei
  *
  * Nodes are clickable (D-3 / FR-5): a click selects a node (highlight ring + larger radius, FR-6)
  * and renders the {@link NodeDetail} block with the node's id/kind/label and its neighbors; clicking
- * the selected node again — or clicking empty canvas — clears the selection. `dreaming` re-expresses
- * the old id-specific pulse HONESTLY (OQ-2): with no hardcoded `"dreaming"` node in real data, it
+ * the selected node again — or clicking empty canvas — clears the selection. `pollinating` re-expresses
+ * the old id-specific pulse HONESTLY (OQ-2): with no hardcoded `"pollinating"` node in real data, it
  * pulses the selected/active node (or the first node as a stable panel-level indicator while no node
- * is selected), only while a real dream pass is active.
+ * is selected), only while a real pollinate pass is active.
  */
-export function GraphCanvas({ graph, dreaming }: { graph: GraphWire; dreaming: boolean }): React.JSX.Element {
+export function GraphCanvas({ graph, pollinating }: { graph: GraphWire; pollinating: boolean }): React.JSX.Element {
 	const [selected, setSelected] = React.useState<string | null>(null);
 
 	if (!graph.built) {
@@ -329,8 +329,8 @@ export function GraphCanvas({ graph, dreaming }: { graph: GraphWire; dreaming: b
 	const selectedNeighborIds = selectedNode !== null ? neighborsOf(selectedNode.id, graph.edges) : [];
 	// Map neighbor ids → their labels for the detail surface (fall back to the id when unlabeled).
 	const selectedNeighborLabels = selectedNeighborIds.map((id) => graph.nodes.find((n) => n.id === id)?.label || id);
-	// The node the dream pulse rides (OQ-2): the selected node, else the first node as a stable indicator.
-	const pulseId = dreaming ? (selectedNode?.id ?? graph.nodes[0]?.id ?? null) : null;
+	// The node the pollinate pulse rides (OQ-2): the selected node, else the first node as a stable indicator.
+	const pulseId = pollinating ? (selectedNode?.id ?? graph.nodes[0]?.id ?? null) : null;
 
 	// Clicking a node toggles selection; clicking empty canvas clears it.
 	const onPick = (id: string): void => setSelected((cur) => (cur === id ? null : id));
@@ -368,7 +368,7 @@ export function GraphCanvas({ graph, dreaming }: { graph: GraphWire; dreaming: b
 							}}
 						>
 							{isSelected && <circle cx={p.x} cy={p.y} r="11" fill="none" stroke="var(--honey)" strokeWidth="1.5" />}
-							<circle cx={p.x} cy={p.y} r={isSelected ? 9 : 7} fill={isPulsing ? "var(--dream)" : KIND_COLOR[n.kind] ?? KIND_COLOR_FALLBACK}>
+							<circle cx={p.x} cy={p.y} r={isSelected ? 9 : 7} fill={isPulsing ? "var(--pollinate)" : KIND_COLOR[n.kind] ?? KIND_COLOR_FALLBACK}>
 								{isPulsing && <animate attributeName="opacity" values="0.5;1;0.5" dur="0.9s" repeatCount="indefinite" />}
 							</circle>
 							<text x={p.x + 12} y={p.y + 4} fontFamily="var(--font-mono)" fontSize="11" fill="var(--text-secondary)">
@@ -418,7 +418,7 @@ export function LiveLog({ lines }: { lines: readonly string[] }): React.JSX.Elem
 export const SETTING_KEY = Object.freeze({
 	activeProvider: "activeProvider",
 	activeModel: "activeModel",
-	dreamingEnabled: "dreaming.enabled",
+	pollinatingEnabled: "pollinating.enabled",
 	// PRD-044c: the recall-mode selector key. The closed enum `keyword | semantic | hybrid` is
 	// validated daemon-side (`vault/api.ts` `isValidRecallMode`, fail-closed); an UNSET key
 	// preserves the PRD-025 runtime default (the page's "default" option leaves it unset).
@@ -481,7 +481,7 @@ function Select({
 
 /**
  * A small on/off toggle (the kit has no Toggle primitive). Renders a pill button whose label +
- * tone reflect the boolean; clicking flips it. Used for the dreaming on/off flag (FR-3).
+ * tone reflect the boolean; clicking flips it. Used for the pollinating on/off flag (FR-3).
  */
 function Toggle({ on, onToggle, ariaLabel }: { on: boolean; onToggle: () => void; ariaLabel: string }): React.JSX.Element {
 	return (
@@ -497,17 +497,17 @@ function Toggle({ on, onToggle, ariaLabel }: { on: boolean; onToggle: () => void
 				gap: 8,
 				height: 36,
 				padding: "0 14px",
-				background: on ? "var(--dream-subtle)" : "var(--bg-elevated)",
-				border: `1px solid ${on ? "var(--dream-border)" : "var(--border-default)"}`,
+				background: on ? "var(--pollinate-subtle)" : "var(--bg-elevated)",
+				border: `1px solid ${on ? "var(--pollinate-border)" : "var(--border-default)"}`,
 				borderRadius: "var(--radius-full)",
-				color: on ? "var(--dream)" : "var(--text-secondary)",
+				color: on ? "var(--pollinate)" : "var(--text-secondary)",
 				fontFamily: "var(--font-mono)",
 				fontSize: 12,
 				fontWeight: 600,
 				cursor: "pointer",
 			}}
 		>
-			<span style={{ width: 8, height: 8, borderRadius: "50%", background: on ? "var(--dream)" : "var(--text-disabled)" }} />
+			<span style={{ width: 8, height: 8, borderRadius: "50%", background: on ? "var(--pollinate)" : "var(--text-disabled)" }} />
 			{on ? "on" : "off"}
 		</button>
 	);
@@ -548,7 +548,7 @@ export interface SettingsPanelProps {
  *   - a PROVIDER select (Anthropic / OpenAI / OpenRouter from the catalog);
  *   - a MODEL control populated from THAT provider's catalog models — a `<select>` for a
  *     closed-list provider, a free-form text input for OpenRouter (`openEnded`, D-6);
- *   - a dreaming on/off toggle;
+ *   - a pollinating on/off toggle;
  *   - a names-only provider-key PRESENCE badge ("set ✓" / "not set") — NO secret value.
  *
  * Every write goes through `onSave` (the daemon `/api/settings` POST); the panel never opens
@@ -562,7 +562,7 @@ export function SettingsPanel({ catalog, settings, secretNames, onSave }: Settin
 	// always the persisted vault value (AC-5: reload reflects the persisted setting).
 	const activeProvider = String(settings[SETTING_KEY.activeProvider] ?? "");
 	const activeModel = String(settings[SETTING_KEY.activeModel] ?? "");
-	const dreamingOn = settings[SETTING_KEY.dreamingEnabled] === true || settings[SETTING_KEY.dreamingEnabled] === "true";
+	const pollinatingOn = settings[SETTING_KEY.pollinatingEnabled] === true || settings[SETTING_KEY.pollinatingEnabled] === "true";
 
 	// The chosen provider's catalog entry (drives the model control). A provider not in the
 	// catalog (or none chosen) → no entry → an empty model list (the panel still renders).
@@ -597,7 +597,7 @@ export function SettingsPanel({ catalog, settings, secretNames, onSave }: Settin
 	};
 
 	return (
-		<Panel title="Settings" eyebrow="provider · model · dreaming">
+		<Panel title="Settings" eyebrow="provider · model · pollinating">
 			<div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
 				{/* Provider selector */}
 				<SettingRow label="Provider" hint="inference provider">
@@ -637,9 +637,9 @@ export function SettingsPanel({ catalog, settings, secretNames, onSave }: Settin
 					)}
 				</SettingRow>
 
-				{/* Dreaming toggle */}
-				<SettingRow label="Dreaming" hint="background consolidation">
-					<Toggle ariaLabel="dreaming" on={dreamingOn} onToggle={() => void onSave(SETTING_KEY.dreamingEnabled, !dreamingOn)} />
+				{/* Pollinating toggle */}
+				<SettingRow label="Pollinating" hint="background consolidation">
+					<Toggle ariaLabel="pollinating" on={pollinatingOn} onToggle={() => void onSave(SETTING_KEY.pollinatingEnabled, !pollinatingOn)} />
 				</SettingRow>
 			</div>
 		</Panel>

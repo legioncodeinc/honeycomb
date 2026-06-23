@@ -49,10 +49,10 @@ import {
 } from "../../../src/daemon/runtime/services/embed-supervisor.js";
 import { noopRuntimePathService } from "../../../src/daemon/runtime/middleware/runtime-path.js";
 import type {
-	DreamingConfigProvider,
-	RawDreamingConfig,
-} from "../../../src/daemon/runtime/dreaming/config.js";
-import type { DreamingJobWorker } from "../../../src/daemon/runtime/dreaming/worker.js";
+	PollinatingConfigProvider,
+	RawPollinatingConfig,
+} from "../../../src/daemon/runtime/pollinating/config.js";
+import type { PollinatingJobWorker } from "../../../src/daemon/runtime/pollinating/worker.js";
 import type { StorageClient } from "../../../src/daemon/storage/client.js";
 import type { QueryResult } from "../../../src/daemon/storage/result.js";
 import { fakeCredentialRecord, stubProvider } from "../../helpers/fake-deeplake.js";
@@ -97,7 +97,7 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 		mountMemoriesPrime: 0,
 		mountVfs: 0,
 		mountProductData: 0,
-		mountDream: 0,
+		mountPollinate: 0,
 		mountCompact: 0,
 		mountDiagnosticsHealth: 0,
 		mountGraph: 0,
@@ -189,22 +189,22 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 				expect(options.defaultScope, "product-data receives the threaded default scope").toBeDefined();
 				expect(options.defaultScope?.org).toBeTruthy();
 		}) as SeamFns["mountProductData"],
-		// ── The "Dream now" trigger seam (PRD-024 / AC-6) the composition root fires. ──
-		mountDream: ((daemon, options) => {
-			calls.mountDream += 1;
-			order.push("mountDream");
+		// ── The "Pollinate now" trigger seam (PRD-024 / AC-6) the composition root fires. ──
+		mountPollinate: ((daemon, options) => {
+			calls.mountPollinate += 1;
+			order.push("mountPollinate");
 			expect(typeof daemon.group).toBe("function");
-			// The trigger is wired with the live storage client (the dreaming_state counter).
+			// The trigger is wired with the live storage client (the pollinating_state counter).
 			expect(options.storage).toBeDefined();
-			// PRD-024: the daemon's default tenancy scope is threaded so the dreaming counter
+			// PRD-024: the daemon's default tenancy scope is threaded so the pollinating counter
 			// runs for the single local tenant a loopback dashboard button targets.
-			expect(options.defaultScope, "dream trigger receives the threaded default scope").toBeDefined();
+			expect(options.defaultScope, "pollinate trigger receives the threaded default scope").toBeDefined();
 			expect(options.defaultScope?.org).toBeTruthy();
-			// The enqueuer is the daemon's OWN durable job queue (no second dreaming subsystem).
-			expect(options.enqueuer, "dream trigger reuses the daemon's job queue as the enqueuer").toBe(
+			// The enqueuer is the daemon's OWN durable job queue (no second pollinating subsystem).
+			expect(options.enqueuer, "pollinate trigger reuses the daemon's job queue as the enqueuer").toBe(
 				daemon.services.queue,
 			);
-		}) as SeamFns["mountDream"],
+		}) as SeamFns["mountPollinate"],
 		// ── The PRD-030 standalone COMPACTION trigger seam the composition root fires. ──
 		mountCompact: ((daemon, options) => {
 			calls.mountCompact += 1;
@@ -271,7 +271,7 @@ afterEach(() => {
 });
 
 describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after construction", () => {
-	it("in LOCAL mode fires all ten seams (logs + dashboard-host + the three data seams + the dream trigger) each exactly once, in order", () => {
+	it("in LOCAL mode fires all ten seams (logs + dashboard-host + the three data seams + the pollinate trigger) each exactly once, in order", () => {
 		const order: string[] = [];
 		const { seams, calls } = recordingSeams(order);
 		assembleDaemon({
@@ -294,8 +294,8 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 		expect(calls.mountMemories).toBe(1);
 		expect(calls.mountVfs).toBe(1);
 		expect(calls.mountProductData).toBe(1);
-		// PRD-024 / AC-6: the "Dream now" trigger fires once and only once.
-		expect(calls.mountDream).toBe(1);
+		// PRD-024 / AC-6: the "Pollinate now" trigger fires once and only once.
+		expect(calls.mountPollinate).toBe(1);
 		// PRD-030 / D-2: the standalone compaction trigger fires once and only once.
 		expect(calls.mountCompact).toBe(1);
 		// PRD-029 / AC-3: the protected per-subsystem health detail fires once and only once.
@@ -305,7 +305,7 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 		// PRD-039a: the harness registry + last-seen telemetry seam fires once and only once.
 		expect(calls.mountHarness).toBe(1);
 		// Deterministic order: the 021 seams, then the 022 data seams (memories → vfs → product),
-		// then the PRD-024 dream trigger, the PRD-030 compaction trigger, the PRD-029 health detail,
+		// then the PRD-024 pollinate trigger, the PRD-030 compaction trigger, the PRD-029 health detail,
 		// the PRD-014 graph seam, and finally the PRD-039a harness telemetry seam.
 		expect(order).toEqual([
 			"attachHooks",
@@ -318,7 +318,7 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 			"mountMemoriesPrime",
 			"mountVfs",
 			"mountProductData",
-			"mountDream",
+			"mountPollinate",
 			"mountCompact",
 			"mountDiagnosticsHealth",
 			"mountGraph",
@@ -341,9 +341,9 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 		expect(calls.mountMemories).toBe(1);
 		expect(calls.mountVfs).toBe(1);
 		expect(calls.mountProductData).toBe(1);
-		// PRD-024 / AC-6: the dream trigger also fires unconditionally — its /api/diagnostics
+		// PRD-024 / AC-6: the pollinate trigger also fires unconditionally — its /api/diagnostics
 		// group is protect:true, so it inherits auth/RBAC and is NOT mode-gated (fires in team too).
-		expect(calls.mountDream).toBe(1);
+		expect(calls.mountPollinate).toBe(1);
 		// PRD-030 / D-2: the standalone compaction trigger also fires unconditionally (same
 		// protected /api/diagnostics group; fires in team too).
 		expect(calls.mountCompact).toBe(1);
@@ -669,7 +669,7 @@ describe("fix/daemon-scope-from-credentials: the daemon's default scope comes fr
 			}) as SeamFns["mountMemories"],
 			mountVfs: noop,
 			mountProductData: noop,
-			mountDream: noop,
+			mountPollinate: noop,
 			mountCompact: noop,
 			mountDiagnosticsHealth: noop,
 		};
@@ -832,14 +832,14 @@ describe("PRD-025 AC-1/D-6 the embed supervisor is wired into the daemon lifecyc
 	});
 });
 
-describe("PRD-026 AC-W the daemon-resident dreaming worker is gated on config.enabled (default OFF)", () => {
-	/** A fixed dreaming-config provider so the gate is driven WITHOUT touching process.env. */
-	function dreamingProvider(over: { enabled?: unknown } = {}): DreamingConfigProvider {
+describe("PRD-026 AC-W the daemon-resident pollinating worker is gated on config.enabled (default OFF)", () => {
+	/** A fixed pollinating-config provider so the gate is driven WITHOUT touching process.env. */
+	function pollinatingProvider(over: { enabled?: unknown } = {}): PollinatingConfigProvider {
 		return {
-			read(): RawDreamingConfig {
+			read(): RawPollinatingConfig {
 				return {
 					enabled: over.enabled,
-					// Tiny numeric knobs so resolveDreamingConfig clamps cleanly.
+					// Tiny numeric knobs so resolvePollinatingConfig clamps cleanly.
 					tokenThreshold: 1,
 					maxInputTokens: 1,
 					backfillOnFirstRun: false,
@@ -848,10 +848,10 @@ describe("PRD-026 AC-W the daemon-resident dreaming worker is gated on config.en
 		};
 	}
 
-	/** A recording fake dreaming worker that satisfies the DreamingJobWorker contract. */
-	function recordingWorker(): { worker: DreamingJobWorker; calls: { start: number; stop: number } } {
+	/** A recording fake pollinating worker that satisfies the PollinatingJobWorker contract. */
+	function recordingWorker(): { worker: PollinatingJobWorker; calls: { start: number; stop: number } } {
 		const calls = { start: 0, stop: 0 };
-		const worker: DreamingJobWorker = {
+		const worker: PollinatingJobWorker = {
 			async runOnce(): Promise<boolean> {
 				return false;
 			},
@@ -875,12 +875,12 @@ describe("PRD-026 AC-W the daemon-resident dreaming worker is gated on config.en
 			embedSupervisor: noopEmbedSupervisor,
 			// Inject the recording worker BUT a disabled config provider: the gate must keep
 			// `start()` from ever firing (in production the heavy bits are never even built).
-			dreamingWorker: worker,
-			dreamingConfigProvider: dreamingProvider({ enabled: false }),
+			pollinatingWorker: worker,
+			pollinatingConfigProvider: pollinatingProvider({ enabled: false }),
 		});
 		await assembled.start();
 		try {
-			expect(calls.start, "a disabled dreaming loop never starts the worker").toBe(0);
+			expect(calls.start, "a disabled pollinating loop never starts the worker").toBe(0);
 		} finally {
 			await assembled.shutdown();
 		}
@@ -896,13 +896,13 @@ describe("PRD-026 AC-W the daemon-resident dreaming worker is gated on config.en
 			logger: createRequestLogger({ silent: true }),
 			runtimeDir,
 			embedSupervisor: noopEmbedSupervisor,
-			dreamingWorker: worker,
-			dreamingConfigProvider: dreamingProvider({ enabled: true }),
+			pollinatingWorker: worker,
+			pollinatingConfigProvider: pollinatingProvider({ enabled: true }),
 		});
 		await assembled.start();
-		expect(calls.start, "an enabled dreaming loop starts the worker exactly once").toBe(1);
+		expect(calls.start, "an enabled pollinating loop starts the worker exactly once").toBe(1);
 		await assembled.shutdown();
-		expect(calls.stop, "a clean shutdown stops the dreaming worker").toBe(1);
+		expect(calls.stop, "a clean shutdown stops the pollinating worker").toBe(1);
 	});
 
 	it("AC-W: injecting `null` as the worker constructs NOTHING — the daemon boots clean (no throw)", async () => {
@@ -914,8 +914,8 @@ describe("PRD-026 AC-W the daemon-resident dreaming worker is gated on config.en
 			logger: createRequestLogger({ silent: true }),
 			runtimeDir,
 			embedSupervisor: noopEmbedSupervisor,
-			dreamingWorker: null,
-			dreamingConfigProvider: dreamingProvider({ enabled: true }),
+			pollinatingWorker: null,
+			pollinatingConfigProvider: pollinatingProvider({ enabled: true }),
 		});
 		await expect(assembled.start()).resolves.toBeUndefined();
 		const res = await assembled.daemon.app.request("/health");
@@ -924,7 +924,7 @@ describe("PRD-026 AC-W the daemon-resident dreaming worker is gated on config.en
 	});
 
 	it("AC-T/AC-W: with NO agent.yaml AND enabled:TRUE the daemon still boots (model degrades to noop, no throw)", async () => {
-		// The end-to-end fail-soft proof for AC-T: enabled dreaming + the REAL (un-injected)
+		// The end-to-end fail-soft proof for AC-T: enabled pollinating + the REAL (un-injected)
 		// worker build, but the inference config path points at a file that does not exist.
 		// `buildInferenceModelClient` returns the no-op client (never throws), the real worker
 		// is constructed + started, and the daemon boots cleanly. The worker leases an empty
@@ -936,10 +936,10 @@ describe("PRD-026 AC-W the daemon-resident dreaming worker is gated on config.en
 			logger: createRequestLogger({ silent: true }),
 			runtimeDir,
 			embedSupervisor: noopEmbedSupervisor,
-			// No `dreamingWorker` injected → the REAL build path runs (model client + trigger +
+			// No `pollinatingWorker` injected → the REAL build path runs (model client + trigger +
 			// worker), proving the production wiring boots without an agent.yaml or a key.
 			agentConfigPath: missingAgentYaml,
-			dreamingConfigProvider: dreamingProvider({ enabled: true }),
+			pollinatingConfigProvider: pollinatingProvider({ enabled: true }),
 		});
 		await expect(assembled.start()).resolves.toBeUndefined();
 		try {
@@ -952,21 +952,21 @@ describe("PRD-026 AC-W the daemon-resident dreaming worker is gated on config.en
 
 	it("AC-W: a malformed/non-bool enabled knob degrades to OFF (never prevents the daemon booting)", async () => {
 		// BoolFlag coerces a non-bool to false, so the gate is closed and the daemon boots with
-		// no worker — the point is start() NEVER throws out of the dreaming wiring (fail-soft).
+		// no worker — the point is start() NEVER throws out of the pollinating wiring (fail-soft).
 		const assembled = assembleDaemon({
 			config: cfg({ mode: "local" }),
 			storage: fakeStorage(OK_RESULT),
 			logger: createRequestLogger({ silent: true }),
 			runtimeDir,
 			embedSupervisor: noopEmbedSupervisor,
-			dreamingConfigProvider: dreamingProvider({ enabled: "not-a-bool" }),
+			pollinatingConfigProvider: pollinatingProvider({ enabled: "not-a-bool" }),
 		});
 		await expect(assembled.start()).resolves.toBeUndefined();
 		await assembled.shutdown();
 	});
 });
 
-describe("PRD-032d AC-6 the inference provider/model + dreaming flag are VAULT-DRIVEN (vault-first, agent.yaml/env fallback)", () => {
+describe("PRD-032d AC-6 the inference provider/model + pollinating flag are VAULT-DRIVEN (vault-first, agent.yaml/env fallback)", () => {
 	/**
 	 * A fake vault `setting`-class reader (the narrow `VaultSettingsReader` surface). A map of
 	 * `key → SettingValue` is the stored vault; a missing key resolves `not_found`. Records every
@@ -989,19 +989,19 @@ describe("PRD-032d AC-6 the inference provider/model + dreaming flag are VAULT-D
 		return { vault, reads };
 	}
 
-	/** A fixed dreaming-config provider so the ENV gate is driven WITHOUT touching process.env. */
-	function dreamingProvider(over: { enabled?: unknown } = {}): DreamingConfigProvider {
+	/** A fixed pollinating-config provider so the ENV gate is driven WITHOUT touching process.env. */
+	function pollinatingProvider(over: { enabled?: unknown } = {}): PollinatingConfigProvider {
 		return {
-			read(): RawDreamingConfig {
+			read(): RawPollinatingConfig {
 				return { enabled: over.enabled, tokenThreshold: 1, maxInputTokens: 1, backfillOnFirstRun: false };
 			},
 		};
 	}
 
-	/** A recording fake dreaming worker (the DreamingJobWorker contract). */
-	function recordingWorker(): { worker: DreamingJobWorker; calls: { start: number; stop: number } } {
+	/** A recording fake pollinating worker (the PollinatingJobWorker contract). */
+	function recordingWorker(): { worker: PollinatingJobWorker; calls: { start: number; stop: number } } {
 		const calls = { start: 0, stop: 0 };
-		const worker: DreamingJobWorker = {
+		const worker: PollinatingJobWorker = {
 			async runOnce(): Promise<boolean> {
 				return false;
 			},
@@ -1015,56 +1015,56 @@ describe("PRD-032d AC-6 the inference provider/model + dreaming flag are VAULT-D
 		return { worker, calls };
 	}
 
-	// ── d-AC-2: dreaming-enabled is VAULT-FIRST ──────────────────────────────────
+	// ── d-AC-2: pollinating-enabled is VAULT-FIRST ──────────────────────────────────
 
-	it("d-AC-2: vault dreaming.enabled=true (env UNSET) → the worker IS started (no HONEYCOMB_DREAMING_ENABLED needed)", async () => {
+	it("d-AC-2: vault pollinating.enabled=true (env UNSET) → the worker IS started (no HONEYCOMB_POLLINATING_ENABLED needed)", async () => {
 		const { worker, calls } = recordingWorker();
-		const { vault } = fakeVault({ "dreaming.enabled": true });
+		const { vault } = fakeVault({ "pollinating.enabled": true });
 		const assembled = assembleDaemon({
 			config: cfg({ mode: "local" }),
 			storage: fakeStorage(OK_RESULT),
 			logger: createRequestLogger({ silent: true }),
 			runtimeDir,
 			embedSupervisor: noopEmbedSupervisor,
-			dreamingWorker: worker,
+			pollinatingWorker: worker,
 			// The env says OFF (enabled:false); the vault says ON — the vault must WIN.
-			dreamingConfigProvider: dreamingProvider({ enabled: false }),
+			pollinatingConfigProvider: pollinatingProvider({ enabled: false }),
 			vault,
 		});
 		await assembled.start();
 		try {
-			expect(calls.start, "vault dreaming.enabled=true starts the worker even with env OFF").toBe(1);
+			expect(calls.start, "vault pollinating.enabled=true starts the worker even with env OFF").toBe(1);
 		} finally {
 			await assembled.shutdown();
 		}
 		expect(calls.stop).toBe(1);
 	});
 
-	it("d-AC-2 precedence: vault dreaming.enabled=false WINS over env enabled=true (vault-first)", async () => {
+	it("d-AC-2 precedence: vault pollinating.enabled=false WINS over env enabled=true (vault-first)", async () => {
 		const { worker, calls } = recordingWorker();
-		const { vault } = fakeVault({ "dreaming.enabled": false });
+		const { vault } = fakeVault({ "pollinating.enabled": false });
 		const assembled = assembleDaemon({
 			config: cfg({ mode: "local" }),
 			storage: fakeStorage(OK_RESULT),
 			logger: createRequestLogger({ silent: true }),
 			runtimeDir,
 			embedSupervisor: noopEmbedSupervisor,
-			dreamingWorker: worker,
+			pollinatingWorker: worker,
 			// The env says ON; the vault says OFF — vault-first means the worker stays OFF.
-			dreamingConfigProvider: dreamingProvider({ enabled: true }),
+			pollinatingConfigProvider: pollinatingProvider({ enabled: true }),
 			vault,
 		});
 		await assembled.start();
 		try {
-			expect(calls.start, "a vault dreaming.enabled=false disables dreaming even when env is true").toBe(0);
+			expect(calls.start, "a vault pollinating.enabled=false disables pollinating even when env is true").toBe(0);
 		} finally {
 			await assembled.shutdown();
 		}
 	});
 
-	it("d-AC-3: NO vault dreaming setting + env unset → the worker is NOT started (env fallback, no regression)", async () => {
+	it("d-AC-3: NO vault pollinating setting + env unset → the worker is NOT started (env fallback, no regression)", async () => {
 		const { worker, calls } = recordingWorker();
-		// An empty vault → the dreaming decision falls back to the env (enabled:false here).
+		// An empty vault → the pollinating decision falls back to the env (enabled:false here).
 		const { vault } = fakeVault({});
 		const assembled = assembleDaemon({
 			config: cfg({ mode: "local" }),
@@ -1072,8 +1072,8 @@ describe("PRD-032d AC-6 the inference provider/model + dreaming flag are VAULT-D
 			logger: createRequestLogger({ silent: true }),
 			runtimeDir,
 			embedSupervisor: noopEmbedSupervisor,
-			dreamingWorker: worker,
-			dreamingConfigProvider: dreamingProvider({ enabled: false }),
+			pollinatingWorker: worker,
+			pollinatingConfigProvider: pollinatingProvider({ enabled: false }),
 			vault,
 		});
 		await assembled.start();
@@ -1084,7 +1084,7 @@ describe("PRD-032d AC-6 the inference provider/model + dreaming flag are VAULT-D
 		}
 	});
 
-	it("d-AC-3: NO vault dreaming setting + env enabled=true → the worker IS started (env fallback preserved)", async () => {
+	it("d-AC-3: NO vault pollinating setting + env enabled=true → the worker IS started (env fallback preserved)", async () => {
 		const { worker, calls } = recordingWorker();
 		const { vault } = fakeVault({});
 		const assembled = assembleDaemon({
@@ -1093,14 +1093,14 @@ describe("PRD-032d AC-6 the inference provider/model + dreaming flag are VAULT-D
 			logger: createRequestLogger({ silent: true }),
 			runtimeDir,
 			embedSupervisor: noopEmbedSupervisor,
-			dreamingWorker: worker,
+			pollinatingWorker: worker,
 			// Empty vault → env decides; env says ON → the worker starts (PRD-026 behavior intact).
-			dreamingConfigProvider: dreamingProvider({ enabled: true }),
+			pollinatingConfigProvider: pollinatingProvider({ enabled: true }),
 			vault,
 		});
 		await assembled.start();
 		try {
-			expect(calls.start, "an empty vault preserves the HONEYCOMB_DREAMING_ENABLED env fallback").toBe(1);
+			expect(calls.start, "an empty vault preserves the HONEYCOMB_POLLINATING_ENABLED env fallback").toBe(1);
 		} finally {
 			await assembled.shutdown();
 		}
@@ -1109,12 +1109,12 @@ describe("PRD-032d AC-6 the inference provider/model + dreaming flag are VAULT-D
 
 	// ── d-AC-1: provider/model is VAULT-DRIVEN — assembly CONSULTS the vault ──────
 
-	it("d-AC-1: with dreaming enabled the assembly READS the vault provider/model keys (vault is consulted before the model build)", async () => {
-		// The REAL dreaming build runs (no injected worker), pointed at a missing agent.yaml so the
+	it("d-AC-1: with pollinating enabled the assembly READS the vault provider/model keys (vault is consulted before the model build)", async () => {
+		// The REAL pollinating build runs (no injected worker), pointed at a missing agent.yaml so the
 		// model degrades to the no-op client (never a throw). The vault carries a valid catalog pair;
 		// we prove assembly READ `activeProvider` + `activeModel` (the override-resolution path runs).
 		const { vault, reads } = fakeVault({
-			"dreaming.enabled": true,
+			"pollinating.enabled": true,
 			activeProvider: "anthropic",
 			activeModel: "claude-opus-4-8",
 		});
@@ -1126,7 +1126,7 @@ describe("PRD-032d AC-6 the inference provider/model + dreaming flag are VAULT-D
 			embedSupervisor: noopEmbedSupervisor,
 			// No injected worker → the REAL build path runs, reaching the provider/model override read.
 			agentConfigPath: join(runtimeDir, "no-such-agent.yaml"),
-			dreamingConfigProvider: dreamingProvider({ enabled: false }), // vault drives the gate ON.
+			pollinatingConfigProvider: pollinatingProvider({ enabled: false }), // vault drives the gate ON.
 			vault,
 		});
 		await expect(assembled.start()).resolves.toBeUndefined();
@@ -1155,7 +1155,7 @@ describe("PRD-032d AC-6 the inference provider/model + dreaming flag are VAULT-D
 			registry: createVaultRegistry(),
 		});
 		// Seed one setting so the GET list is non-empty (and proves the handler reads the store).
-		await realVault.setSetting("dreaming.enabled", true, { org: "local", workspace: "default" });
+		await realVault.setSetting("pollinating.enabled", true, { org: "local", workspace: "default" });
 		const assembled = assembleDaemon({
 			config: cfg({ mode: "local" }),
 			storage: fakeStorage(OK_RESULT),
@@ -1173,14 +1173,14 @@ describe("PRD-032d AC-6 the inference provider/model + dreaming flag are VAULT-D
 			expect(res.status).toBe(200);
 			const body = (await res.json()) as { settings: Record<string, unknown>; catalog: unknown[] };
 			expect(body.catalog.length).toBeGreaterThan(0);
-			expect(body.settings["dreaming.enabled"]).toBe(true);
+			expect(body.settings["pollinating.enabled"]).toBe(true);
 		} finally {
 			rmSync(vaultBase, { recursive: true, force: true });
 		}
 	});
 
 	it("AC-6 fail-soft: an empty/absent vault still boots the daemon cleanly (a vault read never blocks boot)", async () => {
-		// An empty fake vault: every getSetting is not_found. Provider/model + dreaming fall back; the
+		// An empty fake vault: every getSetting is not_found. Provider/model + pollinating fall back; the
 		// daemon must boot + serve /health + shut down without error (the wire-back is fail-soft).
 		const { vault } = fakeVault({});
 		const assembled = assembleDaemon({
@@ -1189,7 +1189,7 @@ describe("PRD-032d AC-6 the inference provider/model + dreaming flag are VAULT-D
 			logger: createRequestLogger({ silent: true }),
 			runtimeDir,
 			embedSupervisor: noopEmbedSupervisor,
-			dreamingConfigProvider: dreamingProvider({ enabled: true }),
+			pollinatingConfigProvider: pollinatingProvider({ enabled: true }),
 			agentConfigPath: join(runtimeDir, "no-such-agent.yaml"),
 			vault,
 		});

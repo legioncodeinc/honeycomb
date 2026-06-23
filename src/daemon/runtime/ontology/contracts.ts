@@ -259,7 +259,7 @@ export type ProposalStatus = (typeof PROPOSAL_STATUSES)[number];
  * time so lineage survives even if the proposal row is later archived (008c FR-3).
  */
 export interface ProposalProvenance {
-	/** Where the change originated (e.g. `cli`, `dreaming`, `extraction`). */
+	/** Where the change originated (e.g. `cli`, `pollinating`, `extraction`). */
 	readonly source: string;
 	/** The evidence supporting the change (memory ids, transcript refs). */
 	readonly evidence: string;

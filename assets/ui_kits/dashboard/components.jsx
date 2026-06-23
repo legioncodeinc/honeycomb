@@ -30,7 +30,7 @@ function Panel({ title, eyebrow, right, children, style }) {
 const AGENT_DOT = {
   "cursor": "var(--severity-info)",
   "claude-code": "var(--honey)",
-  "codex": "var(--dream)",
+  "codex": "var(--pollinate)",
   "openclaw": "var(--verified)",
 };
 function SessionsPanel({ sessions }) {
@@ -107,10 +107,10 @@ const NODE_POS = {
   recall:   { x: 200, y: 120 },
   pipeline: { x: 330, y: 70 },
   store:    { x: 460, y: 110 },
-  dreaming: { x: 360, y: 160 },
+  pollinating: { x: 360, y: 160 },
 };
-const KIND_COLOR = { file: "var(--honey)", function: "var(--severity-info)", class: "var(--dream)" };
-function GraphCanvas({ graph, dreaming }) {
+const KIND_COLOR = { file: "var(--honey)", function: "var(--severity-info)", class: "var(--pollinate)" };
+function GraphCanvas({ graph, pollinating }) {
   if (!graph.built) {
     return (
       <Panel title="Codebase graph">
@@ -132,11 +132,11 @@ function GraphCanvas({ graph, dreaming }) {
         {graph.nodes.map((n) => {
           const p = NODE_POS[n.id];
           if (!p) return null;
-          const isDream = dreaming && n.id === "dreaming";
+          const isPollinate = pollinating && n.id === "pollinating";
           return (
             <g key={n.id}>
-              <circle cx={p.x} cy={p.y} r="7" fill={isDream ? "var(--dream)" : KIND_COLOR[n.kind] || "var(--text-tertiary)"}>
-                {isDream && <animate attributeName="opacity" values="0.5;1;0.5" dur="0.9s" repeatCount="indefinite" />}
+              <circle cx={p.x} cy={p.y} r="7" fill={isPollinate ? "var(--pollinate)" : KIND_COLOR[n.kind] || "var(--text-tertiary)"}>
+                {isPollinate && <animate attributeName="opacity" values="0.5;1;0.5" dur="0.9s" repeatCount="indefinite" />}
               </circle>
               <text x={p.x + 12} y={p.y + 4} fontFamily="var(--font-mono)" fontSize="11" fill="var(--text-secondary)">{n.label}</text>
             </g>

@@ -14,7 +14,7 @@ function _extends() { return _extends = Object.assign ? Object.assign.bind() : f
 /**
  * Honeycomb status badge / pill. Compact label for memory and session
  * states. Tones map to the semantic palette; `verified` is the
- * source-backed (green) state, `honey` the brand highlight, `dream`
+ * source-backed (green) state, `honey` the brand highlight, `pollinate`
  * the consolidation state.
  */
 function Badge({
@@ -41,10 +41,10 @@ function Badge({
       fg: "var(--verified)",
       bd: "var(--verified)"
     },
-    dream: {
-      bg: "var(--dream-subtle)",
-      fg: "var(--dream)",
-      bd: "var(--dream-border)"
+    pollinate: {
+      bg: "var(--pollinate-subtle)",
+      fg: "var(--pollinate)",
+      bd: "var(--pollinate-border)"
     },
     info: {
       bg: "var(--severity-info-bg)",
@@ -101,7 +101,7 @@ function _extends() { return _extends = Object.assign ? Object.assign.bind() : f
 /**
  * Honeycomb Button. Honey is the brand action; the scarcity rule means
  * one primary (honey) button per visible region. Secondary and ghost
- * carry the rest. Dream variant is reserved for Dreaming / maintenance.
+ * carry the rest. Pollinate variant is reserved for Pollinating / maintenance.
  */
 function Button({
   children,
@@ -152,10 +152,10 @@ function Button({
       color: "var(--text-secondary)",
       border: "1px solid transparent"
     },
-    dream: {
-      background: "var(--dream-subtle)",
-      color: "var(--dream)",
-      border: "1px solid var(--dream-border)"
+    pollinate: {
+      background: "var(--pollinate-subtle)",
+      color: "var(--pollinate)",
+      border: "1px solid var(--pollinate-border)"
     },
     danger: {
       background: "var(--severity-critical-bg)",
@@ -189,7 +189,7 @@ function Button({
     primary: "var(--honey-hover)",
     secondary: "var(--bg-subtle)",
     ghost: "var(--bg-elevated)",
-    dream: "var(--dream-subtle)",
+    pollinate: "var(--pollinate-subtle)",
     danger: "var(--severity-critical-bg)"
   };
   const onEnter = e => {
@@ -224,7 +224,7 @@ function _extends() { return _extends = Object.assign ? Object.assign.bind() : f
 /**
  * Honeycomb surface Card. Background bg.elevated, 1px border, 12px
  * radius, no shadow (the brand uses border, not elevation, for cards).
- * Set `glow` to lift a single focused card with the honey/dream glow.
+ * Set `glow` to lift a single focused card with the honey/pollinate glow.
  */
 function Card({
   children,
@@ -237,9 +237,9 @@ function Card({
   const glows = {
     none: "none",
     honey: "var(--glow-honey)",
-    dream: "var(--glow-dream)"
+    pollinate: "var(--glow-pollinate)"
   };
-  const borderColor = glow === "honey" ? "var(--honey-border)" : glow === "dream" ? "var(--dream-border)" : "var(--border-default)";
+  const borderColor = glow === "honey" ? "var(--honey-border)" : glow === "pollinate" ? "var(--pollinate-border)" : "var(--border-default)";
   return /*#__PURE__*/React.createElement("div", _extends({
     style: {
       background: "var(--bg-elevated)",
@@ -354,7 +354,7 @@ function Kpi({
 }) {
   const accents = {
     honey: "var(--honey)",
-    dream: "var(--dream)",
+    pollinate: "var(--pollinate)",
     verified: "var(--verified)",
     neutral: "var(--text-primary)"
   };
@@ -418,7 +418,7 @@ function _extends() { return _extends = Object.assign ? Object.assign.bind() : f
  * MemoryCard — the signature Honeycomb surface: one recalled or stored
  * memory. Shows a hex cell, the memory key (mono), a snippet, its
  * source provenance, and a relevance score. `verified` marks a
- * source-backed memory (green); `dreaming` marks one being consolidated.
+ * source-backed memory (green); `pollinating` marks one being consolidated.
  */
 function MemoryCard({
   memoryKey,
@@ -427,13 +427,13 @@ function MemoryCard({
   score,
   scope = "personal",
   verified = false,
-  dreaming = false,
+  pollinating = false,
   onClick,
   style,
   ...rest
 }) {
-  const accent = dreaming ? "var(--dream)" : verified ? "var(--verified)" : "var(--honey)";
-  const accentBorder = dreaming ? "var(--dream-border)" : verified ? "var(--verified)" : "var(--honey-border)";
+  const accent = pollinating ? "var(--pollinate)" : verified ? "var(--verified)" : "var(--honey)";
+  const accentBorder = pollinating ? "var(--pollinate-border)" : verified ? "var(--verified)" : "var(--honey-border)";
   return /*#__PURE__*/React.createElement("div", _extends({
     onClick: onClick,
     style: {
@@ -464,8 +464,8 @@ function MemoryCard({
       height: 38,
       clipPath: "polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%)",
       background: accent,
-      opacity: dreaming ? 0.9 : 1,
-      animation: dreaming ? "hc-dream-pulse var(--dur-dream) var(--ease-in-out) infinite alternate" : "none"
+      opacity: pollinating ? 0.9 : 1,
+      animation: pollinating ? "hc-pollinate-pulse var(--dur-pollinate) var(--ease-in-out) infinite alternate" : "none"
     }
   })), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -491,21 +491,21 @@ function MemoryCard({
       overflow: "hidden",
       textOverflow: "ellipsis"
     }
-  }, memoryKey), verified && !dreaming && /*#__PURE__*/React.createElement("span", {
+  }, memoryKey), verified && !pollinating && /*#__PURE__*/React.createElement("span", {
     style: {
       fontFamily: "var(--font-mono)",
       fontSize: 11,
       color: "var(--verified)",
       flex: "none"
     }
-  }, "\u2713 verified"), dreaming && /*#__PURE__*/React.createElement("span", {
+  }, "\u2713 verified"), pollinating && /*#__PURE__*/React.createElement("span", {
     style: {
       fontFamily: "var(--font-mono)",
       fontSize: 11,
-      color: "var(--dream)",
+      color: "var(--pollinate)",
       flex: "none"
     }
-  }, "dreaming\u2026")), /*#__PURE__*/React.createElement("div", {
+  }, "pollinating\u2026")), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: "var(--text-sm)",
       lineHeight: "20px",
@@ -545,7 +545,7 @@ function MemoryCard({
       fontWeight: 600,
       color: "var(--text-secondary)"
     }
-  }, score.toFixed(2)))), /*#__PURE__*/React.createElement("style", null, `@keyframes hc-dream-pulse { from { opacity: .5 } to { opacity: 1 } }`));
+  }, score.toFixed(2)))), /*#__PURE__*/React.createElement("style", null, `@keyframes hc-pollinate-pulse { from { opacity: .5 } to { opacity: 1 } }`));
 }
 Object.assign(__ds_scope, { MemoryCard });
 })(); } catch (e) { __ds_ns.__errors.push({ path: "components/honeycomb/MemoryCard.jsx", error: String((e && e.message) || e) }); }
@@ -613,7 +613,7 @@ function Panel({
 const AGENT_DOT = {
   "cursor": "var(--severity-info)",
   "claude-code": "var(--honey)",
-  "codex": "var(--dream)",
+  "codex": "var(--pollinate)",
   "openclaw": "var(--verified)"
 };
 function SessionsPanel({
@@ -811,7 +811,7 @@ const NODE_POS = {
     x: 460,
     y: 110
   },
-  dreaming: {
+  pollinating: {
     x: 360,
     y: 160
   }
@@ -819,11 +819,11 @@ const NODE_POS = {
 const KIND_COLOR = {
   file: "var(--honey)",
   function: "var(--severity-info)",
-  class: "var(--dream)"
+  class: "var(--pollinate)"
 };
 function GraphCanvas({
   graph,
-  dreaming
+  pollinating
 }) {
   if (!graph.built) {
     return /*#__PURE__*/React.createElement(Panel, {
@@ -873,15 +873,15 @@ function GraphCanvas({
   }), graph.nodes.map(n => {
     const p = NODE_POS[n.id];
     if (!p) return null;
-    const isDream = dreaming && n.id === "dreaming";
+    const isPollinate = pollinating && n.id === "pollinating";
     return /*#__PURE__*/React.createElement("g", {
       key: n.id
     }, /*#__PURE__*/React.createElement("circle", {
       cx: p.x,
       cy: p.y,
       r: "7",
-      fill: isDream ? "var(--dream)" : KIND_COLOR[n.kind] || "var(--text-tertiary)"
-    }, isDream && /*#__PURE__*/React.createElement("animate", {
+      fill: isPollinate ? "var(--pollinate)" : KIND_COLOR[n.kind] || "var(--text-tertiary)"
+    }, isPollinate && /*#__PURE__*/React.createElement("animate", {
       attributeName: "opacity",
       values: "0.5;1;0.5",
       dur: "0.9s",
@@ -1020,7 +1020,7 @@ window.HC_DATA = {
     settings: {
       "Capture": "on",
       "Embeddings": "768-dim · nomic",
-      "Dreaming": "auto · 100k tok",
+      "Pollinating": "auto · 100k tok",
       "Recall": "hybrid (BM25 + cosine)"
     }
   },
@@ -1153,8 +1153,8 @@ window.HC_DATA = {
       label: "DeepLake",
       kind: "file"
     }, {
-      id: "dreaming",
-      label: "dreaming()",
+      id: "pollinating",
+      label: "pollinating()",
       kind: "function"
     }],
     edges: [{
@@ -1178,7 +1178,7 @@ window.HC_DATA = {
       to: "recall",
       kind: "imports"
     }, {
-      from: "dreaming",
+      from: "pollinating",
       to: "store",
       kind: "calls"
     }]

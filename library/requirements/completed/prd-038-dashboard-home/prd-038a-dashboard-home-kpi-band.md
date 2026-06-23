@@ -58,7 +58,7 @@ fixes; it does not re-derive them. Every visual value is an existing `var(--…)
   `<Kpi label="Memories" value={kpis.memoryCount.toLocaleString()} accent="honey" />`, the Turns tile (label per
   PRD-035a, value from `kpis` — currently `kpis.sessionCount`, renamed in the wire/contract by 035a),
   `<Kpi label="Est. savings" value={kpis.estimatedSavings.toLocaleString()} unit="tok" accent="verified" />` (real per
-  035b), and `<Kpi label="Team skills" value={skills.length} accent="dream" />` (corrected per 036c). Keep the existing
+  035b), and `<Kpi label="Team skills" value={skills.length} accent="pollinate" />` (corrected per 036c). Keep the existing
   `.kpirow` grid (or its successor) for the band's internal layout.
 - **Band container:** a top section using existing tokens (`--bg-surface` / `--border-default` / `--radius-lg` if the
   band gets a surface, or a plain grouped row matching the current `.kpirow` rhythm). No new token.

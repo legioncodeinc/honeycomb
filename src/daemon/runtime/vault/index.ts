@@ -7,7 +7,7 @@
  *
  * Wave 1 (032a) exports the FULL vault core + the settings API + the catalog. Wave 2
  * consumes these: 032b (CLI) + 032c (dashboard) reach `/api/settings` + the catalog; 032d
- * (wire-back) reads the vault for provider/model/dreaming + resolves the DeepLake token.
+ * (wire-back) reads the vault for provider/model/pollinating + resolves the DeepLake token.
  *
  * The whole module is built on ONE invariant carried from PRD-012: an agent can CAUSE a
  * `secret` to be USED but NEVER receives a decrypted value. A `setting` IS daemon-readable.

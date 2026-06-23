@@ -19,7 +19,7 @@
  *   POST /api/memories/recall                                   → recall hits
  *   GET  /api/logs                                              → the request-log ring buffer
  *   GET  /health                                                → daemon liveness
- *   POST /api/diagnostics/dream                                 → the Wave-1 Dream trigger
+ *   POST /api/diagnostics/pollinate                                 → the Wave-1 Pollinate trigger
  */
 
 import { z } from "zod";
@@ -61,7 +61,7 @@ export const ENDPOINTS = Object.freeze({
 	assets: "/api/diagnostics/assets",
 	syncAction: "/api/diagnostics/sync",
 	health: "/health",
-	dream: "/api/diagnostics/dream",
+	pollinate: "/api/diagnostics/pollinate",
 	// PRD-032c — the vault `setting`-class surface (Wave 1 `vault/api.ts`) + the names-only
 	// secrets surface (PRD-012a `secrets/api.ts`, used ONLY for presence, never a value).
 	vaultSettings: "/api/settings",
@@ -453,13 +453,13 @@ export const HarnessStatusResponseSchema = z.object({
 });
 export type HarnessStatusWire = z.infer<typeof HarnessStatusSchema>;
 
-/** The Wave-1 Dream ack (`POST /api/diagnostics/dream` → 202 + this body). */
-export const DreamAckSchema = z.object({
+/** The Wave-1 Pollinate ack (`POST /api/diagnostics/pollinate` → 202 + this body). */
+export const PollinateAckSchema = z.object({
 	triggered: z.boolean().catch(false),
 	status: z.string().catch("skipped"),
 	reason: z.string().optional(),
 });
-export type DreamAck = z.infer<typeof DreamAckSchema>;
+export type PollinateAck = z.infer<typeof PollinateAckSchema>;
 
 /**
  * The PRD-029 per-subsystem `/health` `reasons` block (D-2 render). This MIRRORS the
@@ -536,7 +536,7 @@ export type SettingValueWire = z.infer<typeof SettingValueWireSchema>;
 /**
  * The `GET /api/settings` body the Wave-1 daemon serves: `{ settings, catalog }`. `settings`
  * is the current key→value map of the `setting` class (the active provider/model + the
- * dreaming toggle + dashboard prefs); `catalog` is the static provider→model list. NO secret
+ * pollinating toggle + dashboard prefs); `catalog` is the static provider→model list. NO secret
  * is in this body by construction (the surface reads only the `setting` class). Each field
  * `.catch()`es to an empty default so a partial body degrades to "nothing selected".
  */
@@ -807,7 +807,7 @@ export interface WireClient {
 		input: { assetType: "skill" | "agent"; name: string; native?: string; honeycombId?: string; harness?: string },
 	): Promise<SyncActionResultWire | null>;
 	health(): Promise<HealthProbe>;
-	dream(): Promise<DreamAck>;
+	pollinate(): Promise<PollinateAck>;
 	/** PRD-032c — read the vault `setting` class + the provider→model catalog (`GET /api/settings`). */
 	vaultSettings(): Promise<VaultSettingsWire>;
 	/**
@@ -1081,10 +1081,10 @@ export function createWireClient(options: WireClientOptions = {}): WireClient {
 				return { up: false, reasons: null };
 			}
 		},
-		async dream(): Promise<DreamAck> {
+		async pollinate(): Promise<PollinateAck> {
 			try {
-				const res = await fetchImpl(url(ENDPOINTS.dream), { method: "POST", headers: { ...DASHBOARD_SESSION_HEADERS } });
-				const parsed = DreamAckSchema.safeParse(await res.json());
+				const res = await fetchImpl(url(ENDPOINTS.pollinate), { method: "POST", headers: { ...DASHBOARD_SESSION_HEADERS } });
+				const parsed = PollinateAckSchema.safeParse(await res.json());
 				return parsed.success ? parsed.data : { triggered: false, status: "skipped", reason: "unavailable" };
 			} catch {
 				return { triggered: false, status: "skipped", reason: "unavailable" };

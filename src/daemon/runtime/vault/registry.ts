@@ -54,7 +54,7 @@ export const SecretValueSchema = z.string().min(1);
 /**
  * The `setting`-class value schema: a small JSON scalar — a string, a finite number, or a
  * boolean. This covers every shipped setting (active provider/model strings, the
- * `dreaming.enabled` boolean, dashboard-pref scalars). The value is serialized to JSON for
+ * `pollinating.enabled` boolean, dashboard-pref scalars). The value is serialized to JSON for
  * storage and parsed back on a daemon-readable read. Objects/arrays are intentionally
  * NOT accepted at the class level — a structured setting would register its own class
  * with its own schema (D-7), keeping each class's value shape explicit.

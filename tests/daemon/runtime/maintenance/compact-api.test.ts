@@ -1,7 +1,7 @@
 /**
  * PRD-030 Wave 2a — the standalone compaction trigger seam suite (D-2 PRIMARY).
  *
- * Verification posture (mirrors the dream/dashboard/logs seam suites): the seam is mounted on
+ * Verification posture (mirrors the pollinate/dashboard/logs seam suites): the seam is mounted on
  * a REAL daemon (`createDaemon` with a `local`-mode config so the `/api/diagnostics` group's
  * permission middleware is open) and exercised in-process via `daemon.app.request(...)` — no
  * socket, no live DeepLake. A FAKE compactor seam records the call + scripts the per-table
@@ -117,7 +117,7 @@ async function postCompact(daemon: Daemon, body?: unknown): Promise<{ status: nu
 describe("PRD-030 D-2 — the compaction trigger runs the Wave-1 compactor over the allow-listed tables", () => {
 	it("runs the compactor over EVERY allow-listed version-bumped table that EXISTS, resolving each key column", async () => {
 		const present = new Set(COMPACTABLE_VERSION_BUMPED_TABLES);
-		const { seam, calls } = recordingCompactor({ reaped: { skills: 4, dreaming_state: 2 } });
+		const { seam, calls } = recordingCompactor({ reaped: { skills: 4, pollinating_state: 2 } });
 		const daemon = daemonWithCompactor(seam, presence(present));
 
 		const { status, out } = await postCompact(daemon);
@@ -134,7 +134,7 @@ describe("PRD-030 D-2 — the compaction trigger runs the Wave-1 compactor over 
 		// The summary carries the per-table reaps.
 		const bySummary = Object.fromEntries(out.summaries.map((s) => [s.table, s.rowsReaped]));
 		expect(bySummary.skills).toBe(4);
-		expect(bySummary.dreaming_state).toBe(2);
+		expect(bySummary.pollinating_state).toBe(2);
 	});
 
 	it("each table resolves the key column its REAL writer keys the version chain by", () => {
@@ -150,12 +150,12 @@ describe("PRD-030 D-2 — the compaction trigger runs the Wave-1 compactor over 
 		//   - rules                → key       (product/api.ts:164 buildHighestVersionSql("rules","key"))
 		//   - entity_attributes    → claim_key (ontology/supersede.ts:437 buildHighestActiveVersionSql(claimKey); `id` is unique-per-version)
 		//   - epistemic_assertions → id        (ontology/control-plane.ts:482-483 appendVersionBumped({keyColumn:"id"}); `claim_key` is an OPTIONAL cross-link `?? ""`)
-		//   - dreaming_state       → id        (dreaming/trigger.ts:285 appendVersionBumped({keyColumn:"id"}); deterministic per-scope id)
+		//   - pollinating_state       → id        (pollinating/trigger.ts:285 appendVersionBumped({keyColumn:"id"}); deterministic per-scope id)
 		expect(COMPACTABLE_KEY_COLUMNS.skills).toBe("id");
 		expect(COMPACTABLE_KEY_COLUMNS.rules).toBe("key");
 		expect(keyColumnFor("entity_attributes")).toBe("claim_key");
 		expect(keyColumnFor("epistemic_assertions")).toBe("id");
-		expect(keyColumnFor("dreaming_state")).toBe("id");
+		expect(keyColumnFor("pollinating_state")).toBe("id");
 		// An unknown table defaults to `id` (conservative).
 		expect(keyColumnFor("unknown_table")).toBe("id");
 	});
@@ -178,7 +178,7 @@ describe("PRD-030 D-2 — the compaction trigger runs the Wave-1 compactor over 
 		{ table: "rules", keyColumn: "key", writer: "src/daemon/runtime/product/api.ts:164 — buildHighestVersionSql(\"rules\", \"key\", …); the rule's logical `key` column" },
 		{ table: "entity_attributes", keyColumn: "claim_key", writer: "src/daemon/runtime/ontology/supersede.ts:437 — buildHighestActiveVersionSql(claimKey); `id` is UNIQUE PER VERSION" },
 		{ table: "epistemic_assertions", keyColumn: "id", writer: "src/daemon/runtime/ontology/control-plane.ts:482-483 — appendVersionBumped({ keyColumn: \"id\", keyValue: assertionKey() }); `claim_key` is an OPTIONAL cross-link (`assertion.claimKey ?? \"\"`), NOT a chain key" },
-		{ table: "dreaming_state", keyColumn: "id", writer: "src/daemon/runtime/dreaming/trigger.ts:285 — appendVersionBumped({ keyColumn: \"id\", keyValue: state.id }); the deterministic per-scope id" },
+		{ table: "pollinating_state", keyColumn: "id", writer: "src/daemon/runtime/pollinating/trigger.ts:285 — appendVersionBumped({ keyColumn: \"id\", keyValue: state.id }); the deterministic per-scope id" },
 	];
 
 	it.each(WRITER_KEYED_BY)(

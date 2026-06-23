@@ -383,7 +383,7 @@ describe("d-AC-4 route test reports the serving target and the full attempt sequ
 
 	it("reports all attempts when a fallback chain fires (multi-hop)", async () => {
 		const decision: RouteDecision = {
-			workload: "memory_dreaming",
+			workload: "memory_pollinating",
 			mode: "strict",
 			servingTarget: "opus-fallback",
 			attempts: [
@@ -396,7 +396,7 @@ describe("d-AC-4 route test reports the serving target and the full attempt sequ
 
 		const { lines, sink } = captureSink();
 		await routeMain(
-			["test", "memory_dreaming", ...SCOPE_FLAGS],
+			["test", "memory_pollinating", ...SCOPE_FLAGS],
 			deps({ explainer: fakeExplainer(decision) }),
 			sink,
 		);

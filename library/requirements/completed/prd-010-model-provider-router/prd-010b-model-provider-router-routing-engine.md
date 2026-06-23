@@ -11,7 +11,7 @@ The decision core that turns a workload into a concrete target: hard gates that 
 
 ## Goals
 
-- Resolve every workload (extraction, synthesis, interactive, dreaming) through one shared policy engine, so there are no separate per-stage routers.
+- Resolve every workload (extraction, synthesis, interactive, pollinating) through one shared policy engine, so there are no separate per-stage routers.
 - Gate deterministically so no request runs on a model that violates its privacy or capability requirements or whose context window is too small.
 - Degrade gracefully when an account is missing or expired rather than hard-blocking the whole request.
 - Fall back through the allowed chain on transient provider failures and record the full attempt sequence for telemetry.

@@ -13,7 +13,7 @@
  *   - `set` NEVER prints a secret value; the existing `secret` verb stays names-only on
  *     `/api/secrets` (no value-returning verb is added).
  *
- * Every case drives an injected {@link FakeDaemonClient} (mirrors dream.test.ts) — no socket, no
+ * Every case drives an injected {@link FakeDaemonClient} (mirrors pollinate.test.ts) — no socket, no
  * live daemon, no model, no live run.
  */
 
@@ -45,9 +45,9 @@ describe("PRD-032b — `honeycomb settings` parse + routing", () => {
 			args: ["activeModel"],
 			model: "",
 		});
-		expect(parseSettingsCliArgs(["set", "dreaming.enabled", "true"])).toEqual({
+		expect(parseSettingsCliArgs(["set", "pollinating.enabled", "true"])).toEqual({
 			subCommand: "set",
-			args: ["dreaming.enabled", "true"],
+			args: ["pollinating.enabled", "true"],
 			model: "",
 		});
 		expect(parseSettingsCliArgs(["provider", "anthropic", "--model", "claude-opus-4-8"])).toEqual({
@@ -94,7 +94,7 @@ describe("PRD-032b b-AC-1 — `settings list` renders settings + catalog, no sec
 				"GET /api/settings": {
 					status: 200,
 					body: {
-						settings: { activeProvider: "anthropic", activeModel: "claude-opus-4-8", "dreaming.enabled": true },
+						settings: { activeProvider: "anthropic", activeModel: "claude-opus-4-8", "pollinating.enabled": true },
 						catalog: [{ id: "anthropic", label: "Anthropic", models: ["claude-opus-4-8"], openEnded: false }],
 					},
 				},
@@ -106,7 +106,7 @@ describe("PRD-032b b-AC-1 — `settings list` renders settings + catalog, no sec
 		const text = lines.join("\n");
 		expect(text).toMatch(/activeProvider = anthropic/);
 		expect(text).toMatch(/activeModel = claude-opus-4-8/);
-		expect(text).toMatch(/dreaming\.enabled = true/);
+		expect(text).toMatch(/pollinating\.enabled = true/);
 		expect(text).toMatch(/anthropic \(Anthropic\)/);
 	});
 
@@ -166,14 +166,14 @@ describe("PRD-032b b-AC-2 — `settings get`/`set` round-trip through the daemon
 
 	it("set <key> <value> POSTs /api/settings/:key with the typed value in the body", async () => {
 		const daemon = createFakeDaemonClient({
-			responses: { "POST /api/settings/dreaming.enabled": { status: 201, body: { ok: true, key: "dreaming.enabled", value: true } } },
+			responses: { "POST /api/settings/pollinating.enabled": { status: 201, body: { ok: true, key: "pollinating.enabled", value: true } } },
 		});
 		const { out, lines } = withSink();
-		const res = await runSettingsVerb(["set", "dreaming.enabled", "true"], { daemon, out });
+		const res = await runSettingsVerb(["set", "pollinating.enabled", "true"], { daemon, out });
 		expect(res.exitCode).toBe(0);
 		const call = daemon.calls[0]!.req;
 		expect(call.method).toBe("POST");
-		expect(call.path).toBe("/api/settings/dreaming.enabled");
+		expect(call.path).toBe("/api/settings/pollinating.enabled");
 		// The boolean is COERCED to a real boolean in the body, not the string "true".
 		expect(call.body).toEqual({ value: true });
 		expect(lines.join("\n")).toMatch(/saved/i);

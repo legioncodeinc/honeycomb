@@ -676,7 +676,7 @@ export function createControlledWriteHandler(deps?: ControlledWriteHandlerDeps):
 		const outcome = await applyControlledWrite(input, scope, deps);
 		// The memory write is now COMMITTED (an ADD inserted, or an UPDATE/DELETE version-bumped).
 		// The fan-out enqueue (`onOutcome`) is a SEPARATE, recoverable effect — graph-persist is
-		// idempotent and the dreaming pass re-consolidates — so its failure must NOT throw out of
+		// idempotent and the pollinating pass re-consolidates — so its failure must NOT throw out of
 		// this handler. If it did, the stage handler would throw → the worker fails+retries the job
 		// → `applyControlledWrite` runs AGAIN. That replay is a no-op for an ADD (the content-hash
 		// dedup returns the existing id), but an UPDATE/DELETE is an APPEND-ONLY version bump that
@@ -696,7 +696,7 @@ export function createControlledWriteHandler(deps?: ControlledWriteHandlerDeps):
 					reason,
 				});
 				// Swallow deliberately: the write is committed; the lost fan-out is recoverable via
-				// the idempotent graph-persist + the dreaming re-consolidation. Re-throwing would
+				// the idempotent graph-persist + the pollinating re-consolidation. Re-throwing would
 				// duplicate the committed write on the retry (the bug this guard exists to prevent).
 			}
 		}

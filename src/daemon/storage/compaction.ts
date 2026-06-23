@@ -3,7 +3,7 @@
  *
  * The append-only write model (`writes.ts` `appendVersionBumped`) INSERTs a NEW
  * row at `version` = N+1 on EVERY edit to a version-bumped table (skills, rules,
- * claim history / `entity_attributes`, `dreaming_state`-style counters). A read
+ * claim history / `entity_attributes`, `pollinating_state`-style counters). A read
  * takes `ORDER BY version DESC LIMIT 1`. That is the correctness-without-
  * transactions strategy this backend needs — but it means a key edited 1,000
  * times is 1,000 rows, and every highest-version read scans them all. There is no
@@ -11,7 +11,7 @@
  * superseded/old `version` rows BELOW the highest live version per key, keeping
  * the current state byte-identical and recent lineage auditable.
  *
- * This is NOT `runtime/dreaming/compaction.ts` (that assembles a full-graph
+ * This is NOT `runtime/pollinating/compaction.ts` (that assembles a full-graph
  * prompt for the model). This is storage-level row reaping.
  *
  * ── What is safe to reap (D-1 / D-5) ────────────────────────────────────────
@@ -83,7 +83,7 @@ export const DEFAULT_VERSION_COLUMN = "version";
 /**
  * A non-negative-integer tuning knob: a non-numeric value falls back to the
  * default, a value below `min` is clamped up to `min`. A fat-fingered retention
- * knob is tuning noise, never a config failure (mirrors `dreaming/config.ts`
+ * knob is tuning noise, never a config failure (mirrors `pollinating/config.ts`
  * `ClampedInt`). `keepLatestN` clamps `>= 1` (the highest is always kept, but a
  * conservative floor of 1 keeps at least one prior version too); `windowDays`
  * clamps `>= 0` (0 disables the time window, leaving keep-latest-N as the sole
@@ -128,7 +128,7 @@ export type CompactionRetention = z.infer<typeof CompactionRetentionSchema>;
 /**
  * Structured compaction-config error. Carries the flattened zod issues so the
  * daemon logs exactly which knob failed. Distinct type so a config failure is
- * never mistaken for a runtime compaction failure (mirrors `DreamingConfigError`).
+ * never mistaken for a runtime compaction failure (mirrors `PollinatingConfigError`).
  */
 export class CompactionConfigError extends Error {
 	readonly issues: string[];
@@ -148,7 +148,7 @@ export interface RawCompactionConfig {
 }
 
 /**
- * The compaction-config provider seam (mirrors `DreamingConfigProvider`). Returns
+ * The compaction-config provider seam (mirrors `PollinatingConfigProvider`). Returns
  * the raw, un-validated record so validation is the schema's job (one boundary,
  * not two). The env provider is the default; a test injects a fixed record.
  */
@@ -161,7 +161,7 @@ export interface CompactionConfigProvider {
  * Default provider: reads `HONEYCOMB_COMPACTION_*` from the environment.
  * Daemon-only code (never bundled into the OpenClaw target, which forbids
  * `process.env`), so a direct env read is correct here — mirrors
- * `envDreamingConfigProvider`.
+ * `envPollinatingConfigProvider`.
  */
 export function envCompactionConfigProvider(env: NodeJS.ProcessEnv = process.env): CompactionConfigProvider {
 	return {
@@ -207,12 +207,12 @@ export function resolveCompactionConfig(
  * truth lineage retention owns). Compaction is allowed ONLY on the curated set
  * below — the history-only tables whose superseded versions are pure churn:
  * skills / rules (product churn), the claim history (`entity_attributes` /
- * `epistemic_assertions`), and the `dreaming_state` counter. This set is the
+ * `epistemic_assertions`), and the `pollinating_state` counter. This set is the
  * AUTHORITATIVE allow-list, intersected with the catalog `version-bumped` pattern
  * so a table that is renamed away from version-bumped is also rejected.
  */
 export const COMPACTABLE_VERSION_BUMPED_TABLES: ReadonlySet<string> = Object.freeze(
-	new Set(["skills", "rules", "entity_attributes", "epistemic_assertions", "dreaming_state"]),
+	new Set(["skills", "rules", "entity_attributes", "epistemic_assertions", "pollinating_state"]),
 ) as ReadonlySet<string>;
 
 /**
@@ -351,7 +351,7 @@ function isInsideWindow(ts: string, nowMs: number, windowMs: number): boolean {
 
 // ── The compactor ───────────────────────────────────────────────────────────
 
-/** ISO/ms clock seam so tests are deterministic (mirrors `DreamingClock`). */
+/** ISO/ms clock seam so tests are deterministic (mirrors `PollinatingClock`). */
 export interface CompactionClock {
 	/** Current wall-clock time in ms (defaults to `Date.now`). */
 	readonly now: () => number;
@@ -472,7 +472,7 @@ export async function compactVersionHistory(
 }
 
 /**
- * Thin factory mirroring `createDreamingTrigger`/`createVersionCompactor` naming:
+ * Thin factory mirroring `createPollinatingTrigger`/`createVersionCompactor` naming:
  * returns a bound function the daemon (Wave 2) can call per table without
  * re-threading the client/scope. The bound function still re-asserts the table is
  * version-bumped on every call (the guard is in {@link compactVersionHistory}).

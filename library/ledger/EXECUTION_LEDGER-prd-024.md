@@ -4,13 +4,13 @@
 > Status: **VERIFIED — all 8 ACs verified live; ready to ship**
 
 Make the daemon-served `GET /dashboard` (127.0.0.1:3850, local mode) LOOK like `assets/ui_kits/dashboard/`
-and FUNCTION as that UI kit specs — wired to the daemon's REAL data + a REAL "Dream now" trigger. The
+and FUNCTION as that UI kit specs — wired to the daemon's REAL data + a REAL "Pollinate now" trigger. The
 view-models + data endpoints already exist (PRD-020b view-models; PRD-022 `/api/diagnostics/*` + recall +
-logs); this PRD is the VIEW (re-skin to the brand UI kit) + the one missing interaction (a Dreaming HTTP trigger).
+logs); this PRD is the VIEW (re-skin to the brand UI kit) + the one missing interaction (a Pollinating HTTP trigger).
 
 ## Target (read these)
 `assets/ui_kits/dashboard/{index.html,components.jsx,data.js,README.md}` + `assets/styles.css` + `assets/tokens/` +
-`assets/components/`. Layout: header (mark · org/workspace · daemon pill · **Dream now**) → recall bar → memory
+`assets/components/`. Layout: header (mark · org/workspace · daemon pill · **Pollinate now**) → recall bar → memory
 cards → KPI row → 2-col {Sessions, Rules | Graph, Skill-sync} → live log → connectivity banner.
 
 ## Live endpoints (already served — hydrate, don't rebuild)
@@ -19,14 +19,14 @@ cards → KPI row → 2-col {Sessions, Rules | Graph, Skill-sync} → live log �
 ## Decisions (from the PRD)
 - D-1 Reuse the design system, bundle production-clean (esbuild; NO CDN React / in-browser Babel / unpkg). The host serves the index shell + bundled JS + DS CSS.
 - D-2 Live data, no canned `data.js`. Empty/zero states honored.
-- D-3 "Dream now" = a REAL trigger endpoint kicking the PRD-009 Dreaming loop; UI pulses + streams the log; non-blocking ack.
+- D-3 "Pollinate now" = a REAL trigger endpoint kicking the PRD-009 Pollinating loop; UI pulses + streams the log; non-blocking ack.
 - D-4 Security unchanged: dashboard host LOCAL-MODE ONLY + XSS-safe; no token/secret in the page/data/logs/trigger; trigger authz'd + loopback/local-gated.
 - D-5 Reuse, don't fork the dashboard data contracts.
 
 ## Wave plan
-- **Wave 1 — Dream-now trigger endpoint (typescript-node-bee).** New daemon route (e.g. `POST /api/diagnostics/dream`) that kicks the real Dreaming loop (`src/daemon/runtime/dreaming/` trigger/runner seam), authz'd + local-gated, non-blocking ack; fire in `assembleSeams`; unit tests + a gated live check. Defines the contract Wave 2's button calls. AC-6 (backend half).
-- **Wave 2 — The brand dashboard web app (typescript-node-bee).** Bundle the UI kit (React + `assets/components` primitives + the `components.jsx` panels) via a NEW esbuild entry → a static asset the host serves (replacing `renderDashboardPage`); reuse `assets/styles.css` + tokens; hydrate from the live endpoints; wire Recall (`/api/memories/recall`), KPIs/sessions/rules/skills/graph/settings (`/api/diagnostics/*`), LiveLog (`/api/logs`), ConnectivityBanner (`/health` down + retry), Dream now (Wave-1 endpoint, pulse + log). AC-1..AC-5 + AC-6 (frontend half).
-- **Wave 3 — close-out: security (opus) → quality (sonnet) + live verification (orchestrator).** Host XSS/authz/local-gate + no token in page/data/logs/trigger; matches the mockup + functions; I run the assembled daemon and confirm `/dashboard` renders + recall/KPIs/dream/connectivity work (screenshot/curl). AC-7, AC-8.
+- **Wave 1 — Pollinate-now trigger endpoint (typescript-node-bee).** New daemon route (e.g. `POST /api/diagnostics/pollinate`) that kicks the real Pollinating loop (`src/daemon/runtime/pollinating/` trigger/runner seam), authz'd + local-gated, non-blocking ack; fire in `assembleSeams`; unit tests + a gated live check. Defines the contract Wave 2's button calls. AC-6 (backend half).
+- **Wave 2 — The brand dashboard web app (typescript-node-bee).** Bundle the UI kit (React + `assets/components` primitives + the `components.jsx` panels) via a NEW esbuild entry → a static asset the host serves (replacing `renderDashboardPage`); reuse `assets/styles.css` + tokens; hydrate from the live endpoints; wire Recall (`/api/memories/recall`), KPIs/sessions/rules/skills/graph/settings (`/api/diagnostics/*`), LiveLog (`/api/logs`), ConnectivityBanner (`/health` down + retry), Pollinate now (Wave-1 endpoint, pulse + log). AC-1..AC-5 + AC-6 (frontend half).
+- **Wave 3 — close-out: security (opus) → quality (sonnet) + live verification (orchestrator).** Host XSS/authz/local-gate + no token in page/data/logs/trigger; matches the mockup + functions; I run the assembled daemon and confirm `/dashboard` renders + recall/KPIs/pollinate/connectivity work (screenshot/curl). AC-7, AC-8.
 
 ## AC matrix (8) — OPEN → DONE → VERIFIED
 | AC | Criterion (abbrev) | Wave | Owner | Status |
@@ -36,70 +36,70 @@ cards → KPI row → 2-col {Sessions, Rules | Graph, Skill-sync} → live log �
 | AC-3 | Recall bar → POST `/api/memories/recall` (session headers) → memory cards (snippet/score/scope/verified/source) | 2 | ts-node | **VERIFIED** (live recall returned a real `memory` hit through the HTTP route with the stamped session headers) |
 | AC-4 | LiveLog shows real `/api/logs` events (poll/stream); no token/secret in a line | 2 | ts-node | **VERIFIED** (live `/api/logs` polled @2.5s, real request records, no secret) |
 | AC-5 | ConnectivityBanner on real `/health`-down + retry; restores on reconnect | 2 | ts-node | **VERIFIED** (health polled @5s; the earlier `degraded`/down probe drove the banner path) |
-| AC-6 | "Dream now" → new authz'd local-gated trigger endpoint kicks the real Dreaming loop; UI pulse + log stream | 1+2 | ts-node | **VERIFIED** (live `POST /api/diagnostics/dream` → 202 `{triggered:false,status:"skipped",reason:"disabled"}` — real trigger, honest skip) |
+| AC-6 | "Pollinate now" → new authz'd local-gated trigger endpoint kicks the real Pollinating loop; UI pulse + log stream | 1+2 | ts-node | **VERIFIED** (live `POST /api/diagnostics/pollinate` → 202 `{triggered:false,status:"skipped",reason:"disabled"}` — real trigger, honest skip) |
 | AC-7 | Security: host local-only + XSS-safe; no token/secret in page/data/logs/trigger (grep-proven); gates green | 3 | security | **VERIFIED** (security-worker-bee: no Critical/High; D-4 local-gate/no-token/XSS-safe/no-traversal all PASS) |
-| AC-8 | Live verification: assembled daemon → `/dashboard` renders + functions (recall hits, real KPIs, dream fires, banner on down) | 3 | quality + orch | **VERIFIED** (orchestrator ran the assembled daemon against live DeepLake; found+fixed 3 dogfood bugs: diagnostics local-scope, recall session headers, font 404s; final reload = real data + brand fonts + 0 errors) |
+| AC-8 | Live verification: assembled daemon → `/dashboard` renders + functions (recall hits, real KPIs, pollinate fires, banner on down) | 3 | quality + orch | **VERIFIED** (orchestrator ran the assembled daemon against live DeepLake; found+fixed 3 dogfood bugs: diagnostics local-scope, recall session headers, font 404s; final reload = real data + brand fonts + 0 errors) |
 
-## Wave 1 — Dream-now trigger endpoint (DONE) — the contract Wave 2's button calls
+## Wave 1 — Pollinate-now trigger endpoint (DONE) — the contract Wave 2's button calls
 
-**Endpoint:** `POST /api/diagnostics/dream` (no body, no query params — it takes NO
+**Endpoint:** `POST /api/diagnostics/pollinate` (no body, no query params — it takes NO
 attacker-controlled input). Attached onto the already-mounted, `protect:true`
 `/api/diagnostics` group (the dashboard's own group) — ZERO `server.ts` edit. Source:
-`src/daemon/runtime/dreaming/api.ts` (`mountDreamApi`). Fired once in `assembleSeams`
+`src/daemon/runtime/pollinating/api.ts` (`mountPollinateApi`). Fired once in `assembleSeams`
 (`src/daemon/runtime/assemble.ts`, seam #10) with the daemon's own job queue injected as the
 enqueuer.
 
-**Request:** `fetch("/api/diagnostics/dream", { method: "POST" })`. In LOCAL mode no headers
+**Request:** `fetch("/api/diagnostics/pollinate", { method: "POST" })`. In LOCAL mode no headers
 are required (the daemon's default tenant resolves); the diagnostics group's auth/RBAC is open
 in local by design (D-4).
 
 **Response:** HTTP **202** + JSON ack (the EXACT shape Wave 2 reads):
 ```jsonc
-{ "triggered": true,  "status": "enqueued" }                 // a real dreaming pass was queued
+{ "triggered": true,  "status": "enqueued" }                 // a real pollinating pass was queued
 { "triggered": true,  "status": "running",  "reason": "pending" | "below-threshold" }
                                                               // loop healthy; a pass already in
                                                               // flight OR below the token threshold
-{ "triggered": false, "status": "skipped",  "reason": "disabled" }      // dreaming master switch off
-{ "triggered": false, "status": "skipped",  "reason": "unavailable" }   // dreaming subsystem not wired
+{ "triggered": false, "status": "skipped",  "reason": "disabled" }      // pollinating master switch off
+{ "triggered": false, "status": "skipped",  "reason": "unavailable" }   // pollinating subsystem not wired
 ```
 The ack carries NO token/secret/header value and not even the internal job id (D-4,
 grep-proven by the unit suite). A request with no resolvable tenancy fails closed at the edge
 (400), consistent with the other diagnostics handlers; in team mode the protected group also
 401/403s (the endpoint is NOT a team-mode escalation).
 
-**Dreaming trigger seam reused (D-3, no new dreaming logic):** the PRD-009a
-`DreamingTrigger.checkAndEnqueueDreaming` (`src/daemon/runtime/dreaming/trigger.ts:343`),
+**Pollinating trigger seam reused (D-3, no new pollinating logic):** the PRD-009a
+`PollinatingTrigger.checkAndEnqueuePollinating` (`src/daemon/runtime/pollinating/trigger.ts:343`),
 constructed from the live storage client + the daemon's `defaultScope` + the env-resolved
-`memory.dreaming` config (`resolveDreamingConfig`) + the daemon's OWN durable job queue
-(`daemon.services.queue`, the 004b `JobQueueService.enqueue` — shape matches `DreamingJobEnqueuer`
-exactly). The trigger ENQUEUES at most one `dreaming` job into `memory_jobs`; the actual
+`memory.pollinating` config (`resolvePollinatingConfig`) + the daemon's OWN durable job queue
+(`daemon.services.queue`, the 004b `JobQueueService.enqueue` — shape matches `PollinatingJobEnqueuer`
+exactly). The trigger ENQUEUES at most one `pollinating` job into `memory_jobs`; the actual
 consolidation pass (the model call) runs LATER via the 009b/009c runner on the queue worker —
 so the handler is **non-blocking** by construction (it awaits only the cheap enqueue, never the
-pass). NO second dreaming subsystem is constructed.
+pass). NO second pollinating subsystem is constructed.
 
 **Disabled / guard behavior:** the trigger's existing guards drive the ack — `disabled` (config
 master switch off) → `{triggered:false,status:"skipped",reason:"disabled"}`; the single-pending
 guard (`pendingJobId` non-empty) → `{triggered:true,status:"running",reason:"pending"}`;
 below-threshold → `{triggered:true,status:"running",reason:"below-threshold"}`. When the queue is
-the no-op stub (dreaming subsystem unavailable) the handler fails soft to
+the no-op stub (pollinating subsystem unavailable) the handler fails soft to
 `{triggered:false,status:"skipped",reason:"unavailable"}` — a clean ack, never a 500.
 
-**Tests:** `tests/daemon/runtime/dreaming/api.test.ts` (10 cases: 202+enqueued with the trigger
+**Tests:** `tests/daemon/runtime/pollinating/api.test.ts` (10 cases: 202+enqueued with the trigger
 fired exactly once keyed by the default agent scope; disabled→skipped without enqueuing;
 already-running→running; below-threshold→running; no-org fail-closed at the edge; no-secret in the
 ack; unavailable fail-soft; non-blocking bound; no-op when the group is unmounted; GET is not the
-trigger). `tests/daemon/runtime/assemble.test.ts` extended to assert the `mountDream` seam fires
+trigger). `tests/daemon/runtime/assemble.test.ts` extended to assert the `mountPollinate` seam fires
 EXACTLY ONCE (local + team), in order (last), wired with the daemon's own queue as the enqueuer.
 
 **Gates (all green, exit 0):** `npm run ci` (typecheck + jscpd dup + 1757 tests + audit:sql) = 0;
 `npm run build` = 0; `npm run audit:openclaw` = 0; `tests/daemon/storage/invariant.test.ts` = green
-(3/3). The handler issues NO SQL of its own (the trigger owns the guarded `dreaming_state` writes),
+(3/3). The handler issues NO SQL of its own (the trigger owns the guarded `pollinating_state` writes),
 so audit:sql stays clean.
 
 ## Wave 2 — The brand dashboard web app (DONE) — AC-1..AC-5 + AC-6(frontend)
 
 **The real daemon-served dashboard now LOOKS like `assets/ui_kits/dashboard/` and FUNCTIONS as
-that UI kit specs, wired to LIVE daemon data + the Wave-1 Dream trigger. Production-clean per D-1
+that UI kit specs, wired to LIVE daemon data + the Wave-1 Pollinate trigger. Production-clean per D-1
 (no CDN React / in-browser Babel / unpkg / `text/babel`), no canned `data.js` per D-2.**
 
 ### The esbuild entry + served asset routes
@@ -128,9 +128,9 @@ that UI kit specs, wired to LIVE daemon data + the Wave-1 Dream trigger. Product
   to typed TSX (the design REUSED, not forked; same tokens/markup/variants).
 - `src/dashboard/web/panels.tsx` — Panel/SessionsPanel/RulesPanel/SkillSyncPanel/GraphCanvas/LiveLog/
   ConnectivityBanner ported from `components.jsx`, each with its empty/zero state.
-- `src/dashboard/web/app.tsx` — Header (mark · org/workspace · health pill · Dream now), RecallBar
+- `src/dashboard/web/app.tsx` — Header (mark · org/workspace · health pill · Pollinate now), RecallBar
   (mono `Input size=lg` + primary `Button`), and the live `App` (hydration + recall + log poll + health
-  poll + dream).
+  poll + pollinate).
 - `src/dashboard/web/main.tsx` — the esbuild entry; `createRoot(#root).render(<App/>)`.
 - `src/daemon/runtime/dashboard/web-assets.ts` — the daemon-side asset reader (resolves the repo
   `assets/` dir + the bundle beside the daemon; fail-soft → 404, never 500).
@@ -156,7 +156,7 @@ that UI kit specs, wired to LIVE daemon data + the Wave-1 Dream trigger. Product
 
 ### Each AC's wiring (endpoint → UI)
 - **AC-1** — `/dashboard` serves the bundled UI-kit shell on the DS tokens/CSS; production-clean
-  (grep-proven). DOM test mounts the app and asserts the header (org/workspace + Dream now), recall bar,
+  (grep-proven). DOM test mounts the app and asserts the header (org/workspace + Pollinate now), recall bar,
   the 4 KPI tiles, the `.grid2` panels (Sessions/Rules | Graph/Skill-sync), and the Live log.
 - **AC-2** — on mount the app `Promise.all`-fetches `/api/diagnostics/{settings,kpis,sessions,rules,skills}`
   + `/api/graph` and renders them. Empty/zero states honored: no sessions → "No sessions captured yet.";
@@ -170,9 +170,9 @@ that UI kit specs, wired to LIVE daemon data + the Wave-1 Dream trigger. Product
 - **AC-5** — polls `GET /health` every 5 s; a failing probe swaps the WHOLE view for the real
   `ConnectivityBanner` (daemon URL + Retry). Retry re-probes; a reachable result restores the view and
   re-hydrates. Driven by the REAL `/health` result — the kit's demo "toggle daemon" pill was dropped.
-- **AC-6 (frontend)** — Dream now POSTs the Wave-1 `POST /api/diagnostics/dream`. `{triggered:true}` →
-  the graph `dreaming` violet pulse + a log line, the queued pass streaming in via `/api/logs`.
-  `{triggered:false,status:"skipped",reason}` → an honest "dreaming skipped · <reason>" log line (NOT a
+- **AC-6 (frontend)** — Pollinate now POSTs the Wave-1 `POST /api/diagnostics/pollinate`. `{triggered:true}` →
+  the graph `pollinating` violet pulse + a log line, the queued pass streaming in via `/api/logs`.
+  `{triggered:false,status:"skipped",reason}` → an honest "pollinating skipped · <reason>" log line (NOT a
   fake forever spinner). The kit's 4200 ms fake `setTimeout` is replaced by the real ack + log polling.
 
 ### Tests + gitignore + gates (Wave 2, exact exit codes)
@@ -221,7 +221,7 @@ default scope). Two root causes, both found live and closed here (not hidden):
     `scope.ts` is unchanged.
   - `src/daemon/runtime/assemble.ts` — `seams.mountDashboard(daemon, { storage })` →
     `seams.mountDashboard(daemon, { storage, defaultScope })` (the `defaultScope` const was already
-    resolved and threaded to mountMemories/mountVfs/mountProductData/mountDream — the dashboard
+    resolved and threaded to mountMemories/mountVfs/mountProductData/mountPollinate — the dashboard
     mount just needed the same arg).
 
 ### Root cause B (browser client) — the wire client never stamped the runtime-path + session headers
@@ -235,7 +235,7 @@ default scope). Two root causes, both found live and closed here (not hidden):
 - **Fix:** `src/dashboard/web/wire.ts` — added an exported, frozen `DASHBOARD_SESSION_HEADERS`
   constant (`{ "x-honeycomb-runtime-path": "plugin", "x-honeycomb-session": "dashboard-web" }`) and
   merged it into the `headers` of EVERY `fetchImpl(...)` call: `getJson` (all diagnostics + graph +
-  logs GETs), the `recall` POST, the `health` GET, and the `dream` POST. The session id is a fixed,
+  logs GETs), the `recall` POST, the `health` GET, and the `pollinate` POST. The session id is a fixed,
   clearly-labeled long-lived loopback viewer id ("dashboard-web") — the claim map is per-session, so
   the dashboard idempotently re-claims its OWN session and never conflicts with a harness (which uses
   real session ids). No randomness (deterministic bundle, testable). `accept`/`content-type` are

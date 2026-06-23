@@ -10,7 +10,7 @@
  * ║  DeepLake, via the assembled daemon (no 501, no manual mount). (c-AC-3)      ║
  * ║                                                                            ║
  * ║  And the reason-gated `POST /api/ontology/proposals` runs the control       ║
- * ║  plane on a live path INDEPENDENT of dreaming: a `claim.add` then a          ║
+ * ║  plane on a live path INDEPENDENT of pollinating: a `claim.add` then a          ║
  * ║  `claim.supersede` leave the superseded prior TOMBSTONED — excluded from     ║
  * ║  the active `/api/ontology/claims` read while still on disk. (c-AC-4)        ║
  * ║                                                                            ║

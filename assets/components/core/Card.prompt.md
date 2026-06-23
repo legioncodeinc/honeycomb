@@ -6,4 +6,4 @@
 <Card interactive>Hover to brighten</Card>
 ```
 
-`glow`: `none | honey | dream`. `interactive` brightens the border on hover. Cards never use drop shadows except the honey/dream glow.
+`glow`: `none | honey | pollinate`. `interactive` brightens the border on hover. Cards never use drop shadows except the honey/pollinate glow.

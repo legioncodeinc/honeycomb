@@ -287,7 +287,7 @@ export function createFakeVaultProvider(table: Record<string, string>): VaultPro
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * The standard "PRD-012b fills this" thrower (mirrors the inference/ontology/dreaming
+ * The standard "PRD-012b fills this" thrower (mirrors the inference/ontology/pollinating
  * harness posture). A stubbed 012b body calls this so an accidental early call FAILS
  * LOUD with the owning sub-PRD, never silently returns a fake-passing value.
  */

@@ -25,7 +25,7 @@
  * ── Token budget (c-AC-2) ────────────────────────────────────────────────────
  * The whole rendered block is bounded by {@link PrimeDigestBudget.maxTokens} using the cheap
  * 4-chars/token heuristic the rest of the codebase uses ({@link estimatePrimeTokens}, the same
- * shape as `dreaming/compaction.ts`). When the candidate set overflows, we TRIM whole entries —
+ * shape as `pollinating/compaction.ts`). When the candidate set overflows, we TRIM whole entries —
  * dropping the LOWEST priority first (oldest recent, then least-durable) — and NEVER truncate
  * mid-key. The header + footer are always kept so the digest stays well-formed.
  *
@@ -38,7 +38,7 @@
 
 import type { PrimedKey } from "./prime-keys.js";
 
-/** The standard 4-chars/token heuristic (the GPT-family estimate `dreaming/compaction.ts` uses). */
+/** The standard 4-chars/token heuristic (the GPT-family estimate `pollinating/compaction.ts` uses). */
 const CHARS_PER_TOKEN = 4;
 
 /** The default token budget for the whole prime block (the ~300–800 target's midpoint ceiling). */

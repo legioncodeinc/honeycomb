@@ -16,8 +16,8 @@
  *     swaps for the `ConnectivityBanner` while the SIDEBAR stays mounted (D-5); on Retry/reconnect the
  *     active page restores and re-hydrates. The per-subsystem health STRIP stays page content (it
  *     polls `/health` reasons inside `DashboardPage`); the shell owns only the coarse up/down.
- *   - The org/workspace identity (the sidebar sub-line) + the "Dream now" action + the `dreaming`
- *     pulse, all relocated from the old `Header` into the shell chrome (D-5). `dreaming` flows DOWN to
+ *   - The org/workspace identity (the sidebar sub-line) + the "Pollinate now" action + the `pollinating`
+ *     pulse, all relocated from the old `Header` into the shell chrome (D-5). `pollinating` flows DOWN to
  *     the active page (the Dashboard graph/cards pulse on it).
  *   - The collapsed/responsive state (037a AC-6): a manual toggle plus an auto-collapse under the
  *     host's `@media (max-width:900px)` breakpoint.
@@ -73,7 +73,7 @@ function Outlet({ route, pageProps }: { route: string; pageProps: PageProps }): 
 
 /**
  * The dashboard shell (037b). Builds the shared wire, runs the hash router + the liveness poll, owns
- * the dream action + the collapsed state, and renders the sidebar beside the routed content (or the
+ * the pollinate action + the collapsed state, and renders the sidebar beside the routed content (or the
  * ConnectivityBanner when the daemon is down — sidebar stays mounted, D-5).
  */
 export function Shell({ client, assetBase = "assets" }: ShellProps = {}): React.JSX.Element {
@@ -83,7 +83,7 @@ export function Shell({ client, assetBase = "assets" }: ShellProps = {}): React.
 	// ── shell-owned state ──
 	const [daemonUp, setDaemonUp] = React.useState(true);
 	const [settings, setSettings] = React.useState<SettingsWire>(EMPTY_SETTINGS);
-	const [dreaming, setDreaming] = React.useState(false);
+	const [pollinating, setPollinating] = React.useState(false);
 	// Collapsed: a manual toggle OR an auto-collapse under the narrow breakpoint (037a AC-6). We track
 	// both an explicit user choice and the viewport, preferring the user's choice once they toggle.
 	const [collapsed, setCollapsed] = React.useState(false);
@@ -137,42 +137,42 @@ export function Shell({ client, assetBase = "assets" }: ShellProps = {}): React.
 		return () => mq.removeEventListener("change", onChange);
 	}, []);
 
-	// A SYNCHRONOUS in-flight guard for the dream action: `setDreaming(true)` is async, so a render-state
-	// guard alone leaves a race window where a rapid second activation fires `wire.dream()` twice. The ref
+	// A SYNCHRONOUS in-flight guard for the pollinate action: `setPollinating(true)` is async, so a render-state
+	// guard alone leaves a race window where a rapid second activation fires `wire.pollinate()` twice. The ref
 	// flips immediately; the reset timer is tracked so it can be cleared on unmount.
-	const dreamInFlightRef = React.useRef(false);
-	const dreamResetTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+	const pollinateInFlightRef = React.useRef(false);
+	const pollinateResetTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 	React.useEffect(() => {
 		return () => {
-			if (dreamResetTimerRef.current !== null) clearTimeout(dreamResetTimerRef.current);
+			if (pollinateResetTimerRef.current !== null) clearTimeout(pollinateResetTimerRef.current);
 		};
 	}, []);
 
-	// D-5: the "Dream now" action, relocated into the shell chrome. POST the Wave-1 trigger; reflect
-	// the 202 ack by pulsing the active page's graph/cards (`dreaming` flows down via PageProps).
-	const dream = React.useCallback(async (): Promise<void> => {
-		if (dreamInFlightRef.current) return; // synchronous re-entry guard (no double POST on rapid clicks)
-		dreamInFlightRef.current = true;
-		setDreaming(true);
-		const ack = await wire.dream();
+	// D-5: the "Pollinate now" action, relocated into the shell chrome. POST the Wave-1 trigger; reflect
+	// the 202 ack by pulsing the active page's graph/cards (`pollinating` flows down via PageProps).
+	const pollinate = React.useCallback(async (): Promise<void> => {
+		if (pollinateInFlightRef.current) return; // synchronous re-entry guard (no double POST on rapid clicks)
+		pollinateInFlightRef.current = true;
+		setPollinating(true);
+		const ack = await wire.pollinate();
 		if (ack.triggered) {
 			// A real pass was queued: pulse briefly while it streams into the live log, then settle.
-			dreamResetTimerRef.current = setTimeout(() => {
-				setDreaming(false);
-				dreamInFlightRef.current = false;
+			pollinateResetTimerRef.current = setTimeout(() => {
+				setPollinating(false);
+				pollinateInFlightRef.current = false;
 			}, 4200);
 		} else {
 			// Honestly reflect the skip (disabled / unavailable) — no fake forever spinner.
-			setDreaming(false);
-			dreamInFlightRef.current = false;
+			setPollinating(false);
+			pollinateInFlightRef.current = false;
 		}
 	}, [wire]);
 
 	const identity = `${settings.orgName || settings.orgId || "local"} · ${settings.workspace || "default"}`;
 
 	// The PageProps every routed page receives (D-7). One shared wire, the liveness flag, the asset
-	// base, and the shell-owned dreaming pulse.
-	const pageProps: PageProps = { wire, daemonUp, assetBase, dreaming };
+	// base, and the shell-owned pollinating pulse.
+	const pageProps: PageProps = { wire, daemonUp, assetBase, pollinating };
 
 	return (
 		<div style={{ display: "flex", minHeight: "100vh", background: "var(--bg-canvas)" }}>
@@ -189,7 +189,7 @@ export function Shell({ client, assetBase = "assets" }: ShellProps = {}): React.
 			/>
 
 			<div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-				{/* Shell chrome bar — the global "Dream now" action (relocated from the old Header, D-5). */}
+				{/* Shell chrome bar — the global "Pollinate now" action (relocated from the old Header, D-5). */}
 				<div
 					style={{
 						display: "flex",
@@ -200,8 +200,8 @@ export function Shell({ client, assetBase = "assets" }: ShellProps = {}): React.
 					}}
 				>
 					<span style={{ flex: 1 }} />
-					<Button variant="dream" onClick={() => void dream()} disabled={dreaming}>
-						{dreaming ? "dreaming…" : "Dream now"}
+					<Button variant="pollinate" onClick={() => void pollinate()} disabled={pollinating}>
+						{pollinating ? "pollinating…" : "Pollinate now"}
 					</Button>
 				</div>
 

@@ -16,8 +16,8 @@ export interface MemoryCardProps {
   scope?: "personal" | "team" | "org";
   /** Source-backed memory — renders the green verified state. */
   verified?: boolean;
-  /** Currently being consolidated by the Dreaming loop — violet pulse. */
-  dreaming?: boolean;
+  /** Currently being consolidated by the Pollinating loop — violet pulse. */
+  pollinating?: boolean;
   onClick?: (e: React.MouseEvent<HTMLDivElement>) => void;
   style?: React.CSSProperties;
 }

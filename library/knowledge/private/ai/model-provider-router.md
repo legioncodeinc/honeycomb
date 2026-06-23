@@ -6,7 +6,7 @@ The unified inference control plane: how the daemon decides which model runs eac
 
 **Related:**
 - [`memory-pipeline.md`](memory-pipeline.md)
-- [`dreaming-loop.md`](dreaming-loop.md)
+- [`pollinating-loop.md`](pollinating-loop.md)
 - [`../integrations/mcp-and-sdk.md`](../integrations/mcp-and-sdk.md)
 - [`../security/secrets.md`](../security/secrets.md)
 
@@ -67,11 +67,11 @@ Hard gates block a target outright: insufficient privacy tier, a missing require
 
 ## Workloads
 
-Three workloads route through the same engine. `memory_extraction` selects the model that drives the extraction stage of the [`memory-pipeline.md`](memory-pipeline.md), `session_synthesis` selects the summary model, and `interactive` covers user-facing chat and agent calls. The dreaming pass routes through its own stronger policy as described in [`dreaming-loop.md`](dreaming-loop.md). There are no separate extractors anymore; they all resolve through one policy engine.
+Three workloads route through the same engine. `memory_extraction` selects the model that drives the extraction stage of the [`memory-pipeline.md`](memory-pipeline.md), `session_synthesis` selects the summary model, and `interactive` covers user-facing chat and agent calls. The pollinating pass routes through its own stronger policy as described in [`pollinating-loop.md`](pollinating-loop.md). There are no separate extractors anymore; they all resolve through one policy engine.
 
 ## API and CLI
 
-The native inference API and the OpenAI-compatible gateway are implemented in `src/daemon/runtime/inference/gateway.ts` (`mountInferenceGateway`) but are **not yet mounted in the daemon's composition root** (`assemble.ts`) as of PRD-045. The dreaming path reaches the router internally through the `ModelClient` seam (`src/daemon/runtime/inference/model-client-factory.ts`); external HTTP access to `/api/inference/*` and `/v1/*` is deferred to a later phase.
+The native inference API and the OpenAI-compatible gateway are implemented in `src/daemon/runtime/inference/gateway.ts` (`mountInferenceGateway`) but are **not yet mounted in the daemon's composition root** (`assemble.ts`) as of PRD-045. The pollinating path reaches the router internally through the `ModelClient` seam (`src/daemon/runtime/inference/model-client-factory.ts`); external HTTP access to `/api/inference/*` and `/v1/*` is deferred to a later phase.
 
 When the gateway is wired, it will expose:
 
@@ -105,4 +105,4 @@ Routing history is daemon-local and redacted: it records the route and fallback 
 
 ## Current state
 
-The shared router core (config parsing, strict/automatic/hybrid resolution, privacy/capability/context gates), the daemon router service (routed execution with fallback, workload shims), and the CLI tools are in place, along with daemon-local routing telemetry. The router is reachable from within the daemon via the `ModelClient` seam used by the memory pipeline and dreaming loop. The **HTTP gateway** (`/api/inference/*` and `/v1/*`) is implemented but not yet mounted in the daemon's composition root — external HTTP access is deferred (PRD-045 scope boundary). Runtime degradation (treating 401/403 as expired and 429 as rate-limited) is in-memory and not yet persisted across restarts. A canonical top-level `models:` map, first-class session and subscription account lifecycle, circuit breaking with cooldown recovery, and full cost telemetry are deferred to a later phase.
+The shared router core (config parsing, strict/automatic/hybrid resolution, privacy/capability/context gates), the daemon router service (routed execution with fallback, workload shims), and the CLI tools are in place, along with daemon-local routing telemetry. The router is reachable from within the daemon via the `ModelClient` seam used by the memory pipeline and pollinating loop. The **HTTP gateway** (`/api/inference/*` and `/v1/*`) is implemented but not yet mounted in the daemon's composition root — external HTTP access is deferred (PRD-045 scope boundary). Runtime degradation (treating 401/403 as expired and 429 as rate-limited) is in-memory and not yet persisted across restarts. A canonical top-level `models:` map, first-class session and subscription account lifecycle, circuit breaking with cooldown recovery, and full cost telemetry are deferred to a later phase.

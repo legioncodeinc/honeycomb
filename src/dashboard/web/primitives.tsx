@@ -14,8 +14,8 @@ import React from "react";
 
 // ── Button ────────────────────────────────────────────────────────────────────
 
-/** Button visual variants (honey is the brand action; dream is the Dreaming/maintenance state). */
-export type ButtonVariant = "primary" | "secondary" | "ghost" | "dream" | "danger";
+/** Button visual variants (honey is the brand action; pollinate is the Pollinating/maintenance state). */
+export type ButtonVariant = "primary" | "secondary" | "ghost" | "pollinate" | "danger";
 /** Button sizes (`lg` is the recall-bar action). */
 export type ButtonSize = "sm" | "md" | "lg";
 
@@ -29,7 +29,7 @@ export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElemen
 
 /**
  * The Honeycomb button (ported from `assets/components/core/Button.jsx`). One primary (honey)
- * action per region; `dream` is reserved for the Dreaming trigger. The hover/press handlers
+ * action per region; `pollinate` is reserved for the Pollinating trigger. The hover/press handlers
  * mutate inline style exactly as the DS source does.
  */
 export function Button({
@@ -55,7 +55,7 @@ export function Button({
 		primary: { background: "var(--honey)", color: "var(--honey-on)", border: "1px solid transparent" },
 		secondary: { background: "var(--bg-elevated)", color: "var(--text-primary)", border: "1px solid var(--border-strong)" },
 		ghost: { background: "transparent", color: "var(--text-secondary)", border: "1px solid transparent" },
-		dream: { background: "var(--dream-subtle)", color: "var(--dream)", border: "1px solid var(--dream-border)" },
+		pollinate: { background: "var(--pollinate-subtle)", color: "var(--pollinate)", border: "1px solid var(--pollinate-border)" },
 		danger: { background: "var(--severity-critical-bg)", color: "var(--severity-critical)", border: "1px solid var(--severity-critical)" },
 	};
 	const v = variants[variant] ?? variants.primary;
@@ -87,7 +87,7 @@ export function Button({
 		primary: "var(--honey-hover)",
 		secondary: "var(--bg-subtle)",
 		ghost: "var(--bg-elevated)",
-		dream: "var(--dream-subtle)",
+		pollinate: "var(--pollinate-subtle)",
 		danger: "var(--severity-critical-bg)",
 	};
 
@@ -125,8 +125,8 @@ export function Button({
 
 // ── Badge ───────────────────────────────────────────────────────────────────
 
-/** Badge tones map to the semantic palette (`verified` green, `honey` brand, `dream` violet). */
-export type BadgeTone = "neutral" | "honey" | "verified" | "dream" | "info" | "warning" | "critical";
+/** Badge tones map to the semantic palette (`verified` green, `honey` brand, `pollinate` violet). */
+export type BadgeTone = "neutral" | "honey" | "verified" | "pollinate" | "info" | "warning" | "critical";
 
 /** Props for {@link Badge}. */
 export interface BadgeProps {
@@ -143,7 +143,7 @@ export function Badge({ children, tone = "neutral", mono = false, dot = false, s
 		neutral: { bg: "var(--bg-subtle)", fg: "var(--text-secondary)", bd: "var(--border-strong)" },
 		honey: { bg: "var(--honey-subtle)", fg: "var(--honey)", bd: "var(--honey-border)" },
 		verified: { bg: "var(--severity-success-bg)", fg: "var(--verified)", bd: "var(--verified)" },
-		dream: { bg: "var(--dream-subtle)", fg: "var(--dream)", bd: "var(--dream-border)" },
+		pollinate: { bg: "var(--pollinate-subtle)", fg: "var(--pollinate)", bd: "var(--pollinate-border)" },
 		info: { bg: "var(--severity-info-bg)", fg: "var(--severity-info)", bd: "var(--severity-info)" },
 		warning: { bg: "var(--severity-warning-bg)", fg: "var(--severity-warning)", bd: "var(--severity-warning)" },
 		critical: { bg: "var(--severity-critical-bg)", fg: "var(--severity-critical)", bd: "var(--severity-critical)" },
@@ -252,7 +252,7 @@ export function Input({
 // ── Kpi ───────────────────────────────────────────────────────────────────────
 
 /** Kpi accent colors. */
-export type KpiAccent = "honey" | "dream" | "verified" | "neutral";
+export type KpiAccent = "honey" | "pollinate" | "verified" | "neutral";
 
 /** Props for {@link Kpi} — one dashboard metric tile. */
 export interface KpiProps {
@@ -268,7 +268,7 @@ export interface KpiProps {
 export function Kpi({ label, value, unit, delta, accent = "honey", style }: KpiProps): React.JSX.Element {
 	const accents: Record<KpiAccent, string> = {
 		honey: "var(--honey)",
-		dream: "var(--dream)",
+		pollinate: "var(--pollinate)",
 		verified: "var(--verified)",
 		neutral: "var(--text-primary)",
 	};
@@ -324,7 +324,7 @@ export interface MemoryCardProps {
 	score?: number;
 	scope?: string;
 	verified?: boolean;
-	dreaming?: boolean;
+	pollinating?: boolean;
 	/** Provenance class from the recall engine (PRD-027): distilled `memory` vs raw `session`. */
 	kind?: "memory" | "session";
 	/** `true` iff a drill-down raw session row — the card visually demotes it (dim + a tag). */
@@ -340,12 +340,12 @@ export function MemoryCard({
 	score,
 	scope = "personal",
 	verified = false,
-	dreaming = false,
+	pollinating = false,
 	kind,
 	secondary = false,
 	style,
 }: MemoryCardProps): React.JSX.Element {
-	const accent = dreaming ? "var(--dream)" : verified ? "var(--verified)" : "var(--honey)";
+	const accent = pollinating ? "var(--pollinate)" : verified ? "var(--verified)" : "var(--honey)";
 
 	return (
 		<div
@@ -370,8 +370,8 @@ export function MemoryCard({
 						height: 38,
 						clipPath: "polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%)",
 						background: accent,
-						opacity: dreaming ? 0.9 : 1,
-						animation: dreaming ? "hc-dream-pulse var(--dur-dream) var(--ease-in-out) infinite alternate" : "none",
+						opacity: pollinating ? 0.9 : 1,
+						animation: pollinating ? "hc-pollinate-pulse var(--dur-pollinate) var(--ease-in-out) infinite alternate" : "none",
 					}}
 				/>
 			</div>
@@ -391,13 +391,13 @@ export function MemoryCard({
 					>
 						{memoryKey}
 					</span>
-					{verified && !dreaming && (
+					{verified && !pollinating && (
 						<span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--verified)", flex: "none" }}>✓ verified</span>
 					)}
-					{(secondary || kind === "session") && !dreaming && (
+					{(secondary || kind === "session") && !pollinating && (
 						<span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-tertiary)", flex: "none" }}>session</span>
 					)}
-					{dreaming && <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--dream)", flex: "none" }}>dreaming…</span>}
+					{pollinating && <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--pollinate)", flex: "none" }}>pollinating…</span>}
 				</div>
 
 				<div style={{ fontSize: "var(--text-sm)", lineHeight: "20px", color: "var(--text-primary)" }}>{snippet}</div>
@@ -428,7 +428,7 @@ export function MemoryCard({
 				</div>
 			</div>
 
-			<style>{"@keyframes hc-dream-pulse { from { opacity: .5 } to { opacity: 1 } }"}</style>
+			<style>{"@keyframes hc-pollinate-pulse { from { opacity: .5 } to { opacity: 1 } }"}</style>
 		</div>
 	);
 }

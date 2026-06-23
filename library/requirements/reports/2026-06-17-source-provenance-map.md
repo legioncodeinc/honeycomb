@@ -30,7 +30,7 @@ hivemind is already DeepLake-native. Its `deeplake-api.ts` client, `deeplake-sch
 Foundation from hivemind, intelligence from otherhive, with as little otherhive code carried as possible.
 
 - Use hivemind's DeepLake-native code as the substrate and product layer: storage client, schema patterns, embeddings, codebase graph, VFS, skillify, notifications, dashboard, capture hooks, CLI.
-- Reimplement otherhive's memory engine DeepLake-native, using otherhive's source as the algorithm reference, not as code to port: the pipeline, hybrid retrieval and ranking, the knowledge-graph ontology and supersession, the dreaming loop, the model and provider router, and agent scoping.
+- Reimplement otherhive's memory engine DeepLake-native, using otherhive's source as the algorithm reference, not as code to port: the pipeline, hybrid retrieval and ranking, the knowledge-graph ontology and supersession, the pollinating loop, the model and provider router, and agent scoping.
 - The daemon is mostly net-new. hivemind is hooks-direct with no daemon; otherhive's daemon is SQLite-coupled. Build a daemon shell that wraps hivemind's `deeplake-api` as the only client and hosts the reimplemented engine and workers, using otherhive's daemon structure as a reference.
 
 Classification legend: **reuse** (lift with light edits), **adapt** (lift and modify), **reference** (read for design, write fresh), **net-new** (no direct source).
@@ -47,7 +47,7 @@ Classification legend: **reuse** (lift with light edits), **adapt** (lift and mo
 | 006 | memory-pipeline | none | `platform/daemon/src/pipeline/*` (extraction, decision, worker, retention) | reimplement, reference otherhive |
 | 007 | retrieval | `embeddings/*` vector path, `graph/vfs-handler` | `memory-search.ts`, ranking, dampening | reimplement (reference otherhive) + reuse hivemind vectors |
 | 008 | knowledge-graph-ontology | none (codebase graph is different) | `knowledge-graph.ts`, `ontology-*.ts`, `pipeline/supersession.ts` | reimplement, reference otherhive |
-| 009 | dreaming-loop | none | `pipeline/dreaming*.ts` | reimplement, reference otherhive |
+| 009 | pollinating-loop | none | `pipeline/pollinating*.ts` | reimplement, reference otherhive |
 | 010 | model-provider-router | host-CLI gate pattern in `hooks/*/wiki-worker` | `inference-router` and model catalog | reimplement, reference otherhive |
 | 011 | tenancy-and-auth | `commands/auth-*`, org header in `deeplake-api`, credential file | `auth/api-keys.ts`, modes/RBAC, agent scope clause | adapt both, reimplement scope on DeepLake |
 | 012 | secrets | none | `plugins/core/secrets`, daemon secrets routes | reimplement, reference otherhive |

@@ -25,7 +25,7 @@
  * ║  NEVER written returns a real (empty) result within the budget — the seam   ║
  * ║  never invents the awaited row, never hangs.                               ║
  * ║                                                                            ║
- * ║  GATED + ISOLATED exactly like dreaming-counter-live.itest.ts:             ║
+ * ║  GATED + ISOLATED exactly like pollinating-counter-live.itest.ts:             ║
  * ║    - `describe.skipIf(!HONEYCOMB_DEEPLAKE_TOKEN)` → no token = SKIP, exit 0.║
  * ║    - `.itest.ts` suffix + `tests/integration/**` exclusion keep it OUT of   ║
  * ║      `npm run test` / `npm run ci`. Run only via `npm run test:integration`.║

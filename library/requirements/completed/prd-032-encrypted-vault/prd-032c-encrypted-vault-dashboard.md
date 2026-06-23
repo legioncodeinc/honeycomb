@@ -9,7 +9,7 @@
 
 The dashboard surface for the vault: a Settings panel in the existing daemon-served dashboard
 (`src/dashboard/web`) where the user selects provider (Anthropic / OpenAI / OpenRouter) → that provider's
-curated model list loads → picks a model; and toggles feature flags (dreaming on/off). Writes go through the
+curated model list loads → picks a model; and toggles feature flags (pollinating on/off). Writes go through the
 daemon to the vault `setting` class. This sub-PRD owns the panel and its daemon data contract; it does NOT
 own the vault store (032a), the CLI verb (032b), or the assembly wire-back (032d). Consistent with PRD-020b,
 the panel reads/writes only through daemon endpoints — it never opens the vault directly.
@@ -18,13 +18,13 @@ the panel reads/writes only through daemon endpoints — it never opens the vaul
 
 - A Settings panel rendering the current active provider/model and feature-flag state from daemon-served data.
 - A provider→model selector: pick provider, then a model from that provider's curated catalog (PRD-032 D-6).
-- Feature-flag toggles (dreaming on/off) that persist to the vault through the daemon.
+- Feature-flag toggles (pollinating on/off) that persist to the vault through the daemon.
 - No secret value ever rendered — a provider key shows as "set ✓" / "not set" by name only.
 
 ## Non-Goals
 
 - The vault store and registry (032a) and the CLI verb (032b).
-- Reading settings at assembly to drive inference/dreaming (032d).
+- Reading settings at assembly to drive inference/pollinating (032d).
 - A live provider model-list fetch (curated catalog only; live fetch is the flagged enhancement, PRD-032 D-6).
 - Editing or displaying secret values in the UI (forbidden — names/presence only).
 
@@ -32,7 +32,7 @@ the panel reads/writes only through daemon endpoints — it never opens the vaul
 
 - As an operator, I want to pick my inference provider and model from the dashboard so I don't hand-edit
   `agent.yaml`.
-- As an operator, I want to toggle dreaming on/off from the dashboard so I don't set an env var.
+- As an operator, I want to toggle pollinating on/off from the dashboard so I don't set an env var.
 - As a security-conscious user, I want the panel to confirm a provider key is set without ever showing it.
 
 ## Functional requirements
@@ -41,7 +41,7 @@ the panel reads/writes only through daemon endpoints — it never opens the vaul
   the active provider, model, and feature-flag state from daemon-served `setting`-class data.
 - FR-2: A provider selector (Anthropic / OpenAI / OpenRouter) drives a model list: choosing a provider loads
   that provider's curated catalog models; choosing a model persists the active provider/model setting.
-- FR-3: Feature-flag toggles (dreaming on/off, and sibling flags) write the corresponding `setting` record;
+- FR-3: Feature-flag toggles (pollinating on/off, and sibling flags) write the corresponding `setting` record;
   on reload the panel reflects the persisted vault value.
 - FR-4: Every write POSTs through a daemon endpoint that writes the vault `setting` record; the panel never
   opens the vault directly and holds no storage logic (PRD-020b posture).
@@ -54,7 +54,7 @@ the panel reads/writes only through daemon endpoints — it never opens the vaul
 |---|---|
 | c-AC-1 | Given the daemon is running, when the Settings panel loads, then it renders the active provider/model and feature-flag state from daemon-served vault settings. |
 | c-AC-2 | Given the panel, when the user selects a provider, then that provider's curated catalog models load; when the user picks a model, then the active provider/model setting persists and survives reload. |
-| c-AC-3 | Given the panel, when the user toggles dreaming on, then the `dreaming.enabled` setting is written to the vault and the toggle reflects the persisted value on reload. |
+| c-AC-3 | Given the panel, when the user toggles pollinating on, then the `pollinating.enabled` setting is written to the vault and the toggle reflects the persisted value on reload. |
 | c-AC-4 | Given a provider key, when the panel renders, then it shows presence ("set ✓" / "not set") by name only and never displays a secret value. |
 | c-AC-5 | Given the panel, when any change is made, then the write goes through a daemon endpoint (the panel never opens the vault directly), consistent with PRD-020b. |
 

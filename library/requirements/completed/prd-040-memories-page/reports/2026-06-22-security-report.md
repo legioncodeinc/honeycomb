@@ -11,7 +11,7 @@
 ## Executive Summary
 
 This audit covers the PRD-040 memories-page change set: a browse/search/view + add/edit/forget +
-compact/dream/watch surface that consumes the **existing** `/api/memories/*` CRUD, `/api/diagnostics/{compact,dream}`,
+compact/pollinate/watch surface that consumes the **existing** `/api/memories/*` CRUD, `/api/diagnostics/{compact,pollinate}`,
 and `/api/logs` endpoints (no new route), plus one **additive** widen of the daemon `MemoryRecord` read-model.
 
 The diff is exemplary on every axis the threat checklist names. Every SQL identifier in the widened SELECT

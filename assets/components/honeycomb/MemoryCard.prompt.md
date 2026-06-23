@@ -9,7 +9,7 @@
   scope="team"
   verified
 />
-<MemoryCard memoryKey="auth/token-drift" snippet="Re-mint on org switch." dreaming />
+<MemoryCard memoryKey="auth/token-drift" snippet="Re-mint on org switch." pollinating />
 ```
 
-`verified` shows the green source-backed state; `dreaming` shows the violet consolidation pulse. `scope`: personal | team | org.
+`verified` shows the green source-backed state; `pollinating` shows the violet consolidation pulse. `scope`: personal | team | org.

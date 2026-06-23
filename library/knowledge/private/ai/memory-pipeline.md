@@ -8,7 +8,7 @@ How a raw memory becomes structured, deduplicated, graph-linked recall. The extr
 - [`session-capture.md`](session-capture.md)
 - [`retrieval.md`](retrieval.md)
 - [`knowledge-graph-ontology.md`](knowledge-graph-ontology.md)
-- [`dreaming-loop.md`](dreaming-loop.md)
+- [`pollinating-loop.md`](pollinating-loop.md)
 - [`model-provider-router.md`](model-provider-router.md)
 - [`../data/schema.md`](../data/schema.md)
 

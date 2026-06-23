@@ -3,7 +3,7 @@ import React from "react";
 /**
  * Honeycomb Button. Honey is the brand action; the scarcity rule means
  * one primary (honey) button per visible region. Secondary and ghost
- * carry the rest. Dream variant is reserved for Dreaming / maintenance.
+ * carry the rest. Pollinate variant is reserved for Pollinating / maintenance.
  */
 export function Button({
   children,
@@ -40,10 +40,10 @@ export function Button({
       color: "var(--text-secondary)",
       border: "1px solid transparent",
     },
-    dream: {
-      background: "var(--dream-subtle)",
-      color: "var(--dream)",
-      border: "1px solid var(--dream-border)",
+    pollinate: {
+      background: "var(--pollinate-subtle)",
+      color: "var(--pollinate)",
+      border: "1px solid var(--pollinate-border)",
     },
     danger: {
       background: "var(--severity-critical-bg)",
@@ -79,7 +79,7 @@ export function Button({
     primary: "var(--honey-hover)",
     secondary: "var(--bg-subtle)",
     ghost: "var(--bg-elevated)",
-    dream: "var(--dream-subtle)",
+    pollinate: "var(--pollinate-subtle)",
     danger: "var(--severity-critical-bg)",
   };
 

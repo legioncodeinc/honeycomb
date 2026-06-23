@@ -22,7 +22,7 @@ Build the entity model (entities with a canonical name and type, weighted aspect
 - Dependency edges and supersession (PRD-008b).
 - The ontology control plane, proposals, and assertions (PRD-008c).
 - The background pipeline graph writer that bulk-upserts entities (PRD-006d).
-- Model-driven graph reshaping (the dreaming loop).
+- Model-driven graph reshaping (the pollinating loop).
 
 ## User stories
 

@@ -37,11 +37,11 @@ export interface PageProps {
 	/** The base path the host serves assets (mark/logo) under (loopback, no secret — D-9). */
 	readonly assetBase: string;
 	/**
-	 * Whether a Dream pass is currently active (D-5: the "Dream now" action lives in the SHELL chrome,
-	 * so the dreaming flag is owned there and passed DOWN). Informational for most pages; the Dashboard
-	 * page reads it to drive the graph/card dream pulse. Defaults `false` for a page that ignores it.
+	 * Whether a Pollinate pass is currently active (D-5: the "Pollinate now" action lives in the SHELL chrome,
+	 * so the pollinating flag is owned there and passed DOWN). Informational for most pages; the Dashboard
+	 * page reads it to drive the graph/card pollinate pulse. Defaults `false` for a page that ignores it.
 	 */
-	readonly dreaming?: boolean;
+	readonly pollinating?: boolean;
 }
 
 /** The maximum readable content width — preserves the old `.wrap` 1180px cap (D-8). */

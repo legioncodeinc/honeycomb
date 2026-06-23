@@ -70,7 +70,7 @@ function mockWire(harnesses: HarnessStatusWire[], logs: LogRecordWire[] = []): W
 		logs: vi.fn(async () => logs),
 		harnesses: vi.fn(async () => harnesses),
 		health: vi.fn(),
-		dream: vi.fn(),
+		pollinate: vi.fn(),
 		vaultSettings: vi.fn(),
 		setSetting: vi.fn(),
 		secretNames: vi.fn(),
@@ -78,7 +78,7 @@ function mockWire(harnesses: HarnessStatusWire[], logs: LogRecordWire[] = []): W
 }
 
 function pageProps(wire: WireClient): PageProps {
-	return { wire, daemonUp: true, assetBase: "assets", dreaming: false };
+	return { wire, daemonUp: true, assetBase: "assets", pollinating: false };
 }
 
 let container: HTMLDivElement;

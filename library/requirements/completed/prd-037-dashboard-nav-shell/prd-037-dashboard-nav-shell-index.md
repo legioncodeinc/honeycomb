@@ -80,7 +80,7 @@ the empty page frame for each destination below — but NOT the page's content, 
 | 4 | Graph | `#/graph` | **PRD-041** | The codebase-graph canvas as a full page. |
 | 5 | Sync | `#/sync` | **PRD-042** | Skill-sync / propagation page. |
 | 6 | Logs | `#/logs` | **PRD-043** | The live-log stream as a full page. |
-| 7 | Settings | `#/settings` | **PRD-044** | Provider · model · dreaming · vault key-presence. |
+| 7 | Settings | `#/settings` | **PRD-044** | Provider · model · pollinating · vault key-presence. |
 
 ## Acceptance Criteria
 
@@ -130,7 +130,7 @@ the empty page frame for each destination below — but NOT the page's content, 
 - **D-5 — Shell owns connectivity, pages do not.** The `/health` poll and the daemon-down view-swap move UP to the
   shell. A page component never re-implements the banner; when the daemon is down the shell swaps the content outlet
   for the ConnectivityBanner and suspends page hydration, then restores the active page on reconnect (PRD-024 AC-5
-  semantics, now shell-level). The "Dream now" action relocates with the Header into the shell chrome.
+  semantics, now shell-level). The "Pollinate now" action relocates with the Header into the shell chrome.
 - **D-6 — Move-then-reorganize, not rewrite.** 037 moves the CURRENT `app.tsx` body onto the Dashboard page
   component verbatim (a lift-and-shift) so the shell ships with zero content regression. The reorg of that home page
   is explicitly PRD-038's job; 037 must not change what the Dashboard page renders, only WHERE it renders.
@@ -157,7 +157,7 @@ the empty page frame for each destination below — but NOT the page's content, 
 - **OQ-3** — The Harnesses page (PRD-039) wants dynamically-loaded per-harness items. Does the dynamic registry
   resolve those from an existing live endpoint, or does PRD-039 add one? (037c defines the registry CONTRACT for
   dynamic entries; the data source is PRD-039's call.)
-- **OQ-4** — Should "Dream now" stay a global action in the shell chrome (always available), or move onto a specific
+- **OQ-4** — Should "Pollinate now" stay a global action in the shell chrome (always available), or move onto a specific
   page? D-5 keeps it global for now; revisit when PRD-038 reorganizes the Dashboard home.
 
 ## Related

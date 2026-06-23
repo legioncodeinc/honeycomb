@@ -114,11 +114,11 @@ export interface StageWorkerDeps {
 	/**
 	 * The job kinds this worker leases. Defaults to {@link PIPELINE_JOB_KINDS} (the
 	 * five pipeline kinds). The SAME `memory_jobs` queue also carries `summary` /
-	 * `skillify` / `dreaming` jobs, so a bare `lease()` would grab one of THOSE,
+	 * `skillify` / `pollinating` jobs, so a bare `lease()` would grab one of THOSE,
 	 * fail to run it as a pipeline job, and walk a legit foreign job toward `dead`.
 	 * Passing the kind filter (the additive `JobQueueService.lease(kinds)`) makes the
 	 * worker lease ONLY pipeline jobs and leave every foreign kind queued for its own
-	 * worker — the load-bearing invariant the dreaming worker also relies on.
+	 * worker — the load-bearing invariant the pollinating worker also relies on.
 	 */
 	readonly leaseKinds?: readonly string[];
 	/** Poll interval in ms when running the continuous loop. Default 1000. */
@@ -195,7 +195,7 @@ class PipelineStageWorker implements StageWorker {
 
 	async runOnce(): Promise<boolean> {
 		// Lease ONLY pipeline kinds (the kind filter) — a foreign summary/skillify/
-		// dreaming job is left queued for its own worker, never grabbed-and-failed here.
+		// pollinating job is left queued for its own worker, never grabbed-and-failed here.
 		const leased = await this.queue.lease(this.leaseKinds);
 		if (leased === null) return false;
 

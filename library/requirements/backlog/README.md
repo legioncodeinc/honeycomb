@@ -33,7 +33,7 @@ Planned PRDs not yet in implementation. All new PRD folders are created here. Th
 | 2 Engine | prd-006 | memory-pipeline | P0 |
 | 2 Engine | prd-007 | retrieval | P0 |
 | 2 Engine | prd-008 | knowledge-graph-ontology | P1 |
-| 2 Engine | prd-009 | dreaming-loop | P2 |
+| 2 Engine | prd-009 | pollinating-loop | P2 |
 | 2 Engine | prd-010 | model-provider-router | P1 |
 | 3 Tenancy + security | prd-011 | tenancy-and-auth | P0 |
 | 3 Tenancy + security | prd-012 | secrets | P1 |

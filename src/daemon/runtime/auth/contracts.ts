@@ -491,7 +491,7 @@ export function encodeStubToken(claims: TokenClaims): string {
 // ────────────────────────────────────────────────────────────────────────────
 
 /**
- * The standard "Wave 2 fills this" thrower (mirrors the inference/dreaming harness
+ * The standard "Wave 2 fills this" thrower (mirrors the inference/pollinating harness
  * posture). A stubbed seam body calls this so an accidental early call FAILS LOUD
  * with the owning sub-PRD, never silently returns a fake-passing (and here,
  * security-relevant) value.

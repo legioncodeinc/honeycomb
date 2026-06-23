@@ -177,7 +177,7 @@ The real `ProviderTransport` against `https://api.anthropic.com/v1/messages`.
   (`AnthropicMessagesResponseSchema`); the `content[]` `type:"text"` blocks are
   joined into `ProviderResult.output`.
 - `stream(call)` is a THIN wrapper: a non-stream execute yielding one terminal
-  `ProviderChunk` carrying the full text (the dreaming path consumes a whole
+  `ProviderChunk` carrying the full text (the pollinating path consumes a whole
   completion, not a token stream). The seam shape is preserved so a real SSE body
   can replace it later without touching the router.
 - **Error mapping (load-bearing):** a non-2xx response THROWS
@@ -199,13 +199,13 @@ The real `ProviderTransport` against `https://api.anthropic.com/v1/messages`.
 `createInferenceRouter(...)` and returns `new RouterModelClient(router)` typed as the
 006 `ModelClient`. Returns `noopModelClient` (NEVER throws) when the config is
 absent, empty, non-routable (no accounts/workloads), or even malformed — a daemon
-without inference configured runs recall on lexical fallback and dreaming is simply
+without inference configured runs recall on lexical fallback and pollinating is simply
 unavailable. `history` defaults to `noopRoutingHistoryStore` so the factory stays
 storage-free (telemetry wiring is a separate assembly step).
 
 **Wave-1c assembly note:** call `await buildInferenceModelClient({ scope,
 secretsStore, config })` and inject the result wherever `noopModelClient` is today
-(stages + the dreaming runner). `config` should be the daemon's resolved
+(stages + the pollinating runner). `config` should be the daemon's resolved
 `InferenceConfig` (or the `agent.yaml` path). No `agent.yaml` exists yet — the
 factory degrades to no-op until one is created, so wiring it is safe before the
 config lands.

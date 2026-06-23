@@ -25,7 +25,7 @@ to every user who opens `GET /dashboard`:
    `0 tok` for everyone, so a headline value prop of the product reads as broken.
 3. **The codebase-graph widget is blank.** `GraphCanvas` in `src/dashboard/web/panels.tsx` only
    draws a node whose `id` is in a HARDCODED `NODE_POS` map (`daemon`/`capture`/`recall`/
-   `pipeline`/`store`/`dreaming`). Real snapshot node ids (file paths / symbols from
+   `pipeline`/`store`/`pollinating`). Real snapshot node ids (file paths / symbols from
    `fetchGraphView` reading the `codebase` table) never match, so `if (!p) return null` skips EVERY
    node. The header reads "N nodes · M edges" while the canvas is empty and nothing is clickable.
 
@@ -53,7 +53,7 @@ storage table names, or the route topology.
   `GraphCanvas` mini-widget so PRD-041 can reuse a correct component. (See Related.)
 - **Not the nav-shell.** These fixes predate the nav-shell **PRD-037**; they apply to the current
   single page and carry forward unchanged into the shell.
-- No change to recall ranking, the embeddings runtime, or the dreaming loop.
+- No change to recall ranking, the embeddings runtime, or the pollinating loop.
 
 ## Features
 
