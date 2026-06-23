@@ -353,6 +353,20 @@ export const echoDocumentContentFetcher: DocumentContentFetcher = {
 	},
 };
 
+/**
+ * True when a fetcher error is a CALLER error — a URL the fetcher REFUSED to fetch
+ * (a blocked scheme, a blocked address range, too many redirects) rather than a
+ * transport failure of an allowed URL. Such an error must NOT be swallowed into a
+ * `failed` job: it propagates out of `submit` so the API maps it to a 4xx (caller
+ * error), not a 5xx/202-failed. Duck-typed on a stable `ssrfBlocked === true` marker
+ * so this module never imports the fetcher implementation (no cycle). A transport
+ * failure (timeout, DNS error of an allowed host, 5xx, size cap) carries NO such
+ * marker and stays fail-soft (the job fails cleanly, the daemon serves on).
+ */
+export function isBlockedUrlError(err: unknown): boolean {
+	return typeof err === "object" && err !== null && (err as { ssrfBlocked?: unknown }).ssrfBlocked === true;
+}
+
 /** Construction deps for the real document worker (everything injected — CONVENTIONS §1). */
 export interface DocumentWorkerDeps {
 	/** Run every statement through this storage client — never a raw fetch. */
@@ -504,10 +518,16 @@ class DurableDocumentWorker implements DocumentWorker {
 			const fetched = await this.fetcher.fetch(submission);
 			content = fetched.content;
 			title = fetched.title ?? url;
-		} catch {
+		} catch (err: unknown) {
+			// Either way the job fails cleanly (append-only `failed`, never an in-place UPDATE);
+			// the daemon never crashes (b-AC-2 posture for the extract step).
 			await this.deps.queue.fail(jobId, "document extraction failed");
 			await this.writeDocumentArtifact(documentId, prov, url, "failed", "");
 			await this.progress.advance(jobId, "failed");
+			// A BLOCKED url (SSRF guard) is a CALLER error: re-throw so the API answers a
+			// clear 4xx rather than a 202-with-`failed` (a transport failure is fail-soft and
+			// returns `failed`). The thrown error carries no internal-topology detail.
+			if (isBlockedUrlError(err)) throw err;
 			return "failed";
 		}
 

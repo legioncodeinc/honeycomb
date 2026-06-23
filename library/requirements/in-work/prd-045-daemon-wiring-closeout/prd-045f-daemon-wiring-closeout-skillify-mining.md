@@ -1,6 +1,6 @@
 # PRD-045f: Wire the Skillify mining worker (closes PRD-016)
 
-> **Status:** Draft
+> **Status:** Completed
 > **Parent:** [PRD-045](./prd-045-daemon-wiring-closeout-index.md)
 > **Closes gap in:** PRD-016 Skillify
 > **Priority:** P1

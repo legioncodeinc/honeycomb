@@ -136,14 +136,19 @@ versions of a skill to the REAL backend and asserts the highest-version read ret
 fresh table). `queryTimeoutMs: 120_000`; DROP the table in `afterAll`. Do NOT run it
 locally (no creds) — the orchestrator runs it.
 
-## 11. Deferred daemon-assembly + hook wiring
+## 11. Daemon-assembly + hook wiring — LIVE by PRD-045f
 
-The skillify **worker** (the `memory_jobs` job that runs `mine` → `writeSkill` →
-`advanceWatermark`) and the **hook signal** (session-end stop-counter trigger → daemon)
-are mounted by the daemon-assembly step (the same deferred-assembly posture as
-`sources/api.ts` / `secrets/api.ts`). Wave 1 does NOT edit `server.ts` or the worker
-registry — it ships the verdict→write core + the seams. 016a wires the trigger + the
-worker; 016c wires the auto-pull at session start.
+The skillify **worker** and **hook signal** are wired as of PRD-045f (2026-06-22):
+
+- `buildSkillifyWorker` is called at `assemble.ts:1283`; start at `:1617-1618`;
+  stop at `:1694-1696`. The worker leases `["skillify"]` (`worker.ts:187`).
+- The session-end stop-counter trigger signals the daemon via
+  `src/hooks/shared/session-end.ts` → `POST /api/hooks/session-end` intent `"skillify"`.
+- `skillify pull` CLI verb is registered in `contracts.ts:88`; dispatch routes to
+  `POST /api/skills/pull` via `storage-handlers.ts:114`.
+
+The seam contracts below remain authoritative for anyone editing the miner, install, or
+propagation modules.
 
 ## 12. PRD-018 team-skill-sharing hardening (the 018a/b/c layer)
 
@@ -167,15 +172,21 @@ through the injected `SkillPullClient` / `TrustedTableList` seams; the publish e
 sole DeepLake-touching 018 module and lives under `src/daemon/`. The symlink/backup logic is
 factored into ONE `linkInto` primitive + a `backupExisting` helper (no copy-paste — jscpd).
 
-## 13. Deferred 018 wiring (honest deferral — matches 016c/017 posture)
+## 13. PRD-045g team-skill-sharing wiring — LIVE
 
-The hook-assembly wiring is the deferred pure-wiring step, NOT built here:
-  - the SessionStart hook actually calling `autoPull` (with the real `install`/`manifest`/
-    `trustedTables` seams supplied);
-  - the bundled `honeycomb` bin dispatching `skill scope` / `skill unpull` (`src/cli/index.ts`
-    is still the version-print stub — `skill.ts` / `skillify.ts` / `org.ts` are all
-    constructed-and-tested behind seams but not yet mounted on the bin);
-  - the daemon HTTP route mounting `createSkillPublishEndpoint` (mirrors `sources/api.ts`).
+The PRD-018 hook wiring is complete as of PRD-045g (2026-06-22):
 
-All 018 modules are constructed-and-tested behind seams (21/21 ACs green). The hook is NOT
-wired — do not claim it is.
+- **Auto-pull at session start:** `SessionStartDeps` is built with the real `autoPull`
+  seam injected at `runtime.ts:191` (`createSessionStartSeams`). The pull is
+  time-budgeted (5 s abort), has a kill-switch, and is fail-soft.
+- **Publish endpoint mounted:** `mountSkillPropagationApi` (`skillify/propagation-api.ts`)
+  is fired at `assemble.ts:908` via `seams.mountSkillPropagation`; `POST /api/skills`
+  publish returns `{published, version}` (no 501).
+- **CLI deduplication:** the duplicate `src/cli/skill.ts` and `src/cli/skillify.ts`
+  were deleted; `skill` + `skillify` verbs now live in the unified `VERB_TABLE` →
+  `buildSkillRequest`.
+- **Cross-harness fan-out:** `POST /api/skills/pull` → real pull engine →
+  `fanOutSymlinks` into agent roots; re-pull is idempotent (`decideAction` writes 0).
+
+All 21 PRD-018 ACs are DONE/VERIFIED. The "deferred" posture above is historical
+context only — do not treat it as current state.

@@ -63,13 +63,13 @@ applies its shaping phases; an entity gets linked and `/api/ontology` answers; a
 
 | Sub-PRD | Source PRD | Scope | Status |
 |---|---|---|---|
-| [`prd-045a-...-memory-pipeline`](./prd-045a-daemon-wiring-closeout-memory-pipeline.md) | 006 | Construct + start the pipeline worker; enqueue pipeline jobs on capture; fill the 4 stub stages. | Draft |
-| [`prd-045b-...-retrieval-engine`](./prd-045b-daemon-wiring-closeout-retrieval-engine.md) | 007 | Wire the five-phase `RecallEngine` onto the recall route (or de-scope + reconcile). | Draft |
-| [`prd-045c-...-ontology-surface`](./prd-045c-daemon-wiring-closeout-ontology-surface.md) | 008 | Invoke the inline entity linker on capture/pipeline; mount `/api/ontology/*` + CLI. | Draft |
-| [`prd-045d-...-dreaming-activation`](./prd-045d-daemon-wiring-closeout-dreaming-activation.md) | 009 | Decide default posture; prove the dreaming pass end-to-end (enqueue→lease→model→apply→state). | Draft |
-| [`prd-045e-...-sources-documents`](./prd-045e-daemon-wiring-closeout-sources-documents.md) | 013 | Fire `mountSourcesApi`; wire the document worker + providers. | Draft |
-| [`prd-045f-...-skillify-mining`](./prd-045f-daemon-wiring-closeout-skillify-mining.md) | 016 | Construct + start a `["skillify"]` worker; register the `skillify pull` CLI verb. | Draft |
-| [`prd-045g-...-team-skill-sharing`](./prd-045g-daemon-wiring-closeout-team-skill-sharing.md) | 018 | Mount publish endpoint; wire session-start auto-pull seam; register skill CLI verbs. | Draft |
+| [`prd-045a-...-memory-pipeline`](./prd-045a-daemon-wiring-closeout-memory-pipeline.md) | 006 | Construct + start the pipeline worker; enqueue pipeline jobs on capture; fill the 4 stub stages. | Completed |
+| [`prd-045b-...-retrieval-engine`](./prd-045b-daemon-wiring-closeout-retrieval-engine.md) | 007 | Wire the five-phase `RecallEngine` onto the recall route (or de-scope + reconcile). | Resolved — DE-SCOPED |
+| [`prd-045c-...-ontology-surface`](./prd-045c-daemon-wiring-closeout-ontology-surface.md) | 008 | Invoke the inline entity linker on capture/pipeline; mount `/api/ontology/*` + CLI. | Completed |
+| [`prd-045d-...-dreaming-activation`](./prd-045d-daemon-wiring-closeout-dreaming-activation.md) | 009 | Decide default posture; prove the dreaming pass end-to-end (enqueue→lease→model→apply→state). | Completed |
+| [`prd-045e-...-sources-documents`](./prd-045e-daemon-wiring-closeout-sources-documents.md) | 013 | Fire `mountSourcesApi`; wire the document worker + providers. | Completed |
+| [`prd-045f-...-skillify-mining`](./prd-045f-daemon-wiring-closeout-skillify-mining.md) | 016 | Construct + start a `["skillify"]` worker; register the `skillify pull` CLI verb. | Completed |
+| [`prd-045g-...-team-skill-sharing`](./prd-045g-daemon-wiring-closeout-team-skill-sharing.md) | 018 | Mount publish endpoint; wire session-start auto-pull seam; register skill CLI verbs. | Completed |
 
 ## Decisions
 
@@ -101,7 +101,7 @@ applies its shaping phases; an entity gets linked and `/api/ontology` answers; a
       workspace/harness (045g), proven end-to-end.
 - [ ] **AC-6** — The retrieval shaping phases are either **on the live recall path** or formally **de-scoped**, with
       PRD-007's doc reconciled to match runtime (045b).
-- [ ] **AC-7** — Each affected Completed PRD index carries an accurate reconciliation note, and no `Status:`
+- [x] **AC-7** — Each affected Completed PRD index carries an accurate reconciliation note, and no `Status:`
       overstates runtime reality.
 
 ## Related

@@ -85,6 +85,7 @@ export const VERB_TABLE: readonly VerbSpec[] = Object.freeze([
 	{ verb: "settings", cls: "storage", summary: "get/set/list vault settings + provider→model selector through the daemon" },
 	{ verb: "asset", cls: "storage", summary: "register/promote/demote/style skills+agents through the tier×style lattice (033)" },
 	{ verb: "skill", cls: "storage", summary: "skillify scope/pull/unpull/force through the daemon" },
+	{ verb: "skillify", cls: "storage", summary: "pull team skills from the daemon (016c)" },
 	{ verb: "hook", cls: "local", summary: "inspect/wire harness hooks" },
 	{ verb: "route", cls: "storage", summary: "manage inference routes through the daemon" },
 	{ verb: "sources", cls: "storage", summary: "connect/index/purge sources through the daemon" },

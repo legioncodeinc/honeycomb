@@ -68,6 +68,7 @@ import {
 	appendVersionBumped,
 	val,
 } from "../../storage/writes.js";
+import { type InlineLinkResult, inlineLinkMemory } from "../ontology/entity-model.js";
 import type { PipelineConfig } from "./config.js";
 import type { EntityTriple } from "./contracts.js";
 import type { StageHandler, StageJob } from "./stage-worker.js";
@@ -322,11 +323,24 @@ interface GraphPersistPayload {
 	readonly memoryId?: unknown;
 	/** The entity triples extracted in 006a, forwarded to this stage. */
 	readonly entities?: unknown;
+	/**
+	 * The committed memory's content text (PRD-045c), forwarded from the controlled-write
+	 * job so the inline entity LINKER can scan it for proper-noun mentions. Optional +
+	 * backward-compatible: a pre-045c payload omits it → the linker sees `""` and links
+	 * nothing (the entity-creation path still runs from the triples).
+	 */
+	readonly content?: unknown;
 }
 
 function readMemoryId(payload: Record<string, unknown>): string {
 	const id = (payload as GraphPersistPayload).memoryId;
 	return typeof id === "string" && id.length > 0 ? id : "";
+}
+
+/** Read the committed memory content off the payload (PRD-045c); `""` when absent. */
+function readContent(payload: Record<string, unknown>): string {
+	const content = (payload as GraphPersistPayload).content;
+	return typeof content === "string" ? content : "";
 }
 
 function readEntities(payload: Record<string, unknown>): EntityTriple[] {
@@ -363,10 +377,32 @@ const DEFAULT_LOGGER: GraphPersistLogger = {
 	},
 };
 
+// ── The inline-linker seam (PRD-045c — c-AC-1) ─────────────────────────────────
+
+/**
+ * The inline entity linker the graph-persist stage invokes on the LIVE write path
+ * (PRD-045c c-AC-1). The default is the real {@link inlineLinkMemory} (008a); a unit
+ * test injects a recorder/fake so the invocation is provable without a backend.
+ *
+ * It is model-free, network-free, append-only, and idempotent by deterministic
+ * `(memoryId, entityId)` mention id — so re-running it (a job retry, OR the future
+ * 045d dreaming consolidation pass) writes NOTHING new. That idempotency is what makes
+ * the pipeline-apply path and the dreaming-apply path safe to BOTH invoke without
+ * double-writing the same mention (the 045d coordination contract).
+ */
+export type InlineLinker = (
+	storage: StorageQuery,
+	scope: QueryScope,
+	args: { readonly agentId: string; readonly memoryId: string; readonly content: string },
+) => Promise<InlineLinkResult>;
+
 // ── Core graph-persist logic ──────────────────────────────────────────────────
 
 /**
- * Persist one memory's entity triples to the knowledge-graph tables (d-AC-1..5).
+ * Persist one memory's entity triples to the knowledge-graph tables (d-AC-1..5) and,
+ * PRD-045c, LINK the committed memory's proper-noun mentions to the now-existing entities
+ * via the inline entity linker on the SAME live write path (c-AC-1).
+ *
  * Called from the stage handler; kept as a named export so unit tests can
  * exercise the logic directly without the handler wrapper (mirrors the extraction
  * stage's `extractFromText` / `createExtractionHandler` split).
@@ -376,6 +412,10 @@ const DEFAULT_LOGGER: GraphPersistLogger = {
  *     is false (d-AC-4).
  *   - Iterates triples: upsert source entity, upsert target entity, upsert
  *     dependency edge, insert-or-ignore mention for source and target (d-AC-1).
+ *   - PRD-045c (c-AC-1): AFTER the entities exist, runs the inline linker over the
+ *     committed memory's `content` so proper-noun mentions link to the just-created
+ *     entities — the LIVE invocation the inline linker never had. Idempotent +
+ *     append-only, so a job retry (or the 045d dreaming pass) re-links nothing.
  *   - All writes idempotent via deterministic ids + poll-convergent dedup (d-AC-2).
  *   - All rows carry `agent_id` from `scope` (d-AC-5).
  */
@@ -386,6 +426,8 @@ export async function persistGraphEntities(
 	memoryId: string,
 	triples: EntityTriple[],
 	logger: GraphPersistLogger,
+	content = "",
+	linkMemory: InlineLinker = inlineLinkMemory,
 ): Promise<void> {
 	// d-AC-4: gate — both flags must be on.
 	if (!config.graph.enabled || !config.graph.extractionWritesEnabled) {
@@ -417,7 +459,22 @@ export async function persistGraphEntities(
 		await insertMentionIfAbsent(storage, scope, agentId, memoryId, targetId);
 	}
 
-	logger.info?.("graph_persist.done", { memoryId, triples: triples.length });
+	// 5. PRD-045c (c-AC-1): the LIVE inline-linker invocation. The triples above already
+	//    created the entities, so the linker now resolves them by exact canonical name and
+	//    links the memory's proper-noun mentions to them. It is append-only + idempotent by
+	//    deterministic `(memoryId, entityId)` id (its own `mention_*` lineage), so it never
+	//    double-writes — re-running this stage (a retry) OR the future 045d dreaming pass
+	//    re-links nothing. A linker error is non-fatal here too (the handler wraps the whole
+	//    body, d-AC-3): linking is a derived index over the committed facts, never a gate.
+	const linkContent = content !== "" ? content : triples.map((t) => `${t.source} ${t.target}`).join(". ");
+	const linked = await linkMemory(storage, scope, { agentId, memoryId, content: linkContent });
+
+	logger.info?.("graph_persist.done", {
+		memoryId,
+		triples: triples.length,
+		linkedMentions: linked.mentions.length,
+		linkCandidates: linked.candidateCount,
+	});
 }
 
 // ── Handler factory ───────────────────────────────────────────────────────────
@@ -440,6 +497,13 @@ export interface GraphPersistHandlerDeps {
 	readonly config: PipelineConfig;
 	/** Optional structured-log sink for warnings. Defaults to stderr. */
 	readonly logger?: GraphPersistLogger;
+	/**
+	 * The inline entity LINKER invoked on the live write path (PRD-045c c-AC-1). Defaults to
+	 * the real {@link inlineLinkMemory}; a unit test injects a recorder so the live invocation
+	 * is provable. Idempotent + append-only, so it is safe to invoke alongside the future 045d
+	 * dreaming consolidation pass without double-writing the same mention.
+	 */
+	readonly linkMemory?: InlineLinker;
 }
 
 /**
@@ -454,14 +518,15 @@ export interface GraphPersistHandlerDeps {
 export function createGraphPersistHandler(deps?: GraphPersistHandlerDeps): StageHandler {
 	if (!deps) return noopGraphPersistHandler;
 
-	const { storage, scope, config, logger = DEFAULT_LOGGER } = deps;
+	const { storage, scope, config, logger = DEFAULT_LOGGER, linkMemory = inlineLinkMemory } = deps;
 
 	return async (job: StageJob): Promise<void> => {
 		// d-AC-3: non-fatal — wrap the whole body. A throw here must NEVER escape.
 		try {
 			const memoryId = readMemoryId(job.payload);
 			const triples = readEntities(job.payload);
-			await persistGraphEntities(storage, scope, config, memoryId, triples, logger);
+			const content = readContent(job.payload);
+			await persistGraphEntities(storage, scope, config, memoryId, triples, logger, content, linkMemory);
 		} catch (err: unknown) {
 			// d-AC-3: log a warning and return normally — the job is NOT failed.
 			const message = err instanceof Error ? err.message : String(err);

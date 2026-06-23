@@ -74,6 +74,18 @@ export interface CaptureHandlerDeps {
 	/** The durable queue the per-turn cues are enqueued into (FR-8 — NOT inline). */
 	readonly queue: JobQueueService;
 	/**
+	 * PRD-045a (a-AC-2): the memory-pipeline ENTRY enqueue. Called once per accepted
+	 * capture (NOT inline — it enqueues a `memory_extraction` job onto the SAME durable
+	 * queue and returns), so a captured turn enters the extraction → decision →
+	 * controlled-write → graph-persist pipeline. Given the captured event's text + the
+	 * tenancy scope it enqueues the entry job (the daemon wires this to the pipeline
+	 * fan-out). Optional + FAIL-SOFT: when absent (the Wave-1 posture / a unit test that
+	 * does not exercise the pipeline) capture behaves exactly as before; when present, a
+	 * throw is caught + logged and NEVER breaks the captured turn (the capture path must
+	 * never fail because the pipeline enqueue did).
+	 */
+	readonly enqueuePipelineEntry?: (text: string, scope: QueryScope, agentId: string) => Promise<void>;
+	/**
 	 * The embed seam called non-blocking after the INSERT (D-3 / 005b). Defaults to
 	 * the no-op attachment: the column stays NULL and the continuation is inert.
 	 */
@@ -173,6 +185,12 @@ class CaptureRouteHandler {
 		const cues = this.bumpCounters(metadata);
 		await this.enqueueCues(cues);
 
+		// PRD-045a (a-AC-2): enqueue the memory-pipeline ENTRY job so the captured turn
+		// flows through extraction → decision → controlled-write → graph-persist. It is a
+		// queue enqueue (NOT inline work), and FAIL-SOFT — a pipeline enqueue failure must
+		// never break the capture path (the row is already committed above).
+		await this.enqueuePipelineEntry(event, scope, metadata.agentId);
+
 		// Fire-and-forget embed (D-3 / b-AC-4): kicked WITHOUT awaiting before responding.
 		this.kickEmbed(id, event, scope);
 
@@ -271,6 +289,28 @@ class CaptureRouteHandler {
 			await this.deps.queue.enqueue({
 				kind: cue.kind,
 				payload: { sessionId: cue.sessionId, path: cue.path, count: cue.count },
+			});
+		}
+	}
+
+	/**
+	 * Enqueue the memory-pipeline ENTRY job (PRD-045a a-AC-2). Derives the captured
+	 * event's text (the same source string the embed seam uses), and — when the daemon
+	 * wired the pipeline seam AND there is text to extract from — calls it to enqueue a
+	 * `memory_extraction` job. FAIL-SOFT: any throw is caught + logged so a pipeline
+	 * enqueue failure NEVER breaks the captured turn (the `sessions` row is already
+	 * committed). A no-op when the seam is unwired (the Wave-1 posture).
+	 */
+	private async enqueuePipelineEntry(event: CaptureEvent, scope: QueryScope, agentId: string): Promise<void> {
+		const enqueue = this.deps.enqueuePipelineEntry;
+		if (enqueue === undefined) return;
+		const text = embedTextFor(event);
+		if (text === "") return; // nothing to extract from (e.g. an empty tool response).
+		try {
+			await enqueue(text, scope, agentId);
+		} catch (err: unknown) {
+			this.deps.logger?.event("capture.pipeline_enqueue.failed", {
+				reason: err instanceof Error ? err.message : String(err),
 			});
 		}
 	}

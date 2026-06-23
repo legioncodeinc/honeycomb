@@ -1,81 +1,41 @@
-# Recall engine — CONVENTIONS (PRD-007)
+# Recall — CONVENTIONS (PRD-007, de-scoped per PRD-045b)
 
-The five-phase recall engine lives under `src/daemon/runtime/recall/` (daemon-only;
-the storage path lives only in the daemon bundle). Wave 1 built the shared scaffold
-+ the ScopeClauseBuilder + 007a collection + the recall-engine harness, and
-pre-wired four phase stubs. Wave 2's four Bees each fill ONE phase module + test.
+The modules under `src/daemon/runtime/recall/` are daemon-only (the storage path
+lives only in the daemon bundle). What remains here after the **PRD-045b de-scope**
+is the part that is actually live: **007a candidate collection** (reused by the VFS
+browse seam), the **recall config**, the **cross-phase contracts**, and the
+**`buildScopeClause` authorization chokepoint**.
 
-This file is the contract Wave 2 follows. Read it before filling a phase.
+## PRD-045b de-scope — what was removed and why
 
-## The flow
+The five-phase `RecallEngine` orchestrator (`collect → traverse → authorize → shape
+→ gate`) and its four phase modules (`engine.ts`, `traversal.ts`, `authorization.ts`,
+`shaping.ts`, `gate.ts`) were **removed**. They had **zero production callers**: live
+recall is `recallMemories` (lexical UNION-ALL + semantic `<#>` RRF, with an honest
+`degraded` flag) in `src/daemon/runtime/memories/recall.ts`, reached from
+`POST /api/memories/recall` (`memories/api.ts`). The engineered currentness
+downweighting was redundant with the append-only highest-version + `is_deleted`
+model on the live recall tables and PRD-008 supersession-on-read of
+`entity_attributes`; the confidence gate had no consumer (every surface — MCP
+`memory_search`/`hivemind_search`, the SDK `recall()`, the dashboard, the CLI — wants
+raw ranked recall, not an inject/empty decision). See
+`library/requirements/in-work/prd-045-daemon-wiring-closeout/prd-045b-daemon-wiring-closeout-retrieval-engine.md`.
 
-```
-collect (007a) → traverse (007b) → authorize (007c) → shape (007d) → gate (007e)
-```
+## What remains (the live surface)
 
-Up to and through **authorization, only IDs move** (`Candidate` carries an `id`,
-per-channel `scores`, `provenance` — never content). Content is hydrated ONLY in
-the gate (007e), strictly on the authorized set, under the same scope clause.
+| File | What it owns | Live consumer |
+|---|---|---|
+| `collection.ts` | 007a — the FTS + vector + hint channels + merge (`collectCandidates`). | `vfs/api.ts` (the `/memory` browse seam). |
+| `config.ts` | The recall config (zod): over-fetch, hint cap, channel limit, reranker/dampening knobs, etc. | `collection.ts` / `vfs/api.ts`. |
+| `contracts.ts` | `Candidate`, `CandidateScores`, `MergedPool`, `RecallQuery`/`RecallScope`/`CallerFilters`, `RecallChannel`, `RecallLogger`, `mergeChannels`, `bestScore`. The cross-phase shapes. | `collection.ts` / `vfs/api.ts`. |
+| `scope-clause.ts` | `buildScopeClause` — THE authorization chokepoint. The three read policies. | Retained as the canonical scope-clause builder; asserted by the PRD-011a/011e suites + the live `recall-authz-live.itest.ts`. |
 
-## Shared files — DO NOT TOUCH (Wave-1 surface)
+> Note: some config knobs (`reranker.*`, `dampening.*`, `minInjectionScore`,
+> `traversal.*`, `graphEnabled`) were tuning inputs for the removed phases. They are
+> kept in `config.ts` as inert, documented defaults rather than churned out — `config.ts`
+> is the single config surface and a later pass may prune the now-unused knobs.
 
-| File | What it owns |
-|---|---|
-| `config.ts` | The recall config (zod): over-fetch, hint cap, traversal budgets, reranker, dampening, min injection score, graph gate. Defaults. A new knob is added HERE in Wave 1, never read off env in a phase. |
-| `contracts.ts` | `Candidate`, `CandidateScores`, `MergedPool`, `RecallQuery`/`RecallScope`/`CallerFilters`, `RecallChannel`, `mergeChannels`. The cross-phase shapes. |
-| `scope-clause.ts` | `buildScopeClause` — THE authorization chokepoint. The three read policies. Reused everywhere a memory query is issued. |
-| `engine.ts` | The harness: `RecallEngine`, `createRecallEngine`, `RecallPhaseDeps`, `ChannelResult`, `RecallPhases`. The phase registration. |
-| `collection.ts` | 007a — FILLED. The FTS + vector + hint channels + merge. |
-
-A Wave-2 phase ADDS its own module + test; it does NOT edit any shared file. A
-genuinely new cross-phase field is a Wave-1 change (raise it), not a phase edit.
-
-## The phase signature + engine registration
-
-Every Wave-2 phase is a function injected into `createRecallEngine({ phases })`.
-The harness defaults each to its no-op, so an un-filled engine runs inertly.
-
-```ts
-// 007b
-export type TraversalPhase   = (query, deps: RecallPhaseDeps) => Promise<ChannelResult>;
-// 007c (THE boundary)
-export type AuthorizationPhase = (pool: MergedPool, query, deps) => Promise<AuthorizedPool>;
-// 007d
-export type ShapingPhase     = (pool: AuthorizedPool, query, deps) => Promise<ShapedPool>;
-// 007e
-export type GatePhase        = (pool: ShapedPool, query, deps) => Promise<RecallResult>;
-```
-
-Register the filled phase by passing it:
-
-```ts
-const engine = createRecallEngine({
-  storage, scope, config, embed, logger,
-  phases: { traversal, authorization, shaping, gate },
-});
-```
-
-The harness wiring in `engine.ts` does not change when you fill a phase — it
-already routes through the module's exported phase, defaulting to the no-op.
-
-## How each phase reaches storage / catalog / embed / config
-
-Every phase receives `RecallPhaseDeps`:
-
-- `deps.storage` — the `StorageQuery` client. **Never a raw fetch.** Every query
-  runs through `storage.query(sql, scope)`. `audit:sql` scans `src/daemon`.
-- `deps.scope` — the `{ org, workspace }` partition (the OUTER scope ring, enforced
-  at the storage layer beneath any inner clause).
-- `deps.config` — the resolved `RecallConfig` (every knob; never read env).
-- `deps.embed` — the 005b `EmbedClient` (the query-vector seam; absent/null →
-  vector skipped, lexical degrade).
-- `deps.logger` — optional structured-log sink.
-
-SQL is built via the 002b helpers (`sqlStr`/`sqlLike`/`sqlIdent`/`sLiteral`/
-`eLiteral`) + the 002e vector builders (`buildVectorSearchSql`,
-`buildLexicalDegradeSql`) + the catalog graph helpers. NEVER hand-quote a value.
-
-## The ScopeClauseBuilder you reuse (007c, 007e, VFS browse)
+## The ScopeClauseBuilder (retained chokepoint)
 
 `buildScopeClause({ agentId, readPolicy, policyGroup, groupAgentIds, org, workspace })`
 returns a `ScopeClause { sql, values, policyApplied, error? }`:
@@ -86,31 +46,24 @@ returns a `ScopeClause { sql, values, policyApplied, error? }`:
 - ALL exclude archived (`is_deleted = 0`).
 - A malformed/missing agent id OR an unknown policy → the `isolated` fragment +
   a structured `error` (fail-closed, NEVER wider).
-- `group` resolves its member ids off the `agents` roster — **the caller (007c)
-  resolves membership and passes `groupAgentIds`**; the builder renders what it is
-  given. No members → degrades to own-only (fail-closed).
+- `group` resolves its member ids off the `agents` roster — the caller resolves
+  membership and passes `groupAgentIds`; the builder renders what it is given. No
+  members → degrades to own-only (fail-closed).
 
-The `sql` is a parenthesized WHERE fragment (no leading `WHERE`/`AND`); the caller
-ANDs it into its statement and runs under the partition `scope`. **007c re-queries
-with it; 007e re-applies the SAME compiled clause when it hydrates (e-AC-4); the VFS
-browse path reuses it (c-AC-7).** It is the single chokepoint — a scoping review is
-a search for `buildScopeClause`, not an audit of hand-written WHEREs.
+The `sql` is a parenthesized WHERE fragment (no leading `WHERE`/`AND`); a caller ANDs
+it into its statement and runs under the partition `scope`. It is the single scope
+chokepoint — a scoping review is a search for `buildScopeClause`, not an audit of
+hand-written WHEREs. (As of PRD-045b the live recall path is `recallMemories`, which
+runs under the storage-partition `QueryScope`; the agent-level read-policy clause is
+the chokepoint reused by browse/tenancy proofs.)
 
-## Where each Wave-2 phase writes
+## SQL safety
 
-| Phase | Module | Test |
-|---|---|---|
-| 007b traversal | `recall/traversal.ts` | `tests/daemon/runtime/recall/traversal.test.ts` |
-| 007c authorization | `recall/authorization.ts` | `tests/daemon/runtime/recall/authorization.test.ts` (adversarial) |
-| 007d shaping | `recall/shaping.ts` | `tests/daemon/runtime/recall/shaping.test.ts` |
-| 007e gate | `recall/gate.ts` | `tests/daemon/runtime/recall/gate.test.ts` |
+SQL is built via the 002b helpers (`sqlStr`/`sqlLike`/`sqlIdent`/`sLiteral`/
+`eLiteral`) + the 002e vector builders. NEVER hand-quote a value. `audit:sql` scans
+`src/daemon`.
 
-Each test is named after the AC it proves (one-to-one ledger map). No `.skip` /
-`.only`; `vitest run` is CI. Drive a FAKE transport (assert the emitted scoped SQL
-+ escaping + IDs-only) and a FAKE embed where the vector path is involved. 007c
-additionally gets an opt-in LIVE re-query test (gated, throwaway table).
-
-## The hint source seam (007a, for the future prospective-hints writer)
+## The hint source seam (007a)
 
 `collection.ts` reads a `HintSource` (`emptyHintSource` by default). Prospective
 hints are not written yet (PRD-006 D-2 deferred them). When the writer lands, it

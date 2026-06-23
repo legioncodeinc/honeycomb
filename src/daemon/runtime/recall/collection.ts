@@ -50,8 +50,7 @@ import {
 } from "../../storage/vector.js";
 import type { EmbedClient } from "../services/embed-client.js";
 import type { RecallConfig } from "./config.js";
-import { mergeChannels, type MergedPool, type RecallChannel, type RecallQuery } from "./contracts.js";
-import type { RecallLogger } from "./engine.js";
+import { mergeChannels, type MergedPool, type RecallChannel, type RecallQuery, type RecallLogger } from "./contracts.js";
 
 /** The table + columns collection reads (the engine `memories` table). */
 const MEMORIES_TABLE = "memories";

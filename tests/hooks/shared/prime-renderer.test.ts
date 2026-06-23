@@ -12,10 +12,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import {
-	createFakeCredentialReader,
-	type HookSessionMeta,
-} from "../../../src/hooks/shared/contracts.js";
+import { createFakeCredentialReader, type HookSessionMeta } from "../../../src/hooks/shared/contracts.js";
 import { createPrimeRenderer, PRIME_PATH } from "../../../src/hooks/shared/prime-renderer.js";
 
 const META: HookSessionMeta = { sessionId: "sess-prime", path: "conv-1", cwd: "/repo", agent: "claude-code" };
@@ -68,6 +65,22 @@ describe("PRD-046d prime renderer — d-AC-1 fetch + inject", () => {
 		expect(seen.headers?.["x-honeycomb-org"]).toBe("acme");
 		expect(seen.headers?.["x-honeycomb-workspace"]).toBe("ws-1");
 		expect(seen.headers?.["x-honeycomb-actor"]).toBe("agent-1");
+	});
+
+	it("d-AC-1: stamps the requested runtime path so legacy harnesses do not conflict later", async () => {
+		const { fetch: fakeFetch, seen } = recordingFetch({
+			status: 200,
+			body: JSON.stringify({ digest: "D", recent: [], durable: [], tokens: 1, empty: false }),
+		});
+		const renderer = createPrimeRenderer({ credentials: createFakeCredentialReader(), fetch: fakeFetch });
+
+		await renderer.render({
+			meta: META,
+			runtimePath: "legacy",
+			credential: { token: "t", org: "acme" },
+		});
+
+		expect(seen.headers?.["x-honeycomb-runtime-path"]).toBe("legacy");
 	});
 
 	it("d-AC-1: a credential with org but no workspace falls back to the `default` sentinel", async () => {

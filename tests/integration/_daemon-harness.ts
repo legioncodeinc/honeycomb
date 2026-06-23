@@ -66,6 +66,22 @@ export interface BootTestDaemonOptions {
 	readonly storage?: StorageClient;
 	/** Override the workspace dir the file watcher watches. Defaults to a temp dir. */
 	readonly workspaceDir?: string;
+	/**
+	 * The filesystem path to the `inference:` config (`agent.yaml`) the assembled daemon
+	 * builds its real {@link ModelClient} from (PRD-026 AC-T). Forwarded verbatim to
+	 * {@link assembleDaemon}. PRD-045d (d-AC-2) passes the committed `agent.yaml` so an
+	 * ENABLED dreaming pass reaches the real `memory_dreaming` model. Absent → the daemon's
+	 * default (`agent.yaml` under the workspace root); unparseable → the no-op model client.
+	 */
+	readonly agentConfigPath?: string;
+	/**
+	 * The dreaming `memory.dreaming` config provider seam (PRD-026 AC-W gate). Forwarded
+	 * verbatim to {@link assembleDaemon}. PRD-045d (d-AC-2) injects a fixed `{ enabled: true }`
+	 * provider so the assembled gate STARTS the real dreaming worker WITHOUT mutating
+	 * `process.env` (the worker is built + started by the composition root, not the test).
+	 * Absent → the env provider (OFF unless `HONEYCOMB_DREAMING_ENABLED`).
+	 */
+	readonly dreamingConfigProvider?: Parameters<typeof assembleDaemon>[0]["dreamingConfigProvider"];
 }
 
 /** A booted, listening test daemon plus its base URL and a clean teardown. */
@@ -108,6 +124,11 @@ export async function bootTestDaemon(options: BootTestDaemonOptions = {}): Promi
 		logger: createRequestLogger({ silent: true }),
 		runtimeDir,
 		...(options.workspaceDir !== undefined ? { workspaceDir: options.workspaceDir } : {}),
+		// PRD-045d (d-AC-2): forward the dreaming gate + inference config so an ENABLED dreaming
+		// pass can run end-to-end on the assembled daemon. Both are additive + backward-compatible
+		// (absent → the daemon's env-resolved defaults, unchanged for every other itest).
+		...(options.agentConfigPath !== undefined ? { agentConfigPath: options.agentConfigPath } : {}),
+		...(options.dreamingConfigProvider !== undefined ? { dreamingConfigProvider: options.dreamingConfigProvider } : {}),
 	});
 
 	// start() acquires the lock, primes the cached /health bit (one live SELECT 1), and

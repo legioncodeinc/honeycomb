@@ -228,9 +228,7 @@ export interface FakeDaemonHookClient extends DaemonHookClient {
  * status/body so a Wave-2 test drives the whole core against it — no daemon, no
  * DeepLake. Drive the 409 path with `{ status: 409 }` (b-AC-6).
  */
-export function createFakeDaemonHookClient(
-	opts: FakeDaemonHookClientOptions = {},
-): FakeDaemonHookClient {
+export function createFakeDaemonHookClient(opts: FakeDaemonHookClientOptions = {}): FakeDaemonHookClient {
 	const calls: RecordedHookCall[] = [];
 	const status = opts.status ?? 200;
 	return {
@@ -310,6 +308,8 @@ export function createFakeCredentialReader(cred?: HookCredential): CredentialRea
 export interface ContextRenderRequest {
 	/** Session metadata (scope + cwd) the block is rendered for. */
 	readonly meta: HookSessionMeta;
+	/** Runtime path stamped on the session-group request. Defaults to `plugin`. */
+	readonly runtimePath?: RuntimePath;
 	/** The credential, when present (gates which blocks render). */
 	readonly credential?: HookCredential;
 }
@@ -351,6 +351,8 @@ export function createFakeContextRenderer(block = ""): ContextRenderer {
 export interface PrimeRenderRequest {
 	/** Session metadata (scope + session id) the digest is fetched for. */
 	readonly meta: HookSessionMeta;
+	/** Runtime path stamped on the session-group request. Defaults to `plugin`. */
+	readonly runtimePath?: RuntimePath;
 	/** The credential, when present (resolves the tenancy the prime is scoped to). */
 	readonly credential?: HookCredential;
 }
@@ -467,9 +469,7 @@ export interface FakeSessionStartSeamsOptions {
  * test asserts the FR-3 order; `throwOn` makes a named step reject so the test
  * proves session-start absorbs it and continues (FR-10 fail-soft).
  */
-export function createFakeSessionStartSeams(
-	opts: FakeSessionStartSeamsOptions = {},
-): FakeSessionStartSeams {
+export function createFakeSessionStartSeams(opts: FakeSessionStartSeamsOptions = {}): FakeSessionStartSeams {
 	const steps: RecordedSessionStartStep[] = [];
 	const throwOn = opts.throwOn ?? new Set<string>();
 	const record = async (step: string): Promise<void> => {

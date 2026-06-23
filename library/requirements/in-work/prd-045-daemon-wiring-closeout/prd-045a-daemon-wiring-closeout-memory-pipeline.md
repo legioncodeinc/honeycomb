@@ -1,6 +1,6 @@
 # PRD-045a: Wire the Memory Pipeline worker (closes PRD-006)
 
-> **Status:** Draft
+> **Status:** Completed
 > **Parent:** [PRD-045](./prd-045-daemon-wiring-closeout-index.md)
 > **Closes gap in:** PRD-006 Memory Pipeline
 > **Priority:** P0
@@ -66,10 +66,30 @@ stage is the only would-be free-tier consumer of the PRD-010 model router, which
 - Keep the model dependency fail-soft: an absent `agent.yaml`/`inference:` block degrades extraction to the no-op
   client (zero-mutation pass), exactly as dreaming does.
 
-## Open questions
+## Default posture & enable mechanism (recorded decision — 2026-06-22 close-out)
 
-- [ ] Single entry job kind that fans out to later stages, or enqueue each stage explicitly? (Prefer entry-fan-out to
-      keep capture's enqueue cheap.)
-- [ ] Does the pipeline run inline-per-turn or batched? (Default: per-turn entry job, batched downstream stages.)
-- [ ] Overlap with the dreaming consolidation pass — ensure pipeline graph-persist and dreaming apply don't
-      double-write (coordinate with 045c/045d).
+The pipeline worker is **constructed, started, and leasing** on every boot, and capture enqueues the entry job — it is
+genuinely live (a-AC-1/a-AC-2). The **stage handlers, however, are gated OFF by default** (`pipeline/config.ts`:
+`enabled`, `graph.enabled`, `graph.extractionWritesEnabled`, `autonomous.enabled` all default `false`, false-safe).
+This is a **deliberate "no surprise model spend" posture** — identical in spirit to the dreaming default-OFF decision
+([PRD-045d](./prd-045d-daemon-wiring-closeout-dreaming-activation.md)): extraction calls the PRD-010 model router, so
+a vanilla boot must not silently incur model cost. The wired path is **proven on the enabled path** by the deterministic
+chain test + the token-gated live itest (a-AC-3/a-AC-4). Confirmed and accepted by the product owner during the
+close-out (QA warning W2).
+
+**Operator enable mechanism (env, `HONEYCOMB_PIPELINE_` prefix):**
+- `HONEYCOMB_PIPELINE_ENABLED=true` — master switch (off → no stage runs).
+- `HONEYCOMB_PIPELINE_GRAPH_ENABLED=true` + `HONEYCOMB_PIPELINE_GRAPH_EXTRACTION_WRITES=true` — graph-persist +
+  `inlineLinkMemory` writes (045c live apply path).
+- `HONEYCOMB_PIPELINE_AUTONOMOUS_ENABLED=true` (+ `..._ALLOW_UPDATE_DELETE`) — retention / autonomous mutations.
+- Extraction additionally requires an `inference:` block in `agent.yaml` + the provider key; absent → fail-soft
+  zero-mutation pass (never crashes).
+
+## Open questions (resolved during close-out)
+
+- [x] Single entry job kind that fans out to later stages, or enqueue each stage explicitly? → **entry-fan-out** (one
+      cheap `memory_extraction` entry job; each stage fans out to the next).
+- [x] Does the pipeline run inline-per-turn or batched? → **per-turn entry job**, downstream stages run as leased jobs.
+- [x] Overlap with the dreaming consolidation pass → **no double-write**: linker + control-plane apply use
+      deterministic IDs + presence-probe, so the pipeline graph-persist path and the dreaming apply path converge to
+      one row (proven by 045d's `dream-coordination-nodoublewrite.test.ts`).

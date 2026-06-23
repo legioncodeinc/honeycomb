@@ -43,7 +43,7 @@ import type { DeploymentMode } from "../config.js";
 import { resolveScopeOrLocalDefault } from "../scope.js";
 import type { Daemon } from "../server.js";
 
-import { mountSourcesApi, type SourcesApiDeps } from "../sources/api.js";
+import { mountSourcesApi, mountDocumentsApi, type SourcesApiDeps } from "../sources/api.js";
 import { mountSecretsApi, type SecretsApiDeps } from "../secrets/api.js";
 import { mountGoalsApi, GOALS_GROUP } from "../goals/api.js";
 import { mountKpisApi, KPIS_GROUP } from "../kpis/api.js";
@@ -52,6 +52,7 @@ import { mountKpisApi, KPIS_GROUP } from "../kpis/api.js";
 export const SKILLS_GROUP = "/api/skills" as const;
 export const RULES_GROUP = "/api/rules" as const;
 export const SOURCES_GROUP = "/api/sources" as const;
+export const DOCUMENTS_GROUP = "/api/documents" as const;
 export const SECRETS_GROUP = "/api/secrets" as const;
 
 /** Options for {@link mountProductDataApi}: the storage client + the sources/secrets deps. */
@@ -233,6 +234,22 @@ export function mountProductSourcesApi(daemon: Daemon, deps: SourcesApiDeps): vo
 }
 
 /**
+ * Mount the existing `mountDocumentsApi` (013b) onto `/api/documents` (PRD-045e e-AC-3).
+ * Resolves `daemon.group("/api/documents")` and delegates to the document worker carried
+ * on the SAME {@link SourcesApiDeps} so `POST /api/documents` ingests instead of 501ing.
+ * No-op if the group is not mounted. When `deps.documentWorker` is absent the handlers
+ * surface the honest 501 themselves (the 013b contract) — but the assembly always wires
+ * the real worker, so production ingests.
+ *
+ * THE ASSEMBLY CALL (045e): `mountProductDocumentsApi(daemon, sourcesDeps)`.
+ */
+export function mountProductDocumentsApi(daemon: Daemon, deps: SourcesApiDeps): void {
+	const group = daemon.group(DOCUMENTS_GROUP);
+	if (group === undefined) return;
+	mountDocumentsApi(group, deps);
+}
+
+/**
  * Mount the existing names-only `mountSecretsApi` (012) onto `/api/secrets` (c-AC-5 / FR-6).
  * Resolves `daemon.group("/api/secrets")` and delegates to the already-built engine. The
  * secrets API mounts NO value-returning route by construction, so a value never crosses the
@@ -276,10 +293,14 @@ export function mountProductDataApi(daemon: Daemon, options: ProductDataApiOptio
 	mountSkillsReadApi(daemon, options.storage, defaultScope);
 	mountRulesReadApi(daemon, options.storage, defaultScope);
 
-	// sources: the EXISTING 013 engine, wired so /api/sources answers (c-AC-4). Skipped when
-	// the source engine deps are not supplied (the assembly wires them when available).
+	// sources + documents: the EXISTING 013 engines, wired so /api/sources AND
+	// /api/documents answer (c-AC-4 / PRD-045e e-AC-2/e-AC-3). Skipped when the source
+	// engine deps are not supplied (the assembly wires them when constructible). Both
+	// route groups read from the SAME SourcesApiDeps (the registry + providers + the
+	// document worker), so one dep object lights up both surfaces.
 	if (options.sources !== undefined) {
 		mountProductSourcesApi(daemon, options.sources);
+		mountProductDocumentsApi(daemon, options.sources);
 	}
 
 	// secrets: the EXISTING 012 names-only engine, wired value-safe (c-AC-5). Skipped when

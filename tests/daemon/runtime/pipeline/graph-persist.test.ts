@@ -33,6 +33,7 @@ import {
 	createGraphPersistHandler,
 	type GraphPersistHandlerDeps,
 	type GraphPersistLogger,
+	type InlineLinker,
 	noopGraphPersistHandler,
 	persistGraphEntities,
 } from "../../../../src/daemon/runtime/pipeline/graph-persist.js";
@@ -87,6 +88,14 @@ import type { StorageRow } from "../../../../src/daemon/storage/result.js";
 function allNewResponder(): (req: TransportRequest) => StorageRow[] {
 	return (_req) => [];
 }
+
+/**
+ * A no-op inline linker (PRD-045c) — used by tests that ISOLATE graph-persist's OWN
+ * entity/dependency/mention write-path shape from the linker's separate by-name entity
+ * resolution. The linker's live invocation + idempotency are proven in their own block
+ * (`PRD-045c inline linker invocation`) and in `ontology/entity-model.test.ts`.
+ */
+const noopLinker: InlineLinker = async () => ({ mentions: [], candidateCount: 0 });
 
 /** Returns a hit row for any SELECT probe, empty rows for everything else. */
 function alreadyPresentResponder(): (req: TransportRequest) => StorageRow[] {
@@ -191,7 +200,10 @@ describe("d-AC-1 entities upsert by canonical name; relationships; mentions inse
 		const { storage, transport } = buildStorage(allNewResponder());
 		const { logger } = makeLogSpy();
 
-		await persistGraphEntities(storage, TEST_SCOPE, enabledGraphConfig(), "mem-probe", [TRIPLE_A], logger);
+		// Inject the no-op linker so this assertion isolates graph-persist's OWN dedup-probe
+		// shape; the inline linker's by-name entity RESOLUTION (a separate, read-only concern)
+		// is proven in the `PRD-045c inline linker invocation` block + the entity-model suite.
+		await persistGraphEntities(storage, TEST_SCOPE, enabledGraphConfig(), "mem-probe", [TRIPLE_A], logger, "", noopLinker);
 
 		const sqls = transport.requests.map((r) => r.sql.toUpperCase());
 		expect(
@@ -525,5 +537,110 @@ describe("createGraphPersistHandler full handler path", () => {
 		};
 		await expect(handler(job)).resolves.toBeUndefined();
 		expect(transport.requests).toHaveLength(0);
+	});
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// PRD-045c: the inline linker is INVOKED on the live graph-persist write path
+//            (c-AC-1), idempotently and non-fatally.
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe("PRD-045c inline linker invocation (c-AC-1)", () => {
+	it("invokes the injected linker with the committed memory id, agent, and forwarded content", async () => {
+		const { storage } = buildStorage(allNewResponder());
+		const { logger } = makeLogSpy();
+		const calls: Array<{ agentId: string; memoryId: string; content: string }> = [];
+		const spyLinker: InlineLinker = async (_s, _scope, args) => {
+			calls.push({ agentId: args.agentId, memoryId: args.memoryId, content: args.content });
+			return { mentions: [{ entityId: "ent_x", canonicalName: "daemon", mentionId: "mention_x" }], candidateCount: 1 };
+		};
+
+		await persistGraphEntities(
+			storage,
+			TEST_SCOPE,
+			enabledGraphConfig(),
+			"mem-link",
+			[TRIPLE_A],
+			logger,
+			"The Daemon binds Port 3850 on boot.",
+			spyLinker,
+		);
+
+		expect(calls, "the linker is invoked exactly once on the live path").toHaveLength(1);
+		expect(calls[0]?.memoryId).toBe("mem-link");
+		// agent_id derives from scope.workspace (the engine-scope inner ring).
+		expect(calls[0]?.agentId).toBe("test-ws");
+		expect(calls[0]?.content).toContain("Daemon");
+	});
+
+	it("falls back to triple-derived text when no content is forwarded (pre-045c payload)", async () => {
+		const { storage } = buildStorage(allNewResponder());
+		const { logger } = makeLogSpy();
+		let seenContent = "";
+		const spyLinker: InlineLinker = async (_s, _scope, args) => {
+			seenContent = args.content;
+			return { mentions: [], candidateCount: 0 };
+		};
+
+		await persistGraphEntities(storage, TEST_SCOPE, enabledGraphConfig(), "mem-nofw", [TRIPLE_A], logger, "", spyLinker);
+
+		// With no forwarded content, the stage synthesises scan text from the triple names so the
+		// linker can still resolve+link the just-created entities.
+		expect(seenContent).toContain("Daemon");
+		expect(seenContent).toContain("Port 3850");
+	});
+
+	it("the handler forwards payload.content to the linker (the live wire)", async () => {
+		const { storage } = buildStorage(allNewResponder());
+		const { logger } = makeLogSpy();
+		let seenContent = "";
+		const spyLinker: InlineLinker = async (_s, _scope, args) => {
+			seenContent = args.content;
+			return { mentions: [], candidateCount: 0 };
+		};
+
+		const handler = createGraphPersistHandler({
+			storage,
+			scope: TEST_SCOPE,
+			config: enabledGraphConfig(),
+			logger,
+			linkMemory: spyLinker,
+		});
+		await handler({
+			id: "job-link",
+			kind: "memory_graph_persist",
+			attempt: 1,
+			scope: { org: "test-org", workspace: "test-ws", agentId: "test-agent" },
+			payload: { memoryId: "mem-h", entities: [TRIPLE_A], content: "Daemon owns the pipeline." },
+		});
+
+		expect(seenContent).toBe("Daemon owns the pipeline.");
+	});
+
+	it("a linker throw is NON-FATAL: the handler still resolves (c-AC-5 / d-AC-3)", async () => {
+		const { storage } = buildStorage(allNewResponder());
+		const { logger, warns } = makeLogSpy();
+		const throwingLinker: InlineLinker = async () => {
+			throw new Error("linker boom");
+		};
+
+		const handler = createGraphPersistHandler({
+			storage,
+			scope: TEST_SCOPE,
+			config: enabledGraphConfig(),
+			logger,
+			linkMemory: throwingLinker,
+		});
+		await expect(
+			handler({
+				id: "job-boom",
+				kind: "memory_graph_persist",
+				attempt: 1,
+				scope: { org: "test-org", workspace: "test-ws", agentId: "test-agent" },
+				payload: { memoryId: "mem-boom", entities: [TRIPLE_A], content: "x" },
+			}),
+		).resolves.toBeUndefined();
+		// The non-fatal swallow logged a warning rather than crashing the job.
+		expect(warns).toContain("graph_persist.storage_error");
 	});
 });

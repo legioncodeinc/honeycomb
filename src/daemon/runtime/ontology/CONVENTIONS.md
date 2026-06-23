@@ -157,9 +157,16 @@ emitted scoped SQL, the escaping, the slot keys, and the version-bump SQL.
    mutating, scoped by org/workspace/agent — c-AC-7).
 4. Do NOT touch `supersede.ts`, `contracts.ts`, `entity-model.ts`, or `dependencies.ts`.
 
-## Daemon assembly is DEFERRED
+## Daemon assembly — WIRED by PRD-045c
 
-Wave 1 is constructed-and-tested, not wired into the running daemon. The pipeline
-hand-off (the linker running right after the memory commit) and the CLI registration
-land when 008b/008c are filled and the assembly step runs. Keep every export's
-signature stable so the assembly is a pure wiring step.
+The ontology module is wired into the running daemon as of PRD-045c (2026-06-22):
+
+- `mountOntologyApi` is fired at `assemble.ts:885` via `seams.mountOntology` (fail-soft
+  try/catch at `:866-873`); `/api/ontology/*` returns real data (no 501).
+- `inlineLinkMemory` runs on the live graph-persist path (`graph-persist.ts:521`),
+  invoked per-turn through the pipeline fan-out after the memory write commits.
+- Supersession tombstone (`supersedeClaim`) is live: `POST /api/ontology/proposals`
+  → `submitProposal` → `supersedeClaim` (append + mark); active-only read filter.
+
+Keep every export's signature stable — the seam wiring in `assemble.ts` depends on
+the typed shapes in `contracts.ts`, `entity-model.ts`, and `supersede.ts`.

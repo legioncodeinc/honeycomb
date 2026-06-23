@@ -175,11 +175,16 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 			calls.mountProductData += 1;
 			order.push("mountProductData");
 			expect(typeof daemon.group).toBe("function");
-			// goals/kpis/skills/rules wire through storage; secrets is wired (constructible),
-			// sources is deferred (NOT faked) — see resolveProductDataDeps in assemble.ts.
+			// goals/kpis/skills/rules wire through storage; secrets is wired (constructible);
+			// sources is NOW wired too (PRD-045e) — the registry + providers resolver + document
+			// worker are constructible at the composition root, so /api/sources + /api/documents
+			// go live. See resolveProductDataDeps + buildSourcesApiDeps in assemble.ts/registry.ts.
 			expect(options.storage).toBeDefined();
 			expect(options.secrets, "secrets engine is wired at the composition root").toBeDefined();
-			expect(options.sources, "sources is deferred (not wired, not faked — D-1)").toBeUndefined();
+			expect(options.sources, "sources engine is wired at the composition root (PRD-045e)").toBeDefined();
+			expect(options.sources?.registry, "the sources registry is constructed").toBeDefined();
+			expect(options.sources?.providers, "the providers resolver is constructed").toBeDefined();
+			expect(options.sources?.documentWorker, "the document worker is wired (e-AC-3)").toBeDefined();
 				// PRD-022: the product-data surface receives the threaded default scope.
 				expect(options.defaultScope, "product-data receives the threaded default scope").toBeDefined();
 				expect(options.defaultScope?.org).toBeTruthy();

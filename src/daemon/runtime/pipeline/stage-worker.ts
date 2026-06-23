@@ -111,6 +111,16 @@ export interface StageWorkerDeps {
 	readonly handlers: StageHandlers;
 	/** Optional structured-log sink. */
 	readonly logger?: StageWorkerLogger;
+	/**
+	 * The job kinds this worker leases. Defaults to {@link PIPELINE_JOB_KINDS} (the
+	 * five pipeline kinds). The SAME `memory_jobs` queue also carries `summary` /
+	 * `skillify` / `dreaming` jobs, so a bare `lease()` would grab one of THOSE,
+	 * fail to run it as a pipeline job, and walk a legit foreign job toward `dead`.
+	 * Passing the kind filter (the additive `JobQueueService.lease(kinds)`) makes the
+	 * worker lease ONLY pipeline jobs and leave every foreign kind queued for its own
+	 * worker — the load-bearing invariant the dreaming worker also relies on.
+	 */
+	readonly leaseKinds?: readonly string[];
 	/** Poll interval in ms when running the continuous loop. Default 1000. */
 	readonly pollIntervalMs?: number;
 	/** Injected timer scheduler (real `setInterval` otherwise) — for tests. */
@@ -161,6 +171,7 @@ class PipelineStageWorker implements StageWorker {
 	private readonly queue: JobQueueService;
 	private readonly handlers: StageHandlers;
 	private readonly logger?: StageWorkerLogger;
+	private readonly leaseKinds: readonly string[];
 	private readonly pollIntervalMs: number;
 	private readonly setTimer: (cb: () => void, ms: number) => unknown;
 	private readonly clearTimer: (handle: unknown) => void;
@@ -172,6 +183,7 @@ class PipelineStageWorker implements StageWorker {
 		this.queue = deps.queue;
 		this.handlers = deps.handlers;
 		this.logger = deps.logger;
+		this.leaseKinds = deps.leaseKinds ?? PIPELINE_JOB_KINDS;
 		this.pollIntervalMs = deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
 		this.setTimer = deps.setTimer ?? ((cb, ms) => setInterval(cb, ms));
 		this.clearTimer =
@@ -182,7 +194,9 @@ class PipelineStageWorker implements StageWorker {
 	}
 
 	async runOnce(): Promise<boolean> {
-		const leased = await this.queue.lease();
+		// Lease ONLY pipeline kinds (the kind filter) — a foreign summary/skillify/
+		// dreaming job is left queued for its own worker, never grabbed-and-failed here.
+		const leased = await this.queue.lease(this.leaseKinds);
 		if (leased === null) return false;
 
 		// A leased job whose kind is not a pipeline kind is not ours to run. Fail it

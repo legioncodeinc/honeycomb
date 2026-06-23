@@ -1,16 +1,25 @@
 # PRD-006: Memory Pipeline
 
-> **Status:** Completed (code shipped) — ⚠ NOT LIVE; close-out tracked in [PRD-045a](../../in-work/prd-045-daemon-wiring-closeout/prd-045a-daemon-wiring-closeout-memory-pipeline.md)
+> **Status:** Completed — WIRED & LIVE, stage handlers default-OFF by design (closed by [PRD-045a](../../in-work/prd-045-daemon-wiring-closeout/prd-045a-daemon-wiring-closeout-memory-pipeline.md))
 > **Priority:** P0
 > **Effort:** XL
 > **Schema changes:** Additive
 
 ---
 
-> **⚠ Not live (2026-06-22 daemon-wiring audit).** The five-stage pipeline engine is built + tested, but the
-> daemon never constructs a worker for it and capture never enqueues pipeline jobs — `assemble.ts` builds only
-> the dreaming worker (`:1265`); capture enqueues only `summary`/`skillify` cues
-> (`capture/capture-handler.ts:268-275`). The deliverable is unreachable at runtime. Wiring close-out:
+> **✅ Now live (2026-06-22 daemon-wiring close-out, PRD-045a).** The memory pipeline is fully wired and running.
+> `assembleDaemon` constructs + starts `buildPipelineWorker` (invocation site: `assemble.ts`, wired by PRD-045a),
+> which leases the five pipeline job kinds (`memory_extraction` / `memory_decision` / `memory_controlled_write` /
+> `memory_graph_persist` / `memory_retention`). Capture enqueues the pipeline entry job so every captured turn
+> enters the pipeline. **The stage handlers are gated OFF by default** (`HONEYCOMB_PIPELINE_ENABLED` and the
+> per-stage `HONEYCOMB_PIPELINE_GRAPH_ENABLED` / `_GRAPH_EXTRACTION_WRITES` / `_AUTONOMOUS_ENABLED` flags all
+> default `false`) — a deliberate "no surprise model spend" posture mirroring the dreaming default-OFF decision
+> (extraction calls the PRD-010 model router). **When enabled**, the turn fans out through all five stages —
+> extraction produces facts/entity triples, decision routes each fact, controlled writes persist with dedup +
+> confidence gate, graph-persist links entities, and retention sweeps run; the enabled path is proven by the
+> deterministic chain test + the token-gated live itest. The four previously-stub stage handlers were filled to
+> produce real, persisted output. See the 045a "Default posture & enable mechanism" note for the operator switch.
+> Closed by
 > [PRD-045a](../../in-work/prd-045-daemon-wiring-closeout/prd-045a-daemon-wiring-closeout-memory-pipeline.md).
 > Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../../in-work/prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
 

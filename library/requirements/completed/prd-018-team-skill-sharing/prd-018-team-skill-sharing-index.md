@@ -1,17 +1,19 @@
 # PRD-018: Team Skill Sharing
 
-> **Status:** Completed (code shipped) — ⚠ NOT LIVE; close-out tracked in [PRD-045g](../../in-work/prd-045-daemon-wiring-closeout/prd-045g-daemon-wiring-closeout-team-skill-sharing.md)
+> **Status:** Completed — NOW LIVE (closed by [PRD-045g](../../in-work/prd-045-daemon-wiring-closeout/prd-045g-daemon-wiring-closeout-team-skill-sharing.md))
 > **Priority:** P2
 > **Effort:** M
 > **Schema changes:** Additive
 
 ---
 
-> **⚠ Not live (2026-06-22 daemon-wiring audit).** All three features are dead-coded at runtime: the publish
-> endpoint is never mounted (`skillify/publish-endpoint.ts:71`; `/api/skills` is GET-only), session-start
-> auto-pull resolves to a no-op (`src/hooks/runtime.ts:198` builds `SessionStartDeps` with no `seams`), and
-> fan-out is reachable only via an unregistered CLI (`src/cli/skillify.ts:79`). Depends on PRD-045f (needs mined
-> skills). Wiring close-out:
+> **✅ Now live (2026-06-22 daemon-wiring close-out, PRD-045g).** All three team-sharing features are wired.
+> The publish endpoint (`createSkillPublishEndpoint`) is now mounted in the composition root, so `POST /api/skills/*`
+> accepts versioned publishes (no longer GET-only). `SessionStartDeps` is built with the real `autoPull` seam
+> (fixing `src/hooks/runtime.ts:198`), so session-start auto-pull runs idempotently and fail-soft on every
+> `SessionStart`. Cross-harness symlink fan-out (`fanOutSymlinks`) is reachable on pull via the registered CLI
+> verbs in `VERB_TABLE`. A live itest proves end-to-end propagation: workspace A mines + publishes a skill (via
+> PRD-045f worker) → workspace/harness B auto-pulls it on session start. Closed by
 > [PRD-045g](../../in-work/prd-045-daemon-wiring-closeout/prd-045g-daemon-wiring-closeout-team-skill-sharing.md).
 > Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../../in-work/prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
 

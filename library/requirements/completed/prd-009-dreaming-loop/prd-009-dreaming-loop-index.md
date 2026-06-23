@@ -1,16 +1,22 @@
 # PRD-009: Dreaming Loop
 
-> **Status:** Completed (code shipped) — ⚠ WIRED BUT DORMANT (default OFF); close-out tracked in [PRD-045d](../../in-work/prd-045-daemon-wiring-closeout/prd-045d-daemon-wiring-closeout-dreaming-activation.md)
+> **Status:** Completed — WIRED, DEFAULT OFF BY DESIGN (closed by [PRD-045d](../../in-work/prd-045-daemon-wiring-closeout/prd-045d-daemon-wiring-closeout-dreaming-activation.md))
 > **Priority:** P2
 > **Effort:** L
 > **Schema changes:** Additive
 
 ---
 
-> **⚠ Wired but dormant (2026-06-22 daemon-wiring audit).** The worker is fully wired (`buildGatedDreamingWorker`
-> `assemble.ts:926`, started `:1265-1266`) but gated OFF by default (needs `HONEYCOMB_DREAMING_ENABLED` or the
-> vault `dreaming.enabled` setting). Its dormancy strands the only live consumers of PRD-008 apply + PRD-010
-> router. Default-posture decision + end-to-end live proof:
+> **✅ Reconciled (2026-06-22 daemon-wiring close-out, PRD-045d).** The dreaming loop is fully wired
+> (`buildGatedDreamingWorker` at `assemble.ts:926`, started at `assemble.ts:1265-1266`) and proven end-to-end
+> when enabled. The default-OFF posture is a **recorded decision** (not a gap): no surprise model spend until an
+> operator explicitly opts in. Enable via `HONEYCOMB_DREAMING_ENABLED=true` (env var, restart required) or
+> `dreaming.enabled = true` in the vault (vault-first precedence, survives restart). When enabled, the worker
+> leases `["dreaming"]` jobs, the runner reasons over session summaries + the entity graph, and mutations route
+> through the ontology control plane (`dreaming/runner.ts:284`). The pipeline (PRD-045a) is the primary live graph
+> writer on every captured turn; dreaming is the opt-in periodic consolidator on top. The PRD-010 router is
+> activated as a side effect of enabling dreaming. Proven by token-gated live itest
+> (`tests/integration/dreaming-activation-live.itest.ts`). Closed by
 > [PRD-045d](../../in-work/prd-045-daemon-wiring-closeout/prd-045d-daemon-wiring-closeout-dreaming-activation.md).
 > Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../../in-work/prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
 
