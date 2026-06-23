@@ -9,7 +9,13 @@
  * seams (a-AC-5). See CONVENTIONS.md before extending.
  */
 
-export { ClaudeCodeConnector, type ClaudeCodeConnectorOptions } from "./claude-code.js";
+export {
+	CLAUDE_PLUGIN_NAME,
+	CLAUDE_PLUGIN_SPEC,
+	ClaudeCodeConnector,
+	type ClaudeCodeConnectorOptions,
+	STALE_MARKETPLACE_NAME,
+} from "./claude-code.js";
 export {
 	type ConnectorCommandDeps,
 	type ConnectorCommandResult,
@@ -40,3 +46,8 @@ export {
 } from "./contracts.js";
 export { CursorConnector, type CursorConnectorOptions } from "./cursor.js";
 export { createNodeConnectorFs } from "./node-fs.js";
+export {
+	createClaudePluginRunner,
+	type PluginCommandResult,
+	type PluginCommandRunner,
+} from "./plugin-runner.js";

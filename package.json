@@ -31,6 +31,7 @@
     "assets/logos/fonts",
     "harnesses/claude-code/bundle",
     "harnesses/claude-code/.claude-plugin",
+    "harnesses/claude-code/hooks",
     "harnesses/codex/bundle",
     "harnesses/codex/package.json",
     "harnesses/cursor/bundle",
