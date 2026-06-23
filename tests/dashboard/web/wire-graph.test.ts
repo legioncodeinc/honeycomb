@@ -42,7 +42,7 @@ function recordingFetch(body: unknown, status = 200): { fetchImpl: typeof fetch;
 const BUILT_MEMORY_GRAPH = {
 	built: true,
 	nodes: [
-		{ id: "e1", label: "Mario", kind: "entity" },
+		{ id: "e1", label: "Alex", kind: "entity" },
 		{ id: "e2", label: "Honeycomb", kind: "entity" },
 	],
 	edges: [{ from: "e1", to: "e2", kind: "depends_on" }],

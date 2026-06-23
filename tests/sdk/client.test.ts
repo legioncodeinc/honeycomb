@@ -52,7 +52,7 @@ function header(init: RequestInit | undefined, name: string): string | undefined
 	return h?.[name];
 }
 
-const ACTOR = { actor: "mario", actorType: "user" };
+const ACTOR = { actor: "alex", actorType: "user" };
 const DAEMON = "http://127.0.0.1:3850";
 
 describe("e-AC-1: remember/recall carry token + actor + actorType", () => {
@@ -63,7 +63,7 @@ describe("e-AC-1: remember/recall carry token + actor + actorType", () => {
 		await client.remember("the deploy is at 5pm", { path: "ops/deploy" });
 
 		expect(calls).toHaveLength(1);
-		expect(header(calls[0].init, "x-honeycomb-actor")).toBe("mario");
+		expect(header(calls[0].init, "x-honeycomb-actor")).toBe("alex");
 		expect(header(calls[0].init, "x-honeycomb-actor-type")).toBe("user");
 		expect(header(calls[0].init, "authorization")).toBe("Bearer tok-123");
 		// The WIRED store endpoint (022a): POST /api/memories { content, normalizedContent }.
@@ -89,7 +89,7 @@ describe("e-AC-1: remember/recall carry token + actor + actorType", () => {
 		expect(out).toEqual([{ path: "p", text: "t", score: 0.9 }]);
 		expect(calls[0].url).toBe(`${DAEMON}/api/memories/recall`);
 		expect(JSON.parse(calls[0].init?.body as string)).toEqual({ query: "when is the deploy", limit: 5 });
-		expect(header(calls[0].init, "x-honeycomb-actor")).toBe("mario");
+		expect(header(calls[0].init, "x-honeycomb-actor")).toBe("alex");
 		expect(header(calls[0].init, "x-honeycomb-actor-type")).toBe("user");
 		expect(header(calls[0].init, "authorization")).toBe("Bearer tok-123");
 		// d-AC-3: the session-group headers are present so the call reaches the wired handler.
@@ -104,7 +104,7 @@ describe("e-AC-1: remember/recall carry token + actor + actorType", () => {
 		await client.recall("q");
 
 		expect(header(calls[0].init, "authorization")).toBeUndefined();
-		expect(header(calls[0].init, "x-honeycomb-actor")).toBe("mario");
+		expect(header(calls[0].init, "x-honeycomb-actor")).toBe("alex");
 	});
 });
 

@@ -361,7 +361,7 @@ describe("c-AC-5 epistemic assertion carries the full shape + does not auto-prom
 			{
 				predicate: "believes",
 				content: "the migration will finish this quarter",
-				speaker: "mario",
+				speaker: "alex",
 				confidence: 0.7,
 				evidence: "mem-belief-1",
 				status: "active",
@@ -379,7 +379,7 @@ describe("c-AC-5 epistemic assertion carries the full shape + does not auto-prom
 		expect(insert).toContain("'believes'");
 		expect(insert).toContain("'believed'");
 		// speaker (subject), content (object), confidence, evidence (provenance), status.
-		expect(insert.toLowerCase()).toContain("mario");
+		expect(insert.toLowerCase()).toContain("alex");
 		expect(insert.toLowerCase()).toContain("the migration will finish this quarter");
 		expect(insert).toContain("'mem-belief-1'");
 		expect(insert).toContain("'active'");

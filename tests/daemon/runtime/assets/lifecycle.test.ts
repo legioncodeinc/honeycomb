@@ -74,7 +74,7 @@ afterEach(() => {
 	rmSync(tmp, { recursive: true, force: true });
 });
 
-const SCOPE: AssetScope = { org: "acme", workspace: "platform", author: "mario", deviceId: "dev-1" };
+const SCOPE: AssetScope = { org: "acme", workspace: "platform", author: "alex", deviceId: "dev-1" };
 
 function deps(sync: AssetSyncApi): AssetLifecycleDeps {
 	return { sync, registry: createAssetRegistryStore(tmp) };
@@ -221,7 +221,7 @@ describe("PRD-033b b-AC-3 — Device publish scope is author + device_set", () =
 		const req = sync.publishes[0]!;
 		expect(req.cell.tier).toBe("Device");
 		// The Device audience is keyed by author + the device set (FR-7).
-		expect(req.scope.author).toBe("mario");
+		expect(req.scope.author).toBe("alex");
 		expect(req.deviceSet).toContain("dev-1");
 	});
 

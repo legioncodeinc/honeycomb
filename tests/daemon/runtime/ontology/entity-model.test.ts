@@ -184,9 +184,9 @@ describe("a-AC-2 linker does no network I/O beyond storage; safe right after com
 	it("extractProperNounCandidates is pure + synchronous (no async, no I/O)", () => {
 		// The proper-noun scan returns synchronously (not a Promise) — proving the
 		// detection path is model-free, offline, and safe on the write path.
-		const out = extractProperNounCandidates("Mario met Claude at Activeloop.");
+		const out = extractProperNounCandidates("Alex met Claude at Activeloop.");
 		expect(Array.isArray(out)).toBe(true);
-		expect(out).toContain("mario");
+		expect(out).toContain("alex");
 		expect(out).toContain("claude");
 		expect(out).toContain("activeloop");
 	});

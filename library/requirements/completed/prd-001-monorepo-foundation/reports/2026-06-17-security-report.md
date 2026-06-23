@@ -3,7 +3,7 @@
 - **Audited by:** security-worker-bee (security-stinger)
 - **Date:** 2026-06-17
 - **Branch:** `prd-001-monorepo-foundation`
-- **Repo root:** `C:\Users\mario\GitHub\honeycomb`
+- **Repo root:** `<repo-root>`
 - **Standalone catalog copy:** none written. The stinger directs feature-tied audits to the PRD's `reports/` folder (this file). No standalone copy under `library/qa/security/` is required for a feature-tied audit.
 
 ---

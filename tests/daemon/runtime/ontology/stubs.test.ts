@@ -108,7 +108,7 @@ describe("008c control plane filled — the entry points route + validate", () =
 		const out = await recordAssertion(storage(), SCOPE, {
 			predicate: "believes",
 			content: "the daemon binds 3850",
-			speaker: "mario",
+			speaker: "alex",
 		});
 		expect(out).not.toBeNull();
 		expect(out?.predicate).toBe("believes");

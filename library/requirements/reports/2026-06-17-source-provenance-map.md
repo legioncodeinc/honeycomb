@@ -15,9 +15,9 @@ The bridge between the Honeycomb PRDs and the code that already exists. For ever
 
 | Source | Path | What is actually on disk |
 |---|---|---|
-| otherhive engine | `C:\Users\mario\GitHub\honeycomb\otherhive-v1\` | Full source. `platform/core` (78 migrations, ingest, fts), `platform/daemon` (HTTP, pipeline, workers, auth, MCP), `platform/daemon-rs` (Rust parity), `platform/native`, `surfaces/*`, `integrations/*`, `libs/*`, `plugins/core/secrets`. |
-| hivemind product | `C:\Users\mario\GitHub\hivemind\` | Full source. `src/` has `deeplake-api.ts`, `deeplake-schema.ts`, `embeddings/`, `graph/` (extract, render, push/pull, vfs), `hooks/`, `notifications/`, `dashboard/`, `cli/`, `commands/`; plus `harnesses/*`, `embeddings/embed-daemon.js`, `esbuild.config.mjs`. |
-| hivemind mirror | `C:\Users\mario\GitHub\honeycomb\hivemind-v1\` | Partial mirror: library, harness shells, a stray `src/deeplake-api.ts`. Do NOT treat as the hivemind source of truth. Use `C:\Users\mario\GitHub\hivemind\`. |
+| otherhive engine | `<repo-root>\otherhive-v1\` | Full source. `platform/core` (78 migrations, ingest, fts), `platform/daemon` (HTTP, pipeline, workers, auth, MCP), `platform/daemon-rs` (Rust parity), `platform/native`, `surfaces/*`, `integrations/*`, `libs/*`, `plugins/core/secrets`. |
+| hivemind product | `<hivemind-source>\` | Full source. `src/` has `deeplake-api.ts`, `deeplake-schema.ts`, `embeddings/`, `graph/` (extract, render, push/pull, vfs), `hooks/`, `notifications/`, `dashboard/`, `cli/`, `commands/`; plus `harnesses/*`, `embeddings/embed-daemon.js`, `esbuild.config.mjs`. |
+| hivemind mirror | `<repo-root>\hivemind-v1\` | Partial mirror: library, harness shells, a stray `src/deeplake-api.ts`. Do NOT treat as the hivemind source of truth. Use `<hivemind-source>\`. |
 
 ## The core finding
 
