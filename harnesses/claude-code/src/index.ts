@@ -14,10 +14,10 @@
  * via the SHARED {@link runHookBinary} driver + {@link createHookRuntime} runtime — so
  * adding the next harness (Codex, c-AC-6) is a shim swap, not a re-derivation.
  *
- * The `hooks.json` the connector installs (`harnesses/claude-code/hooks.json`) points
- * every Claude Code lifecycle event at this built `bundle/index.js`, so a native turn
- * drives the runtime end-to-end. Thin client only: no DeepLake; the only outbound path
- * is the daemon client over loopback.
+ * The plugin's `hooks/hooks.json` (`harnesses/claude-code/hooks/hooks.json` — the location
+ * Claude Code's plugin loader reads) points every Claude Code lifecycle event at this built
+ * `bundle/index.js` via `${CLAUDE_PLUGIN_ROOT}`, so a native turn drives the runtime end-to-end.
+ * Thin client only: no DeepLake; the only outbound path is the daemon client over loopback.
  */
 
 import { createClaudeCodeShim } from "../../../src/hooks/claude-code/shim.js";

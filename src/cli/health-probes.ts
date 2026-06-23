@@ -16,7 +16,8 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type { DaemonClient, StatusHealthSource } from "../commands/index.js";
 import { healthSourceFromCheck } from "../commands/status.js";
@@ -26,7 +27,13 @@ import {
 	type HealthProbes,
 	type ProbeOutcome,
 } from "../notifications/index.js";
-import { ClaudeCodeConnector, createNodeConnectorFs } from "../connectors/index.js";
+import {
+	CLAUDE_PLUGIN_NAME,
+	ClaudeCodeConnector,
+	createClaudePluginRunner,
+	createNodeConnectorFs,
+	type PluginCommandRunner,
+} from "../connectors/index.js";
 import { HONEYCOMB_VERSION } from "../shared/constants.js";
 
 /** D1 — is the `honeycomb` CLI resolvable and does `--version` answer? */
@@ -61,12 +68,20 @@ function probeCursorLogin(): ProbeOutcome {
 		: { ok: false, detail: "cursor-agent not configured" };
 }
 
-/** D5 — are hooks wired? (does `~/.cursor/hooks.json` exist?). */
-function probeHooksWired(): ProbeOutcome {
+/**
+ * D5 — is capture wired? Healthy when EITHER the Claude Code marketplace plugin is installed +
+ * ENABLED (the claude-code capture signal — `claude plugin list`) OR Cursor's `~/.cursor/hooks.json`
+ * is present. The claude-code check is plugin-based, NOT the old hooks.json-present check (which is
+ * Cursor-oriented): a registered, enabled plugin is what actually captures Claude Code turns.
+ */
+function probeHooksWired(runner: PluginCommandRunner): ProbeOutcome {
+	if (runner.isPluginEnabled(CLAUDE_PLUGIN_NAME)) {
+		return { ok: true, detail: "Claude Code plugin installed + enabled" };
+	}
 	const hooksPath = join(homedir(), ".cursor", "hooks.json");
 	return existsSync(hooksPath)
-		? { ok: true, detail: "hooks.json present" }
-		: { ok: false, detail: "hooks.json not found (run `honeycomb setup`)" };
+		? { ok: true, detail: "Cursor hooks.json present" }
+		: { ok: false, detail: "capture not wired (run `honeycomb setup`)" };
 }
 
 /**
@@ -74,7 +89,10 @@ function probeHooksWired(): ProbeOutcome {
  * `ping()` (the SAME reachability the storage verbs + ensure-running use), so the daemon-up answer
  * is single-sourced. The other dims probe PATH / the editor dir / `hooks.json`.
  */
-export function buildHealthProbes(daemon: DaemonClient): HealthProbes {
+export function buildHealthProbes(
+	daemon: DaemonClient,
+	pluginRunner: PluginCommandRunner = createClaudePluginRunner(),
+): HealthProbes {
 	return {
 		async probeCli(): Promise<ProbeOutcome> {
 			return probeCli();
@@ -92,7 +110,7 @@ export function buildHealthProbes(daemon: DaemonClient): HealthProbes {
 			return probeCursorLogin();
 		},
 		async probeHooksWired(): Promise<ProbeOutcome> {
-			return probeHooksWired();
+			return probeHooksWired(pluginRunner);
 		},
 	};
 }
@@ -104,15 +122,24 @@ export function buildHealthProbes(daemon: DaemonClient): HealthProbes {
  * dims, it does not auto-wire); the auto-wiring is wired so the SAME check object can `autoWire()`
  * from another caller without a rebuild.
  */
-export function buildStatusHealthSource(daemon: DaemonClient): StatusHealthSource {
+export function buildStatusHealthSource(
+	daemon: DaemonClient,
+	pluginRunner: PluginCommandRunner = createClaudePluginRunner(),
+): StatusHealthSource {
 	const fs = createNodeConnectorFs();
-	const cursorConnector = new ClaudeCodeConnector(fs, {
+	// D5 auto-wiring registers the Claude Code marketplace plugin via the real `claude plugin` CLI
+	// (the same runner the D5 probe reads `plugin list` through). The package root is the dir holding
+	// `.claude-plugin/marketplace.json` — one dir up from the published `bundle/cli.js`. The runner is
+	// injectable so a unit test drives the whole status surface without shelling to the real binary.
+	const claudeConnector = new ClaudeCodeConnector(fs, {
 		home: homedir(),
-		bundleSource: join(homedir(), ".cursor", "honeycomb", "bundle"),
+		bundleSource: join(homedir(), ".claude", "honeycomb", "bundle"),
+		packageRoot: resolve(dirname(fileURLToPath(import.meta.url)), ".."),
+		pluginRunner,
 	});
 	const check = createHealthCheck({
-		probes: buildHealthProbes(daemon),
-		autoWiring: createAutoWiring({ connector: cursorConnector }),
+		probes: buildHealthProbes(daemon, pluginRunner),
+		autoWiring: createAutoWiring({ connector: claudeConnector }),
 	});
 	return healthSourceFromCheck(check);
 }

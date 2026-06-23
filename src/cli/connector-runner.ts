@@ -24,6 +24,7 @@ import {
 	CodexConnector,
 	type ConnectorFs,
 	type ConnectorRegistry,
+	createClaudePluginRunner,
 	CursorConnector,
 	connectorMain,
 	createNodeConnectorFs,
@@ -54,8 +55,19 @@ function bundleSourceFor(slug: string): string {
  * never a fork of install logic (019a a-AC-5).
  */
 export function createConnectorRegistry(home: string = homedir()): ConnectorRegistry {
+	// Claude Code is wired by REGISTERING the marketplace plugin via the real `claude plugin` CLI
+	// (not by writing top-level settings.json hooks). The runner shells to `claude`; `packageRoot()`
+	// resolves the dir holding `.claude-plugin/marketplace.json` (the same dir that holds `harnesses/`).
+	const claudePluginRunner = createClaudePluginRunner();
 	const builders: Readonly<Record<string, (fs: ConnectorFs) => HarnessConnector>> = {
-		"claude-code": (fs) => new ClaudeCodeConnector(fs, { home, bundleSource: bundleSourceFor("claude-code") }),
+		"claude-code": (fs) =>
+			new ClaudeCodeConnector(fs, {
+				home,
+				bundleSource: bundleSourceFor("claude-code"),
+				packageRoot: packageRoot(),
+				pluginRunner: claudePluginRunner,
+				notify: (line) => console.log(line),
+			}),
 		codex: (fs) => new CodexConnector(fs, { home, bundleSource: bundleSourceFor("codex") }),
 		cursor: (fs) => new CursorConnector(fs, { home, bundleSource: bundleSourceFor("cursor") }),
 	};

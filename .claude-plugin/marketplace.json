@@ -12,10 +12,7 @@
       "name": "honeycomb",
       "description": "Honeycomb Claude Code plugin — captures session activity and provides cross-session memory through the local daemon",
       "version": "0.1.0",
-      "source": {
-        "source": "git-subdir",
-        "path": "harnesses/claude-code"
-      }
+      "source": "./harnesses/claude-code"
     }
   ]
 }
