@@ -30,7 +30,7 @@ flowchart TD
     ws1 --> agentC["agent_id ci (group eng)"]
 ```
 
-The **org** is the top boundary: membership and billing. The **workspace** is the project boundary within an org; storage isolation is enforced here, so two workspaces share nothing. The **agent**, identified by `agent_id`, is the within-workspace boundary: multiple named agents share one workspace and one set of tables but are separated by a read policy. Org and workspace come from Hivemind; `agent_id` scoping comes from Otherhive. Honeycomb stacks them, so a row is reachable only when the org and workspace match and the agent read policy allows it.
+The **org** is the top boundary: membership and billing. The **workspace** is the project boundary within an org; storage isolation is enforced here, so two workspaces share nothing. The **agent**, identified by `agent_id`, is the within-workspace boundary: multiple named agents share one workspace and one set of tables but are separated by a read policy. Org and workspace come from Hivemind; `agent_id` scoping comes from our memory engine. Honeycomb stacks them, so a row is reachable only when the org and workspace match and the agent read policy allows it.
 
 ## How requests carry tenancy
 

@@ -150,7 +150,7 @@ process.env count in bundle: 0    child_process/exec count in bundle: 0
 
 ### 1. Publish/pack safety — SOUND
 - `package.json` uses an **allowlist** `files` array (not a permissive `.npmignore`), so the reference
-  dirs `hivemind-v1/`/`otherhive-v1/`, `.git`, `.cursor`, `library/`, `node_modules`, and any `.env`
+  dirs (Hivemind and our memory engine), `.git`, `.cursor`, `library/`, `node_modules`, and any `.env`
   can never enter the tarball. `npm pack --dry-run` → 27 files, **zero** suspicious paths.
 - `pack-check.mjs` regexes cover `.npmrc`, `.env(.*)`, `secrets/`, `.github/`, `.git/`, SSH keys,
   `.pem/.key/.p12/.pfx`, and `credentials.json`. Patterns are anchored on path separators and are not

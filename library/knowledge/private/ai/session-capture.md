@@ -18,7 +18,7 @@ The input layer: how every prompt, tool call, and response becomes a durable raw
 
 Honeycomb's engine distills memory, but distillation needs raw material, and that material has to be captured the instant it happens, before any model runs. Capture is the cheap, always-on front of the system: it records what the agent did as structured events, commits them durably, and gets out of the way. Everything smart, extraction, the knowledge graph, summaries, skill mining, happens afterward in daemon workers off the turn path. This is the input half of the request lifecycle in [`../architecture/request-lifecycle.md`](../architecture/request-lifecycle.md).
 
-Capture is the part of Honeycomb that came directly from Hivemind, where it was already proven across many harnesses, and it now feeds Otherhive's pipeline instead of only powering wiki summaries.
+Capture is the part of Honeycomb that came directly from Hivemind, where it was already proven across many harnesses, and it now feeds our memory engine's pipeline instead of only powering wiki summaries.
 
 ## One INSERT per event
 

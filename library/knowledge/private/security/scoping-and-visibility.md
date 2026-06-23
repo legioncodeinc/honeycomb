@@ -16,7 +16,7 @@ How Honeycomb keeps memory in its lane: storage-level org and workspace isolatio
 
 ## Two rings of scoping
 
-Honeycomb scopes memory in two rings. The outer ring is tenancy: org and workspace, enforced at the DeepLake storage layer so two workspaces never share a row, partition, or index. The inner ring is the agent: within a single workspace, `agent_id` and a read policy separate multiple agents that share the same tables. The outer ring is the team boundary inherited from Hivemind; the inner ring is the multi-agent boundary inherited from Otherhive. Both have to hold for a row to be visible.
+Honeycomb scopes memory in two rings. The outer ring is tenancy: org and workspace, enforced at the DeepLake storage layer so two workspaces never share a row, partition, or index. The inner ring is the agent: within a single workspace, `agent_id` and a read policy separate multiple agents that share the same tables. The outer ring is the team boundary inherited from Hivemind; the inner ring is the multi-agent boundary inherited from our memory engine. Both have to hold for a row to be visible.
 
 ```mermaid
 flowchart TD

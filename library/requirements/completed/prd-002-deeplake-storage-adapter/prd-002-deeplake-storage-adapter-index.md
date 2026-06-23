@@ -9,7 +9,7 @@
 
 ## Overview
 
-This is the critical-path module. The otherhive memory engine that forms Honeycomb's foundation assumed a SQLite-style store with real transactions; DeepLake has none. DeepLake is a tensor-native, GPU-backed store that speaks SQL and holds 768-dimension vectors as first-class columns, but its query endpoint binds no parameters and it coalesces concurrent UPDATEs in a way that can silently drop an edit. This module builds the storage adapter that the daemon (the only DeepLake client) uses for every durable byte: a typed client and connection layer, the `sqlStr`/`sqlLike`/`sqlIdent` escaping that stands in for parameterized queries, lazy schema creation and `information_schema` healing, the write primitives that achieve atomicity without transactions, and the GPU vector-search interface over 768-dim tensor columns.
+This is the critical-path module. Our memory engine that forms Honeycomb's foundation assumed a SQLite-style store with real transactions; DeepLake has none. DeepLake is a tensor-native, GPU-backed store that speaks SQL and holds 768-dimension vectors as first-class columns, but its query endpoint binds no parameters and it coalesces concurrent UPDATEs in a way that can silently drop an edit. This module builds the storage adapter that the daemon (the only DeepLake client) uses for every durable byte: a typed client and connection layer, the `sqlStr`/`sqlLike`/`sqlIdent` escaping that stands in for parameterized queries, lazy schema creation and `information_schema` healing, the write primitives that achieve atomicity without transactions, and the GPU vector-search interface over 768-dim tensor columns.
 
 ## Goals
 

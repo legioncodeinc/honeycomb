@@ -11,7 +11,7 @@ The `@honeycomb/cli` unified dispatcher and command surface: setup, status, dash
 
 ## Goals
 
-- One `honeycomb` executable for every harness, consolidating the Hivemind product verbs and the otherhive engine verbs into a single dispatcher.
+- One `honeycomb` executable for every harness, consolidating the Hivemind product verbs and our memory engine's verbs into a single dispatcher.
 - A clean split between the entry-point parser (`src/cli/index.ts`) and the command handlers (`src/commands/`), so presentation never entangles storage logic.
 - Every storage-touching command routed through the daemon, never opening DeepLake directly.
 - RFC 8628 device-flow auth shared with the daemon and hooks, with automatic org-token-drift healing.
