@@ -9,6 +9,19 @@
  * seams (a-AC-5). See CONVENTIONS.md before extending.
  */
 
+export { ClaudeCodeConnector, type ClaudeCodeConnectorOptions } from "./claude-code.js";
+export {
+	type ConnectorCommandDeps,
+	type ConnectorCommandResult,
+	type ConnectorInvocation,
+	type ConnectorOutputSink,
+	type ConnectorRegistry,
+	connectorMain,
+	parseConnectorArgs,
+	runConnectorCommand,
+} from "./cli.js";
+
+export { CodexConnector, type CodexConnectorOptions } from "./codex.js";
 export {
 	type ConfigHookEntry,
 	type ConfigMatcherBlock,
@@ -17,28 +30,13 @@ export {
 	createFakeFs,
 	type DetectedPlatform,
 	type FakeFs,
-	HarnessConnector,
 	type HarnessConfig,
+	HarnessConnector,
 	HONEYCOMB_ENTRY_KEY,
 	HONEYCOMB_MARKER,
 	type HookHandlerEntry,
 	notImplemented,
 	type SkillLinkTarget,
 } from "./contracts.js";
-
-export { ClaudeCodeConnector, type ClaudeCodeConnectorOptions } from "./claude-code.js";
-
 export { CursorConnector, type CursorConnectorOptions } from "./cursor.js";
-
 export { createNodeConnectorFs } from "./node-fs.js";
-
-export {
-	connectorMain,
-	type ConnectorCommandDeps,
-	type ConnectorCommandResult,
-	type ConnectorInvocation,
-	type ConnectorOutputSink,
-	type ConnectorRegistry,
-	parseConnectorArgs,
-	runConnectorCommand,
-} from "./cli.js";
