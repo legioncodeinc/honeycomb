@@ -217,6 +217,29 @@ describe("PRD-045g mountSkillPropagationApi — pull + fan-out (g-AC-5)", () => 
 		expect(second.skillsSkipped).toBe(1);
 	});
 
+	it("POST /api/skills/pull { force:true } performs a FORCED pull — re-writes even when not newer", async () => {
+		// The CLI seam (`skillify pull --force`) POSTs `{ force: true }` to `/pull` — the daemon
+		// must honour it on the SAME route, matching the dedicated `/force` route's effect. Before
+		// the fix `/pull` hardcoded force:false, so `--force` was silently a normal (skipping) pull.
+		const storage = new PropagationFake([skillRow("team-skill", "alice", 1)]);
+		const { daemon, app } = makeDaemon(storage);
+		mountSkillPropagationApi(daemon, { storage, roots });
+
+		// First pull lands the canonical SKILL.md at v1.
+		const first = (await (await app.request(`${SKILLS_GROUP}/pull`, { method: "POST", headers: HEADERS, body: "{}" })).json()) as {
+			skillsWritten: number;
+		};
+		expect(first.skillsWritten).toBe(1);
+
+		// A NORMAL re-pull would skip (local is at-or-newer). A FORCED re-pull re-writes it.
+		const forced = (await (
+			await app.request(`${SKILLS_GROUP}/pull`, { method: "POST", headers: HEADERS, body: JSON.stringify({ force: true }) })
+		).json()) as { pulled: boolean; skillsWritten: number; skillsSkipped: number };
+		expect(forced.pulled).toBe(true);
+		expect(forced.skillsWritten, "force:true re-writes the same version (no idempotent skip)").toBe(1);
+		expect(forced.skillsSkipped).toBe(0);
+	});
+
 	it("POST /api/skills/pull is fail-soft — a storage read error returns { pulled:false } not a throw/500", async () => {
 		// A fake that fails the latest-skills SELECT drives the pull's swallow path.
 		const failing: StorageQuery = { query: () => Promise.resolve(connectionError("down", "x")) };

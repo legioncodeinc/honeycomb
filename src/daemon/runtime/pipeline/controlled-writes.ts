@@ -674,6 +674,31 @@ export function createControlledWriteHandler(deps?: ControlledWriteHandlerDeps):
 		};
 		const scope: QueryScope = { org: job.scope.org, workspace: job.scope.workspace };
 		const outcome = await applyControlledWrite(input, scope, deps);
-		if (deps.onOutcome) await deps.onOutcome(job, outcome);
+		// The memory write is now COMMITTED (an ADD inserted, or an UPDATE/DELETE version-bumped).
+		// The fan-out enqueue (`onOutcome`) is a SEPARATE, recoverable effect — graph-persist is
+		// idempotent and the dreaming pass re-consolidates — so its failure must NOT throw out of
+		// this handler. If it did, the stage handler would throw → the worker fails+retries the job
+		// → `applyControlledWrite` runs AGAIN. That replay is a no-op for an ADD (the content-hash
+		// dedup returns the existing id), but an UPDATE/DELETE is an APPEND-ONLY version bump that
+		// is NOT idempotent on replay — a second apply would write an extra, spurious version. So a
+		// fan-out failure is caught + logged here, never propagated, keeping the committed write
+		// un-replayed. (A transactional outbox / idempotency-token redesign is the larger follow-up;
+		// this is the minimal correct guard.)
+		if (deps.onOutcome) {
+			try {
+				await deps.onOutcome(job, outcome);
+			} catch (err: unknown) {
+				const reason = err instanceof Error ? err.message : String(err);
+				logger.event("controlled_write.fan_out_failed", {
+					id: job.id,
+					action: outcome.action,
+					memoryId: outcome.memoryId,
+					reason,
+				});
+				// Swallow deliberately: the write is committed; the lost fan-out is recoverable via
+				// the idempotent graph-persist + the dreaming re-consolidation. Re-throwing would
+				// duplicate the committed write on the retry (the bug this guard exists to prevent).
+			}
+		}
 	};
 }

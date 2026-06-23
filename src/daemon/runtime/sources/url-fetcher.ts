@@ -403,6 +403,10 @@ export function bytesToText(body: Buffer, contentType: string): string {
 	}
 	const stripped = stripElement(stripElement(raw, "script"), "style")
 		.replace(/<\/(?:p|div|li|h[1-6]|br|tr|section|article)>/gi, "\n")
+		// `<br>` / `<br/>` / `<br />` are VOID separators (no closing tag), so the close-tag pass
+		// above misses them — handle them explicitly as newlines BEFORE the generic tag strip,
+		// otherwise they would flatten to a space (`a<br>b` → "a b" instead of "a\nb").
+		.replace(/<br\b[^>]*\/?>/gi, "\n")
 		.replace(/<[^>]+>/g, " ");
 	return decodeEntities(stripped)
 		.replace(/[ \t]+\n/g, "\n")

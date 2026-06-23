@@ -91,21 +91,26 @@ describe("PRD-045g createSessionStartSeams.autoPullSkills (g-AC-2)", () => {
 
 	it("TIME-BUDGETED: a hung fetch is aborted by the budget and still resolves cleanly", async () => {
 		vi.useFakeTimers();
-		// A fetch that rejects on abort (the real fetch behaviour), never resolving on its own.
-		const hanging = ((_url: unknown, init?: RequestInit) =>
-			new Promise((_resolve, reject) => {
-				const signal = init?.signal;
-				signal?.addEventListener("abort", () => reject(new Error("aborted")));
-			})) as unknown as typeof fetch;
-		const seams = createSessionStartSeams({
-			credentials: createFakeCredentialReader({ org: "acme" }),
-			fetch: hanging,
-			env: {},
-			timeoutMs: 50,
-		});
-		const pending = seams.autoPullSkills({ org: "acme" });
-		await vi.advanceTimersByTimeAsync(60);
-		await expect(pending).resolves.toBeUndefined();
-		vi.useRealTimers();
+		try {
+			// A fetch that rejects on abort (the real fetch behaviour), never resolving on its own.
+			const hanging = ((_url: unknown, init?: RequestInit) =>
+				new Promise((_resolve, reject) => {
+					const signal = init?.signal;
+					signal?.addEventListener("abort", () => reject(new Error("aborted")));
+				})) as unknown as typeof fetch;
+			const seams = createSessionStartSeams({
+				credentials: createFakeCredentialReader({ org: "acme" }),
+				fetch: hanging,
+				env: {},
+				timeoutMs: 50,
+			});
+			const pending = seams.autoPullSkills({ org: "acme" });
+			await vi.advanceTimersByTimeAsync(60);
+			await expect(pending).resolves.toBeUndefined();
+		} finally {
+			// Restore real timers even if an assertion above throws — a leaked fake-timer clock
+			// would corrupt every subsequent test in the worker.
+			vi.useRealTimers();
+		}
 	});
 });

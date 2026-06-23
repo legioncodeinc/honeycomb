@@ -128,6 +128,16 @@ async function readJson(c: Context): Promise<unknown> {
 }
 
 /**
+ * Read the `force` flag off a pull request body (g-AC-5). The CLI seam POSTs `{ force: true }`
+ * for `skillify pull --force`; a non-JSON / empty / non-boolean body degrades to `false` (a
+ * normal, idempotent pull). Defensive at the boundary — a malformed body never throws here.
+ */
+async function readForceFlag(c: Context): Promise<boolean> {
+	const body = await readJson(c);
+	return typeof body === "object" && body !== null && (body as Record<string, unknown>)["force"] === true;
+}
+
+/**
  * Build a daemon-side {@link SkillPullClient} from the publish endpoint's select-newer read
  * (g-AC-5). The pull reads the highest-version skills THROUGH the same storage client the
  * daemon already holds — there is no second DeepLake connection and no thin-client dispatch on
@@ -229,7 +239,10 @@ export function mountSkillPropagationApi(daemon: Daemon, options: MountSkillProp
 
 	// POST /api/skills/pull — run the real team pull + symlink fan-out (g-AC-5). Idempotent +
 	// fail-soft: a pull error is surfaced as a data body with `pulled:false`, never a throw.
-	group.post("/pull", async (c) => handlePull(c, false));
+	// `force` is read from the request body so `honeycomb skillify pull --force` (the CLI seam
+	// in `storage-handlers.ts` POSTs `{ force: true }`) re-writes even when remote is not newer
+	// — the same effect as the dedicated `/force` route. Absent/non-boolean body → force:false.
+	group.post("/pull", async (c) => handlePull(c, await readForceFlag(c)));
 
 	// POST /api/skills/force — pull with `force:true` (re-write even when remote is not newer).
 	group.post("/force", async (c) => handlePull(c, true));

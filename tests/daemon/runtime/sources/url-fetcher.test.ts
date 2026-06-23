@@ -333,6 +333,23 @@ describe("PRD-045 W1 — SSRF-safe URL document fetcher", () => {
 			expect(text).not.toContain("display:none");
 		});
 
+		// --- <br> void-separator regression (CodeRabbit PR #82): newline, not a space ---
+
+		it("treats <br> as a newline separator, not a flattened space", () => {
+			const text = bytesToText(Buffer.from("<html><body>a<br>b</body></html>"), "text/html");
+			expect(text).toBe("a\nb");
+		});
+
+		it("treats self-closing <br/> and <br /> as newline separators", () => {
+			expect(bytesToText(Buffer.from("<html><body>a<br/>b</body></html>"), "text/html")).toBe("a\nb");
+			expect(bytesToText(Buffer.from("<html><body>a<br />b</body></html>"), "text/html")).toBe("a\nb");
+		});
+
+		it("treats <br> with attributes (<br class='x'>) as a newline separator", () => {
+			const text = bytesToText(Buffer.from("<html><body>a<br class='x'>b</body></html>"), "text/html");
+			expect(text).toBe("a\nb");
+		});
+
 		// --- CodeQL js/double-escaping regression: entity decode is single-pass ---
 
 		it("decodes &amp;lt; to the LITERAL text &lt; (NOT < — no double-unescape)", () => {

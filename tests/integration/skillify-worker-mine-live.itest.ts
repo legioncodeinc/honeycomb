@@ -313,42 +313,45 @@ describe.skipIf(!HAS_TOKEN)("live skillify worker smoke (opt-in, real backend): 
 		// REAL durable queue over a throwaway memory_jobs table.
 		const queue = createJobQueueService({ storage, scope, config: { tableName: TBL_JOBS } });
 		await queue.start();
+		try {
+			// REAL append-only skill store over a throwaway skills table (native heal-create isolation).
+			const resolveTable = (canonical: string): string => (canonical === "skills" ? TBL_SKILLS : canonical);
+			const store = createSkillStore(storage, scope, resolveTable);
 
-		// REAL append-only skill store over a throwaway skills table (native heal-create isolation).
-		const resolveTable = (canonical: string): string => (canonical === "skills" ? TBL_SKILLS : canonical);
-		const store = createSkillStore(storage, scope, resolveTable);
+			const tmp = mkdtempSync(join(tmpdir(), "skf-live-"));
 
-		const tmp = mkdtempSync(join(tmpdir(), "skf-live-"));
+			const worker = createSkillifyJobWorker({
+				queue,
+				storage,
+				scope,
+				gateSpec: { command: "noop", args: [] },
+				lock: { acquire: () => ({ release: () => {} }) },
+				watermark: createWatermarkStore(join(tmp, "wm")),
+				installDirs: { projectDir: join(tmp, "proj"), globalDir: join(tmp, "home") },
+				author: "alice",
+				gateOverride: createFakeGateCli(keepVerdict()),
+				fetcherOverride: fakeFetcher(sixPairs("proj-live", "sess-live")),
+				storeOverride: store,
+			});
 
-		const worker = createSkillifyJobWorker({
-			queue,
-			storage,
-			scope,
-			gateSpec: { command: "noop", args: [] },
-			lock: { acquire: () => ({ release: () => {} }) },
-			watermark: createWatermarkStore(join(tmp, "wm")),
-			installDirs: { projectDir: join(tmp, "proj"), globalDir: join(tmp, "home") },
-			author: "alice",
-			gateOverride: createFakeGateCli(keepVerdict()),
-			fetcherOverride: fakeFetcher(sixPairs("proj-live", "sess-live")),
-			storeOverride: store,
-		});
+			// ENQUEUE the same skillify cue capture enqueues at session-end.
+			await queue.enqueue(skillifyJob("sess-live", "proj-live"));
 
-		// ENQUEUE the same skillify cue capture enqueues at session-end.
-		await queue.enqueue(skillifyJob("sess-live", "proj-live"));
+			// Drive the lease+mine+write once (the deterministic unit a test asserts against).
+			const processed = await worker.runOnce();
+			expect(processed, "the worker leased + processed the skillify job").toBe(true);
 
-		// Drive the lease+mine+write once (the deterministic unit a test asserts against).
-		const processed = await worker.runOnce();
-		expect(processed, "the worker leased + processed the skillify job").toBe(true);
-
-		// READABLE via the SAME highest-version-per-id read /api/skills serves (the store's
-		// readActive uses the identical resolve shape `fetchSkills` builds, pointed at the
-		// throwaway table by the resolveTable seam so the real `skills` table is untouched).
-		const id = skillLogicalId("ci-mined-skill", "alice");
-		const active = await store.readActive(id);
-		expect(active, "the mined skill row landed + reads back as current").not.toBeNull();
-		expect(active?.provenance.version).toBe(1);
-
-		queue.stop();
+			// READABLE via the SAME highest-version-per-id read /api/skills serves (the store's
+			// readActive uses the identical resolve shape `fetchSkills` builds, pointed at the
+			// throwaway table by the resolveTable seam so the real `skills` table is untouched).
+			const id = skillLogicalId("ci-mined-skill", "alice");
+			const active = await store.readActive(id);
+			expect(active, "the mined skill row landed + reads back as current").not.toBeNull();
+			expect(active?.provenance.version).toBe(1);
+		} finally {
+			// Stop the queue's reaper/poll timers even if an assertion above throws — a leaked
+			// queue keeps a live interval open and can hang the test runner's teardown.
+			queue.stop();
+		}
 	});
 });

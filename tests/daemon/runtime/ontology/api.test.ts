@@ -161,6 +161,21 @@ describe("PRD-045c c-AC-5: reads fail soft to an empty body, never a 501/500", (
 		expect(body.entities).toEqual([]);
 	});
 
+	it("a THROWING storage seam yields an empty 200 read, never a 500 (fail-soft on throw)", async () => {
+		// A storage seam whose query REJECTS (a dropped socket / SDK exception), not merely
+		// returns a non-ok result. Before the fix this bubbled a 500; selectRows now swallows
+		// the throw to `[]` so the read route stays fail-soft.
+		const storage: StorageQuery = {
+			async query(): Promise<QueryResult> {
+				throw new Error("connection reset by peer");
+			},
+		};
+		const res = await wiredDaemon(storage).app.request("/api/ontology/entities", { headers: ORG_HEADER });
+		expect(res.status, "a thrown storage error is degraded to an empty 200, not a 500").toBe(200);
+		const body = (await res.json()) as { entities: unknown[] };
+		expect(body.entities).toEqual([]);
+	});
+
 	it("a request with no resolvable tenancy 400s (fail-closed), never a 501", async () => {
 		// team mode + no default scope + no org header → null scope → 400.
 		const { storage } = storageWith(() => []);

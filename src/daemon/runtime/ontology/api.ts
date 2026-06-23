@@ -97,10 +97,21 @@ function toNum(value: unknown, fallback: number): number {
 	return Number.isFinite(n) ? n : fallback;
 }
 
-/** Run a SELECT through the storage seam, returning rows or `[]` on any non-ok result (fail-soft). */
+/**
+ * Run a SELECT through the storage seam, returning rows or `[]` on any non-ok result
+ * (fail-soft). A THROW from `storage.query` (a dropped socket, an SDK exception, a rejected
+ * promise) is ALSO degraded to `[]` here — a read route never bubbles a 500 for a transport
+ * fault; the module's read contract is "an honest empty body, never a crash" (c-AC-5).
+ */
 async function selectRows(storage: StorageQuery, sql: string, scope: QueryScope): Promise<StorageRow[]> {
-	const result = await storage.query(sql, scope);
-	return isOk(result) ? result.rows : [];
+	try {
+		const result = await storage.query(sql, scope);
+		return isOk(result) ? result.rows : [];
+	} catch {
+		// A thrown storage error is treated identically to a non-ok result: the cold/absent/
+		// unreachable read degrades to empty rather than failing the route (fail-soft read).
+		return [];
+	}
 }
 
 // ── Read builders (identifiers via `sqlIdent`; no interpolated value) ──────────

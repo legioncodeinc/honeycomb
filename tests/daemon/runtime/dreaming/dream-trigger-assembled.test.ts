@@ -79,7 +79,10 @@ describe("PRD-045d d-AC-3 — Dream-now acks cleanly with dreaming OFF on the as
 		expect(ack.triggered, "dreaming OFF → nothing triggered").toBe(false);
 		// The handler awaits only the cheap trigger evaluation (which short-circuits on the
 		// disabled gate), never a consolidation pass — so it returns promptly.
-		expect(elapsed, "the disabled trigger short-circuits — no blocking on a pass").toBeLessThan(2_000);
+		// A generous wall-clock ceiling: the behavioral asserts above already prove the
+		// short-circuit (nothing enqueued, triggered:false). A tight 2s bound flaked under CI
+		// load; 10s still catches a real "blocks on a consolidation pass" regression.
+		expect(elapsed, "the disabled trigger short-circuits — no blocking on a pass").toBeLessThan(10_000);
 
 		// No `INSERT INTO "<jobs>"` reached the wire: a disabled trigger enqueues nothing
 		// (FR-7 / a-AC-4 — the counter may be touched, but no dreaming job is queued).

@@ -269,35 +269,48 @@ class SkillifyJobWorkerImpl implements SkillifyJobWorker {
 
 	async runOnce(): Promise<boolean> {
 		// Lease ONLY a skillify job (the kind filter) — a foreign summary/dreaming/pipeline
-		// job is left queued for its own worker, never grabbed-and-failed here (f-AC-1).
-		const leased = await this.queue.lease(LEASE_KINDS);
-		if (leased === null) return false;
-
-		// Parse the queued payload at the boundary. A malformed body is a corruption/wiring
-		// bug worth surfacing — fail it with a clear reason rather than silently completing
-		// a job we never ran (never a swallowed error, f-AC-4).
-		const payload = parseSkillifyJobPayload(leased.payload);
-		if (payload === null) {
-			this.logger?.event("skillify.worker.bad_payload", { id: leased.id });
-			await this.queue.fail(leased.id, "malformed skillify job payload");
-			return true;
+		// job is left queued for its own worker, never grabbed-and-failed here (f-AC-1). A
+		// THROW from lease() itself (no job to fail-route) must NOT reject runOnce() and become
+		// an unhandled rejection in the timer loop — degrade it to "nothing leased" (false).
+		let leased: Awaited<ReturnType<JobQueueService["lease"]>>;
+		try {
+			leased = await this.queue.lease(LEASE_KINDS);
+		} catch (err: unknown) {
+			const reason = err instanceof Error ? err.message : String(err);
+			this.logger?.event("skillify.worker.lease_failed", { reason });
+			return false;
 		}
-
-		// Resolve the current watermark for the triggering project. The projectKey is the
-		// `path` (the conversation grouping key — the per-project dimension we mine).
-		const projectKey = payload.path !== "" ? payload.path : payload.sessionId;
-		const watermark = this.watermarkStore.read(projectKey);
-
-		// The fetcher / gate / store default to the real seams over `storage`/`scope`/`gateSpec`;
-		// a test injects deterministic overrides (canned rows, a fixed KEEP verdict, an in-memory
-		// store) so the lease→mine→write wiring is proven without a live `sessions`/`skills` read
-		// or a live host CLI. Production passes none → the real constructions.
-		const fetcher = this.fetcherOverride ?? createSessionFetcher(this.storage, this.scope);
-		const gate = this.gateOverride ?? createHostCliGate(this.gateSpec, this.gateSpawner);
-		const store = this.storeOverride ?? createSkillStore(this.storage, this.scope);
-		const install = createFsInstallTarget(this.installDirs);
+		if (leased === null) return false;
+		// After this point a throw routes to `queue.fail(leased.id, ...)` (we hold the job).
+		const job = leased;
 
 		try {
+			// Parse the queued payload at the boundary. A malformed body is a corruption/wiring
+			// bug worth surfacing — fail it with a clear reason rather than silently completing
+			// a job we never ran (never a swallowed error, f-AC-4).
+			const payload = parseSkillifyJobPayload(job.payload);
+			if (payload === null) {
+				this.logger?.event("skillify.worker.bad_payload", { id: job.id });
+				await this.queue.fail(job.id, "malformed skillify job payload");
+				return true;
+			}
+
+			// Resolve the current watermark for the triggering project. The projectKey is the
+			// `path` (the conversation grouping key — the per-project dimension we mine). The
+			// watermark read touches the filesystem; it is INSIDE the try so a read throw is
+			// fail-routed to `queue.fail`, never an unhandled rejection (the f-AC-4 floor).
+			const projectKey = payload.path !== "" ? payload.path : payload.sessionId;
+			const watermark = this.watermarkStore.read(projectKey);
+
+			// The fetcher / gate / store default to the real seams over `storage`/`scope`/`gateSpec`;
+			// a test injects deterministic overrides (canned rows, a fixed KEEP verdict, an in-memory
+			// store) so the lease→mine→write wiring is proven without a live `sessions`/`skills` read
+			// or a live host CLI. Production passes none → the real constructions.
+			const fetcher = this.fetcherOverride ?? createSessionFetcher(this.storage, this.scope);
+			const gate = this.gateOverride ?? createHostCliGate(this.gateSpec, this.gateSpawner);
+			const store = this.storeOverride ?? createSkillStore(this.storage, this.scope);
+			const install = createFsInstallTarget(this.installDirs);
+
 			// Run the mine: lock → fetch → extract → gate (lock released in finally by mine()).
 			const result = await mine(
 				{ projectKey, triggerSessionId: payload.sessionId },
@@ -308,11 +321,11 @@ class SkillifyJobWorkerImpl implements SkillifyJobWorker {
 				// Lock held (concurrent run) or no pairs to gate — complete the job as a no-op;
 				// this is NOT a failure, just "nothing to do right now."
 				this.logger?.event("skillify.worker.skipped", {
-					id: leased.id,
+					id: job.id,
 					reason: result.reason,
-					attempt: leased.attempt,
+					attempt: job.attempt,
 				});
-				await this.queue.complete(leased.id);
+				await this.queue.complete(job.id);
 				return true;
 			}
 
@@ -328,29 +341,34 @@ class SkillifyJobWorkerImpl implements SkillifyJobWorker {
 			const sessionDates = result.outcome.pairs.map((p) => p.sessionDate);
 			this.watermarkStore.advance(projectKey, sessionDates);
 
-			await this.queue.complete(leased.id);
+			await this.queue.complete(job.id);
 			this.logger?.event("skillify.worker.completed", {
-				id: leased.id,
+				id: job.id,
 				decision: outcome.decision,
 				version: outcome.version,
 				skillId: outcome.skillId,
-				attempt: leased.attempt,
+				attempt: job.attempt,
 			});
 		} catch (err: unknown) {
-			// A gate timeout, bad exit code, storage failure, or any other throw routes here.
-			// The daemon is NOT crashed and capture is NOT blocked (f-AC-4).
+			// A gate timeout, bad exit code, storage failure, a payload/watermark read throw, or
+			// any other throw routes here. The daemon is NOT crashed and capture is NOT blocked,
+			// and runOnce() resolves (never an unhandled rejection in the timer loop) — f-AC-4.
 			const reason = err instanceof Error ? err.message : String(err);
 			this.logger?.event("skillify.worker.failed", {
-				id: leased.id,
-				attempt: leased.attempt,
+				id: job.id,
+				attempt: job.attempt,
 				reason,
 			});
-			await this.queue.fail(leased.id, reason);
+			await this.queue.fail(job.id, reason);
 		}
 		return true;
 	}
 
 	start(): void {
+		// Idempotent: a second start() while a timer is already live would overwrite `this.handle`
+		// and leak the first interval (stop() only clears the latest handle). Guard like the
+		// dreaming worker's start() so double-start is a no-op, not a timer leak.
+		if (this.handle !== undefined) return;
 		this.handle = this.setTimer(() => {
 			// Skip a tick if the previous lease+run is still in flight; never overlap.
 			if (this.running) return;

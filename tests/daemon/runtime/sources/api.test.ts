@@ -217,6 +217,10 @@ describe("PRD-022 SECURITY: /api/sources tenancy cross-check against the validat
 		});
 		expect(res.status).toBe(200);
 		expect(await registry.list()).toContain("src-1");
+		// Assert the READ-ROUTE BODY too (not just registry internals), so a regression in the
+		// GET handler's projection — not just the registry — is caught.
+		const body = (await res.json()) as { sources: string[] };
+		expect(body.sources).toContain("src-1");
 	});
 });
 

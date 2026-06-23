@@ -577,6 +577,81 @@ describe("createControlledWriteHandler: payload → write, drop-invalid, scope t
 	});
 });
 
+// ── fan-out failure must NOT replay the committed write (CodeRabbit PR #82) ────────
+
+describe("createControlledWriteHandler: a throwing onOutcome does NOT replay the committed write", () => {
+	/**
+	 * `applyControlledWrite` commits the memory write (an ADD INSERT, an UPDATE/DELETE
+	 * version-bump) BEFORE the fan-out enqueue (`onOutcome`) runs. If `onOutcome` threw out of
+	 * the handler, the stage worker would fail+retry the job → `applyControlledWrite` would run
+	 * AGAIN. For an UPDATE/DELETE (append-only version bump) that replay is NOT idempotent — it
+	 * writes an extra spurious version. So a fan-out failure must be caught inside the handler,
+	 * never propagated: the handler RESOLVES, and the apply ran exactly once.
+	 */
+	it("the handler RESOLVES (does not throw) when onOutcome throws — the write is not retried", async () => {
+		const { storage, requests } = storageWith(noRows);
+		let onOutcomeCalls = 0;
+		const handler = createControlledWriteHandler(
+			deps(storage, config(), recordingEmbed(), {
+				onOutcome: () => {
+					onOutcomeCalls += 1;
+					throw new Error("graph-persist fan-out enqueue failed");
+				},
+			}),
+		);
+		const job: StageJob = {
+			id: "fanout-fail",
+			kind: "memory_controlled_write",
+			attempt: 1,
+			scope: { org: SCOPE.org, workspace: SCOPE.workspace, agentId: "default" },
+			payload: {
+				proposal: { action: "add", confidence: 0.9, reason: "" },
+				content: "fan-out fact",
+				normalized_content: "fan-out fact",
+				fact_confidence: 0.9,
+			},
+		};
+
+		// A thrown fan-out must NOT propagate — if it did, the worker would fail+retry the job and
+		// `applyControlledWrite` would run a SECOND time (the duplicate-write bug this guards).
+		await expect(handler(job)).resolves.toBeUndefined();
+
+		// The committed write happened exactly ONCE (one INSERT), and the fan-out was attempted once.
+		expect(requests.filter((r) => isInsert(r.sql))).toHaveLength(1);
+		expect(onOutcomeCalls).toBe(1);
+	});
+
+	it("a throwing onOutcome on a version-bumped UPDATE does not propagate (no extra version write)", async () => {
+		// The UPDATE/DELETE path is the NON-idempotent one (append-only version bump), so this is
+		// the case the guard most protects: a fan-out throw must not trigger a retry that appends a
+		// second version. Enable the autonomous gate so the UPDATE actually applies.
+		const { storage, requests } = storageWith(noRows);
+		const handler = createControlledWriteHandler(
+			deps(storage, config({ autonomous: { allowUpdateDelete: true } }), recordingEmbed(), {
+				onOutcome: () => {
+					throw new Error("fan-out down");
+				},
+			}),
+		);
+		const job: StageJob = {
+			id: "fanout-fail-update",
+			kind: "memory_controlled_write",
+			attempt: 1,
+			scope: { org: SCOPE.org, workspace: SCOPE.workspace, agentId: "default" },
+			payload: {
+				proposal: { action: "update", confidence: 0.9, reason: "now disabled", targetId: "mem-target-1" },
+				content: "the setting is disabled",
+				normalized_content: "the setting is disabled",
+				fact_confidence: 0.9,
+			},
+		};
+
+		await expect(handler(job)).resolves.toBeUndefined();
+		// Exactly one version-bumped INSERT landed — the fan-out throw did not drive a replay.
+		expect(requests.filter((r) => isInsert(r.sql))).toHaveLength(1);
+	});
+});
+
 // ── dedup probe failure classification (live dogfood regression) ──────────────────
 
 describe("dedup probe failure: missing-table/column tolerated → INSERT; genuine error fatal", () => {
