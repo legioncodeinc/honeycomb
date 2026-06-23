@@ -28,7 +28,7 @@
 // to down-level harness bundles; all hosts run on the same Node 22 floor.
 
 import { build } from "esbuild";
-import { chmodSync, writeFileSync, readFileSync } from "node:fs";
+import { chmodSync, copyFileSync, writeFileSync, readFileSync } from "node:fs";
 
 const ESM_PACKAGE_JSON = '{"type":"module"}\n';
 
@@ -164,9 +164,9 @@ await build({
 //    Each is an independent thin-client bundle (FR-1). No DeepLake (FR-3).
 // ---------------------------------------------------------------------------
 const HOOK_HARNESSES = [
-  { name: "claude-code", entry: "dist/harnesses/claude-code/src/index.js", outdir: "harnesses/claude-code/bundle" },
-  { name: "codex", entry: "dist/harnesses/codex/src/index.js", outdir: "harnesses/codex/bundle" },
-  { name: "cursor", entry: "dist/harnesses/cursor/src/index.js", outdir: "harnesses/cursor/bundle" },
+  { name: "claude-code", entry: "dist/harnesses/claude-code/src/index.js", outdir: "harnesses/claude-code/bundle", aliases: ["session-start.js", "capture.js", "pre-tool-use.js", "session-end.js"] },
+  { name: "codex", entry: "dist/harnesses/codex/src/index.js", outdir: "harnesses/codex/bundle", aliases: ["session-start.js", "capture.js", "pre-tool-use.js"] },
+  { name: "cursor", entry: "dist/harnesses/cursor/src/index.js", outdir: "harnesses/cursor/bundle", aliases: ["session-start.js", "capture.js", "pre-tool-use.js", "session-end.js"] },
   { name: "hermes", entry: "dist/harnesses/hermes/src/index.js", outdir: "harnesses/hermes/bundle" },
   { name: "pi", entry: "dist/harnesses/pi/src/index.js", outdir: "harnesses/pi/bundle" },
 ];
@@ -182,6 +182,10 @@ for (const h of HOOK_HARNESSES) {
     define: VERSION_DEFINE,
   });
   stampExecutable(`${h.outdir}/index.js`);
+  for (const alias of h.aliases ?? []) {
+    copyFileSync(`${h.outdir}/index.js`, `${h.outdir}/${alias}`);
+    stampExecutable(`${h.outdir}/${alias}`);
+  }
   stampEsm(h.outdir);
 }
 

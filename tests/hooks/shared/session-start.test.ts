@@ -9,8 +9,10 @@
  */
 
 import { describe, expect, it } from "vitest";
-
+import { runCapture } from "../../../src/hooks/shared/capture.js";
+import { createContextRenderer } from "../../../src/hooks/shared/context-renderer.js";
 import {
+	type ContextRenderer,
 	createFakeContextRenderer,
 	createFakeCredentialReader,
 	createFakeDaemonHookClient,
@@ -21,8 +23,6 @@ import {
 	type SessionStartDeps,
 } from "../../../src/hooks/shared/contracts.js";
 import { runSessionStart } from "../../../src/hooks/shared/session-start.js";
-import { createContextRenderer } from "../../../src/hooks/shared/context-renderer.js";
-import { runCapture } from "../../../src/hooks/shared/capture.js";
 
 const META = { sessionId: "sess-1", path: "conv-1", cwd: "/repo", agent: "claude-code" } as const;
 
@@ -122,6 +122,36 @@ describe("PRD-019b session-start core", () => {
 		expect(result.additionalContext).toBeUndefined(); // empty block → omitted
 	});
 
+	it("b-AC-3: passes the harness runtime path into the context renderer", async () => {
+		const seen: string[] = [];
+		const recordingContext: ContextRenderer = {
+			async render(req): Promise<string> {
+				if (req.runtimePath !== undefined) seen.push(req.runtimePath);
+				return "BLOCK";
+			},
+		};
+		const d: SessionStartDeps = {
+			daemon: createFakeDaemonHookClient(),
+			credentials: createFakeCredentialReader(),
+			context: recordingContext,
+			seams: createFakeSessionStartSeams(),
+		};
+
+		await runSessionStart(startInput({ runtimePath: "legacy" }), d);
+
+		expect(seen).toEqual(["legacy"]);
+	});
+
+	it("b-AC-3: the production context renderer stamps the requested runtime path", async () => {
+		const daemon = createFakeDaemonHookClient({ body: { additionalContext: "BLOCK" } });
+		const renderer = createContextRenderer(daemon);
+
+		const block = await renderer.render({ meta: META, runtimePath: "legacy" });
+
+		expect(block).toBe("BLOCK");
+		expect(daemon.calls[0].runtimePath).toBe("legacy");
+	});
+
 	// ── PRD-046d: the session-start memory prime (d-AC-1/d-AC-2 at the core; d-AC-4) ──
 
 	it("d-AC-1/d-AC-2: the prime digest is APPENDED to the rendered context block", async () => {
@@ -135,6 +165,27 @@ describe("PRD-019b session-start core", () => {
 		const result = await runSessionStart(startInput(), d);
 		// Both blocks are present, the prime after the rules block, separated by a blank line.
 		expect(result.additionalContext).toBe("## Rules\n- be kind\n\n## Memory\n- decided X");
+	});
+
+	it("d-AC-1: passes the harness runtime path into the prime renderer", async () => {
+		const seen: string[] = [];
+		const recordingPrime: PrimeRenderer = {
+			async render(req): Promise<string> {
+				if (req.runtimePath !== undefined) seen.push(req.runtimePath);
+				return "## Memory\n- decided X";
+			},
+		};
+		const d: SessionStartDeps = {
+			daemon: createFakeDaemonHookClient(),
+			credentials: createFakeCredentialReader({ token: "t", org: "acme" }),
+			context: createFakeContextRenderer(""),
+			prime: recordingPrime,
+			seams: createFakeSessionStartSeams(),
+		};
+
+		await runSessionStart(startInput({ runtimePath: "legacy" }), d);
+
+		expect(seen).toEqual(["legacy"]);
 	});
 
 	it("d-AC-1/d-AC-2: the prime is injected even when there is no rules/goals context block", async () => {
