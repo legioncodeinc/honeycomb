@@ -3,7 +3,7 @@
 - **Auditor:** security-worker-bee (Hivemind Security Stinger)
 - **Date:** 2026-06-18
 - **Branch:** `prd-016-skillify`
-- **Repo:** `honeycomb` (C:\Users\mario\GitHub\honeycomb)
+- **Repo:** `honeycomb` (<repo-root>)
 - **Ordering:** Ran BEFORE `quality-worker-bee`. No prior `*-qa-report.md` exists for PRD-016 — ordering invariant satisfied; QA is cleared to run AFTER this report.
 - **Coverage:** FULL (in-stack: TypeScript / Node ≥22 / ESM, daemon + thin-client, Deep Lake SQL layer). No reduced-coverage surfaces.
 

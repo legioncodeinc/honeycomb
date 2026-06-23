@@ -15,7 +15,7 @@ through `/api/memories/recall` works LIVE; and the file Honeycomb writes is byte
 with what `hivemind whoami` reads.
 
 ## Reference to port (verbatim contract)
-Hivemind `C:\Users\mario\GitHub\hivemind`: `src/commands/auth.ts` (device flow `/auth/device/code` →
+Hivemind `<hivemind-source>`: `src/commands/auth.ts` (device flow `/auth/device/code` →
 poll `/auth/device/token` → mint `/users/me/tokens` → validate `/me`; `/workspaces` list), `src/commands/auth-creds.ts`
 (creds file path/shape/mode), `src/config.ts` (env+creds resolution), `src/deeplake-api.ts` (transport — already mirrored).
 

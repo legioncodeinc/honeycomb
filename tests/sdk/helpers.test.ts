@@ -35,7 +35,7 @@ function header(init: RequestInit | undefined, name: string): string | undefined
 	return (init?.headers as Record<string, string> | undefined)?.[name];
 }
 
-const ACTOR = { actor: "mario", actorType: "user" };
+const ACTOR = { actor: "alex", actorType: "user" };
 const DAEMON = "http://127.0.0.1:3850";
 
 describe("e-AC-5: Vercel AI SDK helper reuses the core client", () => {
@@ -50,7 +50,7 @@ describe("e-AC-5: Vercel AI SDK helper reuses the core client", () => {
 		expect(calls).toHaveLength(1);
 		// PRD-022d: the core client now reaches the WIRED recall endpoint.
 		expect(calls[0].url).toBe(`${DAEMON}/api/memories/recall`);
-		expect(header(calls[0].init, "x-honeycomb-actor")).toBe("mario");
+		expect(header(calls[0].init, "x-honeycomb-actor")).toBe("alex");
 		expect(header(calls[0].init, "x-honeycomb-actor-type")).toBe("user");
 		expect(header(calls[0].init, "authorization")).toBe("Bearer tok-9");
 	});
@@ -65,7 +65,7 @@ describe("e-AC-5: Vercel AI SDK helper reuses the core client", () => {
 		// PRD-022d: the WIRED store body is `{ content, normalizedContent }`.
 		expect(calls[0].url).toBe(`${DAEMON}/api/memories`);
 		expect(JSON.parse(calls[0].init?.body as string)).toEqual({ content: "remember this", normalizedContent: "notes/x" });
-		expect(header(calls[0].init, "x-honeycomb-actor")).toBe("mario");
+		expect(header(calls[0].init, "x-honeycomb-actor")).toBe("alex");
 	});
 
 	it("e-AC-5 the Vercel tool set does NOT expose a secrets tool (value-safety)", () => {
@@ -92,7 +92,7 @@ describe("e-AC-5: OpenAI tool helper reuses the core client", () => {
 		expect(out).toEqual([{ path: "p", text: "t" }]);
 		// PRD-022d: the OpenAI helper reuses the core client, which now hits the wired endpoint.
 		expect(calls[0].url).toBe(`${DAEMON}/api/memories/recall`);
-		expect(header(calls[0].init, "x-honeycomb-actor")).toBe("mario");
+		expect(header(calls[0].init, "x-honeycomb-actor")).toBe("alex");
 		expect(header(calls[0].init, "authorization")).toBe("Bearer tok-7");
 	});
 

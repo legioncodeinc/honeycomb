@@ -57,7 +57,7 @@ function createFakeSync(): FakeSync {
 	};
 }
 
-const DEVICE: DeviceRecord = { device_id: "dev-1", label: "mario-mac", createdAt: "2026-06-21T12:00:00.000Z" };
+const DEVICE: DeviceRecord = { device_id: "dev-1", label: "dev-laptop", createdAt: "2026-06-21T12:00:00.000Z" };
 
 function withSink(): { out: (line: string) => void; lines: string[] } {
 	const lines: string[] = [];
@@ -82,7 +82,7 @@ function cliDeps(sync: FakeSync, over: Partial<AssetCliDeps> = {}): AssetCliDeps
 		device: DEVICE,
 		org: "acme",
 		workspace: "platform",
-		author: "mario",
+		author: "alex",
 		out,
 		...over,
 	};
@@ -183,7 +183,7 @@ describe("PRD-033b b-AC-3 — promote to Device publishes at author+device_set s
 		await runAssetVerb(["promote", id, "Device"], deps);
 		const req = sync.publishes[0]!;
 		expect(req.cell.tier).toBe("Device");
-		expect(req.scope.author).toBe("mario");
+		expect(req.scope.author).toBe("alex");
 		expect(req.deviceSet).toContain("dev-1");
 	});
 });
@@ -268,7 +268,7 @@ describe("PRD-033b — list + device", () => {
 		const listed = withSink();
 		await runAssetVerb(["device", "list"], { ...deps, out: listed.out });
 		expect(listed.lines.join("\n")).toMatch(/dev-1/);
-		expect(listed.lines.join("\n")).toMatch(/mario-mac/);
+		expect(listed.lines.join("\n")).toMatch(/dev-laptop/);
 
 		const revoked = withSink();
 		await runAssetVerb(["device", "revoke", "dev-1"], { ...deps, out: revoked.out });
@@ -389,7 +389,7 @@ describe("PRD-033 F-3 — promote re-reads the CURRENT native bytes (never empty
 			lastSyncedHash: "",
 			localHash: "abc",
 			remoteHash: "",
-			author: "mario",
+			author: "alex",
 			org: "acme",
 			workspace: "platform",
 			deviceSet: [],

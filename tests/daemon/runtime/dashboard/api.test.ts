@@ -87,7 +87,7 @@ function responder(graphBuilt: boolean) {
 		if (/FROM\s+"entities"/i.test(sql)) {
 			if (!graphBuilt) return [];
 			return [
-				{ id: "e1", name: "Mario", type: "entity" },
+				{ id: "e1", name: "Alex", type: "entity" },
 				{ id: "e2", name: "Honeycomb", type: "entity" },
 			];
 		}
@@ -464,7 +464,7 @@ describe("PRD-041b: fetchMemoryGraphView serves the memory-graph view-model (Gra
 		const storage = fakeStorage((sql) => {
 			if (/FROM\s+"entities"/i.test(sql))
 				return [
-					{ id: "e1", name: "Mario", type: "entity" },
+					{ id: "e1", name: "Alex", type: "entity" },
 					{ id: "e2", name: "Honeycomb", type: "entity" },
 				];
 			if (/FROM\s+"entity_dependencies"/i.test(sql))
@@ -474,7 +474,7 @@ describe("PRD-041b: fetchMemoryGraphView serves the memory-graph view-model (Gra
 		const view = await fetchMemoryGraphView(storage, SCOPE_OK);
 		expect(view.built).toBe(true);
 		expect(view.nodes).toEqual([
-			{ id: "e1", label: "Mario", kind: "entity" },
+			{ id: "e1", label: "Alex", kind: "entity" },
 			{ id: "e2", label: "Honeycomb", kind: "entity" },
 		]);
 		// The dependency relation rides the edge `kind` (depends_on) — no special-casing.
@@ -501,7 +501,7 @@ describe("PRD-041b: fetchMemoryGraphView serves the memory-graph view-model (Gra
 
 	it("a dependency edge with a missing endpoint is dropped (no half-edge)", async () => {
 		const storage = fakeStorage((sql) => {
-			if (/FROM\s+"entities"/i.test(sql)) return [{ id: "e1", name: "Mario", type: "entity" }];
+			if (/FROM\s+"entities"/i.test(sql)) return [{ id: "e1", name: "Alex", type: "entity" }];
 			// e2 is not in the entity set → this edge must be filtered out.
 			if (/FROM\s+"entity_dependencies"/i.test(sql))
 				return [{ source_entity_id: "e1", target_entity_id: "e2", type: "depends_on" }];
@@ -517,7 +517,7 @@ describe("PRD-041b: fetchMemoryGraphView serves the memory-graph view-model (Gra
 		const seen: string[] = [];
 		const storage = fakeStorage((sql) => {
 			seen.push(sql);
-			if (/FROM\s+"entities"/i.test(sql)) return [{ id: "e1", name: "Mario", type: "entity" }];
+			if (/FROM\s+"entities"/i.test(sql)) return [{ id: "e1", name: "Alex", type: "entity" }];
 			return [];
 		});
 		await fetchMemoryGraphView(storage, SCOPE_OK);

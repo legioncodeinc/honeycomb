@@ -57,7 +57,7 @@ const CODEBASE_GRAPH: GraphWire = {
 const MEMORY_GRAPH: GraphWire = {
 	built: true,
 	nodes: [
-		{ id: "e1", label: "Mario", kind: "entity" },
+		{ id: "e1", label: "Alex", kind: "entity" },
 		{ id: "e2", label: "Honeycomb", kind: "entity" },
 	],
 	edges: [{ from: "e1", to: "e2", kind: "depends_on" }],
@@ -409,11 +409,11 @@ describe("PRD-041b: the Codebase ↔ Memory toggle swaps the source on the SAME 
 		expect(wire.memoryGraph).toHaveBeenCalled();
 		// The memory graph renders on the SAME canvas (entity nodes drawn, eyebrow says memory).
 		expect(container.querySelectorAll('g[role="button"]')).toHaveLength(MEMORY_GRAPH.nodes.length);
-		expect(container.textContent ?? "").toContain("Mario");
+		expect(container.textContent ?? "").toContain("Alex");
 		expect(container.textContent ?? "").toContain("memory · 2 nodes · 1 edges");
 
 		// A memory node's detail panel shows the `depends_on` relation (no special-casing).
-		clickNode("Mario");
+		clickNode("Alex");
 		expect(container.querySelector('[data-testid="detail-outgoing"]')?.textContent).toContain("depends_on");
 
 		// Switch back to Codebase → the codebase graph is restored.

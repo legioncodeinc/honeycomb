@@ -3,7 +3,7 @@
 - **Date:** 2026-06-17
 - **Auditor:** security-worker-bee (Hivemind security close-out)
 - **Branch:** `prd-008-knowledge-graph-ontology`
-- **Repo root:** `C:\Users\mario\GitHub\honeycomb`
+- **Repo root:** `<repo-root>`
 - **Phase:** Penultimate step of the /the-smoker run (runs BEFORE quality-worker-bee)
 - **Scope:** `src/daemon/runtime/ontology/**`, `src/cli/ontology.ts`, `tests/daemon/runtime/ontology/**`, `tests/integration/ontology-*.itest.ts`. (hivemind-v1 / otherhive-v1 explicitly excluded.)
 

@@ -79,7 +79,7 @@ function jsonResponse(status: number, body: unknown): Response {
 	return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
-const ACTOR = { actor: "mario", actorType: "user" };
+const ACTOR = { actor: "alex", actorType: "user" };
 const DAEMON = "http://127.0.0.1:3850";
 
 describe("e-AC-4: useRecall → results + loading + typed-error", () => {
