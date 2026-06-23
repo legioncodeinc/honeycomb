@@ -218,7 +218,12 @@ describe("PRD-043a retention (AC-5)", () => {
 		expect(page.records[0]?.path).toBe("/p/49");
 		expect(page.records.map((x) => x.path)).toEqual(["/p/49", "/p/48", "/p/47", "/p/46", "/p/45"]);
 		r.close();
-	});
+		// This is the only retention case that does 50 individual disk-backed node:sqlite writes
+		// (each its own fsync) plus a close-checkpoint and a reopen-sweep. That real I/O fits well
+		// under the 5s default locally, but a contended Windows CI runner can exceed it — the prune
+		// LOGIC is already proven by the in-memory + age-sweep siblings, so the only thing the
+		// default timeout catches here is runner slowness. Give this disk-bound case headroom.
+	}, 30_000);
 
 	it("the amortized on-write prune keeps the store bounded over many writes", () => {
 		// The opportunistic prune fires every PRUNE_EVERY_N_WRITES (256) appends, so after a large
