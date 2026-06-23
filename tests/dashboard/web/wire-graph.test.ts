@@ -11,7 +11,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { createWireClient, EMPTY_GRAPH } from "../../../src/dashboard/web/wire.js";
+import { createWireClient, EMPTY_GRAPH, FAILED_BUILD_GRAPH_ACK } from "../../../src/dashboard/web/wire.js";
 
 /** Lowercase a HeadersInit into a flat record for assertion. */
 function headerRecord(init: RequestInit | undefined): Record<string, string> {
@@ -92,5 +92,69 @@ describe("PRD-041b: wire.memoryGraph()", () => {
 		// And memoryGraph hits a DIFFERENT path (the two sources are distinct endpoints).
 		await client.memoryGraph();
 		expect(calls.find((c) => c.url.includes("/api/diagnostics/memory-graph"))).toBeTruthy();
+	});
+});
+
+describe("PRD-041a: wire.buildGraph()", () => {
+	const BUILD_BODY = {
+		built: true,
+		snapshotSha256: "abc123",
+		nodeCount: 42,
+		edgeCount: 58,
+		fileCount: 17,
+		parseErrorCount: 0,
+		cacheStats: { reused: 3, extracted: 14 },
+		localPath: "/tmp/snap.json",
+		push: false,
+	};
+
+	it("POSTs /api/graph/build and returns the parsed ack (counts only; extra body fields ignored)", async () => {
+		const { fetchImpl, calls } = recordingFetch(BUILD_BODY);
+		const client = createWireClient({ fetchImpl });
+		const ack = await client.buildGraph();
+
+		const call = calls.find((c) => c.url.includes("/api/graph/build"));
+		expect(call, "buildGraph hit the endpoint").toBeTruthy();
+		expect(call?.init?.method).toBe("POST");
+		expect(ack).toEqual({ built: true, nodeCount: 42, edgeCount: 58, fileCount: 17 });
+	});
+
+	it("stamps the runtime-path + session headers and forges no tenant org (mirrors pollinate)", async () => {
+		const { fetchImpl, calls } = recordingFetch(BUILD_BODY);
+		const client = createWireClient({ fetchImpl });
+		await client.buildGraph();
+		const headers = headerRecord(calls.find((c) => c.url.includes("/api/graph/build"))?.init);
+		expect(headers["x-honeycomb-runtime-path"]).toBe("plugin");
+		expect(headers["x-honeycomb-session"]).toBeTruthy();
+		expect(headers["x-honeycomb-org"]).toBeUndefined();
+	});
+
+	it("passes an abort signal so a slow build can be bounded (its own generous timeout)", async () => {
+		const { fetchImpl, calls } = recordingFetch(BUILD_BODY);
+		const client = createWireClient({ fetchImpl });
+		await client.buildGraph();
+		const init = calls.find((c) => c.url.includes("/api/graph/build"))?.init;
+		expect(init?.signal, "buildGraph passes an AbortSignal").toBeInstanceOf(AbortSignal);
+	});
+
+	it("degrades to the failure ack on a 500 error body (zod-defaults every field)", async () => {
+		const { fetchImpl } = recordingFetch({ error: "build_failed", reason: "tree-sitter exploded" }, 500);
+		const client = createWireClient({ fetchImpl });
+		expect(await client.buildGraph()).toEqual(FAILED_BUILD_GRAPH_ACK);
+	});
+
+	it("degrades to the failure ack on a malformed/garbage body (never throws)", async () => {
+		const { fetchImpl } = recordingFetch("not json at all" as unknown, 200);
+		const client = createWireClient({ fetchImpl });
+		const ack = await client.buildGraph();
+		expect(ack.built).toBe(false);
+	});
+
+	it("degrades to the failure ack on a network error (never throws into React)", async () => {
+		const fetchImpl = vi.fn(async () => {
+			throw new Error("network down");
+		}) as unknown as typeof fetch;
+		const client = createWireClient({ fetchImpl });
+		expect(await client.buildGraph()).toEqual(FAILED_BUILD_GRAPH_ACK);
 	});
 });

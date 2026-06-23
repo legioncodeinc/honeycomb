@@ -65,8 +65,12 @@ const MEMORY_GRAPH: GraphWire = {
 
 const EMPTY: GraphWire = { built: false, nodes: [], edges: [] };
 
-/** A mock wire client returning the given codebase + memory graphs. */
-function mockWire(codebase: GraphWire, memory: GraphWire): WireClient {
+/**
+ * A mock wire client returning the given codebase + memory graphs. `graph()` returns whatever the test's
+ * `codebaseRef` currently holds (so a test can flip the source from `EMPTY` to a built graph to simulate a
+ * build re-hydrate); `buildGraph` is a vi.fn the test overrides per-case.
+ */
+function mockWire(codebase: GraphWire, memory: GraphWire, buildGraph?: () => Promise<{ built: boolean; nodeCount: number; edgeCount: number; fileCount: number }>): WireClient {
 	return {
 		kpis: vi.fn(),
 		sessions: vi.fn(),
@@ -80,6 +84,7 @@ function mockWire(codebase: GraphWire, memory: GraphWire): WireClient {
 		harnesses: vi.fn(),
 		health: vi.fn(),
 		pollinate: vi.fn(),
+		buildGraph: buildGraph ? vi.fn(buildGraph) : vi.fn(async () => ({ built: false, nodeCount: 0, edgeCount: 0, fileCount: 0 })),
 		vaultSettings: vi.fn(),
 		setSetting: vi.fn(),
 		secretNames: vi.fn(),
@@ -296,14 +301,92 @@ describe("PRD-041a: search focuses + selects the matching node (a-AC-5)", () => 
 
 // ── Empty state (a-AC-6) ─────────────────────────────────────────────────────────
 
-describe("PRD-041a: built:false → the full-page honeycomb graph build empty state (a-AC-6)", () => {
-	it("renders the empty-state prompt, not an error or a blank canvas", async () => {
+describe("PRD-041a: built:false → the full-page empty state with a working Build graph button (a-AC-6)", () => {
+	it("renders the Build graph button (not a dead CLI prompt), not an error or a blank canvas", async () => {
 		await mountPage(mockWire(EMPTY, EMPTY));
 		expect(container.querySelector('[data-testid="graph-empty-state"]')).not.toBeNull();
-		expect(container.textContent ?? "").toContain("honeycomb graph build");
 		expect(container.textContent ?? "").toContain("No graph built for this workspace.");
-		// No canvas in the empty state.
+		// The empty state now offers a real Build graph BUTTON (replacing the old `honeycomb graph build` hint).
+		const buildBtn = container.querySelector('[data-testid="build-graph-button"]');
+		expect(buildBtn, "the Build graph button is present").not.toBeNull();
+		expect(buildBtn?.textContent).toBe("Build graph");
+		// No canvas in the empty state; no dead CLI prompt shown by default (it only appears on failure).
 		expect(container.querySelector('[data-testid="graph-canvas"]')).toBeNull();
+		expect(container.textContent ?? "").not.toContain("honeycomb graph build");
+	});
+
+	it("the memory-source empty state shows NO build button (no build command exists for it)", async () => {
+		const wire = mockWire(EMPTY, EMPTY);
+		await mountPage(wire);
+		const toMem = container.querySelector('[data-testid="source-memory"]') as HTMLButtonElement;
+		await act(async () => {
+			toMem.click();
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		expect(container.querySelector('[data-testid="graph-empty-state"]')).not.toBeNull();
+		expect(container.textContent ?? "").toContain("No memory graph yet for this workspace.");
+		// The memory empty state stays UNCHANGED — no build button, no CLI hint.
+		expect(container.querySelector('[data-testid="build-graph-button"]')).toBeNull();
+	});
+});
+
+// ── Build graph button behavior (the new wired build) ─────────────────────────────
+
+describe("PRD-041a: the Build graph button triggers the daemon build and re-hydrates on success", () => {
+	it("clicking Build graph calls wire.buildGraph() once (even on a double-click) and shows the in-flight label", async () => {
+		// graph() returns EMPTY first (empty state), then the built graph after a successful build — so the
+		// re-hydrate swaps the empty state for the drawn graph.
+		let built = false;
+		const wire = mockWire(EMPTY, EMPTY);
+		(wire.graph as ReturnType<typeof vi.fn>).mockImplementation(async () => (built ? CODEBASE_GRAPH : EMPTY));
+		let resolveBuild: (v: { built: boolean; nodeCount: number; edgeCount: number; fileCount: number }) => void = () => {};
+		(wire.buildGraph as ReturnType<typeof vi.fn>).mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					resolveBuild = resolve;
+				}),
+		);
+		await mountPage(wire);
+
+		const btn = container.querySelector('[data-testid="build-graph-button"]') as HTMLButtonElement;
+		// Double-click rapidly — the synchronous re-entry guard must fire exactly one POST.
+		await act(async () => {
+			btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+			btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+		});
+		// In-flight label + disabled, and buildGraph called exactly once despite two clicks.
+		expect(container.querySelector('[data-testid="build-graph-button"]')?.textContent).toBe("Building…");
+		expect(wire.buildGraph).toHaveBeenCalledTimes(1);
+
+		// Resolve the build successfully → the page re-hydrates and the graph (not the empty state) renders.
+		built = true;
+		await act(async () => {
+			resolveBuild({ built: true, nodeCount: 4, edgeCount: 3, fileCount: 3 });
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		expect(container.querySelector('[data-testid="graph-empty-state"]')).toBeNull();
+		expect(container.querySelector('[data-testid="graph-canvas"]')).not.toBeNull();
+		expect(container.textContent ?? "").toContain("server.ts");
+	});
+
+	it("a { built: false } ack shows the inline error + keeps the CLI hint, and the empty state stays", async () => {
+		const wire = mockWire(EMPTY, EMPTY, async () => ({ built: false, nodeCount: 0, edgeCount: 0, fileCount: 0 }));
+		await mountPage(wire);
+		const btn = container.querySelector('[data-testid="build-graph-button"]') as HTMLButtonElement;
+		await act(async () => {
+			btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		// The empty state is still shown (no build happened) with an honest error + the CLI hint for power users.
+		expect(container.querySelector('[data-testid="graph-empty-state"]')).not.toBeNull();
+		expect(container.querySelector('[data-testid="build-graph-error"]')).not.toBeNull();
+		expect(container.textContent ?? "").toContain("honeycomb graph build");
+		// The button returns to its idle label (not a forever spinner).
+		expect(container.querySelector('[data-testid="build-graph-button"]')?.textContent).toBe("Build graph");
 	});
 });
 

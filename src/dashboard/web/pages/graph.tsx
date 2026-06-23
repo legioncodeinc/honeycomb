@@ -30,12 +30,13 @@
 
 import React from "react";
 
+import { BuildGraphButton } from "../build-graph-button.js";
 import { layout, neighborsOf, splitNeighbors, type Point } from "../graph-layout.js";
 import { KIND_COLOR, KIND_COLOR_FALLBACK } from "../panels.js";
 import { Badge } from "../primitives.js";
 import type { PageProps } from "../page-frame.js";
 import { PageFrame } from "../page-frame.js";
-import { EMPTY_GRAPH, type GraphWire } from "../wire.js";
+import { EMPTY_GRAPH, type GraphWire, type WireClient } from "../wire.js";
 
 /** How often the page re-hydrates the active graph source (ms). Light refresh, stopped on unmount. */
 const GRAPH_POLL_MS = 8000;
@@ -389,8 +390,13 @@ function GraphCanvasFull({
 
 // ── Empty states (D-7 / 041b FR-4) ────────────────────────────────────────────
 
-/** The full-page empty state. Codebase → the `honeycomb graph build` prompt; Memory → an honest note. */
-function GraphEmptyState({ source }: { source: GraphSource }): React.JSX.Element {
+/**
+ * The full-page empty state. Codebase → a working "Build graph" button (wired to the daemon via the
+ * shared `wire`; on success `onBuilt` re-hydrates the page's graph source so the graph appears without a
+ * reload). Memory → an honest note (no build command exists for the memory graph). `wire`/`onBuilt` are
+ * only used by the codebase branch.
+ */
+function GraphEmptyState({ source, wire, onBuilt }: { source: GraphSource; wire: WireClient; onBuilt: () => void | Promise<void> }): React.JSX.Element {
 	return (
 		<div
 			data-testid="graph-empty-state"
@@ -411,7 +417,7 @@ function GraphEmptyState({ source }: { source: GraphSource }): React.JSX.Element
 			{source === "codebase" ? (
 				<>
 					<div style={{ fontSize: 15, color: "var(--text-tertiary)" }}>No graph built for this workspace.</div>
-					<code style={{ fontFamily: "var(--font-mono)", fontSize: 14, color: "var(--honey)" }}>honeycomb graph build</code>
+					<BuildGraphButton wire={wire} onBuilt={onBuilt} />
 				</>
 			) : (
 				<>
@@ -495,11 +501,16 @@ export function GraphPage({ wire }: PageProps): React.JSX.Element {
 	const [hiddenKinds, setHiddenKinds] = React.useState<ReadonlySet<string>>(new Set());
 	const [search, setSearch] = React.useState("");
 	const [transform, setTransform] = React.useState<ViewTransform>(IDENTITY_TRANSFORM);
+	// A monotonically-bumped refetch trigger: bumping it re-runs the hydrate effect at once (used by the
+	// "Build graph" button to re-hydrate the active source immediately after a successful build — the
+	// fresh snapshot is a LOCAL file the next `wire.graph()` reads, no eventual-consistency wait).
+	const [refetchTrigger, setRefetchTrigger] = React.useState(0);
 
 	// Hydrate the ACTIVE source. Fetches IMMEDIATELY whenever the source flips (the effect is keyed on
-	// `source`, so a Codebase↔Memory toggle re-fetches at once — not on the next poll tick), then a light
-	// poll keeps it fresh. A failure degrades to EMPTY_GRAPH (the wire is fail-soft) → the empty state.
-	// An `alive` guard prevents a late-resolving fetch from the PRIOR source updating after a switch.
+	// `source`, so a Codebase↔Memory toggle re-fetches at once — not on the next poll tick) OR when the
+	// refetch trigger bumps (a successful build), then a light poll keeps it fresh. A failure degrades to
+	// EMPTY_GRAPH (the wire is fail-soft) → the empty state. An `alive` guard prevents a late-resolving
+	// fetch from the PRIOR source updating after a switch.
 	React.useEffect(() => {
 		let alive = true;
 		const tick = async (): Promise<void> => {
@@ -512,7 +523,11 @@ export function GraphPage({ wire }: PageProps): React.JSX.Element {
 			alive = false;
 			clearInterval(id);
 		};
-	}, [wire, source]);
+	}, [wire, source, refetchTrigger]);
+
+	// The refresh the "Build graph" button calls on a successful build: bump the trigger so the active
+	// source re-hydrates at once (the codebase graph appears without a manual reload).
+	const refreshGraph = React.useCallback((): void => setRefetchTrigger((n) => n + 1), []);
 
 	// Switching source resets the per-source view (selection, filters, search, pan/zoom) so the new
 	// graph frames cleanly and a stale selection from the other source never lingers.
@@ -568,7 +583,7 @@ export function GraphPage({ wire }: PageProps): React.JSX.Element {
 	return (
 		<PageFrame title="Graph" eyebrow={eyebrow} right={toolbar}>
 			{!graph.built ? (
-				<GraphEmptyState source={source} />
+				<GraphEmptyState source={source} wire={wire} onBuilt={refreshGraph} />
 			) : (
 				<>
 					{/* Controls row: search + kind filters + zoom/fit (D-3/D-5/D-6). */}

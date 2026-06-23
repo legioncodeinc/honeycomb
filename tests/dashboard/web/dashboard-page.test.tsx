@@ -58,6 +58,7 @@ function mockWire(opts: {
 		harnesses: vi.fn(async () => opts.harnesses ?? []),
 		health: vi.fn(async () => ({ up: true, reasons: null })),
 		pollinate: vi.fn(),
+		buildGraph: vi.fn(async () => ({ built: false, nodeCount: 0, edgeCount: 0, fileCount: 0 })),
 		vaultSettings: vi.fn(async () => ({ settings: {}, catalog: [] })),
 		setSetting: vi.fn(),
 		secretNames: vi.fn(async () => []),
