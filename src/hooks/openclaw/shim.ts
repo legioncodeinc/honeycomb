@@ -36,6 +36,13 @@ import {
 } from "../normalize.js";
 import type { HookInput, HookSessionMeta, LogicalEvent } from "../shared/contracts.js";
 
+/**
+ * The canonical OpenClaw harness token (= the `agent` value its captured turns are
+ * attributed to, the same token `harness-registry.CANONICAL_SHIMS` derives the six
+ * from). Single-sourced so the `createShim` spec AND the batch path stamp ONE string.
+ */
+export const OPENCLAW_HARNESS = "openclaw" as const;
+
 export const OPENCLAW_EVENT_MAP: Readonly<Record<string, LogicalEvent>> = {
 	before_agent_start: "session-start",
 	before_prompt_build: "session-start",
@@ -63,14 +70,21 @@ export interface OpenClawMessage {
 }
 
 /**
- * Auto-route the agent from the OpenClaw session key (`agent:alice:...` → `alice`)
- * (FR-5). When the session id is namespaced `agent:<name>:...`, the `<name>` segment
- * is the capturing agent; otherwise the base meta is unchanged.
+ * Auto-route the per-USER agent from the OpenClaw session key (`agent:alice:...` →
+ * `alice`) onto the ENGINE scope `agentId` (FR-5). When the session id is namespaced
+ * `agent:<name>:...`, the `<name>` segment is the capturing per-user agent; otherwise
+ * the base meta is unchanged.
+ *
+ * It sets ONLY `agentId` (+ `author`, downstream) — NOT `agent`. `agent` is the
+ * CANONICAL HARNESS token (`openclaw`), stamped by the shared engine (`createShim`)
+ * and the batch path; the Harnesses page GROUPs BY `agent`, so routing the per-user
+ * name there would mis-attribute OpenClaw's turns to a phantom `alice` harness and
+ * leave `openclaw` reading 0. The two identities live in two columns by design.
  */
 export function openclawDeriveMeta(_raw: unknown, base: HookSessionMeta): HookSessionMeta {
 	void _raw;
 	const match = /^agent:([^:]+):/.exec(base.sessionId);
-	if (match) return { ...base, agent: match[1], agentId: match[1] };
+	if (match) return { ...base, agentId: match[1] };
 	return base;
 }
 
@@ -107,7 +121,11 @@ export function openclawExpandBatch(
 		if (data === undefined) continue;
 		inputs.push({
 			event: openclawMessageEvent(m.role),
-			meta: { ...fullMeta, hookEventName: "agent_end" },
+			// Stamp the canonical harness token (`openclaw`) into `agent` on the BATCH path too —
+			// this slice-expansion bypasses `createShim.normalize`, so without this the batched
+			// rows would land with `agent=""` and the Harnesses page would read 0 for OpenClaw.
+			// `agentId` (the per-USER agent from `openclawDeriveMeta`) stays distinct in `fullMeta`.
+			meta: { ...fullMeta, agent: OPENCLAW_HARNESS, hookEventName: "agent_end" },
 			data,
 			runtimePath: OPENCLAW_RUNTIME_PATH,
 		});
@@ -173,7 +191,7 @@ export function openclawExtractData(raw: unknown, logical: LogicalEvent): unknow
 /** Construct the OpenClaw shim (FR-5). Agent auto-route + new-slice batch + CLI fallback. */
 export function createOpenClawShim(): HarnessShim {
 	return createShim({
-		harness: "openclaw",
+		harness: OPENCLAW_HARNESS,
 		runtimePath: OPENCLAW_RUNTIME_PATH,
 		contextChannel: OPENCLAW_CONTEXT_CHANNEL,
 		hostCli: OPENCLAW_HOST_CLI,

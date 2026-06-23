@@ -25,8 +25,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type RuntimeConfig } from "../../../../src/daemon/runtime/config.js";
 import { createRequestLogger } from "../../../../src/daemon/runtime/logger.js";
 import { createDaemon, type Daemon } from "../../../../src/daemon/runtime/server.js";
-import { mountGraphApi } from "../../../../src/daemon/runtime/codebase/api.js";
-import type { SnapshotIdentity } from "../../../../src/daemon/runtime/codebase/contracts.js";
+import { mountGraphApi, snapshotToGraphView } from "../../../../src/daemon/runtime/codebase/api.js";
+import { mountDashboardApi } from "../../../../src/daemon/runtime/dashboard/api.js";
+import type { Snapshot, SnapshotIdentity } from "../../../../src/daemon/runtime/codebase/contracts.js";
 import type { QueryScope, StorageQuery } from "../../../../src/daemon/storage/client.js";
 import { ok, type QueryResult } from "../../../../src/daemon/storage/result.js";
 
@@ -163,12 +164,16 @@ describe("PRD-014 wiring: mountGraphApi turns the 501 into a real end-to-end bui
 		expect(files[0]).toBe("commit-abc.json");
 	});
 
-	it("GET /api/graph reads the persisted snapshot back as built:true with real nodes/edges", async () => {
+	it("GET /api/graph reads the persisted snapshot back as built:true with the FULL nodes+edges view", async () => {
 		const daemon = wiredDaemon();
-		// Before a build → built:false (no local snapshot yet).
+		// Before a build → built:false with EMPTY arrays (no local snapshot yet) — the honest
+		// empty state the canvas renders as the "run honeycomb graph build" prompt.
 		const before = await daemon.app.request("/api/graph", { headers: { "x-honeycomb-org": SCOPE.org } });
 		expect(before.status).toBe(200);
-		expect((await before.json() as { built?: boolean }).built).toBe(false);
+		const beforeBody = (await before.json()) as { built?: boolean; nodes?: unknown[]; edges?: unknown[] };
+		expect(beforeBody.built).toBe(false);
+		expect(beforeBody.nodes).toEqual([]);
+		expect(beforeBody.edges).toEqual([]);
 
 		// Build, then read it back.
 		await daemon.app.request("/api/graph/build", {
@@ -178,10 +183,121 @@ describe("PRD-014 wiring: mountGraphApi turns the 501 into a real end-to-end bui
 		});
 		const after = await daemon.app.request("/api/graph", { headers: { "x-honeycomb-org": SCOPE.org } });
 		expect(after.status).toBe(200);
-		const body = (await after.json()) as { built?: boolean; nodeCount?: number; edgeCount?: number; commit?: string };
+		// The GET now returns the FULL dashboard GraphView (`{ built, nodes, edges }`), NOT a
+		// counts-only body — this is what the dashboard `GraphCanvas` renders. The two-file fixture
+		// has a real cross-file call, so EDGES are NON-EMPTY (the bug this fix closes was 0 edges).
+		const body = (await after.json()) as {
+			built?: boolean;
+			nodes?: { id: string; label: string; kind: string }[];
+			edges?: { from: string; to: string; kind: string }[];
+		};
 		expect(body.built).toBe(true);
-		expect(body.nodeCount).toBeGreaterThan(0);
-		expect(body.edgeCount).toBeGreaterThan(0);
-		expect(body.commit).toBe("commit-abc");
+		expect(Array.isArray(body.nodes)).toBe(true);
+		expect(Array.isArray(body.edges)).toBe(true);
+		expect(body.nodes?.length).toBeGreaterThan(0);
+		// THE regression guard: edges flow through (mapped from the snapshot's node-link `links`).
+		expect(body.edges?.length).toBeGreaterThan(0);
+		// Each edge carries `from`/`to` (mapped from `source`/`target`) + a relation `kind`.
+		const edge = body.edges?.[0];
+		expect(typeof edge?.from).toBe("string");
+		expect(edge?.from.length).toBeGreaterThan(0);
+		expect(typeof edge?.to).toBe("string");
+		expect(edge?.to.length).toBeGreaterThan(0);
+		expect(typeof edge?.kind).toBe("string");
+		// Each node carries `id` / `label` / `kind` (the dashboard GraphNode shape) — NO counts-only fields.
+		const node = body.nodes?.[0];
+		expect(typeof node?.id).toBe("string");
+		expect(typeof node?.label).toBe("string");
+		expect(typeof node?.kind).toBe("string");
+		expect(body).not.toHaveProperty("nodeCount");
+		expect(body).not.toHaveProperty("edgeCount");
+	});
+});
+
+// ── The snapshot → GraphView mapper (the Cause-A fix, unit-level) ─────────────────
+
+/** A minimal NetworkX node-link snapshot with `n` links — edges live under `links`, NOT `edges`. */
+function snapshotWith(links: { source: string; target: string; relation: string }[]): Snapshot {
+	return {
+		directed: true,
+		multigraph: true,
+		graph: { repo: "honeycomb", commit: "c1" },
+		nodes: [
+			{ id: "src/a.ts", kind: "file", name: "a.ts", sourceFile: "src/a.ts", language: "typescript", observation: { startLine: 1, endLine: 1 } },
+			{ id: "src/b.ts", kind: "file", name: "", sourceFile: "src/b.ts", language: "typescript", observation: { startLine: 1, endLine: 1 } },
+		],
+		links: links.map((l, i) => ({
+			source: l.source,
+			target: l.target,
+			relation: l.relation as Snapshot["links"][number]["relation"],
+			confidence: "EXTRACTED",
+			id: `e${i}`,
+		})),
+		observation: {
+			generatedAt: "2026-06-23T00:00:00Z",
+			generatorVersion: "test",
+			fileCount: 2,
+			nodeCount: 2,
+			edgeCount: links.length,
+			parseErrorCount: 0,
+		},
+	};
+}
+
+describe("snapshotToGraphView maps the node-link snapshot into the dashboard GraphView", () => {
+	it("maps `links` (NOT a non-existent `edges` key) → NON-EMPTY edges with from/to from source/target", () => {
+		const view = snapshotToGraphView(
+			snapshotWith([{ source: "src/a.ts", target: "src/b.ts", relation: "imports" }]),
+		);
+		expect(view.built).toBe(true);
+		// THE Cause-A regression: edges flow from the snapshot's `links` (`source`/`target`).
+		expect(view.edges).toHaveLength(1);
+		expect(view.edges[0]).toEqual({ from: "src/a.ts", to: "src/b.ts", kind: "imports" });
+	});
+
+	it("a snapshot with ZERO links → empty edges (nodes still map)", () => {
+		const view = snapshotToGraphView(snapshotWith([]));
+		expect(view.built).toBe(true);
+		expect(view.edges).toEqual([]);
+		// Nodes always map from `nodes` — `label` falls back to `id` when the node has no name.
+		expect(view.nodes).toHaveLength(2);
+		expect(view.nodes[0]).toEqual({ id: "src/a.ts", label: "a.ts", kind: "file" });
+		expect(view.nodes[1]).toEqual({ id: "src/b.ts", label: "src/b.ts", kind: "file" });
+	});
+});
+
+// ── The route-collision is GONE: exactly ONE GET /api/graph after BOTH mounts fire ──
+
+describe("route-collision resolution: a SINGLE GET /api/graph handler serves the full view", () => {
+	it("with BOTH mountDashboardApi AND mountGraphApi fired, GET /api/graph returns the full nodes+edges view (not counts-only / not built:false flap)", async () => {
+		const daemon = bareDaemon();
+		// Fire the dashboard seam FIRST (its old graph handler would have shadowed the real one)…
+		mountDashboardApi(daemon, { storage: fakeStorage, defaultScope: SCOPE });
+		// …then the graph seam, the SINGLE owner of GET /api/graph.
+		mountGraphApi(daemon, {
+			storage: fakeStorage,
+			defaultScope: SCOPE,
+			workspaceDir: "/repo",
+			graphBaseDir: baseDir,
+			buildDeps: fixtureBuildDeps(baseDir),
+			identity: IDENTITY,
+		});
+
+		// Build so there is a local snapshot to serve.
+		await daemon.app.request("/api/graph/build", {
+			method: "POST",
+			headers: { "x-honeycomb-org": SCOPE.org },
+			body: "{}",
+		});
+
+		const res = await daemon.app.request("/api/graph", { headers: { "x-honeycomb-org": SCOPE.org } });
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { built?: boolean; nodes?: unknown[]; edges?: unknown[] };
+		// The ONE handler that answers is the codebase-graph FULL-view handler: it carries the
+		// nodes AND edges arrays (the dashboard's counts-only / DeepLake-read flap is gone).
+		expect(body.built).toBe(true);
+		expect(Array.isArray(body.nodes)).toBe(true);
+		expect(Array.isArray(body.edges)).toBe(true);
+		expect(body.edges?.length).toBeGreaterThan(0);
 	});
 });

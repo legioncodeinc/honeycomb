@@ -229,6 +229,52 @@ describe("PRD-039a a-AC-5: guarded + fail-soft + secure", () => {
 	});
 });
 
+describe("attribution: the page-counted `agent` token EQUALS the shim's canonical id (rename-safe)", () => {
+	it("buildHarnessStatuses attributes a row keyed by the shim's own harness token to that harness", () => {
+		// Seed ONE captured turn per canonical shim, keyed on the SAME token the shim declares
+		// (`shim.harness`). This is exactly what the capture seam now stamps into `sessions.agent`.
+		// If a future rename drifts the page's canonical id from the stamped token, this fails.
+		const rows = CANONICAL_SHIMS.map((shim, i) => ({
+			agent: shim.harness,
+			n: i + 1,
+			last: `2026-06-2${i}T00:00:00.000Z`,
+		}));
+		const statuses = buildHarnessStatuses(rows, new Set());
+		for (const shim of CANONICAL_SHIMS) {
+			const status = statuses.find((s) => s.name === shim.harness);
+			expect(status, `${shim.harness} appears on the page`).toBeDefined();
+			// The seeded row attributes: real count, active, non-null lastSeen — NOT 0/false/null.
+			expect(status?.turnsCaptured, `${shim.harness} counts its captured turn`).toBeGreaterThan(0);
+			expect(status?.active).toBe(true);
+			expect(status?.lastSeen).not.toBeNull();
+		}
+	});
+
+	it("a harness with claude-code rows reports turnsCaptured>0/active/lastSeen; one with none reports 0/false/null", async () => {
+		// The regression the fix targets: a session captured by claude-code (now `agent="claude-code"`)
+		// makes the claude-code card truthful, while a harness with no rows stays honestly zeroed.
+		const harnesses = await getHarnesses(true, new Set());
+		const claude = harnesses.find((h) => h.name === "claude-code");
+		expect(claude?.turnsCaptured).toBeGreaterThan(0);
+		expect(claude?.active).toBe(true);
+		expect(claude?.lastSeen).not.toBeNull();
+		const pi = harnesses.find((h) => h.name === "pi");
+		expect(pi?.turnsCaptured).toBe(0);
+		expect(pi?.active).toBe(false);
+		expect(pi?.lastSeen).toBeNull();
+	});
+
+	it("an empty `agent` token attributes to NO harness (the pre-fix `agent=''` reads 0 everywhere)", () => {
+		// Proves WHY the bug zeroed every harness: a row with `agent=''` matches none of the six.
+		const statuses = buildHarnessStatuses([{ agent: "", n: 99, last: "2026-06-23T00:00:00.000Z" }], new Set());
+		for (const s of statuses) {
+			expect(s.turnsCaptured).toBe(0);
+			expect(s.active).toBe(false);
+			expect(s.lastSeen).toBeNull();
+		}
+	});
+});
+
 describe("PRD-039c c-AC-4 (server-folded descriptor): Cursor carries `agents`, Claude Code does not", () => {
 	it("the folded capability descriptor reflects the real shim divergences", async () => {
 		const harnesses = await getHarnesses(true, new Set());

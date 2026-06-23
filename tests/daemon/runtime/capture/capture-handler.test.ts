@@ -277,6 +277,40 @@ describe("a-AC-3 the row carries session id, cwd, permission mode, hook event, a
 		expect(insert?.org).toBe(ORG);
 		expect(insert?.workspace).toBe(WORKSPACE);
 	});
+
+	it("records the harness identity into the `agent` column so the Harnesses page can attribute it", async () => {
+		// The harness-turns regression: the Harnesses page GROUPs BY `sessions.agent`, so a captured
+		// turn is only attributed if `metadata.agent` (stamped upstream by the shim with the canonical
+		// harness token) reaches the row's `agent` column. Prove the daemon writes it through.
+		const { daemon, fake } = buildDaemon();
+		await daemon.app.request("/api/hooks/capture", {
+			method: "POST",
+			headers: sessionHeaders(),
+			body: JSON.stringify(userMessageBody({ metadata: { agent: "claude-code", agentId: "alice" } })),
+		});
+		const insert = fake.requests.find((r) => /^\s*INSERT\s+INTO\s+"sessions"/i.test(r.sql));
+		expect(insert).toBeDefined();
+		const sql = insert?.sql ?? "";
+		// The canonical harness token lands on the row (the column the page counts) …
+		expect(sql).toContain("claude-code");
+		// … distinct from the per-user engine-scope agent_id (which carries `alice`).
+		expect(sql).toContain("alice");
+	});
+
+	it("parameterized: each canonical harness token written upstream is recorded on the row", async () => {
+		// One capture per harness, each stamping its own canonical token (as the shims now do). Each
+		// must reach `sessions.agent` verbatim so the page's GROUP BY attributes it to that harness.
+		for (const harness of ["claude-code", "codex", "cursor", "hermes", "pi", "openclaw"]) {
+			const { daemon, fake } = buildDaemon();
+			await daemon.app.request("/api/hooks/capture", {
+				method: "POST",
+				headers: sessionHeaders(),
+				body: JSON.stringify(userMessageBody({ metadata: { agent: harness } })),
+			});
+			const insert = fake.requests.find((r) => /^\s*INSERT\s+INTO\s+"sessions"/i.test(r.sql));
+			expect(insert?.sql, `${harness} reaches the agent column`).toContain(harness);
+		}
+	});
 });
 
 // ── a-AC-4 ───────────────────────────────────────────────────────────────────

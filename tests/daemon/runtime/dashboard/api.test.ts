@@ -2,12 +2,18 @@
  * PRD-020b daemon-side dashboard API suite — the `mountDashboardApi` attach step.
  *
  * `mountDashboardApi` is the single named seam the daemon assembly calls after
- * `createDaemon(...)` to wire the six dashboard read handlers onto the already-mounted route
- * groups (`/api/diagnostics`, `/api/graph`). This suite proves: BEFORE the attach the
+ * `createDaemon(...)` to wire the dashboard read handlers onto the already-mounted route
+ * groups (`/api/diagnostics`). This suite proves: BEFORE the attach the
  * diagnostics group answers the 501 scaffold; AFTER the attach each endpoint is LIVE and returns
  * the matching 020b view-model shape, read through the injected storage client (storage-correct —
- * never a raw fetch). It also proves the graph empty-state (b-AC-6) and the built-graph canvas
- * (b-AC-3) come from the daemon's graph endpoint.
+ * never a raw fetch).
+ *
+ * ── `GET /api/graph` is owned ELSEWHERE (route-collision resolution) ──────────
+ * The codebase-graph view (`GET /api/graph`) is served by `mountGraphApi` (codebase/api.ts), the
+ * SINGLE owner of the `/api/graph` group — it returns the full `{ built, nodes, edges }` view from
+ * the freshest LOCAL snapshot. This seam's former DeepLake-read graph handler was retired to clear
+ * the latent double-registration; this suite asserts the dashboard seam no longer claims it (a 501
+ * with only this seam fired). The full-view + single-owner proofs live in the codebase api suite.
  *
  * ── Route-collision contract (PRD-022) ───────────────────────────────────────
  * The kpis/rules/skills VIEW-MODELS are served UNDER the diagnostics namespace
@@ -71,19 +77,9 @@ function responder(graphBuilt: boolean) {
 		if (/COUNT\(\*\).*FROM\s+"sessions"/i.test(sql)) return [{ n: 7 }];
 		if (/FROM\s+"sessions"/i.test(sql))
 			return [{ id: "sess-1", project: "honeycomb", creation_date: "2026-06-18", path: "conversations/sess-1" }];
-		if (/FROM\s+"codebase"/i.test(sql)) {
-			if (!graphBuilt) return [];
-			return [
-				{
-					snapshot_jsonb: JSON.stringify({
-						nodes: [{ id: "n1", label: "index.ts", kind: "file" }],
-						edges: [{ from: "n1", to: "n1", kind: "self" }],
-					}),
-					node_count: 1,
-					edge_count: 1,
-				},
-			];
-		}
+		// NOTE: the `codebase` table is NO LONGER read by this seam — `GET /api/graph` is owned by
+		// `mountGraphApi` (codebase/api.ts), which reads the freshest LOCAL snapshot, not DeepLake.
+		// `graphBuilt` below still toggles the MEMORY-graph ontology rows (this seam's own view).
 		if (/FROM\s+"rules"/i.test(sql)) return [{ id: "r1", name: "Use ESM", status: "active" }];
 		if (/FROM\s+"skills"/i.test(sql)) return [{ name: "deeplake-recall", scope: "team", visibility: "global" }];
 		// PRD-041b: the memory-graph reads. `graphBuilt` reuses the flag to toggle a populated vs empty
@@ -167,24 +163,20 @@ describe("PRD-020b mountDashboardApi wires the six dashboard read handlers", () 
 		expect(json.workspace).toBe(WORKSPACE);
 	});
 
-	it("b-AC-3: /api/graph returns built:true with the canvas nodes/edges from the snapshot", async () => {
+	it("route-collision resolution: mountDashboardApi does NOT claim GET /api/graph (owned by mountGraphApi)", async () => {
+		// The codebase-graph view (`GET /api/graph`) is owned SOLELY by `mountGraphApi`
+		// (codebase/api.ts), which serves the full `{ built, nodes, edges }` view from the freshest
+		// LOCAL snapshot. The dashboard seam's former DeepLake-read graph handler was RETIRED to clear
+		// the latent `/api/graph` double-registration (two handlers on one method+path flapped
+		// `built:false` in live probes). So with ONLY mountDashboardApi fired, `/api/graph` answers the
+		// scaffold (501) — there is no dashboard handler on it. (See tests/daemon/runtime/codebase/api.test.ts
+		// for the live full-view + single-owner proofs.)
 		const { daemon, storage } = makeDaemon(true);
 		mountDashboardApi(daemon, { storage });
 		const res = await daemon.app.request("/api/graph", { headers: headers() });
-		const json = (await res.json()) as { built: boolean; nodes: unknown[]; edges: unknown[] };
-		expect(json.built).toBe(true);
-		expect(json.nodes).toHaveLength(1);
-		expect(json.edges).toHaveLength(1);
-	});
-
-	it("b-AC-6: /api/graph returns built:false (empty-state flag) when no snapshot exists", async () => {
-		const { daemon, storage } = makeDaemon(false);
-		mountDashboardApi(daemon, { storage });
-		const res = await daemon.app.request("/api/graph", { headers: headers() });
-		expect(res.status).toBe(200); // NOT an error
-		const json = (await res.json()) as { built: boolean; nodes: unknown[] };
-		expect(json.built).toBe(false);
-		expect(json.nodes).toHaveLength(0);
+		expect(res.status).toBe(501);
+		const body = (await res.json()) as { error?: string };
+		expect(body.error).toBe("not_implemented");
 	});
 
 	it("b-AC-4: /api/diagnostics/rules lists the active rules through storage", async () => {
@@ -233,17 +225,18 @@ describe("PRD-020b mountDashboardApi wires the six dashboard read handlers", () 
 describe("PRD-024 Wave 3 local-mode default-scope fallback (the dashboard-panel 400 regression fix)", () => {
 	// The dashboard web app is a loopback thin client (like the SDK/MCP): it sends the
 	// runtime-path + session headers but NOT x-honeycomb-org. BEFORE Wave 3 every diagnostics
-	// view + /api/graph 400'd on that, blanking every panel. AFTER Wave 3, in LOCAL mode with a
-	// configured default tenant, the view falls back to it (200), exactly like the memories API.
+	// view 400'd on that, blanking every panel. AFTER Wave 3, in LOCAL mode with a configured
+	// default tenant, the view falls back to it (200), exactly like the memories API. (`/api/graph`
+	// is owned by `mountGraphApi`, not this seam, so it is proven in the codebase api suite — its
+	// own local-default fallback is exercised there.)
 
-	/** The six diagnostics/graph view paths the browser client GETs (the panels that blanked). */
+	/** The diagnostics view paths the browser client GETs from THIS seam (the panels that blanked). */
 	const VIEW_PATHS = [
 		"/api/diagnostics/kpis",
 		"/api/diagnostics/sessions",
 		"/api/diagnostics/settings",
 		"/api/diagnostics/rules",
 		"/api/diagnostics/skills",
-		"/api/graph",
 	] as const;
 
 	it("local mode + NO org header + defaultScope injected → each view returns 200 (not 400)", async () => {

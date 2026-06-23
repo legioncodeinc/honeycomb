@@ -21,10 +21,13 @@
  * `SettingsView`, `GraphView`, `RulesView`, `SkillSyncView`) — the SAME contract the
  * `src/dashboard` thin client renders, so the dashboard reads exactly what it draws.
  *
- * ── a-AC-6 empty-state ───────────────────────────────────────────────────────
- *   `GET /api/graph` returns `{ built: false, nodes: [], edges: [] }` when no codebase
- *   snapshot exists for the workspace; the 020b `buildGraphView` renders the
- *   `honeycomb graph build` prompt from the flag (NOT an error).
+ * ── `GET /api/graph` is OWNED ELSEWHERE (route-collision resolution) ──────────
+ *   The codebase-graph view (`GET /api/graph`) is served by `mountGraphApi`
+ *   (`codebase/api.ts`), the SINGLE owner of the `/api/graph` group — it returns the FULL
+ *   `{ built, nodes, edges }` GraphView (`built:false` empty-state when no snapshot exists)
+ *   from the freshest LOCAL snapshot. This seam's former DeepLake-read graph handler was
+ *   retired to clear the latent `/api/graph` double-registration. The MEMORY-graph view this
+ *   seam DOES own lives at `/api/diagnostics/memory-graph` (a distinct path — no collision).
  *
  * ── Deferred assembly (D-7) ──────────────────────────────────────────────────
  *   The production daemon assembly that owns the live storage client calls `mountDashboardApi`
@@ -113,8 +116,6 @@ export const DASHBOARD_GROUPS = Object.freeze({
 	sessions: "/api/diagnostics",
 	/** Settings view-model (FR-4) — served off the diagnostics group at `/settings`. */
 	settings: "/api/diagnostics",
-	/** Graph view-model (FR-5 / a-AC-6 empty-state). Product-data does NOT claim `/api/graph`, so this stays. */
-	graph: "/api/graph",
 	/**
 	 * Memory-graph view-model (PRD-041b D-2 / OQ-5) — the knowledge graph of memories/entities, served
 	 * at `GET /api/memory-graph` off the diagnostics group (full path `/api/diagnostics/memory-graph`).
@@ -401,21 +402,6 @@ export function buildSettingsView(
 	};
 }
 
-/** Fetch the graph view (FR-1 / d-AC-1 / d-AC-6): the latest codebase snapshot, or `built:false` empty-state. */
-export async function fetchGraphView(storage: StorageQuery, scope: QueryScope): Promise<GraphView> {
-	const tbl = sqlIdent("codebase");
-	const rows = await selectRows(
-		storage,
-		`SELECT ${sqlIdent("snapshot_jsonb")}, ${sqlIdent("node_count")}, ${sqlIdent("edge_count")} ` +
-			`FROM "${tbl}" WHERE ${sqlIdent("org_id")} = ${sLiteral(scope.org)} ` +
-			`ORDER BY ${sqlIdent("schema_version")} DESC LIMIT 1`,
-		scope,
-	);
-	if (rows.length === 0) return { built: false, nodes: [], edges: [] };
-	const snapshot = parseSnapshot(rows[0]?.snapshot_jsonb);
-	return { built: true, nodes: snapshot.nodes, edges: snapshot.edges };
-}
-
 /**
  * The cap on memory-graph nodes/edges a single read returns (PRD-041b). A defensive bound so a large
  * populated ontology never ships an unbounded payload to the page; mirrors the codebase graph's
@@ -424,9 +410,10 @@ export async function fetchGraphView(storage: StorageQuery, scope: QueryScope): 
 const MEMORY_GRAPH_LIMIT = 500;
 
 /**
- * Fetch the MEMORY-GRAPH view (PRD-041b — FR-2 / AC-2). MIRRORS {@link fetchGraphView}: a guarded,
- * fail-soft read that returns a {@link MemoryGraphView} (the `GraphView` shape the dashboard
- * `GraphCanvas` already renders) or the honest `{ built: false, nodes: [], edges: [] }` empty state.
+ * Fetch the MEMORY-GRAPH view (PRD-041b — FR-2 / AC-2). MIRRORS the codebase graph's `built`
+ * contract: a guarded, fail-soft read that returns a {@link MemoryGraphView} (the `GraphView` shape
+ * the dashboard `GraphCanvas` already renders) or the honest `{ built: false, nodes: [], edges: [] }`
+ * empty state.
  *
  * ── NOW (the foundation) ─────────────────────────────────────────────────────
  *   It reads the PRD-008 ontology tables through the injected {@link StorageQuery} with the SAME
@@ -662,14 +649,12 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 		});
 	}
 
-	const graph = daemon.group(DASHBOARD_GROUPS.graph);
-	if (graph !== undefined) {
-		graph.get("/", async (c) => {
-			const scope = resolveScope(c);
-			if (scope === null) return c.json(NO_ORG_BODY, 400);
-			return c.json(await fetchGraphView(storage, scope));
-		});
-	}
+	// `GET /api/graph` is OWNED BY `mountGraphApi` (codebase/api.ts) — the SINGLE handler for the
+	// codebase-graph view. It serves the FULL `{ built, nodes, edges }` GraphView from the freshest
+	// LOCAL snapshot (the authoritative copy `POST /api/graph/build` writes), so the PRD-041a "Build
+	// graph" re-read is immediate + consistent. The dashboard's former DeepLake-read handler here was
+	// retired to resolve the latent `/api/graph` double-registration (two handlers on one method+path
+	// flapped `built:false` in live probes). This seam no longer touches the `/api/graph` group.
 
 	// PRD-041b (D-2 / OQ-5) — the MEMORY-GRAPH read, served at `/memory-graph` off the diagnostics
 	// group (full `/api/diagnostics/memory-graph`), MIRRORING the codebase graph above. Same scope
@@ -739,40 +724,4 @@ function createInventoryCache(): () => Promise<LocalAssetInventory> {
 		cached = { value, at: now };
 		return value;
 	};
-}
-
-/** The codebase-snapshot graph shape persisted in `snapshot_jsonb`. */
-interface SnapshotGraph {
-	readonly nodes: { readonly id: string; readonly label: string; readonly kind: string }[];
-	readonly edges: { readonly from: string; readonly to: string; readonly kind: string }[];
-}
-
-/**
- * Parse the persisted `snapshot_jsonb` into the 020b graph view-model nodes/edges, tolerating a
- * string-or-object column and missing fields. Returns empty arrays on anything unparseable
- * (the caller has already decided `built: true` from row presence, so a malformed snapshot
- * renders an empty canvas rather than throwing).
- */
-function parseSnapshot(raw: unknown): SnapshotGraph {
-	let obj: unknown = raw;
-	if (typeof raw === "string") {
-		try {
-			obj = JSON.parse(raw);
-		} catch {
-			return { nodes: [], edges: [] };
-		}
-	}
-	if (obj === null || typeof obj !== "object") return { nodes: [], edges: [] };
-	const rec = obj as Record<string, unknown>;
-	const rawNodes = Array.isArray(rec.nodes) ? rec.nodes : [];
-	const rawEdges = Array.isArray(rec.edges) ? rec.edges : [];
-	const nodes = rawNodes.map((n) => {
-		const nn = (n ?? {}) as Record<string, unknown>;
-		return { id: toStr(nn.id), label: toStr(nn.label ?? nn.name ?? nn.id), kind: toStr(nn.kind ?? nn.type) };
-	});
-	const edges = rawEdges.map((e) => {
-		const ee = (e ?? {}) as Record<string, unknown>;
-		return { from: toStr(ee.from ?? ee.source), to: toStr(ee.to ?? ee.target), kind: toStr(ee.kind ?? ee.type) };
-	});
-	return { nodes, edges };
 }

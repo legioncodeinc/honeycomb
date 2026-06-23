@@ -110,7 +110,14 @@ export function createShim(spec: ShimSpec): HarnessShim {
 			const embedding = extractEmbedding(event.payload);
 			return {
 				event: logical,
-				meta: { ...fullMeta, hookEventName: event.name },
+				// `agent` carries the CANONICAL HARNESS identity (`spec.harness` — the same token
+				// `harness-registry.CANONICAL_SHIMS` derives the six from), stamped here so EVERY
+				// harness attributes its captured turns to itself in `sessions.agent` (the column
+				// the Harnesses page GROUPs BY). The honest source: the shim that emits the event
+				// names its own harness. Stamped AFTER `...fullMeta` so the harness identity is
+				// authoritative — a per-harness `deriveMeta` that routes the per-USER agent must use
+				// `agentId` (the engine scope), never overwrite this harness token.
+				meta: { ...fullMeta, agent: spec.harness, hookEventName: event.name },
 				data,
 				...(embedding !== undefined ? { messageEmbedding: embedding } : {}),
 				runtimePath: spec.runtimePath,
