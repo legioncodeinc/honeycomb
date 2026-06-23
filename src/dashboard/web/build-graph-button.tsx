@@ -18,8 +18,10 @@
  *   - On a `{ built: false }` ack (the daemon rejected/failed, or the wire timed out/degraded) it shows an
  *     honest inline error line and keeps a small secondary `honeycomb graph build` CLI hint for power users.
  *
- * The wire NEVER throws (it degrades to a failure ack), so this component never needs a try/catch around
- * the call. Every visual value is an existing `var(--…)` DS token; no new dependency.
+ * The wire NEVER throws (it degrades to a failure ack), but the host's `onBuilt` re-hydrate MAY (its type
+ * allows an async refresh). A `try/finally` therefore always clears the in-flight ref AND the "Building…"
+ * state, so a throwing re-hydrate can never wedge the button permanently disabled or stuck. Every visual
+ * value is an existing `var(--…)` DS token; no new dependency.
  */
 
 import React from "react";
@@ -66,16 +68,27 @@ export function BuildGraphButton({ wire, onBuilt }: BuildGraphButtonProps): Reac
 		inFlightRef.current = true;
 		setBuilding(true);
 		setFailed(false);
-		const ack = await wire.buildGraph();
-		if (ack.built) {
-			// Re-hydrate the active graph source so the fresh LOCAL snapshot renders without a reload.
-			await onBuilt();
+		let built = false;
+		try {
+			const ack = await wire.buildGraph();
+			built = ack.built;
+			if (ack.built) {
+				// Re-hydrate the active graph source so the fresh LOCAL snapshot renders without a reload.
+				await onBuilt();
+			}
+		} catch {
+			// The wire itself never throws; a throwing `onBuilt` re-hydrate must NOT wedge the guard. The
+			// build already succeeded if `built` is true (the snapshot is on disk) — we just couldn't refresh
+			// the view, so we don't flag it as a build failure; the `void onBuild()` caller swallows nothing.
+		} finally {
+			// ALWAYS clear the guard + the in-flight visual, on every path — otherwise a throw leaves the
+			// button permanently disabled and stuck on "Building…".
+			inFlightRef.current = false;
+			if (aliveRef.current) {
+				setBuilding(false);
+				setFailed(!built);
+			}
 		}
-		if (aliveRef.current) {
-			setFailed(!ack.built);
-			setBuilding(false);
-		}
-		inFlightRef.current = false;
 	}, [wire, onBuilt]);
 
 	return (

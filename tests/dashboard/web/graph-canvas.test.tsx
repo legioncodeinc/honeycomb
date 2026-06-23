@@ -192,6 +192,33 @@ describe("GraphCanvas empty state (built: false)", () => {
 		expect(onBuilt).toHaveBeenCalledTimes(1);
 	});
 
+	it("a throwing onBuilt re-hydrate does NOT wedge the button (re-enabled, not stuck on 'Building…')", async () => {
+		// The build succeeds but the host's re-hydrate throws — the finally must still clear the in-flight
+		// guard + the visual state so the button is usable again (regression: it used to stay disabled).
+		const onBuilt = vi.fn(() => {
+			throw new Error("re-hydrate blew up");
+		});
+		const wire = buildWire({ built: true, nodeCount: 4, edgeCount: 3, fileCount: 3 });
+		mountWithWire({ built: false, nodes: [], edges: [] }, wire, onBuilt);
+		const btn = container.querySelector('[data-testid="build-graph-button"]') as HTMLButtonElement;
+		await act(async () => {
+			btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		expect(onBuilt).toHaveBeenCalledTimes(1);
+		// Recovered: not disabled, label back to "Build graph" (not stuck "Building…"); a second click works.
+		expect(btn.disabled).toBe(false);
+		expect(btn.textContent).toBe("Build graph");
+		await act(async () => {
+			btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		expect(wire.buildGraph).toHaveBeenCalledTimes(2);
+	});
+
 	it("a failed build keeps the empty state, shows the inline error + the CLI hint for power users", async () => {
 		const onBuilt = vi.fn();
 		const wire = buildWire({ built: false, nodeCount: 0, edgeCount: 0, fileCount: 0 });

@@ -147,7 +147,8 @@ describe("PRD-041a: wire.buildGraph()", () => {
 		const { fetchImpl } = recordingFetch("not json at all" as unknown, 200);
 		const client = createWireClient({ fetchImpl });
 		const ack = await client.buildGraph();
-		expect(ack.built).toBe(false);
+		// Lock the FULL fallback shape (not just `built`) so a regression in the count defaults is caught.
+		expect(ack).toEqual(FAILED_BUILD_GRAPH_ACK);
 	});
 
 	it("degrades to the failure ack on a network error (never throws into React)", async () => {
