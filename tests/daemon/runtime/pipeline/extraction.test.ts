@@ -28,6 +28,18 @@ import {
 	type StageJob,
 	stripChainOfThought,
 } from "../../../../src/daemon/runtime/pipeline/index.js";
+import { buildExtractionPrompt } from "../../../../src/daemon/runtime/pipeline/extraction.js";
+import { extractionFanOut } from "../../../../src/daemon/runtime/pipeline/fan-out.js";
+import type {
+	JobInput,
+	JobQueueService,
+	LeasedJob,
+} from "../../../../src/daemon/runtime/services/job-queue.js";
+import {
+	MEMORY_TYPES,
+	isMemoryType,
+	memoryTypeGuidance,
+} from "../../../../src/shared/memory-types.js";
 
 // ── Config fixture: extraction ENABLED with the D-1 caps (override per test). ──
 function enabledConfig(overrides: Record<string, unknown> = {}): PipelineConfig {
@@ -104,12 +116,15 @@ describe("a-AC-2 oversized input → capped ~12,000 chars before the model call"
 
 		await extractFromText(huge, enabledConfig(), model);
 
-		// The prompt = a fixed template + the capped content. The content the model
-		// saw must be ≤ the cap (12_000), so the whole prompt is far below 20k.
+		// The prompt = a fixed template header + the capped content. The content the
+		// model saw must be ≤ the cap (12_000), so the whole prompt is far below 20k.
 		expect(model.calls).toHaveLength(1);
 		expect(seenPromptLength).toBeLessThan(20_000);
-		// The capped content (12k) + a small template header is well under 13k.
-		expect(seenPromptLength).toBeLessThanOrEqual(12_000 + 500);
+		// Bound the prompt by the cap PLUS the prompt's own header (measured from an
+		// empty-content prompt), not a magic constant — so this stays the real
+		// content-cap invariant when the template (e.g. the taxonomy guidance) grows.
+		const headerLength = buildExtractionPrompt("").length;
+		expect(seenPromptLength).toBeLessThanOrEqual(12_000 + headerLength);
 		// And the raw 20k input is NOT present verbatim (it was truncated).
 		expect(model.calls[0].prompt).not.toContain("x".repeat(12_001));
 	});
@@ -263,5 +278,100 @@ describe("a-AC-5 disabled / provider 'none' → extraction does not run (no mode
 
 		expect(model.calls).toHaveLength(0);
 		expect(rec.results[0]).toEqual({ facts: [], entities: [], droppedCount: 0 });
+	});
+});
+
+describe("extraction-type binding — the prompt instructs the closed six-token taxonomy", () => {
+	it("the prompt names every taxonomy token and carries the shared guidance", () => {
+		const prompt = buildExtractionPrompt("some captured memory text");
+		// Asserts against the SINGLE SOURCE: a drift in MEMORY_TYPES / memoryTypeGuidance
+		// updates the prompt automatically, and this assertion follows it.
+		for (const token of MEMORY_TYPES) {
+			expect(prompt).toContain(token);
+		}
+		// The exact guidance block (every token + when to use it) is embedded verbatim.
+		expect(prompt).toContain(memoryTypeGuidance());
+		// The JSON-shape hint reads as the closed set, not a free-form string.
+		expect(prompt).toContain(`one of ${MEMORY_TYPES.join("|")}`);
+	});
+});
+
+describe("extraction-type binding — an off-enum model type flows to a VALID fan-out fact_type", () => {
+	// A recording fake queue — only enqueue is exercised by the fan-out.
+	function recordingQueue(): { queue: JobQueueService; enqueued: JobInput[] } {
+		const enqueued: JobInput[] = [];
+		const queue: JobQueueService = {
+			async enqueue(job: JobInput): Promise<string> {
+				enqueued.push(job);
+				return `job-${enqueued.length}`;
+			},
+			async lease(): Promise<LeasedJob | null> {
+				return null;
+			},
+			async complete(): Promise<void> {},
+			async fail(): Promise<void> {},
+			start(): void {},
+			stop(): void {},
+		};
+		return { queue, enqueued };
+	}
+
+	it("model emits type:'banana' → extraction coerces → decision fan-out enqueues fact_type:'fact'", async () => {
+		// Drive the real extraction core with a fake model emitting an off-enum type, then
+		// run the real extraction→decision fan-out over the bounded result. The forwarded
+		// fact (decision job payload) must carry a valid taxonomy token.
+		const body = JSON.stringify({
+			facts: [{ content: "the API returns 429 under load", type: "banana", confidence: 0.9 }],
+			entities: [],
+		});
+		const model = createFakeModelClient({ memory_extraction: body });
+		const config = PipelineConfigSchema.parse({ enabled: true, extractionProvider: "fake-router" });
+
+		const result = await extractFromText("raw", config, model);
+		expect(result.facts).toHaveLength(1); // KEPT, not dropped.
+		expect(result.facts[0].type).toBe("fact"); // coerced to the floor.
+
+		const { queue, enqueued } = recordingQueue();
+		const job: StageJob = {
+			id: "j-e2e",
+			kind: "memory_extraction",
+			attempt: 1,
+			scope: { org: "o", workspace: "w", agentId: "a" },
+			payload: { content: "raw" },
+		};
+		await extractionFanOut(queue)(job, result);
+
+		expect(enqueued).toHaveLength(1);
+		expect(enqueued[0].kind).toBe("memory_decision");
+		const forwarded = (enqueued[0].payload.facts as Array<{ type: string }>)[0];
+		expect(isMemoryType(forwarded.type)).toBe(true);
+		expect(forwarded.type).toBe("fact");
+	});
+
+	it("model emits a synonym type:'rule' → kept and folded to 'convention' end-to-end", async () => {
+		const body = JSON.stringify({
+			facts: [{ content: "prefer named exports", type: "rule", confidence: 0.85 }],
+			entities: [],
+		});
+		const model = createFakeModelClient({ memory_extraction: body });
+		const config = PipelineConfigSchema.parse({ enabled: true, extractionProvider: "fake-router" });
+
+		const result = await extractFromText("raw", config, model);
+		expect(result.facts[0].type).toBe("convention");
+
+		const { queue, enqueued } = recordingQueue();
+		await extractionFanOut(queue)(
+			{
+				id: "j2",
+				kind: "memory_extraction",
+				attempt: 1,
+				scope: { org: "o", workspace: "w", agentId: "a" },
+				payload: { content: "raw" },
+			},
+			result,
+		);
+		const forwarded = (enqueued[0].payload.facts as Array<{ type: string }>)[0];
+		expect(forwarded.type).toBe("convention");
+		expect(isMemoryType(forwarded.type)).toBe(true);
 	});
 });
