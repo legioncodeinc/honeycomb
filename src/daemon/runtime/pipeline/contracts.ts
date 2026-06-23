@@ -32,6 +32,50 @@
 
 import { z } from "zod";
 
+import { DEFAULT_MEMORY_TYPE, type MemoryType, isMemoryType } from "../../../shared/memory-types.js";
+
+/**
+ * Case-insensitive synonym fold for the most common deviations a model emits for a
+ * memory `type` token (PRD: extraction-type binding). The PROMPT does the real work
+ * (it instructs the closed set); this is a thin safety net BELOW the prompt so the
+ * frequent near-misses land on the right token instead of the `fact` floor. It is
+ * NOT the gate — anything not folded here AND not already one of the six falls
+ * through to {@link DEFAULT_MEMORY_TYPE}. Single-sourced targets (every value is one
+ * of {@link MEMORY_TYPES}); the parity test asserts no synonym escapes the closed set.
+ */
+const TYPE_SYNONYMS: Readonly<Record<string, MemoryType>> = Object.freeze({
+	rule: "convention",
+	standard: "convention",
+	pattern: "convention",
+	idiom: "convention",
+	lesson: "gotcha",
+	pitfall: "gotcha",
+	warning: "gotcha",
+	trap: "gotcha",
+	link: "reference",
+	url: "reference",
+	pref: "preference",
+});
+
+/**
+ * Normalize a model-assigned `type` string to exactly one of the six taxonomy tokens
+ * (PRD: extraction-type binding). NEVER drops the fact — an unknown token maps to the
+ * value, not a parse failure:
+ *   1. already one of the six (the closed-set canon) → keep it;
+ *   2. a canonical token in non-canonical casing (e.g. `"Decision"`, `"GOTCHA"`) → its
+ *      lowercase canon — so the model's CORRECT classification isn't lost to casing;
+ *   3. a known synonym (case-insensitive fold) → its taxonomy target;
+ *   4. otherwise → {@link DEFAULT_MEMORY_TYPE} (`fact`), the acceptable floor.
+ * Idempotent: feeding a normalized token back through it returns the same token, so
+ * the decision stage's re-parse (`readFacts` → `parseFact`) is stable.
+ */
+export function normalizeMemoryType(raw: string): MemoryType {
+	if (isMemoryType(raw)) return raw;
+	const lower = raw.trim().toLowerCase();
+	if (isMemoryType(lower)) return lower; // a canonical token that only differed in casing/whitespace
+	return TYPE_SYNONYMS[lower] ?? DEFAULT_MEMORY_TYPE;
+}
+
 /**
  * A confidence score in `[0, 1]` (a-AC-1 / D-4). `.catch` is NOT used here — an
  * out-of-range or non-numeric confidence makes the WHOLE fact invalid, because a
@@ -45,15 +89,29 @@ export const ConfidenceSchema = z.number().min(0).max(1);
  *
  * - `content`    the claim text (non-empty; the stage additionally length-caps it
  *                to `extraction.maxFactChars` AFTER validation — a-AC-3 / FR-7).
- * - `type`       a coarse fact category (free-form string the model assigns, e.g.
- *                `fact` / `preference` / `decision`). Non-empty.
+ * - `type`       the memory taxonomy token — BOUND to the closed six (PRD:
+ *                extraction-type binding). The model is prompted to classify into
+ *                `fact` / `convention` / `preference` / `decision` / `gotcha` /
+ *                `reference`, but its output is unreliable, so the field NORMALIZES
+ *                rather than enum-rejects: a non-empty string the model assigns is
+ *                mapped through {@link normalizeMemoryType} (synonym fold, else the
+ *                `fact` floor) so the parsed `type` is ALWAYS one of the six and a
+ *                stray token NEVER drops the fact. `min(1)` is enforced BEFORE the
+ *                normalize (an empty/missing type is still an invalid fact).
  * - `confidence` 0..1 (a-AC-1). The 006c ADD gate compares this to the threshold.
  */
 export const FactSchema = z.object({
 	/** The claim text. Non-empty; length-capped by the stage post-validation. */
 	content: z.string().min(1),
-	/** Coarse fact category the model assigned. */
-	type: z.string().min(1),
+	/**
+	 * The memory taxonomy token — coerced to exactly one of the six (PRD:
+	 * extraction-type binding). `min(1)` guards non-empty FIRST (so an empty/missing
+	 * type fails the fact as before), then {@link normalizeMemoryType} folds any
+	 * non-token onto a valid one (default `fact`). The resulting `Fact.type` is a
+	 * {@link MemoryType}, never a free-form string. Idempotent → the decision stage's
+	 * re-parse is stable; the controlled-write inherits a guaranteed-valid token.
+	 */
+	type: z.string().min(1).transform(normalizeMemoryType),
 	/** Model confidence in this fact, 0..1 (a-AC-1). */
 	confidence: ConfidenceSchema,
 });

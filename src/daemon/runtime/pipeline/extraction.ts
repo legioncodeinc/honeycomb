@@ -33,6 +33,7 @@
  * assert against; the handler is the wiring.
  */
 
+import { MEMORY_TYPES, memoryTypeGuidance } from "../../../shared/memory-types.js";
 import {
 	type EntityTriple,
 	type ExtractionResult,
@@ -223,12 +224,24 @@ function boundEntities(raw: unknown, config: PipelineConfig): { entities: Entity
  * Build the extraction prompt for the (already input-capped) raw text. The model
  * is asked for the D-4 JSON contract. Kept minimal + deterministic — the prompt is
  * not the seam, the workload is; PRD-010's router owns the model behind it.
+ *
+ * The `type` of each fact is BOUND to the closed taxonomy (PRD: extraction-type
+ * binding): the prompt enumerates the six tokens + their meanings, sourced from
+ * {@link memoryTypeGuidance} and {@link MEMORY_TYPES} so the instruction can NEVER
+ * drift from the single source. The model is told to classify into exactly one;
+ * {@link normalizeMemoryType} in the contract is the resilient floor underneath
+ * (an off-token answer is coerced, not dropped) — the prompt does the real work.
  */
 export function buildExtractionPrompt(cappedText: string): string {
+	const typeList = MEMORY_TYPES.join("|");
 	return [
 		"Extract discrete facts and entity relationships from the memory below.",
+		`Classify each fact's "type" as EXACTLY ONE of: ${typeList}.`,
+		"Use this guidance to choose the type:",
+		memoryTypeGuidance(),
+		"",
 		'Respond ONLY with JSON of the form:',
-		'{"facts":[{"content":string,"type":string,"confidence":number}],',
+		`{"facts":[{"content":string,"type":one of ${typeList},"confidence":number}],`,
 		'"entities":[{"source":string,"relationship":string,"target":string}]}',
 		"confidence is between 0 and 1. Do not include any other text.",
 		"",

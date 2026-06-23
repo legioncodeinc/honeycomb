@@ -50,6 +50,7 @@ export {
 	type ExtractionResult,
 	type Fact,
 	FactSchema,
+	normalizeMemoryType,
 	parseEntityTriple,
 	parseFact,
 	parseProposal,
