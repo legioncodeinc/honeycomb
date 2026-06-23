@@ -36,6 +36,10 @@ export const ENDPOINTS = Object.freeze({
 	rules: "/api/diagnostics/rules",
 	skills: "/api/diagnostics/skills",
 	graph: "/api/graph",
+	// PRD-041a — the codebase-graph BUILD trigger (`POST /api/graph/build`). Runs the real worker
+	// end-to-end and writes the LOCAL snapshot; a subsequent `GET /api/graph` returns it immediately
+	// (local file, no eventual-consistency wait). On the RBAC-protected `/api/graph` group.
+	graphBuild: "/api/graph/build",
 	// PRD-041b — the memory-graph view-model (the knowledge graph of memories/entities). Served off
 	// the diagnostics group (`/api/diagnostics/memory-graph`), mirroring `/api/graph`. Returns the SAME
 	// `GraphView` shape so the existing `GraphCanvas` renders it unchanged; `built:false` until PRD-008
@@ -462,6 +466,37 @@ export const PollinateAckSchema = z.object({
 export type PollinateAck = z.infer<typeof PollinateAckSchema>;
 
 /**
+ * The `POST /api/graph/build` ack (the codebase-graph build worker's data body). The daemon runs the
+ * REAL worker end-to-end — discover → tree-sitter extract → aggregate → finalize → write the LOCAL
+ * snapshot — and returns `{ built, snapshotSha256, nodeCount, edgeCount, fileCount, parseErrorCount,
+ * cacheStats, localPath, push }`. We only validate the four fields the UI needs (`built` + the counts);
+ * the rest of the body is ignored (zod drops extra keys). Every field `.catch()`-defaults so the 500
+ * error body (`{ error, reason }`) — or any malformed/partial payload — degrades to a safe
+ * `{ built: false, … }` ack rather than throwing into React (the page surfaces an honest inline error).
+ */
+export const BuildGraphAckSchema = z.object({
+	built: z.boolean().catch(false),
+	nodeCount: z.number().catch(0),
+	edgeCount: z.number().catch(0),
+	fileCount: z.number().catch(0),
+});
+export type BuildGraphAck = z.infer<typeof BuildGraphAckSchema>;
+
+/**
+ * The honest failure ack the wire returns when the build POST is rejected, times out, or the body is
+ * malformed (never a throw into React). The page keeps its empty state + shows the inline error line.
+ */
+export const FAILED_BUILD_GRAPH_ACK: BuildGraphAck = Object.freeze({ built: false, nodeCount: 0, edgeCount: 0, fileCount: 0 });
+
+/**
+ * The generous client-side timeout (ms) for `buildGraph()`. The build parses the WHOLE repo with
+ * tree-sitter and can take many seconds to tens of seconds; a short default fetch timeout would abort
+ * a legitimate in-progress build. 120s gives the worker ample headroom — well past the realistic build
+ * time — while still bounding a truly hung request so the button never spins forever.
+ */
+export const BUILD_GRAPH_TIMEOUT_MS = 120_000 as const;
+
+/**
  * The PRD-029 per-subsystem `/health` `reasons` block (D-2 render). This MIRRORS the
  * Wave-1 daemon contract `HealthReasons` in `src/daemon/runtime/health.ts` verbatim — a
  * closed enum per subsystem, NO secret (D-5: no token/org/endpoint/header rides these,
@@ -808,6 +843,18 @@ export interface WireClient {
 	): Promise<SyncActionResultWire | null>;
 	health(): Promise<HealthProbe>;
 	pollinate(): Promise<PollinateAck>;
+	/**
+	 * PRD-041a — trigger the codebase-graph BUILD (`POST /api/graph/build`). The daemon runs the REAL
+	 * worker end-to-end (discover → tree-sitter extract → aggregate → finalize) and writes the LOCAL
+	 * snapshot, then returns the build ack `{ built, nodeCount, edgeCount, fileCount }` (the rest of the
+	 * body is ignored). After a `{ built: true }` ack the caller re-runs {@link graph} to render the
+	 * fresh snapshot immediately (it is a LOCAL file — no eventual-consistency poll needed). Stamps the
+	 * session headers exactly like {@link pollinate}. Uses a GENEROUS timeout ({@link BUILD_GRAPH_TIMEOUT_MS})
+	 * — the build is slow (whole-repo tree-sitter parse). Degrades to {@link FAILED_BUILD_GRAPH_ACK} on any
+	 * non-2xx / timeout / network / malformed-body failure — NEVER throws into React (the page shows an
+	 * honest inline error + keeps the CLI hint).
+	 */
+	buildGraph(): Promise<BuildGraphAck>;
 	/** PRD-032c — read the vault `setting` class + the provider→model catalog (`GET /api/settings`). */
 	vaultSettings(): Promise<VaultSettingsWire>;
 	/**
@@ -1088,6 +1135,29 @@ export function createWireClient(options: WireClientOptions = {}): WireClient {
 				return parsed.success ? parsed.data : { triggered: false, status: "skipped", reason: "unavailable" };
 			} catch {
 				return { triggered: false, status: "skipped", reason: "unavailable" };
+			}
+		},
+		async buildGraph(): Promise<BuildGraphAck> {
+			// POST the build trigger, mirroring pollinate()'s header stamping. The build is SLOW (whole-repo
+			// tree-sitter parse), so we give this call its OWN generous abort timeout — the default fetch must
+			// not abort a legitimate in-progress build. A non-2xx (incl. the 500 `{ error, reason }` body), a
+			// timeout/abort, a network error, or a malformed body all degrade to the failure ack (never a throw).
+			const ac = new AbortController();
+			const timer = setTimeout(() => ac.abort(), BUILD_GRAPH_TIMEOUT_MS);
+			try {
+				const res = await fetchImpl(url(ENDPOINTS.graphBuild), {
+					method: "POST",
+					headers: { accept: "application/json", ...DASHBOARD_SESSION_HEADERS },
+					signal: ac.signal,
+				});
+				if (!res.ok) return FAILED_BUILD_GRAPH_ACK;
+				const parsed = BuildGraphAckSchema.safeParse(await res.json());
+				return parsed.success ? parsed.data : FAILED_BUILD_GRAPH_ACK;
+			} catch {
+				// A timeout/abort, network error, or non-JSON body → the honest failure ack.
+				return FAILED_BUILD_GRAPH_ACK;
+			} finally {
+				clearTimeout(timer);
 			}
 		},
 		async vaultSettings(): Promise<VaultSettingsWire> {

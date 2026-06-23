@@ -16,9 +16,10 @@
 
 import React from "react";
 
+import { BuildGraphButton } from "./build-graph-button.js";
 import { layout, neighborsOf } from "./graph-layout.js";
 import { Badge, type BadgeTone } from "./primitives.js";
-import type { GraphWire, LogRecordWire, ProviderEntryWire, RuleRowWire, SessionRowWire, SettingValueWire, SkillRowWire } from "./wire.js";
+import type { GraphWire, LogRecordWire, ProviderEntryWire, RuleRowWire, SessionRowWire, SettingValueWire, SkillRowWire, WireClient } from "./wire.js";
 
 // ── Panel shell ────────────────────────────────────────────────────────────────
 
@@ -308,15 +309,33 @@ function NodeDetail({ node, neighbors }: { node: GraphWire["nodes"][number]; nei
  * pulses the selected/active node (or the first node as a stable panel-level indicator while no node
  * is selected), only while a real pollinate pass is active.
  */
-export function GraphCanvas({ graph, pollinating }: { graph: GraphWire; pollinating: boolean }): React.JSX.Element {
+export function GraphCanvas({
+	graph,
+	pollinating,
+	wire,
+	onBuilt,
+}: {
+	graph: GraphWire;
+	pollinating: boolean;
+	/** The shared wire client (threaded from the home page). When present, the empty state shows the build button. */
+	wire?: WireClient;
+	/** Re-hydrate the panel's graph after a successful build (the home page re-runs its `wire.graph()`). */
+	onBuilt?: () => void | Promise<void>;
+}): React.JSX.Element {
 	const [selected, setSelected] = React.useState<string | null>(null);
 
 	if (!graph.built) {
 		return (
 			<Panel title="Codebase graph">
-				<div style={{ padding: "24px 8px", textAlign: "center" }}>
-					<div style={{ fontSize: 14, color: "var(--text-tertiary)", marginBottom: 8 }}>No graph built for this workspace.</div>
-					<code style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--honey)" }}>honeycomb graph build</code>
+				<div style={{ padding: "24px 8px", textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+					<div style={{ fontSize: 14, color: "var(--text-tertiary)" }}>No graph built for this workspace.</div>
+					{/* The same wired "Build graph" button the full-page Graph empty state uses (shared component,
+					    no duplicated logic). Falls back to the CLI hint only when no wire is threaded (defensive). */}
+					{wire !== undefined ? (
+						<BuildGraphButton wire={wire} onBuilt={onBuilt ?? (() => {})} />
+					) : (
+						<code style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--honey)" }}>honeycomb graph build</code>
+					)}
 				</div>
 			</Panel>
 		);

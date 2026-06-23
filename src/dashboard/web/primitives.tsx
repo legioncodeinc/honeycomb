@@ -55,7 +55,7 @@ export function Button({
 		primary: { background: "var(--honey)", color: "var(--honey-on)", border: "1px solid transparent" },
 		secondary: { background: "var(--bg-elevated)", color: "var(--text-primary)", border: "1px solid var(--border-strong)" },
 		ghost: { background: "transparent", color: "var(--text-secondary)", border: "1px solid transparent" },
-		pollinate: { background: "var(--pollinate-subtle)", color: "var(--pollinate)", border: "1px solid var(--pollinate-border)" },
+		pollinate: { background: "var(--pollinate)", color: "#FFFFFF", border: "1px solid transparent" },
 		danger: { background: "var(--severity-critical-bg)", color: "var(--severity-critical)", border: "1px solid var(--severity-critical)" },
 	};
 	const v = variants[variant] ?? variants.primary;
@@ -87,7 +87,7 @@ export function Button({
 		primary: "var(--honey-hover)",
 		secondary: "var(--bg-subtle)",
 		ghost: "var(--bg-elevated)",
-		pollinate: "var(--pollinate-subtle)",
+		pollinate: "var(--pollinate-hover)",
 		danger: "var(--severity-critical-bg)",
 	};
 

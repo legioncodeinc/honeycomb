@@ -20,11 +20,11 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { layout, neighborsOf } from "../../../src/dashboard/web/graph-layout.js";
 import { GraphCanvas } from "../../../src/dashboard/web/panels.js";
-import type { GraphWire } from "../../../src/dashboard/web/wire.js";
+import type { BuildGraphAck, GraphWire, WireClient } from "../../../src/dashboard/web/wire.js";
 
 // React 18's act() environment flag — silences the "not wrapped in act(...)" warning.
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -68,6 +68,19 @@ function mount(graph: GraphWire, pollinating = false): void {
 		root = createRoot(container);
 		root.render(<GraphCanvas graph={graph} pollinating={pollinating} />);
 	});
+}
+
+/** Mount the canvas with a threaded wire + onBuilt (the production home-page wiring). */
+function mountWithWire(graph: GraphWire, wire: WireClient, onBuilt: () => void | Promise<void>): void {
+	act(() => {
+		root = createRoot(container);
+		root.render(<GraphCanvas graph={graph} pollinating={false} wire={wire} onBuilt={onBuilt} />);
+	});
+}
+
+/** A minimal mock wire whose only used method is buildGraph (the panel's empty state needs just that). */
+function buildWire(ack: BuildGraphAck): WireClient {
+	return { buildGraph: vi.fn(async () => ack) } as unknown as WireClient;
 }
 
 /** Click the node `<g role="button">` whose aria-label matches the node's label. */
@@ -152,7 +165,76 @@ describe("GraphCanvas interactivity (select / detail / clear)", () => {
 });
 
 describe("GraphCanvas empty state (built: false)", () => {
-	it("renders the honeycomb graph build prompt unchanged (AC-5)", () => {
+	it("with a wire threaded, renders the working Build graph button (not the dead CLI prompt)", () => {
+		mountWithWire({ built: false, nodes: [], edges: [] }, buildWire({ built: false, nodeCount: 0, edgeCount: 0, fileCount: 0 }), () => {});
+		expect(container.textContent ?? "").toContain("No graph built for this workspace.");
+		const btn = container.querySelector('[data-testid="build-graph-button"]');
+		expect(btn, "the Build graph button is present").not.toBeNull();
+		expect(btn?.textContent).toBe("Build graph");
+		// No canvas / node groups in the empty state.
+		expect(container.querySelector('g[role="button"]')).toBeNull();
+	});
+
+	it("clicking Build graph posts once (double-click guarded) and re-hydrates via onBuilt on success", async () => {
+		const onBuilt = vi.fn();
+		const wire = buildWire({ built: true, nodeCount: 4, edgeCount: 3, fileCount: 3 });
+		mountWithWire({ built: false, nodes: [], edges: [] }, wire, onBuilt);
+		const btn = container.querySelector('[data-testid="build-graph-button"]') as HTMLButtonElement;
+		await act(async () => {
+			btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+			btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		// Exactly one POST despite the double-click; onBuilt fired to re-hydrate the panel's graph.
+		expect(wire.buildGraph).toHaveBeenCalledTimes(1);
+		expect(onBuilt).toHaveBeenCalledTimes(1);
+	});
+
+	it("a throwing onBuilt re-hydrate does NOT wedge the button (re-enabled, not stuck on 'Building…')", async () => {
+		// The build succeeds but the host's re-hydrate throws — the finally must still clear the in-flight
+		// guard + the visual state so the button is usable again (regression: it used to stay disabled).
+		const onBuilt = vi.fn(() => {
+			throw new Error("re-hydrate blew up");
+		});
+		const wire = buildWire({ built: true, nodeCount: 4, edgeCount: 3, fileCount: 3 });
+		mountWithWire({ built: false, nodes: [], edges: [] }, wire, onBuilt);
+		const btn = container.querySelector('[data-testid="build-graph-button"]') as HTMLButtonElement;
+		await act(async () => {
+			btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		expect(onBuilt).toHaveBeenCalledTimes(1);
+		// Recovered: not disabled, label back to "Build graph" (not stuck "Building…"); a second click works.
+		expect(btn.disabled).toBe(false);
+		expect(btn.textContent).toBe("Build graph");
+		await act(async () => {
+			btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		expect(wire.buildGraph).toHaveBeenCalledTimes(2);
+	});
+
+	it("a failed build keeps the empty state, shows the inline error + the CLI hint for power users", async () => {
+		const onBuilt = vi.fn();
+		const wire = buildWire({ built: false, nodeCount: 0, edgeCount: 0, fileCount: 0 });
+		mountWithWire({ built: false, nodes: [], edges: [] }, wire, onBuilt);
+		const btn = container.querySelector('[data-testid="build-graph-button"]') as HTMLButtonElement;
+		await act(async () => {
+			btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		expect(onBuilt).not.toHaveBeenCalled();
+		expect(container.querySelector('[data-testid="build-graph-error"]')).not.toBeNull();
+		expect(container.textContent ?? "").toContain("honeycomb graph build");
+	});
+
+	it("without a wire (defensive direct mount), falls back to the CLI prompt unchanged (AC-5)", () => {
 		mount({ built: false, nodes: [], edges: [] });
 		expect(container.textContent ?? "").toContain("honeycomb graph build");
 		expect(container.textContent ?? "").toContain("No graph built for this workspace.");

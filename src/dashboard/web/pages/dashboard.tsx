@@ -206,6 +206,15 @@ export function DashboardPage({ wire, pollinating = false }: PageProps): React.J
 		setSecretNames(sn);
 	}, [wire]);
 
+	/**
+	 * Re-hydrate ONLY the codebase graph (used by the home GraphPanel's "Build graph" button on a
+	 * successful build). The fresh snapshot is a LOCAL file the next `wire.graph()` reads immediately —
+	 * no eventual-consistency poll — so the panel swaps from the empty state to the drawn graph at once.
+	 */
+	const refreshGraph = React.useCallback(async (): Promise<void> => {
+		setGraph(await wire.graph());
+	}, [wire]);
+
 	/** PRD-032c (AC-5): persist one vault `setting` through the daemon, then RE-READ the persisted truth. */
 	const saveSetting = React.useCallback(
 		async (key: string, value: SettingValueWire): Promise<boolean> => {
@@ -352,7 +361,7 @@ export function DashboardPage({ wire, pollinating = false }: PageProps): React.J
 						<RulesPanel rules={rules} />
 					</div>
 					<div className="col">
-						<GraphCanvas graph={graph} pollinating={pollinating} />
+						<GraphCanvas graph={graph} pollinating={pollinating} wire={wire} onBuilt={refreshGraph} />
 						<SettingsPanel catalog={vaultSettings.catalog} settings={vaultSettings.settings} secretNames={secretNames} onSave={saveSetting} />
 						<SkillSyncPanel skills={skills} />
 					</div>
