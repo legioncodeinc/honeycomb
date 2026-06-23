@@ -412,7 +412,8 @@ export interface SeamFns {
 	 * that turns the ontology 501 scaffold into a LIVE read surface (no 501) and gives the
 	 * control-plane apply a live, pollinating-INDEPENDENT mutation path. The `/api/ontology` group
 	 * has a SINGLE owner — no other mount registers any `/api/ontology/*` path — so there is no
-	 * route collision (cf. the latent `/api/graph` double-registration the audit flagged).
+	 * route collision (the same single-owner rule that resolved the `/api/graph` double-registration:
+	 * `GET /api/graph` is now served ONLY by {@link mountGraph}; `mountDashboard` no longer claims it).
 	 *
 	 * OPTIONAL on the seam record (like {@link mountGraph}/{@link mountHarness}/{@link mountSync})
 	 * so a pre-existing recording-fake `SeamFns` stays type-compatible WITHOUT editing those
@@ -675,9 +676,13 @@ export function assembleSeams(
 		enqueuePipelineEntry: makePipelineEntryEnqueuer(daemon.services.queue),
 	});
 
-	// 2. The dashboard data API (020b) — the six daemon-served view-models. Threads the
+	// 2. The dashboard data API (020b) — the daemon-served view-models. Threads the
 	//    LOCAL default scope so the dashboard web app (a loopback thin client that sends no
 	//    `x-honeycomb-org`) resolves the single local tenant instead of 400ing (PRD-024 Wave 3).
+	//    NOTE (route-collision resolution): this seam no longer registers `GET /api/graph` — the
+	//    codebase-graph view is owned solely by step 13's `mountGraph` (the freshest-LOCAL-snapshot
+	//    read), so the "Build graph" re-read is immediate + consistent. The MEMORY-graph view this
+	//    seam DOES serve lives at `/api/diagnostics/memory-graph` (a distinct path, no collision).
 	seams.mountDashboard(daemon, { storage, defaultScope, orgName });
 
 	// 3. The backend notifications API (020d) — the org's pending notifications.
@@ -816,7 +821,12 @@ export function assembleSeams(
 	// 13. The codebase-graph build + read surface — `POST /api/graph/build` + `GET /api/graph`
 	//     (PRD-014 assembly wiring, CONVENTIONS §11). Attaches onto the already-mounted, protected
 	//     `/api/graph` group (NO `server.ts` edit), so it inherits the dashboard JSON views'
-	//     auth/RBAC (open in `local`, gated in team/hybrid). This is the DEFERRED daemon-assembly
+	//     auth/RBAC (open in `local`, gated in team/hybrid). SINGLE OWNER of `GET /api/graph` (the
+	//     dashboard seam's former DeepLake-read handler was retired — route-collision resolution):
+	//     the GET returns the FULL `{ built, nodes, edges }` GraphView from the freshest LOCAL
+	//     snapshot (the authoritative copy `POST /build` writes via `writeSnapshotAtomic`), so the
+	//     PRD-041a "Build graph" re-read is immediate + consistent (no DeepLake eventual-consistency
+	//     flap). This is the DEFERRED daemon-assembly
 	//     seam the codebase worker (014a/b/c) needed: the build pipeline (discover → tree-sitter
 	//     extract → snapshot → push) was built + tested but never INVOKED by the live daemon, so
 	//     `honeycomb graph build` 501'd. Firing it here turns the 501 into a real end-to-end build
@@ -879,7 +889,8 @@ export function assembleSeams(
 	//     ontology 501 scaffold into a LIVE read surface (c-AC-2) and gives the control-plane apply
 	//     a live mutation path INDEPENDENT of the dormant pollinating runner (c-AC-4). The `/api/ontology`
 	//     group has a SINGLE owner — no other mount registers any `/api/ontology/*` path — so there is
-	//     no route collision (cf. the latent `/api/graph` double-registration the audit flagged).
+	//     no route collision (the same single-owner rule that resolved the `/api/graph` double-registration:
+	//     `GET /api/graph` is served ONLY by step 13's `mountGraph`; `mountDashboard` no longer claims it).
 	//     FAIL-SOFT (c-AC-5): a mount error must NEVER crash the daemon — the surface stays unmounted
 	//     this run (falls through to the 501 scaffold), exactly the posture the other mounts use.
 	if (seams.mountOntology !== undefined) {

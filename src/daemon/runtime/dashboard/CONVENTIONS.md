@@ -27,12 +27,16 @@ This seam NEVER edits `server.ts`, so the sessions AND settings views attach off
 `GET /api/diagnostics/rules`, `GET /api/diagnostics/skills` — because the canonical `/api/kpis`,
 `/api/rules`, `/api/skills` resource paths are owned by the PRD-022 product-data data-access API (the
 rows the CLI/SDK/MCP read). A dashboard view-model is a presentation concern and yields to the
-resource it shares a name with; only graph keeps its own group (`GET /api/graph`), which product-data
-does not claim. `DASHBOARD_GROUPS` documents the group each view fills.
+resource it shares a name with. `DASHBOARD_GROUPS` documents the group each view fills.
 
-**a-AC-6 empty-state:** the `/api/graph` handler returns `{ built: false, nodes: [], edges: [] }`
-when no codebase snapshot exists for the workspace; the 020b `buildGraphView` renders the
-`honeycomb graph build` prompt from the flag (HTTP 200, not an error).
+**`GET /api/graph` is owned elsewhere (route-collision resolution):** the codebase-graph view is
+served by `mountGraphApi` (`codebase/api.ts`), the SINGLE owner of the `/api/graph` group. It returns
+the FULL `{ built, nodes, edges }` GraphView from the freshest LOCAL snapshot (`built:false`
+empty-state when no snapshot exists), so the PRD-041a "Build graph" re-read is immediate + consistent
+(no DeepLake eventual-consistency flap). This seam's former DeepLake-read graph handler was retired to
+clear the latent `/api/graph` double-registration. The MEMORY-graph view this seam DOES own is served
+at `GET /api/diagnostics/memory-graph` (a distinct path — no collision) and returns
+`{ built: false, nodes: [], edges: [] }` until the PRD-008 ontology is populated.
 
 **Deferred assembly (D-7):** the production daemon assembly that owns the live storage client calls
 `mountDashboardApi` once. It is constructed-and-tested here against a fake `StorageQuery`
@@ -44,7 +48,7 @@ not auto-invoke it.
 `mountDashboardHost(daemon, { storage, scope? })` attaches `GET /dashboard` onto the root group (the
 viewable HTML page, served from inside the daemon). It builds a DAEMON-SIDE `DashboardDataSource`
 that reads the live storage through the SHARED view fetchers `api.ts` now exports
-(`fetchKpisView`/`fetchSessionsView`/`buildSettingsView`/`fetchGraphView`/`fetchRulesView`/`fetchSkillSyncView`)
+(`fetchKpisView`/`fetchSessionsView`/`buildSettingsView`/`fetchRulesView`/`fetchSkillSyncView`)
 — so the served page and the JSON endpoints read EXACTLY the same rows (single-sourced SQL, jscpd-clean).
 It then runs the 020b `renderDashboard` and serializes via `src/dashboard/html.ts`'s
 `renderDashboardPage` (a STANDALONE page, distinct from the cursor webview FRAGMENT serializer).

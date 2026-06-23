@@ -22,8 +22,15 @@
  *                           the 014c SELECT-before-INSERT drift semantics). Returns the
  *                           build result as data — NO MORE 501.
  *   GET  /api/graph        → load the freshest LOCAL snapshot for the worktree and
- *                           report `{ built, nodeCount, edgeCount, ... }`. `built:false`
- *                           with zero counts when no build has run yet.
+ *                           return the FULL dashboard {@link GraphView}
+ *                           (`{ built, nodes, edges }`) the canvas renders — mapping the
+ *                           NetworkX node-link `nodes`/`links` into the view-model shape.
+ *                           `built:false` with empty arrays when no build has run yet.
+ *                           This is the SINGLE owner of `GET /api/graph` (the dashboard's
+ *                           former DeepLake-read handler is retired): reading the LOCAL
+ *                           snapshot makes the PRD-041a "Build graph" re-read immediate +
+ *                           consistent (no DeepLake eventual-consistency flap — the local
+ *                           copy `POST /build` writes via `writeSnapshotAtomic` IS the read).
  *
  * ── Daemon-only storage (codebase CONVENTIONS §10) ───────────────────────────
  * The cloud push runs daemon-side through the injected {@link StorageQuery}; the
@@ -41,6 +48,7 @@ import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import type { Daemon } from "../server.js";
 import { resolveScopeOrLocalDefault } from "../scope.js";
 
+import type { GraphView } from "../../../dashboard/contracts.js";
 import type { Snapshot, SnapshotIdentity } from "./contracts.js";
 import { resolveSnapshotIdentity } from "./identity.js";
 import { parseSnapshotJsonb, pushSnapshot, type PushOutcome } from "./push-pull.js";
@@ -136,6 +144,30 @@ export function loadFreshestLocalSnapshot(baseDir: string): Snapshot | null {
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * Map a local {@link Snapshot} (NetworkX node-link JSON) into the dashboard {@link GraphView}
+ * the canvas renders. The snapshot's `nodes` are codebase {@link import("./contracts.js").GraphNode}s
+ * (`id` / `name` / `kind`) and its EDGES live under `links` (the NetworkX node-link convention —
+ * `source` / `target` / `relation`), NOT an `edges` key. This is the authoritative, typed mapping:
+ *   - node → `{ id, label: name (id fallback), kind }`
+ *   - link → `{ from: source, to: target, kind: relation }`
+ * Reading `links` (not a non-existent `edges`) is why the canvas now draws real edges. Pure +
+ * total — every field is a string on both contracts, so there is no coercion or throw.
+ */
+export function snapshotToGraphView(snapshot: Snapshot): GraphView {
+	const nodes = snapshot.nodes.map((n) => ({
+		id: n.id,
+		label: n.name !== "" ? n.name : n.id,
+		kind: n.kind,
+	}));
+	const edges = snapshot.links.map((l) => ({
+		from: l.source,
+		to: l.target,
+		kind: l.relation,
+	}));
+	return { built: true, nodes, edges };
 }
 
 /** The build result reported back to the caller (data, never a thrown error). */
@@ -236,21 +268,19 @@ export function mountGraphApi(daemon: Daemon, options: MountGraphOptions): void 
 		}
 	});
 
-	// ── GET /api/graph → report the freshest local snapshot (built:true + counts). ──
+	// ── GET /api/graph → the freshest LOCAL snapshot as the FULL dashboard GraphView. ──
+	// SINGLE owner of `GET /api/graph` (the dashboard's former DeepLake `fetchGraphView`
+	// handler is retired). Returns `{ built, nodes, edges }` mapped from the local snapshot's
+	// node-link `nodes`/`links` — `built:false` empty arrays when no build has run yet. The
+	// local copy is the SAME file `POST /build` writes, so the PRD-041a "Build graph" re-read
+	// is immediate + consistent (no DeepLake eventual-consistency wait).
 	group.get("/", (c) => {
 		const scope = resolveScope(c);
 		if (scope === null) return c.json(NO_ORG_BODY, 400);
 		const baseDir = options.graphBaseDir ?? defaultGraphBaseDir(resolveIdentity(scope));
 		const snapshot = loadFreshestLocalSnapshot(baseDir);
-		if (snapshot === null) {
-			return c.json({ built: false, nodeCount: 0, edgeCount: 0 });
-		}
-		return c.json({
-			built: true,
-			nodeCount: snapshot.nodes.length,
-			edgeCount: snapshot.links.length,
-			commit: snapshot.graph.commit ?? "",
-			repo: snapshot.graph.repo ?? "",
-		});
+		const view: GraphView =
+			snapshot === null ? { built: false, nodes: [], edges: [] } : snapshotToGraphView(snapshot);
+		return c.json(view);
 	});
 }

@@ -89,17 +89,25 @@ describe("PRD-019c OpenClaw shim", () => {
 		expect(results.every((r) => r.ok)).toBe(true);
 	});
 
-	it("c-AC-3 the agent is auto-routed from the session key (agent:alice:...)", () => {
+	it("c-AC-3 the per-user agent is auto-routed from the session key onto agentId (NOT agent)", () => {
 		const meta = openclawDeriveMeta(undefined, META);
-		expect(meta.agent).toBe("alice");
+		// The per-USER agent (`alice`) routes onto the ENGINE-scope `agentId` …
 		expect(meta.agentId).toBe("alice");
-		// The batch inputs carry the routed agent on every row.
+		// … and does NOT clobber `agent`, which is reserved for the CANONICAL harness token
+		// (`openclaw`, stamped by the batch path) so the Harnesses page GROUP BY attributes
+		// the turn to OpenClaw — not to a phantom `alice` harness (the harness-turns fix).
+		expect(meta.agent).toBeUndefined();
+		// The batch inputs carry the canonical harness token on `agent`, the per-user on `agentId`.
 		const inputs = openclawExpandBatch([{ role: "user", text: "hi" }], META);
-		expect(inputs[0].meta.agent).toBe("alice");
+		expect(inputs[0].meta.agent).toBe("openclaw");
+		expect(inputs[0].meta.agentId).toBe("alice");
 	});
 
-	it("c-AC-3 a non-namespaced session key leaves the agent unchanged", () => {
+	it("c-AC-3 a non-namespaced session key leaves agentId unchanged (no agent override)", () => {
 		const meta = openclawDeriveMeta(undefined, { sessionId: "plain-session" });
+		// No `agent:<name>:` prefix → no per-user routing; `agent` stays unset here (the batch
+		// path / createShim engine stamps the canonical `openclaw` token downstream).
+		expect(meta.agentId).toBeUndefined();
 		expect(meta.agent).toBeUndefined();
 	});
 
