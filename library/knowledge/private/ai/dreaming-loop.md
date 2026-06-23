@@ -18,6 +18,15 @@ The extraction pipeline is fast and cheap, but it is also near-sighted. Each ext
 
 Dreaming runs inside the daemon's maintenance loop and reasons over DeepLake tables the daemon owns. It is a premium tier. Installs without access to a larger model keep the extraction pipeline as the free tier and lose nothing; they just do not get consolidation.
 
+## Enabling dreaming
+
+Dreaming is **off by default** on fresh installs to avoid surprise model spend. Enable it via either of two mechanisms (vault setting wins when present):
+
+1. Environment variable: `HONEYCOMB_DREAMING_ENABLED=true` (or `1`).
+2. Vault setting: `dreaming.enabled = true` (set via `honeycomb setting set dreaming.enabled true`).
+
+A vault `false` disables dreaming even when the environment variable is set, giving operators a runtime kill-switch without a redeploy.
+
 ## When it fires
 
 The trigger is a token-budget counter, not a clock. The `dreaming_state` row tracks tokens since the last pass. Every session-summary write increments that counter. When it crosses a threshold (default around 100k tokens), a dreaming job is queued. This scales naturally: heavy users dream often, light users dream rarely.
@@ -25,7 +34,7 @@ The trigger is a token-budget counter, not a clock. The `dreaming_state` row tra
 ```yaml
 memory:
   dreaming:
-    enabled: true
+    enabled: true          # must be explicitly set; default is off
     tokenThreshold: 100000
     maxInputTokens: 128000
     backfillOnFirstRun: true

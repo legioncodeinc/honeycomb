@@ -1,18 +1,23 @@
-# Memory-pipeline conventions (PRD-006 scaffold seam) — READ BEFORE FILLING A STUB
+# Memory-pipeline conventions (PRD-006 / PRD-045a) — READ BEFORE EDITING A STAGE
+
+> **Status (PRD-045a, 2026-06-22):** All five stages are WIRED and LIVE. The pipeline
+> worker is constructed and started by `assembleDaemon` (`assemble.ts:1526-1527`,
+> `buildPipelineWorker`), leasing all five `PIPELINE_JOB_KINDS`. Stage handlers are
+> **default OFF** via `HONEYCOMB_PIPELINE_*` env flags — no model spend occurs without
+> explicit opt-in. The scaffold and seam contracts below remain the authoritative
+> conventions for anyone editing a stage.
 
 Wave 1 (`typescript-node-worker-bee`) built the **shared pipeline scaffold**: the
 config flags, the `ModelClient` seam, the cross-stage **contracts**
 (`Fact` / `EntityTriple` / `Proposal`), the **stage-worker harness**, the job-type
-routing, and the **fully-implemented extraction stage (006a)**. It pre-wired
-**four stage stubs** (006b/c/d/e) so each Wave-2 Bee fills **only its own stage
-module + its own test file** with **zero contention** on the scaffold or any
-sibling stub — the same pattern that kept PRD-003/004/005's parallel waves clean.
+routing, and the **fully-implemented extraction stage (006a)**. Wave 2 filled the
+four stage stubs (006b/c/d/e). PRD-045a wired the completed worker into the daemon.
 
-The whole point: **the worker already imports, routes, and runs your stage.** You
-swap your stub's body for the real impl in your module and register your real deps
-through `createPipelineHandlers`. You never edit `stage-worker.ts`, `contracts.ts`,
+The whole point: **the worker already imports, routes, and runs your stage.** Any
+future change to a stage swaps the handler body in its module and registers updated
+deps through `createPipelineHandlers`. Never edit `stage-worker.ts`, `contracts.ts`,
 `config.ts`, `model-client.ts`, `extraction.ts`, `handlers.ts`, or another stage's
-stub.
+module.
 
 ---
 
