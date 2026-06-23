@@ -6,7 +6,7 @@ export interface KpiProps {
   unit?: string;
   /** Optional week-over-week delta; positive = green up, negative = red down. */
   delta?: number;
-  accent?: "honey" | "dream" | "verified" | "neutral";
+  accent?: "honey" | "pollinate" | "verified" | "neutral";
   style?: React.CSSProperties;
 }
 

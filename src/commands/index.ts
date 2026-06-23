@@ -68,11 +68,11 @@ export {
 } from "./storage-handlers.js";
 
 export {
-	DREAM_ENDPOINT,
-	type DreamCliInvocation,
-	parseDreamCliArgs,
-	runDreamVerb,
-} from "./dream.js";
+	POLLINATE_ENDPOINT,
+	type PollinateCliInvocation,
+	parsePollinateCliArgs,
+	runPollinateVerb,
+} from "./pollinate.js";
 
 export {
 	MAINTENANCE_COMPACT_ENDPOINT,

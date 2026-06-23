@@ -57,7 +57,7 @@ function mockWire(opts: {
 		logs: vi.fn(async () => opts.logs ?? []),
 		harnesses: vi.fn(async () => opts.harnesses ?? []),
 		health: vi.fn(async () => ({ up: true, reasons: null })),
-		dream: vi.fn(),
+		pollinate: vi.fn(),
 		vaultSettings: vi.fn(async () => ({ settings: {}, catalog: [] })),
 		setSetting: vi.fn(),
 		secretNames: vi.fn(async () => []),
@@ -65,7 +65,7 @@ function mockWire(opts: {
 }
 
 function pageProps(wire: WireClient): PageProps {
-	return { wire, daemonUp: true, assetBase: "assets", dreaming: false };
+	return { wire, daemonUp: true, assetBase: "assets", pollinating: false };
 }
 
 let container: HTMLDivElement;

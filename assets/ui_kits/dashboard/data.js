@@ -11,7 +11,7 @@ window.HC_DATA = {
     settings: {
       "Capture": "on",
       "Embeddings": "768-dim · nomic",
-      "Dreaming": "auto · 100k tok",
+      "Pollinating": "auto · 100k tok",
       "Recall": "hybrid (BM25 + cosine)",
     },
   },
@@ -81,7 +81,7 @@ window.HC_DATA = {
       { id: "recall",    label: "recall()",       kind: "function" },
       { id: "pipeline",  label: "Pipeline",       kind: "class" },
       { id: "store",     label: "DeepLake",       kind: "file" },
-      { id: "dreaming",  label: "dreaming()",     kind: "function" },
+      { id: "pollinating",  label: "pollinating()",     kind: "function" },
     ],
     edges: [
       { from: "capture", to: "pipeline", kind: "calls" },
@@ -89,7 +89,7 @@ window.HC_DATA = {
       { from: "recall", to: "store", kind: "calls" },
       { from: "daemon", to: "capture", kind: "imports" },
       { from: "daemon", to: "recall", kind: "imports" },
-      { from: "dreaming", to: "store", kind: "calls" },
+      { from: "pollinating", to: "store", kind: "calls" },
     ],
   },
 

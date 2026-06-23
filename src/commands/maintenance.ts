@@ -7,7 +7,7 @@
  * through the {@link DaemonClient} seam — the SAME loopback path every storage verb uses, so
  * the actor/scope/loopback headers are stamped by the shared `createLoopbackDaemonClient`,
  * never re-implemented here. This is the AC-bearing PRIMARY path (D-2): it runs REGARDLESS of
- * whether premium dreaming is enabled.
+ * whether premium pollinating is enabled.
  *
  * ── It is a THIN CLIENT (D-2 / the dispatcher thesis) ─────────────────────────
  * This handler imports NO `daemon/storage` path and holds NO compaction logic: it builds a

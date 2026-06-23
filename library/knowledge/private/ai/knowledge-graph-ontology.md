@@ -7,7 +7,7 @@ The structured layer over memories: entities, aspects, claim slots, dependencies
 **Related:**
 - [`memory-pipeline.md`](memory-pipeline.md)
 - [`retrieval.md`](retrieval.md)
-- [`dreaming-loop.md`](dreaming-loop.md)
+- [`pollinating-loop.md`](pollinating-loop.md)
 - [`../data/schema.md`](../data/schema.md)
 - [`../security/scoping-and-visibility.md`](../security/scoping-and-visibility.md)
 
@@ -81,4 +81,4 @@ Recall resolves focal entities in priority order: pinned entities, checkpoint en
 
 ## Feedback and communities
 
-Aspect weights are not static. When recall and a session keep confirming memories under an aspect, that aspect's weight goes up; aspects that go stale beyond a window decay toward a floor. Community detection clusters related entities. Both keep the graph's shape tracking how the memory is actually used rather than how it was first extracted. The heavier, model-driven reshaping of the graph happens in the [`dreaming-loop.md`](dreaming-loop.md). The tables behind all of this are documented in [`../data/schema.md`](../data/schema.md).
+Aspect weights are not static. When recall and a session keep confirming memories under an aspect, that aspect's weight goes up; aspects that go stale beyond a window decay toward a floor. Community detection clusters related entities. Both keep the graph's shape tracking how the memory is actually used rather than how it was first extracted. The heavier, model-driven reshaping of the graph happens in the [`pollinating-loop.md`](pollinating-loop.md). The tables behind all of this are documented in [`../data/schema.md`](../data/schema.md).

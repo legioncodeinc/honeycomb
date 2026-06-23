@@ -12,7 +12,7 @@ The dashboard's codebase-graph widget renders nothing for a real graph. `GraphCa
 
 ```ts
 const NODE_POS: Record<string, { x: number; y: number }> = {
-  daemon: {...}, capture: {...}, recall: {...}, pipeline: {...}, store: {...}, dreaming: {...},
+  daemon: {...}, capture: {...}, recall: {...}, pipeline: {...}, store: {...}, pollinating: {...},
 };                                                              // panels.tsx:232-239
 ```
 
@@ -49,7 +49,7 @@ correct; PRD-041 builds the full page on top of it.
   is **PRD-041**. This widget handles the dashboard's small snapshot.
 - A physics simulation that runs continuously / animates forever (a deterministic settle is fine;
   see D-1).
-- Replacing the `dreaming` pulse behavior (the dreaming node pulse stays, re-expressed for the new
+- Replacing the `pollinating` pulse behavior (the pollinating node pulse stays, re-expressed for the new
   layout — see D-4).
 
 ## User Story
@@ -77,9 +77,9 @@ what it connects to, instead of staring at a blank box that claims "5 nodes · 0
   a footer/side block) showing the selected node's `id`, `kind`, `label`, and its **neighbors**
   (nodes reachable via edges where `from === id` or `to === id`). Clicking elsewhere / the same node
   toggles selection off. The selected node is visually highlighted.
-- **D-4 — Preserve the dreaming pulse + empty state.** The `dreaming` prop still pulses the relevant
-  node; since the hardcoded `"dreaming"` id no longer exists in real data, re-express the pulse as
-  "pulse the selected/active node while dreaming" or drop the id-specific pulse and pulse a stable
+- **D-4 — Preserve the pollinating pulse + empty state.** The `pollinating` prop still pulses the relevant
+  node; since the hardcoded `"pollinating"` id no longer exists in real data, re-express the pulse as
+  "pulse the selected/active node while pollinating" or drop the id-specific pulse and pulse a stable
   indicator — decided in OQ-2. The `built: false` branch (`panels.tsx:249-258`) is unchanged.
 - **D-5 — Keep it a small, self-contained widget.** Bounded to the existing `viewBox="0 0 540 200"`
   canvas (or a modestly adjusted one). No new dependency unless a layout helper is trivially small;
@@ -122,10 +122,10 @@ what it connects to, instead of staring at a blank box that claims "5 nodes · 0
   vs a fixed-iteration force-directed pass (nicer-looking, slightly less deterministic)? Default:
   deterministic, so AC-7 can assert positions/structure without flake. Confirm with design whether
   the look is acceptable for the mini-widget.
-- **OQ-2 — Dreaming pulse semantics.** With the hardcoded `"dreaming"` id gone, what pulses during
-  a dream? Options: pulse the currently-selected node, pulse all nodes subtly, or move the pulse to
+- **OQ-2 — Pollinating pulse semantics.** With the hardcoded `"pollinating"` id gone, what pulses during
+  a pollinate? Options: pulse the currently-selected node, pulse all nodes subtly, or move the pulse to
   a panel-level indicator. Default: a panel-level/active-node pulse; keep it honest (only while a
-  real dream pass is active per 024 AC-6).
+  real pollinate pass is active per 024 AC-6).
 - **OQ-3 — Node-detail placement.** In-panel footer vs a popover vs a side block? Default: a compact
   in-panel detail block below the canvas, so the widget stays self-contained for the mini view and
   PRD-041 can replace it with a richer side panel.

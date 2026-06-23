@@ -8,7 +8,7 @@ import React from "react";
 export function Kpi({ label, value, unit, delta, accent = "honey", style, ...rest }) {
   const accents = {
     honey: "var(--honey)",
-    dream: "var(--dream)",
+    pollinate: "var(--pollinate)",
     verified: "var(--verified)",
     neutral: "var(--text-primary)",
   };

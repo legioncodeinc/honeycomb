@@ -42,15 +42,15 @@ fresh read) that flips DONE → VERIFIED. Implementers do not grade their own ho
 | c-AC-4 | Append-only supersession applies on a live path; a superseded claim is observably tombstoned (not deleted). | DONE — `POST /api/ontology/proposals`→`submitProposal`→`supersedeClaim` (append+mark); active-only read filter; tested |
 | c-AC-5 | Fail-soft mount + invocation (a mount/link error never crashes the daemon). | DONE — mount try/catch `assemble.ts:866-873`; reads→`[]` on non-ok; linker throw non-fatal in graph-persist |
 
-> **045c→045d:** linker + control-plane apply use deterministic IDs + presence-probe → idempotent; 045d's dreaming runner must keep calling `submitProposal`/`supersedeClaim`/`inlineLinkMemory` (never raw inserts) → no double-write. Dreaming apply path left intact.
+> **045c→045d:** linker + control-plane apply use deterministic IDs + presence-probe → idempotent; 045d's pollinating runner must keep calling `submitProposal`/`supersedeClaim`/`inlineLinkMemory` (never raw inserts) → no double-write. Pollinating apply path left intact.
 
-### PRD-045d — Dreaming-loop activation + proof (closes 009) · Owner: typescript-node-worker-bee · Model: opus · Depends: 045a, 045c
+### PRD-045d — Pollinating-loop activation + proof (closes 009) · Owner: typescript-node-worker-bee · Model: opus · Depends: 045a, 045c
 | ID | Criterion | Status |
 |---|---|---|
-| d-AC-1 | Recorded default-posture decision + exact enable mechanism (env + vault) documented. | DONE — D-045d-1 stay OFF+opt-in (pipeline=primary writer, dreaming=consolidator); enable via `HONEYCOMB_DREAMING_ENABLED` or vault `dreaming.enabled` (vault wins) |
-| d-AC-2 | Token-gated live itest proves an enabled pass runs to completion (enqueue → lease → model → apply → state). | DONE — `dreaming-activation-assembled-live.itest.ts` (gated on token+key, skip-safe; flips gate via injected provider, asserts `last_pass_at` advance) |
-| d-AC-3 | With dreaming OFF, `POST /api/diagnostics/dream` acks cleanly (`{triggered:false}`/queued), no crash. | DONE — `dream-trigger-assembled.test.ts` deterministic: 202 `{triggered:false,reason:"disabled"}`, nothing enqueued |
-| d-AC-4 | Coordination check: dreaming apply + 045a graph-persist do not double-write the same edge. | DONE — `dream-coordination-nodoublewrite.test.ts`: shared stateful store, both paths + interleaved×3 → exactly one row per edge (deterministic IDs) |
+| d-AC-1 | Recorded default-posture decision + exact enable mechanism (env + vault) documented. | DONE — D-045d-1 stay OFF+opt-in (pipeline=primary writer, pollinating=consolidator); enable via `HONEYCOMB_POLLINATING_ENABLED` or vault `pollinating.enabled` (vault wins) |
+| d-AC-2 | Token-gated live itest proves an enabled pass runs to completion (enqueue → lease → model → apply → state). | DONE — `pollinating-activation-assembled-live.itest.ts` (gated on token+key, skip-safe; flips gate via injected provider, asserts `last_pass_at` advance) |
+| d-AC-3 | With pollinating OFF, `POST /api/diagnostics/pollinate` acks cleanly (`{triggered:false}`/queued), no crash. | DONE — `pollinate-trigger-assembled.test.ts` deterministic: 202 `{triggered:false,reason:"disabled"}`, nothing enqueued |
+| d-AC-4 | Coordination check: pollinating apply + 045a graph-persist do not double-write the same edge. | DONE — `pollinate-coordination-nodoublewrite.test.ts`: shared stateful store, both paths + interleaved×3 → exactly one row per edge (deterministic IDs) |
 
 ### PRD-045e — Sources + Documents surface (closes 013) · Owner: typescript-node-worker-bee · Model: opus
 | ID | Criterion | Status |
@@ -83,10 +83,10 @@ fresh read) that flips DONE → VERIFIED. Implementers do not grade their own ho
 ### PRD-045 index (roll-up + reconciliation) · Owner: library-worker-bee (AC-7/AC-1 docs) + close-out
 | ID | Criterion | Status |
 |---|---|---|
-| AC-1 | Each of 006/007/008/009/013/016/018 has a cited runtime invocation site in `src/` (no test-only reachability). | DONE — invocation sites cited per sub-PRD (pipeline worker, recall RRF, ontology mount/linker, dreaming gate, sources mount, skillify worker, publish/auto-pull) |
+| AC-1 | Each of 006/007/008/009/013/016/018 has a cited runtime invocation site in `src/` (no test-only reachability). | DONE — invocation sites cited per sub-PRD (pipeline worker, recall RRF, ontology mount/linker, pollinating gate, sources mount, skillify worker, publish/auto-pull) |
 | AC-2 | A captured turn observably processed by the memory pipeline (extraction produces facts), live itest (045a). | DONE — 045a |
 | AC-3 | `/api/ontology/*` (045c), `/api/sources` + `/api/documents` (045e) return real data (no 501) on a real daemon. | DONE — 045c + 045e |
-| AC-4 | A dreaming pass runs to completion when enabled (045d). | DONE — 045d |
+| AC-4 | A pollinating pass runs to completion when enabled (045d). | DONE — 045d |
 | AC-5 | A session-end mines a skill (045f), published + pulled by a second workspace/harness (045g), end-to-end. | DONE — 045f + 045g e2e itest |
 | AC-6 | Retrieval shaping phases on the live recall path or formally de-scoped, PRD-007 reconciled (045b). | DONE — 045b de-scope + PRD-007 reconciled |
 | AC-7 | Each affected Completed PRD index carries an accurate reconciliation note; no `Status:` overstates runtime reality. | DONE — 6 Completed indexes (006/008/009/013/016/018) reconciled + 007 verified; 5 sub-PRD statuses flipped; parent index updated; no overstatement |

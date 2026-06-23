@@ -9,17 +9,17 @@
 
 The live, daemon-served `GET /dashboard` exposes memory only as a thin slice: a recall bar and recalled-memory
 cards on the home page (PRD-024 / PRD-038b). There is no way to BROWSE the corpus, READ one memory's full content
-and metadata, ADD or EDIT a memory by hand, or watch the memory lifecycle (compaction, dreaming) run. The `memory`
+and metadata, ADD or EDIT a memory by hand, or watch the memory lifecycle (compaction, pollinating) run. The `memory`
 substrate is rich — the `memories` engine table (`src/daemon/storage/catalog/memories.ts`) holds versioned,
 append-only facts with scope/type/source/embedding columns, and the daemon already serves a near-complete
-`/api/memories/*` CRUD surface (`src/daemon/runtime/memories/api.ts`) plus lifecycle triggers for dreaming
-(`/api/diagnostics/dream`) and compaction (`/api/diagnostics/compact`). None of it is surfaced as a manageable page.
+`/api/memories/*` CRUD surface (`src/daemon/runtime/memories/api.ts`) plus lifecycle triggers for pollinating
+(`/api/diagnostics/pollinate`) and compaction (`/api/diagnostics/compact`). None of it is surfaced as a manageable page.
 
 This PRD builds the **Memories** page — the `#/memories` route the nav shell (PRD-037) reserves — as the full
 management surface for memory. It is a routed page inside the PRD-037 shell: it consumes the shared `<PageFrame>`
 and `PageProps` (the injected `wire` client + `daemonUp`), reuses the existing wire hydration/polling pattern, and
 adds NO new design system. It is three concerns, one per sub-PRD: **browse + search + view** (040a), **add + edit**
-(040b), and **compact + dream + watch** (040c).
+(040b), and **compact + pollinate + watch** (040c).
 
 The non-negotiable spine across all three: memory is **versioned, append-only** — `memories` rows are written as
 version bumps and `memory_history` is the immutable audit trail. Edits NEVER hard-update; they append a new version
@@ -35,7 +35,7 @@ the same posture PRD-024 D-4 and PRD-037 D-9 establish, inherited unchanged.
   (scope, type, source, version, embedding presence) — 040a.
 - Let a user ADD a memory and EDIT an existing one, written through the daemon as version-bumped, reason-gated
   writes, with the UI reflecting the persisted value via re-read (never optimistic) — 040b.
-- Surface the memory LIFECYCLE: trigger compaction (PRD-030) and dreaming (PRD-009/026) honestly (triggered vs
+- Surface the memory LIFECYCLE: trigger compaction (PRD-030) and pollinating (PRD-009/026) honestly (triggered vs
   skipped acks, never a fake spinner), and a WATCH mode that live-tails memory activity — 040c.
 - Keep the page production-clean (no CDN React / no in-browser Babel), LOCAL-MODE-ONLY, XSS-safe, and secret-free.
 
@@ -60,7 +60,7 @@ the same posture PRD-024 D-4 and PRD-037 D-9 establish, inherited unchanged.
 |---|---|---|
 | [prd-040a-memories-page-browse-search-view](./prd-040a-memories-page-browse-search-view.md) | Browse + search + view the memory corpus | Draft |
 | [prd-040b-memories-page-add-edit](./prd-040b-memories-page-add-edit.md) | Add + edit memories (versioned CRUD) | Draft |
-| [prd-040c-memories-page-compact-dream-watch](./prd-040c-memories-page-compact-dream-watch.md) | Compact + dream + watch the memory lifecycle | Draft |
+| [prd-040c-memories-page-compact-pollinate-watch](./prd-040c-memories-page-compact-pollinate-watch.md) | Compact + pollinate + watch the memory lifecycle | Draft |
 
 ## Acceptance Criteria
 
@@ -72,7 +72,7 @@ the same posture PRD-024 D-4 and PRD-037 D-9 establish, inherited unchanged.
   search filters them through the recall pipeline, and opening a memory shows its full content + metadata.
 - [ ] **AC-3 — Add + edit (040b).** A user can add a memory and edit an existing one through the daemon; an edit
   creates a NEW version (never a hard-update) and the UI reflects the persisted value by re-reading, not optimistic.
-- [ ] **AC-4 — Compact + dream + watch (040c).** Compact and Dream controls invoke the REAL pipelines and reflect
+- [ ] **AC-4 — Compact + pollinate + watch (040c).** Compact and Pollinate controls invoke the REAL pipelines and reflect
   their acks honestly (triggered vs skipped); Watch mode shows live memory activity.
 - [ ] **AC-5 — Security + gate.** The page is LOCAL-MODE-ONLY + XSS-safe; no token/secret renders in the page or any
   response it reads (memory content is escaped, never injected as HTML). `npm run ci` / `build` / `audit:sql` /
@@ -94,8 +94,8 @@ the same posture PRD-024 D-4 and PRD-037 D-9 establish, inherited unchanged.
   event stream today; the live feed is the polled `/api/logs` ring buffer (PRD-021d). Watch mode can reuse that
   (filtered to memory routes) for a zero-new-endpoint start, OR a real SSE memory-events stream could be added.
   040c proposes the poll-filter start and captures the SSE option as a deferred enhancement.
-- **OQ-4 — Where does "Dream now" live?** PRD-037 D-5/OQ-4 keeps "Dream now" a global shell-chrome action. If the
-  Memories page ALSO surfaces a Dream control (040c), do we keep both, or does the global one move onto this page?
+- **OQ-4 — Where does "Pollinate now" live?** PRD-037 D-5/OQ-4 keeps "Pollinate now" a global shell-chrome action. If the
+  Memories page ALSO surfaces a Pollinate control (040c), do we keep both, or does the global one move onto this page?
   Coordinated with PRD-037 OQ-4; 040c proposes the page surfaces lifecycle controls without removing the global one.
 
 ## Related
@@ -107,14 +107,14 @@ the same posture PRD-024 D-4 and PRD-037 D-9 establish, inherited unchanged.
   full management surface).
 - **House style / prior art:** PRD-024 Dashboard UI Parity —
   `library/requirements/in-work/prd-024-dashboard-ui-parity/prd-024-dashboard-ui-parity-index.md` (D-1
-  production-clean bundle, D-4 LOCAL-MODE + XSS + no-secret, the honest Dream-ack pattern).
-- **Reused pipelines:** recall (PRD-007 / PRD-027 ranking), dreaming (PRD-009 loop / PRD-026 enablement),
+  production-clean bundle, D-4 LOCAL-MODE + XSS + no-secret, the honest Pollinate-ack pattern).
+- **Reused pipelines:** recall (PRD-007 / PRD-027 ranking), pollinating (PRD-009 loop / PRD-026 enablement),
   compaction (PRD-030 memory-compaction).
 - **Source consumed (no new daemon surface unless an OQ resolves to add one):**
   `src/daemon/runtime/memories/api.ts` (recall / store / list / get / modify / forget),
   `src/daemon/runtime/memories/reads.ts` (the list/get read-model),
   `src/daemon/storage/catalog/memories.ts` (the `memories` + `memory_history` columns),
-  `src/daemon/runtime/dreaming/api.ts` (`/api/diagnostics/dream`),
+  `src/daemon/runtime/pollinating/api.ts` (`/api/diagnostics/pollinate`),
   `src/daemon/runtime/maintenance/compact-api.ts` (`/api/diagnostics/compact`),
   `src/daemon/runtime/logs/api.ts` (`/api/logs` ring buffer),
   `src/dashboard/web/wire.ts` (the `WireClient` + `RecalledMemory`), `src/dashboard/web/app.tsx` (the current recall

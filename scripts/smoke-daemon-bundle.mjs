@@ -56,7 +56,7 @@ const child = spawn(process.execPath, [entry], {
 		...process.env,
 		HONEYCOMB_DEEPLAKE_TOKEN: "",
 		HONEYCOMB_DEEPLAKE_ENDPOINT: "",
-		HONEYCOMB_DREAMING_ENABLED: "",
+		HONEYCOMB_POLLINATING_ENABLED: "",
 		// Park runtime state in a temp-ish subdir so the smoke never touches a real .secrets/.daemon.
 		HONEYCOMB_WORKSPACE: resolve(repoRoot, ".smoke-daemon-bundle"),
 	},

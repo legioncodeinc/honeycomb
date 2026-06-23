@@ -469,33 +469,33 @@ describe("b-AC-5 a fresh service over the same state resumes queued + reaps dang
 });
 
 describe("PRD-026 lease(kinds) kind filter — a kind-specialized worker never touches foreign jobs", () => {
-	it("lease(['dreaming']) returns only a dreaming job and leaves other kinds queued", async () => {
+	it("lease(['pollinating']) returns only a pollinating job and leaves other kinds queued", async () => {
 		const { queue, store } = makeQueue();
-		// A mixed queue: a summary, a dreaming, and a skillify job (capture enqueues all three).
+		// A mixed queue: a summary, a pollinating, and a skillify job (capture enqueues all three).
 		const summaryId = await queue.enqueue({ kind: "summary", payload: {} });
-		const dreamingId = await queue.enqueue({ kind: "dreaming", payload: { mode: "incremental" } });
+		const pollinatingId = await queue.enqueue({ kind: "pollinating", payload: { mode: "incremental" } });
 		const skillifyId = await queue.enqueue({ kind: "skillify", payload: {} });
 
-		// The kind-filtered lease returns ONLY the dreaming job.
-		const leased = await queue.lease(["dreaming"]);
+		// The kind-filtered lease returns ONLY the pollinating job.
+		const leased = await queue.lease(["pollinating"]);
 		expect(leased).not.toBeNull();
-		expect(leased?.id).toBe(dreamingId);
-		expect(leased?.kind).toBe("dreaming");
+		expect(leased?.id).toBe(pollinatingId);
+		expect(leased?.kind).toBe("pollinating");
 
 		// The foreign kinds are untouched — still queued for their own workers.
 		expect(store.current(summaryId)?.status).toBe("queued");
 		expect(store.current(skillifyId)?.status).toBe("queued");
-		// And only the dreaming job advanced to leased.
-		expect(store.current(dreamingId)?.status).toBe("leased");
+		// And only the pollinating job advanced to leased.
+		expect(store.current(pollinatingId)?.status).toBe("leased");
 	});
 
-	it("lease(['dreaming']) over a queue with NO dreaming job returns null and leases nothing", async () => {
+	it("lease(['pollinating']) over a queue with NO pollinating job returns null and leases nothing", async () => {
 		const { queue, store } = makeQueue();
 		const summaryId = await queue.enqueue({ kind: "summary", payload: {} });
 		const skillifyId = await queue.enqueue({ kind: "skillify", payload: {} });
 
-		// No dreaming job present → the dreaming worker finds nothing leasable.
-		expect(await queue.lease(["dreaming"])).toBeNull();
+		// No pollinating job present → the pollinating worker finds nothing leasable.
+		expect(await queue.lease(["pollinating"])).toBeNull();
 		// The foreign jobs were never grabbed (and so never walked toward dead).
 		expect(store.current(summaryId)?.status).toBe("queued");
 		expect(store.current(skillifyId)?.status).toBe("queued");
@@ -514,10 +514,10 @@ describe("PRD-026 lease(kinds) kind filter — a kind-specialized worker never t
 	it("the filter accepts a multi-kind set (lease the oldest matching kind)", async () => {
 		const { queue, store } = makeQueue();
 		const summaryId = await queue.enqueue({ kind: "summary", payload: {} });
-		await queue.enqueue({ kind: "dreaming", payload: { mode: "incremental" } });
+		await queue.enqueue({ kind: "pollinating", payload: { mode: "incremental" } });
 
-		// A worker that handles both summary + dreaming leases the OLDEST of the two (summary).
-		const leased = await queue.lease(["summary", "dreaming"]);
+		// A worker that handles both summary + pollinating leases the OLDEST of the two (summary).
+		const leased = await queue.lease(["summary", "pollinating"]);
 		expect(leased?.id).toBe(summaryId);
 		expect(store.current(summaryId)?.status).toBe("leased");
 	});
@@ -526,7 +526,7 @@ describe("PRD-026 lease(kinds) kind filter — a kind-specialized worker never t
 		const { queue, store } = makeQueue();
 		// Jobs of every kind are present and leasable.
 		const summaryId = await queue.enqueue({ kind: "summary", payload: {} });
-		const dreamingId = await queue.enqueue({ kind: "dreaming", payload: { mode: "incremental" } });
+		const pollinatingId = await queue.enqueue({ kind: "pollinating", payload: { mode: "incremental" } });
 
 		// `[]` matches NO kind (`[].includes(type)` is always false) — the explicit
 		// empty filter must lease nothing, NOT degrade to the unfiltered "lease any"
@@ -535,7 +535,7 @@ describe("PRD-026 lease(kinds) kind filter — a kind-specialized worker never t
 
 		// Both jobs stay queued — an empty filter never grabs-and-fails a foreign job.
 		expect(store.current(summaryId)?.status).toBe("queued");
-		expect(store.current(dreamingId)?.status).toBe("queued");
+		expect(store.current(pollinatingId)?.status).toBe("queued");
 	});
 
 	it("a kind NOT present in the queue returns null and leaves every other kind queued", async () => {

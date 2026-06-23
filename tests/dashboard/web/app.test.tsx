@@ -63,14 +63,14 @@ const PAYLOADS = {
 			{ name: "codex", installed: false, active: false, lastSeen: null, turnsCaptured: 0, runtimePath: "legacy", capabilities: { name: "codex", runtimePath: "legacy", contextChannel: "model-only", hostCli: { bin: "codex", args: [] }, lifecycleEvents: [] } },
 		],
 	},
-	dreamEnqueued: { triggered: true, status: "enqueued" },
-	dreamSkipped: { triggered: false, status: "skipped", reason: "disabled" },
+	pollinateEnqueued: { triggered: true, status: "enqueued" },
+	pollinateSkipped: { triggered: false, status: "skipped", reason: "disabled" },
 };
 
 /** A configurable mock fetch routing each path to its canned payload. `healthOk` toggles the down-swap. */
-function makeMockFetch(opts: { healthOk?: boolean; dream?: unknown } = {}): typeof fetch {
+function makeMockFetch(opts: { healthOk?: boolean; pollinate?: unknown } = {}): typeof fetch {
 	const healthOk = opts.healthOk ?? true;
-	const dream = opts.dream ?? PAYLOADS.dreamEnqueued;
+	const pollinate = opts.pollinate ?? PAYLOADS.pollinateEnqueued;
 	return vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
 		const url = typeof input === "string" ? input : input.toString();
 		const json = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -81,7 +81,7 @@ function makeMockFetch(opts: { healthOk?: boolean; dream?: unknown } = {}): type
 		if (url.includes("/api/diagnostics/rules")) return json(PAYLOADS.rules);
 		if (url.includes("/api/diagnostics/skills")) return json(PAYLOADS.skills);
 		if (url.includes("/api/diagnostics/harnesses")) return json(PAYLOADS.harnesses);
-		if (url.includes("/api/diagnostics/dream")) return json(dream, 202);
+		if (url.includes("/api/diagnostics/pollinate")) return json(pollinate, 202);
 		if (url.includes("/api/graph")) return json(PAYLOADS.graph);
 		if (url.includes("/api/memories/recall")) {
 			expect(init?.method, "recall is a POST").toBe("POST");
@@ -129,7 +129,7 @@ async function mountShell(mockFetch: typeof fetch): Promise<void> {
 }
 
 describe("037 AC-1: the left-nav shell renders all seven nav items + the chrome", () => {
-	it("renders the sidebar (mark, wordmark, seven items) + the Dream now action", async () => {
+	it("renders the sidebar (mark, wordmark, seven items) + the Pollinate now action", async () => {
 		await mountShell(makeMockFetch());
 		const text = container.textContent ?? "";
 		// Brand chrome + the seven nav items.
@@ -137,10 +137,10 @@ describe("037 AC-1: the left-nav shell renders all seven nav items + the chrome"
 		for (const label of ["Dashboard", "Harnesses", "Memories", "Graph", "Sync", "Logs", "Settings"]) {
 			expect(text).toContain(label);
 		}
-		// The org/workspace identity + the relocated Dream now live in the shell chrome.
+		// The org/workspace identity + the relocated Pollinate now live in the shell chrome.
 		expect(text).toContain("Activeloop");
 		expect(text).toContain("deeplake-core");
-		expect(text).toContain("Dream now");
+		expect(text).toContain("Pollinate now");
 		// The seven nav items are present as routes.
 		expect(container.querySelectorAll("[data-route]")).toHaveLength(7);
 	});
@@ -311,35 +311,35 @@ describe("037 AC-6 / 037b AC-6: daemon-down swaps the CONTENT for the banner; si
 	});
 });
 
-describe("037 AC-9 / D-5: Dream now POSTs the trigger from the shell chrome", () => {
-	it("clicking Dream now POSTs /api/diagnostics/dream", async () => {
-		const mockFetch = makeMockFetch({ dream: PAYLOADS.dreamEnqueued });
+describe("037 AC-9 / D-5: Pollinate now POSTs the trigger from the shell chrome", () => {
+	it("clicking Pollinate now POSTs /api/diagnostics/pollinate", async () => {
+		const mockFetch = makeMockFetch({ pollinate: PAYLOADS.pollinateEnqueued });
 		await mountShell(mockFetch);
-		const dreamBtn = [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes("Dream now"));
-		expect(dreamBtn).toBeTruthy();
+		const pollinateBtn = [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes("Pollinate now"));
+		expect(pollinateBtn).toBeTruthy();
 		await act(async () => {
-			dreamBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+			pollinateBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 		});
 		await act(async () => {
 			await Promise.resolve();
 			await Promise.resolve();
 		});
-		expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("/api/diagnostics/dream"), expect.objectContaining({ method: "POST" }));
+		expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("/api/diagnostics/pollinate"), expect.objectContaining({ method: "POST" }));
 	});
 
-	it("a skipped ack is reflected honestly — the button returns to 'Dream now', not a forever spinner", async () => {
-		const mockFetch = makeMockFetch({ dream: PAYLOADS.dreamSkipped });
+	it("a skipped ack is reflected honestly — the button returns to 'Pollinate now', not a forever spinner", async () => {
+		const mockFetch = makeMockFetch({ pollinate: PAYLOADS.pollinateSkipped });
 		await mountShell(mockFetch);
-		const dreamBtn = [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes("Dream now"));
+		const pollinateBtn = [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes("Pollinate now"));
 		await act(async () => {
-			dreamBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+			pollinateBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 		});
 		await act(async () => {
 			await Promise.resolve();
 			await Promise.resolve();
 		});
-		const btnAfter = [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes("Dream"));
-		expect(btnAfter?.textContent).toContain("Dream now");
+		const btnAfter = [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes("Pollinate"));
+		expect(btnAfter?.textContent).toContain("Pollinate now");
 	});
 });
 

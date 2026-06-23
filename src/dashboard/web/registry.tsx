@@ -153,7 +153,7 @@ const LogsIcon = (
 	</Icon>
 );
 
-/** Settings — a gear (provider/model/dreaming/vault). */
+/** Settings — a gear (provider/model/pollinating/vault). */
 const SettingsIcon = (
 	<Icon>
 		<circle cx={12} cy={12} r={3} />

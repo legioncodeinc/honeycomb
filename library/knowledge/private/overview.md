@@ -18,13 +18,13 @@ The entry point for everyone working on Honeycomb: what it is, how the pieces fi
 
 Honeycomb is the ultimate harness memory system: one shared, self-improving memory layer that works across every common AI coding harness. One agent solves a problem on Monday, and every agent on the team can recall and reuse that work afterward, with the context inspectable, scoped, and repairable instead of trapped behind a black-box recall API.
 
-Honeycomb is the merger of two systems. Hivemind contributed the broad product: capture across six-plus harnesses, a trace-to-skill mining pipeline, team skill sharing, a live codebase graph, a Cursor extension, multi-tenant org and workspace boundaries, and GPU-backed DeepLake storage. Otherhive contributed the memory engine, which is the better one: a durable extraction-to-recall pipeline, hybrid retrieval, a knowledge-graph ontology, a dreaming maintenance loop, a model and provider router, fine-grained agent scoping, and source-backed recall with provenance. Where the two overlapped on how memory works, Otherhive's engine won.
+Honeycomb is the merger of two systems. Hivemind contributed the broad product: capture across six-plus harnesses, a trace-to-skill mining pipeline, team skill sharing, a live codebase graph, a Cursor extension, multi-tenant org and workspace boundaries, and GPU-backed DeepLake storage. Otherhive contributed the memory engine, which is the better one: a durable extraction-to-recall pipeline, hybrid retrieval, a knowledge-graph ontology, a pollinating maintenance loop, a model and provider router, fine-grained agent scoping, and source-backed recall with provenance. Where the two overlapped on how memory works, Otherhive's engine won.
 
 The result is one daemon that captures everything a harness does, distills it into structured, source-backed memory, and serves it back, all on a DeepLake substrate that a team can share.
 
 ## The shape
 
-Capture, distill, recall, compound. A harness hook captures every prompt, tool call, and response as a raw event. The daemon's pipeline distills those events into facts, entities, and skills with provenance back to the source. Recall serves the right context before the next turn through hybrid search and a browsable virtual filesystem. Over time the dreaming loop and the skillify miner consolidate what was learned, so the memory gets sharper instead of noisier.
+Capture, distill, recall, compound. A harness hook captures every prompt, tool call, and response as a raw event. The daemon's pipeline distills those events into facts, entities, and skills with provenance back to the source. Recall serves the right context before the next turn through hybrid search and a browsable virtual filesystem. Over time the pollinating loop and the skillify miner consolidate what was learned, so the memory gets sharper instead of noisier.
 
 ```mermaid
 flowchart TB
@@ -38,7 +38,7 @@ flowchart TB
         capture[Capture]
         pipeline[Pipeline: extract, decide, graph, retain]
         recall[Recall: hybrid + VFS]
-        workers[Workers: dreaming, skillify, codebase graph, summaries]
+        workers[Workers: pollinating, skillify, codebase graph, summaries]
     end
     store[(DeepLake GPU-backed SQL + Vector)]
 
@@ -52,7 +52,7 @@ flowchart TB
 
 ## Top-level architecture
 
-Honeycomb is daemon-centric. The honeycomb daemon (default port 3850) is the only process that talks to DeepLake. It runs the capture intake, the distillation pipeline, hybrid retrieval, the knowledge-graph ontology, the dreaming maintenance loop, the model and provider router, and the background workers for summaries, skillify, and the codebase graph. Harness shims, lifecycle hooks, the CLI, the SDK, and the MCP server are thin clients of the daemon.
+Honeycomb is daemon-centric. The honeycomb daemon (default port 3850) is the only process that talks to DeepLake. It runs the capture intake, the distillation pipeline, hybrid retrieval, the knowledge-graph ontology, the pollinating maintenance loop, the model and provider router, and the background workers for summaries, skillify, and the codebase graph. Harness shims, lifecycle hooks, the CLI, the SDK, and the MCP server are thin clients of the daemon.
 
 DeepLake is the substrate. It is a GPU-backed SQL and vector store, and all durable state lives in its tables. Org and workspace boundaries are enforced at the storage layer so two workspaces never share a row, partition, or index, and within a workspace Otherhive's agent_id scoping separates multiple agents. The storage mechanics (lazy schema healing, hand-escaped SQL because the query endpoint takes no bound parameters, append-only version-bumped writes around the UPDATE-coalescing quirk) are documented in [`data/deeplake-storage.md`](data/deeplake-storage.md).
 
@@ -60,7 +60,7 @@ DeepLake is the substrate. It is a GPU-backed SQL and vector store, and all dura
 
 | Component | Where | Responsibility |
 |---|---|---|
-| Daemon | `honeycomb daemon` (port 3850) | Pipeline, retrieval, ontology, dreaming, router, workers, the only DeepLake client |
+| Daemon | `honeycomb daemon` (port 3850) | Pipeline, retrieval, ontology, pollinating, router, workers, the only DeepLake client |
 | DeepLake substrate | storage layer | GPU-backed SQL + vector tables, org/workspace isolation |
 | Capture hooks | per-harness shims | Turn lifecycle events into raw `sessions` rows via the daemon |
 | Skillify miner | daemon worker | Mine recurring traces into reusable skills |
@@ -72,7 +72,7 @@ DeepLake is the substrate. It is a GPU-backed SQL and vector store, and all dura
 
 New to the codebase: this overview, then [`architecture/system-overview.md`](architecture/system-overview.md), then [`architecture/request-lifecycle.md`](architecture/request-lifecycle.md).
 
-Working on the memory engine: [`ai/session-capture.md`](ai/session-capture.md), [`ai/memory-pipeline.md`](ai/memory-pipeline.md), [`ai/retrieval.md`](ai/retrieval.md), [`ai/knowledge-graph-ontology.md`](ai/knowledge-graph-ontology.md), [`ai/dreaming-loop.md`](ai/dreaming-loop.md), [`ai/model-provider-router.md`](ai/model-provider-router.md).
+Working on the memory engine: [`ai/session-capture.md`](ai/session-capture.md), [`ai/memory-pipeline.md`](ai/memory-pipeline.md), [`ai/retrieval.md`](ai/retrieval.md), [`ai/knowledge-graph-ontology.md`](ai/knowledge-graph-ontology.md), [`ai/pollinating-loop.md`](ai/pollinating-loop.md), [`ai/model-provider-router.md`](ai/model-provider-router.md).
 
 Working on storage: [`data/deeplake-storage.md`](data/deeplake-storage.md), [`data/schema.md`](data/schema.md), [`data/memory-virtual-filesystem.md`](data/memory-virtual-filesystem.md), [`data/codebase-graph.md`](data/codebase-graph.md), [`data/workspace-layout.md`](data/workspace-layout.md).
 
@@ -88,4 +88,4 @@ Conventions: [`standards/documentation-framework.md`](standards/documentation-fr
 
 ## Coverage
 
-This knowledge base covers the merged Honeycomb runtime end to end: capture, pipeline, retrieval, ontology, dreaming, model routing, DeepLake storage and schema, the virtual filesystem, the codebase graph, skillify and team sharing, harness integrations, auth and tenancy, security, and standards. It was built by merging the hivemind-v1 and otherhive-v1 knowledge bases. Source authority is the code first, then these docs. Where this base disagrees with the implementation, the implementation wins and this base should be corrected.
+This knowledge base covers the merged Honeycomb runtime end to end: capture, pipeline, retrieval, ontology, pollinating, model routing, DeepLake storage and schema, the virtual filesystem, the codebase graph, skillify and team sharing, harness integrations, auth and tenancy, security, and standards. It was built by merging the hivemind-v1 and otherhive-v1 knowledge bases. Source authority is the code first, then these docs. Where this base disagrees with the implementation, the implementation wins and this base should be corrected.

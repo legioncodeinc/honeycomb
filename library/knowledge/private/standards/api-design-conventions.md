@@ -30,7 +30,7 @@ The API documentation organizes routes into coherent groups, and new routes are 
 | sessions-hooks | harness hooks, session lifecycle |
 | inference | routing, execution, streaming, OpenAI-compatible gateway |
 | operations | git sync, updates, diagnostics, repair, pipeline |
-| knowledge-ontology | knowledge navigation, ontology proposals, dreaming, checkpoints |
+| knowledge-ontology | knowledge navigation, ontology proposals, pollinating, checkpoints |
 | telemetry-logs | analytics, telemetry, logs, MCP, scheduled tasks |
 
 ## Errors and status codes

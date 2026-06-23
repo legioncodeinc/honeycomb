@@ -3,7 +3,7 @@ import * as React from "react";
 export interface CardProps {
   children?: React.ReactNode;
   /** Lift one focused card with the expressive glow. Default none. */
-  glow?: "none" | "honey" | "dream";
+  glow?: "none" | "honey" | "pollinate";
   padding?: number;
   /** Brighten the border on hover. */
   interactive?: boolean;

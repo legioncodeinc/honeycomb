@@ -15,7 +15,7 @@ value-returning verb is added.
 
 ## Goals
 
-- `honeycomb settings list` shows the current settings (active provider, model, dreaming flag, dashboard
+- `honeycomb settings list` shows the current settings (active provider, model, pollinating flag, dashboard
   prefs) without printing any secret value.
 - `honeycomb settings get <key>` / `set <key> <value>` round-trip a typed setting through the daemon to the
   vault `setting` class.
@@ -27,14 +27,14 @@ value-returning verb is added.
 
 - The vault store, registry, and migration (032a).
 - The dashboard Settings panel (032c).
-- Reading settings at assembly to drive inference/dreaming (032d).
+- Reading settings at assembly to drive inference/pollinating (032d).
 - A value-returning `secret` verb (forbidden — PRD-012 names-only posture).
 - A live provider model-list fetch (curated catalog only; live fetch is the flagged enhancement, PRD-032 D-6).
 
 ## Functional requirements
 
 - FR-1: `honeycomb settings list` prints the current `setting`-class records (provider, model,
-  `dreaming.enabled`, dashboard prefs) via a daemon endpoint; secret values are NEVER printed (a secret shows
+  `pollinating.enabled`, dashboard prefs) via a daemon endpoint; secret values are NEVER printed (a secret shows
   as "set ✓" / "not set", names only).
 - FR-2: `honeycomb settings get <key>` prints the typed value of a single setting; `honeycomb settings set
   <key> <value>` writes it through the daemon to the vault, validated by the class schema (032a FR-4).
@@ -50,7 +50,7 @@ value-returning verb is added.
 
 | ID | Criterion |
 |---|---|
-| b-AC-1 | Given stored settings, when `honeycomb settings list` runs, then it shows provider/model/dreaming/prefs and shows secrets as set/not-set by name only — no secret value is printed. |
+| b-AC-1 | Given stored settings, when `honeycomb settings list` runs, then it shows provider/model/pollinating/prefs and shows secrets as set/not-set by name only — no secret value is printed. |
 | b-AC-2 | Given a valid key/value, when `honeycomb settings set <key> <value>` runs, then the daemon writes the vault `setting` record and a subsequent `settings get <key>` returns the written value. |
 | b-AC-3 | Given the selector flow, when the user picks a provider then a model, then the active provider/model settings are written; a model id outside the catalog is rejected for catalog providers and accepted free-form for OpenRouter. |
 | b-AC-4 | Given any `settings`/`secret` invocation, when it runs, then it reaches the daemon over loopback (never direct disk) and the `honeycomb secret …` verb remains names-only. |

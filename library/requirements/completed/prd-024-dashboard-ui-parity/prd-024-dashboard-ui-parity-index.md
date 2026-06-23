@@ -2,7 +2,7 @@
 
 > Status: completed · Owner: `/the-smoker` · Type: M (feature)
 > Goal: the daemon-served `GET /dashboard` (127.0.0.1:3850, local mode) LOOKS like `assets/ui_kits/dashboard/`
-> and FUNCTIONS as that UI kit specs — wired to the daemon's real data + a real "Dream now" trigger.
+> and FUNCTIONS as that UI kit specs — wired to the daemon's real data + a real "Pollinate now" trigger.
 
 ## Why
 The live `/dashboard` (PRD-021d host) renders a plain server-side page. The design team shipped a
@@ -10,10 +10,10 @@ brand-elevated UI kit at `assets/ui_kits/dashboard/` (`index.html` + `components
 `README.md`) that is the canonical look + interaction spec. Its data shapes already MIRROR the daemon's
 live view-model contracts (`src/dashboard/contracts.ts`: `KpisView`, `SessionRow`, `SettingsView`,
 `GraphView`, `RuleRow`, `SkillSyncRow`), and the daemon ALREADY serves every one of them. So this PRD is
-the VIEW (re-skin to the UI kit) + the one missing interaction (a real Dreaming trigger) — not new data.
+the VIEW (re-skin to the UI kit) + the one missing interaction (a real Pollinating trigger) — not new data.
 
 ## What the UI kit specs (the target — read `assets/ui_kits/dashboard/`)
-Header (honeycomb mark · org/workspace · daemon health pill · **Dream now**) → recall bar → recalled-memory
+Header (honeycomb mark · org/workspace · daemon health pill · **Pollinate now**) → recall bar → recalled-memory
 cards (snippet + score + scope + verified + source/provenance) → KPI row (Memories, Sessions, Est. savings,
 Team skills) → 2-col grid {SessionsPanel, RulesPanel | GraphCanvas, SkillSyncPanel} → streaming LiveLog →
 **ConnectivityBanner** (daemon-down state + retry). Built from the design-system primitives
@@ -33,14 +33,14 @@ Team skills) → 2-col grid {SessionsPanel, RulesPanel | GraphCanvas, SkillSyncP
   the index shell + the bundled JS + the DS CSS. Pixel-faithful to the mockup by construction.
 - **D-2 — Live data, no canned `data.js`.** Hydrate every panel from the real endpoints above (fetched by the
   page over loopback). Empty/zero states honored (e.g. "No graph built for this workspace.").
-- **D-3 — "Dream now" is a REAL trigger.** Add a daemon endpoint that kicks the PRD-009 Dreaming consolidation
-  loop (its existing trigger/runner seam); the button calls it; the UI shows the dreaming pulse + streams the
+- **D-3 — "Pollinate now" is a REAL trigger.** Add a daemon endpoint that kicks the PRD-009 Pollinating consolidation
+  loop (its existing trigger/runner seam); the button calls it; the UI shows the pollinating pulse + streams the
   consolidation log (from `/api/logs`). Returns an ack/status, never blocks the UI.
 - **D-4 — Security unchanged.** The `/dashboard` host stays **LOCAL-MODE ONLY** (security F-1, PRD-021d) and
-  XSS-safe; NO token/secret in the served page, the data responses, or the dream-trigger response/logs. The
+  XSS-safe; NO token/secret in the served page, the data responses, or the pollinate-trigger response/logs. The
   new trigger endpoint is authz'd + loopback/local-gated. `audit:openclaw`/`audit:sql` stay green.
 - **D-5 — Reuse, don't fork.** The view-models (PRD-020b) + data endpoints (PRD-022) exist; this PRD adds the
-  VIEW + the dream trigger only. Don't duplicate the dashboard data contracts.
+  VIEW + the pollinate trigger only. Don't duplicate the dashboard data contracts.
 
 ## Acceptance criteria
 - **AC-1 — The look.** `GET /dashboard` renders the UI-kit layout (header + recall bar + memory cards + KPI row
@@ -54,13 +54,13 @@ Team skills) → 2-col grid {SessionsPanel, RulesPanel | GraphCanvas, SkillSyncP
 - **AC-4 — Live log.** The LiveLog panel shows real `/api/logs` events (poll or stream); no secret/token in a line.
 - **AC-5 — Connectivity.** When `/health` is unreachable the ConnectivityBanner replaces the view with the
   daemon-down state + retry; on reconnect it restores. Proven by toggling the daemon.
-- **AC-6 — Dream now (real).** A new daemon endpoint triggers the real Dreaming loop; the button calls it, the
-  graph's dreaming node pulses + the consolidation pass streams into the log. Endpoint is authz'd + local-gated;
+- **AC-6 — Pollinate now (real).** A new daemon endpoint triggers the real Pollinating loop; the button calls it, the
+  graph's pollinating node pulses + the consolidation pass streams into the log. Endpoint is authz'd + local-gated;
   unit-tested (trigger fires the loop seam) + a gated live check.
 - **AC-7 — Security.** Dashboard host local-mode-only + XSS-safe; no token/secret in the page, data, logs, or
   the trigger response (grep-proven). `npm run ci`/`build`/`audit:sql`/`audit:openclaw`/invariant all green.
 - **AC-8 — Live verification.** Against a real assembled daemon: the dashboard renders + functions (recall
-  returns real hits, KPIs show real counts, dream-now triggers, connectivity banner on down). A gated itest
+  returns real hits, KPIs show real counts, pollinate-now triggers, connectivity banner on down). A gated itest
   covers the endpoints + the trigger; a manual/screenshot check confirms the look matches the mockup.
 
 ## Out of scope
@@ -70,4 +70,4 @@ Team skills) → 2-col grid {SessionsPanel, RulesPanel | GraphCanvas, SkillSyncP
 ## Reference
 - Target: `assets/ui_kits/dashboard/{index.html,components.jsx,data.js,README.md}` + `assets/styles.css` + `assets/tokens/` + `assets/components/`.
 - Current host + view-models: `src/daemon/runtime/dashboard/host.ts`, `src/dashboard/{contracts.ts,dashboard.ts,html.ts,render.ts,views.ts,launch.ts}`, `src/daemon/runtime/dashboard/api.ts` (the diagnostics endpoints), `src/daemon/runtime/logs/api.ts`.
-- Dreaming loop to trigger: `src/daemon/runtime/dreaming/` (trigger.ts / runner.ts).
+- Pollinating loop to trigger: `src/daemon/runtime/pollinating/` (trigger.ts / runner.ts).

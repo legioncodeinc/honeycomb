@@ -47,7 +47,7 @@
  */
 
 // ── Types shared with the daemon contracts (re-declared locally so the CLI ────
-// ── imports NO daemon path — same approach as ontology.ts / dream.ts) ─────────
+// ── imports NO daemon path — same approach as ontology.ts / pollinate.ts) ─────────
 
 /** The org/workspace partition + agent the command is scoped to (FR-9). */
 export interface RouteScope {

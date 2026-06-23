@@ -43,26 +43,26 @@ hook is registered) **and** reaches a real engine, proven by an invocation site 
 | 003 core-data-model | 🟢 LIVE (foundation) | Catalog loaded/consumed. **Doc rot:** `src/daemon/storage/catalog/index.ts:15-34` still says "(stub)" / "DO NOT TOUCH — Wave 2" for 3 fully-built groups. |
 | 004 daemon-runtime | 🟢 LIVE | Hono server + real services swapped in (`assemble.ts:1036-1050`). |
 | 005 capture-intake | 🟢 LIVE | `attachHooks` fired `assemble.ts:564`; `/api/hooks/capture` real (`capture/capture-handler.ts`). |
-| **006 memory-pipeline** | 🔴 **NOT LIVE** | **No pipeline worker constructed** (`assemble.ts` builds only the dreaming worker, `:1265`); capture enqueues only `summary`/`skillify` cues (`capture/capture-handler.ts:268-275`), never the 5 pipeline kinds. Engine exists (`pipeline/stage-worker.ts:238`, `pipeline/handlers.ts:51`) but is never leased. **→ PRD-045a** |
+| **006 memory-pipeline** | 🔴 **NOT LIVE** | **No pipeline worker constructed** (`assemble.ts` builds only the pollinating worker, `:1265`); capture enqueues only `summary`/`skillify` cues (`capture/capture-handler.ts:268-275`), never the 5 pipeline kinds. Engine exists (`pipeline/stage-worker.ts:238`, `pipeline/handlers.ts:51`) but is never leased. **→ PRD-045a** |
 | **007 retrieval** | 🟡 PARTIAL → 🔴 for the engineered engine | Recall works via `recallMemories` lexical+vector RRF (`memories/recall.ts:549`, LIVE). But the spec'd 5-phase `RecallEngine` (authz boundary / currentness / confidence gate) has **zero callers** + no-op phase defaults (`recall/engine.ts:121-124,149`). **→ PRD-045b** |
-| **008 knowledge-graph-ontology** | 🟡 PARTIAL → 🔴 for surface + linker | Inline entity linker `inlineLinkMemory` (`ontology/entity-model.ts:506`) has **zero callers** (AC-1). **No `/api/ontology/*` mount** (`server.ts:96` scaffold → 501). Apply/supersession run **only via the dormant dreaming runner** (`dreaming/runner.ts:284`). **→ PRD-045c** |
-| **009 dreaming-loop** | 🟡 PARTIAL (dormant) | Fully wired (`buildGatedDreamingWorker` `assemble.ts:926`, started `:1265-1266`) but **gated OFF by default**. It is the sole live consumer of 008 apply + 010 router, so its dormancy strands them. **→ PRD-045d** |
-| 010 model-provider-router | 🟡 PARTIAL | Router engine used only by the dormant dreaming path (`assemble.ts:979`). `/api/inference/*` + `/v1/*` gateway built (`inference/gateway.ts:102`) but **never mounted** → 501. (Surface follow-up; engine activates with 045d.) |
+| **008 knowledge-graph-ontology** | 🟡 PARTIAL → 🔴 for surface + linker | Inline entity linker `inlineLinkMemory` (`ontology/entity-model.ts:506`) has **zero callers** (AC-1). **No `/api/ontology/*` mount** (`server.ts:96` scaffold → 501). Apply/supersession run **only via the dormant pollinating runner** (`pollinating/runner.ts:284`). **→ PRD-045c** |
+| **009 pollinating-loop** | 🟡 PARTIAL (dormant) | Fully wired (`buildGatedPollinatingWorker` `assemble.ts:926`, started `:1265-1266`) but **gated OFF by default**. It is the sole live consumer of 008 apply + 010 router, so its dormancy strands them. **→ PRD-045d** |
+| 010 model-provider-router | 🟡 PARTIAL | Router engine used only by the dormant pollinating path (`assemble.ts:979`). `/api/inference/*` + `/v1/*` gateway built (`inference/gateway.ts:102`) but **never mounted** → 501. (Surface follow-up; engine activates with 045d.) |
 | 011 tenancy-and-auth | 🟢 LIVE (mode-gated) | Authenticator + RBAC enforced on `protect:true` groups (`server.ts:299-306`); local-open / team-hybrid deferral is by design. |
 | 012 secrets | 🟡 PARTIAL | Names-API + `${SECRET_REF}` inference resolver live (`inference/router.ts:392,437`); `secret_exec` + bitwarden/1password are honest 501 stubs (`secrets/api.ts:109-161`). |
 | **013 sources-and-documents** | 🔴 **NOT LIVE** | `/api/sources` deliberately deferred → 501 (`resolveProductDataDeps` omits it, `assemble.ts:732-749`; `product/api.ts:281` skips mount); CLI `honeycomb sources` lands on the 501; `/api/documents` 501 (`sources/api.ts:218-225`); providers are dead code. **→ PRD-045e** |
 | 014 codebase-graph | 🟢 LIVE | `mountGraph` fired `assemble.ts:689-696`; real build + `GET /api/graph` + `honeycomb graph build`. |
 | 015 virtual-filesystem | 🟢 LIVE | `/memory/*` mounted `assemble.ts:627`; pre-tool-use hook intercept wired (`src/hooks/runtime.ts:204-206`). |
-| **016 skillify** | 🔴 **NOT LIVE (mining)** | Skillify jobs enqueued (`session-end.ts:112`, `capture/turn-counters.ts:150`) but **no worker leases `["skillify"]`** (dreaming worker leases only `["dreaming"]`, `dreaming/worker.ts:212-214`); `skillify pull` CLI verb unregistered (`src/cli/skillify.ts:19`). `/api/skills` read is live. **→ PRD-045f** |
+| **016 skillify** | 🔴 **NOT LIVE (mining)** | Skillify jobs enqueued (`session-end.ts:112`, `capture/turn-counters.ts:150`) but **no worker leases `["skillify"]`** (pollinating worker leases only `["pollinating"]`, `pollinating/worker.ts:212-214`); `skillify pull` CLI verb unregistered (`src/cli/skillify.ts:19`). `/api/skills` read is live. **→ PRD-045f** |
 | **018 team-skill-sharing** | 🔴 **NOT LIVE** | Publish endpoint never mounted (`skillify/publish-endpoint.ts:71`; `/api/skills` GET-only `product/api.ts:180`); session-start auto-pull resolves to a **no-op** (`src/hooks/runtime.ts:198` builds `SessionStartDeps` with no `seams`); fan-out only via unregistered CLI (`src/cli/skillify.ts:79`). **→ PRD-045g** |
 | 019 harness-integrations | 🟡 PARTIAL (1 of 6) | **Claude Code fully live**; Cursor/Codex partial; **Hermes, pi, OpenClaw built-not-wired**; MCP-via-install met for none (registry registers only claude-code + cursor, `src/cli/connector-runner.ts:55-70`). Its own QA report flags 019c deferred. **→ reopened to in-work.** |
 | 020 surfaces | 🟡 PARTIAL | CLI + dashboard data API + notifications live; **Cursor extension UI** is an unbuilt source shell (`harnesses/cursor/extension/` — no manifest/installer). **→ reopened to in-work.** |
 | 021 go-live | 🟢 LIVE (foundation) | Daemon assembles + all 3 hook endpoints attached (`capture/attach.ts:127-128`). Gaps: daemon `/mcp` HTTP transport + MCP registration into a harness's native tool list. |
 | 022 data-access-api | 🟢 LIVE | memories/vfs/goals/kpis/skills/rules/secrets mounted (`assemble.ts:621,627,635`); `/api/sources` deferred (= PRD-013). |
 | 023 deeplake-connect-parity | 🟢 LIVE (caveat) | Org-drift heal runs on `honeycomb status` (`status.ts:116-117`); re-mint intentionally inert on real creds (anti-clobber guard, `cli/runtime.ts:263-273`). |
-| 024 dashboard-ui-parity | 🟢 LIVE | "Dream now" `POST /api/diagnostics/dream` mounted `assemble.ts:648`; dashboard consumes live views (`src/dashboard/web/wire.ts`). |
+| 024 dashboard-ui-parity | 🟢 LIVE | "Pollinate now" `POST /api/diagnostics/pollinate` mounted `assemble.ts:648`; dashboard consumes live views (`src/dashboard/web/wire.ts`). |
 | 025 semantic-recall-default | 🟢 LIVE | Embed attach default-on (`assemble.ts:1095`) + supervisor spawns embed daemon (`embed-supervisor.ts:43`) + recall hits the `<#>` arm (`memories/recall.ts:444-524`). |
-| 026 dreaming-loop-enablement | 🟡 PARTIAL (dormant) | Worker built/started behind the gate; OFF by default by design (see 009 / **045d**). |
+| 026 pollinating-loop-enablement | 🟡 PARTIAL (dormant) | Worker built/started behind the gate; OFF by default by design (see 009 / **045d**). |
 | 027 recall-ranking-and-eval | 🟢 LIVE + test-infra | RRF ranking on the live recall path (`memories/recall.ts:83,100-103,255-297`); eval harness is a script/itest (`scripts/eval-recall.mjs`) by design. |
 | 028 storage-read-consistency | 🟡 PARTIAL | `readConverged` seam live (`storage/converge.ts:273`), but its only `src/` consumer is asset-sync (`assets/sync.ts:187`) — **the doc-named store→recall path never adopted it** (`memories/store.ts` has zero usage). **→ reopened to in-work.** |
 | 029 degradation-observability | 🟢 LIVE | `recall.degraded` event (`memories/api.ts:245`) + `/api/diagnostics/health` reasons (`diagnostics-health.ts`, fired `assemble.ts:674`). |
@@ -76,7 +76,7 @@ hook is registered) **and** reaches a real engine, proven by an invocation site 
 | 037 dashboard-nav-shell | 🟢 LIVE (local-only) | Shell + hash router + registry are the live dashboard entry (`dashboard/web/main.tsx:32-35`). |
 | 038 dashboard-home | 🟢 LIVE (local-only) | All 3 zones read real endpoints, no mocks. |
 | 039 harnesses-page | 🟢 LIVE | `mountHarness` fired `assemble.ts:707-714`; page consumes `/api/diagnostics/harnesses`. |
-| 040 memories-page | 🟢 LIVE (local-only) | Browse/search/CRUD/compact/dream/watch all on live endpoints. |
+| 040 memories-page | 🟢 LIVE (local-only) | Browse/search/CRUD/compact/pollinate/watch all on live endpoints. |
 
 ---
 
@@ -88,8 +88,8 @@ These Completed PRDs are **not reachable at runtime**. They are the scope of **P
 |---|---|---|---|
 | 006 memory-pipeline | 045a | No worker constructed; capture never enqueues pipeline jobs. **Largest gap** — also strands the 010 router. | P0 |
 | 007 retrieval | 045b | Five-phase `RecallEngine` (authz/currentness/confidence) has zero callers + no-op phases. | P1 |
-| 008 ontology | 045c | Entity linker uncalled; `/api/ontology/*` unmounted; apply only via dormant dreaming. | P1 |
-| 009 dreaming-loop | 045d | Wired but dormant-by-default; the activation point for 008 apply + 010 router — needs default-posture decision + live proof. | P1 |
+| 008 ontology | 045c | Entity linker uncalled; `/api/ontology/*` unmounted; apply only via dormant pollinating. | P1 |
+| 009 pollinating-loop | 045d | Wired but dormant-by-default; the activation point for 008 apply + 010 router — needs default-posture decision + live proof. | P1 |
 | 013 sources-and-documents | 045e | `/api/sources` + `/api/documents` deferred → 501; providers dead code. | P1 |
 | 016 skillify | 045f | Mining jobs enqueued but no worker leases them; `skillify pull` CLI unregistered. | P1 |
 | 018 team-skill-sharing | 045g | Publish endpoint unmounted; auto-pull a no-op; fan-out via unregistered CLI. Depends on 045f. | P2 |
@@ -101,7 +101,7 @@ These Completed PRDs are **not reachable at runtime**. They are the scope of **P
 - **028 storage-read-consistency** — the store→recall read-your-writes call site never adopted the seam.
 - **033 asset-sync-substrate** — session-start asset auto-pull not hooked into the lifecycle.
 
-**Wired-but-dormant by design (not gaps):** 009 / 026 dreaming worker (needs the enable flag) — tracked under 045d as an activation/decision item, not a defect.
+**Wired-but-dormant by design (not gaps):** 009 / 026 pollinating worker (needs the enable flag) — tracked under 045d as an activation/decision item, not a defect.
 
 ---
 

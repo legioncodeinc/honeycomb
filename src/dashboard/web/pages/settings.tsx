@@ -28,7 +28,7 @@
  *   044c — search mode + migrated inference settings:
  *     · `SearchAndInferenceSection` renders a NEW recall-mode `Select` (`keyword | semantic |
  *       hybrid` + a "default" option that leaves the `recallMode` key UNSET) PLUS the MIGRATED
- *       provider→model selector + dreaming toggle (the existing `SettingsPanel`, REUSED not forked
+ *       provider→model selector + pollinating toggle (the existing `SettingsPanel`, REUSED not forked
  *       — D-5). All persist through the EXISTING `vaultSettings()`/`setSetting()` surface
  *       (persist-then-re-read); `recallMode` adds NO new wire method.
  */
@@ -366,7 +366,7 @@ function RecallModeRow({
 
 /**
  * The search-mode + inference section (044c). Composes the NEW recall-mode selector with the
- * MIGRATED provider/model/dreaming controls (the existing `SettingsPanel`, REUSED verbatim — D-5).
+ * MIGRATED provider/model/pollinating controls (the existing `SettingsPanel`, REUSED verbatim — D-5).
  * Everything persists through the SAME `vaultSettings()`/`setSetting()` surface with a persist-then
  * re-read contract; `recallMode` adds no new wire method.
  */
@@ -386,10 +386,10 @@ export function SearchAndInferenceSection({
 	const recallMode = String(settings[SETTING_KEY.recallMode] ?? "");
 
 	return (
-		<Panel title="Search & inference" eyebrow="recall mode · provider · model · dreaming">
+		<Panel title="Search & inference" eyebrow="recall mode · provider · model · pollinating">
 			<div data-testid="search-inference">
 				<RecallModeRow value={recallMode} onChange={(v) => void onSave(SETTING_KEY.recallMode, v)} />
-				{/* The MIGRATED provider/model/dreaming panel — REUSED, not forked (D-5). It carries its
+				{/* The MIGRATED provider/model/pollinating panel — REUSED, not forked (D-5). It carries its
 				    own Panel shell, so it nests cleanly below the recall-mode row. */}
 				<div style={{ marginTop: 8 }}>
 					<SettingsPanel catalog={catalog} settings={settings} secretNames={secretNames} onSave={onSave} />

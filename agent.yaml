@@ -1,10 +1,10 @@
 # Honeycomb agent configuration.
 #
 # The `inference:` block wires the model-provider router (PRD-010) that the daemon's
-# dreaming loop (PRD-009 / PRD-026) and the memory pipeline call through. The daemon reads
+# pollinating loop (PRD-009 / PRD-026) and the memory pipeline call through. The daemon reads
 # this file from the WORKSPACE ROOT ($HONEYCOMB_WORKSPACE, defaulting to the daemon's cwd)
 # at assembly via `buildInferenceModelClient`; when this file or the `inference:` block is
-# absent the daemon boots cleanly with the no-op model client (dreaming yields empty,
+# absent the daemon boots cleanly with the no-op model client (pollinating yields empty,
 # zero-mutation passes).
 #
 # SECURITY (PRD-010a a-AC-4): the credential is a `${SECRET_REF}` reference ONLY — an inline
@@ -30,13 +30,13 @@ inference:
 
   # ── Policies: how a workload selects among targets. `strict` tries the chain in order. ──
   policies:
-    - id: dreaming-policy
+    - id: pollinating-policy
       mode: strict
       chain: [claude-sonnet]
 
-  # ── Workloads: bind a policy + the gate floors. `memory_dreaming` is the dreaming loop. ──
+  # ── Workloads: bind a policy + the gate floors. `memory_pollinating` is the pollinating loop. ──
   workloads:
-    - name: memory_dreaming
-      policy: dreaming-policy
+    - name: memory_pollinating
+      policy: pollinating-policy
       minPrivacyTier: private
       requiredCapabilities: [chat]

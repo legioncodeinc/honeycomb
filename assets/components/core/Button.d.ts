@@ -6,7 +6,7 @@ import * as React from "react";
 export interface ButtonProps {
   children?: React.ReactNode;
   /** Visual intent. Honey is the one brand action (scarcity rule). */
-  variant?: "primary" | "secondary" | "ghost" | "dream" | "danger";
+  variant?: "primary" | "secondary" | "ghost" | "pollinate" | "danger";
   size?: "sm" | "md" | "lg";
   disabled?: boolean;
   iconLeft?: React.ReactNode;

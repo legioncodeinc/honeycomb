@@ -17,7 +17,7 @@
  * Behavior is UNCHANGED — recall, polling, and the KPI/grid panels are MOVED into the areas, not
  * rebuilt (parent D-2/D-3/D-4). The page hydrates from the SHARED `wire` the shell passes via
  * {@link PageProps} (it never calls `createWireClient` — the shell builds ONE) and reads the
- * shell-owned `dreaming` flag (D-6: the "Dream now" action, the identity, the coarse daemon pill, and
+ * shell-owned `pollinating` flag (D-6: the "Pollinate now" action, the identity, the coarse daemon pill, and
  * the daemon-down swap live in the shell, so this page renders NO header of its own). Every visual
  * value is an existing `var(--…)` DS token; no new token, primitive, or daemon route (AC-7/AC-8).
  */
@@ -147,10 +147,10 @@ function HealthStrip({ reasons }: { reasons: HealthReasonsWire | null }): React.
 /**
  * The Dashboard route content (the lift-and-shift, D-6). On mount it hydrates every view from the
  * shared `wire` (AC-2), polls `/api/logs` (AC-4) and `/health` for the strip reasons (PRD-029), and
- * runs recall (AC-3). The `dreaming` pulse is owned by the shell (D-5) and read from props. All
+ * runs recall (AC-3). The `pollinating` pulse is owned by the shell (D-5) and read from props. All
  * polling clears on unmount. NO header — the shell owns the chrome (D-5).
  */
-export function DashboardPage({ wire, dreaming = false }: PageProps): React.JSX.Element {
+export function DashboardPage({ wire, pollinating = false }: PageProps): React.JSX.Element {
 	// ── view state (hydrated from the shared wire) ──
 	const [healthReasons, setHealthReasons] = React.useState<HealthReasonsWire | null>(null);
 	const [kpis, setKpis] = React.useState<KpisWire>(EMPTY_KPIS);
@@ -306,7 +306,7 @@ export function DashboardPage({ wire, dreaming = false }: PageProps): React.JSX.
 					<Kpi label="Memories" value={kpis.memoryCount.toLocaleString()} accent="honey" />
 					<Kpi label="Turns" value={kpis.turnCount || kpis.sessionCount} accent="neutral" />
 					<Kpi label="Est. savings" value={kpis.estimatedSavings.toLocaleString()} unit="tok" accent="verified" />
-					<Kpi label="Team skills" value={kpis.teamSkillCount} accent="dream" />
+					<Kpi label="Team skills" value={kpis.teamSkillCount} accent="pollinate" />
 				</div>
 			</section>
 
@@ -332,7 +332,7 @@ export function DashboardPage({ wire, dreaming = false }: PageProps): React.JSX.
 							)
 						: results.map((m, i) => (
 								<div className="mem-enter" style={{ animationDelay: `${i * 55}ms` }} key={m.memoryKey}>
-									<MemoryCard {...m} dreaming={dreaming && i === 1} />
+									<MemoryCard {...m} pollinating={pollinating && i === 1} />
 								</div>
 							))}
 				</div>
@@ -352,7 +352,7 @@ export function DashboardPage({ wire, dreaming = false }: PageProps): React.JSX.
 						<RulesPanel rules={rules} />
 					</div>
 					<div className="col">
-						<GraphCanvas graph={graph} dreaming={dreaming} />
+						<GraphCanvas graph={graph} pollinating={pollinating} />
 						<SettingsPanel catalog={vaultSettings.catalog} settings={vaultSettings.settings} secretNames={secretNames} onSave={saveSetting} />
 						<SkillSyncPanel skills={skills} />
 					</div>

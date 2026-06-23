@@ -44,16 +44,16 @@
         "message": "<Badge> doesn't accept that prop. Declared props: children, tone, mono, dot, style."
       },
       {
-        "selector": "JSXOpeningElement[name.name='Badge'] > JSXAttribute[name.name='tone'] > Literal[value!=/^(?:neutral|honey|verified|dream|info|warning|critical)$/]",
-        "message": "<Badge> tone must be one of 'neutral' | 'honey' | 'verified' | 'dream' | 'info' | 'warning' | 'critical'."
+        "selector": "JSXOpeningElement[name.name='Badge'] > JSXAttribute[name.name='tone'] > Literal[value!=/^(?:neutral|honey|verified|pollinate|info|warning|critical)$/]",
+        "message": "<Badge> tone must be one of 'neutral' | 'honey' | 'verified' | 'pollinate' | 'info' | 'warning' | 'critical'."
       },
       {
         "selector": "JSXOpeningElement[name.name='Button'] > JSXAttribute > JSXIdentifier[name!=/^(?:children|variant|size|disabled|iconLeft|iconRight|onClick|type|style|key|ref|className|style|children)$/]",
         "message": "<Button> doesn't accept that prop. Declared props: children, variant, size, disabled, iconLeft, iconRight, onClick, type, style."
       },
       {
-        "selector": "JSXOpeningElement[name.name='Button'] > JSXAttribute[name.name='variant'] > Literal[value!=/^(?:primary|secondary|ghost|dream|danger)$/]",
-        "message": "<Button> variant must be one of 'primary' | 'secondary' | 'ghost' | 'dream' | 'danger'."
+        "selector": "JSXOpeningElement[name.name='Button'] > JSXAttribute[name.name='variant'] > Literal[value!=/^(?:primary|secondary|ghost|pollinate|danger)$/]",
+        "message": "<Button> variant must be one of 'primary' | 'secondary' | 'ghost' | 'pollinate' | 'danger'."
       },
       {
         "selector": "JSXOpeningElement[name.name='Button'] > JSXAttribute[name.name='size'] > Literal[value!=/^(?:sm|md|lg)$/]",
@@ -68,8 +68,8 @@
         "message": "<Card> doesn't accept that prop. Declared props: children, glow, padding, interactive, style."
       },
       {
-        "selector": "JSXOpeningElement[name.name='Card'] > JSXAttribute[name.name='glow'] > Literal[value!=/^(?:none|honey|dream)$/]",
-        "message": "<Card> glow must be one of 'none' | 'honey' | 'dream'."
+        "selector": "JSXOpeningElement[name.name='Card'] > JSXAttribute[name.name='glow'] > Literal[value!=/^(?:none|honey|pollinate)$/]",
+        "message": "<Card> glow must be one of 'none' | 'honey' | 'pollinate'."
       },
       {
         "selector": "JSXOpeningElement[name.name='Input'] > JSXAttribute > JSXIdentifier[name!=/^(?:value|defaultValue|onChange|placeholder|mono|size|disabled|iconLeft|type|style|key|ref|className|style|children)$/]",
@@ -84,12 +84,12 @@
         "message": "<Kpi> doesn't accept that prop. Declared props: label, value, unit, delta, accent, style."
       },
       {
-        "selector": "JSXOpeningElement[name.name='Kpi'] > JSXAttribute[name.name='accent'] > Literal[value!=/^(?:honey|dream|verified|neutral)$/]",
-        "message": "<Kpi> accent must be one of 'honey' | 'dream' | 'verified' | 'neutral'."
+        "selector": "JSXOpeningElement[name.name='Kpi'] > JSXAttribute[name.name='accent'] > Literal[value!=/^(?:honey|pollinate|verified|neutral)$/]",
+        "message": "<Kpi> accent must be one of 'honey' | 'pollinate' | 'verified' | 'neutral'."
       },
       {
-        "selector": "JSXOpeningElement[name.name='MemoryCard'] > JSXAttribute > JSXIdentifier[name!=/^(?:memoryKey|snippet|source|score|scope|verified|dreaming|onClick|style|key|ref|className|style|children)$/]",
-        "message": "<MemoryCard> doesn't accept that prop. Declared props: memoryKey, snippet, source, score, scope, verified, dreaming, onClick, style."
+        "selector": "JSXOpeningElement[name.name='MemoryCard'] > JSXAttribute > JSXIdentifier[name!=/^(?:memoryKey|snippet|source|score|scope|verified|pollinating|onClick|style|key|ref|className|style|children)$/]",
+        "message": "<MemoryCard> doesn't accept that prop. Declared props: memoryKey, snippet, source, score, scope, verified, pollinating, onClick, style."
       },
       {
         "selector": "JSXOpeningElement[name.name='MemoryCard'] > JSXAttribute[name.name='scope'] > Literal[value!=/^(?:personal|team|org)$/]",
@@ -137,21 +137,21 @@
       "--border-default",
       "--border-strong",
       "--border-subtle",
-      "--dream",
-      "--dream-border",
-      "--dream-hover",
-      "--dream-on",
-      "--dream-pressed",
-      "--dream-subtle",
+      "--pollinate",
+      "--pollinate-border",
+      "--pollinate-hover",
+      "--pollinate-on",
+      "--pollinate-pressed",
+      "--pollinate-subtle",
       "--dur-base",
-      "--dur-dream",
+      "--dur-pollinate",
       "--dur-fast",
       "--dur-slow",
       "--ease-in-out",
       "--ease-out",
       "--font-mono",
       "--font-sans",
-      "--glow-dream",
+      "--glow-pollinate",
       "--glow-honey",
       "--honey",
       "--honey-100",
@@ -261,12 +261,12 @@
       "--honey-400": "color",
       "--honey-500": "color",
       "--honey-600": "color",
-      "--dream": "color",
-      "--dream-hover": "color",
-      "--dream-pressed": "color",
-      "--dream-subtle": "color",
-      "--dream-border": "color",
-      "--dream-on": "color",
+      "--pollinate": "color",
+      "--pollinate-hover": "color",
+      "--pollinate-pressed": "color",
+      "--pollinate-subtle": "color",
+      "--pollinate-border": "color",
+      "--pollinate-on": "color",
       "--severity-critical": "color",
       "--severity-critical-bg": "color",
       "--severity-warning": "color",
@@ -331,14 +331,14 @@
       "--shadow-md": "shadow",
       "--shadow-lg": "shadow",
       "--glow-honey": "color",
-      "--glow-dream": "color",
+      "--glow-pollinate": "color",
       "--ring-focus": "color",
       "--ease-out": "other",
       "--ease-in-out": "other",
       "--dur-fast": "other",
       "--dur-base": "other",
       "--dur-slow": "other",
-      "--dur-dream": "other"
+      "--dur-pollinate": "other"
     },
     "fontFamilies": [
       "Inter",

@@ -28,7 +28,7 @@ import {
 	VERB_TABLE,
 } from "./contracts.js";
 import { parseSessionsArgs, runSessionsCommand } from "./sessions.js";
-import { runDreamVerb } from "./dream.js";
+import { runPollinateVerb } from "./pollinate.js";
 import { runMaintenanceVerb } from "./maintenance.js";
 import { runSettingsVerb } from "./settings.js";
 import { runAssetVerb } from "./asset.js";
@@ -121,10 +121,10 @@ async function dispatchStorage(inv: CommandInvocation, deps: CommandDeps): Promi
 	if (inv.verb === "sessions") {
 		return runSessionsCommand(parseSessionsArgs(inv.argv), deps);
 	}
-	// `dream` hits the diagnostics "Dream now" trigger (`/api/diagnostics/dream`), not the
+	// `pollinate` hits the diagnostics "Pollinate now" trigger (`/api/diagnostics/pollinate`), not the
 	// `/api/<verb>` storage convention — so it has its own thin-client handler (PRD-026 D-3).
-	if (inv.verb === "dream") {
-		return runDreamVerb(inv.argv, deps);
+	if (inv.verb === "pollinate") {
+		return runPollinateVerb(inv.argv, deps);
 	}
 	// `maintenance` hits the diagnostics compaction trigger (`/api/diagnostics/compact`), not the
 	// `/api/<verb>` storage convention — so it has its own thin-client handler (PRD-030 D-2).

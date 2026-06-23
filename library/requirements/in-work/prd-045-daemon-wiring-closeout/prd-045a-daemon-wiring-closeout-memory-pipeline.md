@@ -16,7 +16,7 @@ stage is the only would-be free-tier consumer of the PRD-010 model router, which
 
 ## Evidence of the gap
 
-- `assemble.ts` builds **only** the dreaming worker (`buildGatedDreamingWorker`, started at `assemble.ts:1265`).
+- `assemble.ts` builds **only** the pollinating worker (`buildGatedPollinatingWorker`, started at `assemble.ts:1265`).
   No pipeline worker is constructed anywhere in the composition root.
 - Capture enqueues only `summary`/`skillify` cue jobs (`src/daemon/runtime/capture/capture-handler.ts:268-275`),
   never `memory_extraction` / `memory_decision` / `memory_controlled_write` / `memory_graph_persist` /
@@ -28,7 +28,7 @@ stage is the only would-be free-tier consumer of the PRD-010 model router, which
 
 ## Goals
 
-- Construct + start a **pipeline job worker** in `assembleDaemon` (after `startServices()`, like the dreaming
+- Construct + start a **pipeline job worker** in `assembleDaemon` (after `startServices()`, like the pollinating
   worker) that leases the five pipeline job kinds and runs `createPipelineHandlers`.
 - Enqueue the pipeline entry job on capture (or via a cue) so a captured turn enters the pipeline.
 - Fill the four stub stage handlers (decision, controlled-write, graph-persist, retention) to the minimum that
@@ -60,19 +60,19 @@ stage is the only would-be free-tier consumer of the PRD-010 model router, which
 
 ## Implementation notes
 
-- Mirror the dreaming worker lifecycle: build in `assembleDaemon`, start in `start()` after `daemon.startServices()`,
+- Mirror the pollinating worker lifecycle: build in `assembleDaemon`, start in `start()` after `daemon.startServices()`,
   stop in `shutdown()`. Lease `["memory_extraction", …]` (or a single entry kind that fans out).
 - Reuse `daemon.services.queue` as both enqueuer and lease source — do not stand up a second queue.
 - Keep the model dependency fail-soft: an absent `agent.yaml`/`inference:` block degrades extraction to the no-op
-  client (zero-mutation pass), exactly as dreaming does.
+  client (zero-mutation pass), exactly as pollinating does.
 
 ## Default posture & enable mechanism (recorded decision — 2026-06-22 close-out)
 
 The pipeline worker is **constructed, started, and leasing** on every boot, and capture enqueues the entry job — it is
 genuinely live (a-AC-1/a-AC-2). The **stage handlers, however, are gated OFF by default** (`pipeline/config.ts`:
 `enabled`, `graph.enabled`, `graph.extractionWritesEnabled`, `autonomous.enabled` all default `false`, false-safe).
-This is a **deliberate "no surprise model spend" posture** — identical in spirit to the dreaming default-OFF decision
-([PRD-045d](./prd-045d-daemon-wiring-closeout-dreaming-activation.md)): extraction calls the PRD-010 model router, so
+This is a **deliberate "no surprise model spend" posture** — identical in spirit to the pollinating default-OFF decision
+([PRD-045d](./prd-045d-daemon-wiring-closeout-pollinating-activation.md)): extraction calls the PRD-010 model router, so
 a vanilla boot must not silently incur model cost. The wired path is **proven on the enabled path** by the deterministic
 chain test + the token-gated live itest (a-AC-3/a-AC-4). Confirmed and accepted by the product owner during the
 close-out (QA warning W2).
@@ -90,6 +90,6 @@ close-out (QA warning W2).
 - [x] Single entry job kind that fans out to later stages, or enqueue each stage explicitly? → **entry-fan-out** (one
       cheap `memory_extraction` entry job; each stage fans out to the next).
 - [x] Does the pipeline run inline-per-turn or batched? → **per-turn entry job**, downstream stages run as leased jobs.
-- [x] Overlap with the dreaming consolidation pass → **no double-write**: linker + control-plane apply use
-      deterministic IDs + presence-probe, so the pipeline graph-persist path and the dreaming apply path converge to
-      one row (proven by 045d's `dream-coordination-nodoublewrite.test.ts`).
+- [x] Overlap with the pollinating consolidation pass → **no double-write**: linker + control-plane apply use
+      deterministic IDs + presence-probe, so the pipeline graph-persist path and the pollinating apply path converge to
+      one row (proven by 045d's `pollinate-coordination-nodoublewrite.test.ts`).

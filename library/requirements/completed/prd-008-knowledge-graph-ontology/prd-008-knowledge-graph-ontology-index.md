@@ -9,10 +9,10 @@
 
 > **✅ Now live (2026-06-22 daemon-wiring close-out, PRD-045c).** The ontology surface is fully wired. `inlineLinkMemory`
 > (`ontology/entity-model.ts:506`) is now invoked on the live graph-persist path in the memory-pipeline
-> (PRD-045a/045c), so entities are linked as memories land without depending on the dreaming gate. `/api/ontology/*`
+> (PRD-045a/045c), so entities are linked as memories land without depending on the pollinating gate. `/api/ontology/*`
 > is mounted in `assemble.ts:868` (`mountOntologyApi`); the endpoint returns real entity/edge/assertion data (no 501).
-> Control-plane apply/supersession runs on a live path via the pipeline graph-persist stage (independent of dreaming),
-> with dreaming remaining an additional opt-in consolidation consumer. Closed by
+> Control-plane apply/supersession runs on a live path via the pipeline graph-persist stage (independent of pollinating),
+> with pollinating remaining an additional opt-in consolidation consumer. Closed by
 > [PRD-045c](../../in-work/prd-045-daemon-wiring-closeout/prd-045c-daemon-wiring-closeout-ontology-surface.md).
 > Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../../in-work/prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
 
@@ -34,7 +34,7 @@ Flat memories answer "what did I say about X." A graph answers "what is true abo
 
 - The background pipeline graph writer (PRD-006d); this module owns the entity model and control plane, not the bulk extraction write.
 - Retrieval traversal and currentness shaping (PRD-007), which consume this graph.
-- The model-driven graph reshaping of the dreaming loop.
+- The model-driven graph reshaping of the pollinating loop.
 
 ## Sub-features
 

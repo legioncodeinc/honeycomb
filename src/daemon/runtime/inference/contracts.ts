@@ -197,7 +197,7 @@ export interface Policy {
 /**
  * A workload (010a FR-5) — binds a kind of work to a policy + its gate floors. The
  * router maps the 006 `ModelClient` workload tokens (`memory_extraction`,
- * `memory_decision`, `memory_dreaming`) and the gateway's request workload onto a
+ * `memory_decision`, `memory_pollinating`) and the gateway's request workload onto a
  * {@link Workload} by `name`. `policyRef` names a real {@link Policy};
  * `requiredCapabilities` + `minPrivacyTier` are the gate floors (b-AC-1);
  * `requestContextTokens` is an optional default context hint the context gate uses
@@ -615,7 +615,7 @@ export const noopRoutingHistoryStore: RoutingHistoryStore = {
 };
 
 /**
- * The standard "Wave 2 fills this" thrower (mirrors the ontology/dreaming harness
+ * The standard "Wave 2 fills this" thrower (mirrors the ontology/pollinating harness
  * posture). A stubbed seam body calls this so an accidental early call FAILS LOUD
  * with the owning sub-PRD, never silently returns a fake-passing value.
  */

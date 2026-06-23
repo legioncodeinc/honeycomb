@@ -3,7 +3,7 @@
  * that turns the inference router into a 006 {@link ModelClient}).
  *
  * Daemon assembly (a Wave-1c bee owns `assemble.ts`) injects a {@link ModelClient}
- * into every pipeline stage + the dreaming runner. Wave 1 of PRD-010 left a
+ * into every pipeline stage + the pollinating runner. Wave 1 of PRD-010 left a
  * documented TODO: swap `noopModelClient` for `new RouterModelClient(router)` once a
  * real transport + config + secret resolver exist. This factory IS that swap,
  * packaged so the assembly bee calls ONE function:
@@ -14,7 +14,7 @@
  * {@link createAnthropicTransport} + {@link createInferenceRouter}, and returns a
  * {@link RouterModelClient} typed as the 006 {@link ModelClient}. When NO inference
  * config is present/parseable, it returns {@link noopModelClient} — it NEVER throws.
- * A daemon without inference configured runs recall on lexical fallback and dreaming
+ * A daemon without inference configured runs recall on lexical fallback and pollinating
  * is simply unavailable (the runner's no-op model yields an empty completion, which
  * the defensive parser turns into a zero-mutation pass — never a failed job).
  *
@@ -137,7 +137,7 @@ function applyProviderModelOverride(config: InferenceConfig, override: ProviderM
  * Build the inference-backed {@link ModelClient} (AC-T). Returns a
  * {@link RouterModelClient} when a routable {@link InferenceConfig} resolves, else
  * {@link noopModelClient}. NEVER throws — an absent, empty, or even malformed config
- * degrades to the no-op client (dreaming/extraction simply produce empty output,
+ * degrades to the no-op client (pollinating/extraction simply produce empty output,
  * which the defensive parsers treat as "no usable output", never a failed job).
  *
  * The provider transport is the real Anthropic Messages transport; the secret

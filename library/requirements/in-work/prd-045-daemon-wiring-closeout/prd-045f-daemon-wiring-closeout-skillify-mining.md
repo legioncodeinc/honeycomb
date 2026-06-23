@@ -17,8 +17,8 @@ the catalog are live, but with no producer there is nothing to read or propagate
 
 - Skillify jobs ARE enqueued at runtime: session-end (`src/hooks/shared/session-end.ts:112`) and turn-counter
   (`capture/turn-counters.ts:150` → `capture-handler.ts:262-274`).
-- But no worker leases them: `assemble.ts` starts only the dreaming worker, which leases `["dreaming"]` only
-  (`dreaming/worker.ts:212-214`). No skillify worker is constructed.
+- But no worker leases them: `assemble.ts` starts only the pollinating worker, which leases `["pollinating"]` only
+  (`pollinating/worker.ts:212-214`). No skillify worker is constructed.
 - CLI `skillify pull` is implemented (`src/cli/skillify.ts`) but **not registered** in the verb table
   (`src/cli/skillify.ts:19` self-notes the dispatch wiring is deferred).
 - LIVE today: `/api/skills` read (`product/api.ts:180-195`).
@@ -53,7 +53,7 @@ the catalog are live, but with no producer there is nothing to read or propagate
 
 ## Implementation notes
 
-- Mirror the dreaming worker lifecycle (build in `assembleDaemon`, start after `startServices()`, stop in
+- Mirror the pollinating worker lifecycle (build in `assembleDaemon`, start after `startServices()`, stop in
   `shutdown()`), leasing `["skillify"]`. Reuse `daemon.services.queue`.
 - The miner already exists (`skillify/miner.ts`, `skillify/skills-write.ts`); the worker is a thin lease→mine→write
   loop.

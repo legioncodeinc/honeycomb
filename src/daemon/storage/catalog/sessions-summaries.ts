@@ -74,7 +74,7 @@ export const MEMORY_COLUMNS = Object.freeze([
 	{ name: "key", sql: "TEXT NOT NULL DEFAULT ''" },
 	// PRD-046b (b-AC-1): the index-refresh version. The `/MEMORY.md` index row is
 	// re-written version-bumped as new summaries land (highest version = current),
-	// mirroring `ontology/supersede.ts` / `dreaming/trigger.ts`. Per-session summary
+	// mirroring `ontology/supersede.ts` / `pollinating/trigger.ts`. Per-session summary
 	// rows keep version 0 (they are written exactly-once SELECT-before-INSERT); only the
 	// synthesized index/head rows version-bump. Additive, heal-compatible.
 	{ name: "version", sql: "BIGINT NOT NULL DEFAULT 0" },

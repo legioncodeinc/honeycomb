@@ -11,7 +11,7 @@
 PRD-008 shipped the entity model + inline linker (008a), dependency edges + append-only supersession (008b), and the
 control-plane apply/proposals/assertions (008c). Two of its claimed deliverables are not live: the **inline entity
 linker is never invoked**, and there is **no `/api/ontology/*` HTTP mount**. The control-plane apply runs only via the
-dreaming runner — which is dormant by default (see 045d). So the knowledge graph is barely populated on real runs.
+pollinating runner — which is dormant by default (see 045d). So the knowledge graph is barely populated on real runs.
 
 ## Evidence of the gap
 
@@ -19,8 +19,8 @@ dreaming runner — which is dormant by default (see 045d). So the knowledge gra
   pipeline invokes it (AC-1 unreachable).
 - No `mountOntologyApi` exists and none is fired in `assemble.ts`; the `/api/ontology` group is only a `protect:true`
   scaffold (`server.ts:96`) → falls through to 501.
-- Apply/supersession are reachable only through the dreaming runner: `submitProposal` (`dreaming/runner.ts:284`),
-  `supersedeClaim` (`ontology/control-plane.ts:338`) — dormant when dreaming is OFF.
+- Apply/supersession are reachable only through the pollinating runner: `submitProposal` (`pollinating/runner.ts:284`),
+  `supersedeClaim` (`ontology/control-plane.ts:338`) — dormant when pollinating is OFF.
 
 ## Goals
 
@@ -28,8 +28,8 @@ dreaming runner — which is dormant by default (see 045d). So the knowledge gra
   entities are linked as memories land.
 - Build + fire `mountOntologyApi` for `/api/ontology/*` (read entities/edges/assertions; reason-gated mutations),
   plus the matching CLI verbs PRD-008 promised.
-- Ensure the control-plane apply runs on a live path independent of dreaming (via the pipeline graph-persist stage),
-  with dreaming as an additional consolidation consumer.
+- Ensure the control-plane apply runs on a live path independent of pollinating (via the pipeline graph-persist stage),
+  with pollinating as an additional consolidation consumer.
 
 ## Non-Goals
 
@@ -39,7 +39,7 @@ dreaming runner — which is dormant by default (see 045d). So the knowledge gra
 ## User stories
 
 - As a user browsing `/api/ontology`, I want to see the entities and edges extracted from my memories.
-- As a developer, I want entity linking to happen as memories are written, not only during a dreaming pass.
+- As a developer, I want entity linking to happen as memories are written, not only during a pollinating pass.
 
 ## Acceptance criteria
 
@@ -54,7 +54,7 @@ dreaming runner — which is dormant by default (see 045d). So the knowledge gra
 ## Implementation notes
 
 - Sequence after 045a: the pipeline's graph-persist stage is the natural home for `inlineLinkMemory` + the
-  control-plane apply, giving a live apply path that does not depend on the dreaming gate.
+  control-plane apply, giving a live apply path that does not depend on the pollinating gate.
 - Mount `/api/ontology` onto the existing `protect:true` group (no `server.ts` edit needed), mirroring the
   `/api/graph` and data-API mounts; fail-soft try/catch like the other seams.
 
@@ -62,4 +62,4 @@ dreaming runner — which is dormant by default (see 045d). So the knowledge gra
 
 - [ ] Linker on capture (synchronous, cheap) vs in the pipeline graph-persist stage (async, richer)? Prefer the
       pipeline to keep the turn path fast.
-- [ ] Does `/api/ontology` need write routes now, or read-only first with mutations via the pipeline/dreaming apply?
+- [ ] Does `/api/ontology` need write routes now, or read-only first with mutations via the pipeline/pollinating apply?

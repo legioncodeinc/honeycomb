@@ -32,7 +32,7 @@
  * ║      `ci_compaction_<run-id>` from a SMALL local ColumnDef (key / version /  ║
  * ║      payload / updated_at) and DROPs it in afterAll. DROP is the reliable    ║
  * ║      teardown here (DELETE does not dependably remove rows). NEVER a real    ║
- * ║      shared `dreaming_state` / skills / rules table.                        ║
+ * ║      shared `pollinating_state` / skills / rules table.                        ║
  * ║    - The compactor's catalog guard (D-6) only admits catalog version-bumped ║
  * ║      names, so this suite injects a NARROWING `isCompactable` predicate that ║
  * ║      authorizes ONLY this run's throwaway name and rejects everything else — ║
@@ -502,7 +502,7 @@ describe.skipIf(!HAS_TOKEN)("live version-history compaction proof (opt-in, real
 			// backend's one-read guarantee.
 			//
 			// So each "observation" below is a POLL-CONVERGENT resolve mirroring the daemon's
-			// mandated read path — `src/daemon/runtime/dreaming/trigger.ts` `readState` /
+			// mandated read path — `src/daemon/runtime/pollinating/trigger.ts` `readState` /
 			// `RESOLVE_POLLS`: up to RESOLVE_POLLS reads of `ORDER BY version DESC LIMIT 1`, keep
 			// the MAX version seen (versions are append-only + monotone, so a point read can only
 			// UNDER-report, never over-report), and short-circuit once the same max is seen twice

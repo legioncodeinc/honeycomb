@@ -38,7 +38,7 @@
  *   real read (typically a smaller-than-expected `ok`) — it NEVER fabricates the
  *   awaited row and NEVER throws past the closed union. A stale read under-reports;
  *   it must not lie. The budget is env-overridable (`HONEYCOMB_READ_CONVERGE_*`),
- *   coerce-and-clamped like `dreaming/config.ts` so a fat-fingered env never throws.
+ *   coerce-and-clamped like `pollinating/config.ts` so a fat-fingered env never throws.
  * - Injectable clock + sleep seam (default real `node:timers/promises`) so the unit
  *   tests are fast + deterministic: the fake settles instantly and the wall-clock
  *   bound is proven without real time passing.
@@ -62,7 +62,7 @@ import { isOk, type QueryResult, type StorageRow } from "./result.js";
 
 // ── Budget config (D-3): coerce-and-clamp, never throw ──────────────────────
 //
-// Mirrors `dreaming/config.ts`: the budget is a TUNING knob, so a fat-fingered env
+// Mirrors `pollinating/config.ts`: the budget is a TUNING knob, so a fat-fingered env
 // value falls back to its default or clamps to a floor — it never takes the daemon
 // down. The defaults are the PRD's ~2s wall-clock / ~10 attempts.
 
@@ -106,7 +106,7 @@ export interface ConvergeBudgetOverride {
 /**
  * Coerce one numeric knob: a non-finite value falls back to `def`, a value below
  * `min` clamps up to `min`, and the result is truncated to an integer. Pure;
- * mirrors `dreaming/config.ts`'s `ClampedInt` so a bad env is tuning noise, never a
+ * mirrors `pollinating/config.ts`'s `ClampedInt` so a bad env is tuning noise, never a
  * config failure.
  */
 function clampInt(raw: unknown, def: number, min: number): number {
@@ -126,7 +126,7 @@ export interface RawConvergeBudget {
 	readonly backoffCapMs?: unknown;
 }
 
-/** The budget provider seam (mirrors the dreaming-config provider). */
+/** The budget provider seam (mirrors the pollinating-config provider). */
 export interface ConvergeBudgetProvider {
 	/** Read the raw budget record; missing keys yield undefined. */
 	read(): RawConvergeBudget;
@@ -134,7 +134,7 @@ export interface ConvergeBudgetProvider {
 
 /**
  * Default provider: reads `HONEYCOMB_READ_CONVERGE_*` from the environment.
- * Daemon-only code, so a direct env read is correct here (mirrors the dreaming env
+ * Daemon-only code, so a direct env read is correct here (mirrors the pollinating env
  * provider). `HONEYCOMB_READ_CONVERGE_MS` is the headline wall-clock knob the PRD
  * names; the attempt/backoff knobs are also overridable for the live suite to tune
  * without a code change.

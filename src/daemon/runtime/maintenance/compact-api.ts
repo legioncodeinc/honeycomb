@@ -3,12 +3,12 @@
  *
  * The PRIMARY maintenance path: a daemon route that runs the Wave-1 version-history
  * compactor (`storage/compaction.ts`) over the version-bumped tables under the daemon's
- * scope. It is the AC-bearing standalone job (D-2) — NOT gated behind premium dreaming. The
+ * scope. It is the AC-bearing standalone job (D-2) — NOT gated behind premium pollinating. The
  * `honeycomb maintenance compact` CLI verb POSTs here; the dashboard could call it too.
  *
  * This module is the single named step the daemon assembly calls AFTER `createDaemon(...)`
  * to attach `POST /api/diagnostics/compact` onto the ALREADY-MOUNTED, protected
- * `/api/diagnostics` group — mirroring {@link mountDreamApi} (PRD-024). ZERO edits to
+ * `/api/diagnostics` group — mirroring {@link mountPollinateApi} (PRD-024). ZERO edits to
  * `server.ts`: the `/api/diagnostics` group is scaffolded + `protect:true`, so attaching via
  * `daemon.group("/api/diagnostics")` inherits the same auth/RBAC the JSON dashboard views
  * enforce (open in `local` mode by design — the single-user loopback dogfood target).
@@ -28,7 +28,7 @@
  * ── Per-table key column + columns (how each table is addressed) ─────────────
  *   Each version-bumped table reaps history per its LOGICAL key column — `key` for `rules`,
  *   `claim_key` for `entity_attributes`, and `id` for `skills`/`epistemic_assertions`/
- *   `dreaming_state`. {@link COMPACTABLE_KEY_COLUMNS} maps it explicitly (the catalog carries
+ *   `pollinating_state`. {@link COMPACTABLE_KEY_COLUMNS} maps it explicitly (the catalog carries
  *   no `keyColumn` field, and each entry is pinned to the column its REAL writer keys the
  *   version chain by — see the per-entry writer citations there), defaulting to `id`. The
  *   table's ColumnDef array (the
@@ -41,18 +41,18 @@
  *   one {@link CompactionSummary} per table that EXISTED and was compacted (incl.
  *   `keysSkipped`, the transient-flap signal). A table that did not exist is omitted. The
  *   summary carries NO token/secret/header value — only table names, counts, and version
- *   numbers (the same no-secret floor as the dream ack).
+ *   numbers (the same no-secret floor as the pollinate ack).
  *
  * ── Fail-soft, never 500 (the maintenance posture) ───────────────────────────
  *   A per-table compaction error (a flappy DELETE, a transient read) is caught and folded
  *   into an `errored` count on that table's summary — one table failing never aborts the
  *   pass or 500s the request. A request with no resolvable tenancy fails closed at the edge
- *   (400), consistent with the dream handler. The whole route is best-effort: the worst case
+ *   (400), consistent with the pollinate handler. The whole route is best-effort: the worst case
  *   is "nothing reaped this pass", never a crash.
  *
- * ── Deferred assembly (mirrors mountDreamApi) ────────────────────────────────
+ * ── Deferred assembly (mirrors mountPollinateApi) ────────────────────────────────
  *   `assemble.ts` calls `mountCompactApi(daemon, { storage, defaultScope })` ONCE next to
- *   the `mountDream(...)` call. It is constructed-and-tested here against a fake compactor
+ *   the `mountPollinate(...)` call. It is constructed-and-tested here against a fake compactor
  *   seam; importing the daemon does not auto-invoke it.
  */
 
@@ -91,9 +91,9 @@ export const COMPACT_TRIGGER_GROUP = "/api/diagnostics" as const;
  *                                            the current assertion on `claim_key`, so keying
  *                                            compaction by it would collapse every empty-cross-link
  *                                            assertion into one bogus `claim_key=""` chain).
- *   - `dreaming_state`       → `id`         (the deterministic per-scope counter key; the
+ *   - `pollinating_state`       → `id`         (the deterministic per-scope counter key; the
  *                                            version chain genuinely shares `id` —
- *                                            `dreaming/trigger.ts` `appendVersionBumped({ keyColumn: "id", … })`).
+ *                                            `pollinating/trigger.ts` `appendVersionBumped({ keyColumn: "id", … })`).
  * A WRONG key column here is a SAFETY bug, not just a no-op: keying by a per-version-unique
  * column makes "highest version per key" resolve to a singleton (compaction silently does
  * nothing), and keying by a column shared across DISTINCT logical entities could resolve a
@@ -106,7 +106,7 @@ export const COMPACTABLE_KEY_COLUMNS: Readonly<Record<string, string>> = Object.
 	rules: "key",
 	entity_attributes: "claim_key",
 	epistemic_assertions: "id",
-	dreaming_state: "id",
+	pollinating_state: "id",
 });
 
 /** Resolve a table's logical key column (defaulting to `id`). */
@@ -144,7 +144,7 @@ export interface MountCompactOptions {
 	readonly storage: StorageQuery;
 	/**
 	 * The daemon's own tenancy partition the version-bumped rows live under (the same
-	 * `defaultScope` the composition root threads into the data-API + dream mounts). In `local`
+	 * `defaultScope` the composition root threads into the data-API + pollinate mounts). In `local`
 	 * mode this is the single loopback tenant.
 	 */
 	readonly defaultScope: QueryScope;
@@ -188,7 +188,7 @@ const NO_ORG_BODY = { error: "bad_request", reason: "x-honeycomb-org header is r
  * Resolve the per-request tenancy scope, falling back to the daemon's `defaultScope` when the
  * request carries no `x-honeycomb-org` header (the local-mode posture). Returns `null` ONLY
  * when neither a header org NOR a default org is present — fail-closed. Mirrors
- * `mountDreamApi`'s `resolveTriggerScope`.
+ * `mountPollinateApi`'s `resolveTriggerScope`.
  */
 function resolveCompactScope(c: Context, defaultScope: QueryScope): QueryScope | null {
 	const org = c.req.header("x-honeycomb-org");

@@ -3,11 +3,11 @@
 A faithful, brand-elevated recreation of Honeycomb's **daemon-served dashboard** (`GET /dashboard`) and the Cursor extension webview. Both surfaces render the same canonical `ViewBlock` view-model from `src/dashboard/` in the [honeycomb repo](https://github.com/legioncodeinc/honeycomb).
 
 ## Screens
-- `index.html` — the full dashboard: header (org/workspace + daemon health + Dream now), recall bar, recalled-memory results, KPI row, sessions table, rules list, codebase-graph canvas, skill-sync panel, and a streaming live log. Toggle the daemon pill to see the **connectivity-down banner** (the real daemon-unreachable state).
+- `index.html` — the full dashboard: header (org/workspace + daemon health + Pollinate now), recall bar, recalled-memory results, KPI row, sessions table, rules list, codebase-graph canvas, skill-sync panel, and a streaming live log. Toggle the daemon pill to see the **connectivity-down banner** (the real daemon-unreachable state).
 
 ## Interactions (faked)
 - **Recall** — type a query, press Enter / click Recall → memory cells animate in with score + provenance.
-- **Dream now** — triggers the Dreaming consolidation loop: the graph's `dreaming()` node pulses violet, a memory cell enters the consolidating state, and the log streams the pass.
+- **Pollinate now** — triggers the Pollinating consolidation loop: the graph's `pollinating()` node pulses violet, a memory cell enters the consolidating state, and the log streams the pass.
 - **Daemon toggle** — the status pill flips the daemon up/down; down swaps the whole view for the connectivity banner + retry.
 
 ## Composition

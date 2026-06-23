@@ -4,7 +4,7 @@ import React from "react";
  * MemoryCard — the signature Honeycomb surface: one recalled or stored
  * memory. Shows a hex cell, the memory key (mono), a snippet, its
  * source provenance, and a relevance score. `verified` marks a
- * source-backed memory (green); `dreaming` marks one being consolidated.
+ * source-backed memory (green); `pollinating` marks one being consolidated.
  */
 export function MemoryCard({
   memoryKey,
@@ -13,13 +13,13 @@ export function MemoryCard({
   score,
   scope = "personal",
   verified = false,
-  dreaming = false,
+  pollinating = false,
   onClick,
   style,
   ...rest
 }) {
-  const accent = dreaming ? "var(--dream)" : verified ? "var(--verified)" : "var(--honey)";
-  const accentBorder = dreaming ? "var(--dream-border)" : verified ? "var(--verified)" : "var(--honey-border)";
+  const accent = pollinating ? "var(--pollinate)" : verified ? "var(--verified)" : "var(--honey)";
+  const accentBorder = pollinating ? "var(--pollinate-border)" : verified ? "var(--verified)" : "var(--honey-border)";
 
   return (
     <div
@@ -47,8 +47,8 @@ export function MemoryCard({
             height: 38,
             clipPath: "polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%)",
             background: accent,
-            opacity: dreaming ? 0.9 : 1,
-            animation: dreaming ? "hc-dream-pulse var(--dur-dream) var(--ease-in-out) infinite alternate" : "none",
+            opacity: pollinating ? 0.9 : 1,
+            animation: pollinating ? "hc-pollinate-pulse var(--dur-pollinate) var(--ease-in-out) infinite alternate" : "none",
           }}
         />
       </div>
@@ -58,11 +58,11 @@ export function MemoryCard({
           <span style={{ fontFamily: "var(--font-mono)", fontSize: "var(--text-sm)", fontWeight: 600, color: accent, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
             {memoryKey}
           </span>
-          {verified && !dreaming && (
+          {verified && !pollinating && (
             <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--verified)", flex: "none" }}>✓ verified</span>
           )}
-          {dreaming && (
-            <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--dream)", flex: "none" }}>dreaming…</span>
+          {pollinating && (
+            <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--pollinate)", flex: "none" }}>pollinating…</span>
           )}
         </div>
 
@@ -86,7 +86,7 @@ export function MemoryCard({
         </div>
       </div>
 
-      <style>{`@keyframes hc-dream-pulse { from { opacity: .5 } to { opacity: 1 } }`}</style>
+      <style>{`@keyframes hc-pollinate-pulse { from { opacity: .5 } to { opacity: 1 } }`}</style>
     </div>
   );
 }

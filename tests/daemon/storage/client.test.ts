@@ -404,7 +404,7 @@ describe("bounded read-only transient-retry layer (fix/heal-introspection-transi
 		fake.enqueueRows([]); // must NOT be consumed.
 		const client = clientWith(fake);
 
-		const result = await client.query('UPDATE "dreaming_state" SET counter = counter + 1 WHERE id = \'d\'', { org: "o" });
+		const result = await client.query('UPDATE "pollinating_state" SET counter = counter + 1 WHERE id = \'d\'', { org: "o" });
 		expect(result.kind).toBe("query_error");
 		expect(fake.requests).toHaveLength(1); // a relative mutation is never retried.
 	});

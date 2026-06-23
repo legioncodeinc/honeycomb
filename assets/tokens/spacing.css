@@ -35,7 +35,7 @@
   /* honey glow — the ONE expressive shadow, for the active comb /
      a focused recall hit. Use sparingly. */
   --glow-honey: 0 0 0 1px var(--honey-border), 0 8px 28px -10px rgba(247,168,35,0.5);
-  --glow-dream: 0 0 0 1px var(--dream-border), 0 8px 28px -10px rgba(139,124,240,0.5);
+  --glow-pollinate: 0 0 0 1px var(--pollinate-border), 0 8px 28px -10px rgba(139,124,240,0.5);
   --ring-focus: 0 0 0 2px var(--bg-canvas), 0 0 0 4px var(--honey);
 
   /* ---- Motion --------------------------------------------------- */
@@ -44,5 +44,5 @@
   --dur-fast:    120ms;   /* @kind other */
   --dur-base:    200ms;   /* @kind other */
   --dur-slow:    400ms;   /* @kind other */
-  --dur-dream:   900ms;   /* @kind other */
+  --dur-pollinate:   900ms;   /* @kind other */
 }

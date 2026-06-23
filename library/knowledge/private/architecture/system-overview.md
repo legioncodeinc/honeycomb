@@ -16,9 +16,9 @@ The master view of Honeycomb: the planes, the daemon at the center, the DeepLake
 
 ## Why the architecture looks like this
 
-Honeycomb has two jobs that pull in different directions. It has to live inside many coding harnesses that share almost nothing at the integration layer, and it has to run a real memory engine: a background pipeline, a knowledge graph, a dreaming maintenance loop. Hivemind solved the first job with thin per-harness shims over a shared core. Otherhive solved the second with a local daemon. Honeycomb keeps both answers and joins them: write the memory logic once inside a daemon, then wrap it per harness with shims that are thin clients of that daemon.
+Honeycomb has two jobs that pull in different directions. It has to live inside many coding harnesses that share almost nothing at the integration layer, and it has to run a real memory engine: a background pipeline, a knowledge graph, a pollinating maintenance loop. Hivemind solved the first job with thin per-harness shims over a shared core. Otherhive solved the second with a local daemon. Honeycomb keeps both answers and joins them: write the memory logic once inside a daemon, then wrap it per harness with shims that are thin clients of that daemon.
 
-That decision settles the old contradiction between the two systems. Hivemind's hooks used to talk straight to storage, which is fine for capture but cannot host a dreaming loop or a pipeline. Otherhive's daemon hosts exactly that. So in Honeycomb the daemon is the only process that talks to DeepLake, and every harness surface, hook, CLI, SDK, and MCP call goes through it. Adding a harness means writing a new shim, not a new engine. Fixing the engine means editing the daemon, and every harness inherits the fix.
+That decision settles the old contradiction between the two systems. Hivemind's hooks used to talk straight to storage, which is fine for capture but cannot host a pollinating loop or a pipeline. Otherhive's daemon hosts exactly that. So in Honeycomb the daemon is the only process that talks to DeepLake, and every harness surface, hook, CLI, SDK, and MCP call goes through it. Adding a harness means writing a new shim, not a new engine. Fixing the engine means editing the daemon, and every harness inherits the fix.
 
 ## The planes
 
@@ -41,7 +41,7 @@ flowchart TB
         pipeline[Pipeline]
         retrieval[Hybrid retrieval + VFS]
         ontology[Knowledge graph]
-        dreaming[Dreaming loop]
+        pollinating[Pollinating loop]
         router[Model + provider router]
         workers[Skillify + summaries + codebase graph]
     end
@@ -59,7 +59,7 @@ flowchart TB
     pipeline --> store
     retrieval --> store
     ontology --> store
-    dreaming --> store
+    pollinating --> store
     router --> store
     workers --> store
 ```
@@ -70,7 +70,7 @@ Four planes. Surfaces are how a human drives Honeycomb. Integrations are how ext
 
 | Component | Location / name | Responsibility |
 |---|---|---|
-| Daemon | honeycomb daemon, port 3850 | Capture intake, pipeline, retrieval, ontology, dreaming, router, workers. Only DeepLake client. |
+| Daemon | honeycomb daemon, port 3850 | Capture intake, pipeline, retrieval, ontology, pollinating, router, workers. Only DeepLake client. |
 | DeepLake substrate | storage layer | GPU-backed SQL + vector tables; org/workspace partition isolation. See [`../data/deeplake-storage.md`](../data/deeplake-storage.md). |
 | Capture shims | per-harness hooks | Map native lifecycle events to capture/recall calls on the daemon. |
 | Skillify miner | daemon worker | Mine recurring traces into reusable skills. See [`../ai/skillify-pipeline.md`](../ai/skillify-pipeline.md). |
@@ -83,7 +83,7 @@ Four planes. Surfaces are how a human drives Honeycomb. Integrations are how ext
 
 Honeycomb's value splits into the memory engine and the product subsystems built around it.
 
-The engine, inherited from Otherhive, is the path from a raw event to recalled context. Capture writes raw events; the pipeline runs extraction, decision, graph persistence, and retention; retrieval runs hybrid search with an authorization boundary; the knowledge-graph ontology holds entities, aspects, claims, and dependencies; the dreaming loop consolidates over time; the model and provider router decides which model runs each workload. These are documented under `ai/`.
+The engine, inherited from Otherhive, is the path from a raw event to recalled context. Capture writes raw events; the pipeline runs extraction, decision, graph persistence, and retention; retrieval runs hybrid search with an authorization boundary; the knowledge-graph ontology holds entities, aspects, claims, and dependencies; the pollinating loop consolidates over time; the model and provider router decides which model runs each workload. These are documented under `ai/`.
 
 The product subsystems, inherited from Hivemind, are what make the engine a team tool. Skillify mines traces into shareable skills; team skill sharing propagates them; the codebase graph indexes the code agents actually touch; the virtual filesystem lets agents browse memory with ordinary shell commands; goals and KPIs track objectives; the Cursor extension and other frontends surface it all. These live under `ai/`, `data/`, `collaboration/`, and `frontend/`.
 

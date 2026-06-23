@@ -4,8 +4,8 @@
  * ════════════════════════════════════════════════════════════════════════════
  * `mountDiagnosticsHealthApi(daemon, { healthDetail })` is the single named step the
  * composition root calls AFTER `createDaemon(...)` to attach `GET /api/diagnostics/health`
- * onto the ALREADY-MOUNTED, protected `/api/diagnostics` group — mirroring `mountDreamApi`
- * (`dreaming/api.ts`) and `mountLogsApi` (`logs/api.ts`). ZERO edits to `server.ts`: the
+ * onto the ALREADY-MOUNTED, protected `/api/diagnostics` group — mirroring `mountPollinateApi`
+ * (`pollinating/api.ts`) and `mountLogsApi` (`logs/api.ts`). ZERO edits to `server.ts`: the
  * `/api/diagnostics` group is scaffolded + `protect:true`, so attaching via
  * `daemon.group("/api/diagnostics")` inherits the SAME auth/RBAC the JSON dashboard views
  * enforce — open in `local`, GATED in team/hybrid.
@@ -58,7 +58,7 @@ export interface MountDiagnosticsHealthOptions {
  * `/api/diagnostics` group (AC-3). The handler returns the FULL {@link HealthDetail}
  * (status + reasons) — a synchronous read of cached state, no probe (D-4). Call ONCE
  * after `createDaemon(...)`. If the group is not mounted (unknown daemon shape) the
- * attach is a no-op (the route stays the 501 scaffold), mirroring `mountDreamApi`.
+ * attach is a no-op (the route stays the 501 scaffold), mirroring `mountPollinateApi`.
  */
 export function mountDiagnosticsHealthApi(daemon: Daemon, options: MountDiagnosticsHealthOptions): void {
 	const group = daemon.group(DIAGNOSTICS_HEALTH_GROUP);

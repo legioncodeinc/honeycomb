@@ -8,7 +8,7 @@
 ## Overview
 
 The `#/settings` route of the multi-page dashboard shell (PRD-037). Today the only "settings" surface on the live
-`/dashboard` is the small `SettingsPanel` in `src/dashboard/web/panels.tsx` (provider → model selector + a dreaming
+`/dashboard` is the small `SettingsPanel` in `src/dashboard/web/panels.tsx` (provider → model selector + a pollinating
 on/off toggle + a names-only provider-key presence badge), wired through the vault `setting`/`secrets` endpoints
 that PRD-032 stands up. This PRD promotes that widget into a real, full Settings PAGE and grows it into the place a
 user configures their Honeycomb install end-to-end.
@@ -25,7 +25,7 @@ A user lands on `#/settings` and can:
    returns a secret value.
 3. **Pick a search (recall) mode and the existing inference settings** — choose keyword (lexical BM25/ILIKE) vs
    semantic (embeddings/vector) vs hybrid recall, persisted as a vault `setting` and honored by the recall pipeline;
-   plus the migrated provider → model selector and dreaming toggle that live on the dashboard today.
+   plus the migrated provider → model selector and pollinating toggle that live on the dashboard today.
 
 This page OWNS the Settings route content; PRD-037 owns the shell, the nav slot, the router, and the page frame.
 Everything reuses the EXISTING Honeycomb design system (the `var(--…)` tokens in the served `/dashboard/styles.css`)
@@ -43,7 +43,7 @@ Babel; bundled production-clean by the same esbuild entry (PRD-024 D-1 holds).
   vault, with names-only presence feedback and no value-returning route ever introduced.
 - Add a recall-mode setting (`keyword` | `semantic` | `hybrid`) persisted in the vault `setting` class and honored by
   the recall pipeline, documenting how it composes with the embeddings-off lexical fallback (PRD-025 / PRD-029).
-- Migrate the existing `SettingsPanel` (provider → model + dreaming toggle + key-presence) onto this page as its home,
+- Migrate the existing `SettingsPanel` (provider → model + pollinating toggle + key-presence) onto this page as its home,
   extending the provider-key presence model to Cohere (`COHERE_API_KEY`).
 - Keep the LOCAL-MODE-ONLY + XSS-safe + no-secret-in-page posture (PRD-021d F-1 / PRD-024 D-4) intact; never render,
   return, or log a token or secret value anywhere on the page.
@@ -85,7 +85,7 @@ Babel; bundled production-clean by the same esbuild entry (PRD-024 D-1 holds).
   `GET /api/secrets` (names only); no endpoint returns a secret value (grep-proven).
 - [ ] **AC-4 — Search mode is selectable, persisted, and honored (044c).** The recall mode (`keyword` | `semantic` |
   `hybrid`) is selectable, persists as a vault `setting`, and is honored by the recall pipeline; the existing
-  provider → model selector and dreaming toggle live on this page and continue to persist through `/api/settings`.
+  provider → model selector and pollinating toggle live on this page and continue to persist through `/api/settings`.
 - [ ] **AC-5 — Thin client, reused wire.** The page uses the injected `PageProps.wire` (never `createWireClient`),
   reuses the existing `vaultSettings`/`setSetting`/`secretNames` wire methods plus the new auth/secret-write methods,
   and zod-parses every payload with `.catch()` defaults so a partial response degrades to a safe empty state — no
@@ -113,7 +113,7 @@ Babel; bundled production-clean by the same esbuild entry (PRD-024 D-1 holds).
   PRD-025 behavior (semantic-by-default with the embeddings-off lexical fallback), so shipping the selector changes
   nothing until a user picks a non-default mode. The page documents how the chosen mode composes with the
   embeddings-off fallback (see 044c).
-- **D-5 — Migrate, don't fork.** The current `SettingsPanel` (provider → model + dreaming toggle + key-presence) moves
+- **D-5 — Migrate, don't fork.** The current `SettingsPanel` (provider → model + pollinating toggle + key-presence) moves
   ONTO this page as the inference section; the existing `SETTING_KEY` map and `PROVIDER_KEY_NAME` map are reused (the
   latter extended to add `cohere → COHERE_API_KEY`). The old in-grid panel is removed from the Dashboard home as part
   of PRD-038's reorg, or left until this page lands — coordinated, not duplicated.

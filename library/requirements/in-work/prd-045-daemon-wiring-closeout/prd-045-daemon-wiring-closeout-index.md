@@ -25,7 +25,7 @@ and PRD-022 (data-access wiring) — the place where already-built engines from 
 finally meet a live invocation site.
 
 The acceptance bar is **behavioral and per-engine**: a captured turn flows through the memory pipeline; recall
-applies its shaping phases; an entity gets linked and `/api/ontology` answers; a dreaming pass runs to completion;
+applies its shaping phases; an entity gets linked and `/api/ontology` answers; a pollinating pass runs to completion;
 `/api/sources` and `/api/documents` return real data; a session-end mines a skill that a teammate then pulls.
 
 ## Goals
@@ -35,7 +35,7 @@ applies its shaping phases; an entity gets linked and `/api/ontology` answers; a
 - Put the **retrieval shaping engine** on the live recall path, or formally de-scope the dormant five-phase engine
   and reconcile the PRD — no silent gap between doc and runtime (045b).
 - Invoke the **inline entity linker** on a live path and mount **`/api/ontology/*`** (045c).
-- Decide the **dreaming default posture** and prove the loop end-to-end (it is the activation point for 008 apply
+- Decide the **pollinating default posture** and prove the loop end-to-end (it is the activation point for 008 apply
   and the 010 router) (045d).
 - Fire **`mountSourcesApi`** + the document worker + provider instantiation so `/api/sources` and `/api/documents`
   stop 501ing (045e).
@@ -51,7 +51,7 @@ applies its shaping phases; an entity gets linked and `/api/ontology` answers; a
   sub-PRD must fill a stub handler (e.g. 006's four non-extraction stages), that is the minimum to make the wired
   path produce real output, not a redesign.
 - **The 010 model-provider-router HTTP gateway** (`/api/inference/*`, `/v1/*`) and the **021 `/mcp` HTTP transport**
-  are out of scope here — the router engine is reactivated as a side effect of 045d (dreaming), but its external
+  are out of scope here — the router engine is reactivated as a side effect of 045d (pollinating), but its external
   HTTP surface is a separate follow-up.
 - **The four reopened PRDs (019 / 020 / 028 / 033)** are tracked as their **own** in-work PRDs, not as PRD-045
   sub-PRDs (their remaining work is feature completion, not whole-engine wiring). See Related.
@@ -66,7 +66,7 @@ applies its shaping phases; an entity gets linked and `/api/ontology` answers; a
 | [`prd-045a-...-memory-pipeline`](./prd-045a-daemon-wiring-closeout-memory-pipeline.md) | 006 | Construct + start the pipeline worker; enqueue pipeline jobs on capture; fill the 4 stub stages. | Completed |
 | [`prd-045b-...-retrieval-engine`](./prd-045b-daemon-wiring-closeout-retrieval-engine.md) | 007 | Wire the five-phase `RecallEngine` onto the recall route (or de-scope + reconcile). | Resolved — DE-SCOPED |
 | [`prd-045c-...-ontology-surface`](./prd-045c-daemon-wiring-closeout-ontology-surface.md) | 008 | Invoke the inline entity linker on capture/pipeline; mount `/api/ontology/*` + CLI. | Completed |
-| [`prd-045d-...-dreaming-activation`](./prd-045d-daemon-wiring-closeout-dreaming-activation.md) | 009 | Decide default posture; prove the dreaming pass end-to-end (enqueue→lease→model→apply→state). | Completed |
+| [`prd-045d-...-pollinating-activation`](./prd-045d-daemon-wiring-closeout-pollinating-activation.md) | 009 | Decide default posture; prove the pollinating pass end-to-end (enqueue→lease→model→apply→state). | Completed |
 | [`prd-045e-...-sources-documents`](./prd-045e-daemon-wiring-closeout-sources-documents.md) | 013 | Fire `mountSourcesApi`; wire the document worker + providers. | Completed |
 | [`prd-045f-...-skillify-mining`](./prd-045f-daemon-wiring-closeout-skillify-mining.md) | 016 | Construct + start a `["skillify"]` worker; register the `skillify pull` CLI verb. | Completed |
 | [`prd-045g-...-team-skill-sharing`](./prd-045g-daemon-wiring-closeout-team-skill-sharing.md) | 018 | Mount publish endpoint; wire session-start auto-pull seam; register skill CLI verbs. | Completed |
@@ -79,7 +79,7 @@ applies its shaping phases; an entity gets linked and `/api/ontology` answers; a
 - **Every fix lands with a live invocation-site proof.** The recurring root cause was trusting "Completed"
   headers over runtime reachability. Each sub-PRD's acceptance criteria are behavioral and cite the new invocation
   site (`assemble.ts` seam line, leased job kind, registered CLI verb), and add a live itest under the PRD-031 net.
-- **Dormant-by-design is not a defect.** 045d treats the dreaming default-OFF posture as a **decision** to make
+- **Dormant-by-design is not a defect.** 045d treats the pollinating default-OFF posture as a **decision** to make
   explicit (and prove when ON), not a bug — but its dormancy currently strands 008 apply + 010 router, so the
   loop must be proven end-to-end at least under the enable flag.
 - **The four reopened PRDs are separate.** 019/020/028/033 move back to `in-work/` and carry their own reopened
@@ -95,7 +95,7 @@ applies its shaping phases; an entity gets linked and `/api/ontology` answers; a
       proven by a live itest (045a).
 - [ ] **AC-3** — `/api/ontology/*` (045c), `/api/sources` + `/api/documents` (045e) return real data (no 501) on a
       real assembled daemon.
-- [ ] **AC-4** — A **dreaming pass** runs to completion when enabled (enqueue → lease → model → ontology apply →
+- [ ] **AC-4** — A **pollinating pass** runs to completion when enabled (enqueue → lease → model → ontology apply →
       append-only state), proven by a live itest (045d).
 - [ ] **AC-5** — A session-end **mines a skill** (045f) that is then **published and pulled** by a second
       workspace/harness (045g), proven end-to-end.

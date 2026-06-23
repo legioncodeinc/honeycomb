@@ -11,7 +11,7 @@
  * deferred-assembly gap (CONVENTIONS §9). This module is that job: the live CONSUMER
  * that leases `summary` jobs off the durable queue and drives the (unchanged) worker.
  *
- * It is the dreaming/skillify analogue (`dreaming/worker.ts` is its template): the same
+ * It is the pollinating/skillify analogue (`pollinating/worker.ts` is its template): the same
  * `runOnce()` / `start()` / `stop()` shape, the same kind-filtered lease, the same
  * try/catch routing a throw to `queue.fail` (never a swallowed error). It adds NO
  * summarization logic, NO write path, NO schema — it reuses `runSummaryWorker` and the
@@ -19,7 +19,7 @@
  * + `systemSummarySpawner`, `createFileSessionLock`) verbatim.
  *
  * ── Kind-filtered lease — NEVER touch a foreign job ──────────────────────────
- * Capture also enqueues `skillify` jobs, and the dreaming worker enqueues `dreaming`
+ * Capture also enqueues `skillify` jobs, and the pollinating worker enqueues `pollinating`
  * jobs, into the SAME `memory_jobs` queue. A generic `lease()` would let this worker
  * grab one of those, fail to run it, and walk a legit job toward `dead`. So this worker
  * leases ONLY `["summary"]` (the additive `JobQueueService.lease(kinds)` filter).
@@ -175,7 +175,7 @@ export function summaryCliSpecFor(agentId: string): SummaryCliSpec {
 // The worker — lease `["summary"]` → parse → runSummaryWorker → complete/fail.
 // ════════════════════════════════════════════════════════════════════════════
 
-/** A minimal structured-log sink (mirrors the dreaming worker's logger). */
+/** A minimal structured-log sink (mirrors the pollinating worker's logger). */
 export interface SummaryJobWorkerLogger {
 	/** Record a structured event (e.g. `summary.worker.completed`, `summary.worker.failed`). */
 	event(name: string, fields?: Record<string, unknown>): void;
@@ -247,7 +247,7 @@ export type SynthesisStoreFactory = () => SynthesisStore;
  * The summary job worker. Construct via {@link createSummaryJobWorker}. Exposes
  * `runOnce()` (lease + run a single summary job — the deterministic unit a test drives)
  * and `start()` / `stop()` (the continuous poll loop the daemon-assembly uses). The single
- * SHAPE is the PRD-026 dreaming worker.
+ * SHAPE is the PRD-026 pollinating worker.
  */
 export interface SummaryJobWorker {
 	/**
@@ -262,7 +262,7 @@ export interface SummaryJobWorker {
 	stop(): void;
 }
 
-/** Default poll interval for the continuous loop (matches the dreaming/stage worker). */
+/** Default poll interval for the continuous loop (matches the pollinating/stage worker). */
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 
 /** The single kind this worker leases — NEVER a foreign job. */
@@ -368,7 +368,7 @@ class SummaryJobWorkerImpl implements SummaryJobWorker {
 	}
 
 	async runOnce(): Promise<boolean> {
-		// Lease ONLY a summary job (the kind filter) — a foreign skillify/dreaming job is left
+		// Lease ONLY a summary job (the kind filter) — a foreign skillify/pollinating job is left
 		// queued for its own worker, never grabbed-and-failed here.
 		const leased = await this.queue.lease(LEASE_KINDS);
 		if (leased === null) return false;

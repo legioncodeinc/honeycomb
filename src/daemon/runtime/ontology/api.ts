@@ -33,7 +33,7 @@
  *                                     risky / generated-batch op enters the PENDING review
  *                                     queue (NOT applied) — exactly `submitProposal`'s
  *                                     risk routing (008c D-6). Live supersession runs here
- *                                     via a `claim.supersede` op, independent of dreaming.
+ *                                     via a `claim.supersede` op, independent of pollinating.
  *
  * ── built:false / empty is the honest state, never a 501 ─────────────────────
  * PRD-008 tables may be empty (a cold scope) or, on an older schema, absent. Every read
@@ -273,7 +273,7 @@ export function mountOntologyApi(daemon: Daemon, options: MountOntologyOptions):
 	// POST /api/ontology/proposals — submit a control-plane proposal (reason-gated). A bounded
 	// explicit op applies DIRECTLY; a broad/risky/generated-batch op enters the PENDING review
 	// queue and is NOT applied (008c D-6 risk routing). A `claim.supersede` op runs the live,
-	// append-only supersession path INDEPENDENT of dreaming (c-AC-4). A malformed body is a
+	// append-only supersession path INDEPENDENT of pollinating (c-AC-4). A malformed body is a
 	// `failed` outcome — never a throw past the boundary. Reported as data, never a crash.
 	group.post("/proposals", async (c) => {
 		const scope = resolveScope(c);

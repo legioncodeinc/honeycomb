@@ -8,7 +8,7 @@
 ---
 
 > **✅ Now live (2026-06-22 daemon-wiring close-out, PRD-045f).** The skillify mining worker is fully wired.
-> `assembleDaemon` constructs + starts a worker leasing `["skillify"]` (mirroring the dreaming worker lifecycle);
+> `assembleDaemon` constructs + starts a worker leasing `["skillify"]` (mirroring the pollinating worker lifecycle);
 > the worker runs the Haiku KEEP/MERGE/SKIP gate and writes append-only versioned rows to the `skills` table.
 > Session-end enqueue (`session-end.ts:112`) and turn-counter enqueue (`capture/turn-counters.ts:150`) feed the
 > now-live worker. The `skillify pull` CLI verb is registered in the dispatch table (`src/cli/skillify.ts`).

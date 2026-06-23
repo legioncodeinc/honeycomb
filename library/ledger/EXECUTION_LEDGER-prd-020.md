@@ -8,7 +8,7 @@ notifications + D1–D5 health. All THIN CLIENTS of the daemon (3850, the only D
 27 ACs (3 index + 6a + 6b + 6c + 6d). No new schema.
 
 ## Existing footprint (build ON, don't rebuild)
-- CLI verb handlers already exist: `src/cli/{auth,org,keys,skill,skillify,ontology,route,dream}.ts`
+- CLI verb handlers already exist: `src/cli/{auth,org,keys,skill,skillify,ontology,route,pollinate}.ts`
   (each constructed-and-tested behind seams from prior PRDs). `src/cli/index.ts` is still the
   version-print STUB — 020a turns it into the real dispatcher wiring these handlers + new verbs.
 - `src/connectors/` (019a) — connector base for `setup`/`connect`/`uninstall`. 020a/c/d reuse its

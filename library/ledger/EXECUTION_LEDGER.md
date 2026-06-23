@@ -51,7 +51,7 @@ ranking) were already fixed/merged on `main` (verified by tracing the writers / 
 
 ## Open work
 
-- **PRD-026 — dreaming-loop-enablement** (in-work): `/api/diagnostics/dream` returns
+- **PRD-026 — pollinating-loop-enablement** (in-work): `/api/diagnostics/pollinate` returns
   `{triggered:false, status:"skipped", reason:"disabled"}` — the loop is built (PRD-009) but not
   enabled. No QA report. Genuinely incomplete.
 - **PRD-029 — degradation-observability** (in-work): partially live (the dashboard subsystems strip +

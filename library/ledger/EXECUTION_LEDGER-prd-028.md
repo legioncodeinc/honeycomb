@@ -9,7 +9,7 @@
 - `src/daemon/storage/client.ts`: `StorageQuery` interface (line ~350), `query(sql, scope, opts)` (line ~245). NOTE: `query` ALREADY has a TRANSIENT-failure retry (PRD-028's sibling #50 — `isReadStatement`/`isTransientResult`, retries connection/timeout/5xx). `readConverged` is DIFFERENT and complementary: it polls on OK results until a freshness PREDICATE holds (the stale-segment under-report case), not on transport failures. Reuse the abort/timeout discipline (`HONEYCOMB_QUERY_TIMEOUT_MS`).
 - `src/daemon/storage/result.ts`: the closed `QueryResult` union + `isOk`. `readConverged` returns the SAME union — callers branch on `kind`, never a throw.
 - Write watermark source is `src/daemon/storage/writes.ts` (the PRD says `controlled-writes.ts` — it's actually `writes.ts`): `appendVersionBumped` ALREADY returns `{ result, version }` (and the caller has the key) — that IS the watermark (id+version). `updateOrInsertByKey` similarly. Expose a small watermark shape so the read predicate is derived from the write, not guessed.
-- Poll-convergent precedent to fold into one home: `dreaming/trigger.ts` RESOLVE_POLLS; the hand-rolled loops in `tests/integration/{controlled-writes-live,graph-persist-live,ontology-*-live}.itest.ts` to delete (D-4, AC-4).
+- Poll-convergent precedent to fold into one home: `pollinating/trigger.ts` RESOLVE_POLLS; the hand-rolled loops in `tests/integration/{controlled-writes-live,graph-persist-live,ontology-*-live}.itest.ts` to delete (D-4, AC-4).
 - Redaction: `client.ts` `traceSql` (gated by `HONEYCOMB_TRACE_SQL`) redacts org, never a token — reuse it for convergence trace lines (D-5, AC-5).
 
 ## Acceptance criteria
@@ -38,7 +38,7 @@
 ## Constraints (in force)
 - Live creds `.env.local` (gitignored): `set -a; . ./.env.local; set +a`. NEVER paste the token.
 - Explicit `git add <paths>`, NEVER `-A`. Keep `.agents/.codex/.claude/.cursor`/`AGENTS.md`/`.env.local`/`.secrets`/`EXECUTION_LEDGER-prd-026..030.md` (other PRDs') OUT. Verify new files not gitignore-swallowed.
-- Daemon running on 127.0.0.1:3850 (dreaming enabled) — leave it. Poll-convergent live read-backs always.
+- Daemon running on 127.0.0.1:3850 (pollinating enabled) — leave it. Poll-convergent live read-backs always.
 
 ## Status log
 - Phase 0 recon complete; branch cut, PRD moved backlog→in-work; stale empty backlog/prd-023 dir removed. Dispatching Wave 1.

@@ -17,7 +17,7 @@ The storage write model is append-only by design: `appendVersionBumped` (`src/da
 INSERTs a NEW row at `version` = N+1 on EVERY edit to skills, rules, and claim history; a read takes
 `ORDER BY version DESC LIMIT 1`. That correctly survives DeepLake's lack of transactions (it coalesces rapid
 in-place UPDATEs and silently drops one) — but it means versioned tables GROW UNBOUNDEDLY: a claim edited
-1,000 times is 1,000 rows, and every highest-version read scans all of them. The dreaming `compaction.ts`
+1,000 times is 1,000 rows, and every highest-version read scans all of them. The pollinating `compaction.ts`
 exists as a payload strategy for the *graph* (it assembles a full-graph prompt for the model), but there is
 NO routine that PRUNES the storage-level version history — nothing reaps superseded/old `version` rows. At
 scale this inflates storage AND read cost on the hottest tables. This PRD adds the missing version-history
@@ -30,10 +30,10 @@ A compactor that reaps version-bumped history WITHOUT changing current-state rea
 - **What is safe to compact.** ONLY versions strictly BELOW the highest live version per logical key/id, and
   ONLY after a retention window (keep-latest-N and/or a time window) so recent lineage stays auditable. The
   highest-version row per key is NEVER touched — current state is invariant across compaction.
-- **Where it runs.** Decide (D-2): a Dreaming pass that couples to PRD-026's enabled runner (compaction-as-
+- **Where it runs.** Decide (D-2): a Pollinating pass that couples to PRD-026's enabled runner (compaction-as-
   maintenance, reusing the job queue + single-pending guard) vs a standalone maintenance job. Lay out the
-  tradeoff; default toward the standalone maintenance job keyed by the same `dreaming_state`-style cadence so
-  it can run even when the premium dreaming loop is OFF.
+  tradeoff; default toward the standalone maintenance job keyed by the same `pollinating_state`-style cadence so
+  it can run even when the premium pollinating loop is OFF.
 - **Read-correctness under eventual consistency.** Compaction MUST NOT race a reader into a stale-empty state.
   DeepLake flaps stale segments, so deletes must be ordered so the highest-version row is always resolvable:
   reap old versions only after confirming (poll-convergently) the surviving highest version is durably
@@ -45,7 +45,7 @@ A compactor that reaps version-bumped history WITHOUT changing current-state rea
   highest-version read UNCHANGED (byte-identical) before and after, and the total row count strictly dropping.
 
 Out: changing the append-only write pattern itself (correctness depends on it); the graph-consolidation
-semantics (merge/supersede/prune of entities — that is the Dreaming loop, PRD-009/026); compacting
+semantics (merge/supersede/prune of entities — that is the Pollinating loop, PRD-009/026); compacting
 append-only EVENT tables that have no version concept (sessions/raw events — those are not version-bumped).
 
 ## Decisions
@@ -54,12 +54,12 @@ append-only EVENT tables that have no version concept (sessions/raw events — t
   the highest version ALWAYS, plus the most-recent N prior versions, plus any version inside a retention time
   window (e.g. last 30 days), whichever is larger. Default conservative (e.g. N=5 + 30-day window) so routine
   compaction never reaps recently-auditable lineage. Below the window AND below N → eligible to reap.
-- **D-2 — Compaction-as-dreaming-pass vs standalone maintenance job.** Lay out both: (a) a dreaming pass
-  couples to PRD-026's runner and inherits the single-pending guard + queue, but only runs when dreaming is
+- **D-2 — Compaction-as-pollinating-pass vs standalone maintenance job.** Lay out both: (a) a pollinating pass
+  couples to PRD-026's runner and inherits the single-pending guard + queue, but only runs when pollinating is
   ENABLED (premium tier); (b) a standalone maintenance-loop job runs regardless of the premium switch and is
   the right home for a storage-hygiene chore that every install needs. DECISION: standalone maintenance job
   as the primary, exposed via a `honeycomb` maintenance verb; optionally ALSO triggerable as a step of a
-  dreaming pass when 026 is enabled. This keeps storage-bounding from being gated behind premium dreaming.
+  pollinating pass when 026 is enabled. This keeps storage-bounding from being gated behind premium pollinating.
 - **D-3 — Reap order is delete-old-after-confirming-survivor (eventual-consistency-safe).** Resolve the
   highest version per key POLL-CONVERGENTLY (the `trigger.ts` `RESOLVE_POLLS` posture), confirm it is durably
   readable, THEN delete eligible lower versions. Never delete the only readable copy of current state, and
@@ -75,7 +75,7 @@ append-only EVENT tables that have no version concept (sessions/raw events — t
   operator can see what was collapsed. No source-backed current claim is ever reaped (it is the highest
   version).
 - **D-6 — Scope: version-bumped tables only.** Compaction targets `appendVersionBumped` tables (skills,
-  rules, claim history, `dreaming_state`-style counters). It does NOT touch `appendOnlyInsert` event tables
+  rules, claim history, `pollinating_state`-style counters). It does NOT touch `appendOnlyInsert` event tables
   (sessions/raw events) — those have no version-supersession concept and their retention is a separate concern.
 
 ## Acceptance criteria
@@ -99,7 +99,7 @@ append-only EVENT tables that have no version concept (sessions/raw events — t
 - **AC-6 — Lineage + safety + gates.** No source-backed current claim is reaped; reaped counts are logged per
   table/key; `npm run ci`, `build`, `audit:sql`, `audit:openclaw`, and the invariant test pass. The live
   itest is gated (creds-only, skipped in CI) and isolates to a throwaway, namespaced table it is free to DROP
-  (the same isolation the live counter smoke uses), never a real `dreaming_state`/skills/rules table.
+  (the same isolation the live counter smoke uses), never a real `pollinating_state`/skills/rules table.
 
 ## Risks / Out of scope
 
@@ -108,8 +108,8 @@ append-only EVENT tables that have no version concept (sessions/raw events — t
   eventual-consistency poll reads — a single immediate read after a delete is forbidden.
 - **Risk — reaping auditable lineage too aggressively.** Mitigated by D-1's conservative keep-latest-N +
   time-window default; reaping is logged so an operator can widen the window if needed.
-- **Risk — gating storage hygiene behind premium dreaming.** Mitigated by D-2: the primary path is a
-  standalone maintenance job, not a dreaming-only pass.
+- **Risk — gating storage hygiene behind premium pollinating.** Mitigated by D-2: the primary path is a
+  standalone maintenance job, not a pollinating-only pass.
 - **Out of scope.** Changing the append-only write model (correctness depends on it). Graph consolidation
   semantics (PRD-009/026). Event-table (`appendOnlyInsert`) retention. A general TTL/GC for non-versioned
   tables.
@@ -120,18 +120,18 @@ append-only EVENT tables that have no version concept (sessions/raw events — t
   reaps its history) and the guarded `sql.ts` helpers (every value/identifier through `sLiteral`/`sqlIdent`).
 - **Poll-convergent reads** — the `trigger.ts` `RESOLVE_POLLS` posture is mandatory for resolving the
   highest version per key before reaping (D-3) and on every read-back assertion.
-- **PRD-026 (Dreaming loop enablement)** — IF compaction is wired as a dreaming pass (D-2 option b), it rides
+- **PRD-026 (Pollinating loop enablement)** — IF compaction is wired as a pollinating pass (D-2 option b), it rides
   PRD-026's enabled runner + single-pending guard + job queue. The standalone-maintenance primary path does
-  NOT require 026, but the optional dreaming-pass coupling does — so this PRD likely follows 026.
-- **PRD-009 (Dreaming Loop)** — the `compaction.ts` module + the maintenance-loop cadence this work extends.
+  NOT require 026, but the optional pollinating-pass coupling does — so this PRD likely follows 026.
+- **PRD-009 (Pollinating Loop)** — the `compaction.ts` module + the maintenance-loop cadence this work extends.
 - Throwaway-table isolation — the live itest reuses the namespaced-throwaway-table pattern the live counter
   smoke uses, so it never touches a real shared table.
 
 ## Reference
 
-- The gap to fill: storage-level version-history reaping for `appendVersionBumped` tables; the dreaming
-  `compaction.ts` (`src/daemon/runtime/dreaming/compaction.ts`) is graph-prompt assembly, NOT version reaping.
+- The gap to fill: storage-level version-history reaping for `appendVersionBumped` tables; the pollinating
+  `compaction.ts` (`src/daemon/runtime/pollinating/compaction.ts`) is graph-prompt assembly, NOT version reaping.
 - Write model: `src/daemon/storage/writes.ts` (`appendVersionBumped`, `appendOnlyInsert`, the `val.*` /
   `sLiteral` / `sqlIdent` guards), `src/daemon/storage/sql.ts`.
-- Poll-convergent read posture: `src/daemon/runtime/dreaming/trigger.ts` (`RESOLVE_POLLS`, `readState`).
-- Related feature: `library/requirements/in-work/prd-009-dreaming-loop/` and PRD-026.
+- Poll-convergent read posture: `src/daemon/runtime/pollinating/trigger.ts` (`RESOLVE_POLLS`, `readState`).
+- Related feature: `library/requirements/in-work/prd-009-pollinating-loop/` and PRD-026.

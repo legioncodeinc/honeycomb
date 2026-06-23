@@ -50,7 +50,7 @@ function target(overrides: Partial<Target> = {}): Target {
 function call(messages: InferenceRequest["messages"], apiKey = "sk-ant-secret-KEY", maxTokens?: number): ProviderCall {
 	const request: InferenceRequest = {
 		requestId: "req-1",
-		workload: "memory_dreaming",
+		workload: "memory_pollinating",
 		messages,
 		...(maxTokens === undefined ? {} : { maxTokens }),
 	};
@@ -86,7 +86,7 @@ describe("AC-T transport: request reshaping (system split, max_tokens, model)", 
 
 		await transport.execute(
 			call([
-				{ role: "system", content: "you are a dreamer" },
+				{ role: "system", content: "you are a pollinator" },
 				{ role: "user", content: "consolidate" },
 				{ role: "assistant", content: "thinking" },
 			]),
@@ -106,7 +106,7 @@ describe("AC-T transport: request reshaping (system split, max_tokens, model)", 
 		};
 		expect(body.model).toBe("claude-sonnet-4-6");
 		expect(body.max_tokens).toBe(DEFAULT_MAX_TOKENS);
-		expect(body.system).toBe("you are a dreamer");
+		expect(body.system).toBe("you are a pollinator");
 		expect(body.messages).toEqual([
 			{ role: "user", content: "consolidate" },
 			{ role: "assistant", content: "thinking" },
@@ -151,14 +151,14 @@ describe("AC-T transport: response content[] join → output", () => {
 	});
 
 	it("stream yields a single terminal chunk carrying the full text", async () => {
-		const { fetch } = recordingFetch(okResponse([{ type: "text", text: "dreamed" }]));
+		const { fetch } = recordingFetch(okResponse([{ type: "text", text: "pollinated" }]));
 		const transport = createAnthropicTransport({ fetch });
 
 		const chunks: string[] = [];
 		for await (const c of transport.stream(call([{ role: "user", content: "hi" }]))) {
 			chunks.push(c.delta);
 		}
-		expect(chunks).toEqual(["dreamed"]);
+		expect(chunks).toEqual(["pollinated"]);
 	});
 });
 

@@ -6,4 +6,4 @@
 <Kpi label="Est. savings" value="2.4" unit="M tok" accent="verified" delta={8} />
 ```
 
-`accent`: honey | dream | verified | neutral. Pass `delta` for the trend line (▲ green / ▼ red).
+`accent`: honey | pollinate | verified | neutral. Pass `delta` for the trend line (▲ green / ▼ red).

@@ -72,7 +72,7 @@ parent PRD asks for: hash avoids server route config the daemon host deliberatel
   - The Shell renders `<Sidebar … />` (037a) beside an `<Outlet route={route} />` that looks up the registry (037c)
     and renders the matched page component. Layout: a flex/grid with the sidebar gutter + the content max-width (037c
     D-8).
-  - The "Dream now" action + the org/workspace identity move with the old `Header` into the shell chrome (D-5);
+  - The "Pollinate now" action + the org/workspace identity move with the old `Header` into the shell chrome (D-5);
     `DashboardPage` no longer renders its own header.
 - **`DashboardPage` (the lift-and-shift, D-6):** a new `src/dashboard/web/pages/dashboard.tsx` holding the CURRENT
   `app.tsx` body (KPI row → health strip → recall bar → cards → `grid2` → live log) verbatim, hydrating from the same

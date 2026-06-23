@@ -63,7 +63,7 @@
 **Close-out** — security-stinger (prompt-injection/path-traversal on artifact install + frontmatter stamping; tenancy isolation of the Team/Device audience; `.bak`/retraction never escapes the install root; daemon-only access) → quality-stinger. **Dogfood:** run the live propagation end-to-end before declaring done (per project memory — wiring PRDs hide integration bugs that isolated unit tests miss).
 
 ## Constraints (in force)
-- Live creds `.env.local` (gitignored): `set -a; . ./.env.local; set +a`; NEVER paste the token. Explicit `git add <paths>`, NEVER `-A`. Keep `.agents/.codex/.claude/.cursor`/`AGENTS.md`/`.env.local`/`.secrets`/`.vault`/`.settings`/other PRDs' EXECUTION_LEDGER OUT. New source files not gitignore-swallowed (verify before push). NEVER touch `~/.deeplake/credentials.json` destructively. Daemon on 3850 (dreaming enabled) — leave it; tests bind EPHEMERAL ports only. Every live read-back polls to convergence.
+- Live creds `.env.local` (gitignored): `set -a; . ./.env.local; set +a`; NEVER paste the token. Explicit `git add <paths>`, NEVER `-A`. Keep `.agents/.codex/.claude/.cursor`/`AGENTS.md`/`.env.local`/`.secrets`/`.vault`/`.settings`/other PRDs' EXECUTION_LEDGER OUT. New source files not gitignore-swallowed (verify before push). NEVER touch `~/.deeplake/credentials.json` destructively. Daemon on 3850 (pollinating enabled) — leave it; tests bind EPHEMERAL ports only. Every live read-back polls to convergence.
 
 ## Status log
 - Phase 0 recon complete (11-point surface map); branch cut, PRD moved backlog→in-work; OQ decisions D-1..D-7 locked. Dispatching Wave 1 (033a foundation + shared contracts).

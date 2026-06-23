@@ -7,7 +7,7 @@
    Two accents only:
      --honey  : the brand. Memory, recall, the live comb. Scarcity
                 rule applies — one saturated honey region per view.
-     --dream  : violet. Reserved for the Dreaming consolidation
+     --pollinate  : violet. Reserved for the Pollinating consolidation
                 loop and night/maintenance states. Never decorative.
    Use these tokens; never raw hex outside this file.
    ============================================================ */
@@ -49,13 +49,13 @@
   --honey-500: #A86A07;
   --honey-600: #6E4604;
 
-  /* ---- Dream: VIOLET (the Dreaming loop + night states) -------- */
-  --dream:          #8B7CF0;
-  --dream-hover:    #A89CF5;
-  --dream-pressed:  #6E5DDB;
-  --dream-subtle:   rgba(139, 124, 240, 0.14);
-  --dream-border:   rgba(139, 124, 240, 0.34);
-  --dream-on:       #0B0814;
+  /* ---- Pollinate: VIOLET (the Pollinating loop + night states) -------- */
+  --pollinate:          #8B7CF0;
+  --pollinate-hover:    #A89CF5;
+  --pollinate-pressed:  #6E5DDB;
+  --pollinate-subtle:   rgba(139, 124, 240, 0.14);
+  --pollinate-border:   rgba(139, 124, 240, 0.34);
+  --pollinate-on:       #0B0814;
 
   /* ---- Severity (semantic; never decorative) ------------------- */
   --severity-critical:    #FF5C63;
@@ -98,10 +98,10 @@
   --honey-border:   rgba(183, 121, 10, 0.30);
   --honey-on:       #FFFFFF;
 
-  --dream:          #6E5DDB;
-  --dream-hover:    #5B49C6;
-  --dream-subtle:   rgba(110, 93, 219, 0.10);
-  --dream-border:   rgba(110, 93, 219, 0.28);
+  --pollinate:          #6E5DDB;
+  --pollinate-hover:    #5B49C6;
+  --pollinate-subtle:   rgba(110, 93, 219, 0.10);
+  --pollinate-border:   rgba(110, 93, 219, 0.28);
 
   --severity-critical:    #D93741;
   --severity-warning:     #B5790A;

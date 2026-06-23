@@ -27,7 +27,7 @@ it does NOT own the CLI verb (032b), the dashboard panel (032c), or the assembly
 
 - The `honeycomb settings` CLI verb and provider/model selector (032b).
 - The dashboard Settings panel (032c).
-- Reading vault settings at assembly to drive inference/dreaming (032d).
+- Reading vault settings at assembly to drive inference/pollinating (032d).
 - A SQLite/relational substrate (PRD-032 D-1 keeps the file store); a hosted/synced backend; deleting or
   perm-tightening the plaintext DeepLake file (deferred, PRD-032 D-3).
 
@@ -73,7 +73,7 @@ it does NOT own the CLI verb (032b), the dashboard panel (032c), or the assembly
   behavior bit-for-bit (PRD-012 ACs must still pass).
 - The migration is COPY-not-move: read the token via the existing `loadCredentials`
   (`src/daemon/runtime/auth/credentials-store.ts`), write it as a `secret` record, and DO NOT touch the file.
-- Settings values are small typed JSON (active provider/model, `dreaming.enabled` bool, dashboard prefs);
+- Settings values are small typed JSON (active provider/model, `pollinating.enabled` bool, dashboard prefs);
   zod-validate per the class schema so a malformed write is rejected at the boundary.
 - Keep `audit:sql` clean — the vault is file-only, no catalog table, no SQL (the PRD-012 invariant).
 

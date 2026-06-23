@@ -11,7 +11,7 @@
 The dashboard's **Team skills** KPI is wrong. In `src/dashboard/web/app.tsx` it is computed as:
 
 ```tsx
-<Kpi label="Team skills" value={skills.length} accent="dream" />
+<Kpi label="Team skills" value={skills.length} accent="pollinate" />
 ```
 
 where `skills` is the array from the skill-sync view — which, before PRD-036, came from the `skills` table
@@ -53,7 +53,7 @@ already lists every skill with its state (PRD-036b).
   `fetchKpisView` (`src/daemon/runtime/dashboard/api.ts`) from the substrate, and bind the KPI to that.
   Prefer the explicit `KpisView` field so the KPI does not depend on the panel's array length.
 - Update `src/dashboard/web/app.tsx`:
-  `<Kpi label="Team skills" value={teamSkillCount} accent="dream" />` (or the filtered count), no longer
+  `<Kpi label="Team skills" value={teamSkillCount} accent="pollinate" />` (or the filtered count), no longer
   `skills.length`.
 - If a `KpisView` field is added, extend `KpisView` in `src/dashboard/contracts.ts` and `KpisSchema` in
   `src/dashboard/web/wire.ts` (both already tolerant via `.catch(...)`).

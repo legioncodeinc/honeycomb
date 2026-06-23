@@ -358,7 +358,7 @@ function HarnessDetail({
 			<div className="kpirow" style={{ marginBottom: 18 }}>
 				<Kpi label="Turns" value={status.turnsCaptured.toLocaleString()} accent={status.active ? "verified" : "neutral"} />
 				<Kpi label="Installed" value={status.installed ? "yes" : "no"} accent={status.installed ? "honey" : "neutral"} />
-				<Kpi label="Runtime" value={status.runtimePath || "—"} accent="dream" />
+				<Kpi label="Runtime" value={status.runtimePath || "—"} accent="pollinate" />
 			</div>
 
 			{/* Capability panels — driven by the descriptor; a missing capability omits its panel (c-AC-3). */}

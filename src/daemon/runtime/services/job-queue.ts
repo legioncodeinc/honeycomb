@@ -116,7 +116,7 @@ export interface JobQueueService extends DaemonService {
 	 * column is in `kinds` is leasable — every other queued/failed job is left
 	 * untouched. Omitting it (the default) leases ANY kind, so existing callers are
 	 * byte-identical. The filter exists so a kind-specialized worker (e.g. the
-	 * dreaming worker) NEVER leases — and then `fail()`s — a foreign kind it cannot
+	 * pollinating worker) NEVER leases — and then `fail()`s — a foreign kind it cannot
 	 * run, which would otherwise walk a legit `summary`/`skillify` job to dead.
 	 */
 	lease(kinds?: readonly string[]): Promise<LeasedJob | null>;

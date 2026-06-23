@@ -7,7 +7,7 @@ The on-disk shape of a Honeycomb workspace: the identity files that shape the ne
 **Related:**
 - [`schema.md`](schema.md)
 - [`deeplake-storage.md`](deeplake-storage.md)
-- [`../ai/dreaming-loop.md`](../ai/dreaming-loop.md)
+- [`../ai/pollinating-loop.md`](../ai/pollinating-loop.md)
 - [`../architecture/daemon-surface.md`](../architecture/daemon-surface.md)
 - [`../multi-tenant/org-workspace-model.md`](../multi-tenant/org-workspace-model.md)
 - [`../security/secrets.md`](../security/secrets.md)
@@ -32,7 +32,7 @@ $HONEYCOMB_WORKSPACE/                 (default ~/.honeycomb/)
 ├── IDENTITY.md                       # optional identity metadata
 ├── USER.md                           # optional user profile and relationship context
 ├── MEMORY.md                         # generated working-memory summary
-├── DREAMING.md                       # optional dreaming-session prompt (not loaded normally)
+├── POLLINATING.md                       # optional pollinating-session prompt (not loaded normally)
 ├── HEARTBEAT.md                      # optional background-check prompt
 ├── BOOTSTRAP.md                      # optional first-run prompt
 ├── memory/
@@ -63,7 +63,7 @@ These files are the seams the project cares most about, because they go directly
 
 `MEMORY.md` is generated. The synthesis worker rebuilds it from durable memories, thread heads, and the session ledger, all read from DeepLake. It is a working summary loaded at session start, not canonical history, and it should not be hand-edited. On regeneration the daemon backs up the previous copy before writing the new one.
 
-`DREAMING.md`, `HEARTBEAT.md`, and `BOOTSTRAP.md` are special-session prompts that are not part of normal startup. `DREAMING.md` in particular is loaded only for the dreaming pass described in [`../ai/dreaming-loop.md`](../ai/dreaming-loop.md).
+`POLLINATING.md`, `HEARTBEAT.md`, and `BOOTSTRAP.md` are special-session prompts that are not part of normal startup. `POLLINATING.md` in particular is loaded only for the pollinating pass described in [`../ai/pollinating-loop.md`](../ai/pollinating-loop.md).
 
 ## Identity loading presets
 
@@ -71,9 +71,9 @@ The identity preset decides which files load at startup and in what order.
 
 | Preset | Startup load order | Special files |
 |---|---|---|
-| `minimal` (default) | `AGENTS.md` | `DREAMING.md` for dreaming sessions |
+| `minimal` (default) | `AGENTS.md` | `POLLINATING.md` for pollinating sessions |
 | `hermes` | `SOUL.md`, then `AGENTS.md` | matches Hermes SOUL-primary convention |
-| `openclaw` | `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `MEMORY.md` | `HEARTBEAT.md`, `DREAMING.md`, `BOOTSTRAP.md` |
+| `openclaw` | `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `MEMORY.md` | `HEARTBEAT.md`, `POLLINATING.md`, `BOOTSTRAP.md` |
 | `custom` | user-specified ordered list | user-specified |
 
 Each entry in a preset carries a path, a role (such as `operating_instructions` or `user_profile`), and a token budget.

@@ -386,8 +386,8 @@ const DEFAULT_LOGGER: GraphPersistLogger = {
  *
  * It is model-free, network-free, append-only, and idempotent by deterministic
  * `(memoryId, entityId)` mention id — so re-running it (a job retry, OR the future
- * 045d dreaming consolidation pass) writes NOTHING new. That idempotency is what makes
- * the pipeline-apply path and the dreaming-apply path safe to BOTH invoke without
+ * 045d pollinating consolidation pass) writes NOTHING new. That idempotency is what makes
+ * the pipeline-apply path and the pollinating-apply path safe to BOTH invoke without
  * double-writing the same mention (the 045d coordination contract).
  */
 export type InlineLinker = (
@@ -415,7 +415,7 @@ export type InlineLinker = (
  *   - PRD-045c (c-AC-1): AFTER the entities exist, runs the inline linker over the
  *     committed memory's `content` so proper-noun mentions link to the just-created
  *     entities — the LIVE invocation the inline linker never had. Idempotent +
- *     append-only, so a job retry (or the 045d dreaming pass) re-links nothing.
+ *     append-only, so a job retry (or the 045d pollinating pass) re-links nothing.
  *   - All writes idempotent via deterministic ids + poll-convergent dedup (d-AC-2).
  *   - All rows carry `agent_id` from `scope` (d-AC-5).
  */
@@ -463,7 +463,7 @@ export async function persistGraphEntities(
 	//    created the entities, so the linker now resolves them by exact canonical name and
 	//    links the memory's proper-noun mentions to them. It is append-only + idempotent by
 	//    deterministic `(memoryId, entityId)` id (its own `mention_*` lineage), so it never
-	//    double-writes — re-running this stage (a retry) OR the future 045d dreaming pass
+	//    double-writes — re-running this stage (a retry) OR the future 045d pollinating pass
 	//    re-links nothing. A linker error is non-fatal here too (the handler wraps the whole
 	//    body, d-AC-3): linking is a derived index over the committed facts, never a gate.
 	const linkContent = content !== "" ? content : triples.map((t) => `${t.source} ${t.target}`).join(". ");
@@ -501,7 +501,7 @@ export interface GraphPersistHandlerDeps {
 	 * The inline entity LINKER invoked on the live write path (PRD-045c c-AC-1). Defaults to
 	 * the real {@link inlineLinkMemory}; a unit test injects a recorder so the live invocation
 	 * is provable. Idempotent + append-only, so it is safe to invoke alongside the future 045d
-	 * dreaming consolidation pass without double-writing the same mention.
+	 * pollinating consolidation pass without double-writing the same mention.
 	 */
 	readonly linkMemory?: InlineLinker;
 }

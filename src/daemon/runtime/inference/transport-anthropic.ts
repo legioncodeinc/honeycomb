@@ -5,7 +5,7 @@
  * The router (`router.ts` `executeWithFallback`) resolves an account's secret and
  * hands a {@link ProviderCall} to a {@link ProviderTransport}. Wave 1 shipped ONLY
  * the seam + `createFakeProviderTransport`; this module is the real HTTP body that
- * lets the daemon make an actual `memory_dreaming` call against Anthropic.
+ * lets the daemon make an actual `memory_pollinating` call against Anthropic.
  *
  * ── What this transport does ─────────────────────────────────────────────────
  *   - `execute(call)` POSTs `https://api.anthropic.com/v1/messages` with the
@@ -14,7 +14,7 @@
  *     hoisted to the top-level `system` string; the rest become the `messages`
  *     array; `max_tokens` is REQUIRED so a default is supplied), and joins the
  *     response `content[]` text blocks into the returned {@link ProviderResult.output}.
- *   - `stream(call)` is a THIN wrapper over `execute`: the dreaming path consumes a
+ *   - `stream(call)` is a THIN wrapper over `execute`: the pollinating path consumes a
  *     whole completion (it parses a mutation set defensively, not a token stream),
  *     so streaming yields a single terminal {@link ProviderChunk} carrying the full
  *     text. The seam shape is honoured so a future caller that DOES stream can swap
@@ -59,7 +59,7 @@ export const ANTHROPIC_VERSION = "2023-06-01" as const;
 /**
  * The fallback `max_tokens` when a request omits its own. The Anthropic Messages
  * API REQUIRES `max_tokens`, so the transport always sends one. 4096 is a sane
- * ceiling for the dreaming workload's mutation-set completion.
+ * ceiling for the pollinating workload's mutation-set completion.
  */
 export const DEFAULT_MAX_TOKENS = 4096 as const;
 
@@ -206,7 +206,7 @@ export function createAnthropicTransport(deps: AnthropicTransportDeps = {}): Pro
 			return { output };
 		},
 		stream(call: ProviderCall): AsyncIterable<ProviderChunk> {
-			// The dreaming path consumes a whole completion, not a token stream, so this
+			// The pollinating path consumes a whole completion, not a token stream, so this
 			// is a thin non-stream execute that yields one terminal chunk carrying the
 			// full text. The seam shape is preserved; a real SSE body can replace this
 			// later without touching the router (documented in the module header).

@@ -33,7 +33,7 @@ React views; it adds NO new ranking and no new daemon surface, except possibly a
 
 - ADD / EDIT / delete controls — those are 040b. 040a is read-only; the detail view is where 040b later hangs its
   Edit affordance, but 040a ships the view, not the mutation.
-- Compaction / dreaming / watch — those are 040c.
+- Compaction / pollinating / watch — those are 040c.
 - New recall ranking, hybrid weighting, or embedding strategy — recall is consumed verbatim (PRD-007/027).
 - Cross-tenant or team-mode browsing — LOCAL-MODE single-tenant only, like the rest of `/dashboard`.
 

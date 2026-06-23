@@ -126,7 +126,7 @@ function asGetBody(body: unknown): SettingGetBody {
 /**
  * Coerce a CLI string `value` into the typed scalar the `setting` class stores. `true`/`false` →
  * boolean; a finite numeric string → number; everything else stays a string. This mirrors the
- * `setting`-class schema (string | number | boolean) so `set dreaming.enabled true` stores a real
+ * `setting`-class schema (string | number | boolean) so `set pollinating.enabled true` stores a real
  * boolean, not the string `"true"`. The daemon re-validates with the zod class schema regardless.
  */
 export function coerceSettingValue(value: string): SettingValue {
@@ -141,7 +141,7 @@ export function coerceSettingValue(value: string): SettingValue {
 }
 
 /**
- * Render `settings list`: the current settings (provider/model/dreaming/prefs) one per line, then
+ * Render `settings list`: the current settings (provider/model/pollinating/prefs) one per line, then
  * a compact catalog footer. NEVER prints a secret value — `GET /api/settings` returns ONLY the
  * `setting` class, so no key/token can appear; a settings line is `key = value` for the daemon-
  * readable scalar. An empty settings map prints an honest "no settings stored yet".
@@ -150,7 +150,7 @@ function renderList(body: SettingsListBody, out: OutputSink): void {
 	const settings = body.settings ?? {};
 	const keys = Object.keys(settings).sort();
 	if (keys.length === 0) {
-		out("settings: none stored yet (provider/model fall back to agent.yaml; dreaming to the env var).");
+		out("settings: none stored yet (provider/model fall back to agent.yaml; pollinating to the env var).");
 	} else {
 		out("settings:");
 		for (const key of keys) {

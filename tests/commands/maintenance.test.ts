@@ -12,7 +12,7 @@
  *     handler and reaches the daemon seam exactly once (no DeepLake import — enforced by the
  *     `src/commands` NON_DAEMON_ROOT invariant test).
  *
- * Every case drives an injected {@link FakeDaemonClient} (mirrors dream.test.ts) — no socket,
+ * Every case drives an injected {@link FakeDaemonClient} (mirrors pollinate.test.ts) — no socket,
  * no live daemon, no live DeepLake.
  */
 
@@ -40,7 +40,7 @@ const SUMMARY_BODY = {
 		{ table: "skills", keysScanned: 3, keysCompacted: 1, rowsReaped: 7, keysSkipped: 0, errored: 0 },
 		{ table: "rules", keysScanned: 2, keysCompacted: 0, rowsReaped: 0, keysSkipped: 1, errored: 0 },
 	],
-	skippedTables: ["dreaming_state"],
+	skippedTables: ["pollinating_state"],
 } as const;
 
 describe("PRD-030 D-2 — `honeycomb maintenance compact` routes through the daemon seam", () => {

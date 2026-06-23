@@ -6,7 +6,7 @@
  * (NEVER a throw). The working path is exercised end-to-end through the REAL
  * pieces — the real `.secrets/` store + the real `createSecretResolver` + the real
  * Anthropic transport — with `globalThis.fetch` stubbed so NO network is touched
- * and the fake provider output flows back through `complete("memory_dreaming", …)`.
+ * and the fake provider output flows back through `complete("memory_pollinating", …)`.
  */
 
 import { mkdtempSync, rmSync } from "node:fs";
@@ -25,7 +25,7 @@ import { buildInferenceModelClient } from "../../../../src/daemon/runtime/infere
 
 const SCOPE: SecretScope = { org: "acme", workspace: "backend" };
 
-/** A complete, routable inference config (single Anthropic account → sonnet → dreaming). */
+/** A complete, routable inference config (single Anthropic account → sonnet → pollinating). */
 function routableConfig(): InferenceConfig {
 	return {
 		accounts: [{ id: "anthropic-main", provider: "anthropic", apiKeyRef: "${ANTHROPIC_API_KEY}" }],
@@ -42,7 +42,7 @@ function routableConfig(): InferenceConfig {
 		policies: [{ id: "default", mode: "strict", chain: ["sonnet"] }],
 		workloads: [
 			{
-				name: "memory_dreaming",
+				name: "memory_pollinating",
 				policyRef: "default",
 				requiredCapabilities: ["chat"],
 				minPrivacyTier: "private",
@@ -75,7 +75,7 @@ describe("AC-T factory: no config → noopModelClient", () => {
 			config: join(base, "does-not-exist.yaml"),
 		});
 		expect(client).toBe(noopModelClient);
-		await expect(client.complete("memory_dreaming", "anything")).resolves.toBe("");
+		await expect(client.complete("memory_pollinating", "anything")).resolves.toBe("");
 	});
 
 	it("returns the no-op client for an empty (non-routable) config", async () => {
@@ -89,7 +89,7 @@ describe("AC-T factory: no config → noopModelClient", () => {
 });
 
 describe("AC-T factory: routable config → working RouterModelClient", () => {
-	it("complete('memory_dreaming', …) routes through the real wiring and returns the provider output", async () => {
+	it("complete('memory_pollinating', …) routes through the real wiring and returns the provider output", async () => {
 		const store = makeStore();
 		const stored = await store.setSecret("ANTHROPIC_API_KEY", "sk-ant-secret-KEY", SCOPE);
 		expect(stored.ok).toBe(true);
@@ -102,7 +102,7 @@ describe("AC-T factory: routable config → working RouterModelClient", () => {
 			return {
 				status: 200,
 				ok: true,
-				text: async () => JSON.stringify({ content: [{ type: "text", text: "DREAMED-OUTPUT" }] }),
+				text: async () => JSON.stringify({ content: [{ type: "text", text: "POLLINATED-OUTPUT" }] }),
 			};
 		}) as unknown as typeof globalThis.fetch;
 
@@ -113,8 +113,8 @@ describe("AC-T factory: routable config → working RouterModelClient", () => {
 		});
 		expect(client).not.toBe(noopModelClient);
 
-		const output = await client.complete("memory_dreaming", "consolidate the graph");
-		expect(output).toBe("DREAMED-OUTPUT");
+		const output = await client.complete("memory_pollinating", "consolidate the graph");
+		expect(output).toBe("POLLINATED-OUTPUT");
 		expect(seen).toHaveLength(1);
 		expect(seen[0]?.apiKey).toBe("sk-ant-secret-KEY");
 		// The prompt is wrapped as a single user message (RouterModelClient's mapping).
@@ -149,7 +149,7 @@ describe("AC-T factory: routable config → working RouterModelClient", () => {
 		});
 		expect(client).not.toBe(noopModelClient);
 
-		const output = await client.complete("memory_dreaming", "consolidate the graph");
+		const output = await client.complete("memory_pollinating", "consolidate the graph");
 		expect(output).toBe("OPUS-OUTPUT");
 		expect(seen).toHaveLength(1);
 		// The vault model — NOT the agent.yaml `claude-sonnet-4-6` — reached the provider call.
@@ -180,7 +180,7 @@ describe("AC-T factory: routable config → working RouterModelClient", () => {
 			config: routableConfig(),
 			// no providerModelOverride.
 		});
-		await client.complete("memory_dreaming", "go");
+		await client.complete("memory_pollinating", "go");
 		const body = JSON.parse(seen[0]?.body ?? "{}") as { model: string };
 		expect(body.model).toBe("claude-sonnet-4-6");
 	});
@@ -199,6 +199,6 @@ describe("AC-T factory: routable config → working RouterModelClient", () => {
 			config: routableConfig(),
 		});
 		expect(client).not.toBe(noopModelClient);
-		await expect(client.complete("memory_dreaming", "go")).rejects.toThrow();
+		await expect(client.complete("memory_pollinating", "go")).rejects.toThrow();
 	});
 });
