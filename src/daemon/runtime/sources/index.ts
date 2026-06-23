@@ -96,11 +96,35 @@ export {
 	type DocumentWorkerDeps,
 	documentIdForUrl,
 	echoDocumentContentFetcher,
+	isBlockedUrlError,
 	noopDocumentJobProgress,
 	type RawDocumentChunkConfig,
 	resolveDocumentChunkConfig,
 	type SubmitResult,
 } from "./document-worker.js";
+
+// ── The SSRF-safe URL document fetcher (PRD-045 W1 remediation) ──────────────
+export {
+	bytesToText,
+	classifyBlockedAddress,
+	createUrlDocumentFetcher,
+	DEFAULT_FETCH_TIMEOUT_MS,
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_REDIRECTS,
+	isSsrfBlockedError,
+	SsrfBlockedError,
+	type UrlFetcherOptions,
+} from "./url-fetcher.js";
+
+// ── The registry + provider resolver + assembly helper (PRD-045e) ────────────
+export {
+	buildSourcesApiDeps,
+	createSourceProviderResolver,
+	DeeplakeSourceRegistry,
+	SOURCE_CONFIG_KIND,
+	type SourcesApiDepsOptions,
+	sourceIdFor,
+} from "./registry.js";
 
 // ── 013c/d/e provider stubs (Wave 2 fills each) ──────────────────────────────
 export { createObsidianProvider } from "./providers/obsidian.js";

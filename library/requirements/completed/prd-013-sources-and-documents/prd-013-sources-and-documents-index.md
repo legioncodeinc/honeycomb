@@ -1,16 +1,18 @@
 # PRD-013: Sources and Documents
 
-> **Status:** Completed (code shipped) — ⚠ NOT LIVE; close-out tracked in [PRD-045e](../../in-work/prd-045-daemon-wiring-closeout/prd-045e-daemon-wiring-closeout-sources-documents.md)
+> **Status:** Completed — NOW LIVE (closed by [PRD-045e](../../in-work/prd-045-daemon-wiring-closeout/prd-045e-daemon-wiring-closeout-sources-documents.md))
 > **Priority:** P1
 > **Effort:** L
 > **Schema changes:** Additive
 
 ---
 
-> **⚠ Not live (2026-06-22 daemon-wiring audit).** `/api/sources` is deliberately deferred at the composition
-> root (`resolveProductDataDeps` omits it, `assemble.ts:732-749`) → 501 scaffold; `honeycomb sources` reaches the
-> 501; `/api/documents` 501s without a worker (`sources/api.ts:218-225`); the Obsidian/Discord/GitHub providers
-> are instantiated nowhere (dead code). Wiring close-out:
+> **✅ Now live (2026-06-22 daemon-wiring close-out, PRD-045e).** The sources and documents surface is fully wired.
+> The composition root constructs the sources registry + providers resolver and passes it into `mountProductDataApi`
+> so `mountSourcesApi` fires; `/api/sources` GET/POST/DELETE return real tenancy-scoped data (no 501). The
+> document worker is wired so `POST /api/documents` ingests through the worker (no 501); a live itest proves an
+> ingested document is recallable. The Obsidian/Discord/GitHub providers are instantiated and at least one provider
+> (Obsidian) round-trips add → list → sync. Closed by
 > [PRD-045e](../../in-work/prd-045-daemon-wiring-closeout/prd-045e-daemon-wiring-closeout-sources-documents.md).
 > Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../../in-work/prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
 

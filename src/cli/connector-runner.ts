@@ -21,10 +21,11 @@ import { fileURLToPath } from "node:url";
 import type { ConnectorRunner, ConnectorVerbArgs, ConnectorVerbResult } from "../commands/index.js";
 import {
 	ClaudeCodeConnector,
+	CodexConnector,
 	type ConnectorFs,
-	connectorMain,
 	type ConnectorRegistry,
 	CursorConnector,
+	connectorMain,
 	createNodeConnectorFs,
 	type HarnessConnector,
 } from "../connectors/index.js";
@@ -54,8 +55,8 @@ function bundleSourceFor(slug: string): string {
  */
 export function createConnectorRegistry(home: string = homedir()): ConnectorRegistry {
 	const builders: Readonly<Record<string, (fs: ConnectorFs) => HarnessConnector>> = {
-		"claude-code": (fs) =>
-			new ClaudeCodeConnector(fs, { home, bundleSource: bundleSourceFor("claude-code") }),
+		"claude-code": (fs) => new ClaudeCodeConnector(fs, { home, bundleSource: bundleSourceFor("claude-code") }),
+		codex: (fs) => new CodexConnector(fs, { home, bundleSource: bundleSourceFor("codex") }),
 		cursor: (fs) => new CursorConnector(fs, { home, bundleSource: bundleSourceFor("cursor") }),
 	};
 	return {

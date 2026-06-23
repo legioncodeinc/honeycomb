@@ -104,11 +104,18 @@ purge teardown hook (Discord d-AC-4: close the gateway).
 - `DocumentWorker` — `submit` (dedup-by-URL, b-AC-1) / `get` / `remove` (soft-delete
   doc + chunks, b-AC-5). The document lifecycle states queued→…→done (b-AC-3).
 
-## 9. Deferred daemon-assembly wiring
+## 9. Daemon-assembly wiring — LIVE by PRD-045e
 
-`mountSourcesApi` / `mountDocumentsApi` are mounted by the daemon assembly step (the
-same deferred-assembly posture as `secrets/api.ts`): the running daemon constructs
-the registry + provider resolver + (013b) document worker and calls
-`mountSourcesApi(daemon.group("/api/sources"), deps)`. 013a does NOT edit `server.ts`
-— the groups are already scaffolded + protected there. With no document worker
-injected, `/api/documents` returns an honest 501 until 013b lands.
+`mountSourcesApi` and `mountProductDocumentsApi` are mounted in the running daemon as
+of PRD-045e (2026-06-22):
+
+- `buildSourcesApiDeps` (`sources/registry.ts:280`) is called at `assemble.ts:854`,
+  threaded via `resolveProductDataDeps` (`assemble.ts:706`).
+- `/api/sources` GET/POST/DELETE return real data (no 501), tenancy-scoped.
+- `POST /api/documents` ingests through the wired document worker (no 501); a real
+  SSRF-safe `createUrlDocumentFetcher` is wired at `registry.ts:373`.
+- Obsidian provider is live; Discord and GitHub instantiate credential-free and fail-
+  soft (a provider/worker error never crashes the daemon — try/catch at `assemble.ts:852-859`).
+
+The `server.ts` route groups (`/api/sources`, `/api/documents`) were scaffolded by
+013a and remain unchanged; the assembly step is the only wiring site.

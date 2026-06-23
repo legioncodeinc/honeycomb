@@ -1,6 +1,6 @@
 # PRD-045e: Wire the Sources + Documents surface (closes PRD-013)
 
-> **Status:** Draft
+> **Status:** Completed
 > **Parent:** [PRD-045](./prd-045-daemon-wiring-closeout-index.md)
 > **Closes gap in:** PRD-013 Sources and Documents
 > **Priority:** P1

@@ -1,6 +1,6 @@
 # PRD-045c: Wire the Ontology linker + `/api/ontology` surface (closes PRD-008)
 
-> **Status:** Draft
+> **Status:** Completed
 > **Parent:** [PRD-045](./prd-045-daemon-wiring-closeout-index.md)
 > **Closes gap in:** PRD-008 Knowledge Graph and Ontology
 > **Priority:** P1

@@ -2,11 +2,19 @@
  * PRD-011e — agent scoping verified against the EXISTING buildScopeClause (D-8).
  *
  * 011e does NOT rebuild the clause. `buildScopeClause` (recall/scope-clause.ts) is
- * the canonical inner-ring authorization chokepoint, already integrated in
- * recall/authorization.ts and live-proven by recall-authz-live.itest.ts. This suite
- * asserts the six e-ACs against that existing builder; each `describe` is named
- * after the AC it proves. If any e-AC genuinely fails here, that is a REAL finding
- * to report — these are expected to PASS against existing code.
+ * the canonical inner-ring authorization chokepoint, live-proven by
+ * recall-authz-live.itest.ts. This suite asserts the six e-ACs against that existing
+ * builder; each `describe` is named after the AC it proves. If any e-AC genuinely
+ * fails here, that is a REAL finding to report — these are expected to PASS against
+ * existing code.
+ *
+ * ── PRD-045b de-scope note ───────────────────────────────────────────────────
+ * The dormant five-phase `RecallEngine` (and its `recall/authorization.ts`
+ * re-query SQL builders) was removed — it had zero production callers; live recall
+ * is `recallMemories` (lexical+vector RRF). `buildScopeClause` itself is RETAINED as
+ * the canonical scope-clause chokepoint, so the e-AC assertions below target it
+ * directly (e-AC-2 no longer asserts the removed `buildAuthorizationSql` shape; it
+ * asserts the clause the chokepoint compiles, which is the live guarantee).
  *
  * e-AC-1 read_policy+policy_group → matching WHERE, values escaped via helpers.
  * e-AC-2 FTS/vector/traversal IDs → scope clause authorizes BEFORE any content load.
@@ -19,10 +27,6 @@
 import { describe, expect, it } from "vitest";
 
 import { buildScopeClause } from "../../../../src/daemon/runtime/recall/index.js";
-import {
-	buildAuthorizationSql,
-	buildBrowseAuthorizationSql,
-} from "../../../../src/daemon/runtime/recall/authorization.js";
 import { sLiteral } from "../../../../src/daemon/storage/sql.js";
 
 describe("e-AC-1 read_policy+policy_group emits the matching WHERE with escaped values", () => {
@@ -53,27 +57,18 @@ describe("e-AC-1 read_policy+policy_group emits the matching WHERE with escaped 
 	});
 });
 
-describe("e-AC-2 the scope clause authorizes IDs BEFORE any content-bearing stage loads", () => {
-	it("the authorization re-query selects id ONLY — no content column", () => {
+describe("e-AC-2 the scope clause is a pure predicate (it authorizes BEFORE content loads)", () => {
+	it("the compiled clause is a WHERE predicate, never a content projection", () => {
+		// The chokepoint compiles a read-policy predicate any authorizing read ANDs in
+		// before projecting content. The clause itself carries no SELECT and no content
+		// column — the IDs-only-before-authorization guarantee starts here at the source.
 		const clause = buildScopeClause({ agentId: "agent-a", readPolicy: "isolated" });
-		const sql = buildAuthorizationSql({ candidateIds: ["m1", "m2"], clause, filters: undefined });
-		expect(sql).not.toBeNull();
-		// IDs-only: the authorization read projects `id`, never `content`/`normalized_content`.
-		expect(sql).toContain("SELECT id AS id");
-		expect(sql).not.toContain("content");
-		// And the scope clause is ANDed in — a candidate only survives if it satisfies it.
-		expect(sql).toContain(clause.sql);
-		expect(sql).toContain("id IN (");
-	});
-
-	it("the browse authorization likewise selects id ONLY, behind the same clause", () => {
-		// The VFS browse path enumerates the authorized set; it too applies the clause
-		// before any content returns (the same chokepoint, no content projection).
-		const clause = buildScopeClause({ agentId: "agent-a", readPolicy: "isolated" });
-		const sql = buildBrowseAuthorizationSql({ clause });
-		expect(sql).toContain("SELECT id AS id");
-		expect(sql).not.toContain("content");
-		expect(sql).toContain(clause.sql);
+		expect(clause.sql).not.toContain("content");
+		expect(clause.sql).not.toMatch(/\bSELECT\b/i);
+		// The predicate restricts to the authorized agent and excludes archived rows —
+		// a candidate only survives a re-query that ANDs this clause in.
+		expect(clause.sql).toContain(`agent_id = ${sLiteral("agent-a")}`);
+		expect(clause.sql).toContain("is_deleted = 0");
 	});
 });
 

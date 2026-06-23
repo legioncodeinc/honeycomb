@@ -26,6 +26,18 @@
 import type { ScopeClause } from "./scope-clause.js";
 
 /**
+ * A minimal structured-log sink collection (and, historically, the recall phases)
+ * use to record events (e.g. `recall.collect_degraded`). Lives on the shared
+ * contract surface so the live collection path (`collection.ts`, consumed by the
+ * VFS browse seam) depends only on contracts, not on the removed five-phase engine
+ * harness (PRD-045b de-scope).
+ */
+export interface RecallLogger {
+	/** Record a structured event (e.g. `recall.collect_degraded`). */
+	event(name: string, fields?: Record<string, unknown>): void;
+}
+
+/**
  * The recall channels a candidate id can come from (a-AC-7 / FR-8). Each is a
  * distinct signal; a candidate's {@link Candidate.provenance} lists every channel
  * that surfaced it, so shaping (007d) can see whether an id rode in on one channel

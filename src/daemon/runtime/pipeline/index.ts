@@ -88,8 +88,21 @@ export {
 // ── Handler registry ──────────────────────────────────────────────────────────
 export { createPipelineHandlers, type PipelineHandlerDeps } from "./handlers.js";
 
-// ── Wave-2 stage stubs ────────────────────────────────────────────────────────
-export { createControlledWriteHandler, noopControlledWriteHandler } from "./controlled-writes.js";
-export { createDecisionHandler, noopDecisionHandler } from "./decision.js";
-export { createGraphPersistHandler, noopGraphPersistHandler } from "./graph-persist.js";
-export { createRetentionHandler, noopRetentionHandler } from "./retention.js";
+// ── Fan-out wiring (045a — the chain that advances a turn through the stages) ──
+export { controlledWriteFanOut, decisionFanOut, extractionFanOut } from "./fan-out.js";
+
+// ── Wave-2 stage stubs (now filled — 045a wires + chains them) ────────────────
+export {
+	type ControlledWriteHandlerDeps,
+	type ControlledWriteOutcome,
+	createControlledWriteHandler,
+	noopControlledWriteHandler,
+} from "./controlled-writes.js";
+export {
+	createDecisionHandler,
+	type DecisionHandlerDeps,
+	type FactDecision,
+	noopDecisionHandler,
+} from "./decision.js";
+export { createGraphPersistHandler, type GraphPersistHandlerDeps, noopGraphPersistHandler } from "./graph-persist.js";
+export { createRetentionHandler, type RetentionHandlerDeps, noopRetentionHandler } from "./retention.js";

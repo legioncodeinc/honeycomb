@@ -19,11 +19,13 @@ export {
 
 export {
 	buildHighestVersionSql,
+	DOCUMENTS_GROUP,
 	fetchRules,
 	fetchSkills,
 	GOALS_GROUP,
 	KPIS_GROUP,
 	mountProductDataApi,
+	mountProductDocumentsApi,
 	mountProductSecretsApi,
 	mountProductSourcesApi,
 	mountRulesReadApi,

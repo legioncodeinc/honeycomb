@@ -24,7 +24,7 @@ The pipeline has two halves. The first is local and happens at the end of every 
 
 ## Trigger: when the worker fires
 
-The skillify worker is owned by the honeycomb daemon (port 3850). Hooks never run the worker or talk to DeepLake directly; they signal the daemon, which owns both the worker and the only connection to the store. The triggers are wired in `src/hooks/capture.ts` after each captured event.
+The skillify worker is owned by the honeycomb daemon (port 3850) and is constructed and started by the daemon on boot (`src/daemon/runtime/assemble.ts`, `buildSkillifyWorker`). Hooks never run the worker or talk to DeepLake directly; they signal the daemon, which owns both the worker and the only connection to the store. Two triggers exist: the **stop-counter trigger** runs daemon-side in `src/daemon/runtime/capture/capture-handler.ts` after each captured stop event, checking `TurnCounters` against `HONEYCOMB_SKILLIFY_EVERY_N_TURNS`; the **session-end trigger** fires unconditionally through `src/hooks/shared/session-end.ts`, which posts to `/api/hooks/session-end` with the `"skillify"` intent.
 
 The **stop-counter trigger** increments a per-project counter after each `Stop` event. When the counter reaches `HONEYCOMB_SKILLIFY_EVERY_N_TURNS` (default 20), it resets the counter and asks the daemon to run the worker. The **session-end trigger** fires unconditionally at `Stop` / `SessionEnd` regardless of the counter, catching tail-of-session knowledge that the mid-session counter might miss.
 

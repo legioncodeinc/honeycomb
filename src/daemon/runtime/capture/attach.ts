@@ -39,7 +39,7 @@
 import type { Context } from "hono";
 import { healTargetFor } from "../../storage/catalog/index.js";
 import type { HealTarget } from "../../storage/heal.js";
-import type { StorageQuery } from "../../storage/client.js";
+import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import type { Daemon } from "../server.js";
 import type { JobQueueService } from "../services/job-queue.js";
 import type { EmbedAttachment } from "../services/embed-client.js";
@@ -75,6 +75,13 @@ export interface AttachHooksOptions {
 	readonly sessionsTarget?: HealTarget;
 	/** The non-blocking embed seam (005b). Defaults to the handler's no-op. */
 	readonly embed?: EmbedAttachment;
+	/**
+	 * PRD-045a (a-AC-2): the memory-pipeline ENTRY enqueue. Threaded to the capture
+	 * handler so an accepted turn enqueues a `memory_extraction` job. Optional — when
+	 * absent capture does not enter the pipeline (the Wave-1 posture); the daemon
+	 * assembly wires it to the pipeline fan-out.
+	 */
+	readonly enqueuePipelineEntry?: (text: string, scope: QueryScope, agentId: string) => Promise<void>;
 	/** Optional structured-log sink. */
 	readonly logger?: CaptureLogger;
 	/**
@@ -111,6 +118,7 @@ export function attachHooksHandlers(daemon: Daemon, options: AttachHooksOptions)
 		sessionsTarget: options.sessionsTarget ?? healTargetFor("sessions"),
 		queue: options.queue,
 		...(options.embed !== undefined ? { embed: options.embed } : {}),
+		...(options.enqueuePipelineEntry !== undefined ? { enqueuePipelineEntry: options.enqueuePipelineEntry } : {}),
 		...(options.logger !== undefined ? { logger: options.logger } : {}),
 	});
 	handler.register(daemon);

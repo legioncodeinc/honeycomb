@@ -71,7 +71,9 @@ Three workloads route through the same engine. `memory_extraction` selects the m
 
 ## API and CLI
 
-The native inference API exposes status, a history of redacted routing and fallback decisions (when telemetry is on), an explain endpoint that returns the routing decision without executing, a routed execute endpoint, an SSE stream endpoint, and a cancel endpoint for active streams. All of it is served by the daemon on its default port (3850).
+The native inference API and the OpenAI-compatible gateway are implemented in `src/daemon/runtime/inference/gateway.ts` (`mountInferenceGateway`) but are **not yet mounted in the daemon's composition root** (`assemble.ts`) as of PRD-045. The dreaming path reaches the router internally through the `ModelClient` seam (`src/daemon/runtime/inference/model-client-factory.ts`); external HTTP access to `/api/inference/*` and `/v1/*` is deferred to a later phase.
+
+When the gateway is wired, it will expose:
 
 ```text
 GET    /api/inference/status
@@ -80,9 +82,11 @@ POST   /api/inference/explain
 POST   /api/inference/execute
 POST   /api/inference/stream
 DELETE /api/inference/requests/:id
+GET    /v1/models
+POST   /v1/chat/completions  (streaming)
 ```
 
-The OpenAI-compatible gateway exposes `GET /v1/models` and `POST /v1/chat/completions` (streaming supported), so an existing OpenAI client can point at the daemon and get routed inference for free.
+The CLI tools (`honeycomb route list / status / doctor / explain / test / pin / unpin`) are implemented and registered.
 
 The CLI mirrors the API for operators:
 
@@ -101,4 +105,4 @@ Routing history is daemon-local and redacted: it records the route and fallback 
 
 ## Current state
 
-The shared router core (config parsing, strict/automatic/hybrid resolution, privacy/capability/context gates), the daemon router service (routed execution with fallback, workload shims), the native API, the OpenAI gateway, and the CLI tools are in place, along with daemon-local routing telemetry. Runtime degradation (treating 401/403 as expired and 429 as rate-limited) is in-memory and not yet persisted across restarts. A canonical top-level `models:` map, first-class session and subscription account lifecycle, circuit breaking with cooldown recovery, and full cost telemetry are deferred to a later phase. When this section drifts from the implementation, the implementation in `platform/daemon/src/inference-router.ts` is authoritative.
+The shared router core (config parsing, strict/automatic/hybrid resolution, privacy/capability/context gates), the daemon router service (routed execution with fallback, workload shims), and the CLI tools are in place, along with daemon-local routing telemetry. The router is reachable from within the daemon via the `ModelClient` seam used by the memory pipeline and dreaming loop. The **HTTP gateway** (`/api/inference/*` and `/v1/*`) is implemented but not yet mounted in the daemon's composition root — external HTTP access is deferred (PRD-045 scope boundary). Runtime degradation (treating 401/403 as expired and 429 as rate-limited) is in-memory and not yet persisted across restarts. A canonical top-level `models:` map, first-class session and subscription account lifecycle, circuit breaking with cooldown recovery, and full cost telemetry are deferred to a later phase.

@@ -52,6 +52,7 @@ import {
 import type { HarnessShim } from "./contracts.js";
 import { createDaemonHookClient } from "./shared/daemon-client.js";
 import { createCredentialReader } from "./shared/credential-reader.js";
+import { createSessionStartSeams } from "./shared/session-start-seams.js";
 import {
 	createContextRenderer,
 	createPrimeRenderer,
@@ -67,6 +68,7 @@ import {
 	runSessionEnd,
 	runSessionStart,
 	type SessionStartDeps,
+	type SessionStartSeams,
 	type SummarySpawn,
 } from "./shared/index.js";
 
@@ -96,6 +98,14 @@ export interface HookRuntimeOptions {
 	 * CALLS this on session-start; it never reimplements it.
 	 */
 	readonly notifications?: NotificationsPipeline;
+	/**
+	 * Inject the session-start step seams (tests / PRD-045g g-AC-2). Defaults to the REAL seams
+	 * whose `autoPullSkills` POSTs the daemon's `POST /api/skills/pull` over loopback (idempotent,
+	 * fail-soft, time-budgeted), fed tenancy by the same credential reader. The runtime injects
+	 * this on the session-start branch so freshly-mined team skills are pulled at session start;
+	 * the other steps (heal/update/ensure/placeholder/graph-pull) stay no-op (out of 045g scope).
+	 */
+	readonly seams?: SessionStartSeams;
 	/**
 	 * Inject the summary spawn for session-end (019b FR-6). Defaults to a no-op spawn —
 	 * the real detached `claude -p` / `codex exec` spawn is the shim's host-CLI concern,
@@ -173,6 +183,13 @@ export function createHookRuntime(options: HookRuntimeOptions = {}): HookRuntime
 	const summarySpawn = options.summarySpawn ?? noopSummarySpawn;
 	const captureEnv = { captureFlag: options.captureFlag ?? process.env.HONEYCOMB_CAPTURE };
 
+	// PRD-045g (g-AC-2): the REAL session-start step seams. `autoPullSkills` POSTs the daemon's
+	// `POST /api/skills/pull` over loopback (idempotent + fail-soft + time-budgeted), fed tenancy
+	// by the SAME credential reader the daemon client uses. Before this fix the runtime built
+	// `SessionStartDeps` with NO `seams`, so auto-pull resolved to the no-op default and team
+	// skills never reached a teammate's session. Injected ONLY on the session-start branch below.
+	const seams = options.seams ?? createSessionStartSeams({ credentials, host, port, fetch: doFetch });
+
 	return {
 		deps,
 		notifications,
@@ -187,7 +204,7 @@ export function createHookRuntime(options: HookRuntimeOptions = {}): HookRuntime
 			if (input === undefined) {
 				return { result: { ok: true }, dropped: true };
 			}
-			return dispatchLifecycle(input, deps, captureEnv, notifications, summarySpawn, prime);
+			return dispatchLifecycle(input, deps, captureEnv, notifications, summarySpawn, prime, seams);
 		},
 	};
 }
@@ -205,6 +222,7 @@ async function dispatchLifecycle(
 	notifications: NotificationsPipeline,
 	summarySpawn: SummarySpawn,
 	prime: PrimeRenderer,
+	seams: SessionStartSeams,
 ): Promise<HookEventOutcome> {
 	try {
 		switch (input.event) {
@@ -212,7 +230,10 @@ async function dispatchLifecycle(
 				// PRD-046d (d-AC-1..5): the prime is injected ONLY on the session-start branch
 				// (d-AC-3 — per-turn capture never primes). session-start appends the digest to
 				// the rules/goals `additionalContext`, fully fail-soft (d-AC-4).
-				const sessionDeps: SessionStartDeps = { ...deps, captureEnv, prime };
+				// PRD-045g (g-AC-2): the REAL step seams are injected here so `autoPullSkills`
+				// runs a real (idempotent, fail-soft, time-budgeted) loopback pull instead of the
+				// no-op default — freshly-mined team skills reach this session at its start.
+				const sessionDeps: SessionStartDeps = { ...deps, captureEnv, prime, seams };
 				const result = await runSessionStart(input, sessionDeps);
 				// c-AC-4: drain the 020d notifications pipeline (call it; do not reimplement).
 				const drain = await drainNotificationsSoft(notifications);

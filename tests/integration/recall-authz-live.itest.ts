@@ -2,10 +2,11 @@
  * ╔══════════════════════════════════════════════════════════════════════════╗
  * ║  LIVE recall-AUTHORIZATION SMOKE — OPT-IN, SEEDS A REAL DEEPLAKE BACKEND. ║
  * ╠══════════════════════════════════════════════════════════════════════════╣
- * ║  PRD-007c: the authorization boundary (the scope re-query) is proven       ║
- * ║  against the fake transport in tests/daemon/runtime/recall/authorization.  ║
- * ║  test.ts. THIS suite proves the SAME builders the phase emits              ║
- * ║  (buildScopeClause + buildAuthorizationSql) authorize REAL rows on a REAL  ║
+ * ║  PRD-007c / PRD-045b: the authorization boundary (the scope re-query) is    ║
+ * ║  the retained `buildScopeClause` chokepoint. The dormant five-phase engine  ║
+ * ║  (and its `recall/authorization.ts` re-query builder) was de-scoped; this    ║
+ * ║  suite proves the SAME `buildScopeClause` predicate — ANDed into an IDs-only ║
+ * ║  re-query built inline here — authorizes REAL rows on a REAL                ║
  * ║  `memories`-shaped table on this DeepLake store:                          ║
  * ║                                                                          ║
  * ║    - Two agents seeded into ONE throwaway table: agent A (isolated) owns   ║
@@ -41,16 +42,14 @@ import {
 	isOk,
 	resolveStorageConfig,
 	type RowValues,
+	sLiteral,
 	sqlIdent,
 	type StorageClient,
 	val,
 } from "../../src/daemon/storage/index.js";
 import { MEMORIES_COLUMNS, NOT_SOFT_DELETED, SOFT_DELETED } from "../../src/daemon/storage/catalog/index.js";
 import type { HealTarget } from "../../src/daemon/storage/heal.js";
-import {
-	buildAuthorizationSql,
-	buildScopeClause,
-} from "../../src/daemon/runtime/recall/index.js";
+import { buildScopeClause, type ScopeClause } from "../../src/daemon/runtime/recall/index.js";
 
 const HAS_TOKEN = Boolean(process.env.HONEYCOMB_DEEPLAKE_TOKEN);
 
@@ -93,9 +92,20 @@ function describeResult(r: { kind: string }): string {
 	return r.kind;
 }
 
-/** Re-point a `memories` builder at the throwaway CI table (proven collection-live pattern). */
-function repoint(sql: string): string {
-	return sql.replace('FROM "memories"', `FROM "${sqlIdent(CI_TABLE)}"`);
+/**
+ * Build the IDs-only authorization re-query inline (PRD-045b): `SELECT id ... FROM
+ * <CI table> WHERE id IN (<candidates>) AND (<scope clause>)`. This is the exact
+ * shape the (now de-scoped) authorization phase emitted — a guarded IDs-only SELECT
+ * that ANDs in the retained `buildScopeClause` predicate. Every candidate id routes
+ * through `sLiteral`; the table + columns through `sqlIdent` (audit-safe). Returns ""
+ * for an empty candidate set (the phase short-circuited rather than emit `IN ()`).
+ */
+function buildAuthzRequery(candidateIds: readonly string[], clause: ScopeClause): string {
+	if (candidateIds.length === 0) return "";
+	const tbl = sqlIdent(CI_TABLE);
+	const idCol = sqlIdent("id");
+	const inList = candidateIds.map((id) => sLiteral(id)).join(", ");
+	return `SELECT ${idCol} AS id FROM "${tbl}" WHERE ${idCol} IN (${inList}) AND (${clause.sql})`;
 }
 
 /**
@@ -198,10 +208,8 @@ describe.skipIf(!HAS_TOKEN)("live recall-authorization smoke (opt-in, real backe
 		});
 		expect(clause.policyApplied).toBe("isolated");
 
-		// The SAME re-query the authorization phase emits, re-pointed at the CI table.
-		const sql = repoint(
-			buildAuthorizationSql({ candidateIds, clause, filters: undefined }) ?? "",
-		);
+		// The IDs-only re-query: candidate IN-list ANDed with the retained scope clause.
+		const sql = buildAuthzRequery(candidateIds, clause);
 		expect(sql).not.toBe("");
 
 		// Poll-union the re-query: converges UP to agent A's two durable rows while the
@@ -221,7 +229,7 @@ describe.skipIf(!HAS_TOKEN)("live recall-authorization smoke (opt-in, real backe
 		const scope = { org, workspace };
 		const candidateIds = [ID_A_1, ID_A_2, ID_B_1];
 		const clause = buildScopeClause({ agentId: AGENT_B, readPolicy: "isolated", org, workspace });
-		const sql = repoint(buildAuthorizationSql({ candidateIds, clause, filters: undefined }) ?? "");
+		const sql = buildAuthzRequery(candidateIds, clause);
 		const seen = await pollAuthorizedIds(storage, sql, scope);
 		expect([...seen]).toEqual([ID_B_1]);
 		expect(seen.has(ID_A_1)).toBe(false);

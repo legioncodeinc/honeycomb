@@ -59,6 +59,26 @@ describe("PRD-020a a-AC-3 — storage verbs route through the daemon (never Deep
 		expect(req.body).toEqual({ force: true });
 	});
 
+	it("PRD-045f f-AC-3 skillify pull ROUTES onto the live /api/skills group (not a dead /api/skillify)", () => {
+		// The registered `skillify` verb must DISPATCH, not fall through to the generic
+		// `/api/skillify` route the daemon never mounts. It shares the `skill` shape → /api/skills/pull.
+		const req = buildStorageRequest("skillify", ["pull"]);
+		expect(req.method).toBe("POST");
+		expect(req.path).toBe("/api/skills/pull");
+		// It is NOT the dead generic fallthrough.
+		expect(req.path).not.toBe("/api/skillify");
+		expect(req.path).not.toBe("/api/skillify/pull");
+	});
+
+	it("PRD-045f f-AC-3 skillify pull dispatches exactly one daemon request through the seam", async () => {
+		const daemon = createFakeDaemonClient();
+		const deps: CommandDeps = { daemon, out: () => {} };
+		const res = await runStorageVerb("skillify", ["pull"], deps);
+		expect(res.exitCode).toBe(0);
+		expect(daemon.calls).toHaveLength(1);
+		expect(`${daemon.calls[0]!.req.method} ${daemon.calls[0]!.req.path}`).toBe("POST /api/skills/pull");
+	});
+
 	it("a-AC-3 a daemon error status surfaces a non-zero exit (fail-loud, no silent success)", async () => {
 		const daemon = createFakeDaemonClient({ responses: { "POST /api/graph/build": { status: 500 } } });
 		const deps: CommandDeps = { daemon, out: () => {} };

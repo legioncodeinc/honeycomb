@@ -439,5 +439,81 @@ describe("c-AC-6 second harness (codex) reuses the SAME runtime + seams (not re-
 	});
 });
 
+describe("PRD-045g g-AC-2: the runtime injects the REAL auto-pull seam on session-start", () => {
+	/** A recording `SessionStartSeams` whose autoPullSkills records every call. */
+	function recordingSeams(): import("../../../src/hooks/shared/index.js").SessionStartSeams & { pulls: number } {
+		let pulls = 0;
+		return {
+			get pulls() {
+				return pulls;
+			},
+			async healDriftedOrgToken() {},
+			async autoUpdate() {},
+			async ensureTables() {},
+			async writePlaceholderSummary() {},
+			async spawnGraphPull() {},
+			async autoPullSkills() {
+				pulls++;
+			},
+		};
+	}
+
+	it("calls autoPullSkills ONCE on session-start (the seam is wired into SessionStartDeps)", async () => {
+		const { client } = recordingClient(200, { additionalContext: "" });
+		const seams = recordingSeams();
+		const runtime = createHookRuntime({ daemon: client, notifications: recordingPipeline(null), seams });
+		await runtime.runEvent(createClaudeCodeShim(), { name: "SessionStart", payload: { source: "startup" } }, META);
+		expect(seams.pulls, "auto-pull ran at session start").toBe(1);
+	});
+
+	it("does NOT auto-pull on a per-turn capture event (session-start only)", async () => {
+		const { client } = recordingClient();
+		const seams = recordingSeams();
+		const runtime = createHookRuntime({ daemon: client, notifications: recordingPipeline(null), seams });
+		await runtime.runEvent(createClaudeCodeShim(), { name: "UserPromptSubmit", payload: { prompt: "x" } }, META);
+		expect(seams.pulls, "no auto-pull on capture").toBe(0);
+	});
+
+	it("a THROWING autoPullSkills is absorbed — session-start still returns its context (fail-soft)", async () => {
+		const { client } = recordingClient(200, { additionalContext: "RULES: be concise." });
+		const throwingSeams: import("../../../src/hooks/shared/index.js").SessionStartSeams = {
+			async healDriftedOrgToken() {},
+			async autoUpdate() {},
+			async ensureTables() {},
+			async writePlaceholderSummary() {},
+			async spawnGraphPull() {},
+			async autoPullSkills() {
+				throw new Error("pull exploded");
+			},
+		};
+		const runtime = createHookRuntime({ daemon: client, notifications: recordingPipeline(null), seams: throwingSeams });
+		const outcome = await runtime.runEvent(
+			createClaudeCodeShim(),
+			{ name: "SessionStart", payload: { source: "startup" } },
+			META,
+		);
+		expect(outcome.result.ok).toBe(true);
+		expect(outcome.result.additionalContext).toBe("RULES: be concise.");
+	});
+
+	it("the DEFAULT runtime (no injected seams) builds a real seam that fail-softs when the daemon is down", async () => {
+		// No injected seams → the runtime builds the REAL `createSessionStartSeams`, whose
+		// autoPullSkills POSTs the loopback pull. With the daemon down the fetch is refused and
+		// swallowed — session-start still completes (the production fail-soft path, g-AC-2).
+		const failingFetch = (async () => {
+			throw new Error("ECONNREFUSED");
+		}) as unknown as typeof fetch;
+		const { client } = recordingClient(200, { additionalContext: "RULES: be concise." });
+		const runtime = createHookRuntime({ daemon: client, notifications: recordingPipeline(null), fetch: failingFetch });
+		const outcome = await runtime.runEvent(
+			createClaudeCodeShim(),
+			{ name: "SessionStart", payload: { source: "startup" } },
+			META,
+		);
+		expect(outcome.result.ok).toBe(true);
+		expect(outcome.result.additionalContext).toBe("RULES: be concise.");
+	});
+});
+
 // Silence any unhandled-rejection noise from fire-and-forget paths in this suite.
 vi.spyOn(console, "error").mockImplementation(() => undefined);

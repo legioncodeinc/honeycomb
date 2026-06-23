@@ -1,16 +1,18 @@
 # PRD-016: Skillify
 
-> **Status:** Completed (code shipped) — ⚠ NOT LIVE (mining); close-out tracked in [PRD-045f](../../in-work/prd-045-daemon-wiring-closeout/prd-045f-daemon-wiring-closeout-skillify-mining.md)
+> **Status:** Completed — NOW LIVE (closed by [PRD-045f](../../in-work/prd-045-daemon-wiring-closeout/prd-045f-daemon-wiring-closeout-skillify-mining.md))
 > **Priority:** P1
 > **Effort:** M
 > **Schema changes:** Additive
 
 ---
 
-> **⚠ Not live — mining (2026-06-22 daemon-wiring audit).** Skillify jobs are enqueued (`session-end.ts:112`,
-> `capture/turn-counters.ts:150`) but no worker leases `["skillify"]` (the dreaming worker leases only
-> `["dreaming"]`), so the miner never runs; the `skillify pull` CLI verb is unregistered (`src/cli/skillify.ts:19`).
-> `/api/skills` read is live. Wiring close-out:
+> **✅ Now live (2026-06-22 daemon-wiring close-out, PRD-045f).** The skillify mining worker is fully wired.
+> `assembleDaemon` constructs + starts a worker leasing `["skillify"]` (mirroring the dreaming worker lifecycle);
+> the worker runs the Haiku KEEP/MERGE/SKIP gate and writes append-only versioned rows to the `skills` table.
+> Session-end enqueue (`session-end.ts:112`) and turn-counter enqueue (`capture/turn-counters.ts:150`) feed the
+> now-live worker. The `skillify pull` CLI verb is registered in the dispatch table (`src/cli/skillify.ts`).
+> `/api/skills` read was already live and remains so. Closed by
 > [PRD-045f](../../in-work/prd-045-daemon-wiring-closeout/prd-045f-daemon-wiring-closeout-skillify-mining.md).
 > Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../../in-work/prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
 

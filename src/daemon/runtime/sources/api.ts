@@ -40,13 +40,14 @@
 import type { Context, Hono } from "hono";
 
 import type { QueryScope } from "../../storage/client.js";
+import { getRequestIdentity } from "../middleware/permission.js";
 import { parseSourceConfig, type SourceConfig, type SourceProvider } from "./contracts.js";
 import {
 	createSourceLifecycle,
 	type SourceLifecycleDeps,
 	type SourceRegistry,
 } from "./lifecycle.js";
-import type { DocumentWorker } from "./document-worker.js";
+import { type DocumentWorker, isBlockedUrlError, type SubmitResult } from "./document-worker.js";
 
 /** The route groups the sources API attaches to (FR-2). */
 export const SOURCES_GROUP = "/api/sources" as const;
@@ -63,11 +64,25 @@ export interface SourceScopeResolver {
 	resolve(c: Context): QueryScope | null;
 }
 
-/** The default header-based scope resolver (mirrors secrets/api's resolver). */
+/**
+ * The default header-based scope resolver.
+ *
+ * ── Cross-tenant guard (PRD-022 security; mirrors `scope.ts` `resolveScopeFromHeaders`) ──
+ * In team/hybrid the permission middleware has already AUTHENTICATED the request and stamped
+ * the VALIDATED {@link import("../auth/contracts.js").Identity} onto the context. These
+ * handlers partition storage by the `x-honeycomb-org` HEADER, so without a cross-check an
+ * authenticated caller for org A could forge `x-honeycomb-org: orgB` and list/add/delete
+ * org B's sources + documents. When a validated Identity is present, the resolved org MUST
+ * equal `identity.org`; a mismatch returns `null` → the handler fails closed (400). In local
+ * mode no Identity is stamped, so the prior pure-header behaviour is unchanged.
+ */
 export const headerScopeResolver: SourceScopeResolver = {
 	resolve(c: Context): QueryScope | null {
 		const org = c.req.header("x-honeycomb-org");
 		if (org === undefined || org.length === 0) return null;
+		// A forged org header can never cross the token's own org boundary (PRD-022).
+		const identity = getRequestIdentity(c);
+		if (identity !== undefined && org !== identity.org) return null;
 		const workspace = c.req.header("x-honeycomb-workspace");
 		const ws = workspace !== undefined && workspace.length > 0 ? workspace : "default";
 		return { org, workspace: ws };
@@ -107,6 +122,15 @@ export interface SourcesApiDeps {
 	 * testable before 013b fills the worker internals.
 	 */
 	readonly documentWorker?: DocumentWorker;
+	/**
+	 * Delay (ms) between the lifecycle's purge-discovery polls (a DELETE soft-deletes by
+	 * scanning the source's ids — see `lifecycle.ts` `DISCOVERY_POLL_DELAY_MS`). Production
+	 * leaves it unset (the ~400ms spacing that spans the fresh-write propagation window). A
+	 * unit/integration test on the deterministic fake store passes `0` so the spaced polls do
+	 * not push a DELETE toward the vitest default timeout (the fake is authoritative on the
+	 * first poll, so the spacing is pure wall-clock waste there).
+	 */
+	readonly discoveryPollDelayMs?: number;
 }
 
 /** 400 for a request with no resolvable tenancy. */
@@ -126,6 +150,7 @@ function lifecycleFor(deps: SourcesApiDeps, scope: QueryScope) {
 		queue: deps.queue,
 		registry: deps.registry,
 		...(deps.logger !== undefined ? { logger: deps.logger } : {}),
+		...(deps.discoveryPollDelayMs !== undefined ? { discoveryPollDelayMs: deps.discoveryPollDelayMs } : {}),
 	});
 }
 
@@ -223,9 +248,23 @@ export function mountDocumentsApi(group: Hono, deps: SourcesApiDeps): void {
 				501,
 			);
 		}
-		const submitted = await worker.submit({ url, org: scope.org, workspace: scope.workspace ?? "default" });
-		// `deduped` true → the identical URL returned the existing record (b-AC-1).
-		return c.json({ documentId: submitted.documentId, status: submitted.status, deduped: submitted.deduped }, 202);
+		try {
+			const submitted: SubmitResult = await worker.submit({
+				url,
+				org: scope.org,
+				workspace: scope.workspace ?? "default",
+			});
+			// `deduped` true → the identical URL returned the existing record (b-AC-1).
+			return c.json({ documentId: submitted.documentId, status: submitted.status, deduped: submitted.deduped }, 202);
+		} catch (err: unknown) {
+			// A BLOCKED url (SSRF guard: bad scheme, private/loopback/metadata address, too
+			// many redirects) is a CALLER error → a clear 400, not a 5xx stack. The message
+			// names the reason class only (never an internal IP), so it leaks no topology.
+			if (isBlockedUrlError(err)) {
+				return c.json({ error: "bad_request", reason: "document url is not allowed" }, 400);
+			}
+			throw err; // a genuine server fault still surfaces as a 500 (caught by the daemon).
+		}
 	});
 
 	// GET /api/documents/:id — the document's id + status.

@@ -130,3 +130,10 @@ export {
 	type PublishedSkill,
 	type SkillPublishEndpoint,
 } from "./publish-endpoint.js";
+
+// ── 045g the `/api/skills/*` PUBLISH + PULL mount seam (closes the PRD-018 wiring gap) ──
+export {
+	mountSkillPropagationApi,
+	type MountSkillPropagationOptions,
+	SKILLS_GROUP as SKILLS_PROPAGATION_GROUP,
+} from "./propagation-api.js";
