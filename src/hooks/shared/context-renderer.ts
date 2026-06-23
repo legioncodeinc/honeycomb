@@ -12,11 +12,7 @@
  * shim concern (c-AC-5) — this core just produces the text.
  */
 
-import {
-	type ContextRenderer,
-	type ContextRenderRequest,
-	type DaemonHookClient,
-} from "./contracts.js";
+import type { ContextRenderer, ContextRenderRequest, DaemonHookClient } from "./contracts.js";
 
 /** The daemon `/api/hooks/context` sub-path (relative to the `/api/hooks` group). */
 export const CONTEXT_ENDPOINT = "context" as const;
@@ -41,10 +37,9 @@ export function createContextRenderer(daemon: DaemonHookClient): ContextRenderer
 					endpoint: CONTEXT_ENDPOINT,
 					body: { meta: req.meta, hasCredential: req.credential !== undefined },
 					meta: req.meta,
-					// Context render rides the same runtime path the session uses; absent a
-					// shim-supplied value the renderer defaults to the plugin surface. The
-					// daemon enforces the path — this is a read, so a conflict simply yields "".
-					runtimePath: "plugin",
+					// Context render rides the same runtime path the session uses. The daemon
+					// enforces the path — this is a read, so a conflict simply yields "".
+					runtimePath: req.runtimePath ?? "plugin",
 				});
 				if (response.status !== 200) return "";
 				return coerceBlock(response.body);

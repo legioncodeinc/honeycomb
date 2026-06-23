@@ -66,7 +66,7 @@ export async function runSessionStart(input: HookInput, deps: SessionStartDeps):
 
 	// Step 6: render the rules/goals context block (READ-ONLY, fail-soft — the
 	// renderer absorbs its own errors and returns "" on failure, FR-10).
-	const contextBlock = await safe(() => deps.context.render({ meta, credential }), "");
+	const contextBlock = await safe(() => deps.context.render({ meta, runtimePath: input.runtimePath, credential }), "");
 
 	// Step 6.5 (PRD-046d / d-AC-1..5): fetch the session-start memory prime ONCE
 	// (d-AC-3 — this is the session-start branch; per-turn capture never primes) and
@@ -75,9 +75,14 @@ export async function runSessionStart(input: HookInput, deps: SessionStartDeps):
 	// an empty scope contributes NOTHING and never blocks/errors session-start (d-AC-4).
 	// The hook does NO assembly — it injects 046c's already-bounded digest verbatim
 	// (d-AC-5). When no prime seam is wired, this is a no-op (prior behaviour unchanged).
-	const primeBlock = deps.prime !== undefined
-		? await safe(() => (deps.prime as NonNullable<typeof deps.prime>).render({ meta, credential }), "")
-		: "";
+	const primeBlock =
+		deps.prime !== undefined
+			? await safe(
+					() =>
+						(deps.prime as NonNullable<typeof deps.prime>).render({ meta, runtimePath: input.runtimePath, credential }),
+					"",
+				)
+			: "";
 
 	// The injected `additionalContext` is the rendered rules/goals block plus the prime
 	// digest, joined when both are present so neither is lost. Either alone is returned
@@ -91,9 +96,7 @@ export async function runSessionStart(input: HookInput, deps: SessionStartDeps):
 	await safeVoid(() => seams.spawnGraphPull(meta));
 
 	// Step 9: return the rendered block; the shim chooses the channel (c-AC-5).
-	return additionalContext === ""
-		? { ok: true }
-		: { ok: true, additionalContext };
+	return additionalContext === "" ? { ok: true } : { ok: true, additionalContext };
 }
 
 /**

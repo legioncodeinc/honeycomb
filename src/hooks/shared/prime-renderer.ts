@@ -24,8 +24,9 @@
  * BEFORE the handler runs. Tenancy (`x-honeycomb-org` (+ `x-honeycomb-workspace`)) scopes
  * the digest to the repo/agent partition (fail-closed 400 with no org outside local mode).
  * So this client stamps ALL of them from the resolved credential, mirroring the
- * `daemon-client.ts` POST stamp — the session-start `plugin` claim is shared with the
- * other session-start calls, so this GET refreshes that claim rather than conflicting.
+ * `daemon-client.ts` POST stamp. The runtime path comes from the active harness so a
+ * legacy Codex/Claude session-start prime does not claim the session as `plugin` before
+ * later capture posts.
  *
  * ── FAIL-SOFT, NEVER A THROW (d-AC-4) ───────────────────────────────────────
  * ANY failure resolves to `""` (no injection), never a throw: an unreachable/timed-out
@@ -88,7 +89,7 @@ export function createPrimeRenderer(options: PrimeRendererOptions): PrimeRendere
 			const tenancy = resolveTenancy(req.credential);
 			const headers: Record<string, string> = {
 				// The session group requires BOTH of these (runtime-path middleware), or 400.
-				"x-honeycomb-runtime-path": "plugin",
+				"x-honeycomb-runtime-path": req.runtimePath ?? "plugin",
 				"x-honeycomb-session": req.meta.sessionId,
 			};
 			// Tenancy scopes the digest to the repo/agent partition (fail-closed without org).
