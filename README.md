@@ -139,7 +139,11 @@ npm run ci           # the gate: typecheck + duplication (jscpd) + tests (vitest
 
 ## License
 
-Pre-release and not yet licensed for redistribution. © Legion Code Inc.
+Honeycomb is licensed under the **GNU Affero General Public License v3.0 or later** (AGPL-3.0-or-later). See [`LICENSE`](LICENSE) for the full text.
+
+Use it commercially or privately, free of charge. In return: keep the copyright and license notices intact, and if you modify it, your changes ship under the same AGPL license with source available. The "Affero" part is the point. Run a modified version as a network service and you owe its source to the users who interact with it. No locking a fork behind a SaaS wall.
+
+© 2026 Legion Code Inc.
 
 ---
 
