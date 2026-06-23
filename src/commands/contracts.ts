@@ -77,7 +77,7 @@ export const VERB_TABLE: readonly VerbSpec[] = Object.freeze([
 	{ verb: "dashboard", cls: "local", summary: "launch the daemon-served dashboard (020b)" },
 	{ verb: "pollinate", cls: "storage", summary: "trigger a pollinating consolidation pass on the daemon (009/026)" },
 	{ verb: "maintenance", cls: "storage", summary: "run version-history compaction over version-bumped tables (030)" },
-	{ verb: "remember", cls: "storage", summary: "write a memory through the daemon" },
+	{ verb: "remember", cls: "storage", summary: "write a memory through the daemon (--type fact|convention|preference|decision|gotcha|reference)" },
 	{ verb: "recall", cls: "storage", summary: "recall memories through the daemon" },
 	{ verb: "agent", cls: "storage", summary: "run an agent turn through the daemon" },
 	{ verb: "ontology", cls: "storage", summary: "inspect/propose ontology changes through the daemon" },

@@ -16,6 +16,7 @@ import {
 	createFakeDaemonClient,
 	runStorageVerb,
 } from "../../src/commands/index.js";
+import { MEMORY_TYPES } from "../../src/shared/memory-types.js";
 
 describe("PRD-020a a-AC-3 — storage verbs route through the daemon (never DeepLake)", () => {
 	it("a-AC-3 each storage verb dispatches exactly one daemon request to its route", async () => {
@@ -188,5 +189,51 @@ describe("PRD-023 dogfood — `recall` RENDERS the daemon's hits (not just `reca
 		const deps: CommandDeps = { daemon, out: (l) => lines.push(l) };
 		await runStorageVerb("remember", ["a", "fact"], deps);
 		expect(lines.join("\n")).toContain("remember: ok");
+	});
+});
+
+describe("memory-type taxonomy — `remember --type` validates against the closed set", () => {
+	it("a valid --type rides in the body and is stripped from the remembered content", () => {
+		const req = buildStorageRequest("remember", ["use", "ESM", "imports", "--type", "convention"]);
+		expect(req.method).toBe("POST");
+		expect(req.path).toBe("/api/memories");
+		// The type token rides as the body `type`, and is NOT part of the content.
+		expect(req.body).toEqual({ content: "use ESM imports", type: "convention" });
+	});
+
+	it("an omitted --type sends no `type` (the daemon applies the column default `fact`)", () => {
+		const req = buildStorageRequest("remember", ["a", "plain", "fact"]);
+		expect(req.body).toEqual({ content: "a plain fact" });
+		expect((req.body as Record<string, unknown>).type).toBeUndefined();
+	});
+
+	it("each of the six types is accepted by the build path", () => {
+		for (const t of MEMORY_TYPES) {
+			const req = buildStorageRequest("remember", ["x", "--type", t]);
+			expect((req.body as Record<string, unknown>).type).toBe(t);
+		}
+	});
+
+	it("an unknown --type is REJECTED before dispatch (exit 2) and names the valid set", async () => {
+		const daemon = createFakeDaemonClient();
+		const lines: string[] = [];
+		const deps: CommandDeps = { daemon, out: (l) => lines.push(l) };
+		const res = await runStorageVerb("remember", ["x", "--type", "banana"], deps);
+		expect(res.exitCode).toBe(2);
+		// No daemon call — the gate short-circuits before dispatch.
+		expect(daemon.calls).toHaveLength(0);
+		const stdout = lines.join("\n");
+		expect(stdout).toContain('unknown --type "banana"');
+		// The error names every valid token so the user can self-correct.
+		for (const t of MEMORY_TYPES) expect(stdout).toContain(t);
+	});
+
+	it("a valid --type dispatches exactly one daemon request to /api/memories", async () => {
+		const daemon = createFakeDaemonClient();
+		const deps: CommandDeps = { daemon, out: () => {} };
+		const res = await runStorageVerb("remember", ["a", "gotcha", "--type", "gotcha"], deps);
+		expect(res.exitCode).toBe(0);
+		expect(daemon.calls).toHaveLength(1);
+		expect(daemon.calls[0]!.req.body).toEqual({ content: "a gotcha", type: "gotcha" });
 	});
 });

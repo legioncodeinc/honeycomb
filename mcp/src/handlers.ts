@@ -132,14 +132,18 @@ function rec(args: unknown): Record<string, unknown> {
 }
 
 /**
- * Map the `memory_store` tool args (`{ text, path? }`) onto the WIRED `/api/memories`
- * store body (`{ content, normalizedContent? }`) — PRD-022d / d-AC-3. The 022a controlled-
- * writes engine keys on `content`; the optional `path` rides as a normalized hint.
+ * Map the `memory_store` tool args (`{ text, path?, type? }`) onto the WIRED `/api/memories`
+ * store body (`{ content, normalizedContent?, type? }`) — PRD-022d / d-AC-3 + the memory-type
+ * taxonomy. The 022a controlled-writes engine keys on `content`; the optional `path` rides as a
+ * normalized hint; the optional `type` (already enum-validated by the strict tool schema) rides
+ * verbatim and is re-validated by the daemon's enum gate (defense in depth). An omitted `type`
+ * is not forwarded, so the daemon applies the column default `fact`.
  */
 function toStoreBody(args: Record<string, unknown>): Record<string, unknown> {
 	const content = typeof args.text === "string" ? args.text : String(args.text ?? "");
 	const body: Record<string, unknown> = { content };
 	if (typeof args.path === "string" && args.path.length > 0) body.normalizedContent = args.path;
+	if (typeof args.type === "string" && args.type.length > 0) body.type = args.type;
 	return body;
 }
 
