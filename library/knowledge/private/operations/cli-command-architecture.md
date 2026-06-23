@@ -30,7 +30,7 @@ This split guarantees that CLI presentation details never entangle core storage,
 
 ## Command surface
 
-The merged Honeycomb CLI consolidates the hivemind product verbs with the otherhive memory-engine verbs into one dispatcher. The full top-level command set is:
+The merged Honeycomb CLI consolidates the hivemind product verbs with our memory engine's verbs into one dispatcher. The full top-level command set is:
 
 | Command | Purpose |
 |---|---|

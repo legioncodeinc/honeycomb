@@ -29,7 +29,7 @@ function fullData(): DashboardData {
 		sessions: {
 			sessions: [
 				{ sessionId: "sess-1", project: "honeycomb", startedAt: "2026-06-18T00:00:00Z", eventCount: 12, status: "captured" },
-				{ sessionId: "sess-2", project: "otherhive", startedAt: "2026-06-17T00:00:00Z", eventCount: 3, status: "summarized" },
+				{ sessionId: "sess-2", project: "sample-project", startedAt: "2026-06-17T00:00:00Z", eventCount: 3, status: "summarized" },
 			],
 		},
 		settings: { orgId: "org-1", orgName: "Acme", workspace: "default", settings: { mode: "local", port: "3850" } },

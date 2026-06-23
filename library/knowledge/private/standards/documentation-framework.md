@@ -152,4 +152,4 @@ When the library guardian seeds a repo:
 
 ## Changelog
 
-- v1.0: Reconciled from the hivemind-v1 and otherhive-v1 documentation frameworks into the canonical Honeycomb standard.
+- v1.0: Reconciled from the Hivemind and our-memory-engine documentation frameworks into the canonical Honeycomb standard.

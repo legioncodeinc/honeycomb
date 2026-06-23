@@ -9,7 +9,7 @@
 
 ## Overview
 
-Capture is the cheap, always-on front of Honeycomb: it records what the agent did as structured events, commits them durably, and gets out of the way before any model runs. This module builds the intake layer: the capture API that writes exactly one `sessions` row per event (with a `JSONB` message), the non-blocking attachment of a 768-dim `nomic-embed-text-v1.5` embedding via the embed daemon, and the guards that keep capture defensible on every turn. Capture came directly from hivemind, proven across harnesses, and now feeds otherhive's pipeline rather than only powering summaries. The smart work, extraction and the graph, happens afterward in daemon workers off the turn path.
+Capture is the cheap, always-on front of Honeycomb: it records what the agent did as structured events, commits them durably, and gets out of the way before any model runs. This module builds the intake layer: the capture API that writes exactly one `sessions` row per event (with a `JSONB` message), the non-blocking attachment of a 768-dim `nomic-embed-text-v1.5` embedding via the embed daemon, and the guards that keep capture defensible on every turn. Capture came directly from hivemind, proven across harnesses, and now feeds our memory engine's pipeline rather than only powering summaries. The smart work, extraction and the graph, happens afterward in daemon workers off the turn path.
 
 ## Goals
 

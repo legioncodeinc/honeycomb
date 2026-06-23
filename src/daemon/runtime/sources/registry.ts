@@ -14,7 +14,7 @@
  * deterministic-id) the lifecycle engine writes artifacts with — so it inherits the
  * live-correct write path for free and stores config in an EXISTING table (no DDL).
  * The provider resolver instantiates the three already-built providers
- * (`providers/{obsidian,discord,github}.ts`); it does NOT re-port otherhive's ingest.
+ * (`providers/{obsidian,discord,github}.ts`); it does NOT re-port our memory engine's ingest.
  *
  * ── The deterministic source id (why register() can be id-stable) ────────────
  * The `/api/sources` POST flow resolves the provider from the parsed config BEFORE

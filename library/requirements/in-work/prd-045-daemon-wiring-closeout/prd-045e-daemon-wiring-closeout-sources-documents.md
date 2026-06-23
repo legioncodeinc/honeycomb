@@ -34,7 +34,7 @@ registry + providers resolver "not yet constructible there"), so it and the CLI 
 
 - New provider types beyond the three already built (Obsidian/Discord/GitHub).
 - New schema — the sources/documents tables exist (PRD-003/013).
-- Re-using otherhive's SQLite ingest wholesale; reuse only the already-ported parsers.
+- Re-using our memory engine's SQLite ingest wholesale; reuse only the already-ported parsers.
 
 ## User stories
 

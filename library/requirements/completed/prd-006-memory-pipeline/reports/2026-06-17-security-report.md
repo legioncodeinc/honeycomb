@@ -3,7 +3,7 @@
 - **Branch:** `prd-006-memory-pipeline`
 - **Date:** 2026-06-17
 - **Auditor:** security-worker-bee (runs immediately before quality-worker-bee)
-- **Scope:** `src/daemon/runtime/pipeline/**` (config, model-client, contracts, stage-worker, handlers, extraction, decision, controlled-writes, graph-persist, retention, index) + the storage primitives they depend on (`src/daemon/storage/{sql,writes,vector,client}.ts`) + `tests/daemon/runtime/pipeline/**` and the three live integration tests. `hivemind-v1/` and `otherhive-v1/` explicitly out of scope.
+- **Scope:** `src/daemon/runtime/pipeline/**` (config, model-client, contracts, stage-worker, handlers, extraction, decision, controlled-writes, graph-persist, retention, index) + the storage primitives they depend on (`src/daemon/storage/{sql,writes,vector,client}.ts`) + `tests/daemon/runtime/pipeline/**` and the three live integration tests. The Hivemind and our-memory-engine reference dirs are explicitly out of scope.
 
 ---
 

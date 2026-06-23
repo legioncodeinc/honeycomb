@@ -89,4 +89,4 @@ When recall runs, several channels collect candidate IDs (full-text, vector, kno
 
 ## Why durable-first matters
 
-Capture commits the raw event before any model runs, so the worst a slow extractor can do is delay enrichment, never lose a memory. Distillation jobs live in a durable queue, so a daemon restart resumes them. This is the same principle on both sides of the merge: Hivemind captured raw events first and summarized later; Otherhive committed raw memory first and distilled later. Honeycomb keeps both, with the daemon owning everything downstream of capture.
+Capture commits the raw event before any model runs, so the worst a slow extractor can do is delay enrichment, never lose a memory. Distillation jobs live in a durable queue, so a daemon restart resumes them. This is the same principle on both sides of the merge: Hivemind captured raw events first and summarized later; our memory engine committed raw memory first and distilled later. Honeycomb keeps both, with the daemon owning everything downstream of capture.

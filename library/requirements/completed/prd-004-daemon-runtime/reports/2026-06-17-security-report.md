@@ -3,7 +3,7 @@
 - **Auditor:** security-worker-bee (security-stinger)
 - **Date:** 2026-06-17
 - **Branch:** `prd-004-daemon-runtime`
-- **Scope:** the daemon runtime — `src/daemon/runtime/**`, `src/daemon/storage/catalog/runtime-jobs.ts`, `src/daemon/storage/writes.ts` (new `buildInsert`/`renderValue`), `src/daemon/index.ts`, `tests/daemon/runtime/**`, `tests/integration/memory-jobs-live.itest.ts`, `scripts/audit-sql-safety.mjs`. Excludes `hivemind-v1/` / `otherhive-v1/` (gitignored reference dirs).
+- **Scope:** the daemon runtime — `src/daemon/runtime/**`, `src/daemon/storage/catalog/runtime-jobs.ts`, `src/daemon/storage/writes.ts` (new `buildInsert`/`renderValue`), `src/daemon/index.ts`, `tests/daemon/runtime/**`, `tests/integration/memory-jobs-live.itest.ts`, `scripts/audit-sql-safety.mjs`. Excludes the Hivemind and our-memory-engine gitignored reference dirs.
 - **Ordering:** Clean. No `*-qa-report.md` exists for PRD-004 (the in-work QA reports cover PRD-001/002/003). security-worker-bee ran BEFORE quality-worker-bee as required.
 
 ## Executive Summary

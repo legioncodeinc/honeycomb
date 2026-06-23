@@ -62,7 +62,7 @@ export interface VerbSpec {
 
 /**
  * The full merged verb set (FR-2). The order is the help-listing order. The merged
- * surface consolidates the Hivemind product verbs and the otherhive engine verbs
+ * surface consolidates the Hivemind product verbs and our memory engine's verbs
  * into ONE dispatcher; every storage-touching verb is `cls: "storage"` so a single
  * predicate ({@link isStorageVerb}) proves AC-3 (storage → daemon, never DeepLake).
  *
