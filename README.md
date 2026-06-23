@@ -68,7 +68,7 @@ npm run build
 
 ```bash
 # 2. Point the daemon at your Deep Lake dataset (it reads these from the environment)
-export HONEYCOMB_DEEPLAKE_ENDPOINT="https://api.activeloop.ai"
+export HONEYCOMB_DEEPLAKE_ENDPOINT="https://api.deeplake.ai"
 export HONEYCOMB_DEEPLAKE_TOKEN="<your-activeloop-token>"
 export HONEYCOMB_DEEPLAKE_ORG="<your-org>"
 export HONEYCOMB_DEEPLAKE_WORKSPACE="<your-workspace>"
