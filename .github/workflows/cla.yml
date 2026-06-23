@@ -5,11 +5,11 @@ name: CLA
 # their signature is recorded in a JSON file in the branch named below.
 #
 # SETUP REQUIRED before this works:
-#   1. Create a Personal Access Token (classic, `repo` scope) on an account
-#      that can write to this repo, and add it as a repo secret named
-#      PERSONAL_ACCESS_TOKEN. (GITHUB_TOKEN handles PR comments.)
-#   2. Decide where signatures live. Default below stores them in a
-#      `cla-signatures` branch of this repo. Create that branch (can be empty).
+#   1. Signatures are stored in the `cla-signatures` branch of THIS repo; the
+#      workflow's own GITHUB_TOKEN commits them (the `permissions: contents: write`
+#      below grants that). No Personal Access Token is needed for same-repo storage.
+#      (A PAT is only required if you move signatures to a SEPARATE/private repo.)
+#   2. The `cla-signatures` branch must exist (can be empty) and must NOT be protected.
 #   3. Keep `path-to-document` pointed at CLA.md on the default branch.
 
 on:
@@ -20,7 +20,12 @@ on:
 
 permissions:
   actions: write
-  contents: read
+  # contents: write lets the auto-generated GITHUB_TOKEN commit the signature file to the
+  # `cla-signatures` branch in THIS repo (the bot was failing with "Resource not accessible by
+  # integration" under contents: read). Scoped to this repo + expires when the job ends; the
+  # workflow runs no PR-authored code (no checkout), so the pull_request_target write risk
+  # does not apply here.
+  contents: write
   pull-requests: write
   statuses: write
 
@@ -30,10 +35,14 @@ jobs:
     steps:
       - name: CLA Assistant
         if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
-        uses: contributor-assistant/github-action@v2.6.1
+        # Pinned to the v2.6.1 commit SHA (not the mutable tag) so a compromised tag cannot
+        # introduce new code into a contents:write run.
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
         env:
+          # Same-repo signature storage (the `cla-signatures` branch) only needs the
+          # workflow's own GITHUB_TOKEN now that contents:write is granted — no long-lived
+          # PERSONAL_ACCESS_TOKEN in the path.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
         with:
           path-to-signatures: "signatures/cla.json"
           path-to-document: "https://github.com/legioncodeinc/honeycomb/blob/main/CLA.md"
