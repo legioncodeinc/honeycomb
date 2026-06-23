@@ -48,6 +48,7 @@
 import type { Context } from "hono";
 import { z } from "zod";
 
+import { MEMORY_TYPES } from "../../../shared/memory-types.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import type { Daemon } from "../server.js";
 import type { EmbedClient } from "../services/embed-client.js";
@@ -140,11 +141,28 @@ const RecallBodySchema = z.object({
 	limit: z.number().int().positive().optional(),
 });
 
-/** `POST /api/memories` (store) body: content + optional type/normalized/agent. */
-const StoreBodySchema = z.object({
+/**
+ * `POST /api/memories` (store) body: content + optional type/normalized/agent.
+ *
+ * `type` is the CLOSED taxonomy gate (the user-facing write surface): it validates
+ * against the single-sourced {@link MEMORY_TYPES} set, so an unknown type is REJECTED
+ * with a 400 that NAMES the valid set (never silently coerced). Unset → the column
+ * default `fact` is applied downstream (`controlled-writes.ts` `factType ?? "fact"`),
+ * so the column DDL `TEXT NOT NULL DEFAULT 'fact'` is unchanged (no schema migration).
+ * This gate constrains ONLY this user-facing path; the autonomous capture pipeline
+ * (`fan-out.ts` → controlled-writes) enqueues its model-assigned `fact_type` directly
+ * and never passes through here, so a free-form internal type is not broken.
+ */
+// Exported so the taxonomy parity suite asserts the REAL gate's `type` enum (not a
+// reconstruction) — a future hardcode of the daemon enum then fails parity directly.
+export const StoreBodySchema = z.object({
 	content: z.string().min(1, "content is required"),
 	normalizedContent: z.string().optional(),
-	type: z.string().min(1).optional(),
+	type: z
+		.enum(MEMORY_TYPES, {
+			error: () => `type must be one of: ${MEMORY_TYPES.join(", ")}`,
+		})
+		.optional(),
 	agentId: z.string().min(1).optional(),
 });
 

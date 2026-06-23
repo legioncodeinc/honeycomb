@@ -18,6 +18,7 @@
  * SAME daemon seam (the daemon owns the `skills` table; the CLI dispatches intent).
  */
 
+import { MEMORY_TYPES, isMemoryType, memoryTypeGuidance } from "../shared/memory-types.js";
 import {
 	type CommandDeps,
 	type CommandResult,
@@ -91,10 +92,56 @@ function buildSkillRequest(argv: readonly string[]): DaemonRequest {
 	return { method: "GET", path: "/api/skills" };
 }
 
-/** Build the `remember` verb's request — the memory body is the joined non-flag tail. */
+/**
+ * Drop a `--flag value` PAIR from an argv tail (both the flag and the word after it),
+ * so the value does not leak into a downstream positional join. Returns a new array.
+ */
+function stripFlagPair(argv: readonly string[], flag: string): string[] {
+	const out: string[] = [];
+	for (let i = 0; i < argv.length; i++) {
+		if (argv[i] === flag) {
+			// Skip the flag AND its value (when the value is not itself another flag).
+			if (argv[i + 1] !== undefined && !argv[i + 1].startsWith("--")) i += 1;
+			continue;
+		}
+		out.push(argv[i] as string);
+	}
+	return out;
+}
+
+/**
+ * Build the `remember` verb's request (PRD memory-type taxonomy). The memory body is the
+ * joined non-flag tail, with the `--type <value>` pair stripped so the type token never leaks
+ * into the remembered content. A `--type` is included in the body ONLY when it is one of the
+ * six {@link MEMORY_TYPES} — an unknown value is rejected earlier in {@link runStorageVerb}
+ * (before dispatch), so it never reaches here as a valid request. An omitted `--type` sends no
+ * `type`, so the daemon applies the column default `fact`.
+ */
 function buildRememberRequest(argv: readonly string[]): DaemonRequest {
-	const content = argv.filter((a) => !a.startsWith("--")).join(" ");
-	return { method: "POST", path: "/api/memories", body: { content } };
+	const content = stripFlagPair(argv, "--type")
+		.filter((a) => !a.startsWith("--"))
+		.join(" ");
+	const type = flagValue(argv, "--type");
+	const body: Record<string, string> = { content };
+	if (type !== undefined && isMemoryType(type)) body.type = type;
+	return { method: "POST", path: "/api/memories", body };
+}
+
+/**
+ * Validate a `remember --type` value against the CLOSED {@link MEMORY_TYPES} set (the CLI's
+ * write-time gate). Returns an error MESSAGE (listing the valid values + their descriptions)
+ * when a `--type` is present but unknown, or `null` when absent/valid. Keeping this here lets
+ * {@link runStorageVerb} reject a bad type BEFORE any daemon dispatch.
+ */
+export function rememberTypeError(argv: readonly string[]): string | null {
+	const type = flagValue(argv, "--type");
+	if (type === undefined || isMemoryType(type)) return null;
+	return [
+		`error: unknown --type "${type}".`,
+		`valid types: ${MEMORY_TYPES.join(", ")}`,
+		"",
+		memoryTypeGuidance(),
+	].join("\n");
 }
 
 /** Build the `recall` verb's request — the query is the joined non-flag tail. */
@@ -231,6 +278,15 @@ export async function runStorageVerb(
 	json = false,
 ): Promise<CommandResult> {
 	const out: OutputSink = deps.out ?? ((line: string): void => console.log(line));
+	// PRD memory-type taxonomy: reject an unknown `remember --type` BEFORE any daemon dispatch,
+	// naming the valid set + when to use each. A valid/omitted type falls through unchanged.
+	if (verb === "remember") {
+		const typeError = rememberTypeError(argv);
+		if (typeError !== null) {
+			out(typeError);
+			return { exitCode: 2 };
+		}
+	}
 	const req = buildStorageRequest(verb, argv);
 	const res = await deps.daemon.send(req);
 	if (res.status >= 400) {

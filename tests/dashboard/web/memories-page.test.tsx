@@ -21,6 +21,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MemoriesPage } from "../../../src/dashboard/web/pages/memories.js";
+import { DEFAULT_MEMORY_TYPE, MEMORY_TYPES } from "../../../src/shared/memory-types.js";
 import type { PageProps } from "../../../src/dashboard/web/page-frame.js";
 import type { CompactSummaryWire, PollinateAck, LogRecordWire, MemoryRecordWire, RecalledMemory, WireClient } from "../../../src/dashboard/web/wire.js";
 
@@ -134,6 +135,15 @@ async function setValue(el: HTMLTextAreaElement | HTMLInputElement | null, value
 	const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
 	setter?.call(el, value);
 	await act(async () => el.dispatchEvent(new Event("input", { bubbles: true })));
+	await flush();
+}
+
+/** Select an `<option>` value through React's onChange (the `change` event a select fires). */
+async function setSelect(el: HTMLSelectElement | null, value: string): Promise<void> {
+	if (el === null) return;
+	const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set;
+	setter?.call(el, value);
+	await act(async () => el.dispatchEvent(new Event("change", { bubbles: true })));
 	await flush();
 }
 
@@ -269,6 +279,31 @@ describe("040b-AC-1: add POSTs the store + re-lists (re-read, not optimistic)", 
 		await setValue(container.querySelector('textarea[aria-label="new content"]'), "x");
 		await click(btn("Add memory"));
 		expect(container.querySelector('[data-testid="add-note"]')?.textContent).toContain("Add failed");
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// memory-type taxonomy — the AddForm type dropdown (closed set)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("memory-type taxonomy: the AddForm renders a closed-set <select> defaulting to fact", () => {
+	it("renders a <select> with exactly the six MEMORY_TYPES, defaulting to fact", async () => {
+		await mountPage(mockWire({ list: [] }));
+		const select = container.querySelector<HTMLSelectElement>('[data-testid="add-type"]');
+		expect(select, "the add form must render a type <select>").not.toBeNull();
+		const options = [...(select?.querySelectorAll("option") ?? [])].map((o) => o.getAttribute("value"));
+		expect(options).toEqual([...MEMORY_TYPES]);
+		// Default selection is `fact`.
+		expect(select?.value).toBe(DEFAULT_MEMORY_TYPE);
+	});
+
+	it("submits the chosen token (not free text) to wire.addMemory", async () => {
+		const wire = mockWire({ list: [] });
+		await mountPage(wire);
+		await setValue(container.querySelector('textarea[aria-label="new content"]'), "an architectural choice");
+		await setSelect(container.querySelector<HTMLSelectElement>('[data-testid="add-type"]'), "decision");
+		await click(btn("Add memory"));
+		expect(wire.addMemory).toHaveBeenCalledWith({ content: "an architectural choice", type: "decision" });
 	});
 });
 

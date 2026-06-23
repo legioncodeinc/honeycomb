@@ -22,7 +22,22 @@
  *     `degraded` honest). Routes to `POST /api/memories/recall`.
  */
 
+import { MEMORY_TYPES, memoryTypeGuidance } from "../../src/shared/memory-types.js";
 import { type ToolArgSchema, type ToolCluster, z } from "./contracts.js";
+
+/**
+ * The CLOSED memory-type enum the `memory_store` tool publishes (PRD memory-type taxonomy).
+ * Built ONCE from the single-sourced {@link MEMORY_TYPES} with `zod/v3` (the MCP SDK's zod
+ * major — `z` here is re-exported from `zod/v3`), so the harness renders a six-value dropdown
+ * and an UNKNOWN type is rejected at the tool boundary. The `.describe(...)` carries the
+ * LLM-facing guidance (every token + WHEN to use it) so the agent classifies the memory it is
+ * about to store. Optional — omitted ⇒ the daemon applies the column default `fact`. The tuple
+ * is zod-free (a plain `as const`), so the SAME source feeds the app's `zod ^4` gate too.
+ */
+const memoryTypeArg = z
+	.enum(MEMORY_TYPES)
+	.describe(`The memory's type (optional; defaults to "fact"). Choose the best fit:\n${memoryTypeGuidance()}`)
+	.optional();
 
 /** A tool's Wave-1 descriptor: its `honeycomb_`-prefixed name, cluster, and arg schema. */
 export interface ToolSpec {
@@ -48,7 +63,7 @@ const opt = z.unknown().optional();
 export const TOOL_SPECS: readonly ToolSpec[] = [
 	// ── Memory cluster (FR-3) ────────────────────────────────────────────────
 	{ name: "memory_search", cluster: "memory", argSchema: args({ query: z.string(), limit: opt }) },
-	{ name: "memory_store", cluster: "memory", argSchema: args({ text: z.string(), path: opt }) },
+	{ name: "memory_store", cluster: "memory", argSchema: args({ text: z.string(), path: opt, type: memoryTypeArg }) },
 	{ name: "memory_get", cluster: "memory", argSchema: args({ path: z.string() }) },
 	{ name: "memory_list", cluster: "memory", argSchema: args({ prefix: opt }) },
 	// memory_modify / memory_forget REQUIRE a `reason` (FR-9 / d-AC-3).

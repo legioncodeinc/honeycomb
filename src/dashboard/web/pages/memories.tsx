@@ -31,6 +31,11 @@ import React from "react";
 import { Badge, Button, Input, MemoryCard } from "../primitives.js";
 import { PageFrame, type PageProps } from "../page-frame.js";
 import {
+	DEFAULT_MEMORY_TYPE,
+	MEMORY_TYPE_DESCRIPTIONS,
+	MEMORY_TYPES,
+} from "../../../shared/memory-types.js";
+import {
 	formatLogLine,
 	type CompactSummaryWire,
 	type PollinateAck,
@@ -313,10 +318,28 @@ function DetailView({ record, onClose, onEdit, onForget }: DetailViewProps): Rea
 // The add form (040b)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** The ADD form (040b-AC-1): content (required) + optional type. On 201, the parent re-lists. */
+/** The DS-token styling shared by the AddForm's `<select>` and `<textarea>` (kept in one place). */
+const ADD_FIELD_STYLE: React.CSSProperties = {
+	height: 40,
+	padding: "0 12px",
+	background: "var(--bg-surface)",
+	border: "1px solid var(--border-default)",
+	borderRadius: "var(--radius-md)",
+	color: "var(--text-primary)",
+	fontFamily: "var(--font-mono)",
+	fontSize: "var(--text-sm)",
+};
+
+/**
+ * The ADD form (040b-AC-1): content (required) + a CLOSED-taxonomy `type` dropdown. On 201,
+ * the parent re-lists. The `type` field is a `<select>` of the single-sourced {@link MEMORY_TYPES}
+ * (default {@link DEFAULT_MEMORY_TYPE}) — never free text — so a user can only submit one of the
+ * six the daemon's enum gate accepts; each option's description rides as the `title` hint. The
+ * chosen token is passed verbatim to the existing submit path (`onAdd` → `wire.addMemory`).
+ */
 function AddForm({ onAdd }: { onAdd: (content: string, type: string) => Promise<string | null> }): React.JSX.Element {
 	const [content, setContent] = React.useState("");
-	const [type, setType] = React.useState("");
+	const [type, setType] = React.useState<string>(DEFAULT_MEMORY_TYPE);
 	const [busy, setBusy] = React.useState(false);
 	const [note, setNote] = React.useState("");
 
@@ -325,7 +348,7 @@ function AddForm({ onAdd }: { onAdd: (content: string, type: string) => Promise<
 		if (busy || empty) return;
 		setBusy(true);
 		setNote("");
-		const result = await onAdd(content, type.trim());
+		const result = await onAdd(content, type);
 		setBusy(false);
 		if (result === null) {
 			setNote("Add failed — nothing was stored.");
@@ -333,7 +356,7 @@ function AddForm({ onAdd }: { onAdd: (content: string, type: string) => Promise<
 		}
 		// On success clear the form; the parent has re-listed and the new memory shows in the list.
 		setContent("");
-		setType("");
+		setType(DEFAULT_MEMORY_TYPE);
 		setNote(result);
 	};
 
@@ -360,9 +383,20 @@ function AddForm({ onAdd }: { onAdd: (content: string, type: string) => Promise<
 				}}
 			/>
 			<div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-				<div style={{ width: 180 }}>
-					<Input mono value={type} placeholder="type (optional)" onChange={(e) => setType(e.target.value)} />
-				</div>
+				<select
+					aria-label="memory type"
+					data-testid="add-type"
+					value={type}
+					onChange={(e) => setType(e.target.value)}
+					title={MEMORY_TYPE_DESCRIPTIONS[type as keyof typeof MEMORY_TYPE_DESCRIPTIONS]}
+					style={{ ...ADD_FIELD_STYLE, width: 180, cursor: "pointer" }}
+				>
+					{MEMORY_TYPES.map((t) => (
+						<option key={t} value={t} title={MEMORY_TYPE_DESCRIPTIONS[t]}>
+							{t === DEFAULT_MEMORY_TYPE ? `${t} (default)` : t}
+						</option>
+					))}
+				</select>
 				<Button variant="primary" onClick={() => void submit()} disabled={busy || empty}>
 					{busy ? "…" : "Add memory"}
 				</Button>

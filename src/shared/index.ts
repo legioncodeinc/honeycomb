@@ -9,3 +9,11 @@ export {
 	HONEYCOMB_VERSION,
 	PRODUCT_SLUG,
 } from "./constants.js";
+export {
+	DEFAULT_MEMORY_TYPE,
+	MEMORY_TYPE_DESCRIPTIONS,
+	MEMORY_TYPES,
+	isMemoryType,
+	memoryTypeGuidance,
+	type MemoryType,
+} from "./memory-types.js";
