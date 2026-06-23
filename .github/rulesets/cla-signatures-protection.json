@@ -1,0 +1,15 @@
+{
+  "name": "cla-signatures protection",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["refs/heads/cla-signatures"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    { "type": "deletion" },
+    { "type": "non_fast_forward" }
+  ]
+}

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/legioncodeinc/honeycomb/blob/main/SECURITY.md
+    about: Do not file security issues in public. Report them privately per our security policy.
+  - name: Question or discussion
+    url: https://github.com/legioncodeinc/honeycomb/discussions
+    about: For questions, ideas, and general discussion, use Discussions instead of an issue.
