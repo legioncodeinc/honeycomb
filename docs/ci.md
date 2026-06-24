@@ -60,7 +60,7 @@ The integration job reads four `HONEYCOMB_DEEPLAKE_*` repository secrets. Set
 them with the GitHub CLI from the repo root:
 
 ```bash
-gh secret set HONEYCOMB_DEEPLAKE_ENDPOINT   # e.g. https://api.activeloop.ai
+gh secret set HONEYCOMB_DEEPLAKE_ENDPOINT   # e.g. https://api.deeplake.ai
 gh secret set HONEYCOMB_DEEPLAKE_TOKEN      # the bearer token (the gate key)
 gh secret set HONEYCOMB_DEEPLAKE_ORG        # your DeepLake org id
 gh secret set HONEYCOMB_DEEPLAKE_WORKSPACE  # optional; defaults to honeycomb_ci

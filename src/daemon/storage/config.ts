@@ -44,7 +44,7 @@ const QueryTimeoutMs = z.preprocess((raw) => {
  * here in memory only; redaction (FR-8) happens at every log/error boundary.
  */
 export const StorageConfigSchema = z.object({
-	/** DeepLake HTTP query endpoint, e.g. https://api.activeloop.ai. */
+	/** DeepLake HTTP query endpoint, e.g. https://api.deeplake.ai. */
 	endpoint: z.string().url("endpoint must be a valid URL"),
 	/** Bearer token. Never logged in full — see redactToken. */
 	token: z.string().min(1, "token must not be empty"),
