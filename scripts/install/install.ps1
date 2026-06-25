@@ -1,7 +1,7 @@
 # Honeycomb one-command bootstrap installer (Windows PowerShell) -- PRD-050a.
 #
 # Usage (the single line a brand-new Windows user pastes):
-#   irm https://raw.githubusercontent.com/legioncodeinc/honeycomb/main/scripts/install/install.ps1 | iex
+#   irm https://get.theapiary.sh/install.ps1 | iex
 #
 # This is the FUNCTIONAL EQUIVALENT of install.sh (PRD-050a a-AC-5): same contract -- leave the user
 # on a running dashboard, or tell them in ONE plain sentence why not. It owns ONLY the host-bootstrap
@@ -30,10 +30,12 @@ $HoneycombNodeVersion = '22'
 # The published npm package the global install pulls (PRD-048 publishes it; this consumes it).
 $HoneycombNpmPackage = '@legioncodeinc/honeycomb@latest'
 
-# INTERIM distribution constant (PRD-050a operator decision): the raw repo URL the irm|iex line
-# points at. BLOCKED follow-up (non-gating): a vanity `get.honeycomb.*` domain + a published
-# checksum / "inspect before piping" page. Tracked in the report, not blocking this script.
-$HoneycombInstallBaseUrl = 'https://raw.githubusercontent.com/legioncodeinc/honeycomb/main/scripts/install'
+# Distribution base URL: the vanity domain that serves this installer surface (PRD-050a follow-up,
+# now RESOLVED). get.theapiary.sh is a Cloudflare Pages site (site/install/) that content-negotiates:
+# a shell client piping `/` gets the POSIX install.sh as text/plain; a browser gets an "inspect before
+# piping" page with the PUBLISHED SHA-256 checksums. `$HoneycombInstallBaseUrl/install.ps1` always
+# resolves to the raw, checksummed script. To verify before running: see https://get.theapiary.sh
+$HoneycombInstallBaseUrl = 'https://get.theapiary.sh'
 
 # Friendly progress log: step lines to the host, the single failure summary to the error stream.
 function Write-Step([string]$m) { Write-Host "-> $m" }
