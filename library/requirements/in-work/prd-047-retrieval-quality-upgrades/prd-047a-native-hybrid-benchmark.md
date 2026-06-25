@@ -1,6 +1,6 @@
 # PRD-047a — Native `deeplake_hybrid_record` vs RRF: benchmark + adoption gate
 
-> Status: CLOSED — decision recorded (keep RRF) · Parent: PRD-047 · Wave: W0 · Type: S
+> Status: CLOSED — decision UNCHANGED (keep RRF); operator since FIXED, re-eval deferred · Parent: PRD-047 · Wave: W0 · Type: S
 > Goal: settle PRD-027 D-1's deferred question with NUMBERS — does DeepLake's native hybrid
 > operator tie-or-beat the post-query RRF the engine ships, on the committed golden set? Adopt
 > native hybrid iff it does; otherwise keep RRF and record why.
@@ -11,6 +11,20 @@
 > root cause in [reports/2026-06-22-hybrid-benchmark-decision.md](reports/2026-06-22-hybrid-benchmark-decision.md).
 > The slice (`hybrid-recall.ts` + benchmark + `npm run bench:hybrid`) stays in tree as the unwired
 > reference; no production recall path changed.
+>
+> **RE-RUN (2026-06-24): the operator is FIXED — now at PARITY with RRF, but decision still KEEP RRF.**
+> DeepLake has since fixed `deeplake_hybrid_record`: it no longer returns a degenerate zero score and
+> is now weight-SENSITIVE (genuinely ranking). On the same harness (`npm run bench:hybrid`, live,
+> workspace `honeycomb`): RRF recall@5 0.611 / MRR 0.593 vs native-hybrid (0.5/0.5) recall@5 0.611 /
+> MRR 0.589 — a TIE on recall@1/@5, marginally behind on recall@10/MRR/nDCG. It ties but does not
+> BEAT RRF, so the adoption gate (tie-or-beat recall@5 AND MRR) is not cleared. A separate
+> cost/benefit review found adoption buys **no package savings** (RRF is hand-rolled, no dep; both
+> paths need the embed daemon + DeepLake), **no clear cost saving**, and only ~5→~3 DeepLake
+> round-trips per recall (possible latency win, unmeasured) — against re-coupling ranking to an
+> opaque operator that just spent months broken. **Decision: keep RRF; keep `hybrid-recall.ts` as the
+> live reference candidate; revisit with the graded eval (047f).** Full re-run numbers + triggers in
+> [reports/2026-06-22-hybrid-benchmark-decision.md](reports/2026-06-22-hybrid-benchmark-decision.md)
+> and [ADR-0001](../../../knowledge/private/architecture/adr/0001-retrieval-fusion-rrf-vs-native-hybrid.md).
 
 ## Why
 PRD-027 D-1 shipped post-query RRF and named the DB's native `deeplake_hybrid_record` operator a

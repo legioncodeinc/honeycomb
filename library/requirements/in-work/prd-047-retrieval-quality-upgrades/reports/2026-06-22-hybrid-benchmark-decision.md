@@ -70,3 +70,66 @@ recall path changed.
 - Bonus signal: in the cleaner `default` workspace, RRF scored recall@5 ≈ 0.72–0.78, ABOVE the
   committed `honeycomb_ci` baseline (0.583) — consistent with fewer near-duplicate clones, and
   extra motivation for 047c (semantic dedup).
+
+---
+
+# RE-RUN — 2026-06-24: the operator is FIXED, now at PARITY. Decision UNCHANGED (keep RRF).
+
+> Date: 2026-06-24 · Run: live, workspace `honeycomb` (org `4ad849af…`), embed daemon
+> `nomic-embed-text-v1.5` (768-dim), two-phase convergence. Same harness: `npm run bench:hybrid`.
+> **Decision: KEEP RRF for now.** Continue evaluations later (see Triggers).
+
+## What changed
+DeepLake has since FIXED `deeplake_hybrid_record`. The 2026-06-22 degeneracy (every row scored
+`0.000000` → random ordering) is GONE: the operator now returns real, varying scores and is
+**weight-sensitive** — the decisive proof it is genuinely ranking (in June, weights "barely moved"
+*because* every score was zero).
+
+## Measured results (same warm store, only fusion varies)
+
+| Path | recall@1 | recall@5 | recall@10 | MRR | nDCG |
+|---|---|---|---|---|---|
+| **RRF (current)** | 0.583 | **0.611** | **0.639** | **0.593** | **0.586** |
+| Native hybrid (v=0.5 / t=0.5) | 0.583 | 0.611 | 0.611 | 0.589 | 0.573 |
+| Native hybrid (v=0.7 / t=0.3) | 0.528 | 0.583 | 0.611 | 0.555 | 0.556 |
+| Δ best-hybrid − RRF | 0.000 | 0.000 | −0.027 | −0.004 | −0.013 |
+
+Native hybrid at balanced weights **TIES** RRF on recall@1/@5 and is marginally behind on
+recall@10 / MRR / nDCG (Δ ≈ 0.004–0.027 ≈ ~1 pair of 36 — within noise). The 0.7/0.3 sweep moved
+the numbers (confirming weight-sensitivity) and was slightly worse. **It ties; it does not BEAT.**
+Absolute levels differ from the 2026-06-22 run only because this re-run used the `honeycomb`
+workspace (the prior run used the cleaner `default`); the A/B is valid because both paths read the
+same warm store.
+
+## Decision + rationale (cost/benefit)
+The adoption gate is **tie-or-beat recall@5 AND MRR**. Native hybrid ties recall@5 but loses MRR by
+0.004 → gate not cleared. A separate cost/benefit review confirmed adoption is low-value today:
+
+- **Packages: ZERO saved.** RRF is hand-rolled TypeScript (`recall.ts` `fuseHits`, no npm dep). Both
+  paths still require the embed daemon (`@huggingface/transformers` + ~600 MB nomic model) and
+  DeepLake. Nothing gets uninstalled.
+- **Cost: no clear saving.** Query is embedded once locally (no per-token API cost) on either path;
+  recall calls no LLM. The only lever is DeepLake query volume: recall fires ~5 deliberate per-arm
+  round-trips (per-arm, not UNION, for fresh-table robustness); native hybrid fuses vector+text
+  server-side, one statement per table → ~5 → ~3. Whether fewer statements = fewer dollars depends
+  on DeepLake's (unverified) billing model.
+- **Upside is modest:** possibly lower recall latency (fewer round-trips, server-side fusion —
+  unmeasured here) and deleting the RRF rank-bookkeeping (partial; cross-arm weighting + the
+  `degraded` fallback stay).
+- **Cost of switching:** re-couples ranking to an opaque engine scorer that just spent months
+  silently broken (only the eval caught it), and the per-arm `degraded:true` fallback / fresh-table
+  tolerance must be re-proven. Taking that on for PARITY is a bad trade.
+
+**Verdict: keep RRF as the default; keep `hybrid-recall.ts` as the unwired live reference candidate.**
+The benchmark + score-inspection stay in tree.
+
+## Triggers to revisit (continue evaluations later)
+Re-open the adoption question if ANY of these appears:
+1. DeepLake billing turns out to be **per-query / per-compute** AND recall query volume is a real
+   cost line.
+2. Recall **latency** becomes a measured problem (the ~5→~3 round-trip cut would matter).
+3. A **graded-relevance + nDCG sweep (047f, now wired)** — ideally multi-run, in the `default`
+   workspace, across a fuller weight grid — shows native hybrid **BEATING** RRF, not just tying.
+
+See [ADR-0001](../../../../knowledge/private/architecture/adr/0001-retrieval-fusion-rrf-vs-native-hybrid.md)
+for the standing decision record.

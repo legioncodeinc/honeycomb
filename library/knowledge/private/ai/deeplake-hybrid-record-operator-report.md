@@ -1,6 +1,15 @@
 # DeepLake `deeplake_hybrid_record` — zero-score report
 
-> Category: Ai | Version: 1.0 | Date: June 2026 | Status: Active | Audience: Activeloop / DeepLake engineering
+> Category: Ai | Version: 1.1 | Date: June 2026 | Status: RESOLVED (fixed by DeepLake, verified 2026-06-24) | Audience: Activeloop / DeepLake engineering
+
+> **✅ RESOLVED 2026-06-24.** DeepLake has fixed the operator. A re-run of the same benchmark
+> (`npm run bench:hybrid`, live) shows `deeplake_hybrid_record` now returns real, varying,
+> **weight-sensitive** scores and ranks at parity with our post-query RRF (recall@5 0.611 vs 0.611,
+> MRR 0.589 vs 0.593) — the constant-zero degeneracy described below is gone. This report is retained
+> as the historical root-cause record. Honeycomb still keeps RRF as the default (parity, not a win)
+> per [ADR-0001](../architecture/adr/0001-retrieval-fusion-rrf-vs-native-hybrid.md); the operator is
+> now a viable candidate to revisit. See the re-run section of the
+> [benchmark decision report](../../../requirements/in-work/prd-047-retrieval-quality-upgrades/reports/2026-06-22-hybrid-benchmark-decision.md).
 
 A technical report for DeepLake on the `deeplake_hybrid_record` hybrid-search operator returning a
 constant `0` score for every row on our managed dataset. Every statement below is a directly
