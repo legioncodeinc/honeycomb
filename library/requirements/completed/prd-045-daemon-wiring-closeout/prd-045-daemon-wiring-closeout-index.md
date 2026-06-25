@@ -1,6 +1,6 @@
 # PRD-045: Daemon-Wiring Close-out
 
-> **Status:** In Work
+> **Status:** Completed (2026-06-25 — all engines verified live at the composition root; QA rev 3 PASS)
 > **Priority:** P0
 > **Effort:** XL
 > **Schema changes:** None (the engines + tables already exist; this PRD wires them)
@@ -89,17 +89,17 @@ applies its shaping phases; an entity gets linked and `/api/ontology` answers; a
 
 ## Acceptance Criteria
 
-- [ ] **AC-1** — Each of 006/007/008/009/013/016/018 has a cited **runtime invocation site** in `src/` (a fired
+- [x] **AC-1** — Each of 006/007/008/009/013/016/018 has a cited **runtime invocation site** in `src/` (a fired
       `assemble.ts` seam, a leased job kind, or a registered CLI/hook seam) — no deliverable reachable only from tests.
-- [ ] **AC-2** — A captured turn is observably processed by the **memory pipeline** (extraction produces facts),
+- [x] **AC-2** — A captured turn is observably processed by the **memory pipeline** (extraction produces facts),
       proven by a live itest (045a).
-- [ ] **AC-3** — `/api/ontology/*` (045c), `/api/sources` + `/api/documents` (045e) return real data (no 501) on a
+- [x] **AC-3** — `/api/ontology/*` (045c), `/api/sources` + `/api/documents` (045e) return real data (no 501) on a
       real assembled daemon.
-- [ ] **AC-4** — A **pollinating pass** runs to completion when enabled (enqueue → lease → model → ontology apply →
+- [x] **AC-4** — A **pollinating pass** runs to completion when enabled (enqueue → lease → model → ontology apply →
       append-only state), proven by a live itest (045d).
-- [ ] **AC-5** — A session-end **mines a skill** (045f) that is then **published and pulled** by a second
+- [x] **AC-5** — A session-end **mines a skill** (045f) that is then **published and pulled** by a second
       workspace/harness (045g), proven end-to-end.
-- [ ] **AC-6** — The retrieval shaping phases are either **on the live recall path** or formally **de-scoped**, with
+- [x] **AC-6** — The retrieval shaping phases are either **on the live recall path** or formally **de-scoped**, with
       PRD-007's doc reconciled to match runtime (045b).
 - [x] **AC-7** — Each affected Completed PRD index carries an accurate reconciliation note, and no `Status:`
       overstates runtime reality.

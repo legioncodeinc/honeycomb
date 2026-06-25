@@ -1,6 +1,6 @@
 # PRD-008: Knowledge Graph and Ontology
 
-> **Status:** Completed — NOW LIVE (closed by [PRD-045c](../../in-work/prd-045-daemon-wiring-closeout/prd-045c-daemon-wiring-closeout-ontology-surface.md))
+> **Status:** Completed — NOW LIVE (closed by [PRD-045c](../prd-045-daemon-wiring-closeout/prd-045c-daemon-wiring-closeout-ontology-surface.md))
 > **Priority:** P1
 > **Effort:** L
 > **Schema changes:** Additive
@@ -13,8 +13,8 @@
 > is mounted in `assemble.ts:868` (`mountOntologyApi`); the endpoint returns real entity/edge/assertion data (no 501).
 > Control-plane apply/supersession runs on a live path via the pipeline graph-persist stage (independent of pollinating),
 > with pollinating remaining an additional opt-in consolidation consumer. Closed by
-> [PRD-045c](../../in-work/prd-045-daemon-wiring-closeout/prd-045c-daemon-wiring-closeout-ontology-surface.md).
-> Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../../in-work/prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
+> [PRD-045c](../prd-045-daemon-wiring-closeout/prd-045c-daemon-wiring-closeout-ontology-surface.md).
+> Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
 
 ---
 

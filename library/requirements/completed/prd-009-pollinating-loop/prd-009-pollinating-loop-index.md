@@ -1,6 +1,6 @@
 # PRD-009: Pollinating Loop
 
-> **Status:** Completed — WIRED, DEFAULT OFF BY DESIGN (closed by [PRD-045d](../../in-work/prd-045-daemon-wiring-closeout/prd-045d-daemon-wiring-closeout-pollinating-activation.md))
+> **Status:** Completed — WIRED, DEFAULT OFF BY DESIGN (closed by [PRD-045d](../prd-045-daemon-wiring-closeout/prd-045d-daemon-wiring-closeout-pollinating-activation.md))
 > **Priority:** P2
 > **Effort:** L
 > **Schema changes:** Additive
@@ -17,8 +17,8 @@
 > writer on every captured turn; pollinating is the opt-in periodic consolidator on top. The PRD-010 router is
 > activated as a side effect of enabling pollinating. Proven by token-gated live itest
 > (`tests/integration/pollinating-activation-live.itest.ts`). Closed by
-> [PRD-045d](../../in-work/prd-045-daemon-wiring-closeout/prd-045d-daemon-wiring-closeout-pollinating-activation.md).
-> Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../../in-work/prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
+> [PRD-045d](../prd-045-daemon-wiring-closeout/prd-045d-daemon-wiring-closeout-pollinating-activation.md).
+> Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
 
 ---
 

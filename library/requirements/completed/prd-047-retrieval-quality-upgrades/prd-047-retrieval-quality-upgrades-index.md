@@ -1,6 +1,6 @@
 # PRD-047 — Retrieval quality upgrades (native hybrid, rerank, dedup, recency, assembly)
 
-> Status: in-work · Owner: `/the-smoker` · Type: L (multi-feature)
+> Status: Completed (2026-06-25 — merged #97 `cdc909d`; all waves wired into live `recallMemories`; QA PASS 31/31) · Owner: `/the-smoker` · Type: L (multi-feature)
 > Goal: take the recall engine from a strong-but-bare hybrid+RRF floor (PRD-025/027) to a
 > shaped, reranked, freshness-aware result — by adopting the capabilities Honeycomb already
 > pays for (DeepLake's native hybrid operator; the scaffolded-but-unconsumed reranker) and

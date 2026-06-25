@@ -1,6 +1,6 @@
 # PRD-007: Retrieval
 
-> **Status:** Completed — reconciled to shipped behavior (the five-phase engine was DE-SCOPED, see [PRD-045b](../../in-work/prd-045-daemon-wiring-closeout/prd-045b-daemon-wiring-closeout-retrieval-engine.md))
+> **Status:** Completed — reconciled to shipped behavior (the five-phase engine was DE-SCOPED, see [PRD-045b](../prd-045-daemon-wiring-closeout/prd-045b-daemon-wiring-closeout-retrieval-engine.md))
 > **Priority:** P0
 > **Effort:** XL
 > **Schema changes:** None
@@ -15,8 +15,8 @@
 > was **DE-SCOPED and removed** — its currentness was redundant with the append-only highest-version + soft-delete
 > model and PRD-008 supersession-on-read, and its confidence gate had no consumer (every surface wants raw ranked
 > recall). The acceptance criteria below are rewritten to the shipped behavior; no claim overstates runtime reality.
-> Decision + evidence: [PRD-045b](../../in-work/prd-045-daemon-wiring-closeout/prd-045b-daemon-wiring-closeout-retrieval-engine.md).
-> Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../../in-work/prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
+> Decision + evidence: [PRD-045b](../prd-045-daemon-wiring-closeout/prd-045b-daemon-wiring-closeout-retrieval-engine.md).
+> Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
 
 ---
 

@@ -1,6 +1,6 @@
 # PRD-018: Team Skill Sharing
 
-> **Status:** Completed — NOW LIVE (closed by [PRD-045g](../../in-work/prd-045-daemon-wiring-closeout/prd-045g-daemon-wiring-closeout-team-skill-sharing.md))
+> **Status:** Completed — NOW LIVE (closed by [PRD-045g](../prd-045-daemon-wiring-closeout/prd-045g-daemon-wiring-closeout-team-skill-sharing.md))
 > **Priority:** P2
 > **Effort:** M
 > **Schema changes:** Additive
@@ -14,8 +14,8 @@
 > `SessionStart`. Cross-harness symlink fan-out (`fanOutSymlinks`) is reachable on pull via the registered CLI
 > verbs in `VERB_TABLE`. A live itest proves end-to-end propagation: workspace A mines + publishes a skill (via
 > PRD-045f worker) → workspace/harness B auto-pulls it on session start. Closed by
-> [PRD-045g](../../in-work/prd-045-daemon-wiring-closeout/prd-045g-daemon-wiring-closeout-team-skill-sharing.md).
-> Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../../in-work/prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
+> [PRD-045g](../prd-045-daemon-wiring-closeout/prd-045g-daemon-wiring-closeout-team-skill-sharing.md).
+> Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
 
 ---
 

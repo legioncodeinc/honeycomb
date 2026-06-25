@@ -1,6 +1,6 @@
 # PRD-013: Sources and Documents
 
-> **Status:** Completed — NOW LIVE (closed by [PRD-045e](../../in-work/prd-045-daemon-wiring-closeout/prd-045e-daemon-wiring-closeout-sources-documents.md))
+> **Status:** Completed — NOW LIVE (closed by [PRD-045e](../prd-045-daemon-wiring-closeout/prd-045e-daemon-wiring-closeout-sources-documents.md))
 > **Priority:** P1
 > **Effort:** L
 > **Schema changes:** Additive
@@ -13,8 +13,8 @@
 > document worker is wired so `POST /api/documents` ingests through the worker (no 501); a live itest proves an
 > ingested document is recallable. The Obsidian/Discord/GitHub providers are instantiated and at least one provider
 > (Obsidian) round-trips add → list → sync. Closed by
-> [PRD-045e](../../in-work/prd-045-daemon-wiring-closeout/prd-045e-daemon-wiring-closeout-sources-documents.md).
-> Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../../in-work/prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
+> [PRD-045e](../prd-045-daemon-wiring-closeout/prd-045e-daemon-wiring-closeout-sources-documents.md).
+> Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
 
 ---
 

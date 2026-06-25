@@ -73,6 +73,6 @@ None. No daemon endpoints added or changed. New developer entry points only: an 
 ## Related
 
 - [PRD-031 Live-integration test net](../in-work/prd-031-live-integration-test-net/prd-031-live-integration-test-net-index.md) — the plain-CI assembled tests + scheduled-live architecture this builds on.
-- [PRD-028 Storage read-consistency](../in-work/prd-028-storage-read-consistency/prd-028-storage-read-consistency-index.md) — `readConverged`, reused for the "eventually" assertions.
+- [PRD-028 Storage read-consistency](../prd-028-storage-read-consistency/prd-028-storage-read-consistency-index.md) — `readConverged`, reused for the "eventually" assertions.
 - [PRD-027 Recall ranking & eval](../in-work/prd-027-recall-ranking-and-eval/prd-027-recall-ranking-and-eval-index.md) — the `src/eval/` harness + metrics pattern the stress report mirrors.
 - [DeepLake eventual-consistency poll reads](../../../.claude/projects/) — every live read-back polls to convergence (project memory).

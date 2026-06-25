@@ -99,8 +99,8 @@ Re-open this decision (continue evaluations later) if ANY of these holds:
 
 ## Links
 
-- PRD-047a: `library/requirements/in-work/prd-047-retrieval-quality-upgrades/prd-047a-native-hybrid-benchmark.md`
-- Benchmark decision report (both runs): `library/requirements/in-work/prd-047-retrieval-quality-upgrades/reports/2026-06-22-hybrid-benchmark-decision.md`
+- PRD-047a: `library/requirements/completed/prd-047-retrieval-quality-upgrades/prd-047a-native-hybrid-benchmark.md`
+- Benchmark decision report (both runs): `library/requirements/completed/prd-047-retrieval-quality-upgrades/reports/2026-06-22-hybrid-benchmark-decision.md`
 - Live recall (RRF): `src/daemon/runtime/memories/recall.ts`
 - Reference candidate: `src/daemon/runtime/memories/hybrid-recall.ts`
 - Operator probe report: `library/knowledge/private/ai/deeplake-hybrid-record-operator-report.md`
