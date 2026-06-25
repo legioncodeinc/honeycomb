@@ -32,7 +32,7 @@ flowchart TB
         cc[Claude Code]
         cur[Cursor]
         ocl[OpenClaw]
-        more[Codex / Hermes / pi / OpenCode / Gemini]
+        more[Codex / Hermes / pi]
     end
     subgraph runtime[Honeycomb daemon]
         capture[Capture]
@@ -72,20 +72,24 @@ DeepLake is the substrate. It is a GPU-backed SQL and vector store, and all dura
 
 New to the codebase: this overview, then [`architecture/system-overview.md`](architecture/system-overview.md), then [`architecture/request-lifecycle.md`](architecture/request-lifecycle.md).
 
+Installing and onboarding: [`operations/install-and-onboarding.md`](operations/install-and-onboarding.md), then [`infrastructure/npm-publishing.md`](infrastructure/npm-publishing.md).
+
 Working on the memory engine: [`ai/session-capture.md`](ai/session-capture.md), [`ai/memory-pipeline.md`](ai/memory-pipeline.md), [`ai/retrieval.md`](ai/retrieval.md), [`ai/knowledge-graph-ontology.md`](ai/knowledge-graph-ontology.md), [`ai/pollinating-loop.md`](ai/pollinating-loop.md), [`ai/model-provider-router.md`](ai/model-provider-router.md).
 
-Working on storage: [`data/deeplake-storage.md`](data/deeplake-storage.md), [`data/schema.md`](data/schema.md), [`data/memory-virtual-filesystem.md`](data/memory-virtual-filesystem.md), [`data/codebase-graph.md`](data/codebase-graph.md), [`data/workspace-layout.md`](data/workspace-layout.md).
+Working on memory recall and priming: [`ai/retrieval.md`](ai/retrieval.md), [`ai/session-priming-architecture.md`](ai/session-priming-architecture.md), [`ai/three-tier-memory-strategy.md`](ai/three-tier-memory-strategy.md).
 
-Working on learning and sharing: [`ai/skillify-pipeline.md`](ai/skillify-pipeline.md), [`ai/wiki-summary-workers.md`](ai/wiki-summary-workers.md), [`collaboration/team-skills-sharing.md`](collaboration/team-skills-sharing.md).
+Working on storage: [`data/deeplake-storage.md`](data/deeplake-storage.md), [`data/schema.md`](data/schema.md), [`data/memory-virtual-filesystem.md`](data/memory-virtual-filesystem.md), [`data/codebase-graph.md`](data/codebase-graph.md), [`data/memory-compaction.md`](data/memory-compaction.md), [`data/workspace-layout.md`](data/workspace-layout.md).
 
-Working on integrations: [`integrations/harness-integration.md`](integrations/harness-integration.md), [`integrations/hook-lifecycle.md`](integrations/hook-lifecycle.md), [`integrations/mcp-and-sdk.md`](integrations/mcp-and-sdk.md), [`frontend/cursor-extension-architecture.md`](frontend/cursor-extension-architecture.md).
+Working on learning and sharing: [`ai/skillify-pipeline.md`](ai/skillify-pipeline.md), [`ai/wiki-summary-workers.md`](ai/wiki-summary-workers.md), [`collaboration/team-skills-sharing.md`](collaboration/team-skills-sharing.md), [`collaboration/asset-sync-substrate.md`](collaboration/asset-sync-substrate.md).
 
-Working on access, tenancy, and security: [`auth/auth-architecture.md`](auth/auth-architecture.md), [`multi-tenant/org-workspace-model.md`](multi-tenant/org-workspace-model.md), [`security/scoping-and-visibility.md`](security/scoping-and-visibility.md), [`security/secrets.md`](security/secrets.md), [`security/credential-storage.md`](security/credential-storage.md), [`security/trust-boundaries.md`](security/trust-boundaries.md), [`sources/source-lifecycle.md`](sources/source-lifecycle.md).
+Working on integrations and surfaces: [`integrations/harness-integration.md`](integrations/harness-integration.md), [`integrations/hook-lifecycle.md`](integrations/hook-lifecycle.md), [`integrations/mcp-and-sdk.md`](integrations/mcp-and-sdk.md), [`frontend/cursor-extension-architecture.md`](frontend/cursor-extension-architecture.md), [`frontend/dashboard-architecture.md`](frontend/dashboard-architecture.md).
 
-Build, CLI, and ops: [`infrastructure/monorepo-build-release.md`](infrastructure/monorepo-build-release.md), [`operations/cli-command-architecture.md`](operations/cli-command-architecture.md), [`operations/notifications-and-health.md`](operations/notifications-and-health.md).
+Working on access, tenancy, and security: [`auth/auth-architecture.md`](auth/auth-architecture.md), [`multi-tenant/org-workspace-model.md`](multi-tenant/org-workspace-model.md), [`architecture/multi-project-and-context-switching.md`](architecture/multi-project-and-context-switching.md), [`security/scoping-and-visibility.md`](security/scoping-and-visibility.md), [`security/secrets.md`](security/secrets.md), [`security/credential-storage.md`](security/credential-storage.md), [`security/trust-boundaries.md`](security/trust-boundaries.md), [`sources/source-lifecycle.md`](sources/source-lifecycle.md).
+
+Build, CLI, and ops: [`infrastructure/monorepo-build-release.md`](infrastructure/monorepo-build-release.md), [`infrastructure/npm-publishing.md`](infrastructure/npm-publishing.md), [`operations/cli-command-architecture.md`](operations/cli-command-architecture.md), [`operations/install-and-onboarding.md`](operations/install-and-onboarding.md), [`operations/notifications-and-health.md`](operations/notifications-and-health.md), [`operations/observability-and-degradation.md`](operations/observability-and-degradation.md).
 
 Conventions: [`standards/documentation-framework.md`](standards/documentation-framework.md), [`standards/coding-standards-typescript.md`](standards/coding-standards-typescript.md), [`standards/api-design-conventions.md`](standards/api-design-conventions.md).
 
 ## Coverage
 
-This knowledge base covers the merged Honeycomb runtime end to end: capture, pipeline, retrieval, ontology, pollinating, model routing, DeepLake storage and schema, the virtual filesystem, the codebase graph, skillify and team sharing, harness integrations, auth and tenancy, security, and standards. It was built by merging the Hivemind and our-memory-engine knowledge bases. Source authority is the code first, then these docs. Where this base disagrees with the implementation, the implementation wins and this base should be corrected.
+This knowledge base covers the merged Honeycomb runtime end to end: install and onboarding, capture, pipeline, retrieval and session priming, ontology, pollinating and compaction, model routing, DeepLake storage and schema, the virtual filesystem, the codebase graph, skillify and team sharing, asset sync, the six harness integrations, the dashboard and Cursor extension surfaces, auth and tenancy, multi-project context switching, operational observability, npm publishing, security, and standards. It was built by merging the Hivemind and our-memory-engine knowledge bases. Source authority is the code first, then these docs. Where this base disagrees with the implementation, the implementation wins and this base should be corrected.

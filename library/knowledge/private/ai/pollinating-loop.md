@@ -1,13 +1,14 @@
 # Pollinating Loop
 
-> Category: Ai | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Ai | Version: 1.1 | Date: June 2026 | Status: Active
 
-The maintenance pass that periodically reasons over accumulated summaries and the whole graph to merge duplicates, prune junk, and supersede stale claims. Why it exists, when it fires, and what it is allowed to change.
+The maintenance pass that periodically reasons over accumulated summaries and the whole graph to merge duplicates, prune junk, and supersede stale claims. Why it exists, how it is enabled (off-by-default, no-surprise-spend), when it fires, and what it is allowed to change.
 
 **Related:**
 - [`memory-pipeline.md`](memory-pipeline.md)
 - [`knowledge-graph-ontology.md`](knowledge-graph-ontology.md)
 - [`model-provider-router.md`](model-provider-router.md)
+- [`../data/memory-compaction.md`](../data/memory-compaction.md)
 - [`../data/workspace-layout.md`](../data/workspace-layout.md)
 
 ---
@@ -18,14 +19,18 @@ The extraction pipeline is fast and cheap, but it is also near-sighted. Each ext
 
 Pollinating runs inside the daemon's maintenance loop and reasons over DeepLake tables the daemon owns. It is a premium tier. Installs without access to a larger model keep the extraction pipeline as the free tier and lose nothing; they just do not get consolidation.
 
-## Enabling pollinating
+## Enabling pollinating (off-by-default, no-surprise-spend)
 
-Pollinating is **off by default** on fresh installs to avoid surprise model spend. Enable it via either of two mechanisms (vault setting wins when present):
+Pollinating is **off by default** on fresh installs to avoid surprise model spend. `resolvePollinatingConfig` (`src/daemon/runtime/pollinating/config.ts`) ships `memory.pollinating.enabled = false` as the false-safe default, a missing flag is OFF, deliberately, because enabling a model-calling loop by default before it is proven on a user's real data is exactly the run-away risk the guards exist for. While disabled, `POST /api/diagnostics/pollinate` returns `{triggered:false, status:"skipped", reason:"disabled"}`; the whole loop is built and mounted, just gated.
+
+Turning it on is a one-knob flip, via either mechanism (vault setting wins when present):
 
 1. Environment variable: `HONEYCOMB_POLLINATING_ENABLED=true` (or `1`).
 2. Vault setting: `pollinating.enabled = true` (set via `honeycomb setting set pollinating.enabled true`).
 
-A vault `false` disables pollinating even when the environment variable is set, giving operators a runtime kill-switch without a redeploy.
+A vault `false` disables pollinating even when the environment variable is set, giving operators a runtime kill-switch without a redeploy. The same posture extends to the broader memory pipeline: the `HONEYCOMB_PIPELINE_*` flags gate the extraction/consolidation machinery so an install opts into spend explicitly rather than inheriting it.
+
+Once enabled, the live trigger flips: `POST /api/diagnostics/pollinate` returns `{triggered:true, status:"enqueued"}` at/over threshold (or `status:"running"` when a pass is already pending). PRD-026 proved this end-to-end against live DeepLake, a gated itest seeds a workspace with known duplicates, stale claims, and a junk entity, runs one real pass, and asserts the graph came back measurably smaller and sharper with nothing source-backed lost. So the consolidation promise rests on observed behavior on real data, not on an unrun loop.
 
 ## When it fires
 
