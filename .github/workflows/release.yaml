@@ -53,6 +53,18 @@ jobs:
   release:
     name: Publish honeycomb to npm
     runs-on: ubuntu-latest
+    # ── Build-time telemetry config (PRD-050e adoption telemetry). ──────────────
+    # Injected at JOB level because the bundle is built TWICE in this job — the
+    # explicit "Build" step AND again inside `npm publish` via `prepack` — so both
+    # must see these. esbuild bakes them in via `define` (__HONEYCOMB_POSTHOG_KEY__
+    # / __HONEYCOMB_REF_DEFAULT__); an UNSET key compiles to "" which the telemetry
+    # chokepoint treats as disabled (fail-soft), so a tokenless/fork run emits
+    # nothing. Release-only ON PURPOSE: ci.yaml must NOT set these, so PR/test
+    # builds never emit. The key is write-only ingest and ends up embedded in the
+    # published tarball by design — the secret only keeps it out of logs/fork PRs.
+    env:
+      HONEYCOMB_POSTHOG_KEY: ${{ secrets.HONEYCOMB_POSTHOG_KEY }}
+      HONEYCOMB_REF_DEFAULT: ${{ vars.HONEYCOMB_REF_DEFAULT }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4.2.2

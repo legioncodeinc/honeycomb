@@ -61,6 +61,8 @@ chain last:
 | **048c** | W1 | **Version-sync lifecycle hardening** — wire the `"version"` npm script so `sync-versions` + `git add` run inside `npm version`, closing the manifest-drift gap | high |
 | **048d** | W1 | **Rehearsal + verification** — CI dry-run green with switches flipped, local `pack:check` + `npm pack` + scratch-dir install dogfood; NO tag pushed | high |
 
+> **Cross-PRD note (feeds [PRD-050e](../prd-050-quick-install-and-guided-setup/prd-050e-quick-install-and-guided-setup-operator-adoption-telemetry.md)):** `release.yaml` now carries a job-level `env:` block (`HONEYCOMB_POSTHOG_KEY` secret + optional `HONEYCOMB_REF_DEFAULT` var) that esbuild `define`-bakes into the daemon bundle for PRD-050e adoption telemetry. It is **release-only by design** (never `ci.yaml`) and **fail-soft** (unset key → `""` → telemetry disabled), so it does not affect this PRD's dry-run/rehearsal green path. The only added go-live action is populating the `HONEYCOMB_POSTHOG_KEY` secret (PostHog project "Honeycomb" 485287) alongside `NPM_TOKEN` in 048a — both are release secrets set the same way.
+
 ## Design alternatives + recommendation (per sub-PRD)
 
 ### 048a — where the publishing identity lives
