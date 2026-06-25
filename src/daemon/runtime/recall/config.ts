@@ -130,6 +130,19 @@ export const DEFAULT_RECENCY_HALF_LIFE_DAYS = 36_500;
 /** The floor for the recency half-life: a sub-1-day half-life is clamped up (no div-by-zero / inversion). */
 export const MIN_RECENCY_HALF_LIFE_DAYS = 1;
 
+// ── PRD-047e — token-budget + MMR context assembly ───────────────────────────
+/**
+ * The MMR relevance/diversity trade-off knob λ (PRD-047e / e-AC-2). MMR selects the next
+ * hit by `argmax [ λ·rel(d) − (1−λ)·max_{s∈selected} sim(d,s) ]`: λ near 1 favors pure
+ * relevance (the fused/dampened score), λ near 0 favors maximal diversity from what is
+ * already selected. The DEFAULT is `0.7` — relevance-favoring by design, the PRD risk
+ * mitigation ("λ tuned high (relevance-favoring)") so diversity only re-orders the tail,
+ * never the head. A single named, eval-tunable knob (like the dedup threshold / recency
+ * half-life); env-overridable + clamped to `[0,1]`. It bites ONLY when the caller supplies
+ * a `tokenBudget` — the row-`limit` path never builds an MMR selection (e-AC-4).
+ */
+export const DEFAULT_MMR_LAMBDA = 0.7;
+
 // ── D-5 dampening (007d) ────────────────────────────────────────────────────
 /** Gravity dampening factor for a semantic hit sharing no query terms (D-5 / d-AC-4). */
 export const DEFAULT_GRAVITY_DAMPENING = 0.5;
@@ -239,6 +252,12 @@ export const RecencyConfigSchema = z.object({
 	),
 });
 
+/** PRD-047e context-assembly config (token-budget + MMR), grouped so the recall adapter reads one object. */
+export const ContextAssemblyConfigSchema = z.object({
+	/** The MMR relevance/diversity λ in `[0,1]` (PRD-047e / e-AC-2); relevance-favoring by default. */
+	mmrLambda: ClampedFloat(DEFAULT_MMR_LAMBDA).default(DEFAULT_MMR_LAMBDA),
+});
+
 /** D-5 dampening/boost factors, grouped so the shaping phase reads one object. */
 export const DampeningConfigSchema = z.object({
 	/** Gravity dampening for a semantic hit sharing no query terms (d-AC-4). */
@@ -280,6 +299,8 @@ export const RecallConfigSchema = z.object({
 	dedup: DedupConfigSchema.default(() => DedupConfigSchema.parse({})),
 	/** PRD-047d recency dampening (OFF-equivalent half-life by default). */
 	recency: RecencyConfigSchema.default(() => RecencyConfigSchema.parse({})),
+	/** PRD-047e token-budget + MMR context assembly (engages only when a tokenBudget is supplied). */
+	contextAssembly: ContextAssemblyConfigSchema.default(() => ContextAssemblyConfigSchema.parse({})),
 });
 
 /** The validated recall config object every phase consumes. */
@@ -294,6 +315,8 @@ export type DampeningConfig = z.infer<typeof DampeningConfigSchema>;
 export type DedupConfig = z.infer<typeof DedupConfigSchema>;
 /** The validated recency sub-config (PRD-047d). */
 export type RecencyConfig = z.infer<typeof RecencyConfigSchema>;
+/** The validated context-assembly sub-config (PRD-047e). */
+export type ContextAssemblyConfig = z.infer<typeof ContextAssemblyConfigSchema>;
 
 /**
  * Structured recall-config error. Carries the flattened zod issues so the daemon
@@ -354,6 +377,9 @@ export interface RawRecallConfig {
 	readonly recency?: {
 		readonly halfLifeDays?: unknown;
 	};
+	readonly contextAssembly?: {
+		readonly mmrLambda?: unknown;
+	};
 }
 
 /**
@@ -397,6 +423,9 @@ export function envRecallConfigProvider(env: NodeJS.ProcessEnv = process.env): R
 				},
 				recency: {
 					halfLifeDays: env.HONEYCOMB_RECALL_RECENCY_HALF_LIFE_DAYS,
+				},
+				contextAssembly: {
+					mmrLambda: env.HONEYCOMB_RECALL_MMR_LAMBDA,
 				},
 			};
 		},

@@ -38,10 +38,10 @@ daemon**. Split per AC:
 | d-AC-2 | 047d | Nothing dropped by age (demote, not cut) | det | retrieval | ✅ DONE (sort, never filter) |
 | d-AC-3 | 047d | Missing timestamp → decay=1, no exception | det | retrieval | ✅ DONE (recencyDecay null→1) |
 | d-AC-4 | 047d | Eval-tuned half-life; recall@5/MRR/nDCG hold at-or-above baseline | live | orch+retrieval | ✅ DONE — default half-life 100yr (off-equiv); live eval recall@5 0.639 / MRR 0.618 / nDCG 0.623 (gate PASS, neutral) |
-| e-AC-1 | 047e | Token-budget mode returns MMR-selected hits that fit the budget | det | retrieval | OPEN |
-| e-AC-2 | 047e | MMR surfaces distinct facts a pure top-k would crowd out | det | retrieval | OPEN |
-| e-AC-3 | 047e | Eval: λ tuned; recall@5/MRR/nDCG hold at-or-above baseline | live | orch+retrieval | OPEN |
-| e-AC-4 | 047e | Row-`limit` path unchanged when no budget; fallback intact; gates green | det | retrieval | OPEN |
+| e-AC-1 | 047e | Token-budget mode returns MMR-selected hits that fit the budget | det | retrieval | ✅ DONE (recall.ts:1095 selectWithinTokenBudget) |
+| e-AC-2 | 047e | MMR surfaces distinct facts a pure top-k would crowd out | det | retrieval | ✅ DONE (diversity-vs-topk test) |
+| e-AC-3 | 047e | Eval: λ tuned; recall@5/MRR/nDCG hold at-or-above baseline | live | orch+retrieval | ✅ DONE — opt-in budget; no-budget path byte-unchanged; live eval recall@5 0.639 / MRR 0.618 / nDCG 0.623 (gate PASS) |
+| e-AC-4 | 047e | Row-`limit` path unchanged when no budget; fallback intact; gates green | det | retrieval | ✅ DONE (no-budget identity + rank-1-kept + MMR-fail→topk) |
 | SEC | close-out | security-worker-bee: OWASP/PII/injection over the recall changes | — | security | OPEN |
 | QA | close-out | quality-worker-bee: implementation vs PRD-047 | — | quality | OPEN |
 

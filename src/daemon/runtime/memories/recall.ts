@@ -68,10 +68,12 @@ import { cosineSimilarity, EMBEDDING_DIMS, type ScoredId, vectorSearch } from ".
 import {
 	DEFAULT_DEDUP_ENABLED,
 	DEFAULT_DEDUP_SIMILARITY_THRESHOLD,
+	DEFAULT_MMR_LAMBDA,
 	DEFAULT_RECENCY_HALF_LIFE_DAYS,
 	DEFAULT_RERANKER,
 	DEFAULT_RERANKER_TIMEOUT_MS,
 	DEFAULT_RERANKER_WINDOW,
+	type ContextAssemblyConfig,
 	type DedupConfig,
 	type RecencyConfig,
 	type RerankerConfig,
@@ -454,6 +456,13 @@ export interface MemoryRecallDeps {
 	 * usable {@link MemoryRecallHit.createdAt} gets `decay = 1` (no penalty), never a throw (d-AC-3).
 	 */
 	readonly recency?: RecencyConfig;
+	/**
+	 * The context-assembly config (PRD-047e / e-AC-1..4): the MMR lambda knob the token-budget
+	 * selection uses. It bites ONLY when the request carries a {@link MemoryRecallRequest.tokenBudget}
+	 * — with NO budget the assembly stage is SKIPPED entirely and the fixed top-`limit` path runs
+	 * byte-for-byte as before (e-AC-4 back-compat). ABSENT → defaults to {@link DEFAULT_MMR_LAMBDA}.
+	 */
+	readonly contextAssembly?: ContextAssemblyConfig;
 }
 
 /** A recall request as it enters the adapter (the zod-validated, scoped body). */
@@ -464,6 +473,17 @@ export interface MemoryRecallRequest {
 	readonly scope: QueryScope;
 	/** The caller's hit limit (clamped to `[1, MAX_RECALL_LIMIT]`; defaulted when absent). */
 	readonly limit?: number;
+	/**
+	 * OPTIONAL token budget (PRD-047e / e-AC-1). When supplied (and positive), recall replaces the
+	 * fixed top-`limit` slice with a token-BUDGETED, diversity-aware (MMR) selection: it fills the
+	 * budget with the highest-value NON-redundant hits ({@link selectWithinTokenBudget}) rather than a
+	 * fixed count, counting tokens per hit via {@link estimateTokenCount}. ABSENT/undefined → the
+	 * assembly stage is SKIPPED and the row-`limit` path runs byte-for-byte as before (e-AC-4 back-
+	 * compat — what keeps the live eval, which never sets a budget, neutral). The budget is the SURFACE
+	 * CONTRACT; per-consumer budget POLICY (what number each surface picks) is out of scope. An
+	 * MMR/budget failure fails-soft to the fixed top-`limit` list, never a 500.
+	 */
+	readonly tokenBudget?: number;
 }
 
 /**
@@ -1042,6 +1062,106 @@ export function applyRecencyDampening(
 	return dampened.map(({ hit, score }) => ({ ...hit, score }));
 }
 
+// ── PRD-047e — token-budget + MMR context assembly ───────────────────────────
+
+/** The heuristic chars-per-token ratio (PRD-047e). ~4 chars/token is the well-known rough English estimate. */
+const CHARS_PER_TOKEN = 4;
+
+/**
+ * Estimate the token cost of a hit's text with a CHEAP, DETERMINISTIC heuristic (PRD-047e / e-AC-1):
+ * `ceil(text.length / 4)` (~4 chars per token, the rough English ratio). Exactness is NOT required for
+ * BUDGETING — an exact per-model tokenizer is out of scope (PRD risk note). RULES:
+ *  - A hit with NO countable text (empty/whitespace) counts as the SANE DEFAULT `1` token, never `0`
+ *    and never an error (a zero-cost hit would let an unbounded number ride into any budget).
+ *  - The result is always a positive integer.
+ * Exported so the unit test counts with the EXACT same function (a deterministic counter + known hit
+ * sizes) — the budget math the test asserts is the budget math recall runs.
+ */
+export function estimateTokenCount(text: string): number {
+	const trimmedLen = text.trim().length;
+	if (trimmedLen === 0) return 1; // no countable text → a sane default, never 0.
+	return Math.max(1, Math.ceil(trimmedLen / CHARS_PER_TOKEN));
+}
+
+/**
+ * Select hits into a token budget with Maximal Marginal Relevance (PRD-047e / e-AC-1, e-AC-2).
+ *
+ * MMR greedily picks the next hit by `argmax [ lambda·rel(d) − (1−lambda)·max_{s∈selected} sim(d,s) ]`,
+ * where `rel` is the (already dampened/fused) score and `sim` is the cosine of the two hits' candidate
+ * embeddings ({@link cosineSimilarity} over `embByKey`). This trades a little pure relevance for
+ * diversity, so a window of near-paraphrases does not crowd out the distinct facts (e-AC-2).
+ *
+ * RISK MITIGATION (PRD-047e): the SELECTED set is SEEDED with rank-1 (the incoming top hit), so the
+ * single best hit is NEVER displaced by the diversity term — it is always selected first, and only its
+ * token cost is charged before MMR ranks the rest. A hit with no countable text still costs the sane
+ * default token (so it cannot ride in free), and a hit with no usable embedding has `sim = 0` to every
+ * peer (it is treated as maximally diverse — it is never penalized for missing an embedding).
+ *
+ * BUDGET RULE (e-AC-1): a hit is taken only while the running token total + its cost ≤ `tokenBudget`;
+ * a hit that does not fit is SKIPPED and the search continues (a later, smaller hit may still fit). A
+ * smaller budget therefore returns FEWER, higher-value hits. The rank-1 seed is always taken even when
+ * its own cost exceeds the budget (a budget below the single best hit still returns that one hit, never
+ * an empty result — recall always answers with its best hit).
+ *
+ * Pure + sync: no I/O. The candidate embeddings are sourced by the caller via the SAME
+ * {@link fetchCandidateEmbeddings} dedup/rerank use — no extra embed-daemon calls (design constraint).
+ */
+export function selectWithinTokenBudget(
+	hits: readonly MemoryRecallHit[],
+	tokenBudget: number,
+	lambda: number,
+	embByKey: Map<string, number[]>,
+): MemoryRecallHit[] {
+	if (hits.length === 0) return [];
+	const budget = Math.max(1, Math.trunc(tokenBudget));
+	const lam = Math.min(1, Math.max(0, lambda));
+
+	// Pre-compute each hit's relevance + token cost + embedding once.
+	const pool = hits.map((hit) => ({
+		hit,
+		rel: hit.score,
+		cost: estimateTokenCount(hit.text),
+		vec: embByKey.get(fusionKey(hit.source, hit.id)),
+	}));
+
+	const selected: typeof pool = [];
+	const remaining = new Set(pool);
+
+	// RISK MITIGATION: always keep rank-1 — seed with the incoming top hit (pool[0], the
+	// dampened/fused order), charged to the budget but never blocked from selection.
+	const seed = pool[0]!;
+	selected.push(seed);
+	remaining.delete(seed);
+	let used = seed.cost;
+
+	// Greedy MMR over the remaining pool, taking the argmax-MMR hit only while it fits the budget.
+	while (remaining.size > 0) {
+		let best: (typeof pool)[number] | null = null;
+		let bestMmr = -Infinity;
+		for (const cand of remaining) {
+			if (used + cand.cost > budget) continue; // does not fit → skip (a smaller later hit may).
+			// max similarity to anything already selected; a missing embedding → sim 0 (maximally diverse).
+			let maxSim = 0;
+			for (const s of selected) {
+				if (cand.vec === undefined || s.vec === undefined) continue;
+				const cos = cosineSimilarity(cand.vec, s.vec);
+				if (cos !== null && cos > maxSim) maxSim = cos;
+			}
+			const mmr = lam * cand.rel - (1 - lam) * maxSim;
+			if (mmr > bestMmr) {
+				bestMmr = mmr;
+				best = cand;
+			}
+		}
+		if (best === null) break; // nothing left fits the budget.
+		selected.push(best);
+		remaining.delete(best);
+		used += best.cost;
+	}
+
+	return selected.map((s) => s.hit);
+}
+
 /**
  * Run the cross-table recall for `request.query`, scoped to `request.scope`.
  * Returns the surfaced hits, the arms that produced them, and the HONEST `degraded`
@@ -1154,5 +1274,28 @@ export async function recallMemories(
 	const halfLifeDays = deps.recency?.halfLifeDays ?? DEFAULT_RECENCY_HALF_LIFE_DAYS;
 	const nowMs = (deps.now ?? Date.now)();
 	const dampened = applyRecencyDampening(deduped, halfLifeDays, nowMs);
-	return { hits: dampened, sources: dedupedSources, degraded };
+
+	// PRD-047e: OPTIONAL token-budget + MMR context assembly. ADDITIVE + OPT-IN — it engages ONLY
+	// when the request carries a positive `tokenBudget`. With NO budget the row-`limit` path runs
+	// BYTE-FOR-BYTE as before (the dampened top-`limit` list), which is what keeps the live eval (it
+	// never sets a budget) neutral by construction (e-AC-3 / e-AC-4). When a budget IS supplied, we
+	// fill it with the highest-value NON-redundant hits via MMR (e-AC-1, e-AC-2): the candidate
+	// embeddings are self-sourced via the SAME `fetchCandidateEmbeddings` dedup/rerank use (no extra
+	// embed calls), the top hit is always kept (rank-1 seed), and ANY failure degrades to the fixed
+	// top-`limit` list — never a 500 (e-AC-4).
+	const budget = request.tokenBudget;
+	if (typeof budget !== "number" || !Number.isFinite(budget) || budget <= 0) {
+		// No budget → the unchanged fixed top-k path (e-AC-4 back-compat).
+		return { hits: dampened, sources: dedupedSources, degraded };
+	}
+	try {
+		const lambda = deps.contextAssembly?.mmrLambda ?? DEFAULT_MMR_LAMBDA;
+		const embByKey = await fetchCandidateEmbeddings(dampened, request, deps);
+		const assembled = selectWithinTokenBudget(dampened, budget, lambda, embByKey);
+		const assembledSources = assembled.length === dampened.length ? dedupedSources : [...new Set(assembled.map((h) => h.source))];
+		return { hits: assembled, sources: assembledSources, degraded };
+	} catch {
+		// e-AC-4: an MMR/budget failure degrades to the fixed top-`limit` list, never a throw.
+		return { hits: dampened, sources: dedupedSources, degraded };
+	}
 }
