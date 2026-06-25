@@ -4,6 +4,19 @@ name: Release
 # (npm run ci + build + audit:openclaw + pack:check) and then publishes the
 # package to the public npm registry with provenance.
 #
+# AUTH: npm TRUSTED PUBLISHING (OIDC) — no NPM_TOKEN. The publish authenticates
+# tokenlessly: GitHub Actions presents a short-lived OIDC identity (via the
+# `id-token: write` permission below) that npm verifies against the trusted
+# publisher configured on the package (org + repo `honeycomb` + this workflow
+# filename `release.yaml`). There is NO long-lived automation token anywhere in
+# this workflow or in repo secrets. Provenance stays ON (the same OIDC identity
+# also signs the supply-chain attestation). Trusted Publishing REQUIRES npm
+# >= 11.5.1, which Node 22 does NOT ship (it bundles npm 10.x) — see the "Upgrade
+# npm" step below, which is mandatory for OIDC to engage. The trusted publisher
+# must be configured on npm BEFORE the first CI publish, and that config requires
+# the package to already exist, so the FIRST publish is a one-time manual publish
+# (2FA); every subsequent CI publish is tokenless. See RELEASING.md / PRD-048a.
+#
 # DRAFT STATUS (read RELEASING.md before going public): the package is still
 # `private: true` and named `honeycomb` (a name already owned by someone else on
 # the public registry). This workflow is wired so a maintainer can go public with
@@ -11,9 +24,10 @@ name: Release
 #   * the publishability preflight aborts if `private` is still true OR if the
 #     name is the taken unscoped `honeycomb` — so a stray tag push cannot publish
 #     a broken or duplicate package by accident.
-#   * a real `npm publish` only happens when NPM_TOKEN is set AND this is not a
-#     dry run; otherwise the job runs the gate + `npm publish --dry-run` and stays
-#     green (mirrors ci.yaml's gated-integration pattern: skip, don't fail).
+#   * a real `npm publish` only happens on a tag push AND when this is not a dry
+#     run; a workflow_dispatch always rehearses (gate + `npm publish --dry-run`)
+#     and stays green (mirrors ci.yaml's gated-integration pattern: skip, don't
+#     fail). The publish intent is the TRIGGER (a tag = go live), not a token.
 #
 # Two ways in:
 #   * push a version tag `vX.Y.Z` -> a real publish attempt (still gated as above).
@@ -41,10 +55,13 @@ concurrency:
 # Least privilege (mirrors ci.yaml principle #7), scoped UP only for what a
 # publish needs:
 #   * contents: write  — ONLY to create the GitHub Release for the pushed tag.
-#   * id-token: write  — the OIDC token npm provenance signs against, so the
-#                        published package carries a verifiable supply-chain
-#                        attestation (`npm publish --provenance`). Without this
-#                        scope provenance generation fails.
+#   * id-token: write  — the short-lived OIDC identity, which now does DOUBLE duty:
+#                        (1) it is the publish AUTH for npm Trusted Publishing
+#                        (npm verifies it against the package's trusted publisher;
+#                        this replaces NPM_TOKEN), AND (2) npm provenance signs
+#                        against it so the published package carries a verifiable
+#                        supply-chain attestation (`npm publish --provenance`).
+#                        Without this scope BOTH tokenless auth and provenance fail.
 permissions:
   contents: write
   id-token: write
@@ -57,16 +74,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4.2.2
 
-      # registry-url is what wires `npm publish` (and provenance) to the public
-      # npm registry and makes setup-node write the NODE_AUTH_TOKEN line into
-      # .npmrc. One pinned Node major — the publish surface does not need the
-      # full engine matrix (that canary lives on ci.yaml's quality-gate).
+      # registry-url is what points `npm publish` (and provenance) at the public
+      # npm registry. With Trusted Publishing there is NO NODE_AUTH_TOKEN / .npmrc
+      # auth line — auth is the OIDC identity, not a token. One pinned Node major —
+      # the publish surface does not need the full engine matrix (that canary lives
+      # on ci.yaml's quality-gate).
       - name: Setup Node
         uses: actions/setup-node@v6.4.0
         with:
           node-version: '22.x'
           registry-url: 'https://registry.npmjs.org'
           cache: npm
+
+      # Node 22 bundles npm 10.x, but npm Trusted Publishing (OIDC) requires
+      # npm >= 11.5.1 — without it the OIDC handshake never engages and `npm
+      # publish` falls back to token auth (which we no longer provide) and fails.
+      # Upgrade BEFORE npm ci / build / publish so every npm invocation in this job
+      # is OIDC-capable. Pinned to the major (`@^11.5.1`) for reproducibility.
+      - name: Upgrade npm (Trusted Publishing needs npm >= 11.5.1)
+        run: npm install -g npm@^11.5.1
 
       - name: Install (npm ci)
         run: npm ci
@@ -150,38 +176,29 @@ jobs:
           fi
           echo "OK — package is publishable (not private, scoped name)."
 
-      # ── Token gate. ──────────────────────────────────────────────────────────
-      # secrets are not allowed in a job/step `if:`, so read NPM_TOKEN in a run
-      # step and emit a boolean. Empty token (before the secret is set, or on a
-      # fork) -> publish=false -> the publish step does a --dry-run and the job
-      # stays GREEN (skip, don't fail — same pattern as ci.yaml's secret gate).
-      - name: Token gate
-        id: token
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [ -n "$NPM_TOKEN" ]; then
-            echo "has_token=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_token=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      # Decide dry-run vs real publish in one place. A real publish requires ALL:
-      #   * a token is present, AND
-      #   * this is not a workflow_dispatch dry_run.
-      # On a tag push `inputs.dry_run` is empty, so the only gate is the token.
+      # ── Resolve publish mode — gated on the TRIGGER, not a token. ─────────────
+      # Trusted Publishing needs no NPM_TOKEN, so the publish intent is expressed
+      # by HOW the workflow was triggered. A real publish requires BOTH:
+      #   * this is a tag push (`github.ref_type == 'tag'`) — pushing `vX.Y.Z` is
+      #     the deliberate "go live" signal, AND
+      #   * this is not a workflow_dispatch dry_run (`inputs.dry_run != 'true'`).
+      # On a tag push `inputs.dry_run` is empty (!= 'true'), so a tag push publishes
+      # for real. The manual dispatch button defaults dry_run=true, so it always
+      # rehearses unless a maintainer explicitly opts in — and even an opt-in
+      # dispatch stays a dry-run here because it is not a tag ref. Real publishes
+      # only ever come from a tag push.
       - name: Resolve publish mode
         id: mode
         env:
-          HAS_TOKEN: ${{ steps.token.outputs.has_token }}
+          REF_TYPE: ${{ github.ref_type }}
           DRY_RUN_INPUT: ${{ github.event.inputs.dry_run }}
         run: |
-          if [ "$HAS_TOKEN" = "true" ] && [ "$DRY_RUN_INPUT" != "true" ]; then
+          if [ "$REF_TYPE" = "tag" ] && [ "$DRY_RUN_INPUT" != "true" ]; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
-            echo "Mode: REAL publish (token present, not a dry run)."
+            echo "Mode: REAL publish (tag push, not a dry run) — authenticating via OIDC Trusted Publishing."
           else
             echo "publish=false" >> "$GITHUB_OUTPUT"
-            echo "Mode: DRY-RUN (token=$HAS_TOKEN, dry_run_input=$DRY_RUN_INPUT) — running npm publish --dry-run, not publishing."
+            echo "Mode: DRY-RUN (ref_type=$REF_TYPE, dry_run_input=$DRY_RUN_INPUT) — running npm publish --dry-run, not publishing."
           fi
 
       # ── Publish. ─────────────────────────────────────────────────────────────
@@ -192,27 +209,26 @@ jobs:
       #   --access public: scoped packages default to restricted; this publishes
       #                    them public. (Also set via publishConfig in
       #                    package.json when going public — belt and suspenders.)
-      # NODE_AUTH_TOKEN is the .npmrc auth var setup-node wired to registry-url.
+      # Auth is TOKENLESS: npm (>= 11.5.1, ensured above) performs the OIDC
+      # handshake using the id-token: write identity and verifies it against the
+      # package's trusted publisher. There is NO NODE_AUTH_TOKEN / .npmrc auth line.
       - name: Publish (real)
         if: ${{ steps.mode.outputs.publish == 'true' }}
         run: npm publish --provenance --access public
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           # `prepack` rebuilds the bundle here, so the published tarball needs the
           # telemetry define present on THIS step too (see Build step comment).
           HONEYCOMB_POSTHOG_KEY: ${{ secrets.HONEYCOMB_POSTHOG_KEY }}
           HONEYCOMB_REF_DEFAULT: ${{ vars.HONEYCOMB_REF_DEFAULT }}
 
       # Rehearse: same command minus the real upload. Runs whenever we are NOT in
-      # real-publish mode (dry_run input, or no token yet) so the pipeline is
-      # exercised end-to-end and stays green before secrets exist.
+      # real-publish mode (any workflow_dispatch, or a non-tag ref) so the pipeline
+      # is exercised end-to-end and stays green. `--dry-run` does no OIDC handshake
+      # and no upload, so it is tokenless by nature — nothing to wire here.
       - name: Publish (dry-run rehearsal)
         if: ${{ steps.mode.outputs.publish != 'true' }}
         run: npm publish --provenance --access public --dry-run
         env:
-          # Harmless when empty; present so the dry-run exercises the same auth
-          # path the real publish takes.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           # The dry-run's `prepack` rebuilds too — keep the define present so the
           # rehearsal exercises the same build the real publish takes.
           HONEYCOMB_POSTHOG_KEY: ${{ secrets.HONEYCOMB_POSTHOG_KEY }}
