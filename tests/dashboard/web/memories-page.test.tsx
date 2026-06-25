@@ -21,6 +21,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MemoriesPage } from "../../../src/dashboard/web/pages/memories.js";
+import { ScopeContext, type ScopeContextValue } from "../../../src/dashboard/web/scope-context.js";
 import { DEFAULT_MEMORY_TYPE, MEMORY_TYPES } from "../../../src/shared/memory-types.js";
 import type { PageProps } from "../../../src/dashboard/web/page-frame.js";
 import type { CompactSummaryWire, PollinateAck, LogRecordWire, MemoryRecordWire, RecalledMemory, WireClient } from "../../../src/dashboard/web/wire.js";
@@ -110,10 +111,24 @@ async function flush(): Promise<void> {
 	});
 }
 
+/**
+ * A scope context with an ACTIVE project selected — PRD-049e. The Memories page reads
+ * `useScope().scope.project` (49e-AC-2/AC-5): with no project it renders the needs-selection state.
+ * These 040 suites assert the populated page, so they mount under a provider with a project selected.
+ */
+const SCOPE_WITH_PROJECT: ScopeContextValue = {
+	scope: { org: "acme", workspace: "backend", project: "api" },
+	setScope: () => {},
+};
+
 async function mountPage(wire: WireClient): Promise<void> {
 	await act(async () => {
 		root = createRoot(container);
-		root.render(<MemoriesPage {...pageProps(wire)} />);
+		root.render(
+			<ScopeContext.Provider value={SCOPE_WITH_PROJECT}>
+				<MemoriesPage {...pageProps(wire)} />
+			</ScopeContext.Provider>,
+		);
 	});
 	await flush();
 }

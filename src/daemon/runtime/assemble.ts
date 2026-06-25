@@ -67,6 +67,7 @@ import { mountSetupLogin } from "./dashboard/setup-login.js";
 import { mountSetupStateApi } from "./dashboard/setup-state.js";
 import { mountSetupMigrate } from "./dashboard/setup-migrate.js";
 import { mountPollinateApi } from "./pollinating/api.js";
+import { mountProjectsSyncApi, mountScopeEnumerationApi } from "./projects/index.js";
 import { mountCompactApi } from "./maintenance/compact-api.js";
 import { mountLogsApi } from "./logs/api.js";
 import { type LogStore, NULL_LOG_STORE, openLogStore } from "./logs/log-store.js";
@@ -387,6 +388,15 @@ export interface SeamFns {
 	 */
 	readonly mountPollinate: typeof mountPollinateApi;
 	/**
+	 * The project registry → local-cache sync trigger — `POST /api/diagnostics/projects-sync`
+	 * (PRD-049d). Fires UNCONDITIONALLY: its `/api/diagnostics` group is already `protect:true`, so
+	 * it inherits the dashboard JSON views' auth/RBAC (open in `local`, gated in team/hybrid). It
+	 * refreshes the thin-client `~/.deeplake/projects.json` cache from the workspace's `projects`
+	 * registry so the resolver matches the workspace's real projects OFFLINE. FAIL-SOFT — a registry
+	 * read failure leaves the prior cache intact and returns a clean ack, never a 500.
+	 */
+	readonly mountProjectsSync: typeof mountProjectsSyncApi;
+	/**
 	 * The standalone version-history COMPACTION trigger — `POST /api/diagnostics/compact`
 	 * (PRD-030 / D-2 PRIMARY). Fires UNCONDITIONALLY: its `/api/diagnostics` group is already
 	 * `protect:true`, so it inherits the same auth/RBAC as the dashboard's JSON views (open in
@@ -496,6 +506,7 @@ export const defaultSeamFns: SeamFns = {
 	mountVfs: mountVfsApi,
 	mountProductData: mountProductDataApi,
 	mountPollinate: mountPollinateApi,
+	mountProjectsSync: mountProjectsSyncApi,
 	mountCompact: mountCompactApi,
 	mountDiagnosticsHealth: mountDiagnosticsHealthApi,
 	mountGraph: mountGraphApi,
@@ -876,6 +887,20 @@ export function assembleSeams(
 	//     (the same single local tenant the data-API mounts use). When the queue is the no-op stub
 	//     (a bare `createDaemon`), the handler fails soft to a clean `{ triggered: false }` ack.
 	seams.mountPollinate(daemon, { storage, defaultScope, enqueuer: daemon.services.queue });
+
+	// 10b. The project registry → local-cache sync trigger — `POST /api/diagnostics/projects-sync`
+	//     (PRD-049d). Attaches onto the same already-mounted, protected `/api/diagnostics` group (NO
+	//     `server.ts` edit), inheriting the dashboard JSON views' auth/RBAC. It refreshes the
+	//     thin-client `~/.deeplake/projects.json` cache from the workspace's `projects` registry under
+	//     the resolved request scope (header org/workspace, else the daemon `defaultScope`), so the
+	//     hot-path resolver matches the workspace's real projects offline. FAIL-SOFT: a registry-read
+	//     failure leaves the prior cache intact and returns a clean ack — never a 500, never a crash.
+	try {
+		seams.mountProjectsSync(daemon, { storage, defaultScope });
+	} catch (err: unknown) {
+		const reason = err instanceof Error ? err.message : String(err);
+		process.stderr.write(`honeycomb: projects-sync route mount failed (non-fatal): ${reason}\n`);
+	}
 
 	// 11. The standalone version-history COMPACTION trigger — `POST /api/diagnostics/compact`
 	//     (PRD-030 / D-2 PRIMARY). Attaches onto the same already-mounted, protected
@@ -1355,14 +1380,17 @@ function buildSummaryWorker(
  */
 function makePipelineEntryEnqueuer(
 	queue: DaemonServices["queue"],
-): (text: string, scope: QueryScope, agentId: string) => Promise<void> {
-	return async (text: string, scope: QueryScope, agentId: string): Promise<void> => {
+): (text: string, scope: QueryScope, agentId: string, projectId?: string) => Promise<void> {
+	return async (text: string, scope: QueryScope, agentId: string, projectId?: string): Promise<void> => {
 		await queue.enqueue({
 			kind: "memory_extraction",
 			payload: {
 				org: scope.org,
 				workspace: scope.workspace ?? "",
 				agent_id: agentId === "" ? "default" : agentId,
+				// PRD-049b (49b-AC-1): seed the resolved project segment onto the entry job so it
+				// rides the scope envelope through every stage to the controlled-write commit.
+				...(projectId !== undefined && projectId !== "" ? { project_id: projectId } : {}),
 				content: text,
 			},
 		});
@@ -1671,6 +1699,23 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		} catch (err: unknown) {
 			const reason = err instanceof Error ? err.message : String(err);
 			process.stderr.write(`honeycomb: auth status API mount failed (non-fatal): ${reason}\n`);
+		}
+
+		// PRD-049e (49e-AC-1 / 49e-AC-3): FIRE the dashboard SCOPE-SWITCHER enumeration reads ONCE so the
+		// Org→Workspace→Project switcher can hydrate its dropdowns — `GET /api/diagnostics/scope/{orgs,
+		// workspaces,projects}`. They attach onto the already-mounted, protected `/api/diagnostics` group
+		// (NO `server.ts` edit) and SELF-GATE to local mode (a non-local request 404s), mirroring the auth
+		// status read. `listOrgs`/`listWorkspaces` are privilege-scoped by the token; the Org change re-mints
+		// the org-bound token (PRD-011) BEFORE enumerating the new org. The projects read syncs + reads the
+		// 049a `projects.json` cache under the daemon's `defaultScope`. The bearer token rides ONLY in the
+		// auth client's Authorization header — NEVER in a body (D-4). FAIL-SOFT: a mount error never crashes
+		// the daemon (the switcher falls back to empty lists), and each handler returns an empty list on any
+		// auth-API failure rather than a 500.
+		try {
+			mountScopeEnumerationApi(daemon, { storage, defaultScope: scope });
+		} catch (err: unknown) {
+			const reason = err instanceof Error ? err.message : String(err);
+			process.stderr.write(`honeycomb: scope enumeration API mount failed (non-fatal): ${reason}\n`);
 		}
 
 	// ── PRD-033c / FR-1/FR-2/FR-6: FIRE the `/api/assets` mount ONCE so the asset-sync

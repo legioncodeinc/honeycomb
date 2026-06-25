@@ -25,6 +25,7 @@ import { POLLINATING_STATE_TABLES } from "./pollinating-state.js"; // PRD-009a (
 import { KNOWLEDGE_GRAPH_TABLES } from "./knowledge-graph.js"; // PRD-003b (stub)
 import { MEMORIES_TABLES } from "./memories.js"; // PRD-003a (implemented)
 import { PRODUCT_TABLES } from "./product.js"; // PRD-003d (stub)
+import { PROJECTS_TABLES } from "./projects.js"; // PRD-049a (project registry)
 import { buildRegistry, type CatalogRegistry } from "./registry.js";
 import { ROUTING_HISTORY_TABLES } from "./routing-history.js"; // PRD-010 (routing-decision telemetry)
 import { RUNTIME_JOBS_TABLES } from "./runtime-jobs.js"; // PRD-004b (durable job queue)
@@ -50,6 +51,7 @@ export const CATALOG: readonly CatalogTable[] = Object.freeze([
 	...ROUTING_HISTORY_TABLES,
 	...SOURCES_TABLES,
 	...SYNCED_ASSETS_TABLES,
+	...PROJECTS_TABLES,
 ]);
 
 /** The write-pattern registry over the whole catalog (table → pattern → primitive). */
@@ -144,3 +146,20 @@ export {
 	TOMBSTONE_FALSE,
 	TOMBSTONE_TRUE,
 } from "./synced-assets.js";
+export {
+	assertNotReservedProjectId,
+	buildEnsureUnsortedSelectSql,
+	buildListProjectsSql,
+	buildProjectByIdSql,
+	isReservedProjectId,
+	PROJECT_NOT_RESERVED,
+	PROJECT_RESERVED,
+	PROJECTS_COLUMNS,
+	PROJECTS_TABLE,
+	PROJECTS_TABLES,
+	type ProjectRow,
+	RESERVED_PROJECT_IDS,
+	ReservedProjectIdError,
+	UNSORTED_PROJECT_ID,
+	UNSORTED_PROJECT_NAME,
+} from "./projects.js";

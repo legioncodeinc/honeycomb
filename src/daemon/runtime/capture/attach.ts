@@ -81,7 +81,7 @@ export interface AttachHooksOptions {
 	 * absent capture does not enter the pipeline (the Wave-1 posture); the daemon
 	 * assembly wires it to the pipeline fan-out.
 	 */
-	readonly enqueuePipelineEntry?: (text: string, scope: QueryScope, agentId: string) => Promise<void>;
+	readonly enqueuePipelineEntry?: (text: string, scope: QueryScope, agentId: string, projectId?: string) => Promise<void>;
 	/** Optional structured-log sink. */
 	readonly logger?: CaptureLogger;
 	/**

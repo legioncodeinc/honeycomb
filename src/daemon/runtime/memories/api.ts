@@ -53,7 +53,12 @@ import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import type { Daemon } from "../server.js";
 import type { EmbedClient } from "../services/embed-client.js";
 import type { RequestLogger } from "../logger.js";
-import { resolveScopeFromHeaders, resolveScopeOrLocalDefault } from "../scope.js";
+import {
+	resolveScopeFromHeaders,
+	resolveScopeOrLocalDefault,
+	resolveRequestProject,
+	type RequestProjectScope,
+} from "../scope.js";
 import { recallMemories, type MemoryRecallResult } from "./recall.js";
 import { isValidRecallMode, type RecallMode } from "../vault/api.js";
 import type { VaultStore } from "../vault/store.js";
@@ -82,6 +87,19 @@ export const MEMORIES_GROUP = "/api/memories" as const;
  * dashboard live-log panel (Wave 2) and a test can filter on exactly this line.
  */
 export const RECALL_DEGRADED_EVENT = "recall.degraded" as const;
+
+/**
+ * PRD-049b (D8): the structured event emitted when a recall could NOT resolve its session
+ * project (no cwd available) and fell back to the workspace `__unsorted__` inbox + workspace-
+ * global rows. A fixed, greppable identifier so the dashboard + a test can filter on exactly
+ * this line. Carries NO query text/org/cwd — only the coarse degraded fact (D-5 secret-free).
+ */
+export const PROJECT_SCOPE_DEGRADED_EVENT = "recall.project_scope_degraded" as const;
+
+/** The visible warning string a project-scope-degraded recall response carries (D8). */
+export const PROJECT_SCOPE_DEGRADED_WARNING: string =
+	"project scoping degraded: no working directory was resolvable for this session, so recall " +
+	"was narrowed to the workspace inbox + workspace-global rows only (no project could be resolved).";
 
 /** Options for {@link mountMemoriesApi}. Mirrors {@link import("../dashboard/api.js").MountDashboardOptions}. */
 export interface MountMemoriesOptions {
@@ -159,6 +177,16 @@ const RecallBodySchema = z.object({
 	query: z.string().min(1, "query is required"),
 	limit: z.number().int().positive().optional(),
 	tokenBudget: z.number().int().positive().max(MAX_RECALL_TOKEN_BUDGET).optional(),
+	/**
+	 * PRD-049b (49b-AC-2): the session working directory the recall ran in. The daemon resolves
+	 * the project from it (049a `resolveScope(cwd)`) and ANDs the project-segment predicate into
+	 * every recall arm, so a recall in project A never returns a project-B row. ABSENT (a harness
+	 * that does not pass cwd, or the `x-honeycomb-cwd` header instead) → the daemon falls to the
+	 * cwd header, then to the workspace `__unsorted__` inbox + workspace-global with a visible
+	 * degraded-scoping warning (D8 / 49b-AC-3). Optional + back-compat: an omitted cwd is the
+	 * unbound inbox session, never an error.
+	 */
+	cwd: z.string().optional(),
 });
 
 /**
@@ -184,6 +212,13 @@ export const StoreBodySchema = z.object({
 		})
 		.optional(),
 	agentId: z.string().min(1).optional(),
+	/**
+	 * PRD-049b (49b-AC-1): the session cwd the store ran in. The daemon resolves the `project_id`
+	 * from it (049a) so the stored memory is segmented by the SAME project a recall in that folder
+	 * narrows to. ABSENT → the `__unsorted__` inbox (never dropped, never mis-attributed). Optional
+	 * + back-compat: an omitted cwd stores to the inbox, never an error.
+	 */
+	cwd: z.string().optional(),
 });
 
 /** `POST /api/memories/:id/modify` body: a new content + a REQUIRED reason (a-AC-4). */
@@ -244,12 +279,35 @@ function zodError(c: Context, error: z.ZodError): Response {
  * `session`), and the `secondary` drill-down flag — so the dashboard/CLI render the
  * ENGINE's relevance score + order (D-4 repoints the client off its `1 - i*0.06` fake).
  */
-function recallResponse(result: MemoryRecallResult): {
+function recallResponse(
+	result: MemoryRecallResult,
+	project?: RequestProjectScope,
+): {
 	hits: MemoryRecallResult["hits"];
 	sources: string[];
 	degraded: boolean;
+	projectScopeDegraded?: boolean;
+	warning?: string;
 } {
-	return { hits: result.hits, sources: result.sources, degraded: result.degraded };
+	const base = { hits: result.hits, sources: result.sources, degraded: result.degraded };
+	// PRD-049b (D8): when the project could not be resolved (no cwd), surface a VISIBLE warning
+	// + a boolean flag so the caller knows recall was not project-narrowed. Omitted when the
+	// project resolved (a bound or inbox session WITH a cwd) — the field is additive, back-compat.
+	if (project !== undefined && project.degraded) {
+		return { ...base, projectScopeDegraded: true, warning: PROJECT_SCOPE_DEGRADED_WARNING };
+	}
+	return base;
+}
+
+/**
+ * Emit the structured `recall.project_scope_degraded` event (PRD-049b / D8) when — and ONLY
+ * when — a recall could not resolve its session project (no cwd available) and fell back to the
+ * inbox + workspace-global rows. Subsystem state ONLY: a fixed `mode` tag, no query/org/cwd.
+ * A project-resolved recall (bound OR inbox-with-cwd) logs NOTHING.
+ */
+function logProjectScopeDegraded(logger: RequestLogger | undefined, project: RequestProjectScope): void {
+	if (logger === undefined || !project.degraded) return;
+	logger.event(PROJECT_SCOPE_DEGRADED_EVENT, { mode: "inbox_global_fallback" });
 }
 
 /**
@@ -340,10 +398,17 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 		// scope, FAIL-SOFT (an unreadable/unset setting → undefined → today's behavior). Threaded into
 		// the engine deps to gate the semantic arm (`keyword` → lexical-only, NOT degraded).
 		const recallMode = await readRecallMode(options.vault, scope);
+		// PRD-049b (49b-AC-2): resolve the session's project from the cwd (body or the
+		// `x-honeycomb-cwd` header) so the project-segment predicate is ANDed into every arm.
+		// No resolvable cwd falls to inbox + workspace-global with the D8 warning.
+		const project = resolveRequestProject(c, scope, parsed.data.cwd);
 		const result = await recallMemories(
 			{
 				query: parsed.data.query,
 				scope,
+				// PRD-049b (49b-AC-2): the resolved project segment threaded into recall.
+				projectId: project.projectId,
+				projectBound: project.bound,
 				...(parsed.data.limit !== undefined ? { limit: parsed.data.limit } : {}),
 				// PRD-047e: thread the optional token budget through. ABSENT → the engine skips the
 				// MMR/budget stage and runs the unchanged fixed top-`limit` path (e-AC-4).
@@ -359,7 +424,10 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 		// structured `recall.degraded` event with the mode + arm coverage. No-op otherwise
 		// and when no logger is wired. Secret-free by construction (see logDegradedRecall).
 		logDegradedRecall(options.logger, result);
-		return c.json(recallResponse(result));
+		// PRD-049b (D8): when no cwd was resolvable, project scoping degraded to inbox+global;
+		// emit a structured warning so the degrade is visible (silent-when-surprising guard).
+		logProjectScopeDegraded(options.logger, project);
+		return c.json(recallResponse(result, project));
 	});
 
 	// ── a-AC-3: POST /api/memories (store/remember) → controlled-writes (no 501). ─
@@ -368,10 +436,14 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 		if (scope === null) return c.json(NO_ORG_BODY, 400);
 		const parsed = StoreBodySchema.safeParse(await readJsonBody(c));
 		if (!parsed.success) return zodError(c, parsed.error);
+		// PRD-049b (49b-AC-1): resolve the store's project from the cwd so the memory is segmented
+		// by the SAME project a recall in that folder narrows to (no cwd → the `__unsorted__` inbox).
+		const storeProject = resolveRequestProject(c, scope, parsed.data.cwd);
 		const result = await storeMemory(
 			{
 				content: parsed.data.content,
 				scope,
+				projectId: storeProject.projectId,
 				...(parsed.data.normalizedContent !== undefined ? { normalizedContent: parsed.data.normalizedContent } : {}),
 				...(parsed.data.type !== undefined ? { type: parsed.data.type } : {}),
 				...(parsed.data.agentId !== undefined ? { agentId: parsed.data.agentId } : {}),
@@ -386,7 +458,19 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 		const scope = resolveScope(c);
 		if (scope === null) return c.json(NO_ORG_BODY, 400);
 		const limit = resolveListLimit(parseQueryInt(c.req.query("limit")));
-		const memories = await listMemories(limit, scope, { storage });
+		// PRD-049e (49e-AC-2): when the dashboard stamps a SELECTED project (the `x-honeycomb-project`
+		// header), narrow the list to that project's rows via the SHARED project-segment predicate — the
+		// SAME clause recall ANDs. With NO selection AND no cwd, `resolveRequestProject` returns the
+		// degraded inbox fallback; we treat THAT as "no project filter" (the list stays project-agnostic,
+		// back-compat) so a non-dashboard caller (the CLI/SDK list) is unchanged. A real selection (bound,
+		// or the explicit inbox) narrows the list.
+		const project = resolveRequestProject(c, scope);
+		const memories = await listMemories(
+			limit,
+			scope,
+			{ storage },
+			project.degraded ? undefined : { projectId: project.projectId, bound: project.bound },
+		);
 		return c.json({ memories });
 	});
 

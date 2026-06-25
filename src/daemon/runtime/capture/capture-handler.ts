@@ -51,6 +51,7 @@ import type { JobQueueService } from "../services/job-queue.js";
 import { type EmbedAttachment, noopEmbedAttachment } from "../services/embed-client.js";
 import { type CaptureEvent, type CaptureMetadata, parseCaptureRequest } from "./event-contract.js";
 import { type MemoryCue, TurnCounters, type TurnCounterConfig, tryStopCounterTrigger } from "./turn-counters.js";
+import { resolveScopeFromDisk, UNSORTED_PROJECT_ID } from "../../../hooks/shared/project-resolver.js";
 
 /** The route group the capture handler attaches to (FR-1). */
 export const HOOKS_GROUP = "/api/hooks" as const;
@@ -84,7 +85,7 @@ export interface CaptureHandlerDeps {
 	 * throw is caught + logged and NEVER breaks the captured turn (the capture path must
 	 * never fail because the pipeline enqueue did).
 	 */
-	readonly enqueuePipelineEntry?: (text: string, scope: QueryScope, agentId: string) => Promise<void>;
+	readonly enqueuePipelineEntry?: (text: string, scope: QueryScope, agentId: string, projectId?: string) => Promise<void>;
 	/**
 	 * The embed seam called non-blocking after the INSERT (D-3 / 005b). Defaults to
 	 * the no-op attachment: the column stays NULL and the continuation is inert.
@@ -98,6 +99,14 @@ export interface CaptureHandlerDeps {
 	readonly logger?: CaptureLogger;
 	/** Injected clock (ISO timestamps) so tests are deterministic. Default `Date.now`. */
 	readonly now?: () => number;
+	/**
+	 * PRD-049b: override the local `~/.deeplake/projects.json` cache dir the capture path
+	 * resolves `project_id` from (049a `resolveScopeFromDisk`). Defaults to `~/.deeplake` in
+	 * production; a test points it at a temp dir with a seeded cache to prove a bound cwd
+	 * attributes the captured row to the real project (49b-AC-1) — and a missing cache resolves
+	 * to the `__unsorted__` inbox (49b-AC-3, capture never dropped).
+	 */
+	readonly projectsDir?: string;
 	/**
 	 * Wait for the fire-and-forget embed continuation. ONLY for tests — production
 	 * NEVER awaits it (b-AC-4). The handler returns the HTTP response before this
@@ -170,7 +179,11 @@ class CaptureRouteHandler {
 
 		const id = this.makeRowId(metadata);
 		const nowIso = new Date(this.now()).toISOString();
-		const row = this.buildRow(id, event, metadata, nowIso);
+		// PRD-049b (49b-AC-1): resolve the session's project ONCE, then carry it onto BOTH the
+		// `sessions` row AND the pipeline-entry job so the distilled fact the pipeline writes is
+		// segmented by the SAME project. Capture never drops: a no-cwd session falls to the inbox.
+		const projectId = this.resolveCaptureProjectId(metadata);
+		const row = this.buildRow(id, event, metadata, nowIso, projectId);
 
 		// ONE append-only INSERT (FR-3 / a-AC-1 / a-AC-2). `appendOnlyInsert` wraps
 		// `withHeal`: a missing `sessions` table is created from its ColumnDef array
@@ -189,7 +202,7 @@ class CaptureRouteHandler {
 		// flows through extraction → decision → controlled-write → graph-persist. It is a
 		// queue enqueue (NOT inline work), and FAIL-SOFT — a pipeline enqueue failure must
 		// never break the capture path (the row is already committed above).
-		await this.enqueuePipelineEntry(event, scope, metadata.agentId);
+		await this.enqueuePipelineEntry(event, scope, metadata.agentId, projectId);
 
 		// Fire-and-forget embed (D-3 / b-AC-4): kicked WITHOUT awaiting before responding.
 		this.kickEmbed(id, event, scope);
@@ -239,10 +252,13 @@ class CaptureRouteHandler {
 	 * NULL (its DEFAULT) here; 005b attaches it later (D-3). `visibility` defaults;
 	 * org/workspace scope the partition.
 	 */
-	private buildRow(id: string, event: CaptureEvent, meta: CaptureMetadata, nowIso: string): RowValues {
+	private buildRow(id: string, event: CaptureEvent, meta: CaptureMetadata, nowIso: string, projectId: string): RowValues {
 		// The verbatim normalized envelope: the event AND its session metadata, so a
 		// later extractor decomposes the original shape rather than re-parsing prose.
 		const message = JSON.stringify({ event, metadata: meta });
+		// PRD-049b (49b-AC-1 / 49b-AC-3): `projectId` is the RESOLVED registry key (049a), resolved
+		// ONCE in handleCapture from the session cwd and carried onto the row + the pipeline entry.
+		// `project` keeps the raw cwd path (D5). Capture never drops (no-cwd → inbox upstream).
 		return [
 			["id", val.str(id)],
 			["path", val.str(meta.path)],
@@ -253,11 +269,35 @@ class CaptureRouteHandler {
 			["author", val.str(meta.agentId)],
 			["agent", val.str(meta.agent)],
 			["project", val.str(meta.cwd)],
+			// PRD-049b: the resolved registry key the scope clause segments on (additive, D5 keeps `project`).
+			["project_id", val.str(projectId)],
 			["plugin_version", val.str(meta.pluginVersion)],
 			["agent_id", val.str(meta.agentId)],
 			["creation_date", val.str(nowIso)],
 			["last_update_date", val.str(nowIso)],
 		];
+	}
+
+	/**
+	 * Resolve the capture row's `project_id` from the session cwd (PRD-049b 49b-AC-1 / 49b-AC-3).
+	 * Uses the thin-client {@link resolveScopeFromDisk} (049a) scoped to the capture's resolved
+	 * org/workspace so a stale cross-workspace cache can never bind the wrong project. Capture is
+	 * NEVER dropped: a blank cwd, a missing/malformed cache, or any throw falls to the workspace
+	 * {@link UNSORTED_PROJECT_ID} inbox (the write-side asymmetry — never fail-closed on capture).
+	 */
+	private resolveCaptureProjectId(meta: CaptureMetadata): string {
+		if (meta.cwd.trim() === "") return UNSORTED_PROJECT_ID; // no cwd → inbox (never dropped).
+		try {
+			return resolveScopeFromDisk({
+				cwd: meta.cwd,
+				org: meta.org,
+				workspace: meta.workspace,
+				...(this.deps.projectsDir !== undefined ? { dir: this.deps.projectsDir } : {}),
+			}).projectId;
+		} catch {
+			// The resolver is fail-soft; guard belt-and-suspenders so capture never fails on resolution.
+			return UNSORTED_PROJECT_ID;
+		}
 	}
 
 	/** A stable, unique row id for an event (append-only → every event is its own row). */
@@ -301,13 +341,14 @@ class CaptureRouteHandler {
 	 * enqueue failure NEVER breaks the captured turn (the `sessions` row is already
 	 * committed). A no-op when the seam is unwired (the Wave-1 posture).
 	 */
-	private async enqueuePipelineEntry(event: CaptureEvent, scope: QueryScope, agentId: string): Promise<void> {
+	private async enqueuePipelineEntry(event: CaptureEvent, scope: QueryScope, agentId: string, projectId: string): Promise<void> {
 		const enqueue = this.deps.enqueuePipelineEntry;
 		if (enqueue === undefined) return;
 		const text = embedTextFor(event);
 		if (text === "") return; // nothing to extract from (e.g. an empty tool response).
 		try {
-			await enqueue(text, scope, agentId);
+			// PRD-049b: carry the resolved project so the distilled fact is segmented identically.
+			await enqueue(text, scope, agentId, projectId);
 		} catch (err: unknown) {
 			this.deps.logger?.event("capture.pipeline_enqueue.failed", {
 				reason: err instanceof Error ? err.message : String(err),

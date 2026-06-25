@@ -35,6 +35,7 @@ import { matchRoute, ROUTES, type RouteEntry } from "./registry.js";
 import { Sidebar } from "./sidebar.js";
 import { useHashRoute } from "./router.js";
 import { PAGE_MAX_WIDTH, type PageProps } from "./page-frame.js";
+import { ScopeProvider } from "./scope-context.js";
 import { createWireClient, EMPTY_SETTINGS, type SettingsWire, type WireClient } from "./wire.js";
 
 /** How often the shell probes `/health` for coarse liveness (ms). */
@@ -175,6 +176,11 @@ export function Shell({ client, assetBase = "assets" }: ShellProps = {}): React.
 	const pageProps: PageProps = { wire, daemonUp, assetBase, pollinating };
 
 	return (
+		// PRD-049e: the ScopeProvider owns the switchable Org→Workspace→Project selection + the
+		// enumeration state, feeding both the sidebar switcher (the filled 050b slot) and every page
+		// (via useScope). It wraps the sidebar + outlet so they share ONE scope source of truth. The
+		// shell/host stay scope-UNAWARE — scope lives entirely here in the React app.
+		<ScopeProvider wire={wire}>
 		<div style={{ display: "flex", minHeight: "100vh", background: "var(--bg-canvas)" }}>
 			{/* The sidebar stays mounted on EVERY route and in the daemon-down state (D-5). */}
 			<Sidebar
@@ -226,5 +232,6 @@ export function Shell({ client, assetBase = "assets" }: ShellProps = {}): React.
 				)}
 			</div>
 		</div>
+		</ScopeProvider>
 	);
 }

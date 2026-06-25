@@ -14,6 +14,7 @@ import {
 	buildStorageRequest,
 	type CommandDeps,
 	createFakeDaemonClient,
+	parseSkillId,
 	runStorageVerb,
 } from "../../src/commands/index.js";
 import { MEMORY_TYPES } from "../../src/shared/memory-types.js";
@@ -189,6 +190,102 @@ describe("PRD-023 dogfood — `recall` RENDERS the daemon's hits (not just `reca
 		const deps: CommandDeps = { daemon, out: (l) => lines.push(l) };
 		await runStorageVerb("remember", ["a", "fact"], deps);
 		expect(lines.join("\n")).toContain("remember: ok");
+	});
+});
+
+describe("PRD-049c — `skill promote` CLI verb routes to the daemon promote endpoint (49c-AC-2 / 49c-AC-4)", () => {
+	it("parseSkillId splits `<name>--<author>` on the LAST `--` (a name may itself contain `--`)", () => {
+		expect(parseSkillId("tidy-imports--alice")).toEqual({ name: "tidy-imports", author: "alice" });
+		expect(parseSkillId("a--b--carol")).toEqual({ name: "a--b", author: "carol" });
+		// A bare id (no `--`) → empty author, which the daemon's zod boundary then rejects.
+		expect(parseSkillId("loner")).toEqual({ name: "loner", author: "" });
+	});
+
+	it("default reach: `skill promote tidy-imports--alice` → POST /api/skills/promote { workspaceWide:false }", () => {
+		const req = buildStorageRequest("skill", ["promote", "tidy-imports--alice"]);
+		expect(req.method).toBe("POST");
+		expect(req.path).toBe("/api/skills/promote");
+		expect(req.body).toEqual({ name: "tidy-imports", author: "alice", workspaceWide: false });
+	});
+
+	it("--workspace-wide sets the reach: { workspaceWide:true }", () => {
+		const req = buildStorageRequest("skill", ["promote", "house-style--alice", "--workspace-wide"]);
+		expect(req.path).toBe("/api/skills/promote");
+		expect(req.body).toEqual({ name: "house-style", author: "alice", workspaceWide: true });
+	});
+
+	it("dispatches exactly one daemon request through the seam (registered + routed, not a dead row)", async () => {
+		const daemon = createFakeDaemonClient({
+			responses: {
+				"POST /api/skills/promote": {
+					status: 200,
+					body: { promoted: true, skillId: "tidy-imports--alice", crossProjectScope: "user", promotedFromProject: "proj-A", version: 2 },
+				},
+			},
+		});
+		const deps: CommandDeps = { daemon, out: () => {} };
+		const res = await runStorageVerb("skill", ["promote", "tidy-imports--alice"], deps);
+		expect(res.exitCode).toBe(0);
+		expect(daemon.calls).toHaveLength(1);
+		expect(`${daemon.calls[0]!.req.method} ${daemon.calls[0]!.req.path}`).toBe("POST /api/skills/promote");
+	});
+
+	it("prints a plain-language confirmation naming the reach + origin project (visible provenance)", async () => {
+		const daemon = createFakeDaemonClient({
+			responses: {
+				"POST /api/skills/promote": {
+					status: 200,
+					body: { promoted: true, skillId: "tidy-imports--alice", crossProjectScope: "user", promotedFromProject: "proj-A", version: 2 },
+				},
+			},
+		});
+		const lines: string[] = [];
+		const deps: CommandDeps = { daemon, out: (l) => lines.push(l) };
+		const res = await runStorageVerb("skill", ["promote", "tidy-imports--alice"], deps);
+		expect(res.exitCode).toBe(0);
+		const out = lines.join("\n");
+		expect(out).toContain("Promoted");
+		expect(out).toContain("across all of your projects");
+		expect(out).toContain("proj-A"); // the origin project is named (provenance is visible).
+		expect(out).not.toContain("skill: ok"); // not the generic render.
+	});
+
+	it("workspace-wide confirmation names the broader reach", async () => {
+		const daemon = createFakeDaemonClient({
+			responses: {
+				"POST /api/skills/promote": {
+					status: 200,
+					body: { promoted: true, skillId: "house-style--alice", crossProjectScope: "workspace", promotedFromProject: "proj-A", version: 2 },
+				},
+			},
+		});
+		const lines: string[] = [];
+		const deps: CommandDeps = { daemon, out: (l) => lines.push(l) };
+		await runStorageVerb("skill", ["promote", "house-style--alice", "--workspace-wide"], deps);
+		expect(lines.join("\n")).toContain("across the whole workspace");
+	});
+
+	it("a `promoted:false` outcome (no such skill) is reported plainly with a non-zero exit", async () => {
+		const daemon = createFakeDaemonClient({
+			responses: { "POST /api/skills/promote": { status: 200, body: { promoted: false, skillId: null } } },
+		});
+		const lines: string[] = [];
+		const deps: CommandDeps = { daemon, out: (l) => lines.push(l) };
+		const res = await runStorageVerb("skill", ["promote", "ghost--alice"], deps);
+		expect(res.exitCode).toBe(1);
+		expect(lines.join("\n")).toContain('No skill "ghost--alice" to promote');
+	});
+
+	it("a daemon error status surfaces a non-zero exit (fail-loud)", async () => {
+		const daemon = createFakeDaemonClient({ responses: { "POST /api/skills/promote": { status: 400 } } });
+		const deps: CommandDeps = { daemon, out: () => {} };
+		const res = await runStorageVerb("skill", ["promote", "tidy-imports--alice"], deps);
+		expect(res.exitCode).toBe(1);
+	});
+
+	it("the dispatched body carries NO SQL — the CLI dispatches intent, the daemon owns the SQL", () => {
+		const req = buildStorageRequest("skill", ["promote", "tidy-imports--alice", "--workspace-wide"]);
+		expect(JSON.stringify(req.body)).not.toMatch(/SELECT|INSERT|UPDATE|DELETE|FROM/i);
 	});
 });
 

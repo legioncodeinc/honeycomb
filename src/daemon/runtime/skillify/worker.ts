@@ -36,6 +36,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
+import { resolveScopeFromDisk, UNSORTED_PROJECT_ID } from "../../../hooks/shared/project-resolver.js";
 import type { JobQueueService } from "../services/job-queue.js";
 import {
 	createFileWorkerLock,
@@ -176,6 +177,22 @@ export interface SkillifyWorkerDeps {
 	 * precedent for daemon-authored rows).
 	 */
 	readonly author?: string;
+	/**
+	 * PRD-049c (49c-AC-1 / 49c-AC-5): the session cwd the mined skill is scoped to. The worker
+	 * resolves the row's `project_id` from this via the thin-client {@link resolveScopeFromDisk}
+	 * (049a) — the SAME resolver the capture path uses — so a skill mined in project A carries A's
+	 * `project_id` and never surfaces in B. Defaults to the SKILL.md project-install dir
+	 * (`installDirs.projectDir`, i.e. the shell cwd) when absent. An identity-less session (blank
+	 * cwd, missing/malformed cache, or any throw) falls to the workspace {@link UNSORTED_PROJECT_ID}
+	 * inbox (49c-AC-5, mirroring 049b capture) — mining NEVER drops and NEVER fails on resolution.
+	 */
+	readonly cwd?: string;
+	/**
+	 * PRD-049c: override the local `~/.deeplake/projects.json` cache dir the project resolution
+	 * reads (mirrors the capture handler's `projectsDir`). Defaults to `~/.deeplake` in production;
+	 * a test points it at a temp dir with a seeded cache to prove a bound cwd resolves to its project.
+	 */
+	readonly projectsDir?: string;
 	/** Optional structured-log sink. */
 	readonly logger?: SkillifyWorkerLogger;
 	/** Poll interval in ms when running the continuous loop. Default 1000. */
@@ -231,6 +248,10 @@ class SkillifyJobWorkerImpl implements SkillifyJobWorker {
 	private readonly watermarkStore: WatermarkStore;
 	private readonly installDirs: FsInstallDirs;
 	private readonly author: string;
+	/** PRD-049c: the session cwd the mined skill's `project_id` resolves from (49c-AC-1/5). */
+	private readonly cwd: string;
+	/** PRD-049c: optional override for the `projects.json` cache dir the resolution reads. */
+	private readonly projectsDir?: string;
 	private readonly logger?: SkillifyWorkerLogger;
 	private readonly pollIntervalMs: number;
 	private readonly setTimer: (cb: () => void, ms: number) => unknown;
@@ -254,6 +275,10 @@ class SkillifyJobWorkerImpl implements SkillifyJobWorker {
 		// The author defaults to `scope.org` (the tenant identifier). When the scope is
 		// `"local"` (no-creds dev mode) we still produce a stable, non-empty author token.
 		this.author = deps.author ?? (deps.scope.org !== "" ? deps.scope.org : "local");
+		// PRD-049c: the cwd the skill's `project_id` resolves from — defaults to the SKILL.md
+		// project-install dir (the shell cwd), or `process.cwd()` when that too is absent.
+		this.cwd = deps.cwd ?? this.installDirs.projectDir ?? process.cwd();
+		this.projectsDir = deps.projectsDir;
 		this.logger = deps.logger;
 		this.pollIntervalMs = deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
 		this.setTimer = deps.setTimer ?? ((cb, ms) => setInterval(cb, ms));
@@ -329,10 +354,16 @@ class SkillifyJobWorkerImpl implements SkillifyJobWorker {
 				return true;
 			}
 
+			// PRD-049c (49c-AC-1 / 49c-AC-5): resolve the mined skill's `project_id` from the session
+			// cwd ONCE (049a resolver), so the row is segmented by its origin project. An identity-less
+			// session falls to the workspace `__unsorted__` inbox (49c-AC-5). The mine path NEVER sets
+			// any promotion field — `writeSkill` writes `cross_project_scope = 'none'` (49c-AC-4).
+			const projectId = this.resolveSkillProjectId();
+
 			// A run produced a verdict — act on it (KEEP/MERGE/SKIP → append-only row).
 			const outcome = await writeSkill(
 				result.outcome.verdict,
-				{ store, install, author: this.author },
+				{ store, install, author: this.author, projectId },
 				result.outcome.minedSessionIds,
 				"global", // All daemon-mined skills install globally (the user's ~/.claude).
 			);
@@ -362,6 +393,28 @@ class SkillifyJobWorkerImpl implements SkillifyJobWorker {
 			await this.queue.fail(job.id, reason);
 		}
 		return true;
+	}
+
+	/**
+	 * Resolve the mined skill's `project_id` from the session cwd (PRD-049c 49c-AC-1 / 49c-AC-5).
+	 * Uses the thin-client {@link resolveScopeFromDisk} (049a) scoped to the mine's org/workspace so
+	 * a stale cross-workspace cache can never bind the wrong project. Mining is NEVER dropped: a blank
+	 * cwd, a missing/malformed cache, or any throw falls to the workspace {@link UNSORTED_PROJECT_ID}
+	 * inbox (49c-AC-5, mirroring 049b capture — the write-side never fails closed on resolution).
+	 */
+	private resolveSkillProjectId(): string {
+		if (this.cwd.trim() === "") return UNSORTED_PROJECT_ID; // no cwd → inbox (never dropped).
+		try {
+			return resolveScopeFromDisk({
+				cwd: this.cwd,
+				org: this.scope.org,
+				...(this.scope.workspace !== undefined ? { workspace: this.scope.workspace } : {}),
+				...(this.projectsDir !== undefined ? { dir: this.projectsDir } : {}),
+			}).projectId;
+		} catch {
+			// The resolver is fail-soft; guard belt-and-suspenders so mining never fails on resolution.
+			return UNSORTED_PROJECT_ID;
+		}
 	}
 
 	start(): void {

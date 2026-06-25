@@ -79,6 +79,7 @@ import {
 	MEMORIES_COLUMNS,
 	NOT_SOFT_DELETED,
 	SOFT_DELETED,
+	UNSORTED_PROJECT_ID,
 } from "../../storage/catalog/index.js";
 import { type ColumnDef } from "../../storage/schema.js";
 import { EMBEDDING_DIMS, serializeFloat4Array } from "../../storage/vector.js";
@@ -160,6 +161,15 @@ export interface ControlledWriteInput {
 	 * catalog default `'default'` when absent.
 	 */
 	readonly agentId?: string;
+	/**
+	 * PRD-049b (49b-AC-1): the RESOLVED `project_id` the distilled memory row is segmented by
+	 * (049a `resolveScope(cwd)`). The autonomous extraction path threads the capturing session's
+	 * resolved project; the explicit `/api/memories` store path threads the request's. ABSENT →
+	 * the `__unsorted__` inbox (never mis-attributed to a real project), mirroring how `agentId`
+	 * defaults to `'default'` rather than failing closed on write. The scope clause segments recall
+	 * on this column (49b-AC-2); `project` (the raw cwd path, D5) is unaffected.
+	 */
+	readonly projectId?: string;
 }
 
 /** Construction deps for {@link createControlledWriteHandler} + {@link applyControlledWrite}. */
@@ -567,6 +577,9 @@ function buildMemoryRow(args: MemoryRowArgs): RowValues {
 		["content_hash", val.str(args.hash)],
 		["confidence", val.num(clampConfidence(args.input.factConfidence))],
 		["content_embedding", embeddingValue],
+		// PRD-049b (49b-AC-1): the resolved project segment. ABSENT → the `__unsorted__` inbox
+		// (never mis-attributed to a real project), mirroring the `agent_id` default discipline.
+		["project_id", val.str(args.input.projectId ?? UNSORTED_PROJECT_ID)],
 		["is_deleted", val.num(args.isDeleted)],
 		["agent_id", val.str(args.input.agentId ?? "default")],
 		["created_at", val.str(args.createdAt)],
@@ -602,6 +615,8 @@ interface ControlledWritePayload {
 	readonly fact_type?: unknown;
 	/** The agent the memory is scoped to (FR-11); falls back to the job scope. */
 	readonly agent_id?: unknown;
+	/** PRD-049b: the resolved project segment carried on the scope envelope (`__unsorted__` default). */
+	readonly project_id?: unknown;
 }
 
 /** Read a string field off a payload defensively ("" when absent / non-string). */
@@ -635,6 +650,8 @@ export function readControlledWriteInput(payload: Record<string, unknown>): Cont
 		factConfidence: readNumber(p.fact_confidence),
 		factType: readString(p.fact_type) || undefined,
 		agentId: readString(p.agent_id) || undefined,
+		// PRD-049b: the resolved project segment (absent → controlled-writes defaults to inbox).
+		projectId: readString(p.project_id) || undefined,
 	};
 }
 

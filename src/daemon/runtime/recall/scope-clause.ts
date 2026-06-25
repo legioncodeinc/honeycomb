@@ -58,11 +58,34 @@
  */
 
 import { sLiteral, sqlIdent } from "../../storage/sql.js";
+import { UNSORTED_PROJECT_ID } from "../../storage/catalog/projects.js";
 
 /** The engine table's scope columns this clause filters on. */
 const AGENT_ID_COLUMN = "agent_id";
 const VISIBILITY_COLUMN = "visibility";
 const IS_DELETED_COLUMN = "is_deleted";
+/**
+ * PRD-049b: the RESOLVED registry key column the project segment filters on (additive,
+ * beside `agent_id`/`visibility`). The free-text `project` column (a raw cwd path, D5) is
+ * NOT this — that is display metadata; `project_id` is the resolved registry key.
+ */
+const PROJECT_ID_COLUMN = "project_id";
+/**
+ * The sentinel for a row carrying NO resolved project (the column DEFAULT '' — a legacy
+ * row written before 049b, or a workspace-global row). Per D5 these resolve to the inbox
+ * at read time and are admitted alongside both a bound project and the inbox so back-compat
+ * recall never silently drops the pre-049b corpus.
+ */
+const PROJECT_ID_UNSET = "";
+/**
+ * PRD-049c: the EXPLICIT cross-project promotion tokens. A skills row whose promotion column
+ * holds one of these surfaces in ANY of the user's projects (49c-AC-2), so the project-segment
+ * predicate ADMITS it in addition to the session's own project + the inbox. The mine/pull default
+ * `'none'` is NOT admitted by the promotion arm — a `none` row is governed purely by its
+ * `project_id` (49c-AC-1 isolation). Only set on the `skills` table; memory/session recall passes
+ * no `promotionColumn` and this list is unused there.
+ */
+const CROSS_PROJECT_ADMITTED = Object.freeze(["user", "workspace"] as const);
 /** The `visibility` token that marks a workspace-global memory (catalog default). */
 const VISIBILITY_GLOBAL = "global";
 /** Soft-delete encodings (catalog `memories.is_deleted`, BIGINT 0/1). Archived = 1. */
@@ -243,4 +266,136 @@ export function buildScopeClause(input: ScopeClauseInput): ScopeClause {
 		values: [VISIBILITY_GLOBAL, ...members, agentId],
 		policyApplied: "group",
 	};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRD-049b — the project-segment predicate (the SECOND inner-ring clause)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A compiled project-segment WHERE fragment — the 049b sibling of {@link ScopeClause}
+ * (PRD-049b 49b-AC-2). `sql` is a parenthesized fragment (NO leading `WHERE`/`AND`; the
+ * caller ANDs it beside the {@link buildScopeClause} agent clause). `values` lists every
+ * interpolated value for auditability. `bound` echoes whether the session resolved a real
+ * project (vs the unbound inbox fallback) so a caller can surface the D8 degraded-scoping
+ * warning. This is exported + cleanly factored so PRD-049c REUSES it verbatim for skills.
+ */
+export interface ProjectScopeClause {
+	/** The parenthesized WHERE fragment (no leading `WHERE`/`AND`). */
+	readonly sql: string;
+	/** Every value interpolated into the fragment, for auditability. */
+	readonly values: string[];
+	/** True when the session resolved a real bound project; false for the inbox fallback (D8). */
+	readonly bound: boolean;
+}
+
+/** Inputs to {@link buildProjectScopeClause}. */
+export interface ProjectScopeInput {
+	/**
+	 * The session's RESOLVED project id (PRD-049a `resolveScope(cwd).projectId`). The
+	 * reserved {@link UNSORTED_PROJECT_ID} (or a blank id) is the UNBOUND inbox session
+	 * (D8 / 49b-AC-3): recall narrows to inbox + workspace-global only, never another
+	 * project. Any other value is a bound project (49b-AC-2).
+	 */
+	readonly projectId: string;
+	/**
+	 * Whether the session resolved a REAL project (PRD-049a `resolveScope(cwd).bound`).
+	 * Defaults to inferring from `projectId` (a non-blank, non-`__unsorted__` id is bound)
+	 * so a caller can pass just the id. Carried onto the result for the D8 warning surface.
+	 */
+	readonly bound?: boolean;
+	/** The column the predicate filters on. Defaults to `project_id`; 049c may pass the skill table's column. */
+	readonly projectColumn?: string;
+	/**
+	 * PRD-049c (49c-AC-2): the OPTIONAL cross-project promotion column on the `skills` table
+	 * (`cross_project_scope`). When provided, the disjunction ADMITS — in ADDITION to the session's
+	 * project + the inbox/unset rows — any row whose promotion column is an explicit cross-project
+	 * reach (`user` / `workspace`), so a promoted skill surfaces in ANY of the user's projects. When
+	 * ABSENT (memory/session recall, 049b), the predicate is byte-for-byte 049b's project-only segment
+	 * — promotion is a skills-only concern. The mine/pull default `'none'` is never admitted by this
+	 * arm, so an unpromoted skill stays isolated to its `project_id` (49c-AC-1).
+	 */
+	readonly promotionColumn?: string;
+}
+
+/**
+ * Build the project-segment WHERE fragment — the SECOND inner-ring clause beside the
+ * {@link buildScopeClause} agent_id/visibility clause (PRD-049b 49b-AC-2 / 49b-AC-4).
+ * Project is an ADDITIONAL predicate, NOT a replacement: the caller ANDs both fragments,
+ * so a row must pass BOTH the agent read policy AND the project segment to be visible.
+ *
+ * The fragment ADMITS exactly:
+ *   - the session's resolved `project_id` (a bound session sees its own project), AND
+ *   - the workspace `__unsorted__` inbox — ONLY for an UNBOUND session (49b-AC-3); a BOUND
+ *     session does NOT see the inbox (its captures landed in the real project), AND
+ *   - rows with an UNSET `project_id` (`''`) — legacy pre-049b rows + workspace-global rows
+ *     that resolve to the inbox at read (D5), so back-compat recall never drops the prior corpus.
+ * It EXCLUDES every OTHER project's `project_id` — even on a strong vector / high-degree-entity
+ * hit (49b-AC-2): this fragment is ANDed into the SAME statement as the match, so an
+ * authorized-id channel can surface an id but the content is filtered past this predicate.
+ *
+ *   - BOUND session in project P → `(project_id = 'P' OR project_id = '')`
+ *   - UNBOUND session            → `(project_id = '__unsorted__' OR project_id = '')`
+ *
+ * ── PRD-049c — the cross-project promotion arm (49c-AC-2) ────────────────────
+ * When `promotionColumn` is supplied (the `skills` table's `cross_project_scope`), the
+ * disjunction ALSO admits any row whose promotion column is an explicit cross-project reach
+ * (`user` / `workspace`), so an EXPLICITLY-promoted skill surfaces in ANY of the user's
+ * projects in ADDITION to the project-segment rows above. The mine/pull default `'none'` is
+ * NOT admitted by this arm, so an unpromoted skill stays isolated to its `project_id`
+ * (49c-AC-1). When `promotionColumn` is absent (memory/session recall), the clause is
+ * byte-for-byte 049b's project-only segment.
+ *
+ *   - BOUND skills session in P (promotion-aware) →
+ *       `(project_id = 'P' OR project_id = '' OR cross_project_scope = 'user' OR cross_project_scope = 'workspace')`
+ *
+ * SQL-safe: the column routes through `sqlIdent`, every value through `sLiteral` (the
+ * 002b floor; `audit:sql` scans `src/daemon`). Pure — no IO, never throws.
+ */
+export function buildProjectScopeClause(input: ProjectScopeInput): ProjectScopeClause {
+	const projectColumn = input.projectColumn ?? PROJECT_ID_COLUMN;
+	const rawId = input.projectId ?? "";
+	// A blank or reserved-inbox id is the UNBOUND session; default `bound` from the id but
+	// honor an explicit override (the resolver's authoritative `bound` flag).
+	const isInbox = rawId.trim() === "" || rawId === UNSORTED_PROJECT_ID;
+	const bound = input.bound ?? !isInbox;
+
+	const col = sqlIdent(projectColumn);
+	// The admitted project id: a bound session admits its real project; an unbound session
+	// admits the reserved inbox. Either way, the UNSET sentinel ('') is ALSO admitted (D5
+	// workspace-global / legacy rows). De-duped so a redundant `OR x OR x` is never emitted.
+	const primaryId = bound ? rawId : UNSORTED_PROJECT_ID;
+	const admitted = primaryId === PROJECT_ID_UNSET ? [PROJECT_ID_UNSET] : [primaryId, PROJECT_ID_UNSET];
+	const disjuncts = admitted.map((id) => `${col} = ${sLiteral(id)}`);
+	const values = [...admitted];
+
+	// PRD-049c (49c-AC-2): admit explicitly-promoted skills in ANY of the user's projects. This
+	// arm is ADDED ONLY when the caller passes a `promotionColumn` (the skills surfacing path); the
+	// memory/session recall path passes none, so its predicate is unchanged (49b). `none` is never
+	// admitted here — isolation (49c-AC-1) is preserved for unpromoted rows.
+	if (input.promotionColumn !== undefined && input.promotionColumn !== "") {
+		const promoCol = sqlIdent(input.promotionColumn);
+		for (const reach of CROSS_PROJECT_ADMITTED) {
+			disjuncts.push(`${promoCol} = ${sLiteral(reach)}`);
+			values.push(reach);
+		}
+	}
+
+	const sql = `(${disjuncts.join(" OR ")})`;
+	return { sql, values, bound };
+}
+
+/**
+ * Build the project-segment conjuncts as a {@link import("../../storage/vector.js").VectorScopeFilter}-style
+ * AND fragment for the INLINE vector/hybrid path (49b-AC-2). The `<#>` vector search
+ * (`vector.ts` `buildVectorSearchSql`) and the native hybrid operator take their scope as
+ * extra ` AND <col> = '<val>'` conjuncts in the SAME statement — but the project segment is a
+ * DISJUNCTION (project OR unset), so it cannot ride the single-equality `VectorScopeFilter`.
+ * This returns the parenthesized `AND (…)` fragment a builder appends verbatim after its
+ * own WHERE, keeping the project filter in the same round trip as the cosine match so a
+ * strong vector hit is filtered BEFORE any id leaves the engine (49b-AC-2). Empty string is
+ * never returned — the predicate always constrains.
+ */
+export function buildProjectScopeConjunct(input: ProjectScopeInput): string {
+	return ` AND ${buildProjectScopeClause(input).sql}`;
 }

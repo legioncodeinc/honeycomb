@@ -67,6 +67,13 @@ export interface PipelineJobScope {
 	readonly workspace: string;
 	/** The agent the memory is scoped to (default `'default'`). */
 	readonly agentId: string;
+	/**
+	 * PRD-049b (49b-AC-1): the RESOLVED `project_id` the captured turn ran in, threaded from
+	 * capture through every pipeline stage so a distilled fact written by the autonomous pipeline
+	 * carries the SAME project segment a recall in that folder narrows to. ABSENT/blank → the
+	 * `__unsorted__` inbox at the write (controlled-writes default), never mis-attributed.
+	 */
+	readonly projectId?: string;
 }
 
 /**
@@ -162,6 +169,8 @@ function toStageJob(leased: LeasedJob, kind: PipelineJobKind): StageJob {
 		org: typeof p.org === "string" ? p.org : "",
 		workspace: typeof p.workspace === "string" ? p.workspace : "",
 		agentId: typeof p.agent_id === "string" ? p.agent_id : "default",
+		// PRD-049b: carry the resolved project segment through the stage envelope (defensively "").
+		...(typeof p.project_id === "string" ? { projectId: p.project_id } : {}),
 	};
 	return { id: leased.id, kind, attempt: leased.attempt, scope, payload: p };
 }

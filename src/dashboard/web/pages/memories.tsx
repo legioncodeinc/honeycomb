@@ -30,6 +30,8 @@ import React from "react";
 
 import { Badge, Button, Input, MemoryCard } from "../primitives.js";
 import { PageFrame, type PageProps } from "../page-frame.js";
+import { useScope } from "../scope-context.js";
+import { NeedsProjectSelection } from "../needs-project.js";
 import {
 	DEFAULT_MEMORY_TYPE,
 	MEMORY_TYPE_DESCRIPTIONS,
@@ -554,6 +556,10 @@ function LifecyclePanel({ pollinating, onCompact, onPollinate, watchLines, watch
  * every write so the rendered value is the daemon-persisted truth, never optimistic.
  */
 export function MemoriesPage({ wire, pollinating = false }: PageProps): React.JSX.Element {
+	// PRD-049e (49e-AC-2): the dashboard-selected project. Threaded into the list + recall fetchers so
+	// the page shows ONLY that project's memories; `undefined` → the needs-selection state (49e-AC-5).
+	const { scope } = useScope();
+	const project = scope.project;
 	// ── browse list (040a) ──
 	const [records, setRecords] = React.useState<readonly MemoryRecordWire[]>([]);
 	const [limit, setLimit] = React.useState(LIST_STEP);
@@ -575,21 +581,28 @@ export function MemoriesPage({ wire, pollinating = false }: PageProps): React.JS
 	const [watching, setWatching] = React.useState(false);
 	const [watchLines, setWatchLines] = React.useState<readonly string[]>([]);
 
-	/** Re-list the browse corpus from the daemon (the persisted truth). */
+	/** Re-list the browse corpus from the daemon (the persisted truth), narrowed to the selected project. */
 	const reList = React.useCallback(
 		async (nextLimit: number): Promise<MemoryRecordWire[]> => {
-			const rows = await wire.listMemories(nextLimit);
+			// 49e-AC-2: stamp the selected project so the list re-scopes; no project → empty (49e-AC-5).
+			if (project === undefined) {
+				setRecords([]);
+				setHydrated(true);
+				return [];
+			}
+			const rows = await wire.listMemories(nextLimit, project);
 			setRecords(rows);
 			setHydrated(true);
 			return rows;
 		},
-		[wire],
+		[wire, project],
 	);
 
-	// 040a-AC-1: hydrate the list on mount.
+	// 040a-AC-1: hydrate the list on mount + whenever the limit bumps (load more) OR the selected
+	// project changes (49e-AC-2 re-scope on the next render). `reList` is keyed on `project` so the
+	// dependency is the callback identity.
 	React.useEffect(() => {
 		void reList(limit);
-		// Only on mount + when the limit bumps (load more).
 	}, [reList, limit]);
 
 	// 040c-AC-3: Watch — poll `/api/logs` filtered to memory routes; stop clears the interval; cleanup on unmount.
@@ -620,12 +633,13 @@ export function MemoriesPage({ wire, pollinating = false }: PageProps): React.JS
 			return;
 		}
 		setSearching(true);
-		const { memories, degraded: deg } = await wire.recall(q);
+		// 49e-AC-2: recall is narrowed to the selected project (the wire stamps the project header).
+		const { memories, degraded: deg } = await wire.recall(q, project);
 		setHits(memories);
 		setDegraded(deg);
 		setSearchActive(true);
 		setSearching(false);
-	}, [query, wire]);
+	}, [query, wire, project]);
 
 	const clearSearch = React.useCallback((): void => {
 		setQuery("");
@@ -737,10 +751,15 @@ export function MemoriesPage({ wire, pollinating = false }: PageProps): React.JS
 			title="Memories"
 			right={
 				<span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-tertiary)" }}>
-					{records.length} kept
+					{project === undefined ? "no project" : `${records.length} kept`}
 				</span>
 			}
 		>
+			{project === undefined ? (
+				// 49e-AC-5: no project selected → the explicit needs-selection state, never another scope's memories.
+				<NeedsProjectSelection surface="memories" />
+			) : (
+			<>
 			{/* ── SEARCH (040a-AC-2) ── */}
 			<div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
 				<div style={{ flex: 1 }}>
@@ -846,6 +865,8 @@ export function MemoriesPage({ wire, pollinating = false }: PageProps): React.JS
 						/>
 					</div>
 				</>
+			)}
+			</>
 			)}
 		</PageFrame>
 	);

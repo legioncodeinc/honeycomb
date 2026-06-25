@@ -23,6 +23,21 @@
 import { isOk, type StorageRow } from "../../storage/result.js";
 import { sLiteral, sqlIdent } from "../../storage/sql.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
+import { buildProjectScopeClause } from "../recall/scope-clause.js";
+
+/**
+ * The session's resolved project segment for the LIST read (PRD-049e 49e-AC-2). When supplied, the
+ * list is narrowed to the project's rows (+ unset/legacy rows) via the SHARED
+ * {@link buildProjectScopeClause} — the SAME predicate recall ANDs — so the dashboard's selected
+ * project re-scopes the Memories list identically. ABSENT → the list is project-agnostic (the prior
+ * behavior, back-compat), so a caller that does not pass it is unchanged.
+ */
+export interface ListProjectScope {
+	/** The resolved project id (049a registry key, or the reserved inbox). */
+	readonly projectId: string;
+	/** Whether a real project resolved (vs the unbound inbox fallback). */
+	readonly bound: boolean;
+}
 
 /** The default page size for `memory_list` (CLI-facing). */
 export const DEFAULT_LIST_LIMIT = 50;
@@ -166,15 +181,22 @@ export function buildGetSql(id: string): string {
  * Build the `memory_list` SQL: the scoped tenant's non-deleted memories, newest
  * first, bounded by the page limit. The org/workspace partition rides the
  * `storage.query` scope; `is_deleted = 0` excludes tombstones.
+ *
+ * PRD-049e (49e-AC-2): when a `project` segment is supplied (the dashboard's selected project), the
+ * project-segment predicate from the SHARED {@link buildProjectScopeClause} is ANDed in — the SAME
+ * clause recall uses — so the list shows ONLY that project's rows (+ unset/legacy rows), never
+ * another project's data. ABSENT → the list is project-agnostic (back-compat, the prior behavior).
  */
-export function buildListSql(limit: number): string {
+export function buildListSql(limit: number, project?: ListProjectScope): string {
 	const tbl = sqlIdent("memories");
 	// `limit` is a clamped integer (resolveListLimit) → a bare numeric interpolation,
 	// the same shape the rest of the data layer uses for a dynamic LIMIT (audit-safe).
 	const safeLimit = Math.max(1, Math.trunc(limit));
+	const projectClause =
+		project !== undefined ? ` AND ${buildProjectScopeClause({ projectId: project.projectId, bound: project.bound }).sql}` : "";
 	return (
 		`SELECT ${SELECT_COLS} FROM "${tbl}" ` +
-		`WHERE ${sqlIdent("is_deleted")} = 0 ` +
+		`WHERE ${sqlIdent("is_deleted")} = 0${projectClause} ` +
 		`ORDER BY ${sqlIdent("created_at")} DESC LIMIT ${safeLimit}`
 	);
 }
@@ -202,8 +224,13 @@ export async function getMemory(id: string, scope: QueryScope, deps: MemoryReadD
  * version-bump model can surface multiple versions of the same id in the raw
  * scan, so the list de-dups by id, keeping the first (newest by `created_at`) seen.
  */
-export async function listMemories(limit: number, scope: QueryScope, deps: MemoryReadDeps): Promise<MemoryRecord[]> {
-	const result = await deps.storage.query(buildListSql(limit), scope);
+export async function listMemories(
+	limit: number,
+	scope: QueryScope,
+	deps: MemoryReadDeps,
+	project?: ListProjectScope,
+): Promise<MemoryRecord[]> {
+	const result = await deps.storage.query(buildListSql(limit, project), scope);
 	if (!isOk(result)) return [];
 	const seen = new Set<string>();
 	const records: MemoryRecord[] = [];

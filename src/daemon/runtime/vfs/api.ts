@@ -62,7 +62,12 @@ import {
 import { resolveRecallConfig, type RecallConfig } from "../recall/config.js";
 import { bestScore, type RecallScope } from "../recall/contracts.js";
 import { classifyPath } from "../../../daemon-client/vfs/classify.js";
-import { resolveScopeFromHeaders, resolveScopeOrLocalDefault } from "../scope.js";
+import {
+	resolveScopeFromHeaders,
+	resolveScopeOrLocalDefault,
+	resolveRequestProject,
+	type RequestProjectScope,
+} from "../scope.js";
 import type { Daemon } from "../server.js";
 
 /** The route group the VFS browse handlers attach to (already mounted in `server.ts`). */
@@ -257,6 +262,13 @@ export interface GrepResult {
 	readonly query: string;
 	readonly degraded: boolean;
 	readonly hits: GrepHit[];
+	/**
+	 * PRD-049b (D8): true when the session project could NOT be resolved (no cwd) and the grep
+	 * fell back to the workspace inbox + workspace-global rows. Surfaced so the browse caller can
+	 * render the visible degraded-scoping warning, mirroring the `degraded` (embeddings) signal.
+	 * Omitted when the project resolved (a bound or inbox-with-cwd session).
+	 */
+	readonly projectScopeDegraded?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -302,6 +314,7 @@ export async function fetchGrep(
 	query: string,
 	config: RecallConfig,
 	hints: HintSource | undefined,
+	project?: RequestProjectScope,
 ): Promise<GrepResult> {
 	const recallScope: RecallScope = {
 		org: scope.org,
@@ -311,6 +324,10 @@ export async function fetchGrep(
 		// read-policy clause (007c) is a recall-injection concern, not a browse one.
 		readPolicy: "isolated",
 		policyGroup: "",
+		// PRD-049b (49b-AC-2): the resolved project segment is threaded into the SAME collection
+		// layer the live recall uses, so the fast-path grep is project-narrowed identically. No
+		// project (no cwd) → the unbound inbox session (D8 / 49b-AC-3): inbox + workspace-global.
+		...(project !== undefined ? { projectId: project.projectId, projectBound: project.bound } : {}),
 	};
 	const collectionDeps: CollectionDeps = {
 		storage,
@@ -341,7 +358,13 @@ export async function fetchGrep(
 		score: bestScore(c.scores),
 		content: contentById.get(c.id) ?? "",
 	}));
-	return { query, degraded: pool.degraded, hits };
+	return {
+		query,
+		degraded: pool.degraded,
+		hits,
+		// PRD-049b (D8): surface the project-scope-degraded fact when no cwd resolved a project.
+		...(project !== undefined && project.degraded ? { projectScopeDegraded: true } : {}),
+	};
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -411,7 +434,10 @@ export function mountVfsApi(daemon: Daemon, options: MountVfsOptions): void {
 		const query = c.req.query("q");
 		if (query === undefined || query.length === 0) return c.json(missingParam("q"), 400);
 		const agentId = resolveAgentId(c);
-		return c.json(await fetchGrep(storage, scope, agentId, query, recallConfig, hints));
+		// PRD-049b (49b-AC-2): resolve the session project from the `x-honeycomb-cwd` header so
+		// the fast-path grep is project-narrowed identically to the live recall. No cwd is the D8 inbox.
+		const project = resolveRequestProject(c, scope);
+		return c.json(await fetchGrep(storage, scope, agentId, query, recallConfig, hints, project));
 	});
 
 	// b-AC-3: ls — `GET /memory/ls?prefix=<p>` → the entries under the prefix.

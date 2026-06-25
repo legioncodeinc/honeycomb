@@ -230,11 +230,13 @@ describe("037b AC-2/AC-3/AC-4: client-side routing — swap without reload, deep
 		});
 		const text = container.textContent ?? "";
 		expect(window.location.hash).toBe("#/graph");
-		// PRD-041 replaced the ComingSoon placeholder: the real Graph page renders its source toggle
-		// (Codebase ↔ Memory) and its `<source> · N nodes · M edges` eyebrow.
+		// PRD-041 replaced the ComingSoon placeholder with the real Graph page. PRD-049e: with NO project
+		// selected in the scope switcher, the Graph page renders its explicit needs-selection state (49e-AC-5)
+		// rather than another scope's graph — so the outlet swap is proven by the Graph page's OWN content
+		// (the needs-selection panel + the page title), not the project-gated source toggle.
 		expect(text).not.toContain("coming soon · owned by PRD-041");
-		expect(container.querySelector('[data-testid="source-codebase"]'), "the real Graph page is mounted").not.toBeNull();
-		expect(text).toContain("codebase ·");
+		expect(container.querySelector('[data-testid="needs-project-selection"]'), "the real Graph page is mounted (needs-selection)").not.toBeNull();
+		expect(text).toContain("No project selected.");
 		expect(text).not.toContain("Recall"); // the Dashboard body is no longer mounted
 		// The sidebar (the seven items) is STILL mounted — only the content region swapped.
 		expect(container.querySelectorAll("[data-route]")).toHaveLength(7);

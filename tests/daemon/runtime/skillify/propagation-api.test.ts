@@ -133,6 +133,26 @@ describe("PRD-045g mountSkillPropagationApi — publish (g-AC-1)", () => {
 		expect(storage.statements.some((s) => /INSERT\s+INTO/i.test(s))).toBe(true);
 	});
 
+	// ── PRD-049c 49c-AC-3 / 49c-AC-4 — a publish lands in the ORIGIN project, NEVER promoted ──
+	it("49c-AC-3/49c-AC-4 a publish carrying provenance.projectId writes that project_id and cross_project_scope='none'", async () => {
+		const storage = new PropagationFake([]);
+		const harness = makeDaemon(storage);
+		mountSkillPropagationApi(harness.daemon, { storage, roots });
+		const body = { ...publishBody(3), provenance: { sourceSessions: ["s1"], version: 3, createdBy: "alice", scope: "team", projectId: "proj-A" } };
+		const res = await harness.app.request(`${SKILLS_GROUP}`, {
+			method: "POST",
+			headers: HEADERS,
+			body: JSON.stringify(body),
+		});
+		expect(res.status).toBe(200);
+		const insert = storage.statements.find((s) => /INSERT\s+INTO/i.test(s)) ?? "";
+		// 49c-AC-3: the published row lands in project A's scope (surfaced only in A on pull-back).
+		expect(insert).toContain("proj-A");
+		// 49c-AC-4: publish NEVER promotes — the row carries the default `none` reach + blank provenance.
+		expect(insert).toMatch(/'none'/);
+		expect(insert).not.toMatch(/'user'|'workspace'/);
+	});
+
 	it("POST /api/skills rejects a malformed body at the zod boundary → 400", async () => {
 		const storage = new PropagationFake([]);
 		const { daemon, app } = makeDaemon(storage);

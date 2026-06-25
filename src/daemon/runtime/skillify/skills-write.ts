@@ -56,13 +56,17 @@ import type { HealTarget } from "../../storage/heal.js";
 import { isOk, type StorageRow } from "../../storage/result.js";
 import { sLiteral, sqlIdent } from "../../storage/sql.js";
 import { appendOnlyInsert, type RowValues, val } from "../../storage/writes.js";
+import { UNSORTED_PROJECT_ID } from "../../../hooks/shared/project-resolver.js";
 import {
+	asCrossProjectScope,
+	type CrossProjectScope,
 	type GateVerdict,
 	type Skill,
 	SKILLOPT_CONTRIBUTOR,
 	skillLogicalId,
 	type SkillInstall,
 	type SkillInstallTarget,
+	type SkillPromotion,
 	type SkillProvenance,
 	type SkillScope,
 	type SkillStore,
@@ -169,9 +173,16 @@ export function createSkillStore(
 			// The row mirrors the SKILLS_COLUMNS shape exactly. `source_sessions` and
 			// `contributors` are JSON arrays stored as TEXT (the catalog default is
 			// '[]'); the author IS the creator (→ `author` + `agent_id`).
+			// PRD-049c: the resolved project the skill is scoped to (49c-AC-1 / 49c-AC-5); unset → inbox.
+			const projectId = skill.provenance.projectId ?? UNSORTED_PROJECT_ID;
+			// PRD-049c (49c-AC-4): the promotion columns. ABSENT promotion → `none` + blank provenance —
+			// the ONLY shape mining + pull ever write (they never construct a `promotion`).
+			const promotion = skill.provenance.promotion;
+			const crossProjectScope: CrossProjectScope = promotion?.crossProjectScope ?? "none";
 			const row: RowValues = [
 				["id", val.str(skill.id)],
 				["name", val.str(skill.name)],
+				["project_id", val.str(projectId)],
 				["scope", val.str(skill.provenance.scope)],
 				["install", val.str(skill.install)],
 				["author", val.str(skill.author)],
@@ -181,6 +192,11 @@ export function createSkillStore(
 				["trigger_text", val.text(skill.triggerText)],
 				["body", val.text(skill.body)],
 				["version", val.num(skill.provenance.version)],
+				// PRD-049c D6: explicit-promotion columns (never set by mine/pull — `none`/blank).
+				["cross_project_scope", val.str(crossProjectScope)],
+				["promoted_by", val.str(promotion?.promotedBy ?? "")],
+				["promoted_at", val.str(promotion?.promotedAt ?? "")],
+				["promoted_from_project", val.str(promotion?.promotedFromProject ?? "")],
 				["agent_id", val.str(skill.author)],
 				["created_at", val.str(now)],
 				["updated_at", val.str(now)],
@@ -220,6 +236,21 @@ function rowToSkill(row: StorageRow): Skill {
 	};
 	const scope: SkillScope = str("scope", "me") === "team" ? "team" : "me";
 	const install: SkillInstall = str("install", "project") === "global" ? "global" : "project";
+	// PRD-049c: the resolved project (default '' → admitted at read as a legacy/unset row, D5).
+	const projectId = str("project_id", "");
+	// PRD-049c D6: reconstruct the promotion provenance ONLY when the row was explicitly promoted
+	// (`cross_project_scope !== 'none'`). A `none` row carries no promotion block — exactly the
+	// shape mining + pull write (49c-AC-4).
+	const crossProjectScope: CrossProjectScope = asCrossProjectScope(str("cross_project_scope", "none"));
+	const promotion: SkillPromotion | undefined =
+		crossProjectScope === "none"
+			? undefined
+			: {
+					crossProjectScope,
+					promotedBy: str("promoted_by", ""),
+					promotedAt: str("promoted_at", ""),
+					promotedFromProject: str("promoted_from_project", ""),
+				};
 	return {
 		id: str("id"),
 		name: str("name"),
@@ -233,6 +264,8 @@ function rowToSkill(row: StorageRow): Skill {
 			version: num("version", 1),
 			createdBy: str("author"),
 			scope,
+			projectId,
+			...(promotion !== undefined ? { promotion } : {}),
 		},
 	};
 }
@@ -284,6 +317,15 @@ export interface SkillWriteDeps {
 	readonly install: SkillInstallTarget;
 	/** The author/agent mining this skill (→ `author`/`agent_id`/`created_by_agent`). */
 	readonly author: string;
+	/**
+	 * PRD-049c (49c-AC-1 / 49c-AC-5): the RESOLVED project this mine ran under (049a
+	 * `resolveScopeFromDisk(cwd).projectId`), stamped onto the written row's `project_id` so the
+	 * skill surfaces ONLY in its origin project. The worker resolves it ONCE from the session cwd;
+	 * an identity-less session resolves to the workspace inbox upstream. ABSENT → the writer
+	 * defaults to {@link UNSORTED_PROJECT_ID} (capture is never dropped). The mine path NEVER sets
+	 * any promotion field — `writeSkill` writes `cross_project_scope = 'none'` by construction (49c-AC-4).
+	 */
+	readonly projectId?: string;
 }
 
 /** The outcome of a {@link writeSkill} call, for the worker's audit + the watermark. */
@@ -360,7 +402,7 @@ export async function writeNewSkill(
 	const name = verdict.name ?? verdict.target ?? "untitled-skill";
 	const id = skillLogicalId(name, deps.author);
 	const version = (await deps.store.maxVersion(id)) + 1;
-	const skill = buildSkill(id, name, deps.author, verdict, sourceSessions, version, scope, install);
+	const skill = buildSkill(id, name, deps.author, verdict, sourceSessions, version, scope, install, deps.projectId);
 
 	const filePath = await deps.install.write(install, name, renderSkillMarkdown(skill));
 	const writtenVersion = await deps.store.appendVersion(skill);
@@ -422,7 +464,7 @@ export async function mergeSkill(
 	// Record under the TARGET's logical id so the bump accrues on the original chain.
 	const id = skillLogicalId(targetName, targetAuthor);
 	const version = (await deps.store.maxVersion(id)) + 1;
-	const skill = buildSkill(id, targetName, targetAuthor, verdict, sourceSessions, version, scope, install, contributors);
+	const skill = buildSkill(id, targetName, targetAuthor, verdict, sourceSessions, version, scope, install, deps.projectId, contributors);
 
 	const filePath = await deps.install.write(install, targetName, renderSkillMarkdown(skill));
 	const writtenVersion = await deps.store.appendVersion(skill);
@@ -438,7 +480,7 @@ export async function mergeSkill(
 	};
 }
 
-/** Assemble a {@link Skill} from a verdict + the resolved version/scope/install/contributors. */
+/** Assemble a {@link Skill} from a verdict + the resolved version/scope/install/project/contributors. */
 function buildSkill(
 	id: string,
 	name: string,
@@ -448,13 +490,18 @@ function buildSkill(
 	version: number,
 	scope: SkillScope,
 	install: SkillInstall,
+	projectId?: string,
 	contributors?: readonly string[],
 ): Skill {
+	// PRD-049c (49c-AC-1 / 49c-AC-5): stamp the resolved project; unset → the workspace inbox.
+	// NO promotion block is EVER constructed here — the mine path writes `cross_project_scope = 'none'`
+	// (49c-AC-4). Promotion is a SEPARATE explicit operation (`promoteSkill`), never this write.
 	const provenance: SkillProvenance = {
 		sourceSessions: [...sourceSessions],
 		version,
 		createdBy: author,
 		scope,
+		projectId: projectId ?? UNSORTED_PROJECT_ID,
 	};
 	return {
 		id,

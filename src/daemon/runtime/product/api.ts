@@ -40,7 +40,8 @@ import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import { isOk, type StorageRow } from "../../storage/result.js";
 import { sqlIdent } from "../../storage/sql.js";
 import type { DeploymentMode } from "../config.js";
-import { resolveScopeOrLocalDefault } from "../scope.js";
+import { resolveRequestProject, resolveScopeOrLocalDefault } from "../scope.js";
+import { buildProjectScopeClause } from "../recall/scope-clause.js";
 import type { Daemon } from "../server.js";
 
 import { mountSourcesApi, mountDocumentsApi, type SourcesApiDeps } from "../sources/api.js";
@@ -82,13 +83,21 @@ export interface ProductDataApiOptions {
 /** The 400 body for a request with no resolvable org (fail-closed — never a broad scope). */
 const NO_ORG_BODY = { error: "bad_request", reason: "x-honeycomb-org header is required" } as const;
 
-/** One mined-skill view row (016/018). */
+/** One mined-skill view row (016/018) + the PRD-049c project + cross-project provenance. */
 export interface SkillReadRow {
 	readonly id: string;
 	readonly name: string;
 	readonly scope: string;
 	readonly visibility: string;
 	readonly version: number;
+	/** PRD-049c: the resolved project the skill is scoped to (`''`/unset for a legacy row). */
+	readonly projectId: string;
+	/** PRD-049c (49c-AC-2): the cross-project promotion reach — `none` | `user` | `workspace`. */
+	readonly crossProjectScope: string;
+	/** PRD-049c (49c-AC-2): WHO promoted it (visible provenance; `''` when unpromoted). */
+	readonly promotedBy: string;
+	/** PRD-049c (49c-AC-2): the ORIGIN project it was promoted FROM (`''` when unpromoted). */
+	readonly promotedFromProject: string;
 }
 
 /** One active-rule view row. */
@@ -122,21 +131,31 @@ function toNum(value: unknown): number {
  * @param table        the version-bumped table name (`"skills"` / `"rules"`)
  * @param idColumn     the logical id column to group by (`"id"` / `"key"`)
  * @param selectColumns the columns to project from the current row
+ * @param whereClause  PRD-049c: an OPTIONAL pre-built, parenthesized WHERE fragment (no leading
+ *                     `WHERE`/`AND`) ANDed onto the CURRENT (highest-version) row — the skills
+ *                     surfacing path passes the project-segment predicate here so a project-B
+ *                     row is filtered server-side (49c-AC-1). Empty → no extra filter (rules).
  */
 export function buildHighestVersionSql(
 	table: string,
 	idColumn: string,
 	selectColumns: readonly string[],
+	whereClause = "",
 ): string {
 	const tbl = sqlIdent(table);
 	const id = sqlIdent(idColumn);
 	const version = sqlIdent("version");
 	const projection = selectColumns.map((col) => `s.${sqlIdent(col)} AS ${sqlIdent(col)}`).join(", ");
+	// The project predicate (49c-AC-1) is ANDed onto the CURRENT row `s.*`, so the segment runs on
+	// the highest-version row that won the self-join — a promoted (later) version is judged on its
+	// own promotion columns, never a superseded prior version's.
+	const where = whereClause === "" ? "" : ` WHERE ${whereClause}`;
 	return (
 		`SELECT ${projection}, s.${version} AS version ` +
 		`FROM "${tbl}" s ` +
 		`JOIN (SELECT ${id}, MAX(${version}) AS mv FROM "${tbl}" GROUP BY ${id}) latest ` +
-		`ON s.${id} = latest.${id} AND s.${version} = latest.mv ` +
+		`ON s.${id} = latest.${id} AND s.${version} = latest.mv` +
+		`${where} ` +
 		`LIMIT 1000`
 	);
 }
@@ -147,9 +166,51 @@ async function selectRows(storage: StorageQuery, sql: string, scope: QueryScope)
 	return isOk(result) ? result.rows : [];
 }
 
-/** Fetch the scoped tenant's mined skills, highest-version-per-id (c-AC-3 / FR-3). */
-export async function fetchSkills(storage: StorageQuery, scope: QueryScope): Promise<SkillReadRow[]> {
-	const sql = buildHighestVersionSql("skills", "id", ["id", "name", "scope", "visibility"]);
+/**
+ * The session's resolved project segment for skills surfacing (PRD-049c). `projectId`/`bound`
+ * come from {@link resolveRequestProject} (049a/049b); they drive {@link buildProjectScopeClause}
+ * so a skill surfaces ONLY in its origin project + any explicitly cross-project-promoted skill
+ * (49c-AC-1 / 49c-AC-2). ABSENT → the unbound inbox session (the project-only segment narrows to
+ * inbox + unset rows), exactly the 049b unbound posture.
+ */
+export interface SkillProjectScope {
+	/** The session's resolved project id (049a). */
+	readonly projectId: string;
+	/** Whether the session resolved a real bound project (049a `resolveScope(cwd).bound`). */
+	readonly bound: boolean;
+}
+
+/**
+ * Fetch the scoped tenant's mined skills, highest-version-per-id (c-AC-3 / FR-3), filtered to the
+ * session's PROJECT (PRD-049c 49c-AC-1) PLUS any explicitly cross-project-promoted skill (49c-AC-2).
+ *
+ * The project segment is built by the SINGLE factored {@link buildProjectScopeClause} (49c reuses
+ * the 049b builder, NOT a parallel predicate) with the skill table's `project_id` column AND the
+ * `cross_project_scope` promotion column, so a project-B row is filtered server-side and a promoted
+ * row surfaces in any of the user's projects. When `project` is ABSENT (a caller that does not scope
+ * by project, e.g. the dashboard read), the unbound-inbox segment applies. The surfaced row carries
+ * the cross-project provenance (`crossProjectScope`/`promotedBy`/`promotedFromProject`) so the
+ * promotion is VISIBLE (49c-AC-2).
+ */
+export async function fetchSkills(
+	storage: StorageQuery,
+	scope: QueryScope,
+	project?: SkillProjectScope,
+): Promise<SkillReadRow[]> {
+	// PRD-049c: the project-segment predicate over the skills `project_id` + promotion column. A
+	// missing `project` is the unbound inbox session (049b posture). REUSES buildProjectScopeClause.
+	const projectClause = buildProjectScopeClause({
+		projectId: project?.projectId ?? "",
+		...(project?.bound !== undefined ? { bound: project.bound } : {}),
+		projectColumn: "project_id",
+		promotionColumn: "cross_project_scope",
+	}).sql;
+	const sql = buildHighestVersionSql(
+		"skills",
+		"id",
+		["id", "name", "scope", "visibility", "project_id", "cross_project_scope", "promoted_by", "promoted_from_project"],
+		projectClause,
+	);
 	const rows = await selectRows(storage, sql, scope);
 	return rows.map((r) => ({
 		id: toStr(r.id),
@@ -157,6 +218,10 @@ export async function fetchSkills(storage: StorageQuery, scope: QueryScope): Pro
 		scope: toStr(r.scope),
 		visibility: toStr(r.visibility),
 		version: toNum(r.version),
+		projectId: toStr(r.project_id),
+		crossProjectScope: toStr(r.cross_project_scope) || "none",
+		promotedBy: toStr(r.promoted_by),
+		promotedFromProject: toStr(r.promoted_from_project),
 	}));
 }
 
@@ -185,7 +250,18 @@ export async function fetchRules(storage: StorageQuery, scope: QueryScope): Prom
 export function mountSkillsReadApi(daemon: Daemon, storage: StorageQuery, defaultScope?: QueryScope): void {
 	const group = daemon.group(SKILLS_GROUP);
 	if (group === undefined) return;
-	mountReadHandler(group, "skills", daemon.config.mode, defaultScope, (scope) => fetchSkills(storage, scope));
+	const mode = daemon.config.mode;
+	// PRD-049c: skills surfacing is PROJECT-scoped (49c-AC-1) + admits explicitly-promoted skills
+	// (49c-AC-2). Resolve the session project from the cwd header (049b `resolveRequestProject`)
+	// and thread it into `fetchSkills` so the project-segment predicate runs server-side. Rules
+	// stay on the project-agnostic shared handler — project is a skills/memory concern only.
+	group.get("/", async (c: Context) => {
+		const scope = resolveScopeOrLocalDefault(c, mode, defaultScope);
+		if (scope === null) return c.json(NO_ORG_BODY, 400);
+		const project = resolveRequestProject(c, scope);
+		const rows = await fetchSkills(storage, scope, { projectId: project.projectId, bound: project.bound });
+		return c.json({ skills: rows });
+	});
 }
 
 /**

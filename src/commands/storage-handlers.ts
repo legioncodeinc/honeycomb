@@ -60,17 +60,42 @@ function flagValue(argv: readonly string[], flag: string): string | undefined {
 }
 
 /**
+ * Split a skill's logical id (`<name>--<author>`) into its name + author halves (PRD-049c). The
+ * id format is the {@link import("../daemon/runtime/skillify/contracts.js").skillLogicalId}
+ * convention `<name>--<author>` — the SAME the install dir + the version chain use. The `--`
+ * separator is split on the LAST occurrence so a name containing `--` keeps it (the author half is
+ * the final segment). A bare id with no `--` is treated as a name with an EMPTY author, which the
+ * daemon's zod boundary then rejects (a 400), so the user is told the id was malformed rather than a
+ * silent miss. Pure — the daemon escapes the values before any SQL.
+ */
+export function parseSkillId(raw: string): { readonly name: string; readonly author: string } {
+	const sep = raw.lastIndexOf("--");
+	if (sep <= 0) return { name: raw, author: "" };
+	return { name: raw.slice(0, sep), author: raw.slice(sep + 2) };
+}
+
+/**
  * Build the `skill` verb's daemon request (FR-5 / a-AC-6). Maps the skillify subcommands onto
  * the `/api/skills` group:
- *   - `skill scope <team|org|private> --users a,b` → `POST /api/skills/scope`
- *   - `skill pull [--force]`                       → `POST /api/skills/pull`
- *   - `skill unpull <name>`                        → `POST /api/skills/unpull`
- *   - `skill force <name>`                         → `POST /api/skills/force`
+ *   - `skill scope <team|org|private> --users a,b`   → `POST /api/skills/scope`
+ *   - `skill pull [--force]`                         → `POST /api/skills/pull`
+ *   - `skill unpull <name>`                          → `POST /api/skills/unpull`
+ *   - `skill force <name>`                           → `POST /api/skills/force`
+ *   - `skill promote <skill-id> [--workspace-wide]`  → `POST /api/skills/promote` (PRD-049c D6)
  * Every value lands in the JSON body — the daemon owns the SQL.
  */
 function buildSkillRequest(argv: readonly string[]): DaemonRequest {
 	const sub = subcommandOf(argv);
 	const rest = argv.filter((a) => !a.startsWith("--"));
+	if (sub === "promote") {
+		// PRD-049c (49c-AC-2 / 49c-AC-4 / D6): the EXPLICIT cross-project promotion. The positional is
+		// the skill's logical id (`<name>--<author>`); `--workspace-wide` picks the reach (default →
+		// this user's other projects; flag → all teammates). The daemon takes `promoted_by` from the
+		// authenticated actor header, never the body, so the provenance cannot be forged.
+		const { name, author } = parseSkillId(rest[1] ?? "");
+		const workspaceWide = argv.includes("--workspace-wide");
+		return { method: "POST", path: "/api/skills/promote", body: { name, author, workspaceWide } };
+	}
 	if (sub === "scope") {
 		const scope = rest[1] ?? "";
 		const users = (flagValue(argv, "--users") ?? "")
@@ -262,6 +287,52 @@ function renderRecall(query: string, res: DaemonResponse, json: boolean, out: Ou
 	}
 }
 
+/** The daemon's `PromoteSkillOutcome` as it crosses the HTTP boundary (every field parsed defensively). */
+interface PromoteResponseBody {
+	/** True when the target skill existed and a promotion version row was appended. */
+	readonly promoted?: boolean;
+	/** The logical id the promotion landed under (`<name>--<author>`), or null when absent. */
+	readonly skillId?: string | null;
+	/** The reach stamped (`user` | `workspace`), or null when the target was absent. */
+	readonly crossProjectScope?: string | null;
+	/** The origin project recorded as `promoted_from_project`, or null when absent. */
+	readonly promotedFromProject?: string | null;
+	/** The append-only version the promotion row landed at, or null when absent. */
+	readonly version?: number | null;
+}
+
+/**
+ * Render a `skill promote` response in plain language (PRD-049c 49c-AC-2 / 49c-AC-4). On success the
+ * confirmation names the promotion REACH (this user's projects vs the whole workspace) and the ORIGIN
+ * project the skill was promoted FROM — the same provenance the surfaced result later shows. When the
+ * target skill did not exist (`promoted: false`), it says so plainly (a promotion never CREATES a
+ * skill). `--json` prints the raw outcome verbatim. Returns the exit code (0 on a real promotion,
+ * 1 when nothing was promoted so a script can branch).
+ */
+function renderPromote(skillId: string, res: DaemonResponse, json: boolean, out: OutputSink): CommandResult {
+	if (json) {
+		out(JSON.stringify(res.body ?? {}, null, 2));
+	}
+	const body = (typeof res.body === "object" && res.body !== null ? res.body : {}) as PromoteResponseBody;
+	if (body.promoted !== true) {
+		if (!json) out(`No skill "${skillId}" to promote — promotion widens an existing skill, it never creates one.`);
+		return { exitCode: 1 };
+	}
+	if (json) return { exitCode: 0 };
+	const reach =
+		body.crossProjectScope === "workspace"
+			? "across the whole workspace (every project, every teammate)"
+			: "across all of your projects";
+	const origin =
+		body.promotedFromProject !== undefined && body.promotedFromProject !== null && body.promotedFromProject.length > 0
+			? body.promotedFromProject
+			: "the unsorted inbox";
+	out(`Promoted "${skillId}" ${reach}.`);
+	out(`  origin project: ${origin}  (recorded as the promotion provenance)`);
+	out(`  it will now surface in those projects, tagged "promoted from ${origin}".`);
+	return { exitCode: 0 };
+}
+
 /**
  * Run a storage verb (FR-3 / a-AC-3). Parse the verb's subcommand into a {@link DaemonRequest},
  * `deps.daemon.send` it, and render the response. The dispatch goes ONLY through `deps.daemon`
@@ -298,6 +369,12 @@ export async function runStorageVerb(
 		const query = argv.filter((a) => !a.startsWith("--")).join(" ");
 		renderRecall(query, res, json, out);
 		return { exitCode: 0 };
+	}
+	// PRD-049c: `skill promote <id> [--workspace-wide]` gets a plain-language confirmation naming the
+	// reach + origin project (the visible provenance), instead of the generic `<verb>: ok` line.
+	if ((verb === "skill" || verb === "skillify") && subcommandOf(argv) === "promote") {
+		const skillId = argv.filter((a) => !a.startsWith("--"))[1] ?? "";
+		return renderPromote(skillId, res, json, out);
 	}
 	out(`${verb}: ok`);
 	return { exitCode: 0 };

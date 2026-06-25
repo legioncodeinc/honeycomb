@@ -53,17 +53,40 @@ import { type CatalogTable, defineGroup } from "./types.js";
  * (d-AC-1). Scope: engine table (D-2) → agent_id + visibility.
  *
  * Column mapping (FR-1 / hivemind-v1 SKILLS_COLUMNS adapted):
- *   identity:    id, name, project_key
+ *   identity:    id, name, project_key, project_id
  *   install:     scope, install, author, contributors, source_sessions
  *   body:        description, trigger_text, body
  *   version:     version (BIGINT default 1)
+ *   promotion:   cross_project_scope, promoted_by, promoted_at, promoted_from_project (PRD-049c)
  *   timestamps:  created_at, updated_at
  *   scope:       agent_id, visibility
+ *
+ * ── PRD-049c — per-project skill isolation + explicit cross-project promotion ──
+ * `project_id` is the RESOLVED registry key (049a) the surfacing predicate segments on —
+ * ADDITIVE, heal-compatible (NOT NULL DEFAULT ''). The legacy path-derived `project_key`
+ * STAYS as a display/back-compat alias (D7): existing rows are NOT rewritten. A row written
+ * before 049c carries `project_id = ''`, which the surfacing predicate ({@link import("../../runtime/recall/scope-clause.js").buildProjectScopeClause})
+ * admits at read time alongside the session's project + the inbox (back-compat, D5).
+ *
+ * The four promotion columns make cross-project sharing an EXPLICIT, provenance-recorded
+ * opt-in (49c-AC-2 / 49c-AC-4). They are NEVER set by the mine path or the pull path — only
+ * by the two explicit promote operations (this-user-cross-project / workspace-wide):
+ *   - `cross_project_scope` — `none` (project-scoped, the mine/pull default) | `user`
+ *     (this user's other projects) | `workspace` (all teammates, every project). The
+ *     surfacing predicate admits a `user`/`workspace` row in ANY of the user's projects.
+ *   - `promoted_by` / `promoted_at` — WHO promoted it and WHEN (visible provenance, 49c-AC-2).
+ *   - `promoted_from_project` — the ORIGIN `project_id` the skill was promoted FROM, so the
+ *     surfaced result shows "promoted from <project>" cross-project provenance (49c-AC-2).
+ * Append-only/version-bump discipline (d-AC-1): a promotion is a NEW version row stamping
+ * these columns, never an in-place UPDATE of the mined row.
  */
 export const SKILLS_COLUMNS = Object.freeze([
 	{ name: "id", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "name", sql: "TEXT NOT NULL DEFAULT ''" },
+	// PRD-049c: legacy path-derived alias (D7) — KEPT for display/back-compat, never migrated away.
 	{ name: "project_key", sql: "TEXT NOT NULL DEFAULT ''" },
+	// PRD-049c: the RESOLVED registry key (049a) the surfacing predicate segments on (additive, D5/D7).
+	{ name: "project_id", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "scope", sql: "TEXT NOT NULL DEFAULT 'me'" },
 	{ name: "install", sql: "TEXT NOT NULL DEFAULT 'project'" },
 	{ name: "author", sql: "TEXT NOT NULL DEFAULT ''" },
@@ -73,6 +96,11 @@ export const SKILLS_COLUMNS = Object.freeze([
 	{ name: "trigger_text", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "body", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "version", sql: "BIGINT NOT NULL DEFAULT 1" },
+	// PRD-049c D6: explicit cross-project promotion marker + provenance (never set by mine/pull).
+	{ name: "cross_project_scope", sql: "TEXT NOT NULL DEFAULT 'none'" },
+	{ name: "promoted_by", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "promoted_at", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "promoted_from_project", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "agent_id", sql: "TEXT NOT NULL DEFAULT 'default'" },
 	{ name: "visibility", sql: "TEXT NOT NULL DEFAULT 'global'" },
 	{ name: "created_at", sql: "TEXT NOT NULL DEFAULT ''" },

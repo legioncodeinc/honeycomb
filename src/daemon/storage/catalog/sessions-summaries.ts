@@ -41,7 +41,12 @@ export const SESSIONS_COLUMNS = Object.freeze([
 	embeddingColumn("message_embedding"),
 	{ name: "author", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "agent", sql: "TEXT NOT NULL DEFAULT ''" },
+	// PRD-049b: `project` is the existing free-text raw cwd path (kept per D5). `project_id`
+	// is the RESOLVED registry key (049a) the scope clause segments on — additive, healed via
+	// the `ALTER TABLE ADD COLUMN … DEFAULT ''` path. Default '' resolves to the workspace
+	// `__unsorted__` inbox at read time (D5 / D8 unbound-session fallback).
 	{ name: "project", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "project_id", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "plugin_version", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "agent_id", sql: "TEXT NOT NULL DEFAULT 'default'" },
 	{ name: "visibility", sql: "TEXT NOT NULL DEFAULT 'global'" },
@@ -80,7 +85,11 @@ export const MEMORY_COLUMNS = Object.freeze([
 	{ name: "version", sql: "BIGINT NOT NULL DEFAULT 0" },
 	{ name: "author", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "mime_type", sql: "TEXT NOT NULL DEFAULT 'text/plain'" },
+	// PRD-049b: `project` is the existing free-text raw cwd path (kept per D5); `project_id`
+	// is the RESOLVED registry key (049a) the scope clause segments on — additive, healed via
+	// `ALTER TABLE ADD COLUMN … DEFAULT ''`. Default '' resolves to the workspace inbox at read.
 	{ name: "project", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "project_id", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "agent", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "agent_id", sql: "TEXT NOT NULL DEFAULT 'default'" },
 	{ name: "visibility", sql: "TEXT NOT NULL DEFAULT 'global'" },

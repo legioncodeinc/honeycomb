@@ -98,6 +98,7 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 		mountVfs: 0,
 		mountProductData: 0,
 		mountPollinate: 0,
+		mountProjectsSync: 0,
 		mountCompact: 0,
 		mountDiagnosticsHealth: 0,
 		mountGraph: 0,
@@ -205,6 +206,18 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 				daemon.services.queue,
 			);
 		}) as SeamFns["mountPollinate"],
+		// ── The PRD-049d registry → cache sync trigger seam the composition root fires. ──
+		mountProjectsSync: ((daemon, options) => {
+			calls.mountProjectsSync += 1;
+			order.push("mountProjectsSync");
+			expect(typeof daemon.group).toBe("function");
+			// The sync route is wired with the live storage client (the projects-registry read).
+			expect(options.storage).toBeDefined();
+			// PRD-049d: the daemon's default tenancy scope is threaded so a no-org loopback sync
+			// resolves the single local tenant's workspace registry.
+			expect(options.defaultScope, "projects-sync trigger receives the threaded default scope").toBeDefined();
+			expect(options.defaultScope?.org).toBeTruthy();
+		}) as SeamFns["mountProjectsSync"],
 		// ── The PRD-030 standalone COMPACTION trigger seam the composition root fires. ──
 		mountCompact: ((daemon, options) => {
 			calls.mountCompact += 1;
@@ -296,6 +309,8 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 		expect(calls.mountProductData).toBe(1);
 		// PRD-024 / AC-6: the "Pollinate now" trigger fires once and only once.
 		expect(calls.mountPollinate).toBe(1);
+		// PRD-049d: the registry → cache sync trigger fires once and only once.
+		expect(calls.mountProjectsSync).toBe(1);
 		// PRD-030 / D-2: the standalone compaction trigger fires once and only once.
 		expect(calls.mountCompact).toBe(1);
 		// PRD-029 / AC-3: the protected per-subsystem health detail fires once and only once.
@@ -319,6 +334,7 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 			"mountVfs",
 			"mountProductData",
 			"mountPollinate",
+			"mountProjectsSync",
 			"mountCompact",
 			"mountDiagnosticsHealth",
 			"mountGraph",
@@ -670,6 +686,7 @@ describe("fix/daemon-scope-from-credentials: the daemon's default scope comes fr
 			mountVfs: noop,
 			mountProductData: noop,
 			mountPollinate: noop,
+			mountProjectsSync: noop,
 			mountCompact: noop,
 			mountDiagnosticsHealth: noop,
 		};

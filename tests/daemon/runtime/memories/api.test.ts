@@ -594,3 +594,50 @@ describe("PRD-044c — /api/memories/recall reads the recallMode setting and hon
 		expect(json.degraded).toBe(false);
 	});
 });
+
+// ── PRD-049b: per-project recall scoping on the /api/memories/recall handler ──
+describe("PRD-049b recall handler project scoping (49b-AC-2 / D8)", () => {
+	it("with NO cwd, the recall narrows to inbox+global and surfaces the visible D8 warning", async () => {
+		const term = "projterm";
+		const { daemon, storage, fake } = makeDaemon(term);
+		mountMemoriesApi(daemon, { storage });
+		const res = await daemon.app.request("/api/memories/recall", {
+			method: "POST",
+			headers: headers(), // no cwd body field, no x-honeycomb-cwd header → unbound.
+			body: JSON.stringify({ query: term }),
+		});
+		expect(res.status).toBe(200);
+		const json = (await res.json()) as { projectScopeDegraded?: boolean; warning?: string };
+		// D8: the degrade is VISIBLE, not silent.
+		expect(json.projectScopeDegraded).toBe(true);
+		expect(typeof json.warning).toBe("string");
+		expect(json.warning).toContain("project scoping degraded");
+		// Every memory arm narrowed to the inbox + the unset sentinel (never a real project).
+		const arms = fake.requests.filter((r) => /FROM\s+"(memories|memory|sessions)"/i.test(r.sql) && /AS source/i.test(r.sql));
+		expect(arms.length).toBeGreaterThan(0);
+		for (const r of arms) {
+			expect(r.sql).toContain("project_id = '__unsorted__'");
+			expect(r.sql).toContain("project_id = ''");
+		}
+	});
+
+	it("a recall body `cwd` with no resolvable binding still resolves (no degrade warning; inbox scope)", async () => {
+		const term = "projterm2";
+		const { daemon, storage, fake } = makeDaemon(term);
+		mountMemoriesApi(daemon, { storage });
+		const res = await daemon.app.request("/api/memories/recall", {
+			method: "POST",
+			headers: headers(),
+			// A cwd IS provided → the project resolves (to the inbox, since no projects.json), so
+			// scoping is NOT degraded — the warning is omitted, but the arms still narrow correctly.
+			body: JSON.stringify({ query: term, cwd: "/some/unbound/dir" }),
+		});
+		expect(res.status).toBe(200);
+		const json = (await res.json()) as { projectScopeDegraded?: boolean };
+		expect(json.projectScopeDegraded).toBeUndefined();
+		const arms = fake.requests.filter((r) => /FROM\s+"(memories|memory|sessions)"/i.test(r.sql) && /AS source/i.test(r.sql));
+		for (const r of arms) {
+			expect(r.sql).toContain("project_id = '__unsorted__'");
+		}
+	});
+});

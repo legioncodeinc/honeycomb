@@ -86,7 +86,29 @@ export const ENDPOINTS = Object.freeze({
 	// crash-recovery "Roll back" affordance (d-AC-7).
 	setupMigrate: "/setup/migrate-from-hivemind",
 	setupMigrateRollback: "/setup/migrate-from-hivemind/rollback",
+	// PRD-049e — the dashboard scope-switcher enumeration reads (local-mode-only loopback). The
+	// switcher hydrates its Org→Workspace→Project dropdowns from these. `scopeOrgs`/`scopeWorkspaces`
+	// are privilege-scoped by the daemon's token (`GET /organizations` / `GET /workspaces`);
+	// `scopeProjects` is the workspace's synced 049a registry copy. Changing the Org re-mints the
+	// org-bound token (PRD-011) on the daemon side BEFORE enumerating the new org (49e-AC-3).
+	scopeOrgs: "/api/diagnostics/scope/orgs",
+	scopeWorkspaces: "/api/diagnostics/scope/workspaces",
+	scopeProjects: "/api/diagnostics/scope/projects",
 } as const);
+
+/**
+ * PRD-049e (49e-AC-2) — the header carrying the dashboard's SELECTED project id. The switcher's
+ * selection is VIEWER-SIDE: stamping this header on a read narrows the daemon's project-segment
+ * predicate to exactly that project (the daemon honors it in `resolveRequestProject`), WITHOUT
+ * touching any per-folder CLI binding (49e-AC-4 — it is a request header, never a write). An empty
+ * selection omits the header (the read stays project-agnostic / cwd-resolved, back-compat).
+ */
+export const PROJECT_HEADER = "x-honeycomb-project" as const;
+
+/** Build the per-request project header, or an empty object when no project is selected. */
+export function projectHeader(projectId: string | undefined): Record<string, string> {
+	return projectId !== undefined && projectId !== "" ? { [PROJECT_HEADER]: projectId } : {};
+}
 
 /** PRD-040a — the default first-page size the Memories list requests (the daemon clamps to 500). */
 export const DEFAULT_MEMORY_LIST_LIMIT = 50 as const;
@@ -772,6 +794,57 @@ export const FAILED_SETUP_MIGRATE_ROLLBACK: SetupMigrateRollbackWire = Object.fr
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PRD-049e — the scope-switcher enumeration schemas. Every field `.catch()`-defaults so a
+// partial/failed/non-local (404) body degrades to a SAFE empty list (never a throw into React).
+// NO token rides any of these bodies by construction (the daemon enumerates id+name only).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** One enumerated org (id + display name) from `GET /api/diagnostics/scope/orgs`. */
+export const ScopeOrgSchema = z.object({
+	id: z.string().catch(""),
+	name: z.string().catch(""),
+});
+export type ScopeOrgWire = z.infer<typeof ScopeOrgSchema>;
+
+/** The `GET /api/diagnostics/scope/orgs` body — `{ orgs }`. A failure degrades to an empty list. */
+export const ScopeOrgsSchema = z.object({
+	orgs: z.array(ScopeOrgSchema).catch([]),
+});
+
+/** One enumerated workspace (id + display name) from `GET /api/diagnostics/scope/workspaces`. */
+export const ScopeWorkspaceSchema = z.object({
+	id: z.string().catch(""),
+	name: z.string().catch(""),
+});
+export type ScopeWorkspaceWire = z.infer<typeof ScopeWorkspaceSchema>;
+
+/**
+ * The `GET /api/diagnostics/scope/workspaces` body — `{ workspaces, org, reminted }`. `reminted` is
+ * true when the daemon re-minted the org-bound token before enumerating (49e-AC-3 observability).
+ */
+export const ScopeWorkspacesSchema = z.object({
+	workspaces: z.array(ScopeWorkspaceSchema).catch([]),
+	org: z.string().catch(""),
+	reminted: z.boolean().catch(false),
+});
+export type ScopeWorkspacesWire = z.infer<typeof ScopeWorkspacesSchema>;
+
+/** One enumerated project (the workspace's synced 049a registry copy) — id + display name. */
+export const ScopeProjectSchema = z.object({
+	projectId: z.string().catch(""),
+	name: z.string().catch(""),
+});
+export type ScopeProjectWire = z.infer<typeof ScopeProjectSchema>;
+
+/** The `GET /api/diagnostics/scope/projects` body — `{ projects, org, workspace }`. */
+export const ScopeProjectsSchema = z.object({
+	projects: z.array(ScopeProjectSchema).catch([]),
+	org: z.string().catch(""),
+	workspace: z.string().catch(""),
+});
+export type ScopeProjectsWire = z.infer<typeof ScopeProjectsSchema>;
+
+// ─────────────────────────────────────────────────────────────────────────────
 // The typed fetch client. Every method validates its payload through zod, so the
 // React tree never sees an untyped/garbage value (AC-2 empty states are free).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -809,14 +882,19 @@ export interface WireClientOptions {
 	readonly fetchImpl?: FetchLike;
 }
 
-/** GET + zod-parse a JSON endpoint, returning the parsed value or `null` on any failure. */
+/**
+ * GET + zod-parse a JSON endpoint, returning the parsed value or `null` on any failure. `extraHeaders`
+ * (PRD-049e) carries the optional `x-honeycomb-project` selection header so a project-scoped read
+ * narrows server-side; absent it, the read is unchanged (back-compat).
+ */
 async function getJson<T>(
 	fetchImpl: FetchLike,
 	url: string,
 	schema: z.ZodType<T>,
+	extraHeaders: Record<string, string> = {},
 ): Promise<T | null> {
 	try {
-		const res = await fetchImpl(url, { headers: { accept: "application/json", ...DASHBOARD_SESSION_HEADERS } });
+		const res = await fetchImpl(url, { headers: { accept: "application/json", ...DASHBOARD_SESSION_HEADERS, ...extraHeaders } });
 		if (!res.ok) return null;
 		const body: unknown = await res.json();
 		const parsed = schema.safeParse(body);
@@ -873,7 +951,13 @@ export interface WireClient {
 	settings(): Promise<SettingsWire>;
 	rules(): Promise<RuleRowWire[]>;
 	skills(): Promise<SkillRowWire[]>;
-	graph(): Promise<GraphWire>;
+	/**
+	 * PRD-049e — read the codebase-graph view (`GET /api/graph`). `projectId` (when set) stamps the
+	 * selected-project header so the read re-scopes on the dashboard's scope change (49e-AC-2); the
+	 * page passes the active `useScope().scope.project`, so a switch re-fetches the graph for the new
+	 * project rather than showing the prior scope's cached data.
+	 */
+	graph(projectId?: string): Promise<GraphWire>;
 	/**
 	 * PRD-041b — read the MEMORY-GRAPH view-model (`GET /api/diagnostics/memory-graph`). Returns the
 	 * SAME `GraphWire` shape as {@link graph} (the memory graph is a `GraphView`-shaped source), so the
@@ -881,14 +965,14 @@ export interface WireClient {
 	 * while PRD-008 data is unpopulated — degrades to {@link EMPTY_GRAPH} so the page renders its honest
 	 * "no memory graph yet" empty state, never a throw. Validated through the shared `GraphSchema`.
 	 */
-	memoryGraph(): Promise<GraphWire>;
-	recall(query: string): Promise<{ memories: RecalledMemory[]; degraded: boolean }>;
+	memoryGraph(projectId?: string): Promise<GraphWire>;
+	recall(query: string, projectId?: string): Promise<{ memories: RecalledMemory[]; degraded: boolean }>;
 	/**
 	 * PRD-040a — list the scoped tenant's memories (`GET /api/memories`, newest-first). `limit`
 	 * bumps for "load more" (the daemon clamps to `MAX_LIST_LIMIT` 500). A malformed/absent body
 	 * degrades to `[]` (the page renders its honest empty state). Stamps the session headers.
 	 */
-	listMemories(limit?: number): Promise<MemoryRecordWire[]>;
+	listMemories(limit?: number, projectId?: string): Promise<MemoryRecordWire[]>;
 	/**
 	 * PRD-040a — read one memory by id (`GET /api/memories/:id`). Returns `null` on a 404 (the id is
 	 * unknown OR forgotten → the page renders "this memory was forgotten") or any failure.
@@ -1056,6 +1140,27 @@ export interface WireClient {
 	 * a non-2xx / network failure (never a throw).
 	 */
 	rollbackMigration(): Promise<SetupMigrateRollbackWire>;
+	/**
+	 * PRD-049e (49e-AC-1) — list the orgs the user has access to (`GET /api/diagnostics/scope/orgs`).
+	 * Privilege-scoped by the daemon's token (`GET /organizations`); nothing the user lacks access to
+	 * appears. A failed/absent/non-local (404) read degrades to `[]` (the switcher shows an empty
+	 * state), never a throw. No token rides the body.
+	 */
+	scopeOrgs(): Promise<ScopeOrgWire[]>;
+	/**
+	 * PRD-049e (49e-AC-1 / 49e-AC-3) — list a given org's workspaces
+	 * (`GET /api/diagnostics/scope/workspaces?org=<id>`). When `org` differs from the daemon's
+	 * credential org, the daemon RE-MINTS the org-bound token (PRD-011) BEFORE enumerating. Returns the
+	 * full body (`{ workspaces, org, reminted }`) so the caller can observe the re-mint. A failed/absent
+	 * read degrades to an empty workspace list, never a throw.
+	 */
+	scopeWorkspaces(org?: string): Promise<ScopeWorkspacesWire>;
+	/**
+	 * PRD-049e (49e-AC-1) — list the workspace's registry projects
+	 * (`GET /api/diagnostics/scope/projects`), the daemon-synced 049a `projects.json` copy (incl. the
+	 * `__unsorted__` inbox). A failed/absent read degrades to `[]`, never a throw.
+	 */
+	scopeProjects(): Promise<ScopeProjectWire[]>;
 }
 
 /** The empty/zero KPIs the UI shows before the first load resolves (or on failure). */
@@ -1125,20 +1230,22 @@ export function createWireClient(options: WireClientOptions = {}): WireClient {
 			const v = await getJson(fetchImpl, url(ENDPOINTS.skills), SkillsSchema);
 			return v?.skills ?? [];
 		},
-		async graph(): Promise<GraphWire> {
-			return (await getJson(fetchImpl, url(ENDPOINTS.graph), GraphSchema)) ?? EMPTY_GRAPH;
+		async graph(projectId?: string): Promise<GraphWire> {
+			// PRD-049e: stamp the selected-project header so the read re-scopes on a dashboard scope change.
+			return (await getJson(fetchImpl, url(ENDPOINTS.graph), GraphSchema, projectHeader(projectId))) ?? EMPTY_GRAPH;
 		},
-		async memoryGraph(): Promise<GraphWire> {
+		async memoryGraph(projectId?: string): Promise<GraphWire> {
 			// Same shape as the codebase graph (a `GraphView`-shaped source) — validated through the
 			// shared GraphSchema. A failure / `built:false` empty graph degrades to EMPTY_GRAPH so the
-			// page renders the honest "no memory graph yet" state (never a throw).
-			return (await getJson(fetchImpl, url(ENDPOINTS.memoryGraph), GraphSchema)) ?? EMPTY_GRAPH;
+			// page renders the honest "no memory graph yet" state (never a throw). PRD-049e: project-stamped.
+			return (await getJson(fetchImpl, url(ENDPOINTS.memoryGraph), GraphSchema, projectHeader(projectId))) ?? EMPTY_GRAPH;
 		},
-		async recall(query: string): Promise<{ memories: RecalledMemory[]; degraded: boolean }> {
+		async recall(query: string, projectId?: string): Promise<{ memories: RecalledMemory[]; degraded: boolean }> {
 			try {
 				const res = await fetchImpl(url(ENDPOINTS.recall), {
 					method: "POST",
-					headers: { "content-type": "application/json", accept: "application/json", ...DASHBOARD_SESSION_HEADERS },
+					// PRD-049e: stamp the selected-project header so recall narrows to the dashboard's project.
+					headers: { "content-type": "application/json", accept: "application/json", ...DASHBOARD_SESSION_HEADERS, ...projectHeader(projectId) },
 					body: JSON.stringify({ query }),
 				});
 				if (!res.ok) return { memories: [], degraded: true };
@@ -1165,10 +1272,11 @@ export function createWireClient(options: WireClientOptions = {}): WireClient {
 				return { memories: [], degraded: true };
 			}
 		},
-		async listMemories(limit = DEFAULT_MEMORY_LIST_LIMIT): Promise<MemoryRecordWire[]> {
+		async listMemories(limit = DEFAULT_MEMORY_LIST_LIMIT, projectId?: string): Promise<MemoryRecordWire[]> {
 			// GET the scoped tenant's memories (newest-first); a malformed/absent body degrades to []
 			// so the page renders its honest empty state. The daemon clamps `limit` to MAX_LIST_LIMIT.
-			const v = await getJson(fetchImpl, url(`${ENDPOINTS.memories}?limit=${limit}`), MemoryListResponseSchema);
+			// PRD-049e: stamp the selected-project header so the list re-scopes to the dashboard's project.
+			const v = await getJson(fetchImpl, url(`${ENDPOINTS.memories}?limit=${limit}`), MemoryListResponseSchema, projectHeader(projectId));
 			return v?.memories ?? [];
 		},
 		async getMemory(id: string): Promise<MemoryRecordWire | null> {
@@ -1409,6 +1517,26 @@ export function createWireClient(options: WireClientOptions = {}): WireClient {
 					(await postJson(fetchImpl, url(ENDPOINTS.setupMigrateRollback), {}, SetupMigrateRollbackSchema)) ??
 					FAILED_SETUP_MIGRATE_ROLLBACK
 				);
+			},
+			async scopeOrgs(): Promise<ScopeOrgWire[]> {
+				// GET the privilege-scoped org list; a failed/absent/non-local read degrades to [] so the
+				// switcher shows an empty/needs-login state (never a throw). No token rides the body.
+				const v = await getJson(fetchImpl, url(ENDPOINTS.scopeOrgs), ScopeOrgsSchema);
+				return v?.orgs ?? [];
+			},
+			async scopeWorkspaces(org?: string): Promise<ScopeWorkspacesWire> {
+				// GET the org's workspaces; the daemon re-mints the org-bound token (PRD-011) before
+				// enumerating when `org` differs from its credential org (49e-AC-3). A failed read degrades
+				// to an empty workspace list. The `org` query is encodeURIComponent-escaped (one safe value).
+				const qs = org !== undefined && org !== "" ? `?org=${encodeURIComponent(org)}` : "";
+				const v = await getJson(fetchImpl, url(`${ENDPOINTS.scopeWorkspaces}${qs}`), ScopeWorkspacesSchema);
+				return v ?? { workspaces: [], org: org ?? "", reminted: false };
+			},
+			async scopeProjects(): Promise<ScopeProjectWire[]> {
+				// GET the workspace's synced registry projects (049a cache). A failed/absent read degrades
+				// to [] so the switcher shows no projects (and the pages render the needs-selection state).
+				const v = await getJson(fetchImpl, url(ENDPOINTS.scopeProjects), ScopeProjectsSchema);
+				return v?.projects ?? [];
 			},
 	};
 }

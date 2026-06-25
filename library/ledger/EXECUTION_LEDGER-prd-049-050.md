@@ -19,7 +19,10 @@ Shared substrate (build early, Wave 1): `~/.deeplake/onboarding.json` state file
 - D2: dual-send `X-Honeycomb-Referrer` (new) + `X-Hivemind-Referrer` (recognized now); backend recognition of new header = external item (old header carries attribution meanwhile).
 - D3: Path A = assume NO → silent-adopt valid creds via `GET /me`; 050e measures upgraders.
 - D4: local `~/.deeplake/projects.json` cache over server `projects` table (cross-device identity via git-remote signal in server registry).
-- D5 (not yet asked; low-stakes Wave 4): default = leave free-text `project` values, resolve to inbox (non-destructive). Confirm before 049b.
+- D5 (RESOLVED 2026-06-25): leave free-text `project` values, resolve to inbox on read (non-destructive — no bulk migration).
+- D6 (049c promotion): support BOTH explicit flags — promote-to-my-other-projects (this user) AND promote-workspace-wide (teammates); each provenance-recorded, no implicit set.
+- D7 (049c project_key): add `project_id` additively; keep `project_key` as legacy alias resolving through the registry (no skill-row rewrite).
+- D8 (049b no-cwd): recall falls back to inbox + workspace-global with a VISIBLE warning; capture still lands in inbox (never dropped).
 
 ---
 
@@ -92,6 +95,7 @@ Shared substrate (build early, Wave 1): `~/.deeplake/onboarding.json` state file
 ---
 
 ## Wave 3 — 049a — Project Identity & Resolution
+> **STATUS: all ACs DONE (2026-06-25), CI-green @3142 (1 pre-existing flake `secrets/exec.test.ts`). Pending VERIFIED in 049 close-out.** Branch `legion/prd-049-multi-project` off merged main (#100). SCHEMA: `src/daemon/storage/catalog/projects.ts` (tenant-scoped registry, `remote_signal`/`bound_paths`/`is_reserved`, `__unsorted__` reserved+collision-guard = 49a-AC-6, additive heal). RESOLVER: `src/hooks/shared/project-resolver.ts` (`canonicalizeRemote`, pure `resolveScope`, fail-soft zod `projects.json` cache, thin-client) + `resolveRequestScope` in `tenancy-resolution.ts` (per-request Org→Ws→Project, workspaceId fallback-only). projects.json shape: `{schemaVersion,org,workspace,bindings[],projects[]}`. NOTE: nothing CALLS resolveRequestScope on live capture/recall yet — 049b wires it; daemon registry→cache sync writes projects.json (049d).
 | ID | Criterion | Status | Bee |
 |---|---|---|---|
 | 49a-AC-1 | `resolveScope({cwd})` pure/deterministic — same `project_id` for same bound folder across runs & across remote-URL forms (`git@`≡`https`). | OPEN | typescript-node |
@@ -146,7 +150,8 @@ Shared substrate (build early, Wave 1): `~/.deeplake/onboarding.json` state file
 
 ## Module-level roll-ups (verified at close-out)
 - **PRD-050 AC-1..9 — VERIFIED (2026-06-25).** All 5 sub-PRDs (35 sub-ACs) + 9 module ACs PASS. security-worker-bee clean at Medium+ (0 Crit/High/Med, 2 Low documented). quality-worker-bee PASS (report: `prd-050-.../reports/2026-06-25-qa-report.md`). CI green @3110. Shipping as PR-1. Non-gating follow-up: vanity domain + checksum.
-- **PRD-049 AC-1..8** — composed of sub-PRD ACs above; verify after waves 3-5 land.
+- **PRD-049 AC-1..8 — VERIFIED (2026-06-25).** All 5 sub-PRDs (27 sub-ACs) + 8 module ACs PASS. Waves 3-5 (049a resolver+registry, 049b memory isolation, 049c skill isolation, 049d CLI switchers + registry→cache sync, 049e dashboard switcher into 050b seam). Reopened+closed: cross-project skill promotion was unreachable → added `honeycomb skill promote [--workspace-wide]` + `POST /api/skills/promote` (round-trip test proves 49c-AC-2/AC-4 end-to-end). security-worker-bee clean at Medium+ ×2 (full 049 surface + promotion-seam spot-check; load-bearing verdict: forged project_id/header/override CANNOT cross the org/workspace hard partition; 1 Medium fixed: cross-tenant guard parity on diagnostic endpoints). quality-worker-bee PASS (report: `prd-049-.../reports/2026-06-25-qa-report.md`; 49e-AC-2 judged PASS — graphs are workspace-level by data model, row predicate applies to memories+recall). CI green @3252. Shipping as PR-2.
+  - Non-defect notes from QA (acceptable): memory/codebase graph re-scope is view-level (ontology tables have no project_id by design); sync page assets are workspace-shared.
 
 ## Operator decisions (pending — block listed ACs)
 | # | Decision | Blocks | Default/lean |
