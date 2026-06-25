@@ -114,7 +114,7 @@ This whole catalog rides the **existing** `emitTelemetry` chokepoint + allow-lis
 - [ ] **Write-key abuse:** a public write-only key can be spammed with fake events. Acceptable for v1 marketing measurement; a forwarding proxy with light validation is the mitigation if it ever matters.
 - [ ] **Reconciliation with Path A:** if Activeloop later credits adoptions, the anonymous Path-B ids won't perfectly reconcile with Activeloop's account-level attribution — decide whether that matters enough to switch to the hashed-account id.
 - [x] **Destination project → RESOLVED:** operator-owned PostHog project **"Honeycomb" (id `485287`, US cloud)**, separate from `legionsight.ai` (448151). Still TODO at implementation time: paste the project's write-only `phc_…` key into the build (Project settings → Project API Key).
-- [ ] **Event endpoint/version:** confirm the current PostHog capture path + payload shape against project 485287 before hard-coding (`/i/v0/e/` vs `/capture/`).
+- [x] **Event endpoint → RESOLVED:** pin the PostHog US-Cloud capture path `POST https://us.i.posthog.com/i/v0/e/` with body `{ api_key, event, properties, distinct_id }`. The legacy `/capture/` alternative is dropped. (Implementation may still smoke-test one real event against project 485287 before first release, but the endpoint is no longer an open decision.)
 
 ## Related
 

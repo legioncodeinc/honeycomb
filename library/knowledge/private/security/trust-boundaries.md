@@ -172,7 +172,7 @@ Honeycomb may emit anonymized **operator telemetry** from the daemon to an opera
 Boundary invariants:
 
 - **Daemon-only emitter.** Telemetry leaves only from the daemon, through a single `emitTelemetry` chokepoint with a hardcoded allow-list; a structural test asserts no other call site posts to the endpoint and that the banned set (token, email, paths, repo/branch names, query strings, content, error messages, raw ids, secrets) is absent from every event.
-- **No item-level egress.** No per-memory / per-query / per-file events — the cardinality itself is a signal. Egress is daemon/session-level rollup; counts are **bucketed** (the precise number never leaves the machine).
+- **No item-level egress.** No per-memory / per-query / per-file events — the cardinality itself is a signal. Tier-1 lifecycle events (install/link/upgrade) remain **exact** so the operator can count the funnel precisely; only Tier-2 usage *counts* are **bucketed** (the precise number never leaves the machine).
 - **Tiered consent.** Operational (Tier 1) events are opt-out; usage-count (Tier 2) events are opt-in. `DO_NOT_TRACK=1` or `HONEYCOMB_TELEMETRY=0` silences all of it. An unkeyed build (no PostHog key baked in) emits nothing (fail-soft).
 - **Glass-box.** `honeycomb telemetry --show` renders, in plaintext, exactly what has been and would be sent — the displayed set *is* the egress set, sourced from the same local events.
 - **Anonymous identity.** The `distinct_id` is a random per-machine install-id, never an email or a content-derived hash. The write-only ingest key carries no read access to operator data.

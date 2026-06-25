@@ -14,7 +14,7 @@ This sub-PRD answers the question the parent poses directly — *"do we need the
 
 The daemon **already** serves a self-hydrating, token-free dashboard shell over loopback ([`renderShell` / `mountDashboardHost`](../../../../src/daemon/runtime/dashboard/host.ts)), and it does **not** require DeepLake credentials to *boot* — only to serve the surfaces that read DeepLake. So the lifecycle is: boot the daemon in a **pre-auth phase** (dashboard + guided-setup wizard render, DeepLake surfaces show an empty/"connect me" state), the user completes login (050c) which writes the shared credential, and the **same** daemon flips to the **authenticated phase** where capture/recall/graph hydrate. The embeddings runtime is a **lazily-warmed sub-daemon** — it is the closest thing to "another daemon," but it comes up in the **background** when first needed and never gates the dashboard or the login.
 
-This module owns the phase model, the credential-presence detection that drives which setup state the dashboard shows, and the live transition from pre-auth to authenticated **without a daemon restart or a second browser open**.
+This module owns the phase model, the credential-presence detection that drives which setup state the dashboard shows, and the live transition from pre-auth to authenticated **on the same daemon, with no restart and no re-opening of the dashboard tab**. (050c *does* open a DeepLake verification/account tab to complete login — that browser launch is intentional; what this module rules out is a *second daemon* and a *dashboard reload/relaunch* after the credential lands.)
 
 ## Goals
 

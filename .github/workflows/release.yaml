@@ -53,18 +53,6 @@ jobs:
   release:
     name: Publish honeycomb to npm
     runs-on: ubuntu-latest
-    # ── Build-time telemetry config (PRD-050e adoption telemetry). ──────────────
-    # Injected at JOB level because the bundle is built TWICE in this job — the
-    # explicit "Build" step AND again inside `npm publish` via `prepack` — so both
-    # must see these. esbuild bakes them in via `define` (__HONEYCOMB_POSTHOG_KEY__
-    # / __HONEYCOMB_REF_DEFAULT__); an UNSET key compiles to "" which the telemetry
-    # chokepoint treats as disabled (fail-soft), so a tokenless/fork run emits
-    # nothing. Release-only ON PURPOSE: ci.yaml must NOT set these, so PR/test
-    # builds never emit. The key is write-only ingest and ends up embedded in the
-    # published tarball by design — the secret only keeps it out of logs/fork PRs.
-    env:
-      HONEYCOMB_POSTHOG_KEY: ${{ secrets.HONEYCOMB_POSTHOG_KEY }}
-      HONEYCOMB_REF_DEFAULT: ${{ vars.HONEYCOMB_REF_DEFAULT }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4.2.2
@@ -88,8 +76,22 @@ jobs:
       - name: Quality gate (typecheck + dup + test + audit:sql)
         run: npm run ci
 
+      # ── Build-time telemetry config (PRD-050e adoption telemetry). ───────────
+      # Scoped to JUST the build/publish steps that consume it (least privilege —
+      # npm ci / the quality gate / audits / pack-check have no need for it). The
+      # bundle is built TWICE in this job — this explicit step AND again inside
+      # `npm publish` via `prepack` — so the env is repeated on each consumer.
+      # esbuild bakes them in via `define` (__HONEYCOMB_POSTHOG_KEY__ /
+      # __HONEYCOMB_REF_DEFAULT__); an UNSET key compiles to "" which the telemetry
+      # chokepoint treats as disabled (fail-soft), so a tokenless/fork run emits
+      # nothing. Release-only ON PURPOSE: ci.yaml must NOT set these. The key is
+      # write-only ingest, embedded in the published tarball by design — the secret
+      # only keeps it out of logs/fork PRs.
       - name: Build (tsc + esbuild bundles)
         run: npm run build
+        env:
+          HONEYCOMB_POSTHOG_KEY: ${{ secrets.HONEYCOMB_POSTHOG_KEY }}
+          HONEYCOMB_REF_DEFAULT: ${{ vars.HONEYCOMB_REF_DEFAULT }}
 
       - name: Audit OpenClaw bundle (ClawHub rules)
         run: npm run audit:openclaw
@@ -196,6 +198,10 @@ jobs:
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # `prepack` rebuilds the bundle here, so the published tarball needs the
+          # telemetry define present on THIS step too (see Build step comment).
+          HONEYCOMB_POSTHOG_KEY: ${{ secrets.HONEYCOMB_POSTHOG_KEY }}
+          HONEYCOMB_REF_DEFAULT: ${{ vars.HONEYCOMB_REF_DEFAULT }}
 
       # Rehearse: same command minus the real upload. Runs whenever we are NOT in
       # real-publish mode (dry_run input, or no token yet) so the pipeline is
@@ -207,6 +213,10 @@ jobs:
           # Harmless when empty; present so the dry-run exercises the same auth
           # path the real publish takes.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # The dry-run's `prepack` rebuilds too — keep the define present so the
+          # rehearsal exercises the same build the real publish takes.
+          HONEYCOMB_POSTHOG_KEY: ${{ secrets.HONEYCOMB_POSTHOG_KEY }}
+          HONEYCOMB_REF_DEFAULT: ${{ vars.HONEYCOMB_REF_DEFAULT }}
 
       # ── GitHub Release. ──────────────────────────────────────────────────────
       # Only on a real tag push AND only after a real publish — a dry-run or a
