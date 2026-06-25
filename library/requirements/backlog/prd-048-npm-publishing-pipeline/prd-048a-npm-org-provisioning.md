@@ -82,5 +82,6 @@ go-live step PRD-048 D-1 keeps out of scope; this sub-PRD provisions everything 
 - npmjs.com account (the maintainer's — confirmed: the user has an NPMjs account).
 - GitHub repo admin access to configure the trusted publisher on npm (and, if an environment is used, to
   create it in repo settings). No GitHub Actions secret is set for npm auth.
-- `release.yaml`'s OIDC publish path (`id-token: write` + the npm-upgrade step) — already wired; this
-  configures the npm-side trusted publisher it authenticates against.
+- `release.yaml`'s OIDC publish path (`id-token: write` + the npm-upgrade step) only **consumes** the
+  OIDC trust — it does not configure the publisher. This sub-PRD (048a) configures the npm-side trusted
+  publisher that publish path authenticates against.

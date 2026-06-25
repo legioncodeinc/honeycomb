@@ -74,25 +74,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4.2.2
 
-      # registry-url is what points `npm publish` (and provenance) at the public
-      # npm registry. With Trusted Publishing there is NO NODE_AUTH_TOKEN / .npmrc
-      # auth line — auth is the OIDC identity, not a token. One pinned Node major —
-      # the publish surface does not need the full engine matrix (that canary lives
-      # on ci.yaml's quality-gate).
+      # registry-url points `npm publish` (and provenance) at the public npm registry.
+      # With Trusted Publishing there is NO NODE_AUTH_TOKEN: registry-url may scaffold a
+      # ~/.npmrc, but we supply no token VALUE — auth is the OIDC identity, not a token.
+      # Dependency caching is deliberately OFF on this publish job: a lower-privilege
+      # workflow could poison an npm cache that this high-privilege release build then
+      # executes (zizmor cache-poisoning). `npm ci` installs from the committed lockfile.
+      # One pinned Node major — the publish surface does not need the full engine matrix
+      # (that canary lives on ci.yaml's quality-gate).
       - name: Setup Node
         uses: actions/setup-node@v6.4.0
         with:
           node-version: '22.x'
           registry-url: 'https://registry.npmjs.org'
-          cache: npm
 
       # Node 22 bundles npm 10.x, but npm Trusted Publishing (OIDC) requires
       # npm >= 11.5.1 — without it the OIDC handshake never engages and `npm
       # publish` falls back to token auth (which we no longer provide) and fails.
       # Upgrade BEFORE npm ci / build / publish so every npm invocation in this job
-      # is OIDC-capable. Pinned to the major (`@^11.5.1`) for reproducibility.
+      # is OIDC-capable. Pinned to an EXACT version (not a `^` range) so a release
+      # never runs an unreviewed npm; bump it deliberately (must stay >= 11.5.1).
       - name: Upgrade npm (Trusted Publishing needs npm >= 11.5.1)
-        run: npm install -g npm@^11.5.1
+        run: npm install -g npm@11.6.2
 
       - name: Install (npm ci)
         run: npm ci
@@ -178,27 +181,29 @@ jobs:
 
       # ── Resolve publish mode — gated on the TRIGGER, not a token. ─────────────
       # Trusted Publishing needs no NPM_TOKEN, so the publish intent is expressed
-      # by HOW the workflow was triggered. A real publish requires BOTH:
-      #   * this is a tag push (`github.ref_type == 'tag'`) — pushing `vX.Y.Z` is
-      #     the deliberate "go live" signal, AND
-      #   * this is not a workflow_dispatch dry_run (`inputs.dry_run != 'true'`).
-      # On a tag push `inputs.dry_run` is empty (!= 'true'), so a tag push publishes
-      # for real. The manual dispatch button defaults dry_run=true, so it always
-      # rehearses unless a maintainer explicitly opts in — and even an opt-in
-      # dispatch stays a dry-run here because it is not a tag ref. Real publishes
-      # only ever come from a tag push.
+      # by HOW the workflow was triggered. A real publish requires ALL THREE:
+      #   * this is a `push` event (`github.event_name == 'push'`) — NOT a manual
+      #     dispatch (a workflow_dispatch CAN be run against a tag ref, so the
+      #     event-name check is what actually keeps the manual button a rehearsal), AND
+      #   * the pushed ref is a tag (`github.ref_type == 'tag'`) — pushing `vX.Y.Z`
+      #     is the deliberate "go live" signal, AND
+      #   * it is not a dispatch dry_run (`inputs.dry_run != 'true'`; empty on a push).
+      # The manual dispatch button always rehearses (it is not a `push`), even if a
+      # maintainer points it at a tag and unchecks dry_run. Real publishes only ever
+      # come from a pushed `vX.Y.Z` tag.
       - name: Resolve publish mode
         id: mode
         env:
+          EVENT_NAME: ${{ github.event_name }}
           REF_TYPE: ${{ github.ref_type }}
           DRY_RUN_INPUT: ${{ github.event.inputs.dry_run }}
         run: |
-          if [ "$REF_TYPE" = "tag" ] && [ "$DRY_RUN_INPUT" != "true" ]; then
+          if [ "$EVENT_NAME" = "push" ] && [ "$REF_TYPE" = "tag" ] && [ "$DRY_RUN_INPUT" != "true" ]; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
-            echo "Mode: REAL publish (tag push, not a dry run) — authenticating via OIDC Trusted Publishing."
+            echo "Mode: REAL publish (pushed tag, not a dry run) — authenticating via OIDC Trusted Publishing."
           else
             echo "publish=false" >> "$GITHUB_OUTPUT"
-            echo "Mode: DRY-RUN (ref_type=$REF_TYPE, dry_run_input=$DRY_RUN_INPUT) — running npm publish --dry-run, not publishing."
+            echo "Mode: DRY-RUN (event=$EVENT_NAME, ref_type=$REF_TYPE, dry_run_input=$DRY_RUN_INPUT) — running npm publish --dry-run, not publishing."
           fi
 
       # ── Publish. ─────────────────────────────────────────────────────────────

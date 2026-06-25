@@ -57,10 +57,11 @@ verifies the pipeline stops exactly one deliberate human action short of live.
 ## Risks / Out of scope
 - **Risk — an accidental real publish during rehearsal.** Now that the preflight is disarmed (048b) and
   auth is trigger-gated OIDC (D-2′), a real publish is gated purely on a **tag push** — a `workflow_dispatch`
-  (even `dry_run=false`) resolves to dry-run because it is not a tag ref, so the disarming-then-stray-tag
-  path is the live risk: a stray `vX.Y.Z` tag would publish. Mitigated by pushing NO tag this PRD, leaving
-  `dry_run` checked on any dispatch, the trusted publisher only authorizing publishes from this repo's
-  `release.yaml`, and d-AC-5's explicit guard documentation.
+  (even `dry_run=false`, even if pointed at a tag ref) resolves to dry-run because the mode step requires
+  `github.event_name == 'push'` — a `workflow_dispatch` never sets `publish=true`. So the stray-tag path is
+  the live risk: a pushed `vX.Y.Z` tag would publish. Mitigated by pushing NO tag this PRD, the trusted
+  publisher only authorizing publishes from this repo's `release.yaml`, and d-AC-5's explicit guard
+  documentation.
 - **Risk — eventual-consistency / flaky live reads in any smoke.** Project memory: poll to convergence,
   never a single immediate read, in any live-backed smoke this dogfood touches.
 - **Risk — scratch-dir install pulls the heavy optional embed dep.** The `@huggingface/transformers`

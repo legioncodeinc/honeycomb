@@ -28,7 +28,7 @@ a switch-flipping PRD, not a build-it-from-scratch PRD. A grounded read of the r
   (b) `publishConfig` public+provenance, (c) remove `private`, (d) **configure the trusted publisher on
   npm** (GitHub Actions as the trusted publisher for the package — no `NPM_TOKEN` secret) — plus the
   off-repo prerequisite that the **npm org/scope must exist** with our identity as a publishing member.
-  *(Auth model superseded — see D-2: CI now publishes via npm Trusted Publishing (OIDC), not an
+  *(Auth model superseded — see D-2′: CI now publishes via npm Trusted Publishing (OIDC), not an
   automation token.)*
 - **RELEASING.md flags one real gap.** `npm version` runs npm's `version` lifecycle but **not**
   `prebuild`, so `scripts/sync-versions.mjs` does not auto-run on a version bump. Without a wired
