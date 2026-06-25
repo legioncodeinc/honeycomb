@@ -26,7 +26,9 @@ The API is organized into coherent groups. Permission semantics are defined in [
 |---|---|---|
 | `/health`, `/api/status` | Liveness, version, resolved config and providers | none |
 | `/api/auth/*` | Device-flow login, token issuance, whoami, org switch | varies |
-| `/api/memories`, `/memory/*` | List, search, similarity, remember, recall, forget, modify, recover | scoped |
+| `/setup/*` | Pre-auth guided setup: credential-presence state, on-page device-flow login, Hivemind migration (loopback, local-mode only) | none |
+| `/api/memories`, `/memory/*` | List, search, similarity, remember, recall, forget, modify, recover, and the session-start `prime` digest | scoped |
+| `/api/assets/*` | Asset-sync substrate: publish, pull, tombstone synced assets across the team | scoped |
 | `/api/hooks/*` | session-start, user-prompt-submit, pre-compaction, compaction-complete, session-end, synthesis | remember/recall |
 | `/api/embeddings/*` | Vector export, health, 2D/3D projection | recall |
 | `/api/documents/*`, `/api/sources/*` | Document ingest, source connect/index/health/purge | documents/source |
@@ -37,7 +39,7 @@ The API is organized into coherent groups. Permission semantics are defined in [
 | `/api/secrets/*` | List names, store, delete, exec with secrets | admin/secret |
 | `/api/org/*`, `/api/workspace/*` | Tenancy admin and switching | admin |
 | `/api/diagnostics`, `/api/pipeline/*`, `/api/repair/*` | Health report, pipeline stats, operator repair | diagnostics/operator |
-| `/api/inference/*`, `/v1/*` | Native inference routing and OpenAI-compatible gateway | varies |
+| `/api/inference/*`, `/v1/*` | Native inference routing and OpenAI-compatible gateway (gateway implemented; external HTTP mount deferred, the router is reached internally via the `ModelClient` seam) | deferred |
 | `/api/tasks/*`, `/api/logs`, `/api/update/*`, `/api/git/*` | Scheduled tasks, logs, updates, git sync | local |
 | `/` | Dashboard static assets | none |
 

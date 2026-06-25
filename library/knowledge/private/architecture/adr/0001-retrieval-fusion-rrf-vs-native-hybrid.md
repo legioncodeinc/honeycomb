@@ -1,4 +1,4 @@
-# ADR-0001 — Retrieval fusion: keep post-query RRF over DeepLake's native `deeplake_hybrid_record`
+# ADR-0001, Retrieval fusion: keep post-query RRF over DeepLake's native `deeplake_hybrid_record`
 
 > **Status:** Accepted (keep RRF) · **Date:** 2026-06-24
 > **Supersedes:** none · **Superseded by:** none
@@ -13,7 +13,7 @@ Honeycomb's recall path needs to fuse a semantic (`<#>` cosine, embedding) signa
   queries** (a `<#>` vector arm + a lexical arm, over `memories` and `sessions`) and fuses their
   ranked lists in TypeScript with reciprocal-rank fusion (`fuseHits`, `RRF_K=60`, arm-class
   weights). The per-arm design is deliberate (`recall.ts:24-47`): a single `UNION ALL` fails as a
-  whole on a fresh/missing partition, and per-arm execution gives graceful degradation — if the
+  whole on a fresh/missing partition, and per-arm execution gives graceful degradation, if the
   embed daemon is down, recall runs lexical-only and sets `degraded: true` (an honest signal).
 - **Native `deeplake_hybrid_record` (candidate, unwired).** DeepLake fuses vector + BM25 in **one
   statement per table** with tunable weights. Reference implementation: `hybrid-recall.ts` (built,
@@ -27,7 +27,7 @@ Two live A/B runs were performed:
 
 | Run | Native `deeplake_hybrid_record` | RRF | Finding |
 |---|---|---|---|
-| **2026-06-22** | recall@5 0.14–0.17, MRR 0.08, **weight-insensitive** | recall@5 0.72–0.78 | Operator returned a **degenerate constant-zero score** → random ordering. Broken. |
+| **2026-06-22** | recall@5 0.14-0.17, MRR 0.08, **weight-insensitive** | recall@5 0.72-0.78 | Operator returned a **degenerate constant-zero score** → random ordering. Broken. |
 | **2026-06-24** | recall@5 0.611, MRR 0.589, **weight-sensitive** | recall@5 0.611, MRR 0.593 | DeepLake **fixed** the operator; it now ranks for real and is at **parity** with RRF (ties recall@1/@5, marginally behind on recall@10/MRR/nDCG). |
 
 (2026-06-24 run: live, workspace `honeycomb`, embed daemon `nomic-embed-text-v1.5`, two-phase
@@ -45,21 +45,21 @@ now.)
 
 ## Considered options
 
-### Option A — Keep post-query RRF (CHOSEN)
-### Option B — Adopt native `deeplake_hybrid_record`
+### Option A, Keep post-query RRF (CHOSEN)
+### Option B, Adopt native `deeplake_hybrid_record`
 
 Cost/benefit of switching to Option B, as measured/verified 2026-06-24:
 
 - **Packages saved: ZERO.** RRF is hand-rolled TypeScript with no npm dependency (`recall.ts`
   imports only internal storage/vector/embed modules). Both options still require the embed daemon
-  (`@huggingface/transformers` + the ~600 MB nomic model — native hybrid also needs a query vector)
+  (`@huggingface/transformers` + the ~600 MB nomic model, native hybrid also needs a query vector)
   and DeepLake. Nothing is uninstalled.
 - **Cost reduction: none verified.** The query is embedded once locally on either path (no per-token
-  API cost); recall invokes no LLM. The only lever is DeepLake query volume — recall fires ~5
+  API cost); recall invokes no LLM. The only lever is DeepLake query volume, recall fires ~5
   per-arm round-trips today; native hybrid fuses server-side, ~5 → ~3. Whether fewer statements
   reduces dollars depends on DeepLake's (unverified) billing model.
 - **Upside (modest):** possibly lower recall latency (fewer round-trips + server-side fusion,
-  unmeasured) and deletion of the RRF rank-fusion code (partial — cross-arm weighting and the
+  unmeasured) and deletion of the RRF rank-fusion code (partial, cross-arm weighting and the
   `degraded` fallback remain).
 - **Downside:** re-couples ranking to an opaque operator that just spent months silently broken
   (only the eval caught it); the per-arm `degraded:true` fallback and fresh-table tolerance must be
@@ -74,7 +74,7 @@ reference candidate** so the A/B is repeatable on demand.
 
 Rationale: native hybrid now **works** but only **ties** RRF (fails the tie-or-beat-on-MRR gate), and
 switching delivers no package savings, no verified cost reduction, and only a possible (unmeasured)
-latency gain — not enough to justify re-coupling ranking to a black-box operator with a weaker
+latency gain, not enough to justify re-coupling ranking to a black-box operator with a weaker
 robustness story. Parity is "good to know," not "adopt."
 
 ## Consequences
@@ -94,8 +94,8 @@ robustness story. Parity is "good to know," not "adopt."
 Re-open this decision (continue evaluations later) if ANY of these holds:
 1. DeepLake billing is confirmed **per-query / per-compute** AND recall query volume is a real cost.
 2. Recall **latency** becomes a measured problem (the round-trip reduction would then matter).
-3. A **graded-relevance + nDCG sweep** (PRD-047f, now wired) — ideally multi-run, in the cleaner
-   `default` workspace, across a fuller weight grid — shows native hybrid **beating** RRF, not tying.
+3. A **graded-relevance + nDCG sweep** (PRD-047f, now wired), ideally multi-run, in the cleaner
+   `default` workspace, across a fuller weight grid, shows native hybrid **beating** RRF, not tying.
 
 ## Links
 

@@ -10,6 +10,8 @@ End to end through Honeycomb: from a harness hook firing at session start, throu
 - [`../ai/session-capture.md`](../ai/session-capture.md)
 - [`../ai/memory-pipeline.md`](../ai/memory-pipeline.md)
 - [`../ai/retrieval.md`](../ai/retrieval.md)
+- [`../ai/session-priming-architecture.md`](../ai/session-priming-architecture.md)
+- [`multi-project-and-context-switching.md`](multi-project-and-context-switching.md)
 - [`../integrations/hook-lifecycle.md`](../integrations/hook-lifecycle.md)
 
 ---
@@ -35,7 +37,9 @@ sequenceDiagram
     D-->>H: inject (identity + memories + Memory Check Loop)
 ```
 
-The daemon resolves the tenancy and scope (org and workspace from the credentials and token, `agent_id` from the request or session key), runs a scoped recall, and returns an injection block: identity, scored memories, active rules and goals, and the Memory Check Loop that tells the agent when prior context matters. Scoring and the confidence gate are documented in [`../ai/retrieval.md`](../ai/retrieval.md).
+The daemon resolves the tenancy and scope (org and workspace from the credentials and token, the `project_id` from the session's working directory, `agent_id` from the request or session key), runs a scoped recall, and returns an injection block: identity, scored memories, active rules and goals, and the Memory Check Loop that tells the agent when prior context matters. Scoring and the confidence gate are documented in [`../ai/retrieval.md`](../ai/retrieval.md); the per-session project resolution that scopes this recall is in [`multi-project-and-context-switching.md`](multi-project-and-context-switching.md).
+
+Alongside that injection, session-start also pushes a small, bounded **prime**: a compact index of the most relevant Tier-1 memory keys (one keyword-dense line each) served by `GET /api/memories/prime`. The prime is the cheap "here is what I already know about this project" header the agent skims once; it then pulls deeper detail on demand instead of paying for a full recall every turn. The push-once-pull-on-demand design, and why it avoids the lost-in-the-middle failure of injecting everything, are in [`../ai/session-priming-architecture.md`](../ai/session-priming-architecture.md) and [`../ai/three-tier-memory-strategy.md`](../ai/three-tier-memory-strategy.md).
 
 ## Per turn: capture and recall
 
