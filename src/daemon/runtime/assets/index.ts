@@ -42,6 +42,8 @@ export {
 	type AssetRegistryStore,
 	createAssetRegistryStore,
 	defaultRegistryBaseDir,
+	type PulledManifest,
+	PulledManifestSchema,
 	type RegistryEntry,
 	RegistryEntrySchema,
 } from "./registry.js";

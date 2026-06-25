@@ -442,6 +442,15 @@ export interface SessionStartSeams {
 	writePlaceholderSummary(meta: HookSessionMeta): Promise<void>;
 	/** Pull team/org skills into the local skill tree (FR-3 step 7). */
 	autoPullSkills(cred: HookCredential | undefined): Promise<void>;
+	/**
+	 * Pull team/org synced ASSETS (skills/agents) and install them in-process (PRD-033
+	 * R-1, the session-start asset auto-pull). Unlike {@link autoPullSkills} (a
+	 * fire-and-forget daemon POST), the asset pull runs the THIN-CLIENT install LOCALLY:
+	 * the daemon returns rows over loopback, this client writes the native artifacts to
+	 * disk. Idempotent + fail-soft + time-budgeted by the assets thin client's `autoPull`.
+	 * Runs as a new FR-3 step right after {@link autoPullSkills}.
+	 */
+	autoPullAssets(cred: HookCredential | undefined): Promise<void>;
 	/** Spawn the detached graph-pull worker (FR-3 step 8). Fire-and-forget. */
 	spawnGraphPull(meta: HookSessionMeta): Promise<void>;
 }
@@ -495,6 +504,9 @@ export function createFakeSessionStartSeams(opts: FakeSessionStartSeamsOptions =
 		async autoPullSkills(): Promise<void> {
 			await record("autoPullSkills");
 		},
+		async autoPullAssets(): Promise<void> {
+			await record("autoPullAssets");
+		},
 		async spawnGraphPull(): Promise<void> {
 			await record("spawnGraphPull");
 		},
@@ -509,6 +521,7 @@ export function createNoopSessionStartSeams(): SessionStartSeams {
 		async ensureTables(): Promise<void> {},
 		async writePlaceholderSummary(): Promise<void> {},
 		async autoPullSkills(): Promise<void> {},
+		async autoPullAssets(): Promise<void> {},
 		async spawnGraphPull(): Promise<void> {},
 	};
 }

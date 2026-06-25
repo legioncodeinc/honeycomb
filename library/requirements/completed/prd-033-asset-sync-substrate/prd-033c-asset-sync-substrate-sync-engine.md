@@ -1,7 +1,7 @@
 # PRD-033c: Sync Engine (Publish + Pull) with Adapter Seam
 
 > **Parent:** [PRD-033](./prd-033-asset-sync-substrate-index.md)
-> **Status:** Draft
+> **Status:** Completed (2026-06-25)
 > **Priority:** P2
 > **Effort:** M
 
@@ -68,12 +68,19 @@ The daemon-served sync engine that publishes registered artifacts into the synce
 
 ## Open questions
 
-- [ ] Should the existing skillify pull manifest be migrated into the unified `registry.json`, or should the two coexist?
-- [ ] On a tombstone retraction, is the local file deleted or left in place but unmanaged (shared with PRD-033b)?
+Both questions resolved 2026-06-25 by explicit owner ruling.
+
+- [x] **Pull manifest migration (resolved 2026-06-25):** The skillify pull manifest is MIGRATED into the
+  unified `.honeycomb/registry.json` as the single source of truth. The prior "coexist during a transition"
+  answer is superseded. A one-time idempotent migration folds legacy `pull-manifest.json` entries in;
+  `skill unpull` and `backfillSymlinks` are unchanged.
+- [x] **Tombstone retraction UX (resolved 2026-06-25):** On tombstone retraction, the local artifact file
+  is left in place and marked UNMANAGED. The engine never deletes or moves user files. The prior "back up
+  to .bak then remove" answer is superseded.
 
 ## Related
 
 - [parent index](./prd-033-asset-sync-substrate-index.md)
 - [Skillify Pipeline](../../../knowledge/private/ai/skillify-pipeline.md)
 - [Team Skills Sharing](../../../knowledge/private/collaboration/team-skills-sharing.md)
-- [PRD-016 Skillify](../../in-work/prd-016-skillify/prd-016-skillify-index.md)
+- [PRD-016 Skillify](../../completed/prd-016-skillify/prd-016-skillify-index.md)

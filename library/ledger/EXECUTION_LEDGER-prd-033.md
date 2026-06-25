@@ -82,3 +82,44 @@
   - **Tests:** unit c-AC-1..6 — `tests/daemon/runtime/assets/{sync.test.ts(7),api.test.ts(6)}` + `tests/daemon-client/assets/{install.test.ts(22),loopback.test.ts(5)}` = 40 new (+15 Wave-1 foundation = 55 asset tests green). Gated live `tests/integration/asset-sync-propagation-live.itest.ts` (`describe.skipIf(!HONEYCOMB_DEEPLAKE_TOKEN)`, throwaway `ci_assets_<runId>` + DROP in afterAll, every read-back through the engine's `readConverged` pull + an outer convergence barrier): AC-3 Team workspace-isolation, AC-2 Device 2nd-device/cross-workspace, AC-5 tombstone retract, AC-4 LWW `.bak` real pull, AC-7 idempotent/fail-soft — authored gated + skip-safe, NOT run here (the smoker runs it with creds).
   - **Gates (repo root):** typecheck clean; `npm run test` 205 files / 2191 passed / 6 skipped (gated itests) / 0 fail; build (all bundles) clean; `smoke:daemon-bundle` OK (assemble.ts edit loads); `audit:sql` clean (194 files); `audit:openclaw` clean; `dup` 0.4% (<7 threshold). New source files tracked (not gitignore-swallowed). NO `git add`, NO live run.
 - **Next: 033b (Wave 3, `typescript-node-worker-bee`)** consumes the landed engine: `createLoopbackAssetSyncApi`/`pullAndInstall` signatures are STABLE in `src/daemon-client/assets/`; promote→`api.publish`, demote/revoke→`api.tombstone` per WIDER tier left. AC-2/AC-3/AC-5 propagation are engine-DONE (033c); their PROMOTION drivers land in 033b.
+
+---
+
+# REOPENED 2026-06-25 (the-smoker, second run) — liveness gap + two ruling reversals
+
+The 2026-06-22 daemon-wiring liveness audit reopened PRD-033 (moved back to `in-work/`): the prior run reached "VERIFIED" on UNIT + a direct-`pullAndInstall` live itest, but the session-start asset auto-pull is DEAD CODE, so the propagation ACs are not LIVE at session start. Mario also revised two open-question rulings before this run. Net: three deltas + re-close-out + live dogfood + ship.
+
+## Revised open-question rulings (Mario, 2026-06-25 — supersede the prior D-2 / D-4)
+- **D-1 (unchanged, confirmed):** device identity = generated UUID at `~/.honeycomb/device.json` (already shipped). ✔ holds.
+- **D-2′ (REVERSED — was COEXIST, now MIGRATE):** MIGRATE the skillify pull manifest (`~/.honeycomb/state/skillify/pull-manifest.json`) INTO the unified `.honeycomb/registry.json` now (single SoT). Rationale: early beta, limited users, do it the right way before production. HARD GUARDRAIL: must not regress completed PRD-016/018 (`skill unpull`, `backfillSymlinks`); every skillify/018 test stays green; add migration + back-compat tests.
+- **D-3 (unchanged):** `honeycomb_id` stamped in frontmatter (skills+agents), registry authoritative fallback. ✔ holds.
+- **D-4′ (REVERSED — was `.bak`-then-remove, now LEAVE-IN-PLACE):** on tombstone/demotion retraction, LEAVE the local artifact file in place and mark it UNMANAGED. NEVER delete or move user files. Changes `install.ts retract()` + AC-5 semantics + the AC-5 live itest expectation.
+- **D-5 / D-6 / D-7 (unchanged):** append-only + tombstone-as-row; daemon-only DeepLake; native-per-harness + reserved canonical + identity adapter. ✔ hold.
+- **Session-start seam:** PRD-045g has SHIPPED (now in `completed/`). Wire 033's asset auto-pull onto the EXISTING `SessionStartSeams` object independently (no joint 045g work), the production-right way.
+
+## Reopen work items
+- **R-1 (headline) — session-start asset auto-pull wiring.** `SessionStartSeams` (`src/hooks/shared/contracts.ts:427`) has `autoPullSkills` but NO `autoPullAssets`; `runSessionStart` (`session-start.ts`) never calls the asset `autoPull` that already exists at `src/daemon-client/assets/install.ts:258`. Add an `autoPullAssets` step to the seam interface + the recording/noop fakes, a REAL fail-soft time-budgeted impl in `session-start-seams.ts` (construct `AssetAutoPullDeps` = loopback `createLoopbackAssetSyncApi` + `createDefaultHarnessRoots` + scope from credential+device, call `autoPull`), call it as a new fail-soft step in `runSessionStart`, and keep the runtime wiring at `runtime.ts:191/236`. Update `tests/hooks/shared/session-start.test.ts` (step-order) + add a session-start asset-pull test. THIN-CLIENT INVARIANT must still pass (no `daemon/storage` import leak into `src/hooks`).
+- **R-2 — skillify manifest → registry.json migration (D-2′).** Make `.honeycomb/registry.json` the single SoT; fold pulled-skill manifest entries in; repoint `skill unpull` + `backfillSymlinks` to the unified SoT; one-time migration of an existing manifest; back-compat. Guardrail above.
+- **R-3 — retraction = leave-in-place/mark-unmanaged (D-4′).** Rewrite `install.ts retract()` to NOT move/remove the live artifact: leave `SKILL.md`/`AGENT.md` in place, drop/flag the managed marker so future pulls treat it as unmanaged. Align `lifecycle.ts` demotion semantics + flip the AC-5 itest (`asset-sync-propagation-live.itest.ts`) to assert the live file REMAINS and is unmanaged.
+
+## Reopened AC status (others remain VERIFIED from run 1, to be re-verified in close-out)
+| AC | Reopened? | Depends on |
+|----|-----------|------------|
+| AC-1 register→registry; Local no DeepLake | RE-VERIFY (R-2 changes registry internals) | R-2 |
+| AC-2 Device appears on 2nd device at session start | REOPEN (only unit/direct-pull proven, not live at session start) | R-1 |
+| AC-3 Team appears for same-workspace author at session start | REOPEN (same) | R-1 |
+| AC-4 LWW `.bak` overwrite | RE-VERIFY (unaffected) | — |
+| AC-5 demotion retracts | REOPEN (semantics change to unmanaged) | R-3 |
+| AC-6 matching harness + identity adapter | RE-VERIFY (unaffected) | — |
+| AC-7 pull never blocks session start | REOPEN (auto-pull was never wired into session start) | R-1 |
+
+## Reopen wave plan + model selection
+- **Wave R (parallel, disjoint file ownership):**
+  - **R-1 → `harness-integration-worker-bee`** (armed `harness-integration-stinger`), model `claude-opus-4-8-thinking-high` — wiring the headline reopening fix across the hook lifecycle is tenancy-sensitive and multi-file; depth + careful instruction-following warranted. OWNS `src/hooks/**` (contracts seam, session-start-seams, session-start, runtime) + its tests ONLY.
+  - **R-2 → `typescript-node-worker-bee`** (armed `typescript-node-stinger`), model `claude-opus-4-8-thinking-high` — SoT migration that must not regress two completed PRDs is the highest-risk item; deep autonomous refactoring. OWNS `src/daemon-client/skillify/manifest.ts`, `src/daemon/runtime/assets/registry.ts`, the skillify unpull/backfill call sites, a migration module + tests ONLY.
+  - **R-3 → `typescript-node-worker-bee`** (armed `typescript-node-stinger`), model `claude-4.6-sonnet-medium-thinking` — focused, well-bounded behavior change. OWNS `src/daemon-client/assets/install.ts` (`retract`), `src/daemon/runtime/assets/lifecycle.ts` (demotion semantics), `tests/integration/asset-sync-propagation-live.itest.ts` (AC-5 flip) + asset unit tests ONLY.
+- **Close-out:** `security-worker-bee` (`security-stinger`, `claude-opus-4-8-thinking-high`) → `quality-worker-bee` (`quality-stinger`, `claude-4.6-sonnet-medium-thinking`). Then LIVE DOGFOOD of the session-start asset pull path before declaring done.
+- **Ship:** `library-worker-bee` updates the PRD open-question text to the final rulings (D-2′/D-4′) + moves the set `in-work/`→`completed/` on green; commit → push → PR → bounded CI poll.
+
+## Reopen status log
+- Phase 0 recon (run 2) complete: confirmed dead-code seam gap (R-1), confirmed registry still COEXIST (R-2 needed), confirmed `retract()` does `.bak`-then-remove (R-3 needed). Exact seam-wiring site `runtime.ts:191/236`; migration source `manifest.ts` (consumed by `skill unpull`/`backfillSymlinks`). Dispatching Wave R (3 bees, parallel, disjoint files).

@@ -1,7 +1,7 @@
 # PRD-033b: Promotion/Demotion Lifecycle and CLI
 
 > **Parent:** [PRD-033](./prd-033-asset-sync-substrate-index.md)
-> **Status:** Draft
+> **Status:** Completed (2026-06-25)
 > **Priority:** P2
 > **Effort:** M
 
@@ -64,12 +64,18 @@ Define the lifecycle that moves an artifact through the tier × style lattice un
 
 ## Open questions
 
-- [ ] On demotion, is the correct retraction UX to delete the local file, or to leave it in place but mark it unmanaged?
-- [ ] How does a user list and revoke a device, which directly affects the `Device`-tier audience?
+Both questions resolved 2026-06-25 by explicit owner ruling.
+
+- [x] **Demotion retraction UX (resolved 2026-06-25):** Demotion leaves the local artifact file in place
+  and marks it UNMANAGED. The engine never deletes or moves user files. The prior "back up to .bak then
+  remove" answer is superseded.
+- [x] **Device listing and revocation (resolved 2026-06-25):** A user lists and revokes devices via
+  `honeycomb asset device`. The device identity is a generated UUID persisted at
+  `~/.honeycomb/device.json`. Already shipped.
 
 ## Related
 
 - [parent index](./prd-033-asset-sync-substrate-index.md)
 - [Team Skills Sharing](../../../knowledge/private/collaboration/team-skills-sharing.md)
-- [PRD-018 Team Skill Sharing](../../in-work/prd-018-team-skill-sharing/prd-018-team-skill-sharing-index.md)
+- [PRD-018 Team Skill Sharing](../../completed/prd-018-team-skill-sharing/prd-018-team-skill-sharing-index.md)
 - [Org and Workspace Model](../../../knowledge/private/multi-tenant/org-workspace-model.md)

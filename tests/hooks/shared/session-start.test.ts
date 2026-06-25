@@ -47,13 +47,15 @@ describe("PRD-019b session-start core", () => {
 		expect(result.ok).toBe(true);
 		expect(result.additionalContext).toContain("Goals");
 
-		// FR-3 ORDER: heal → autoUpdate → ensureTables → placeholder → (render) → pull → graph.
+		// FR-3 ORDER: heal → autoUpdate → ensureTables → placeholder → (render) → pull skills →
+		// pull assets → graph.
 		expect(seams.steps.map((s) => s.step)).toEqual([
 			"healDriftedOrgToken",
 			"autoUpdate",
 			"ensureTables",
 			"writePlaceholderSummary",
 			"autoPullSkills",
+			"autoPullAssets",
 			"spawnGraphPull",
 		]);
 	});
@@ -75,6 +77,7 @@ describe("PRD-019b session-start core", () => {
 			"healDriftedOrgToken",
 			"autoUpdate",
 			"autoPullSkills",
+			"autoPullAssets",
 			"spawnGraphPull",
 		]);
 		expect(result.additionalContext).toBe("BLOCK");
@@ -99,8 +102,48 @@ describe("PRD-019b session-start core", () => {
 			"ensureTables",
 			"writePlaceholderSummary",
 			"autoPullSkills",
+			"autoPullAssets",
 			"spawnGraphPull",
 		]);
+	});
+
+	it("PRD-033 R-1: invokes autoPullAssets right after autoPullSkills (before spawnGraphPull)", async () => {
+		const seams = createFakeSessionStartSeams();
+		const d: SessionStartDeps = {
+			daemon: createFakeDaemonHookClient(),
+			credentials: createFakeCredentialReader({ token: "t", org: "acme" }),
+			context: createFakeContextRenderer("BLOCK"),
+			seams,
+		};
+
+		await runSessionStart(startInput(), d);
+
+		const order = seams.steps.map((s) => s.step);
+		const skillsIdx = order.indexOf("autoPullSkills");
+		const assetsIdx = order.indexOf("autoPullAssets");
+		const graphIdx = order.indexOf("spawnGraphPull");
+		expect(assetsIdx).toBeGreaterThan(-1);
+		expect(assetsIdx).toBe(skillsIdx + 1); // immediately after the skills pull
+		expect(assetsIdx).toBeLessThan(graphIdx); // before graph-pull
+	});
+
+	it("PRD-033 R-1 / FR-10: a THROWING autoPullAssets is absorbed — session-start still returns context", async () => {
+		const seams = createFakeSessionStartSeams({ throwOn: new Set(["autoPullAssets"]) });
+		const d: SessionStartDeps = {
+			daemon: createFakeDaemonHookClient(),
+			credentials: createFakeCredentialReader({ token: "t", org: "acme" }),
+			context: createFakeContextRenderer("STILL HERE"),
+			seams,
+		};
+
+		const result = await runSessionStart(startInput(), d);
+
+		// The asset pull blew up, but session start absorbed it and returned its context block,
+		// and the LATER steps (spawnGraphPull) still ran.
+		expect(result.ok).toBe(true);
+		expect(result.additionalContext).toBe("STILL HERE");
+		expect(seams.steps.map((s) => s.step)).toContain("autoPullAssets");
+		expect(seams.steps.map((s) => s.step)).toContain("spawnGraphPull");
 	});
 
 	it("b-AC-3 / FR-10: the context renderer absorbs a daemon error and returns no block", async () => {
