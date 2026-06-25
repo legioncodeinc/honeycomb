@@ -16,7 +16,7 @@
  * process; `assembleDaemon` returns a single `Daemon`, and we never call `start()` so no lock/socket).
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { type RuntimeConfig } from "../../../src/daemon/runtime/config.js";
 import { createRequestLogger } from "../../../src/daemon/runtime/logger.js";

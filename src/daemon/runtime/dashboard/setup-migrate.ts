@@ -193,11 +193,9 @@ async function runMigration(options: MountSetupMigrateOptions): Promise<SetupMig
 	//    `backup` first so a crash before/after the copy is recoverable to a non-terminal phase (d-AC-7).
 	advancePhase(dir, "backup");
 	let backupPath: string | undefined;
-	let removed = false;
 	try {
 		const result = backupAndUninstallHivemind(options.uninstall ?? {});
 		backupPath = result.backupPath;
-		removed = result.removed;
 	} catch {
 		// 2) A failed/partial uninstall (d-AC-5): leave the marker at the non-terminal phase, return a
 		//    plain-language message + the (possibly-taken) backup path, and DO NOT touch the credential.

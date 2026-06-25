@@ -46,7 +46,6 @@ const LINKED_STATE = {
 };
 
 const MIGRATE_ADOPTED = { ok: true, phase: "done", message: "All set.", migrated: true, backupPath: "/home/u/.hivemind-backup-x" };
-const MIGRATE_NEEDS_LOGIN = { ok: true, phase: "link", message: "Sign in to finish.", needsLogin: true };
 const ROLLBACK_OK = { ok: true, phase: "rolled_back", message: "Rolled back." };
 
 /** A mock fetch whose `/setup/state` is a getter so a test flips the state mid-poll. */
