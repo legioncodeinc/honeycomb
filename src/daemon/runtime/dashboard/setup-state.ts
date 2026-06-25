@@ -144,6 +144,13 @@ export interface SetupStateApiDeps {
 	 */
 	readonly credentialsDir?: string;
 	/**
+	 * The LEGACY (`~/.honeycomb`) credentials dir override threaded into {@link loadCredentials}'s
+	 * read-fallback. Without it a temp-home test (or any sandboxed `homeDir` caller) would fall back to
+	 * the REAL `~/.honeycomb` when the shared dir is absent and could report `authenticated:true` off
+	 * real machine state. Absent → derived from `homeDir` so the fallback stays inside the test home.
+	 */
+	readonly legacyCredentialsDir?: string;
+	/**
 	 * The onboarding directory override threaded into {@link loadOnboarding} (tests). Absent → the
 	 * real `~/.deeplake`.
 	 */
@@ -206,8 +213,11 @@ export function resolveSetupState(deps: SetupStateApiDeps = {}): SetupStateBody 
 	const onboarding = loadOnboarding(deps.onboardingDir);
 
 	// AUTH SOURCE OF TRUTH: a valid credential loads. `loadCredentials` returns null on a
-	// missing/malformed file (never throws) and applies the `HONEYCOMB_TOKEN` env rule.
-	const authenticated = loadCredentials(deps.credentialsDir, env) !== null;
+	// missing/malformed file (never throws) and applies the `HONEYCOMB_TOKEN` env rule. The legacy
+	// `~/.honeycomb` read-fallback is pinned to the (possibly-overridden) home too, so a sandboxed
+	// `homeDir` caller can never fall through to real machine credentials.
+	const legacyCredentialsDir = deps.legacyCredentialsDir ?? join(home, LEGACY_CREDENTIALS_DIR_NAME);
+	const authenticated = loadCredentials(deps.credentialsDir, env, legacyCredentialsDir) !== null;
 
 	const credentials = probeCredentialDirs(home);
 	// d-AC-1: the prior-tool flag is DERIVED — the onboarding record wins, but an `absent` record with a

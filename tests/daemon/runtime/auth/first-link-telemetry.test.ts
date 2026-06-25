@@ -59,6 +59,17 @@ function recordingTelemetryFetch(opts: { throws?: boolean } = {}) {
 	};
 }
 
+/**
+ * Drain pending microtasks/timers until `predicate` holds or the budget is spent. `honeycomb_first_link`
+ * now emits FIRE-AND-FORGET (the login no longer awaits it), so the emit completes on a later turn of the
+ * event loop — the test waits for it deterministically instead of relying on the (removed) await.
+ */
+async function waitFor(predicate: () => boolean, budget = 50): Promise<void> {
+	for (let i = 0; i < budget && !predicate(); i += 1) {
+		await new Promise((resolve) => setTimeout(resolve, 0));
+	}
+}
+
 let dir: string;
 beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), "hc-firstlink-"));
@@ -80,6 +91,8 @@ describe("e-AC-1 the device-flow login emits honeycomb_first_link with the effec
 			ref: "carol",
 			telemetry: { fetch: tele.fetch, posthogKey: KEY },
 		});
+		// The emit is fire-and-forget — wait for the chokepoint to reach the recorder before asserting.
+		await waitFor(() => tele.calls.length > 0);
 		expect(tele.calls).toHaveLength(1);
 		const body = JSON.parse(tele.calls[0]!.init.body) as Record<string, unknown>;
 		expect(body.event).toBe("honeycomb_first_link");

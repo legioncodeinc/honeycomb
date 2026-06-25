@@ -406,20 +406,25 @@ export function SetupGate({ client, assetBase = "assets" }: SetupGateProps = {})
 	const [forceLogin, setForceLogin] = React.useState(false);
 
 	React.useEffect(() => {
+		// Once authenticated the Shell owns its own polling, so this pre-auth poll STOPS. Continuing to
+		// poll here would let a single transient `/setup/state` error — `setupState()` falls back to
+		// FRESH_SETUP_STATE on a failed/non-JSON response — flip `authenticated` back to false and bounce
+		// a linked user out of the authenticated shell into Guided Setup.
+		if (state.authenticated) return;
 		let alive = true;
 		const tick = async (): Promise<void> => {
 			const next = await wire.setupState();
 			if (alive) setState(next);
 		};
 		void tick();
-		// Keep polling while pre-auth so the transition is live; once authenticated the Shell owns its
-		// own polling, so we can stop. We keep a single interval and clear it on unmount regardless.
+		// Keep polling while pre-auth so the transition is live; we clear the interval on unmount and on
+		// the authenticated flip (the effect re-runs and early-returns above).
 		const id = setInterval(() => void tick(), SETUP_POLL_MS);
 		return () => {
 			alive = false;
 			clearInterval(id);
 		};
-	}, [wire]);
+	}, [wire, state.authenticated]);
 
 	// AUTHENTICATED is the DERIVED source of truth (a valid credential loads) — NOT the onboarding
 	// phase. When true every guided-setup subtree unmounts and the dashboard renders.

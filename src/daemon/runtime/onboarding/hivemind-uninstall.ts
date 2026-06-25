@@ -65,8 +65,12 @@ export type NpmGlobalRemover = (pkg: string) => boolean;
  */
 export function defaultNpmGlobalRemover(pkg: string): boolean {
 	try {
+		// On win32 the npm launcher is `npm.cmd`; `execFileSync` does NOT resolve the bare `npm` shim
+		// (it is not a real `.exe`), so the global remove would silently fail there. The fixed argv still
+		// never reaches a shell — we only switch the binary name, not the exec discipline.
+		const npmBin = process.platform === "win32" ? "npm.cmd" : "npm";
 		// `--silent` keeps npm's own output off our sinks; the fixed argv never reaches a shell.
-		execFileSync("npm", ["uninstall", "-g", "--silent", pkg], { stdio: "ignore", timeout: 60_000, windowsHide: true });
+		execFileSync(npmBin, ["uninstall", "-g", "--silent", pkg], { stdio: "ignore", timeout: 60_000, windowsHide: true });
 		return true;
 	} catch {
 		// npm absent / package not installed / non-zero exit → not removed, never a throw.
@@ -125,8 +129,15 @@ export function backupAndUninstallHivemind(deps: HivemindUninstallDeps = {}): Hi
 	const dir = hivemindDirPath(home);
 
 	// The global npm remove is best-effort + independent of the dir presence (the package can linger
-	// even if a user deleted `~/.hivemind` by hand). A `false` here is non-fatal (d-AC-5).
-	const npmRemoved = npmRemove(HIVEMIND_NPM_PACKAGE);
+	// even if a user deleted `~/.hivemind` by hand). A `false` here is non-fatal (d-AC-5). The default
+	// remover already swallows its own errors, but an INJECTED seam (or a future remover) might throw —
+	// guard it here so a throwing remove can never abort the load-bearing backup+remove step.
+	let npmRemoved = false;
+	try {
+		npmRemoved = npmRemove(HIVEMIND_NPM_PACKAGE);
+	} catch {
+		npmRemoved = false;
+	}
 
 	if (!existsSync(dir)) {
 		// Nothing to back up / remove — idempotent no-op (safe to re-run, d-AC-5).
@@ -140,10 +151,16 @@ export function backupAndUninstallHivemind(deps: HivemindUninstallDeps = {}): Hi
 	//    left as-is by re-running (the timestamp makes collisions astronomically unlikely).
 	cpSync(dir, backupPath, { recursive: true });
 
-	// 2) Only AFTER the backup lands, remove the original. `force` makes a re-run idempotent.
-	rmSync(dir, { recursive: true, force: true });
-
-	return { removed: true, backupPath, npmRemoved };
+	// 2) Only AFTER the backup lands, remove the original. `force` makes a re-run idempotent. If the
+	//    removal fails (e.g. a Windows file lock), the backup STILL exists — so we surface the
+	//    `backupPath` regardless (`removed:false`) rather than throwing, which would strand the
+	//    already-created backup the rollback marker needs to find (d-AC-5 / d-AC-7).
+	try {
+		rmSync(dir, { recursive: true, force: true });
+		return { removed: true, backupPath, npmRemoved };
+	} catch {
+		return { removed: false, backupPath, npmRemoved };
+	}
 }
 
 /**
@@ -158,6 +175,10 @@ export function restoreHivemindBackup(backupPath: string, deps: { homeDir?: stri
 	if (backupPath.length === 0 || !existsSync(backupPath)) return false;
 	const home = deps.homeDir ?? homedir();
 	const dir = hivemindDirPath(home);
+	// Clear the target FIRST so a retried rollback restores the EXACT backup snapshot instead of merging
+	// the recursive copy over leftover files (which would restore a superset of the backup). `force`
+	// makes the clear a no-op when the dir is already absent.
+	rmSync(dir, { recursive: true, force: true });
 	cpSync(backupPath, dir, { recursive: true });
 	return true;
 }

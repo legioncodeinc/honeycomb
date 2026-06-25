@@ -122,6 +122,14 @@ elevation_required_node() {
 #          here (that is the embed daemon's lazy warmup — 050b), so this stays fast.
 # ─────────────────────────────────────────────────────────────────────────────
 install_honeycomb() {
+  # Idempotent: a re-run on a machine that already has `honeycomb` is a NO-OP — no npm mutation, no
+  # network. This keeps the documented "safe to re-run" contract and lets a rerun succeed OFFLINE. Only
+  # an absent install triggers the global npm install. (`resolve_honeycomb_bin` is defined below; POSIX sh
+  # resolves functions at call time, so the forward reference is fine — both exist before `main` runs.)
+  if existing_bin="$(resolve_honeycomb_bin 2>/dev/null)"; then
+    ok "${HONEYCOMB_NPM_PACKAGE} already installed (${existing_bin})."
+    return 0
+  fi
   step "installing ${HONEYCOMB_NPM_PACKAGE} globally…"
   if ! npm install -g "$HONEYCOMB_NPM_PACKAGE" >/dev/null 2>&1; then
     fail "the global install of ${HONEYCOMB_NPM_PACKAGE} failed."
@@ -167,8 +175,9 @@ main() {
 
   # The verb prints its own friendly step log (daemon up / onboarding marked / opening dashboard) and
   # returns a clean exit code; we forward it verbatim. A handled failure inside the verb is already a
-  # plain-language line + non-zero exit — no raw stack reaches the user here.
-  "$bin" install
+  # plain-language line + non-zero exit — no raw stack reaches the user here. Forward the caller's args
+  # ("$@") so a bootstrap `--ref <code>` (and any future install flag) reaches the CLI's install verb.
+  "$bin" install "$@"
   exit $?
 }
 

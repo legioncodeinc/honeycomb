@@ -68,6 +68,18 @@ function seedValidCredential(): string {
 /** A `/me` fetch that ACCEPTS the token (valid → adopt) or REJECTS it (invalid → needsLogin). */
 function meFetch(ok: boolean): AuthFetch {
 	return (url: string): Promise<AuthFetchResponse> => {
+		// Path-sensitive: only the `/me` adopt-check succeeds/401s. Any OTHER endpoint 404s, so the suite
+		// would FAIL if the migration flow ever stopped calling `/me` or hit the wrong endpoint (keeps the
+		// d-AC-4 adoption contract honest rather than passing for any URL).
+		const path = url.replace(/^https?:\/\/[^/]+/, "");
+		if (path !== "/me") {
+			return Promise.resolve({
+				ok: false,
+				status: 404,
+				json: () => Promise.resolve({ error: "not_found" }),
+				text: () => Promise.resolve(JSON.stringify({ error: "not_found" })),
+			});
+		}
 		const body = ok ? { id: "u-1", name: "Ada", email: "ada@deeplake.ai" } : { error: "unauthorized" };
 		return Promise.resolve({
 			ok,

@@ -76,6 +76,14 @@ function Ensure-Node {
     # Prefer winget (per-user, no elevation) to install fnm; fall back to the documented manual path.
     if (Test-Have 'winget') {
       winget install Schniz.fnm --accept-source-agreements --accept-package-agreements 2>$null | Out-Null
+      # winget does NOT refresh THIS session's PATH, so a bare `fnm` lookup right after the install can
+      # still miss even though the binary is on disk. Rebuild $env:Path from the machine + user
+      # registry so the just-installed shim resolves in-process before we judge the install failed.
+      try {
+        $machinePath = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
+        $userPath = [System.Environment]::GetEnvironmentVariable('Path', 'User')
+        $env:Path = (@($machinePath, $userPath) | Where-Object { $_ }) -join ';'
+      } catch { }
     }
     if (-not (Test-Have 'fnm')) {
       # Could not install fnm without elevation -- surface the exact manual command + clean exit (a-AC-3).
@@ -142,9 +150,12 @@ function Resolve-HoneycombBin {
 #           open. The verb is idempotent + health-gated (a-AC-2 / a-AC-4) and opens
 #           honeycomb.local -> loopback (a-AC-6), writing onboarding "installed" (a-AC-5).
 # -----------------------------------------------------------------------------
+# Returns a status CODE (never calls `exit`): in the documented `irm ... | iex` bootstrap, `exit`
+# terminates the CALLER's PowerShell host and can close the user's terminal. The single process-exit
+# handling lives at the entrypoint below, which sets `$global:LASTEXITCODE` from this return value.
 function Invoke-Main {
-  if (-not (Ensure-Node))       { exit 1 }
-  if (-not (Install-Honeycomb)) { exit 1 }
+  if (-not (Ensure-Node))       { return 1 }
+  if (-not (Install-Honeycomb)) { return 1 }
 
   $bin = Resolve-HoneycombBin
   if (-not $bin) {
@@ -154,13 +165,15 @@ function Invoke-Main {
     Write-Host ''
     Write-Host '  honeycomb install'
     Write-Host ''
-    exit 1
+    return 1
   }
 
   # The verb prints its own friendly step log and returns a clean exit code; forward it verbatim. A
   # handled failure inside the verb is already a plain-language line + non-zero exit -- no raw trace.
   & $bin install
-  exit $LASTEXITCODE
+  return $LASTEXITCODE
 }
 
-Invoke-Main
+# Entrypoint: run main, then set the exit code ONCE without tearing down the host (so `irm | iex`
+# hands control back to the user's session instead of closing it).
+$global:LASTEXITCODE = Invoke-Main

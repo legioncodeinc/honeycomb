@@ -196,9 +196,13 @@ function writeInstalledMarker(ref: string, dir: string | undefined, out: OutputS
 function openDashboardWithFallback(opener: DashboardOpener, out: OutputSink): void {
 	const friendly = localDashboardUrl();
 	const loopback = loopbackDashboardUrl();
-	// Best-effort friendly host first (a-AC-6) — never required.
+	// Best-effort friendly host first (a-AC-6) — never required. A successful OS-opener launch only means
+	// the browser was handed the URL, NOT that `honeycomb.local` resolves on this machine. So even on the
+	// happy path we ALSO print the always-correct loopback URL as the guaranteed fallback link — a user
+	// whose `.local` name does not resolve is never stranded on a broken page with no working URL to try.
 	if (opener(friendly)) {
 		out(`→ opening dashboard at ${friendly}…`);
+		out(`  (if that doesn't load, use ${loopback})`);
 		return;
 	}
 	// Fall back to the always-correct loopback URL; the run succeeds regardless of the launch result.
@@ -249,11 +253,13 @@ export async function runInstallCommand(argv: readonly string[], deps: InstallVe
 	out("✓ Honeycomb is ready.");
 
 	// 4) Emit the `honeycomb_installed` lifecycle event (PRD-050e e-AC-1) — AFTER the user-facing
-	//    success, NEVER gating it (e-AC-4). Fire-and-forget through the single chokepoint: the result is
-	//    intentionally ignored, all errors are swallowed inside `emitTelemetry`, and the onboarding `dir`
-	//    is threaded so the dedupe ledger lives in the same temp HOME under test. A second install run is
-	//    a no-op send (e-AC-5, dedupe). Tier-1 → opt-out default; an opt-out env / empty key silences it.
-	await emitTelemetry(
+	//    success, NEVER gating it (e-AC-4). FIRE-AND-FORGET through the single chokepoint: the promise is
+	//    intentionally NOT awaited (`void`), so a slow/timing-out PostHog hop never delays the installer
+	//    after the success line has printed. All errors are swallowed inside `emitTelemetry`; the
+	//    onboarding `dir` is threaded so the dedupe ledger lives in the same temp HOME under test. A second
+	//    install run is a no-op send (e-AC-5, dedupe). Tier-1 → opt-out default; an opt-out env / empty
+	//    key silences it.
+	void emitTelemetry(
 		"honeycomb_installed",
 		{ ref, tier: "tier1" },
 		{ ...(deps.telemetry ?? {}), ...(deps.dir !== undefined ? { dir: deps.dir } : {}) },

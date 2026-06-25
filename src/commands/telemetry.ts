@@ -57,9 +57,10 @@ function resolveRef(dir: string | undefined, load: GlassBoxDeps["loadOnboarding"
 export function runTelemetryCommand(argv: readonly string[], deps: TelemetryVerbDeps = {}): CommandResult {
 	const out: OutputSink = deps.out ?? ((line: string): void => console.log(line));
 
-	// Bare `telemetry` and `telemetry --show` both render; only an unrecognized non-flag subcommand hints.
-	const sub = argv.find((a) => !a.startsWith("--"));
-	const wantsShow = argv.length === 0 || argv.includes("--show") || sub === undefined;
+	// Only BARE `telemetry` or a lone `telemetry --show` render the glass box. Anything else — an unknown
+	// subcommand (`telemetry foo`), a stray flag (`telemetry --bogus`), or extra tail after `--show`
+	// (`telemetry foo --show`) — falls to the usage hint rather than being silently accepted.
+	const wantsShow = argv.length === 0 || (argv.length === 1 && argv[0] === "--show");
 	if (!wantsShow) {
 		out("usage: honeycomb telemetry --show   # print what telemetry has been / would be sent");
 		return { exitCode: 0 };

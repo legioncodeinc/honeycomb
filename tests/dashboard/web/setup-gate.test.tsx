@@ -132,4 +132,37 @@ describe("b-AC-3 the gate polls /setup/state and swaps to the dashboard on the l
 		expect(container.querySelector('[data-testid="guided-setup"]')).toBeNull();
 		expect(container.querySelector('[aria-label="Dashboard navigation"]')).not.toBeNull();
 	});
+
+	it("STOPS polling /setup/state after auth so a later transient error never reopens Guided Setup", async () => {
+		// fresh → linked on the second poll, then a TRANSIENT failure (FRESH fallback) on any later poll.
+		let authenticated = false;
+		let polled = 0;
+		const fetchImpl = makeMockFetch({
+			setupState: () => {
+				polled += 1;
+				// Once authenticated, any FURTHER /setup/state call would (via the FRESH fallback) flip the
+				// gate back to fresh — so the guarantee under test is that NO further call happens.
+				return authenticated ? LINKED_STATE : FRESH_STATE;
+			},
+		});
+		await mountGate(fetchImpl);
+
+		authenticated = true;
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(2600); // > SETUP_POLL_MS — the linked state lands.
+		});
+		expect(container.querySelector('[aria-label="Dashboard navigation"]')).not.toBeNull();
+
+		// Record the poll count at the moment of the auth flip, then advance several MORE intervals.
+		const polledAtAuth = polled;
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(2600 * 5);
+		});
+
+		// The pre-auth poller tore down: no additional /setup/state requests fired, and the dashboard
+		// stayed mounted (a transient FRESH fallback could never bounce a linked user back to setup).
+		expect(polled).toBe(polledAtAuth);
+		expect(container.querySelector('[data-testid="guided-setup"]')).toBeNull();
+		expect(container.querySelector('[aria-label="Dashboard navigation"]')).not.toBeNull();
+	});
 });

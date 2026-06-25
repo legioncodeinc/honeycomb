@@ -608,12 +608,13 @@ export async function loginWithDeviceFlow(deps: DeviceFlowLoginDeps = {}): Promi
 	const persisted = await persistFromToken(client, longLived, deps);
 
 	// Emit `honeycomb_first_link` (PRD-050e e-AC-1) AFTER the credential is persisted — the first
-	// successful link. Fire-and-forget through the single chokepoint: the result is ignored, all errors
-	// are swallowed inside `emitTelemetry`, and the onboarding `dir` is threaded so the dedupe ledger and
-	// the persisted credential share one HOME. The carried `ref` is the SAME effective ref the attribution
-	// header used (the header and the telemetry agree on the code — e-AC-1). Deduped once per machine
-	// (e-AC-5); an opt-out env / empty key silences it. NEVER gates the login (the persist already returned).
-	await emitTelemetry(
+	// successful link. FIRE-AND-FORGET through the single chokepoint: the promise is intentionally NOT
+	// awaited (`void`), so a slow/timing-out PostHog hop never delays CLI completion or the `/setup/login`
+	// state transition. All errors are swallowed inside `emitTelemetry`; the onboarding `dir` is threaded
+	// so the dedupe ledger and the persisted credential share one HOME. The carried `ref` is the SAME
+	// effective ref the attribution header used (e-AC-1). Deduped once per machine (e-AC-5); an opt-out
+	// env / empty key silences it. NEVER gates the login (the persist already returned).
+	void emitTelemetry(
 		"honeycomb_first_link",
 		{ ref: effectiveRef, tier: "tier1" },
 		{ ...(deps.telemetry ?? {}), ...(deps.dir !== undefined ? { dir: deps.dir } : {}) },

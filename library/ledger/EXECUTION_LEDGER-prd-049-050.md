@@ -12,7 +12,7 @@
 5. **Wave 5 — 049d then 049e** (CLI switchers, then dashboard scope switcher into 050b nav shell).
 
 Shared substrate (build early, Wave 1): `~/.deeplake/onboarding.json` state file + `esbuild` build-time `define`s (`__HONEYCOMB_REF_DEFAULT__`, `__HONEYCOMB_POSTHOG_KEY__`, `__HONEYCOMB_POSTHOG_HOST__`) + `src/shared/globals.d.ts` ambient decls. Consumed by 050a/050c/050e.
-> **SUBSTRATE: DONE (2026-06-25)** — `src/daemon/runtime/onboarding/onboarding-store.ts` (+ index barrel), esbuild defines folded into VERSION_DEFINE, globals.d.ts decls, 16-case test suite. `npm run ci` green (2997 tests). Locked exports: `OnboardingState`, `TelemetryEventName`, `TelemetrySentRecord`, `loadOnboarding`/`saveOnboarding`/`getOrCreateInstallId`/`markReported`/`isReported`/`appendSent`. Import via `src/daemon/runtime/onboarding/index.js`.
+> **SUBSTRATE: DONE (2026-06-25)** — `src/daemon/runtime/onboarding/onboarding-store.ts` (+ index barrel), esbuild defines folded into VERSION_DEFINE, globals.d.ts decls, 16-case test suite. `npm run ci` green at the SUBSTRATE snapshot (2997 tests — before the 050a-e/049 waves landed; the authoritative close-out snapshot is the 3110-test run in the roll-up below). Locked exports: `OnboardingState`, `TelemetryEventName`, `TelemetrySentRecord`, `loadOnboarding`/`saveOnboarding`/`getOrCreateInstallId`/`markReported`/`isReported`/`appendSent`. Import via `src/daemon/runtime/onboarding/index.js`.
 
 ### Resolved operator decisions
 - D1: fnm + pinned Node LTS; scripts in-repo `scripts/install/`; interim host = repo raw/Pages URL; vanity domain + checksum = BLOCKED polish (non-gating).

@@ -102,7 +102,9 @@ describe("b-AC-4 the setup endpoints are unreachable in non-local mode", () => {
 		// The dashboard host + the setup routes fire LOCAL-MODE ONLY (security F-1). In team mode they
 		// fall through to the root scaffold (404/501), never serving a tenant surface without auth.
 		const setup = await daemon.app.request("/setup/state");
-		expect(setup.status).not.toBe(200);
+		// Indistinguishable from an unmounted path: a precise 404 (not merely "not 200", which a 500 would
+		// also satisfy and would hide a broken-closed posture) is the contract for the team-mode setup read.
+		expect(setup.status).toBe(404);
 		const dash = await daemon.app.request("/dashboard");
 		expect(dash.status).not.toBe(200);
 	});

@@ -8,6 +8,9 @@
  *     the invariant test proves the static no-storage-import half.
  */
 
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -96,21 +99,32 @@ describe("PRD-020a a-AC-1 — the unified dispatcher parses + routes", () => {
 	it("PRD-050a routes `install` as a LOCAL verb through the daemon ensure-running + opener seams", async () => {
 		const lines: string[] = [];
 		const urls: string[] = [];
-		// A live daemon so ensure-running short-circuits (no lifecycle needed here); a recording opener.
-		const deps = {
-			daemon: createFakeDaemonClient({ alive: true }),
-			openDashboard: (url: string): boolean => {
-				urls.push(url);
-				return true;
-			},
-			out: (l: string) => lines.push(l),
-		} as unknown as CommandDeps;
-		const d = createDispatcher();
-		const res = await d.dispatch(d.parse(["install", "--ref", "alice"]), deps);
-		expect(res.exitCode).toBe(0);
-		// The verb reached the install handler: a dashboard URL was opened and the ready line printed.
-		expect(urls.length).toBeGreaterThan(0);
-		expect(lines.join("\n")).toMatch(/Honeycomb is ready/);
+		// Bind a TEMP onboarding dir so this dispatcher test never persists to the developer/CI machine's
+		// real `~/.deeplake/onboarding.json` or telemetry dedupe ledger — install's handler writes the
+		// onboarding marker (and the dedupe ledger lives in the same dir) and would otherwise mutate real
+		// state (mirrors install.test.ts). The dispatcher forwards `dir` into the install verb deps;
+		// telemetry stays a no-op under the empty build-time PostHog key.
+		const dir = mkdtempSync(join(tmpdir(), "hc-dispatch-install-"));
+		try {
+			// A live daemon so ensure-running short-circuits (no lifecycle needed here); a recording opener.
+			const deps = {
+				daemon: createFakeDaemonClient({ alive: true }),
+				openDashboard: (url: string): boolean => {
+					urls.push(url);
+					return true;
+				},
+				out: (l: string) => lines.push(l),
+				dir,
+			} as unknown as CommandDeps;
+			const d = createDispatcher();
+			const res = await d.dispatch(d.parse(["install", "--ref", "alice"]), deps);
+			expect(res.exitCode).toBe(0);
+			// The verb reached the install handler: a dashboard URL was opened and the ready line printed.
+			expect(urls.length).toBeGreaterThan(0);
+			expect(lines.join("\n")).toMatch(/Honeycomb is ready/);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("a-AC-1 an unknown command prints usage and exits non-zero", async () => {

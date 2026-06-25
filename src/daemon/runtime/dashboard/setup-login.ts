@@ -73,6 +73,23 @@ function pickRef(value: unknown): string | undefined {
 	return typeof value === "string" ? value : undefined;
 }
 
+/**
+ * Re-validate `verification_uri_complete` to an https-only URL before echoing it to the browser (c-AC-4).
+ * `loginWithDeviceFlow` fires `onGrant` BEFORE its own `validateVerificationUrl` runs, so the raw
+ * device-code value reaches this handler unchecked — a `javascript:`/`http:`/malformed value would
+ * otherwise render as a clickable link on the setup page. Returns the canonical https href, or
+ * `undefined` (omit the field) for anything that is not a parseable https URL.
+ */
+function safeVerificationUriComplete(value: unknown): string | undefined {
+	if (typeof value !== "string" || value.length === 0) return undefined;
+	try {
+		const parsed = new URL(value);
+		return parsed.protocol === "https:" ? parsed.href : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /** Read + JSON-parse the POST body, tolerating an absent/empty/non-JSON body (the button may send none). */
 async function readBody(c: Context): Promise<Record<string, unknown>> {
 	try {
@@ -139,13 +156,14 @@ export function mountSetupLogin(daemon: Daemon, options: MountSetupLoginOptions 
 			return c.json({ error: "device_flow_unavailable", reason: "could not begin the device flow" }, 502);
 		}
 
-		// Render-safe payload ONLY: user_code + the verification URIs. NEVER the device/bearer token.
+		// Render-safe payload ONLY: user_code + the verification URIs. NEVER the device/bearer token. The
+		// completion URI is re-validated to https-only here (onGrant fires before the flow's own gate), so
+		// a non-https/javascript value never reaches the page as a clickable link.
+		const verificationUriComplete = safeVerificationUriComplete(grant.verification_uri_complete);
 		const payload: SetupLoginResponse = {
 			user_code: grant.user_code,
 			verification_uri: grant.verification_uri,
-			...(typeof grant.verification_uri_complete === "string" && grant.verification_uri_complete.length > 0
-				? { verification_uri_complete: grant.verification_uri_complete }
-				: {}),
+			...(verificationUriComplete !== undefined ? { verification_uri_complete: verificationUriComplete } : {}),
 		};
 		return c.json(payload);
 	});

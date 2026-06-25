@@ -157,6 +157,10 @@ describe("c-AC-1 the device-code request carries BOTH referral headers = `mario`
 			sleep: noWait,
 			openBrowser: () => true,
 			reporter: { prompt: () => {} },
+			// Explicitly disable telemetry so the suite stays hermetic regardless of the ambient build-time
+			// PostHog key — `loginWithDeviceFlow` now always fires `honeycomb_first_link`, and an empty key
+			// hard-disables the chokepoint (no global fetch, no network).
+			telemetry: { posthogKey: "" },
 			// No `ref` → effective ref resolves to the build default `mario` (no onboarding file in temp HOME).
 		});
 		expect(disk.orgId).toBe("org-acme"); // the flow completed end to end
@@ -178,6 +182,7 @@ describe("c-AC-2 explicit --ref overrides; a blank ref omits both headers", () =
 			sleep: noWait,
 			openBrowser: () => true,
 			reporter: { prompt: () => {} },
+			telemetry: { posthogKey: "" },
 			ref: "erin",
 		});
 		const devCode = deviceCodeRecord(records);
@@ -195,6 +200,7 @@ describe("c-AC-2 explicit --ref overrides; a blank ref omits both headers", () =
 			sleep: noWait,
 			openBrowser: () => true,
 			reporter: { prompt: () => {} },
+			telemetry: { posthogKey: "" },
 			ref: "   ",
 		});
 		const devCode = deviceCodeRecord(records);
@@ -214,6 +220,7 @@ describe("c-AC-5 on approval the EXISTING persist path still mints + writes the 
 			sleep: noWait,
 			openBrowser: () => true,
 			reporter: { prompt: () => {} },
+			telemetry: { posthogKey: "" },
 		});
 		// The persist path is unchanged: the long-lived minted token landed on disk, server-stamped.
 		expect(disk.token).toBe(LONG_LIVED_TOKEN);
@@ -235,6 +242,7 @@ describe("c-AC-6 the referral headers ride ONLY on the device-code request", () 
 			sleep: noWait,
 			openBrowser: () => true,
 			reporter: { prompt: () => {} },
+			telemetry: { posthogKey: "" },
 			ref: "mario",
 		});
 

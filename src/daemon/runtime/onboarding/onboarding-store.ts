@@ -147,7 +147,10 @@ const TelemetrySentRecordSchema = z.object({
  */
 export const OnboardingStateSchema = z.object({
 	schemaVersion: z.literal(ONBOARDING_SCHEMA_VERSION),
-	installId: z.string().min(1),
+	// The installId is minted by `randomUUID()` and is the anonymized telemetry `distinct_id`. Validate
+	// the on-disk value as a UUID (not merely non-empty) so a tampered `onboarding.json` cannot inject an
+	// arbitrary distinct_id — a non-UUID value fails validation and falls soft to a fresh installId.
+	installId: z.uuid(),
 	phase: z.enum(["fresh", "installed", "linking", "linked", "migrating", "migrated"]),
 	firstTimeSetupComplete: z.boolean(),
 	ref: z.string(),

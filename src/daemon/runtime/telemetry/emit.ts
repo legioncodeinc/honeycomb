@@ -277,7 +277,10 @@ export function buildAllowedProperties(input: {
 	// is DROPPED (the structural guarantee behind e-AC-2). The allow-listed core above always wins.
 	if (input.extra !== undefined) {
 		for (const [key, value] of Object.entries(input.extra)) {
-			if (ALLOWED_KEY_SET.has(key) && typeof value === "string") {
+			// `!(key in out)` enforces "the allow-listed core above always wins": a caller-supplied extra
+			// may only FILL a missing allow-listed key, never OVERWRITE the canonical ref/tier/version/
+			// platform facts already seeded (which would break attribution/platform integrity).
+			if (ALLOWED_KEY_SET.has(key) && typeof value === "string" && !(key in out)) {
 				out[key as AllowedPropertyKey] = value;
 			}
 		}
@@ -410,11 +413,19 @@ export async function emitTelemetry(
 	const key = deps.posthogKey ?? POSTHOG_KEY;
 	const version = deps.version ?? HONEYCOMB_VERSION;
 
+	// The EFFECTIVE tier is the STRICTER of the event-derived tier and the caller-supplied tier — tier2
+	// always wins. This closes two abuse paths the caller-trusted `opts.tier` alone left open: it cannot
+	// DOWNGRADE a (future) Tier-2-named event to escape the consent gate, and a caller marking an emit
+	// `tier2` still trips the Gate-3 consent check below even on a Tier-1-named event. A named Tier-1
+	// lifecycle event therefore can never be silently suppressed, and no Tier-2 emit can bypass opt-in
+	// (e-AC-9). `tierForEvent` supplies the floor; `opts.tier` may only raise it.
+	const effectiveTier: TelemetryTier = tierForEvent(event) === "tier2" || opts.tier === "tier2" ? "tier2" : "tier1";
+
 	// The payload is built up-front so the glass-box outcome carries it even when a gate blocks the send
 	// (so `telemetry --show` can render "what WOULD be sent next" from the SAME builder — e-AC-8).
 	const properties = buildAllowedProperties({
 		ref: opts.ref,
-		tier: opts.tier,
+		tier: effectiveTier,
 		version,
 		...(opts.sourceTool !== undefined ? { sourceTool: opts.sourceTool } : {}),
 		...(opts.countBucket !== undefined ? { countBucket: opts.countBucket } : {}),
@@ -432,8 +443,10 @@ export async function emitTelemetry(
 		const save = deps.saveOnboarding ?? saveOnboarding;
 		const state = load(deps.dir);
 
-		// Gate 3: a Tier-2 event needs explicit opt-in (e-AC-9). Tier-1 rides the opt-out default.
-		if (opts.tier === "tier2" && state.telemetry.optInTier2 !== true) {
+		// Gate 3: a Tier-2 event needs explicit opt-in (e-AC-9). Tier-1 rides the opt-out default. The tier
+		// is the EVENT-derived effectiveTier (above), never the caller-supplied opts.tier, so consent
+		// cannot be bypassed by mislabelling the event.
+		if (effectiveTier === "tier2" && state.telemetry.optInTier2 !== true) {
 			return { sent: false, skipped: "not_consented", properties };
 		}
 
@@ -446,13 +459,19 @@ export async function emitTelemetry(
 		const ok = await postCapture(event, properties, distinctId, key, deps);
 		if (!ok) return { sent: false, skipped: "send_failed", properties };
 
-		// 2xx → record in BOTH ledgers (dedupe + glass-box) and persist. A persist hiccup is swallowed
-		// below; the event still counts as sent (PostHog-side dedup is the backstop per the PRD).
+		// 2xx → record in BOTH ledgers (dedupe + glass-box) and persist. The persist is BEST-EFFORT: a 2xx
+		// already happened, so a save IO failure must NOT flip the outcome to `send_failed` (which would
+		// leave the dedupe ledger un-advanced and re-open a duplicate emission on the next trigger). The
+		// event counts as sent regardless; PostHog-side dedup is the backstop per the PRD.
 		const clock = deps.clock ?? systemTelemetryClock;
 		const at = clock();
 		const sentRecord: TelemetrySentRecord = { event, at, properties };
 		const next = appendSent(markReported(state, event, at), sentRecord);
-		save(next, deps.dir);
+		try {
+			save(next, deps.dir);
+		} catch {
+			// A persist hiccup after a successful send is non-fatal — the send still counts (see above).
+		}
 		return { sent: true, properties };
 	} catch {
 		// Fail-soft: ANY unexpected error (load/save IO, a thrown fetch) is swallowed (e-AC-4).

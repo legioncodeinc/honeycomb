@@ -795,18 +795,20 @@ export function assembleSeams(
 			} catch {
 				// A mount failure degrades the guided-setup state read (the page falls back to a cold render), never crashes.
 			}
-			// 6d. The Hivemind->Honeycomb migration routes - POST /setup/migrate-from-hivemind (+ /rollback)
-			//     (PRD-050d). Beside the other setup routes on the SAME unprotected root group, under the SAME
-			//     local-mode gate (security F-1 / d-AC). Backs up + uninstalls Hivemind idempotently, verify-and-
-			//     adopts the shared credential (or signals needsLogin), advances a durable crash-recovery marker,
-			//     and emits the upgrade telemetry on success only. Fail-soft - a mount error degrades the migration
-			//     button (the user falls back to a manual uninstall + honeycomb login), never crashes.
-			if (seams.mountSetupMigrate !== undefined) {
-				try {
-					seams.mountSetupMigrate(daemon);
-				} catch {
-					// A mount failure degrades the on-page migration (the user falls back to the CLI), never crashes.
-				}
+		}
+		// 6d. The Hivemind->Honeycomb migration routes - POST /setup/migrate-from-hivemind (+ /rollback)
+		//     (PRD-050d). Beside the other setup routes on the SAME unprotected root group, under the SAME
+		//     local-mode gate (security F-1 / d-AC). A SIBLING of the setup-state mount, NOT nested under it:
+		//     the two seams are independently optional, so nesting would silently drop the migration routes in
+		//     a seam fake that overrides only one of them. Backs up + uninstalls Hivemind idempotently,
+		//     verify-and-adopts the shared credential (or signals needsLogin), advances a durable crash-recovery
+		//     marker, and emits the upgrade telemetry on success only. Fail-soft - a mount error degrades the
+		//     migration button (the user falls back to a manual uninstall + honeycomb login), never crashes.
+		if (seams.mountSetupMigrate !== undefined) {
+			try {
+				seams.mountSetupMigrate(daemon);
+			} catch {
+				// A mount failure degrades the on-page migration (the user falls back to the CLI), never crashes.
 			}
 		}
 	}

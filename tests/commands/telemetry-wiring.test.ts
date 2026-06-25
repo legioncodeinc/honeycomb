@@ -50,6 +50,17 @@ function recordingFetch(opts: { throws?: boolean } = {}) {
 	};
 }
 
+/**
+ * Drain pending microtasks/timers until `predicate` holds or the budget is spent. `honeycomb_installed`
+ * now emits FIRE-AND-FORGET (the installer no longer awaits it), so the emit lands on a later turn of the
+ * event loop — the test waits for it deterministically instead of relying on the (removed) await.
+ */
+async function waitFor(predicate: () => boolean, budget = 50): Promise<void> {
+	for (let i = 0; i < budget && !predicate(); i += 1) {
+		await new Promise((resolve) => setTimeout(resolve, 0));
+	}
+}
+
 let dir: string;
 beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), "hc-tele-wire-"));
@@ -71,11 +82,15 @@ describe("e-AC-1/e-AC-5 honeycomb install emits honeycomb_installed once, dedupe
 		};
 		const first = await runInstallCommand(["--ref", "mario"], deps);
 		expect(first.exitCode).toBe(0);
+		// The emit is fire-and-forget — wait for the chokepoint to reach the recorder before asserting.
+		await waitFor(() => rec.calls.length > 0);
 		expect(rec.calls).toHaveLength(1);
 		expect(JSON.parse(rec.calls[0]!.init.body).event).toBe("honeycomb_installed");
-		// Second run: deduped — still exactly one network call total.
+		// Second run: deduped — still exactly one network call total. Give a would-be duplicate send a
+		// chance to land (it must not) before re-asserting the count is unchanged.
 		const second = await runInstallCommand(["--ref", "mario"], deps);
 		expect(second.exitCode).toBe(0);
+		await waitFor(() => false, 5);
 		expect(rec.calls).toHaveLength(1);
 	});
 });
@@ -128,6 +143,8 @@ describe("e-AC-8 honeycomb telemetry --show renders the glass box", () => {
 			out: () => {},
 			telemetry: { fetch: rec.fetch, posthogKey: KEY },
 		});
+		// The emit is fire-and-forget — wait for the ledger persist before reading it back.
+		await waitFor(() => loadOnboarding(dir).telemetry.sent.length > 0);
 		// Confirm the ledger recorded it.
 		expect(loadOnboarding(dir).telemetry.sent.map((s) => s.event)).toContain("honeycomb_installed");
 		const lines: string[] = [];

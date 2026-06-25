@@ -193,20 +193,31 @@ async function runMigration(options: MountSetupMigrateOptions): Promise<SetupMig
 	//    `backup` first so a crash before/after the copy is recoverable to a non-terminal phase (d-AC-7).
 	advancePhase(dir, "backup");
 	let backupPath: string | undefined;
-	try {
-		const result = backupAndUninstallHivemind(options.uninstall ?? {});
-		backupPath = result.backupPath;
-	} catch {
-		// 2) A failed/partial uninstall (d-AC-5): leave the marker at the non-terminal phase, return a
-		//    plain-language message + the (possibly-taken) backup path, and DO NOT touch the credential.
-		advancePhase(dir, "uninstall", {}, backupPath !== undefined ? { backupPath } : {});
+	const partialFailure = (path: string | undefined): SetupMigrateResponse => {
+		// A failed/partial uninstall (d-AC-5): record the backup path on the NON-TERMINAL marker (so a
+		// later rollback can find it), return a plain-language message + the (already-taken) backup path,
+		// and DO NOT touch the credential.
+		advancePhase(dir, "uninstall", {}, path !== undefined ? { backupPath: path } : {});
 		return {
 			ok: false,
 			phase: "uninstall",
 			message:
 				"Couldn't fully remove the previous Hivemind setup. Your Hivemind config was backed up and your account is untouched — retry, or roll back to restore it.",
-			...(backupPath !== undefined ? { backupPath } : {}),
+			...(path !== undefined ? { backupPath: path } : {}),
 		};
+	};
+	try {
+		const result = backupAndUninstallHivemind(options.uninstall ?? {});
+		backupPath = result.backupPath;
+		// A backup exists but the removal did not complete (e.g. a Windows file lock): the backup the
+		// rollback needs IS captured here, so surface the d-AC-5 safe-failure with that path rather than
+		// proceeding into the link phase on a half-removed footprint.
+		if (!result.removed && result.backupPath !== undefined) {
+			return partialFailure(result.backupPath);
+		}
+	} catch {
+		// A throw BEFORE the backup landed (e.g. the recursive copy failed): no backup path to preserve.
+		return partialFailure(backupPath);
 	}
 
 	// 2) PHASE uninstall — the destructive step completed (or there was nothing to remove, idempotent).

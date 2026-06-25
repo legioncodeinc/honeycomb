@@ -101,15 +101,13 @@ describe("d-AC-5 idempotent + credential-safe + npm-failure-tolerant", () => {
 
 	it("a THROWING npm remover does not abort the dir backup+remove (best-effort npm)", () => {
 		seedHivemind("payload-B");
-		// The production seam catches internally, but assert the module is robust if a custom seam throws:
-		// the dir half must still complete (the load-bearing reversibility step).
+		// A misbehaving custom seam THROWS — the module must catch it and still complete the
+		// load-bearing dir half (backup + remove), reporting npmRemoved:false (best-effort npm, d-AC-5).
 		const result = backupAndUninstallHivemind({
 			homeDir: home,
 			now: () => "2026-06-25T12:00:00.000Z",
 			npmRemove: () => {
-				// A misbehaving seam returns false rather than throwing in production; here we simulate a
-				// benign "not installed" outcome and assert the dir still moved.
-				return false;
+				throw new Error("npm exploded");
 			},
 		});
 		expect(result.removed).toBe(true);
