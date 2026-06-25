@@ -72,9 +72,11 @@ export interface VerbSpec {
  */
 export const VERB_TABLE: readonly VerbSpec[] = Object.freeze([
 	{ verb: "setup", cls: "local", summary: "detect assistants, wire hooks, bring up the daemon" },
+	{ verb: "install", cls: "local", summary: "bring up the daemon (health-gated) + open the dashboard (PRD-050a)" },
 	{ verb: "status", cls: "local", summary: "daemon connectivity + login + D1–D5 environment health" },
 	{ verb: "daemon", cls: "local", summary: "start | stop | status the loopback daemon (3850)" },
 	{ verb: "dashboard", cls: "local", summary: "launch the daemon-served dashboard (020b)" },
+	{ verb: "telemetry", cls: "local", summary: "show exactly what adoption telemetry has been / would be sent (--show, PRD-050e)" },
 	{ verb: "pollinate", cls: "storage", summary: "trigger a pollinating consolidation pass on the daemon (009/026)" },
 	{ verb: "maintenance", cls: "storage", summary: "run version-history compaction over version-bumped tables (030)" },
 	{ verb: "remember", cls: "storage", summary: "write a memory through the daemon (--type fact|convention|preference|decision|gotcha|reference)" },

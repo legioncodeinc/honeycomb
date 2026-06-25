@@ -9,6 +9,29 @@
 declare const __HONEYCOMB_VERSION__: string | undefined;
 
 /**
+ * Build-time onboarding/telemetry tokens (PRD-050 substrate).
+ *
+ * The esbuild config replaces each of these with a string literal via `define`
+ * (mirroring `__HONEYCOMB_VERSION__`), each sourced from a CI env var with a safe
+ * default so a local un-bundled build still type-checks and runs:
+ *   - `__HONEYCOMB_REF_DEFAULT__`  — the default referral code (env
+ *     `HONEYCOMB_REF_DEFAULT`, default `"mario"`). Consumed by the onboarding store.
+ *   - `__HONEYCOMB_POSTHOG_KEY__`  — the PostHog project key (env
+ *     `HONEYCOMB_POSTHOG_KEY`, default `""`). An EMPTY key means telemetry is a
+ *     no-op (PRD-050e); no real key is ever baked into source — it arrives only via
+ *     CI env at build time.
+ *   - `__HONEYCOMB_POSTHOG_HOST__` — the PostHog ingest host (env
+ *     `HONEYCOMB_POSTHOG_HOST`, default `"https://us.i.posthog.com"`).
+ *
+ * Declared `string` (not `string | undefined`): the esbuild `define` always
+ * substitutes a literal, and each has a safe default, so the bundled value is never
+ * undefined. A `typeof` guard in source is therefore unnecessary for these.
+ */
+declare const __HONEYCOMB_REF_DEFAULT__: string;
+declare const __HONEYCOMB_POSTHOG_KEY__: string;
+declare const __HONEYCOMB_POSTHOG_HOST__: string;
+
+/**
  * OpenClaw runtime tuning dispatch (PRD-001b FR-7 / b-AC-7).
  *
  * The OpenClaw esbuild build rewrites every `process.env.HONEYCOMB_*` read to

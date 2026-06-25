@@ -37,7 +37,24 @@ const ESM_PACKAGE_JSON = '{"type":"module"}\n';
 // OpenClaw bundle's __HONEYCOMB_VERSION__ matches the root version too).
 const HONEYCOMB_VERSION = JSON.parse(readFileSync("package.json", "utf-8")).version;
 
-const VERSION_DEFINE = { __HONEYCOMB_VERSION__: JSON.stringify(HONEYCOMB_VERSION) };
+// PRD-050 substrate build-time defines. Each is sourced from a CI env var with a
+// safe default and JSON.stringify'd into the define map EXACTLY as the version
+// define above — esbuild then substitutes the string literal into every bundle.
+//   - HONEYCOMB_REF_DEFAULT  → the default referral code (default "mario").
+//   - HONEYCOMB_POSTHOG_KEY  → the PostHog project key. Default "" (empty =
+//     telemetry disabled; PRD-050e treats an empty key as a no-op). NO real key
+//     is ever committed to source — the key arrives ONLY via CI env at build time.
+//   - HONEYCOMB_POSTHOG_HOST → the PostHog ingest host (default us cloud).
+const HONEYCOMB_REF_DEFAULT = process.env.HONEYCOMB_REF_DEFAULT ?? "mario";
+const HONEYCOMB_POSTHOG_KEY = process.env.HONEYCOMB_POSTHOG_KEY ?? "";
+const HONEYCOMB_POSTHOG_HOST = process.env.HONEYCOMB_POSTHOG_HOST ?? "https://us.i.posthog.com";
+
+const VERSION_DEFINE = {
+  __HONEYCOMB_VERSION__: JSON.stringify(HONEYCOMB_VERSION),
+  __HONEYCOMB_REF_DEFAULT__: JSON.stringify(HONEYCOMB_REF_DEFAULT),
+  __HONEYCOMB_POSTHOG_KEY__: JSON.stringify(HONEYCOMB_POSTHOG_KEY),
+  __HONEYCOMB_POSTHOG_HOST__: JSON.stringify(HONEYCOMB_POSTHOG_HOST),
+};
 
 // The tree-sitter parser stack (PRD-014 codebase graph, D-1). RESOLVED to
 // `web-tree-sitter` (WASM) over native `tree-sitter` + `tree-sitter-<lang>`

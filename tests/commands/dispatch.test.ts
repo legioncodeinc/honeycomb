@@ -93,6 +93,26 @@ describe("PRD-020a a-AC-1 — the unified dispatcher parses + routes", () => {
 		expect(daemon.calls[0]?.req.path).toBe("/api/skills/pull");
 	});
 
+	it("PRD-050a routes `install` as a LOCAL verb through the daemon ensure-running + opener seams", async () => {
+		const lines: string[] = [];
+		const urls: string[] = [];
+		// A live daemon so ensure-running short-circuits (no lifecycle needed here); a recording opener.
+		const deps = {
+			daemon: createFakeDaemonClient({ alive: true }),
+			openDashboard: (url: string): boolean => {
+				urls.push(url);
+				return true;
+			},
+			out: (l: string) => lines.push(l),
+		} as unknown as CommandDeps;
+		const d = createDispatcher();
+		const res = await d.dispatch(d.parse(["install", "--ref", "alice"]), deps);
+		expect(res.exitCode).toBe(0);
+		// The verb reached the install handler: a dashboard URL was opened and the ready line printed.
+		expect(urls.length).toBeGreaterThan(0);
+		expect(lines.join("\n")).toMatch(/Honeycomb is ready/);
+	});
+
 	it("a-AC-1 an unknown command prints usage and exits non-zero", async () => {
 		const lines: string[] = [];
 		const deps: CommandDeps = { daemon: createFakeDaemonClient(), out: (l) => lines.push(l) };

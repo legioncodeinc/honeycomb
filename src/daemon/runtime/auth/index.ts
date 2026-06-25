@@ -91,11 +91,15 @@ export {
 	ENV_DEEPLAKE_ENDPOINT,
 	ENV_HEADLESS_TOKEN,
 	ENV_ORG_ID as ENV_DEEPLAKE_ORG_ID,
+	HIVEMIND_REFERRER_HEADER,
+	HONEYCOMB_REFERRER_HEADER,
 	createDeeplakeAuthClient,
 	defaultBrowserOpener,
 	loginWithDeviceFlow,
 	loginWithToken,
+	referrerHeaders,
 	resolveApiUrl,
+	resolveEffectiveRef,
 	validateVerificationUrl,
 } from "./deeplake-issuer.js";
 
