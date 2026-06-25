@@ -21,7 +21,7 @@ flowchart TD
     agentProcess([Coding Agent Process])
     hookProcess([Hook / Thin Client Process])
     honeycombDaemon([Honeycomb Daemon - port 3850])
-    credFile([~/.honeycomb/credentials.json])
+    credFile([~/.deeplake/credentials.json])
     deeplakeStore([DeepLake - GPU SQL/Vector])
     tenantPartition([Org/Workspace Partition - storage-isolated])
     byocBucket([BYOC Bucket - GCS / Azure / S3])
@@ -47,7 +47,7 @@ Note: the credentials file and the BYOC bucket are the data-at-rest nodes, disti
 | **Agent Process** | Coding agent (Claude Code, Codex, Cursor, etc.) | Agent LLM loop, tool calls | Host OS user |
 | **Hook / Thin Client Process** | Agent runtime | Spawned Node bundles at lifecycle events; call the daemon | Same OS user as agent |
 | **Honeycomb Daemon** | `honeycomb daemon` on port 3850 | Capture, recall, pipeline, secrets decrypt, the only DeepLake client | Same OS user; sole storage authority |
-| **Credentials File** | File system | `~/.honeycomb/credentials.json` | Mode 0600; OS user only |
+| **Credentials File** | File system | `~/.deeplake/credentials.json` | Mode 0600; OS user only |
 | **DeepLake** | GPU-backed SQL/Vector backend | Session storage, memory, skill mining, vector search | Reached only by the daemon; org/workspace isolation enforced here |
 | **Org/Workspace Partition** | DeepLake backend | Row- and partition-level org/workspace isolation | Server-enforced; AES-256 at rest |
 | **BYOC Bucket** | Customer's cloud (GCS/Azure/S3) | Raw object storage | Customer-controlled; creds in DeepLake vault |
@@ -186,7 +186,7 @@ This boundary is **additive to** [Capture Opt-Out](#capture-opt-out): `HONEYCOMB
 
 | Data type | Where stored | At rest | In transit | Access scope |
 |---|---|---|---|---|
-| Access token | `~/.honeycomb/credentials.json` | Plaintext; mode 0600 | Bearer header, daemon to backend over TLS | OS user only |
+| Access token | `~/.deeplake/credentials.json` | Plaintext; mode 0600 | Bearer header, daemon to backend over TLS | OS user only |
 | Secrets (key/value material) | Secrets subsystem via daemon | Encrypted; decrypted in daemon on demand | TLS | Scoped per [`secrets.md`](secrets.md) |
 | Session traces (prompts, tool calls, responses) | DeepLake org/workspace partition | AES-256 | TLS | All members of the org workspace |
 | Codified skills (`SKILL.md`) | Project directory + DeepLake | Plaintext files + AES-256 | TLS | Org workspace members |
