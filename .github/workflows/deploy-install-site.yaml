@@ -32,10 +32,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
+        with:
+          # This job only builds + deploys to Cloudflare; it never pushes back to the repo,
+          # so don't persist the GITHUB_TOKEN into the checkout (artipacked hardening).
+          persist-credentials: false
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.4.0
         with:
           node-version: "22"
 
@@ -43,7 +47,7 @@ jobs:
         run: node site/install/build.mjs
 
       - name: Deploy to Cloudflare Pages (production)
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@v3.15.0
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: 893c7bdc0782f11d23ebd2da8926c132
