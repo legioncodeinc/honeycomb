@@ -22,10 +22,10 @@ daemon**. Split per AC:
 | a-AC-2 | 047a | Weight sweep changes operator weights | live | retrieval | ✅ VERIFIED |
 | a-AC-3 | 047a | Decision recorded (keep RRF) + re-run | doc | retrieval | ✅ VERIFIED |
 | a-AC-4 | 047a | No live-engine regression; gates green | det | retrieval | ✅ VERIFIED |
-| f-AC-1 | 047f | Golden set carries graded `relevance` where meaningful | data | retrieval | OPEN |
-| f-AC-2 | 047f | `gateAgainstBaseline` enforces nDCG@10 floor; baseline schema gains `ndcg` | det | retrieval | OPEN |
-| f-AC-3 | 047f | Live poll-convergent run re-commits graded baseline (`placeholder:false`) | live | orch+retrieval | OPEN |
-| f-AC-4 | 047f | Gates green; no secret/PII in graded set (grep-proven) | det | retrieval | OPEN |
+| f-AC-1 | 047f | Golden set carries graded `relevance` where meaningful | data | retrieval | ✅ DONE (36 pairs graded 1–3) |
+| f-AC-2 | 047f | `gateAgainstBaseline` enforces nDCG@10 floor; baseline schema gains `ndcg` | det | retrieval | ✅ DONE (golden.ts:255/271/294/321; hand-computed tests) |
+| f-AC-3 | 047f | Live poll-convergent run re-commits graded baseline (`placeholder:false`) | live | orch+retrieval | ✅ DONE (live nDCG@10=0.596 → floor 0.50 committed) |
+| f-AC-4 | 047f | Gates green; no secret/PII in graded set (grep-proven) | det | retrieval | ✅ DONE (npm run ci green; synthetic set) |
 | b-AC-1 | 047b | `embedding-cosine` reranks fused top-N; `none` leaves RRF order | det | retrieval | OPEN |
 | b-AC-2 | 047b | Rerank timeout → keep prior (RRF) order | det | retrieval | OPEN |
 | b-AC-3 | 047b | Eval: rerank holds recall@5, no nDCG/MRR drop below baseline−ε (ideally lift) | live | orch+retrieval | OPEN |

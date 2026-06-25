@@ -240,20 +240,34 @@ export async function runEval(
  */
 export const EPSILON = 0.05;
 
-/** The committed baseline the gate enforces: the `recall@5` / `MRR` floor. */
+/** The committed baseline the gate enforces: the `recall@5` / `MRR` / `nDCG@10` floor. */
 export interface RecallBaseline {
 	/** The committed recall@5 baseline (the floor minus EPSILON). */
 	readonly recallAt5: number;
 	/** The committed MRR baseline (the floor minus EPSILON). */
 	readonly mrr: number;
+	/**
+	 * The committed nDCG@10 baseline (the floor minus EPSILON), or `null` when the nDCG
+	 * number has NOT yet been measured against the graded golden set (PRD-047f f-AC-3 is the
+	 * orchestrator's live run). A `null` nDCG is PLACEHOLDER-TOLERANT: the nDCG arm of the
+	 * gate is advisory (never fails the run) until the measured number lands, EVEN WHEN the
+	 * recall@5 / MRR numbers are already enforced (`placeholder: false`). This lets f-047f
+	 * ship the graded set + gating mechanism without blocking on a live measurement.
+	 */
+	readonly ndcg: number | null;
 	/** `true` while the numbers are the pre-Wave-3 placeholder (the gate is advisory, not enforced). */
 	readonly placeholder: boolean;
 }
 
-/** The zod shape of `eval/recall-baseline.json`. */
+/**
+ * The zod shape of `eval/recall-baseline.json`. `ndcg` is `number | null` and OPTIONAL:
+ * absent or `null` both mean "nDCG not yet measured" → the nDCG arm of the gate is advisory.
+ * Keys beginning `//` in the JSON are documentation comments, ignored by zod.
+ */
 const BaselineFileSchema = z.object({
 	recallAt5: z.number().min(0).max(1),
 	mrr: z.number().min(0).max(1),
+	ndcg: z.number().min(0).max(1).nullable().optional().default(null),
 	placeholder: z.boolean(),
 });
 
@@ -270,16 +284,23 @@ export function loadBaseline(jsonText: string): RecallBaseline {
 
 /** The verdict of the baseline gate: pass/fail + the per-metric detail. */
 export interface GateVerdict {
-	/** `true` iff both metrics cleared `baseline − EPSILON` (or the baseline is a placeholder). */
+	/** `true` iff every enforced metric cleared `baseline − EPSILON` (or the baseline is a placeholder). */
 	readonly passed: boolean;
 	/** The recall@5 measured this run. */
 	readonly recallAt5: number;
 	/** The MRR measured this run. */
 	readonly mrr: number;
+	/** The nDCG@10 measured this run. */
+	readonly ndcg: number;
 	/** The recall@5 floor (`baseline.recallAt5 − EPSILON`). */
 	readonly recallAt5Floor: number;
 	/** The MRR floor (`baseline.mrr − EPSILON`). */
 	readonly mrrFloor: number;
+	/**
+	 * The nDCG@10 floor (`baseline.ndcg − EPSILON`), or `null` when the baseline nDCG is
+	 * not yet measured (`baseline.ndcg === null`) — i.e. the nDCG arm is advisory.
+	 */
+	readonly ndcgFloor: number | null;
 	/** `true` when the baseline is the placeholder → the gate is ADVISORY (never fails the run). */
 	readonly advisory: boolean;
 	/** Human-readable reasons for a failure (empty on pass). */
@@ -287,17 +308,23 @@ export interface GateVerdict {
 }
 
 /**
- * Gate a run's aggregate metrics against the committed baseline (AC-6). Both `recall@5`
- * and `MRR` must be `≥ baseline − EPSILON`. When the baseline is the pre-Wave-3
- * PLACEHOLDER, the gate is ADVISORY: it computes the verdict + reasons but `passed` is
- * forced `true`, so the harness reports the comparison without failing a run before the
- * real baseline is committed. Once Wave 3 sets `placeholder: false`, the gate enforces.
+ * Gate a run's aggregate metrics against the committed baseline (AC-6 + PRD-047f f-AC-2).
+ * `recall@5`, `MRR`, and `nDCG@10` must each be `≥ baseline − EPSILON`. Two independent
+ * advisory short-circuits:
+ *   - When the baseline is the pre-Wave-3 PLACEHOLDER (`placeholder: true`), the WHOLE gate
+ *     is advisory: it computes the verdict + reasons but `passed` is forced `true`.
+ *   - When `baseline.ndcg === null` (nDCG not yet measured — PRD-047f f-AC-3 is a later live
+ *     run), only the nDCG ARM is advisory: its reason is still reported but it never fails the
+ *     run, while recall@5 / MRR stay ENFORCED. This is the placeholder-tolerant nDCG floor:
+ *     the gating mechanism ships now; the orchestrator drops in the measured number later.
  */
 export function gateAgainstBaseline(metrics: AggregateMetrics, baseline: RecallBaseline): GateVerdict {
 	const recallAt5 = metrics.recallAtK["5"] ?? 0;
 	const mrr = metrics.mrr;
+	const ndcg = metrics.ndcg;
 	const recallAt5Floor = baseline.recallAt5 - EPSILON;
 	const mrrFloor = baseline.mrr - EPSILON;
+	const ndcgFloor = baseline.ndcg === null ? null : baseline.ndcg - EPSILON;
 
 	const reasons: string[] = [];
 	if (recallAt5 < recallAt5Floor) {
@@ -306,15 +333,25 @@ export function gateAgainstBaseline(metrics: AggregateMetrics, baseline: RecallB
 	if (mrr < mrrFloor) {
 		reasons.push(`MRR ${mrr.toFixed(4)} < floor ${mrrFloor.toFixed(4)} (baseline ${baseline.mrr} − ε ${EPSILON})`);
 	}
+	// nDCG is enforced only once a real (non-null) baseline number is committed; an unmeasured
+	// (null) nDCG baseline keeps this arm advisory even when recall@5 / MRR are enforced.
+	const ndcgAdvisory = ndcgFloor === null;
+	if (ndcgFloor !== null && ndcg < ndcgFloor) {
+		reasons.push(`nDCG@10 ${ndcg.toFixed(4)} < floor ${ndcgFloor.toFixed(4)} (baseline ${baseline.ndcg} − ε ${EPSILON})`);
+	}
 
-	const enforcedPass = reasons.length === 0;
+	// The nDCG arm, when advisory, must not contribute to the enforced pass/fail decision.
+	const blockingReasons = reasons.filter((r) => !(ndcgAdvisory && r.startsWith("nDCG@10")));
+	const enforcedPass = blockingReasons.length === 0;
 	return {
 		// Placeholder baseline → advisory: never fail the run on placeholder numbers.
 		passed: baseline.placeholder ? true : enforcedPass,
 		recallAt5,
 		mrr,
+		ndcg,
 		recallAt5Floor,
 		mrrFloor,
+		ndcgFloor,
 		advisory: baseline.placeholder,
 		reasons,
 	};
