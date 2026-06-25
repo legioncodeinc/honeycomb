@@ -80,14 +80,24 @@ re-confirmed to **still exist** in current code.
 |---|---|---|
 | 047a native hybrid | ✅ **Closed with a measured NO** | Live A/B proved `deeplake_hybrid_record` returns degenerate constant-zero scores (recall@5 0.14 vs RRF 0.72–0.78). Keep RRF. `memories/hybrid-recall.ts` kept as **unwired** reference (bench-only); vendor report filed. |
 | 047f graded nDCG eval | ✅ **Implemented + wired** | `eval/metrics.ts:108-150` computes nDCG; `eval/golden.ts` `runEval` reports nDCG@10; graded-relevance schema live (golden set still binary). |
-| 047b reranker | ⏳ **Backlog (not built)** | config knob in `recall/config.ts:69-73`, never called from `recall.ts`. |
-| 047c semantic dedup | ⏳ **Backlog (not built)** | recall still dedups by `source+id` only (`recall.ts` `fuseHits` / `fusionKey:322`); semantic seam lives in `summaries/prime-digest.ts` (different module). |
-| 047d recency dampening | ⏳ **Backlog (not built)** | config stub `recall/config.ts:75-85`; no age-decay on the fused score. |
-| 047e token-budget + MMR | ❌ **Backlog (not started)** | recall is fixed top-k (`recall.ts:570-571`); no MMR / token budget. |
+| 047b reranker | ✅ **Built (later 2026-06-24)** | `rerankHits` in `recall.ts`; default `none` (measured ~0 lift). See update below. |
+| 047c semantic dedup | ✅ **Built (later 2026-06-24)** | `dedupHits` in `recall.ts`, default on. See update below. |
+| 047d recency dampening | ✅ **Built (later 2026-06-24)** | `applyRecencyDampening`, default off-equivalent. See update below. |
+| 047e token-budget + MMR | ✅ **Built (later 2026-06-24)** | `selectWithinTokenBudget`, opt-in. See update below. |
 
-### Why 047b–047d aren't wired in (root cause, code-validated)
+> **UPDATE (later 2026-06-24): 047b–047e are now BUILT.** This SOTU was written in the morning; a
+> `/the-smoker` run later the same day drove PRD-047 to completion (W0 047f → W1 047b → W2 047c →
+> W3 047d → W4 047e), with an `EXECUTION_LEDGER-prd-047.md`, security + quality close-out (QA PASS,
+> 31/31 ACs), and PR #97. The "why they aren't wired" analysis below was accurate **at the time of
+> the original audit** and is retained as the pre-smoker snapshot — read it as history, not current
+> state. Net change vs the snapshot: the reranker/dedup/recency/MMR stages are wired into `recall.ts`
+> behind honest defaults (rerank `none` after a measured ~0 lift; dedup on; recency off-equivalent;
+> MMR opt-in), and the config knobs are no longer orphaned. 047a was also re-tested (operator fixed →
+> parity; still keep RRF).
 
-Two distinct facts:
+### Why 047b–047d weren't wired in — as of the original morning audit (root cause, code-validated)
+
+> Historical snapshot — superseded by the UPDATE above. Two distinct facts at the time:
 
 1. **They were never built — they are `backlog` sub-PRDs inside an in-work parent.** Each of
    047b/c/d/e carries `Status: backlog` in its own header. Only **Wave 0** of PRD-047 has

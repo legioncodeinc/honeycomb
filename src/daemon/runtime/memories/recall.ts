@@ -406,10 +406,11 @@ export interface MemoryRecallDeps {
 	readonly recallMode?: RecallMode;
 	/**
 	 * The reranker config (PRD-047b / D-4). When ABSENT, recall applies the DEFAULT
-	 * strategy ({@link DEFAULT_RERANKER} = `embedding-cosine`) with the default window
-	 * + timeout — so the LIVE route and the eval measure the reranker ON by default
-	 * without any caller change. A caller passes `{ strategy: "none" }` for the
-	 * RRF-only escape hatch, or an explicit config to tune `window` / `timeoutMs`.
+	 * strategy ({@link DEFAULT_RERANKER} = `none`) — so absence of config means RRF-only
+	 * (NO rerank stage runs), matching the b-AC-3 measured ~0 lift default. A caller
+	 * passes an explicit `{ strategy: "embedding-cosine", window, timeoutMs }` to ACTIVATE
+	 * the cosine rerank (the LIVE route / eval opt in this way and tune `window` /
+	 * `timeoutMs`); `{ strategy: "none" }` is the explicit RRF-only form.
 	 *
 	 * The rerank runs AFTER {@link fuseHits}, re-scores the fused top-`window`
 	 * candidates by cosine(query vector, candidate embedding), and reorders. It runs
@@ -817,29 +818,40 @@ async function rerankHits(
 		// pre-rerank order, never a partial/blank reorder (b-AC-2).
 		if (now() - start > config.timeoutMs) return rrfOrder;
 
-		// Score each head candidate by cosine; a candidate with no usable embedding falls
-		// back to a rank-proxy score so it slots by its RRF position, never leapfrogging.
+		// Score each head candidate by cosine; a candidate with no usable embedding is
+		// un-scored (`null`) and will NOT move — it keeps its exact RRF slot.
 		const scored = head.map((hit, index) => {
 			const vec = embByKey.get(fusionKey(hit.source, hit.id));
 			const cos = vec === undefined ? null : cosineSimilarity(queryVector, vec);
 			return { hit, index, rerankScore: cos };
 		});
 
-		// Stable sort: cosine-scored candidates by score DESC; an un-scored candidate sorts
-		// by its original RRF index (kept relative order). A scored candidate outranks an
-		// un-scored one only when its cosine beats the un-scored peer's implied position —
-		// to keep the reorder CONSERVATIVE (never worse-than-RRF for a missing embedding),
-		// un-scored candidates retain their original index slot via a stable comparator.
-		scored.sort((a, b) => {
-			if (a.rerankScore !== null && b.rerankScore !== null) {
-				if (b.rerankScore !== a.rerankScore) return b.rerankScore - a.rerankScore;
+		// A single `.sort` with a mixed (cosine-vs-index) rule is NON-TRANSITIVE when scored
+		// and un-scored candidates interleave (it can cycle C<A<B<C), making the head order
+		// implementation-dependent. Instead build a TOTAL ORDER by construction:
+		//   1. take the cosine-scored candidates, ordered by score DESC (tie → original index);
+		//   2. leave un-scored candidates FIXED in their original slots;
+		//   3. write the cosine-ordered candidates back into the slots the scored candidates
+		//      originally occupied, in order.
+		// Un-scored candidates never move (conservative: never worse-than-RRF for a missing
+		// embedding); scored candidates reorder only among their own slots. Deterministic and
+		// transitive — the result is identical across runs for the same input.
+		const scoredSlots = scored
+			.filter((s) => s.rerankScore !== null)
+			.map((s) => s.index);
+		const scoredByCosine = scored
+			.filter((s) => s.rerankScore !== null)
+			.sort((a, b) => {
+				if (b.rerankScore! !== a.rerankScore!) return b.rerankScore! - a.rerankScore!;
 				return a.index - b.index; // tie → original RRF order (stable).
-			}
-			// At least one is un-scored → preserve original RRF order between them.
-			return a.index - b.index;
+			});
+
+		const reorderedHead = head.slice();
+		scoredSlots.forEach((slot, i) => {
+			reorderedHead[slot] = scoredByCosine[i]!.hit;
 		});
 
-		return [...scored.map((s) => s.hit), ...tail];
+		return [...reorderedHead, ...tail];
 	} catch {
 		// Any failure in the fetch/score path degrades to the RRF order, never a throw (b-AC-4).
 		return rrfOrder;

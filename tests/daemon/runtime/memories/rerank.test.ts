@@ -151,15 +151,25 @@ describe("PRD-047b b-AC-1 — embedding-cosine rerank reorders the fused top-N b
 			embeddings: { memories: [embRow("b", unitVector(0))] },
 		});
 
+		// Activate the cosine rerank explicitly (default is `none`); without this the stage
+		// never runs and the no-embedding path is not exercised.
 		const result = await recallMemories(
 			{ query: "anything", scope: SCOPE, limit: 10 },
-			{ storage, embed: fakeEmbed(QUERY_VECTOR) },
+			{ storage, embed: fakeEmbed(QUERY_VECTOR), reranker: { strategy: "embedding-cosine", timeoutMs: 300, window: 50 } },
 		);
 
-		// No throw; all three survive; a/c keep their relative RRF order (stable comparator).
+		// No throw; all three survive. The un-scored candidates (`a`, `c`) keep their EXACT
+		// RRF slots and the only scored candidate (`b`) stays in its slot — a TOTAL-ORDER
+		// rerank produces a deterministic, stable head with no cycle (guards FIX-1).
 		const ids = result.hits.map((h) => h.id);
-		expect(ids).toHaveLength(3);
-		expect(ids.indexOf("a")).toBeLessThan(ids.indexOf("c"));
+		expect(ids).toEqual(["a", "b", "c"]);
+
+		// Determinism: the same input yields the identical head across repeated runs.
+		const again = await recallMemories(
+			{ query: "anything", scope: SCOPE, limit: 10 },
+			{ storage, embed: fakeEmbed(QUERY_VECTOR), reranker: { strategy: "embedding-cosine", timeoutMs: 300, window: 50 } },
+		);
+		expect(again.hits.map((h) => h.id)).toEqual(["a", "b", "c"]);
 	});
 
 	it("strategy `none` leaves the RRF order UNTOUCHED and issues NO rerank fetch", async () => {
@@ -294,9 +304,17 @@ describe("PRD-047b b-AC-4 — no-vector skip + rerank fail-soft keep the RRF ord
 			failRerankFetch: true, // the embedding column fetch errors.
 		});
 
+		// Activate the cosine rerank explicitly (default is `none`) so `failRerankFetch`
+		// trips the RERANK batch-fetch, not just the dedup fetch; dedup OFF isolates the
+		// rerank fail-soft path. Without this the rerank stage never runs.
 		const result = await recallMemories(
 			{ query: "anything", scope: SCOPE, limit: 10 },
-			{ storage, embed: fakeEmbed(QUERY_VECTOR) },
+			{
+				storage,
+				embed: fakeEmbed(QUERY_VECTOR),
+				reranker: { strategy: "embedding-cosine", timeoutMs: 300, window: 50 },
+				dedup: { enabled: false, similarityThreshold: 0.9 },
+			},
 		);
 
 		// A failed fetch contributes no embeddings → every candidate keeps RRF position.
