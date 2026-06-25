@@ -92,6 +92,12 @@ export async function runSessionStart(input: HookInput, deps: SessionStartDeps):
 	// Step 7: pull team/org skills. Fail-soft.
 	await safeVoid(() => seams.autoPullSkills(credential));
 
+	// Step 7b (PRD-033 R-1): pull team/org synced ASSETS and install them in-process. Unlike
+	// the skills pull (a fire-and-forget daemon POST), this runs the thin-client install locally
+	// (the daemon returns rows; this client writes the files). Idempotent + fail-soft + bounded by
+	// the assets thin client's own 5s budget. Ordered right after the skills pull, before graph-pull.
+	await safeVoid(() => seams.autoPullAssets(credential));
+
 	// Step 8: spawn the detached graph-pull worker (fire-and-forget). Fail-soft.
 	await safeVoid(() => seams.spawnGraphPull(meta));
 

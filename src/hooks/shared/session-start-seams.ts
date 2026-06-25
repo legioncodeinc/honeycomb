@@ -30,17 +30,38 @@
  *     We do not pre-gate on auth here (the daemon is the authority) — the pull simply returns a
  *     no-op outcome and session start proceeds.
  *
- * ── Shared-seam note (PRD-033 assets) ────────────────────────────────────────
- * This wiring fixes the SAME `SessionStartDeps`-missing-`seams` defect PRD-033's asset auto-pull
- * would also need. PRD-045g wires the SKILLS step here and leaves the other five steps at their
- * no-op default; a later PRD-033 pass adds an `assets` step onto the SAME injected seams object
- * WITHOUT re-plumbing the runtime. We do not take on 033's asset work here, only avoid blocking it.
+ * ── ASSETS auto-pull (PRD-033 R-1) — the SECOND real step on this seam ────────
+ * PRD-045g wired the SKILLS step (a fire-and-forget daemon POST). PRD-033 R-1 now adds the
+ * `autoPullAssets` step onto the SAME injected seams object WITHOUT re-plumbing the runtime — the
+ * runtime already constructs this factory with `{ credentials, host, port, fetch }`, so the new
+ * step flows through for free. The asset pull is DIFFERENT in shape from the skills pull: it runs
+ * the THIN-CLIENT install IN-PROCESS (`daemon-client/assets`'s `autoPull` → `pullAndInstall`). The
+ * daemon only returns rows over loopback (`POST /api/assets/pull`); THIS client writes the native
+ * artifacts to disk. The same discipline holds — kill-switch (`HONEYCOMB_ASSET_AUTOPULL_DISABLED`),
+ * fully fail-soft (ANY error swallowed → resolves void), and time-budgeted (the thin client's own
+ * 5s budget; we add NO second timeout). The tenancy scope is built from the credential
+ * (org/workspace/author) + this machine's stable device id (`~/.honeycomb/device.json`).
  */
 
+import {
+	type AssetAutoPullDeps,
+	type AssetScope,
+	ASSET_AUTOPULL_DISABLED_ENV,
+	autoPull as autoPullAssetsThinClient,
+	createDefaultHarnessRoots,
+	createLoopbackAssetSyncApi,
+} from "../../daemon-client/assets/index.js";
 import {
 	AUTOPULL_DISABLED_ENV,
 	AUTOPULL_TIMEOUT_MS,
 } from "../../daemon-client/skillify/index.js";
+import { createLoopbackDaemonClient } from "../../commands/contracts.js";
+// `loadOrCreateDevice` is imported from the PURE device module (NOT the assets barrel
+// `daemon/runtime/assets/index.js`, which re-exports the storage-laden `sync.js`/`api.js`).
+// `device.js` itself imports only node builtins (crypto/fs/os/path), so this deep import keeps
+// the thin-client invariant: `src/hooks` stays free of any `daemon/storage` path, statically AND
+// at bundle time (esbuild never pulls the storage client in through this leaf). See D-6.
+import { type DeviceRecord, loadOrCreateDevice } from "../../daemon/runtime/assets/device.js";
 import { DAEMON_HOST, DAEMON_PORT } from "../../shared/constants.js";
 import {
 	type CredentialReader,
@@ -76,6 +97,12 @@ export interface SessionStartSeamsOptions {
 	readonly env?: NodeJS.ProcessEnv;
 	/** The auto-pull time budget in ms (default {@link AUTOPULL_TIMEOUT_MS}). */
 	readonly timeoutMs?: number;
+	/**
+	 * Resolve this machine's stable device record for the asset-pull scope (default
+	 * {@link loadOrCreateDevice}, which reads/mints `~/.honeycomb/device.json`). Injected so the
+	 * asset auto-pull test drives the device id deterministically WITHOUT touching the real home.
+	 */
+	readonly loadDevice?: () => DeviceRecord;
 }
 
 /**
@@ -93,6 +120,7 @@ export function createSessionStartSeams(options: SessionStartSeamsOptions): Sess
 	const doFetch = options.fetch ?? fetch;
 	const env = options.env ?? process.env;
 	const timeoutMs = options.timeoutMs ?? AUTOPULL_TIMEOUT_MS;
+	const loadDevice = options.loadDevice ?? loadOrCreateDevice;
 	const url = `http://${host}:${port}${SKILLS_PULL_ENDPOINT}`;
 
 	return {
@@ -112,7 +140,68 @@ export function createSessionStartSeams(options: SessionStartSeamsOptions): Sess
 			if (env[AUTOPULL_DISABLED_ENV] === "1") return;
 			await autoPullViaLoopback({ url, doFetch, cred, timeoutMs });
 		},
+
+		// Step 7b (PRD-033 R-1): pull + install team/org synced ASSETS in-process. Runs the
+		// assets THIN-CLIENT `autoPull` (the daemon returns rows over loopback; this client writes
+		// the files). Idempotent + fail-soft + time-budgeted by the thin client itself (its own 5s
+		// budget — we add NO second timeout). The kill switch + scope are resolved here; ANY error
+		// is swallowed so session start is NEVER blocked (FR-10).
+		async autoPullAssets(cred: HookCredential | undefined): Promise<void> {
+			try {
+				// Kill switch (the SAME env the assets thin client honors). Checked here too so a
+				// disabled pull never even constructs the loopback client / reads the device file.
+				if (env[ASSET_AUTOPULL_DISABLED_ENV] === "1") return;
+				const deps = buildAssetAutoPullDeps({ cred, host, port, doFetch, loadDevice });
+				await autoPullAssetsThinClient(deps);
+			} catch {
+				// Device read, client construction, or pull — ANY failure is swallowed. The thin
+				// client's `autoPull` is already fail-soft; this outer guard covers the wiring too.
+			}
+		},
 	};
+}
+
+/** The wiring a {@link buildAssetAutoPullDeps} resolves the asset auto-pull from. */
+interface AssetAutoPullWiring {
+	readonly cred: HookCredential | undefined;
+	readonly host: string;
+	readonly port: number;
+	readonly doFetch: typeof fetch;
+	readonly loadDevice: () => DeviceRecord;
+}
+
+/**
+ * Assemble the {@link AssetAutoPullDeps} the assets thin-client `autoPull` runs against: the
+ * loopback {@link createLoopbackAssetSyncApi} over a credential-stamped {@link createLoopbackDaemonClient}
+ * (the ONLY path to `synced_assets`, D-6), the default per-harness install roots, and the pull
+ * scope built from the credential + this machine's stable device id. No timeout is set — the thin
+ * client applies its own 5s budget; setting one here would double-bound it.
+ */
+function buildAssetAutoPullDeps(wiring: AssetAutoPullWiring): AssetAutoPullDeps {
+	const daemon = createLoopbackDaemonClient({
+		baseUrl: `http://${wiring.host}:${wiring.port}`,
+		headers: tenancyHeaders(wiring.cred),
+		fetchImpl: wiring.doFetch,
+	});
+	return {
+		api: createLoopbackAssetSyncApi(daemon),
+		roots: createDefaultHarnessRoots(),
+		scope: buildAssetScope(wiring.cred, wiring.loadDevice),
+	};
+}
+
+/**
+ * Build the {@link AssetScope} the asset pull is scoped by — org/workspace bound the Team radius,
+ * author + the stable device id bound the Device radius. Prefer the credential's resolved tenancy;
+ * fall back to the same `local`/`default` sentinels the CLI's `resolveScope` uses for a loopback,
+ * single-tenant local pull. The device id is read from (or minted into) `~/.honeycomb/device.json`.
+ */
+function buildAssetScope(cred: HookCredential | undefined, loadDevice: () => DeviceRecord): AssetScope {
+	const device = loadDevice();
+	const org = cred?.org !== undefined && cred.org.length > 0 ? cred.org : "local";
+	const workspace = cred?.workspace !== undefined && cred.workspace.length > 0 ? cred.workspace : DEFAULT_WORKSPACE;
+	const author = cred?.actor !== undefined && cred.actor.length > 0 ? cred.actor : device.label;
+	return { org, workspace, author, deviceId: device.device_id };
 }
 
 /** The args {@link autoPullViaLoopback} runs against (kept small so the call site reads clean). */
