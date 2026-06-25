@@ -72,6 +72,11 @@ async function main() {
   //     nosniff rules on /install.sh|/install.ps1|/SHA256SUMS would never publish.
   await copyFile(join(__dirname, '_headers'), join(DIST_DIR, '_headers'));
 
+  // 2c) Copy the canonical brand favicon from the shared logo set (single source of truth — same
+  //     asset the dashboard uses). The inspect page references /favicon.svg; the page MARK is the
+  //     real honeycomb-mark.svg inlined in the template.
+  await copyFile(join(REPO_ROOT, 'assets', 'logos', 'favicon.svg'), join(DIST_DIR, 'favicon.svg'));
+
   // 3) Render index.html from the template, injecting live values.
   const template = await readFile(TEMPLATE, 'utf8');
   const html = template
@@ -90,6 +95,7 @@ async function main() {
   console.log('  install.ps1  ', sums['install.ps1']);
   console.log('  SHA256SUMS   written');
   console.log('  _headers     copied');
+  console.log('  favicon.svg  copied');
   console.log('  index.html   rendered');
 }
 
