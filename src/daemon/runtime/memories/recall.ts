@@ -68,10 +68,12 @@ import { cosineSimilarity, EMBEDDING_DIMS, type ScoredId, vectorSearch } from ".
 import {
 	DEFAULT_DEDUP_ENABLED,
 	DEFAULT_DEDUP_SIMILARITY_THRESHOLD,
+	DEFAULT_RECENCY_HALF_LIFE_DAYS,
 	DEFAULT_RERANKER,
 	DEFAULT_RERANKER_TIMEOUT_MS,
 	DEFAULT_RERANKER_WINDOW,
 	type DedupConfig,
+	type RecencyConfig,
 	type RerankerConfig,
 } from "../recall/config.js";
 import type { EmbedClient } from "../services/embed-client.js";
@@ -157,6 +159,15 @@ export interface MemoryRecallHit {
 	 * distilled `memory` hit. The surface renders `secondary` hits demoted, never dropped.
 	 */
 	readonly secondary: boolean;
+	/**
+	 * The row's creation/version timestamp as stored (PRD-047d): `memories.created_at`,
+	 * `memory.creation_date`, or `sessions.creation_date` — an ISO-8601 string already on
+	 * the row (no new column). Carried so the recency dampener ({@link applyRecencyDampening})
+	 * can multiply the fused score by an age-decay. `""` (or any unparseable value) means
+	 * "no usable timestamp" → the dampener applies `decay = 1` (no penalty), never an error
+	 * (d-AC-3).
+	 */
+	readonly createdAt: string;
 }
 
 /** The result of a recall: the surfaced hits, the arms that produced them, and the fallback flag. */
@@ -199,9 +210,12 @@ export function buildMemoriesArmSql(term: string, perArmLimit: number): string {
 	const idCol = sqlIdent("id");
 	const contentCol = sqlIdent("content");
 	const isDeletedCol = sqlIdent("is_deleted");
+	// PRD-047d: project the row's creation timestamp (already on the table) so the
+	// recency dampener can age-decay the fused score — no new column.
+	const createdAtCol = sqlIdent("created_at");
 	const perArm = Math.max(1, Math.trunc(perArmLimit));
 	return (
-		`SELECT 'memories' AS source, ${idCol} AS id, ${contentCol}::text AS text ` +
+		`SELECT 'memories' AS source, ${idCol} AS id, ${contentCol}::text AS text, ${createdAtCol}::text AS created_at ` +
 		`FROM "${memoriesTbl}" ` +
 		`WHERE ${contentCol}::text ILIKE ${pattern} AND ${isDeletedCol} = 0 ` +
 		`LIMIT ${perArm}`
@@ -217,9 +231,12 @@ export function buildMemoryArmSql(term: string, perArmLimit: number): string {
 	const memoryTbl = sqlIdent("memory");
 	const pathCol = sqlIdent("path");
 	const summaryCol = sqlIdent("summary");
+	// PRD-047d: the `memory` (summaries) table stamps `creation_date`; alias it to the
+	// uniform `created_at` projection the dampener reads (no new column).
+	const createdAtCol = sqlIdent("creation_date");
 	const perArm = Math.max(1, Math.trunc(perArmLimit));
 	return (
-		`SELECT 'memory' AS source, ${pathCol} AS id, ${summaryCol}::text AS text ` +
+		`SELECT 'memory' AS source, ${pathCol} AS id, ${summaryCol}::text AS text, ${createdAtCol}::text AS created_at ` +
 		`FROM "${memoryTbl}" ` +
 		`WHERE ${summaryCol}::text ILIKE ${pattern} ` +
 		`LIMIT ${perArm}`
@@ -235,9 +252,12 @@ export function buildSessionsArmSql(term: string, perArmLimit: number): string {
 	const sessionsTbl = sqlIdent("sessions");
 	const pathCol = sqlIdent("path");
 	const messageCol = sqlIdent("message");
+	// PRD-047d: the `sessions` table stamps `creation_date`; alias it to the uniform
+	// `created_at` projection the dampener reads (no new column).
+	const createdAtCol = sqlIdent("creation_date");
 	const perArm = Math.max(1, Math.trunc(perArmLimit));
 	return (
-		`SELECT 'sessions' AS source, ${pathCol} AS id, ${messageCol}::text AS text ` +
+		`SELECT 'sessions' AS source, ${pathCol} AS id, ${messageCol}::text AS text, ${createdAtCol}::text AS created_at ` +
 		`FROM "${sessionsTbl}" ` +
 		`WHERE ${messageCol}::text ILIKE ${pattern} ` +
 		`LIMIT ${perArm}`
@@ -272,10 +292,18 @@ function fuseHits(arms: readonly RankedArm[], limit: number): { hits: MemoryReca
 			const docKey = fusionKey(entry.source, entry.id);
 			const existing = docs.get(docKey);
 			if (existing === undefined) {
-				docs.set(docKey, { source: entry.source, id: entry.id, text: entry.text, score: contribution });
+				docs.set(docKey, {
+					source: entry.source,
+					id: entry.id,
+					text: entry.text,
+					score: contribution,
+					createdAt: entry.createdAt,
+				});
 			} else {
 				existing.score += contribution; // corroboration across arms accumulates.
 				if (existing.text === "" && entry.text !== "") existing.text = entry.text;
+				// PRD-047d: take the first non-empty timestamp seen across the corroborating arms.
+				if (existing.createdAt === "" && entry.createdAt !== "") existing.createdAt = entry.createdAt;
 			}
 		});
 	}
@@ -300,6 +328,7 @@ function fuseHits(arms: readonly RankedArm[], limit: number): { hits: MemoryReca
 			score: doc.score,
 			kind,
 			secondary: kind === "session",
+			createdAt: doc.createdAt, // PRD-047d: carried for the recency dampener.
 		});
 		sourceSet.add(doc.source);
 	}
@@ -311,6 +340,8 @@ interface RankedArmEntry {
 	readonly source: RecallSource;
 	readonly id: string;
 	readonly text: string;
+	/** The row's creation timestamp (ISO, PRD-047d); `""` when the arm carries none. */
+	readonly createdAt: string;
 }
 
 /** A single arm's ranked list (1-based rank = array index + 1). */
@@ -324,6 +355,8 @@ interface FusedDoc {
 	id: string;
 	text: string;
 	score: number;
+	/** The row's creation timestamp (ISO, PRD-047d); first non-empty across arms wins. */
+	createdAt: string;
 }
 
 /** The fusion identity for a doc: `source+id` (cross-arm dedup key, AC-3). */
@@ -337,6 +370,7 @@ function rowsToRankedArm(rows: readonly StorageRow[]): RankedArm {
 		source: readSource(row.source),
 		id: cell(row.id),
 		text: cell(row.text),
+		createdAt: cell(row.created_at), // PRD-047d: the projected creation timestamp (or "").
 	}));
 	return { entries };
 }
@@ -406,6 +440,20 @@ export interface MemoryRecallDeps {
 	 * (c-AC-4).
 	 */
 	readonly dedup?: DedupConfig;
+	/**
+	 * The recency-dampening config (PRD-047d / d-AC-1..4). When ABSENT, the dampener runs with
+	 * its OFF-EQUIVALENT default half-life ({@link DEFAULT_RECENCY_HALF_LIFE_DAYS} = 100 years),
+	 * so the LIVE route and the eval are NEUTRAL on the age-agnostic synthetic golden set until
+	 * the eval tunes the knob (d-AC-4 — "measured before it bites"). A caller passes a short
+	 * `{ halfLifeDays }` to activate the age-decay.
+	 *
+	 * The dampener runs LAST — after {@link fuseHits}, the rerank, AND dedup — so it never
+	 * disturbs dedup's provenance-based keep-decision ({@link outranksForKeep}). It multiplies
+	 * each surviving hit's fused score by `0.5 ^ (age_days / half_life_days)` and re-orders by
+	 * the dampened score; it DEMOTES the oldest hit but never DROPS it (d-AC-2). A hit with no
+	 * usable {@link MemoryRecallHit.createdAt} gets `decay = 1` (no penalty), never a throw (d-AC-3).
+	 */
+	readonly recency?: RecencyConfig;
 }
 
 /** A recall request as it enters the adapter (the zod-validated, scoped body). */
@@ -448,6 +496,8 @@ interface SemanticArmSpec {
 	readonly embeddingColumn: string;
 	/** The text column hydrated for the hit (`content` / `message`). */
 	readonly textColumn: string;
+	/** The creation-timestamp column hydrated for the recency dampener (`created_at` / `creation_date`, PRD-047d). */
+	readonly timestampColumn: string;
 	/** Extra WHERE conjunct for the hydration SELECT (e.g. soft-delete exclusion), or "". */
 	readonly hydrateFilter: string;
 }
@@ -460,6 +510,7 @@ const SEMANTIC_ARMS: readonly SemanticArmSpec[] = [
 		idColumn: "id",
 		embeddingColumn: "content_embedding",
 		textColumn: "content",
+		timestampColumn: "created_at", // PRD-047d: `memories` stamps `created_at`.
 		// Exclude soft-deleted rows, mirroring the lexical memories arm.
 		hydrateFilter: `AND ${sqlIdent("is_deleted")} = 0`,
 	},
@@ -469,6 +520,7 @@ const SEMANTIC_ARMS: readonly SemanticArmSpec[] = [
 		idColumn: "path",
 		embeddingColumn: "message_embedding",
 		textColumn: "message",
+		timestampColumn: "creation_date", // PRD-047d: `sessions` stamps `creation_date`.
 		hydrateFilter: "",
 	},
 ];
@@ -485,11 +537,13 @@ function buildSemanticHydrateSql(spec: SemanticArmSpec, ids: readonly string[]):
 	const tbl = sqlIdent(spec.table);
 	const idCol = sqlIdent(spec.idColumn);
 	const textCol = sqlIdent(spec.textColumn);
+	// PRD-047d: hydrate the creation timestamp too, aliased to the uniform `created_at`.
+	const tsCol = sqlIdent(spec.timestampColumn);
 	const sourceLit = sLiteral(spec.source);
 	const inList = ids.map((id) => sLiteral(id)).join(", ");
 	const filterClause = spec.hydrateFilter === "" ? "" : ` ${spec.hydrateFilter}`;
 	return (
-		`SELECT ${sourceLit} AS source, ${idCol} AS id, ${textCol}::text AS text ` +
+		`SELECT ${sourceLit} AS source, ${idCol} AS id, ${textCol}::text AS text, ${tsCol}::text AS created_at ` +
 		`FROM "${tbl}" ` +
 		`WHERE ${idCol} IN (${inList})${filterClause}`
 	);
@@ -537,7 +591,11 @@ async function runSemanticArm(
 	if (ids.length === 0) return [];
 	const hydrated = await runArm(buildSemanticHydrateSql(spec, ids), request, deps);
 	const textById = new Map<string, string>();
-	for (const row of hydrated) textById.set(cell(row.id), cell(row.text));
+	const tsById = new Map<string, string>(); // PRD-047d: id → creation timestamp (ISO, or "").
+	for (const row of hydrated) {
+		textById.set(cell(row.id), cell(row.text));
+		tsById.set(cell(row.id), cell(row.created_at));
+	}
 
 	const entries: RankedArmEntry[] = [];
 	const seen = new Set<string>();
@@ -546,7 +604,7 @@ async function runSemanticArm(
 		const text = textById.get(s.id);
 		if (text === undefined) continue; // hydration miss (eventual consistency) — skip.
 		seen.add(s.id);
-		entries.push({ source: spec.source, id: s.id, text });
+		entries.push({ source: spec.source, id: s.id, text, createdAt: tsById.get(s.id) ?? "" });
 	}
 	return entries;
 }
@@ -900,6 +958,90 @@ async function dedupHits(
 	}
 }
 
+// ── PRD-047d — the recency dampening stage (multiplicative age-decay) ─────────
+
+/** Milliseconds in a day, for the age-in-days computation (PRD-047d). */
+const MS_PER_DAY = 24 * 60 * 60 * 1_000;
+
+/** Runtime floor mirroring the config clamp, so the math is safe even if a caller hand-builds a config. */
+const MIN_RECENCY_HALF_LIFE_FLOOR = 1;
+
+/**
+ * Parse a hit's stored creation timestamp into epoch ms, or `null` when it is
+ * absent/unparseable (PRD-047d / d-AC-3). The stored value is an ISO-8601 string
+ * (`memories.created_at` / `memory`+`sessions`.`creation_date`), but recall must NEVER
+ * throw on a malformed cell — an empty, whitespace, or non-date value yields `null`,
+ * which the dampener treats as "no penalty" (`decay = 1`).
+ */
+function parseCreatedAtMs(createdAt: string): number | null {
+	const trimmed = createdAt.trim();
+	if (trimmed === "") return null;
+	const ms = Date.parse(trimmed);
+	return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * The age-decay multiplier for a hit (PRD-047d): `decay = 0.5 ^ (age_days / half_life_days)`,
+ * a smooth exponential in `(0, 1]`. RULES (d-AC-1..d-AC-3):
+ *  - A hit with NO usable timestamp (`null` parse) → `decay = 1` (no penalty), never a throw.
+ *  - A FUTURE timestamp (clock skew / eventual-consistency stamp ahead of `now`) is clamped to
+ *    age 0 → `decay = 1`, so a skewed row is never BOOSTED above a present-day one.
+ *  - `half_life_days` is already floored ≥ 1 by the config clamp, so the exponent is finite and
+ *    the result never divides by zero or inverts.
+ * With the OFF-equivalent default half-life (100 years) the multiplier is ≈ 1 for every realistic
+ * row — the change is NEUTRAL until the eval tunes the knob down (d-AC-4).
+ */
+export function recencyDecay(createdAtMs: number | null, nowMs: number, halfLifeDays: number): number {
+	// d-AC-3: a missing (null) OR non-finite (NaN/±∞) timestamp → no penalty, never NaN.
+	if (createdAtMs === null || !Number.isFinite(createdAtMs)) return 1;
+	const ageDays = Math.max(0, (nowMs - createdAtMs) / MS_PER_DAY); // future → age 0 → decay 1.
+	const halfLife = Math.max(MIN_RECENCY_HALF_LIFE_FLOOR, halfLifeDays);
+	return Math.pow(0.5, ageDays / halfLife);
+}
+
+/**
+ * Apply the recency dampener to the final hit list (PRD-047d / d-AC-1, d-AC-2, d-AC-3).
+ * Each hit's fused `score` is MULTIPLIED by {@link recencyDecay} and the list is re-ordered
+ * by the dampened score DESC, with the SAME deterministic tie-breaks as {@link fuseHits}
+ * (distilled before raw, then earlier id). This is a DEMOTION, never a cutoff: every input
+ * hit is present in the output (d-AC-2) — the oldest is merely pushed down. A hit with no
+ * usable timestamp keeps its score unchanged (`decay = 1`, d-AC-3). The returned hits carry
+ * the dampened score so a downstream gate/threshold sees the age-aware value. Pure + sync —
+ * no I/O, no throw.
+ */
+export function applyRecencyDampening(
+	hits: readonly MemoryRecallHit[],
+	halfLifeDays: number,
+	nowMs: number,
+): MemoryRecallHit[] {
+	const dampened = hits.map((hit, index) => {
+		const decay = recencyDecay(parseCreatedAtMs(hit.createdAt), nowMs, halfLifeDays);
+		return {
+			hit,
+			index, // the INCOMING rank (RRF → rerank → dedup) — the authoritative order to preserve.
+			decay,
+			score: hit.score * decay,
+		};
+	});
+
+	// OFF-equivalent fast path (d-AC-4): when NO hit carries a real age penalty (every decay is
+	// ~1 — the default 100-year half-life, or no usable timestamps), the dampener is a strict
+	// NO-OP on ordering. This is what keeps it composing with rerank/dedup, whose authoritative
+	// order is encoded in POSITION, not in the (RRF) score — a blind score re-sort would undo it.
+	const anyPenalty = dampened.some((d) => d.decay < 1);
+	if (!anyPenalty) return [...hits];
+
+	// At least one hit is genuinely aged: order by the dampened (`score × decay`) value DESC,
+	// using the INCOMING index as the stable tie-break so equally-dampened hits keep their
+	// upstream (rerank/dedup) order. Never drops a hit — the oldest is demoted, not removed (d-AC-2).
+	dampened.sort((a, b) => {
+		if (b.score !== a.score) return b.score - a.score; // dampened score DESC (the age-aware order).
+		return a.index - b.index; // stable: preserve the incoming rerank/dedup/RRF order on a tie.
+	});
+	// Re-emit with the dampened score on the hit so a downstream threshold sees the age-aware value.
+	return dampened.map(({ hit, score }) => ({ ...hit, score }));
+}
+
 /**
  * Run the cross-table recall for `request.query`, scoped to `request.scope`.
  * Returns the surfaced hits, the arms that produced them, and the HONEST `degraded`
@@ -1001,5 +1143,16 @@ export async function recallMemories(
 		({ enabled: DEFAULT_DEDUP_ENABLED, similarityThreshold: DEFAULT_DEDUP_SIMILARITY_THRESHOLD } as const);
 	const deduped = await dedupHits(ranked, dedupConfig, request, deps);
 	const dedupedSources = deduped.length === ranked.length ? sources : [...new Set(deduped.map((h) => h.source))];
-	return { hits: deduped, sources: dedupedSources, degraded };
+
+	// PRD-047d: apply the recency dampener LAST — after fusion, rerank, AND dedup — so it
+	// never disturbs dedup's provenance-based keep-decision. It multiplies each surviving
+	// hit's fused score by an age-decay (`0.5 ^ age_days / half_life_days`) and re-orders by
+	// the dampened score. The half-life DEFAULTS to OFF-equivalent (100 years), so this is
+	// NEUTRAL on the age-agnostic synthetic golden set until the eval tunes it (d-AC-4). It
+	// DEMOTES the oldest hit, never DROPS it (d-AC-2); a hit with no usable timestamp gets
+	// `decay = 1` (d-AC-3). Pure + sync — no I/O, no throw.
+	const halfLifeDays = deps.recency?.halfLifeDays ?? DEFAULT_RECENCY_HALF_LIFE_DAYS;
+	const nowMs = (deps.now ?? Date.now)();
+	const dampened = applyRecencyDampening(deduped, halfLifeDays, nowMs);
+	return { hits: dampened, sources: dedupedSources, degraded };
 }

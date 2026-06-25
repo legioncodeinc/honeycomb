@@ -34,10 +34,10 @@ daemon**. Split per AC:
 | c-AC-2 | 047c | Distinct facts below threshold both survive (false-merge guard) | det | retrieval | ✅ DONE (0.85<0.9 not merged) |
 | c-AC-3 | 047c | Eval: recall@5/MRR/nDCG hold at-or-above baseline with dedup on | live | orch+retrieval | ✅ DONE — dedup on: recall@5 0.639 / MRR 0.600 / nDCG 0.609 (gate PASS). Surfaced + fixed the relevance-class/nDCG tension: nDCG made DEDUP-INVARIANT (the c-AC-3 "retire the workaround" deliverable) |
 | c-AC-4 | 047c | Provenance preserved; fallback + fail-soft intact; gates green | det | retrieval | ✅ DONE (dedup-failure → un-deduped, fail-soft) |
-| d-AC-1 | 047d | Newer wins on a relevance tie under the dampener | det | retrieval | OPEN |
-| d-AC-2 | 047d | Nothing dropped by age (demote, not cut) | det | retrieval | OPEN |
-| d-AC-3 | 047d | Missing timestamp → decay=1, no exception | det | retrieval | OPEN |
-| d-AC-4 | 047d | Eval-tuned half-life; recall@5/MRR/nDCG hold at-or-above baseline | live | orch+retrieval | OPEN |
+| d-AC-1 | 047d | Newer wins on a relevance tie under the dampener | det | retrieval | ✅ DONE (recall.ts:1012 applyRecencyDampening) |
+| d-AC-2 | 047d | Nothing dropped by age (demote, not cut) | det | retrieval | ✅ DONE (sort, never filter) |
+| d-AC-3 | 047d | Missing timestamp → decay=1, no exception | det | retrieval | ✅ DONE (recencyDecay null→1) |
+| d-AC-4 | 047d | Eval-tuned half-life; recall@5/MRR/nDCG hold at-or-above baseline | live | orch+retrieval | ✅ DONE — default half-life 100yr (off-equiv); live eval recall@5 0.639 / MRR 0.618 / nDCG 0.623 (gate PASS, neutral) |
 | e-AC-1 | 047e | Token-budget mode returns MMR-selected hits that fit the budget | det | retrieval | OPEN |
 | e-AC-2 | 047e | MMR surfaces distinct facts a pure top-k would crowd out | det | retrieval | OPEN |
 | e-AC-3 | 047e | Eval: λ tuned; recall@5/MRR/nDCG hold at-or-above baseline | live | orch+retrieval | OPEN |

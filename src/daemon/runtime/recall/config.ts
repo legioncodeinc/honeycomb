@@ -110,6 +110,26 @@ export const DEFAULT_DEDUP_ENABLED = true;
  */
 export const DEFAULT_DEDUP_SIMILARITY_THRESHOLD = 0.9;
 
+// ── PRD-047d — recency dampening (multiplicative age-decay on the fused score) ─
+/**
+ * The recency half-life in DAYS (PRD-047d / d-AC-4): the age at which a hit's fused
+ * score is multiplied by 0.5 under `decay = 0.5 ^ (age_days / half_life_days)`. A
+ * single named, eval-tunable knob (like {@link DEFAULT_RERANKER_WINDOW} / the dedup
+ * threshold), env-overridable + clamped.
+ *
+ * The DEFAULT is OFF-EQUIVALENT by design (d-AC-4): `36500` days (100 years) makes the
+ * decay multiplier ≈ 1 for every realistic row — even a year-old row is demoted by only
+ * `1 - 0.5^(365/36500) = 1 - 0.5^0.01 ≈ 0.0069` (< 0.7%), i.e. NEUTRAL on the age-agnostic
+ * synthetic golden set, so recall@5/MRR/nDCG hold at-or-above baseline BY CONSTRUCTION until
+ * the eval picks a real value ("defaulting to OFF-equivalent … so the change is measured
+ * before it bites"). A small positive half-life (e.g. 30/90 days) is the live tuning lever.
+ * `0` / negative / non-numeric is clamped UP to {@link MIN_RECENCY_HALF_LIFE_DAYS} so the
+ * dampener can never divide by zero or invert (a typo never bites; it just runs near-off).
+ */
+export const DEFAULT_RECENCY_HALF_LIFE_DAYS = 36_500;
+/** The floor for the recency half-life: a sub-1-day half-life is clamped up (no div-by-zero / inversion). */
+export const MIN_RECENCY_HALF_LIFE_DAYS = 1;
+
 // ── D-5 dampening (007d) ────────────────────────────────────────────────────
 /** Gravity dampening factor for a semantic hit sharing no query terms (D-5 / d-AC-4). */
 export const DEFAULT_GRAVITY_DAMPENING = 0.5;
@@ -163,6 +183,20 @@ function ClampedFloat(def: number, ceil = 1) {
 	}, z.number());
 }
 
+/**
+ * The recency half-life knob (PRD-047d): a float in `[min, +∞)` DAYS. A non-numeric
+ * value falls back to the default; a value below `min` is clamped UP to `min` so the
+ * decay function can never divide by zero or invert (`0`/negative → near-off, not a
+ * crash). No upper clamp — a very large half-life IS the OFF-equivalent default.
+ */
+function ClampedHalfLifeDays(def: number, min: number) {
+	return z.preprocess((raw) => {
+		const n = typeof raw === "number" ? raw : Number(raw);
+		if (!Number.isFinite(n)) return def;
+		return Math.max(min, n);
+	}, z.number());
+}
+
 /** D-3 traversal budgets, grouped so the traversal phase reads one object. */
 export const TraversalConfigSchema = z.object({
 	/** Max aspects per focal entity. */
@@ -195,6 +229,14 @@ export const DedupConfigSchema = z.object({
 	enabled: BoolFlag.default(DEFAULT_DEDUP_ENABLED),
 	/** The cosine-similarity collapse threshold in `[0,1]` (PRD-047c / c-AC-1). */
 	similarityThreshold: ClampedFloat(DEFAULT_DEDUP_SIMILARITY_THRESHOLD).default(DEFAULT_DEDUP_SIMILARITY_THRESHOLD),
+});
+
+/** PRD-047d recency config, grouped so the recall adapter reads one object. */
+export const RecencyConfigSchema = z.object({
+	/** The recency half-life in DAYS (PRD-047d / d-AC-4); OFF-equivalent by default. */
+	halfLifeDays: ClampedHalfLifeDays(DEFAULT_RECENCY_HALF_LIFE_DAYS, MIN_RECENCY_HALF_LIFE_DAYS).default(
+		DEFAULT_RECENCY_HALF_LIFE_DAYS,
+	),
 });
 
 /** D-5 dampening/boost factors, grouped so the shaping phase reads one object. */
@@ -236,6 +278,8 @@ export const RecallConfigSchema = z.object({
 	dampening: DampeningConfigSchema.default(() => DampeningConfigSchema.parse({})),
 	/** PRD-047c semantic near-duplicate dedup (ON by default). */
 	dedup: DedupConfigSchema.default(() => DedupConfigSchema.parse({})),
+	/** PRD-047d recency dampening (OFF-equivalent half-life by default). */
+	recency: RecencyConfigSchema.default(() => RecencyConfigSchema.parse({})),
 });
 
 /** The validated recall config object every phase consumes. */
@@ -248,6 +292,8 @@ export type RerankerConfig = z.infer<typeof RerankerConfigSchema>;
 export type DampeningConfig = z.infer<typeof DampeningConfigSchema>;
 /** The validated dedup sub-config (PRD-047c). */
 export type DedupConfig = z.infer<typeof DedupConfigSchema>;
+/** The validated recency sub-config (PRD-047d). */
+export type RecencyConfig = z.infer<typeof RecencyConfigSchema>;
 
 /**
  * Structured recall-config error. Carries the flattened zod issues so the daemon
@@ -305,6 +351,9 @@ export interface RawRecallConfig {
 		readonly enabled?: unknown;
 		readonly similarityThreshold?: unknown;
 	};
+	readonly recency?: {
+		readonly halfLifeDays?: unknown;
+	};
 }
 
 /**
@@ -345,6 +394,9 @@ export function envRecallConfigProvider(env: NodeJS.ProcessEnv = process.env): R
 				dedup: {
 					enabled: env.HONEYCOMB_RECALL_DEDUP_ENABLED,
 					similarityThreshold: env.HONEYCOMB_RECALL_DEDUP_SIMILARITY_THRESHOLD,
+				},
+				recency: {
+					halfLifeDays: env.HONEYCOMB_RECALL_RECENCY_HALF_LIFE_DAYS,
 				},
 			};
 		},
