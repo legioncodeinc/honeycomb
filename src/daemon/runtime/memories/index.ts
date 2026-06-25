@@ -13,6 +13,7 @@ export {
 	RECALL_MODE_SETTING_KEY,
 	type MountMemoriesOptions,
 	type VaultSettingsReader,
+	MAX_RECALL_TOKEN_BUDGET,
 	mountMemoriesApi,
 	resolveMemoryScope,
 } from "./api.js";

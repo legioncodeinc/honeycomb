@@ -161,6 +161,40 @@ describe("runEval (the harness, AC-5)", () => {
 		expect(report.metrics.recallAtK["10"]).toBeCloseTo(2 / 3, 10);
 		// MRR = (1/1 + 1/6 + 0)/3
 		expect(report.metrics.mrr).toBeCloseTo((1 + 1 / 6) / 3, 10);
+		// nDCG@10 (dedup-invariant): each pair is a single-id class → nDCG = 1/log2(rank+1).
+		//   hit1: rank 1 → 1/log2(2) = 1.0;  hit6: rank 6 → 1/log2(7);  missing: 0.
+		//   aggregate = (1 + 1/log2(7) + 0)/3.
+		expect(report.metrics.ndcg).toBeCloseTo((1 + 1 / Math.log2(7)) / 3, 10);
+	});
+
+	it("nDCG is DEDUP-INVARIANT end-to-end: a fact's best copy at rank 1 → nDCG 1.0 no matter how many clones follow (PRD-047c c-AC-3)", async () => {
+		// ONE golden pair whose relevance class is a cluster of near-duplicate copies of the
+		// SAME fact (the shared-workspace reality). The seeded class has FOUR copies.
+		const goldenDup: GoldenSet = {
+			pairs: [{ key: "fact", memoryText: "m", query: "q", lexicalMiss: false, relevance: 3 }],
+		};
+		const expectedDup: ExpectedIds = new Map([["fact", ["d1", "d2", "d3", "d4"]]]);
+
+		// An engine that returns the best copy at rank 1 PLUS three extra clones later.
+		const stuffer: SeededRecall = async () => ["d1", "noise", "d2", "d3", "noise2", "d4"];
+		// An engine that DEDUPES to exactly one copy at rank 1 (the PRD-047c behavior).
+		const deduper: SeededRecall = async () => ["d1", "noise", "noise2"];
+
+		const stuffed = await runEval(goldenDup, stuffer, expectedDup);
+		const deduped = await runEval(goldenDup, deduper, expectedDup);
+
+		// Both score nDCG 1.0 (best class member at rank 1; clones earn nothing extra) —
+		// clone-stuffing no longer beats deduping. This is the regression the fix removes.
+		expect(stuffed.metrics.ndcg).toBeCloseTo(1, 10);
+		expect(deduped.metrics.ndcg).toBeCloseTo(1, 10);
+		expect(stuffed.metrics.ndcg).toBe(deduped.metrics.ndcg);
+
+		// And recall@5 / MRR are equal across the two engines too (a hit on ANY class member),
+		// proving the dedup change did not perturb the headline-recall semantics.
+		expect(stuffed.metrics.recallAtK["5"]).toBe(deduped.metrics.recallAtK["5"]);
+		expect(stuffed.metrics.mrr).toBe(deduped.metrics.mrr);
+		expect(deduped.metrics.recallAtK["5"]).toBe(1);
+		expect(deduped.metrics.mrr).toBeCloseTo(1, 10);
 	});
 });
 
@@ -178,9 +212,9 @@ describe("the baseline gate (AC-6)", () => {
 		expect(committed.mrr).toBeLessThanOrEqual(1);
 	});
 
-	function metricsWith(recallAt5: number, mrr: number): AggregateMetrics {
-		// Build an AggregateMetrics with the two gated fields set (others irrelevant to the gate).
-		return { queryCount: 1, recallAtK: { "1": 0, "5": recallAt5, "10": 0 }, mrr, ndcg: 0 };
+	function metricsWith(recallAt5: number, mrr: number, ndcg = 0): AggregateMetrics {
+		// Build an AggregateMetrics with the gated fields set (others irrelevant to the gate).
+		return { queryCount: 1, recallAtK: { "1": 0, "5": recallAt5, "10": 0 }, mrr, ndcg };
 	}
 
 	it("the committed ENFORCED baseline is non-advisory and FAILS a run far below its floor", () => {
@@ -228,6 +262,113 @@ describe("the baseline gate (AC-6)", () => {
 	it("EPSILON is a small, named, positive tolerance", () => {
 		expect(EPSILON).toBeGreaterThan(0);
 		expect(EPSILON).toBeLessThanOrEqual(0.1);
+	});
+});
+
+describe("the nDCG@10 gate (PRD-047f f-AC-2)", () => {
+	function metricsWith(recallAt5: number, mrr: number, ndcg: number): AggregateMetrics {
+		return { queryCount: 1, recallAtK: { "1": 0, "5": recallAt5, "10": 0 }, mrr, ndcg };
+	}
+
+	// Hand-computed anchor nDCG used across these cases. A single graded-3 target surfacing at
+	// rank 2 with one ideal-ordering target gives nDCG@10 = DCG/IDCG = (3/log2(3)) / (3/log2(2))
+	// = (1/log2(3)) / 1 = 1/log2(3) ≈ 0.6309. We feed that as the MEASURED nDCG and gate it.
+	const NDCG_RANK2 = 1 / Math.log2(3); // ≈ 0.63093
+	// A perfect-order graded target → nDCG 1.0; a target one rank lower than ideal drags it down.
+
+	it("a non-null, ENFORCED nDCG baseline FAILS when measured nDCG drops below baseline − ε", () => {
+		// baseline.ndcg 0.80 → floor 0.75. Measured 0.6309 (the rank-2 anchor) is below the floor.
+		const baseline = { recallAt5: 0.5, mrr: 0.5, ndcg: 0.8, placeholder: false };
+		const m = metricsWith(0.9, 0.9, NDCG_RANK2); // recall@5 / MRR healthy; only nDCG regresses
+		const v = gateAgainstBaseline(m, baseline);
+		expect(v.advisory).toBe(false);
+		expect(v.ndcgFloor).toBeCloseTo(0.75, 10);
+		expect(v.ndcg).toBeCloseTo(NDCG_RANK2, 10);
+		expect(v.passed).toBe(false); // a pure rank-ORDER regression now fails the gate
+		expect(v.reasons.some((r) => r.startsWith("nDCG@10"))).toBe(true);
+	});
+
+	it("a non-null, ENFORCED nDCG baseline PASSES at/above baseline − ε (and within ε is noise)", () => {
+		// baseline.ndcg = anchor + ε → floor = anchor exactly. Measured at the anchor sits ON the
+		// floor and PASSES (ε absorbs the residual). A higher measured nDCG passes a fortiori.
+		const baseline = { recallAt5: 0.5, mrr: 0.5, ndcg: NDCG_RANK2 + EPSILON, placeholder: false };
+		const atFloor = metricsWith(0.9, 0.9, NDCG_RANK2);
+		const vAt = gateAgainstBaseline(atFloor, baseline);
+		expect(vAt.ndcgFloor).toBeCloseTo(NDCG_RANK2, 10);
+		expect(vAt.passed).toBe(true);
+		expect(vAt.reasons.some((r) => r.startsWith("nDCG@10"))).toBe(false);
+		// A perfect-order nDCG of 1.0 clears it with room to spare.
+		expect(gateAgainstBaseline(metricsWith(0.9, 0.9, 1), baseline).passed).toBe(true);
+	});
+
+	it("a PLACEHOLDER baseline keeps the WHOLE gate advisory — a low nDCG never fails the run", () => {
+		const placeholder = { recallAt5: 0.9, mrr: 0.9, ndcg: 0.9, placeholder: true };
+		const m = metricsWith(0.1, 0.1, 0.0); // everything far below, nDCG included
+		const v = gateAgainstBaseline(m, placeholder);
+		expect(v.advisory).toBe(true);
+		expect(v.passed).toBe(true); // advisory → never fails
+		expect(v.reasons.some((r) => r.startsWith("nDCG@10"))).toBe(true); // but reported
+	});
+
+	it("a NULL nDCG baseline (f-AC-3 not yet run) keeps ONLY the nDCG arm advisory; recall@5/MRR stay ENFORCED", () => {
+		// This is the placeholder-tolerant nDCG floor that ships in this wave: recall@5 / MRR are
+		// real + enforced (placeholder:false) but ndcg is null → ndcgFloor null → the nDCG arm
+		// never fails the run, even on a 0 nDCG, while a recall@5 / MRR regression still fails.
+		const baseline = { recallAt5: 0.8, mrr: 0.8, ndcg: null, placeholder: false };
+		// Healthy recall@5 / MRR, terrible nDCG → still PASSES (nDCG advisory).
+		const ndcgOnly = metricsWith(0.9, 0.9, 0.0);
+		const vNdcg = gateAgainstBaseline(ndcgOnly, baseline);
+		expect(vNdcg.advisory).toBe(false); // the baseline itself is enforced
+		expect(vNdcg.ndcgFloor).toBeNull(); // but the nDCG arm has no floor
+		expect(vNdcg.passed).toBe(true);
+		expect(vNdcg.reasons.length).toBe(0); // nDCG arm contributes no blocking reason and is not even computed
+		// recall@5 below floor → FAILS even though nDCG is null (recall@5 / MRR still have teeth).
+		const recallRegress = metricsWith(0.1, 0.9, 1.0);
+		const vRecall = gateAgainstBaseline(recallRegress, baseline);
+		expect(vRecall.passed).toBe(false);
+		expect(vRecall.reasons.some((r) => r.startsWith("recall@5"))).toBe(true);
+	});
+
+	it("the committed baseline carries the live-measured, ENFORCED nDCG@10 floor (f-AC-3 done)", () => {
+		const committed = loadBaseline(readEval("recall-baseline.json"));
+		// f-AC-3 was completed 2026-06-24: a live graded run measured nDCG@10≈0.596 and committed the
+		// floor at-or-below it (0.55 → enforced floor 0.50), mirroring recall@5 / MRR conservatism.
+		expect(committed.ndcg).not.toBeNull();
+		expect(committed.ndcg).toBeGreaterThan(0);
+		expect(committed.ndcg).toBeLessThanOrEqual(1);
+		// non-placeholder ⇒ the nDCG arm of gateAgainstBaseline is now ENFORCED, not advisory.
+		expect(committed.placeholder).toBe(false);
+	});
+});
+
+describe("the graded golden set (PRD-047f f-AC-1)", () => {
+	const golden = loadGoldenSet(readEval("recall-golden.json"));
+
+	it("every relevance grade is an integer on the 1–3 scale", () => {
+		for (const p of golden.pairs) {
+			expect(Number.isInteger(p.relevance)).toBe(true);
+			expect(p.relevance).toBeGreaterThanOrEqual(1);
+			expect(p.relevance).toBeLessThanOrEqual(3);
+		}
+	});
+
+	it("carries genuinely GRADED relevance (more than one distinct grade is present)", () => {
+		const grades = new Set(golden.pairs.map((p) => p.relevance));
+		expect(grades.size).toBeGreaterThan(1); // not a degenerate all-binary set
+		expect([...grades].sort()).toEqual([1, 2, 3]); // all three grades are used
+	});
+
+	it("the keyword-precise (lexical) pairs are graded exact-target (3); abstract semantic gestures stay binary (1)", () => {
+		// Defensible rubric (see eval/recall-golden.json //relevance): a lexical pair whose query
+		// restates its target is the exact answer → 3; the broadest conceptual semantic pairs → 1.
+		const lexical = golden.pairs.filter((p) => !p.lexicalMiss);
+		for (const p of lexical) expect(p.relevance, `lexical pair "${p.key}"`).toBe(3);
+		// The four most abstract semantic-miss gestures are kept binary.
+		const binaryKeys = ["g-hybrid-weighting", "g-null-vector", "g-provenance-row", "g-measured-not-vibed"];
+		for (const key of binaryKeys) {
+			const p = golden.pairs.find((x) => x.key === key);
+			expect(p?.relevance, `abstract pair "${key}"`).toBe(1);
+		}
 	});
 });
 

@@ -66,11 +66,82 @@ export const DEFAULT_TRAVERSAL_MIN_EDGE_WEIGHT = 0.3;
 /** Hard traversal timeout in ms (D-3). */
 export const DEFAULT_TRAVERSAL_TIMEOUT_MS = 500;
 
-// ── D-4 reranker (007d) ─────────────────────────────────────────────────────
-/** The default reranker strategy (D-4): embedding-cosine. LLM rerank is opt-in. */
-export const DEFAULT_RERANKER = "embedding-cosine" as const;
-/** Reranker timeout in ms; on timeout the original order is kept (D-4 / d-AC-2). */
+// ── D-4 reranker (007d / PRD-047b) ──────────────────────────────────────────
+/**
+ * The default reranker strategy. PRD-047b shipped the embedding-cosine rerank stage
+ * fully wired + tested, then MEASURED it on the live graded golden set (b-AC-3,
+ * 2026-06-24): rerank-on recall@5/MRR/nDCG sat INSIDE the RRF-only noise band
+ * (recall@5 0.611 vs RRF 0.611–0.639) — i.e. ~0 lift on the synthetic instrument,
+ * exactly the risk b-AC-3 pre-registered ("cosine rerank ≈ the `<#>` arm signal; if
+ * the lift is ~0, drop rerank to `none` by default — the eval decides"). So the
+ * DEFAULT is `none` (keep the proven RRF order; don't pay a per-recall embedding
+ * batch-fetch + cosine for no measured gain). `embedding-cosine` and `llm` remain
+ * fully implemented + activatable via config/env; revisit when a stronger instrument
+ * (graded multi-id eval or dogfood) demonstrates the lift. See
+ * `reports/2026-06-24-reranker-activation-eval.md`.
+ */
+export const DEFAULT_RERANKER = "none" as const;
+/** Reranker timeout in ms; on timeout the original order is kept (D-4 / d-AC-2 / b-AC-2). */
 export const DEFAULT_RERANKER_TIMEOUT_MS = 300;
+/**
+ * The rerank WINDOW N (PRD-047b): the count of fused top-N candidates the reranker
+ * re-scores. A tuned knob — large enough to recover the magnitude RRF discarded
+ * across a realistic recall window, small enough that the one guarded embedding
+ * batch-fetch stays cheap. 50 is the documented default; env-overridable + clamped.
+ */
+export const DEFAULT_RERANKER_WINDOW = 50;
+
+// ── PRD-047c — semantic / near-duplicate dedup ──────────────────────────────
+/**
+ * Semantic dedup is ON by default (PRD-047c / c-AC-3). It is the direct fix for the
+ * eval's known ~12-clone problem and is neutral-or-better: the recall-eval scores a
+ * relevance CLASS, so collapsing a class of paraphrases to its ONE highest-provenance
+ * copy keeps recall@5/MRR/nDCG at-or-above baseline while freeing top-k slots for
+ * distinct facts. A caller passes `{ enabled: false }` for the escape hatch.
+ */
+export const DEFAULT_DEDUP_ENABLED = true;
+/**
+ * The cosine-similarity threshold (0..1, the normalized {@link cosineSimilarity} range)
+ * above which two candidate embeddings are treated as the SAME fact and collapsed
+ * (PRD-047c / c-AC-1). Tuned HIGH by design (err toward NOT merging): only obvious
+ * paraphrases exceed ~0.9, so two semantically DISTINCT facts stay below it and BOTH
+ * survive (the c-AC-2 false-merge guard). An eval-tunable named knob, mirroring the
+ * rerank window; env-overridable + clamped to `[0,1]`.
+ */
+export const DEFAULT_DEDUP_SIMILARITY_THRESHOLD = 0.9;
+
+// ── PRD-047d — recency dampening (multiplicative age-decay on the fused score) ─
+/**
+ * The recency half-life in DAYS (PRD-047d / d-AC-4): the age at which a hit's fused
+ * score is multiplied by 0.5 under `decay = 0.5 ^ (age_days / half_life_days)`. A
+ * single named, eval-tunable knob (like {@link DEFAULT_RERANKER_WINDOW} / the dedup
+ * threshold), env-overridable + clamped.
+ *
+ * The DEFAULT is OFF-EQUIVALENT by design (d-AC-4): `36500` days (100 years) makes the
+ * decay multiplier ≈ 1 for every realistic row — even a year-old row is demoted by only
+ * `1 - 0.5^(365/36500) = 1 - 0.5^0.01 ≈ 0.0069` (< 0.7%), i.e. NEUTRAL on the age-agnostic
+ * synthetic golden set, so recall@5/MRR/nDCG hold at-or-above baseline BY CONSTRUCTION until
+ * the eval picks a real value ("defaulting to OFF-equivalent … so the change is measured
+ * before it bites"). A small positive half-life (e.g. 30/90 days) is the live tuning lever.
+ * `0` / negative / non-numeric is clamped UP to {@link MIN_RECENCY_HALF_LIFE_DAYS} so the
+ * dampener can never divide by zero or invert (a typo never bites; it just runs near-off).
+ */
+export const DEFAULT_RECENCY_HALF_LIFE_DAYS = 36_500;
+/** The floor for the recency half-life: a sub-1-day half-life is clamped up (no div-by-zero / inversion). */
+export const MIN_RECENCY_HALF_LIFE_DAYS = 1;
+
+// ── PRD-047e — token-budget + MMR context assembly ───────────────────────────
+/**
+ * The MMR relevance/diversity trade-off knob λ (PRD-047e / e-AC-2). MMR selects the next
+ * hit by `argmax [ λ·rel(d) − (1−λ)·max_{s∈selected} sim(d,s) ]`: λ near 1 favors pure
+ * relevance (the fused/dampened score), λ near 0 favors maximal diversity from what is
+ * already selected. The DEFAULT is `0.7` — relevance-favoring by design, the PRD risk
+ * mitigation ("λ tuned high (relevance-favoring)") so diversity only re-orders the tail,
+ * never the head. A single named, eval-tunable knob (like the dedup threshold / recency
+ * half-life); env-overridable + clamped to `[0,1]`. It bites ONLY when the caller supplies
+ * a `tokenBudget` — the row-`limit` path never builds an MMR selection (e-AC-4).
+ */
+export const DEFAULT_MMR_LAMBDA = 0.7;
 
 // ── D-5 dampening (007d) ────────────────────────────────────────────────────
 /** Gravity dampening factor for a semantic hit sharing no query terms (D-5 / d-AC-4). */
@@ -125,6 +196,20 @@ function ClampedFloat(def: number, ceil = 1) {
 	}, z.number());
 }
 
+/**
+ * The recency half-life knob (PRD-047d): a float in `[min, +∞)` DAYS. A non-numeric
+ * value falls back to the default; a value below `min` is clamped UP to `min` so the
+ * decay function can never divide by zero or invert (`0`/negative → near-off, not a
+ * crash). No upper clamp — a very large half-life IS the OFF-equivalent default.
+ */
+function ClampedHalfLifeDays(def: number, min: number) {
+	return z.preprocess((raw) => {
+		const n = typeof raw === "number" ? raw : Number(raw);
+		if (!Number.isFinite(n)) return def;
+		return Math.max(min, n);
+	}, z.number());
+}
+
 /** D-3 traversal budgets, grouped so the traversal phase reads one object. */
 export const TraversalConfigSchema = z.object({
 	/** Max aspects per focal entity. */
@@ -145,8 +230,32 @@ export const TraversalConfigSchema = z.object({
 export const RerankerConfigSchema = z.object({
 	/** The reranker strategy (D-4). */
 	strategy: z.enum(RERANKER_STRATEGIES).default(DEFAULT_RERANKER),
-	/** Reranker timeout in ms; on timeout keep the original order (d-AC-2). */
+	/** Reranker timeout in ms; on timeout keep the original order (d-AC-2 / b-AC-2). */
 	timeoutMs: ClampedInt(DEFAULT_RERANKER_TIMEOUT_MS, 1).default(DEFAULT_RERANKER_TIMEOUT_MS),
+	/** Rerank window N: how many fused top-N candidates to re-score (PRD-047b). */
+	window: ClampedInt(DEFAULT_RERANKER_WINDOW, 1).default(DEFAULT_RERANKER_WINDOW),
+});
+
+/** PRD-047c dedup config, grouped so the recall adapter reads one object. */
+export const DedupConfigSchema = z.object({
+	/** Whether semantic near-duplicate dedup runs; ON by default (PRD-047c / c-AC-3). */
+	enabled: BoolFlag.default(DEFAULT_DEDUP_ENABLED),
+	/** The cosine-similarity collapse threshold in `[0,1]` (PRD-047c / c-AC-1). */
+	similarityThreshold: ClampedFloat(DEFAULT_DEDUP_SIMILARITY_THRESHOLD).default(DEFAULT_DEDUP_SIMILARITY_THRESHOLD),
+});
+
+/** PRD-047d recency config, grouped so the recall adapter reads one object. */
+export const RecencyConfigSchema = z.object({
+	/** The recency half-life in DAYS (PRD-047d / d-AC-4); OFF-equivalent by default. */
+	halfLifeDays: ClampedHalfLifeDays(DEFAULT_RECENCY_HALF_LIFE_DAYS, MIN_RECENCY_HALF_LIFE_DAYS).default(
+		DEFAULT_RECENCY_HALF_LIFE_DAYS,
+	),
+});
+
+/** PRD-047e context-assembly config (token-budget + MMR), grouped so the recall adapter reads one object. */
+export const ContextAssemblyConfigSchema = z.object({
+	/** The MMR relevance/diversity λ in `[0,1]` (PRD-047e / e-AC-2); relevance-favoring by default. */
+	mmrLambda: ClampedFloat(DEFAULT_MMR_LAMBDA).default(DEFAULT_MMR_LAMBDA),
 });
 
 /** D-5 dampening/boost factors, grouped so the shaping phase reads one object. */
@@ -186,6 +295,12 @@ export const RecallConfigSchema = z.object({
 	reranker: RerankerConfigSchema.default(() => RerankerConfigSchema.parse({})),
 	/** D-5 dampening/boost factors (007d). */
 	dampening: DampeningConfigSchema.default(() => DampeningConfigSchema.parse({})),
+	/** PRD-047c semantic near-duplicate dedup (ON by default). */
+	dedup: DedupConfigSchema.default(() => DedupConfigSchema.parse({})),
+	/** PRD-047d recency dampening (OFF-equivalent half-life by default). */
+	recency: RecencyConfigSchema.default(() => RecencyConfigSchema.parse({})),
+	/** PRD-047e token-budget + MMR context assembly (engages only when a tokenBudget is supplied). */
+	contextAssembly: ContextAssemblyConfigSchema.default(() => ContextAssemblyConfigSchema.parse({})),
 });
 
 /** The validated recall config object every phase consumes. */
@@ -196,6 +311,12 @@ export type TraversalConfig = z.infer<typeof TraversalConfigSchema>;
 export type RerankerConfig = z.infer<typeof RerankerConfigSchema>;
 /** The validated dampening sub-config. */
 export type DampeningConfig = z.infer<typeof DampeningConfigSchema>;
+/** The validated dedup sub-config (PRD-047c). */
+export type DedupConfig = z.infer<typeof DedupConfigSchema>;
+/** The validated recency sub-config (PRD-047d). */
+export type RecencyConfig = z.infer<typeof RecencyConfigSchema>;
+/** The validated context-assembly sub-config (PRD-047e). */
+export type ContextAssemblyConfig = z.infer<typeof ContextAssemblyConfigSchema>;
 
 /**
  * Structured recall-config error. Carries the flattened zod issues so the daemon
@@ -240,6 +361,7 @@ export interface RawRecallConfig {
 	readonly reranker?: {
 		readonly strategy?: unknown;
 		readonly timeoutMs?: unknown;
+		readonly window?: unknown;
 	};
 	readonly dampening?: {
 		readonly gravity?: unknown;
@@ -247,6 +369,16 @@ export interface RawRecallConfig {
 		readonly resolutionBoost?: unknown;
 		readonly rehearsalBoost?: unknown;
 		readonly rehearsalWindowMs?: unknown;
+	};
+	readonly dedup?: {
+		readonly enabled?: unknown;
+		readonly similarityThreshold?: unknown;
+	};
+	readonly recency?: {
+		readonly halfLifeDays?: unknown;
+	};
+	readonly contextAssembly?: {
+		readonly mmrLambda?: unknown;
 	};
 }
 
@@ -276,6 +408,7 @@ export function envRecallConfigProvider(env: NodeJS.ProcessEnv = process.env): R
 				reranker: {
 					strategy: env.HONEYCOMB_RECALL_RERANKER,
 					timeoutMs: env.HONEYCOMB_RECALL_RERANKER_TIMEOUT_MS,
+					window: env.HONEYCOMB_RECALL_RERANKER_WINDOW,
 				},
 				dampening: {
 					gravity: env.HONEYCOMB_RECALL_DAMPENING_GRAVITY,
@@ -283,6 +416,16 @@ export function envRecallConfigProvider(env: NodeJS.ProcessEnv = process.env): R
 					resolutionBoost: env.HONEYCOMB_RECALL_RESOLUTION_BOOST,
 					rehearsalBoost: env.HONEYCOMB_RECALL_REHEARSAL_BOOST,
 					rehearsalWindowMs: env.HONEYCOMB_RECALL_REHEARSAL_WINDOW_MS,
+				},
+				dedup: {
+					enabled: env.HONEYCOMB_RECALL_DEDUP_ENABLED,
+					similarityThreshold: env.HONEYCOMB_RECALL_DEDUP_SIMILARITY_THRESHOLD,
+				},
+				recency: {
+					halfLifeDays: env.HONEYCOMB_RECALL_RECENCY_HALF_LIFE_DAYS,
+				},
+				contextAssembly: {
+					mmrLambda: env.HONEYCOMB_RECALL_MMR_LAMBDA,
 				},
 			};
 		},

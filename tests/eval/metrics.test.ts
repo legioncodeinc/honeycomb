@@ -125,6 +125,88 @@ describe("DCG / IDCG / nDCG (D-6, binary + graded)", () => {
 	});
 });
 
+describe("DEDUP-INVARIANT nDCG via relevance classes (PRD-047c c-AC-3)", () => {
+	// Each golden pair targets ONE distinct fact; the relevance class is duplicate COPIES
+	// of that same fact. With a class map, DCG credits the class ONCE (best rank) and IDCG
+	// ranks DISTINCT classes (one gain per class), so an engine scores the same whether it
+	// returns one copy or many — the property the old clone-summing nDCG lacked.
+
+	it("a single-fact class with the best member at rank 1 → nDCG 1.0 regardless of extra clones", () => {
+		// Three copies of ONE fact (all class "c"), best at rank 1; two more clones follow.
+		const judg: RelevanceJudgements = { c1: 1, c2: 1, c3: 1 };
+		const classes = { c1: "c", c2: "c", c3: "c" };
+		const r: RankedResult = { ids: ["c1", "x", "c2", "y", "c3"] };
+		// DCG: class "c" credited ONCE at rank 1 → 1/log2(2) = 1. Clones c2/c3 add 0.
+		near(dcgAtK(r, judg, 10, classes), 1);
+		// IDCG: ONE distinct class, gain 1 at rank 1 → 1.
+		near(idealDcgAtK(judg, 10, classes), 1);
+		near(ndcgAtK(r, judg, 10, classes), 1);
+	});
+
+	it("DEDUP-INVARIANCE: adding more clones later in the ranking does not change nDCG", () => {
+		const judg: RelevanceJudgements = { c1: 1, c2: 1, c3: 1, c4: 1 };
+		const classes = { c1: "c", c2: "c", c3: "c", c4: "c" };
+		// One copy at rank 1.
+		const oneCopy: RankedResult = { ids: ["c1", "x", "y"] };
+		// Same best rank (1) but three extra clones stuffed in later.
+		const manyCopies: RankedResult = { ids: ["c1", "c2", "x", "c3", "c4"] };
+		// Both score 1.0 — clone-stuffing earns nothing extra.
+		near(ndcgAtK(oneCopy, judg, 10, classes), 1);
+		near(ndcgAtK(manyCopies, judg, 10, classes), 1);
+		expect(ndcgAtK(oneCopy, judg, 10, classes)).toBe(ndcgAtK(manyCopies, judg, 10, classes));
+	});
+
+	it("best class member at rank 2 → nDCG 1/log2(3) ≈ 0.6309, even with a clone at rank 1's neighbor", () => {
+		// Best (first-seen) member of class "c" is at rank 2; a later clone at rank 4 adds 0.
+		const judg: RelevanceJudgements = { c1: 1, c2: 1 };
+		const classes = { c1: "c", c2: "c" };
+		const r: RankedResult = { ids: ["x", "c1", "y", "c2"] };
+		// DCG = 1/log2(2+1) = 1/log2(3); IDCG = 1 (one class at rank 1).
+		near(dcgAtK(r, judg, 10, classes), 1 / Math.log2(3));
+		near(idealDcgAtK(judg, 10, classes), 1);
+		near(ndcgAtK(r, judg, 10, classes), 1 / Math.log2(3));
+	});
+
+	it("a distinct MISS (no class member surfaces) → nDCG 0", () => {
+		const judg: RelevanceJudgements = { c1: 1, c2: 1 };
+		const classes = { c1: "c", c2: "c" };
+		expect(ndcgAtK({ ids: ["a", "b", "z"] }, judg, 10, classes)).toBe(0);
+	});
+
+	it("graded single-fact class: grade 3 at rank 2 → still 1/log2(3) (grade cancels in DCG/IDCG)", () => {
+		// The class's grade is 3; best member at rank 2. DCG = 3/log2(3); IDCG = 3/log2(2) = 3.
+		// nDCG = (3/log2(3))/3 = 1/log2(3) — dedup-invariant AND grade-normalized.
+		const judg: RelevanceJudgements = { c1: 3, c2: 3 };
+		const classes = { c1: "c", c2: "c" };
+		const r: RankedResult = { ids: ["x", "c1", "c2"] };
+		near(dcgAtK(r, judg, 10, classes), 3 / Math.log2(3));
+		near(idealDcgAtK(judg, 10, classes), 3);
+		near(ndcgAtK(r, judg, 10, classes), 1 / Math.log2(3));
+	});
+
+	it("two DISTINCT facts (two classes) still rank independently in DCG and IDCG", () => {
+		// Class "a" (gain 3) at rank 1, class "b" (gain 1) at rank 3 — two distinct facts.
+		const judg: RelevanceJudgements = { a1: 3, a2: 3, b1: 1 };
+		const classes = { a1: "a", a2: "a", b1: "b" };
+		const r: RankedResult = { ids: ["a1", "a2", "b1"] };
+		// DCG: class a once at rank 1 (3), class b once at rank 3 (1/log2(4)=0.5). a2 adds 0.
+		near(dcgAtK(r, judg, 10, classes), 3 + 0.5);
+		// IDCG: two classes, gains 3 then 1, ideal ranks 1,2 → 3 + 1/log2(3).
+		near(idealDcgAtK(judg, 10, classes), 3 + 1 / Math.log2(3));
+		near(ndcgAtK(r, judg, 10, classes), (3 + 0.5) / (3 + 1 / Math.log2(3)));
+	});
+
+	it("without a class map the legacy per-id behavior is preserved (clone-summing)", () => {
+		// No classes arg → each id is its own class → the old summing IDCG/DCG.
+		const judg: RelevanceJudgements = { c1: 1, c2: 1 };
+		const r: RankedResult = { ids: ["c1", "c2"] };
+		// DCG = 1/log2(2) + 1/log2(3); IDCG = same → nDCG 1.0 (the pre-fix shape).
+		near(dcgAtK(r, judg, 10), 1 + 1 / Math.log2(3));
+		near(idealDcgAtK(judg, 10), 1 + 1 / Math.log2(3));
+		near(ndcgAtK(r, judg, 10), 1);
+	});
+});
+
 describe("isRelevant", () => {
 	it("treats any strictly-positive gain as relevant; 0 / absent as not", () => {
 		expect(isRelevant({ a: 1 }, "a")).toBe(true);

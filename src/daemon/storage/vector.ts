@@ -97,6 +97,37 @@ export function serializeFloat4Array(vector: readonly number[]): string {
 	return `ARRAY[${numbersLit}]::float4[]`;
 }
 
+/**
+ * In-memory cosine similarity of two equal-length vectors, normalized to 0..1
+ * (PRD-047b reranker). Mirrors the SQL `<#>` arm's score normalization
+ * (`(1 + cosine) / 2`) so a rerank score is on the SAME 0..1 scale as the
+ * semantic arm. Returns `null` when the vectors are unusable for a cosine —
+ * mismatched length, empty, or a zero-magnitude vector — so the caller keeps the
+ * candidate's pre-rerank position rather than scoring it on a garbage value.
+ *
+ * Pure + dependency-free: the reranker calls this over candidate embeddings it
+ * has already hydrated; no SQL, no I/O.
+ */
+export function cosineSimilarity(a: readonly number[], b: readonly number[]): number | null {
+	if (a.length === 0 || a.length !== b.length) return null;
+	let dot = 0;
+	let magA = 0;
+	let magB = 0;
+	for (let i = 0; i < a.length; i += 1) {
+		const x = a[i] as number;
+		const y = b[i] as number;
+		if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+		dot += x * y;
+		magA += x * x;
+		magB += y * y;
+	}
+	if (magA === 0 || magB === 0) return null; // a zero vector has no direction.
+	const cosine = dot / (Math.sqrt(magA) * Math.sqrt(magB));
+	// Clamp the raw cosine into [-1,1] (float drift), then map to a 0..1 similarity.
+	const clamped = Math.min(1, Math.max(-1, cosine));
+	return (1 + clamped) / 2;
+}
+
 /** A scope filter on the structured columns, applied in the SAME query (FR-3). */
 export interface VectorScopeFilter {
 	readonly orgColumn?: string;

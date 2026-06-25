@@ -100,12 +100,20 @@ near-duplicate crowding the eval already works around.
 
 ## Decisions
 - **D-1 — Native hybrid is ADOPTED ONLY ON EVIDENCE (047a). RESOLVED 2026-06-22: NOT adopted —
-  keep RRF.** The live A/B ran: native `deeplake_hybrid_record` returned a degenerate constant-zero
-  score (random ordering, recall@5 0.14–0.17 vs RRF 0.72–0.78, weight-insensitive). It executes but
-  does not rank as wired. RRF stays the default; the native path is deferred pending an
-  operator-contract investigation (does it need a registered hybrid/BM25 index?). This closes
-  PRD-027 D-1's deferred fast-follow WITH A MEASURED NO. See
-  [047a's decision report](reports/2026-06-22-hybrid-benchmark-decision.md).
+  keep RRF. RE-AFFIRMED 2026-06-24: operator now FIXED but only TIES RRF — still keep RRF.** The
+  2026-06-22 live A/B found native `deeplake_hybrid_record` returned a degenerate constant-zero score
+  (random ordering, recall@5 0.14–0.17 vs RRF 0.72–0.78, weight-insensitive). A 2026-06-24 re-run
+  found DeepLake has since FIXED the operator: it now ranks for real and is weight-sensitive, scoring
+  recall@5 0.611 / MRR 0.589 vs RRF's 0.611 / 0.593 — a TIE on recall@1/@5, marginally behind on
+  recall@10/MRR/nDCG. It ties but does not BEAT, so the adoption gate (tie-or-beat recall@5 AND MRR)
+  is still not cleared. A cost/benefit review confirmed adoption buys no package savings (RRF is
+  hand-rolled, zero deps; both paths need the embed daemon + DeepLake), no clear cost saving, and
+  only ~5→~3 DeepLake round-trips per recall — not worth re-coupling ranking to an opaque operator
+  for parity. RRF stays the default; `hybrid-recall.ts` stays as the unwired live reference. Revisit
+  only on a concrete trigger (per-query DeepLake billing, a measured recall-latency problem, or a
+  graded-eval (047f) sweep where native hybrid BEATS RRF). See
+  [047a's decision report](reports/2026-06-22-hybrid-benchmark-decision.md) and
+  [ADR-0001](../../../knowledge/private/architecture/adr/0001-retrieval-fusion-rrf-vs-native-hybrid.md).
 - **D-2 — The reranker is a real stage, not a stub (047b).** `recall.ts` consumes the configured
   reranker on the top-k, preserving the timeout keep-order fallback already specified.
 - **D-3 — Dedup is semantic, not just `source+id` (047c).** Near-duplicate hits collapse by
@@ -180,7 +188,7 @@ near-duplicate crowding the eval already works around.
   never a single immediate read (project memory).
 
 ## Sub-PRD index
-- [047a — Native-hybrid benchmark + adoption gate](prd-047a-native-hybrid-benchmark.md) (W0, **CLOSED: keep RRF** — native operator scored degenerate-zero, see [report](reports/2026-06-22-hybrid-benchmark-decision.md))
+- [047a — Native-hybrid benchmark + adoption gate](prd-047a-native-hybrid-benchmark.md) (W0, **CLOSED: keep RRF** — operator was degenerate-zero on 2026-06-22; FIXED by 2026-06-24 but only ties RRF, so decision stands. See [report](reports/2026-06-22-hybrid-benchmark-decision.md) · [ADR-0001](../../../knowledge/private/architecture/adr/0001-retrieval-fusion-rrf-vs-native-hybrid.md))
 - [047f — Graded relevance + nDCG eval upgrade](prd-047f-graded-relevance-ndcg-eval.md) (W0)
 - [047b — Reranker activation](prd-047b-reranker-activation.md) (W1)
 - [047c — Semantic / near-duplicate dedup](prd-047c-semantic-dedup.md) (W1)

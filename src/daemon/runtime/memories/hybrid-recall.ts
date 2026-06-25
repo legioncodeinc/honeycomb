@@ -284,7 +284,10 @@ export async function hybridRecall(
 	for (const doc of ordered) {
 		if (hits.length >= limit) break;
 		const kind = kindOfSource(doc.source);
-		hits.push({ source: doc.source, id: doc.id, text: doc.text, score: doc.score, kind, secondary: kind === "session" });
+		// PRD-047d: this BENCH-ONLY path is intentionally untouched by recency dampening (it is
+		// unwired, W0). It carries no creation timestamp, so `createdAt` is "" — which the
+		// dampener (if ever applied) treats as `decay = 1`. No SQL/behavior change here.
+		hits.push({ source: doc.source, id: doc.id, text: doc.text, score: doc.score, kind, secondary: kind === "session", createdAt: "" });
 		sourceSet.add(doc.source);
 	}
 	return { hits, sources: [...sourceSet], degraded: false };
