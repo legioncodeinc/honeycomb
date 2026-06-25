@@ -195,7 +195,7 @@ The `contributes` block declares four commands:
 | Command id | Title | Effect |
 |---|---|---|
 | `honeycomb.wireHooks` | Wire / Refresh Hooks | Copies `harnesses/cursor/bundle/` into `~/.cursor/honeycomb/bundle/` and idempotently merges `~/.cursor/hooks.json` (delegates to the 019a connector). |
-| `honeycomb.login` | Login | Browser device flow or API-key entry; writes the shared `~/.honeycomb/credentials.json` at mode `0o600`; opens the verification URL via the host. |
+| `honeycomb.login` | Login | Browser device flow or API-key entry; writes the shared `~/.deeplake/credentials.json` at mode `0o600`; opens the verification URL via the host. |
 | `honeycomb.openDashboard` | Open Dashboard | Renders the canonical dashboard view tree into a webview panel titled "Honeycomb Dashboard". |
 | `honeycomb.syncSkills` | Sync Skills | Symlinks org/team skills into `~/.cursor/skills-cursor/` and `<project>/.cursor/skills/` without clobbering. |
 

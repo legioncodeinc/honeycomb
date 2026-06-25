@@ -66,7 +66,7 @@ The cross-harness logic lives in `src/hooks/shared/`. Every shim routes through 
 | `src/hooks/shared/session-end.ts` | Session-end core: mark ended, record usage, fire skillify, spawn the summary worker. |
 | `src/hooks/shared/context-renderer.ts` | Renders the rules/goals block injected at session start. Read-only; absorbs its own errors. |
 | `src/hooks/shared/prime-renderer.ts` | Renders the session-start memory-prime digest appended to the context block. |
-| `src/hooks/shared/credential-reader.ts` | Reads `~/.honeycomb/credentials.json`. |
+| `src/hooks/shared/credential-reader.ts` | Reads the shared `~/.deeplake/credentials.json` (PRD-023), falling back to the legacy `~/.honeycomb/credentials.json`. See [`../security/credential-storage.md`](../security/credential-storage.md). |
 | `src/hooks/shared/daemon-client.ts` | The loopback transport every shared step calls the daemon through. |
 | `src/hooks/shared/project-resolver.ts` | Resolves the project key for scope. |
 

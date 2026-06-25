@@ -1,9 +1,12 @@
 # How to add a dashboard page
 
-> **Audience:** private (contributors building the dashboard).
-> **Owner of the seam:** PRD-037 (Dashboard Nav Shell). **Consumers:** PRD-038 (Dashboard home reorg),
-> PRD-039 (Harnesses), PRD-040 (Memories), PRD-041 (Graph), PRD-042 (Sync), PRD-043 (Logs),
-> PRD-044 (Settings).
+> Category: Frontend | Version: 1.0 | Date: June 2026 | Status: Active
+
+A contributor how-to: adding a page to the daemon-served dashboard is one registry entry plus one component. Owner of the seam: PRD-037 (Dashboard Nav Shell); consumers: PRD-038 (home reorg), PRD-039 (Harnesses), PRD-040 (Memories), PRD-041 (Graph), PRD-042 (Sync), PRD-043 (Logs), PRD-044 (Settings).
+
+**Related:**
+- [`../frontend/dashboard-architecture.md`](../frontend/dashboard-architecture.md)
+- [`../architecture/daemon-surface.md`](../architecture/daemon-surface.md)
 
 The `/dashboard` mini-site is a left-nav multi-page app shell (PRD-037). The shell, the sidebar
 (`src/dashboard/web/sidebar.tsx`), the hash router (`src/dashboard/web/router.tsx`), and the app-shell
