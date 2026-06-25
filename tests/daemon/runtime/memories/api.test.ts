@@ -21,7 +21,11 @@ import type { TransportRequest } from "../../../../src/daemon/storage/transport.
 import { type RuntimeConfig } from "../../../../src/daemon/runtime/config.js";
 import { createRequestLogger } from "../../../../src/daemon/runtime/logger.js";
 import { createDaemon } from "../../../../src/daemon/runtime/server.js";
-import { mountMemoriesApi, type VaultSettingsReader } from "../../../../src/daemon/runtime/memories/index.js";
+import {
+	MAX_RECALL_TOKEN_BUDGET,
+	mountMemoriesApi,
+	type VaultSettingsReader,
+} from "../../../../src/daemon/runtime/memories/index.js";
 import { EMBEDDING_DIMS } from "../../../../src/daemon/storage/vector.js";
 import type { EmbedClient } from "../../../../src/daemon/runtime/services/embed-client.js";
 import type { SecretScope } from "../../../../src/daemon/runtime/secrets/contracts.js";
@@ -199,6 +203,45 @@ describe("PRD-022a mountMemoriesApi wires the /api/memories/* handlers", () => {
 		// The engine was never reached: no recall arm (the per-arm `'…' AS source`
 		// SELECT) ran.
 		expect(fake.requests.some((r) => /\bAS\s+source\b/i.test(r.sql))).toBe(false);
+	});
+
+	it("SECURITY (PRD-047e): a tokenBudget above MAX_RECALL_TOKEN_BUDGET → zod 400 before the engine", async () => {
+		const { daemon, storage, fake } = makeDaemon("widget");
+		mountMemoriesApi(daemon, { storage });
+		const res = await daemon.app.request("/api/memories/recall", {
+			method: "POST",
+			headers: headers(),
+			// One above the boundary ceiling: a defense-in-depth reject, never a silent coerce.
+			body: JSON.stringify({ query: "widget", tokenBudget: MAX_RECALL_TOKEN_BUDGET + 1 }),
+		});
+		expect(res.status).toBe(400);
+		const json = (await res.json()) as { error: string };
+		expect(json.error).toBe("bad_request");
+		// The engine was never reached: no recall arm SELECT ran.
+		expect(fake.requests.some((r) => /\bAS\s+source\b/i.test(r.sql))).toBe(false);
+	});
+
+	it("SECURITY (PRD-047e): a non-positive tokenBudget → zod 400 (never a silent coerce)", async () => {
+		const { daemon, storage } = makeDaemon("widget");
+		mountMemoriesApi(daemon, { storage });
+		const res = await daemon.app.request("/api/memories/recall", {
+			method: "POST",
+			headers: headers(),
+			body: JSON.stringify({ query: "widget", tokenBudget: 0 }),
+		});
+		expect(res.status).toBe(400);
+	});
+
+	it("PRD-047e: a tokenBudget AT the ceiling is accepted (no legitimate request is rejected)", async () => {
+		const { daemon, storage } = makeDaemon("widget");
+		mountMemoriesApi(daemon, { storage });
+		const res = await daemon.app.request("/api/memories/recall", {
+			method: "POST",
+			headers: headers(),
+			body: JSON.stringify({ query: "widget", tokenBudget: MAX_RECALL_TOKEN_BUDGET }),
+		});
+		// In-range budget passes validation and reaches the engine (200, not a 400 reject).
+		expect(res.status).toBe(200);
 	});
 
 	it("a-AC-5: a malformed store body (missing content) → zod 400 before the engine", async () => {

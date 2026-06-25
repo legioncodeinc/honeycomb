@@ -136,18 +136,29 @@ export const RECALL_MODE_SETTING_KEY = "recallMode" as const;
 // ── Zod request schemas (a-AC-5 / FR-6) ──────────────────────────────────────
 
 /**
+ * The boundary ceiling for the recall `tokenBudget` (PRD-047e). The MMR/budget stage only ever
+ * iterates the fused candidate pool (capped at `MAX_RECALL_LIMIT`, ≤200) — the budget value
+ * NEVER scales an allocation or a loop, so a huge budget cannot drive O(n) blowup. This cap is
+ * DEFENSE-IN-DEPTH and contract hygiene: it makes the documented "sane cap" real at the zod
+ * boundary, rejects an absurd/garbage budget with a 400 (never a silent coerce), and is set far
+ * above any realistic model context window (10M tokens) so no legitimate request is affected.
+ */
+export const MAX_RECALL_TOKEN_BUDGET = 10_000_000;
+
+/**
  * `POST /api/memories/recall` body: a query string + optional limit + optional token budget.
  *
  * `tokenBudget` (PRD-047e / e-AC-1) is ADDITIVE + OPTIONAL: when supplied, recall returns the
  * token-budgeted, diversity-aware (MMR) selection that FITS the budget instead of a fixed count;
  * when ABSENT, the row-`limit` path runs byte-for-byte as before (e-AC-4 back-compat). Validated
- * as a positive int at the boundary; a non-positive/garbage value is rejected (zod 400) rather
- * than silently coerced, and the engine ALSO guards it (defense in depth).
+ * as a positive int BOUNDED at {@link MAX_RECALL_TOKEN_BUDGET} at the boundary; a non-positive,
+ * out-of-range, or garbage value is rejected (zod 400) rather than silently coerced, and the
+ * engine ALSO guards it (defense in depth).
  */
 const RecallBodySchema = z.object({
 	query: z.string().min(1, "query is required"),
 	limit: z.number().int().positive().optional(),
-	tokenBudget: z.number().int().positive().optional(),
+	tokenBudget: z.number().int().positive().max(MAX_RECALL_TOKEN_BUDGET).optional(),
 });
 
 /**
