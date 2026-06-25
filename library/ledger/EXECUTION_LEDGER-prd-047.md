@@ -42,8 +42,8 @@ daemon**. Split per AC:
 | e-AC-2 | 047e | MMR surfaces distinct facts a pure top-k would crowd out | det | retrieval | ✅ DONE (diversity-vs-topk test) |
 | e-AC-3 | 047e | Eval: λ tuned; recall@5/MRR/nDCG hold at-or-above baseline | live | orch+retrieval | ✅ DONE — opt-in budget; no-budget path byte-unchanged; live eval recall@5 0.639 / MRR 0.618 / nDCG 0.623 (gate PASS) |
 | e-AC-4 | 047e | Row-`limit` path unchanged when no budget; fallback intact; gates green | det | retrieval | ✅ DONE (no-budget identity + rank-1-kept + MMR-fail→topk) |
-| SEC | close-out | security-worker-bee: OWASP/PII/injection over the recall changes | — | security | OPEN |
-| QA | close-out | quality-worker-bee: implementation vs PRD-047 | — | quality | OPEN |
+| SEC | close-out | security-worker-bee: OWASP/PII/injection over the recall changes | — | security | ✅ VERIFIED — 0 Critical / 0 High; 1 Low fixed (tokenBudget cap + 3 regression tests) |
+| QA | close-out | quality-worker-bee: implementation vs PRD-047 | — | quality | ✅ VERIFIED — PASS, 7/7 parent + 24/24 sub-ACs, 0 Critical/0 Warning (reports/2026-06-24-qa-report.md) |
 
 ## Wave plan (sequential — all feature waves edit the same `recall.ts` pipeline)
 
@@ -66,3 +66,10 @@ audit + QA verification both demand high reasoning).
 
 ## Status log
 - 2026-06-24: Ledger created. 047a VERIFIED (incl. today's re-run). 047f/b/c/d/e OPEN. Branch cut from `main`.
+- 2026-06-24: W0 (047f) DONE — graded set + gated dedup-invariant nDCG; live baseline nDCG floor 0.50. Committed.
+- 2026-06-24: W1 (047b) DONE — reranker wired+tested; measured ~0 lift → default `none` (product decision, recorded). Committed.
+- 2026-06-24: W2 (047c) DONE — semantic dedup (default on) + dedup-invariant nDCG fix; live recall@5 0.639/MRR 0.600/nDCG 0.609. Committed.
+- 2026-06-24: W3 (047d) DONE — recency dampening, default off-equivalent; live neutral, gate PASS. Committed.
+- 2026-06-24: W4 (047e) DONE — token-budget+MMR, opt-in; no-budget path byte-unchanged; gate PASS. Committed.
+- 2026-06-24: Close-out — security PASS (0C/0H, 1 Low fixed), quality PASS (31/31 ACs). **Ledger fully VERIFIED.**
+- **Open product decision surfaced to owner:** 047b reranker shipped default `none` (measured-neutral on the synthetic set), activatable via config — revisit with a stronger instrument/dogfood. Not a blocker.
