@@ -1,7 +1,7 @@
 # PRD-050c: Referral-Attributed Login (`--ref mario`)
 
 > **Parent:** [PRD-050](./prd-050-quick-install-and-guided-setup-index.md)
-> **Status:** Draft
+> **Status:** Completed — shipped with PRD-050 (merged #100, 2026-06-25)
 > **Priority:** P0 (this is Goal 2 — referral capture — in one sub-PRD)
 > **Effort:** M (0.5-1d)
 > **Schema changes:** None. Adds a referral header to the existing device-flow request.

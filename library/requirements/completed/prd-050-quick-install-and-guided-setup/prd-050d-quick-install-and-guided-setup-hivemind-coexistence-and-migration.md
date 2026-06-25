@@ -1,7 +1,7 @@
 # PRD-050d: Hivemind Coexistence Detection and Migration
 
 > **Parent:** [PRD-050](./prd-050-quick-install-and-guided-setup-index.md)
-> **Status:** Draft
+> **Status:** Completed — shipped with PRD-050 (merged #100, 2026-06-25)
 > **Priority:** P1
 > **Effort:** M (0.5-1d)
 > **Schema changes:** None. Reads existing credential locations; records migration state locally.

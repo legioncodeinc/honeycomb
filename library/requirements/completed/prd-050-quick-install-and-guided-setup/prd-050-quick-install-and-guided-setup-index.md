@@ -1,6 +1,6 @@
 # PRD-050: Quick Install and Guided Setup
 
-> **Status:** Backlog
+> **Status:** Completed — merged #100 (2026-06-25). All 5 sub-PRDs (35 sub-ACs) + 9 module ACs VERIFIED; security clean at Medium+, quality PASS.
 > **Priority:** P0 (growth-critical — the top-of-funnel for every new user)
 > **Effort:** XL (> 3d)
 > **Schema changes:** None to the DeepLake catalog. Adds a machine-local install/onboarding state file and a referral-attribution header on the existing device-flow request.
@@ -37,7 +37,7 @@ The four sub-PRDs cover the bootstrap installer, the pre-auth dashboard + guided
 
 - **A new auth backend or a new credential shape.** The device flow, the shared `~/.deeplake/credentials.json` (0600), org pinning, and drift-heal (PRD-011b / PRD-023) are reused verbatim; this module *triggers* them from the UI and *attributes* them, it does not reinvent them.
 - **A second daemon, or a public-facing server.** The dashboard stays a **loopback, local-mode-only** surface ([`host.ts`](../../../../src/daemon/runtime/dashboard/host.ts) is mounted only when `mode === "local"`). `honeycomb.local` is a local-resolution convenience, never a remote bind.
-- **Designing the npm publish pipeline.** Getting `@legioncodeinc/honeycomb` actually published is **[PRD-048](../prd-048-npm-publishing-pipeline/prd-048-npm-publishing-pipeline-index.md)**; this module *consumes* the published package and assumes its bin exists.
+- **Designing the npm publish pipeline.** Getting `@legioncodeinc/honeycomb` actually published is **[PRD-048](../../backlog/prd-048-npm-publishing-pipeline/prd-048-npm-publishing-pipeline-index.md)**; this module *consumes* the published package and assumes its bin exists.
 - **Bundling a Node runtime.** We detect/guide/instal­l Node via the platform's standard path; we do not ship a vendored Node.
 - **Re-architecting the embeddings daemon.** Its lifecycle (warmup, socket IPC) is owned by the embeddings-runtime work; here it is only *sequenced* (background, non-blocking) relative to the dashboard.
 - **Multi-referrer / affiliate management UI.** The referral code is a build-time/install-time default (`mario`), overridable by flag; a dashboard to manage codes is out of scope.
@@ -108,7 +108,7 @@ The partition boundary and the auth backend are unchanged. New/changed surface, 
 ## Related
 
 - [PRD-011b: Device-Flow Auth](../../completed/prd-011-tenancy-and-auth/prd-011b-tenancy-and-auth-device-flow-auth.md) — the device flow + shared `~/.deeplake/credentials.json` this module triggers from the UI and attributes (the `api.deeplake.ai` adapter is PRD-023's `deeplake-issuer.ts`).
-- [PRD-048: npm Publishing Pipeline](../prd-048-npm-publishing-pipeline/prd-048-npm-publishing-pipeline-index.md) — publishes the `@legioncodeinc/honeycomb` package this installer pulls; hard dependency for AC-1 in the field.
+- [PRD-048: npm Publishing Pipeline](../../backlog/prd-048-npm-publishing-pipeline/prd-048-npm-publishing-pipeline-index.md) — publishes the `@legioncodeinc/honeycomb` package this installer pulls; hard dependency for AC-1 in the field.
 - [PRD-021: Go-Live](../../completed/prd-021-go-live/prd-021-go-live-index.md) / [CLI Command Architecture](../../../knowledge/private/operations/cli-command-architecture.md) — the `setup` engine + daemon-ensure path the `install` verb composes.
 - [PRD-024: Dashboard UI Parity](../../completed/prd-024-dashboard-ui-parity/prd-024-dashboard-ui-parity-index.md) — the self-hydrating, token-free dashboard shell ([`host.ts`](../../../../src/daemon/runtime/dashboard/host.ts)) the pre-auth phase reuses.
 - [Credential Storage](../../../knowledge/private/security/credential-storage.md) · [Auth Architecture](../../../knowledge/private/auth/auth-architecture.md) — the credential locations (`~/.deeplake`, `~/.honeycomb`, `~/.hivemind`) detection reads.

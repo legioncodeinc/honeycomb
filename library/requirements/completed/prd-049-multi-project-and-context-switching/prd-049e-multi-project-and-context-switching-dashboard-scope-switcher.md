@@ -1,7 +1,7 @@
 # PRD-049e: Dashboard Org / Workspace / Project Switcher
 
 > **Parent:** [PRD-049](./prd-049-multi-project-and-context-switching-index.md)
-> **Status:** Draft
+> **Status:** Completed — shipped with PRD-049 (merged #101, 2026-06-25)
 > **Priority:** P1
 > **Effort:** L (1-3d)
 > **Schema changes:** None — consumes 049a resolution + DeepLake enumeration.

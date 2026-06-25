@@ -1,7 +1,7 @@
 # PRD-050a: One-Command Bootstrap Installer
 
 > **Parent:** [PRD-050](./prd-050-quick-install-and-guided-setup-index.md)
-> **Status:** Draft
+> **Status:** Completed — shipped with PRD-050 (merged #100, 2026-06-25)
 > **Priority:** P0
 > **Effort:** L (1-3d)
 > **Schema changes:** None. Writes a machine-local onboarding state file only.
@@ -83,6 +83,6 @@ The script is deliberately **thin and idempotent**: it detects what is already p
 - [`src/commands/daemon.ts`](../../../../src/commands/daemon.ts) — `ensureDaemonRunning` + the PID/lock lifecycle the script drives rather than re-implements.
 - [`src/daemon/runtime/dashboard/host.ts`](../../../../src/daemon/runtime/dashboard/host.ts) — `GET /dashboard` the script opens once `/health` is green.
 - [`src/daemon/runtime/auth/deeplake-issuer.ts`](../../../../src/daemon/runtime/auth/deeplake-issuer.ts) — the safe OS browser-opener pattern to reuse.
-- [PRD-048: npm Publishing Pipeline](../prd-048-npm-publishing-pipeline/prd-048-npm-publishing-pipeline-index.md) — must land before this works in the field.
+- [PRD-048: npm Publishing Pipeline](../../backlog/prd-048-npm-publishing-pipeline/prd-048-npm-publishing-pipeline-index.md) — must land before this works in the field.
 - [Monorepo Build & Release](../../../knowledge/private/infrastructure/monorepo-build-release.md) — bin/bundle layout the global install lands.
 </content>

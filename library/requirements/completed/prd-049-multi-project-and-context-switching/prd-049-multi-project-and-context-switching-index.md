@@ -1,6 +1,6 @@
 # PRD-049: Multi-Project Isolation and Context Switching
 
-> **Status:** Backlog
+> **Status:** Completed — merged #101 (2026-06-25). All 5 sub-PRDs (27 sub-ACs) + 8 module ACs VERIFIED; security clean at Medium+ (×2), quality PASS.
 > **Priority:** P1
 > **Effort:** XL (> 3d)
 > **Schema changes:** Additive — new `projects` registry table; promote the existing free-text `project` column to a resolved `project_id`; thread it into the scope clause.

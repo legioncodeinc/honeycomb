@@ -1,7 +1,7 @@
 # PRD-049c: Per-Project Skill Isolation and Propagation
 
 > **Parent:** [PRD-049](./prd-049-multi-project-and-context-switching-index.md)
-> **Status:** Draft
+> **Status:** Completed — shipped with PRD-049 (merged #101, 2026-06-25)
 > **Priority:** P1
 > **Effort:** M (3-8h)
 > **Schema changes:** Additive — skill rows carry the resolved `project_id`; cross-project share flag.
