@@ -51,6 +51,7 @@ import {
 import type { EmbedClient } from "../services/embed-client.js";
 import type { RecallConfig } from "./config.js";
 import { mergeChannels, type MergedPool, type RecallChannel, type RecallQuery, type RecallLogger } from "./contracts.js";
+import { buildProjectScopeConjunct } from "./scope-clause.js";
 
 /** The table + columns collection reads (the engine `memories` table). */
 const MEMORIES_TABLE = "memories";
@@ -172,6 +173,8 @@ export function buildFtsSql(args: {
 	readonly term: string;
 	readonly agentId: string;
 	readonly limit: number;
+	/** PRD-049b: the prebuilt project-segment conjunct, ANDed beside the agent_id conjunct (49b-AC-4). */
+	readonly projectClause?: string;
 }): string {
 	const tbl = sqlIdent(MEMORIES_TABLE);
 	const id = sqlIdent(ID_COLUMN);
@@ -186,10 +189,13 @@ export function buildFtsSql(args: {
 	// The term length is a numeric literal computed at build time (not a value sink).
 	const termLen = args.term.length;
 	const scoreSql = `LEAST(1.0, ${termLen}.0 / GREATEST(1, LENGTH(${contentCol}::text)))`;
+	// PRD-049b (49b-AC-2 / 49b-AC-4): the project segment is ANDed BESIDE the agent_id conjunct
+	// in the SAME statement — project is an additional predicate, not a replacement.
+	const projectClause = args.projectClause ?? "";
 	return (
 		`SELECT ${id} AS id, ${scoreSql} AS score ` +
 		`FROM "${tbl}" ` +
-		`WHERE ${contentCol}::text ILIKE ${pattern} AND ${agentCol} = ${agentVal} ` +
+		`WHERE ${contentCol}::text ILIKE ${pattern} AND ${agentCol} = ${agentVal}${projectClause} ` +
 		"ORDER BY score DESC " +
 		`LIMIT ${limit}`
 	);
@@ -248,12 +254,20 @@ export async function collectCandidates(query: RecallQuery, deps: CollectionDeps
 	const scopeFilter = collectionScopeFilter(agentId);
 	const channelInputs: { channel: RecallChannel; ids: ScoredId[] }[] = [];
 
+	// PRD-049b (49b-AC-2): the project-segment conjunct, ANDed into BOTH collection channels
+	// (FTS + vector) beside the agent_id scope (49b-AC-4). A blank `projectId` is the unbound
+	// inbox session (D8 / 49b-AC-3): the conjunct narrows to inbox + workspace-global only.
+	const projectClause = buildProjectScopeConjunct({
+		projectId: query.scope.projectId ?? "",
+		...(query.scope.projectBound !== undefined ? { bound: query.scope.projectBound } : {}),
+	});
+
 	// 1. Prepare the lexical term (FR-1); the NL query is preserved verbatim for vector.
 	const term = prepareLexicalTerm(query.query, config.keywordExpansion);
 
 	// 2. FTS channel — always runs (a-AC-1 / the lexical floor).
 	const ftsResult = await deps.storage.query(
-		buildFtsSql({ term, agentId, limit: config.channelLimit }),
+		buildFtsSql({ term, agentId, limit: config.channelLimit, projectClause }),
 		{ org: deps.scope.org, workspace: deps.scope.workspace },
 	);
 	channelInputs.push({ channel: "fts", ids: toScoredIds(ftsResult) });
@@ -291,6 +305,9 @@ export async function collectCandidates(query: RecallQuery, deps: CollectionDeps
 					scope: scopeFilter,
 					limit: config.channelLimit,
 					overFetchMultiplier: config.overFetchMultiplier, // D-1: 3x (a-AC-2).
+					// PRD-049b (49b-AC-2): the project segment rides the `<#>` match in the SAME
+					// statement, so a strong cross-project cosine hit is filtered before its id leaves.
+					...(projectClause !== "" ? { extraClause: projectClause } : {}),
 				}),
 				{ org: deps.scope.org, workspace: deps.scope.workspace },
 			);

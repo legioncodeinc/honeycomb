@@ -24,6 +24,8 @@ import {
 	type CommandDeps,
 	type OutputSink,
 } from "./contracts.js";
+import { loadCredentials } from "../daemon/runtime/auth/credentials-store.js";
+import { ENV_PROJECT_ID, resolveScopeFromDisk, UNSORTED_PROJECT_ID } from "../hooks/shared/project-resolver.js";
 
 /**
  * One rendered health dimension line for `status` (mirrors 020d's `HealthDimension` result
@@ -101,6 +103,15 @@ export interface StatusDeps extends CommandDeps {
 	readonly drift?: OrgDriftHealer;
 	/** Whether a credential is present (login state). Injected so a test drives it without `~`. */
 	readonly loggedIn?: boolean;
+	/**
+	 * The session working directory the per-cwd scope line resolves against (PRD-049d 49d-AC-5).
+	 * Defaults to `process.cwd()`. Injected so a test drives the resolved project without chdir.
+	 */
+	readonly cwd?: string;
+	/** Override the `~/.deeplake` dir (credentials + projects cache) for the scope line (tests). */
+	readonly dir?: string;
+	/** The env (defaults to `process.env`) — the `HONEYCOMB_PROJECT_ID` override is read here. */
+	readonly env?: NodeJS.ProcessEnv;
 }
 
 /**
@@ -124,6 +135,12 @@ export async function runStatusCommand(deps: StatusDeps): Promise<CommandResult>
 	out(`daemon:     ${alive ? "up (127.0.0.1:3850)" : "down"}`);
 	out(`login:      ${deps.loggedIn === true ? "logged in" : "not logged in"}`);
 
+	// PRD-049d 49d-AC-5: report the resolved Org → Workspace → Project for the CURRENT cwd, so "what
+	// am I writing to right now" is answerable per-folder, and an UNBOUND folder is marked explicitly.
+	// Fail-soft + session-safe: the project is resolved PER cwd from the local cache (never a machine-
+	// global field), and any failure simply omits the line rather than crashing status.
+	renderResolvedScope(deps, out);
+
 	if (deps.health !== undefined) {
 		const lines = await deps.health.evaluate();
 		for (const line of lines) {
@@ -133,4 +150,37 @@ export async function runStatusCommand(deps: StatusDeps): Promise<CommandResult>
 	}
 
 	return { exitCode: 0 };
+}
+
+/**
+ * Render the per-cwd resolved Org → Workspace → Project lines (PRD-049d 49d-AC-5). FAIL-SOFT: it
+ * reads the credential (for the org/workspace partition) + the local `~/.deeplake/projects.json`
+ * cache (for the cwd-bound project) through the THIN-CLIENT resolver — never the daemon, never a
+ * machine-global active-project field (session-safe). On no credential, or any error, it prints
+ * nothing rather than crashing `status`. The `HONEYCOMB_PROJECT_ID` override is honored (49d-AC-6).
+ * The deeper `honeycomb project status` verb is the richer surface; this is the at-a-glance line.
+ */
+function renderResolvedScope(deps: StatusDeps, out: OutputSink): void {
+	try {
+		const creds = loadCredentials(deps.dir, deps.env);
+		if (creds === null) return;
+		const env = deps.env ?? process.env;
+		const override = env[ENV_PROJECT_ID];
+		const resolved = resolveScopeFromDisk({
+			cwd: deps.cwd ?? process.cwd(),
+			org: creds.orgId,
+			workspace: creds.workspace,
+			...(override !== undefined ? { projectIdOverride: override } : {}),
+			...(deps.dir !== undefined ? { dir: deps.dir } : {}),
+		});
+		out(`org:        ${creds.orgName} (${creds.orgId})`);
+		out(`workspace:  ${creds.workspace}`);
+		if (resolved.bound) {
+			out(`project:    ${resolved.projectId} (this folder)`);
+		} else {
+			out(`project:    ${UNSORTED_PROJECT_ID} (this folder is UNBOUND — captures land in the inbox)`);
+		}
+	} catch {
+		// Fail-soft: a resolution hiccup never crashes `status` — the scope line is simply omitted.
+	}
 }

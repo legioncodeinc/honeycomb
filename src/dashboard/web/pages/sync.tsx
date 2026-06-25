@@ -30,7 +30,9 @@ import React from "react";
 import { Badge, Button, type BadgeTone } from "../primitives.js";
 import { LiveLog, Panel, SYNC_TONE } from "../panels.js";
 import type { PageProps } from "../page-frame.js";
-import { PageFrame, usePoll } from "../page-frame.js";
+import { PageFrame } from "../page-frame.js";
+import { useScope } from "../scope-context.js";
+import { NeedsProjectSelection } from "../needs-project.js";
 import {
 	type AssetSyncRowWire,
 	type AssetSyncViewWire,
@@ -371,6 +373,11 @@ export function appendActivityRecord(
  * shows the per-scope summary + the sync activity feed.
  */
 export function SyncPage({ wire }: PageProps): React.JSX.Element {
+	// PRD-049e (49e-AC-2 / 49e-AC-5): the dashboard-selected project gates this page. With no project
+	// selected the page renders the needs-selection state (never another scope's assets); a project
+	// change re-hydrates the view (the poll effect is keyed on `project`).
+	const { scope } = useScope();
+	const project = scope.project;
 	const [view, setView] = React.useState<AssetSyncViewWire>(EMPTY_ASSET_SYNC_VIEW);
 	// The chronological (oldest-last) sync-activity buffer: BACKFILLED from the /api/logs snapshot, then
 	// EXTENDED by the /api/logs/stream SSE tail (042c c-AC-2). The LiveLog lines derive from it.
@@ -380,7 +387,25 @@ export function SyncPage({ wire }: PageProps): React.JSX.Element {
 	const [inFlight, setInFlight] = React.useState<InFlightMap>({});
 
 	// Hydrate the union view-model (the read backbone). A light poll keeps it fresh; stops on unmount.
-	usePoll(async () => setView(await wire.assetsView()), VIEW_POLL_MS);
+	// 49e-AC-2/AC-5: re-hydrate when the selected project changes; with no project selected, do not
+	// fetch (the page renders the needs-selection state below) so another scope's assets never show.
+	React.useEffect(() => {
+		if (project === undefined) {
+			setView(EMPTY_ASSET_SYNC_VIEW);
+			return;
+		}
+		let alive = true;
+		const tick = async (): Promise<void> => {
+			const v = await wire.assetsView();
+			if (alive) setView(v);
+		};
+		void tick();
+		const id = setInterval(() => void tick(), VIEW_POLL_MS);
+		return () => {
+			alive = false;
+			clearInterval(id);
+		};
+	}, [wire, project]);
 
 	// The activity feed FOLLOWS the SSE tail (042c c-AC-2): BACKFILL the recent records from the
 	// /api/logs snapshot ONCE, THEN subscribe to /api/logs/stream and append each NEW sync record as it
@@ -448,7 +473,12 @@ export function SyncPage({ wire }: PageProps): React.JSX.Element {
 	const rows = tab === "skill" ? view.skills : view.agents;
 
 	return (
-		<PageFrame title="Sync" eyebrow={`${view.skills.length + view.agents.length} assets`}>
+		<PageFrame title="Sync" eyebrow={project === undefined ? "sync" : `${view.skills.length + view.agents.length} assets`}>
+			{project === undefined ? (
+				// 49e-AC-5: no project selected → the explicit needs-selection state, never another scope's assets.
+				<NeedsProjectSelection surface="sync state" />
+			) : (
+			<>
 			<ScopeSummary view={view} />
 			<div style={{ height: 16 }} />
 
@@ -463,6 +493,8 @@ export function SyncPage({ wire }: PageProps): React.JSX.Element {
 			<div style={{ height: 16 }} />
 			{/* The activity feed reuses the LiveLog panel (042c — filtered to sync events). */}
 			<LiveLog lines={activity} />
+			</>
+			)}
 		</PageFrame>
 	);
 }

@@ -200,6 +200,17 @@ export interface VectorSearchArgs {
 	readonly limit: number;
 	/** Over-fetch multiplier; defaults to {@link DEFAULT_OVERFETCH_MULTIPLIER}. */
 	readonly overFetchMultiplier?: number;
+	/**
+	 * PRD-049b: an EXTRA prebuilt WHERE conjunct ANDed inline AFTER the structured scope
+	 * conjuncts (e.g. the project-segment ` AND (project_id = … OR project_id = '')` from
+	 * `recall/scope-clause.ts` `buildProjectScopeConjunct`). Unlike {@link VectorScopeFilter}'s
+	 * single-equality conjuncts, this carries a DISJUNCTION the filter shape cannot express, so
+	 * the project filter rides the SAME `<#>` statement (49b-AC-2). It is a PREBUILT fragment the
+	 * caller has already routed through the 002b `sqlIdent`/`sLiteral` guards (never a raw value);
+	 * `audit:sql` reads it as a fragment, not a value sink. Must start with a leading space + `AND`
+	 * (or be empty). Defaults to "" — no extra constraint, byte-for-byte the prior SQL.
+	 */
+	readonly extraClause?: string;
 }
 
 /**
@@ -222,6 +233,9 @@ export function buildVectorSearchSql(args: VectorSearchArgs): string {
 	const multiplier = args.overFetchMultiplier ?? DEFAULT_OVERFETCH_MULTIPLIER;
 	const fetchLimit = Math.max(0, Math.trunc(args.limit)) * Math.max(1, Math.trunc(multiplier));
 	const scopeConjuncts = buildScopeConjuncts(args.scope);
+	// PRD-049b: the prebuilt project-segment conjunct (a disjunction the VectorScopeFilter
+	// cannot express) is appended inline so the project filter rides the SAME `<#>` statement.
+	const extraClause = args.extraClause ?? "";
 	// `(emb <#> vec)` is the cosine distance; normalize to a 0..1 similarity.
 	// The `<#>` operator returns negative inner product in pgvector-style
 	// engines; `(1 + (emb <#> vec)) / 2` maps the cosine range [-1,1] → [0,1].
@@ -229,7 +243,7 @@ export function buildVectorSearchSql(args: VectorSearchArgs): string {
 	return (
 		`SELECT ${id} AS id, ${scoreSql} AS score ` +
 		`FROM "${tbl}" ` +
-		`WHERE ARRAY_LENGTH(${emb}, 1) > 0 ${scopeConjuncts} ` +
+		`WHERE ARRAY_LENGTH(${emb}, 1) > 0 ${scopeConjuncts}${extraClause} ` +
 		"ORDER BY score DESC " +
 		`LIMIT ${fetchLimit}`
 	);
@@ -250,18 +264,21 @@ export function buildLexicalDegradeSql(args: {
 	readonly term: string;
 	readonly scope: VectorScopeFilter;
 	readonly limit: number;
+	/** PRD-049b: the prebuilt project-segment conjunct (see {@link VectorSearchArgs.extraClause}). */
+	readonly extraClause?: string;
 }): string {
 	const tbl = sqlIdent(args.table);
 	const id = sqlIdent(args.idColumn);
 	const textCol = sqlIdent(args.textColumn);
 	const scopeConjuncts = buildScopeConjuncts(args.scope);
+	const extraClause = args.extraClause ?? "";
 	const lexLimit = Math.max(0, Math.trunc(args.limit));
 	// ILIKE substring match; the term is escaped as a value and wrapped in `%…%`.
 	const pattern = `'%${sqlStr(args.term)}%'`;
 	return (
 		`SELECT ${id} AS id, 1.0 AS score ` +
 		`FROM "${tbl}" ` +
-		`WHERE ${textCol}::text ILIKE ${pattern} ${scopeConjuncts} ` +
+		`WHERE ${textCol}::text ILIKE ${pattern} ${scopeConjuncts}${extraClause} ` +
 		`LIMIT ${lexLimit}`
 	);
 }
@@ -323,6 +340,9 @@ export async function vectorSearch(
 			term: lexicalFallback.term,
 			scope: args.scope,
 			limit: lexicalFallback.limit,
+			// PRD-049b: carry the project segment into the lexical-degrade arm too, so the
+			// embeddings-off fallback never widens past the project boundary.
+			...(args.extraClause !== undefined ? { extraClause: args.extraClause } : {}),
 		}),
 		scope,
 	);

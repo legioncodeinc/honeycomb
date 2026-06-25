@@ -55,6 +55,13 @@ export {
 	SCOPE_READ_POLICIES,
 	asReadPolicy,
 	buildScopeClause,
+	// PRD-049b: the project-segment predicate (the SECOND inner-ring clause), exported so
+	// the live recall arms, the fast-path collection layer, AND PRD-049c (skills) all reuse
+	// ONE factored builder — a scoping review is a search for this symbol (49b-AC-5).
+	type ProjectScopeClause,
+	type ProjectScopeInput,
+	buildProjectScopeClause,
+	buildProjectScopeConjunct,
 } from "./scope-clause.js";
 
 // ── 007a collection (FILLED, live — reused by the VFS browse seam) ────────────

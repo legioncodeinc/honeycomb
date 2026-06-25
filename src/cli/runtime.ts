@@ -55,6 +55,7 @@ import { DAEMON_HOST, DAEMON_PORT } from "../shared/constants.js";
 
 import { authMain } from "./auth.js";
 import { orgMain } from "./org.js";
+import { projectMain } from "./project.js";
 import { whoamiMain } from "./whoami.js";
 import { buildRealTokenIssuer } from "./token-issuer.js";
 import { buildConnectorRunner } from "./connector-runner.js";
@@ -231,6 +232,13 @@ export function buildAuthPassthrough(): AuthPassthrough {
 			if (verb === "whoami") {
 				// AC-3: GET /me identity. The real client is constructed from the credential's apiUrl.
 				const result = await whoamiMain(tail);
+				return result.exitCode;
+			}
+			if (verb === "project") {
+				// PRD-049d: the PROJECT level (`list`/`bind`/`use`/`status`). Thin-client only — it writes
+				// the local `~/.deeplake/projects.json` binding store and reports the per-cwd resolved
+				// scope; no `api.deeplake.ai` call, no token re-mint, no machine-global mutation.
+				const result = projectMain(tail);
 				return result.exitCode;
 			}
 			// `org` / `workspace` / `workspaces` route to the tenancy dispatcher. PRD-023 Wave 3 drives

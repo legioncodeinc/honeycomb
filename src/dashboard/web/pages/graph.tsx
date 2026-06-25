@@ -36,6 +36,8 @@ import { KIND_COLOR, KIND_COLOR_FALLBACK } from "../panels.js";
 import { Badge } from "../primitives.js";
 import type { PageProps } from "../page-frame.js";
 import { PageFrame } from "../page-frame.js";
+import { useScope } from "../scope-context.js";
+import { NeedsProjectSelection } from "../needs-project.js";
 import { EMPTY_GRAPH, type GraphWire, type WireClient } from "../wire.js";
 
 /** How often the page re-hydrates the active graph source (ms). Light refresh, stopped on unmount. */
@@ -495,6 +497,10 @@ function SourceToggle({ source, onPick }: { source: GraphSource; onPick: (s: Gra
  * owns the daemon-down swap (D-9), so this page just renders empty/loading until its fetch resolves.
  */
 export function GraphPage({ wire }: PageProps): React.JSX.Element {
+	// PRD-049e (49e-AC-2): the dashboard-selected project. Threaded into the graph fetchers (so a scope
+	// switch re-queries for the new project on the NEXT render) and gating the needs-selection state.
+	const { scope } = useScope();
+	const project = scope.project;
 	const [source, setSource] = React.useState<GraphSource>("codebase");
 	const [graph, setGraph] = React.useState<GraphWire>(EMPTY_GRAPH);
 	const [selected, setSelected] = React.useState<string | null>(null);
@@ -512,9 +518,16 @@ export function GraphPage({ wire }: PageProps): React.JSX.Element {
 	// EMPTY_GRAPH (the wire is fail-soft) → the empty state. An `alive` guard prevents a late-resolving
 	// fetch from the PRIOR source updating after a switch.
 	React.useEffect(() => {
+		// 49e-AC-5: with NO project selected, do not fetch (and below we render the needs-selection
+		// state) — never show another project's graph. The effect is keyed on `project` so a scope
+		// switch re-fetches for the new project on the next render (49e-AC-2).
+		if (project === undefined) {
+			setGraph(EMPTY_GRAPH);
+			return;
+		}
 		let alive = true;
 		const tick = async (): Promise<void> => {
-			const next = source === "memory" ? await wire.memoryGraph() : await wire.graph();
+			const next = source === "memory" ? await wire.memoryGraph(project) : await wire.graph(project);
 			if (alive) setGraph(next);
 		};
 		void tick();
@@ -523,7 +536,7 @@ export function GraphPage({ wire }: PageProps): React.JSX.Element {
 			alive = false;
 			clearInterval(id);
 		};
-	}, [wire, source, refetchTrigger]);
+	}, [wire, source, refetchTrigger, project]);
 
 	// The refresh the "Build graph" button calls on a successful build: bump the trigger so the active
 	// source re-hydrates at once (the codebase graph appears without a manual reload).
@@ -581,8 +594,11 @@ export function GraphPage({ wire }: PageProps): React.JSX.Element {
 	const toolbar = <SourceToggle source={source} onPick={pickSource} />;
 
 	return (
-		<PageFrame title="Graph" eyebrow={eyebrow} right={toolbar}>
-			{!graph.built ? (
+		<PageFrame title="Graph" eyebrow={project === undefined ? "graph" : eyebrow} right={toolbar}>
+			{project === undefined ? (
+				// 49e-AC-5: no project selected → the explicit needs-selection state, never another scope's graph.
+				<NeedsProjectSelection surface="codebase & memory graph" />
+			) : !graph.built ? (
 				<GraphEmptyState source={source} wire={wire} onBuilt={refreshGraph} />
 			) : (
 				<>

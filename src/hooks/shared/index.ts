@@ -112,3 +112,32 @@ export {
 	CREDENTIALS_FILE_NAME,
 	ENV_TOKEN,
 } from "./credential-reader.js";
+
+// ── PRD-049a — per-session project identity & resolution (thin-client) ──────────
+// ── PRD-049d — cache writers (bind/use + registry sync) + the project env override ──
+export {
+	type BindFolderInput,
+	bindFolderToProject,
+	canonicalizeRemote,
+	type CachedProject,
+	defaultGitRemoteReader,
+	emptyProjectsCache,
+	ENV_PROJECT_ID,
+	type FolderBinding,
+	type GitRemoteReader,
+	loadProjectsCache,
+	noGitRemoteReader,
+	PROJECTS_CACHE_FILE_NAME,
+	PROJECTS_CACHE_SCHEMA_VERSION,
+	type ProjectsCache,
+	ProjectsCacheSchema,
+	projectsCacheDir,
+	projectsCachePath,
+	type ResolvedScope,
+	type ResolveScopeInput,
+	resolveScope,
+	resolveScopeFromDisk,
+	saveProjectsCache,
+	type ScopeSource,
+	UNSORTED_PROJECT_ID,
+} from "./project-resolver.js";

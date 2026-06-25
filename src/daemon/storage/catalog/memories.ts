@@ -62,7 +62,12 @@ export const MEMORIES_COLUMNS = Object.freeze([
 	{ name: "importance", sql: "FLOAT4 NOT NULL DEFAULT 0.5" },
 	{ name: "tags", sql: "TEXT NOT NULL DEFAULT '[]'" },
 	{ name: "who", sql: "TEXT NOT NULL DEFAULT ''" },
+	// PRD-049b: the existing free-text `project` (a raw cwd path, kept per D5 — no bulk
+	// migration) STAYS for display/back-compat. `project_id` is the RESOLVED registry key
+	// (049a) the scope clause segments on — additive, heal-compatible (NOT NULL DEFAULT '').
+	// Default '' resolves to the workspace `__unsorted__` inbox at read time (D5).
 	{ name: "project", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "project_id", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "source_id", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "source_type", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "pinned", sql: "BIGINT NOT NULL DEFAULT 0" },

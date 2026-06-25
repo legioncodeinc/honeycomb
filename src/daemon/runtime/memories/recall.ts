@@ -65,6 +65,7 @@ import { isOk, type StorageRow } from "../../storage/result.js";
 import { sLiteral, sqlIdent, sqlLike } from "../../storage/sql.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import { cosineSimilarity, EMBEDDING_DIMS, type ScoredId, vectorSearch } from "../../storage/vector.js";
+import { buildProjectScopeConjunct } from "../recall/scope-clause.js";
 import {
 	DEFAULT_DEDUP_ENABLED,
 	DEFAULT_DEDUP_SIMILARITY_THRESHOLD,
@@ -206,7 +207,7 @@ export function resolveRecallLimit(limit: number | undefined): number {
  * interpolation, the same shape the rest of the data layer uses for a dynamic
  * LIMIT (audit-safe; never a `String(...)` wrapper, never a hand-quoted value).
  */
-export function buildMemoriesArmSql(term: string, perArmLimit: number): string {
+export function buildMemoriesArmSql(term: string, perArmLimit: number, projectClause = ""): string {
 	const pattern = `'%${sqlLike(term)}%'`;
 	const memoriesTbl = sqlIdent("memories");
 	const idCol = sqlIdent("id");
@@ -216,10 +217,12 @@ export function buildMemoriesArmSql(term: string, perArmLimit: number): string {
 	// recency dampener can age-decay the fused score — no new column.
 	const createdAtCol = sqlIdent("created_at");
 	const perArm = Math.max(1, Math.trunc(perArmLimit));
+	// PRD-049b (49b-AC-2): the project-segment predicate ANDed into the SAME statement as the
+	// lexical match, so a project-B row is filtered server-side and never enters the fusion.
 	return (
 		`SELECT 'memories' AS source, ${idCol} AS id, ${contentCol}::text AS text, ${createdAtCol}::text AS created_at ` +
 		`FROM "${memoriesTbl}" ` +
-		`WHERE ${contentCol}::text ILIKE ${pattern} AND ${isDeletedCol} = 0 ` +
+		`WHERE ${contentCol}::text ILIKE ${pattern} AND ${isDeletedCol} = 0${projectClause} ` +
 		`LIMIT ${perArm}`
 	);
 }
@@ -228,7 +231,7 @@ export function buildMemoriesArmSql(term: string, perArmLimit: number): string {
  * Build the `memory` arm: AI session summaries, keyed by `path`, matched with a
  * guarded `ILIKE` over `summary`. Same guard discipline as {@link buildMemoriesArmSql}.
  */
-export function buildMemoryArmSql(term: string, perArmLimit: number): string {
+export function buildMemoryArmSql(term: string, perArmLimit: number, projectClause = ""): string {
 	const pattern = `'%${sqlLike(term)}%'`;
 	const memoryTbl = sqlIdent("memory");
 	const pathCol = sqlIdent("path");
@@ -237,10 +240,12 @@ export function buildMemoryArmSql(term: string, perArmLimit: number): string {
 	// uniform `created_at` projection the dampener reads (no new column).
 	const createdAtCol = sqlIdent("creation_date");
 	const perArm = Math.max(1, Math.trunc(perArmLimit));
+	// PRD-049b (49b-AC-2): project-segment predicate ANDed in so a summary from another
+	// project never surfaces.
 	return (
 		`SELECT 'memory' AS source, ${pathCol} AS id, ${summaryCol}::text AS text, ${createdAtCol}::text AS created_at ` +
 		`FROM "${memoryTbl}" ` +
-		`WHERE ${summaryCol}::text ILIKE ${pattern} ` +
+		`WHERE ${summaryCol}::text ILIKE ${pattern}${projectClause} ` +
 		`LIMIT ${perArm}`
 	);
 }
@@ -249,7 +254,7 @@ export function buildMemoryArmSql(term: string, perArmLimit: number): string {
  * Build the `sessions` arm: raw captured turns (JSONB `message`, matched as
  * `::text`), keyed by `path`. Same guard discipline as {@link buildMemoriesArmSql}.
  */
-export function buildSessionsArmSql(term: string, perArmLimit: number): string {
+export function buildSessionsArmSql(term: string, perArmLimit: number, projectClause = ""): string {
 	const pattern = `'%${sqlLike(term)}%'`;
 	const sessionsTbl = sqlIdent("sessions");
 	const pathCol = sqlIdent("path");
@@ -258,10 +263,12 @@ export function buildSessionsArmSql(term: string, perArmLimit: number): string {
 	// `created_at` projection the dampener reads (no new column).
 	const createdAtCol = sqlIdent("creation_date");
 	const perArm = Math.max(1, Math.trunc(perArmLimit));
+	// PRD-049b (49b-AC-2): project-segment predicate ANDed in so a raw turn from another
+	// project never surfaces — the broadest leak surface (raw dialogue) is filtered server-side.
 	return (
 		`SELECT 'sessions' AS source, ${pathCol} AS id, ${messageCol}::text AS text, ${createdAtCol}::text AS created_at ` +
 		`FROM "${sessionsTbl}" ` +
-		`WHERE ${messageCol}::text ILIKE ${pattern} ` +
+		`WHERE ${messageCol}::text ILIKE ${pattern}${projectClause} ` +
 		`LIMIT ${perArm}`
 	);
 }
@@ -475,6 +482,23 @@ export interface MemoryRecallRequest {
 	/** The caller's hit limit (clamped to `[1, MAX_RECALL_LIMIT]`; defaulted when absent). */
 	readonly limit?: number;
 	/**
+	 * PRD-049b (49b-AC-2): the session's RESOLVED project id (049a `resolveScope(cwd)`). The
+	 * project-segment predicate ({@link buildProjectScopeConjunct}) is ANDed into EVERY recall
+	 * arm (lexical, semantic `<#>`, hydrate, rerank/dedup fetch) so a recall in project A
+	 * NEVER returns a project-B row — even on a strong vector or high-degree-entity hit.
+	 * ABSENT/blank → the unbound inbox session (D8 / 49b-AC-3): recall narrows to the
+	 * `__unsorted__` inbox + workspace-global (unset `project_id`) rows only, never another
+	 * project. Carried into every guarded statement; the predicate is SQL-safe (`sLiteral`).
+	 */
+	readonly projectId?: string;
+	/**
+	 * PRD-049b: whether the session resolved a REAL bound project (049a `resolveScope(cwd).bound`).
+	 * ABSENT → inferred from `projectId` (a non-blank, non-`__unsorted__` id is bound). Drives the
+	 * inbox-vs-project admission in {@link buildProjectScopeConjunct} and the D8 degraded-scoping
+	 * signal (a recall with no resolvable project is unbound → inbox+global, with a visible warning).
+	 */
+	readonly projectBound?: boolean;
+	/**
 	 * OPTIONAL token budget (PRD-047e / e-AC-1). When supplied (and positive), recall replaces the
 	 * fixed top-`limit` slice with a token-BUDGETED, diversity-aware (MMR) selection: it fills the
 	 * budget with the highest-value NON-redundant hits ({@link selectWithinTokenBudget}) rather than a
@@ -485,6 +509,20 @@ export interface MemoryRecallRequest {
 	 * MMR/budget failure fails-soft to the fixed top-`limit` list, never a 500.
 	 */
 	readonly tokenBudget?: number;
+}
+
+/**
+ * Build the project-segment ` AND (project_id = … OR project_id = '')` conjunct for a
+ * recall request (PRD-049b 49b-AC-2). Reuses the SINGLE factored {@link buildProjectScopeConjunct}
+ * so every arm (and PRD-049c skills) shares ONE predicate. A request with no `projectId` is
+ * the unbound inbox session (D8 / 49b-AC-3): the conjunct narrows to inbox + workspace-global.
+ * The returned string is ANDed verbatim into each arm's WHERE (SQL-safe via `sLiteral`).
+ */
+function projectConjunctFor(request: MemoryRecallRequest): string {
+	return buildProjectScopeConjunct({
+		projectId: request.projectId ?? "",
+		...(request.projectBound !== undefined ? { bound: request.projectBound } : {}),
+	});
 }
 
 /**
@@ -554,7 +592,7 @@ const SEMANTIC_ARMS: readonly SemanticArmSpec[] = [
  * IDs+score only by design (e-AC-4), so the text is hydrated here in ONE guarded
  * statement rather than re-running the vector match.
  */
-function buildSemanticHydrateSql(spec: SemanticArmSpec, ids: readonly string[]): string {
+function buildSemanticHydrateSql(spec: SemanticArmSpec, ids: readonly string[], projectClause = ""): string {
 	const tbl = sqlIdent(spec.table);
 	const idCol = sqlIdent(spec.idColumn);
 	const textCol = sqlIdent(spec.textColumn);
@@ -563,10 +601,12 @@ function buildSemanticHydrateSql(spec: SemanticArmSpec, ids: readonly string[]):
 	const sourceLit = sLiteral(spec.source);
 	const inList = ids.map((id) => sLiteral(id)).join(", ");
 	const filterClause = spec.hydrateFilter === "" ? "" : ` ${spec.hydrateFilter}`;
+	// PRD-049b (49b-AC-2 defense-in-depth): the project segment is ALSO applied at hydration,
+	// so even if a cross-project id reached this step it loads no text and is dropped upstream.
 	return (
 		`SELECT ${sourceLit} AS source, ${idCol} AS id, ${textCol}::text AS text, ${tsCol}::text AS created_at ` +
 		`FROM "${tbl}" ` +
-		`WHERE ${idCol} IN (${inList})${filterClause}`
+		`WHERE ${idCol} IN (${inList})${filterClause}${projectClause}`
 	);
 }
 
@@ -586,10 +626,14 @@ async function runSemanticArm(
 	deps: MemoryRecallDeps,
 	limit: number,
 ): Promise<RankedArmEntry[]> {
+	// PRD-049b (49b-AC-2): the project segment rides the `<#>` match (extraClause) AND the
+	// hydrate, so a strong cross-project cosine hit is filtered server-side before its id leaves.
+	const projectClause = projectConjunctFor(request);
 	let scored: ScoredId[];
 	try {
 		// vectorSearch validates the dim (asserts 768) + over-fetches; the org/workspace
-		// partition rides the QueryScope, so the in-row scope filter is empty here.
+		// partition rides the QueryScope, so the in-row scope filter is empty here EXCEPT for
+		// the project-segment conjunct ANDed inline (49b-AC-2).
 		const recall = await vectorSearch(deps.storage, request.scope, {
 			table: spec.table,
 			idColumn: spec.idColumn,
@@ -597,6 +641,7 @@ async function runSemanticArm(
 			queryVector,
 			scope: {},
 			limit,
+			...(projectClause !== "" ? { extraClause: projectClause } : {}),
 		});
 		scored = recall.ids;
 	} catch {
@@ -610,7 +655,7 @@ async function runSemanticArm(
 	// cosine ranking the vector match produced (the IN-list read order is unspecified).
 	const ids = scored.map((s) => s.id).filter((id) => id !== "");
 	if (ids.length === 0) return [];
-	const hydrated = await runArm(buildSemanticHydrateSql(spec, ids), request, deps);
+	const hydrated = await runArm(buildSemanticHydrateSql(spec, ids, projectClause), request, deps);
 	const textById = new Map<string, string>();
 	const tsById = new Map<string, string>(); // PRD-047d: id → creation timestamp (ISO, or "").
 	for (const row of hydrated) {
@@ -1219,6 +1264,11 @@ export async function recallMemories(
 	//   · UNSET (default)        → run `runSemanticArms` exactly as today (behavior-neutral).
 	const keywordOnly = deps.recallMode === "keyword";
 
+	// PRD-049b (49b-AC-2): compute the project-segment conjunct ONCE and AND it into every
+	// lexical arm. The semantic arm threads the SAME predicate inline (runSemanticArm). A row
+	// from another project is filtered server-side in the SAME statement as the match.
+	const projectClause = projectConjunctFor(request);
+
 	// Run the semantic arms (embed-query → `<#>`) and the lexical arms concurrently.
 	// The semantic path returns null when it could not run (→ degraded:true); the
 	// lexical arms always run (the resilient floor). Each lexical arm is bounded by the
@@ -1226,9 +1276,9 @@ export async function recallMemories(
 	// semantic arm is never invoked — it short-circuits to `null` before the await.
 	const [semanticRun, memoriesRows, memoryRows, sessionsRows] = await Promise.all([
 		keywordOnly ? Promise.resolve(null) : runSemanticArms(request, deps, limit),
-		runArm(buildMemoriesArmSql(term, limit), request, deps),
-		runArm(buildMemoryArmSql(term, limit), request, deps),
-		runArm(buildSessionsArmSql(term, limit), request, deps),
+		runArm(buildMemoriesArmSql(term, limit, projectClause), request, deps),
+		runArm(buildMemoryArmSql(term, limit, projectClause), request, deps),
+		runArm(buildSessionsArmSql(term, limit, projectClause), request, deps),
 	]);
 
 	// `degraded` is HONEST (PRD-025 AC-3): false iff the semantic arm actually ran — EXCEPT in

@@ -29,6 +29,7 @@ import {
 	viewBoxFor,
 } from "../../../src/dashboard/web/pages/graph.js";
 import { splitNeighbors } from "../../../src/dashboard/web/graph-layout.js";
+import { ScopeContext, type ScopeContextValue } from "../../../src/dashboard/web/scope-context.js";
 import type { PageProps } from "../../../src/dashboard/web/page-frame.js";
 import type { GraphWire, WireClient } from "../../../src/dashboard/web/wire.js";
 
@@ -110,11 +111,21 @@ afterEach(() => {
 	window.location.hash = "";
 });
 
+/** A scope with an ACTIVE project — PRD-049e (the page renders the needs-selection state without one). */
+const SCOPE_WITH_PROJECT: ScopeContextValue = {
+	scope: { org: "acme", workspace: "backend", project: "api" },
+	setScope: () => {},
+};
+
 /** Mount the page and flush the usePoll fetch-on-mount microtask so state settles. */
 async function mountPage(wire: WireClient): Promise<void> {
 	await act(async () => {
 		root = createRoot(container);
-		root.render(<GraphPage {...pageProps(wire)} />);
+		root.render(
+			<ScopeContext.Provider value={SCOPE_WITH_PROJECT}>
+				<GraphPage {...pageProps(wire)} />
+			</ScopeContext.Provider>,
+		);
 	});
 	await act(async () => {
 		await Promise.resolve();

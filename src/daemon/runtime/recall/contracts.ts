@@ -147,6 +147,20 @@ export interface RecallScope {
 	readonly readPolicy: RecallReadPolicy;
 	/** The agent's policy group (only meaningful for `group`; blank otherwise). */
 	readonly policyGroup: string;
+	/**
+	 * PRD-049b (49b-AC-2): the session's RESOLVED project id (049a `resolveScope(cwd)`). The
+	 * project-segment predicate is ANDed into the fast-path collection channels (FTS + vector)
+	 * beside the `agent_id` conjunct (49b-AC-4 — project is an ADDITIONAL segment, not a
+	 * replacement). ABSENT/blank → the unbound inbox session (D8 / 49b-AC-3): collection narrows
+	 * to inbox + workspace-global (unset `project_id`) only, never another project.
+	 */
+	readonly projectId?: string;
+	/**
+	 * PRD-049b: whether the session resolved a REAL bound project (049a `resolveScope(cwd).bound`).
+	 * ABSENT → inferred from `projectId`. Drives the inbox-vs-project admission + the D8 degraded
+	 * signal the browse surface surfaces when no project resolves.
+	 */
+	readonly projectBound?: boolean;
 }
 
 /**

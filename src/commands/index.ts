@@ -63,6 +63,7 @@ export {
 
 export {
 	buildStorageRequest,
+	parseSkillId,
 	runStorageVerb,
 	STORAGE_VERB_ROUTES,
 } from "./storage-handlers.js";

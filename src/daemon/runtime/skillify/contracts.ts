@@ -129,6 +129,31 @@ export const SKILL_INSTALLS = Object.freeze(["project", "global"] as const);
 export type SkillInstall = (typeof SKILL_INSTALLS)[number];
 
 /**
+ * The cross-project promotion marker (PRD-049c D6 / 49c-AC-2 / 49c-AC-4). It is ORTHOGONAL
+ * to {@link SkillScope} (`me`/`team`, the publish/co-ownership axis) and governs WHICH of a
+ * user's PROJECTS surface a skill:
+ *
+ *   - `none`       project-scoped — surfaces ONLY in its origin `project_id` (the mine/pull
+ *                  DEFAULT; isolation, 49c-AC-1). A mined or pulled skill is ALWAYS `none`.
+ *   - `user`       this-user-cross-project — surfaces in ANY of the promoting user's projects
+ *                  (49c-AC-2). Set ONLY by the explicit `promote --cross-project` operation.
+ *   - `workspace`  workspace-wide — surfaces in EVERY project for EVERY teammate (49c-AC-2).
+ *                  Set ONLY by the explicit `promote --workspace` operation.
+ *
+ * Frozen so the type, the surfacing predicate, and the promote operations read ONE source.
+ * NO mining path and NO pull path ever sets a value other than `none` (49c-AC-4 — the
+ * structural test asserts the mine + pull rows carry `none`).
+ */
+export const CROSS_PROJECT_SCOPES = Object.freeze(["none", "user", "workspace"] as const);
+/** A cross-project promotion marker (PRD-049c D6). */
+export type CrossProjectScope = (typeof CROSS_PROJECT_SCOPES)[number];
+
+/** Narrow an arbitrary string to a known {@link CrossProjectScope}, defaulting to `none` (fail-closed: never wider). */
+export function asCrossProjectScope(raw: string): CrossProjectScope {
+	return (CROSS_PROJECT_SCOPES as readonly string[]).includes(raw) ? (raw as CrossProjectScope) : "none";
+}
+
+/**
  * The provenance frontmatter every mined `SKILL.md` carries (FR-2) and the
  * provenance columns the `skills` row records. A teammate reads this to know WHO
  * mined the skill, FROM WHICH sessions, at WHAT version, and its scope — so a pull
@@ -148,6 +173,41 @@ export interface SkillProvenance {
 	readonly createdBy: string;
 	/** The skill's scope (`me` | `team`). */
 	readonly scope: SkillScope;
+	/**
+	 * PRD-049c (49c-AC-1 / 49c-AC-5): the RESOLVED registry key (049a) the skill is scoped to —
+	 * stamped at MINE time from the session cwd (`resolveScopeFromDisk`). An identity-less session
+	 * resolves to the workspace {@link UNSORTED_PROJECT_ID} inbox (49c-AC-5, mirroring 049b
+	 * capture). The surfacing predicate ({@link import("../recall/scope-clause.js").buildProjectScopeClause})
+	 * filters on this so a skill mined in project A never surfaces in project B. ABSENT/blank on a
+	 * legacy pre-049c row → the unset sentinel `''`, admitted at read alongside the session's
+	 * project + the inbox (back-compat, D5). Defaults to the inbox in the writer when unset.
+	 */
+	readonly projectId?: string;
+	/**
+	 * PRD-049c (49c-AC-2 / 49c-AC-4 / D6): the EXPLICIT cross-project promotion + its provenance.
+	 * ABSENT on every mined or pulled row — mining and pull NEVER promote (49c-AC-4); the row then
+	 * records `cross_project_scope = 'none'`. PRESENT only on a row written by one of the two
+	 * explicit promote operations ({@link promoteSkill}), carrying WHO promoted it, WHEN, and the
+	 * ORIGIN project it was promoted FROM (visible cross-project provenance on the surfaced result,
+	 * 49c-AC-2).
+	 */
+	readonly promotion?: SkillPromotion;
+}
+
+/**
+ * The explicit cross-project promotion provenance (PRD-049c D6 / 49c-AC-2 / 49c-AC-4). Recorded
+ * ONLY by the two explicit promote operations — never by mining, never by pull. A surfaced
+ * cross-project skill carries this so the user SEES it is shared across projects and from where.
+ */
+export interface SkillPromotion {
+	/** The promotion reach — `user` (this user's projects) or `workspace` (all teammates). Never `none` here. */
+	readonly crossProjectScope: Exclude<CrossProjectScope, "none">;
+	/** WHO promoted the skill (the acting user/agent) — visible provenance (49c-AC-2). */
+	readonly promotedBy: string;
+	/** WHEN the promotion happened (ISO-8601) — visible provenance (49c-AC-2). */
+	readonly promotedAt: string;
+	/** The ORIGIN `project_id` the skill was promoted FROM — surfaced as "promoted from <project>" (49c-AC-2). */
+	readonly promotedFromProject: string;
 }
 
 /**

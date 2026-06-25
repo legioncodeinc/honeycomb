@@ -19,6 +19,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SyncPage, summarizeScopes, buildActivityLines } from "../../../src/dashboard/web/pages/sync.js";
+import { ScopeContext, type ScopeContextValue } from "../../../src/dashboard/web/scope-context.js";
 import type { PageProps } from "../../../src/dashboard/web/page-frame.js";
 import type { AssetSyncRowWire, AssetSyncViewWire, LogRecordWire, WireClient } from "../../../src/dashboard/web/wire.js";
 
@@ -107,10 +108,20 @@ afterEach(() => {
 	window.location.hash = "";
 });
 
+/** A scope with an ACTIVE project — PRD-049e (the page renders the needs-selection state without one). */
+const SCOPE_WITH_PROJECT: ScopeContextValue = {
+	scope: { org: "acme", workspace: "backend", project: "api" },
+	setScope: () => {},
+};
+
 async function mountPage(wire: WireClient): Promise<void> {
 	await act(async () => {
 		root = createRoot(container);
-		root.render(<SyncPage {...pageProps(wire)} />);
+		root.render(
+			<ScopeContext.Provider value={SCOPE_WITH_PROJECT}>
+				<SyncPage {...pageProps(wire)} />
+			</ScopeContext.Provider>,
+		);
 	});
 	await act(async () => {
 		await Promise.resolve();

@@ -62,6 +62,10 @@ function scopeEnvelope(scope: PipelineJobScope): Record<string, unknown> {
 		org: scope.org,
 		workspace: scope.workspace,
 		agent_id: scope.agentId === "" ? "default" : scope.agentId,
+		// PRD-049b (49b-AC-1): carry the resolved project segment onto every downstream payload so
+		// the distilled fact the controlled-write stage commits is segmented by the capturing
+		// session's project (omitted when unresolved → the write defaults to the inbox).
+		...(scope.projectId !== undefined && scope.projectId !== "" ? { project_id: scope.projectId } : {}),
 	};
 }
 

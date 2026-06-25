@@ -27,6 +27,12 @@
  */
 
 import type { QueryScope } from "../../storage/client.js";
+import {
+	ENV_PROJECT_ID,
+	type GitRemoteReader,
+	type ResolvedScope,
+	resolveScopeFromDisk,
+} from "../../../hooks/shared/project-resolver.js";
 import type { Credentials } from "./contracts.js";
 import {
 	type ResolvedTenancy,
@@ -124,4 +130,108 @@ export function resolveRequestTenancy(input: ResolveRequestTenancyInput = {}): T
 		kind: "ok",
 		tenancy: { scope, orgName: resolved.orgName, agentId: resolved.agentId },
 	};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRD-049a — per-REQUEST, cwd-aware scope (a-AC-5)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The full per-request scope: the {@link RequestTenancy} (org/workspace partition
+ * + display identity) PLUS the {@link ResolvedScope} project the session's `cwd`
+ * resolved to. This is the shape capture/recall thread per request — replacing the
+ * single machine-global `credentials.json.workspaceId` read every concurrent
+ * session shared (PRD-049a Overview).
+ *
+ * The `tenancy.scope` carries the workspace partition (the org/workspace isolation
+ * boundary — UNCHANGED, PRD-011); `project.projectId` is the cwd-resolved project
+ * WITHIN that workspace. `workspaceId` (in `tenancy.scope.workspace`) is the
+ * FALLBACK DEFAULT only: the project authority is the cwd binding/git/path
+ * resolution, NEVER the workspace id (a-AC-5).
+ */
+export interface RequestScope {
+	/** The resolved tenancy partition + display identity (PRD-011, unchanged). */
+	readonly tenancy: RequestTenancy;
+	/** The cwd-resolved project WITHIN the workspace (PRD-049a). */
+	readonly project: ResolvedScope;
+}
+
+/** The fail-closed/ok result of {@link resolveRequestScope}. */
+export type RequestScopeResolution =
+	| { readonly kind: "ok"; readonly scope: RequestScope }
+	| {
+			readonly kind: "denied";
+			readonly reason: string;
+			readonly fileOrg: string;
+			readonly tokenOrg: string | null;
+	  };
+
+/** Inputs to {@link resolveRequestScope}: the tenancy inputs + the session cwd. */
+export interface ResolveRequestScopeInput extends ResolveRequestTenancyInput {
+	/**
+	 * The session working directory to resolve the project from — the per-request
+	 * identity the resolution turns on. This is what makes scope per-session rather
+	 * than a machine-global snapshot (a-AC-5 / the deferred 050 item).
+	 */
+	readonly cwd: string;
+	/**
+	 * Override the local `~/.deeplake/projects.json` cache dir (tests). Defaults to
+	 * `~/.deeplake`. The cache is read FAIL-SOFT — a missing/malformed file resolves
+	 * to the workspace inbox, never a throw (a-AC-3).
+	 */
+	readonly projectsDir?: string;
+	/**
+	 * The git-remote reader seam for the git-signal branch (a-AC-4). Defaults to the
+	 * production `git config` reader inside {@link resolveScopeFromDisk}; tests inject
+	 * a fixed reader to drive the git branch deterministically.
+	 */
+	readonly readRemote?: GitRemoteReader;
+}
+
+/**
+ * Resolve the FULL per-request scope (a-AC-5): first the org/workspace tenancy
+ * (fail-closed, via {@link resolveRequestTenancy} — the integrity gate is
+ * UNCHANGED), THEN the cwd-resolved project within that workspace (fail-soft, via
+ * the thin-client {@link resolveScopeFromDisk}).
+ *
+ * The ordering is deliberate: a request that fails the tenancy integrity gate is
+ * `denied` BEFORE any project resolution — there is no project without a verified
+ * workspace. Once tenancy resolves, the project NEVER throws: a no-binding /
+ * no-git folder falls to the `__unsorted__` inbox (`bound: false`), so capture is
+ * never dropped (a-AC-3).
+ *
+ * **`workspaceId` is a fallback default only (a-AC-5).** The resolved workspace
+ * (`tenancy.scope.workspace`) is passed to {@link resolveScopeFromDisk} as the
+ * fallback workspace the project is scoped to — but the PROJECT authority is the
+ * cwd binding/git/path resolution. When a binding resolves a project, that project
+ * wins; the workspace id is only the partition the project lives in, never the
+ * "active project". The structural test in the suite asserts this seam never reads
+ * `workspaceId` as the project authority.
+ *
+ * PURE per call given its inputs — no module-level `currentProject`/`currentWorkspace`
+ * singleton — so two concurrent requests in two cwds resolve independently (a-AC-2).
+ */
+export function resolveRequestScope(input: ResolveRequestScopeInput): RequestScopeResolution {
+	const tenancyResult = resolveRequestTenancy(input);
+	if (tenancyResult.kind === "denied") return tenancyResult;
+
+	const { tenancy } = tenancyResult;
+	// 49d-AC-6: the `HONEYCOMB_PROJECT_ID` env override pins the project for scripted/CI
+	// use, with PRD-011 parity — it WINS over the cwd binding/git/path, exactly as
+	// `HONEYCOMB_ORG_ID`/`HONEYCOMB_WORKSPACE_ID` win over the file for the partition.
+	// It is read from the SAME env the tenancy overrides came from. An empty/whitespace
+	// value is treated as absent by {@link resolveScopeFromDisk} (no override).
+	const env = input.env ?? process.env;
+	const projectOverride = env[ENV_PROJECT_ID];
+	const project = resolveScopeFromDisk({
+		cwd: input.cwd,
+		org: tenancy.scope.org,
+		// The resolved workspace is the FALLBACK the project is scoped to (a-AC-5);
+		// the cwd binding/git/path is the project authority.
+		workspace: tenancy.scope.workspace,
+		...(projectOverride !== undefined ? { projectIdOverride: projectOverride } : {}),
+		...(input.projectsDir !== undefined ? { dir: input.projectsDir } : {}),
+		...(input.readRemote !== undefined ? { readRemote: input.readRemote } : {}),
+	});
+	return { kind: "ok", scope: { tenancy, project } };
 }

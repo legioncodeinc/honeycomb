@@ -46,6 +46,7 @@
 import { isOk, type StorageRow } from "../../storage/result.js";
 import { sLiteral, sqlIdent } from "../../storage/sql.js";
 import { EMBEDDING_DIMS, serializeFloat4Array } from "../../storage/vector.js";
+import { buildProjectScopeConjunct } from "../recall/scope-clause.js";
 import {
 	ARM_CLASS_WEIGHT,
 	kindOfSource,
@@ -149,6 +150,7 @@ export function buildHybridArmSql(
 	queryVector: readonly number[],
 	weights: HybridWeights,
 	perArmLimit: number,
+	projectClause = "",
 ): string {
 	const tbl = sqlIdent(spec.table);
 	const idCol = sqlIdent(spec.idColumn);
@@ -166,10 +168,11 @@ export function buildHybridArmSql(
 	const scoreSql =
 		`(${embCol}, ${textCol})::deeplake_hybrid_record <#> ` +
 		`deeplake_hybrid_record(${vecLit}, ${queryLit}, ${vecWeightLit}, ${textWeightLit})`;
+	// PRD-049b (49b-AC-2): the project-segment predicate rides the SAME native-hybrid statement.
 	return (
 		`SELECT ${sourceLit} AS source, ${idCol} AS id, ${textCol}::text AS text, (${scoreSql}) AS score ` +
 		`FROM "${tbl}" ` +
-		`WHERE ARRAY_LENGTH(${embCol}, 1) > 0${hydrateFilterClause} ` +
+		`WHERE ARRAY_LENGTH(${embCol}, 1) > 0${hydrateFilterClause}${projectClause} ` +
 		`ORDER BY score DESC ` +
 		`LIMIT ${perArm}`
 	);
@@ -209,7 +212,12 @@ async function runHybridArm(
 	weights: HybridWeights,
 	limit: number,
 ): Promise<HybridDoc[]> {
-	const sql = buildHybridArmSql(spec, request.query, queryVector, weights, limit);
+	// PRD-049b (49b-AC-2): AND the project segment into the native-hybrid arm.
+	const projectClause = buildProjectScopeConjunct({
+		projectId: request.projectId ?? "",
+		...(request.projectBound !== undefined ? { bound: request.projectBound } : {}),
+	});
+	const sql = buildHybridArmSql(spec, request.query, queryVector, weights, limit, projectClause);
 	const result = await deps.storage.query(sql, request.scope);
 	if (!isOk(result)) return [];
 	const classWeight = ARM_CLASS_WEIGHT[kindOfSource(spec.source)];

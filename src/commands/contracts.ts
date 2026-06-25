@@ -86,7 +86,7 @@ export const VERB_TABLE: readonly VerbSpec[] = Object.freeze([
 	{ verb: "secret", cls: "storage", summary: "manage named secrets through the daemon" },
 	{ verb: "settings", cls: "storage", summary: "get/set/list vault settings + provider→model selector through the daemon" },
 	{ verb: "asset", cls: "storage", summary: "register/promote/demote/style skills+agents through the tier×style lattice (033)" },
-	{ verb: "skill", cls: "storage", summary: "skillify scope/pull/unpull/force through the daemon" },
+	{ verb: "skill", cls: "storage", summary: "skillify scope/pull/unpull/force/promote through the daemon (promote = cross-project, 049c)" },
 	{ verb: "skillify", cls: "storage", summary: "pull team skills from the daemon (016c)" },
 	{ verb: "hook", cls: "local", summary: "inspect/wire harness hooks" },
 	{ verb: "route", cls: "storage", summary: "manage inference routes through the daemon" },
@@ -97,6 +97,7 @@ export const VERB_TABLE: readonly VerbSpec[] = Object.freeze([
 	{ verb: "org", cls: "auth", summary: "list/switch org (passthrough to the auth dispatcher)" },
 	{ verb: "workspace", cls: "auth", summary: "list/switch/use workspace (passthrough to the auth dispatcher)" },
 	{ verb: "workspaces", cls: "auth", summary: "list workspaces in the active org (alias of `workspace list`)" },
+	{ verb: "project", cls: "auth", summary: "list/bind/use projects + show the resolved per-folder scope (049d)" },
 	{ verb: "sessions", cls: "storage", summary: "list/prune captured sessions through the daemon" },
 	{ verb: "uninstall", cls: "local", summary: "reverse only Honeycomb's changes" },
 	{ verb: "update", cls: "local", summary: "self-update the CLI, daemon, and bundles" },
@@ -121,11 +122,18 @@ export function isStorageVerb(verb: string): boolean {
  *
  * PRD-023 Wave 3 (AC-3 / AC-5) adds `whoami` (GET /me identity) and `workspaces` (the single-word
  * `workspace list` alias) — both are recognized here and forwarded verbatim to the auth dispatcher.
+ *
+ * PRD-049d adds `project` (`list`/`bind`/`use`/`status`) — the PROJECT level of the scope surface.
+ * It is forwarded verbatim to the auth dispatcher → `src/cli/project.ts`; the dispatcher does NOT
+ * re-parse its subcommands. `project` writes only the LOCAL `~/.deeplake/projects.json` binding store
+ * (no token re-mint, no machine-global mutation — session-safe), so it rides the same thin-client
+ * passthrough as `org`/`workspace`.
  */
 export const AUTH_SUBCOMMANDS: ReadonlySet<string> = new Set([
 	"org",
 	"workspace",
 	"workspaces",
+	"project",
 	"whoami",
 	"login",
 	"logout",

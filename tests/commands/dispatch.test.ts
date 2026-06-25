@@ -67,9 +67,16 @@ describe("PRD-020a a-AC-1 — the unified dispatcher parses + routes", () => {
 		await d.dispatch(d.parse(["org", "switch", "acme"]), deps);
 		await d.dispatch(d.parse(["workspace", "use", "prod"]), deps);
 		await d.dispatch(d.parse(["login"]), deps);
+		// PRD-049d: `project` is an auth passthrough too — forwarded verbatim to `src/cli/project.ts`.
+		await d.dispatch(d.parse(["project", "bind", "api"]), deps);
 
 		// The dispatcher forwards verb + tail verbatim — it does NOT re-parse the subcommand.
-		expect(auth.calls).toEqual([["org", "switch", "acme"], ["workspace", "use", "prod"], ["login"]]);
+		expect(auth.calls).toEqual([
+			["org", "switch", "acme"],
+			["workspace", "use", "prod"],
+			["login"],
+			["project", "bind", "api"],
+		]);
 	});
 
 	it("index AC-1 a storage verb dispatches THROUGH the DaemonClient seam (never DeepLake)", async () => {

@@ -81,6 +81,11 @@ export interface StoreMemoryRequest {
 	readonly type?: string;
 	/** The agent the memory is scoped to; defaults to the scope's resolution. */
 	readonly agentId?: string;
+	/**
+	 * PRD-049b (49b-AC-1): the RESOLVED `project_id` the stored memory is segmented by. ABSENT →
+	 * the `__unsorted__` inbox (controlled-writes default), never mis-attributed to a real project.
+	 */
+	readonly projectId?: string;
 	/** The storage partition the write lands under (org/workspace). */
 	readonly scope: QueryScope;
 }
@@ -170,6 +175,8 @@ export async function storeMemory(
 			factConfidence: DELIBERATE_WRITE_CONFIDENCE,
 			...(request.type !== undefined ? { factType: request.type } : {}),
 			...(request.agentId !== undefined ? { agentId: request.agentId } : {}),
+			// PRD-049b (49b-AC-1): segment the stored memory by the resolved project.
+			...(request.projectId !== undefined ? { projectId: request.projectId } : {}),
 		},
 		request.scope,
 		writeDeps(deps, config),

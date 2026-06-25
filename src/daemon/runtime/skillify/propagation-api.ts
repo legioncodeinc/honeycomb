@@ -64,6 +64,8 @@ import {
 } from "../../../daemon-client/skillify/index.js";
 import { type Skill, SKILL_INSTALLS, SKILL_SCOPES } from "./contracts.js";
 import { createSkillPublishEndpoint } from "./publish-endpoint.js";
+import { promoteToMyProjects, promoteWorkspaceWide } from "./promote.js";
+import { createSkillStore } from "./skills-write.js";
 
 /** The route group the propagation API attaches to (already mounted + protected in `server.ts`). */
 export const SKILLS_GROUP = "/api/skills" as const;
@@ -113,8 +115,31 @@ const PublishBodySchema = z.object({
 		version: z.number().int().positive(),
 		createdBy: z.string().trim().min(1),
 		scope: z.enum(SKILL_SCOPES).default("team"),
+		// PRD-049c (49c-AC-3): the ORIGIN project the published skill belongs to, so a teammate's
+		// auto-pull re-publish lands in A's scope (surfaced only in A) — not globally. ABSENT → the
+		// writer defaults to the inbox. The promotion block is INTENTIONALLY absent from the publish
+		// body: publish/pull NEVER promote (49c-AC-4); a `none` row is written by construction.
+		projectId: z.string().optional(),
 	}),
 	contributors: z.array(z.string()).optional(),
+});
+
+/**
+ * The zod boundary schema for a PROMOTE body (PRD-049c 49c-AC-2 / 49c-AC-4; typescript-node Hard
+ * Rule #3: zod at every untrusted boundary). The CLI POSTs `{ name, author, workspaceWide }`; this
+ * rejects a malformed payload at the edge with a 400 rather than letting it reach the promote write.
+ * `workspaceWide` chooses the EXPLICIT reach (D6): `false`/absent → this-user-cross-project
+ * (`promoteToMyProjects`); `true` → all-teammates (`promoteWorkspaceWide`). The acting user
+ * (`promoted_by`) is NOT taken from the body — it is the request's authenticated actor (the
+ * `x-honeycomb-actor` header), so a caller cannot forge another user's promotion provenance.
+ */
+const PromoteBodySchema = z.object({
+	/** The skill's logical name (`<name>` half of `<name>--<author>`). */
+	name: z.string().trim().min(1),
+	/** The skill's author (`<author>` half) — the version-chain owner. */
+	author: z.string().trim().min(1),
+	/** `true` → workspace-wide (all teammates); `false`/absent → this user's other projects (D6). */
+	workspaceWide: z.boolean().default(false),
 });
 
 /** Read a JSON body defensively; a non-JSON / empty body → `{}` (the schema then rejects it). */
@@ -224,6 +249,11 @@ export function mountSkillPropagationApi(daemon: Daemon, options: MountSkillProp
 				version: parsed.data.provenance.version,
 				createdBy: parsed.data.provenance.createdBy,
 				scope: parsed.data.provenance.scope,
+				// PRD-049c (49c-AC-3): carry the origin project so the published row lands in A's scope.
+				// NO promotion is constructed here — publish/pull never promote (49c-AC-4).
+				...(parsed.data.provenance.projectId !== undefined
+					? { projectId: parsed.data.provenance.projectId }
+					: {}),
 			},
 			...(parsed.data.contributors !== undefined ? { contributors: parsed.data.contributors } : {}),
 		};
@@ -261,6 +291,43 @@ export function mountSkillPropagationApi(daemon: Daemon, options: MountSkillProp
 		const scope = resolveScope(c);
 		if (scope === null) return c.json(NO_ORG_BODY, 400);
 		return c.json({ ok: true, note: "unpull is reversed client-side" }, 200);
+	});
+
+	// POST /api/skills/promote — the EXPLICIT cross-project promotion (PRD-049c 49c-AC-2 / 49c-AC-4 /
+	// D6). The thin invocation seam over the already-built promoteToMyProjects / promoteWorkspaceWide
+	// engine (REUSED verbatim — no promotion logic is reimplemented here). `workspaceWide` chooses the
+	// reach: default => this user's other projects; true => all teammates.
+	//
+	// ── Stays inside the caller's authorized partition (the hard constraint) ──────────────────────────
+	// The promote runs through a createSkillStore bound to the request's RESOLVED `scope` (the
+	// org/workspace partition resolveScopeOrLocalDefault returns, fail-closed 400 outside local). A
+	// promotion only ever APPENDS a wider-surfacing version row to a skill ALREADY in that partition —
+	// it cannot reach a workspace/org the caller is not scoped to (the storage partition still governs
+	// every read/write). The mine/pull path is untouched (49c-AC-4): this is the ONLY explicit verb.
+	group.post("/promote", async (c) => {
+		const scope = resolveScope(c);
+		if (scope === null) return c.json(NO_ORG_BODY, 400);
+		// `promoted_by` is the AUTHENTICATED actor, never a body field — a caller cannot forge
+		// another user's promotion provenance. Fail-closed 400 when absent (mirrors the prune gate).
+		const actor = c.req.header("x-honeycomb-actor");
+		if (actor === undefined || actor.length === 0) {
+			return c.json({ error: "bad_request", reason: "x-honeycomb-actor header is required" }, 400);
+		}
+		const parsed = PromoteBodySchema.safeParse(await readJson(c));
+		if (!parsed.success) {
+			return c.json({ error: "bad_request", reason: "invalid promote body" }, 400);
+		}
+		try {
+			const store = createSkillStore(storage, scope, resolveTable);
+			const input = { name: parsed.data.name, author: parsed.data.author, promotedBy: actor };
+			const outcome = parsed.data.workspaceWide
+				? await promoteWorkspaceWide(input, { store })
+				: await promoteToMyProjects(input, { store });
+			return c.json(outcome, 200);
+		} catch (err: unknown) {
+			const reason = err instanceof Error ? err.message : String(err);
+			return c.json({ error: "promote_failed", reason }, 500);
+		}
 	});
 
 	/** Shared pull handler (pull + force differ only in the `force` flag). Fail-soft by construction. */

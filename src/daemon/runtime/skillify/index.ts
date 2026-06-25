@@ -11,7 +11,10 @@
 
 // ── Contracts + seams (the pinned Wave-2 surface) ──
 export {
+	asCrossProjectScope,
 	createFakeGateCli,
+	CROSS_PROJECT_SCOPES,
+	type CrossProjectScope,
 	GATE_VERDICTS,
 	type GateCli,
 	type GateDecision,
@@ -25,10 +28,22 @@ export {
 	type SkillInstall,
 	type SkillInstallTarget,
 	skillLogicalId,
+	type SkillPromotion,
 	type SkillProvenance,
 	type SkillScope,
 	type SkillStore,
 } from "./contracts.js";
+
+// ── 049c explicit cross-project promotion (the ONLY non-`none` promotion writer) ──
+export {
+	promoteSkill,
+	promoteToMyProjects,
+	promoteWorkspaceWide,
+	type PromoteSkillDeps,
+	type PromoteSkillInput,
+	type PromoteSkillOutcome,
+	type PromotionReach,
+} from "./promote.js";
 
 // ── 016b skills writes (FULL) ──
 export {

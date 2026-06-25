@@ -103,10 +103,14 @@ export {
 	validateVerificationUrl,
 } from "./deeplake-issuer.js";
 
-// ── 011a request-scope tenancy resolution ───────────────────────────────────
+// ── 011a request-scope tenancy resolution + PRD-049a per-request cwd-aware scope ──
 export {
+	type RequestScope,
+	type RequestScopeResolution,
 	type RequestTenancy,
+	type ResolveRequestScopeInput,
 	type TenancyResolution,
+	resolveRequestScope,
 	resolveRequestTenancy,
 } from "./tenancy-resolution.js";
 
