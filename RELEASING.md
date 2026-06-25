@@ -98,9 +98,16 @@ long-lived to leak or rotate.
 
 1. **First publish is a one-time manual bootstrap.** A trusted publisher can only
    be attached to a package that already exists on npm. So the very first release
-   is a manual, interactive (2FA) `npm publish` by an org member with publish
-   rights — this creates `@legioncodeinc/honeycomb` on the registry. (See "Cut
-   the release" below for the bootstrap-vs-subsequent split.)
+   is a manual, interactive (2FA) publish by an org member with publish rights:
+   ```sh
+   npm publish --access public --provenance=false
+   ```
+   This creates `@legioncodeinc/honeycomb` on the registry. **You must pass
+   `--provenance=false`** here: `publishConfig.provenance: true` makes npm try to
+   generate a provenance attestation, which only works inside a supported CI OIDC
+   environment, so a local publish without the override fails. Provenance is not
+   skipped going forward, every subsequent CI publish (tag push) generates it
+   normally. (See "Cut the release" below for the bootstrap-vs-subsequent split.)
 2. **Attach the trusted publisher.** On npmjs.com → the package → **Settings →
    Trusted Publishers → GitHub Actions**, add:
    - **Organization / user:** `legioncodeinc`
@@ -179,9 +186,11 @@ Once (a)–(d) are flipped and a dry-run rehearsal is green:
 
    > **Bootstrap (first release only).** The trusted publisher cannot be attached
    > until the package exists on npm, so the FIRST publish is a one-time manual
-   > publish by an org member: `npm publish --access public` (interactive, 2FA),
-   > then attach the trusted publisher per switch (d). Every release after the
-   > first is the tokenless CI flow below.
+   > publish by an org member: `npm publish --access public --provenance=false`
+   > (interactive, 2FA; `--provenance=false` is required because a local publish
+   > cannot generate the CI-only provenance attestation that `publishConfig` asks
+   > for), then attach the trusted publisher per switch (d). Every release after
+   > the first is the tokenless CI flow below, which DOES carry provenance.
 
 2. **Push the tag.**
    ```sh
