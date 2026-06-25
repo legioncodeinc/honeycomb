@@ -10,7 +10,7 @@
 
 ## Overview
 
-This is the front door. It owns the **single command** a brand-new user pastes — `curl -fsSL https://get.honeycomb…/install.sh | sh` on macOS/Linux, `irm https://get.honeycomb…/install.ps1 | iex` on Windows PowerShell — and everything between that paste and a **running daemon serving the dashboard**. It assumes the operator knows nothing: no Node, no npm, no idea what a daemon is. Its contract is "leave them on a dashboard, or tell them in one plain sentence why not."
+This is the front door. It owns the **single command** a brand-new user pastes — `curl -fsSL https://get.theapiary.sh | sh` on macOS/Linux, `irm https://get.theapiary.sh/install.ps1 | iex` on Windows PowerShell — and everything between that paste and a **running daemon serving the dashboard**. It assumes the operator knows nothing: no Node, no npm, no idea what a daemon is. Its contract is "leave them on a dashboard, or tell them in one plain sentence why not."
 
 The script is deliberately **thin and idempotent**: it detects what is already present, installs only what is missing, and re-running it is safe. The heavy lifting (auth, dashboard, migration) is the daemon's and the dashboard's job (050b–050d); this sub-PRD stops the moment the browser is told to open.
 
@@ -74,7 +74,7 @@ The script is deliberately **thin and idempotent**: it detects what is already p
 ## Open questions
 
 - [ ] Node install path per OS (official installer vs `fnm`/`nvm` vs `winget`/Homebrew); elevation handling + no-elevation fallback copy.
-- [ ] Host the scripts where (`get.honeycomb.*`?) and publish a checksum / "inspect before piping" URL for the `curl|sh` trust concern (parent open question).
+- [x] **RESOLVED (2026-06-25).** Hosted at **`get.theapiary.sh`** — a Cloudflare Pages project (`site/install/`) that content-negotiates (a shell pipe gets `install.sh` as `text/plain`; a browser gets an "inspect before piping" page) and serves a published **`SHA256SUMS`**; the scripts are repointed off the raw-GitHub placeholder. Shipped in PRs #103 / #104; deployed by `.github/workflows/deploy-install-site.yaml` on `v*` tags via Wrangler.
 - [ ] npm-only alternative (`npm create @legioncodeinc/honeycomb`) for users who refuse piped-shell installs.
 - [ ] Exact daemon-up wait budget before declaring failure (reuse the ensure-running timeout).
 
