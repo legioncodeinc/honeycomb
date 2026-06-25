@@ -39,7 +39,7 @@ The API is organized into coherent groups. Permission semantics are defined in [
 | `/api/secrets/*` | List names, store, delete, exec with secrets | admin/secret |
 | `/api/org/*`, `/api/workspace/*` | Tenancy admin and switching | admin |
 | `/api/diagnostics`, `/api/pipeline/*`, `/api/repair/*` | Health report, pipeline stats, operator repair | diagnostics/operator |
-| `/api/inference/*`, `/v1/*` | Native inference routing and OpenAI-compatible gateway | varies |
+| `/api/inference/*`, `/v1/*` | Native inference routing and OpenAI-compatible gateway (gateway implemented; external HTTP mount deferred, the router is reached internally via the `ModelClient` seam) | deferred |
 | `/api/tasks/*`, `/api/logs`, `/api/update/*`, `/api/git/*` | Scheduled tasks, logs, updates, git sync | local |
 | `/` | Dashboard static assets | none |
 

@@ -1,11 +1,11 @@
 # Distillation and the Tier-1 Key (the make-or-break)
 
-> Category: Ai | Version: 1.1 | Date: June 2026 | Status: Strategy, CORE BUILT (PRD-046, merged #77); extensions proposed
+> Category: Ai | Version: 1.2 | Date: June 2026 | Status: Active
 
 The quality of the 3-tier zoom memory is gated almost entirely by one thing: how good the distilled
 keys and summaries are. This doc defines the Tier-1 *key* (the new artifact), the grounded
-distillation discipline that keeps it honest, what a good vs bad key looks like, and the real status
-of PRD-017 (built + shipped, pending live wiring) that the strategy depends on. **Proposed design.**
+distillation discipline that keeps it honest, what a good vs bad key looks like, and the status
+of PRD-017 (built, shipped, and wired live) that the strategy depends on.
 
 **Related:**
 - [`three-tier-memory-strategy.md`](three-tier-memory-strategy.md), where the key sits in the hierarchy
@@ -95,44 +95,33 @@ extra key-derivation step.
 
 ---
 
-## 5. The real dependency: PRD-017 is BUILT, but not yet wired live
+## 5. The dependency: PRD-017 is BUILT and wired live
 
-This is the most important grounding fact for a future agent, and an earlier draft of these docs got
-it wrong, so it is stated precisely, verified against the QA report + the source on 2026-06:
+This is the most important grounding fact for a future agent, verified against the QA reports and the
+source: Tier-2 distillation is implemented, shipped, and now running in the live daemon.
 
-> **Tier-2 distillation is fully implemented and shipped, PRD-017 is `Completed`.** Both the
-> per-session summary worker (017a) and the `/MEMORY.md` synthesis (017b) are full, QA-passed
-> implementations (15/15 ACs; unit + live itests; all CI gates green; security passed first). 017a
-> generates a per-session summary via the host-CLI gate and writes a `memory` row at
-> `/summaries/<userName>/<sessionId>.md` with `summary` + a short `description` + a (non-fatal)
-> embedding; 017b synthesizes a top-level `/MEMORY.md` linking those summaries. It is **not a stub**:
-> the `notImplemented` reference lingering in `summaries/index.ts`'s *header comment* is stale; the
-> file body exports the real `synthesizeMemoryIndex` / `synthesizeThreadHeads`.
+> **Tier-2 distillation is fully implemented, shipped, and wired.** Both the per-session summary
+> worker (017a) and the `/MEMORY.md` synthesis (017b) are full, QA-passed implementations (15/15 ACs;
+> unit + live itests; all CI gates green; security passed first). 017a generates a per-session
+> summary via the host-CLI gate and writes a `memory` row at `/summaries/<userName>/<sessionId>.md`
+> with `summary` + a short `description` + a (non-fatal) embedding; 017b synthesizes a top-level
+> `/MEMORY.md` linking those summaries. It is **not a stub**: the `notImplemented` reference lingering
+> in `summaries/index.ts`'s *header comment* is stale; the file body exports the real
+> `synthesizeMemoryIndex` / `synthesizeThreadHeads`.
 
-The genuine gaps are smaller and different from "not built":
+What was once the gap, "built but not assembled", is now closed:
 
-- **Not wired into the live daemon (deferred assembly).** `runSummaryWorker` / `synthesizeMemoryIndex`
-  are invoked *nowhere* in `src` outside their own module; `server.ts` / `assemble.ts` mount no summary
-  job. So although the code is complete and tested, **no running daemon triggers it yet**, summaries
-  are not actually produced until the assembly step mounts the `memory_jobs` job + the final/periodic
-  hook trigger. This is the same honest "deferred assembly" posture as PRD-008-016, not a missing
-  feature.
-- **`/MEMORY.md` write-once refresh limitation (017b).** Re-synthesis after new summaries land is a
-  no-op (SELECT-before-INSERT, no version-bump refresh), so the index does not auto-refresh.
-  Documented product follow-up, not blocking.
+- **Wired into the live daemon.** PRD-045 (daemon-wiring-closeout) mounted the summary worker and its
+  triggers at the composition root, so a running daemon now produces `memory` summaries on the
+  session-end and periodic paths. The earlier "deferred assembly" caveat no longer holds; the live
+  worker behavior is documented in [`wiki-summary-workers.md`](wiki-summary-workers.md).
+- **`/MEMORY.md` refresh shipped.** PRD-046b added the version-bumped `/MEMORY.md` refresh, so the
+  top-level index re-synthesizes as new summaries land rather than writing once and freezing.
 
-Consequences for sequencing, *better* than the earlier draft implied:
-
-- Tier-2 quality is **not** gated on building summaries; it is gated on **wiring the worker into the
-  live daemon** (mount + trigger) plus the refresh follow-up. That is an assembly task, not a
-  from-scratch build.
-- **017b's `/MEMORY.md` is itself strong prior art for the prime.** It is already "a top-level index
-  that links per-session summaries with short `description`s", most of what the Tier-1 key index
-  needs. The prime may be able to *reuse* synthesis output (the `description` field is close to a
-  Tier-1 key) rather than generate keys from scratch.
-- A reasonable build order: (a) wire/trigger the summary worker so `memory` summaries actually land
-  live, (b) reuse/extend 017b synthesis (or its `description`) as the Tier-1 key index + add refresh,
-  (c) the prime hook + resolve-depth on the existing read tools.
+That leaves the make-or-break exactly where section 1 put it: **not wiring, but distillation
+quality.** The plumbing is live; whether a key earns its pull is the open bet. The prime reuses 017b's
+synthesis as prior art, the `description` field is close to a Tier-1 key, so it skims the `key`
+columns the summary gate now populates rather than generating keys at read time.
 
 ---
 
@@ -171,5 +160,6 @@ These tie into the PRD-047f eval discipline, prove the keys earn their place rat
 
 | Date | Version | Change |
 |------|---------|--------|
+| 2026-06 | 1.2 | Status → Active. PRD-045 wired the summary worker into the live daemon and PRD-046b shipped the `/MEMORY.md` refresh, so the "deferred assembly" and "write-once refresh" gaps are closed; the make-or-break is now distillation quality, not wiring. |
 | 2026-06 | 1.1 | **Correction:** PRD-017 is `Completed` (017a worker + 017b synthesis fully built, QA-passed), NOT a stub. The real gap is deferred live wiring + the MEMORY.md refresh follow-up. Earlier draft was wrong. |
 | 2026-06 | 1.0 | Initial capture of the Tier-1 key definition, grounded-distillation discipline, and the PRD-017 dependency. |

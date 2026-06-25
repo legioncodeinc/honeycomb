@@ -1,6 +1,6 @@
 # Why Hybrid (SQL + Vector) Makes the Zoom Memory Doable
 
-> Category: Ai | Version: 1.1 | Date: June 2026 | Status: Strategy, CORE BUILT (PRD-046, merged #77); extensions proposed
+> Category: Ai | Version: 1.1 | Date: June 2026 | Status: Active
 
 Why Honeycomb's Deep Lake substrate (SQL *and* vector in one store) is a genuinely better fit for the
 3-tier zoom memory than a vector-only store, and what each half of the hybrid is responsible for.
@@ -119,3 +119,4 @@ is *more* doable than the prior system it is modeled on, the owner's intuition i
 | Date | Version | Change |
 |------|---------|--------|
 | 2026-06 | 1.0 | Initial rationale for the SQL+vector division of labor; grounded in the PRD-047a operator finding. |
+| 2026-06 | 1.1 | Core shipped (PRD-046, merged #77); status normalized to Active; recall numbers and the native-operator finding reconciled with the live A/B. |
