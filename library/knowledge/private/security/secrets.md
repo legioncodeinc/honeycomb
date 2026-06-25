@@ -23,9 +23,30 @@ Secrets are owned by a bundled core plugin, `honeycomb.secrets` (under `plugins/
 
 ## Storage and encryption
 
-Secrets live in `$HONEYCOMB_WORKSPACE/.secrets/` as encrypted JSON with mode 0600: human-readable names, ciphertext values. Encryption is XSalsa20-Poly1305 (libsodium `crypto_secretbox_easy`). The key is derived by hashing a machine-bound identifier (`/etc/machine-id` on Linux, `IOPlatformUUID` on macOS, with a hostname-plus-username fallback) and stretching it to 32 bytes. Each value gets a random nonce prepended to its ciphertext. The practical consequence is that the secret store cannot be decrypted on another machine without the same machine identity, so copying `.secrets/` to a different box yields nothing usable.
+Secrets live in `$HONEYCOMB_WORKSPACE/.secrets/` as encrypted JSON with mode 0600 (dirs 0700): human-readable names, ciphertext values. Encryption is XSalsa20-Poly1305 (the libsodium `crypto_secretbox` construction) implemented with the audited, zero-dependency `@noble/ciphers` library rather than a native libsodium binding, there is no native module to compile or heal. The key is derived from a machine-bound identifier (`/etc/machine-id` on Linux, `IOPlatformUUID` on macOS, with a hostname-plus-username fallback) stretched to 32 bytes with HKDF, scope-bound so org/workspace records derive distinct keys. Each value gets a random nonce prepended to its ciphertext. The practical consequence is that the store cannot be decrypted on another machine without the same machine identity, so copying the encrypted tree to a different box yields nothing usable.
 
-This is distinct from the device-flow credentials file used by the daemon's own auth and provider sign-in, which is covered in [`credential-storage.md`](credential-storage.md). User secrets and the daemon's stored credentials are deliberately separate stores with separate rules.
+This is distinct from the device-flow credentials file used by the daemon's own auth and provider sign-in, which is covered in [`credential-storage.md`](credential-storage.md). User secrets and the daemon's stored credentials are deliberately separate stores with separate rules, though the vault below now offers an encrypted-at-rest *copy* of the DeepLake login token.
+
+## The unified vault
+
+The secret store generalizes into one local, machine-bound encrypted **vault** that holds several typed record classes behind a single seam, keyed by `(class, scope, name)`. It reuses the secrets crypto, machine-key derivation, and `0600`/`0700` discipline verbatim, no new crypto, and adds breadth, not a new encryption story. Two classes ship built-in:
+
+| Class | Read posture | Holds |
+|---|---|---|
+| `secret` | internal-only (value never returned) | provider API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`) and a copy of the DeepLake login token |
+| `setting` | daemon-readable (typed value may be returned) | active inference provider/model, `pollinating.enabled` and sibling feature toggles, dashboard prefs |
+
+The read posture is **data, not scattered conditionals**: a record-class registry declares each class's posture and a zod value schema, and the store asks the registry before returning any decrypted value. An attempt to read a `secret`-class value through the settings accessor is rejected at that choke point, a secret can never be read through the daemon-readable path. A future class (cached tokens, connector configs) slots in by registering a descriptor (id, posture, schema) with no storage rewrite and existing records untouched. The `secret` class keeps its on-disk path at `.secrets/<scope>/<name>`, so a pre-existing key written by the old store decrypts unchanged; other classes live under `.vault/<class>/<scope>/<name>`.
+
+### The no-SQLite rule
+
+The vault deliberately stays a per-record encrypted **file** store; it is not a SQLite database. The file store already owns the encryption primitive, machine binding, permission discipline, scope segmentation, and redacted audit, and it is `audit:sql`-clean precisely because it touches no SQL. SQLite would add a native dependency and a *second* at-rest encryption story (SQLCipher or app-level field encryption, re-deriving the same machine key anyway) to buy a queryability that tens of settings and a handful of secrets per scope do not need. A settings read is one file read; a settings write is one atomic file write. The vault is local by design and is never a DeepLake table, and copying its directory to another host yields nothing, because the machine key differs.
+
+### COPY-not-move credential migration
+
+The vault offers an encrypted-at-rest copy of the DeepLake login token, and the migration that creates it is the single highest-risk operation in the subsystem, so it is non-destructive **by construction**. The shared `~/.deeplake/credentials.json` is the user's live login, byte-cross-compatible with Hivemind. The migration **copies** the token into the vault as a `secret`-class record (`DEEPLAKE_TOKEN`) and performs zero writes to `~/.deeplake`: there is no move, delete, rewrite, re-chmod, or rename of the plaintext file anywhere in the migration path. The plaintext file stays byte-unchanged and authoritative for the shared login; the vault copy is an additive cache, not a replacement.
+
+Token resolution then follows a fixed precedence, **vault → env → plaintext file**: the migrated vault copy first, then a `HONEYCOMB_TOKEN` env override, then the plaintext file as the never-regressed fallback. The login resolves in every case, so an empty vault is not a regression. Tightening or removing the plaintext file is deliberately deferred to a later change gated on this proving out; this subsystem never makes the user's login unrecoverable. The credentials file contract itself is documented in [`credential-storage.md`](credential-storage.md).
 
 ## What agents can and cannot do
 

@@ -2,7 +2,7 @@
 
 > Category: Integrations | Version: 1.0 | Date: June 2026 | Status: Active
 
-Which hook events fire on each agent, what each hook does, and how every hook is a thin client that hands capture, recall, and pipeline work to the Honeycomb daemon.
+Which hook events fire on each of the six harnesses, what each hook does, and how the shared session-start seam now auto-pulls both team skills and portable assets, every hook a thin client that hands capture, recall, and pipeline work to the Honeycomb daemon.
 
 **Related:**
 - [`harness-integration.md`](harness-integration.md)
@@ -10,94 +10,67 @@ Which hook events fire on each agent, what each hook does, and how every hook is
 - [`../ai/session-capture.md`](../ai/session-capture.md)
 - [`../architecture/request-lifecycle.md`](../architecture/request-lifecycle.md)
 - [`../architecture/daemon-surface.md`](../architecture/daemon-surface.md)
-- [`../security/trust-boundaries.md`](../security/trust-boundaries.md)
+- [`../collaboration/team-skills-sharing.md`](../collaboration/team-skills-sharing.md)
+- [`../collaboration/asset-sync-substrate.md`](../collaboration/asset-sync-substrate.md)
 
 ---
 
 ## Hooks are thin clients
 
-Every Honeycomb hook is a thin client. When a lifecycle event fires, the hook reads the device-flow credential, normalizes the agent's payload into the shape the daemon expects, and makes a local request to the Honeycomb daemon on port 3850. The daemon runs all of the actual work: capture writes, recall queries, the memory pipeline, skillify mining, and summary generation. The daemon is the only component that talks to DeepLake.
+Every Honeycomb hook is a thin client. When a lifecycle event fires, the hook reads the credential, normalizes the harness's payload into the shape the daemon expects, and makes a local request to the daemon on port 3850. The daemon runs all of the actual work: capture writes, recall queries, the memory pipeline, skillify mining, and summary generation. The daemon is the only component that talks to DeepLake.
 
-This keeps the per-agent code small and uniform. The hook does not build SQL, does not hold a DeepLake handle, and does not decide scope; it states what happened and lets the daemon decide what to persist and what to return. The end-to-end path a single request takes through the daemon is covered in [`../architecture/request-lifecycle.md`](../architecture/request-lifecycle.md).
+This keeps the per-harness code small and uniform. The hook does not build SQL, does not hold a DeepLake handle, and does not decide scope; it states what happened and lets the daemon decide what to persist and what to return. The end-to-end path a single request takes is covered in [`../architecture/request-lifecycle.md`](../architecture/request-lifecycle.md).
 
 ---
 
-## Hook event coverage by agent
+## Hook event coverage by harness
 
-Each assistant has its own event vocabulary. The table below maps the logical Honeycomb events to the names each agent actually emits.
+Each harness has its own event vocabulary. The table maps the logical Honeycomb events to the native names each harness actually emits (the maps live in each `src/hooks/<harness>/shim.ts`).
 
-| Logical event | Claude Code | Codex | Cursor (1.7+) | OpenClaw | Hermes | pi |
+| Logical event | Claude Code | Codex | Cursor | Hermes | pi | OpenClaw |
 |---|---|---|---|---|---|---|
-| Session start / recall inject | `SessionStart` | `SessionStart` | `sessionStart` | `before_agent_start` + `before_prompt_build` | `on_session_start` | AGENTS.md static block |
-| Prompt capture | `UserPromptSubmit` | `UserPromptSubmit` | `beforeSubmitPrompt` | `agent_end` (message batch) | `on_user_message` | `agent_end` |
-| Pre-tool intercept (VFS recall) | `PreToolUse` | `PreToolUse(Bash)` | `postToolUse` / `beforeSubmitPrompt` | N/A (tool registration) | `on_tool_use` (terminal only) | N/A |
-| Post-tool capture | `PostToolUse` | `PostToolUse` | `postToolUse` | `agent_end` (message batch) | N/A | N/A |
-| Assistant response capture | `Stop` / `SubagentStop` | `Stop` | `afterAgentResponse` / `stop` | `agent_end` (message batch) | N/A | N/A |
-| Session end / summary spawn | `SessionEnd` | N/A (periodic only) | `sessionEnd` | `agent_end` (with summary worker request) | `on_session_end` | `session_shutdown` |
+| Session start / recall inject | `SessionStart` | `SessionStart` | `sessionStart` | `on_session_start` | AGENTS.md static block | `before_agent_start` + `before_prompt_build` |
+| Prompt capture | `UserPromptSubmit` | `UserPromptSubmit` | `beforeSubmitPrompt` | `on_user_message` | (batched) | `agent_end` (batch) |
+| Pre-tool intercept (VFS recall) | `PreToolUse` | `PreToolUse` (Bash) | `beforeShellExecution` (Shell) | `on_tool_use` (terminal only) | N/A | N/A |
+| Tool-call capture | `PostToolUse` | `PostToolUse` | `postToolUse` | `on_tool_use` (terminal only) | N/A | `agent_end` (batch) |
+| Assistant response capture | `Stop` / `SubagentStop` | `Stop` | `afterAgentResponse` / `stop` | N/A | N/A | `agent_end` (batch) |
+| Session end / summary spawn | `SessionEnd` | N/A (periodic only) | `sessionEnd` | `on_session_end` | `agent_end` / `session_shutdown` | `agent_end` (with summary slice) |
 
-A blank cell means that event is not available on that assistant. The lifecycle is still functionally complete: OpenClaw, for example, batches capture across the full conversation in `agent_end` rather than per-event, producing the same rows the daemon would have written incrementally, just grouped into one flush.
+A blank cell means that native event is not available on that harness. The lifecycle is still functionally complete: OpenClaw batches capture across the full conversation in `agent_end` rather than per-event, producing the same rows the daemon would have written incrementally, just grouped into one flush; pi reads its session-start context from the static `AGENTS.md` block rather than a live event.
+
+Each harness also carries a context channel and a host CLI, both single-sourced in its shim:
+
+| Harness | Context channel | Runtime path | Summary host CLI |
+|---|---|---|---|
+| Claude Code | model-only (`additionalContext`) | `legacy` | `claude -p` |
+| Codex | user-visible | `legacy` | `codex exec --dangerously-bypass-approvals-and-sandbox` |
+| Cursor | model-only (`additional_context`) | `plugin` | `cursor-agent` → `claude` fallback |
+| Hermes | user-visible (`{ context }` + MCP mention) | `legacy` | `hermes --non-interactive` |
+| pi | user-visible | `plugin` | `pi --print --provider <p> --model <m>` |
+| OpenClaw | model-only | `plugin` | native extension slice (no host CLI) |
 
 ---
 
-## The shared core files
+## The shim and the shared core
 
-The code paths that normalize payloads and call the daemon are agent-agnostic. Every per-agent shim calls into these shared modules:
+Each harness gets a single `src/hooks/<harness>/shim.ts`. The shim is a thin override: it declares the harness's event map, context channel, runtime path, and host CLI, and it lowers the harness's native payload into the canonical normalized data. The shim shares one `createShim` engine and contains no SQL and no DeepLake access.
+
+The cross-harness logic lives in `src/hooks/shared/`. Every shim routes through these agent-agnostic modules:
 
 | File | Role |
 |---|---|
-| `src/hooks/capture.ts` | Reference capture implementation (Claude Code). Sends one capture request per event to the daemon. |
-| `src/hooks/session-start.ts` | Reference SessionStart (Claude Code). Authenticates, heals drift, asks the daemon to ensure tables, writes placeholder, renders context block. |
-| `src/hooks/pre-tool-use.ts` | Reference VFS intercept (Claude Code). Routes Bash/Read/Grep/Glob on the memory path to daemon-backed queries. |
-| `src/hooks/session-end.ts` | Reference SessionEnd (Claude Code). Marks session ended, records usage, fires skillify, requests the summary worker. |
-| `src/hooks/wiki-worker.ts` | Background summary worker (Claude Code). Reads session rows via the daemon, shells `claude -p`, sends the result to the daemon for the `memory` table. |
-| `src/hooks/spawn-wiki-worker.ts` | Detached spawn helper. Writes a temp config JSON and forks `wiki-worker.js` as an unref'd child. |
-| `src/hooks/shared/context-renderer.ts` | Renders the rules and goals block injected at SessionStart. Read-only; absorbs its own errors. |
-| `src/hooks/shared/capture-gate.ts` | `HONEYCOMB_CAPTURE !== "false"` gate and only-CLI entrypoint check used by every capture path. |
-| `src/hooks/shared/autoupdate.ts` | `autoUpdate(creds, { agent })`: checks npm registry, spawns `honeycomb update` if a newer version is found. |
-| `src/hooks/shared/goals-instructions.ts` | `GOALS_INSTRUCTIONS_CLI`: the CLI-variant goal-management instructions injected for Cursor, Hermes, and pi. |
-| `src/hooks/shared/skillopt-hook.ts` | Arms the skill-optimization counter when the agent invokes an org skill. |
-| `src/hooks/summary-state.ts` | Per-session sidecar: `clearSessionEnded`, `markSessionEnded`, `tryAcquireLock`, `releaseLock`, `finalizeSummary`. |
+| `src/hooks/shared/session-start.ts` | The session-start lifecycle: credentials → heal → autoUpdate → ensure tables → placeholder → render context → prime → **autoPullSkills** + **assets** → spawn graph-pull → return context. |
+| `src/hooks/shared/session-start-seams.ts` | The production `SessionStartSeams`, the real, fail-soft, time-budgeted loopback auto-pull wiring for skills and assets. |
+| `src/hooks/shared/capture.ts` | Capture core: one normalized capture request per event to the daemon, which writes one `sessions` row. |
+| `src/hooks/shared/pre-tool-use.ts` | The VFS intercept core: routes memory-path tool calls to daemon-backed reads/searches. |
+| `src/hooks/shared/session-end.ts` | Session-end core: mark ended, record usage, fire skillify, spawn the summary worker. |
+| `src/hooks/shared/context-renderer.ts` | Renders the rules/goals block injected at session start. Read-only; absorbs its own errors. |
+| `src/hooks/shared/prime-renderer.ts` | Renders the session-start memory-prime digest appended to the context block. |
+| `src/hooks/shared/credential-reader.ts` | Reads `~/.honeycomb/credentials.json`. |
+| `src/hooks/shared/daemon-client.ts` | The loopback transport every shared step calls the daemon through. |
+| `src/hooks/shared/project-resolver.ts` | Resolves the project key for scope. |
 
----
-
-## Per-agent shim directories
-
-Each agent that needs behavior different from the Claude Code reference gets its own subdirectory under `src/hooks/`.
-
-```
-src/hooks/
-├── capture.ts              ← reference
-├── session-start.ts        ← reference
-├── pre-tool-use.ts         ← reference
-├── session-end.ts          ← reference
-├── wiki-worker.ts          ← reference (shells claude -p)
-├── spawn-wiki-worker.ts    ← reference
-├── harnesses/codex/
-│   ├── session-start.ts        # minimal inject; async setup in session-start-setup.ts
-│   ├── session-start-setup.ts  # table ensure, placeholder, version check (detached)
-│   ├── capture.ts              # same logic, Codex payload shape
-│   ├── pre-tool-use.ts         # intercepts Bash only
-│   ├── wiki-worker.ts          # shells `codex exec --dangerously-bypass-approvals-and-sandbox`
-│   └── spawn-wiki-worker.ts    # same pattern, Codex config keys
-├── cursor/
-│   ├── session-start.ts        # additional_context key, workspace_roots for cwd
-│   ├── capture.ts              # same logic, Cursor payload shape
-│   ├── pre-tool-use.ts         # Shell intercept, same VFS logic
-│   ├── session-end.ts          # sessionEnd event name
-│   ├── wiki-worker.ts          # shells `cursor-agent` or falls back to claude
-│   └── spawn-wiki-worker.ts    # Cursor config keys
-├── harnesses/hermes/
-│   ├── session-start.ts        # { context: "..." } output, MCP tools mention in inject
-│   ├── capture.ts              # same logic, Hermes payload shape
-│   ├── pre-tool-use.ts         # terminal tool intercept only
-│   ├── session-end.ts          # on_session_end event
-│   ├── wiki-worker.ts          # shells `hermes` in non-interactive mode
-│   └── spawn-wiki-worker.ts    # Hermes config keys
-└── harnesses/pi/
-    └── wiki-worker.ts          # shells `pi --print --provider <p> --model <m>`
-```
-
-The pi extension itself lives at `harnesses/pi/extension-source/honeycomb.ts` (installed as `~/.pi/agent/honeycomb/honeycomb.ts`). It contains the pi-native session hooks and spawns the summary worker. Only the summary worker is in `src/hooks/pi/` because the extension entry point is pi-specific TypeScript that pi compiles directly. The mapping of each agent to its install surface is detailed in [`harness-integration.md`](harness-integration.md).
+The normalization layer (`src/hooks/normalize.ts`, `src/hooks/contracts.ts`) supplies the canonical `*Data` builders every shim reuses, so a Cursor `Shell` tool and a Claude Code `Bash` tool produce the same normalized shape and reach the same shared VFS intercept.
 
 ---
 
@@ -105,57 +78,63 @@ The pi extension itself lives at `harnesses/pi/extension-source/honeycomb.ts` (i
 
 ### Session start
 
-The SessionStart hook runs once when the assistant opens a new session. Its responsibilities, in order, are:
+The session-start core (`src/hooks/shared/session-start.ts`) runs once when the harness opens a new session. Its steps, in order, each fail-soft:
 
-1. Load credentials from `~/.honeycomb/credentials.json`. On a fresh box with no token, either prompt for login (OpenClaw, pi) or log a notice and continue read-only (all others).
-2. Heal token/org drift with `healDriftedOrgToken` if credentials are present.
-3. Run `autoUpdate` before any daemon calls so the update notice appears even if the backend is slow. (Not in Codex, which defers this to the detached setup process.)
-4. Ask the daemon to ensure the `memory` and `sessions` tables exist. Gated on `HONEYCOMB_CAPTURE !== "false"`.
-5. Ask the daemon to write a placeholder summary row so the session is visible in the index while it is in progress. Gated on capture.
-6. Render the rules/goals context block via `renderContextBlock`. Read-only; runs regardless of the capture gate.
-7. Pull skills from teammates with `autoPullSkills` (a daemon request).
-8. Spawn the graph pull worker for the next session's codebase context.
-9. Return the assembled `additionalContext` (or equivalent) to the assistant.
+1. Load credentials. A session with no token continues read-only (recall is never disabled).
+2. Heal token/org drift with `healDriftedOrgToken`.
+3. `autoUpdate`, self-update if a newer plugin exists.
+4. Ensure the `memory` and `sessions` tables exist. **Gated** on `HONEYCOMB_CAPTURE !== "false"`.
+5. Write a placeholder summary row so the session is visible while in progress. **Gated** on capture.
+6. Render the rules/goals context block (read-only, runs regardless of the gate), then append the session-start memory-prime digest.
+7. **Auto-pull team skills** *and* **portable assets** (see below).
+8. Spawn the detached graph-pull worker for the next session's codebase context.
+9. Return the assembled context to the harness, routed through its channel.
 
-Claude Code and Cursor both receive a full context block (memory tier docs, memory commands, skillify commands, rules, goals, graph line) because their `additionalContext` is model-only. Codex receives only a brief login-state line because its `hook context:` is user-visible. Hermes receives the full block despite TUI visibility because the structural index is considered worth the extra lines. pi reads from the static `AGENTS.md` block.
+The two gated steps (table-ensure + placeholder) reuse the pure `shouldCapture` gate; when capture is off, neither runs, but the context block still renders and is returned.
+
+### The shared auto-pull seam
+
+Steps 7's auto-pulls are the seam that makes team collaboration live. Both ride the same injectable `SessionStartSeams` object so they share one wiring discipline (`src/hooks/shared/session-start-seams.ts`):
+
+- **Skills** POST to `POST /api/skills/pull`; **assets** POST to `POST /api/assets/pull`. The hook states "pull now"; the daemon runs the idempotent team pull plus the cross-harness symlink fan-out and the install/retract daemon-side. The hook opens no DeepLake.
+- Both are **idempotent** (a re-pull of a version already on disk writes nothing), **fail-soft** (any error, daemon down, non-200, refused socket, timeout, is swallowed, so session start is never blocked), and **time-budgeted** (a 5-second abort timer; a hung daemon never delays the first turn).
+- Both honor a kill switch: `HONEYCOMB_AUTOPULL_DISABLED=1` for skills, `HONEYCOMB_ASSET_AUTOPULL_DISABLED=1` for assets.
+- Both stamp tenancy headers (`x-honeycomb-org` / `x-honeycomb-workspace` / `x-honeycomb-actor`) from the credential. A signed-out session POSTs unscoped and the daemon fail-closes it to a no-op.
+
+This is why a teammate's freshly-mined skill or promoted asset becomes visible within seconds of publication. The skills loop is detailed in [`../collaboration/team-skills-sharing.md`](../collaboration/team-skills-sharing.md); the asset substrate it generalizes is in [`../collaboration/asset-sync-substrate.md`](../collaboration/asset-sync-substrate.md).
 
 ### Per-turn capture
 
-Capture handles three event types and sends one capture request per event to the daemon, which writes one row per event to the `sessions` table:
+The capture core handles three event types and sends one capture request per event, which the daemon writes as one row in the `sessions` table:
 
-- **UserPromptSubmit / beforeSubmitPrompt** (`user_message` row): records the user's prompt text.
-- **PostToolUse** (`tool_call` row): records the tool name, input, and response.
-- **Stop / SubagentStop / afterAgentResponse** (`assistant_message` row): records the assistant's last message.
+- **prompt events** (`user_message` row): the user's prompt text.
+- **tool-call events** (`tool_call` row): the tool name, input, and response.
+- **assistant-response events** (`assistant_message` row): the assistant's last message.
 
-Each request carries session metadata (session id, cwd, permission mode, hook event name, agent id) and an optional `message_embedding` vector. If the daemon reports the table does not exist yet (the SessionStart ensure failed), it creates the table and retries once. The capture mechanics on the engine side are covered in [`../ai/session-capture.md`](../ai/session-capture.md).
-
-On a Stop event, `capture.ts` additionally asks the daemon to evaluate `tryStopCounterTrigger`, which may fire the skillify miner independently of the summary worker.
-
-OpenClaw batches capture differently: `agent_end` delivers the full conversation as a `messages` array and the hook sends only the slice of new messages since the previous flush.
+Each request carries session metadata (session id, cwd, permission mode, native event name, agent id) and an optional message embedding. If the daemon reports the table does not exist (a missed session-start ensure), it creates the table and retries once. On an assistant-response event, capture additionally asks the daemon to evaluate the stop-counter trigger, which may fire the skillify miner independently of the summary worker. OpenClaw batches capture differently: `agent_end` delivers the full conversation and the hook sends only the slice of new messages since the previous flush. The capture mechanics on the engine side are covered in [`../ai/session-capture.md`](../ai/session-capture.md).
 
 ### Pre-tool-use (VFS recall)
 
-The PreToolUse hook is the VFS intercept. It runs before every tool execution and looks for Bash, Read, Grep, or Glob calls whose paths start with the memory path. When it sees one, it asks the daemon to resolve the call and rewrites the tool result from the daemon's response:
+The pre-tool-use core is the VFS intercept. It runs before tool execution and looks for memory-path tool calls. When it sees one, it asks the daemon to resolve the call and rewrites the tool result from the daemon's response:
 
-- `cat` / `Read` on a path becomes a direct row read from the `memory` or `sessions` table via the daemon's `readVirtualPathContent`.
-- `grep` / `Glob` becomes a hybrid lexical-plus-semantic search through the daemon's `handleGrepDirect`.
-- `ls` becomes a path-prefix listing.
-- `find` becomes a path-pattern query.
+- `cat` / `Read` on a path becomes a direct row read via the daemon's `readVirtualPathContent`.
+- `grep` / `Glob` becomes a hybrid lexical-plus-semantic search through the daemon's grep-direct path.
+- `ls` becomes a path-prefix listing; `find` becomes a path-pattern query.
 
-Write and Edit on a memory path are denied with guidance to use Bash instead. Commands that the VFS cannot model (interpreters, pipes, command substitution) are rewritten to a harmless `echo` so nothing escapes to the real filesystem. Codex and Hermes intercept only Bash/terminal, so Read-tool memory access is less available on those assistants. OpenClaw and pi have no PreToolUse hook at all.
+Write and Edit on a memory path are denied with guidance to use the CLI instead. Commands the VFS cannot model (interpreters, pipes, command substitution) are rewritten to a harmless `echo`. The harnesses differ on coverage: Claude Code and Codex intercept Bash; Cursor normalizes its `Shell` tool to the canonical `Bash` shape so the same intercept applies; Hermes intercepts terminal tools only; pi and OpenClaw have no pre-tool intercept.
 
 ```mermaid
 flowchart TD
-    hookFire["PreToolUse fires"] --> isMemoryPath{"path on the memory mount?"}
+    hookFire["Pre-tool event fires"] --> isMemoryPath{"path on the memory mount?"}
     isMemoryPath -- no --> passThrough["Pass through unchanged"]
     isMemoryPath -- yes --> routeCmd{"command type?"}
-    routeCmd -- "cat / Read" --> daemonRead["daemon readVirtualPathContent\nSELECT row"]
-    routeCmd -- "grep / Glob" --> daemonSearch["daemon handleGrepDirect\nhybrid lexical+semantic"]
+    routeCmd -- "cat / Read" --> daemonRead["daemon readVirtualPathContent"]
+    routeCmd -- "grep / Glob" --> daemonSearch["daemon grep-direct\nhybrid lexical+semantic"]
     routeCmd -- "ls" --> daemonList["daemon path-prefix listing"]
     routeCmd -- "find" --> daemonPattern["daemon path-pattern query"]
     routeCmd -- "Write / Edit" --> denyWrite["Return deny guidance"]
     routeCmd -- "interpreter / pipe" --> safeEcho["Rewrite to echo + retry guidance"]
-    daemonRead --> emitResult["Emit result via printf\nagent sees file output"]
+    daemonRead --> emitResult["Emit result; agent sees file output"]
     daemonSearch --> emitResult
     daemonList --> emitResult
     daemonPattern --> emitResult
@@ -163,18 +142,18 @@ flowchart TD
 
 ### Session end
 
-The SessionEnd hook exits fast and pushes all work to detached processes and the daemon:
+The session-end core exits fast and pushes work to detached processes and the daemon:
 
-1. Call `markSessionEnded` so other sessions stop treating this one as live.
-2. Call `recordSessionUsage` to parse the transcript for memory-search activity and append a record to `~/.honeycomb/usage-stats.jsonl`.
-3. Call `forceSessionEndTrigger` to run skillify mining (uses its own per-project lock, independent of the summary lock).
-4. Acquire the per-session summary lock and spawn the summary worker with reason `SessionEnd`.
+1. Mark the session ended so other sessions stop treating it as live.
+2. Record usage by parsing the transcript for memory-search activity.
+3. Fire skillify mining (its own per-project lock, independent of the summary lock).
+4. Acquire the per-session summary lock and spawn the summary worker.
 
-If the spawn throws before the worker takes ownership, the hook releases the lock so a `--resume` can retrigger summaries. The detached worker reads the session's events from the daemon, shells the host CLI, and sends the finished summary back to the daemon for the `memory` table. This is covered in detail in [`../architecture/request-lifecycle.md`](../architecture/request-lifecycle.md).
+The detached worker reads the session's events from the daemon, shells the harness's host CLI (the per-harness binary in the table above), and sends the finished summary back to the daemon for the `memory` table. If the spawn throws before the worker takes ownership, the lock is released so a resume can retrigger summaries. The detail is in [`../architecture/request-lifecycle.md`](../architecture/request-lifecycle.md).
 
 ---
 
-## Shared vs agent-specific behavior summary
+## Shared vs harness-specific behavior
 
 ```mermaid
 flowchart LR
@@ -182,21 +161,21 @@ flowchart LR
         capGate["Capture gate check"]
         daemonCall["Request to Honeycomb daemon"]
         vfsRoute["VFS path routing"]
+        autopull["Skills + assets auto-pull seam"]
         summaryWorker["Summary worker spawn"]
         skillify["Skillify trigger"]
-        contextRender["Rules/goals render"]
+        contextRender["Rules/goals + prime render"]
     end
 
-    subgraph agentSpecific["Agent-specific shims"]
-        eventNames["Event name mapping"]
-        payloadShape["Payload field normalization"]
-        contextChannel["Context injection channel\nmodel-only vs user-visible"]
+    subgraph harnessSpecific["Per-harness shims"]
+        eventNames["Native event name map"]
+        payloadShape["Payload normalization"]
+        contextChannel["Context channel\nmodel-only vs user-visible"]
         toolSurface["Tool surface\nhook intercept vs registered tool"]
-        hostCli["Host CLI for summary\nclaude / codex / cursor-agent / pi"]
-        asyncPattern["Async pattern\ninline vs detached setup"]
+        hostCli["Host CLI for summary"]
     end
 
-    agentSpecific --> shared
+    harnessSpecific --> shared
 ```
 
-The shims are intentionally thin. Their only job is to normalize the incoming payload into the shape the shared core expects and to route the daemon's response back through the assistant's specific response format. All memory decisions, all SQL, all embedding calls, and all locking happen in the daemon, behind the shared core.
+The shims are intentionally thin. Their only job is to normalize the incoming payload into the shape the shared core expects and to route the daemon's response back through the harness's response format. All memory decisions, all SQL, all embedding calls, all locking, and both auto-pulls happen behind the shared core, in the daemon.

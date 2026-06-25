@@ -19,27 +19,45 @@ Hooks let the daemon volunteer context. MCP and the SDK are the other half: surf
 
 ## The MCP server
 
-The MCP server runs inside the daemon, reachable over streamable HTTP at `/mcp` or as a stdio subprocess. It is separate from hooks and can run alongside them. Every MCP tool handler calls the daemon's own API internally, stamping `x-honeycomb-runtime-path: plugin` plus actor headers, so MCP traffic is identified and scoped like any other plugin-path call.
+The MCP server lives at `mcp/src/` (entry `mcp/src/index.ts`) and is built by esbuild to `mcp/bundle/server.js`, a self-contained executable bundle that ships with the package. It binds two transports against one `McpServer` (built on `@modelcontextprotocol/sdk`): a **stdio** transport when run as a subprocess (`node mcp/bundle/server.js`), and a **streamable-HTTP** transport served at `/mcp` on loopback. It is separate from hooks and runs alongside them. Every tool handler calls the daemon's own API internally through the HTTP daemon seam (`mcp/src/daemon-seam.ts`), stamping `x-honeycomb-runtime-path: plugin` plus actor headers (`x-honeycomb-actor: honeycomb-mcp`, actor type `plugin`, and a synthetic `mcp-<n>` session for session-group paths), so MCP traffic is identified and scoped like any other plugin-path call. Tool input schemas use `zod/v3` for SDK compatibility, distinct from the app's `zod ^4`.
 
-The merged tool surface unions both source systems' tools and renames them under the `honeycomb_` prefix.
+The tool surface is defined in `mcp/src/tools.ts` and handled in `mcp/src/handlers.ts`, grouped into clusters under the `honeycomb_` / `memory_` / `session_` / `agent_` / `secret_` prefixes:
 
 | Cluster | Tools |
 |---|---|
 | Memory | `memory_search`, `memory_store`, `memory_get`, `memory_list`, `memory_modify`, `memory_forget`, `memory_feedback` |
-| Browse | `honeycomb_search`, `honeycomb_read`, `honeycomb_index` (virtual-filesystem style read-only recall) |
+| Browse (VFS) | `honeycomb_search`, `honeycomb_read`, `honeycomb_index` |
 | Sessions | `session_search`, `session_bypass` |
+| Prime pull | `hivemind_read`, `hivemind_search` |
 | Goals and KPIs | `honeycomb_goal_add`, `honeycomb_kpi_add` |
 | Codebase | `honeycomb_code_search`, `honeycomb_code_context`, `honeycomb_code_blast`, `honeycomb_code_impact` |
 | Agent coordination | `agent_peers`, `agent_message_send`, `agent_message_inbox` |
 | Secrets (value-safe) | `secret_list`, `secret_exec` |
 
-`memory_search` is the hybrid recall described in [`../ai/retrieval.md`](../ai/retrieval.md). `memory_modify` and `memory_forget` require a reason because every mutation is audited. `session_search` queries session transcripts and can infer lineage from a child session key, which is how OpenClaw resolves a parent session. The `honeycomb_search`/`read`/`index` trio is the browse surface carried from Hivemind's MCP tools, backed by the virtual filesystem in [`../data/memory-virtual-filesystem.md`](../data/memory-virtual-filesystem.md). The secrets tools never expose values: `secret_list` returns names and `secret_exec` queues a command and returns redacted output, per [`../security/secrets.md`](../security/secrets.md).
+`memory_search` is the hybrid recall described in [`../ai/retrieval.md`](../ai/retrieval.md). `memory_modify` and `memory_forget` require a `reason` argument because every mutation is audited. `session_search` queries session transcripts and can infer parent lineage from a child session key (`mcp/src/sessions.ts`), which is how OpenClaw resolves a parent session. The `honeycomb_search`/`read`/`index` trio is the read-only browse surface backed by the virtual filesystem in [`../data/memory-virtual-filesystem.md`](../data/memory-virtual-filesystem.md). The secrets tools never expose values: `secret_list` returns names and `secret_exec` queues a command and returns redacted output, per [`../security/secrets.md`](../security/secrets.md). The codebase tools surface the query endpoints documented in [`../data/codebase-graph.md`](../data/codebase-graph.md) once a graph exists for the workspace.
 
-The codebase tools are registered when the codebase graph is enabled for the workspace after `honeycomb graph build`, and surface the query endpoints documented in [`../data/codebase-graph.md`](../data/codebase-graph.md).
+### Read/resolve vs search/mine
+
+The tool surface splits along a deliberate seam between *resolving a known reference* and *mining for unknown matches*:
+
+- **Read / resolve**, deterministic `SELECT`s. `memory_get` fetches a single memory by path; `hivemind_read` zooms a primed reference to its fuller Tier-2 summary or Tier-3 raw detail. These return exactly the row asked for; they do not rank.
+- **Search / mine**, hybrid lexical-plus-semantic recall fused by reciprocal-rank, with an honest `degraded` flag when the semantic path is unavailable. `memory_search` and `hivemind_search` are the mining tools; `honeycomb_search` is the VFS-backed search variant.
+
+This is why a session that already holds a primed reference can `hivemind_read` it cheaply without re-running a recall, while a cold query reaches for `memory_search` / `hivemind_search`.
+
+## MCP-server-via-install
+
+Where a harness speaks MCP, the connector registers the Honeycomb server during `honeycomb connect` so the `honeycomb_*` tools appear in the harness's native tool list, no separate "add an MCP server" step for the user. The registration is the stdio entry `node mcp/bundle/server.js`. Hermes, for example, carries it in `harnesses/hermes/.mcp.json`:
+
+```json
+{ "mcpServers": { "honeycomb": { "command": "node", "args": ["mcp/bundle/server.js"] } } }
+```
+
+and the Hermes shim appends a user-visible mention so the agent knows the tools are live: `(Honeycomb MCP tools available: honeycomb_search, honeycomb_read, honeycomb_index.)`. The same stdio bundle registers into the other MCP-speaking harnesses (Cursor through its extension, Codex, OpenClaw) during their connect step, and the daemon additionally serves the streamable-HTTP transport at `/mcp` for HTTP-speaking clients. The install-time registration is part of the connector contract documented in [`harness-integration.md`](harness-integration.md).
 
 ## The OpenClaw extension surface
 
-OpenClaw gets a native extension on top of MCP. It registers the same memory and browse tools plus the goal and KPI tools as agent-callable commands, batches capture at `agent_end`, and supplements the agent's memory corpus on `before_agent_start`. The extension carries an env-harvesting workaround from the Hivemind build (tuning values are read from a global object rather than `process.env`); the build mechanics are in [`../infrastructure/monorepo-build-release.md`](../infrastructure/monorepo-build-release.md).
+OpenClaw gets a native extension on top of MCP (registered during its connect step). It registers the same memory and browse tools plus the goal and KPI tools as agent-callable commands, batches capture at `agent_end`, and supplements the agent's memory corpus on `before_agent_start`. The extension carries an env-harvesting workaround from the Hivemind build (tuning values are read from a global object rather than `process.env`); the build mechanics are in [`../infrastructure/monorepo-build-release.md`](../infrastructure/monorepo-build-release.md).
 
 ## The SDK
 

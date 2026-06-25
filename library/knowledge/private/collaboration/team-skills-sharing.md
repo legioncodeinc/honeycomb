@@ -6,9 +6,11 @@ How Honeycomb mines reusable skills from agent sessions, publishes them to the o
 
 **Related:**
 - [`../ai/skillify-pipeline.md`](../ai/skillify-pipeline.md)
+- [`asset-sync-substrate.md`](asset-sync-substrate.md)
 - [`../architecture/system-overview.md`](../architecture/system-overview.md)
 - [`../architecture/daemon-surface.md`](../architecture/daemon-surface.md)
 - [`../multi-tenant/org-workspace-model.md`](../multi-tenant/org-workspace-model.md)
+- [`../integrations/hook-lifecycle.md`](../integrations/hook-lifecycle.md)
 - [`../frontend/cursor-extension-architecture.md`](../frontend/cursor-extension-architecture.md)
 - [`../data/deeplake-storage.md`](../data/deeplake-storage.md)
 
@@ -50,11 +52,13 @@ Setting `install = "global"` writes skills to `~/.claude/skills/`, making them v
 
 ## Auto-pull at session start
 
-The auto-pull runs on every `SessionStart` hook for every agent that Honeycomb supports. It is intentionally not throttled: because the pull is idempotent (skipping any skill whose local version is at-or-newer than the remote version), the only cost per call is one daemon round-trip plus `existsSync` syscalls. This makes teammate-mined skills visible within seconds of publication, rather than within the 30-minute polling window an older design used.
+The auto-pull runs live on every session-start hook for every harness Honeycomb supports. It is wired through the shared session-start seam (`src/hooks/shared/session-start-seams.ts`): the hook POSTs to the daemon's `POST /api/skills/pull` route over loopback, and the daemon runs the real team pull plus the cross-harness symlink fan-out daemon-side. The hook states "pull now"; it never opens DeepLake itself. The asset substrate ([`asset-sync-substrate.md`](asset-sync-substrate.md)) rides the same seam with a parallel `POST /api/assets/pull` step.
 
-The auto-pull is bounded by a 5-second timeout. A slow or unreachable daemon never blocks `SessionStart` past that limit. All errors are swallowed; the pull result is informational only.
+It is intentionally not throttled: because the pull is idempotent (skipping any skill whose local version is at-or-newer than the remote version), the only cost per call is one daemon round-trip plus `existsSync` syscalls. This makes teammate-mined skills visible within seconds of publication, rather than within the 30-minute polling window an older design used.
 
-Hard opt-out is available via `HONEYCOMB_AUTOPULL_DISABLED=1`. Unauthenticated sessions skip the pull silently without logging a warning.
+The auto-pull is bounded by a 5-second timeout, raced against an abort timer so a slow or unreachable daemon never blocks session start past that limit. All errors are swallowed; the pull result is informational only.
+
+Hard opt-out is available via `HONEYCOMB_AUTOPULL_DISABLED=1`. Unauthenticated sessions POST unscoped and the daemon fail-closes the pull to a no-op; session start proceeds either way.
 
 ### Early exit when table is absent
 
