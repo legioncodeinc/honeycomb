@@ -42,15 +42,15 @@ Code size is treated as a cost. Refactors should reduce non-test LOC unless they
 
 ## Don't create drift
 
-Do not duplicate constants, maps, dependency types, config defaults, package lists, or descriptions across files; extract a shared source of truth when duplication would create drift. JS daemon changes must preserve the Rust shadow parity expectations in `platform/daemon-rs` where behavior overlaps. DeepLake is the canonical store: durable app state lives in DeepLake tables, not local JSON sidecars. JSON, JSONL, and sidecar files are not acceptable as the default for app state, caches, queues, indexes, or cursors. The storage substrate, and how durable state is shaped against it, is documented in [DeepLake Storage](../data/deeplake-storage.md).
+Do not duplicate constants, maps, dependency types, config defaults, package lists, or descriptions across files; extract a shared source of truth when duplication would create drift. DeepLake is the canonical store: durable app state lives in DeepLake tables, not local JSON sidecars. JSON, JSONL, and sidecar files are not acceptable as the default for app state, caches, queues, indexes, or cursors. The storage substrate, and how durable state is shaped against it, is documented in [DeepLake Storage](../data/deeplake-storage.md).
 
 ## Tests
 
-Every bug fix needs a test that would fail before the fix. Test behavior, not implementation plumbing, and prefer integration-style tests when a contract crosses modules. Add edge cases for scoping, invalid inputs, timer lifecycle, permission checks, fallback behavior, generated manifests, and publish output. Keep prompt and model-dependent tests opt-in unless the command already defines a model-backed loop. Run focused tests directly rather than a bare root run, which would also pick up third-party tests under `references/`.
+Every bug fix needs a test that would fail before the fix. Test behavior, not implementation plumbing, and prefer integration-style tests when a contract crosses modules. Add edge cases for scoping, invalid inputs, timer lifecycle, permission checks, fallback behavior, generated manifests, and publish output. Keep prompt and model-dependent tests opt-in unless the command already defines a model-backed loop. The runner is Vitest (`tests/` mirrors `src/`); run focused suites directly rather than a bare root run, which would also pick up third-party tests under `references/`.
 
 ```bash
-bun test platform/daemon/src/pipeline/worker.test.ts
-bun run --filter '@honeycomb/daemon' build
+npx vitest run tests/daemon/recall.test.ts   # one focused suite (tests/ mirrors src/)
+npm run build                                # tsc + esbuild, respects the build order
 ```
 
 ## Naming and style
@@ -64,12 +64,13 @@ Conventional commits, `type(scope): subject`. Reserve `feat:` for user-facing fe
 ## Workspace commands
 
 ```bash
-bun install
-bun run build       # respects the cross-package build order
-bun test
-bun run lint
-bun run format
-bun run typecheck
+npm install
+npm run build       # tsc && node esbuild.config.mjs, respects the fixed build order
+npm run test        # vitest run
+npm run lint        # biome check
+npm run format      # biome format --write
+npm run typecheck   # tsc --noEmit
+npm run ci          # the full gate: typecheck + dup (jscpd) + test + audit:sql
 ```
 
 The build order is fixed because packages depend on each other: core first, then connector-base, then the plugins and native bindings, then the connectors, then the assembled distribution. The route-group conventions these commands build toward are documented in [API Design Conventions](api-design-conventions.md).

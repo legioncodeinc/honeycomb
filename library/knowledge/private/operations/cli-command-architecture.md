@@ -138,7 +138,7 @@ The flow operates as follows:
 2. **User Authorization:** The client opens the default browser pointing to the complete URI or instructs the user to open it manually.
 3. **Token Polling:** The client polls the `/auth/device/token` endpoint at the prescribed interval. If the authorization is pending, it continues; if verified, it receives a short-lived token.
 4. **Credential Storage:** The token is validated against the `/me` endpoint, a preferred organization is selected (supporting overrides like `HONEYCOMB_ORG_ID`), and a long-lived API token is minted through the `/users/me/tokens` endpoint.
-5. **Serialization:** Credentials are written to `~/.honeycomb/credentials.json` with user-private filesystem permissions (`0600`).
+5. **Serialization:** Credentials are written to the shared `~/.deeplake/credentials.json` (byte-compatible with Hivemind; PRD-023) with user-private filesystem permissions (`0600`). See [`../security/credential-storage.md`](../security/credential-storage.md).
 
 The daemon reads the same credential file at startup, so once the CLI logs in, every hook and the daemon share one authenticated identity.
 
