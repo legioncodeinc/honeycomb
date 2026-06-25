@@ -64,7 +64,13 @@
 import { isOk, type StorageRow } from "../../storage/result.js";
 import { sLiteral, sqlIdent, sqlLike } from "../../storage/sql.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
-import { EMBEDDING_DIMS, type ScoredId, vectorSearch } from "../../storage/vector.js";
+import { cosineSimilarity, EMBEDDING_DIMS, type ScoredId, vectorSearch } from "../../storage/vector.js";
+import {
+	DEFAULT_RERANKER,
+	DEFAULT_RERANKER_TIMEOUT_MS,
+	DEFAULT_RERANKER_WINDOW,
+	type RerankerConfig,
+} from "../recall/config.js";
 import type { EmbedClient } from "../services/embed-client.js";
 import type { RecallMode } from "../vault/api.js";
 
@@ -359,6 +365,28 @@ export interface MemoryRecallDeps {
 	 *                              `degraded` honest) — a no-op for any caller that omits this.
 	 */
 	readonly recallMode?: RecallMode;
+	/**
+	 * The reranker config (PRD-047b / D-4). When ABSENT, recall applies the DEFAULT
+	 * strategy ({@link DEFAULT_RERANKER} = `embedding-cosine`) with the default window
+	 * + timeout — so the LIVE route and the eval measure the reranker ON by default
+	 * without any caller change. A caller passes `{ strategy: "none" }` for the
+	 * RRF-only escape hatch, or an explicit config to tune `window` / `timeoutMs`.
+	 *
+	 * The rerank runs AFTER {@link fuseHits}, re-scores the fused top-`window`
+	 * candidates by cosine(query vector, candidate embedding), and reorders. It runs
+	 * ONLY when a real query vector exists (the semantic arm ran); on a lexical-only /
+	 * degraded / keyword recall there is no query vector, so the rerank is SKIPPED and
+	 * the RRF order stands (b-AC-4). A candidate with no hydrated embedding keeps its
+	 * RRF position (b-AC-1); a rerank that exceeds the budget keeps the RRF order
+	 * (b-AC-2); a rerank failure degrades to the RRF order, never a throw (b-AC-4).
+	 */
+	readonly reranker?: RerankerConfig;
+	/**
+	 * Injectable monotonic clock (ms) for the rerank timeout budget (b-AC-2). Defaults
+	 * to {@link Date.now}; a unit test injects a fake clock to drive the timeout
+	 * deterministically with no real waiting.
+	 */
+	readonly now?: () => number;
 }
 
 /** A recall request as it enters the adapter (the zod-validated, scoped body). */
@@ -505,19 +533,32 @@ async function runSemanticArm(
 }
 
 /**
+ * The product of a semantic run: the per-table ranked arms PLUS the query vector that
+ * produced them. The vector is carried out so the PRD-047b reranker can re-score the
+ * fused top-N by cosine(query, candidate) WITHOUT re-embedding (the query is embedded
+ * exactly once, here).
+ */
+interface SemanticRun {
+	/** ONE {@link RankedArm} per semantic table, each in its own cosine ranking. */
+	readonly arms: RankedArm[];
+	/** The 768-dim query vector the arms matched against (reused by the reranker). */
+	readonly queryVector: readonly number[];
+}
+
+/**
  * Embed the query + run BOTH semantic arms (PRD-025 AC-3). Returns `null` when the
  * semantic path could NOT run — no embed client, or the query embed returned null
  * (embeddings off / daemon unreachable / timeout / wrong-dim) — which is the signal
- * to fall back to lexical-only with `degraded: true`. Returns ONE {@link RankedArm}
- * per semantic table (each in its own cosine ranking, the RRF rank signal) when the
- * arms DID run — `degraded: false`, because "ran and found nothing semantically" is
- * still an honest non-degraded recall (the returned arrays may be empty).
+ * to fall back to lexical-only with `degraded: true`. Returns a {@link SemanticRun}
+ * (one {@link RankedArm} per semantic table, each in its own cosine ranking, plus the
+ * query vector) when the arms DID run — `degraded: false`, because "ran and found
+ * nothing semantically" is still an honest non-degraded recall (the arms may be empty).
  */
 async function runSemanticArms(
 	request: MemoryRecallRequest,
 	deps: MemoryRecallDeps,
 	limit: number,
-): Promise<RankedArm[] | null> {
+): Promise<SemanticRun | null> {
 	if (deps.embed === undefined) return null; // no semantic seam → lexical-only.
 
 	let queryVector: readonly number[] | null;
@@ -536,7 +577,176 @@ async function runSemanticArms(
 		SEMANTIC_ARMS.map((spec) => runSemanticArm(spec, queryVector!, request, deps, limit)),
 	);
 	// Each semantic table is its OWN ranked arm so RRF sees its cosine ranking distinctly.
-	return armEntries.map((entries) => ({ entries }));
+	return { arms: armEntries.map((entries) => ({ entries })), queryVector };
+}
+
+// ── PRD-047b — the rerank stage (embedding-cosine over the fused top-N) ──────────
+
+/**
+ * Map a {@link RecallSource} to its `FLOAT4[]` embedding column for the rerank
+ * fetch. `memory` summaries carry NO embedding column (mirrors {@link SEMANTIC_ARMS}),
+ * so they yield `null` — a summary candidate keeps its RRF position, never errors.
+ */
+function embeddingColumnFor(source: RecallSource): string | null {
+	if (source === "memories") return "content_embedding";
+	if (source === "sessions") return "message_embedding";
+	return null; // `memory` (summaries) — no embedding column.
+}
+
+/**
+ * Build the guarded batch-fetch of `(id, embedding)` for the rerank candidates of ONE
+ * table (PRD-047b / b-AC-1). Every identifier routes through `sqlIdent` and every id
+ * through `sLiteral` (audit:sql-safe), exactly like {@link buildSemanticHydrateSql}.
+ * Only rows whose embedding is non-empty are returned (`ARRAY_LENGTH(col,1) > 0`),
+ * so a NULL-embedding candidate simply does not come back and keeps its RRF position.
+ * One statement per table, never one-per-candidate.
+ */
+export function buildRerankEmbeddingSql(
+	table: string,
+	idColumn: string,
+	embeddingColumn: string,
+	ids: readonly string[],
+): string {
+	const tbl = sqlIdent(table);
+	const idCol = sqlIdent(idColumn);
+	const embCol = sqlIdent(embeddingColumn);
+	const inList = ids.map((id) => sLiteral(id)).join(", ");
+	return (
+		`SELECT ${idCol} AS id, ${embCol} AS embedding ` +
+		`FROM "${tbl}" ` +
+		`WHERE ${idCol} IN (${inList}) AND ARRAY_LENGTH(${embCol}, 1) > 0`
+	);
+}
+
+/** The per-table id column the lexical/semantic arms key on (`memories`→id, `sessions`→path). */
+function idColumnFor(source: RecallSource): string {
+	return source === "sessions" || source === "memory" ? "path" : "id";
+}
+
+/** Coerce a stored `FLOAT4[]` cell into a `number[]`, or `null` when it is not a usable vector. */
+function readEmbeddingCell(value: unknown): number[] | null {
+	if (!Array.isArray(value)) return null;
+	const vec: number[] = [];
+	for (const v of value) {
+		const n = typeof v === "number" ? v : Number(v);
+		if (!Number.isFinite(n)) return null;
+		vec.push(n);
+	}
+	return vec.length === 0 ? null : vec;
+}
+
+/**
+ * Fetch the candidate embeddings for the rerank window in ONE guarded batch per
+ * embedding-bearing table (PRD-047b / b-AC-1). Returns a `source+id → vector` map.
+ * A table whose fetch fails (missing column on a fresh partition, any query error)
+ * simply contributes no embeddings — its candidates keep their RRF position. Never
+ * throws: a fetch failure degrades the rerank to RRF order, it does not fail recall.
+ */
+async function fetchCandidateEmbeddings(
+	candidates: readonly MemoryRecallHit[],
+	request: MemoryRecallRequest,
+	deps: MemoryRecallDeps,
+): Promise<Map<string, number[]>> {
+	// Group candidate ids by their embedding-bearing table.
+	const idsBySource = new Map<Extract<RecallSource, "memories" | "sessions">, string[]>();
+	for (const hit of candidates) {
+		const col = embeddingColumnFor(hit.source);
+		if (col === null || hit.id === "") continue; // no embedding column / empty id → skip.
+		const source = hit.source as Extract<RecallSource, "memories" | "sessions">;
+		const bucket = idsBySource.get(source);
+		if (bucket === undefined) idsBySource.set(source, [hit.id]);
+		else bucket.push(hit.id);
+	}
+
+	const byKey = new Map<string, number[]>();
+	await Promise.all(
+		[...idsBySource.entries()].map(async ([source, ids]) => {
+			if (ids.length === 0) return;
+			const embeddingColumn = embeddingColumnFor(source);
+			if (embeddingColumn === null) return;
+			const sql = buildRerankEmbeddingSql(source, idColumnFor(source), embeddingColumn, ids);
+			// `runArm` swallows a non-ok result to [] (per-arm tolerance) — a failed fetch
+			// just means no embeddings for this table, so its candidates keep RRF position.
+			const rows = await runArm(sql, request, deps);
+			for (const row of rows) {
+				const id = cell(row.id);
+				if (id === "") continue;
+				const vec = readEmbeddingCell(row.embedding);
+				if (vec !== null) byKey.set(fusionKey(source, id), vec);
+			}
+		}),
+	);
+	return byKey;
+}
+
+/**
+ * Rerank the fused hits by cosine(query vector, candidate embedding) over the top-N
+ * window (PRD-047b / b-AC-1). RULES:
+ *  - `strategy: "none"` (or no query vector) → return the RRF order UNCHANGED.
+ *  - Only the top-`window` fused hits are re-scored; the tail keeps RRF order and is
+ *    appended after the reranked head.
+ *  - A candidate with no hydrated embedding keeps its RRF position (it is scored on its
+ *    fused RRF rank so it never leapfrogs a cosine-scored peer arbitrarily).
+ *  - The reorder is STABLE within ties (a reranked head that ties keeps RRF order).
+ *  - The whole stage is budgeted: if the wall clock passes `timeoutMs` after the
+ *    candidate fetch, the pre-rerank (RRF) order is returned (b-AC-2). The fetch +
+ *    cosine are wrapped so any throw degrades to the RRF order (b-AC-4).
+ *
+ * The query vector is the one the semantic arm already embedded — no re-embed here.
+ */
+async function rerankHits(
+	hits: readonly MemoryRecallHit[],
+	queryVector: readonly number[],
+	config: RerankerConfig,
+	request: MemoryRecallRequest,
+	deps: MemoryRecallDeps,
+): Promise<MemoryRecallHit[]> {
+	const rrfOrder = [...hits];
+	// `none` → RRF-only escape hatch; `llm` is a measured follow-up (not built here),
+	// so it falls through to the RRF order until its branch lands. `embedding-cosine`
+	// is the deterministic deliverable.
+	if (config.strategy !== "embedding-cosine") return rrfOrder;
+	if (hits.length === 0) return rrfOrder;
+
+	const now = deps.now ?? Date.now;
+	const start = now();
+	const window = Math.max(1, Math.trunc(config.window));
+	const head = rrfOrder.slice(0, window);
+	const tail = rrfOrder.slice(window);
+
+	try {
+		const embByKey = await fetchCandidateEmbeddings(head, request, deps);
+		// Budget check AFTER the fetch (the only async/I/O cost): a slow fetch yields the
+		// pre-rerank order, never a partial/blank reorder (b-AC-2).
+		if (now() - start > config.timeoutMs) return rrfOrder;
+
+		// Score each head candidate by cosine; a candidate with no usable embedding falls
+		// back to a rank-proxy score so it slots by its RRF position, never leapfrogging.
+		const scored = head.map((hit, index) => {
+			const vec = embByKey.get(fusionKey(hit.source, hit.id));
+			const cos = vec === undefined ? null : cosineSimilarity(queryVector, vec);
+			return { hit, index, rerankScore: cos };
+		});
+
+		// Stable sort: cosine-scored candidates by score DESC; an un-scored candidate sorts
+		// by its original RRF index (kept relative order). A scored candidate outranks an
+		// un-scored one only when its cosine beats the un-scored peer's implied position —
+		// to keep the reorder CONSERVATIVE (never worse-than-RRF for a missing embedding),
+		// un-scored candidates retain their original index slot via a stable comparator.
+		scored.sort((a, b) => {
+			if (a.rerankScore !== null && b.rerankScore !== null) {
+				if (b.rerankScore !== a.rerankScore) return b.rerankScore - a.rerankScore;
+				return a.index - b.index; // tie → original RRF order (stable).
+			}
+			// At least one is un-scored → preserve original RRF order between them.
+			return a.index - b.index;
+		});
+
+		return [...scored.map((s) => s.hit), ...tail];
+	} catch {
+		// Any failure in the fetch/score path degrades to the RRF order, never a throw (b-AC-4).
+		return rrfOrder;
+	}
 }
 
 /**
@@ -589,7 +799,7 @@ export async function recallMemories(
 	// lexical arms always run (the resilient floor). Each lexical arm is bounded by the
 	// overall limit so a single arm cannot starve the fusion. In `keyword` mode the
 	// semantic arm is never invoked — it short-circuits to `null` before the await.
-	const [semanticArms, memoriesRows, memoryRows, sessionsRows] = await Promise.all([
+	const [semanticRun, memoriesRows, memoryRows, sessionsRows] = await Promise.all([
 		keywordOnly ? Promise.resolve(null) : runSemanticArms(request, deps, limit),
 		runArm(buildMemoriesArmSql(term, limit), request, deps),
 		runArm(buildMemoryArmSql(term, limit), request, deps),
@@ -599,7 +809,7 @@ export async function recallMemories(
 	// `degraded` is HONEST (PRD-025 AC-3): false iff the semantic arm actually ran — EXCEPT in
 	// `keyword` mode, where an intentional lexical-only run is NOT a degraded fallback (PRD-044c /
 	// PRD-029), so it is forced `false` even though the semantic arm never ran.
-	const degraded = keywordOnly ? false : semanticArms === null;
+	const degraded = keywordOnly ? false : semanticRun === null;
 
 	// PRD-027 D-1/D-2/D-3: assemble every arm as a RANKED list, then fuse with RRF +
 	// the arm-class weight, dedup, and order by fused score. The semantic arms (one per
@@ -607,11 +817,27 @@ export async function recallMemories(
 	// order. A null semantic path contributes no arms (lexical-only); a missing lexical
 	// sibling is simply an empty arm (per-arm fail-soft, AC-7) that contributes nothing.
 	const arms: RankedArm[] = [
-		...(semanticArms ?? []),
+		...(semanticRun?.arms ?? []),
 		rowsToRankedArm(memoriesRows),
 		rowsToRankedArm(memoryRows),
 		rowsToRankedArm(sessionsRows),
 	];
 	const { hits, sources } = fuseHits(arms, limit);
-	return { hits, sources, degraded };
+
+	// PRD-047b: rerank the fused top-N by cosine(query vector, candidate embedding). The
+	// rerank runs ONLY when a real query vector exists (the semantic arm ran) — on a
+	// lexical-only / degraded / keyword recall there is no vector, so RRF order stands
+	// (b-AC-4). The strategy DEFAULTS to `none` (b-AC-3: embedding-cosine measured ~0
+	// lift on the synthetic golden set, so the eval-driven default keeps RRF order); a
+	// caller passes `{ strategy: "embedding-cosine" }` to activate the wired+tested
+	// rerank. The stage is timeout-budgeted (b-AC-2) and fail-soft to RRF order (b-AC-4).
+	const rerankerConfig: RerankerConfig =
+		deps.reranker ??
+		({ strategy: DEFAULT_RERANKER, timeoutMs: DEFAULT_RERANKER_TIMEOUT_MS, window: DEFAULT_RERANKER_WINDOW } as const);
+	if (semanticRun === null || rerankerConfig.strategy === "none") {
+		// No query vector to rerank against, or RRF-only requested → keep the fused order.
+		return { hits, sources, degraded };
+	}
+	const reranked = await rerankHits(hits, semanticRun.queryVector, rerankerConfig, request, deps);
+	return { hits: reranked, sources, degraded };
 }

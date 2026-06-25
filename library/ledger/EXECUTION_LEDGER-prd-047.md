@@ -26,10 +26,10 @@ daemon**. Split per AC:
 | f-AC-2 | 047f | `gateAgainstBaseline` enforces nDCG@10 floor; baseline schema gains `ndcg` | det | retrieval | ✅ DONE (golden.ts:255/271/294/321; hand-computed tests) |
 | f-AC-3 | 047f | Live poll-convergent run re-commits graded baseline (`placeholder:false`) | live | orch+retrieval | ✅ DONE (live nDCG@10=0.596 → floor 0.50 committed) |
 | f-AC-4 | 047f | Gates green; no secret/PII in graded set (grep-proven) | det | retrieval | ✅ DONE (npm run ci green; synthetic set) |
-| b-AC-1 | 047b | `embedding-cosine` reranks fused top-N; `none` leaves RRF order | det | retrieval | OPEN |
-| b-AC-2 | 047b | Rerank timeout → keep prior (RRF) order | det | retrieval | OPEN |
-| b-AC-3 | 047b | Eval: rerank holds recall@5, no nDCG/MRR drop below baseline−ε (ideally lift) | live | orch+retrieval | OPEN |
-| b-AC-4 | 047b | `degraded` fallback + fail-soft intact; rerank failure → RRF order | det | retrieval | OPEN |
+| b-AC-1 | 047b | `embedding-cosine` reranks fused top-N; `none` leaves RRF order | det | retrieval | ✅ DONE (recall.ts:680 rerankHits; rerank.test.ts) |
+| b-AC-2 | 047b | Rerank timeout → keep prior (RRF) order | det | retrieval | ✅ DONE (injected-clock test) |
+| b-AC-3 | 047b | Eval: rerank holds recall@5, no nDCG/MRR drop below baseline−ε (ideally lift) | live | orch+retrieval | ✅ DONE — measured NEUTRAL (no lift, inside RRF noise band); per pre-registered rule default→`none`; recorded in reports/2026-06-24-reranker-activation-eval.md. **Product flag: cosine kept activatable behind config.** |
+| b-AC-4 | 047b | `degraded` fallback + fail-soft intact; rerank failure → RRF order | det | retrieval | ✅ DONE (no-vector/failure → RRF tests) |
 | c-AC-1 | 047c | Near-dups (memory+summary+turns) collapse to ONE (memories copy) | det | retrieval | OPEN |
 | c-AC-2 | 047c | Distinct facts below threshold both survive (false-merge guard) | det | retrieval | OPEN |
 | c-AC-3 | 047c | Eval: recall@5/MRR/nDCG hold at-or-above baseline with dedup on | live | orch+retrieval | OPEN |

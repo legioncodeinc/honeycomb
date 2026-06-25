@@ -66,11 +66,30 @@ export const DEFAULT_TRAVERSAL_MIN_EDGE_WEIGHT = 0.3;
 /** Hard traversal timeout in ms (D-3). */
 export const DEFAULT_TRAVERSAL_TIMEOUT_MS = 500;
 
-// ── D-4 reranker (007d) ─────────────────────────────────────────────────────
-/** The default reranker strategy (D-4): embedding-cosine. LLM rerank is opt-in. */
-export const DEFAULT_RERANKER = "embedding-cosine" as const;
-/** Reranker timeout in ms; on timeout the original order is kept (D-4 / d-AC-2). */
+// ── D-4 reranker (007d / PRD-047b) ──────────────────────────────────────────
+/**
+ * The default reranker strategy. PRD-047b shipped the embedding-cosine rerank stage
+ * fully wired + tested, then MEASURED it on the live graded golden set (b-AC-3,
+ * 2026-06-24): rerank-on recall@5/MRR/nDCG sat INSIDE the RRF-only noise band
+ * (recall@5 0.611 vs RRF 0.611–0.639) — i.e. ~0 lift on the synthetic instrument,
+ * exactly the risk b-AC-3 pre-registered ("cosine rerank ≈ the `<#>` arm signal; if
+ * the lift is ~0, drop rerank to `none` by default — the eval decides"). So the
+ * DEFAULT is `none` (keep the proven RRF order; don't pay a per-recall embedding
+ * batch-fetch + cosine for no measured gain). `embedding-cosine` and `llm` remain
+ * fully implemented + activatable via config/env; revisit when a stronger instrument
+ * (graded multi-id eval or dogfood) demonstrates the lift. See
+ * `reports/2026-06-24-reranker-activation-eval.md`.
+ */
+export const DEFAULT_RERANKER = "none" as const;
+/** Reranker timeout in ms; on timeout the original order is kept (D-4 / d-AC-2 / b-AC-2). */
 export const DEFAULT_RERANKER_TIMEOUT_MS = 300;
+/**
+ * The rerank WINDOW N (PRD-047b): the count of fused top-N candidates the reranker
+ * re-scores. A tuned knob — large enough to recover the magnitude RRF discarded
+ * across a realistic recall window, small enough that the one guarded embedding
+ * batch-fetch stays cheap. 50 is the documented default; env-overridable + clamped.
+ */
+export const DEFAULT_RERANKER_WINDOW = 50;
 
 // ── D-5 dampening (007d) ────────────────────────────────────────────────────
 /** Gravity dampening factor for a semantic hit sharing no query terms (D-5 / d-AC-4). */
@@ -145,8 +164,10 @@ export const TraversalConfigSchema = z.object({
 export const RerankerConfigSchema = z.object({
 	/** The reranker strategy (D-4). */
 	strategy: z.enum(RERANKER_STRATEGIES).default(DEFAULT_RERANKER),
-	/** Reranker timeout in ms; on timeout keep the original order (d-AC-2). */
+	/** Reranker timeout in ms; on timeout keep the original order (d-AC-2 / b-AC-2). */
 	timeoutMs: ClampedInt(DEFAULT_RERANKER_TIMEOUT_MS, 1).default(DEFAULT_RERANKER_TIMEOUT_MS),
+	/** Rerank window N: how many fused top-N candidates to re-score (PRD-047b). */
+	window: ClampedInt(DEFAULT_RERANKER_WINDOW, 1).default(DEFAULT_RERANKER_WINDOW),
 });
 
 /** D-5 dampening/boost factors, grouped so the shaping phase reads one object. */
@@ -240,6 +261,7 @@ export interface RawRecallConfig {
 	readonly reranker?: {
 		readonly strategy?: unknown;
 		readonly timeoutMs?: unknown;
+		readonly window?: unknown;
 	};
 	readonly dampening?: {
 		readonly gravity?: unknown;
@@ -276,6 +298,7 @@ export function envRecallConfigProvider(env: NodeJS.ProcessEnv = process.env): R
 				reranker: {
 					strategy: env.HONEYCOMB_RECALL_RERANKER,
 					timeoutMs: env.HONEYCOMB_RECALL_RERANKER_TIMEOUT_MS,
+					window: env.HONEYCOMB_RECALL_RERANKER_WINDOW,
 				},
 				dampening: {
 					gravity: env.HONEYCOMB_RECALL_DAMPENING_GRAVITY,

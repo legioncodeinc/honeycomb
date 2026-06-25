@@ -31,9 +31,28 @@ describe("recall config — D-1..D-6 defaults", () => {
 		expect(config.traversal.totalIds).toBe(100);
 		expect(config.traversal.minEdgeWeight).toBe(0.3);
 		expect(config.traversal.timeoutMs).toBe(500);
-		// D-4 reranker.
-		expect(config.reranker.strategy).toBe("embedding-cosine");
+		// D-4 reranker (+ PRD-047b window). Default strategy is `none` (b-AC-3: the
+		// embedding-cosine rerank measured ~0 lift on the synthetic golden set, so the
+		// eval-driven default keeps RRF order; cosine/llm stay activatable via config).
+		expect(config.reranker.strategy).toBe("none");
 		expect(config.reranker.timeoutMs).toBe(300);
+		expect(config.reranker.window).toBe(50);
+	});
+});
+
+describe("recall config — PRD-047b reranker window", () => {
+	it("clamps a sub-1 window up to 1 and truncates a float", () => {
+		expect(resolveRecallConfig({ read: () => ({ reranker: { window: 0 } }) }).reranker.window).toBe(1);
+		expect(resolveRecallConfig({ read: () => ({ reranker: { window: 75.9 } }) }).reranker.window).toBe(75);
+	});
+
+	it("a non-numeric window falls back to the default (50)", () => {
+		expect(resolveRecallConfig({ read: () => ({ reranker: { window: "nope" } }) }).reranker.window).toBe(50);
+	});
+
+	it("maps HONEYCOMB_RECALL_RERANKER_WINDOW from the env provider", () => {
+		const provider = envRecallConfigProvider({ HONEYCOMB_RECALL_RERANKER_WINDOW: "20" } as NodeJS.ProcessEnv);
+		expect(resolveRecallConfig(provider).reranker.window).toBe(20);
 	});
 });
 
