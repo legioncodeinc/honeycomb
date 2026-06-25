@@ -36,6 +36,7 @@ import {
 	firstRelevantRank,
 	type AggregateMetrics,
 	type RankedResult,
+	type RelevanceClasses,
 	type RelevanceJudgements,
 	type ScoredQuery,
 } from "./metrics.js";
@@ -209,8 +210,18 @@ export async function runEval(
 		// Judgements: EVERY id in the class carries the pair's graded relevance, so a hit on ANY
 		// correct copy is a hit (the stability property — see {@link ExpectedIds}). An empty
 		// class (seed produced no id) → empty judgements → every metric scores this as a miss.
+		// recall@5 / MRR consume ONLY these judgements (class-agnostic) and so are unchanged.
 		const judgements: RelevanceJudgements = Object.fromEntries(
 			expectedSet.map((id) => [id, pair.relevance] as const),
+		);
+		// The relevance CLASS: every member id of this pair maps to ONE class key (the pair key),
+		// because the members are duplicate COPIES of the same distinct fact. This is what makes
+		// nDCG DEDUP-INVARIANT — DCG and IDCG credit the fact once (best rank), so an engine that
+		// collapses the clones scores identically to one that returns them all (PRD-047c c-AC-3:
+		// the old relevance-class workaround over-rewarded clone-stuffing; this retires it). The
+		// per-query nDCG reduces to 1/log2(bestRank+1), or 0 on a distinct miss.
+		const classes: RelevanceClasses = Object.fromEntries(
+			expectedSet.map((id) => [id, pair.key] as const),
 		);
 		const rank = firstRelevantRank(result, judgements);
 
@@ -223,7 +234,7 @@ export async function runEval(
 			rank,
 			hit: rank !== null,
 		});
-		scored.push({ queryId: pair.key, result, judgements });
+		scored.push({ queryId: pair.key, result, judgements, classes });
 	}
 
 	return { queries, metrics: aggregateMetrics(scored) };

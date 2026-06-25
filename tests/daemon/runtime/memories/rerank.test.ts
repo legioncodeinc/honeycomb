@@ -177,7 +177,9 @@ describe("PRD-047b b-AC-1 — embedding-cosine rerank reorders the fused top-N b
 
 		const result = await recallMemories(
 			{ query: "anything", scope: SCOPE, limit: 10 },
-			{ storage, embed: fakeEmbed(QUERY_VECTOR), reranker: noneConfig },
+			// Dedup OFF so the `AS embedding` assertion isolates the RERANK stage (PRD-047c
+			// dedup also self-sources embeddings via the same batch-fetch shape).
+			{ storage, embed: fakeEmbed(QUERY_VECTOR), reranker: noneConfig, dedup: { enabled: false, similarityThreshold: 0.9 } },
 		);
 
 		// RRF order preserved (the vector arm's order: far before near) — NO reorder.
@@ -257,7 +259,9 @@ describe("PRD-047b b-AC-4 — no-vector skip + rerank fail-soft keep the RRF ord
 
 		const result = await recallMemories(
 			{ query: "fact", scope: SCOPE, limit: 10 },
-			{ storage, embed: fakeEmbed(null) }, // no query vector → degraded, no rerank.
+			// no query vector → degraded, no rerank. Dedup OFF so `AS embedding` isolates the
+			// RERANK stage (PRD-047c dedup self-sources embeddings via the same batch-fetch shape).
+			{ storage, embed: fakeEmbed(null), dedup: { enabled: false, similarityThreshold: 0.9 } },
 		);
 
 		expect(result.degraded).toBe(true);
@@ -316,7 +320,8 @@ describe("PRD-047b b-AC-4 — no-vector skip + rerank fail-soft keep the RRF ord
 
 		const result = await recallMemories(
 			{ query: "anything", scope: SCOPE, limit: 10 },
-			{ storage, embed: fakeEmbed(QUERY_VECTOR), recallMode: "keyword" },
+			// Dedup OFF so `AS embedding` isolates the RERANK stage (dedup self-sources embeddings).
+			{ storage, embed: fakeEmbed(QUERY_VECTOR), recallMode: "keyword", dedup: { enabled: false, similarityThreshold: 0.9 } },
 		);
 
 		expect(result.degraded).toBe(false); // intentional lexical run, not a fallback.

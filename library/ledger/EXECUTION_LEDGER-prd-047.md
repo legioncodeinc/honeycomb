@@ -30,10 +30,10 @@ daemon**. Split per AC:
 | b-AC-2 | 047b | Rerank timeout → keep prior (RRF) order | det | retrieval | ✅ DONE (injected-clock test) |
 | b-AC-3 | 047b | Eval: rerank holds recall@5, no nDCG/MRR drop below baseline−ε (ideally lift) | live | orch+retrieval | ✅ DONE — measured NEUTRAL (no lift, inside RRF noise band); per pre-registered rule default→`none`; recorded in reports/2026-06-24-reranker-activation-eval.md. **Product flag: cosine kept activatable behind config.** |
 | b-AC-4 | 047b | `degraded` fallback + fail-soft intact; rerank failure → RRF order | det | retrieval | ✅ DONE (no-vector/failure → RRF tests) |
-| c-AC-1 | 047c | Near-dups (memory+summary+turns) collapse to ONE (memories copy) | det | retrieval | OPEN |
-| c-AC-2 | 047c | Distinct facts below threshold both survive (false-merge guard) | det | retrieval | OPEN |
-| c-AC-3 | 047c | Eval: recall@5/MRR/nDCG hold at-or-above baseline with dedup on | live | orch+retrieval | OPEN |
-| c-AC-4 | 047c | Provenance preserved; fallback + fail-soft intact; gates green | det | retrieval | OPEN |
+| c-AC-1 | 047c | Near-dups (memory+summary+turns) collapse to ONE (memories copy) | det | retrieval | ✅ DONE (recall.ts:840 dedupHits, provenance memories>memory>sessions) |
+| c-AC-2 | 047c | Distinct facts below threshold both survive (false-merge guard) | det | retrieval | ✅ DONE (0.85<0.9 not merged) |
+| c-AC-3 | 047c | Eval: recall@5/MRR/nDCG hold at-or-above baseline with dedup on | live | orch+retrieval | ✅ DONE — dedup on: recall@5 0.639 / MRR 0.600 / nDCG 0.609 (gate PASS). Surfaced + fixed the relevance-class/nDCG tension: nDCG made DEDUP-INVARIANT (the c-AC-3 "retire the workaround" deliverable) |
+| c-AC-4 | 047c | Provenance preserved; fallback + fail-soft intact; gates green | det | retrieval | ✅ DONE (dedup-failure → un-deduped, fail-soft) |
 | d-AC-1 | 047d | Newer wins on a relevance tie under the dampener | det | retrieval | OPEN |
 | d-AC-2 | 047d | Nothing dropped by age (demote, not cut) | det | retrieval | OPEN |
 | d-AC-3 | 047d | Missing timestamp → decay=1, no exception | det | retrieval | OPEN |

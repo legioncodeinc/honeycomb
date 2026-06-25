@@ -66,9 +66,12 @@ import { sLiteral, sqlIdent, sqlLike } from "../../storage/sql.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import { cosineSimilarity, EMBEDDING_DIMS, type ScoredId, vectorSearch } from "../../storage/vector.js";
 import {
+	DEFAULT_DEDUP_ENABLED,
+	DEFAULT_DEDUP_SIMILARITY_THRESHOLD,
 	DEFAULT_RERANKER,
 	DEFAULT_RERANKER_TIMEOUT_MS,
 	DEFAULT_RERANKER_WINDOW,
+	type DedupConfig,
 	type RerankerConfig,
 } from "../recall/config.js";
 import type { EmbedClient } from "../services/embed-client.js";
@@ -387,6 +390,22 @@ export interface MemoryRecallDeps {
 	 * deterministically with no real waiting.
 	 */
 	readonly now?: () => number;
+	/**
+	 * The semantic-dedup config (PRD-047c / c-AC-1..4). When ABSENT, dedup runs with
+	 * its defaults ({@link DEFAULT_DEDUP_ENABLED} = ON, threshold
+	 * {@link DEFAULT_DEDUP_SIMILARITY_THRESHOLD}) — so the LIVE route and the eval get
+	 * the near-dup collapse without any caller change (c-AC-3). A caller passes
+	 * `{ enabled: false }` for the escape hatch, or tunes `similarityThreshold`.
+	 *
+	 * Dedup runs AFTER {@link fuseHits} AND after the rerank stage, over the fused
+	 * top-N. It collapses hits whose candidate embeddings exceed the threshold into ONE,
+	 * keeping the highest-PROVENANCE copy (`memories` > `memory` > `sessions`, higher
+	 * fused score within a class). Dropped copies are REMOVED (not demoted). It sources
+	 * the candidate embeddings itself via {@link fetchCandidateEmbeddings} (no extra
+	 * embed-daemon calls); a dedup failure degrades to the un-deduped list, never a throw
+	 * (c-AC-4).
+	 */
+	readonly dedup?: DedupConfig;
 }
 
 /** A recall request as it enters the adapter (the zod-validated, scoped body). */
@@ -749,6 +768,138 @@ async function rerankHits(
 	}
 }
 
+// ── PRD-047c — the semantic / near-duplicate dedup stage ─────────────────────
+
+/**
+ * The provenance RANK of a hit's source for the dedup keep-decision (PRD-047c / c-AC-1).
+ * LOWER wins: `memories` (a kept fact) > `memory` (a summary) > `sessions` (a raw turn).
+ * When a cluster of near-duplicates collapses, the surviving copy is the one with the
+ * lowest rank; ties within a class are broken by the higher fused score (then the
+ * earlier id, deterministically).
+ */
+function provenanceRank(source: RecallSource): number {
+	if (source === "memories") return 0;
+	if (source === "memory") return 1;
+	return 2; // sessions
+}
+
+/**
+ * Decide whether `candidate` should REPLACE `current` as a cluster's surviving copy
+ * (PRD-047c / c-AC-1): better provenance class first, then higher fused score, then the
+ * lexicographically-earlier id (a deterministic final tie-break, mirroring fuseHits).
+ */
+function outranksForKeep(candidate: MemoryRecallHit, current: MemoryRecallHit): boolean {
+	const rc = provenanceRank(candidate.source);
+	const rk = provenanceRank(current.source);
+	if (rc !== rk) return rc < rk;
+	if (candidate.score !== current.score) return candidate.score > current.score;
+	return candidate.id < current.id;
+}
+
+/** Normalize hit text for the embeddingless-summary fold-in test (lowercased, collapsed whitespace). */
+function normalizeForFold(text: string): string {
+	return text.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/**
+ * A near-duplicate cluster (PRD-047c). `members` are the hits collapsed together; the
+ * surviving copy is recomputed as members join. `seedVectors` are the embedding-bearing
+ * members' vectors used to test whether a new candidate is within threshold of THIS
+ * cluster — an embeddingless `memory` summary contributes no seed vector (it can only
+ * FOLD INTO an established cluster, never seed one).
+ */
+interface DedupCluster {
+	keep: MemoryRecallHit;
+	readonly members: MemoryRecallHit[];
+	readonly seedVectors: number[][];
+	readonly normalizedTexts: string[];
+}
+
+/**
+ * Collapse semantic near-duplicates in the fused/reranked hit list into ONE copy each
+ * (PRD-047c / c-AC-1, c-AC-2, c-AC-4), keeping the highest-provenance copy per cluster.
+ *
+ * RULES:
+ *  - Two hits collapse when the cosine of their candidate embeddings exceeds
+ *    `config.similarityThreshold` (default ~0.9, tuned HIGH so only obvious paraphrases
+ *    merge — the c-AC-2 false-merge guard: distinct facts below threshold both survive).
+ *  - The surviving copy is the highest-provenance member (`memories` > `memory` >
+ *    `sessions`), tie-broken by higher fused score then earlier id ({@link outranksForKeep}).
+ *    Dropped copies are REMOVED from the result, not demoted (c-AC-1).
+ *  - A `memory` summary carries NO embedding column ({@link embeddingColumnFor}); it
+ *    cannot be embedding-compared, so it FOLDS INTO an already-established embedding
+ *    cluster only when its normalized text contains (or is contained in) a clustered
+ *    member's text — otherwise it stands alone, never erroring (the embeddings-sourcing
+ *    contract). It never SEEDS a merge.
+ *  - Survivors keep their original `source`/`kind`/`secondary` provenance and relative
+ *    order (c-AC-4). Embeddings are sourced via {@link fetchCandidateEmbeddings} (no
+ *    extra embed-daemon calls); the whole stage is wrapped so any failure degrades to
+ *    the input list unchanged, never a throw (c-AC-4).
+ */
+async function dedupHits(
+	hits: readonly MemoryRecallHit[],
+	config: DedupConfig,
+	request: MemoryRecallRequest,
+	deps: MemoryRecallDeps,
+): Promise<MemoryRecallHit[]> {
+	const input = [...hits];
+	if (!config.enabled || input.length < 2) return input;
+
+	try {
+		// Source the candidate embeddings ourselves (rerank may be `none`, so they are
+		// NOT already hydrated): ONE guarded batch-fetch per embedding-bearing table.
+		const embByKey = await fetchCandidateEmbeddings(input, request, deps);
+		const threshold = config.similarityThreshold;
+
+		const clusters: DedupCluster[] = [];
+		for (const hit of input) {
+			const vec = embByKey.get(fusionKey(hit.source, hit.id));
+			const normalized = normalizeForFold(hit.text);
+
+			if (vec === undefined) {
+				// No embedding (a `memory` summary, or a NULL-embedding row): fold into an
+				// ESTABLISHED cluster by text containment only; never seed an embedding merge.
+				const target = normalized === "" ? undefined : clusters.find((c) =>
+					c.seedVectors.length > 0 && c.normalizedTexts.some((t) => t !== "" && (t.includes(normalized) || normalized.includes(t))),
+				);
+				if (target === undefined) {
+					clusters.push({ keep: hit, members: [hit], seedVectors: [], normalizedTexts: [normalized] });
+				} else {
+					target.members.push(hit);
+					target.normalizedTexts.push(normalized);
+					if (outranksForKeep(hit, target.keep)) target.keep = hit;
+				}
+				continue;
+			}
+
+			// An embedding-bearing hit: join the first cluster within threshold, else seed one.
+			const target = clusters.find((c) =>
+				c.seedVectors.some((sv) => {
+					const cos = cosineSimilarity(vec, sv);
+					return cos !== null && cos > threshold;
+				}),
+			);
+			if (target === undefined) {
+				clusters.push({ keep: hit, members: [hit], seedVectors: [vec], normalizedTexts: [normalized] });
+			} else {
+				target.members.push(hit);
+				target.seedVectors.push(vec);
+				target.normalizedTexts.push(normalized);
+				if (outranksForKeep(hit, target.keep)) target.keep = hit;
+			}
+		}
+
+		// Rebuild the surviving copies in the INPUT order (preserve the rerank/RRF ranking;
+		// a collapsed cluster occupies the position of its earliest member's appearance).
+		const survivors = new Set(clusters.map((c) => c.keep));
+		return input.filter((hit) => survivors.has(hit));
+	} catch {
+		// Any failure in the embedding-fetch/cluster path degrades to the un-deduped list,
+		// never a throw (c-AC-4) — recall still answers 200 with the fused/reranked hits.
+		return input;
+	}
+}
+
 /**
  * Run the cross-table recall for `request.query`, scoped to `request.scope`.
  * Returns the surfaced hits, the arms that produced them, and the HONEST `degraded`
@@ -834,10 +985,21 @@ export async function recallMemories(
 	const rerankerConfig: RerankerConfig =
 		deps.reranker ??
 		({ strategy: DEFAULT_RERANKER, timeoutMs: DEFAULT_RERANKER_TIMEOUT_MS, window: DEFAULT_RERANKER_WINDOW } as const);
-	if (semanticRun === null || rerankerConfig.strategy === "none") {
-		// No query vector to rerank against, or RRF-only requested → keep the fused order.
-		return { hits, sources, degraded };
-	}
-	const reranked = await rerankHits(hits, semanticRun.queryVector, rerankerConfig, request, deps);
-	return { hits: reranked, sources, degraded };
+	const ranked =
+		semanticRun === null || rerankerConfig.strategy === "none"
+			? // No query vector to rerank against, or RRF-only requested → keep the fused order.
+				hits
+			: await rerankHits(hits, semanticRun.queryVector, rerankerConfig, request, deps);
+
+	// PRD-047c: collapse semantic near-duplicates over the fused/reranked top-N, keeping
+	// the highest-provenance copy of each fact (`memories` > `memory` > `sessions`). Runs
+	// AFTER fusion AND after rerank; ON by default (c-AC-3), self-sources the candidate
+	// embeddings (rerank may be `none`), and fail-soft to the un-deduped list (c-AC-4).
+	// `sources` is recomputed from the survivors so the hybrid-coverage signal stays honest.
+	const dedupConfig: DedupConfig =
+		deps.dedup ??
+		({ enabled: DEFAULT_DEDUP_ENABLED, similarityThreshold: DEFAULT_DEDUP_SIMILARITY_THRESHOLD } as const);
+	const deduped = await dedupHits(ranked, dedupConfig, request, deps);
+	const dedupedSources = deduped.length === ranked.length ? sources : [...new Set(deduped.map((h) => h.source))];
+	return { hits: deduped, sources: dedupedSources, degraded };
 }

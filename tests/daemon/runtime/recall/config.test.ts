@@ -37,6 +37,34 @@ describe("recall config — D-1..D-6 defaults", () => {
 		expect(config.reranker.strategy).toBe("none");
 		expect(config.reranker.timeoutMs).toBe(300);
 		expect(config.reranker.window).toBe(50);
+		// PRD-047c dedup: ON by default (c-AC-3 — the direct fix for the ~12-clone eval
+		// problem, neutral-or-better), threshold tuned HIGH (0.9) to avoid false merges.
+		expect(config.dedup.enabled).toBe(true);
+		expect(config.dedup.similarityThreshold).toBe(0.9);
+	});
+});
+
+describe("recall config — PRD-047c dedup knobs", () => {
+	it("the threshold clamps into [0,1] and a typo falls back to the default", () => {
+		expect(resolveRecallConfig({ read: () => ({ dedup: { similarityThreshold: 1.5 } }) }).dedup.similarityThreshold).toBe(1);
+		expect(resolveRecallConfig({ read: () => ({ dedup: { similarityThreshold: -1 } }) }).dedup.similarityThreshold).toBe(0);
+		expect(resolveRecallConfig({ read: () => ({ dedup: { similarityThreshold: "nope" } }) }).dedup.similarityThreshold).toBe(0.9);
+	});
+
+	it("dedup can be turned OFF via the flag (escape hatch)", () => {
+		expect(resolveRecallConfig({ read: () => ({ dedup: { enabled: "false" } }) }).dedup.enabled).toBe(false);
+		expect(resolveRecallConfig({ read: () => ({ dedup: { enabled: "0" } }) }).dedup.enabled).toBe(false);
+		expect(resolveRecallConfig({ read: () => ({ dedup: { enabled: "true" } }) }).dedup.enabled).toBe(true);
+	});
+
+	it("maps the dedup env vars from the env provider", () => {
+		const provider = envRecallConfigProvider({
+			HONEYCOMB_RECALL_DEDUP_ENABLED: "false",
+			HONEYCOMB_RECALL_DEDUP_SIMILARITY_THRESHOLD: "0.95",
+		} as NodeJS.ProcessEnv);
+		const config = resolveRecallConfig(provider);
+		expect(config.dedup.enabled).toBe(false);
+		expect(config.dedup.similarityThreshold).toBe(0.95);
 	});
 });
 

@@ -91,6 +91,25 @@ export const DEFAULT_RERANKER_TIMEOUT_MS = 300;
  */
 export const DEFAULT_RERANKER_WINDOW = 50;
 
+// ── PRD-047c — semantic / near-duplicate dedup ──────────────────────────────
+/**
+ * Semantic dedup is ON by default (PRD-047c / c-AC-3). It is the direct fix for the
+ * eval's known ~12-clone problem and is neutral-or-better: the recall-eval scores a
+ * relevance CLASS, so collapsing a class of paraphrases to its ONE highest-provenance
+ * copy keeps recall@5/MRR/nDCG at-or-above baseline while freeing top-k slots for
+ * distinct facts. A caller passes `{ enabled: false }` for the escape hatch.
+ */
+export const DEFAULT_DEDUP_ENABLED = true;
+/**
+ * The cosine-similarity threshold (0..1, the normalized {@link cosineSimilarity} range)
+ * above which two candidate embeddings are treated as the SAME fact and collapsed
+ * (PRD-047c / c-AC-1). Tuned HIGH by design (err toward NOT merging): only obvious
+ * paraphrases exceed ~0.9, so two semantically DISTINCT facts stay below it and BOTH
+ * survive (the c-AC-2 false-merge guard). An eval-tunable named knob, mirroring the
+ * rerank window; env-overridable + clamped to `[0,1]`.
+ */
+export const DEFAULT_DEDUP_SIMILARITY_THRESHOLD = 0.9;
+
 // ── D-5 dampening (007d) ────────────────────────────────────────────────────
 /** Gravity dampening factor for a semantic hit sharing no query terms (D-5 / d-AC-4). */
 export const DEFAULT_GRAVITY_DAMPENING = 0.5;
@@ -170,6 +189,14 @@ export const RerankerConfigSchema = z.object({
 	window: ClampedInt(DEFAULT_RERANKER_WINDOW, 1).default(DEFAULT_RERANKER_WINDOW),
 });
 
+/** PRD-047c dedup config, grouped so the recall adapter reads one object. */
+export const DedupConfigSchema = z.object({
+	/** Whether semantic near-duplicate dedup runs; ON by default (PRD-047c / c-AC-3). */
+	enabled: BoolFlag.default(DEFAULT_DEDUP_ENABLED),
+	/** The cosine-similarity collapse threshold in `[0,1]` (PRD-047c / c-AC-1). */
+	similarityThreshold: ClampedFloat(DEFAULT_DEDUP_SIMILARITY_THRESHOLD).default(DEFAULT_DEDUP_SIMILARITY_THRESHOLD),
+});
+
 /** D-5 dampening/boost factors, grouped so the shaping phase reads one object. */
 export const DampeningConfigSchema = z.object({
 	/** Gravity dampening for a semantic hit sharing no query terms (d-AC-4). */
@@ -207,6 +234,8 @@ export const RecallConfigSchema = z.object({
 	reranker: RerankerConfigSchema.default(() => RerankerConfigSchema.parse({})),
 	/** D-5 dampening/boost factors (007d). */
 	dampening: DampeningConfigSchema.default(() => DampeningConfigSchema.parse({})),
+	/** PRD-047c semantic near-duplicate dedup (ON by default). */
+	dedup: DedupConfigSchema.default(() => DedupConfigSchema.parse({})),
 });
 
 /** The validated recall config object every phase consumes. */
@@ -217,6 +246,8 @@ export type TraversalConfig = z.infer<typeof TraversalConfigSchema>;
 export type RerankerConfig = z.infer<typeof RerankerConfigSchema>;
 /** The validated dampening sub-config. */
 export type DampeningConfig = z.infer<typeof DampeningConfigSchema>;
+/** The validated dedup sub-config (PRD-047c). */
+export type DedupConfig = z.infer<typeof DedupConfigSchema>;
 
 /**
  * Structured recall-config error. Carries the flattened zod issues so the daemon
@@ -270,6 +301,10 @@ export interface RawRecallConfig {
 		readonly rehearsalBoost?: unknown;
 		readonly rehearsalWindowMs?: unknown;
 	};
+	readonly dedup?: {
+		readonly enabled?: unknown;
+		readonly similarityThreshold?: unknown;
+	};
 }
 
 /**
@@ -306,6 +341,10 @@ export function envRecallConfigProvider(env: NodeJS.ProcessEnv = process.env): R
 					resolutionBoost: env.HONEYCOMB_RECALL_RESOLUTION_BOOST,
 					rehearsalBoost: env.HONEYCOMB_RECALL_REHEARSAL_BOOST,
 					rehearsalWindowMs: env.HONEYCOMB_RECALL_REHEARSAL_WINDOW_MS,
+				},
+				dedup: {
+					enabled: env.HONEYCOMB_RECALL_DEDUP_ENABLED,
+					similarityThreshold: env.HONEYCOMB_RECALL_DEDUP_SIMILARITY_THRESHOLD,
 				},
 			};
 		},

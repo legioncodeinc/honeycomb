@@ -161,6 +161,40 @@ describe("runEval (the harness, AC-5)", () => {
 		expect(report.metrics.recallAtK["10"]).toBeCloseTo(2 / 3, 10);
 		// MRR = (1/1 + 1/6 + 0)/3
 		expect(report.metrics.mrr).toBeCloseTo((1 + 1 / 6) / 3, 10);
+		// nDCG@10 (dedup-invariant): each pair is a single-id class → nDCG = 1/log2(rank+1).
+		//   hit1: rank 1 → 1/log2(2) = 1.0;  hit6: rank 6 → 1/log2(7);  missing: 0.
+		//   aggregate = (1 + 1/log2(7) + 0)/3.
+		expect(report.metrics.ndcg).toBeCloseTo((1 + 1 / Math.log2(7)) / 3, 10);
+	});
+
+	it("nDCG is DEDUP-INVARIANT end-to-end: a fact's best copy at rank 1 → nDCG 1.0 no matter how many clones follow (PRD-047c c-AC-3)", async () => {
+		// ONE golden pair whose relevance class is a cluster of near-duplicate copies of the
+		// SAME fact (the shared-workspace reality). The seeded class has FOUR copies.
+		const goldenDup: GoldenSet = {
+			pairs: [{ key: "fact", memoryText: "m", query: "q", lexicalMiss: false, relevance: 3 }],
+		};
+		const expectedDup: ExpectedIds = new Map([["fact", ["d1", "d2", "d3", "d4"]]]);
+
+		// An engine that returns the best copy at rank 1 PLUS three extra clones later.
+		const stuffer: SeededRecall = async () => ["d1", "noise", "d2", "d3", "noise2", "d4"];
+		// An engine that DEDUPES to exactly one copy at rank 1 (the PRD-047c behavior).
+		const deduper: SeededRecall = async () => ["d1", "noise", "noise2"];
+
+		const stuffed = await runEval(goldenDup, stuffer, expectedDup);
+		const deduped = await runEval(goldenDup, deduper, expectedDup);
+
+		// Both score nDCG 1.0 (best class member at rank 1; clones earn nothing extra) —
+		// clone-stuffing no longer beats deduping. This is the regression the fix removes.
+		expect(stuffed.metrics.ndcg).toBeCloseTo(1, 10);
+		expect(deduped.metrics.ndcg).toBeCloseTo(1, 10);
+		expect(stuffed.metrics.ndcg).toBe(deduped.metrics.ndcg);
+
+		// And recall@5 / MRR are equal across the two engines too (a hit on ANY class member),
+		// proving the dedup change did not perturb the headline-recall semantics.
+		expect(stuffed.metrics.recallAtK["5"]).toBe(deduped.metrics.recallAtK["5"]);
+		expect(stuffed.metrics.mrr).toBe(deduped.metrics.mrr);
+		expect(deduped.metrics.recallAtK["5"]).toBe(1);
+		expect(deduped.metrics.mrr).toBeCloseTo(1, 10);
 	});
 });
 
