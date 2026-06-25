@@ -1,7 +1,7 @@
 # PRD-050b: Pre-Auth Dashboard and Guided Setup Shell
 
 > **Parent:** [PRD-050](./prd-050-quick-install-and-guided-setup-index.md)
-> **Status:** Draft
+> **Status:** Completed — shipped with PRD-050 (merged #100, 2026-06-25)
 > **Priority:** P0
 > **Effort:** L (1-3d)
 > **Schema changes:** None. Adds local-only setup-state endpoints; reads an onboarding state file.

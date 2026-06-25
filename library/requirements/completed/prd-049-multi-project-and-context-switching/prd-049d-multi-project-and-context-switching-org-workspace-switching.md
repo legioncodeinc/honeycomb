@@ -1,7 +1,7 @@
 # PRD-049d: Org / Workspace Switching and Project Binding (CLI)
 
 > **Parent:** [PRD-049](./prd-049-multi-project-and-context-switching-index.md)
-> **Status:** Draft
+> **Status:** Completed — shipped with PRD-049 (merged #101, 2026-06-25)
 > **Priority:** P1
 > **Effort:** M (3-8h)
 > **Schema changes:** Additive — writes to the 049a `projects` registry + binding store.

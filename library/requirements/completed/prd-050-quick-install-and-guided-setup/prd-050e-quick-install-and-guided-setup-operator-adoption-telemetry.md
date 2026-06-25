@@ -1,7 +1,7 @@
 # PRD-050e: Operator Adoption Telemetry (Path B)
 
 > **Parent:** [PRD-050](./prd-050-quick-install-and-guided-setup-index.md)
-> **Status:** Draft
+> **Status:** Completed — shipped with PRD-050 (merged #100, 2026-06-25)
 > **Priority:** P1 (this is the floor for Goal 2 measurement — works with zero backend dependency)
 > **Schema changes:** None to the DeepLake catalog. Adds anonymized lifecycle events to an operator-owned PostHog project + a dedupe flag in the local onboarding file.
 

@@ -1,6 +1,6 @@
 # PRD-049: Multi-Project Isolation and Context Switching
 
-> **Status:** Backlog
+> **Status:** Completed — merged #101 (2026-06-25). All 5 sub-PRDs (27 sub-ACs) + 8 module ACs VERIFIED; security clean at Medium+ (×2), quality PASS.
 > **Priority:** P1
 > **Effort:** XL (> 3d)
 > **Schema changes:** Additive — new `projects` registry table; promote the existing free-text `project` column to a resolved `project_id`; thread it into the scope clause.
@@ -47,11 +47,11 @@ Crucially, **the data layer already has the seam**: `memories` and `sessions` ca
 
 | Sub-PRD | Scope | Status |
 |---|---|---|
-| [`prd-049a-…-project-identity-and-resolution`](./prd-049a-multi-project-and-context-switching-project-identity-and-resolution.md) | The `projects` registry, folder→project bindings, resolution precedence (binding > git signal > path fallback > `__unsorted__`), and **per-session** resolution from cwd replacing the machine-global `workspaceId`. | Draft |
-| [`prd-049b-…-memory-isolation`](./prd-049b-multi-project-and-context-switching-memory-isolation.md) | Promote `project` → resolved `project_id`; thread it through capture (inbox-default, never dropped) and recall (narrow) so memories never cross a project boundary under concurrent sessions. | Draft |
-| [`prd-049c-…-skill-isolation`](./prd-049c-multi-project-and-context-switching-skill-isolation.md) | Scope skillify output and team SKILL.md propagation per project; cross-project sharing as explicit opt-in. | Draft |
-| [`prd-049d-…-org-workspace-switching`](./prd-049d-multi-project-and-context-switching-org-workspace-switching.md) | CLI: list/switch orgs & workspaces the user has privileges in; bind/inspect/use a project; all session-safe (no global race). | Draft |
-| [`prd-049e-…-dashboard-scope-switcher`](./prd-049e-multi-project-and-context-switching-dashboard-scope-switcher.md) | Dashboard Org → Workspace → Project switcher in the nav shell driving codebase graph, memory graph, memories, and sync views. | Draft |
+| [`prd-049a-…-project-identity-and-resolution`](./prd-049a-multi-project-and-context-switching-project-identity-and-resolution.md) | The `projects` registry, folder→project bindings, resolution precedence (binding > git signal > path fallback > `__unsorted__`), and **per-session** resolution from cwd replacing the machine-global `workspaceId`. | Completed |
+| [`prd-049b-…-memory-isolation`](./prd-049b-multi-project-and-context-switching-memory-isolation.md) | Promote `project` → resolved `project_id`; thread it through capture (inbox-default, never dropped) and recall (narrow) so memories never cross a project boundary under concurrent sessions. | Completed |
+| [`prd-049c-…-skill-isolation`](./prd-049c-multi-project-and-context-switching-skill-isolation.md) | Scope skillify output and team SKILL.md propagation per project; cross-project sharing as explicit opt-in. | Completed |
+| [`prd-049d-…-org-workspace-switching`](./prd-049d-multi-project-and-context-switching-org-workspace-switching.md) | CLI: list/switch orgs & workspaces the user has privileges in; bind/inspect/use a project; all session-safe (no global race). | Completed |
+| [`prd-049e-…-dashboard-scope-switcher`](./prd-049e-multi-project-and-context-switching-dashboard-scope-switcher.md) | Dashboard Org → Workspace → Project switcher in the nav shell driving codebase graph, memory graph, memories, and sync views. | Completed |
 
 ---
 

@@ -162,7 +162,14 @@ Shared substrate (build early, Wave 1): `~/.deeplake/onboarding.json` state file
 | D4 | 049a binding-registry backing store | 49a-AC-1..6 | local `~/.deeplake/projects.json` cache over server `projects` table |
 | D5 | Migrate existing free-text `project` values (backfill vs leave→inbox) | 49b-AC, 49c-AC | leave; resolve to inbox (non-destructive) |
 
-## Close-out
-- [ ] security-worker-bee (armed security-stinger): OWASP/PII/financial — remediate Critical+High in place.
-- [ ] quality-worker-bee (armed quality-stinger): verify implementation vs source PRDs. After security only.
-- [ ] PRs opened, CodeRabbit/CodeQL clean, CI green, merged.
+## Close-out — COMPLETE (2026-06-25)
+- [x] security-worker-bee: PRD-050 clean at Medium+; PRD-049 clean at Medium+ (×2, incl. promotion-seam spot-check). All Crit/High = 0; 1 Medium fixed (049 diagnostic-endpoint cross-tenant guard parity).
+- [x] quality-worker-bee: PRD-050 PASS (9+35 ACs); PRD-049 PASS (8+27 ACs). Reports under each PRD's reports/ folder.
+- [x] PRs merged: **PRD-050 → #100** (merged 08:10Z, CodeQL+CodeRabbit clean, all bot findings triaged/fixed). **PRD-049 → #101** (merged 11:17Z, CI+CodeQL+CodeRabbit green, no actionable bot findings).
+- **RUN COMPLETE: 10/10 sub-PRDs, 100% of acceptance criteria VERIFIED and shipped to main.**
+
+## Outstanding external / non-gating follow-ups (no AC depends on these)
+1. **Activeloop backend must recognize `X-Honeycomb-Referrer`** for the new header to actually attribute (dual-send means `X-Hivemind-Referrer` carries attribution meanwhile — Goal 2 works today, just on the old header). Backend-owned; coordinate with Activeloop.
+2. **Installer hosting**: stand up vanity domain `get.honeycomb.*` + published checksum / "inspect before piping" page; repoint the interim repo-raw URL in `scripts/install/*`. Before public launch.
+
+> Lifecycle bookkeeping DONE (2026-06-25, docs PR #102): `prd-049`/`prd-050` folders `git mv`'d backlog/ → `library/requirements/completed/` with QA reports intact, status headers + sub-PRD rows set to Completed (#101 / #100), cross-PRD links repointed.

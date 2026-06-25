@@ -1,6 +1,6 @@
 # PRD-050: Quick Install and Guided Setup
 
-> **Status:** Backlog
+> **Status:** Completed — merged #100 (2026-06-25). All 5 sub-PRDs (35 sub-ACs) + 9 module ACs VERIFIED; security clean at Medium+, quality PASS.
 > **Priority:** P0 (growth-critical — the top-of-funnel for every new user)
 > **Effort:** XL (> 3d)
 > **Schema changes:** None to the DeepLake catalog. Adds a machine-local install/onboarding state file and a referral-attribution header on the existing device-flow request.
@@ -37,7 +37,7 @@ The four sub-PRDs cover the bootstrap installer, the pre-auth dashboard + guided
 
 - **A new auth backend or a new credential shape.** The device flow, the shared `~/.deeplake/credentials.json` (0600), org pinning, and drift-heal (PRD-011b / PRD-023) are reused verbatim; this module *triggers* them from the UI and *attributes* them, it does not reinvent them.
 - **A second daemon, or a public-facing server.** The dashboard stays a **loopback, local-mode-only** surface ([`host.ts`](../../../../src/daemon/runtime/dashboard/host.ts) is mounted only when `mode === "local"`). `honeycomb.local` is a local-resolution convenience, never a remote bind.
-- **Designing the npm publish pipeline.** Getting `@legioncodeinc/honeycomb` actually published is **[PRD-048](../prd-048-npm-publishing-pipeline/prd-048-npm-publishing-pipeline-index.md)**; this module *consumes* the published package and assumes its bin exists.
+- **Designing the npm publish pipeline.** Getting `@legioncodeinc/honeycomb` actually published is **[PRD-048](../../backlog/prd-048-npm-publishing-pipeline/prd-048-npm-publishing-pipeline-index.md)**; this module *consumes* the published package and assumes its bin exists.
 - **Bundling a Node runtime.** We detect/guide/instal­l Node via the platform's standard path; we do not ship a vendored Node.
 - **Re-architecting the embeddings daemon.** Its lifecycle (warmup, socket IPC) is owned by the embeddings-runtime work; here it is only *sequenced* (background, non-blocking) relative to the dashboard.
 - **Multi-referrer / affiliate management UI.** The referral code is a build-time/install-time default (`mario`), overridable by flag; a dashboard to manage codes is out of scope.
@@ -48,11 +48,11 @@ The four sub-PRDs cover the bootstrap installer, the pre-auth dashboard + guided
 
 | Sub-PRD | Scope | Status |
 |---|---|---|
-| [`prd-050a-…-one-command-bootstrap-installer`](./prd-050a-quick-install-and-guided-setup-one-command-bootstrap-installer.md) | The `curl\|sh` / `irm\|iex` script: Node/npm detect-and-install, `@huggingface/transformers` + deps, `npm i -g @legioncodeinc/honeycomb`, daemon boot on 3850, optional `honeycomb.local`, and the open-the-dashboard handoff — all with a friendly progress log. | Draft |
-| [`prd-050b-…-pre-auth-dashboard-and-setup-shell`](./prd-050b-quick-install-and-guided-setup-pre-auth-dashboard-and-setup-shell.md) | The one-daemon / two-phase model: boot the daemon unauthenticated, serve the dashboard + a **guided "First time setup"** wizard with no credentials, detect credential presence, and hydrate the DeepLake surfaces once login completes. | Draft |
-| [`prd-050c-…-referral-attributed-login`](./prd-050c-quick-install-and-guided-setup-referral-attributed-login.md) | Thread `--ref mario` into the device-flow request as a referral header; render the user-code **on the setup page** + open the DeepLake verification / create-account page; default the ref to `mario` for every Honeycomb install. | Draft |
-| [`prd-050d-…-hivemind-coexistence-and-migration`](./prd-050d-quick-install-and-guided-setup-hivemind-coexistence-and-migration.md) | Detect an existing Hivemind/credential install, explain the unsupported-coexistence rule, and on **"Proceed with Honeycomb"** uninstall Hivemind then run the **"Link to DeepLake"** `--ref mario` flow. | Draft |
-| [`prd-050e-…-operator-adoption-telemetry`](./prd-050e-quick-install-and-guided-setup-operator-adoption-telemetry.md) | **Path B** — the daemon emits anonymized install / first-link / Hivemind-upgrade events (tagged with `ref`) to an operator-owned PostHog so upgraders are *measurable* even though registration-time referral can't credit an already-registered account. Opt-out, fail-soft, allow-list payload. | Draft |
+| [`prd-050a-…-one-command-bootstrap-installer`](./prd-050a-quick-install-and-guided-setup-one-command-bootstrap-installer.md) | The `curl\|sh` / `irm\|iex` script: Node/npm detect-and-install, `@huggingface/transformers` + deps, `npm i -g @legioncodeinc/honeycomb`, daemon boot on 3850, optional `honeycomb.local`, and the open-the-dashboard handoff — all with a friendly progress log. | Completed |
+| [`prd-050b-…-pre-auth-dashboard-and-setup-shell`](./prd-050b-quick-install-and-guided-setup-pre-auth-dashboard-and-setup-shell.md) | The one-daemon / two-phase model: boot the daemon unauthenticated, serve the dashboard + a **guided "First time setup"** wizard with no credentials, detect credential presence, and hydrate the DeepLake surfaces once login completes. | Completed |
+| [`prd-050c-…-referral-attributed-login`](./prd-050c-quick-install-and-guided-setup-referral-attributed-login.md) | Thread `--ref mario` into the device-flow request as a referral header; render the user-code **on the setup page** + open the DeepLake verification / create-account page; default the ref to `mario` for every Honeycomb install. | Completed |
+| [`prd-050d-…-hivemind-coexistence-and-migration`](./prd-050d-quick-install-and-guided-setup-hivemind-coexistence-and-migration.md) | Detect an existing Hivemind/credential install, explain the unsupported-coexistence rule, and on **"Proceed with Honeycomb"** uninstall Hivemind then run the **"Link to DeepLake"** `--ref mario` flow. | Completed |
+| [`prd-050e-…-operator-adoption-telemetry`](./prd-050e-quick-install-and-guided-setup-operator-adoption-telemetry.md) | **Path B** — the daemon emits anonymized install / first-link / Hivemind-upgrade events (tagged with `ref`) to an operator-owned PostHog so upgraders are *measurable* even though registration-time referral can't credit an already-registered account. Opt-out, fail-soft, allow-list payload. | Completed |
 
 ---
 
@@ -108,7 +108,7 @@ The partition boundary and the auth backend are unchanged. New/changed surface, 
 ## Related
 
 - [PRD-011b: Device-Flow Auth](../../completed/prd-011-tenancy-and-auth/prd-011b-tenancy-and-auth-device-flow-auth.md) — the device flow + shared `~/.deeplake/credentials.json` this module triggers from the UI and attributes (the `api.deeplake.ai` adapter is PRD-023's `deeplake-issuer.ts`).
-- [PRD-048: npm Publishing Pipeline](../prd-048-npm-publishing-pipeline/prd-048-npm-publishing-pipeline-index.md) — publishes the `@legioncodeinc/honeycomb` package this installer pulls; hard dependency for AC-1 in the field.
+- [PRD-048: npm Publishing Pipeline](../../backlog/prd-048-npm-publishing-pipeline/prd-048-npm-publishing-pipeline-index.md) — publishes the `@legioncodeinc/honeycomb` package this installer pulls; hard dependency for AC-1 in the field.
 - [PRD-021: Go-Live](../../completed/prd-021-go-live/prd-021-go-live-index.md) / [CLI Command Architecture](../../../knowledge/private/operations/cli-command-architecture.md) — the `setup` engine + daemon-ensure path the `install` verb composes.
 - [PRD-024: Dashboard UI Parity](../../completed/prd-024-dashboard-ui-parity/prd-024-dashboard-ui-parity-index.md) — the self-hydrating, token-free dashboard shell ([`host.ts`](../../../../src/daemon/runtime/dashboard/host.ts)) the pre-auth phase reuses.
 - [Credential Storage](../../../knowledge/private/security/credential-storage.md) · [Auth Architecture](../../../knowledge/private/auth/auth-architecture.md) — the credential locations (`~/.deeplake`, `~/.honeycomb`, `~/.hivemind`) detection reads.
