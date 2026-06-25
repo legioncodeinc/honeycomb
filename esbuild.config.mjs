@@ -289,7 +289,7 @@ stampExecutable("mcp/bundle/server.js");
 stampEsm("mcp/bundle");
 
 // ---------------------------------------------------------------------------
-// 4b. @honeycomb/sdk (PRD-019e) — the fetch-only typed client + 3 framework
+// 4b. @legioncodeinc/honeycomb SDK (PRD-019e) — the fetch-only typed client + 3 framework
 //     helper entry points, each a SEPARATE bundle so the core (.) stays
 //     dependency-free for browser use. The core + openai entries are pure
 //     fetch-only TS (no peer dep). The react + vercel entries reference their
@@ -299,7 +299,7 @@ stampEsm("mcp/bundle");
 //
 //     The package.json#exports map points `.`/`./react`/`./vercel`/`./openai`
 //     at these `sdk/*.js` outputs. Honest deferral: the SDK is constructed,
-//     bundled, and tested here; publishing `@honeycomb/sdk` as its own package
+//     bundled, and tested here; publishing the SDK as its own package
 //     (vs. these subpath exports of the repo) is out of scope for 019e.
 // ---------------------------------------------------------------------------
 const SDK_ENTRIES = [

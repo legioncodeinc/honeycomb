@@ -1,5 +1,5 @@
 /**
- * `@honeycomb/sdk` barrel — PRD-019e (the typed daemon client).
+ * `@legioncodeinc/honeycomb` barrel — PRD-019e (the typed daemon client).
  *
  * The CORE entry point: the fetch-only {@link HoneycombClient}, the typed error
  * classes, and the seams. The three framework helpers ship as SEPARATE entry points

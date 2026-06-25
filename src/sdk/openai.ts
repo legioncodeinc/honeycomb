@@ -1,5 +1,5 @@
 /**
- * OpenAI tool helper entry point — PRD-019e Wave 2 (`@honeycomb/sdk/openai`).
+ * OpenAI tool helper entry point — PRD-019e Wave 2 (`@legioncodeinc/honeycomb/openai`).
  *
  * A SEPARATE entry point (FR-8 / e-AC-5) exposing the same memory operations as
  * OpenAI function-tool definitions. It REUSES the core {@link HoneycombClient}'s

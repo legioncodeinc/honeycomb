@@ -120,6 +120,17 @@ cannot succeed; before then, `release.yaml` on a `workflow_dispatch` does the ga
 + `npm publish --dry-run` and stays green (the `--dry-run` does no OIDC handshake)
 — same skip-don't-fail pattern as `ci.yaml`'s gated integration job.
 
+> **What guards against an accidental publish now.** Once switches (a) through
+> (c) are flipped, the fail-closed publishability preflight no longer aborts
+> (that is its job; it only blocked the unscoped/`private` draft). And with
+> tokenless OIDC there is no `NPM_TOKEN` whose absence used to force a dry-run. So
+> the single operative guard becomes the **trigger**: only a `vX.Y.Z` **tag push**
+> publishes for real. A `workflow_dispatch` always resolves to `--dry-run` (it is
+> not a tag ref), even with `dry_run=false`, because the publish-mode step
+> requires a tag push. Put plainly: as long as **no `vX.Y.Z` tag is pushed**,
+> nothing goes live. The trusted publisher also only authorizes publishes from
+> this repo's `release.yaml`, so no other workflow can publish.
+
 ---
 
 ## Rehearse first (do this before the real tag)
@@ -156,13 +167,15 @@ Once (a)–(d) are flipped and a dry-run rehearsal is green:
    `npm version` writes the new version into `package.json` and creates the
    annotated git tag `vX.Y.Z`.
 
-   > **Make sure the manifests are synced into the commit.** `npm version` runs
-   > npm's `version` lifecycle but **not** `prebuild`. If you have not wired a
-   > `"version": "node scripts/sync-versions.mjs && git add -A"` npm script,
-   > run `node scripts/sync-versions.mjs` **before** `npm version`, or run it
-   > after and amend, so the propagated manifest versions land in the tagged
-   > commit. CI's tag-vs-`package.json` guard checks the root version against
-   > the tag; sync-versions keeps the harness manifests honest with it.
+   > **The manifests sync automatically.** `npm version` runs npm's `version`
+   > lifecycle script, which this repo wires to
+   > `node scripts/sync-versions.mjs && git add <the manifest paths>`. So a bump
+   > propagates the new version into every harness manifest and stages those
+   > manifests into the version commit on its own: no manual sync step, no
+   > amend. (The `git add` is scoped to the exact files sync-versions writes, not
+   > a blanket `git add -A`, so it cannot stage an accidental asset deletion.)
+   > CI's tag-vs-`package.json` guard checks the root version against the tag;
+   > sync-versions keeps the harness manifests honest with it.
 
    > **Bootstrap (first release only).** The trusted publisher cannot be attached
    > until the package exists on npm, so the FIRST publish is a one-time manual
