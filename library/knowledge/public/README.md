@@ -19,7 +19,7 @@ human_description: |
   knowledge/private/ instead.
 ---
 
-# Knowledge — Public
+# Knowledge, Public
 
 Customer-facing documentation. Anything in this folder may eventually be published.
 

@@ -51,7 +51,7 @@ export async function drainSessionStart(opts: DrainOptions): Promise<void> {
     //
     // pickPrimaryBanner returns the single banner for the welcome/savings
     // priority slot (org savings > 1M → savings recap; else → welcome).
-    // Backend pushes remain additive in this PR — they're rare and not yet
+    // Backend pushes remain additive in this PR, they're rare and not yet
     // under the priority model. A follow-up will collapse all sources
     // (including queue) under the same priority.
     const [fromBackend, primary] = await Promise.all([
