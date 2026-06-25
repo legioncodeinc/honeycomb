@@ -2,7 +2,7 @@
 # Honeycomb one-command bootstrap installer (POSIX) — PRD-050a.
 #
 # Usage (the single line a brand-new user pastes):
-#   curl -fsSL https://raw.githubusercontent.com/legioncodeinc/honeycomb/main/scripts/install/install.sh | sh
+#   curl -fsSL https://get.theapiary.sh | sh
 #
 # Contract (PRD-050a a-AC-1..6): leave the user on a running dashboard, OR tell them in ONE plain
 # sentence why not. It assumes the operator knows nothing — no Node, no npm, no idea what a daemon
@@ -30,11 +30,12 @@ HONEYCOMB_NODE_VERSION="22"
 # The published npm package the global install pulls (PRD-048 publishes it; this consumes it).
 HONEYCOMB_NPM_PACKAGE="@legioncodeinc/honeycomb@latest"
 
-# INTERIM distribution constant (PRD-050a operator decision): the raw repo URL the curl|sh line
-# above points at. BLOCKED follow-up (non-gating): a vanity `get.honeycomb.*` domain + a published
-# checksum / "inspect before piping" page for the curl|sh trust concern. Tracked in the report, not
-# blocking this script.
-HONEYCOMB_INSTALL_BASE_URL="https://raw.githubusercontent.com/legioncodeinc/honeycomb/main/scripts/install"
+# Distribution base URL: the vanity domain that serves this installer surface (PRD-050a follow-up,
+# now RESOLVED). get.theapiary.sh is a Cloudflare Pages site (site/install/) that content-negotiates:
+# a shell client piping `/` gets this script as text/plain; a browser gets an "inspect before piping"
+# page with the PUBLISHED SHA-256 checksums. `${BASE}/install.sh` and `${BASE}/install.ps1` always
+# resolve to the raw, checksummed scripts. To verify before running: see https://get.theapiary.sh
+HONEYCOMB_INSTALL_BASE_URL="https://get.theapiary.sh"
 
 # ── Friendly progress log: step lines to stdout, the single failure summary to stderr. ──
 step()  { printf '→ %s\n' "$1"; }

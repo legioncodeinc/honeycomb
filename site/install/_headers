@@ -1,0 +1,44 @@
+# site/install/_headers — Cloudflare Pages header rules for the install surface.
+#
+# The script + checksum paths MUST be served as text/plain so a user can read them in a
+# browser before piping, and so `irm https://get.theapiary.sh/install.ps1 | iex` and
+# `curl -fsSL https://get.theapiary.sh/install.sh` receive plain text (not an HTML wrapper
+# or a download-forcing octet-stream). nosniff stops the browser from re-interpreting them.
+
+/install.sh
+  Content-Type: text/plain; charset=utf-8
+  X-Content-Type-Options: nosniff
+  Cache-Control: public, max-age=300
+
+/install.ps1
+  Content-Type: text/plain; charset=utf-8
+  X-Content-Type-Options: nosniff
+  Cache-Control: public, max-age=300
+
+/SHA256SUMS
+  Content-Type: text/plain; charset=utf-8
+  X-Content-Type-Options: nosniff
+  Cache-Control: public, max-age=300
+
+# The inspect page itself — standard security headers, no framing.
+# CSP is defense-in-depth: the script source injected into the page is HTML-escaped at
+# build time (build.mjs escapeHtml), so it cannot break out of its <pre> container today.
+# The CSP ensures a future edit that slipped an injection through still could not load or
+# execute off-origin script. The page uses only one inline <style>, one inline <script>
+# (the copy handler), an inline SVG, and a data: SVG favicon — all permitted below. No
+# external origins, no remote fetch, no eval; form/object/base/frame are locked off.
+#
+# NOTE: the bare "/" is served by functions/index.js (content negotiation), which sets these same
+# headers EXPLICITLY (Pages Functions don't inherit _headers). The "/" rule below is a static-serve
+# fallback; the "/index.html" rule covers a direct hit to the asset path. Keep all three in sync.
+/
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: no-referrer
+  Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+
+/index.html
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: no-referrer
+  Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
