@@ -171,4 +171,5 @@ Shared substrate (build early, Wave 1): `~/.deeplake/onboarding.json` state file
 ## Outstanding external / non-gating follow-ups (no AC depends on these)
 1. **Activeloop backend must recognize `X-Honeycomb-Referrer`** for the new header to actually attribute (dual-send means `X-Hivemind-Referrer` carries attribution meanwhile — Goal 2 works today, just on the old header). Backend-owned; coordinate with Activeloop.
 2. **Installer hosting**: stand up vanity domain `get.honeycomb.*` + published checksum / "inspect before piping" page; repoint the interim repo-raw URL in `scripts/install/*`. Before public launch.
-3. **Lifecycle bookkeeping**: move `prd-049`/`prd-050` folders backlog/ → completed/ (library-worker-bee) — DONE (2026-06-25, this docs PR): both folders `git mv`'d to `library/requirements/completed/` with QA reports intact, status headers set to Completed (#101 / #100), and cross-PRD links repointed (PRD-050→PRD-048 now `../../backlog/`, PRD-048→PRD-050e now `../../completed/`).
+
+> Lifecycle bookkeeping DONE (2026-06-25, docs PR #102): `prd-049`/`prd-050` folders `git mv`'d backlog/ → `library/requirements/completed/` with QA reports intact, status headers + sub-PRD rows set to Completed (#101 / #100), cross-PRD links repointed.
