@@ -163,6 +163,25 @@ This provides a per-session escape hatch for sensitive workflows where trace cap
 
 ---
 
+## Telemetry Egress Boundary
+
+Honeycomb may emit anonymized **operator telemetry** from the daemon to an operator-owned analytics backend (PostHog) — install-funnel attribution and operational health (see PRD-050e). This is the one outbound boundary other than the daemon→DeepLake storage path, and because Honeycomb captures coding sessions and memories (the most sensitive data a dev tool handles), it is governed by a single non-negotiable rule.
+
+**The content/operation bright line.** Telemetry may describe **how the tool behaves** (counts, durations, versions, states, error *classes*). It must never describe **the content the tool handles** (memory/session text, code, prompts, recall queries, file paths, cwd, repo/branch names, org/workspace names, identities, secrets). The operational test for any property is the **shrug test**: *would the user shrug if they saw this value in plaintext?* If they would lean in and squint, it is over the line and does not ship.
+
+Boundary invariants:
+
+- **Daemon-only emitter.** Telemetry leaves only from the daemon, through a single `emitTelemetry` chokepoint with a hardcoded allow-list; a structural test asserts no other call site posts to the endpoint and that the banned set (token, email, paths, repo/branch names, query strings, content, error messages, raw ids, secrets) is absent from every event.
+- **No item-level egress.** No per-memory / per-query / per-file events — the cardinality itself is a signal. Tier-1 lifecycle events (install/link/upgrade) remain **exact** so the operator can count the funnel precisely; only Tier-2 usage *counts* are **bucketed** (the precise number never leaves the machine).
+- **Tiered consent.** Operational (Tier 1) events are opt-out; usage-count (Tier 2) events are opt-in. `DO_NOT_TRACK=1` or `HONEYCOMB_TELEMETRY=0` silences all of it. An unkeyed build (no PostHog key baked in) emits nothing (fail-soft).
+- **Glass-box.** `honeycomb telemetry --show` renders, in plaintext, exactly what has been and would be sent — the displayed set *is* the egress set, sourced from the same local events.
+- **Anonymous identity.** The `distinct_id` is a random per-machine install-id, never an email or a content-derived hash. The write-only ingest key carries no read access to operator data.
+- **Self-host conservatism.** A session against BYOC/self-hosted DeepLake defaults Tier-2 off (and Tier-1 minimal) — an enterprise user firewalls egress anyway; respecting that before they ask is the posture.
+
+This boundary is **additive to** [Capture Opt-Out](#capture-opt-out): `HONEYCOMB_CAPTURE=false` governs what the user's *memory* records into DeepLake; telemetry opt-out governs what *operational metadata* leaves for the operator. They are independent switches with independent defaults.
+
+---
+
 ## Data Classification Summary
 
 | Data type | Where stored | At rest | In transit | Access scope |
@@ -173,5 +192,6 @@ This provides a per-session escape hatch for sensitive workflows where trace cap
 | Codified skills (`SKILL.md`) | Project directory + DeepLake | Plaintext files + AES-256 | TLS | Org workspace members |
 | Memory summaries | DeepLake `memory` table | AES-256 | TLS | Org workspace members |
 | BYOC cloud credentials | DeepLake vault | Encrypted | Never sent to client | Backend only |
+| Operator telemetry (anonymized lifecycle/health) | Operator PostHog project | n/a (no content at rest locally beyond the local event log) | TLS, daemon to PostHog, write-only ingest key | Operator only; opt-out + glass-box; **never** carries content (see Telemetry Egress Boundary) |
 
 Workspace-level isolation is the outer boundary; within a workspace, members share the trace and skill surface by design, with `agent_id` narrowing where the engine enforces it. See [`../multi-tenant/org-workspace-model.md`](../multi-tenant/org-workspace-model.md) and [`../data/deeplake-storage.md`](../data/deeplake-storage.md) for the storage-layer detail.
