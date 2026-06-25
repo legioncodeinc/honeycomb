@@ -83,7 +83,10 @@ function Ensure-Node {
         $machinePath = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
         $userPath = [System.Environment]::GetEnvironmentVariable('Path', 'User')
         $env:Path = (@($machinePath, $userPath) | Where-Object { $_ }) -join ';'
-      } catch { }
+      } catch {
+        # Fail-soft: the `Test-Have 'fnm'` re-check below is the real gate; just surface why, don't abort.
+        Write-Warning "Couldn't refresh PATH from the registry ($($_.Exception.Message)); continuing."
+      }
     }
     if (-not (Test-Have 'fnm')) {
       # Could not install fnm without elevation -- surface the exact manual command + clean exit (a-AC-3).
@@ -94,10 +97,16 @@ function Ensure-Node {
 
   # Load fnm into THIS session so node/npm resolve in-process (the install does not refresh the
   # current shell's PATH). `fnm env` emits the PowerShell shims; invoke them here.
-  try { fnm env --use-on-cd | Out-String | Invoke-Expression } catch { }
+  # Fail-soft on `fnm env`: the final `Test-Have 'node'/'npm'` gate below is the real decider; a failure
+  # here must not abort the bootstrap, but the reason should be visible (not silently swallowed).
+  try { fnm env --use-on-cd | Out-String | Invoke-Expression } catch {
+    Write-Warning "fnm env (pre-install) didn't load into this session ($($_.Exception.Message)); continuing."
+  }
   fnm install $HoneycombNodeVersion 2>$null | Out-Null
   fnm use $HoneycombNodeVersion 2>$null | Out-Null
-  try { fnm env --use-on-cd | Out-String | Invoke-Expression } catch { }
+  try { fnm env --use-on-cd | Out-String | Invoke-Expression } catch {
+    Write-Warning "fnm env (post-install) didn't load into this session ($($_.Exception.Message)); continuing."
+  }
 
   if ((Test-Have 'node') -and (Test-Have 'npm')) {
     Write-Ok "Installed Node $(node --version) via fnm."
