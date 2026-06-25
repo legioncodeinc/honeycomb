@@ -27,7 +27,17 @@
 # execute off-origin script. The page uses only one inline <style>, one inline <script>
 # (the copy handler), an inline SVG, and a data: SVG favicon — all permitted below. No
 # external origins, no remote fetch, no eval; form/object/base/frame are locked off.
+#
+# NOTE: the bare "/" is served by functions/index.js (content negotiation), which sets these same
+# headers EXPLICITLY (Pages Functions don't inherit _headers). The "/" rule below is a static-serve
+# fallback; the "/index.html" rule covers a direct hit to the asset path. Keep all three in sync.
 /
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: no-referrer
+  Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+
+/index.html
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
   Referrer-Policy: no-referrer

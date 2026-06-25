@@ -1,0 +1,53 @@
+# Deploy the get.theapiary.sh install surface (site/install/) to Cloudflare Pages.
+#
+# Model A — Direct Upload via Wrangler. The Pages project `honeycomb-install` (production branch
+# `production`) + the custom domain get.theapiary.sh are pre-provisioned in the Legion Code Inc.
+# Cloudflare account. This workflow builds site/install/ and promotes a release tag to production.
+#
+# Triggers: a pushed release tag (v*), or manual dispatch. Deploys are intentionally NOT on every
+# push to main, so the script served at get.theapiary.sh — and its published SHA-256 — stay stable
+# between releases (see site/install/README.md "Version pinning").
+#
+# Required repo secret: CLOUDFLARE_API_TOKEN (Account → Cloudflare Pages → Edit).
+# The account id is not secret and is inlined below.
+
+name: Deploy install site (get.theapiary.sh)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+# Don't pile up concurrent deploys to the same Pages project.
+concurrency:
+  group: deploy-install-site
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build the install surface (copies scripts, hashes them, renders the page)
+        run: node site/install/build.mjs
+
+      - name: Deploy to Cloudflare Pages (production)
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: 893c7bdc0782f11d23ebd2da8926c132
+          command: >-
+            pages deploy site/install/dist
+            --project-name=honeycomb-install
+            --branch=production

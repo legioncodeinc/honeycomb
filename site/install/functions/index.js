@@ -15,6 +15,11 @@
 // Pages Functions run on the Workers runtime; `context.env.ASSETS.fetch` reads the deployed
 // static assets (dist/), so the served script is byte-identical to the published, checksummed file.
 
+// The inspect-page CSP (kept in sync with the `/` + `/index.html` rules in _headers). The page uses
+// only one inline <style>, one inline <script> (copy handler), an inline SVG, and a data: favicon.
+const INSPECT_CSP =
+  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
 export async function onRequest(context) {
   const { request, env, next } = context;
   const url = new URL(request.url);
@@ -26,8 +31,21 @@ export async function onRequest(context) {
   }
 
   if (wantsHtml(request)) {
-    // Browser → the inspect page. Let Pages serve dist/index.html with its own headers.
-    return env.ASSETS.fetch(new Request(new URL('/index.html', url), request));
+    // Browser → the inspect page. Pages Functions do NOT inherit _headers for function-generated
+    // responses, and env.ASSETS.fetch('/index.html') wouldn't match the "/" rule anyway — so set
+    // the inspect-page security headers EXPLICITLY here (the authoritative source for the bare "/").
+    const assetResp = await env.ASSETS.fetch(new Request(new URL('/index.html', url), request));
+    return new Response(assetResp.body, {
+      status: assetResp.status,
+      headers: {
+        'Content-Type': 'text/html; charset=utf-8',
+        'X-Content-Type-Options': 'nosniff',
+        'X-Frame-Options': 'DENY',
+        'Referrer-Policy': 'no-referrer',
+        'Content-Security-Policy': INSPECT_CSP,
+        'Cache-Control': 'public, max-age=300',
+      },
+    });
   }
 
   // Shell client → stream the canonical install.sh as plain text so `| sh` works.

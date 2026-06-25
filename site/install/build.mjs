@@ -67,6 +67,11 @@ async function main() {
   const sumsBody = SCRIPTS.map((name) => `${sums[name]}  ${name}`).join('\n') + '\n';
   await writeFile(join(DIST_DIR, 'SHA256SUMS'), sumsBody, 'utf8');
 
+  // 2b) Copy the _headers rules into the PUBLISH dir. Cloudflare Pages only reads _headers from
+  //     the build OUTPUT directory (dist/), NOT the project root — without this, the text/plain +
+  //     nosniff rules on /install.sh|/install.ps1|/SHA256SUMS would never publish.
+  await copyFile(join(__dirname, '_headers'), join(DIST_DIR, '_headers'));
+
   // 3) Render index.html from the template, injecting live values.
   const template = await readFile(TEMPLATE, 'utf8');
   const html = template
@@ -84,6 +89,7 @@ async function main() {
   console.log('  install.sh   ', sums['install.sh']);
   console.log('  install.ps1  ', sums['install.ps1']);
   console.log('  SHA256SUMS   written');
+  console.log('  _headers     copied');
   console.log('  index.html   rendered');
 }
 
