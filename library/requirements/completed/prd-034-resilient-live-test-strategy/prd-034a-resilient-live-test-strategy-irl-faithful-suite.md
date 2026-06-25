@@ -66,4 +66,4 @@ Rewrite the gated live itests so they assert what a real user depends on (correc
 
 - [parent index](./prd-034-resilient-live-test-strategy-index.md)
 - [PRD-031 Live-integration test net](../../in-work/prd-031-live-integration-test-net/prd-031-live-integration-test-net-index.md)
-- [PRD-028 Storage read-consistency](../../in-work/prd-028-storage-read-consistency/prd-028-storage-read-consistency-index.md)
+- [PRD-028 Storage read-consistency](../prd-028-storage-read-consistency/prd-028-storage-read-consistency-index.md)

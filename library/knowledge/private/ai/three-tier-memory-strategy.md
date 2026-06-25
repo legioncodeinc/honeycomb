@@ -18,7 +18,7 @@ dedup/recency), the durable-key sharpener, and GraphRAG ([`graphrag-followon.md`
 - [`graphrag-followon.md`](graphrag-followon.md) — the approved later add
 - [`retrieval.md`](retrieval.md) — how recall works today (the substrate this builds on)
 - [`memory-pipeline.md`](memory-pipeline.md) · [`session-capture.md`](session-capture.md) · [`wiki-summary-workers.md`](wiki-summary-workers.md)
-- [`../../../requirements/in-work/prd-047-retrieval-quality-upgrades/prd-047-retrieval-quality-upgrades-index.md`](../../../requirements/in-work/prd-047-retrieval-quality-upgrades/prd-047-retrieval-quality-upgrades-index.md)
+- [`../../../requirements/completed/prd-047-retrieval-quality-upgrades/prd-047-retrieval-quality-upgrades-index.md`](../../../requirements/completed/prd-047-retrieval-quality-upgrades/prd-047-retrieval-quality-upgrades-index.md)
 
 ---
 

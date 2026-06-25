@@ -1,6 +1,6 @@
 # PRD-016: Skillify
 
-> **Status:** Completed — NOW LIVE (closed by [PRD-045f](../../in-work/prd-045-daemon-wiring-closeout/prd-045f-daemon-wiring-closeout-skillify-mining.md))
+> **Status:** Completed — NOW LIVE (closed by [PRD-045f](../prd-045-daemon-wiring-closeout/prd-045f-daemon-wiring-closeout-skillify-mining.md))
 > **Priority:** P1
 > **Effort:** M
 > **Schema changes:** Additive
@@ -13,8 +13,8 @@
 > Session-end enqueue (`session-end.ts:112`) and turn-counter enqueue (`capture/turn-counters.ts:150`) feed the
 > now-live worker. The `skillify pull` CLI verb is registered in the dispatch table (`src/cli/skillify.ts`).
 > `/api/skills` read was already live and remains so. Closed by
-> [PRD-045f](../../in-work/prd-045-daemon-wiring-closeout/prd-045f-daemon-wiring-closeout-skillify-mining.md).
-> Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../../in-work/prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
+> [PRD-045f](../prd-045-daemon-wiring-closeout/prd-045f-daemon-wiring-closeout-skillify-mining.md).
+> Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
 
 ---
 

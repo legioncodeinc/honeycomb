@@ -1,6 +1,6 @@
 # PRD-006: Memory Pipeline
 
-> **Status:** Completed — WIRED & LIVE, stage handlers default-OFF by design (closed by [PRD-045a](../../in-work/prd-045-daemon-wiring-closeout/prd-045a-daemon-wiring-closeout-memory-pipeline.md))
+> **Status:** Completed — WIRED & LIVE, stage handlers default-OFF by design (closed by [PRD-045a](../prd-045-daemon-wiring-closeout/prd-045a-daemon-wiring-closeout-memory-pipeline.md))
 > **Priority:** P0
 > **Effort:** XL
 > **Schema changes:** Additive
@@ -20,8 +20,8 @@
 > deterministic chain test + the token-gated live itest. The four previously-stub stage handlers were filled to
 > produce real, persisted output. See the 045a "Default posture & enable mechanism" note for the operator switch.
 > Closed by
-> [PRD-045a](../../in-work/prd-045-daemon-wiring-closeout/prd-045a-daemon-wiring-closeout-memory-pipeline.md).
-> Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../../in-work/prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
+> [PRD-045a](../prd-045-daemon-wiring-closeout/prd-045a-daemon-wiring-closeout-memory-pipeline.md).
+> Full audit: [`2026-06-22-daemon-wiring-liveness-audit.md`](../prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
 
 ---
 

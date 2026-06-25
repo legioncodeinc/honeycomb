@@ -12,7 +12,7 @@ Grounded in the recall behavior measured this cycle. **Design rationale, not a b
 - [`prior-art-owls-roost-crosswalk.md`](prior-art-owls-roost-crosswalk.md) — the vector-only system this contrasts with
 - [`retrieval.md`](retrieval.md) — the live recall engine
 - [`deeplake-hybrid-record-operator-report.md`](deeplake-hybrid-record-operator-report.md) — the native-operator finding
-- [`../../../requirements/in-work/prd-047-retrieval-quality-upgrades/prd-047-retrieval-quality-upgrades-index.md`](../../../requirements/in-work/prd-047-retrieval-quality-upgrades/prd-047-retrieval-quality-upgrades-index.md)
+- [`../../../requirements/completed/prd-047-retrieval-quality-upgrades/prd-047-retrieval-quality-upgrades-index.md`](../../../requirements/completed/prd-047-retrieval-quality-upgrades/prd-047-retrieval-quality-upgrades-index.md)
 
 ---
 

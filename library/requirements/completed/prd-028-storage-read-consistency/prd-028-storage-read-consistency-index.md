@@ -1,15 +1,21 @@
 # PRD-028 — Storage read-consistency layer (read-your-writes by construction)
 
-> Status: In Work (reopened 2026-06-22) · Owner: `/the-smoker` · Type: M (feature)
+> Status: Completed (2026-06-25 — all 5 required ACs verified live; store→recall was always non-AC polish) · Owner: `/the-smoker` · Type: M (feature)
 > Goal: make read-your-writes / eventual-consistency handling a PROPERTY OF THE STORAGE LAYER
 > (`src/daemon/storage/`), not a poll loop reinvented in every itest and call site.
 
-> **⚠ Reopened 2026-06-22 — partial implementation.** A daemon-wiring liveness audit found this PRD only
-> partially live; moved back to `in-work/`. See
+> **✅ Closed 2026-06-25 — re-validated against current code.** The 2026-06-22 reopen flagged the
+> store→recall call site as un-adopted; a 2026-06-25 re-validation (see
+> [`../../in-work/2026-06-24-requirements-sotu.md`](../../in-work/2026-06-24-requirements-sotu.md) §0) confirmed that adoption was
+> **always explicitly optional / non-AC polish**, never an acceptance criterion. All 5 required ACs (AC-1..AC-5)
+> are met in current code: `readConverged` (`src/daemon/storage/converge.ts:273`) is live and consumed by
+> asset-sync (`runtime/assets/sync.ts:187`), the dashboard (`runtime/dashboard/sync-api.ts:409`), and 6 live
+> itests. Adoption has *grown* since the reopen note. The un-adopted store→recall wiring is tracked as optional
+> future polish, not a blocking gap. Moved `in-work/` → `completed/`.
+>
+> **(Historical) Reopened 2026-06-22 — partial implementation.** A daemon-wiring liveness audit moved this PRD
+> back to `in-work/`. See
 > [`../prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md`](../prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
-> **Remaining:** the `readConverged` seam (`src/daemon/storage/converge.ts:273`) shipped and the itests adopted
-> it, but the headline store→recall read-your-writes call site never did — `src/daemon/runtime/memories/store.ts`
-> has zero `readConverged`/`watermark` usage; the only `src/` consumer is asset-sync (`assets/sync.ts:187`).
 
 ## Why
 DeepLake is eventually consistent: it flaps stale segments, so a read issued immediately after a

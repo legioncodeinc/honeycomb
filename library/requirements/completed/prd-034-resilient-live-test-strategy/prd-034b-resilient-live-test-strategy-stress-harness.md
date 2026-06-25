@@ -70,4 +70,4 @@ Build a deliberate, parameterized DeepLake load generator that keeps the strict,
 
 - [parent index](./prd-034-resilient-live-test-strategy-index.md)
 - [PRD-027 Recall ranking & eval](../../in-work/prd-027-recall-ranking-and-eval/prd-027-recall-ranking-and-eval-index.md)
-- [PRD-028 Storage read-consistency](../../in-work/prd-028-storage-read-consistency/prd-028-storage-read-consistency-index.md)
+- [PRD-028 Storage read-consistency](../prd-028-storage-read-consistency/prd-028-storage-read-consistency-index.md)

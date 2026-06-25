@@ -9,7 +9,7 @@
 > as the historical root-cause record. Honeycomb still keeps RRF as the default (parity, not a win)
 > per [ADR-0001](../architecture/adr/0001-retrieval-fusion-rrf-vs-native-hybrid.md); the operator is
 > now a viable candidate to revisit. See the re-run section of the
-> [benchmark decision report](../../../requirements/in-work/prd-047-retrieval-quality-upgrades/reports/2026-06-22-hybrid-benchmark-decision.md).
+> [benchmark decision report](../../../requirements/completed/prd-047-retrieval-quality-upgrades/reports/2026-06-22-hybrid-benchmark-decision.md).
 
 A technical report for DeepLake on the `deeplake_hybrid_record` hybrid-search operator returning a
 constant `0` score for every row on our managed dataset. Every statement below is a directly
