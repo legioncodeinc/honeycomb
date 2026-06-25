@@ -73,6 +73,19 @@ export const ENDPOINTS = Object.freeze({
 	// PRD-044a — the REDACTED DeepLake auth-status read-model (`auth/status-api.ts`). Metadata
 	// only (org/workspace/agent/source/savedAt/expiresAt) — NO token by construction.
 	authStatus: "/api/auth/status",
+	// PRD-050b — the pre-auth guided-setup STATE read (`dashboard/setup-state.ts`). Local-mode-only,
+	// loopback. Reports credential-dir presence + onboarding phase/prior-tool + the derived
+	// `authenticated` bit + the embeddings warmup signal — install metadata only, NO token/secret.
+	setupState: "/setup/state",
+	// PRD-050c — the "First time setup" on-page device-flow login (`dashboard/setup-login.ts`). The
+	// 050b button POSTs here; the response is the `user_code` + verification URIs (NO token).
+	setupLogin: "/setup/login",
+	// PRD-050d — the "Proceed with Honeycomb" migration handler (`dashboard/setup-migrate.ts`). The
+	// coexistence-warning wizard POSTs here; the response carries the terminal phase + a plain-language
+	// message + the backup path + `needsLogin`/`migrated` flags (NO token). `migrateRollback` is the
+	// crash-recovery "Roll back" affordance (d-AC-7).
+	setupMigrate: "/setup/migrate-from-hivemind",
+	setupMigrateRollback: "/setup/migrate-from-hivemind/rollback",
 } as const);
 
 /** PRD-040a — the default first-page size the Memories list requests (the daemon clamps to 500). */
@@ -639,6 +652,126 @@ export const DISCONNECTED_AUTH_STATUS: AuthStatusWire = Object.freeze({
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PRD-050b — the pre-auth guided-setup STATE read (`GET /setup/state`). Drives the
+// fresh-install vs already-linked render (b-AC-6) and the live pre-auth→authenticated
+// transition (b-AC-3). Every field `.catch()`-defaults so a partial/failed/non-local
+// (404) payload degrades to a SAFE fresh-install state (never a throw into React). The
+// body carries NO token/secret/PII by construction (install metadata only). The shape
+// mirrors `src/daemon/runtime/dashboard/setup-state.ts` `SetupStateBody`; 050d EXTENDS it
+// additively, so unknown future fields are simply ignored here (zod drops extras).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Per-tool credential/state directory presence (mirrors the daemon `SetupCredentialsPresence`). */
+export const SetupCredentialsSchema = z.object({
+	deeplake: z.boolean().catch(false),
+	honeycomb: z.boolean().catch(false),
+	hivemind: z.boolean().catch(false),
+});
+
+/** The embeddings warmup signal (b-AC-5) — observable, never blocking. */
+export const SetupWarmupSchema = z.object({
+	enabled: z.boolean().catch(false),
+	live: z.boolean().catch(false),
+	warm: z.boolean().catch(false),
+});
+
+/**
+ * The `GET /setup/state` body the guided-setup shell reads (PRD-050b). `authenticated` is the
+ * DERIVED auth source of truth (a valid credential loads), NOT the `phase` hint. Every field
+ * `.catch()`-defaults to a fresh-install-safe value so a failed/non-local read renders the
+ * guided-setup state (the safe default), never a throw.
+ */
+export const SetupStateSchema = z.object({
+	credentials: SetupCredentialsSchema.catch({ deeplake: false, honeycomb: false, hivemind: false }),
+	phase: z.enum(["fresh", "installed", "linking", "linked", "migrating", "migrated"]).catch("fresh"),
+	priorTool: z
+		.object({ hivemind: z.enum(["absent", "present", "migrated"]).catch("absent") })
+		.catch({ hivemind: "absent" }),
+	firstTimeSetupComplete: z.boolean().catch(false),
+	// THE load-bearing field for b-AC-6: when false the "First time setup" button shows; when true
+	// the dashboard renders the authenticated state instead. Defaults FALSE (safe: show guided-setup).
+	authenticated: z.boolean().catch(false),
+	warmup: SetupWarmupSchema.catch({ enabled: false, live: false, warm: false }),
+	// PRD-050d (d-AC-7) — the durable Hivemind→Honeycomb migration marker, present ONLY while a
+	// migration is in flight or terminal. A NON-TERMINAL phase (`backup`/`uninstall`/`link`) means the
+	// migration was interrupted → the dashboard offers RESUME or ROLL BACK. `.optional()` so a machine
+	// that never migrated simply omits it; `backupPath` rides for the rollback affordance. No secret.
+	migration: z
+		.object({
+			phase: z.enum(["backup", "uninstall", "link", "done", "rolled_back"]).catch("backup"),
+			startedAt: z.string().catch(""),
+			backupPath: z.string().optional(),
+		})
+		.optional(),
+});
+export type SetupStateWire = z.infer<typeof SetupStateSchema>;
+
+/**
+ * The honest fresh-install setup state the shell shows before the first load, on any failure, or in
+ * non-local mode (the route 404s). `authenticated:false` ⇒ the guided-setup state renders (b-AC-6).
+ */
+export const FRESH_SETUP_STATE: SetupStateWire = Object.freeze({
+	credentials: { deeplake: false, honeycomb: false, hivemind: false },
+	phase: "fresh",
+	priorTool: { hivemind: "absent" as const },
+	firstTimeSetupComplete: false,
+	authenticated: false,
+	warmup: { enabled: false, live: false, warm: false },
+});
+
+/**
+ * The `POST /setup/login` render payload (PRD-050c, consumed by 050b's "First time setup" button).
+ * The body carries ONLY the `user_code` to display + the verification URIs — NEVER a token/device
+ * code (the schema has no token field by construction). Every field `.catch()`-defaults so a partial
+ * body degrades safely; `verification_uri_complete` is optional (present only when https-validated).
+ */
+export const SetupLoginSchema = z.object({
+	user_code: z.string().catch(""),
+	verification_uri: z.string().catch(""),
+	verification_uri_complete: z.string().optional(),
+});
+export type SetupLoginWire = z.infer<typeof SetupLoginSchema>;
+
+/**
+ * PRD-050d — the `POST /setup/migrate-from-hivemind` response (consumed by the "Proceed with Honeycomb"
+ * button). Carries the terminal `phase` + a plain-language `message` + the `backupPath` reversibility
+ * anchor + the `needsLogin`/`migrated` flags. NO token/secret rides this shape by construction. Every
+ * field `.catch()`-defaults so a partial/failed body degrades to a safe "not ok" state, never a throw.
+ * `needsLogin:true` ⇒ the page runs the 050c device flow; `migrated:true` ⇒ the silent-adopt completed.
+ */
+export const SetupMigrateSchema = z.object({
+	ok: z.boolean().catch(false),
+	phase: z.enum(["backup", "uninstall", "link", "done", "rolled_back"]).catch("backup"),
+	message: z.string().catch(""),
+	backupPath: z.string().optional(),
+	needsLogin: z.boolean().optional(),
+	migrated: z.boolean().optional(),
+});
+export type SetupMigrateWire = z.infer<typeof SetupMigrateSchema>;
+
+/** The honest "migration unavailable" ack the wizard shows on a non-2xx / network failure (never a throw). */
+export const FAILED_SETUP_MIGRATE: SetupMigrateWire = Object.freeze({
+	ok: false,
+	phase: "backup",
+	message: "Migration is unavailable right now. Retry, or run the uninstall + `honeycomb login` in your terminal.",
+});
+
+/** PRD-050d — the `POST /setup/migrate-from-hivemind/rollback` response (the d-AC-7 roll-back affordance). */
+export const SetupMigrateRollbackSchema = z.object({
+	ok: z.boolean().catch(false),
+	phase: z.literal("rolled_back").catch("rolled_back"),
+	message: z.string().catch(""),
+});
+export type SetupMigrateRollbackWire = z.infer<typeof SetupMigrateRollbackSchema>;
+
+/** The honest "rollback unavailable" ack the wizard shows on a non-2xx / network failure (never a throw). */
+export const FAILED_SETUP_MIGRATE_ROLLBACK: SetupMigrateRollbackWire = Object.freeze({
+	ok: false,
+	phase: "rolled_back",
+	message: "Rollback is unavailable right now. Retry.",
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // The typed fetch client. Every method validates its payload through zod, so the
 // React tree never sees an untyped/garbage value (AC-2 empty states are free).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -889,6 +1022,40 @@ export interface WireClient {
 	 * reflects here.
 	 */
 	authStatus(): Promise<AuthStatusWire>;
+	/**
+	 * PRD-050b — read the pre-auth guided-setup STATE (`GET /setup/state`). Returns credential-dir
+	 * presence + the onboarding phase/prior-tool + the DERIVED `authenticated` bit + the embeddings
+	 * warmup signal. Drives the fresh-install vs already-linked render (b-AC-6) and the live
+	 * pre-auth→authenticated transition the shell polls for (b-AC-3). A malformed/absent/failed read,
+	 * or a non-local 404, degrades to {@link FRESH_SETUP_STATE} (the guided-setup state) — never a
+	 * throw into React. The body carries NO token/secret (install metadata only).
+	 */
+	setupState(): Promise<SetupStateWire>;
+	/**
+	 * PRD-050c (the 050b "First time setup" button handler) — BEGIN the on-page device-flow login
+	 * (`POST /setup/login`). Returns the `user_code` + verification URIs to display on the page (the
+	 * daemon keeps polling → mint → persist in the background); the shell then polls {@link setupState}
+	 * and flips to the authenticated view when the credential lands (b-AC-3). Returns `null` on a
+	 * non-2xx (the 502 device-flow-unavailable) / network failure so the button shows an honest error.
+	 * The response carries NO token (the schema has no token field by construction — c-AC-4).
+	 */
+	setupLogin(): Promise<SetupLoginWire | null>;
+	/**
+	 * PRD-050d — "Proceed with Honeycomb": run the Hivemind→Honeycomb migration (`POST
+	 * /setup/migrate-from-hivemind`). The daemon backs up + uninstalls Hivemind idempotently, then
+	 * verify-and-adopts the shared credential (d-AC-4) or returns `needsLogin:true` (the page then runs
+	 * {@link setupLogin}). The response carries the terminal phase + a plain-language message + the
+	 * backup path (NO token). Degrades to {@link FAILED_SETUP_MIGRATE} on a non-2xx / network failure so
+	 * the wizard shows an honest, recoverable error (never a throw).
+	 */
+	migrateFromHivemind(): Promise<SetupMigrateWire>;
+	/**
+	 * PRD-050d (d-AC-7) — "Roll back": restore the pre-migration Hivemind backup (`POST
+	 * /setup/migrate-from-hivemind/rollback`). Offered when `/setup/state` reports a NON-TERMINAL
+	 * `migration.phase` (an interrupted migration). Degrades to {@link FAILED_SETUP_MIGRATE_ROLLBACK} on
+	 * a non-2xx / network failure (never a throw).
+	 */
+	rollbackMigration(): Promise<SetupMigrateRollbackWire>;
 }
 
 /** The empty/zero KPIs the UI shows before the first load resolves (or on failure). */
@@ -1217,6 +1384,32 @@ export function createWireClient(options: WireClientOptions = {}): WireClient {
 			// throw — AC-4). The schema has NO token field, so a token in the body is dropped.
 			return (await getJson(fetchImpl, url(ENDPOINTS.authStatus), AuthStatusSchema)) ?? DISCONNECTED_AUTH_STATUS;
 		},
+		async setupState(): Promise<SetupStateWire> {
+			// GET the guided-setup state; a malformed/absent/failed body OR a non-local 404 (getJson's
+			// non-ok guard → null) degrades to the FRESH-INSTALL state so the shell renders the
+			// guided-setup wizard (the safe default, b-AC-6), never a throw. No token rides this body.
+			return (await getJson(fetchImpl, url(ENDPOINTS.setupState), SetupStateSchema)) ?? FRESH_SETUP_STATE;
+		},
+		async setupLogin(): Promise<SetupLoginWire | null> {
+			// POST to begin the device flow; the daemon returns user_code + URIs the moment the grant
+			// arrives (it keeps polling → persist in the background). A 502 (device-flow-unavailable) or
+			// a network failure → null (the button shows an honest error). The body carries NO token.
+			return postJson(fetchImpl, url(ENDPOINTS.setupLogin), {}, SetupLoginSchema);
+		},
+			async migrateFromHivemind(): Promise<SetupMigrateWire> {
+				// POST the migration trigger; the daemon runs the guarded backup->uninstall->adopt transaction
+				// and returns the terminal phase + message + backup path (+ needsLogin/migrated flags). A non-2xx
+				// / network / malformed body degrades to the honest failure ack (never a throw). NO token rides it.
+				return (await postJson(fetchImpl, url(ENDPOINTS.setupMigrate), {}, SetupMigrateSchema)) ?? FAILED_SETUP_MIGRATE;
+			},
+			async rollbackMigration(): Promise<SetupMigrateRollbackWire> {
+				// POST the rollback trigger (the d-AC-7 affordance); the daemon restores the backup + stamps
+				// migration.phase rolled_back. A failure degrades to the honest rollback-unavailable ack.
+				return (
+					(await postJson(fetchImpl, url(ENDPOINTS.setupMigrateRollback), {}, SetupMigrateRollbackSchema)) ??
+					FAILED_SETUP_MIGRATE_ROLLBACK
+				);
+			},
 	};
 }
 

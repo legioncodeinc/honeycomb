@@ -50,6 +50,8 @@ import {
 	saveDiskCredentials,
 	systemClock,
 } from "./credentials-store.js";
+import { DEFAULT_REF, loadOnboarding } from "../onboarding/index.js";
+import { type EmitDeps, emitTelemetry } from "../telemetry/index.js";
 
 // ────────────────────────────────────────────────────────────────────────────
 // The injectable seams (fetch / browser-open / sleep / reporter).
@@ -139,6 +141,54 @@ export const DEEPLAKE_ORG_HEADER = "X-Activeloop-Org-Id";
 /** The honeycomb client-family value. */
 export const DEEPLAKE_CLIENT_VALUE = "honeycomb";
 
+/**
+ * The referral-attribution header names carried on `POST /auth/device/code` ONLY (PRD-050c).
+ *
+ * Operator decision (do NOT re-litigate): we DUAL-SEND both headers, each carrying the SAME
+ * effective ref — `X-Hivemind-Referrer` is recognized by the Activeloop backend TODAY (verbatim
+ * port of Hivemind's `hivemindReferrerHeader`), and `X-Honeycomb-Referrer` is the new
+ * Honeycomb-namespaced header that goes fully live once the backend ships recognition. Sending both
+ * preserves attribution now AND future-proofs the migration with a single code path.
+ */
+export const HIVEMIND_REFERRER_HEADER = "X-Hivemind-Referrer";
+/** The new Honeycomb-namespaced referral header (recognized once the backend ships it — PRD-050c). */
+export const HONEYCOMB_REFERRER_HEADER = "X-Honeycomb-Referrer";
+
+/**
+ * Build the referral-attribution headers for the device-code request from an effective ref.
+ *
+ * Returns BOTH `X-Honeycomb-Referrer` and `X-Hivemind-Referrer` set to the TRIMMED ref when it is
+ * non-empty after trimming; returns an EMPTY object (omitting both headers entirely) when the ref is
+ * `undefined`, empty, or whitespace-only — the trim-and-omit parity Hivemind's `hivemindReferrerHeader`
+ * enforces (an empty referrer is never sent, never attributed). This is the ONLY producer of these
+ * headers; they ride on the device-code request and NOWHERE else (PRD-050c c-AC-6).
+ */
+export function referrerHeaders(ref?: string): Record<string, string> {
+	const trimmed = (ref ?? "").trim();
+	if (trimmed.length === 0) return {};
+	return { [HONEYCOMB_REFERRER_HEADER]: trimmed, [HIVEMIND_REFERRER_HEADER]: trimmed };
+}
+
+/**
+ * Resolve the EFFECTIVE referral code for a Honeycomb install (PRD-050c c-AC-1).
+ *
+ * Precedence: an explicit `ref` argument (the `--ref <code>` override) wins; else the machine-local
+ * `onboarding.ref` ({@link loadOnboarding}); else the build-injected {@link DEFAULT_REF}
+ * (`__HONEYCOMB_REF_DEFAULT__`, shipped `"mario"`). The result is TRIMMED. An explicitly-blank `--ref`
+ * (empty/whitespace) resolves to `""` so {@link referrerHeaders} omits both headers — an operator can
+ * deliberately opt OUT of attribution. The empty-string `explicit` is honored as an explicit override
+ * (it short-circuits the onboarding/default fallback), matching the "explicit blank omits" contract.
+ *
+ * `dir` overrides the onboarding directory (tests point it at a temp HOME); it defaults to the real
+ * `~/.deeplake`.
+ */
+export function resolveEffectiveRef(explicit?: string, dir?: string): string {
+	if (explicit !== undefined) return explicit.trim();
+	const fromOnboarding = loadOnboarding(dir).ref;
+	if (fromOnboarding.trim().length > 0) return fromOnboarding.trim();
+	return DEFAULT_REF.trim();
+}
+
 /** The env var carrying a pre-issued long-lived token for headless login (AC-2; HIVEMIND_TOKEN parity). */
 export const ENV_HEADLESS_TOKEN = "HONEYCOMB_TOKEN";
 /** The env var overriding the DeepLake API base URL (else {@link DEFAULT_DEEPLAKE_API_URL}). */
@@ -210,8 +260,12 @@ export interface DeeplakeAuthClient {
 	listWorkspaces(token: string, orgId?: string): Promise<WorkspaceRow[]>;
 	/** `POST /users/me/tokens` — mint a fresh long-lived token bound to `orgId` (AC-4 `org switch`). */
 	reMint(token: string, orgId: string): Promise<string>;
-	/** Begin the device-flow grant (`POST /auth/device/code`). */
-	requestDeviceCode(): Promise<DeviceCodeResponse>;
+	/**
+	 * Begin the device-flow grant (`POST /auth/device/code`). The optional `extraHeaders` carry the
+	 * referral-attribution headers ({@link referrerHeaders}) — spread onto THIS request only (PRD-050c
+	 * c-AC-6); they NEVER reach `/me`, `/organizations`, the mint call, or any data-plane request.
+	 */
+	requestDeviceCode(extraHeaders?: Record<string, string>): Promise<DeviceCodeResponse>;
 	/** Poll the device-flow grant; `"pending"` until approved, then the short-lived Auth0 token. */
 	pollDeviceToken(deviceCode: string): Promise<DeviceTokenResponse | "pending">;
 }
@@ -303,10 +357,18 @@ export function createDeeplakeAuthClient(options: DeeplakeAuthClientOptions = {}
 			}
 			return minted;
 		},
-		async requestDeviceCode(): Promise<DeviceCodeResponse> {
+		async requestDeviceCode(extraHeaders?: Record<string, string>): Promise<DeviceCodeResponse> {
+			// The referral-attribution headers ({@link referrerHeaders}) ride ONLY here (PRD-050c c-AC-6).
 			const body = await request(
 				"/auth/device/code",
-				{ method: "POST", headers: { "Content-Type": "application/json", [DEEPLAKE_CLIENT_HEADER]: DEEPLAKE_CLIENT_VALUE } },
+				{
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						[DEEPLAKE_CLIENT_HEADER]: DEEPLAKE_CLIENT_VALUE,
+						...(extraHeaders ?? {}),
+					},
+				},
 				true,
 			);
 			return body as DeviceCodeResponse;
@@ -411,6 +473,30 @@ export interface DeviceFlowLoginDeps extends LoginDeps {
 	readonly openBrowser?: BrowserOpener;
 	/** A safety cap on poll attempts so a never-approving grant cannot loop forever. */
 	readonly maxPolls?: number;
+	/**
+	 * The referral code attributed on the device-code request (PRD-050c). An explicit value (the
+	 * `--ref <code>` override) wins; absent it, the effective ref resolves from `onboarding.ref` then
+	 * the build-injected {@link DEFAULT_REF} (`"mario"`) — see {@link resolveEffectiveRef}. An
+	 * explicitly-blank ref (empty/whitespace) OMITS both attribution headers (trim-and-omit parity).
+	 */
+	readonly ref?: string;
+	/**
+	 * A structured hook fired ONCE, right after the device-code grant is obtained and BEFORE the poll
+	 * loop begins (PRD-050c c-AC-3). It carries the {@link DeviceCodeResponse} — `user_code` +
+	 * verification URIs — so the `/setup/login` route can render the code on the page while the flow
+	 * keeps polling. The grant carries NO bearer/device token in any field a UI displays (the
+	 * `device_code` is the poll handle, never rendered/logged by the route — c-AC-4). This is the
+	 * structured analogue of {@link DeviceFlowReporter}; the reporter still fires for CLI prompts.
+	 */
+	readonly onGrant?: (grant: DeviceCodeResponse) => void;
+	/**
+	 * Telemetry chokepoint seam (PRD-050e). The `honeycomb_first_link` event emits through here AFTER
+	 * the credential is persisted (the first successful link), fire-and-forget — NEVER gating the login
+	 * (e-AC-4). The onboarding `dir` is threaded automatically so the dedupe ledger + the persisted
+	 * credential share one HOME under test. Omit in production — `emitTelemetry`'s defaults + the empty
+	 * build key make it a no-op; a test injects `telemetry.fetch` to record/throw.
+	 */
+	readonly telemetry?: EmitDeps;
 }
 
 /** The default device-flow poll cap — bounded so a stuck flow surfaces rather than hangs. */
@@ -477,7 +563,15 @@ export async function loginWithDeviceFlow(deps: DeviceFlowLoginDeps = {}): Promi
 		...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
 	});
 
-	const grant = await client.requestDeviceCode();
+	// Resolve the effective referral code (explicit `--ref` > onboarding.ref > DEFAULT_REF) and build
+	// the dual attribution headers. They ride ONLY on this device-code request (PRD-050c c-AC-6); a
+	// blank effective ref omits both headers (trim-and-omit parity — c-AC-2).
+	const effectiveRef = resolveEffectiveRef(deps.ref, deps.dir);
+	const grant = await client.requestDeviceCode(referrerHeaders(effectiveRef));
+
+	// Hand the structured grant (user_code + URIs, NO bearer token) to the on-page render hook before
+	// polling begins (PRD-050c c-AC-3) — the `/setup/login` route displays the code while we poll.
+	deps.onGrant?.(grant);
 
 	// Surface the SHORT user code + the verification URI — never the bearer token (D-4).
 	reporter.prompt(`To finish signing in, open ${grant.verification_uri} and enter code: ${grant.user_code}`);
@@ -511,7 +605,22 @@ export async function loginWithDeviceFlow(deps: DeviceFlowLoginDeps = {}): Promi
 	const longLived = await client.reMint(authToken, chosen.id);
 
 	// Persist the long-lived token (validated + identity-hydrated via /me) — the auth token is discarded.
-	return persistFromToken(client, longLived, deps);
+	const persisted = await persistFromToken(client, longLived, deps);
+
+	// Emit `honeycomb_first_link` (PRD-050e e-AC-1) AFTER the credential is persisted — the first
+	// successful link. FIRE-AND-FORGET through the single chokepoint: the promise is intentionally NOT
+	// awaited (`void`), so a slow/timing-out PostHog hop never delays CLI completion or the `/setup/login`
+	// state transition. All errors are swallowed inside `emitTelemetry`; the onboarding `dir` is threaded
+	// so the dedupe ledger and the persisted credential share one HOME. The carried `ref` is the SAME
+	// effective ref the attribution header used (e-AC-1). Deduped once per machine (e-AC-5); an opt-out
+	// env / empty key silences it. NEVER gates the login (the persist already returned).
+	void emitTelemetry(
+		"honeycomb_first_link",
+		{ ref: effectiveRef, tier: "tier1" },
+		{ ...(deps.telemetry ?? {}), ...(deps.dir !== undefined ? { dir: deps.dir } : {}) },
+	);
+
+	return persisted;
 }
 
 /**

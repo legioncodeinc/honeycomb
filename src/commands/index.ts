@@ -118,3 +118,18 @@ export {
 	parseDaemonArgs,
 	runDaemonCommand,
 } from "./daemon.js";
+
+export {
+	DASHBOARD_LOCAL_HOST,
+	DASHBOARD_PATH,
+	type DashboardOpener,
+	type InstallVerbDeps,
+	localDashboardUrl,
+	loopbackDashboardUrl,
+	openLocalDashboardUrl,
+	parseRefArg,
+	resolveEffectiveRef,
+	runInstallCommand,
+} from "./install.js";
+
+export { type TelemetryVerbDeps, runTelemetryCommand } from "./telemetry.js";

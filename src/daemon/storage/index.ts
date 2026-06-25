@@ -8,13 +8,14 @@
  * 3850), never by importing this module (a-AC-5).
  */
 
-import { type SleepFn, StorageClient, type StorageQuery } from "./client.js";
+import { type QueryOptions, type QueryScope, type SleepFn, StorageClient, type StorageQuery } from "./client.js";
 import {
 	type CredentialProvider,
 	defaultCredentialProvider,
 	resolveStorageConfig,
 	type StorageConfig,
 } from "./config.js";
+import { connectionError, type QueryResult } from "./result.js";
 import { type DeepLakeTransport, HttpDeepLakeTransport } from "./transport.js";
 
 export {
@@ -206,6 +207,86 @@ export function createStorageClient(
 	const config: StorageConfig = resolveStorageConfig(provider);
 	const transport: DeepLakeTransport = options.transport ?? new HttpDeepLakeTransport(config.endpoint, config.token);
 	return new StorageClient(transport, config, options.sleep);
+}
+
+/**
+ * Build a DEFERRED storage client that NEVER throws at construction (PRD-050b b-AC-1 / b-AC-3).
+ *
+ * ── Why this exists (the boot-without-credentials invariant) ─────────────────
+ * {@link createStorageClient} validates config EAGERLY and throws a `StorageConfigError` when no
+ * usable credential resolves (a fresh install: no `~/.deeplake/credentials.json`, no
+ * `HONEYCOMB_DEEPLAKE_*` env — `token`/`org`/`endpoint` are all `undefined`, which the
+ * `StorageConfigSchema` rejects). The daemon composition root constructs the storage client at
+ * boot, so that eager throw would take the WHOLE daemon down before it could serve the pre-auth
+ * dashboard + the guided-setup login (PRD-050b). That is the exact seam b-AC-1 audits and forbids.
+ *
+ * This factory wraps the construction so a missing/invalid credential degrades the client to a
+ * "not connected yet" state instead of a throw:
+ *   - it builds the real {@link createStorageClient} LAZILY, on the FIRST query (not at boot);
+ *   - a `StorageConfigError` (no creds) is caught and the call returns a typed `connection_error`
+ *     result — exactly the closed-union "no server response" kind every storage consumer already
+ *     branches on (so a DeepLake-backed seam degrades to an empty/"connect me" state, never a 500);
+ *   - once a real client is successfully built it is CACHED, so the happy path pays the build cost
+ *     at most once.
+ *
+ * ── This is what makes the live pre-auth → authenticated transition work (b-AC-3) ──
+ * Because construction is RE-ATTEMPTED per query until it succeeds (the failed build is NOT
+ * cached — only a successful one is), the moment the login flow writes the shared credential the
+ * NEXT query through this client builds a real, connected client and the authenticated surfaces
+ * hydrate — on the SAME running daemon, with NO restart and NO credential value cached at boot.
+ *
+ * The default provider ({@link defaultCredentialProvider}, env-over-file) is read fresh on each
+ * build attempt, so a credential written after boot is picked up. A `transport` override is honored
+ * for tests (a fake transport that needs no live endpoint).
+ */
+export function createLazyStorageClient(
+	options: {
+		provider?: CredentialProvider;
+		transport?: DeepLakeTransport;
+		sleep?: SleepFn;
+	} = {},
+): StorageClient {
+	let built: StorageClient | null = null;
+
+	/** Try to build the real client; return it on success, or `null` when no usable credential resolves. */
+	const tryBuild = (): StorageClient | null => {
+		if (built !== null) return built;
+		try {
+			built = createStorageClient(options);
+			return built;
+		} catch {
+			// No usable credential yet (a fresh install) → stay deferred. We do NOT cache the
+			// failure: the NEXT call re-attempts the build, so a credential written after boot is
+			// picked up on the next request (the live pre-auth → authenticated transition, b-AC-3).
+			return null;
+		}
+	};
+
+	// A structural StorageClient: only the public surface (`query`/`connect`/`endpoint`) is used by
+	// daemon consumers, so the deferred wrapper implements exactly that. The single cast at this
+	// factory boundary keeps every call site untouched (the same `as StorageClient` posture the
+	// fakes in tests use), while the wrapper is fully type-checked against the public members it forwards.
+	const lazy: StorageQuery & { connect(scope: QueryScope): Promise<QueryResult>; readonly endpoint: string } = {
+		get endpoint(): string {
+			// Before the first successful build there is no resolved endpoint; report a stable
+			// placeholder (no secret, diagnostics-only) rather than reading creds eagerly here.
+			return tryBuild()?.endpoint ?? "pending-credentials";
+		},
+		async connect(scope: QueryScope): Promise<QueryResult> {
+			return this.query("SELECT 1", scope);
+		},
+		async query(sql: string, scope: QueryScope, opts?: QueryOptions): Promise<QueryResult> {
+			const client = tryBuild();
+			if (client === null) {
+				// No credential on disk/env yet — the daemon is in the pre-auth phase (PRD-050b).
+				// Return a typed connection_error so the DeepLake-backed seam shows its empty/"connect"
+				// state instead of throwing a 500 (b-AC-1). No token, no secret, no stack.
+				return connectionError("no DeepLake credential resolved yet (pre-auth phase)");
+			}
+			return client.query(sql, scope, opts);
+		},
+	};
+	return lazy as unknown as StorageClient;
 }
 
 /** Re-export the structural query contract Wave 2 codes against. */

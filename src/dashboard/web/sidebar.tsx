@@ -27,6 +27,7 @@ import React from "react";
 
 import { Button } from "./primitives.js";
 import type { RouteEntry } from "./registry.js";
+import { ScopeSwitcherSlot } from "./scope-context.js";
 
 /** The expanded sidebar gutter width (px). */
 export const SIDEBAR_WIDTH = 220 as const;
@@ -194,6 +195,14 @@ export function Sidebar({
 					</div>
 				)}
 			</div>
+
+			{/* ── PRD-049e SCOPE-SWITCHER SEAM (mounted by PRD-050b) ──────────────────────────────
+			    The Org→Workspace→Project switcher mounts HERE, between the brand chrome and the nav
+			    items. 050b renders a zero-content placeholder ({@link ScopeSwitcherSlot} returns null),
+			    so the layout is identical today; 049e fills the slot WITHOUT restructuring this sidebar.
+			    The shell stays scope-UNAWARE — scope is hydrated by the React app via the scope context,
+			    never baked into `host.ts`/`renderShell`. Do NOT add a single-workspace assumption here. */}
+			<ScopeSwitcherSlot collapsed={collapsed} />
 
 			{/* Nav items — the seven registry entries, exactly one active (037a AC-2 / AC-3). */}
 			<div style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1 }}>

@@ -41,6 +41,8 @@ import {
 	ensureDaemonRunning,
 	runDaemonCommand,
 } from "./daemon.js";
+import { type InstallVerbDeps, runInstallCommand } from "./install.js";
+import { type TelemetryVerbDeps, runTelemetryCommand } from "./telemetry.js";
 import { HONEYCOMB_VERSION, PRODUCT_SLUG } from "../shared/constants.js";
 
 /** The recognized global-flag tokens (FR-1). A per-command flag is left for the handler. */
@@ -101,6 +103,34 @@ function daemonVerbDeps(deps: CommandDeps): DaemonVerbDeps {
 }
 
 /**
+ * The deps the `install` verb (PRD-050a) runs against: the daemon HTTP+lifecycle seams (for the
+ * health-gated ensure-running) plus the onboarding-state `dir` override. The browser opener is left
+ * unbound — `runInstallCommand` defaults to the production fixed-argv opener; only a test injects a
+ * recorder. `deps.openDashboard` is forwarded when present so a bin/test can override it.
+ */
+function installVerbDeps(deps: CommandDeps): InstallVerbDeps {
+	const opener = (deps as { openDashboard?: InstallVerbDeps["openDashboard"] }).openDashboard;
+	return {
+		...daemonVerbDeps(deps),
+		...(deps.dir !== undefined ? { dir: deps.dir } : {}),
+		...(opener !== undefined ? { openDashboard: opener } : {}),
+	};
+}
+
+/**
+ * The deps the `telemetry --show` glass-box verb (PRD-050e) runs against: the onboarding-state `dir`
+ * override, the `env` (for the opt-out gate readout), and the `out` sink. A local READ only — no daemon
+ * seam, no storage. The onboarding loader defaults inside the handler; tests inject it via the verb deps.
+ */
+function telemetryVerbDeps(deps: CommandDeps): TelemetryVerbDeps {
+	return {
+		...(deps.dir !== undefined ? { dir: deps.dir } : {}),
+		...(deps.env !== undefined ? { env: deps.env } : {}),
+		...(deps.out !== undefined ? { out: deps.out } : {}),
+	};
+}
+
+/**
  * Route a `storage` verb to its handler (sessions has its own paired-delete module). Ensure-running
  * on demand FIRST (b-AC-3): if the daemon is down, auto-start it (idempotent via the 021a PID/lock)
  * so the verb completes rather than failing with ECONNREFUSED. When no lifecycle seam is bound
@@ -153,6 +183,10 @@ function dispatchLocal(inv: CommandInvocation, deps: LocalDeps & StatusDeps): Pr
 		case "connect":
 		case "uninstall":
 			return runConnectorVerb(inv.verb, inv.argv, deps);
+		case "install":
+			return runInstallCommand(inv.argv, installVerbDeps(deps));
+		case "telemetry":
+			return Promise.resolve(runTelemetryCommand(inv.argv, telemetryVerbDeps(deps)));
 		case "dashboard":
 			return runDashboardCommand(deps);
 		case "status":

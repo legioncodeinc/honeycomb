@@ -63,6 +63,9 @@ import { mountHarnessApi } from "./dashboard/harness-api.js";
 import { mountSyncApi } from "./dashboard/sync-mount.js";
 import { detectInstalledHarnesses } from "./dashboard/harness-detect.js";
 import { mountDashboardHost } from "./dashboard/host.js";
+import { mountSetupLogin } from "./dashboard/setup-login.js";
+import { mountSetupStateApi } from "./dashboard/setup-state.js";
+import { mountSetupMigrate } from "./dashboard/setup-migrate.js";
 import { mountPollinateApi } from "./pollinating/api.js";
 import { mountCompactApi } from "./maintenance/compact-api.js";
 import { mountLogsApi } from "./logs/api.js";
@@ -119,7 +122,7 @@ import {
 	type SkillifyJobWorker,
 } from "./skillify/worker.js";
 
-import { createStorageClient } from "../storage/index.js";
+import { createLazyStorageClient } from "../storage/index.js";
 import {
 	type CredentialProvider,
 	defaultCredentialProvider,
@@ -324,6 +327,43 @@ export interface SeamFns {
 	readonly mountLogs: typeof mountLogsApi;
 	/** The viewable `/dashboard` HTML host (021d). Fires LOCAL-MODE ONLY (security F-1). */
 	readonly mountDashboardHost: typeof mountDashboardHost;
+	/**
+	 * The "First time setup" on-page login route — `POST /setup/login` (PRD-050c). Sits beside the
+	 * dashboard host on the UNPROTECTED root group, so it fires LOCAL-MODE ONLY under the SAME gate
+	 * (security F-1): a single loopback tenant, the permission middleware open by design. It begins the
+	 * device flow with the dual referral-attribution headers and returns the `user_code` + URIs for the
+	 * page to render (NO token — c-AC-4), then polls → mints → persists the shared credential.
+	 *
+	 * OPTIONAL on the seam record (like {@link mountSync}) so a pre-existing recording-fake `SeamFns`
+	 * stays type-compatible WITHOUT editing those out-of-scope suites; `assembleSeams` fires it only when
+	 * present (always present in {@link defaultSeamFns}, i.e. production), under the local-mode gate.
+	 */
+	readonly mountSetupLogin?: typeof mountSetupLogin;
+	/**
+	 * The pre-auth guided-setup STATE read — `GET /setup/state` (PRD-050b b-AC-2). Sits beside the
+	 * dashboard host + setup-login on the UNPROTECTED root group, so it fires under the SAME local-mode
+	 * gate (security F-1 / b-AC-4): in team/hybrid it 404s/is-absent. It reports the three credential-dir
+	 * presences, the onboarding phase, prior-tool detection, the derived `authenticated` bit, and the
+	 * embeddings warmup signal (b-AC-5) — install metadata only, NO token/secret/PII.
+	 *
+	 * OPTIONAL on the seam record (like {@link mountSetupLogin}) so a pre-existing recording-fake
+	 * `SeamFns` stays type-compatible WITHOUT editing those out-of-scope suites; `assembleSeams` fires
+	 * it only when present (always present in {@link defaultSeamFns}, i.e. production), under the gate.
+	 */
+	readonly mountSetupState?: typeof mountSetupStateApi;
+	/**
+	 * The Hivemind→Honeycomb migration routes — `POST /setup/migrate-from-hivemind` (+ `/rollback`)
+	 * (PRD-050d d-AC-3 .. d-AC-7). Sits beside the dashboard host + setup-login + setup-state on the SAME
+	 * unprotected root group, so it fires under the SAME local-mode gate (security F-1): in team/hybrid it
+	 * is never mounted. Backs up + uninstalls Hivemind idempotently, verify-and-adopts the shared
+	 * credential (or signals `needsLogin`), and advances a durable `migration.phase` marker so a crash
+	 * mid-migration is recoverable. NO token/secret crosses the wire.
+	 *
+	 * OPTIONAL on the seam record (like {@link mountSetupLogin}) so a pre-existing recording-fake `SeamFns`
+	 * stays type-compatible WITHOUT editing those out-of-scope suites; `assembleSeams` fires it only when
+	 * present (always present in {@link defaultSeamFns}, i.e. production), under the local-mode gate.
+	 */
+	readonly mountSetupMigrate?: typeof mountSetupMigrate;
 	/** The `/api/memories/*` data API (022a). Fires UNCONDITIONALLY — its group is a protected session group. */
 	readonly mountMemories: typeof mountMemoriesApi;
 	/**
@@ -448,6 +488,9 @@ export const defaultSeamFns: SeamFns = {
 	attachPrune: attachSessionsPrune,
 	mountLogs: mountLogsApi,
 	mountDashboardHost,
+	mountSetupLogin,
+	mountSetupState: mountSetupStateApi,
+	mountSetupMigrate,
 	mountMemories: mountMemoriesApi,
 	mountMemoriesPrime: mountMemoriesPrimeApi,
 	mountVfs: mountVfsApi,
@@ -726,6 +769,48 @@ export function assembleSeams(
 	//    posture — never an open tenancy hole.
 	if (daemon.config.mode === "local") {
 		seams.mountDashboardHost(daemon, { storage });
+		// 6b. The "First time setup" on-page login route — `POST /setup/login` (PRD-050c). Sits beside
+		//     the dashboard host on the SAME unprotected root group, so it shares the SAME local-mode gate
+		//     (security F-1): in team/hybrid it is never mounted and falls through to the root scaffold.
+		//     Begins the device flow with the dual referral headers, returns user_code + URIs (no token),
+		//     then polls → mints → persists the shared `~/.deeplake/credentials.json` (0600). Fail-soft —
+		//     a mount error never crashes the daemon (guarded + present-only like the other newer seams).
+		if (seams.mountSetupLogin !== undefined) {
+			try {
+				seams.mountSetupLogin(daemon);
+			} catch {
+				// A mount failure degrades the on-page login (the user falls back to the CLI), never crashes.
+			}
+		}
+		// 6c. The pre-auth guided-setup STATE read — `GET /setup/state` (PRD-050b b-AC-2). Sits beside the
+		//     dashboard host + setup-login on the SAME unprotected root group, so it shares the SAME local-mode
+		//     gate (security F-1 / b-AC-4). It reports credential-dir presence + the onboarding phase/prior-tool
+		//     + the derived `authenticated` bit + the embeddings warmup signal (b-AC-5) — install metadata only,
+		//     NO token/secret. The daemon's REAL embed supervisor is threaded so the warmup signal is live (the
+		//     supervisor backgrounds the warm wait — this is a pure read of its already-tracked state). Fail-soft:
+		//     a mount error never crashes the daemon (guarded + present-only like the other newer seams).
+		if (seams.mountSetupState !== undefined) {
+			try {
+				seams.mountSetupState(daemon, { embed: daemon.services.embed });
+			} catch {
+				// A mount failure degrades the guided-setup state read (the page falls back to a cold render), never crashes.
+			}
+		}
+		// 6d. The Hivemind->Honeycomb migration routes - POST /setup/migrate-from-hivemind (+ /rollback)
+		//     (PRD-050d). Beside the other setup routes on the SAME unprotected root group, under the SAME
+		//     local-mode gate (security F-1 / d-AC). A SIBLING of the setup-state mount, NOT nested under it:
+		//     the two seams are independently optional, so nesting would silently drop the migration routes in
+		//     a seam fake that overrides only one of them. Backs up + uninstalls Hivemind idempotently,
+		//     verify-and-adopts the shared credential (or signals needsLogin), advances a durable crash-recovery
+		//     marker, and emits the upgrade telemetry on success only. Fail-soft - a mount error degrades the
+		//     migration button (the user falls back to a manual uninstall + honeycomb login), never crashes.
+		if (seams.mountSetupMigrate !== undefined) {
+			try {
+				seams.mountSetupMigrate(daemon);
+			} catch {
+				// A mount failure degrades the on-page migration (the user falls back to the CLI), never crashes.
+			}
+		}
 	}
 
 	// 7. The /api/memories/* data API (022a). Recall + store + get/list + reason-gated
@@ -1425,7 +1510,17 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// unchanged). When the real client is built, it connects THROUGH this very provider.
 	const provider: CredentialProvider | undefined =
 		options.storage !== undefined ? options.provider : (options.provider ?? defaultCredentialProvider());
-	const storage = options.storage ?? createStorageClient(provider !== undefined ? { provider } : {});
+	// PRD-050b (b-AC-1 / b-AC-3): the production storage client is the DEFERRED variant — it NEVER
+	// throws at construction when no credential resolves (a fresh install with no
+	// `~/.deeplake/credentials.json` and no `HONEYCOMB_DEEPLAKE_*` env). The eager
+	// `createStorageClient` validates config at build time and throws a `StorageConfigError` on no
+	// creds, which would take the whole daemon down before it could serve the pre-auth dashboard +
+	// guided-setup login. `createLazyStorageClient` defers the build to the first query and re-attempts
+	// it per request, so (a) the daemon boots without credentials (b-AC-1) and (b) the moment the login
+	// flow writes the shared credential, the NEXT request builds a real connected client on the SAME
+	// running daemon — no restart, no credential cached at boot (b-AC-3). A test injecting a fake
+	// `storage` bypasses this entirely (the deterministic suite is unchanged).
+	const storage = options.storage ?? createLazyStorageClient(provider !== undefined ? { provider } : {});
 
 	// The daemon's own tenancy partition + friendly org name: resolved from the SAME
 	// credential provider the storage client connected through (env-over-file), with env as
