@@ -31,6 +31,21 @@ Customer-facing documentation. Anything in this folder may eventually be publish
 | `guides/` | Step-by-step user guides (written for customers, not developers) |
 | `faqs/` | Frequently asked questions from customers |
 
+## Contents
+
+Start here, then follow the cross-links:
+
+- **overview/**
+  - [What is Honeycomb?](overview/what-is-honeycomb.md): the plain-language introduction; start here
+  - [How Honeycomb works](overview/how-it-works.md): the capture, distill, recall, compound loop without jargon
+  - [Glossary](overview/glossary.md): plain definitions of every term
+- **guides/**
+  - [Getting started](guides/getting-started.md): install, connect, and save your first memory
+  - [Everyday use](guides/everyday-use.md): the day-to-day flow
+  - [Honeycomb for teams](guides/teams.md): sharing memory and skills across a team
+- **faqs/**
+  - [Frequently asked questions](faqs/faq.md): short answers to the common questions
+
 ## What does NOT belong here
 
 - Internal architecture docs or ADRs
