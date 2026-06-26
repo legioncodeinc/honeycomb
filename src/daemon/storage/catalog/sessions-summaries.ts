@@ -147,6 +147,32 @@ export function buildTranscriptLookupSql(sessionId: string): string {
 }
 
 /**
+ * Build the per-project session-count aggregate (PRD-059c c-AC-1 / c-AC-2): ONE
+ * grouped read over `sessions` returning `(project_id, count, last_capture)` for
+ * every project in the active org/workspace partition in a single round-trip. The
+ * caller passes the active {@link QueryScope}, so the storage client's partition
+ * layer scopes the read — `sessions` is an ENGINE table (no `org_id`/
+ * `workspace_id` column); isolation comes from the partition header, not a WHERE.
+ *
+ * `sessions` is append-only RAW capture (one row per event), so the count is the
+ * raw-event volume per project — the honest "captured activity" signal the
+ * Projects page surfaces. The empty/`''` `project_id` group is the workspace
+ * `__unsorted__` inbox (D5 / D8 unbound-session fallback); the caller maps the
+ * `''` bucket onto the inbox id for c-AC-2's inbox size. `last_capture` is
+ * `max(creation_date)` (ISO-8601 TEXT, lexicographically chronological), a cheap
+ * by-product of the same GROUP BY.
+ *
+ * All identifiers route through `sqlIdent`; there is NO interpolated VALUE, so
+ * `audit:sql` stays clean.
+ */
+export function buildSessionCountsByProjectSql(): string {
+	const tbl = sqlIdent("sessions");
+	const pid = sqlIdent("project_id");
+	const created = sqlIdent("creation_date");
+	return `SELECT ${pid}, count(*) AS n, max(${created}) AS last_capture FROM "${tbl}" GROUP BY ${pid}`;
+}
+
+/**
  * The role of each of the three memory tables (index AC-2 / c-AC-3). Exported so
  * a test can assert the roles are distinct and non-overlapping, and so a reader
  * has a single authoritative statement of which table holds what.

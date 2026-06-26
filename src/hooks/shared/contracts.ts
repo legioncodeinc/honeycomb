@@ -552,6 +552,29 @@ export interface SessionStartDeps extends HookCoreDeps {
 	 * session-start (d-AC-4).
 	 */
 	readonly prime?: PrimeRenderer;
+	/**
+	 * PRD-059a / IRD-123 — the first-run "bind a project to start" notice gate. When supplied,
+	 * session-start asks it ONCE per session (a-AC-2 — the session-start seam, NOT per turn) whether
+	 * the active workspace has bound any project yet; when it has NOT, session-start prepends a single
+	 * quiet "bind a project to start" notice to the rendered `additionalContext`, telling the user
+	 * capture is paused until they bind a folder. ABSENT → no notice (the prior session-start behaviour
+	 * is unchanged), so a unit-constructed session-start stays inert. The check reads the LOCAL
+	 * `~/.deeplake/projects.json` cache with NO DeepLake call (a-AC-3) and is FAIL-SOFT: a throw is
+	 * absorbed and no notice is shown (never break session-start over the notice — 059a impl-note).
+	 */
+	readonly onboardingNotice?: OnboardingNoticeGate;
+}
+
+/**
+ * The first-run onboarding-notice gate seam (PRD-059a a-AC-2 / IRD-123). Returns whether the active
+ * workspace has at least one locally-bound project; when `false`, session-start shows the one-per-session
+ * "bind a project to start" notice. The default production impl reads the thin-client
+ * `~/.deeplake/projects.json` cache ({@link import("./project-resolver.js").hasBoundProjectOnDisk}); a
+ * test injects a fixed boolean. SYNC + pure given its input — no network, no DeepLake.
+ */
+export interface OnboardingNoticeGate {
+	/** True when the workspace has ≥1 bound project (notice suppressed); false in the zero-state. */
+	hasBoundProject(meta: HookSessionMeta, credential: HookCredential | undefined): boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

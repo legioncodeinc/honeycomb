@@ -204,3 +204,98 @@ describe("PRD-049e GET /api/diagnostics/scope/projects (49e-AC-1)", () => {
 		expect(JSON.stringify(body)).not.toMatch(/tok-secret|token|bearer/i);
 	});
 });
+
+/**
+ * PRD-059c c-AC-1 / c-AC-2: the per-project STATE enrichment on scope/projects. A per-statement fake
+ * routes the registry-sync read (`FROM "projects"`), the memories aggregate (`FROM "memories"`), and
+ * the sessions aggregate (`FROM "sessions"`) to distinct scripted results — proving paths/remote come
+ * from local/registry state and counts come from the grouped aggregates, with the inbox size folded
+ * from the empty `project_id` bucket, and counts fail-soft to 0 on a backend error.
+ */
+function routedStorage(scripted: {
+	projects?: QueryResult;
+	memories?: QueryResult;
+	sessions?: QueryResult;
+}): StorageQuery {
+	return {
+		async query(sql: string): Promise<QueryResult> {
+			if (/FROM\s+"memories"/i.test(sql)) return scripted.memories ?? ok([], 0);
+			if (/FROM\s+"sessions"/i.test(sql)) return scripted.sessions ?? ok([], 0);
+			return scripted.projects ?? ok([], 0); // the registry-sync `FROM "projects"` read.
+		},
+	};
+}
+
+function countRow(projectId: string, n: number, last = ""): StorageRow {
+	return { project_id: projectId, n, last_capture: last };
+}
+
+describe("PRD-059c scope/projects per-project STATE (c-AC-1 / c-AC-2)", () => {
+	it("c-AC-1: serves boundPaths (local binding) + remote (registry) + counts (aggregate) per project", async () => {
+		writeCreds(dir);
+		// Seed a local binding so `api`'s boundPaths populate from the resolver cache (network-free).
+		writeFileSync(
+			join(dir, "projects.json"),
+			JSON.stringify({
+				schemaVersion: 1,
+				org: "acme",
+				workspace: "backend",
+				bindings: [{ path: "/work/api", projectId: "api" }],
+				projects: [],
+			}),
+		);
+		const client = fakeAuthClient({ calls });
+		const storage = routedStorage({
+			projects: ok([registryRow({ project_id: "api", name: "API", remote_signal: "github.com/acme/api" })], 1),
+			memories: ok([countRow("api", 5, "2026-06-01T00:00:00Z")], 1),
+			sessions: ok([countRow("api", 9, "2026-06-10T00:00:00Z")], 1),
+		});
+		const daemon = daemonWith({ storage, client });
+		const res = await daemon.app.request("/api/diagnostics/scope/projects");
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as ScopeProjectsBody;
+		const api = body.projects.find((p) => p.projectId === "api");
+		expect(api?.boundPaths).toContain("/work/api"); // from the local binding (registry copy boundPaths union).
+		expect(api?.remote).toBe("github.com/acme/api"); // from the synced registry remote_signal.
+		expect(api?.memoryCount).toBe(5);
+		expect(api?.sessionCount).toBe(9);
+		expect(api?.lastCapture).toBe("2026-06-10T00:00:00Z"); // later of the two.
+	});
+
+	it("c-AC-2: the inbox size is served from the empty/`__unsorted__` project_id bucket", async () => {
+		writeCreds(dir);
+		const client = fakeAuthClient({ calls });
+		const storage = routedStorage({
+			// The registry carries the reserved inbox row so the enumeration lists it.
+			projects: ok([registryRow({ project_id: "__unsorted__", name: "Unsorted", remote_signal: "", is_reserved: 1 })], 1),
+			// Unresolved captures land in the '' bucket → folded onto the inbox id.
+			memories: ok([countRow("", 4)], 1),
+			sessions: ok([countRow("", 6)], 1),
+		});
+		const daemon = daemonWith({ storage, client });
+		const res = await daemon.app.request("/api/diagnostics/scope/projects");
+		const body = (await res.json()) as ScopeProjectsBody;
+		const inbox = body.projects.find((p) => p.projectId === "__unsorted__");
+		expect(inbox?.memoryCount).toBe(4);
+		expect(inbox?.sessionCount).toBe(6); // the c-AC-2 inbox size.
+	});
+
+	it("fail-soft: a counts-aggregate backend error zeroes counts but still 200s with paths/remote", async () => {
+		writeCreds(dir);
+		const client = fakeAuthClient({ calls });
+		const storage = routedStorage({
+			projects: ok([registryRow({ project_id: "api", name: "API", remote_signal: "github.com/acme/api" })], 1),
+			memories: { kind: "connection_error", message: "backend flap" },
+			sessions: { kind: "query_error", message: "boom" },
+		});
+		const daemon = daemonWith({ storage, client });
+		const res = await daemon.app.request("/api/diagnostics/scope/projects");
+		expect(res.status).toBe(200); // counts failed, but the read NEVER 500s.
+		const body = (await res.json()) as ScopeProjectsBody;
+		const api = body.projects.find((p) => p.projectId === "api");
+		expect(api?.memoryCount).toBe(0); // fail-soft → zeroed.
+		expect(api?.sessionCount).toBe(0);
+		expect(api?.lastCapture).toBeNull();
+		expect(api?.remote).toBe("github.com/acme/api"); // local/registry state still served.
+	});
+});

@@ -68,13 +68,14 @@ describe("037a AC-1: brand chrome — mark + wordmark + org/workspace sub-line",
 	});
 });
 
-describe("037a AC-2: all seven nav items render from the registry in order", () => {
+describe("037a AC-2: all nav items render from the registry in order", () => {
 	it("renders Dashboard…Settings, each with a label, in registry order", () => {
 		mountSidebar();
 		const items = [...container.querySelectorAll("[data-route]")];
-		expect(items.map((el) => el.getAttribute("data-route"))).toEqual(["/", "/harnesses", "/memories", "/graph", "/sync", "/logs", "/settings"]);
+		// PRD-059c adds the Projects nav item right after Dashboard.
+		expect(items.map((el) => el.getAttribute("data-route"))).toEqual(["/", "/projects", "/harnesses", "/memories", "/graph", "/sync", "/logs", "/settings"]);
 		const text = container.textContent ?? "";
-		for (const label of ["Dashboard", "Harnesses", "Memories", "Graph", "Sync", "Logs", "Settings"]) {
+		for (const label of ["Dashboard", "Projects", "Harnesses", "Memories", "Graph", "Sync", "Logs", "Settings"]) {
 			expect(text).toContain(label);
 		}
 	});

@@ -601,6 +601,66 @@ export function resolveScope(input: ResolveScopeInput): ResolvedScope {
 	return { projectId: UNSORTED_PROJECT_ID, bound: false, source: "inbox", org, workspace };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// First-run capture gate predicate — PRD-059a / IRD-123 (PURE, no IO)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Does this workspace have AT LEAST ONE real, locally-bound project? (PRD-059a / IRD-123.)
+ *
+ * The first-run capture gate (059a) reverses 049a's "never drop → inbox" policy for the
+ * ZERO-projects pre-onboarding state ONLY: while a brand-new user has bound no project on
+ * THIS device, capture no-ops rather than hoarding unscoped sessions in `__unsorted__`. The
+ * predicate that decides "is the gate open?" is this PURE count over the LOCAL cache — no
+ * DeepLake call (a-AC-3): the gate must resolve from the thin-client store on the capture
+ * hot path with no network round-trip.
+ *
+ * "Bound enough to start" (the parent open-question lean) is an EXPLICIT local binding: a
+ * folder→project `binding` whose `projectId` is not the reserved {@link UNSORTED_PROJECT_ID}
+ * inbox. A registry `projects[]` copy synced from another device (059d) does NOT by itself
+ * open the gate — that copy can be present on a fresh device that has imported nothing yet,
+ * and the lean (059a OQ-2) is to gate on the LOCAL binding so device B onboards via import.
+ * So the count is over `bindings[]`, not the synced `projects[]`.
+ *
+ * Returns `true` the moment one such binding exists (the gate opens and, per 049a, stays
+ * open — the `__unsorted__` inbox fallback for unbound folders resumes as normal, a-AC-5).
+ * An empty/absent cache (the genuine zero-state) returns `false` → the gate is CLOSED.
+ */
+export function hasBoundProject(cache: ProjectsCache): boolean {
+	return cache.bindings.some((b) => b.projectId.length > 0 && b.projectId !== UNSORTED_PROJECT_ID);
+}
+
+/**
+ * The disk-backed first-run gate check (PRD-059a a-AC-3 / IRD-123): load the local cache
+ * (fail-soft) and answer "has this workspace bound a project yet?" with NO DeepLake call.
+ *
+ * Applies the SAME tenancy guard {@link resolveScopeFromDisk} does on read: a cache synced
+ * for a DIFFERENT workspace than the active one is treated as empty (its bindings belong to
+ * another tenancy), so a stale cross-workspace cache can never spuriously OPEN the gate for
+ * the wrong workspace. The capture handler calls this; when it returns `false` the workspace
+ * is in the zero-projects first-run state and capture suppresses (writes nothing).
+ *
+ * FAIL-SOFT asymmetry (059a impl-note): the loader already collapses a missing/malformed file
+ * to an EMPTY cache, so a genuinely-absent store reads as "not onboarded" (gate CLOSED). A
+ * transient read hiccup is indistinguishable from absence at this layer, which is acceptable:
+ * the loader does not throw, and a brand-new user IS the empty-store case. The caller may
+ * additionally fail-open on an unexpected throw so a set-up user is never hard-blocked.
+ */
+export function hasBoundProjectOnDisk(input: {
+	/** Override the cache directory (tests). Defaults to `~/.deeplake`. */
+	readonly dir?: string;
+	/** The active workspace id — the tenancy guard (a foreign-workspace cache reads as empty). */
+	readonly workspace?: string;
+}): boolean {
+	const loaded = loadProjectsCache(input.dir);
+	// Tenancy guard: only trust a cache synced for the active workspace (mirrors resolveScopeFromDisk).
+	const cache =
+		input.workspace !== undefined && loaded.workspace.length > 0 && loaded.workspace !== input.workspace
+			? emptyProjectsCache(loaded.org, loaded.workspace)
+			: loaded;
+	return hasBoundProject(cache);
+}
+
 /**
  * The disk-backed convenience wrapper: load the cache via {@link loadProjectsCache}
  * (fail-soft) and delegate to the PURE {@link resolveScope}. The capture/recall

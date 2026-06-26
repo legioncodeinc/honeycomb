@@ -44,6 +44,7 @@ export {
 	type LogicalEvent,
 	LOGICAL_EVENTS,
 	notImplemented,
+	type OnboardingNoticeGate,
 	type RecordedHookCall,
 	type RecordedSessionStartStep,
 	type RecordedVfsOp,
@@ -55,7 +56,7 @@ export {
 	type VfsToolOp,
 } from "./contracts.js";
 
-export { runSessionStart } from "./session-start.js";
+export { BIND_PROJECT_NOTICE, createOnboardingNoticeGate, runSessionStart } from "./session-start.js";
 
 export {
 	buildCaptureBody,
@@ -125,6 +126,8 @@ export {
 	ENV_PROJECT_ID,
 	type FolderBinding,
 	type GitRemoteReader,
+	hasBoundProject,
+	hasBoundProjectOnDisk,
 	loadProjectsCache,
 	noGitRemoteReader,
 	PROJECTS_CACHE_FILE_NAME,

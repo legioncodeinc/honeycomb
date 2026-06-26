@@ -23,6 +23,7 @@ import {
 	type DaemonHookRequest,
 	type DaemonHookResponse,
 	type HookSessionMeta,
+	type OnboardingNoticeGate,
 	type PrimeRenderer,
 } from "../../../src/hooks/shared/index.js";
 import {
@@ -32,6 +33,14 @@ import {
 	type Notification,
 	type NotificationsPipeline,
 } from "../../../src/notifications/index.js";
+
+/**
+ * PRD-059a: a deterministic onboarding-notice gate that reports "a project IS bound" so the one-per-
+ * session "bind a project to start" notice NEVER fires in this (context-rendering) suite. These tests
+ * assert exact `additionalContext` strings and use the real credential reader; pinning the gate keeps
+ * them hermetic (the notice's own behaviour is covered by tests/hooks/shared/onboarding-notice.test.ts).
+ */
+const NOTICE_BOUND: OnboardingNoticeGate = { hasBoundProject: () => true };
 
 /** A recording DaemonHookClient: records every send + returns a configurable status. */
 function recordingClient(status = 201, body: unknown = { ok: true, id: "row" }) {
@@ -71,7 +80,7 @@ describe("c-AC-4 session-start: renders prior context via the renderer + drains 
 		// The renderer asks the daemon /context; the recording client returns a block.
 		const { client } = recordingClient(200, { additionalContext: "GOALS: ship 021c." });
 		const pipeline = recordingPipeline(null);
-		const runtime = createHookRuntime({ daemon: client, notifications: pipeline });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: pipeline });
 
 		const outcome = await runtime.runEvent(
 			createClaudeCodeShim(),
@@ -90,7 +99,7 @@ describe("c-AC-4 session-start: renders prior context via the renderer + drains 
 			priority: 10,
 			dedupKey: "welcome",
 		});
-		const runtime = createHookRuntime({ daemon: client, notifications: pipeline });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: pipeline });
 
 		const outcome = await runtime.runEvent(
 			createClaudeCodeShim(),
@@ -114,7 +123,7 @@ describe("c-AC-4 session-start: renders prior context via the renderer + drains 
 			backend,
 		});
 		const { client } = recordingClient(200, { additionalContext: "" });
-		const runtime = createHookRuntime({ daemon: client, notifications: pipeline });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: pipeline });
 		const outcome = await runtime.runEvent(
 			createClaudeCodeShim(),
 			{ name: "SessionStart", payload: { source: "startup" } },
@@ -130,7 +139,7 @@ describe("c-AC-4 session-start: renders prior context via the renderer + drains 
 				throw new Error("backend exploded");
 			},
 		};
-		const runtime = createHookRuntime({ daemon: client, notifications: throwingPipeline });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: throwingPipeline });
 		const outcome = await runtime.runEvent(
 			createClaudeCodeShim(),
 			{ name: "SessionStart", payload: {} },
@@ -159,6 +168,7 @@ describe("PRD-046d session prime: the runtime injects the 046c digest at session
 	it("d-AC-1: the Claude Code session-start injects the prime digest into additionalContext", async () => {
 		const { client } = recordingClient(200, { additionalContext: "" }); // no rules/goals block
 		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
 			daemon: client,
 			notifications: recordingPipeline(null),
 			prime: createFakePrimeRenderer("## Memory\n- decided X"),
@@ -174,6 +184,7 @@ describe("PRD-046d session prime: the runtime injects the 046c digest at session
 	it("d-AC-2: the Cursor session-start injects the SAME prime digest (shared runtime, no per-harness fork)", async () => {
 		const { client } = recordingClient(200, { additionalContext: "" });
 		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
 			daemon: client,
 			notifications: recordingPipeline(null),
 			prime: createFakePrimeRenderer("## Memory\n- decided X"),
@@ -190,6 +201,7 @@ describe("PRD-046d session prime: the runtime injects the 046c digest at session
 	it("d-AC-1: the prime is APPENDED to the rules/goals block when both are present", async () => {
 		const { client } = recordingClient(200, { additionalContext: "RULES: be concise." });
 		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
 			daemon: client,
 			notifications: recordingPipeline(null),
 			prime: createFakePrimeRenderer("## Memory\n- decided X"),
@@ -205,7 +217,7 @@ describe("PRD-046d session prime: the runtime injects the 046c digest at session
 	it("d-AC-3: the prime renders ONCE at session-start and NOT on a per-turn capture", async () => {
 		const { client } = recordingClient(200, { additionalContext: "" });
 		const prime = recordingPrime("## Memory\n- decided X");
-		const runtime = createHookRuntime({ daemon: client, notifications: recordingPipeline(null), prime });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null), prime });
 
 		// Session-start → one prime render.
 		await runtime.runEvent(createClaudeCodeShim(), { name: "SessionStart", payload: { source: "startup" } }, META);
@@ -228,6 +240,7 @@ describe("PRD-046d session prime: the runtime injects the 046c digest at session
 	it("d-AC-4: a cold-repo / unreachable prime ('') injects nothing and never errors session-start", async () => {
 		const { client } = recordingClient(200, { additionalContext: "RULES: be concise." });
 		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
 			daemon: client,
 			notifications: recordingPipeline(null),
 			prime: createFakePrimeRenderer(""), // daemon down / cold repo → empty digest
@@ -250,6 +263,7 @@ describe("PRD-046d session prime: the runtime injects the 046c digest at session
 			},
 		};
 		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
 			daemon: client,
 			notifications: recordingPipeline(null),
 			prime: throwingPrime,
@@ -275,6 +289,7 @@ describe("PRD-046d session prime: the runtime injects the 046c digest at session
 		};
 		const { client } = recordingClient(200, { additionalContext: "" });
 		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
 			daemon: client,
 			notifications: recordingPipeline(null),
 			prime: createFakePrimeRenderer("## Memory\n- decided X"),
@@ -299,6 +314,7 @@ describe("PRD-046d session prime: the runtime injects the 046c digest at session
 		};
 		const { client } = recordingClient(200, { additionalContext: "" });
 		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
 			daemon: client,
 			notifications: recordingPipeline(null),
 			prime: createFakePrimeRenderer("## Memory\n- decided X"),
@@ -328,7 +344,7 @@ describe("c-AC-5 claude-code binary: native stdin event drives the runtime (shim
 
 	it("parses the native Claude Code UserPromptSubmit envelope and POSTs the capture", async () => {
 		const { client, calls } = recordingClient();
-		const runtime = createHookRuntime({ daemon: client, notifications: recordingPipeline(null) });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null) });
 		const stdin = JSON.stringify({
 			hook_event_name: "UserPromptSubmit",
 			session_id: "sess-bin",
@@ -352,7 +368,7 @@ describe("c-AC-5 claude-code binary: native stdin event drives the runtime (shim
 
 	it("session-start emits the rendered context block on stdout (model-only additionalContext)", async () => {
 		const { client } = recordingClient(200, { additionalContext: "RULES: be concise." });
-		const runtime = createHookRuntime({ daemon: client, notifications: recordingPipeline(null) });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null) });
 		const surface = io(JSON.stringify({ hook_event_name: "SessionStart", session_id: "s", source: "startup" }));
 		await runHookBinary({ shim: createClaudeCodeShim(), runtime, io: surface });
 		expect(surface.out).toHaveLength(1);
@@ -363,7 +379,7 @@ describe("c-AC-5 claude-code binary: native stdin event drives the runtime (shim
 
 	it("malformed stdin exits cleanly with an empty response (fail-soft, never a throw)", async () => {
 		const { client, calls } = recordingClient();
-		const runtime = createHookRuntime({ daemon: client, notifications: recordingPipeline(null) });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null) });
 		const surface = io("{ not json");
 		const outcome = await runHookBinary({ shim: createClaudeCodeShim(), runtime, io: surface });
 		expect(outcome.dropped).toBe(true);
@@ -373,7 +389,7 @@ describe("c-AC-5 claude-code binary: native stdin event drives the runtime (shim
 
 	it("a non-lifecycle event the shim drops makes no daemon call", async () => {
 		const { client, calls } = recordingClient();
-		const runtime = createHookRuntime({ daemon: client, notifications: recordingPipeline(null) });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null) });
 		const surface = io(JSON.stringify({ hook_event_name: "Notification", session_id: "s" }));
 		const outcome = await runHookBinary({ shim: createClaudeCodeShim(), runtime, io: surface });
 		expect(outcome.dropped).toBe(true);
@@ -390,7 +406,7 @@ describe("c-AC-6 second harness (codex) reuses the SAME runtime + seams (not re-
 	it("the codex binary drives the SAME runtime instance — proving the runtime is shared", async () => {
 		const { client, calls } = recordingClient();
 		// ONE runtime, used by BOTH harnesses below — the c-AC-6 reuse proof.
-		const runtime = createHookRuntime({ daemon: client, notifications: recordingPipeline(null) });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null) });
 
 		// Drive a claude-code event AND a codex event through the SAME runtime + seams.
 		await runHookBinary({
@@ -414,7 +430,7 @@ describe("c-AC-6 second harness (codex) reuses the SAME runtime + seams (not re-
 
 	it("createHookRuntime builds the three production seams once (deps reused across events)", async () => {
 		const { client } = recordingClient();
-		const runtime = createHookRuntime({ daemon: client, notifications: recordingPipeline(null) });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null) });
 		// The runtime exposes ONE deps bundle (daemon + credentials + context) reused per event.
 		expect(runtime.deps.daemon).toBe(client);
 		expect(runtime.deps.credentials).toBeDefined();
@@ -429,7 +445,7 @@ describe("c-AC-6 second harness (codex) reuses the SAME runtime + seams (not re-
 			throw new Error("ECONNREFUSED");
 		}) as unknown as typeof fetch;
 		const { client } = recordingClient(200, { additionalContext: "" });
-		const runtime = createHookRuntime({ daemon: client, fetch: failingFetch });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, fetch: failingFetch });
 		const outcome = await runtime.runEvent(
 			createCodexShim(),
 			{ name: "SessionStart", payload: { source: "startup" } },
@@ -461,7 +477,7 @@ describe("PRD-045g g-AC-2: the runtime injects the REAL auto-pull seam on sessio
 	it("calls autoPullSkills ONCE on session-start (the seam is wired into SessionStartDeps)", async () => {
 		const { client } = recordingClient(200, { additionalContext: "" });
 		const seams = recordingSeams();
-		const runtime = createHookRuntime({ daemon: client, notifications: recordingPipeline(null), seams });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null), seams });
 		await runtime.runEvent(createClaudeCodeShim(), { name: "SessionStart", payload: { source: "startup" } }, META);
 		expect(seams.pulls, "auto-pull ran at session start").toBe(1);
 	});
@@ -469,7 +485,7 @@ describe("PRD-045g g-AC-2: the runtime injects the REAL auto-pull seam on sessio
 	it("does NOT auto-pull on a per-turn capture event (session-start only)", async () => {
 		const { client } = recordingClient();
 		const seams = recordingSeams();
-		const runtime = createHookRuntime({ daemon: client, notifications: recordingPipeline(null), seams });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null), seams });
 		await runtime.runEvent(createClaudeCodeShim(), { name: "UserPromptSubmit", payload: { prompt: "x" } }, META);
 		expect(seams.pulls, "no auto-pull on capture").toBe(0);
 	});
@@ -486,7 +502,7 @@ describe("PRD-045g g-AC-2: the runtime injects the REAL auto-pull seam on sessio
 				throw new Error("pull exploded");
 			},
 		};
-		const runtime = createHookRuntime({ daemon: client, notifications: recordingPipeline(null), seams: throwingSeams });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null), seams: throwingSeams });
 		const outcome = await runtime.runEvent(
 			createClaudeCodeShim(),
 			{ name: "SessionStart", payload: { source: "startup" } },
@@ -504,7 +520,7 @@ describe("PRD-045g g-AC-2: the runtime injects the REAL auto-pull seam on sessio
 			throw new Error("ECONNREFUSED");
 		}) as unknown as typeof fetch;
 		const { client } = recordingClient(200, { additionalContext: "RULES: be concise." });
-		const runtime = createHookRuntime({ daemon: client, notifications: recordingPipeline(null), fetch: failingFetch });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null), fetch: failingFetch });
 		const outcome = await runtime.runEvent(
 			createClaudeCodeShim(),
 			{ name: "SessionStart", payload: { source: "startup" } },

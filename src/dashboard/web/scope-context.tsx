@@ -92,14 +92,44 @@ export interface ScopeSwitcherValue {
 	readonly workspaces: readonly ScopeWorkspaceWire[];
 	/** The workspace's registry projects (the 049a synced copy, incl. the `__unsorted__` inbox). */
 	readonly projects: readonly ScopeProjectWire[];
+	/**
+	 * True once the FIRST projects enumeration has resolved (PRD-059b). The first-run "pick a folder"
+	 * CTA keys off this so it never flashes before the projects read returns — only AFTER the read
+	 * resolves with zero locally-bound projects does the CTA show (b-AC-1).
+	 */
+	readonly projectsHydrated: boolean;
 	/** True while an org change is re-minting + re-enumerating (the workspace dropdown shows a loading hint). */
 	readonly loadingWorkspaces: boolean;
-	/** Select an org → re-mint (daemon) + re-enumerate workspaces (49e-AC-3); clears the workspace/project. */
+	/**
+	 * IRD-122 — the last switch's outcome feedback (122-AC-4: no switch is a silent no-op). `null` until a
+	 * switch runs; then a `{ kind: "persisted" | "view" | "error", message }` the switcher surfaces so the
+	 * user always sees whether a selection PERSISTED a real scope change, is a VIEW filter, or FAILED.
+	 */
+	readonly switchFeedback: SwitchFeedback | null;
+	/**
+	 * Select an org → PERSIST a real org switch via the daemon (re-mint + save to credentials.json —
+	 * 122-AC-2), then re-enumerate workspaces; clears the workspace/project. Surfaces persisted/error
+	 * feedback (122-AC-4). A failed persist does NOT silently change the view.
+	 */
 	readonly selectOrg: (org: string) => void;
-	/** Select a workspace → re-enumerate its projects; clears the project. */
+	/** Select a workspace → PERSIST the workspace switch via the daemon (IRD-122), then re-enumerate projects. */
 	readonly selectWorkspace: (workspace: string) => void;
-	/** Select a project → re-scope the pages (viewer-side; no registry write — 49e-AC-4). */
+	/**
+	 * Select a project → re-scope the pages (VIEW filter only; viewer-side, no registry write — 49e-AC-4
+	 * / 122-AC-3). Surfaces "view filter" feedback so the user understands the project dropdown changes
+	 * the VIEW, not where capture is written (that is folder/binding-driven — PRD-059).
+	 */
 	readonly selectProject: (project: string | undefined) => void;
+}
+
+/** IRD-122 — the outcome of the last switcher action, surfaced so no change is a silent no-op (122-AC-4). */
+export interface SwitchFeedback {
+	/** `persisted` = a real org/workspace scope change saved to credentials.json; `view` = a project view filter; `error` = the switch failed. */
+	readonly kind: "persisted" | "view" | "error";
+	/** A short human message the switcher renders (e.g. "switched to Acme", "view filter", "could not switch"). */
+	readonly message: string;
+	/** True while the switch is in flight (the org re-mint loading state — 122-AC-4 surfaces it). */
+	readonly pending?: boolean;
 }
 
 /** The default switcher value (empty enumeration + no-op handlers) — used outside a {@link ScopeProvider}. */
@@ -107,7 +137,9 @@ const DEFAULT_SWITCHER: ScopeSwitcherValue = Object.freeze({
 	orgs: [],
 	workspaces: [],
 	projects: [],
+	projectsHydrated: false,
 	loadingWorkspaces: false,
+	switchFeedback: null,
 	selectOrg: () => {},
 	selectWorkspace: () => {},
 	selectProject: () => {},
@@ -174,7 +206,10 @@ export function ScopeProvider({ wire, children }: { wire: WireClient; children: 
 	const [orgs, setOrgs] = React.useState<readonly ScopeOrgWire[]>([]);
 	const [workspaces, setWorkspaces] = React.useState<readonly ScopeWorkspaceWire[]>([]);
 	const [projects, setProjects] = React.useState<readonly ScopeProjectWire[]>([]);
+	const [projectsHydrated, setProjectsHydrated] = React.useState(false);
 	const [loadingWorkspaces, setLoadingWorkspaces] = React.useState(false);
+	// IRD-122 (122-AC-4): the last switch's outcome, so no switcher change is ever a silent no-op.
+	const [switchFeedback, setSwitchFeedback] = React.useState<SwitchFeedback | null>(null);
 
 	/** Commit a new scope: persist it (viewer-side) + update state so pages re-render against it. */
 	const commitScope = React.useCallback((next: DashboardScope): void => {
@@ -185,10 +220,11 @@ export function ScopeProvider({ wire, children }: { wire: WireClient; children: 
 	// The setScope a page would call (e.g. a deep link). Persists + re-renders; no enumeration side effect.
 	const setScope = React.useCallback((next: DashboardScope): void => commitScope(next), [commitScope]);
 
-	/** Enumerate a workspace's projects + restore the persisted project if it is still present. */
+	/** Enumerate a workspace's projects (sets the hydrated flag so the 059b first-run CTA can key off it). */
 	const loadProjects = React.useCallback(async (): Promise<void> => {
 		const rows = await wire.scopeProjects();
 		setProjects(rows);
+		setProjectsHydrated(true);
 	}, [wire]);
 
 	// Hydrate orgs once on mount (49e-AC-1). The list is privilege-scoped server-side.
@@ -212,18 +248,33 @@ export function ScopeProvider({ wire, children }: { wire: WireClient; children: 
 		};
 	}, [wire, loadProjects]);
 
-	// Select an org → re-enumerate workspaces (49e-AC-3: the daemon re-mints the org-bound token FIRST,
-	// then lists). Clears the workspace + project (a new org has its own workspaces/projects).
+	// IRD-122 (122-AC-1 / 122-AC-2): selecting an org now PERSISTS a real org switch via the daemon
+	// (re-mint the org-bound token + save to credentials.json — the SAME mechanic as `honeycomb org
+	// switch`), THEN re-enumerates the new org's workspaces. The switch is no longer viewer-only: on
+	// success `whoami` reflects it. Feedback is surfaced (122-AC-4) — pending while re-minting, then
+	// persisted or error; a FAILED persist does NOT silently change the dashboard view (we keep the prior
+	// scope so the control never lies about what is active).
 	const selectOrg = React.useCallback(
 		(org: string): void => {
-			commitScope({ org, workspace: DEFAULT_SCOPE.workspace, project: undefined });
 			setLoadingWorkspaces(true);
+			setSwitchFeedback({ kind: "persisted", message: "switching org…", pending: true });
 			void (async () => {
 				try {
-					const ws = await wire.scopeWorkspaces(org);
+					const ack = await wire.switchOrg(org);
+					if (!ack.switched) {
+						// The persist failed (no credential / unknown org / re-mint error). Surface it; do NOT
+						// mutate the active scope — the switcher honestly reflects that nothing changed.
+						setSwitchFeedback({ kind: "error", message: ack.error !== undefined && ack.error !== "" ? `could not switch: ${ack.error}` : "could not switch org" });
+						return;
+					}
+					// Persisted (re-minted if the org changed). Commit the view to the now-active org + reset the
+					// workspace (a concrete workspace belonged to the previous org), then re-enumerate.
+					commitScope({ org: ack.org, workspace: DEFAULT_SCOPE.workspace, project: undefined });
+					const ws = await wire.scopeWorkspaces(ack.org);
 					setWorkspaces(ws.workspaces);
-					// Projects belong to a workspace; clear them until a workspace is picked under the new org.
 					setProjects([]);
+					setProjectsHydrated(true);
+					setSwitchFeedback({ kind: "persisted", message: ack.reminted ? `switched to ${ack.orgName ?? ack.org} · re-minted` : `switched to ${ack.orgName ?? ack.org}` });
 				} finally {
 					setLoadingWorkspaces(false);
 				}
@@ -232,28 +283,41 @@ export function ScopeProvider({ wire, children }: { wire: WireClient; children: 
 		[wire, commitScope],
 	);
 
-	// Select a workspace → re-enumerate its projects. Clears the project (the new workspace's projects differ).
+	// IRD-122: selecting a workspace PERSISTS the workspace switch via the daemon (write the workspace id
+	// to credentials.json — no re-mint), THEN re-enumerates its projects. Failure is surfaced, never silent.
 	const selectWorkspace = React.useCallback(
 		(workspace: string): void => {
-			commitScope({ org: scope.org, workspace, project: undefined });
-			void loadProjects();
+			setSwitchFeedback({ kind: "persisted", message: "switching workspace…", pending: true });
+			void (async () => {
+				const ack = await wire.switchWorkspace(workspace);
+				if (!ack.switched) {
+					setSwitchFeedback({ kind: "error", message: ack.error !== undefined && ack.error !== "" ? `could not switch: ${ack.error}` : "could not switch workspace" });
+					return;
+				}
+				commitScope({ org: scope.org, workspace: ack.workspace, project: undefined });
+				await loadProjects();
+				setSwitchFeedback({ kind: "persisted", message: `switched to ${ack.workspace}` });
+			})();
 		},
-		[commitScope, scope.org, loadProjects],
+		[wire, commitScope, scope.org, loadProjects],
 	);
 
-	// Select a project → re-scope the pages (viewer-side). `undefined` clears the selection (the
-	// needs-selection empty state, 49e-AC-5). NO registry write (49e-AC-4).
+	// 122-AC-3: the project dropdown is a VIEW FILTER. Selecting a project re-scopes the pages
+	// (viewer-side; NO registry write — 49e-AC-4) and surfaces "view filter" feedback so the user
+	// understands it changes the VIEW, not where capture is written (that is folder/binding-driven —
+	// PRD-059). `undefined` clears the selection (the needs-selection empty state, 49e-AC-5).
 	const selectProject = React.useCallback(
 		(project: string | undefined): void => {
 			commitScope({ org: scope.org, workspace: scope.workspace, ...(project !== undefined ? { project } : {}) });
+			setSwitchFeedback({ kind: "view", message: project !== undefined ? "view filter — capture is set by folder binding" : "view cleared" });
 		},
 		[commitScope, scope.org, scope.workspace],
 	);
 
 	const scopeValue = React.useMemo<ScopeContextValue>(() => ({ scope, setScope }), [scope, setScope]);
 	const switcherValue = React.useMemo<ScopeSwitcherValue>(
-		() => ({ orgs, workspaces, projects, loadingWorkspaces, selectOrg, selectWorkspace, selectProject }),
-		[orgs, workspaces, projects, loadingWorkspaces, selectOrg, selectWorkspace, selectProject],
+		() => ({ orgs, workspaces, projects, projectsHydrated, loadingWorkspaces, switchFeedback, selectOrg, selectWorkspace, selectProject }),
+		[orgs, workspaces, projects, projectsHydrated, loadingWorkspaces, switchFeedback, selectOrg, selectWorkspace, selectProject],
 	);
 
 	return (
@@ -367,8 +431,11 @@ export function ScopeSwitcherSlot({ collapsed }: ScopeSwitcherSlotProps): React.
 				))}
 			</SwitcherSelect>
 
+			{/* IRD-122 (122-AC-3): the project dropdown is explicitly a VIEW FILTER — it cannot set capture
+			    scope (that is folder/binding-driven via PRD-059). The label + caption say so unambiguously so a
+			    user never reads it as "capture here". */}
 			<SwitcherSelect
-				label="project"
+				label="project · view filter"
 				testId="scope-project"
 				value={scope.project ?? NO_PROJECT_VALUE}
 				onChange={(v) => switcher.selectProject(v === NO_PROJECT_VALUE ? undefined : v)}
@@ -382,6 +449,32 @@ export function ScopeSwitcherSlot({ collapsed }: ScopeSwitcherSlotProps): React.
 					</option>
 				))}
 			</SwitcherSelect>
+			<span data-testid="project-view-hint" style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-tertiary)", lineHeight: 1.4 }}>
+				Filters what you VIEW. To set where Honeycomb captures, bind a folder in Projects.
+			</span>
+
+			{/* IRD-122 (122-AC-4): every switch surfaces feedback — no change is a silent no-op. A persisted
+			    org/workspace switch (saved to credentials.json), a project view-filter change, or a failure
+			    each show here, distinctly toned. */}
+			{switcher.switchFeedback !== null && (
+				<span
+					data-testid="switch-feedback"
+					data-kind={switcher.switchFeedback.kind}
+					style={{
+						fontFamily: "var(--font-mono)",
+						fontSize: 10,
+						color:
+							switcher.switchFeedback.kind === "error"
+								? "var(--severity-critical)"
+								: switcher.switchFeedback.kind === "persisted"
+									? "var(--verified)"
+									: "var(--text-tertiary)",
+					}}
+				>
+					{switcher.switchFeedback.pending === true ? "⟳ " : switcher.switchFeedback.kind === "persisted" ? "✓ " : ""}
+					{switcher.switchFeedback.message}
+				</span>
+			)}
 		</div>
 	);
 }

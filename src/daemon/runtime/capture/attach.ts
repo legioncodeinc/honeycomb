@@ -82,6 +82,20 @@ export interface AttachHooksOptions {
 	 * assembly wires it to the pipeline fan-out.
 	 */
 	readonly enqueuePipelineEntry?: (text: string, scope: QueryScope, agentId: string, projectId?: string) => Promise<void>;
+	/**
+	 * PRD-059a / IRD-123: enable the first-run capture gate (default ON in production via
+	 * {@link attachHooksHandlers}). When enabled, a capture whose active workspace has zero
+	 * locally-bound projects no-ops (writes nothing) until the first `honeycomb project bind`.
+	 * Threaded to the capture handler's `firstRunGate`. A test that does not exercise onboarding
+	 * passes `false` (or seeds a bound project) to restore the pre-059a always-capture behaviour.
+	 */
+	readonly firstRunGate?: boolean;
+	/**
+	 * PRD-059a: override the local `~/.deeplake/projects.json` directory the gate (and the 049b
+	 * project attribution) read. Defaults to `~/.deeplake` in production; a test points it at a temp
+	 * cache so the gate's open/closed state is deterministic.
+	 */
+	readonly projectsDir?: string;
 	/** Optional structured-log sink. */
 	readonly logger?: CaptureLogger;
 	/**
@@ -119,6 +133,8 @@ export function attachHooksHandlers(daemon: Daemon, options: AttachHooksOptions)
 		queue: options.queue,
 		...(options.embed !== undefined ? { embed: options.embed } : {}),
 		...(options.enqueuePipelineEntry !== undefined ? { enqueuePipelineEntry: options.enqueuePipelineEntry } : {}),
+		...(options.firstRunGate !== undefined ? { firstRunGate: options.firstRunGate } : {}),
+		...(options.projectsDir !== undefined ? { projectsDir: options.projectsDir } : {}),
 		...(options.logger !== undefined ? { logger: options.logger } : {}),
 	});
 	handler.register(daemon);

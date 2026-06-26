@@ -80,6 +80,7 @@ export { type CatalogRegistry, PATTERN_PRIMITIVE } from "./registry.js";
 export { type CatalogScope, type CatalogTable, type WritePattern } from "./types.js";
 export {
 	buildDedupCheckSql,
+	buildMemoryCountsByProjectSql,
 	contentHash,
 	MEMORIES_COLUMNS,
 	MEMORIES_TABLES,
@@ -90,6 +91,7 @@ export {
 	SOFT_DELETED,
 } from "./memories.js";
 export {
+	buildSessionCountsByProjectSql,
 	buildTranscriptLookupSql,
 	isTranscriptPath,
 	MEMORY_COLUMNS,

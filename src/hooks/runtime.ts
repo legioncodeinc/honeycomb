@@ -55,6 +55,7 @@ import { createCredentialReader } from "./shared/credential-reader.js";
 import { createSessionStartSeams } from "./shared/session-start-seams.js";
 import {
 	createContextRenderer,
+	createOnboardingNoticeGate,
 	createPrimeRenderer,
 	type CredentialReader,
 	type DaemonHookClient,
@@ -62,6 +63,7 @@ import {
 	type HookInput,
 	type HookResult,
 	type HookSessionMeta,
+	type OnboardingNoticeGate,
 	type PrimeRenderer,
 	runCapture,
 	runPreToolUse,
@@ -106,6 +108,13 @@ export interface HookRuntimeOptions {
 	 * the other steps (heal/update/ensure/placeholder/graph-pull) stay no-op (out of 045g scope).
 	 */
 	readonly seams?: SessionStartSeams;
+	/**
+	 * Inject the first-run onboarding-notice gate (tests / PRD-059a / IRD-123). Defaults to the REAL
+	 * gate reading `~/.deeplake/projects.json` ({@link createOnboardingNoticeGate}). When the active
+	 * workspace has bound no project, session-start prepends the one-per-session "bind a project to
+	 * start" notice. Fail-soft, NO DeepLake call. A test injects a fixed gate to drive the notice.
+	 */
+	readonly onboardingNotice?: OnboardingNoticeGate;
 	/**
 	 * Inject the summary spawn for session-end (019b FR-6). Defaults to a no-op spawn —
 	 * the real detached `claude -p` / `codex exec` spawn is the shim's host-CLI concern,
@@ -190,6 +199,11 @@ export function createHookRuntime(options: HookRuntimeOptions = {}): HookRuntime
 	// skills never reached a teammate's session. Injected ONLY on the session-start branch below.
 	const seams = options.seams ?? createSessionStartSeams({ credentials, host, port, fetch: doFetch });
 
+	// PRD-059a / IRD-123 (a-AC-2): the REAL first-run onboarding-notice gate — a pure local read of
+	// `~/.deeplake/projects.json`. When the active workspace has bound no project yet, session-start
+	// prepends the one-per-session "bind a project to start" notice. Fail-soft (no DeepLake call).
+	const onboardingNotice = options.onboardingNotice ?? createOnboardingNoticeGate();
+
 	return {
 		deps,
 		notifications,
@@ -204,7 +218,7 @@ export function createHookRuntime(options: HookRuntimeOptions = {}): HookRuntime
 			if (input === undefined) {
 				return { result: { ok: true }, dropped: true };
 			}
-			return dispatchLifecycle(input, deps, captureEnv, notifications, summarySpawn, prime, seams);
+			return dispatchLifecycle(input, deps, captureEnv, notifications, summarySpawn, prime, seams, onboardingNotice);
 		},
 	};
 }
@@ -223,6 +237,7 @@ async function dispatchLifecycle(
 	summarySpawn: SummarySpawn,
 	prime: PrimeRenderer,
 	seams: SessionStartSeams,
+	onboardingNotice: OnboardingNoticeGate,
 ): Promise<HookEventOutcome> {
 	try {
 		switch (input.event) {
@@ -233,7 +248,7 @@ async function dispatchLifecycle(
 				// PRD-045g (g-AC-2): the REAL step seams are injected here so `autoPullSkills`
 				// runs a real (idempotent, fail-soft, time-budgeted) loopback pull instead of the
 				// no-op default — freshly-mined team skills reach this session at its start.
-				const sessionDeps: SessionStartDeps = { ...deps, captureEnv, prime, seams };
+				const sessionDeps: SessionStartDeps = { ...deps, captureEnv, prime, seams, onboardingNotice };
 				const result = await runSessionStart(input, sessionDeps);
 				// c-AC-4: drain the 020d notifications pipeline (call it; do not reimplement).
 				const drain = await drainNotificationsSoft(notifications);
