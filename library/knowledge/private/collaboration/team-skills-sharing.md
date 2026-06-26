@@ -5,6 +5,7 @@
 How Honeycomb mines reusable skills from agent sessions, publishes them to the org's shared DeepLake table, and automatically distributes them to every teammate's agents on the next session start.
 
 **Related:**
+- [`fleet-observation-and-on-demand-skills.md`](fleet-observation-and-on-demand-skills.md)
 - [`../ai/skillify-pipeline.md`](../ai/skillify-pipeline.md)
 - [`asset-sync-substrate.md`](asset-sync-substrate.md)
 - [`../architecture/system-overview.md`](../architecture/system-overview.md)
