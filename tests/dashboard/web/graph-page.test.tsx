@@ -66,6 +66,14 @@ const MEMORY_GRAPH: GraphWire = {
 
 const EMPTY: GraphWire = { built: false, nodes: [], edges: [] };
 
+/** A built graph the daemon TRUNCATED: the shipped nodes are few, but `meta` reports the full snapshot size. */
+const TRUNCATED_GRAPH: GraphWire = {
+	built: true,
+	nodes: CODEBASE_GRAPH.nodes,
+	edges: CODEBASE_GRAPH.edges,
+	meta: { totalNodes: 2000, totalEdges: 1500, shownNodes: 4, shownEdges: 3, truncated: true },
+};
+
 /**
  * A mock wire client returning the given codebase + memory graphs. `graph()` returns whatever the test's
  * `codebaseRef` currently holds (so a test can flip the source from `EMPTY` to a built graph to simulate a
@@ -211,6 +219,45 @@ describe("PRD-041a: the page renders the FULL graph (every node + every edge)", 
 		expect(container.textContent ?? "").toContain("fetchGraphView()");
 		// The eyebrow reflects the live counts + the active source.
 		expect(container.textContent ?? "").toContain("codebase · 4 nodes · 3 edges");
+	});
+});
+
+// ── Truncation notice (the graph memory cap) ─────────────────────────────────────
+
+describe("graph memory cap: the truncation notice reports the daemon meta counts, not post-filter counts", () => {
+	it("shows 'shownNodes of totalNodes' from meta, and a kind filter does NOT change those numbers", async () => {
+		await mountPage(mockWire(TRUNCATED_GRAPH, EMPTY));
+		const notice = container.querySelector('[data-testid="graph-truncation-notice"]');
+		expect(notice).not.toBeNull();
+		// Sourced from graph.meta (4 of 2,000), NOT the rendered node count.
+		expect(notice?.textContent).toContain("4 most-connected of 2,000");
+
+		// Hiding a kind shrinks the RENDERED set, but the daemon-cap counts in the banner must not move
+		// (the regression CodeRabbit caught: rendered.nodes.length was leaking into the cap message).
+		const fnToggle = container.querySelector('[data-testid="kind-toggle-function"]') as HTMLButtonElement;
+		act(() => fnToggle.click());
+		expect(container.querySelector('[data-testid="graph-truncation-notice"]')?.textContent).toContain("4 most-connected of 2,000");
+	});
+
+	it("does NOT show the notice for an untruncated graph (meta.truncated=false / no meta)", async () => {
+		await mountPage(mockWire(CODEBASE_GRAPH, EMPTY));
+		expect(container.querySelector('[data-testid="graph-truncation-notice"]')).toBeNull();
+	});
+
+	it("shows the CLIENT-cap message when the fetched graph exceeds the render cap with NO daemon meta", async () => {
+		// > MAX_RENDER_NODES (1500) nodes and no `meta` → serverTruncated=false, capped=true → the fallback
+		// "Rendering is capped at …" branch (the client-only render backstop).
+		const huge: GraphWire = {
+			built: true,
+			nodes: Array.from({ length: 1600 }, (_, i) => ({ id: `n${i}`, label: `n${i}`, kind: "file" })),
+			edges: [],
+		};
+		await mountPage(mockWire(huge, EMPTY));
+		const notice = container.querySelector('[data-testid="graph-truncation-notice"]');
+		expect(notice).not.toBeNull();
+		expect(notice?.textContent).toContain("Rendering is capped at 1,500 nodes");
+		// It must NOT borrow the daemon "most-connected of M" phrasing (there is no meta here).
+		expect(notice?.textContent).not.toContain("most-connected of");
 	});
 });
 

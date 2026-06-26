@@ -165,10 +165,20 @@ export const GraphEdgeSchema = z.object({
 	to: z.string().catch(""),
 	kind: z.string().catch(""),
 });
+/** Bounded-view metadata → {@link import("../contracts.js").GraphViewMeta} (the graph memory cap — the graph cap). */
+export const GraphMetaSchema = z.object({
+	totalNodes: z.number().catch(0),
+	totalEdges: z.number().catch(0),
+	shownNodes: z.number().catch(0),
+	shownEdges: z.number().catch(0),
+	truncated: z.boolean().catch(false),
+});
 export const GraphSchema = z.object({
 	built: z.boolean().catch(false),
 	nodes: z.array(GraphNodeSchema).catch([]),
 	edges: z.array(GraphEdgeSchema).catch([]),
+	// Optional + fail-soft: a malformed/absent `meta` degrades to undefined, never nuking the graph.
+	meta: GraphMetaSchema.optional().catch(undefined),
 });
 export type GraphWire = z.infer<typeof GraphSchema>;
 
@@ -1171,6 +1181,49 @@ export const EMPTY_SETTINGS: SettingsWire = { orgId: "", orgName: "", workspace:
 
 /** The empty graph (renders the kit's "no graph built" empty-state). */
 export const EMPTY_GRAPH: GraphWire = { built: false, nodes: [], edges: [] };
+
+/**
+ * The client-side render cap (the graph memory cap — memory-aware). The daemon already bounds the
+ * codebase graph (`GET /api/graph` ships ≤ ~750 nodes), but this is the shared defense-in-depth backstop
+ * so NO consumer mounts an unbounded number of SVG node groups, whatever the source (a large memory
+ * graph, an older uncapped daemon, a future endpoint). Set above the daemon budget so the daemon's cap
+ * normally governs and this only catches outliers. Single source for both the full Graph page and the
+ * mini-widget so the policy can never drift between them.
+ */
+export const MAX_RENDER_NODES = 1500;
+
+/**
+ * The companion EDGE cap. Nodes are `<g>` groups but edges are `<line>` elements — a dense graph under
+ * the node cap can still carry hundreds of thousands of edges and lock up layout/SVG. So the helper
+ * bounds edges too. Sized so nodes+edges together stay a few thousand SVG elements (well within budget).
+ */
+export const MAX_RENDER_EDGES = 5000;
+
+/**
+ * Bound a graph to {@link MAX_RENDER_NODES}-ish nodes AND {@link MAX_RENDER_EDGES} edges for rendering
+ * (the shared cap helper). Within BOTH limits → returned unchanged (same ref, so a memoized layout is
+ * not invalidated). Over EITHER → the first `limit` nodes plus at most `MAX_RENDER_EDGES` of the edges
+ * whose both endpoints survive, with `capped:true`. Capping edges as well as nodes is what makes this a
+ * real backstop: a dense graph (or an old uncapped daemon) can no longer flood the DOM with `<line>`s
+ * even when the node count is bounded. Pure — order is whatever the caller already settled (the daemon
+ * ships its bounded set importance-ranked, so "first N" here is already the meaningful head).
+ */
+export function capGraphForRender(graph: GraphWire, limit: number): { graph: GraphWire; capped: boolean } {
+	const tooManyNodes = graph.nodes.length > limit;
+	const tooManyEdges = graph.edges.length > MAX_RENDER_EDGES;
+	if (!tooManyNodes && !tooManyEdges) return { graph, capped: false };
+	const nodes = tooManyNodes ? graph.nodes.slice(0, limit) : graph.nodes;
+	const kept = new Set(nodes.map((n) => n.id));
+	// Keep only edges between surviving nodes, stopping at the edge budget so a dense subgraph can't
+	// hand the canvas an unbounded `<line>` count.
+	const edges: GraphWire["edges"] = [];
+	for (const edge of graph.edges) {
+		if (!kept.has(edge.from) || !kept.has(edge.to)) continue;
+		edges.push(edge);
+		if (edges.length >= MAX_RENDER_EDGES) break;
+	}
+	return { graph: { ...graph, nodes, edges }, capped: true };
+}
 
 /** The empty log-history page the table shows before the first load (or on failure / unavailable store). */
 export const EMPTY_LOGS_HISTORY: LogsHistoryWire = Object.freeze({ records: [], count: 0, nextCursor: null, persistent: false });

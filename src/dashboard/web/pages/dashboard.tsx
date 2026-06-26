@@ -25,15 +25,13 @@
 import React from "react";
 
 import { Badge, Button, Input, Kpi, MemoryCard } from "../primitives.js";
-import { GraphCanvas, LiveLog, RulesPanel, SessionsPanel, SettingsPanel, SkillSyncPanel } from "../panels.js";
+import { LiveLog, RulesPanel, SessionsPanel, SettingsPanel, SkillSyncPanel } from "../panels.js";
 import { HarnessStrip } from "../harness-strip.js";
 import type { PageProps } from "../page-frame.js";
 import {
-	EMPTY_GRAPH,
 	EMPTY_KPIS,
 	EMPTY_VAULT_SETTINGS,
 	formatLogLine,
-	type GraphWire,
 	type HarnessStatusWire,
 	type HealthReasonsWire,
 	type KpisWire,
@@ -157,7 +155,6 @@ export function DashboardPage({ wire, pollinating = false }: PageProps): React.J
 	const [sessions, setSessions] = React.useState<readonly SessionRowWire[]>([]);
 	const [rules, setRules] = React.useState<readonly RuleRowWire[]>([]);
 	const [skills, setSkills] = React.useState<readonly SkillRowWire[]>([]);
-	const [graph, setGraph] = React.useState<GraphWire>(EMPTY_GRAPH);
 	const [vaultSettings, setVaultSettings] = React.useState<VaultSettingsWire>(EMPTY_VAULT_SETTINGS);
 	const [secretNames, setSecretNames] = React.useState<readonly string[]>([]);
 
@@ -188,12 +185,11 @@ export function DashboardPage({ wire, pollinating = false }: PageProps): React.J
 	 * its own settings; this page hydrates only what its body renders.
 	 */
 	const hydrate = React.useCallback(async (): Promise<void> => {
-		const [k, sess, r, sk, g, vs, sn] = await Promise.all([
+		const [k, sess, r, sk, vs, sn] = await Promise.all([
 			wire.kpis(),
 			wire.sessions(),
 			wire.rules(),
 			wire.skills(),
-			wire.graph(),
 			wire.vaultSettings(),
 			wire.secretNames(),
 		]);
@@ -201,18 +197,8 @@ export function DashboardPage({ wire, pollinating = false }: PageProps): React.J
 		setSessions(sess);
 		setRules(r);
 		setSkills(sk);
-		setGraph(g);
 		setVaultSettings(vs);
 		setSecretNames(sn);
-	}, [wire]);
-
-	/**
-	 * Re-hydrate ONLY the codebase graph (used by the home GraphPanel's "Build graph" button on a
-	 * successful build). The fresh snapshot is a LOCAL file the next `wire.graph()` reads immediately —
-	 * no eventual-consistency poll — so the panel swaps from the empty state to the drawn graph at once.
-	 */
-	const refreshGraph = React.useCallback(async (): Promise<void> => {
-		setGraph(await wire.graph());
 	}, [wire]);
 
 	/** PRD-032c (AC-5): persist one vault `setting` through the daemon, then RE-READ the persisted truth. */
@@ -361,7 +347,9 @@ export function DashboardPage({ wire, pollinating = false }: PageProps): React.J
 						<RulesPanel rules={rules} />
 					</div>
 					<div className="col">
-						<GraphCanvas graph={graph} pollinating={pollinating} wire={wire} onBuilt={refreshGraph} />
+						{/* The codebase-graph canvas is intentionally NOT on the home (the graph memory cap): a real snapshot is
+						    tens of thousands of nodes and rendering it here froze the browser. The graph lives on its
+						    own bounded, memory-aware `#/graph` page; the home stays light. */}
 						<SettingsPanel catalog={vaultSettings.catalog} settings={vaultSettings.settings} secretNames={secretNames} onSave={saveSetting} />
 						<SkillSyncPanel skills={skills} />
 					</div>

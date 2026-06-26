@@ -147,7 +147,7 @@ describe("037 AC-1: the left-nav shell renders all seven nav items + the chrome"
 });
 
 describe("037b AC-5: Dashboard route parity — the monolithic content renders intact on '/'", () => {
-	it("renders KPIs/recall/sessions/rules/skills/graph/live-log on the default Dashboard route", async () => {
+	it("renders KPIs/recall/sessions/rules/skills/live-log on the default Dashboard route", async () => {
 		await mountShell(makeMockFetch());
 		const text = container.textContent ?? "";
 		// Recall bar + KPI tiles.
@@ -166,7 +166,9 @@ describe("037b AC-5: Dashboard route parity — the monolithic content renders i
 		expect(text).toContain("Never deploy from main");
 		expect(text).toContain("Skill-sync");
 		expect(text).toContain("deeplake-query-builder");
-		expect(text).toContain("Codebase graph");
+		// graph memory cap: the codebase graph is NO LONGER on the dashboard home (a real snapshot froze the
+		// browser). It lives on its own bounded `#/graph` page; the home must not render it.
+		expect(text).not.toContain("Codebase graph");
 		expect(text).toContain("Live log");
 		// The kit's grid container classes are present.
 		expect(container.querySelector(".kpirow")).not.toBeNull();

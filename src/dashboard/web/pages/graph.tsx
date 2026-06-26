@@ -38,7 +38,7 @@ import type { PageProps } from "../page-frame.js";
 import { PageFrame } from "../page-frame.js";
 import { useScope } from "../scope-context.js";
 import { NeedsProjectSelection } from "../needs-project.js";
-import { EMPTY_GRAPH, type GraphWire, type WireClient } from "../wire.js";
+import { capGraphForRender, EMPTY_GRAPH, MAX_RENDER_NODES, type GraphWire, type WireClient } from "../wire.js";
 
 /** How often the page re-hydrates the active graph source (ms). Light refresh, stopped on unmount. */
 const GRAPH_POLL_MS = 8000;
@@ -554,10 +554,21 @@ export function GraphPage({ wire }: PageProps): React.JSX.Element {
 	}, []);
 
 	const kinds = React.useMemo(() => distinctKinds(graph), [graph]);
-	// The visible sub-graph after the kind filter (D-5) — this is what the canvas + counts read.
+	// The visible sub-graph after the kind filter (D-5).
 	const visible = React.useMemo(() => applyKindFilter(graph, hiddenKinds), [graph, hiddenKinds]);
-	// The selected node still present in the VISIBLE graph (clears if it was filtered/removed).
-	const selectedNode = selected !== null ? visible.nodes.find((n) => n.id === selected) ?? null : null;
+	// graph memory cap: bound what the canvas actually draws. The daemon already caps the payload (`graph.meta`);
+	// this is the client-side backstop so the page never mounts an unbounded number of SVG nodes. This
+	// `rendered` set is what the canvas, counts, selection, and search all read.
+	const { graph: rendered, capped } = React.useMemo(() => capGraphForRender(visible, MAX_RENDER_NODES), [visible]);
+	// graph memory cap — TWO distinct, separately-reported reductions (never conflated with the kind FILTER,
+	// which is a user action, not truncation):
+	//   • serverTruncated — the daemon dropped nodes from the snapshot; its honest counts are in `graph.meta`
+	//     (shownNodes of totalNodes), independent of any local filter.
+	//   • capped — the client render backstop fired (the fetched graph still exceeded MAX_RENDER_NODES).
+	const serverTruncated = graph.meta?.truncated ?? false;
+	const truncated = serverTruncated || capped;
+	// The selected node still present in the RENDERED graph (clears if it was filtered/capped away).
+	const selectedNode = selected !== null ? rendered.nodes.find((n) => n.id === selected) ?? null : null;
 
 	const toggleKind = React.useCallback((kind: string): void => {
 		setHiddenKinds((prev) => {
@@ -571,15 +582,15 @@ export function GraphPage({ wire }: PageProps): React.JSX.Element {
 	const onSearch = React.useCallback(
 		(raw: string): void => {
 			setSearch(raw);
-			const hit = findNode(visible, raw);
+			const hit = findNode(rendered, raw);
 			if (hit === null) return;
 			setSelected(hit);
 			// Focus the match: center the view on its computed position at a comfortable zoom (D-6).
-			const positions = layout(visible.nodes, visible.edges, GRAPH_VIEW);
+			const positions = layout(rendered.nodes, rendered.edges, GRAPH_VIEW);
 			const p = positions.get(hit);
 			if (p !== undefined) setTransform(centerOn(p, Math.max(transform.scale, 1.4)));
 		},
-		[visible, transform.scale],
+		[rendered, transform.scale],
 	);
 
 	const fit = React.useCallback((): void => setTransform(IDENTITY_TRANSFORM), []);
@@ -589,7 +600,7 @@ export function GraphPage({ wire }: PageProps): React.JSX.Element {
 	const onSelect = React.useCallback((id: string): void => setSelected((cur) => (cur === id ? null : id)), []);
 	const clearSelection = React.useCallback((): void => setSelected(null), []);
 
-	const eyebrow = `${source} · ${visible.nodes.length} nodes · ${visible.edges.length} edges`;
+	const eyebrow = `${source} · ${rendered.nodes.length} nodes · ${rendered.edges.length} edges`;
 
 	const toolbar = <SourceToggle source={source} onPick={pickSource} />;
 
@@ -602,6 +613,32 @@ export function GraphPage({ wire }: PageProps): React.JSX.Element {
 				<GraphEmptyState source={source} wire={wire} onBuilt={refreshGraph} />
 			) : (
 				<>
+					{/* graph memory cap: when the graph is bounded, say so honestly — and source the "N of M" from the
+					    daemon's `meta` (NOT the post-filter render count, which the kind filter also shrinks). */}
+					{truncated && (
+						<div
+							data-testid="graph-truncation-notice"
+							style={{
+								display: "flex",
+								alignItems: "center",
+								gap: 8,
+								marginBottom: 14,
+								padding: "9px 12px",
+								background: "var(--bg-elevated)",
+								border: "1px solid var(--border-subtle)",
+								borderRadius: "var(--radius-md)",
+								fontFamily: "var(--font-mono)",
+								fontSize: 12,
+								color: "var(--text-tertiary)",
+							}}
+						>
+							<span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--severity-warning)", flex: "none" }} />
+							{serverTruncated
+								? `Showing the ${(graph.meta?.shownNodes ?? graph.nodes.length).toLocaleString()} most-connected of ${(graph.meta?.totalNodes ?? graph.nodes.length).toLocaleString()} nodes. Use search and kind filters to focus.`
+								: `Rendering is capped at ${MAX_RENDER_NODES.toLocaleString()} nodes. Use search and kind filters to focus.`}
+						</div>
+					)}
+
 					{/* Controls row: search + kind filters + zoom/fit (D-3/D-5/D-6). */}
 					<div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14, flexWrap: "wrap" }}>
 						<input
@@ -648,7 +685,7 @@ export function GraphPage({ wire }: PageProps): React.JSX.Element {
 							}}
 						>
 							<GraphCanvasFull
-								graph={visible}
+								graph={rendered}
 								selected={selectedNode?.id ?? null}
 								transform={transform}
 								onSelect={onSelect}

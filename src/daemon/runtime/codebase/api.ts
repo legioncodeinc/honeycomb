@@ -147,27 +147,73 @@ export function loadFreshestLocalSnapshot(baseDir: string): Snapshot | null {
 }
 
 /**
- * Map a local {@link Snapshot} (NetworkX node-link JSON) into the dashboard {@link GraphView}
- * the canvas renders. The snapshot's `nodes` are codebase {@link import("./contracts.js").GraphNode}s
- * (`id` / `name` / `kind`) and its EDGES live under `links` (the NetworkX node-link convention —
- * `source` / `target` / `relation`), NOT an `edges` key. This is the authoritative, typed mapping:
+ * The maximum number of nodes `GET /api/graph` ships to the browser (the memory-aware graph cap).
+ *
+ * A real snapshot is tens of thousands of nodes (this repo: ~16k — mostly isolated symbol nodes). The
+ * dashboard rendered every one as an SVG `<g>`/`<circle>`/`<text>` group, which froze the CPU/GPU. The
+ * fix bounds the PAYLOAD at the source: no consumer (dashboard widget OR the full Graph page) can ever
+ * be handed more than this. The value is comfortably renderable as SVG yet large enough to carry the
+ * whole connected import/heritage core (the dropped tail is low-value isolated leaves).
+ */
+export const MAX_VIEW_NODES = 750;
+
+/**
+ * Map a local {@link Snapshot} (NetworkX node-link JSON) into a BOUNDED dashboard {@link GraphView}
+ * the canvas can render without freezing (the graph memory cap). The snapshot's `nodes` are codebase
+ * {@link import("./contracts.js").GraphNode}s (`id` / `name` / `kind`) and its EDGES live under `links`
+ * (the NetworkX node-link convention — `source` / `target` / `relation`), NOT an `edges` key.
+ *
  *   - node → `{ id, label: name (id fallback), kind }`
  *   - link → `{ from: source, to: target, kind: relation }`
- * Reading `links` (not a non-existent `edges`) is why the canvas now draws real edges. Pure +
- * total — every field is a string on both contracts, so there is no coercion or throw.
+ *
+ * ── The cap (the memory fix) ─────────────────────────────────────────────────
+ * When the snapshot has ≤ `limit` nodes it ships WHOLE, in original order (stable, test-friendly). When
+ * it is larger it ships only the top-`limit` nodes by IMPORTANCE — incident-edge degree (the connected
+ * structure), with a small bump for `file` nodes and entrypoints — and only the edges whose BOTH
+ * endpoints survived. Ranking by degree means the thousands of isolated, zero-edge symbol nodes (the
+ * bulk, and the least useful to draw) drop first while the connected core is preserved. `meta` reports
+ * the full-vs-shown counts so the UI can say "showing N of M" honestly. Pure + total — no throw.
  */
-export function snapshotToGraphView(snapshot: Snapshot): GraphView {
-	const nodes = snapshot.nodes.map((n) => ({
-		id: n.id,
-		label: n.name !== "" ? n.name : n.id,
-		kind: n.kind,
-	}));
-	const edges = snapshot.links.map((l) => ({
-		from: l.source,
-		to: l.target,
-		kind: l.relation,
-	}));
-	return { built: true, nodes, edges };
+export function snapshotToGraphView(snapshot: Snapshot, limit: number = MAX_VIEW_NODES): GraphView {
+	const totalNodes = snapshot.nodes.length;
+	const totalEdges = snapshot.links.length;
+
+	// Per-node degree over the DRAWABLE (internal) edges only — a link to an `external:<pkg>` target has
+	// no node to draw against (the canvas drops it), so counting it would rank a file high for imports
+	// that never render. Ranking by internal degree surfaces the genuinely connected core and keeps its
+	// edges intact under the cap, instead of a smear of high-import hubs with no drawable neighbors.
+	const nodeIds = new Set(snapshot.nodes.map((n) => n.id));
+	const degree = new Map<string, number>();
+	for (const l of snapshot.links) {
+		if (!nodeIds.has(l.source) || !nodeIds.has(l.target)) continue;
+		degree.set(l.source, (degree.get(l.source) ?? 0) + 1);
+		degree.set(l.target, (degree.get(l.target) ?? 0) + 1);
+	}
+
+	// Under budget → every node in ORIGINAL order. Over budget → the top-`limit` by importance.
+	let selected: readonly Snapshot["nodes"][number][] = snapshot.nodes;
+	let truncated = false;
+	if (totalNodes > limit) {
+		truncated = true;
+		const importance = (n: Snapshot["nodes"][number]): number =>
+			(degree.get(n.id) ?? 0) * 4 + (n.kind === "file" ? 2 : 0) + (n.observation.isEntrypoint === true ? 1 : 0);
+		// Tie-break by id so the selection is deterministic (two builds → the same shown set).
+		selected = [...snapshot.nodes].sort((a, b) => importance(b) - importance(a) || a.id.localeCompare(b.id)).slice(0, limit);
+	}
+
+	const kept = new Set(selected.map((n) => n.id));
+	const nodes = selected.map((n) => ({ id: n.id, label: n.name !== "" ? n.name : n.id, kind: n.kind }));
+	// Keep only edges whose BOTH endpoints survived — a dangling edge has no node to draw against.
+	const edges = snapshot.links
+		.filter((l) => kept.has(l.source) && kept.has(l.target))
+		.map((l) => ({ from: l.source, to: l.target, kind: l.relation }));
+
+	return {
+		built: true,
+		nodes,
+		edges,
+		meta: { totalNodes, totalEdges, shownNodes: nodes.length, shownEdges: edges.length, truncated },
+	};
 }
 
 /** The build result reported back to the caller (data, never a thrown error). */

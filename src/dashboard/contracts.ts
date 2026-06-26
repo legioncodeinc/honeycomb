@@ -120,18 +120,50 @@ export interface GraphEdge {
 }
 
 /**
+ * Bounded-view metadata (the memory-aware graph cap). A real codebase snapshot is tens of
+ * thousands of nodes; shipping/rendering all of them froze the browser. The daemon now ships only a
+ * bounded, importance-ranked SUBSET and reports here what the full graph held vs what was sent, so the
+ * UI can state honestly "showing N of M" rather than silently dropping nodes. When a graph fit under the
+ * budget whole, `truncated` is `false` and `shownNodes === totalNodes` (the shipped `nodes`/`edges` ARE
+ * the full graph). See {@link GraphView.meta} for which producers populate it.
+ */
+export interface GraphViewMeta {
+	/** Total nodes in the underlying snapshot (before the cap). */
+	readonly totalNodes: number;
+	/** Total edges in the underlying snapshot (before the cap). */
+	readonly totalEdges: number;
+	/** Nodes actually shipped in {@link GraphView.nodes} (≤ totalNodes). */
+	readonly shownNodes: number;
+	/** Edges actually shipped in {@link GraphView.edges} (≤ totalEdges). */
+	readonly shownEdges: number;
+	/** True when the cap dropped nodes/edges — the shown set is a subset, not the whole graph. */
+	readonly truncated: boolean;
+}
+
+/**
  * The codebase-graph view-model (FR-5 / a-AC-3 / a-AC-6). `built` is false when no graph
  * has been built for the workspace → the view shows the empty-state prompt to run
  * `honeycomb graph build` rather than an error (a-AC-6). When `built`, the canvas renders
  * from the nodes/edges the daemon's graph endpoints serve.
+ *
+ * The served nodes/edges are BOUNDED (the graph memory cap): for a large snapshot the daemon ships only the
+ * most-connected subset and reports the full-vs-shown counts in {@link meta}. The view is never the
+ * raw tens-of-thousands-node snapshot, so no consumer can be handed a payload that freezes the browser.
  */
 export interface GraphView {
 	/** True when a graph has been built for the workspace (FR-5 / a-AC-6). */
 	readonly built: boolean;
-	/** The graph nodes (empty when not built). */
+	/** The graph nodes (empty when not built; a bounded subset for a large graph — see {@link meta}). */
 	readonly nodes: readonly GraphNode[];
-	/** The graph edges (empty when not built). */
+	/** The graph edges (empty when not built; only edges between shown nodes for a large graph). */
 	readonly edges: readonly GraphEdge[];
+	/**
+	 * Bounded-view metadata (the graph memory cap). The codebase-graph endpoint (`GET /api/graph`)
+	 * ALWAYS populates it when `built` — `truncated` tells whether the cap dropped nodes. Other producers
+	 * (the memory-graph view, the `built:false` empty state) may OMIT it; consumers must treat it as
+	 * optional and fall back to `nodes`/`edges` lengths when it is absent.
+	 */
+	readonly meta?: GraphViewMeta;
 }
 
 /**
