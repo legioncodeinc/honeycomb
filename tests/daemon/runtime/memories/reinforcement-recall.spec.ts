@@ -231,9 +231,10 @@ describe("PRD-058e schema (58e.schema), additive lazy-heal, no migration", () =>
 	it("ALL new memories lifecycle columns ALTER-ADD cleanly (additive heal, no backfill failure)", () => {
 		// Every 058c/058e lifecycle column the catalog added to `memories`: the reinforcement cache
 		// (last_reinforced_at, access_count), the staleness layer (ref_status, verified_at, stale_refs),
-		// and the compaction watermark (access_compacted_at). Each must be additive-heal-safe so an
-		// ALTER ADD COLUMN backfills a populated table without failing the load-time guard.
-		const names = ["last_reinforced_at", "access_count", "ref_status", "verified_at", "stale_refs", "access_compacted_at"];
+		// and the compaction watermark CURSOR (access_compacted_at + its companion access_compacted_id).
+		// Each must be additive-heal-safe so an ALTER ADD COLUMN backfills a populated table without
+		// failing the load-time guard.
+		const names = ["last_reinforced_at", "access_count", "ref_status", "verified_at", "stale_refs", "access_compacted_at", "access_compacted_id"];
 		const columns = names.map((name) => {
 			const col = MEMORIES_COLUMNS.find((c) => c.name === name);
 			expect(col, `column ${name} is registered`).toBeDefined();

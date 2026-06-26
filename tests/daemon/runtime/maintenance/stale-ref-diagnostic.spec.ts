@@ -328,9 +328,12 @@ describe("PRD-058c runStaleRefDiagnostic — write, audit, posture", () => {
 		// The memory aborted fail-soft: written:false, and the batch still completed (never threw).
 		expect(report.ok).toBe(true);
 		expect(report.results[0]).toMatchObject({ id: "m6", written: false });
-		// CRITICAL: NO audit history append and NO projection UPDATE landed when the prior could not be read.
+		// CRITICAL: NO audit history append and NO projection write landed when the prior could not be read.
+		// The projection write is an update-or-insert, so assert BOTH branches are absent: a regression where
+		// `updateOrInsertByKey(...)` falls back to an INSERT would slip past a UPDATE-only check (round-3 #4).
 		expect(sql.some((s) => /INSERT INTO\s+"memory_history"/i.test(s))).toBe(false);
 		expect(sql.some((s) => /UPDATE\s+"memories"/i.test(s))).toBe(false);
+		expect(sql.some((s) => /INSERT INTO\s+"memories"/i.test(s))).toBe(false);
 	});
 
 	it("fail-soft: a snapshot provider THROW degrades to graphUnavailable, never a thrown pass", async () => {

@@ -19,17 +19,20 @@
  *     partition, embeddings-off dogfood) degrades activation to the cold floor,
  *     never throws.
  *  3. {@link compactAccessLog}, the retention worker's pruning step: keep the
- *     last `N = 32` raw events per memory, FOLD the older ones into
- *     `access_count` + `last_reinforced_at`, then delete the folded raw rows. So
- *     the log does not grow without bound (PRD-058e Risks / open question), while
- *     the activation frequency signal is preserved in the denormalized cache.
+ *     last `N = 32` raw events per memory, advance `last_reinforced_at` + the
+ *     compaction watermark for the older ones, then delete those raw rows. So the
+ *     log does not grow without bound (PRD-058e Risks / open question). NOTE
+ *     compaction does NOT touch `access_count`: that counter is owned solely by the
+ *     append path (`+1` per access), counted ONCE at append and left untouched by
+ *     pruning (the single-owner model — see {@link accumulateCache}). Pruning only
+ *     discards the raw rows; the reinforcement-count signal was already persisted.
  *
  * ── Append-only / version-bump-consistent (the one rule that cannot bend) ─────
  * The raw event INSERT is `appendOnlyInsert` (PRD-002d). The `memories` cache
  * maintenance is the `update-or-insert` pattern `memories` ALREADY uses (a keyed
- * upsert of two scalar columns), NOT a destructive rewrite of the row, it only
- * advances `last_reinforced_at` forward and the `access_count` counter, leaving
- * every other column intact. Reinforcement / compaction is off the capture hot
+ * upsert of scalar columns), NOT a destructive rewrite of the row, it only
+ * advances `last_reinforced_at` forward and the `access_count` counter (at append),
+ * leaving every other column intact. Reinforcement / compaction is off the capture hot
  * path (the session-end worker + the retention worker call these); the capture
  * write is never blocked by an access-log write (PRD-058e Technical
  * Considerations: "no model or aggregation step can cost the user a memory").
@@ -122,7 +125,10 @@ export interface AccessLogDeps {
  * Record ONE access event for a memory (PRD-058e). Appends `(id, memory_id, at,
  * usefulness, kind, agent_id, visibility)` to `memory_access` (append-only) and
  * maintains the `memories` denormalized cache:
- *   - `access_count` is bumped (read-modify-write of the keyed row);
+ *   - `access_count` is bumped `+1` (atomic relative increment, never a read-modify-
+ *     write). This is the SOLE writer of `access_count` (the single-owner model,
+ *     round-3 #1): every access is counted EXACTLY ONCE here at append, and
+ *     compaction never re-adds it. So `access_count` is the lifetime total accesses;
  *   - `last_reinforced_at` is advanced to `at` for a `reinforce` event (a recall
  *     confirmed useful is the freshness reference 058a's `t_ref` reads); a
  *     `recall`/`create`/`downweight` event bumps the count but does NOT move
@@ -189,7 +195,7 @@ export async function recordAccess(
  * The count is advanced with an ATOMIC relative SQL expression
  * `access_count = COALESCE(access_count, 0) + 1` — NOT a `SELECT` of the prior
  * value followed by an `UPDATE` to a computed constant. A read-then-write loses
- * increments under concurrency (two `recordAccess`/compaction runs read the same
+ * increments under concurrency (two concurrent `recordAccess` appends read the same
  * count and overwrite each other). The relative form composes: each apply adds
  * exactly one regardless of interleaving. (It is, by construction, a NON-idempotent
  * UPDATE — `statementRetryability` classifies a relative SET as `unsafe-write`, so
@@ -238,9 +244,13 @@ async function maintainMemoryCache(
  * sums over (PRD-058e), oldest-first. FAIL-SOFT: a missing `memory_access` table
  * (fresh partition) or any query error yields an EMPTY history, the activation
  * then floors at `A_min` (a cold memory), never throws. Rows with an unparseable
- * `at` are skipped (they cannot enter the time-weighted sum). The denormalized
- * `access_count` for folded-away older events is layered in by
- * {@link readActivationHistory}; THIS reader returns only the raw retained rows.
+ * `at` are skipped (they cannot enter the time-weighted sum). THIS reader returns
+ * only the RETAINED raw rows, which is exactly what the ACT-R activation math
+ * (`activation.ts`) sums over. The denormalized `access_count` (the lifetime total
+ * accesses) is a SEPARATE signal: it is surfaced as the displayed reinforcement
+ * count (`recall.ts` `MemoryRecallHit.accessCount`), NOT folded back into the
+ * activation sum — the two are never combined, so a folded-away event is counted
+ * once in `access_count` and never re-enters the activation history (no double count).
  */
 export async function readAccessHistory(
 	memoryId: string,
@@ -260,43 +270,51 @@ export async function readAccessHistory(
 
 /**
  * Compact a memory's access log (PRD-058e retention step). Keeps the most recent
- * `keepN` raw events, FOLDS the older ones into the `memories` cache
- * (`access_count` accumulates the folded count; `last_reinforced_at` advances to
- * the newest folded reinforcing event when later than the stored value), and
- * DELETEs the folded raw rows so the log stays bounded.
+ * `keepN` raw events, FOLDS the older ones (advances `last_reinforced_at` to the
+ * newest folded reinforcing event when later than the stored value, and advances
+ * the compaction watermark), then DELETEs those raw rows so the log stays bounded.
+ *
+ * ── SINGLE-OWNER `access_count` (round-3 #1) ─────────────────────────────────
+ * Compaction does NOT add to `access_count`. `access_count` is the TOTAL-accesses
+ * counter, incremented `+1` per access at APPEND ({@link maintainMemoryCache}) and
+ * NEVER re-touched here. An aged-out event was already counted once at append;
+ * pruning its raw row discards an optimization detail, not the reinforcement
+ * signal. The activation MATH reads the RETAINED raw rows, not `access_count`;
+ * `access_count` is surfaced only as the displayed lifetime reinforcement total
+ * (`recall.ts`). The two are never summed, so an access contributes EXACTLY ONCE
+ * end to end — no double count, no loss.
  *
  * ── IDEMPOTENT across a partial failure (the load-bearing invariant) ──────────
  * DeepLake has NO multi-statement transaction, so the fold-then-delete pair can be
- * interrupted: a crash after the cache write but before the delete would, with a
- * naive `access_count += foldCount`, RE-FOLD the same rows on the next run and
- * DOUBLE-COUNT; the reverse order would LOSE them. This compaction is made
- * idempotent by a persisted WATERMARK CURSOR, the TOTAL-ORDER position `(at, id)`
- * of the newest event already folded (`memories.access_compacted_at` +
- * `access_compacted_id`):
+ * interrupted. This compaction is made idempotent by a persisted WATERMARK CURSOR,
+ * the TOTAL-ORDER position `(at, id)` of the newest event already FOLDED
+ * (`memories.access_compacted_at` + `access_compacted_id`):
  *  - the fold set is exactly the events OLDER than the keep-horizon AND STRICTLY
  *    AFTER the `(at, id)` cursor (events at-or-before the cursor were already
- *    counted, so they are never re-folded). The cursor is the COMPOSITE `(at, id)`,
+ *    processed, so they are never re-folded). The cursor is the COMPOSITE `(at, id)`,
  *    not `at` alone: several events can share one `at`, and an `at`-only cursor
  *    could not tell an already-folded row from a not-yet-folded same-`at` sibling:
  *    it would treat the sibling as folded (`at === watermark`, not `>`) and delete
- *    it WITHOUT counting it (a silent loss). Pairing `at` with `id` gives a strict
- *    total order so a same-`at` sibling still compares "after" the cursor;
- *  - the count accumulate + BOTH cursor halves advance in the SAME atomic cache
- *    UPDATE, so the cursor always reflects precisely what was counted;
+ *    it WITHOUT processing it (a silent loss of the reinforce/freshness advance).
+ *    Pairing `at` with `id` gives a strict total order so a same-`at` sibling still
+ *    compares "after" the cursor;
+ *  - BOTH cursor halves advance in the SAME atomic cache UPDATE as the
+ *    reinforcement advance, so the cursor always reflects precisely what was folded;
  *  - the raw-row DELETE runs AFTER. A failed delete leaves the (now-folded) rows in
  *    place, but they are at-or-before the cursor so the NEXT run does not re-fold
- *    them (no double count) — it merely re-issues the idempotent DELETE. A failed
- *    cache UPDATE leaves the cursor UNADVANCED and the rows present, so the next
- *    run retries the whole fold cleanly (no loss).
+ *    them — it merely re-issues the idempotent DELETE. A failed cache UPDATE leaves
+ *    the cursor UNADVANCED and the rows present, so the next run retries cleanly.
  *
  * RULES:
  *  - A memory with `≤ keepN` events is left UNTOUCHED (nothing to fold).
  *  - FAIL-SOFT: a read/cache/delete error aborts the compaction for that memory
  *    without throwing; the next run retries with no double count and no loss. An
  *    UNREADABLE watermark (a query error, distinct from a genuinely-absent one)
- *    ABORTS rather than re-folding from the start (no double count).
+ *    ABORTS rather than re-folding from the start. An ABSENT memories row likewise
+ *    ABORTS (no fold, NO delete) — deleting raw rows the cache UPDATE could not
+ *    persist a watermark for would silently lose them (round-3 #2).
  * Returns the count of raw events folded THIS run (0 when nothing new was folded —
- * including a re-run over already-folded-but-undeleted rows).
+ * including a re-run over already-folded-but-undeleted rows, or an aborted run).
  */
 export async function compactAccessLog(
 	memoryId: string,
@@ -322,12 +340,17 @@ export async function compactAccessLog(
 	const rows = read.rows as StorageRow[];
 	if (rows.length <= keep) return { folded: 0 }; // nothing to fold.
 
-	// The compaction watermark: the (at, id) of the newest event ALREADY folded into the count. A read
-	// ERROR (not a genuinely-absent watermark) ABORTS: re-folding from "the start" after a transient read
-	// failure would double-count rows a prior run already folded but had not yet deleted. Read once, up front.
+	// The compaction watermark: the (at, id) of the newest event ALREADY folded into the count. This read
+	// also probes the memories ROW so the fold cannot delete raw events without a row to persist the
+	// watermark to. Two abort cases, BOTH before any cache write or delete:
+	//  - `error`: an unreadable watermark (a transient read failure). Re-folding from "the start" would
+	//    double-count rows a prior run already folded but had not yet deleted (round-2 #1).
+	//  - `missing`: the memories row is absent. The fold's UPDATE would match 0 rows (a silent no-op), so
+	//    the watermark never persists, yet the DELETE would still fire → a silent reinforcement LOSS
+	//    (round-3 #2). Abort with folded:0 and NO delete so the raw rows survive for a clean retry.
 	const watermarkRead = await readCompactionWatermark(memoryId, deps, scope);
-	if (watermarkRead.kind === "error") return { folded: 0 }; // fail-soft: unreadable watermark → retry next run, never re-fold.
-	const watermark = watermarkRead.value; // null ⇒ genuinely never compacted (every event is "after" it).
+	if (watermarkRead.kind === "error" || watermarkRead.kind === "missing") return { folded: 0 };
+	const watermark = watermarkRead.value; // null ⇒ row exists but genuinely never compacted (every event is "after" it).
 
 	// The horizon set is the OLDEST `rows.length - keep` events (in (at, id) order); from those, the rows
 	// STRICTLY AFTER the watermark cursor are the NOT-YET-folded set this run counts. The comparison is on
@@ -374,11 +397,14 @@ export async function compactAccessLog(
 		}
 	}
 
-	// Fold the count + (optional) reinforcement + the watermark advance into the cache as ONE atomic
-	// UPDATE BEFORE deleting the raw rows. If this fails, the watermark is unadvanced and the rows are
-	// present → the next run re-folds cleanly (no loss). If it succeeds but the delete then fails, the
-	// rows are now at-or-before the watermark → the next run does NOT re-fold (no double count).
-	const accumulated = await accumulateCache(memoryId, foldCount, newestReinforceAt, newestFoldedAt, newestFoldedId, deps, scope);
+	// Advance (optional) reinforcement + the watermark CURSOR into the cache as ONE atomic UPDATE BEFORE
+	// deleting the raw rows. `access_count` is NOT touched here: it is the total-accesses counter owned
+	// solely by the append path (`+1` per `recordAccess`), so an aged-out event keeps the single count it
+	// got at append and compaction never re-counts it (round-3 finding #1 — no double count). If this fails,
+	// the watermark is unadvanced and the rows are present → the next run re-folds cleanly (no loss). If it
+	// succeeds but the delete then fails, the rows are now at-or-before the watermark → the next run does
+	// NOT re-fold (no double count). `foldCount` remains the count of rows pruned this run, reported below.
+	const accumulated = await accumulateCache(memoryId, newestReinforceAt, newestFoldedAt, newestFoldedId, deps, scope);
 	if (!accumulated) return { folded: 0 }; // cache write failed → no watermark advance, retry next run.
 
 	await deleteFoldedRows(memoryId, deleteRows, deps, scope);
@@ -396,13 +422,23 @@ interface CompactionCursor {
 }
 
 /**
- * The result of reading the compaction watermark. The `error` case is DISTINCT from a `null` value so the
- * caller can tell "the watermark is genuinely absent (never compacted → fold from the start)" apart from
- * "the watermark could not be read (a transient query error → ABORT, do not re-fold)". Collapsing both
- * into `null` would let a transient read failure re-fold rows a prior run already folded but had not yet
- * deleted → a double count. (PRD-058e idempotent compaction; CodeRabbit round-2 finding #1.)
+ * The result of reading the compaction watermark. THREE distinct cases the caller must tell apart so a
+ * fold never deletes raw rows without persisting the count/watermark (PRD-058e idempotent compaction):
+ *  - `ok`: the memories row EXISTS; `value` is the stored cursor, or `null` when the row exists but the
+ *    watermark is genuinely absent (never compacted → fold from the start).
+ *  - `missing`: the memories row is ABSENT. The fold's cache UPDATE would match 0 rows (a silent no-op),
+ *    so persisting neither the watermark nor — under the single-owner count model — the reinforcement,
+ *    yet the subsequent raw-row DELETE would still fire and LOSE those events. The caller MUST ABORT.
+ *  - `error`: the read FAILED (a transient query error). The caller MUST ABORT rather than treat an
+ *    unreadable watermark as "never compacted": re-folding from the start after a transient read error
+ *    would double-count rows a prior run already folded but had not yet deleted.
+ * Collapsing `missing`/`error` into the `ok null` ("never compacted") case is the round-3 finding #2 loss
+ * (delete-without-persist) and the round-2 finding #1 double-count respectively. (CodeRabbit r2 #1 / r3 #2.)
  */
-type WatermarkRead = { readonly kind: "ok"; readonly value: CompactionCursor | null } | { readonly kind: "error" };
+type WatermarkRead =
+	| { readonly kind: "ok"; readonly value: CompactionCursor | null }
+	| { readonly kind: "missing" }
+	| { readonly kind: "error" };
 
 /**
  * Strict total-order comparison on `(at, id)`: is `(at, id)` AFTER the `cursor`? Lexicographic, `at` then
@@ -420,11 +456,15 @@ function isAfterCursor(at: string, id: string, cursor: CompactionCursor): boolea
 /**
  * Read the compaction WATERMARK cursor (`memories.access_compacted_at` + `access_compacted_id`) for a
  * memory: the `(at, id)` of the newest raw access event already folded into `access_count` (PRD-058e
- * idempotent compaction). RETURNS a discriminated result:
- *  - `{ kind: "ok", value: null }`: the row exists but the watermark is absent/empty (genuinely never
- *    compacted, so every event is "after" it, fold from the start), OR the memory row is absent (a fresh
- *    memory has nothing folded yet).
- *  - `{ kind: "ok", value: { at, id } }`: the stored cursor.
+ * idempotent compaction). This read DOUBLES as the existence probe for the memories row, so the caller can
+ * abort BEFORE a fold deletes raw rows that no UPDATE could persist a count/watermark for. RETURNS a
+ * discriminated result:
+ *  - `{ kind: "ok", value: null }`: the row EXISTS but the watermark is absent/empty (genuinely never
+ *    compacted, so every event is "after" it, fold from the start).
+ *  - `{ kind: "ok", value: { at, id } }`: the row exists with a stored cursor.
+ *  - `{ kind: "missing" }`: the memories row is ABSENT (`rows.length === 0`). DISTINCT from "never
+ *    compacted": the fold's cache UPDATE would match 0 rows (a silent no-op), so the watermark would never
+ *    persist, yet the raw-row DELETE would still fire → a silent reinforcement LOSS. The caller MUST ABORT.
  *  - `{ kind: "error" }`: the read FAILED (a query/connection error). The caller MUST ABORT rather than
  *    treat an unreadable watermark as "never compacted": re-folding from the start after a transient read
  *    error would double-count rows a prior run already folded but had not deleted. Never throws.
@@ -439,7 +479,7 @@ async function readCompactionWatermark(memoryId: string, deps: AccessLogDeps, sc
 		`WHERE ${idCol} = ${sLiteral(memoryId)} LIMIT 1`;
 	const read = await deps.storage.query(readSql, scope);
 	if (!isOk(read)) return { kind: "error" }; // read FAILED → abort (do NOT degrade to "never compacted").
-	if (read.rows.length === 0) return { kind: "ok", value: null }; // no row → genuinely nothing folded yet.
+	if (read.rows.length === 0) return { kind: "missing" }; // no memories row → abort (delete-without-persist guard).
 	const row = read.rows[0] as StorageRow;
 	const at = String(row.access_compacted_at ?? "");
 	if (at === "") return { kind: "ok", value: null }; // present but empty → nothing folded yet.
@@ -460,20 +500,31 @@ async function deleteFoldedRows(memoryId: string, foldRows: readonly StorageRow[
 }
 
 /**
- * Accumulate a folded batch into the `memories` cache (compaction helper) as ONE ATOMIC UPDATE:
- * `access_count += addCount` (relative, COALESCE-guarded — never a read-modify-write that loses a
- * concurrent increment), advance `last_reinforced_at` to `reinforcedAt` only when strictly later (a
- * `CASE` MAX), and advance the compaction watermark CURSOR `(access_compacted_at, access_compacted_id)` to
- * `(newestFoldedAt, newestFoldedId)`, all in the SAME statement so the count and BOTH cursor halves are
- * committed together (the idempotency invariant: the cursor always reflects exactly what was counted, and
- * the `id` half disambiguates same-`at` siblings). Distinct from {@link maintainMemoryCache},
- * which bumps by exactly one for a live event. Returns whether the cache write landed (the caller gates
- * the subsequent delete on it). FAIL-SOFT: a non-ok result returns `false` (no watermark advance → the
- * next run retries the fold, no loss).
+ * Advance the `memories` cache for a folded batch (compaction helper) as ONE ATOMIC UPDATE:
+ * advance `last_reinforced_at` to `reinforcedAt` only when strictly later (a `CASE` MAX) and advance the
+ * compaction watermark CURSOR `(access_compacted_at, access_compacted_id)` to `(newestFoldedAt,
+ * newestFoldedId)`, in the SAME statement so BOTH cursor halves commit together (the idempotency
+ * invariant: the cursor always pins exactly the last-folded row, and the `id` half disambiguates same-`at`
+ * siblings).
+ *
+ * ── SINGLE-OWNER `access_count` (round-3 finding #1) ─────────────────────────────────────────────────
+ * Compaction does NOT touch `access_count`. `access_count` is the TOTAL number of accesses ever, and its
+ * SOLE writer is the append path ({@link maintainMemoryCache}, `+1` per `recordAccess`). An access is
+ * counted EXACTLY ONCE — at append — and that single count survives compaction untouched, because
+ * compaction only PRUNES the raw `memory_access` rows (an optimization), it does not re-observe the events.
+ * Folding the count here too (`access_count += foldCount`) DOUBLE-COUNTED every aged-out event: once at
+ * append and again at fold. The activation MATH ({@link import("./activation.js").actrActivation}) reads
+ * the RETAINED raw rows, never `access_count`; `access_count` is surfaced only as the displayed total
+ * reinforcement count (`recall.ts` `MemoryRecallHit.accessCount`). The two signals never overlap, so the
+ * count and the retained rows are not added together anywhere — no double count, no loss.
+ *
+ * Returns whether the cache write landed (the caller gates the subsequent delete on it). FAIL-SOFT: a
+ * non-ok result returns `false` (no watermark advance → the next run retries the fold, no loss). When the
+ * batch carries no advanceable signal (no reinforcement and an empty `newestFoldedAt`), this is a no-op
+ * that returns `true` (the rows carry nothing to persist, so the delete may proceed).
  */
 async function accumulateCache(
 	memoryId: string,
-	addCount: number,
 	reinforcedAt: string | null,
 	newestFoldedAt: string,
 	newestFoldedId: string,
@@ -482,33 +533,36 @@ async function accumulateCache(
 ): Promise<boolean> {
 	const tbl = sqlIdent(MEMORIES_TABLE);
 	const idCol = sqlIdent("id");
-	const accessCountCol = sqlIdent("access_count");
 	const lastReinforcedCol = sqlIdent("last_reinforced_at");
 	const watermarkCol = sqlIdent("access_compacted_at");
 	const watermarkIdCol = sqlIdent("access_compacted_id");
 
-	const add = Math.max(0, Math.trunc(addCount));
-	// Atomic relative increment (COALESCE handles a NULL/un-backfilled cell) — concurrency-safe.
-	const countClause = `${accessCountCol} = COALESCE(${accessCountCol}, 0) + ${String(add)}`;
+	const setClauses: string[] = [];
 	// last_reinforced_at advances to the LATER of the stored value and the folded reinforcement.
-	const reinforceClause =
-		reinforcedAt === null
-			? ""
-			: `, ${lastReinforcedCol} = CASE WHEN ${lastReinforcedCol} IS NULL OR ${lastReinforcedCol} < ${sLiteral(reinforcedAt)} ` +
-				`THEN ${sLiteral(reinforcedAt)} ELSE ${lastReinforcedCol} END`;
+	if (reinforcedAt !== null) {
+		setClauses.push(
+			`${lastReinforcedCol} = CASE WHEN ${lastReinforcedCol} IS NULL OR ${lastReinforcedCol} < ${sLiteral(reinforcedAt)} ` +
+				`THEN ${sLiteral(reinforcedAt)} ELSE ${lastReinforcedCol} END`,
+		);
+	}
 	// The watermark CURSOR advances to the newest folded `(at, id)`: monotone, never backward. Both halves
 	// advance together GATED on the SAME `at`-monotonicity guard so the (at, id) pair stays consistent (the
 	// id is only meaningful relative to its `at`): when `at` strictly advances OR ties the stored `at`, the
-	// companion id is set to the newly-folded id; the count and BOTH cursor halves commit in one statement
-	// so the persisted cursor always pins exactly the last-folded row (the idempotency invariant).
-	const watermarkAdvances = `${watermarkCol} IS NULL OR ${watermarkCol} < ${sLiteral(newestFoldedAt)} ` + `OR (${watermarkCol} = ${sLiteral(newestFoldedAt)} AND (${watermarkIdCol} IS NULL OR ${watermarkIdCol} < ${sLiteral(newestFoldedId)}))`;
-	const watermarkClause =
-		newestFoldedAt === ""
-			? ""
-			: `, ${watermarkCol} = CASE WHEN ${watermarkAdvances} THEN ${sLiteral(newestFoldedAt)} ELSE ${watermarkCol} END` +
-				`, ${watermarkIdCol} = CASE WHEN ${watermarkAdvances} THEN ${sLiteral(newestFoldedId)} ELSE ${watermarkIdCol} END`;
+	// companion id is set to the newly-folded id; both cursor halves commit in one statement so the persisted
+	// cursor always pins exactly the last-folded row (the idempotency invariant).
+	if (newestFoldedAt !== "") {
+		const watermarkAdvances =
+			`${watermarkCol} IS NULL OR ${watermarkCol} < ${sLiteral(newestFoldedAt)} ` +
+			`OR (${watermarkCol} = ${sLiteral(newestFoldedAt)} AND (${watermarkIdCol} IS NULL OR ${watermarkIdCol} < ${sLiteral(newestFoldedId)}))`;
+		setClauses.push(`${watermarkCol} = CASE WHEN ${watermarkAdvances} THEN ${sLiteral(newestFoldedAt)} ELSE ${watermarkCol} END`);
+		setClauses.push(`${watermarkIdCol} = CASE WHEN ${watermarkAdvances} THEN ${sLiteral(newestFoldedId)} ELSE ${watermarkIdCol} END`);
+	}
 
-	const updateSql = `UPDATE "${tbl}" SET ${countClause}${reinforceClause}${watermarkClause} WHERE ${idCol} = ${sLiteral(memoryId)}`;
+	// Nothing advanceable (no reinforcement, no datable fold row) → no-op success: the rows carry no signal
+	// to persist, so the caller's delete may proceed without leaving the cache behind.
+	if (setClauses.length === 0) return true;
+
+	const updateSql = `UPDATE "${tbl}" SET ${setClauses.join(", ")} WHERE ${idCol} = ${sLiteral(memoryId)}`;
 	const res = await deps.storage.query(updateSql, scope);
 	return isOk(res);
 }

@@ -154,7 +154,7 @@ describe("PRD-058e compactAccessLog, keep last N, fold the rest", () => {
 		expect(sql.some((s) => s.startsWith('DELETE FROM "memory_access"'))).toBe(false);
 	});
 
-	it("> keepN events → folds the oldest atomically (count +=, watermark advances) then deletes the folded ids", async () => {
+	it("> keepN events → folds the oldest (watermark + reinforce advance, NO count change) then deletes the folded ids", async () => {
 		// 5 events, keep 2 → fold the oldest 3.
 		const rows: StorageRow[] = Array.from({ length: 5 }, (_, i) => ({
 			id: `e${i}`,
@@ -168,9 +168,10 @@ describe("PRD-058e compactAccessLog, keep last N, fold the rest", () => {
 		});
 		const res = await compactAccessLog("mem-1", fixedDeps(storage), SCOPE, 2);
 		expect(res.folded).toBe(3);
-		// The cache is accumulated atomically (relative +=) BEFORE the delete, NOT a read-then-write constant.
 		const update = sql.find((s) => s.startsWith('UPDATE "memories"'));
-		expect(update).toContain("access_count = COALESCE(access_count, 0) + 3");
+		// SINGLE-OWNER (round-3 #1): compaction does NOT touch access_count — it is incremented only at
+		// append. Re-adding the fold count here would DOUBLE-COUNT every aged-out event.
+		expect(update).not.toContain("access_count");
 		// last_reinforced_at advances to the folded reinforce event (e1, in the oldest-3 set).
 		expect(update).toContain("last_reinforced_at = CASE WHEN");
 		// The compaction watermark advances to the newest folded `at` (e2, the 3rd-oldest) in the SAME write.
@@ -286,7 +287,8 @@ describe("PRD-058e compactAccessLog, keep last N, fold the rest", () => {
 		// e2 (the same-`at` sibling strictly after the cursor) IS folded, never silently dropped.
 		expect(res.folded).toBe(1);
 		const update = sql.find((s) => s.startsWith('UPDATE "memories"'));
-		expect(update).toContain("access_count = COALESCE(access_count, 0) + 1");
+		// Single-owner: compaction advances the watermark/reinforcement, never access_count.
+		expect(update).not.toContain("access_count");
 		// The cursor advances to (sharedAt, e2): the id half disambiguates the same-`at` sibling.
 		expect(update).toContain("access_compacted_id = CASE WHEN");
 		const del = sql.find((s) => s.startsWith('DELETE FROM "memory_access"'));
@@ -312,5 +314,106 @@ describe("PRD-058e compactAccessLog, keep last N, fold the rest", () => {
 		expect(sql.some((s) => s.startsWith('UPDATE "memories"'))).toBe(false);
 		// It still re-issues the idempotent DELETE so the (already-folded) rows converge.
 		expect(sql.some((s) => s.startsWith('DELETE FROM "memory_access"'))).toBe(true);
+	});
+
+	// ── CRITICAL (round-3 #2): a MISSING memories row ABORTS — no delete without persisting the watermark ──
+	it("a MISSING memories row aborts compaction (folded 0, NO cache write, NO delete) — events are never lost", async () => {
+		// The horizon would fold, but the memories row is ABSENT (the watermark read returns 0 rows). The
+		// cache UPDATE would match 0 rows (a silent no-op), so the watermark never persists — yet a delete
+		// would still fire and LOSE the raw events. Distinguishing "missing row" from "never compacted"
+		// (both were `rows.length === 0` before) is what makes the abort possible.
+		const rows: StorageRow[] = Array.from({ length: 5 }, (_, i) => ({
+			id: `e${i}`,
+			at: new Date(NOW - (5 - i) * MS_PER_DAY).toISOString(),
+			kind: "recall",
+		}));
+		const { storage, sql } = fakeStorage({
+			memoriesRead: ok([], 0), // the memories row is ABSENT (not just an empty watermark).
+			accessRead: ok(rows, 0),
+		});
+		const res = await compactAccessLog("mem-gone", fixedDeps(storage), SCOPE, 2);
+		expect(res.folded).toBe(0); // aborted: nothing folded.
+		// No watermark/cache UPDATE and — critically — NO destructive DELETE when there is no row to persist to.
+		expect(sql.some((s) => s.startsWith('UPDATE "memories"'))).toBe(false);
+		expect(sql.some((s) => s.startsWith('DELETE FROM "memory_access"'))).toBe(false);
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────
+// The single-owner INVARIANT (round-3 #1): an access is counted EXACTLY ONCE end to end. We append N
+// events (each `recordAccess` bumps `access_count` by 1), then compact (folds the oldest, prunes raw rows).
+// The persisted `access_count` must equal N BOTH before and after compaction — a folded event contributes
+// once (no inflation) and is never dropped (no loss). A STATEFUL fake applies the emitted SQL to a real
+// `access_count` cell + raw-row set so the count is computed through the actual append→fold→read path.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────
+describe("PRD-058e access_count is counted EXACTLY ONCE across compaction (round-3 #1 invariant)", () => {
+	/** A stateful fake: a single memories row (`access_count` + watermark cells) and the raw `memory_access` set. */
+	function statefulStorage(initial: { rows: StorageRow[] }): {
+		storage: StorageQuery;
+		state: { accessCount: number; compactedAt: string; compactedId: string; rows: StorageRow[] };
+	} {
+		const state = { accessCount: 0, compactedAt: "", compactedId: "", rows: [...initial.rows] };
+		const storage: StorageQuery = {
+			async query(statement: string): Promise<QueryResult> {
+				// Append: a new raw event row + the caller's separate access_count +1 UPDATE applies the bump.
+				if (/^INSERT INTO "memory_access"/.test(statement)) return ok([], 0);
+				// The watermark/count read over "memories": return the live cell (a present row).
+				if (/^SELECT .* FROM "memories"/.test(statement)) {
+					return ok([{ access_count: state.accessCount, access_compacted_at: state.compactedAt, access_compacted_id: state.compactedId, last_reinforced_at: "" }], 0);
+				}
+				// The ordered raw-event read for compaction: serve the current raw set (oldest-first).
+				if (/^SELECT .* FROM "memory_access"/.test(statement)) {
+					return ok([...state.rows].sort((a, b) => String(a.at).localeCompare(String(b.at)) || String(a.id).localeCompare(String(b.id))), 0);
+				}
+				if (/^UPDATE "memories"/.test(statement)) {
+					// Apply a relative access_count increment iff the statement carries one (append path only).
+					const m = /access_count = COALESCE\(access_count, 0\) \+ (\d+)/.exec(statement);
+					if (m) state.accessCount += Number(m[1]);
+					// Apply the watermark advance (compaction path) so a re-run resumes after it.
+					const wAt = /access_compacted_at = CASE WHEN[\s\S]*?THEN '([^']+)'/.exec(statement);
+					if (wAt) state.compactedAt = wAt[1]!;
+					const wId = /access_compacted_id = CASE WHEN[\s\S]*?THEN '([^']+)'/.exec(statement);
+					if (wId) state.compactedId = wId[1]!;
+					return ok([], 1);
+				}
+				if (/^DELETE FROM "memory_access"/.test(statement)) {
+					// Prune the folded ids from the raw set (the IN-list of id literals).
+					const ids = [...statement.matchAll(/'([^']+)'/g)].map((x) => x[1]);
+					state.rows = state.rows.filter((r) => !ids.includes(String(r.id)));
+					return ok([], 0);
+				}
+				return ok([], 0);
+			},
+		};
+		return { storage, state };
+	}
+
+	it("append N=5 (count→5), compact keep 2 (fold 3) → access_count stays 5; raw set pruned to 2; re-compact is a no-op", async () => {
+		const { storage, state } = statefulStorage({ rows: [] });
+		// Append N=5 events at distinct times; each recordAccess bumps access_count by exactly 1.
+		const N = 5;
+		for (let i = 0; i < N; i++) {
+			const at = new Date(NOW - (N - i) * MS_PER_DAY);
+			// Pre-seed the raw row the (separate) compaction read will later see (the fake append is a no-op).
+			state.rows.push({ id: `e${i}`, at: at.toISOString(), kind: "recall" });
+			await recordAccess(`mem-1`, 1, "recall", { storage, now: () => at, newId: () => `e${i}` }, SCOPE);
+		}
+		// INVARIANT before compaction: every append counted once.
+		expect(state.accessCount).toBe(N);
+		const rawBefore = state.rows.length;
+		expect(rawBefore).toBe(N);
+
+		// Compact: keep 2, fold the oldest 3, prune their raw rows.
+		const r1 = await compactAccessLog("mem-1", { storage, now: () => new Date(NOW), newId: () => "x" }, SCOPE, 2);
+		expect(r1.folded).toBe(3);
+		// INVARIANT after compaction: the count is UNCHANGED (no double-count from folding, no loss).
+		expect(state.accessCount).toBe(N);
+		// The raw log was pruned to the keep horizon (the folded events live on only in access_count).
+		expect(state.rows.length).toBe(2);
+
+		// A re-compaction over the now-pruned log changes nothing (≤ keepN) — still exactly N.
+		const r2 = await compactAccessLog("mem-1", { storage, now: () => new Date(NOW), newId: () => "x" }, SCOPE, 2);
+		expect(r2.folded).toBe(0);
+		expect(state.accessCount).toBe(N);
 	});
 });

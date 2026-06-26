@@ -84,9 +84,13 @@ export const MEMORIES_COLUMNS = Object.freeze([
 	// reinforced row reads NULL and `t_ref` falls back to `created_at`. Maintained by the
 	// access-log compaction (`access-log.ts`) from the `memory_access` event stream.
 	{ name: "last_reinforced_at", sql: "TIMESTAMPTZ" },
-	// PRD-058e: the denormalized access-count cache. Folds the compacted raw access events
-	// so activation has a frequency signal after the `memory_access` log is pruned to the
-	// last N=32 events per memory. Nullable default 0 (heal-safe ALTER ADD COLUMN backfill).
+	// PRD-058e: the denormalized TOTAL-accesses counter. SINGLE-OWNER (round-3 #1): incremented
+	// `+1` per access at APPEND only (`access-log.ts` `recordAccess`/`maintainMemoryCache`), counted
+	// EXACTLY ONCE and NEVER re-touched by compaction — pruning the raw `memory_access` log to the last
+	// N=32 events discards an optimization detail, not this signal. Read back as the displayed lifetime
+	// reinforcement total (`recall.ts` `MemoryRecallHit.accessCount`); the activation MATH reads the
+	// RETAINED raw rows, not this counter, so the two are never summed (no double count, no loss).
+	// Nullable default 0 (heal-safe ALTER ADD COLUMN backfill).
 	{ name: "access_count", sql: "BIGINT DEFAULT 0" },
 	// PRD-058c (stale code-reference healing — the `σ(m,t)` term): the staleness verdict for
 	// the memory's extracted code references. A LOGICAL enum `fresh` | `stale` | `unknown`
