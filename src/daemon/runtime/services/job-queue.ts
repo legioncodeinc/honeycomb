@@ -367,6 +367,14 @@ class DeepLakeJobQueueService implements JobQueueService {
 	private readonly clock: JobQueueClock;
 	private readonly target: HealTarget;
 	private reaperHandle: unknown;
+	/**
+	 * Re-entrancy guard for the reaper. A single sweep over a large append-only table
+	 * resolves every job id sequentially and can take many seconds; the reaper runs on a
+	 * `setInterval`, so without this guard a slow sweep would stack under the interval and
+	 * stampede the backend with overlapping scans. A sweep already in flight makes the next
+	 * tick a no-op.
+	 */
+	private reaping = false;
 	private idSeq = 0;
 
 	constructor(deps: JobQueueDeps) {
@@ -765,10 +773,41 @@ class DeepLakeJobQueueService implements JobQueueService {
 	 */
 	async start(): Promise<void> {
 		await this.ensureTable();
-		await this.reapExpiredLeases();
+		// Do NOT block daemon readiness on the initial reap. `reapExpiredLeases()` resolves
+		// EVERY job's current version sequentially (`discoverIds()` walks the whole id set),
+		// so its cost scales with the TOTAL number of jobs ever recorded in the append-only
+		// table (done jobs included), not with the number of stale leases. On a large live
+		// table that is many minutes of sequential round-trips. Because the daemon binds its
+		// socket only AFTER `startServices()` resolves, awaiting the reap here wedged boot
+		// ("process holds the lock but is not answering /health"). Mirror the embed supervisor
+		// (server.ts): warm in the BACKGROUND, never block readiness. Schedule the steady-state
+		// reaper, then kick ONE immediate sweep (not awaited) so a fresh process still reclaims
+		// dangling leases promptly. Both go through `reapSweep()`, which is guarded so the
+		// per-sweep cost can never overlap/stampede the backend.
 		this.reaperHandle = this.clock.setTimer(() => {
-			void this.reapExpiredLeases();
+			void this.reapSweep();
 		}, this.cfg.reaperIntervalMs);
+		void this.reapSweep();
+	}
+
+	/**
+	 * One reaper sweep, guarded against overlap (FR-5). A sweep already in flight makes
+	 * this a no-op so a slow scan over a large table cannot stack under the reaper interval
+	 * or the boot-time immediate kick. Errors are swallowed to a structured event — a reaper
+	 * failure must never crash the daemon (the next tick retries).
+	 */
+	private async reapSweep(): Promise<void> {
+		if (this.reaping) return;
+		this.reaping = true;
+		try {
+			await this.reapExpiredLeases();
+		} catch (err: unknown) {
+			this.logger?.event("reaper.sweep.failed", {
+				reason: err instanceof Error ? err.message : String(err),
+			});
+		} finally {
+			this.reaping = false;
+		}
 	}
 
 	/** Stop the queue: clear the reaper timer. Idempotent. */
