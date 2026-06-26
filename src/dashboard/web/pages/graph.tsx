@@ -567,7 +567,6 @@ export function GraphPage({ wire }: PageProps): React.JSX.Element {
 	//   • capped — the client render backstop fired (the fetched graph still exceeded MAX_RENDER_NODES).
 	const serverTruncated = graph.meta?.truncated ?? false;
 	const truncated = serverTruncated || capped;
-	const totalNodes = graph.meta?.totalNodes ?? graph.nodes.length;
 	// The selected node still present in the RENDERED graph (clears if it was filtered/capped away).
 	const selectedNode = selected !== null ? rendered.nodes.find((n) => n.id === selected) ?? null : null;
 
