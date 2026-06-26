@@ -949,6 +949,82 @@ function scopeForSource(source: string): string {
 	return "session";
 }
 
+/** The max characters a recalled snippet renders before it is truncated with an ellipsis. */
+export const MAX_SNIPPET_CHARS = 280;
+
+/**
+ * Pull a short, human detail out of a captured tool-call's input (the file it read, the
+ * command it ran, the pattern it searched). Returns "" when none of the known input keys
+ * carry a usable string, so the caller falls back to the bare tool name.
+ */
+function toolInputDetail(input: unknown): string {
+	if (typeof input !== "object" || input === null) return "";
+	const rec = input as Record<string, unknown>;
+	for (const key of ["file_path", "path", "command", "pattern", "query", "url", "prompt", "description"]) {
+		const v = rec[key];
+		if (typeof v === "string" && v.trim() !== "") return v.trim();
+	}
+	return "";
+}
+
+/**
+ * Turn a RAW captured-session turn (the JSONB `sessions.message`, forwarded verbatim as a
+ * recall hit's `text`) into ONE readable line. The stored shape varies across harnesses and
+ * plugin versions (`kind` vs `type`, `tool` vs `tool_name`, `input` vs `tool_input`, `text`
+ * vs `prompt`), so every field is read defensively. Returns `null` when the text is not a
+ * JSON object we recognize, so the caller renders the original text untouched (a distilled
+ * prose fact is never mangled).
+ */
+function humanizeSessionTurn(raw: string): string | null {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		return null; // not JSON: distilled prose, render as-is.
+	}
+	if (typeof parsed !== "object" || parsed === null) return null;
+	const rec = parsed as Record<string, unknown>;
+	const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+	const kind = str(rec.kind) || str(rec.type);
+	const tool = str(rec.tool) || str(rec.tool_name);
+	const body = str(rec.text) || str(rec.prompt) || str(rec.message);
+
+	// A user / assistant turn: render the speaker + the message body.
+	if (kind.startsWith("assistant") && body !== "") return `assistant: ${body}`;
+	if (kind.startsWith("user") && body !== "") return `user: ${body}`;
+	// A tool call: render the tool name + its most informative input detail.
+	if (tool !== "" || kind === "tool_call") {
+		const detail = toolInputDetail(rec.input ?? rec.tool_input);
+		const name = tool !== "" ? tool : "tool";
+		return detail !== "" ? `${name} · ${detail}` : name;
+	}
+	// A recognized object that carries SOME body text under an unknown kind: render the body.
+	if (body !== "") return body;
+	return null;
+}
+
+/**
+ * Format a recall hit's matched `text` into the snippet the {@link MemoryCard} renders. A raw
+ * `session` dump (the JSONB capture turn) is collapsed to one readable line via
+ * {@link humanizeSessionTurn} so the card never shows escaped JSON; a distilled `memory` fact
+ * passes through as prose. EITHER way the result is whitespace-collapsed and capped at
+ * {@link MAX_SNIPPET_CHARS} so a long row can never blow out the card. Exported so a test can
+ * drive it deterministically (mirrors {@link formatLogLine}).
+ */
+export function formatRecallSnippet(text: string, kind: "memory" | "session"): string {
+	const trimmed = text.trim();
+	let display = trimmed;
+	// A session hit (or any text that looks like a JSON object/array) is humanized; clean prose
+	// is left alone so a distilled fact is never reshaped.
+	if (kind === "session" || trimmed.startsWith("{") || trimmed.startsWith("[")) {
+		const human = humanizeSessionTurn(trimmed);
+		if (human !== null) display = human;
+	}
+	display = display.replace(/\s+/g, " ").trim();
+	if (display.length <= MAX_SNIPPET_CHARS) return display;
+	return `${display.slice(0, MAX_SNIPPET_CHARS - 1).trimEnd()}…`;
+}
+
 /**
  * The dashboard web client. Each method hits one already-served endpoint, validates the
  * payload with zod, and returns a typed value (or a safe empty/zero state). The whole
@@ -1312,7 +1388,9 @@ export function createWireClient(options: WireClientOptions = {}): WireClient {
 				// honestly from the arm name.
 				const memories = parsed.data.hits.map((h, i) => ({
 					memoryKey: h.id !== "" ? h.id : `hit-${i + 1}`,
-					snippet: h.text,
+					// A raw `session` hit's `text` is the JSONB capture turn (escaped JSON); humanize it to
+					// one readable line so the card never shows the raw dump. A distilled fact passes through.
+					snippet: formatRecallSnippet(h.text, h.kind),
 					source: h.source,
 					score: h.score,
 					scope: scopeForSource(h.source),
