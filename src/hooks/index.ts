@@ -42,6 +42,8 @@ export {
 	asRecord,
 	assistantMessageData,
 	createShim,
+	extractTurnUsage,
+	type NormalizedTurnUsage,
 	pickString,
 	preToolData,
 	sessionEndData,

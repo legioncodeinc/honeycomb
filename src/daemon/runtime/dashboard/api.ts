@@ -39,23 +39,41 @@ import type { Context } from "hono";
 import { sLiteral, sqlIdent } from "../../storage/sql.js";
 import { isOk, type StorageRow } from "../../storage/result.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
-import { resolveScopeOrLocalDefault } from "../scope.js";
+import { resolveRequestProject, resolveScopeOrLocalDefault } from "../scope.js";
 import type {
 	GraphView,
 	KpisView,
 	LocalAssetInventory,
 	MemoryGraphView,
+	RoiCostBasisTag,
+	RoiRollup,
+	RoiRollupDimension,
+	RoiRollupRow,
+	RoiTrendView,
+	RoiView,
 	RulesView,
 	SessionsView,
 	SettingsView,
 	SkillSyncRow,
 	SkillSyncView,
 } from "../../../dashboard/contracts.js";
+import { EMPTY_ROI_TREND, EMPTY_ROI_VIEW } from "../../../dashboard/contracts.js";
 import { scanInstalledAssets } from "./installed-assets.js";
 import {
 	SYNCED_ASSETS_TABLE,
 	TOMBSTONE_FALSE,
 } from "../../storage/catalog/synced-assets.js";
+import {
+	blendedCentsPerMtok,
+	type CapturedTurn,
+	measuredCacheSavings,
+	modeledMemoryInjectionSavings,
+} from "./roi-savings.js";
+import { RATES_AS_OF } from "./roi-rates.js";
+import { createInfraCostReadModel, type InfraCostReadModel, type InfraCostReadModel_API } from "./roi-billing.js";
+import { composePollinationCost, type PollinationStatus } from "./roi-pollination.js";
+import { type SkillifyUsageSource, emptyUsageSource } from "./roi-skillify-meter.js";
+import { readRoiMetrics } from "./roi-ledger.js";
 import type { Daemon } from "../server.js";
 
 /** Options for {@link mountDashboardApi}. */
@@ -79,6 +97,19 @@ export interface MountDashboardOptions {
 	 * scope's org id (the prior behaviour). Display-only; never a tenancy decision.
 	 */
 	readonly orgName?: string;
+	/**
+	 * PRD-060e — the 060c infra-cost read-model (the SOLE billing egress + creds holder), threaded from
+	 * the composition root so the ROI view-model reads infra cost over loopback without minting its own
+	 * billing client. ABSENT (a unit-constructed daemon) → the `/api/diagnostics/roi` handler builds a
+	 * fresh fail-soft model per call (degrades to `unauthenticated`/`unreachable`). Daemon is sole egress.
+	 */
+	readonly roiInfra?: InfraCostReadModel_API;
+	/**
+	 * PRD-060e — the 060d skillify usage meter (the live "since boot" own-inference rollup) the
+	 * pollination half reads. ABSENT → the empty source (no calls metered → an `absent` Haiku
+	 * contribution, never a fabricated `$0`). Threaded from the composition root which owns the singleton.
+	 */
+	readonly roiUsage?: SkillifyUsageSource;
 }
 
 /**
@@ -143,6 +174,13 @@ export const DASHBOARD_GROUPS = Object.freeze({
 	 * the underlying `scanInstalledAssets` IN-PROCESS, not over this HTTP surface.
 	 */
 	installedAssets: "/api/diagnostics",
+	/**
+	 * ROI composite read-model (PRD-060e) — served off the diagnostics group at `/roi` + `/roi/trend`
+	 * (full paths `/api/diagnostics/roi` + `/api/diagnostics/roi/trend`). Local-mode-only loopback like
+	 * every other dashboard view-model; attached under the already-mounted, protected diagnostics group
+	 * (no new group, no `server.ts` edit). The page is a PURE function of the `RoiView` this returns.
+	 */
+	roi: "/api/diagnostics",
 } as const);
 
 /** Number coercion that never returns NaN/undefined for a count column. */
@@ -589,6 +627,363 @@ export async function fetchSkillSyncView(
 	return { skills: [...merged.values()] };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// PRD-060e — the COMPOSITE ROI read-model (the data half: e-AC-2/6/11/12/13/14/15).
+//
+// `fetchRoiView` is the fail-soft fan-out that assembles the `RoiView` the page renders
+// as a PURE function: savings (060b over the `sessions` token columns), infra (060c read-
+// model), pollination (060d composer), and the org/team/agent/project rollups (060f
+// `readRoiMetrics`, scoped through `read_policy`). It mirrors `fetchKpisView`'s posture —
+// `Promise.all`, guarded, NEVER throws, degrades to the typed-empty `EMPTY_ROI_VIEW`.
+// The NET is computed ONLY when its inputs are present; a missing/unreachable input
+// leaves the net section reflecting that and the net is NOT fabricated (e-AC-6).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Options for {@link fetchRoiView} / {@link fetchRoiTrendView} (the scope/seam injection). */
+export interface FetchRoiOptions {
+	/**
+	 * The requesting agent the `read_policy`-scoped ledger read pins to (060f). An `isolated` policy
+	 * returns ONLY this agent's ledger rows; `shared` is workspace-wide. This is NO LONGER defaulted to
+	 * `scope.org`: the org id is a TENANT identifier, not an agent identity, and filtering
+	 * `roi_metrics.agent_id = <org>` would return the wrong rows (typically none). When this is absent or
+	 * blank AND the policy is `isolated`, the read FAILS CLOSED (no agent to scope to => empty), never a
+	 * silent filter on the org id. `shared` does not depend on the agent id and is unaffected.
+	 */
+	readonly agentId?: string;
+	/**
+	 * PRD-049e -- the SELECTED project the dashboard stamped via the `x-honeycomb-project` header. When
+	 * present, BOTH the savings read (sessions.project_id) AND the ledger read (roi_metrics.project_id)
+	 * narrow to it, so switching projects re-scopes the ROI figure instead of returning workspace-wide
+	 * data. ABSENT/blank => no project filter (the prior workspace-wide behaviour; back-compat).
+	 */
+	readonly projectId?: string;
+	/**
+	 * The `read_policy` the ledger read is scoped through (`isolated` | `shared` | `group`, e-AC-12).
+	 * Defaults to `shared` so the LOCAL dashboard shows the ACROSS-DEVICE aggregate (the whole point of
+	 * the shared ledger); a caller may pin `isolated` to see only this machine. `buildRoiReadScopeSql`
+	 * fails closed to `isolated` on an unknown value.
+	 */
+	readonly readPolicy?: string;
+	/**
+	 * The 060c infra-cost read-model (the SOLE billing egress + creds holder). INJECTED so a test drives
+	 * the assembly without touching the network; production passes the daemon's singleton. ABSENT → a
+	 * fresh `createInfraCostReadModel()` (which is itself fail-soft → `unauthenticated`/`unreachable`).
+	 */
+	readonly infra?: InfraCostReadModel_API;
+	/**
+	 * The 060d skillify usage source (the live meter, or a static snapshot in tests). ABSENT → the
+	 * empty source (no own-inference metered yet → an `absent` Haiku contribution, never a fake `$0`).
+	 */
+	readonly usage?: SkillifyUsageSource;
+}
+
+/** The default read policy for the LOCAL dashboard — `shared` so the figure aggregates across devices (e-AC-12). */
+const DEFAULT_ROI_READ_POLICY = "shared" as const;
+
+/** Map 060c's billing status / 060d's pollination status onto the contract's section status (one vocabulary). */
+function roiSectionStatusFor(status: PollinationStatus | "ok" | "partial" | "unreachable" | "unauthenticated"): RoiView["infra"]["status"] {
+	// 060d's `measured` (Haiku-ok) maps to `ok` at the section level; everything else is 1:1.
+	if (status === "measured") return "ok";
+	return status;
+}
+
+/**
+ * Coerce a stored BIGINT token count to the 060b `CapturedTurn` shape: a SQL NULL (absent —
+ * the column was never produced) MUST stay `null`, NOT collapse to `0`-as-measured (a-AC-6 /
+ * b-AC-7). A real integer `0` (nothing read from cache) is a measured zero and is preserved.
+ */
+function tokenCountOrNull(value: unknown): number | null {
+	if (value === null || value === undefined) return null;
+	const n = typeof value === "number" ? value : Number(value);
+	return Number.isFinite(n) ? Math.trunc(n) : null;
+}
+
+/** Map one `sessions` row (060a token columns) to a 060b {@link CapturedTurn}, preserving NULL=absent. */
+function rowToCapturedTurn(r: StorageRow): CapturedTurn {
+	const sourceTool = toStr(r.source_tool);
+	return {
+		input_tokens: tokenCountOrNull(r.input_tokens),
+		output_tokens: tokenCountOrNull(r.output_tokens),
+		cache_read_input_tokens: tokenCountOrNull(r.cache_read_input_tokens),
+		cache_creation_input_tokens: tokenCountOrNull(r.cache_creation_input_tokens),
+		...(sourceTool !== "" ? { sourceTool } : {}),
+	};
+}
+
+/** The max `sessions` rows the savings read folds (a defensive bound mirroring the other fetchers). */
+const ROI_SESSIONS_LIMIT = 5000;
+
+/**
+ * Read the captured `sessions` token columns (060a) for the savings math. METADATA-shaped read:
+ * only the four nullable token counts + `source_tool` (never a transcript/JSONB body). Fail-soft
+ * via `selectRows` (`[]` on any non-ok result). Identifiers via `sqlIdent`; no interpolated value.
+ */
+async function readCapturedTurns(storage: StorageQuery, scope: QueryScope, projectId?: string): Promise<CapturedTurn[]> {
+	const tbl = sqlIdent("sessions");
+	const dateCol = sqlIdent("creation_date");
+	const idCol = sqlIdent("id");
+	// PRD-049e: narrow to the selected project when one was stamped (value via `sLiteral`).
+	const projClause =
+		projectId !== undefined && projectId !== ""
+			? ` WHERE ${sqlIdent("project_id")} = ${sLiteral(projectId)}`
+			: "";
+	// Identifiers inlined through `sqlIdent` directly into the template (the audit:sql floor — a
+	// pre-joined `cols` variable reads as a raw interpolation to the scanner even when guarded).
+	const sql =
+		`SELECT ${sqlIdent("input_tokens")}, ${sqlIdent("output_tokens")}, ` +
+		`${sqlIdent("cache_read_input_tokens")}, ${sqlIdent("cache_creation_input_tokens")}, ${sqlIdent("source_tool")} ` +
+		`FROM "${tbl}"${projClause} ORDER BY ${dateCol} DESC, ${idCol} DESC LIMIT ${ROI_SESSIONS_LIMIT}`;
+	const rows = await selectRows(storage, sql, scope);
+	return rows.map(rowToCapturedTurn);
+}
+
+/** The known rollup dimensions + the `roi_metrics` column each groups by (e-AC-13). */
+const ROLLUP_DIMENSIONS: ReadonlyArray<{ dimension: RoiRollupDimension; column: string }> = Object.freeze([
+	{ dimension: "org", column: "org_id" },
+	{ dimension: "team", column: "team_id" },
+	{ dimension: "agent", column: "agent_id" },
+	{ dimension: "project", column: "project_id" },
+]);
+
+/** Narrow a stored `cost_basis` string to the contract tag (defaulting to `none`). */
+function asCostBasisTag(raw: unknown): RoiCostBasisTag {
+	const s = toStr(raw);
+	return s === "measured" || s === "allocated" || s === "none" ? s : "none";
+}
+
+/**
+ * Compute the org / team / agent / project rollups (e-AC-13) as READ-TIME GROUP BYs in TS over
+ * the canonical-per-session ledger rows (060f already resolved `MAX(created_at)` + the read_policy
+ * scope). The component does NO grouping — it renders these. A rollup is flagged `mixedBasis` when
+ * its rows span more than one `cost_basis` (`COUNT(DISTINCT cost_basis) > 1`, e-AC-15) so the page
+ * never silently blends a measured + an allocated net.
+ */
+export function computeRollups(rows: readonly StorageRow[]): RoiRollup[] {
+	return ROLLUP_DIMENSIONS.map(({ dimension, column }) => {
+		// Group rows by the dimension key; accumulate cents + the distinct cost bases per group.
+		const groups = new Map<
+			string,
+			{ measured: number; net: number; infra: number; sessions: number; bases: Set<RoiCostBasisTag> }
+		>();
+		const allBases = new Set<RoiCostBasisTag>();
+		for (const r of rows) {
+			const key = toStr(r[column]);
+			const measured = toNum(r.measured_cache_savings_cents);
+			const modeled = toNum(r.modeled_savings_cents);
+			const infra = toNum(r.infra_cost_cents);
+			const gross = toNum(r.gross_cost_cents);
+			const basis = asCostBasisTag(r.cost_basis);
+			allBases.add(basis);
+			const g = groups.get(key) ?? { measured: 0, net: 0, infra: 0, sessions: 0, bases: new Set<RoiCostBasisTag>() };
+			g.measured += measured;
+			// Net = saved (measured + modeled) − (infra + gross cost). Integer cents throughout.
+			g.net += measured + modeled - (infra + gross);
+			g.infra += infra;
+			g.sessions += 1;
+			g.bases.add(basis);
+			groups.set(key, g);
+		}
+		const rollupRows: RoiRollupRow[] = [...groups.entries()].map(([key, g]) => ({
+			key,
+			label: key,
+			measuredSavingsCents: g.measured,
+			netCents: g.net,
+			infraCostCents: g.infra,
+			// A row whose own group mixes bases is flagged `allocated` (the more-cautious tag); a single
+			// basis carries through verbatim, so a measured-only row stays `measured`.
+			costBasis: g.bases.size > 1 ? "allocated" : ([...g.bases][0] ?? "none"),
+			sessions: g.sessions,
+		}));
+		return { dimension, rows: rollupRows, mixedBasis: allBases.size > 1 };
+	});
+}
+
+/**
+ * Fetch the composite ROI view (PRD-060e, the data half). FAIL-SOFT fan-out mirroring
+ * `fetchKpisView`: it `Promise.all`s the four independent reads, never throws, and degrades to
+ * `EMPTY_ROI_VIEW` on a wholesale failure. Assembles:
+ *   - SAVINGS (060b): `measuredCacheSavings` + `modeledMemoryInjectionSavings` + `blendedCentsPerMtok`
+ *     over the `sessions` token columns (060a). A NULL count is absent (never `0`-as-measured).
+ *   - INFRA (060c): the TTL-cached billing read-model's measured infra cost + its status discriminant.
+ *   - POLLINATION (060d): the composer over the live usage meter + the already-read infra snapshot
+ *     (NO second billing egress).
+ *   - ROLLUPS (060f): `readRoiMetrics` at the requesting agent's `read_policy` (e-AC-12), grouped
+ *     org/team/agent/project in TS (e-AC-13). Per-user is GATED off (e-AC-14: `perUserAvailable=false`).
+ *
+ * The NET is computed ONLY when BOTH the measured savings (a real capture) AND a confident cost
+ * (infra `ok`/`partial` AND pollination `ok`/`partial`) are present — a missing/unreachable input
+ * leaves the net section reflecting that and the net is NOT fabricated (e-AC-6). All money is
+ * INTEGER cents; modeled savings carries its assumption as data (e-AC-8); `blendedCentsPerMtok` is
+ * `null` until capture is live (e-AC-11).
+ */
+export async function fetchRoiView(
+	storage: StorageQuery,
+	scope: QueryScope,
+	options: FetchRoiOptions = {},
+): Promise<RoiView> {
+	// Finding (isolated-agentid): do NOT default the agent id to `scope.org`. The org is a TENANT
+	// identifier, not an agent identity; filtering `roi_metrics.agent_id = <org>` returns the wrong
+	// rows. `agentId` is the explicit requesting agent or `""` (no agent). `readRoiMetrics` FAILS CLOSED
+	// to empty when an `isolated` read has no agent to pin to, rather than silently filtering on the org.
+	const agentId = options.agentId !== undefined && options.agentId.trim() !== "" ? options.agentId.trim() : "";
+	const readPolicy = options.readPolicy ?? DEFAULT_ROI_READ_POLICY;
+	const infraModel = options.infra ?? createInfraCostReadModel();
+	const usage = options.usage ?? emptyUsageSource;
+	const projectId = options.projectId !== undefined && options.projectId.trim() !== "" ? options.projectId.trim() : undefined;
+
+	// Fail-soft fan-out (parity with fetchKpisView): each read is independently guarded so one
+	// failure degrades its section rather than nuking the whole view. `infraModel.read()` is itself
+	// fail-soft (never throws); the captured-turns + ledger reads go through `selectRows`/`readRoiMetrics`
+	// (both fail-soft). A belt-and-braces try wraps the whole assembly → EMPTY_ROI_VIEW on any surprise.
+	try {
+		const [turns, infra, ledger] = await Promise.all([
+			readCapturedTurns(storage, scope, projectId),
+			infraModel.read(),
+			readRoiMetrics(storage, scope, { agentId, readPolicy, ...(projectId !== undefined ? { projectId } : {}) }),
+		]);
+
+		return assembleRoiView({ turns, infra, usage, ledger, readPolicy });
+	} catch {
+		// Any unexpected throw (a seam misbehaving) degrades to the honest-empty view — the daemon
+		// never 500s the ROI page (parity with the rest of the dashboard read-model).
+		return EMPTY_ROI_VIEW;
+	}
+}
+
+/** The shape `assembleRoiView` folds (split out so the pure assembly is unit-testable without IO). */
+interface RoiAssemblyInputs {
+	readonly turns: readonly CapturedTurn[];
+	readonly infra: InfraCostReadModel;
+	readonly usage: SkillifyUsageSource;
+	readonly ledger: Awaited<ReturnType<typeof readRoiMetrics>>;
+	readonly readPolicy: string;
+}
+
+/**
+ * Fold the four already-read inputs into the {@link RoiView} (the PURE assembly, no IO). Split from
+ * {@link fetchRoiView} so a test can drive the section-status matrix (e-AC-2) deterministically.
+ */
+export function assembleRoiView(input: RoiAssemblyInputs): RoiView {
+	const { turns, infra, usage, ledger, readPolicy } = input;
+
+	// ── SAVINGS (060b) ──────────────────────────────────────────────────────────
+	const measured = measuredCacheSavings(turns);
+	const modeled = modeledMemoryInjectionSavings(turns.length);
+	const blended = blendedCentsPerMtok(turns); // null until capture is live (e-AC-11).
+	// 060b's CaptureStatus is `measured | partial | absent`; the section vocabulary is
+	// `ok | partial | absent | …`, so a `measured` capture maps to the section status `ok`
+	// (a confident, billed-fact figure) while `partial`/`absent` carry through verbatim.
+	const captureStatus = measured.value.status; // measured | partial | absent (b-AC-7).
+	const savingsStatus: RoiView["savings"]["status"] = captureStatus === "measured" ? "ok" : captureStatus;
+	const savings: RoiView["savings"] = {
+		status: savingsStatus,
+		measuredCents: measured.value.savingsCents,
+		modeledCents: modeled.value.estimatedCents,
+		assumption: {
+			kind: modeled.assumption.kind,
+			assumptionText: modeled.assumption.assumptionText,
+			signedOff: modeled.assumption.signedOff,
+		},
+		blendedCentsPerMtok: blended,
+	};
+
+	// ── INFRA (060c) ────────────────────────────────────────────────────────────
+	const infraStatus = roiSectionStatusFor(infra.status);
+	const infraCents = infra.summary !== undefined ? infra.summary.total_cost_cents : 0;
+	const infraSection: RoiView["infra"] = {
+		status: infraStatus,
+		cents: infraCents,
+		// Org/workspace infra read from billing is a MEASURED fact when present; otherwise no line.
+		costBasis: infra.status === "ok" || infra.status === "partial" ? "measured" : "none",
+	};
+
+	// ── POLLINATION (060d) ──────────────────────────────────────────────────────
+	const pollination = composePollinationCost(usage, infra);
+	const pollinationLines = [
+		{ label: "haiku-skillify", cents: pollination.haiku.cents },
+		...pollination.deeplake.bySessionType.map((s) => ({ label: `deeplake-${s.session_type}`, cents: s.cost_cents })),
+	];
+	const pollinationSection: RoiView["pollination"] = {
+		status: roiSectionStatusFor(pollination.status),
+		cents: pollination.pollinationCents,
+		lines: pollinationLines,
+	};
+
+	// ── NET (e-AC-6) — computed ONLY from complete inputs, never fabricated ───────
+	// Required inputs: a real measured capture (savings ok/partial) AND a confident cost on BOTH the
+	// infra and pollination halves (ok/partial, not unreachable/unauthenticated/absent). A missing
+	// input leaves the net reflecting it (not `ok`) with `computed:false` and a dash on the page.
+	// PRD honesty contract: a confident net (status "ok", computed true) is emitted ONLY when ALL
+	// THREE inputs are FULLY confident ("ok") - savings AND infra AND pollination. A "partial" cost
+	// would understate the bill and overstate net ROI (the dishonest direction), so it does NOT
+	// qualify even though each section's own dash threshold tolerates partial.
+	const savingsPresent = savingsStatus === "ok";
+	const infraConfident = infraStatus === "ok";
+	const pollinationConfident = pollinationSection.status === "ok";
+	const netComputable = savingsPresent && infraConfident && pollinationConfident;
+	let netSection: RoiView["net"];
+	if (netComputable) {
+		const netCents = measured.value.savingsCents + modeled.value.estimatedCents - (infraCents + pollination.pollinationCents);
+		netSection = {
+			status: "ok",
+			computed: true,
+			netCents,
+			modeled: true, // the net folds a modeled term → ALWAYS `est.` (e-AC-3 net-hero inheritance).
+			costBasis: infraSection.costBasis,
+		};
+	} else {
+		// Reflect WHY the net is unavailable: the worst contributing reason drives the section status,
+		// and `computed:false` ⇒ the page renders a dash + scoped retry, never a fabricated net.
+		const reason: RoiView["net"]["status"] = !savingsPresent
+			? savingsStatus
+			: !infraConfident
+				? infraStatus
+				: pollinationSection.status;
+		netSection = { status: reason, computed: false, netCents: 0, modeled: true, costBasis: "none" };
+	}
+
+	// ── ROLLUPS (060f) ──────────────────────────────────────────────────────────
+	const ledgerRows = ledger.status === "ok" ? ledger.rows : [];
+	const rollups = computeRollups(ledgerRows);
+
+	return {
+		savings,
+		infra: infraSection,
+		pollination: pollinationSection,
+		net: netSection,
+		rollups,
+		// PER-USER GATE (e-AC-14): there is no verified backend user-claim today, so per-user is NEVER
+		// available — the page shows the "per-user requires verified login" empty state, never a $0/name.
+		perUserAvailable: false,
+		// ACROSS-DEVICE (e-AC-12): a `shared` read returned workspace-wide rows (across devices); an
+		// `isolated` read returned only this machine's. The page captions the scope from this.
+		scopedAcrossDevices: readPolicy === "shared",
+		ratesAsOf: RATES_AS_OF,
+	};
+}
+
+/**
+ * Fetch the ROI trend view (PRD-060e, e-AC-10) backing the inline-SVG chart. The trend has NO token
+ * history before 060a capture started, so this is HONEST-EMPTY today: it returns `EMPTY_ROI_TREND`
+ * (status `absent`) until a real history exists rather than fabricating a flat line. The `range`
+ * (e.g. `30d`) is accepted for forward-compat (the window the chart will request); the assembly of a
+ * real series defers to a coordinated 060a/060c history read (the trend-backfill open question).
+ * FAIL-SOFT: never throws — the chart renders its honest empty state.
+ */
+export async function fetchRoiTrendView(
+	storage: StorageQuery,
+	scope: QueryScope,
+	_range: string,
+	_options: FetchRoiOptions = {},
+): Promise<RoiTrendView> {
+	// No token history exists before capture-start (the trend-backfill open question); render the
+	// honest empty trend rather than a fabricated series. The signature is stable so the real history
+	// read folds in here without a route/wire change.
+	void storage;
+	void scope;
+	return EMPTY_ROI_TREND;
+}
+
 /** The 400 body a dashboard handler returns when the request carries no resolvable org (fail-closed). */
 const NO_ORG_BODY = { error: "bad_request", reason: "x-honeycomb-org header is required" } as const;
 
@@ -704,6 +1099,47 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 			return c.json(await inventoryCache());
 		});
 	}
+
+	// PRD-060e — the composite ROI read-model + the trend series, served at `/roi` + `/roi/trend`
+	// off the diagnostics group (full `/api/diagnostics/roi` + `/api/diagnostics/roi/trend`). Same
+	// scope resolution + fail-closed 400 + auth/RBAC inheritance as every other dashboard view-model.
+	// The page is a PURE function of the `RoiView` this returns; the daemon assembles savings (060b),
+	// infra (060c), pollination (060d), and the read_policy-scoped rollups (060f). `?policy=` lets the
+	// operator pin `isolated` (this-device) vs the default across-device `shared` read (e-AC-12). The
+	// infra read-model + usage meter are threaded from the composition root (daemon = sole billing egress).
+	const roi = daemon.group(DASHBOARD_GROUPS.roi);
+	if (roi !== undefined) {
+		// Finding (project-scope): read the SELECTED project header (PRD-049e -- the same
+		// `x-honeycomb-project` header every other dashboard read-model honors via
+		// `resolveRequestProject`) and thread it into the ROI reads so switching projects narrows the
+		// figure. Only a REAL selection (`!degraded`) applies a filter; with no selection the read stays
+		// workspace-wide (back-compat for a non-dashboard caller). The header carries no cwd for ROI.
+		const roiOptions = (c: Context, scope: QueryScope): FetchRoiOptions => {
+			const project = resolveRequestProject(c, scope);
+			return {
+				...(options.roiInfra !== undefined ? { infra: options.roiInfra } : {}),
+				...(options.roiUsage !== undefined ? { usage: options.roiUsage } : {}),
+				readPolicy: resolveRoiReadPolicy(c.req.query("policy")),
+				...(!project.degraded ? { projectId: project.projectId } : {}),
+			};
+		};
+		roi.get("/roi", async (c) => {
+			const scope = resolveScope(c);
+			if (scope === null) return c.json(NO_ORG_BODY, 400);
+			return c.json(await fetchRoiView(storage, scope, roiOptions(c, scope)));
+		});
+		roi.get("/roi/trend", async (c) => {
+			const scope = resolveScope(c);
+			if (scope === null) return c.json(NO_ORG_BODY, 400);
+			const range = c.req.query("range") ?? "";
+			return c.json(await fetchRoiTrendView(storage, scope, range, roiOptions(c, scope)));
+		});
+	}
+}
+
+/** Resolve the ROI read policy from the optional `?policy=` query, defaulting to the across-device `shared`. */
+function resolveRoiReadPolicy(raw: string | undefined): string {
+	return raw === "isolated" || raw === "shared" || raw === "group" ? raw : DEFAULT_ROI_READ_POLICY;
 }
 
 /** The TTL for the installed-assets inventory cache (PRD-036a D-1). */

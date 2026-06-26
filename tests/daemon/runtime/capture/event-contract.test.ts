@@ -68,4 +68,24 @@ describe("event contract (FR-2 / FR-5)", () => {
 		expect(parseCaptureRequest(null).ok).toBe(false);
 		expect(parseCaptureRequest("nope").ok).toBe(false);
 	});
+
+	// Finding (empty-usage): an EMPTY `usage: {}` carries no information and must normalize to ABSENT
+	// (undefined), so a no-usage turn never persists a distinct "present but empty" usage block.
+	it("normalizes an empty `usage: {}` to ABSENT (the turn validates, usage is undefined)", () => {
+		const r = parseCaptureRequest({ event: { kind: "assistant_message", text: "done", usage: {} }, metadata });
+		expect(r.ok).toBe(true);
+		if (r.ok && r.value.event.kind === "assistant_message") {
+			// `{}` was normalized away -> the field round-trips ABSENT, not an empty object.
+			expect(r.value.event.usage).toBeUndefined();
+		}
+	});
+
+	it("keeps a usage block with at least one count (does not normalize a real partial usage away)", () => {
+		const r = parseCaptureRequest({ event: { kind: "assistant_message", text: "done", usage: { input: 42 } }, metadata });
+		expect(r.ok).toBe(true);
+		if (r.ok && r.value.event.kind === "assistant_message") {
+			expect(r.value.event.usage).toBeDefined();
+			expect(r.value.event.usage?.input).toBe(42);
+		}
+	});
 });

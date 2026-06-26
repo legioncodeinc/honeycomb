@@ -196,9 +196,116 @@ export function userMessageData(text: string): unknown {
 	return { kind: "user_message", text };
 }
 
-/** The canonical `assistant_message` data shape (the reference's). */
-export function assistantMessageData(text: string): unknown {
-	return { kind: "assistant_message", text };
+/**
+ * The four normalized per-turn token + cache counts (PRD-060a a-AC-1 / a-AC-2).
+ * Each is OPTIONAL: only the counts the harness actually saw are present. Mirrors
+ * the daemon-side `TurnUsage` (`event-contract.ts`) — the shim lowers the harness's
+ * native field names onto these canonical keys; the daemon's zod boundary validates.
+ */
+export interface NormalizedTurnUsage {
+	readonly input?: number;
+	readonly output?: number;
+	readonly cacheRead?: number;
+	readonly cacheCreation?: number;
+}
+
+/**
+ * The canonical `assistant_message` data shape (the reference's). PRD-060a (a-AC-1):
+ * when the harness extracted a per-turn `usage` block, it rides along on the SAME
+ * event object. ABSENT/empty usage is OMITTED entirely (never zero-filled) so a
+ * turn with no usage round-trips with the field absent (a-AC-1 / a-AC-6) and the
+ * downstream columns stay NULL = "token data absent" rather than a silent 0.
+ */
+export function assistantMessageData(text: string, usage?: NormalizedTurnUsage): unknown {
+	const normalized = usage !== undefined ? compactUsage(usage) : undefined;
+	return {
+		kind: "assistant_message",
+		text,
+		...(normalized !== undefined ? { usage: normalized } : {}),
+	};
+}
+
+/**
+ * Drop absent counts and the whole block when EMPTY (PRD-060a a-AC-2 / a-AC-6).
+ * Returns `undefined` when no count survived — so an all-absent usage block is
+ * omitted from the event rather than serialized as `{}` (which would still read as
+ * "present but empty"). A genuine `0` SURVIVES (a real measurement, distinct from
+ * absent — the zero-vs-null rule), so it is carried through to the column verbatim.
+ */
+function compactUsage(usage: NormalizedTurnUsage): NormalizedTurnUsage | undefined {
+	const out: { input?: number; output?: number; cacheRead?: number; cacheCreation?: number } = {};
+	if (isCount(usage.input)) out.input = usage.input;
+	if (isCount(usage.output)) out.output = usage.output;
+	if (isCount(usage.cacheRead)) out.cacheRead = usage.cacheRead;
+	if (isCount(usage.cacheCreation)) out.cacheCreation = usage.cacheCreation;
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Is `n` a valid, present token count? A non-negative finite integer. A malformed
+ * count (negative, fractional, NaN, or a non-number that slipped through) is NOT a
+ * count — it is dropped here so the column stays NULL ("token data absent"), never
+ * a silent 0 (a-AC-6). A genuine measured `0` passes (zero ≠ absent).
+ */
+function isCount(n: number | undefined): n is number {
+	return typeof n === "number" && Number.isInteger(n) && n >= 0;
+}
+
+/**
+ * Extract the per-message token/cache `usage` block from a harness's native
+ * assistant payload (PRD-060a a-AC-2). Claude Code writes the per-message `usage`
+ * to its transcript JSONL with `input_tokens` / `output_tokens` /
+ * `cache_read_input_tokens` / `cache_creation_input_tokens`; the hook payload
+ * surfaces that block either at the top level (`usage`) or nested under the
+ * assistant `message` (`message.usage`) depending on the lifecycle wiring, so both
+ * shapes are probed. ABSENT / non-object usage → `undefined` (the field is omitted
+ * downstream, NOT zero-filled). A present-but-partial block keeps only the counts
+ * it carried; a malformed count is dropped by {@link compactUsage}/{@link isCount}.
+ */
+export function extractTurnUsage(raw: unknown): NormalizedTurnUsage | undefined {
+	const block = usageBlock(raw);
+	if (block === undefined) return undefined;
+	const usage: NormalizedTurnUsage = {
+		...(readCount(block, "input_tokens") !== undefined ? { input: readCount(block, "input_tokens") } : {}),
+		...(readCount(block, "output_tokens") !== undefined ? { output: readCount(block, "output_tokens") } : {}),
+		...(readCount(block, "cache_read_input_tokens") !== undefined
+			? { cacheRead: readCount(block, "cache_read_input_tokens") }
+			: {}),
+		...(readCount(block, "cache_creation_input_tokens") !== undefined
+			? { cacheCreation: readCount(block, "cache_creation_input_tokens") }
+			: {}),
+	};
+	// All counts absent/malformed → no usage data (omit the whole block).
+	return compactUsage(usage);
+}
+
+/** Find the `usage` object on a native payload — top-level `usage` or `message.usage`. */
+function usageBlock(raw: unknown): Record<string, unknown> | undefined {
+	const top = nested(raw, "usage");
+	if (top !== null && typeof top === "object") return top as Record<string, unknown>;
+	const inner = nestedRecord(nested(raw, "message"), "usage");
+	return inner;
+}
+
+/** Read `obj[key].inner` as a record, or `undefined`. */
+function nestedRecord(obj: unknown, key: string): Record<string, unknown> | undefined {
+	if (obj !== null && typeof obj === "object") {
+		const value = (obj as Record<string, unknown>)[key];
+		if (value !== null && typeof value === "object") return value as Record<string, unknown>;
+	}
+	return undefined;
+}
+
+/**
+ * Read one native count field as a non-negative integer, or `undefined`. A missing,
+ * non-numeric, negative, or fractional value yields `undefined` (the field is
+ * dropped → the column stays NULL, never a silent 0). A genuine `0` is returned
+ * (zero ≠ absent — the a-AC-6 distinction).
+ */
+function readCount(block: Record<string, unknown>, key: string): number | undefined {
+	const value = block[key];
+	if (typeof value !== "number" || !Number.isInteger(value) || value < 0) return undefined;
+	return value;
 }
 
 /** The canonical `tool_call` data shape (the reference's). */

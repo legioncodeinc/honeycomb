@@ -35,6 +35,7 @@ import { HarnessesPage, resolveHarnessSubItems } from "./pages/harnesses.js";
 import { LogsPage } from "./pages/logs.js";
 import { MemoriesPage } from "./pages/memories.js";
 import { ProjectsPage } from "./pages/projects.js";
+import { RoiPage } from "./pages/roi.js";
 import { SettingsPage } from "./pages/settings.js";
 import { SyncPage } from "./pages/sync.js";
 import type { PageProps } from "./page-frame.js";
@@ -161,6 +162,15 @@ const LogsIcon = (
 	</Icon>
 );
 
+/** ROI — a rising trend line over an axis (the Net-ROI ledger, PRD-060e). */
+const RoiIcon = (
+	<Icon>
+		<path d="M4 19V5" />
+		<path d="M4 19h16" />
+		<path d="M7 15l4-5 3 3 5-7" />
+	</Icon>
+);
+
 /** Settings — a gear (provider/model/pollinating/vault). */
 const SettingsIcon = (
 	<Icon>
@@ -197,6 +207,10 @@ export const ROUTES: readonly RouteEntry[] = [
 	{ route: "/graph", label: "Graph", icon: GraphIcon, component: GraphPage },
 	{ route: "/sync", label: "Sync", icon: SyncIcon, component: SyncPage },
 	{ route: "/logs", label: "Logs", icon: LogsIcon, component: LogsPage },
+	// PRD-060e: the ROI page (the Net-ROI ledger — measured/modeled savings vs infra + pollination cost,
+	// with org/team/agent/project rollups). ONE registry entry is the whole wiring (037c contract): the
+	// sidebar renders the nav item and the outlet routes the hash, no sidebar/router hand-edit.
+	{ route: "/roi", label: "ROI", icon: RoiIcon, component: RoiPage },
 	{ route: "/settings", label: "Settings", icon: SettingsIcon, component: SettingsPage },
 ];
 

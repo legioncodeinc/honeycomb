@@ -63,6 +63,10 @@ import {
 	createWatermarkStore,
 	type WatermarkStore,
 } from "./watermark.js";
+import {
+	createRoiSessionWriter,
+	type RoiSessionWriter,
+} from "../dashboard/roi-session-writer.js";
 
 /** The job kind capture enqueues; this worker leases ONLY this — NEVER a foreign job. */
 export const SKILLIFY_JOB_KIND = "skillify" as const;
@@ -219,6 +223,14 @@ export interface SkillifyWorkerDeps {
 	 * `skills` table. Production leaves it absent → the real store.
 	 */
 	readonly storeOverride?: SkillStore;
+	/**
+	 * PRD-060e/060f — the per-session ROI-metric writer fired ONCE at skillify completion (the seam
+	 * 060f left open). Defaults to the real {@link createRoiSessionWriter} over `storage`/`scope`,
+	 * which prices the session's measured cache savings (060b) and appends one immutable `roi_metrics`
+	 * row. Injected so a test asserts the write fires once with integer-cents fields + the gated
+	 * identity columns WITHOUT a live ledger. The write is FAIL-SOFT — it never blocks completion.
+	 */
+	readonly roiWriter?: RoiSessionWriter;
 }
 
 /** The single kind this worker leases — NEVER a foreign job (f-AC-1). */
@@ -259,6 +271,8 @@ class SkillifyJobWorkerImpl implements SkillifyJobWorker {
 	private readonly gateOverride?: GateCli;
 	private readonly fetcherOverride?: SessionFetcher;
 	private readonly storeOverride?: SkillStore;
+	/** PRD-060e/060f — the per-session ROI writer fired once at completion (fail-soft). */
+	private readonly roiWriter: RoiSessionWriter;
 	private handle: unknown;
 	/** Guards against overlapping `runOnce` invocations on the poll loop. */
 	private running = false;
@@ -290,6 +304,8 @@ class SkillifyJobWorkerImpl implements SkillifyJobWorker {
 		this.gateOverride = deps.gateOverride;
 		this.fetcherOverride = deps.fetcherOverride;
 		this.storeOverride = deps.storeOverride;
+		// PRD-060e/060f: default to the real per-session ROI writer over this worker's storage/scope.
+		this.roiWriter = deps.roiWriter ?? createRoiSessionWriter({ storage: this.storage, scope: this.scope });
 	}
 
 	async runOnce(): Promise<boolean> {
@@ -371,6 +387,30 @@ class SkillifyJobWorkerImpl implements SkillifyJobWorker {
 			// Advance the watermark after EVERY run — SKIP included (b-AC-2 / FR-9).
 			const sessionDates = result.outcome.pairs.map((p) => p.sessionDate);
 			this.watermarkStore.advance(projectKey, sessionDates);
+
+			// PRD-060e/060f (module AC-11): at summary/skillify completion, append ONE immutable ROI row
+			// for this session — its MEASURED cache savings (060b) priced into integer cents, team_id
+			// resolved at write time, user_id gated to '' (no verified claim), cost UNallocated
+			// (`cost_basis:'none'` — the honest option, see roi-session-writer.ts). FAIL-SOFT by
+			// construction: `writeForSession` never throws, so an ROI-write hiccup can never fail the
+			// skillify job (it fires AFTER the skill write + watermark advance, before the job completes).
+			// Finding (worker-trycatch): wrap the ROI write in its OWN try/catch. It is fail-soft only by
+			// convention today; a THROWING writer would drop into the outer catch and `queue.fail` the job
+			// AFTER the skill write + watermark advance already succeeded -- failing a job whose real work
+			// is done. This guard makes the job complete regardless of an ROI-write fault.
+			try {
+				await this.roiWriter.writeForSession({
+					sessionId: payload.sessionId,
+					path: payload.path,
+					agentId: this.author,
+					projectId,
+				});
+			} catch (roiErr: unknown) {
+				this.logger?.event("skillify.worker.roi_write_failed", {
+					id: job.id,
+					reason: roiErr instanceof Error ? roiErr.message : String(roiErr),
+				});
+			}
 
 			await this.queue.complete(job.id);
 			this.logger?.event("skillify.worker.completed", {
