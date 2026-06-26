@@ -47,4 +47,8 @@ Plain-language definitions of the words you will see around Honeycomb. Each entr
 
 **Dashboard**: The simple local web page Honeycomb serves on your own machine. It shows your memories, how your tools are wired, your team's shared skills, and the health of everything. It is also where first-time setup happens. No database skills required.
 
+**ROI**: The dashboard page that answers "is this saving me money?" It nets what Honeycomb saves you (from reused context and fewer back-and-forths) against what it costs to run, in plain dollars. It carefully labels which numbers are **measured** (real, billed facts) and which are **estimates** (projections), and shows a dash rather than a made-up number when something cannot be measured yet. See [Your ROI dashboard](../guides/roi-dashboard.md).
+
+**Measured vs estimated savings**: Honeycomb's honesty rule on the ROI page. A *measured* number is arithmetic over your real billed usage, trust it like a receipt. An *estimated* number is a model of what would otherwise have happened, useful but a projection, and it is always flagged with an "est." marker so the two are never confused.
+
 **MCP**: A standard way for AI tools to call external helpers. Honeycomb offers an MCP "server" so assistants that speak it can ask Honeycomb for memory directly, as a built-in tool.

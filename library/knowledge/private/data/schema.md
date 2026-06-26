@@ -262,6 +262,59 @@ The `native` and `canonical` blobs are the per-harness and canonical asset paylo
 
 Telemetry is opt-in and local to the deployment: usage counters and an optional recall QA ledger, used for diagnostics and never carrying secrets or request bodies. The router's redacted routing history (see [`../ai/model-provider-router.md`](../ai/model-provider-router.md)) lands here too.
 
+## Spend ledger and teams (ROI)
+
+`roi_metrics` is the **shared, cross-device spend ledger** that backs the ROI Tracker (see [`../operations/roi-tracker.md`](../operations/roi-tracker.md)). It is tenant-scoped (explicit `org_id`/`workspace_id`) and **append-only**, one immutable row per session via `appendOnlyInsert`; a re-price APPENDs a new row with a fresh `price_ref` and the canonical row per `session_id` is `MAX(created_at)`, there is **no UPDATE path**. Every money column is **BIGINT integer cents, never FLOAT** (a ledger reconciles to the penny), and measured / modeled / allocated are kept as separate, self-describing columns so a modeled estimate can never read as a measured fact. `user_id` is **gated**, it stays `''` until a verified `backend-token` claim populates it (no git-email / `$USER` / OS-login fallback, no backfill). Indexes are lookup-only on the rollup columns; there is **no embedding column, no JSONB, no BM25, no vector**.
+
+```sql
+CREATE TABLE IF NOT EXISTS "roi_metrics" (
+  id                            TEXT NOT NULL DEFAULT '',
+  session_id                    TEXT NOT NULL DEFAULT '',
+  org_id                        TEXT NOT NULL DEFAULT '',
+  workspace_id                  TEXT NOT NULL DEFAULT '',
+  agent_id                      TEXT NOT NULL DEFAULT 'default',
+  project_id                    TEXT NOT NULL DEFAULT '',
+  team_id                       TEXT NOT NULL DEFAULT '',
+  user_id                       TEXT NOT NULL DEFAULT '',   -- GATED: '' until a verified backend-token claim
+  input_tokens                  BIGINT NOT NULL DEFAULT 0,
+  output_tokens                 BIGINT NOT NULL DEFAULT 0,
+  cache_read_tokens             BIGINT NOT NULL DEFAULT 0,
+  cache_creation_tokens         BIGINT NOT NULL DEFAULT 0,
+  measured_cache_savings_cents  BIGINT NOT NULL DEFAULT 0,  -- MEASURED, billed fact
+  modeled_savings_cents         BIGINT NOT NULL DEFAULT 0,  -- MODELED, labeled estimate
+  modeled_assumption_ref        TEXT NOT NULL DEFAULT '',
+  gross_cost_cents              BIGINT NOT NULL DEFAULT 0,
+  infra_cost_cents              BIGINT NOT NULL DEFAULT 0,
+  cost_basis                    TEXT NOT NULL DEFAULT 'none', -- measured | allocated | none
+  allocation_method             TEXT NOT NULL DEFAULT '',
+  price_ref                     TEXT NOT NULL DEFAULT '',
+  period_start                  TEXT NOT NULL DEFAULT '',
+  period_end                    TEXT NOT NULL DEFAULT '',
+  created_at                    TEXT NOT NULL DEFAULT ''
+) USING deeplake;
+```
+
+`teams` is the roster `roi_metrics.team_id` resolves against at ROI-write time. It is tenant-scoped and **version-bumped** (one row per (team, member); an edit APPENDs version N+1, read `ORDER BY version DESC`, the same primitive `api_keys` uses for the same backend-non-convergence reason). `member_type` is an `'agent'｜'user'` union, `agent` rows work today and `user` rows are inert until `user_id` is verified.
+
+```sql
+CREATE TABLE IF NOT EXISTS "teams" (
+  id           TEXT NOT NULL DEFAULT '',
+  team_id      TEXT NOT NULL DEFAULT '',
+  team_name    TEXT NOT NULL DEFAULT '',
+  member_type  TEXT NOT NULL DEFAULT 'agent',  -- agent (live) | user (inert until user_id verified)
+  member_id    TEXT NOT NULL DEFAULT '',
+  role         TEXT NOT NULL DEFAULT 'member',
+  active       BIGINT NOT NULL DEFAULT 1,
+  org_id       TEXT NOT NULL DEFAULT '',
+  workspace_id TEXT NOT NULL DEFAULT '',
+  version      BIGINT NOT NULL DEFAULT 0,
+  created_at   TEXT NOT NULL DEFAULT '',
+  updated_at   TEXT NOT NULL DEFAULT ''
+) USING deeplake;
+```
+
+The `sessions` capture table additionally gained five additive token/cache columns (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`) plus a `source_tool` discriminant, added via additive schema healing so the measured-savings half has per-turn token data; a missing/legacy column degrades the read to "token data absent" rather than throwing.
+
 ## Retention summary
 
 | Data | Default behavior |
@@ -271,6 +324,7 @@ Telemetry is opt-in and local to the deployment: usage counters and an optional 
 | `memory_jobs` | Completed purged after a window; dead jobs later |
 | `memory_artifacts` | Soft-delete on source file removal, hard purge on source disconnect by `source_id` |
 | `skills` / `rules` | Append-only version history retained |
+| `roi_metrics` | Append-only ledger retained (re-price appends a new row; canonical = `MAX(created_at)` per session) |
 | embeddings / vectors | Purged with their owning row during retention sweeps |
 
 Because DeepLake exposes no transactions at this layer, retention runs as batched, idempotent sweeps in a daemon worker rather than cascading deletes, consistent with the patterns in [`deeplake-storage.md`](deeplake-storage.md).

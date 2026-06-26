@@ -88,6 +88,8 @@ Working on access, tenancy, and security: [`auth/auth-architecture.md`](auth/aut
 
 Build, CLI, and ops: [`infrastructure/monorepo-build-release.md`](infrastructure/monorepo-build-release.md), [`infrastructure/npm-publishing.md`](infrastructure/npm-publishing.md), [`operations/cli-command-architecture.md`](operations/cli-command-architecture.md), [`operations/install-and-onboarding.md`](operations/install-and-onboarding.md), [`operations/notifications-and-health.md`](operations/notifications-and-health.md), [`operations/observability-and-degradation.md`](operations/observability-and-degradation.md).
 
+Working on cost and ROI: [`operations/deeplake-compute-cost.md`](operations/deeplake-compute-cost.md), [`operations/roi-tracker.md`](operations/roi-tracker.md), then [`data/schema.md`](data/schema.md) for the `roi_metrics` + `teams` ledger tables.
+
 Conventions: [`standards/documentation-framework.md`](standards/documentation-framework.md), [`standards/coding-standards-typescript.md`](standards/coding-standards-typescript.md), [`standards/api-design-conventions.md`](standards/api-design-conventions.md).
 
 ## Coverage

@@ -42,6 +42,7 @@ Start here, then follow the cross-links:
 - **guides/**
   - [Getting started](guides/getting-started.md): install, connect, and save your first memory
   - [Everyday use](guides/everyday-use.md): the day-to-day flow
+  - [Your ROI dashboard](guides/roi-dashboard.md): the page that shows whether the memory layer pays for itself
   - [Honeycomb for teams](guides/teams.md): sharing memory and skills across a team
 - **faqs/**
   - [Frequently asked questions](faqs/faq.md): short answers to the common questions
