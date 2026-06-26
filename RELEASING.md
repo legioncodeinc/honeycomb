@@ -98,9 +98,16 @@ long-lived to leak or rotate.
 
 1. **First publish is a one-time manual bootstrap.** A trusted publisher can only
    be attached to a package that already exists on npm. So the very first release
-   is a manual, interactive (2FA) `npm publish` by an org member with publish
-   rights — this creates `@legioncodeinc/honeycomb` on the registry. (See "Cut
-   the release" below for the bootstrap-vs-subsequent split.)
+   is a manual, interactive (2FA) publish by an org member with publish rights:
+   ```sh
+   npm publish --access public --provenance=false
+   ```
+   This creates `@legioncodeinc/honeycomb` on the registry. **You must pass
+   `--provenance=false`** here: `publishConfig.provenance: true` makes npm try to
+   generate a provenance attestation, which only works inside a supported CI OIDC
+   environment, so a local publish without the override fails. Provenance is not
+   skipped going forward, every subsequent CI publish (tag push) generates it
+   normally. (See "Cut the release" below for the bootstrap-vs-subsequent split.)
 2. **Attach the trusted publisher.** On npmjs.com → the package → **Settings →
    Trusted Publishers → GitHub Actions**, add:
    - **Organization / user:** `legioncodeinc`
@@ -119,6 +126,17 @@ Until the package exists + the trusted publisher is attached, a real CI publish
 cannot succeed; before then, `release.yaml` on a `workflow_dispatch` does the gate
 + `npm publish --dry-run` and stays green (the `--dry-run` does no OIDC handshake)
 — same skip-don't-fail pattern as `ci.yaml`'s gated integration job.
+
+> **What guards against an accidental publish now.** Once switches (a) through
+> (c) are flipped, the fail-closed publishability preflight no longer aborts
+> (that is its job; it only blocked the unscoped/`private` draft). And with
+> tokenless OIDC there is no `NPM_TOKEN` whose absence used to force a dry-run. So
+> the single operative guard becomes the **trigger**: only a `vX.Y.Z` **tag push**
+> publishes for real. A `workflow_dispatch` always resolves to `--dry-run` (it is
+> not a tag ref), even with `dry_run=false`, because the publish-mode step
+> requires a tag push. Put plainly: as long as **no `vX.Y.Z` tag is pushed**,
+> nothing goes live. The trusted publisher also only authorizes publishes from
+> this repo's `release.yaml`, so no other workflow can publish.
 
 ---
 
@@ -156,19 +174,23 @@ Once (a)–(d) are flipped and a dry-run rehearsal is green:
    `npm version` writes the new version into `package.json` and creates the
    annotated git tag `vX.Y.Z`.
 
-   > **Make sure the manifests are synced into the commit.** `npm version` runs
-   > npm's `version` lifecycle but **not** `prebuild`. If you have not wired a
-   > `"version": "node scripts/sync-versions.mjs && git add -A"` npm script,
-   > run `node scripts/sync-versions.mjs` **before** `npm version`, or run it
-   > after and amend, so the propagated manifest versions land in the tagged
-   > commit. CI's tag-vs-`package.json` guard checks the root version against
-   > the tag; sync-versions keeps the harness manifests honest with it.
+   > **The manifests sync automatically.** `npm version` runs npm's `version`
+   > lifecycle script, which this repo wires to
+   > `node scripts/sync-versions.mjs && git add <the manifest paths>`. So a bump
+   > propagates the new version into every harness manifest and stages those
+   > manifests into the version commit on its own: no manual sync step, no
+   > amend. (The `git add` is scoped to the exact files sync-versions writes, not
+   > a blanket `git add -A`, so it cannot stage an accidental asset deletion.)
+   > CI's tag-vs-`package.json` guard checks the root version against the tag;
+   > sync-versions keeps the harness manifests honest with it.
 
    > **Bootstrap (first release only).** The trusted publisher cannot be attached
    > until the package exists on npm, so the FIRST publish is a one-time manual
-   > publish by an org member: `npm publish --access public` (interactive, 2FA),
-   > then attach the trusted publisher per switch (d). Every release after the
-   > first is the tokenless CI flow below.
+   > publish by an org member: `npm publish --access public --provenance=false`
+   > (interactive, 2FA; `--provenance=false` is required because a local publish
+   > cannot generate the CI-only provenance attestation that `publishConfig` asks
+   > for), then attach the trusted publisher per switch (d). Every release after
+   > the first is the tokenless CI flow below, which DOES carry provenance.
 
 2. **Push the tag.**
    ```sh

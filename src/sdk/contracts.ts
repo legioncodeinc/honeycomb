@@ -1,5 +1,5 @@
 /**
- * SDK contracts + seams — PRD-019e Wave 1 (`@honeycomb/sdk` typed client).
+ * SDK contracts + seams — PRD-019e Wave 1 (`@legioncodeinc/honeycomb` typed client).
  *
  * ── THE THESIS (FR-1 / FR-3 / e-AC-3 / D-2) ─────────────────────────────────
  *   THE SDK IS A FETCH-ONLY THIN CLIENT. {@link HoneycombClient} wraps the daemon

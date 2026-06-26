@@ -1,4 +1,4 @@
-# `@honeycomb/sdk` — CONVENTIONS (PRD-019e)
+# `@legioncodeinc/honeycomb` — CONVENTIONS (PRD-019e)
 
 The SDK lives under `src/sdk/`. It is a typed HTTP client with NO native dependencies (safe in
 Node, Bun, and the browser) wrapping the daemon API, plus React bindings, a Vercel AI SDK helper,
@@ -48,8 +48,8 @@ REDACTED output only. The SDK never returns a raw secret value — the type surf
 
 `react.ts`, `vercel.ts`, `openai.ts` are separate modules so the core client stays dependency-free
 for browser use. They REUSE the core client's token + actor model — they adapt its methods, never
-re-implement HTTP. The barrel (`index.ts`) does NOT re-export them; an app imports `@honeycomb/sdk`
-for the core and `@honeycomb/sdk/react` (etc.) for a helper.
+re-implement HTTP. The barrel (`index.ts`) does NOT re-export them; an app imports `@legioncodeinc/honeycomb`
+for the core and `@legioncodeinc/honeycomb/react` (etc.) for a helper.
 
 **Wave 2 build wiring (DONE — PRD-019e).** The three helpers ship as separate package exports:
 - `package.json#exports` subpaths are wired: `.` → `./sdk/index.js`, `./react` → `./sdk/react.js`,
@@ -68,11 +68,11 @@ the bindings take it as a parameter; an app threads its real `React`, a test pas
 keeps the module compiling with zero new deps while the bindings run against real React at app runtime.
 
 **Honest deferral.** The SDK is constructed, bundled, and tested as subpath exports of this repo.
-PUBLISHING `@honeycomb/sdk` as its own npm package (vs. these subpath exports) is out of scope for 019e.
+PUBLISHING `@legioncodeinc/honeycomb` as its own npm package (vs. these subpath exports) is out of scope for 019e.
 
 ## Open questions (recorded, not resolved)
 
-- Separate published packages vs subpath exports of `@honeycomb/sdk` for the helpers (PRD open Q).
+- Separate published packages vs subpath exports of `@legioncodeinc/honeycomb` for the helpers (PRD open Q).
 - The default timeout budget + per-call override (`DEFAULT_TIMEOUT_MS` is the Wave-1 placeholder).
 
 ## What Wave 2 fills (signatures STABLE — pure fill)
