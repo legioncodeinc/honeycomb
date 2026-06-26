@@ -105,11 +105,17 @@ export class PgDeepLakeTransport implements DeepLakeTransport {
 	/**
 	 * (G2) Ensure the workspace's Postgres schema exists. Cached in
 	 * {@link ensuredSchemas} so the create is issued once per workspace per
-	 * process. The identifier is quoted, never concatenated raw.
+	 * process. Raced against the abort signal so a slow CREATE during a statement
+	 * timeout is honored too. The identifier is quoted, never concatenated raw.
 	 */
-	private async ensureSchema(client: import("pg").PoolClient, workspace: string): Promise<void> {
+	private async ensureSchema(
+		client: import("pg").PoolClient,
+		workspace: string,
+		signal: AbortSignal,
+		onAbort: () => void,
+	): Promise<void> {
 		if (this.ensuredSchemas.has(workspace)) return;
-		await client.query(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(workspace)}`);
+		await runWithAbort(client, `CREATE SCHEMA IF NOT EXISTS ${quoteIdent(workspace)}`, signal, onAbort);
 		this.ensuredSchemas.add(workspace);
 	}
 
@@ -133,24 +139,24 @@ export class PgDeepLakeTransport implements DeepLakeTransport {
 			throw new TransportError("connection", messageOf(err));
 		}
 
-		// Set when the abort wins the race below, so the catch maps to a timeout
+		// Set when the abort wins any race below, so the catch maps to a timeout
 		// and the finally DESTROYS (does not pool-return) the connection.
 		let aborted = false;
+		const onAbort = (): void => {
+			aborted = true;
+		};
 		try {
 			// (G2) workspace == its own schema; SET search_path on every checkout
 			// (pooled connections are reused, so the search_path must be re-set each
 			// time). `public` stays on the path so the shared `pg_deeplake` functions
-			// and `information_schema` resolve.
-			await this.ensureSchema(client, req.workspace);
-			await client.query(`SET search_path TO ${quoteIdent(req.workspace)}, public`);
+			// and `information_schema` resolve. EVERY statement (the schema setup AND
+			// the query) is raced against the abort, so a timeout landing during
+			// setup is honored and never blocks until the setup awaits settle.
+			await this.ensureSchema(client, req.workspace, req.signal, onAbort);
+			await runWithAbort(client, `SET search_path TO ${quoteIdent(req.workspace)}, public`, req.signal, onAbort);
 
-			// Race the pure-passthrough query (G3) against the abort signal. On abort
-			// we reject with a timeout; the in-flight query promise is settled by the
-			// race so it never surfaces as an unhandled rejection.
-			const rows = await runWithAbort(client, req.sql, req.signal, () => {
-				aborted = true;
-			});
-			return rows;
+			// (G3) pure-passthrough query, raced against the abort signal.
+			return await runWithAbort(client, req.sql, req.signal, onAbort);
 		} catch (err) {
 			// The abort path: our timeout fired. The client relies on the transport
 			// rejecting on abort, then classifies it as a timeout result.
