@@ -15,6 +15,7 @@ import {
 	resolveStorageConfig,
 	type StorageConfig,
 } from "./config.js";
+import { PgDeepLakeTransport } from "./pg-transport.js";
 import { connectionError, type QueryResult } from "./result.js";
 import { type DeepLakeTransport, HttpDeepLakeTransport } from "./transport.js";
 
@@ -65,6 +66,7 @@ export {
 	type TransportErrorKind,
 	type TransportRequest,
 } from "./transport.js";
+export { PgDeepLakeTransport, type PgPoolFactory } from "./pg-transport.js";
 
 // ── Wave 2: SQL safety (002b) ──────────────────────────────────────────────
 export { eLiteral, sLiteral, sqlColumnList, sqlIdent, sqlLike, sqlStr } from "./sql.js";
@@ -176,6 +178,23 @@ export {
 } from "./compaction.js";
 
 /**
+ * Choose the default transport for a resolved config (self-hosted Postgres
+ * backend). A `postgres://` / `postgresql://` endpoint means the operator is
+ * pointing honeycomb at an Activeloop `pg_deeplake` Postgres URL DIRECTLY (no
+ * HTTP gateway), so we wire the {@link PgDeepLakeTransport}; anything else is an
+ * HTTP DeepLake endpoint and gets the {@link HttpDeepLakeTransport}. Both sit
+ * behind the same `DeepLakeTransport` seam, so the client is identical either
+ * way. `config.endpoint` is `z.string().url()`, so a `postgres://` URL has
+ * already validated by the time we get here.
+ */
+export function createDefaultTransport(config: StorageConfig): DeepLakeTransport {
+	if (/^postgres(ql)?:\/\//i.test(config.endpoint)) {
+		return new PgDeepLakeTransport(config.endpoint);
+	}
+	return new HttpDeepLakeTransport(config.endpoint, config.token);
+}
+
+/**
  * Build the storage client, failing closed on bad config (FR-2 / a-AC-3).
  *
  * Order matters: config is resolved and validated FIRST, so the daemon throws
@@ -205,7 +224,7 @@ export function createStorageClient(
 ): StorageClient {
 	const provider = options.provider ?? defaultCredentialProvider();
 	const config: StorageConfig = resolveStorageConfig(provider);
-	const transport: DeepLakeTransport = options.transport ?? new HttpDeepLakeTransport(config.endpoint, config.token);
+	const transport: DeepLakeTransport = options.transport ?? createDefaultTransport(config);
 	return new StorageClient(transport, config, options.sleep);
 }
 
