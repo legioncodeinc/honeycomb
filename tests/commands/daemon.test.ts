@@ -56,6 +56,38 @@ describe("PRD-021b b-AC-2 — daemon start|stop|status", () => {
 		expect(lines.join("\n")).toMatch(/started on 127\.0\.0\.1:3850/);
 	});
 
+	it("`daemon start` reports a warming-up daemon (process up, /health not yet) instead of failing", async () => {
+		const lines: string[] = [];
+		// start() exhausts the readiness budget (started:false) but the process is up + holds the lock.
+		const lifecycle = fakeLifecycle({
+			start: { started: false, alreadyRunning: false },
+			status: { running: true, pid: 4242, port: 3850 },
+		});
+		const res = await runDaemonCommand(["start"], {
+			daemon: createFakeDaemonClient({ alive: false }),
+			lifecycle,
+			out: (l) => lines.push(l),
+		});
+		expect(res.exitCode).toBe(0); // a daemon that is coming up is NOT a failure
+		expect(lines.join("\n")).toMatch(/warming up/);
+		expect(lines.join("\n")).not.toMatch(/failed to start/);
+	});
+
+	it("`daemon start` still reports failure when the process never comes up", async () => {
+		const lines: string[] = [];
+		const lifecycle = fakeLifecycle({
+			start: { started: false, alreadyRunning: false },
+			status: { running: false, port: 3850 },
+		});
+		const res = await runDaemonCommand(["start"], {
+			daemon: createFakeDaemonClient({ alive: false }),
+			lifecycle,
+			out: (l) => lines.push(l),
+		});
+		expect(res.exitCode).toBe(1);
+		expect(lines.join("\n")).toMatch(/failed to start/);
+	});
+
 	it("b-AC-2 `daemon start` is idempotent when already running", async () => {
 		const lines: string[] = [];
 		const lifecycle = fakeLifecycle({ start: { started: false, alreadyRunning: true } });

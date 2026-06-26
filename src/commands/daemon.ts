@@ -86,6 +86,18 @@ async function start(deps: DaemonVerbDeps, out: OutputSink): Promise<CommandResu
 		out("daemon: started on 127.0.0.1:3850.");
 		return { exitCode: 0 };
 	}
+	// The readiness budget was exhausted without a `/health` answer. Distinguish a daemon that is
+	// still WARMING UP (the process is up and holds the 021a PID/lock, just not answering yet — a
+	// cold boot warms embeddings + wires workers, which can exceed the budget) from a genuine
+	// failure. Reporting "failed to start" at a daemon that is actually coming up is exactly what
+	// made a slow-but-fine boot look like a crash.
+	const status = await deps.lifecycle.status();
+	if (status.running) {
+		out(
+			`daemon: starting — the process is up (pid ${status.pid ?? "?"}) but has not answered /health within the start budget; it is likely still warming up. Re-check with \`honeycomb daemon status\`.`,
+		);
+		return { exitCode: 0 };
+	}
 	out("daemon: failed to start (did not become reachable on 127.0.0.1:3850).");
 	return { exitCode: 1 };
 }
