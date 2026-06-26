@@ -74,15 +74,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4.2.2
 
-      # DO NOT set `registry-url`: setup-node's registry-url scaffolds an ~/.npmrc with
-      # `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` AND injects a DUMMY
-      # NODE_AUTH_TOKEN placeholder (`XXXXX-XXXXX-XXXXX-XXXXX`). npm then sends that bogus
-      # token on `npm publish`, which (a) fails auth with a 404 and (b) SUPPRESSES OIDC
-      # Trusted Publishing entirely — npm uses OIDC ONLY when no credentials are configured.
-      # Omitting registry-url leaves the job credential-free so the OIDC handshake engages;
-      # npm publishes to the default public registry (registry.npmjs.org) regardless, and
-      # `--access public` (below) grants the scoped package public access. (Earlier releases
-      # 404'd on exactly this: the scaffolded dummy token shadowed the trusted publisher.)
+      # `registry-url` is REQUIRED for OIDC Trusted Publishing to engage: it writes the
+      # explicit `registry=https://registry.npmjs.org/` into the job ~/.npmrc, which is what
+      # makes npm enter the npmjs auth path (without it npm skips OIDC and errors ENEEDAUTH).
+      # BUT setup-node ALSO scaffolds `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}`
+      # with a DUMMY NODE_AUTH_TOKEN (`XXXXX-XXXXX-XXXXX-XXXXX`); npm would send that bogus
+      # token and 404 (and never fall back to OIDC, which it uses ONLY when no credential is
+      # configured). The next step strips JUST that `_authToken` line, leaving the registry
+      # line intact — so npm is OIDC-capable AND credential-free, and the trusted publisher
+      # authenticates the publish. (v0.1.1 404'd on the dummy token; v0.1.2 ENEEDAUTH'd with
+      # registry-url removed entirely — this keeps the registry, drops only the token.)
       # Dependency caching is deliberately OFF on this publish job: a lower-privilege
       # workflow could poison an npm cache that this high-privilege release build then
       # executes (zizmor cache-poisoning). `npm ci` installs from the committed lockfile.
@@ -92,6 +93,7 @@ jobs:
         uses: actions/setup-node@v6.4.0
         with:
           node-version: '22.x'
+          registry-url: 'https://registry.npmjs.org'
 
       # Node 22 bundles npm 10.x, but npm Trusted Publishing (OIDC) requires
       # npm >= 11.5.1 — without it the OIDC handshake never engages and `npm
@@ -101,6 +103,21 @@ jobs:
       # never runs an unreviewed npm; bump it deliberately (must stay >= 11.5.1).
       - name: Upgrade npm (Trusted Publishing needs npm >= 11.5.1)
         run: npm install -g npm@11.6.2
+
+      # Strip setup-node's dummy `_authToken` line so OIDC Trusted Publishing authenticates
+      # the publish (npm uses OIDC only when NO credential is configured). The registry line
+      # written by registry-url is KEPT (it is what makes npm OIDC-capable). Diagnostics are
+      # printed so a future auth failure shows the resolved npm version + registry + .npmrc.
+      - name: Enable OIDC trusted publishing (strip scaffolded auth token)
+        run: |
+          npmrc="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
+          if [ -f "$npmrc" ]; then
+            sed -i '/:_authToken=/d' "$npmrc"
+          fi
+          echo "npm version: $(npm --version)"
+          echo "registry:    $(npm config get registry)"
+          echo "----- effective .npmrc ($npmrc) -----"
+          sed -E 's/(_authToken=).*/\1<redacted>/' "$npmrc" 2>/dev/null || echo "(no .npmrc)"
 
       - name: Install (npm ci)
         run: npm ci
