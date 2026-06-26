@@ -2,10 +2,11 @@
  * The shared "Build graph" BUTTON — the codebase-graph build trigger, used on BOTH graph surfaces.
  *
  * Two places show the codebase-graph empty state — the full-page Graph (`pages/graph.tsx`) and the home
- * GraphPanel (`panels.tsx`). Before, each showed a dead `honeycomb graph build` CLI hint. This single
- * component replaces that with a working primary button wired to the daemon's already-served
- * `POST /api/graph/build` (via `wire.buildGraph()`), so the logic lives in ONE place (jscpd discipline)
- * and both surfaces behave identically.
+ * GraphPanel (`panels.tsx`). Before, each showed a dead `honeycomb graph build` CLI hint (a command that
+ * does not exist — the graph is ONLY buildable from this UI). This single component replaces that with a
+ * working primary button wired to the daemon's already-served `POST /api/graph/build` (via
+ * `wire.buildGraph()`), so the logic lives in ONE place (jscpd discipline) and both surfaces behave
+ * identically.
  *
  * Behavior (mirrors the shell's `pollinate` action in `app.tsx`):
  *   - A SYNCHRONOUS in-flight ref guards re-entry: `setBuilding(true)` is async, so a render-state guard
@@ -16,7 +17,8 @@
  *     `wire.graph()`) and the fresh LOCAL snapshot renders WITHOUT a manual reload (no eventual-consistency
  *     wait — the build wrote a local file the next `GET /api/graph` reads immediately).
  *   - On a `{ built: false }` ack (the daemon rejected/failed, or the wire timed out/degraded) it shows an
- *     honest inline error line and keeps a small secondary `honeycomb graph build` CLI hint for power users.
+ *     honest inline error line inviting a retry — the same button is right there, so there is NO CLI hint
+ *     (the old `honeycomb graph build` command never existed).
  *
  * The wire NEVER throws (it degrades to a failure ack), but the host's `onBuilt` re-hydrate MAY (its type
  * allows an async refresh). A `try/finally` therefore always clears the in-flight ref AND the "Building…"
@@ -41,12 +43,9 @@ export interface BuildGraphButtonProps {
 	readonly onBuilt: () => void | Promise<void>;
 }
 
-/** The dead CLI command the build used to be — kept ONLY as a small secondary hint on failure (power users). */
-const BUILD_CLI_HINT = "honeycomb graph build";
-
 /**
  * The shared Build-graph button. Renders a primary button that triggers the real daemon build, re-hydrates
- * the active graph on success, and surfaces an honest inline error + the CLI hint on failure. Mirrors the
+ * the active graph on success, and surfaces an honest inline error inviting a retry on failure. Mirrors the
  * `pollinateInFlightRef` synchronous re-entry guard so a double-click POSTs exactly once.
  */
 export function BuildGraphButton({ wire, onBuilt }: BuildGraphButtonProps): React.JSX.Element {
@@ -97,12 +96,9 @@ export function BuildGraphButton({ wire, onBuilt }: BuildGraphButtonProps): Reac
 				{building ? "Building…" : "Build graph"}
 			</Button>
 			{failed && (
-				<>
-					<span data-testid="build-graph-error" style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--severity-critical)" }}>
-						Build failed — the daemon could not build the graph.
-					</span>
-					<code style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-tertiary)" }}>{BUILD_CLI_HINT}</code>
-				</>
+				<span data-testid="build-graph-error" style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--severity-critical)" }}>
+					Build failed — the daemon could not build the graph. Try again.
+				</span>
 			)}
 		</div>
 	);

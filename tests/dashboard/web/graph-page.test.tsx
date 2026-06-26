@@ -383,7 +383,7 @@ describe("PRD-041a: the Build graph button triggers the daemon build and re-hydr
 		expect(container.textContent ?? "").toContain("server.ts");
 	});
 
-	it("a { built: false } ack shows the inline error + keeps the CLI hint, and the empty state stays", async () => {
+	it("a { built: false } ack shows the inline error (no dead CLI hint), and the empty state stays", async () => {
 		const wire = mockWire(EMPTY, EMPTY, async () => ({ built: false, nodeCount: 0, edgeCount: 0, fileCount: 0 }));
 		await mountPage(wire);
 		const btn = container.querySelector('[data-testid="build-graph-button"]') as HTMLButtonElement;
@@ -392,10 +392,11 @@ describe("PRD-041a: the Build graph button triggers the daemon build and re-hydr
 			await Promise.resolve();
 			await Promise.resolve();
 		});
-		// The empty state is still shown (no build happened) with an honest error + the CLI hint for power users.
+		// The empty state is still shown (no build happened) with an honest error inviting a retry.
 		expect(container.querySelector('[data-testid="graph-empty-state"]')).not.toBeNull();
 		expect(container.querySelector('[data-testid="build-graph-error"]')).not.toBeNull();
-		expect(container.textContent ?? "").toContain("honeycomb graph build");
+		// The button is right there to retry — we never surface the non-existent `honeycomb graph build` command.
+		expect(container.textContent ?? "").not.toContain("honeycomb graph build");
 		// The button returns to its idle label (not a forever spinner).
 		expect(container.querySelector('[data-testid="build-graph-button"]')?.textContent).toBe("Build graph");
 	});

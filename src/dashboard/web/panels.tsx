@@ -295,8 +295,9 @@ function NodeDetail({ node, neighbors }: { node: GraphWire["nodes"][number]; nei
 }
 
 /**
- * The codebase-graph canvas (PRD-035c). When the wire's `graph.built` is false, renders the kit's
- * `honeycomb graph build` empty-state prompt UNCHANGED (FR-7 / AC-5). When built, it computes a
+ * The codebase-graph canvas (PRD-035c). When the wire's `graph.built` is false, renders the empty state
+ * with the wired "Build graph" button (the graph is buildable ONLY from the UI — there is no CLI verb).
+ * When built, it computes a
  * deterministic position per node via {@link layout} (NOT a hardcoded id map — the old `NODE_POS`
  * keyed on six fixed ids that real file-path / symbol ids never matched, so every node was skipped
  * and the canvas was blank), then draws ONE mark per node (FR-1) and every edge whose endpoints
@@ -330,11 +331,12 @@ export function GraphCanvas({
 				<div style={{ padding: "24px 8px", textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
 					<div style={{ fontSize: 14, color: "var(--text-tertiary)" }}>No graph built for this workspace.</div>
 					{/* The same wired "Build graph" button the full-page Graph empty state uses (shared component,
-					    no duplicated logic). Falls back to the CLI hint only when no wire is threaded (defensive). */}
+					    no duplicated logic). With no wire threaded (defensive, never in production) we point at the
+					    Graph page's button rather than a `honeycomb graph build` CLI command that does not exist. */}
 					{wire !== undefined ? (
 						<BuildGraphButton wire={wire} onBuilt={onBuilt ?? (() => {})} />
 					) : (
-						<code style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--honey)" }}>honeycomb graph build</code>
+						<div style={{ fontSize: 13, color: "var(--text-tertiary)" }}>Use the Build graph button on the Graph page.</div>
 					)}
 				</div>
 			</Panel>
