@@ -22,10 +22,12 @@ import {
 	createWireClient,
 	DASHBOARD_SESSION_HEADERS,
 	EMPTY_VAULT_SETTINGS,
+	formatRecallSnippet,
 	type GraphWire,
 	HealthBodySchema,
 	HealthReasonsSchema,
 	MAX_RENDER_EDGES,
+	MAX_SNIPPET_CHARS,
 	SecretNamesSchema,
 	VaultSettingsSchema,
 } from "../../../src/dashboard/web/wire.js";
@@ -177,6 +179,79 @@ describe("PRD-027 AC-4: recall() carries the ENGINE score in ENGINE order (no `1
 		expect(memories[0]?.secondary).toBe(false);
 	});
 });
+
+describe("formatRecallSnippet: a raw session turn renders as one readable line, not escaped JSON", () => {
+	it("humanizes a captured tool_call into `tool · detail` instead of dumping the JSON", () => {
+		const raw = JSON.stringify({
+			id: "abdb49bd",
+			cwd: "C:/Users/mario/GitHub/honeycomb",
+			type: "tool_call",
+			tool_name: "Read",
+			tool_input: { file_path: "C:/Users/mario/GitHub/honeycomb/assets/ui_kits/dashboard/index.html" },
+			tool_response: "<!doctype html> …a very long file body…",
+		});
+		const snippet = formatRecallSnippet(raw, "session");
+		expect(snippet).toBe("Read · C:/Users/mario/GitHub/honeycomb/assets/ui_kits/dashboard/index.html");
+		// The escaped-JSON tell-tales are gone: no brace, no quoted key.
+		expect(snippet).not.toContain('"tool_name"');
+		expect(snippet).not.toContain("{");
+	});
+
+	it("renders a user_message turn as `user: <prompt>`", () => {
+		const raw = JSON.stringify({ kind: "user_message", text: "how do we deploy" });
+		expect(formatRecallSnippet(raw, "session")).toBe("user: how do we deploy");
+	});
+
+	it("renders an assistant turn (variant `type` + `tool_name`) using the normalized contract too", () => {
+		const raw = JSON.stringify({ type: "assistant_message", text: "We deploy via the npm release pipeline." });
+		expect(formatRecallSnippet(raw, "session")).toBe("assistant: We deploy via the npm release pipeline.");
+	});
+
+	it("falls back to the bare tool name when the input carries no known detail key", () => {
+		const raw = JSON.stringify({ type: "tool_call", tool: "TodoWrite", input: { todos: [] } });
+		expect(formatRecallSnippet(raw, "session")).toBe("TodoWrite");
+	});
+
+	it("leaves a distilled `memory` prose fact untouched (never reshaped)", () => {
+		expect(formatRecallSnippet("We deploy by publishing @deeplake/hivemind to npm.", "memory")).toBe(
+			"We deploy by publishing @deeplake/hivemind to npm.",
+		);
+	});
+
+	it("collapses whitespace and never throws on non-JSON session text", () => {
+		expect(formatRecallSnippet("raw   session\n\tdump", "session")).toBe("raw session dump");
+	});
+
+	it("caps an overlong snippet at MAX_SNIPPET_CHARS with an ellipsis", () => {
+		const long = "x".repeat(MAX_SNIPPET_CHARS + 50);
+		const snippet = formatRecallSnippet(long, "memory");
+		expect(snippet.length).toBe(MAX_SNIPPET_CHARS);
+		expect(snippet.endsWith("…")).toBe(true);
+	});
+
+	it("end-to-end: recall() maps a raw session hit's text through the humanizer", async () => {
+		const raw = JSON.stringify({ type: "tool_call", tool_name: "Grep", tool_input: { pattern: "onRecall" } });
+		const fetchImpl = recallFetchBody({
+			hits: [{ source: "sessions", id: "sess-1", text: raw, score: 0.2, kind: "session", secondary: true }],
+			sources: ["sessions"],
+			degraded: false,
+		});
+		const client = createWireClient({ fetchImpl });
+		const { memories } = await client.recall("how do we deploy");
+		expect(memories[0]?.snippet).toBe("Grep · onRecall");
+	});
+});
+
+/** A fetch mock that answers the recall POST with a canned `{hits,sources,degraded}` body. */
+function recallFetchBody(body: unknown): typeof fetch {
+	return vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+		const url = typeof input === "string" ? input : input.toString();
+		if (url.includes("/api/memories/recall")) {
+			return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+		}
+		return new Response("not found", { status: 404 });
+	}) as unknown as typeof fetch;
+}
 
 describe("PRD-029: health() threads the per-subsystem reasons through the IO boundary defensively", () => {
 	/** A fetch mock answering /health with a given body + HTTP status; everything else 404s. */
