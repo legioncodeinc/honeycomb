@@ -165,10 +165,20 @@ export const GraphEdgeSchema = z.object({
 	to: z.string().catch(""),
 	kind: z.string().catch(""),
 });
+/** Bounded-view metadata → {@link import("../contracts.js").GraphViewMeta} (the graph memory cap — the graph cap). */
+export const GraphMetaSchema = z.object({
+	totalNodes: z.number().catch(0),
+	totalEdges: z.number().catch(0),
+	shownNodes: z.number().catch(0),
+	shownEdges: z.number().catch(0),
+	truncated: z.boolean().catch(false),
+});
 export const GraphSchema = z.object({
 	built: z.boolean().catch(false),
 	nodes: z.array(GraphNodeSchema).catch([]),
 	edges: z.array(GraphEdgeSchema).catch([]),
+	// Optional + fail-soft: a malformed/absent `meta` degrades to undefined, never nuking the graph.
+	meta: GraphMetaSchema.optional().catch(undefined),
 });
 export type GraphWire = z.infer<typeof GraphSchema>;
 

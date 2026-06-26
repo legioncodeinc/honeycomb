@@ -260,6 +260,23 @@ export const KIND_COLOR_FALLBACK = "var(--text-tertiary)" as const;
 const GRAPH_VIEW = { width: 540, height: 200 } as const;
 
 /**
+ * The render cap (the graph memory cap). A real snapshot is tens of thousands of nodes; mounting one SVG group per
+ * node froze the browser. The daemon now bounds `GET /api/graph`, but this is a local backstop so the
+ * canvas never mounts an unbounded node count regardless of what it is handed. The graph is no longer on
+ * the dashboard home (the graph memory cap), but this component is still reusable/tested — so it defends itself.
+ */
+const MAX_RENDER_NODES = 1500;
+
+/** Bound a graph to `limit` nodes for rendering (first-N + only the edges between them). Pure. */
+function capForRender(graph: GraphWire, limit: number): GraphWire {
+	if (graph.nodes.length <= limit) return graph;
+	const nodes = graph.nodes.slice(0, limit);
+	const kept = new Set(nodes.map((n) => n.id));
+	const edges = graph.edges.filter((e) => kept.has(e.from) && kept.has(e.to));
+	return { ...graph, nodes, edges };
+}
+
+/**
  * The in-panel node-detail surface (D-3 / OQ-3): a compact block below the canvas that shows the
  * SELECTED node's `id`, `kind`, `label`, and its neighbor labels. Rendered only when a node is
  * selected. Pure presentation — selection state lives in {@link GraphCanvas}.
@@ -341,33 +358,35 @@ export function GraphCanvas({
 		);
 	}
 
-	// Computed positions for EVERY node (D-1) — keyed by real id, so an arbitrary-id snapshot draws.
-	const positions = layout(graph.nodes, graph.edges, GRAPH_VIEW);
-	// The selected node still present in the current snapshot (clears defensively if it vanished).
-	const selectedNode = selected !== null ? graph.nodes.find((n) => n.id === selected) ?? null : null;
-	const selectedNeighborIds = selectedNode !== null ? neighborsOf(selectedNode.id, graph.edges) : [];
+	// graph memory cap: bound what is drawn so a large snapshot never mounts an unbounded SVG node count.
+	const view = capForRender(graph, MAX_RENDER_NODES);
+	// Computed positions for EVERY rendered node (D-1) — keyed by real id, so an arbitrary-id snapshot draws.
+	const positions = layout(view.nodes, view.edges, GRAPH_VIEW);
+	// The selected node still present in the rendered snapshot (clears defensively if it vanished).
+	const selectedNode = selected !== null ? view.nodes.find((n) => n.id === selected) ?? null : null;
+	const selectedNeighborIds = selectedNode !== null ? neighborsOf(selectedNode.id, view.edges) : [];
 	// Map neighbor ids → their labels for the detail surface (fall back to the id when unlabeled).
-	const selectedNeighborLabels = selectedNeighborIds.map((id) => graph.nodes.find((n) => n.id === id)?.label || id);
+	const selectedNeighborLabels = selectedNeighborIds.map((id) => view.nodes.find((n) => n.id === id)?.label || id);
 	// The node the pollinate pulse rides (OQ-2): the selected node, else the first node as a stable indicator.
-	const pulseId = pollinating ? (selectedNode?.id ?? graph.nodes[0]?.id ?? null) : null;
+	const pulseId = pollinating ? (selectedNode?.id ?? view.nodes[0]?.id ?? null) : null;
 
 	// Clicking a node toggles selection; clicking empty canvas clears it.
 	const onPick = (id: string): void => setSelected((cur) => (cur === id ? null : id));
 
 	return (
-		<Panel title="Codebase graph" eyebrow={`${graph.nodes.length} nodes · ${graph.edges.length} edges`}>
+		<Panel title="Codebase graph" eyebrow={`${view.nodes.length} nodes · ${view.edges.length} edges`}>
 			<svg
 				viewBox={`0 0 ${GRAPH_VIEW.width} ${GRAPH_VIEW.height}`}
 				style={{ width: "100%", height: 200, display: "block" }}
 				onClick={() => setSelected(null)}
 			>
-				{graph.edges.map((e, i) => {
+				{view.edges.map((e, i) => {
 					const a = positions.get(e.from);
 					const b = positions.get(e.to);
 					if (a === undefined || b === undefined) return null;
 					return <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="var(--border-strong)" strokeWidth="1.5" />;
 				})}
-				{graph.nodes.map((n) => {
+				{view.nodes.map((n) => {
 					const p = positions.get(n.id);
 					if (p === undefined) return null;
 					const isSelected = n.id === selected;

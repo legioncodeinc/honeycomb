@@ -264,6 +264,64 @@ describe("snapshotToGraphView maps the node-link snapshot into the dashboard Gra
 		expect(view.nodes[0]).toEqual({ id: "src/a.ts", label: "a.ts", kind: "file" });
 		expect(view.nodes[1]).toEqual({ id: "src/b.ts", label: "src/b.ts", kind: "file" });
 	});
+
+	it("under the cap → ships the whole graph with meta.truncated=false (the graph memory cap)", () => {
+		const view = snapshotToGraphView(snapshotWith([{ source: "src/a.ts", target: "src/b.ts", relation: "imports" }]));
+		expect(view.meta).toEqual({ totalNodes: 2, totalEdges: 1, shownNodes: 2, shownEdges: 1, truncated: false });
+	});
+});
+
+// ── The memory-aware cap (the graph memory cap): a large snapshot ships BOUNDED, not whole ─────
+describe("snapshotToGraphView bounds a large snapshot (the graph memory cap — the memory fix)", () => {
+	/** A snapshot of `n` file nodes; `linkedPairs` consecutive pairs get an `imports` link (so some have degree). */
+	function bigSnapshot(n: number, linkedPairs: number): Snapshot {
+		const nodes = Array.from({ length: n }, (_, i) => ({
+			id: `src/f${i}.ts`,
+			kind: "file" as const,
+			name: `f${i}.ts`,
+			sourceFile: `src/f${i}.ts`,
+			language: "typescript" as const,
+			observation: { startLine: 1, endLine: 1 },
+		}));
+		const links = Array.from({ length: linkedPairs }, (_, i) => ({
+			source: `src/f${i}.ts`,
+			target: `src/f${i + 1}.ts`,
+			relation: "imports" as const,
+			confidence: "EXTRACTED" as const,
+			id: `e${i}`,
+		}));
+		return {
+			directed: true,
+			multigraph: true,
+			graph: { repo: "honeycomb", commit: "c1" },
+			nodes,
+			links,
+			observation: { generatedAt: "2026-06-23T00:00:00Z", generatorVersion: "test", fileCount: n, nodeCount: n, edgeCount: links.length, parseErrorCount: 0 },
+		};
+	}
+
+	it("caps the shipped node count to `limit` and reports the full-vs-shown counts honestly", () => {
+		// 5000 nodes, 100 connected → with a tiny limit of 50 the view ships at most 50 nodes, never 5000.
+		const view = snapshotToGraphView(bigSnapshot(5000, 100), 50);
+		expect(view.nodes.length).toBe(50);
+		expect(view.meta?.truncated).toBe(true);
+		expect(view.meta?.totalNodes).toBe(5000);
+		expect(view.meta?.shownNodes).toBe(50);
+		// Every shipped edge connects two SHIPPED nodes (no dangling endpoint).
+		const ids = new Set(view.nodes.map((n) => n.id));
+		for (const e of view.edges) {
+			expect(ids.has(e.from)).toBe(true);
+			expect(ids.has(e.to)).toBe(true);
+		}
+	});
+
+	it("keeps the CONNECTED core under the cap — the most-linked nodes survive, isolated ones drop", () => {
+		// 200 nodes but only the first ~21 participate in the 20 import links; cap to 30.
+		const view = snapshotToGraphView(bigSnapshot(200, 20), 30);
+		expect(view.nodes.length).toBe(30);
+		// The connected nodes (f0..f20) rank above the 179 isolated ones, so edges survive the cap.
+		expect(view.edges.length).toBeGreaterThan(0);
+	});
 });
 
 // ── The route-collision is GONE: exactly ONE GET /api/graph after BOTH mounts fire ──

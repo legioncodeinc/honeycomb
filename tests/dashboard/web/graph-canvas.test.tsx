@@ -277,6 +277,25 @@ describe("layout()/neighborsOf() pure helpers (FR-8 — PRD-041 reuse)", () => {
 		expect(layout([], [], box).size).toBe(0);
 	});
 
+	it("a LARGE graph lays out as a grid — every node placed, all inside the box, no overlap-into-one-ring (the graph memory cap)", () => {
+		// 200 nodes is well past the ring threshold → the grid branch. Every node gets a distinct cell.
+		const many = Array.from({ length: 200 }, (_, i) => ({ id: `n${i}`, label: `n${i}`, kind: "file" }));
+		const pos = layout(many, [], box);
+		expect(pos.size).toBe(200);
+		const seen = new Set<string>();
+		for (const node of many) {
+			const p = pos.get(node.id);
+			expect(p, node.id).toBeDefined();
+			expect(p?.x).toBeGreaterThanOrEqual(0);
+			expect(p?.x).toBeLessThanOrEqual(box.width);
+			expect(p?.y).toBeGreaterThanOrEqual(0);
+			expect(p?.y).toBeLessThanOrEqual(box.height);
+			seen.add(`${p?.x},${p?.y}`);
+		}
+		// Grid placement → distinct cells, not all collapsed onto one ring radius.
+		expect(seen.size).toBeGreaterThan(100);
+	});
+
 	it("neighborsOf finds both directions and de-dupes", () => {
 		expect(neighborsOf("fetchGraphView", BUILT_GRAPH.edges)).toEqual([
 			"src/daemon/runtime/dashboard/api.ts",
