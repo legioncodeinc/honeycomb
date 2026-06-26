@@ -46,7 +46,7 @@ AI coding agents forget. They forget across sessions, and they forget across too
 <tr>
 <td width="50%" valign="top">
 
-#### 🛹 For vibe coders
+#### 🛹 For AI augmented devs
 Stop re-explaining your project to a fresh agent every morning. Honeycomb remembers your decisions, your conventions, and the fixes that worked, then primes your next session with them automatically. One install command, a friendly dashboard, no SQL, no config gauntlet.
 
 </td>
