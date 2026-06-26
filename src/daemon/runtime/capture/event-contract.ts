@@ -37,6 +37,55 @@ export const CAPTURE_EVENT_KINDS = ["user_message", "tool_call", "assistant_mess
 const nonEmpty = z.string().trim().min(1);
 
 /**
+ * PRD-060a (a-AC-1 / a-AC-6) — normalized per-turn token + cache usage.
+ *
+ * An assistant turn OPTIONALLY carries this, lowered by the harness shim from the
+ * Claude Code transcript's per-message `usage` block (`input_tokens` /
+ * `output_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens`).
+ * Every field is itself OPTIONAL: a partial usage block populates only the counts
+ * the harness actually saw, and a turn with NO usage omits the whole object.
+ *
+ * ── ZERO vs NULL DISCIPLINE (a-AC-1 / a-AC-6, the open-question ruling) ───────
+ * A genuine `cacheRead = 0` (a real measurement: the turn read nothing from cache)
+ * is DISTINCT from "no usage data" (the harness never produced a count). The
+ * contract keeps them apart by ABSENCE, not by a sentinel: a measured zero is the
+ * number `0`; "absent" is the field (or the whole `usage` object) simply not being
+ * there. This is why the persisted columns are NULLABLE (no `DEFAULT 0`) — a
+ * `DEFAULT 0` would silently collapse "absent" into "measured zero", which a-AC-6
+ * forbids. Each count is a NON-NEGATIVE integer; a negative or fractional value is
+ * a malformed count and is rejected at this boundary (the handler then omits it →
+ * the column stays NULL, never a silent 0).
+ */
+const tokenCount = z.number().int().nonnegative();
+
+/** The optional normalized per-turn usage block (PRD-060a a-AC-1). */
+export const TurnUsageSchema = z
+	.object({
+		/** `input_tokens` — prompt tokens billed for this turn. */
+		input: tokenCount.optional(),
+		/** `output_tokens` — completion tokens billed for this turn. */
+		output: tokenCount.optional(),
+		/** `cache_read_input_tokens` — tokens served from the prompt cache (a real 0 ≠ absent). */
+		cacheRead: tokenCount.optional(),
+		/** `cache_creation_input_tokens` — tokens written into the prompt cache. */
+		cacheCreation: tokenCount.optional(),
+	})
+	// `.strict()` would reject a future harness adding a field; stay permissive but
+	// only the four known counts are read downstream. No unknown field is persisted.
+	.optional()
+	// Finding (empty-usage): an EMPTY `usage: {}` (every field absent) carries no information and must
+	// NEVER persist as a distinct "present but empty" usage block. Normalize `{}` (or any object with no
+	// known count) -> `undefined`, so the "no-usage turn round-trips with the field ABSENT" behavior is
+	// preserved and a `{}` never reaches the row. A block with at least one of input/output/cacheRead/
+	// cacheCreation passes through unchanged.
+	.transform((u) =>
+		u !== undefined &&
+		(u.input !== undefined || u.output !== undefined || u.cacheRead !== undefined || u.cacheCreation !== undefined)
+			? u
+			: undefined,
+	);
+
+/**
  * `user_message` — a captured user prompt (FR-2). `text` is the prompt body; it
  * is attacker-controllable and is escaped via `eLiteral` at the SQL boundary.
  */
@@ -56,10 +105,17 @@ export const ToolCallEventSchema = z.object({
 	response: z.unknown().optional(),
 });
 
-/** `assistant_message` — the assistant's last message (FR-2). */
+/**
+ * `assistant_message` — the assistant's last message (FR-2). PRD-060a (a-AC-1):
+ * it ADDITIVELY carries the optional normalized `usage` block alongside `text`.
+ * The field is OPTIONAL and round-trips ABSENT when the harness produced no usage,
+ * so every pre-060a assistant turn still validates unchanged (a-AC-1 / a-AC-6).
+ */
 export const AssistantMessageEventSchema = z.object({
 	kind: z.literal("assistant_message"),
 	text: z.string(),
+	/** PRD-060a: optional per-turn token + cache counts; absent when unavailable. */
+	usage: TurnUsageSchema,
 });
 
 /** The normalized event: a discriminated union over `kind` (FR-2). */
@@ -109,6 +165,8 @@ export const CaptureRequestSchema = z.object({
 	metadata: CaptureMetadataSchema,
 });
 
+/** PRD-060a: a validated, normalized per-turn usage block (all fields optional). */
+export type TurnUsage = NonNullable<z.infer<typeof TurnUsageSchema>>;
 /** A validated, normalized capture event. */
 export type CaptureEvent = z.infer<typeof CaptureEventSchema>;
 /** Validated session metadata. */

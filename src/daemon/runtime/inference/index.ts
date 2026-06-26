@@ -97,7 +97,10 @@ export {
 	DEFAULT_MAX_TOKENS,
 	type FetchLike,
 	type FetchResponseLike,
+	noopUsageSink,
 	toAnthropicBody,
+	type UsageReport,
+	type UsageSink,
 } from "./transport-anthropic.js";
 // ── Inference-backed ModelClient factory (PRD-026 AC-T; the assembly swap) ────
 export {

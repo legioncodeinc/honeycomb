@@ -154,7 +154,17 @@ export {
 	MEMORY_JOBS_TABLE,
 	RUNTIME_JOBS_TABLES,
 } from "./runtime-jobs.js";
-export { TENANCY_TABLES } from "./tenancy.js";
+export {
+	ROI_COST_BASES,
+	ROI_METRICS_COLUMNS,
+	type RoiCostBasis,
+	TEAM_ACTIVE,
+	TEAM_INACTIVE,
+	TEAM_MEMBER_TYPES,
+	TEAMS_COLUMNS,
+	type TeamMemberType,
+	TENANCY_TABLES,
+} from "./tenancy.js";
 export { POLLINATING_STATE_COLUMNS, POLLINATING_STATE_TABLE, POLLINATING_STATE_TABLES } from "./pollinating-state.js";
 export { ROUTING_HISTORY_COLUMNS, ROUTING_HISTORY_TABLE, ROUTING_HISTORY_TABLES } from "./routing-history.js";
 export {

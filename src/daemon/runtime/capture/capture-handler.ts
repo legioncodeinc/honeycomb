@@ -45,7 +45,7 @@ import type { Context } from "hono";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import { type HealTarget } from "../../storage/heal.js";
 import { isOk, type StorageRow } from "../../storage/result.js";
-import { appendOnlyInsertMany, readAppendOrdered, type RowValues, val } from "../../storage/writes.js";
+import { appendOnlyInsertMany, type ColumnValue, readAppendOrdered, type RowValues, val } from "../../storage/writes.js";
 import type { Daemon } from "../server.js";
 import type { JobQueueService } from "../services/job-queue.js";
 import { type EmbedAttachment, noopEmbedAttachment } from "../services/embed-client.js";
@@ -425,7 +425,7 @@ class CaptureRouteHandler {
 		// PRD-049b (49b-AC-1 / 49b-AC-3): `projectId` is the RESOLVED registry key (049a), resolved
 		// ONCE in handleCapture from the session cwd and carried onto the row + the pipeline entry.
 		// `project` keeps the raw cwd path (D5). Capture never drops (no-cwd → inbox upstream).
-		return [
+		const row: Array<readonly [string, ColumnValue]> = [
 			["id", val.str(id)],
 			["path", val.str(meta.path)],
 			["filename", val.str(meta.hookEventName)],
@@ -439,9 +439,23 @@ class CaptureRouteHandler {
 			["project_id", val.str(projectId)],
 			["plugin_version", val.str(meta.pluginVersion)],
 			["agent_id", val.str(meta.agentId)],
+			// PRD-060a (a-AC-7): the capture-source discriminant. `metadata.agent` is the
+			// canonical harness token the shim stamps (`claude-code` for the reference
+			// shim), so every Claude-Code-captured row carries `source_tool='claude-code'`.
+			["source_tool", val.str(meta.agent)],
 			["creation_date", val.str(nowIso)],
 			["last_update_date", val.str(nowIso)],
 		];
+		// PRD-060a (a-AC-5): the per-turn token + cache counts ride the SAME append-only
+		// INSERT as the turn — no second write, no row mutation. Only an assistant turn
+		// that actually carried a validated `usage` block contributes columns; each count
+		// is written ONLY when present (a measured value, including a real 0). Absent
+		// counts are OMITTED, so the nullable column defaults to SQL NULL = "token data
+		// absent" (a-AC-6) — never a silent 0. (No-usage / non-assistant turns add nothing.)
+		for (const [col, value] of usageColumns(event)) {
+			row.push([col, val.num(value)]);
+		}
+		return row;
 	}
 
 	/**
@@ -598,6 +612,26 @@ function embedTextFor(event: CaptureEvent): string {
 		case "tool_call":
 			return [event.tool, serialize(event.input), serialize(event.response)].filter((s) => s.length > 0).join("\n");
 	}
+}
+
+/**
+ * The per-turn token/cache columns an event contributes to its `sessions` row
+ * (PRD-060a a-AC-5 / a-AC-6). ONLY an `assistant_message` that carried a validated
+ * `usage` block contributes, and ONLY the counts actually present are emitted —
+ * each as a measured integer (a real 0 included). An absent count is OMITTED so the
+ * nullable column defaults to SQL NULL = "token data absent" (a-AC-6), never a
+ * silent 0. The zod boundary already guaranteed every present count is a
+ * non-negative integer, so no re-validation is needed here.
+ */
+function usageColumns(event: CaptureEvent): ReadonlyArray<readonly [string, number]> {
+	if (event.kind !== "assistant_message" || event.usage === undefined) return [];
+	const u = event.usage;
+	const cols: Array<readonly [string, number]> = [];
+	if (u.input !== undefined) cols.push(["input_tokens", u.input]);
+	if (u.output !== undefined) cols.push(["output_tokens", u.output]);
+	if (u.cacheRead !== undefined) cols.push(["cache_read_input_tokens", u.cacheRead]);
+	if (u.cacheCreation !== undefined) cols.push(["cache_creation_input_tokens", u.cacheCreation]);
+	return cols;
 }
 
 /**

@@ -24,6 +24,8 @@
 
 import { z } from "zod";
 
+import { EMPTY_ROI_TREND, EMPTY_ROI_VIEW, type RoiTrendView, type RoiView } from "../contracts.js";
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Endpoint paths (single source — the host serves these under the daemon origin).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -118,6 +120,12 @@ export const ENDPOINTS = Object.freeze({
 	// only, NO token (D-4). These make the switcher persist a real scope change instead of a no-op.
 	scopeOrgSwitch: "/api/diagnostics/scope/org-switch",
 	scopeWorkspaceSwitch: "/api/diagnostics/scope/workspace-switch",
+	// PRD-060e — the composite ROI read-model + the trend series. Both served off the diagnostics
+	// group (`/api/diagnostics/roi` + `/api/diagnostics/roi/trend`), local-mode-only loopback like the
+	// other dashboard view-models. The page is a PURE function of the `RoiView` the daemon assembles
+	// (savings/infra/pollination/net + the org/team/agent/project rollups); the chart reads `roi/trend`.
+	roi: "/api/diagnostics/roi",
+	roiTrend: "/api/diagnostics/roi/trend",
 } as const);
 
 /**
@@ -227,6 +235,139 @@ export const SkillsSchema = z.object({
 	skills: z.array(SkillRowSchema).catch([]),
 });
 export type SkillRowWire = z.infer<typeof SkillRowSchema>;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRD-060e — the composite ROI view-model + the trend series. Mirrors the daemon
+// contracts in `src/dashboard/contracts.ts` (`RoiView` / `RoiTrendView`) over the
+// WIRE truth `src/daemon/runtime/dashboard/api.ts` returns. Every money field is
+// INTEGER cents (`z.number().int()` — a float-cents value is `.catch()`-rejected to a
+// safe integer, so a test asserts NO float-cents survives the wire schema, e-AC-11);
+// every per-section status discriminant `.catch()`-defaults to the SAFE degraded value
+// (`'absent'` for the data sections, `'unreachable'` for billing-backed lines) so a
+// partial/malformed payload degrades honestly rather than throwing into React (e-AC-2).
+// NO secret rides these shapes by construction (numbers + labels + status enums only).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Integer-cents wire field (e-AC-11): a present-but-float/garbage value degrades to `0`, never a float. */
+const roiCentsField = z.number().int().catch(0);
+
+/** The per-section status discriminant → {@link import("../contracts.js").RoiSectionStatus}. */
+export const RoiSectionStatusSchema = z
+	.enum(["ok", "partial", "absent", "unreachable", "unauthenticated"])
+	.catch("absent");
+/** The status default for a BILLING-backed line — `unreachable` (couldn't read), not `absent` (no data). */
+export const RoiBillingStatusSchema = z
+	.enum(["ok", "partial", "absent", "unreachable", "unauthenticated"])
+	.catch("unreachable");
+/** The cost-basis tag → {@link import("../contracts.js").RoiCostBasisTag}. */
+export const RoiCostBasisSchema = z.enum(["measured", "allocated", "none"]).catch("none");
+
+/** The modeled assumption carried as data (e-AC-8) → {@link import("../contracts.js").RoiAssumption}. */
+export const RoiAssumptionSchema = z.object({
+	kind: z.string().catch(""),
+	assumptionText: z.string().catch(""),
+	signedOff: z.boolean().catch(false),
+});
+
+/** The savings section (e-AC-3) → {@link import("../contracts.js").RoiSavingsSection}. */
+export const RoiSavingsSectionSchema = z.object({
+	status: RoiSectionStatusSchema,
+	measuredCents: roiCentsField,
+	modeledCents: roiCentsField,
+	assumption: RoiAssumptionSchema.catch({ kind: "", assumptionText: "", signedOff: false }),
+	// `null` until token capture is live (e-AC-11) — a present-but-float value degrades to null, never a float.
+	blendedCentsPerMtok: z.number().int().nullable().catch(null),
+});
+
+/** The infra cost section (e-AC-6) → {@link import("../contracts.js").RoiInfraSection}. */
+export const RoiInfraSectionSchema = z.object({
+	status: RoiBillingStatusSchema,
+	cents: roiCentsField,
+	costBasis: RoiCostBasisSchema,
+});
+
+/** One pollination split line → {@link import("../contracts.js").RoiPollinationLine}. */
+export const RoiPollinationLineSchema = z.object({
+	label: z.string().catch(""),
+	cents: roiCentsField,
+});
+
+/** The pollination cost section (e-AC-6) → {@link import("../contracts.js").RoiPollinationSection}. */
+export const RoiPollinationSectionSchema = z.object({
+	status: RoiBillingStatusSchema,
+	cents: roiCentsField,
+	lines: z.array(RoiPollinationLineSchema).catch([]),
+});
+
+/** The net-ROI section (e-AC-6) → {@link import("../contracts.js").RoiNetSection}. */
+export const RoiNetSectionSchema = z.object({
+	status: RoiSectionStatusSchema,
+	// `computed:false` ⇒ the page renders a dash, NOT the number (e-AC-6 net-not-fabricated).
+	computed: z.boolean().catch(false),
+	netCents: roiCentsField,
+	// The net folds a modeled term → ALWAYS `est.` (e-AC-3). Defaults TRUE (safe: treat as estimate).
+	modeled: z.boolean().catch(true),
+	costBasis: RoiCostBasisSchema,
+});
+
+/** One rollup row → {@link import("../contracts.js").RoiRollupRow}. */
+export const RoiRollupRowSchema = z.object({
+	key: z.string().catch(""),
+	label: z.string().catch(""),
+	measuredSavingsCents: roiCentsField,
+	netCents: roiCentsField,
+	infraCostCents: roiCentsField,
+	costBasis: RoiCostBasisSchema,
+	sessions: z.number().int().catch(0),
+});
+
+/** One rollup view (e-AC-13) → {@link import("../contracts.js").RoiRollup}. */
+export const RoiRollupSchema = z.object({
+	dimension: z.enum(["org", "team", "agent", "project"]).catch("org"),
+	rows: z.array(RoiRollupRowSchema).catch([]),
+	mixedBasis: z.boolean().catch(false),
+});
+
+/** `GET /api/diagnostics/roi` → {@link import("../contracts.js").RoiView}. */
+export const RoiViewSchema = z.object({
+	savings: RoiSavingsSectionSchema.catch({
+		status: "absent",
+		measuredCents: 0,
+		modeledCents: 0,
+		assumption: { kind: "", assumptionText: "", signedOff: false },
+		blendedCentsPerMtok: null,
+	}),
+	infra: RoiInfraSectionSchema.catch({ status: "unreachable", cents: 0, costBasis: "none" }),
+	pollination: RoiPollinationSectionSchema.catch({ status: "unreachable", cents: 0, lines: [] }),
+	net: RoiNetSectionSchema.catch({ status: "absent", computed: false, netCents: 0, modeled: true, costBasis: "none" }),
+	rollups: z.array(RoiRollupSchema).catch([]),
+	// Per-user is gated off until verified backend claims land (e-AC-14) — defaults FALSE (safe: empty state).
+	perUserAvailable: z.boolean().catch(false),
+	scopedAcrossDevices: z.boolean().catch(false),
+	ratesAsOf: z.string().catch(""),
+});
+export type RoiViewWire = z.infer<typeof RoiViewSchema>;
+
+/** One trend point (e-AC-10) → {@link import("../contracts.js").RoiTrendPoint}. */
+export const RoiTrendPointSchema = z.object({
+	period: z.string().catch(""),
+	cents: roiCentsField,
+});
+
+/** One trend series (e-AC-10, dashed=modeled / solid=measured) → {@link import("../contracts.js").RoiTrendSeries}. */
+export const RoiTrendSeriesSchema = z.object({
+	label: z.string().catch(""),
+	modeled: z.boolean().catch(false),
+	points: z.array(RoiTrendPointSchema).catch([]),
+});
+
+/** `GET /api/diagnostics/roi/trend` → {@link import("../contracts.js").RoiTrendView}. */
+export const RoiTrendViewSchema = z.object({
+	status: RoiSectionStatusSchema,
+	series: z.array(RoiTrendSeriesSchema).catch([]),
+	startedAt: z.string().catch(""),
+});
+export type RoiTrendViewWire = z.infer<typeof RoiTrendViewSchema>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PRD-042 — the Sync page union view-model (skills + agents) + the action acks.
@@ -1272,6 +1413,23 @@ export interface WireClient {
 	 * "no memory graph yet" empty state, never a throw. Validated through the shared `GraphSchema`.
 	 */
 	memoryGraph(projectId?: string): Promise<GraphWire>;
+	/**
+	 * PRD-060e — read the composite ROI view-model (`GET /api/diagnostics/roi`). Returns the
+	 * full {@link RoiViewWire} the page renders as a PURE function (savings/infra/pollination/net
+	 * + the org/team/agent/project rollups + the per-user availability flag + `cost_basis`). All
+	 * money is INTEGER cents. A malformed/absent/failed body degrades to {@link EMPTY_ROI_VIEW}
+	 * (every section `absent`, net NOT computed) so the page renders its honest empty state — a
+	 * DASH glyph, never `$0.00` — rather than throwing (e-AC-2/e-AC-5). `projectId` (when set)
+	 * stamps the selected-project header so the read re-scopes on a dashboard scope change.
+	 */
+	roi(projectId?: string): Promise<RoiView>;
+	/**
+	 * PRD-060e — read the ROI trend series (`GET /api/diagnostics/roi/trend`) backing the
+	 * inline-SVG chart (e-AC-10, dashed=modeled / solid=measured). All money is INTEGER cents. A
+	 * malformed/absent/failed body — or a genuine no-history-yet state — degrades to
+	 * {@link EMPTY_ROI_TREND} so the chart renders its honest empty state, never a throw.
+	 */
+	roiTrend(range: string, projectId?: string): Promise<RoiTrendView>;
 	recall(query: string, projectId?: string): Promise<{ memories: RecalledMemory[]; degraded: boolean }>;
 	/**
 	 * PRD-040a — list the scoped tenant's memories (`GET /api/memories`, newest-first). `limit`
@@ -1656,6 +1814,21 @@ export function createWireClient(options: WireClientOptions = {}): WireClient {
 			// shared GraphSchema. A failure / `built:false` empty graph degrades to EMPTY_GRAPH so the
 			// page renders the honest "no memory graph yet" state (never a throw). PRD-049e: project-stamped.
 			return (await getJson(fetchImpl, url(ENDPOINTS.memoryGraph), GraphSchema, projectHeader(projectId))) ?? EMPTY_GRAPH;
+		},
+		async roi(projectId?: string): Promise<RoiView> {
+			// The page is a PURE function of this; a failed/malformed body degrades to the honest-empty
+			// view (every section `absent`, net NOT computed) so the page shows a dash, never `$0.00`.
+			// PRD-049e: stamp the selected-project header so the read re-scopes on a dashboard scope change.
+			return (await getJson(fetchImpl, url(ENDPOINTS.roi), RoiViewSchema, projectHeader(projectId))) ?? EMPTY_ROI_VIEW;
+		},
+		async roiTrend(range: string, projectId?: string): Promise<RoiTrendView> {
+			// `range` selects the trend window (e.g. `30d`); it rides as a query param. A failed/malformed
+			// body — or a genuine no-history-yet state — degrades to the honest-empty trend (never a throw).
+			const qs = range !== "" ? `?range=${encodeURIComponent(range)}` : "";
+			return (
+				(await getJson(fetchImpl, url(`${ENDPOINTS.roiTrend}${qs}`), RoiTrendViewSchema, projectHeader(projectId))) ??
+				EMPTY_ROI_TREND
+			);
 		},
 		async recall(query: string, projectId?: string): Promise<{ memories: RecalledMemory[]; degraded: boolean }> {
 			try {

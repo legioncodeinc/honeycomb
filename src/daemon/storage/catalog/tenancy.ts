@@ -214,6 +214,119 @@ export const ROUTER_HISTORY_COLUMNS = Object.freeze([
 	{ name: "created_at", sql: "TEXT NOT NULL DEFAULT ''" },
 ]);
 
+// ── ROI_METRICS columns (PRD-060f / f-AC-1..f-AC-12) ─────────────────────────
+
+/**
+ * `roi_metrics` — the shared, append-only spend ledger (PRD-060f). One immutable
+ * row per session, written at summary/skillify time via `appendOnlyInsert`. A
+ * re-price APPENDs a NEW row with a fresh `price_ref`; there is NO UPDATE path,
+ * and the canonical row per `session_id` is `MAX(created_at)` (f-AC-2/f-AC-3).
+ *
+ * ── Why tenant-scoped, not agent-scoped (f-AC-1) ─────────────────────────────
+ * Rollups need QUERYABLE identity columns — `org_id`/`workspace_id`/`team_id` are
+ * explicit columns a `GROUP BY` reads, not a partition header. An agent-scoped
+ * table could not answer a cross-device org question. So `scope: "tenant"` and the
+ * org/workspace columns are first-class, exactly like `telemetry_counters` /
+ * `recall_qa_ledger`.
+ *
+ * ── Money is BIGINT integer cents, never FLOAT (f-AC-4) ──────────────────────
+ * Every money column (`measured_cache_savings_cents`, `modeled_savings_cents`,
+ * `gross_cost_cents`, `infra_cost_cents`) is `BIGINT` — a ledger must reconcile to
+ * the penny. There is intentionally NO float money column here (`telemetry_counters`
+ * uses `FLOAT4` for an approximate counter; that is the wrong type for a ledger).
+ *
+ * ── Measured / modeled / allocated are SEPARATE, self-describing (f-AC-5) ─────
+ * Measured cache savings (060b) and modeled memory-injection savings (060b) are
+ * DISTINCT columns; `cost_basis` (`'measured'|'allocated'|'none'`, DEFAULT
+ * `'none'`) + `allocation_method` mark whether an infra share is a measured fact or
+ * an allocated estimate, so a mixed-basis rollup is detectable via
+ * `COUNT(DISTINCT cost_basis) > 1` and an allocated estimate never reads as measured.
+ *
+ * ── The per-user gate (f-AC-6/f-AC-7) ────────────────────────────────────────
+ * `user_id` is GATED: it is populated ONLY from a verified `backend-token` claim and
+ * stays `''` otherwise. There is no git-email / `$USER` / OS-login fallback and no
+ * historical backfill — the WRITER enforces this; the column merely carries the value.
+ *
+ * No embedding column. No JSONB. Indexes are lookup-only on the rollup columns
+ * (`org_id`/`workspace_id`/`team_id`/`period_start` + drill-down `project_id`/`user_id`);
+ * NO BM25, NO vector — this is a ledger, not a search corpus (f-AC-12).
+ *
+ * Scope: tenant.
+ */
+export const ROI_METRICS_COLUMNS = Object.freeze([
+	{ name: "id", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "session_id", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "org_id", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "workspace_id", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "agent_id", sql: "TEXT NOT NULL DEFAULT 'default'" },
+	{ name: "project_id", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "team_id", sql: "TEXT NOT NULL DEFAULT ''" },
+	// GATED: '' until a verified backend-token claim populates it (f-AC-6/f-AC-7).
+	{ name: "user_id", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "input_tokens", sql: "BIGINT NOT NULL DEFAULT 0" },
+	{ name: "output_tokens", sql: "BIGINT NOT NULL DEFAULT 0" },
+	{ name: "cache_read_tokens", sql: "BIGINT NOT NULL DEFAULT 0" },
+	{ name: "cache_creation_tokens", sql: "BIGINT NOT NULL DEFAULT 0" },
+	// MEASURED / MODELED / GROSS / INFRA money — BIGINT integer cents, never FLOAT (f-AC-4).
+	{ name: "measured_cache_savings_cents", sql: "BIGINT NOT NULL DEFAULT 0" },
+	{ name: "modeled_savings_cents", sql: "BIGINT NOT NULL DEFAULT 0" },
+	{ name: "modeled_assumption_ref", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "gross_cost_cents", sql: "BIGINT NOT NULL DEFAULT 0" },
+	{ name: "infra_cost_cents", sql: "BIGINT NOT NULL DEFAULT 0" },
+	// cost_basis ∈ {measured, allocated, none}; allocation_method '' unless allocated (f-AC-5).
+	{ name: "cost_basis", sql: "TEXT NOT NULL DEFAULT 'none'" },
+	{ name: "allocation_method", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "price_ref", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "period_start", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "period_end", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "created_at", sql: "TEXT NOT NULL DEFAULT ''" },
+]);
+
+/** Allowed `roi_metrics.cost_basis` values (f-AC-5). */
+export const ROI_COST_BASES = Object.freeze(["measured", "allocated", "none"] as const);
+/** One `cost_basis` value. */
+export type RoiCostBasis = (typeof ROI_COST_BASES)[number];
+
+// ── TEAMS columns (PRD-060f / f-AC-8) ────────────────────────────────────────
+
+/**
+ * `teams` — the roster (PRD-060f). One row per (team, member), VERSION-BUMPED via
+ * `appendVersionBumped` (edit = INSERT version N+1, `ORDER BY version DESC` read) —
+ * the same primitive `api_keys` uses, for the same reason (an in-place UPDATE does
+ * not converge on this backend). `member_type` is an `'agent'|'user'` union: an
+ * `agent` row maps an `agent_id` to a `team_id` and works TODAY; a `user` row is
+ * structurally valid but inert until `user_id` is verified (f-AC-8).
+ *
+ * Indexes: lookup-only on `org_id`/`workspace_id`/`team_id`/`member_id`. No BM25, no
+ * vector.
+ *
+ * Scope: tenant.
+ */
+export const TEAMS_COLUMNS = Object.freeze([
+	{ name: "id", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "team_id", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "team_name", sql: "TEXT NOT NULL DEFAULT ''" },
+	// 'agent' rows work today; 'user' rows inert until user_id verified.
+	{ name: "member_type", sql: "TEXT NOT NULL DEFAULT 'agent'" },
+	{ name: "member_id", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "role", sql: "TEXT NOT NULL DEFAULT 'member'" },
+	{ name: "active", sql: "BIGINT NOT NULL DEFAULT 1" },
+	{ name: "org_id", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "workspace_id", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "version", sql: "BIGINT NOT NULL DEFAULT 0" },
+	{ name: "created_at", sql: "TEXT NOT NULL DEFAULT ''" },
+	{ name: "updated_at", sql: "TEXT NOT NULL DEFAULT ''" },
+]);
+
+/** Allowed `teams.member_type` values (f-AC-8). */
+export const TEAM_MEMBER_TYPES = Object.freeze(["agent", "user"] as const);
+/** One `member_type` value. */
+export type TeamMemberType = (typeof TEAM_MEMBER_TYPES)[number];
+
+/** Live/inactive encodings for `teams.active` (BIGINT 0/1). */
+export const TEAM_ACTIVE = 1 as const;
+export const TEAM_INACTIVE = 0 as const;
+
 // ── The group export ─────────────────────────────────────────────────────────
 
 /** The 003e group — spread into `CATALOG` by the barrel. */
@@ -253,6 +366,25 @@ export const TENANCY_TABLES: readonly CatalogTable[] = defineGroup([
 		name: "router_history",
 		columns: ROUTER_HISTORY_COLUMNS,
 		pattern: "append-only",
+		embeddingColumns: [],
+		scope: "tenant",
+	},
+	{
+		// PRD-060f (f-AC-1/f-AC-2): the shared spend ledger. APPEND-ONLY — one
+		// immutable row per session, a re-price APPENDs a new row (new price_ref),
+		// NEVER an in-place UPDATE; the canonical row is MAX(created_at) per session.
+		name: "roi_metrics",
+		columns: ROI_METRICS_COLUMNS,
+		pattern: "append-only",
+		embeddingColumns: [],
+		scope: "tenant",
+	},
+	{
+		// PRD-060f (f-AC-8): the roster. VERSION-BUMPED — one row per (team, member),
+		// an edit APPENDs version N+1, read ORDER BY version DESC (same as api_keys).
+		name: "teams",
+		columns: TEAMS_COLUMNS,
+		pattern: "version-bumped",
 		embeddingColumns: [],
 		scope: "tenant",
 	},

@@ -50,6 +50,28 @@ export const SESSIONS_COLUMNS = Object.freeze([
 	{ name: "plugin_version", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "agent_id", sql: "TEXT NOT NULL DEFAULT 'default'" },
 	{ name: "visibility", sql: "TEXT NOT NULL DEFAULT 'global'" },
+	// ── PRD-060a (a-AC-3 / a-AC-6): per-turn token + cache usage ──────────────────
+	// Additive columns, healed in via the SAME `ALTER TABLE ADD COLUMN` path the rest
+	// of the catalog uses (the heal engine iterates THIS array; nothing else to wire).
+	//
+	// ZERO vs NULL (a-AC-1 / a-AC-6, the open-question ruling): these four counts are
+	// NULLABLE BIGINT with NO `DEFAULT 0`. The distinction is load-bearing — a genuine
+	// `cache_read_input_tokens = 0` (a real measurement: nothing read from cache) must
+	// stay DISTINCT from "no usage data" (the count was never produced). A `DEFAULT 0`
+	// would collapse "absent" into "measured zero", which a-AC-6 forbids, so absent is
+	// encoded as SQL NULL and a measured zero as the integer 0. Nullable columns are
+	// exempt from the NOT-NULL-needs-a-DEFAULT load guard (NULL is their implicit
+	// default), so `ALTER TABLE ADD COLUMN … BIGINT` heals cleanly onto a populated
+	// legacy table: existing rows read back NULL = "token data absent" (a-AC-4).
+	{ name: "input_tokens", sql: "BIGINT" },
+	{ name: "output_tokens", sql: "BIGINT" },
+	{ name: "cache_read_input_tokens", sql: "BIGINT" },
+	{ name: "cache_creation_input_tokens", sql: "BIGINT" },
+	// The capture-source discriminant (a-AC-7): every Claude-Code row carries
+	// `source_tool = 'claude-code'`, so 060b/060e can render a "Claude Code only"
+	// partial state. NOT NULL DEFAULT '' (a discriminant always present; '' = unknown
+	// source) — heal-safe on a populated table because the empty string backfills.
+	{ name: "source_tool", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "creation_date", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "last_update_date", sql: "TEXT NOT NULL DEFAULT ''" },
 ]);
