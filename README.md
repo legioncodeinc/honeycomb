@@ -13,8 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/legioncodeinc/honeycomb/actions"><img src="https://img.shields.io/github/actions/workflow/status/legioncodeinc/honeycomb/ci.yaml?branch=main&label=CI&style=flat-square" alt="CI"></a>
-  <img src="https://img.shields.io/badge/version-0.1.5-F7A823?style=flat-square" alt="Version 0.1.5">
+  <a href="https://www.npmjs.com/package/@legioncodeinc/honeycomb"><img src="https://img.shields.io/npm/v/@legioncodeinc/honeycomb?style=flat-square&color=F7A823&label=version" alt="npm version"></a>
   <img src="https://img.shields.io/badge/node-%E2%89%A522-339933?style=flat-square&logo=node.js&logoColor=white" alt="Node ≥ 22">
   <a href="https://deeplake.ai"><img src="https://img.shields.io/badge/powered%20by-Deep%20Lake-ff5a1f?style=flat-square" alt="Powered by Deep Lake"></a>
   <a href="#license"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="AGPL-3.0"></a>
@@ -213,7 +212,7 @@ Four ways to reach the same daemon and the same shared memory:
 
 ## 📍 Status & roadmap
 
-Honeycomb is **v0.1.0, pre-release**. We document what's real and flag what's opt-in.
+Honeycomb is **pre-release (v0.1.x)**. We document what's real and flag what's opt-in.
 
 **Working today**
 - Capture-to-recall, proven end-to-end against live Deep Lake (`npm run smoke:golden-path` with credentials).
