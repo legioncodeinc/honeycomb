@@ -136,6 +136,9 @@ function buildCaptureDaemon(embedDeps: Omit<EmbedAttachmentDeps, "storage">) {
 		sessionsTarget: healTargetFor("sessions"),
 		queue: new NoopQueue(),
 		embed,
+		// PRD-062c: the embed seam contract was authored against the synchronous single-INSERT
+		// write path; pin the flags-OFF behavior so these tests stay deterministic (AC-9 parity).
+		captureConfig: { batch: false, windowMs: 1_000, maxEvents: 25, envelopeBudgetBytes: 0 },
 	});
 	captureHandler.register(daemon);
 	return { daemon, fake };
@@ -490,6 +493,8 @@ describe("b-AC-4 non-blocking: capture HTTP response returns before embed settle
 			queue: new NoopQueue(),
 			embed,
 			onEmbedSettled: (p) => settledPromises.push(p),
+			// PRD-062c: synchronous single-INSERT path (flags-OFF parity, AC-9).
+			captureConfig: { batch: false, windowMs: 1_000, maxEvents: 25, envelopeBudgetBytes: 0 },
 		};
 		createCaptureHandler(deps).register(daemon);
 
@@ -556,6 +561,8 @@ describe("b-AC-4 non-blocking: capture HTTP response returns before embed settle
 			queue: new NoopQueue(),
 			embed: embed2,
 			onEmbedSettled: (p) => settledPromises.push(p),
+			// PRD-062c: synchronous single-INSERT path (flags-OFF parity, AC-9).
+			captureConfig: { batch: false, windowMs: 1_000, maxEvents: 25, envelopeBudgetBytes: 0 },
 		}).register(daemon2);
 
 		const res = await daemon2.app.request("/api/hooks/capture", {

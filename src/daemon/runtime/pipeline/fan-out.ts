@@ -42,7 +42,9 @@ import type { JobQueueService } from "../services/job-queue.js";
 import type { EntityTriple, ExtractionResult, Fact } from "./contracts.js";
 import type { FactDecision } from "./decision.js";
 import type { ControlledWriteOutcome } from "./controlled-writes.js";
+import { CONTROLLED_WRITE_BATCH_KEY } from "./controlled-writes.js";
 import type { PipelineJobScope, StageJob } from "./stage-worker.js";
+import { type AmplificationConfig, amplificationConfig } from "../memories/amplification-config.js";
 
 /** The committed-write actions that produced (or referenced) a durable memory id. */
 const COMMITTED_ACTIONS: ReadonlySet<ControlledWriteOutcome["action"]> = new Set([
@@ -128,60 +130,97 @@ export function extractionFanOut(
 }
 
 /**
- * The decision → controlled-write fan-out (`onDecisions`): enqueue one
- * `memory_controlled_write` job per proposal whose action is not `none` (a `none`
- * proposal has nothing to write — it was already recorded to history by decision).
- * Each job carries the proposal + the fact material the writes stage gates on, plus
- * the forwarded entities so they reach graph-persist after the commit.
+ * Build the per-fact controlled-write payload for ONE non-`none` decision (the SAME
+ * wire shape the unbatched path emitted, single-sourced so the batched and per-job
+ * dispatch stay byte-identical — jscpd-safe). `entities` is the forwarded triple set
+ * shared by every proposal in the decision (they all rode the same upstream job).
+ */
+function buildControlledWritePayload(
+	decision: FactDecision,
+	entities: readonly EntityTriple[],
+): Record<string, unknown> {
+	// Emit the D-4 proposal wire shape. `target_id` is included ONLY when the
+	// proposal actually targets an existing memory (update/delete) — an empty
+	// `target_id` fails the contract's `min(1)` and would drop the proposal.
+	const proposal: Record<string, unknown> = {
+		action: decision.proposal.action,
+		confidence: decision.proposal.confidence,
+		reason: decision.proposal.reason,
+	};
+	if (decision.proposal.targetId !== undefined && decision.proposal.targetId !== "") {
+		proposal.target_id = decision.proposal.targetId;
+	}
+	// PRD-058b LIVE (C-1): forward the decision stage's candidate set (id + hydrated content) so
+	// the controlled-write stage runs conflict detection over the SAME candidates the decision
+	// model saw — no new scan. Only candidates that hydrated their content are forwarded (a
+	// content-less candidate cannot feed the detector's sim/opp signals).
+	// Exclude the UPDATE target itself: on an `update` the proposal's `targetId` is still in the
+	// candidate set (the stale PRE-update row). Forwarding it would let the controlled-write hook
+	// detect the just-committed row as conflicting with its own prior version — a bogus self-conflict
+	// projected into `memory_conflicts`. Drop it alongside the empty-id / empty-content filters.
+	const targetId = decision.proposal.targetId;
+	const candidates = decision.candidates
+		.filter((c) => c.id !== "" && c.id !== targetId && typeof c.content === "string" && c.content !== "")
+		.map((c) => ({ id: c.id, content: c.content as string }));
+	// NO scope envelope here — the tenancy envelope is stamped ONCE on the carrying job
+	// (per-fact in the unbatched loop, on the batch job in the batched path), never per-fact.
+	return {
+		proposal,
+		content: decision.fact.content,
+		normalized_content: decision.fact.content,
+		fact_confidence: decision.fact.confidence,
+		fact_type: decision.fact.type,
+		entities: serializeEntities(entities),
+		...(candidates.length > 0 ? { candidates } : {}),
+	};
+}
+
+/**
+ * The decision → controlled-write fan-out (`onDecisions`). PRD-062d (L-D1 / AC-62d.1.1):
+ * coalesce the per-fact DISPATCH so a decision producing M fact proposals does NOT fan
+ * into M independent `memory_jobs` enqueues (a write storm the pollers then re-discover).
+ *
+ *  - BATCH ON (default, `HONEYCOMB_FANOUT_BATCH`): enqueue ONE `memory_controlled_write`
+ *    job carrying ALL non-`none` proposals under {@link CONTROLLED_WRITE_BATCH_KEY}. The
+ *    controlled-write stage then processes each fact with its OWN append/version-bumped
+ *    write (AC-62d.1.2: distinct memories are NEVER collapsed into one row — only the
+ *    DISPATCH is batched). Sub-linear: 1 enqueue for M facts, not M.
+ *  - BATCH OFF (`HONEYCOMB_FANOUT_BATCH=false`): the exact pre-PRD behaviour — one
+ *    enqueue per proposal (parent AC-9 parity).
+ *
+ * A `none` proposal has nothing to write (decision already recorded it to history) and
+ * is filtered from both paths. With zero writable proposals NO job is enqueued.
  */
 export function decisionFanOut(
 	queue: JobQueueService,
+	config: AmplificationConfig = amplificationConfig(),
 ): (job: StageJob, decisions: FactDecision[]) => Promise<void> {
 	return async (job: StageJob, decisions: FactDecision[]): Promise<void> => {
 		const entities = readForwardedEntities(job.payload);
-		for (const decision of decisions) {
-			if (decision.proposal.action === "none") continue;
-			// Emit the D-4 proposal wire shape. `target_id` is included ONLY when the
-			// proposal actually targets an existing memory (update/delete) — an empty
-			// `target_id` fails the contract's `min(1)` and would drop the proposal.
-			const proposal: Record<string, unknown> = {
-				action: decision.proposal.action,
-				confidence: decision.proposal.confidence,
-				reason: decision.proposal.reason,
-			};
-			if (decision.proposal.targetId !== undefined && decision.proposal.targetId !== "") {
-				proposal.target_id = decision.proposal.targetId;
-			}
-			// PRD-058b LIVE (C-1): forward the decision stage's candidate set (id + hydrated content) so
-			// the controlled-write stage runs conflict detection over the SAME candidates the decision
-			// model saw — no new scan. Only candidates that hydrated their content are forwarded (a
-			// content-less candidate cannot feed the detector's sim/opp signals).
-			// Exclude the UPDATE target itself: on an `update` the proposal's `targetId` is still in the
-			// candidate set (the stale PRE-update row). Forwarding it would let the controlled-write hook
-			// detect the just-committed row as conflicting with its own prior version — a bogus self-conflict
-			// projected into `memory_conflicts`. Drop it alongside the empty-id / empty-content filters.
-			const targetId = decision.proposal.targetId;
-			const candidates = decision.candidates
-				.filter(
-					(c) =>
-						c.id !== "" &&
-						c.id !== targetId &&
-						typeof c.content === "string" &&
-						c.content !== "",
-				)
-				.map((c) => ({ id: c.id, content: c.content as string }));
+		const envelope = scopeEnvelope(job.scope);
+		// Build one per-fact payload per writable proposal (the shared wire shape), each WITHOUT
+		// its own scope envelope — the envelope is stamped once on the carrying job below.
+		const facts = decisions
+			.filter((d) => d.proposal.action !== "none")
+			.map((d) => buildControlledWritePayload(d, entities));
+		if (facts.length === 0) return; // nothing to write → no enqueue (both paths).
+
+		if (config.fanoutBatch) {
+			// AC-62d.1.1: ONE batched enqueue carrying all proposals (sub-linear in M). The
+			// tenancy envelope is stamped ONCE on the batch job; each fact's per-fact payload
+			// rides under the batch key and is processed with its own append/version-bump.
 			await queue.enqueue({
 				kind: "memory_controlled_write",
-				payload: {
-					...scopeEnvelope(job.scope),
-					proposal,
-					content: decision.fact.content,
-					normalized_content: decision.fact.content,
-					fact_confidence: decision.fact.confidence,
-					fact_type: decision.fact.type,
-					entities: serializeEntities(entities),
-					...(candidates.length > 0 ? { candidates } : {}),
-				},
+				payload: { ...envelope, [CONTROLLED_WRITE_BATCH_KEY]: facts },
+			});
+			return;
+		}
+
+		// BATCH OFF — the pre-PRD per-proposal enqueue loop (parent AC-9 parity).
+		for (const fact of facts) {
+			await queue.enqueue({
+				kind: "memory_controlled_write",
+				payload: { ...envelope, ...fact },
 			});
 		}
 	};

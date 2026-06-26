@@ -22,6 +22,15 @@ import {
 import type { ExtractionResult } from "../../../../src/daemon/runtime/pipeline/contracts.js";
 import type { JobInput, JobQueueService, LeasedJob } from "../../../../src/daemon/runtime/services/job-queue.js";
 import type { StageJob } from "../../../../src/daemon/runtime/pipeline/stage-worker.js";
+import { AmplificationConfigSchema } from "../../../../src/daemon/runtime/memories/amplification-config.js";
+
+/**
+ * The amplification config with fan-out BATCHING OFF — the PRD-062d parity posture (parent AC-9):
+ * `decisionFanOut` falls back to the exact pre-PRD per-proposal enqueue loop, so the pre-existing
+ * decisionFanOut assertions (one job per non-none proposal, fact material at the payload top level)
+ * hold byte-for-byte. The batched (default-ON) shape is covered in `fan-out-batch.test.ts`.
+ */
+const BATCH_OFF = AmplificationConfigSchema.parse({ fanoutBatch: false });
 
 /** A recording fake queue — only `enqueue` is exercised by the fan-out enqueuers. */
 function recordingQueue(): { queue: JobQueueService; enqueued: JobInput[] } {
@@ -99,7 +108,7 @@ describe("decisionFanOut: proposals → memory_controlled_write jobs (skipping `
 			},
 		];
 
-		await decisionFanOut(queue)(
+		await decisionFanOut(queue, BATCH_OFF)(
 			jobWith({ entities: [{ source: "s", relationship: "r", target: "t" }] }),
 			decisions,
 		);

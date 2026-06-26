@@ -78,6 +78,7 @@ import { type HealTarget, withHeal } from "../../storage/heal.js";
 import { isOk, type QueryResult, type StorageRow } from "../../storage/result.js";
 import { sLiteral, sqlIdent } from "../../storage/sql.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
+import type { QuerySource } from "../../storage/query-meter.js";
 import { buildInsert, type RowValues, val } from "../../storage/writes.js";
 import type { DaemonService } from "./types.js";
 
@@ -244,6 +245,21 @@ const DISCOVER_POLLS = 8;
  * spin forever.
  */
 const LEASE_CANDIDATE_TRIES = 8;
+
+/**
+ * PRD-062b L-X (062a labeling, poll-path half): the `source` labels every physical
+ * read on the two poll paths carries through `StorageClient.query`'s options, so the
+ * 062a query meter attributes the idle-poll baseline correctly:
+ *
+ *   - `poll-lease`  — every read the LEASE path issues (discovery scan + per-id
+ *     current-state resolves, which is where the UNION-scan amplification lives).
+ *   - `poll-reaper` — every read the stale-lease REAPER sweep issues.
+ *
+ * The retention purge (`purgeRetained`) is NOT a poll-loop read; it keeps the meter
+ * default (`other`) so the idle-baseline number is exactly the two poll sources.
+ */
+const SOURCE_LEASE: QuerySource = "poll-lease";
+const SOURCE_REAPER: QuerySource = "poll-reaper";
 
 /** The default clock: real `Date.now` + `setInterval`/`clearInterval`. */
 function defaultClock(): JobQueueClock {
@@ -484,7 +500,7 @@ class DeepLakeJobQueueService implements JobQueueService {
 			// converging resolve reads back THIS owner on a `leased` row when we won. A
 			// racer who appended a competing version leaves a DIFFERENT owner at the
 			// highest version → confirm fails → exclude + try the next candidate.
-			const current = await this.resolveCurrent(candidate.id);
+			const current = await this.resolveCurrent(candidate.id, SOURCE_LEASE);
 			if (current !== null && current.leaseOwner === owner && current.status === JOB_LEASED) {
 				return {
 					id: candidate.id,
@@ -513,7 +529,7 @@ class DeepLakeJobQueueService implements JobQueueService {
 		kinds?: readonly string[],
 	): Promise<JobState | null> {
 		const nowIso = this.nowIso();
-		const states = await this.discoverIds();
+		const states = await this.discoverIds(SOURCE_LEASE);
 		const leasable = states.filter(
 			(s) =>
 				!exclude.has(s.id) &&
@@ -537,12 +553,15 @@ class DeepLakeJobQueueService implements JobQueueService {
 	 * growing. Then resolves each id's current state via {@link resolveCurrent}. The
 	 * `__ensure__` sentinel row (see {@link ensureTable}) is filtered out.
 	 */
-	private async discoverIds(): Promise<JobState[]> {
+	private async discoverIds(source?: QuerySource): Promise<JobState[]> {
 		const ids = new Set<string>();
 		let lastSize = -1;
 		for (let poll = 0; poll < DISCOVER_POLLS; poll++) {
 			const sql = `SELECT DISTINCT ${sqlIdent("id")} FROM "${this.tbl()}"`;
-			const res = await this.storage.query(sql, this.scope);
+			// PRD-062b: tag the discovery scan with the poll-path `source` so the 062a
+			// meter attributes the idle-poll baseline (`source` is meter-only; it never
+			// changes the query result).
+			const res = await this.storage.query(sql, this.scope, source !== undefined ? { source } : {});
 			if (isOk(res)) {
 				for (const row of res.rows as StorageRow[]) {
 					const id = rowText(row, "id");
@@ -555,7 +574,7 @@ class DeepLakeJobQueueService implements JobQueueService {
 
 		const states: JobState[] = [];
 		for (const id of ids) {
-			const state = await this.resolveCurrent(id);
+			const state = await this.resolveCurrent(id, source);
 			if (state !== null) states.push(state);
 		}
 		return states;
@@ -571,11 +590,11 @@ class DeepLakeJobQueueService implements JobQueueService {
 	 * when the id has no row at all. Short-circuits once a max-version row is seen
 	 * twice (the fake is decisive on the first read).
 	 */
-	private async resolveCurrent(id: string): Promise<JobState | null> {
+	private async resolveCurrent(id: string, source?: QuerySource): Promise<JobState | null> {
 		let best: JobState | null = null;
 		let seenBestTwice = false;
 		for (let poll = 0; poll < RESOLVE_POLLS; poll++) {
-			const row = await this.latestById(id);
+			const row = await this.latestById(id, source);
 			if (row !== null) {
 				const state = toJobState(row);
 				if (best === null || state.version > best.version) {
@@ -591,13 +610,15 @@ class DeepLakeJobQueueService implements JobQueueService {
 	}
 
 	/** One highest-version by-id read of the full job row, or `null` when absent. */
-	private async latestById(id: string): Promise<StorageRow | null> {
+	private async latestById(id: string, source?: QuerySource): Promise<StorageRow | null> {
 		const cols = STATE_COLUMNS.map((c) => sqlIdent(c)).join(", ");
 		const sql =
 			`SELECT ${cols} FROM "${this.tbl()}" ` +
 			`WHERE ${sqlIdent("id")} = ${sLiteral(id)} ` +
 			`ORDER BY ${sqlIdent("version")} DESC LIMIT 1`;
-		const res = await this.storage.query(sql, this.scope);
+		// PRD-062b: carry the poll-path `source` (lease/reaper) onto each per-id resolve
+		// read — these are the bulk of the UNION-scan amplification the meter must see.
+		const res = await this.storage.query(sql, this.scope, source !== undefined ? { source } : {});
 		if (isOk(res) && res.rows.length > 0) return res.rows[0] as StorageRow;
 		return null;
 	}
@@ -703,7 +724,7 @@ class DeepLakeJobQueueService implements JobQueueService {
 	 */
 	async reapExpiredLeases(): Promise<number> {
 		const nowIso = this.nowIso();
-		const states = await this.discoverIds();
+		const states = await this.discoverIds(SOURCE_REAPER);
 		const expired = states.filter(
 			(s) => s.status === JOB_LEASED && s.leaseExpiresAt !== "" && s.leaseExpiresAt <= nowIso,
 		);

@@ -35,6 +35,9 @@
  * "do the stage's work" function.
  */
 
+import type { LeaseParticipant } from "../services/lease-coordinator.js";
+import type { PollBackoffConfig } from "../services/poll-backoff.js";
+import { buildWorkerPollLoop, type PollLoop } from "../services/poll-loop.js";
 import type { JobQueueService, LeasedJob } from "../services/job-queue.js";
 
 /** The five pipeline job kinds — the `memory_jobs.type` discriminator (one per stage). */
@@ -130,6 +133,16 @@ export interface StageWorkerDeps {
 	readonly leaseKinds?: readonly string[];
 	/** Poll interval in ms when running the continuous loop. Default 1000. */
 	readonly pollIntervalMs?: number;
+	/**
+	 * PRD-062b adaptive poll backoff (L-B1 / AC-2 / AC-3 / AC-9). When supplied with
+	 * `enabled: true`, the continuous loop self-reschedules with exponential backoff
+	 * (idle → ~30s ceiling, reset-to-floor on any leased job) instead of a flat
+	 * `pollIntervalMs` interval. DEFAULTS to a DISABLED config (the schema's
+	 * false-safe default), so an un-passed `backoff` reproduces the exact pre-PRD flat
+	 * cadence — the AC-9 parity contract. The daemon-assembly resolves the real
+	 * (default-ON) config from the env and passes it here.
+	 */
+	readonly backoff?: PollBackoffConfig;
 	/** Injected timer scheduler (real `setInterval` otherwise) — for tests. */
 	readonly setTimer?: (cb: () => void, ms: number) => unknown;
 	/** Injected timer canceller (real `clearInterval` otherwise) — for tests. */
@@ -141,7 +154,7 @@ export interface StageWorkerDeps {
  * `runOnce()` (lease + run a single job, the deterministic unit a test drives) and
  * `start()`/`stop()` (the continuous poll loop the daemon-assembly uses).
  */
-export interface StageWorker {
+export interface StageWorker extends LeaseParticipant {
 	/**
 	 * Lease the next runnable job, route it, run it, and complete/fail it. Returns
 	 * `true` when a job was processed (completed OR failed), `false` when nothing
@@ -180,26 +193,27 @@ class PipelineStageWorker implements StageWorker {
 	private readonly queue: JobQueueService;
 	private readonly handlers: StageHandlers;
 	private readonly logger?: StageWorkerLogger;
-	private readonly leaseKinds: readonly string[];
-	private readonly pollIntervalMs: number;
-	private readonly setTimer: (cb: () => void, ms: number) => unknown;
-	private readonly clearTimer: (handle: unknown) => void;
-	private handle: unknown;
-	/** Guards against overlapping `runOnce` invocations on the poll loop. */
-	private running = false;
+	/** Public for the lease coordinator's union (the kinds this participant owns). */
+	readonly leaseKinds: readonly string[];
+	private readonly loop: PollLoop;
 
 	constructor(deps: StageWorkerDeps) {
 		this.queue = deps.queue;
 		this.handlers = deps.handlers;
 		this.logger = deps.logger;
 		this.leaseKinds = deps.leaseKinds ?? PIPELINE_JOB_KINDS;
-		this.pollIntervalMs = deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-		this.setTimer = deps.setTimer ?? ((cb, ms) => setInterval(cb, ms));
-		this.clearTimer =
-			deps.clearTimer ??
-			((handle) => {
-				if (handle !== undefined) clearInterval(handle as ReturnType<typeof setInterval>);
-			});
+		// PRD-062b: the loop owns the cadence (flat when backoff is off — the AC-9
+		// pre-PRD path; adaptive self-reschedule when on). The overlap guard + the
+		// injected timer seam are preserved inside the loop; `buildWorkerPollLoop`
+		// applies the shared flat-interval / timer / disabled-backoff defaults so the
+		// wiring is not copied between the two workers.
+		this.loop = buildWorkerPollLoop({
+			tick: () => this.runOnce(),
+			flatIntervalMs: deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+			backoff: deps.backoff,
+			setTimer: deps.setTimer,
+			clearTimer: deps.clearTimer,
+		});
 	}
 
 	async runOnce(): Promise<boolean> {
@@ -207,14 +221,26 @@ class PipelineStageWorker implements StageWorker {
 		// pollinating job is left queued for its own worker, never grabbed-and-failed here.
 		const leased = await this.queue.lease(this.leaseKinds);
 		if (leased === null) return false;
+		await this.processLeased(leased);
+		return true;
+	}
 
+	/**
+	 * PRD-062b (AC-4): process ONE already-leased pipeline job — route it by kind, run
+	 * the handler, and complete/fail it. Split out of {@link runOnce} so the single
+	 * combined lease coordinator can dispatch a job IT leased (over the union of kinds)
+	 * to this participant without a second lease. The standalone `runOnce` leases then
+	 * calls this; both paths share the identical route+run+complete/fail body, so kind
+	 * isolation and the no-swallowed-error contract hold whether consolidation is on or off.
+	 */
+	async processLeased(leased: LeasedJob): Promise<void> {
 		// A leased job whose kind is not a pipeline kind is not ours to run. Fail it
 		// with a clear reason rather than silently completing it (a non-pipeline job
 		// in the pipeline queue is a wiring bug worth surfacing) — never swallowed.
 		if (!isPipelineJobKind(leased.kind)) {
 			this.logger?.event("stage.unknown_kind", { id: leased.id, kind: leased.kind });
 			await this.queue.fail(leased.id, `unknown pipeline job kind: ${leased.kind}`);
-			return true;
+			return;
 		}
 
 		const job = toStageJob(leased, leased.kind);
@@ -231,25 +257,14 @@ class PipelineStageWorker implements StageWorker {
 			this.logger?.event("stage.failed", { id: job.id, kind: job.kind, attempt: job.attempt, reason });
 			await this.queue.fail(job.id, reason);
 		}
-		return true;
 	}
 
 	start(): void {
-		this.handle = this.setTimer(() => {
-			// Skip a tick if the previous lease+run is still in flight; never overlap.
-			if (this.running) return;
-			this.running = true;
-			void this.runOnce().finally(() => {
-				this.running = false;
-			});
-		}, this.pollIntervalMs);
+		this.loop.start();
 	}
 
 	stop(): void {
-		if (this.handle !== undefined) {
-			this.clearTimer(this.handle);
-			this.handle = undefined;
-		}
+		this.loop.stop();
 	}
 }
 

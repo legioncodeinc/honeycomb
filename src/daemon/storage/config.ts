@@ -56,6 +56,16 @@ export const StorageConfigSchema = z.object({
 	queryTimeoutMs: QueryTimeoutMs.default(DEFAULT_QUERY_TIMEOUT_MS),
 	/** SQL tracing gate (FR-6). Evaluated at call time, see client.ts. */
 	traceSql: z.boolean().default(false),
+	/**
+	 * Query-meter persistence gate (PRD-062a). RESERVED, NOT YET IMPLEMENTED. The
+	 * query meter's default posture is in-memory + structured-log only and adds
+	 * ZERO DeepLake queries; persisting per-source counts to the existing
+	 * `telemetry_counters` tenant group is a later, separate concern and would add
+	 * write cost, so it is gated behind this flag. Today the flag is parsed and
+	 * carried but nothing reads it for behavior — wiring persistence is out of
+	 * scope for this sub-PRD (it must not make the meter itself a write-cost driver).
+	 */
+	queryMeterPersist: z.boolean().default(false),
 });
 
 /** The validated config object every storage layer reads. */
@@ -103,6 +113,8 @@ export function envCredentialProvider(env: NodeJS.ProcessEnv = process.env): Cre
 				workspace: env.HONEYCOMB_DEEPLAKE_WORKSPACE,
 				queryTimeoutMs: env.HONEYCOMB_QUERY_TIMEOUT_MS,
 				traceSql: env.HONEYCOMB_TRACE_SQL === "1" || env.HONEYCOMB_TRACE_SQL === "true",
+				queryMeterPersist:
+					env.HONEYCOMB_QUERY_METER_PERSIST === "1" || env.HONEYCOMB_QUERY_METER_PERSIST === "true",
 			};
 		},
 	};
@@ -209,6 +221,7 @@ export function defaultCredentialProvider(options: CredentialsFileProviderOption
 				// Tuning knobs are env-only (the file carries none).
 				queryTimeoutMs: fromEnv.queryTimeoutMs,
 				traceSql: fromEnv.traceSql,
+				queryMeterPersist: fromEnv.queryMeterPersist,
 			};
 		},
 	};

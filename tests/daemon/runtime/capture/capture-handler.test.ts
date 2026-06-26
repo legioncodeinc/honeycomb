@@ -134,6 +134,12 @@ function buildDaemon(opts: {
 		queue,
 		embed: opts.embed,
 		counters: opts.counters,
+		// PRD-062c: these a-AC-* tests assert the pre-062c write contract (ONE synchronous
+		// append-only INSERT per event, full untrimmed envelope) — i.e. the flags-OFF parity
+		// path (AC-9). Pin batching off + trimming off here so the existing single-INSERT
+		// assertions hold; the new batching/trim behavior is proven in its own suites. A
+		// caller may override via `opts.deps.captureConfig`.
+		captureConfig: { batch: false, windowMs: 1_000, maxEvents: 25, envelopeBudgetBytes: 0 },
 		...opts.deps,
 	});
 	handler.register(daemon);

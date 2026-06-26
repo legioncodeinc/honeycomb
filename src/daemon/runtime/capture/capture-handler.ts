@@ -45,16 +45,26 @@ import type { Context } from "hono";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import { type HealTarget } from "../../storage/heal.js";
 import { isOk, type StorageRow } from "../../storage/result.js";
-import { appendOnlyInsert, readAppendOrdered, type RowValues, val } from "../../storage/writes.js";
+import { appendOnlyInsertMany, readAppendOrdered, type RowValues, val } from "../../storage/writes.js";
 import type { Daemon } from "../server.js";
 import type { JobQueueService } from "../services/job-queue.js";
 import { type EmbedAttachment, noopEmbedAttachment } from "../services/embed-client.js";
 import { type CaptureEvent, type CaptureMetadata, parseCaptureRequest } from "./event-contract.js";
 import { type MemoryCue, TurnCounters, type TurnCounterConfig, tryStopCounterTrigger } from "./turn-counters.js";
+import { type BufferClock, CaptureBuffer } from "./capture-buffer.js";
+import { type CaptureConfig, resolveCaptureConfig } from "./capture-config.js";
+import { budgetedStringify } from "./budgeted-stringify.js";
 import { hasBoundProjectOnDisk, resolveScopeFromDisk, UNSORTED_PROJECT_ID } from "../../../hooks/shared/project-resolver.js";
 
 /** The route group the capture handler attaches to (FR-1). */
 export const HOOKS_GROUP = "/api/hooks" as const;
+
+/**
+ * The PRD-062a query-meter label for a captured-event append to `sessions`. Threaded
+ * onto every capture write (single or batched) so the 062a meter attributes the write
+ * cost to `capture-write` and AC-62c.1.3 can show the per-session count drop with batching.
+ */
+const CAPTURE_WRITE_SOURCE = "capture-write" as const;
 /** The capture route, relative to {@link HOOKS_GROUP}. */
 export const CAPTURE_PATH = "/capture" as const;
 /** The conversation read-back route, relative to {@link HOOKS_GROUP}. */
@@ -100,6 +110,21 @@ export interface CaptureHandlerDeps {
 	/** Injected clock (ISO timestamps) so tests are deterministic. Default `Date.now`. */
 	readonly now?: () => number;
 	/**
+	 * PRD-062c (L-C1 / L-C2 / L-X1): the capture write-batching + envelope-trim config.
+	 * Defaults to {@link resolveCaptureConfig} (reads the `HONEYCOMB_CAPTURE_*` env flags,
+	 * DEFAULT-ON). A test injects an explicit config to force batch on/off and pick a budget
+	 * deterministically. When `batch` is false AND the envelope budget is 0 the handler
+	 * reproduces EXACTLY the pre-062c behavior (one INSERT per event, full untrimmed
+	 * envelope) — AC-9.
+	 */
+	readonly captureConfig?: CaptureConfig;
+	/**
+	 * PRD-062c: injected clock/timer seam for the flush window so tests advance the
+	 * window deterministically with NO real sleep. Defaults to the real timer
+	 * (`setTimeout`/`Date.now`, unref'd so a pending flush never keeps the process alive).
+	 */
+	readonly bufferClock?: BufferClock;
+	/**
 	 * PRD-049b: override the local `~/.deeplake/projects.json` cache dir the capture path
 	 * resolves `project_id` from (049a `resolveScopeFromDisk`). Defaults to `~/.deeplake` in
 	 * production; a test points it at a temp dir with a seeded cache to prove a bound cwd
@@ -137,6 +162,14 @@ export interface CaptureHandler {
 	register(daemon: Daemon): void;
 	/** The shared per-turn counter store (for assertions). */
 	readonly counters: TurnCounters;
+	/**
+	 * PRD-062c (AC-5 / AC-62c.1.2): force-flush + close the capture write buffer so no
+	 * buffered event is lost on a clean stop. The daemon assembly calls this in its
+	 * graceful-shutdown path; a test calls it to assert the buffer drains. Idempotent and
+	 * never throws (a flush failure on shutdown is logged via the injected logger, not
+	 * surfaced). A no-op when batching is off (there is no buffer to drain).
+	 */
+	flush(): Promise<void>;
 }
 
 /**
@@ -149,7 +182,8 @@ export function createCaptureHandler(deps: CaptureHandlerDeps): CaptureHandler {
 	const counters = deps.counters ?? new TurnCounters(deps.counterConfig);
 	const embed = deps.embed ?? noopEmbedAttachment;
 	const now = deps.now ?? ((): number => Date.now());
-	const handler = new CaptureRouteHandler(deps, counters, embed, now);
+	const config = deps.captureConfig ?? resolveCaptureConfig();
+	const handler = new CaptureRouteHandler(deps, counters, embed, now, config);
 	return {
 		register(daemon: Daemon): void {
 			const group = daemon.group(HOOKS_GROUP);
@@ -160,16 +194,35 @@ export function createCaptureHandler(deps: CaptureHandlerDeps): CaptureHandler {
 			group.get(CONVERSATION_PATH, (c) => handler.handleConversation(c));
 		},
 		counters,
+		flush: () => handler.flush(),
 	};
+}
+
+/**
+ * One buffered capture write: the pre-built `sessions` row + the tenancy scope it
+ * must be written under. The buffer groups these and the flush appends each scope's
+ * rows as one multi-row INSERT.
+ */
+interface BufferedRow {
+	readonly row: RowValues;
+	readonly scope: QueryScope;
 }
 
 /** The route bodies, factored so `register` stays a thin wiring shell. */
 class CaptureRouteHandler {
+	/**
+	 * PRD-062c (L-C1): the capture write buffer. NULL when batching is off — the handler
+	 * then does one append-only INSERT per event (the pre-062c path). Lazily created on the
+	 * first buffered write so a flag-off handler allocates nothing.
+	 */
+	private buffer: CaptureBuffer<BufferedRow> | null = null;
+
 	constructor(
 		private readonly deps: CaptureHandlerDeps,
 		private readonly counters: TurnCounters,
 		private readonly embed: EmbedAttachment,
 		private readonly now: () => number,
+		private readonly config: CaptureConfig,
 	) {}
 
 	/**
@@ -212,13 +265,23 @@ class CaptureRouteHandler {
 		const projectId = this.resolveCaptureProjectId(metadata);
 		const row = this.buildRow(id, event, metadata, nowIso, projectId);
 
-		// ONE append-only INSERT (FR-3 / a-AC-1 / a-AC-2). `appendOnlyInsert` wraps
-		// `withHeal`: a missing `sessions` table is created from its ColumnDef array
-		// and the INSERT retried ONCE (FR-7 / a-AC-4).
-		const result = await appendOnlyInsert(this.deps.storage, this.deps.sessionsTarget, scope, row);
-		if (!isOk(result)) {
-			this.deps.logger?.event("capture.insert.failed", { id, kind: result.kind });
-			return c.json({ error: "capture_failed", reason: "could not write the session row" }, 502);
+		// PRD-062c (L-C1 / AC-5): the write path. With batching ON the row is BUFFERED and
+		// flushed as part of a multi-row append over a bounded window (a burst of turns → one
+		// DeepLake write); the handler returns fast once the row is committed to the in-memory
+		// window (the buffer GUARANTEES a flush on window-close / size-cap / shutdown). With
+		// batching OFF the row is written immediately as ONE append-only INSERT (the pre-062c
+		// path, FR-3 / a-AC-1) and a write failure surfaces as 502. Either path threads the
+		// `capture-write` 062a meter source and heals a missing `sessions` table once (FR-7).
+		if (this.config.batch) {
+			this.bufferRow(id, row, scope);
+		} else {
+			const result = await appendOnlyInsertMany(this.deps.storage, this.deps.sessionsTarget, scope, [row], {
+				source: CAPTURE_WRITE_SOURCE,
+			});
+			if (!isOk(result)) {
+				this.deps.logger?.event("capture.insert.failed", { id, kind: result.kind });
+				return c.json({ error: "capture_failed", reason: "could not write the session row" }, 502);
+			}
 		}
 
 		// Per-turn counters → cue background workers, NEVER inline (FR-8 / a-AC-5 / D-1).
@@ -265,6 +328,73 @@ class CaptureRouteHandler {
 	}
 
 	/**
+	 * Buffer one built row for batched flushing (PRD-062c L-C1). Lazily creates the
+	 * buffer on first use (a flag-off handler never allocates one). The per-item flush
+	 * promise the buffer returns is observed fire-and-forget: a flush failure is logged
+	 * here (never swallowed) but does NOT fail the captured turn — the row is committed
+	 * to the in-memory window, which the buffer GUARANTEES to flush (window / size /
+	 * shutdown). This is the documented trade: worst-case loss is one window on a hard
+	 * crash (see {@link CaptureBuffer}); a graceful stop drains the buffer.
+	 */
+	private bufferRow(id: string, row: RowValues, scope: QueryScope): void {
+		const buffer = this.ensureBuffer();
+		void buffer.add({ row, scope }).catch((err: unknown) => {
+			this.deps.logger?.event("capture.flush.failed", {
+				id,
+				reason: err instanceof Error ? err.message : String(err),
+			});
+		});
+	}
+
+	/** Lazily build the capture write buffer from the resolved config + the flush callback. */
+	private ensureBuffer(): CaptureBuffer<BufferedRow> {
+		if (this.buffer === null) {
+			const cfg = { maxEvents: this.config.maxEvents, windowMs: this.config.windowMs };
+			this.buffer =
+				this.deps.bufferClock !== undefined
+					? new CaptureBuffer<BufferedRow>((batch) => this.flushBatch(batch), cfg, this.deps.bufferClock)
+					: new CaptureBuffer<BufferedRow>((batch) => this.flushBatch(batch), cfg);
+		}
+		return this.buffer;
+	}
+
+	/**
+	 * Flush a buffered batch as multi-row append(s) (PRD-062c L-C1 / AC-5). Rows that
+	 * share a tenancy scope are grouped and written with ONE `appendOnlyInsertMany`, so N
+	 * within-window same-scope events become ONE DeepLake write (AC-62c.1.1). Different
+	 * scopes (the rare cross-tenant interleave within a window) each get their own append —
+	 * a multi-row INSERT cannot span partitions. Every append threads the `capture-write`
+	 * 062a meter source. A failed append rejects so the awaiter ({@link bufferRow}) logs it.
+	 */
+	private async flushBatch(batch: readonly BufferedRow[]): Promise<void> {
+		for (const [scope, rows] of groupRowsByScope(batch)) {
+			const result = await appendOnlyInsertMany(this.deps.storage, this.deps.sessionsTarget, scope, rows, {
+				source: CAPTURE_WRITE_SOURCE,
+			});
+			if (!isOk(result)) {
+				this.deps.logger?.event("capture.batch_insert.failed", { count: rows.length, kind: result.kind });
+				throw new Error(`capture batch append failed: ${result.kind}`);
+			}
+		}
+	}
+
+	/**
+	 * Force-flush + close the buffer on shutdown (PRD-062c AC-5 / AC-62c.1.2). Drains the
+	 * remaining window so nothing buffered is lost on a clean stop. A no-op when batching is
+	 * off (no buffer). Never throws — a flush failure on shutdown is logged, not surfaced.
+	 */
+	async flush(): Promise<void> {
+		if (this.buffer === null) return;
+		try {
+			await this.buffer.close();
+		} catch (err: unknown) {
+			this.deps.logger?.event("capture.flush.failed", {
+				reason: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	/**
 	 * Build the single `sessions` row's ordered column values (FR-4 / FR-5).
 	 *
 	 * The JSONB `message` stores the FULL normalized envelope `{ event, metadata }`
@@ -280,9 +410,18 @@ class CaptureRouteHandler {
 	 * org/workspace scope the partition.
 	 */
 	private buildRow(id: string, event: CaptureEvent, meta: CaptureMetadata, nowIso: string, projectId: string): RowValues {
-		// The verbatim normalized envelope: the event AND its session metadata, so a
-		// later extractor decomposes the original shape rather than re-parsing prose.
-		const message = JSON.stringify({ event, metadata: meta });
+		// PRD-062c (L-C2 / AC-6): the normalized envelope `{ event, metadata }`, with a
+		// `tool_call`'s oversized `input`/`response` capped to the byte budget and replaced by
+		// an explicit `…[truncated N bytes]` marker. A budget of 0 disables trimming → the FULL
+		// untrimmed envelope (the exact pre-062c content, AC-9). The CONSUMER AUDIT (PRD-062c
+		// gating) governs what is trimmed: ONLY the unbounded tool I/O is capped; `event.text`
+		// and the WHOLE `metadata` object are preserved verbatim because the skillify miner reads
+		// `metadata.sessionId` from this envelope (no dedicated column carries it) and recall +
+		// the summary gate read `event.text` — trimming either would be a silent capability cut.
+		const message =
+			this.config.envelopeBudgetBytes > 0
+				? budgetedStringify(event, meta, this.config.envelopeBudgetBytes)
+				: JSON.stringify({ event, metadata: meta });
 		// PRD-049b (49b-AC-1 / 49b-AC-3): `projectId` is the RESOLVED registry key (049a), resolved
 		// ONCE in handleCapture from the session cwd and carried onto the row + the pipeline entry.
 		// `project` keeps the raw cwd path (D5). Capture never drops (no-cwd → inbox upstream).
@@ -459,6 +598,28 @@ function embedTextFor(event: CaptureEvent): string {
 		case "tool_call":
 			return [event.tool, serialize(event.input), serialize(event.response)].filter((s) => s.length > 0).join("\n");
 	}
+}
+
+/**
+ * Group buffered rows by their tenancy scope (PRD-062c L-C1). A multi-row INSERT
+ * cannot span partitions, so rows are bucketed by `org`+`workspace` and each bucket
+ * is appended as one statement. Insertion order is preserved within a bucket (the
+ * `Map` keeps first-seen key order) so `creation_date` ordering is unaffected. In the
+ * common single-tenant daemon every row shares one scope → one bucket → one append.
+ */
+function groupRowsByScope(batch: readonly BufferedRow[]): Map<QueryScope, RowValues[]> {
+	const byKey = new Map<string, { scope: QueryScope; rows: RowValues[] }>();
+	for (const item of batch) {
+		// Collision-free composite key: JSON-encode the pair so a separator char in an
+		// org/workspace value can never alias a different scope into the same bucket.
+		const key = JSON.stringify([item.scope.org, item.scope.workspace ?? ""]);
+		const bucket = byKey.get(key);
+		if (bucket === undefined) byKey.set(key, { scope: item.scope, rows: [item.row] });
+		else bucket.rows.push(item.row);
+	}
+	const out = new Map<QueryScope, RowValues[]>();
+	for (const { scope, rows } of byKey.values()) out.set(scope, rows);
+	return out;
 }
 
 /** Serialize an unknown JSON value to a string for embedding (empty when absent). */
