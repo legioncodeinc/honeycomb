@@ -117,6 +117,16 @@ export const MEMORIES_COLUMNS = Object.freeze([
 	// unadvanced for a clean retry (no loss). Nullable (NULL = nothing folded yet — every event is
 	// newer than an absent watermark, so the first compaction folds normally). Heal-safe ALTER ADD.
 	{ name: "access_compacted_at", sql: "TIMESTAMPTZ" },
+	// PRD-058e: the COMPANION half of the compaction watermark CURSOR, the `id` of the newest raw
+	// `memory_access` event already folded into `access_count`. The watermark is a TOTAL-ORDER cursor
+	// `(access_compacted_at, access_compacted_id)`, not `access_compacted_at` alone: when several access
+	// events share the same `at`, an `at`-only cursor cannot tell an already-folded row from a not-yet-
+	// folded same-`at` sibling, so a later run would treat the sibling as already folded (`at === watermark`,
+	// not `>`) and DELETE it without counting it: a silent reinforcement loss. Pairing `at` with the row
+	// `id` gives a strict total order so a same-`at` sibling still compares "after" the cursor and is folded.
+	// Advanced in the SAME atomic cache write as `access_compacted_at` + `access_count`. Nullable (NULL =
+	// nothing folded yet, paired with a NULL `access_compacted_at`). Heal-safe ALTER ADD (additive backfill).
+	{ name: "access_compacted_id", sql: "TEXT" },
 ]);
 
 /**

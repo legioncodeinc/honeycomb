@@ -110,12 +110,25 @@ export function buildResolutionIndex(snapshot: Snapshot): ResolutionIndex {
 const REPO_PATH_EXT_RE = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|py|go|rs|java|rb|c|h|cc|cpp|cxx|hpp)$/i;
 
 /**
+ * A SCOPED npm package specifier (`@scope/pkg`, optionally with a sub-path like `@scope/pkg/dist`), with NO
+ * source extension. Such a specifier CONTAINS a `/` yet is an EXTERNAL package, never indexed repo code, so
+ * it must be excluded BEFORE the slash-based repo test below. Otherwise `@scope/pkg#symbol` would be
+ * mis-classified repo-shaped and a missing external symbol would score a false `stale` (PRD-058c.1.3 forbids
+ * a false `stale`). A scoped path that DOES carry a source extension (e.g. a vendored `@scope/pkg/x.ts`) is
+ * NOT matched here: it falls through to the extension test and stays in-graph.
+ */
+const SCOPED_PACKAGE_RE = /^@[^/]+\/[^/]+(?:\/.*)?$/;
+
+/**
  * Is a `file-symbol`'s left-hand side a REPO-SHAPED path (so an absence is meaningful = `stale`), rather
- * than a bare package/module specifier (e.g. `react`, `lodash`) that must score `unknown`? Repo-shaped =
- * it carries a path separator OR ends in a known source extension. A bare module token (no `/`, no
- * extension) is an external package reference, never indexed code (PRD-058c.1.3 — out-of-graph → unknown).
+ * than a bare package/module specifier (e.g. `react`, `lodash`, `@scope/pkg`) that must score `unknown`?
+ * A SCOPED package specifier is excluded FIRST (it contains a `/` but is external; PRD-058c.1.3) UNLESS it
+ * carries a source extension. Otherwise repo-shaped = it carries a path separator OR ends in a known source
+ * extension. A bare module token (no `/`, no extension) is an external package reference, never indexed code.
  */
 function isRepoShapedPath(file: string): boolean {
+	// A scoped package specifier with no source extension is external (out-of-graph) despite its `/`.
+	if (SCOPED_PACKAGE_RE.test(file) && !REPO_PATH_EXT_RE.test(file)) return false;
 	return file.includes("/") || REPO_PATH_EXT_RE.test(file);
 }
 
@@ -462,7 +475,14 @@ async function writeVerdict(
 	const staleRefsJson = JSON.stringify(verdict.staleRefs);
 	try {
 		// (1) Capture the PRIOR verdict fields so the audit's before_payload makes the transition reversible.
-		const before = await readPriorVerdict(memoryId, scope, deps);
+		// A READ ERROR (distinct from a genuinely-absent row) ABORTS before any write: appending an audit
+		// with a FABRICATED empty before_payload and then mutating the projection would break the
+		// reconstructable-audit guarantee (the before_payload would not reflect the real prior state). Do
+		// nothing this run; the next pass retries. Only a genuinely-absent row (ok + 0 rows) is a legitimate
+		// empty prior (a never-verified memory has no prior verdict to record).
+		const prior = await readPriorVerdict(memoryId, scope, deps);
+		if (prior.kind === "error") return false; // unreadable prior → abort BEFORE the audit/projection writes.
+		const before = prior.value;
 
 		// (2) Append the audit FIRST. If it fails, abort BEFORE the projection mutates — no ranking change
 		// without its history row.
@@ -496,21 +516,40 @@ interface PriorVerdict {
 }
 
 /**
- * Read a memory's CURRENT `ref_status` / `verified_at` / `stale_refs` (the prior verdict the diagnostic
- * is about to overwrite) so the audit `before_payload` captures the reversible pre-state. FAIL-SOFT: a
- * missing row / read error → empty fields (a never-verified memory simply has no prior verdict to record).
+ * The result of reading the prior verdict. The `error` case is DISTINCT from a genuinely-absent row so the
+ * caller can tell "this memory was never verified (no prior to record → a legitimate empty before_payload)"
+ * apart from "the prior could not be read (a query error → ABORT before any audit/projection write)".
+ * Collapsing both into an empty prior would let a transient read failure write an audit with a FABRICATED
+ * empty before_payload and then mutate the projection, breaking the reconstructable-audit guarantee
+ * (CodeRabbit round-2 finding #4). An absent prior is the `ok` + empty-fields value; a read failure is `error`.
  */
-async function readPriorVerdict(memoryId: string, scope: QueryScope, deps: StaleRefDiagnosticDeps): Promise<PriorVerdict> {
+type PriorVerdictRead = { readonly kind: "ok"; readonly value: PriorVerdict } | { readonly kind: "error" };
+
+/** The empty prior a genuinely-absent (never-verified) memory row yields. */
+const ABSENT_PRIOR: PriorVerdict = { refStatus: "", verifiedAt: "", staleRefs: "" };
+
+/**
+ * Read a memory's CURRENT `ref_status` / `verified_at` / `stale_refs` (the prior verdict the diagnostic
+ * is about to overwrite) so the audit `before_payload` captures the reversible pre-state. RETURNS a
+ * discriminated result:
+ *  - `{ kind: "ok", value: <empty> }` when the row is genuinely ABSENT (a never-verified memory has no
+ *    prior verdict, a legitimate empty before_payload), or has empty/NULL verdict fields;
+ *  - `{ kind: "ok", value: { … } }` with the stored prior;
+ *  - `{ kind: "error" }` when the read FAILED (a query/connection error). The caller MUST ABORT before any
+ *    audit/projection write rather than fabricate an empty before_payload over an unreadable prior. It never throws.
+ */
+async function readPriorVerdict(memoryId: string, scope: QueryScope, deps: StaleRefDiagnosticDeps): Promise<PriorVerdictRead> {
 	const tbl = sqlIdent("memories");
 	const idCol = sqlIdent("id");
 	const readSql =
 		`SELECT ${sqlIdent("ref_status")} AS ref_status, ${sqlIdent("verified_at")} AS verified_at, ` +
 		`${sqlIdent("stale_refs")} AS stale_refs FROM "${tbl}" WHERE ${idCol} = ${sLiteral(memoryId)} LIMIT 1`;
 	const res = await deps.storage.query(readSql, scope);
-	if (!isOk(res) || res.rows.length === 0) return { refStatus: "", verifiedAt: "", staleRefs: "" };
+	if (!isOk(res)) return { kind: "error" }; // read FAILED → abort (do NOT fabricate an empty before_payload).
+	if (res.rows.length === 0) return { kind: "ok", value: ABSENT_PRIOR }; // genuinely absent → legitimate empty prior.
 	const row = res.rows[0] as Record<string, unknown>;
 	const str = (v: unknown): string => (v === undefined || v === null ? "" : String(v));
-	return { refStatus: str(row.ref_status), verifiedAt: str(row.verified_at), staleRefs: str(row.stale_refs) };
+	return { kind: "ok", value: { refStatus: str(row.ref_status), verifiedAt: str(row.verified_at), staleRefs: str(row.stale_refs) } };
 }
 
 /**

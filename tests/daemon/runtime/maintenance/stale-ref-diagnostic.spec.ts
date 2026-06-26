@@ -149,6 +149,33 @@ describe("PRD-058c resolveReference — the resolve(r, G_t) classification", () 
 		expect(r.resolve).toBeGreaterThan(0);
 		expect(r.resolve).toBeLessThan(1);
 	});
+
+	// ── round-2 #3: a SCOPED package `@scope/pkg#symbol` is external (its `/` must NOT make it repo-shaped) ──
+	it("58c.1.3 a scoped-package `@scope/pkg#symbol` is EXCLUDED → unknown, NEVER stale (the `/` does not make it repo-shaped)", () => {
+		// A scoped npm specifier contains a `/` but is an EXTERNAL package, never indexed repo code. The
+		// extractor's bare-module rule emits a file-symbol whose `file` is the scoped specifier; the diagnostic
+		// must EXCLUDE it (neutral/unknown), never resolve it against the graph and score a false `stale`.
+		const ref = { raw: "@scope/pkg#symbol", kind: "file-symbol" as const, file: "@scope/pkg", symbol: "symbol" };
+		const r = resolveReference(ref, index);
+		expect(r.excluded).toBe(true); // out-of-graph → neutral.
+		expect(r.resolve).toBe(1); // contributes nothing to σ (never a false stale).
+	});
+
+	it("58c.1.3 a scoped-package with a sub-path `@scope/pkg/dist#symbol` is also EXCLUDED → unknown", () => {
+		const ref = { raw: "@scope/pkg/dist#symbol", kind: "file-symbol" as const, file: "@scope/pkg/dist", symbol: "symbol" };
+		const r = resolveReference(ref, index);
+		expect(r.excluded).toBe(true);
+		expect(r.resolve).toBe(1);
+	});
+
+	it("58c a REAL repo file-symbol (src/daemon/x.ts#sym) is STILL in-graph (the scoped-package guard does not over-exclude)", () => {
+		// Guard against over-narrowing: a genuine `/`-separated source path with a #symbol must remain in-graph
+		// so a truly-absent in-repo symbol can be scored dangling. Only the scoped-package case is excluded.
+		const ref = { raw: "src/daemon/x.ts#sym", kind: "file-symbol" as const, file: "src/daemon/x.ts", symbol: "sym" };
+		const r = resolveReference(ref, index);
+		expect(r.excluded).toBe(false); // repo-shaped → in-graph; absence is meaningful.
+		expect(r.resolve).toBe(0); // indexed-but-absent → dangling.
+	});
 });
 
 describe("PRD-058c bestRenameSim", () => {
@@ -274,6 +301,36 @@ describe("PRD-058c runStaleRefDiagnostic — write, audit, posture", () => {
 		expect(logs.some((l) => l.includes("graph-unavailable"))).toBe(true);
 		// The write still stamps `unknown` (neutral) but never `stale`.
 		expect(sql.some((s) => /'stale'/.test(s))).toBe(false);
+	});
+
+	// ── round-2 #4: an UNREADABLE prior verdict ABORTS before any audit/projection write ──
+	it("a prior-verdict READ ERROR aborts the memory (written:false, NO history append, NO projection update)", async () => {
+		// The prior-verdict read (the `memories` SELECT capturing before_payload) FAILS. Treating that read
+		// error as an empty prior would let the audit append a FABRICATED before_payload and then mutate the
+		// projection, breaking the reconstructable-audit guarantee. The write must abort BEFORE either write.
+		const sql: string[] = [];
+		const failingPriorRead = {
+			async query(statement: string): Promise<QueryResult> {
+				sql.push(statement);
+				// The prior-verdict read is the SELECT over "memories" capturing ref_status/verified_at/stale_refs.
+				if (/^\s*SELECT[\s\S]*ref_status[\s\S]*FROM\s+"memories"/i.test(statement)) {
+					return { kind: "query_error", message: "prior-read-boom" } as QueryResult;
+				}
+				return { kind: "ok", rows: /^\s*SELECT/i.test(statement) ? [{ id: "x" }] : [], durationMs: 0 } as QueryResult;
+			},
+		} as unknown as StorageQuery;
+		const report = await runStaleRefDiagnostic([{ id: "m6", content: "src/a.ts#gone" }], SCOPE, "execute", {
+			storage: failingPriorRead,
+			snapshots: staticProvider(snapshot),
+			now: () => NOW,
+			newId: () => "h6",
+		});
+		// The memory aborted fail-soft: written:false, and the batch still completed (never threw).
+		expect(report.ok).toBe(true);
+		expect(report.results[0]).toMatchObject({ id: "m6", written: false });
+		// CRITICAL: NO audit history append and NO projection UPDATE landed when the prior could not be read.
+		expect(sql.some((s) => /INSERT INTO\s+"memory_history"/i.test(s))).toBe(false);
+		expect(sql.some((s) => /UPDATE\s+"memories"/i.test(s))).toBe(false);
 	});
 
 	it("fail-soft: a snapshot provider THROW degrades to graphUnavailable, never a thrown pass", async () => {

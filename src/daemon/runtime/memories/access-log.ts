@@ -270,23 +270,31 @@ export async function readAccessHistory(
  * interrupted: a crash after the cache write but before the delete would, with a
  * naive `access_count += foldCount`, RE-FOLD the same rows on the next run and
  * DOUBLE-COUNT; the reverse order would LOSE them. This compaction is made
- * idempotent by a persisted WATERMARK (`memories.access_compacted_at` — the `at` of
- * the newest event already folded):
+ * idempotent by a persisted WATERMARK CURSOR, the TOTAL-ORDER position `(at, id)`
+ * of the newest event already folded (`memories.access_compacted_at` +
+ * `access_compacted_id`):
  *  - the fold set is exactly the events OLDER than the keep-horizon AND STRICTLY
- *    NEWER than the watermark (events at-or-before the watermark were already
- *    counted, so they are never re-folded);
- *  - the count accumulate + the watermark advance happen in the SAME atomic cache
- *    UPDATE, so the watermark always reflects precisely what was counted;
+ *    AFTER the `(at, id)` cursor (events at-or-before the cursor were already
+ *    counted, so they are never re-folded). The cursor is the COMPOSITE `(at, id)`,
+ *    not `at` alone: several events can share one `at`, and an `at`-only cursor
+ *    could not tell an already-folded row from a not-yet-folded same-`at` sibling:
+ *    it would treat the sibling as folded (`at === watermark`, not `>`) and delete
+ *    it WITHOUT counting it (a silent loss). Pairing `at` with `id` gives a strict
+ *    total order so a same-`at` sibling still compares "after" the cursor;
+ *  - the count accumulate + BOTH cursor halves advance in the SAME atomic cache
+ *    UPDATE, so the cursor always reflects precisely what was counted;
  *  - the raw-row DELETE runs AFTER. A failed delete leaves the (now-folded) rows in
- *    place, but they are at-or-before the watermark so the NEXT run does not re-fold
+ *    place, but they are at-or-before the cursor so the NEXT run does not re-fold
  *    them (no double count) — it merely re-issues the idempotent DELETE. A failed
- *    cache UPDATE leaves the watermark UNADVANCED and the rows present, so the next
+ *    cache UPDATE leaves the cursor UNADVANCED and the rows present, so the next
  *    run retries the whole fold cleanly (no loss).
  *
  * RULES:
  *  - A memory with `≤ keepN` events is left UNTOUCHED (nothing to fold).
  *  - FAIL-SOFT: a read/cache/delete error aborts the compaction for that memory
- *    without throwing; the next run retries with no double count and no loss.
+ *    without throwing; the next run retries with no double count and no loss. An
+ *    UNREADABLE watermark (a query error, distinct from a genuinely-absent one)
+ *    ABORTS rather than re-folding from the start (no double count).
  * Returns the count of raw events folded THIS run (0 when nothing new was folded —
  * including a re-run over already-folded-but-undeleted rows).
  */
@@ -302,28 +310,36 @@ export async function compactAccessLog(
 	const memoryIdCol = sqlIdent("memory_id");
 	const atCol = sqlIdent("at");
 
-	// Read the full ordered event set (id + at + kind) so we can pick the fold horizon.
+	// Read the full ordered event set (id + at + kind) so we can pick the fold horizon. The order is the
+	// TOTAL ORDER (at, id), NOT `at` alone, so same-timestamp siblings have a stable, deterministic rank
+	// the keep-horizon slice and the watermark cursor agree on (see the (at, id) cursor note below).
 	const readSql =
 		`SELECT ${idCol} AS id, ${atCol} AS at, ${sqlIdent("kind")} AS kind ` +
-		`FROM "${tbl}" WHERE ${memoryIdCol} = ${sLiteral(memoryId)} ORDER BY ${atCol} ASC`;
+		`FROM "${tbl}" WHERE ${memoryIdCol} = ${sLiteral(memoryId)} ORDER BY ${atCol} ASC, ${idCol} ASC`;
 	const read = await deps.storage.query(readSql, scope);
 	if (!isOk(read)) return { folded: 0 }; // fail-soft: retry next run.
 
 	const rows = read.rows as StorageRow[];
 	if (rows.length <= keep) return { folded: 0 }; // nothing to fold.
 
-	// The compaction watermark: the `at` of the newest event ALREADY folded into the count. NULL/absent
-	// → nothing folded yet (every event is "newer" than an absent watermark). Read once, up front.
-	const watermark = await readCompactionWatermark(memoryId, deps, scope);
+	// The compaction watermark: the (at, id) of the newest event ALREADY folded into the count. A read
+	// ERROR (not a genuinely-absent watermark) ABORTS: re-folding from "the start" after a transient read
+	// failure would double-count rows a prior run already folded but had not yet deleted. Read once, up front.
+	const watermarkRead = await readCompactionWatermark(memoryId, deps, scope);
+	if (watermarkRead.kind === "error") return { folded: 0 }; // fail-soft: unreadable watermark → retry next run, never re-fold.
+	const watermark = watermarkRead.value; // null ⇒ genuinely never compacted (every event is "after" it).
 
-	// The horizon set is the OLDEST `rows.length - keep` events (ascending order); from those, the rows
-	// STRICTLY NEWER than the watermark are the NOT-YET-folded set this run counts. Rows at-or-before the
-	// watermark were already counted on a prior run (their delete may simply not have landed) — never
-	// re-fold them (the no-double-count guarantee).
+	// The horizon set is the OLDEST `rows.length - keep` events (in (at, id) order); from those, the rows
+	// STRICTLY AFTER the watermark cursor are the NOT-YET-folded set this run counts. The comparison is on
+	// the COMPOSITE (at, id), not `at` alone: when several events share an `at`, comparing on `at` alone
+	// would treat a same-`at` sibling of an already-folded row as also folded (`at === watermarkAt`, not
+	// `>`) and DELETE it without ever counting it: a silent loss. (at, id) gives a strict total order so a
+	// same-`at` sibling that was NOT yet folded still compares "after" the cursor and is counted.
 	const horizon = rows.slice(0, rows.length - keep);
 	const foldRows = horizon.filter((r) => {
 		const at = String(r.at ?? "");
-		return at !== "" && (watermark === null || at > watermark);
+		const id = String(r.id ?? "");
+		return at !== "" && (watermark === null || isAfterCursor(at, id, watermark));
 	});
 
 	// Delete every horizon id whose row is at-or-before the watermark too (re-issue a prior failed
@@ -340,12 +356,19 @@ export async function compactAccessLog(
 
 	const foldCount = foldRows.length;
 
-	// The newest event in the fold set is the new watermark (advanced in the SAME write as the count).
+	// The newest event in the fold set is the new watermark CURSOR (at, id), advanced in the SAME write as
+	// the count. The "newest" is by the COMPOSITE (at, id): among same-`at` siblings the larger `id` wins,
+	// so the persisted cursor pins the exact last-folded row and the next run resumes strictly after it.
 	let newestFoldedAt = "";
+	let newestFoldedId = "";
 	let newestReinforceAt: string | null = null;
 	for (const r of foldRows) {
 		const at = String(r.at ?? "");
-		if (at !== "" && at > newestFoldedAt) newestFoldedAt = at;
+		const id = String(r.id ?? "");
+		if (at !== "" && isAfterCursor(at, id, { at: newestFoldedAt, id: newestFoldedId })) {
+			newestFoldedAt = at;
+			newestFoldedId = id;
+		}
 		if (String(r.kind ?? "") === "reinforce" && at !== "" && (newestReinforceAt === null || at > newestReinforceAt)) {
 			newestReinforceAt = at;
 		}
@@ -355,7 +378,7 @@ export async function compactAccessLog(
 	// UPDATE BEFORE deleting the raw rows. If this fails, the watermark is unadvanced and the rows are
 	// present → the next run re-folds cleanly (no loss). If it succeeds but the delete then fails, the
 	// rows are now at-or-before the watermark → the next run does NOT re-fold (no double count).
-	const accumulated = await accumulateCache(memoryId, foldCount, newestReinforceAt, newestFoldedAt, deps, scope);
+	const accumulated = await accumulateCache(memoryId, foldCount, newestReinforceAt, newestFoldedAt, newestFoldedId, deps, scope);
 	if (!accumulated) return { folded: 0 }; // cache write failed → no watermark advance, retry next run.
 
 	await deleteFoldedRows(memoryId, deleteRows, deps, scope);
@@ -363,23 +386,65 @@ export async function compactAccessLog(
 }
 
 /**
- * Read the compaction WATERMARK (`memories.access_compacted_at`) for a memory — the `at` of the newest
- * raw access event already folded into `access_count` (PRD-058e idempotent compaction). Returns the
- * stored ISO stamp, or `null` when absent/empty (nothing folded yet) or on any read error (fail-soft:
- * an unreadable watermark degrades to "fold from the start", which the at-most-once delete still keeps
- * convergent). Never throws.
+ * The compaction watermark CURSOR: the TOTAL-ORDER position `(at, id)` of the newest raw access event
+ * already folded into `access_count`. `id` may be `""` for a legacy watermark written before the
+ * companion `access_compacted_id` column existed (an `at`-only watermark heals forward on the next fold).
  */
-async function readCompactionWatermark(memoryId: string, deps: AccessLogDeps, scope: QueryScope): Promise<string | null> {
+interface CompactionCursor {
+	readonly at: string;
+	readonly id: string;
+}
+
+/**
+ * The result of reading the compaction watermark. The `error` case is DISTINCT from a `null` value so the
+ * caller can tell "the watermark is genuinely absent (never compacted → fold from the start)" apart from
+ * "the watermark could not be read (a transient query error → ABORT, do not re-fold)". Collapsing both
+ * into `null` would let a transient read failure re-fold rows a prior run already folded but had not yet
+ * deleted → a double count. (PRD-058e idempotent compaction; CodeRabbit round-2 finding #1.)
+ */
+type WatermarkRead = { readonly kind: "ok"; readonly value: CompactionCursor | null } | { readonly kind: "error" };
+
+/**
+ * Strict total-order comparison on `(at, id)`: is `(at, id)` AFTER the `cursor`? Lexicographic, `at` then
+ * `id`. LEGACY watermark guard: a cursor with an EMPTY `id` (a pre-companion-column at-only watermark)
+ * compares conservatively on `at` ALONE: a same-`at` row is treated as at-or-before (NOT re-folded), so
+ * migrating from a legacy at-only watermark never double-counts a same-`at` sibling. Once the cursor has a
+ * real `id` (the next fold heals it forward) the strict `(at, id)` comparison applies.
+ */
+function isAfterCursor(at: string, id: string, cursor: CompactionCursor): boolean {
+	if (at !== cursor.at) return at > cursor.at;
+	if (cursor.id === "") return false; // legacy at-only cursor: same-`at` rows are at-or-before (no re-fold).
+	return id > cursor.id;
+}
+
+/**
+ * Read the compaction WATERMARK cursor (`memories.access_compacted_at` + `access_compacted_id`) for a
+ * memory: the `(at, id)` of the newest raw access event already folded into `access_count` (PRD-058e
+ * idempotent compaction). RETURNS a discriminated result:
+ *  - `{ kind: "ok", value: null }`: the row exists but the watermark is absent/empty (genuinely never
+ *    compacted, so every event is "after" it, fold from the start), OR the memory row is absent (a fresh
+ *    memory has nothing folded yet).
+ *  - `{ kind: "ok", value: { at, id } }`: the stored cursor.
+ *  - `{ kind: "error" }`: the read FAILED (a query/connection error). The caller MUST ABORT rather than
+ *    treat an unreadable watermark as "never compacted": re-folding from the start after a transient read
+ *    error would double-count rows a prior run already folded but had not deleted. Never throws.
+ */
+async function readCompactionWatermark(memoryId: string, deps: AccessLogDeps, scope: QueryScope): Promise<WatermarkRead> {
 	const tbl = sqlIdent(MEMORIES_TABLE);
 	const idCol = sqlIdent("id");
 	const watermarkCol = sqlIdent("access_compacted_at");
+	const watermarkIdCol = sqlIdent("access_compacted_id");
 	const readSql =
-		`SELECT ${watermarkCol} AS access_compacted_at FROM "${tbl}" ` +
+		`SELECT ${watermarkCol} AS access_compacted_at, ${watermarkIdCol} AS access_compacted_id FROM "${tbl}" ` +
 		`WHERE ${idCol} = ${sLiteral(memoryId)} LIMIT 1`;
 	const read = await deps.storage.query(readSql, scope);
-	if (!isOk(read) || read.rows.length === 0) return null;
-	const raw = String((read.rows[0] as StorageRow).access_compacted_at ?? "");
-	return raw === "" ? null : raw;
+	if (!isOk(read)) return { kind: "error" }; // read FAILED → abort (do NOT degrade to "never compacted").
+	if (read.rows.length === 0) return { kind: "ok", value: null }; // no row → genuinely nothing folded yet.
+	const row = read.rows[0] as StorageRow;
+	const at = String(row.access_compacted_at ?? "");
+	if (at === "") return { kind: "ok", value: null }; // present but empty → nothing folded yet.
+	const id = String(row.access_compacted_id ?? ""); // "" for a legacy at-only watermark; heals on next fold.
+	return { kind: "ok", value: { at, id } };
 }
 
 /** Delete a batch of folded raw access rows (idempotent — re-deleting a gone row converges the log). FAIL-SOFT. */
@@ -398,9 +463,10 @@ async function deleteFoldedRows(memoryId: string, foldRows: readonly StorageRow[
  * Accumulate a folded batch into the `memories` cache (compaction helper) as ONE ATOMIC UPDATE:
  * `access_count += addCount` (relative, COALESCE-guarded — never a read-modify-write that loses a
  * concurrent increment), advance `last_reinforced_at` to `reinforcedAt` only when strictly later (a
- * `CASE` MAX), and advance the compaction watermark `access_compacted_at` to `newestFoldedAt` — all in
- * the SAME statement so the count and the watermark are committed together (the idempotency invariant:
- * the watermark always reflects exactly what was counted). Distinct from {@link maintainMemoryCache},
+ * `CASE` MAX), and advance the compaction watermark CURSOR `(access_compacted_at, access_compacted_id)` to
+ * `(newestFoldedAt, newestFoldedId)`, all in the SAME statement so the count and BOTH cursor halves are
+ * committed together (the idempotency invariant: the cursor always reflects exactly what was counted, and
+ * the `id` half disambiguates same-`at` siblings). Distinct from {@link maintainMemoryCache},
  * which bumps by exactly one for a live event. Returns whether the cache write landed (the caller gates
  * the subsequent delete on it). FAIL-SOFT: a non-ok result returns `false` (no watermark advance → the
  * next run retries the fold, no loss).
@@ -410,6 +476,7 @@ async function accumulateCache(
 	addCount: number,
 	reinforcedAt: string | null,
 	newestFoldedAt: string,
+	newestFoldedId: string,
 	deps: AccessLogDeps,
 	scope: QueryScope,
 ): Promise<boolean> {
@@ -418,6 +485,7 @@ async function accumulateCache(
 	const accessCountCol = sqlIdent("access_count");
 	const lastReinforcedCol = sqlIdent("last_reinforced_at");
 	const watermarkCol = sqlIdent("access_compacted_at");
+	const watermarkIdCol = sqlIdent("access_compacted_id");
 
 	const add = Math.max(0, Math.trunc(addCount));
 	// Atomic relative increment (COALESCE handles a NULL/un-backfilled cell) — concurrency-safe.
@@ -428,12 +496,17 @@ async function accumulateCache(
 			? ""
 			: `, ${lastReinforcedCol} = CASE WHEN ${lastReinforcedCol} IS NULL OR ${lastReinforcedCol} < ${sLiteral(reinforcedAt)} ` +
 				`THEN ${sLiteral(reinforcedAt)} ELSE ${lastReinforcedCol} END`;
-	// The watermark advances to the newest folded `at` (monotone: never moves backward).
+	// The watermark CURSOR advances to the newest folded `(at, id)`: monotone, never backward. Both halves
+	// advance together GATED on the SAME `at`-monotonicity guard so the (at, id) pair stays consistent (the
+	// id is only meaningful relative to its `at`): when `at` strictly advances OR ties the stored `at`, the
+	// companion id is set to the newly-folded id; the count and BOTH cursor halves commit in one statement
+	// so the persisted cursor always pins exactly the last-folded row (the idempotency invariant).
+	const watermarkAdvances = `${watermarkCol} IS NULL OR ${watermarkCol} < ${sLiteral(newestFoldedAt)} ` + `OR (${watermarkCol} = ${sLiteral(newestFoldedAt)} AND (${watermarkIdCol} IS NULL OR ${watermarkIdCol} < ${sLiteral(newestFoldedId)}))`;
 	const watermarkClause =
 		newestFoldedAt === ""
 			? ""
-			: `, ${watermarkCol} = CASE WHEN ${watermarkCol} IS NULL OR ${watermarkCol} < ${sLiteral(newestFoldedAt)} ` +
-				`THEN ${sLiteral(newestFoldedAt)} ELSE ${watermarkCol} END`;
+			: `, ${watermarkCol} = CASE WHEN ${watermarkAdvances} THEN ${sLiteral(newestFoldedAt)} ELSE ${watermarkCol} END` +
+				`, ${watermarkIdCol} = CASE WHEN ${watermarkAdvances} THEN ${sLiteral(newestFoldedId)} ELSE ${watermarkIdCol} END`;
 
 	const updateSql = `UPDATE "${tbl}" SET ${countClause}${reinforceClause}${watermarkClause} WHERE ${idCol} = ${sLiteral(memoryId)}`;
 	const res = await deps.storage.query(updateSql, scope);

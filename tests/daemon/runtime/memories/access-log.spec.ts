@@ -211,10 +211,10 @@ describe("PRD-058e compactAccessLog, keep last N, fold the rest", () => {
 		expect(run1.sql.some((s) => s.startsWith('UPDATE "memories"'))).toBe(true); // the fold landed.
 		expect(run1.sql.some((s) => s.startsWith('DELETE FROM "memory_access"'))).toBe(true); // delete attempted.
 
-		// Run 2: the delete failed, so the same rows are STILL present — but the watermark is now at e2.
-		// The horizon (e0,e1,e2) is all at-or-before the watermark → NOTHING is re-folded (no double count).
+		// Run 2: the delete failed, so the same rows are STILL present, but the watermark CURSOR is now (e2At, e2).
+		// The horizon (e0,e1,e2) is all at-or-before the cursor → NOTHING is re-folded (no double count).
 		const run2 = fakeStorage({
-			memoriesRead: ok([{ access_count: 13, access_compacted_at: e2At }], 0), // watermark persisted from run 1.
+			memoriesRead: ok([{ access_count: 13, access_compacted_at: e2At, access_compacted_id: "e2" }], 0), // (at,id) cursor persisted from run 1.
 			accessRead: ok(rows, 0), // delete never landed → rows unchanged.
 		});
 		const r2 = await compactAccessLog("mem-1", fixedDeps(run2.storage), SCOPE, 2);
@@ -240,5 +240,77 @@ describe("PRD-058e compactAccessLog, keep last N, fold the rest", () => {
 		expect(res.folded).toBe(0); // not counted.
 		// The raw rows must NOT be deleted when the fold did not land — otherwise the events are LOST.
 		expect(sql.some((s) => s.startsWith('DELETE FROM "memory_access"'))).toBe(false);
+	});
+
+	// ── CRITICAL (round-2 #1): an UNREADABLE watermark ABORTS, it must NOT re-fold from the start ──
+	it("a watermark READ ERROR aborts (folded 0, NO cache write, NO delete), never re-folds already-folded rows", async () => {
+		// 5 events, keep 2 → the horizon (e0,e1,e2) was already folded on a prior run, but the watermark
+		// read now FAILS (a transient query error). Collapsing that error into "no watermark" would re-fold
+		// the whole horizon and DOUBLE-COUNT. The read-error must abort: no count change, no destructive delete.
+		const rows: StorageRow[] = Array.from({ length: 5 }, (_, i) => ({
+			id: `e${i}`,
+			at: new Date(NOW - (5 - i) * MS_PER_DAY).toISOString(),
+			kind: "recall",
+		}));
+		const { storage, sql } = fakeStorage({
+			// The `memories` SELECT (the watermark read) FAILS, distinct from a genuinely-absent watermark.
+			memoriesRead: { kind: "query_error", message: "watermark-read-boom" },
+			accessRead: ok(rows, 0),
+		});
+		const res = await compactAccessLog("mem-1", fixedDeps(storage), SCOPE, 2);
+		expect(res.folded).toBe(0); // aborted: nothing folded this run.
+		// No count-advancing cache UPDATE and no destructive DELETE on an unreadable watermark.
+		expect(sql.some((s) => s.startsWith('UPDATE "memories"'))).toBe(false);
+		expect(sql.some((s) => s.startsWith('DELETE FROM "memory_access"'))).toBe(false);
+	});
+
+	// ── CRITICAL (round-2 #2): same-timestamp siblings are NOT lost across a partial-failure re-run ──
+	it("same-`at` rows: a partial run folds a SUBSET; the re-run folds the remaining same-`at` sibling (no loss)", async () => {
+		// THREE events share ONE identical `at`; keep 1 → the horizon is the OLDEST 2 (in (at,id) order: e1,e2).
+		// Run 1 persisted a cursor at (sharedAt, e1): it folded e1 but (simulating a position-sensitive partial
+		// fold) the sibling e2 at the SAME `at` is still NOT folded. An `at`-ONLY cursor would treat e2 as
+		// already folded (sharedAt === watermark) and DELETE it WITHOUT counting it → a silent loss. The
+		// (at,id) cursor compares e2 STRICTLY AFTER (sharedAt, e1), so e2 is folded on the re-run.
+		const sharedAt = new Date(NOW - 1 * MS_PER_DAY).toISOString();
+		const rows: StorageRow[] = [
+			{ id: "e1", at: sharedAt, kind: "recall" },
+			{ id: "e2", at: sharedAt, kind: "recall" },
+			{ id: "e3", at: new Date(NOW).toISOString(), kind: "recall" }, // newest, kept (keepN=1).
+		];
+		const { storage, sql } = fakeStorage({
+			// Cursor persisted from a prior run that folded only e1: (sharedAt, "e1").
+			memoriesRead: ok([{ access_count: 1, access_compacted_at: sharedAt, access_compacted_id: "e1" }], 0),
+			accessRead: ok(rows, 0),
+		});
+		const res = await compactAccessLog("mem-1", fixedDeps(storage), SCOPE, 1);
+		// e2 (the same-`at` sibling strictly after the cursor) IS folded, never silently dropped.
+		expect(res.folded).toBe(1);
+		const update = sql.find((s) => s.startsWith('UPDATE "memories"'));
+		expect(update).toContain("access_count = COALESCE(access_count, 0) + 1");
+		// The cursor advances to (sharedAt, e2): the id half disambiguates the same-`at` sibling.
+		expect(update).toContain("access_compacted_id = CASE WHEN");
+		const del = sql.find((s) => s.startsWith('DELETE FROM "memory_access"'));
+		expect(del).toContain("'e2'"); // the folded sibling is then deleted.
+	});
+
+	it("a legacy at-only watermark (empty id) does NOT re-fold same-`at` rows (no double count on migration)", async () => {
+		// A pre-companion-column watermark stored only `access_compacted_at` (id absent → ""). A same-`at`
+		// horizon row must be treated as at-or-before that legacy cursor (already folded) so migrating off an
+		// at-only watermark never double-counts. Three same-`at` rows, keep 1, legacy cursor at sharedAt (id "").
+		const sharedAt = new Date(NOW - 1 * MS_PER_DAY).toISOString();
+		const rows: StorageRow[] = [
+			{ id: "e1", at: sharedAt, kind: "recall" },
+			{ id: "e2", at: sharedAt, kind: "recall" },
+			{ id: "e3", at: new Date(NOW).toISOString(), kind: "recall" },
+		];
+		const { storage, sql } = fakeStorage({
+			memoriesRead: ok([{ access_count: 2, access_compacted_at: sharedAt, access_compacted_id: "" }], 0), // legacy: no id.
+			accessRead: ok(rows, 0),
+		});
+		const res = await compactAccessLog("mem-1", fixedDeps(storage), SCOPE, 1);
+		expect(res.folded).toBe(0); // both same-`at` horizon rows are at-or-before the legacy cursor → no re-fold.
+		expect(sql.some((s) => s.startsWith('UPDATE "memories"'))).toBe(false);
+		// It still re-issues the idempotent DELETE so the (already-folded) rows converge.
+		expect(sql.some((s) => s.startsWith('DELETE FROM "memory_access"'))).toBe(true);
 	});
 });
