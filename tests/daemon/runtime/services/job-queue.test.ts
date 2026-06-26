@@ -33,7 +33,7 @@ import { describe, expect, it } from "vitest";
 import { MEMORY_JOBS_COLUMNS } from "../../../../src/daemon/storage/catalog/index.js";
 import { createStorageClient } from "../../../../src/daemon/storage/index.js";
 import type { QueryScope, StorageClient } from "../../../../src/daemon/storage/index.js";
-import { TransportError, type TransportRequest } from "../../../../src/daemon/storage/transport.js";
+import { type DeepLakeTransport, TransportError, type TransportRequest } from "../../../../src/daemon/storage/transport.js";
 import { fakeCredentialRecord, FakeDeepLakeTransport, stubProvider } from "../../../helpers/fake-deeplake.js";
 import {
 	backoffDelayMs,
@@ -455,7 +455,11 @@ describe("b-AC-5 a fresh service over the same state resumes queued + reaps dang
 
 		// Instance 2 starts fresh over the SAME durable store.
 		const inst2 = makeQueue({ store, clock, config: { leaseMs: 5 * 60 * 1_000, owner: "owner-2" } });
-		await inst2.queue.start(); // start() reaps dangling leases (b-AC-5 / FR-8).
+		await inst2.queue.start(); // start() schedules the reaper + kicks an immediate background sweep (b-AC-5 / FR-8).
+		// The startup reap is NON-BLOCKING (it must never wedge boot on a large append-only
+		// table); flush microtasks so the background sweep's reclaim append lands before we
+		// observe it (same pattern as the b-AC-3 timer test above).
+		await new Promise((r) => setImmediate(r));
 
 		// The dangling lease was reclaimed to queued ...
 		expect(store.current(dangling)?.status).toBe("queued");
@@ -465,6 +469,36 @@ describe("b-AC-5 a fresh service over the same state resumes queued + reaps dang
 		expect(leasedAgain).not.toBeNull();
 		expect([dangling, queued]).toContain(leasedAgain?.id);
 		inst2.queue.stop();
+	});
+});
+
+describe("boot resilience: start() never blocks daemon readiness on the reap (wedge regression)", () => {
+	it("start() resolves promptly even when the reap's discovery scan never converges", async () => {
+		// Reproduces the boot wedge: a transport where the ensureTable INSERT lands but every
+		// discovery/resolve SELECT hangs forever (a stand-in for a huge live table whose
+		// per-id resolve never finishes in time). Before the fix, `start()` awaited
+		// `reapExpiredLeases()` → `discoverIds()` → these SELECTs, so the daemon's
+		// `startServices()` never resolved and the socket never bound. The reap is now
+		// backgrounded, so `start()` MUST resolve regardless of reap cost.
+		const hangingTransport: DeepLakeTransport = {
+			query: (req: TransportRequest) => {
+				if (/^\s*INSERT/i.test(req.sql)) return Promise.resolve([]); // ensureTable write lands
+				return new Promise(() => {}); // every SELECT scan never resolves
+			},
+		};
+		const storage: StorageClient = createStorageClient({
+			transport: hangingTransport,
+			provider: stubProvider(fakeCredentialRecord()),
+		});
+		const queue = createJobQueueService({ storage, scope: SCOPE, config: { owner: "owner-wedge" }, clock: manualClock() });
+
+		const TIMED_OUT = Symbol("timed-out");
+		const outcome = await Promise.race([
+			queue.start().then(() => "resolved" as const),
+			new Promise<typeof TIMED_OUT>((resolve) => setTimeout(() => resolve(TIMED_OUT), 1_000)),
+		]);
+		queue.stop();
+		expect(outcome).toBe("resolved");
 	});
 });
 
