@@ -18,11 +18,14 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+	capGraphForRender,
 	createWireClient,
 	DASHBOARD_SESSION_HEADERS,
 	EMPTY_VAULT_SETTINGS,
+	type GraphWire,
 	HealthBodySchema,
 	HealthReasonsSchema,
+	MAX_RENDER_EDGES,
 	SecretNamesSchema,
 	VaultSettingsSchema,
 } from "../../../src/dashboard/web/wire.js";
@@ -352,5 +355,42 @@ describe("PRD-032c: the wire client threads /api/settings (GET+POST) + names-onl
 		// The class stores scalars; a stray object value `.catch()`es to "" rather than riding through.
 		const parsed = VaultSettingsSchema.parse({ settings: { weird: { nested: "obj" } }, catalog: [] });
 		expect(parsed.settings["weird"]).toBe("");
+	});
+});
+
+describe("graph memory cap: capGraphForRender bounds BOTH nodes and edges (the render backstop)", () => {
+	/** Build a built graph with `n` nodes and `e` edges among the first nodes. */
+	function bigGraph(n: number, e: number): GraphWire {
+		const nodes = Array.from({ length: n }, (_, i) => ({ id: `n${i}`, label: `n${i}`, kind: "file" }));
+		const edges = Array.from({ length: e }, (_, i) => ({ from: `n${i % n}`, to: `n${(i + 1) % n}`, kind: "imports" }));
+		return { built: true, nodes, edges };
+	}
+
+	it("a graph within both limits is returned unchanged (same ref, capped:false)", () => {
+		const g = bigGraph(10, 5);
+		const out = capGraphForRender(g, 1500);
+		expect(out.capped).toBe(false);
+		expect(out.graph).toBe(g);
+	});
+
+	it("over the node limit → caps nodes AND clamps edges to MAX_RENDER_EDGES, keeping only kept-node edges", () => {
+		const out = capGraphForRender(bigGraph(3000, 50_000), 1500);
+		expect(out.capped).toBe(true);
+		expect(out.graph.nodes.length).toBe(1500);
+		expect(out.graph.edges.length).toBeLessThanOrEqual(MAX_RENDER_EDGES);
+		// Every retained edge connects two retained nodes (no dangling endpoint).
+		const ids = new Set(out.graph.nodes.map((node) => node.id));
+		for (const edge of out.graph.edges) {
+			expect(ids.has(edge.from)).toBe(true);
+			expect(ids.has(edge.to)).toBe(true);
+		}
+	});
+
+	it("a DENSE graph UNDER the node limit but over the edge limit is still capped (edges bounded)", () => {
+		// 100 nodes (< 1500) but 20k edges (> MAX_RENDER_EDGES) — the node count alone would not trigger.
+		const out = capGraphForRender(bigGraph(100, 20_000), 1500);
+		expect(out.capped).toBe(true);
+		expect(out.graph.nodes.length).toBe(100); // nodes untouched (under the node limit)
+		expect(out.graph.edges.length).toBe(MAX_RENDER_EDGES);
 	});
 });

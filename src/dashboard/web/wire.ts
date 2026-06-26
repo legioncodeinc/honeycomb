@@ -1193,17 +1193,35 @@ export const EMPTY_GRAPH: GraphWire = { built: false, nodes: [], edges: [] };
 export const MAX_RENDER_NODES = 1500;
 
 /**
- * Bound a graph to `limit` nodes for rendering (the shared cap helper). Under the limit → returned
- * unchanged (same ref, so a memoized layout is not invalidated). Over it → the first `limit` nodes plus
- * only the edges whose both endpoints survive, with `capped:true`. Pure — the order is whatever the
- * caller already settled (the daemon ships its bounded set importance-ranked, so "first N" here is
- * already the meaningful head).
+ * The companion EDGE cap. Nodes are `<g>` groups but edges are `<line>` elements — a dense graph under
+ * the node cap can still carry hundreds of thousands of edges and lock up layout/SVG. So the helper
+ * bounds edges too. Sized so nodes+edges together stay a few thousand SVG elements (well within budget).
+ */
+export const MAX_RENDER_EDGES = 5000;
+
+/**
+ * Bound a graph to {@link MAX_RENDER_NODES}-ish nodes AND {@link MAX_RENDER_EDGES} edges for rendering
+ * (the shared cap helper). Within BOTH limits → returned unchanged (same ref, so a memoized layout is
+ * not invalidated). Over EITHER → the first `limit` nodes plus at most `MAX_RENDER_EDGES` of the edges
+ * whose both endpoints survive, with `capped:true`. Capping edges as well as nodes is what makes this a
+ * real backstop: a dense graph (or an old uncapped daemon) can no longer flood the DOM with `<line>`s
+ * even when the node count is bounded. Pure — order is whatever the caller already settled (the daemon
+ * ships its bounded set importance-ranked, so "first N" here is already the meaningful head).
  */
 export function capGraphForRender(graph: GraphWire, limit: number): { graph: GraphWire; capped: boolean } {
-	if (graph.nodes.length <= limit) return { graph, capped: false };
-	const nodes = graph.nodes.slice(0, limit);
+	const tooManyNodes = graph.nodes.length > limit;
+	const tooManyEdges = graph.edges.length > MAX_RENDER_EDGES;
+	if (!tooManyNodes && !tooManyEdges) return { graph, capped: false };
+	const nodes = tooManyNodes ? graph.nodes.slice(0, limit) : graph.nodes;
 	const kept = new Set(nodes.map((n) => n.id));
-	const edges = graph.edges.filter((e) => kept.has(e.from) && kept.has(e.to));
+	// Keep only edges between surviving nodes, stopping at the edge budget so a dense subgraph can't
+	// hand the canvas an unbounded `<line>` count.
+	const edges: GraphWire["edges"] = [];
+	for (const edge of graph.edges) {
+		if (!kept.has(edge.from) || !kept.has(edge.to)) continue;
+		edges.push(edge);
+		if (edges.length >= MAX_RENDER_EDGES) break;
+	}
 	return { graph: { ...graph, nodes, edges }, capped: true };
 }
 
