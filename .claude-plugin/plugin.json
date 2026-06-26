@@ -1,7 +1,7 @@
 {
   "name": "honeycomb",
   "description": "Honeycomb — a long-lived daemon plus thin clients for six coding harnesses, the unified honeycomb CLI, the MCP server, and the embed daemon",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "author": {
     "name": "Honeycomb"
   },
