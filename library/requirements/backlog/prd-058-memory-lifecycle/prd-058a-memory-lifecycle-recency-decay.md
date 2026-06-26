@@ -1,11 +1,11 @@
-# PRD-055a: Recency activation and decay policy
+# PRD-058a: Recency activation and decay policy
 
-> **Parent:** [PRD-055 Memory Lifecycle](./prd-055-memory-lifecycle-index.md)
+> **Parent:** [PRD-058 Memory Lifecycle](./prd-058-memory-lifecycle-index.md)
 > **Implements:** the `A(m,t)` term, Stage 1, of [`memory-lifecycle-scoring.md`](../../../knowledge/private/ai/memory-lifecycle-scoring.md)
 > **Status:** Draft
 > **Priority:** P1
 > **Effort:** M
-> **Schema changes:** None (reads existing `created_at`; reads `last_reinforced_at` once 055e lands)
+> **Schema changes:** None (reads existing `created_at`; reads `last_reinforced_at` once 058e lands)
 
 ---
 
@@ -13,7 +13,7 @@
 
 ### Goals
 
-Promote recency from a dormant, neutral knob into a measured, eval-gated recall default. Today `applyRecencyDampening` (PRD-047) is wired into `recallMemories` but ships with a half-life of roughly 100 years, an identity multiplier. This sub-PRD implements **Stage 1** of the activation term `A(m,t)` from the scoring model: a class-aware exponential decay, proven on the golden set, with a per-result freshness signal. Stage 2 (ACT-R activation + reinforcement) is sub-PRD 055e and is a parameter-continuous upgrade of the same term; 055a deliberately ships the simple form first because it is immediately measurable and has no new write path.
+Promote recency from a dormant, neutral knob into a measured, eval-gated recall default. Today `applyRecencyDampening` (PRD-047) is wired into `recallMemories` but ships with a half-life of roughly 100 years, an identity multiplier. This sub-PRD implements **Stage 1** of the activation term `A(m,t)` from the scoring model: a class-aware exponential decay, proven on the golden set, with a per-result freshness signal. Stage 2 (ACT-R activation + reinforcement) is sub-PRD 058e and is a parameter-continuous upgrade of the same term; 058a deliberately ships the simple form first because it is immediately measurable and has no new write path.
 
 ### The equation this implements
 
@@ -23,7 +23,7 @@ From the scoring model, Stage 1 activation:
 A_simple(m,t) = 2^( −(t − t_ref(m)) / h(class(m)) )      with  t_ref = max(created_at, last_reinforced_at)
 ```
 
-and the master equation's contribution is `A^a`, where `a` (default `1.0`) is the eval-swept activation exponent. Half-life `h` is the interpretable knob; the implementation uses `λ = ln 2 / h`. Until 055e ships `last_reinforced_at`, `t_ref = created_at`, so 055a is correct and self-contained on day one.
+and the master equation's contribution is `A^a`, where `a` (default `1.0`) is the eval-swept activation exponent. Half-life `h` is the interpretable knob; the implementation uses `λ = ln 2 / h`. Until 058e ships `last_reinforced_at`, `t_ref = created_at`, so 058a is correct and self-contained on day one.
 
 ### Scope
 
@@ -34,15 +34,15 @@ and the master equation's contribution is `A^a`, where `a` (default `1.0`) is th
 
 ### Out of scope
 
-- ACT-R activation, access-frequency, and reinforcement (`u_k`, `t_k` series) -> sub-PRD 055e.
-- Confidence, staleness, and conflict terms -> sub-PRDs 055e / 055c / 055b.
+- ACT-R activation, access-frequency, and reinforcement (`u_k`, `t_k` series) -> sub-PRD 058e.
+- Confidence, staleness, and conflict terms -> sub-PRDs 058e / 058c / 058b.
 - Hard time-based deletion or expiry -> retention worker, PRD-030.
 - Any change to RRF fusion, arm-class weights, or the dedup stage.
 
 ### Dependencies
 
 - **Blocked by:** none (all infrastructure exists in `recall.ts`).
-- **Forward-compatible with:** 055e, which swaps `A_simple` for `A_actr` behind the same `freshnessScore` field and `a` exponent.
+- **Forward-compatible with:** 058e, which swaps `A_simple` for `A_actr` behind the same `freshnessScore` field and `a` exponent.
 
 ---
 
@@ -79,7 +79,7 @@ and the master equation's contribution is `A^a`, where `a` (default `1.0`) is th
 
 ## Data Model Changes
 
-None for 055a. Recency reads the existing `created_at`. The `last_reinforced_at` column that makes `t_ref` reinforcement-aware is added by 055e via additive lazy schema-healing; until then `t_ref = created_at` and the code reads `last_reinforced_at` as nullable-defaulting-to-`created_at`.
+None for 058a. Recency reads the existing `created_at`. The `last_reinforced_at` column that makes `t_ref` reinforcement-aware is added by 058e via additive lazy schema-healing; until then `t_ref = created_at` and the code reads `last_reinforced_at` as nullable-defaulting-to-`created_at`.
 
 ---
 
@@ -150,5 +150,5 @@ const RecencyOverride = z.object({
 ## Related
 
 - [`memory-lifecycle-scoring.md`](../../../knowledge/private/ai/memory-lifecycle-scoring.md) - the `A(m,t)` term, both stages.
-- [`prd-055e-memory-lifecycle-reinforcement-calibration.md`](./prd-055e-memory-lifecycle-reinforcement-calibration.md) - the Stage 2 upgrade.
+- [`prd-058e-memory-lifecycle-reinforcement-calibration.md`](./prd-058e-memory-lifecycle-reinforcement-calibration.md) - the Stage 2 upgrade.
 - [`retrieval.md`](../../../knowledge/private/ai/retrieval.md) - the shaping-stages table and the currentness invariant.

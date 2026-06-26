@@ -1,6 +1,6 @@
-# PRD-051c: Obsidian plugin enhancements + continuous export (exploration)
+# PRD-057c: Obsidian plugin enhancements + continuous export (exploration)
 
-> **Parent:** [PRD-051](./prd-051-memory-graph-obsidian-vault-index.md)
+> **Parent:** [PRD-057](./prd-057-memory-graph-obsidian-vault-index.md)
 > **Status:** Draft (exploratory — mostly open questions, NOT v1 scope)
 > **Priority:** P3
 > **Effort:** L (if pursued)
@@ -10,7 +10,7 @@
 
 ## Overview
 
-v1 (051a + 051b) is deliberately **stock-Obsidian-only and on-demand**: plain Markdown + wikilinks +
+v1 (057a + 057b) is deliberately **stock-Obsidian-only and on-demand**: plain Markdown + wikilinks +
 the core `obsidian://` scheme, exported when the user asks. That is the whole product for most users.
 
 This sub-PRD captures the *optional* layer the feature request asked about — "what could we do with
@@ -19,7 +19,7 @@ without committing v1 to it. Nothing here is required for the vault to be useful
 enhancement gated behind the user installing a community plugin or us shipping more daemon machinery.
 
 **Framing:** v1's frontmatter is intentionally plugin-agnostic (plain keys any plugin *can* consume,
-none *requires*), so these enhancements layer on without changing the 051a format.
+none *requires*), so these enhancements layer on without changing the 057a format.
 
 ## The plugin enhancement menu (each independent, each optional)
 
@@ -40,7 +40,7 @@ v1 = on-demand. The alternative is a **watcher** that re-exports whenever the me
 - **Effect:** the canonical vault stays fresh with no button press; Obsidian (open on that vault) live-
   reloads changed notes.
 - **Cost/risk:** churn on the user's filesystem + git noise if the vault is under version control;
-  must respect 051a's `.obsidian/` preservation and never fight a user mid-edit; needs a quiet-period
+  must respect 057a's `.obsidian/` preservation and never fight a user mid-edit; needs a quiet-period
   debounce and an opt-out. This is a fast-follow at most, not v1.
 
 ## Open questions
@@ -62,5 +62,5 @@ v1 = on-demand. The alternative is a **watcher** that re-exports whenever the me
 
 ## Related
 
-- [PRD-051a](./prd-051a-memory-graph-obsidian-vault-markdown-export.md) / [PRD-051b](./prd-051b-memory-graph-obsidian-vault-open-in-obsidian.md) — the v1 baseline these enhance.
+- [PRD-057a](./prd-057a-memory-graph-obsidian-vault-markdown-export.md) / [PRD-057b](./prd-057b-memory-graph-obsidian-vault-open-in-obsidian.md) — the v1 baseline these enhance.
 - [JSON Canvas](https://jsoncanvas.org/) · [Obsidian Advanced URI](https://github.com/Vinzent03/obsidian-advanced-uri) · [InfraNodus](https://infranodus.com/use-case/visualize-knowledge-graphs-pkm) (prior art: vault ↔ knowledge-graph round-trip).

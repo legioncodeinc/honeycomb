@@ -1,6 +1,6 @@
-# PRD-055e: Reinforcement, activation, and confidence calibration
+# PRD-058e: Reinforcement, activation, and confidence calibration
 
-> **Parent:** [PRD-055 Memory Lifecycle](./prd-055-memory-lifecycle-index.md)
+> **Parent:** [PRD-058 Memory Lifecycle](./prd-058-memory-lifecycle-index.md)
 > **Implements:** the `A(m,t)` term Stage 2 (ACT-R) and the `C(m)` term of [`memory-lifecycle-scoring.md`](../../../knowledge/private/ai/memory-lifecycle-scoring.md)
 > **Status:** Draft
 > **Priority:** P2
@@ -13,7 +13,7 @@
 
 ### Goals
 
-This is the sub-PRD that makes the store a *memory* rather than an aging cache. It adds two things the simple decay of 055a cannot express:
+This is the sub-PRD that makes the store a *memory* rather than an aging cache. It adds two things the simple decay of 058a cannot express:
 
 1. **Reinforcement.** A memory that is recalled and confirmed useful should become harder to forget, exactly as retrieval strengthens human memory (the testing effect). This upgrades activation from single-access exponential decay to the full ACT-R base-level activation over a usefulness-weighted access history, from which the spacing effect emerges for free.
 2. **Calibration.** Raw model confidence is systematically miscalibrated. The store should *learn* how much to trust its own confidence from outcomes it already observes, which memories win conflicts and pass re-verification, and map raw confidence through a fitted calibration curve.
@@ -40,20 +40,20 @@ quality tracked by `ECE = Σ_b (|B_b|/N)·|acc(B_b) − conf(B_b)|` and the Brie
 ### Scope
 
 - **Access-event log.** Append `(t_k, u_k, kind)` whenever a memory is created (`u=1`), recalled-and-injected, reinforced (confirmed useful), or down-weighted (ignored/contradicted, `u→0`).
-- **Activation upgrade.** Compute `A_actr` from the event log; expose it behind the same `freshnessScore` field and `a` exponent 055a defined, so the swap is invisible to callers.
-- **`last_reinforced_at`.** Maintained from the event log so 055a's `t_ref` becomes reinforcement-aware.
+- **Activation upgrade.** Compute `A_actr` from the event log; expose it behind the same `freshnessScore` field and `a` exponent 058a defined, so the swap is invisible to callers.
+- **`last_reinforced_at`.** Maintained from the event log so 058a's `t_ref` becomes reinforcement-aware.
 - **Calibration curve.** Periodically refit `g` from resolved outcomes; expose `C(m)` and activate the `c` exponent once ECE clears a threshold.
-- **Spaced re-verification hook.** The activation/event machinery also drives the staleness re-verification cadence (055c) and conflict re-evaluation: a low-activation memory is re-checked less often, a high-activation one more often, so verification effort follows utility.
+- **Spaced re-verification hook.** The activation/event machinery also drives the staleness re-verification cadence (058c) and conflict re-evaluation: a low-activation memory is re-checked less often, a high-activation one more often, so verification effort follows utility.
 
 ### Out of scope
 
 - The reinforcement *signal source* wiring per harness (what counts as "confirmed useful" in each host) beyond a documented default; the default is "injected into context and not contradicted or down-ranked in the same session." Per-harness richer signals are a follow-on.
-- Staleness and conflict mechanics themselves (055c / 055b); this sub-PRD only feeds them activation and calibrated confidence.
+- Staleness and conflict mechanics themselves (058c / 058b); this sub-PRD only feeds them activation and calibrated confidence.
 
 ### Dependencies
 
-- **Blocked by:** 055a (defines `freshnessScore`, the `a` exponent, and `t_ref`).
-- **Feeds:** 055b (uses `A` and `C` in conflict weights `w_i`), 055c (uses activation to pace re-verification), 055d (renders reinforcement events and calibration health).
+- **Blocked by:** 058a (defines `freshnessScore`, the `a` exponent, and `t_ref`).
+- **Feeds:** 058b (uses `A` and `C` in conflict weights `w_i`), 058c (uses activation to pace re-verification), 058d (renders reinforcement events and calibration health).
 
 ---
 
@@ -110,14 +110,14 @@ All added via additive lazy schema-healing, no migration, no backfill. `memory_a
 
 - **Internal:** a `recordAccess(memoryId, usefulness, kind)` daemon call invoked from the recall path (on inject) and the session-end summary worker (to grade usefulness from the turn outcome). No public write endpoint, reinforcement is daemon-internal so it cannot be spoofed by a client.
 - **Read:** recall responses gain `activation` (the `A_actr` value), `accessCount`, and `calibratedConfidence` (`C`) alongside the existing `freshnessScore` and `score`, for the dashboard.
-- **Calibration introspection:** `GET /api/memories/calibration` returns the current curve's `ece`, `brier`, `n_samples`, and a reliability-diagram payload for 055d.
+- **Calibration introspection:** `GET /api/memories/calibration` returns the current curve's `ece`, `brier`, `n_samples`, and a reliability-diagram payload for 058d.
 
 ---
 
 ## Technical Considerations
 
 - **Off the hot path.** Activation is computed at recall time from the event log (bounded by `access_count`, and the log is compacted), and reinforcement grading happens in the session-end summary worker, not on the capture write path. The one rule that cannot bend still holds: no model or aggregation step can cost the user a memory.
-- **Usefulness grading.** Default signal: a recalled memory that was injected and not contradicted/down-ranked in the same session scores `u ≈ 1`; one ignored or contradicted scores `u ≈ 0`. The grader reuses the conflict detector (055b) to spot contradiction. Graded usefulness is the partial-reinforcement weight `u_k`.
+- **Usefulness grading.** Default signal: a recalled memory that was injected and not contradicted/down-ranked in the same session scores `u ≈ 1`; one ignored or contradicted scores `u ≈ 0`. The grader reuses the conflict detector (058b) to spot contradiction. Graded usefulness is the partial-reinforcement weight `u_k`.
 - **ACT-R numerics.** Guard `(t − t_k)^{−d}` against `t_k = t` (use a small `ε` floor on age); compute `B` in log space; cache per-memory `B` between writes and invalidate on a new access event. `B*` is calibrated so the busiest memories sit near `A = 1`.
 - **Calibration fit.** Isotonic regression (monotone, no parametric assumption) over `(f, y)` pairs where `y ∈ {0,1}` is the observed correctness from resolved conflicts and re-verifications. Refit on a schedule; keep the prior curve until the new one beats it on held-out ECE. Cold-start = identity.
 - **Eventual consistency.** Access-event read-backs and calibration reads poll to convergence, never single-read, per the repo rule.
@@ -162,5 +162,5 @@ All added via additive lazy schema-healing, no migration, no backfill. `memory_a
 ## Related
 
 - [`memory-lifecycle-scoring.md`](../../../knowledge/private/ai/memory-lifecycle-scoring.md) - the `A` (Stage 2) and `C` terms.
-- [`prd-055a-memory-lifecycle-recency-decay.md`](./prd-055a-memory-lifecycle-recency-decay.md) - the Stage 1 form this upgrades.
+- [`prd-058a-memory-lifecycle-recency-decay.md`](./prd-058a-memory-lifecycle-recency-decay.md) - the Stage 1 form this upgrades.
 - [`memory-pipeline.md`](../../../knowledge/private/ai/memory-pipeline.md) - the summary worker and retention worker this hooks.

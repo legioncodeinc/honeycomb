@@ -1,6 +1,6 @@
-# PRD-051b: "Open in Obsidian" — dashboard deep-link
+# PRD-057b: "Open in Obsidian" — dashboard deep-link
 
-> **Parent:** [PRD-051](./prd-051-memory-graph-obsidian-vault-index.md)
+> **Parent:** [PRD-057](./prd-057-memory-graph-obsidian-vault-index.md)
 > **Status:** Draft
 > **Priority:** P2
 > **Effort:** S
@@ -10,7 +10,7 @@
 
 ## Overview
 
-Close the loop: a button on the dashboard that exports/refreshes the vault (051a) and then **launches
+Close the loop: a button on the dashboard that exports/refreshes the vault (057a) and then **launches
 Obsidian straight into it**, focused on the `Home.md` landing note. This needs **no custom plugin** —
 Obsidian registers a core `obsidian://` URL protocol on install, and a plain anchor/`window.location`
 to an `obsidian://open?…` URI is enough for the OS to hand off to the app.
@@ -19,8 +19,8 @@ This sub-PRD answers the three questions the feature request raised directly:
 1. **Can the dashboard open Obsidian into the right vault?** Yes — `obsidian://open` with the vault
    path/name. (This PRD.)
 2. **Is a plugin required?** No — the URI scheme and Markdown+wikilinks are both core Obsidian.
-   (Plugins are the optional 051c layer.)
-3. **A fixed area, or on-demand?** A **fixed canonical vault dir** per scope (051a), refreshed
+   (Plugins are the optional 057c layer.)
+3. **A fixed area, or on-demand?** A **fixed canonical vault dir** per scope (057a), refreshed
    **on-demand** by this button — so Obsidian only needs registering once and the link is stable.
 
 ## How the deep-link works (grounded)
@@ -39,7 +39,7 @@ Per the [Obsidian URI docs](https://help.obsidian.md/Extending+Obsidian/Obsidian
 ## Goals
 
 - An **"Open in Obsidian"** action on the `#/graph` Memory view (and/or a small toolbar button) that:
-  triggers `POST /api/vault/export` (051a), receives `{ vaultPath }`, and navigates to
+  triggers `POST /api/vault/export` (057a), receives `{ vaultPath }`, and navigates to
   `obsidian://open?path=<encoded vaultPath>/Home.md`.
 - A **first-run experience** that handles the "vault not registered yet" case: a short "Open this folder
   as a vault in Obsidian once" hint with the exact path (copy-to-clipboard), shown the first time / on
@@ -50,9 +50,9 @@ Per the [Obsidian URI docs](https://help.obsidian.md/Extending+Obsidian/Obsidian
 
 ## Non-Goals
 
-- The export engine itself (051a).
+- The export engine itself (057a).
 - Auto-installing or auto-registering Obsidian / writing the user's `.obsidian` workspace (that veers
-  into 051c's Advanced-URI territory). v1 guides the one-time manual registration.
+  into 057c's Advanced-URI territory). v1 guides the one-time manual registration.
 - Detecting Obsidian reliably from the browser (not possible cross-platform) — we design for graceful
   failure, not detection.
 
@@ -70,7 +70,7 @@ Per the [Obsidian URI docs](https://help.obsidian.md/Extending+Obsidian/Obsidian
 | ID | Criterion |
 |---|---|
 | b-AC-1 | Clicking "Open in Obsidian" calls `POST /api/vault/export` exactly once, then navigates to a correctly URI-encoded `obsidian://open?path=…/Home.md`; double-clicks are guarded (one export). |
-| b-AC-2 | When the memory graph is empty, the button is replaced by the honest "no memory graph yet — run `honeycomb pollinate trigger --compact`" state (no export, no dead link) — parity with 051a a-AC-3. |
+| b-AC-2 | When the memory graph is empty, the button is replaced by the honest "no memory graph yet — run `honeycomb pollinate trigger --compact`" state (no export, no dead link) — parity with 057a a-AC-3. |
 | b-AC-3 | First-run / failure path shows the exact canonical vault path with a copy affordance and a one-line "Open folder as vault in Obsidian once" instruction; it never leaves a silent dead button. |
 | b-AC-4 | The `obsidian://` URI contains only a local filesystem path — no token, org, workspace, or header — and the page renders the path as React text (XSS-safe), never `dangerouslySetInnerHTML`. |
 | b-AC-5 | The action degrades safely when the daemon is down (the shell's existing daemon-down swap) and when the export returns `builtFalse` (shows b-AC-2 state). |
@@ -101,7 +101,7 @@ Per the [Obsidian URI docs](https://help.obsidian.md/Extending+Obsidian/Obsidian
 
 - [ ] **OQ-1:** `path=` (absolute, needs the folder registered as a vault) vs. shipping a tiny
   `.obsidian/` so the folder *is* a ready vault on first export — does writing a minimal `.obsidian/app.json`
-  make first-run one-click, and does that step on user settings if they later customize? (Ties to 051a
+  make first-run one-click, and does that step on user settings if they later customize? (Ties to 057a
   "preserve `.obsidian/`".)
 - [ ] **OQ-2:** Should "Open in Obsidian" always re-export first (fresh but slower) or open-then-export
   (instant but possibly stale, with a "refresh" action)? Lean: export-then-open for correctness, with a
@@ -111,6 +111,6 @@ Per the [Obsidian URI docs](https://help.obsidian.md/Extending+Obsidian/Obsidian
 
 ## Related
 
-- [PRD-051a: the export engine](./prd-051a-memory-graph-obsidian-vault-markdown-export.md) — provides `{ vaultPath }`.
-- [Obsidian URI docs](https://help.obsidian.md/Extending+Obsidian/Obsidian+URI) · [Advanced URI plugin](https://github.com/Vinzent03/obsidian-advanced-uri) (optional, 051c).
+- [PRD-057a: the export engine](./prd-057a-memory-graph-obsidian-vault-markdown-export.md) — provides `{ vaultPath }`.
+- [Obsidian URI docs](https://help.obsidian.md/Extending+Obsidian/Obsidian+URI) · [Advanced URI plugin](https://github.com/Vinzent03/obsidian-advanced-uri) (optional, 057c).
 - `src/dashboard/web/pages/graph.tsx` / `build-graph-button.tsx` — the patterns to reuse.

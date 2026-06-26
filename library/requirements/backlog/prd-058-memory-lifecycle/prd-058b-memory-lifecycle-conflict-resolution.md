@@ -1,6 +1,6 @@
-# PRD-055b: Semantic conflict detection and resolution
+# PRD-058b: Semantic conflict detection and resolution
 
-> **Parent:** [PRD-055 Memory Lifecycle](./prd-055-memory-lifecycle-index.md)
+> **Parent:** [PRD-058 Memory Lifecycle](./prd-058-memory-lifecycle-index.md)
 > **Implements:** the `κ(m,t)` term of [`memory-lifecycle-scoring.md`](../../../knowledge/private/ai/memory-lifecycle-scoring.md)
 > **Status:** Draft
 > **Priority:** P1
@@ -39,8 +39,8 @@ To resolve, treat a claim slot as a variable with competing memory-evidence. Eac
 w_i = A(m_i,t) · C(m_i) · prov(m_i) · corr(o_i)
 ```
 
-- `A` = activation from 055a / 055e (fresher, more-reinforced evidence votes harder).
-- `C` = calibrated confidence from 055e (until calibrated, `C = f`, the raw confidence).
+- `A` = activation from 058a / 058e (fresher, more-reinforced evidence votes harder).
+- `C` = calibrated confidence from 058e (until calibrated, `C = f`, the raw confidence).
 - `prov` = provenance arm-class weight, reusing the recall weighting: distilled `memory` = `1.0`, raw `session` = `0.4`.
 - `corr(o)` = corroboration bonus, log-scaled over *independent* sources so duplicated rows cannot inflate a side: `corr(o) = 1 + γ · ln(1 + n_independent(o))`.
 
@@ -73,17 +73,17 @@ The winner always keeps `κ = 1`; an uncontested memory (no recorded conflict) h
 
 ### Out of scope
 
-- Recency / activation math (`A`, sub-PRDs 055a / 055e) and stale-reference detection (`σ`, sub-PRD 055c). This sub-PRD *consumes* `A` and `C` as inputs to `w_i`; it does not compute them.
+- Recency / activation math (`A`, sub-PRDs 058a / 058e) and stale-reference detection (`σ`, sub-PRD 058c). This sub-PRD *consumes* `A` and `C` as inputs to `w_i`; it does not compute them.
 - Cross-workspace conflict detection. Conflicts are detected strictly within the same `org` / `workspace` / `agent_id` scope.
 - Auto-applying destructive deletes. Resolution supersedes (append-only version bump); it never hard-deletes the losing row.
-- The dashboard surface for the review queue (sub-PRD 055d renders `memory_conflicts`).
+- The dashboard surface for the review queue (sub-PRD 058d renders `memory_conflicts`).
 
 ### Dependencies
 
 - **Blocked by:** none. Reuses the PRD-008 supersession primitives (`status`, `superseded_by`, version bump) and the decision-stage contradiction helper.
-- **Consumes:** `A(m,t)` (055a / 055e) and `C(m)` (055e) as the `w_i` factors. Before those land, `A` and `C` default to their identity values (`A = A_simple`, `C = f`), so `w_i` is well-defined from day one.
+- **Consumes:** `A(m,t)` (058a / 058e) and `C(m)` (058e) as the `w_i` factors. Before those land, `A` and `C` default to their identity values (`A = A_simple`, `C = f`), so `w_i` is well-defined from day one.
 - **External:** model router `memory_extraction` workload for `P_contradiction` (skipped when the provider is `none`).
-- **Feeds:** 055d (renders the conflict queue and the per-memory `κ` in the health scalar `H`).
+- **Feeds:** 058d (renders the conflict queue and the per-memory `κ` in the health scalar `H`).
 
 ---
 
@@ -187,7 +187,7 @@ const ResolveSchema = z.object({
 - **Recall-time suppression, fail-soft.** A small scope-clause addition in `buildScopeClause` / the recall path (`recall.ts`) applies the gate: `κ = 0` losers are already excluded by supersession; `κ = ρ` (`ρ = 0`) losers are filtered by the open-conflict projection. This must stay **fail-soft**: if `memory_conflicts` is missing or unreadable, recall degrades to returning both sides rather than 500-ing. The gate is the last currentness filter, layered over (not replacing) the `MAX(version)` invariant.
 - **SQL safety.** The endpoint has no parameterized queries, so every interpolated value (ids, claim-slot text, scope keys) passes through `sqlStr` / `sqlLike` / `sqlIdent`, identical to the supersession path in `knowledge-graph-ontology.md`.
 - **Eventual consistency.** DeepLake reads flap stale segments, so every live read-back of a freshly written conflict row (detection projecting into `memory_conflicts`, the resolve endpoint reading its own write) **polls to convergence**, never a single immediate read.
-- **`κ` is the only zeroing term.** Because `κ` can be exactly `0`, the suppression logic is the highest-stakes correctness surface in 055b: a wrong `supersede` hides a correct memory entirely. That is why the default open verdict is `review` (not `supersede`), suppression is reversible, and false positives are memoized.
+- **`κ` is the only zeroing term.** Because `κ` can be exactly `0`, the suppression logic is the highest-stakes correctness surface in 058b: a wrong `supersede` hides a correct memory entirely. That is why the default open verdict is `review` (not `supersede`), suppression is reversible, and false positives are memoized.
 
 ---
 
@@ -228,6 +228,6 @@ const ResolveSchema = z.object({
 ## Related
 
 - [`memory-lifecycle-scoring.md`](../../../knowledge/private/ai/memory-lifecycle-scoring.md) - Term 4, the `κ(m,t)` gate and the `Contra` / `w_i` / `score(o)` / `margin` math.
-- [`prd-055-memory-lifecycle-index.md`](./prd-055-memory-lifecycle-index.md) - the parent index and the sibling terms.
+- [`prd-058-memory-lifecycle-index.md`](./prd-058-memory-lifecycle-index.md) - the parent index and the sibling terms.
 - [`memory-pipeline.md`](../../../knowledge/private/ai/memory-pipeline.md) - the decision stage, the existing lexical contradiction check, and the append-only / lazy-heal write rules.
 - [`knowledge-graph-ontology.md`](../../../knowledge/private/ai/knowledge-graph-ontology.md) - the PRD-008 supersession and currentness model reused for `supersede`.

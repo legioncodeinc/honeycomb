@@ -1,4 +1,4 @@
-# PRD-055: Memory Lifecycle (Recency, Conflict Resolution, Stale-Reference Healing)
+# PRD-058: Memory Lifecycle (Recency, Conflict Resolution, Stale-Reference Healing)
 
 > **Status:** Backlog
 > **Priority:** P1
@@ -26,11 +26,11 @@ P(m | q, t) = R(m,q) · A(m,t)^a · C(m)^c · (1 − σ(m,t))^s · κ(m,t)
 | Term | Meaning | Sub-PRD |
 |---|---|---|
 | `R(m,q)` | Relevance (RRF + shaping). Unchanged. | PRD-047 |
-| `A(m,t)` | Activation: recency + access frequency + reinforcement. | 055a + 055e |
-| `C(m)` | Calibrated confidence. | 055e |
-| `σ(m,t)` | Staleness probability (dangling code refs). | 055c |
-| `κ(m,t)` | Conflict gate (winner / superseded / open). | 055b |
-| `a, c, s` | Per-term exponents; `0` = dormant, defaults eval-measured. | 055d |
+| `A(m,t)` | Activation: recency + access frequency + reinforcement. | 058a + 058e |
+| `C(m)` | Calibrated confidence. | 058e |
+| `σ(m,t)` | Staleness probability (dangling code refs). | 058c |
+| `κ(m,t)` | Conflict gate (winner / superseded / open). | 058b |
+| `a, c, s` | Per-term exponents; `0` = dormant, defaults eval-measured. | 058d |
 
 Every term is a bounded multiplier: it can only demote relevance, never invent it, so `P ≤ R` always. Each ships behind an exponent that defaults to a value measured on the golden set, an unproven term ships neutral exactly as recency does today. The query-independent product `H(m,t) = A · C · (1 − σ) · κ` is the per-memory **health** scalar the dashboard renders.
 
@@ -55,11 +55,11 @@ Every term is a bounded multiplier: it can only demote relevance, never invent i
 
 | Sub-PRD | Feature | Status |
 |---|---|---|
-| [prd-055a-memory-lifecycle-recency-decay](./prd-055a-memory-lifecycle-recency-decay.md) | Recency activation and decay policy | Draft |
-| [prd-055b-memory-lifecycle-conflict-resolution](./prd-055b-memory-lifecycle-conflict-resolution.md) | Semantic conflict detection and resolution | Draft |
-| [prd-055c-memory-lifecycle-stale-reference-healing](./prd-055c-memory-lifecycle-stale-reference-healing.md) | Stale code-reference detection and healing | Draft |
-| [prd-055d-memory-lifecycle-surfaces-and-controls](./prd-055d-memory-lifecycle-surfaces-and-controls.md) | Lifecycle config, audit, dashboard, and CLI surfaces | Draft |
-| [prd-055e-memory-lifecycle-reinforcement-calibration](./prd-055e-memory-lifecycle-reinforcement-calibration.md) | Reinforcement (ACT-R activation), spaced re-verification, confidence calibration | Draft |
+| [prd-058a-memory-lifecycle-recency-decay](./prd-058a-memory-lifecycle-recency-decay.md) | Recency activation and decay policy | Draft |
+| [prd-058b-memory-lifecycle-conflict-resolution](./prd-058b-memory-lifecycle-conflict-resolution.md) | Semantic conflict detection and resolution | Draft |
+| [prd-058c-memory-lifecycle-stale-reference-healing](./prd-058c-memory-lifecycle-stale-reference-healing.md) | Stale code-reference detection and healing | Draft |
+| [prd-058d-memory-lifecycle-surfaces-and-controls](./prd-058d-memory-lifecycle-surfaces-and-controls.md) | Lifecycle config, audit, dashboard, and CLI surfaces | Draft |
+| [prd-058e-memory-lifecycle-reinforcement-calibration](./prd-058e-memory-lifecycle-reinforcement-calibration.md) | Reinforcement (ACT-R activation), spaced re-verification, confidence calibration | Draft |
 
 ## Acceptance Criteria
 
@@ -69,7 +69,7 @@ Every term is a bounded multiplier: it can only demote relevance, never invent i
 - [ ] Every lifecycle action (demote, supersede, flag) is gated by an explicit config flag, defaults to a non-destructive posture, and is visible in the dashboard memories surface.
 - [ ] A memory that is recalled and confirmed useful is measurably harder to forget afterward (its activation rises), and confidence calibration error (ECE) is monotone-non-increasing as resolved outcomes accumulate.
 - [ ] Recall remains fail-soft: with embeddings off or the embed daemon down, every lifecycle stage degrades gracefully and recall still answers.
-- [ ] The end-to-end `useful-context@k` metric (top-k contains the correct, current, non-conflicting memory) improves over the pre-055 baseline, and no term regresses the committed recall@5 / MRR / nDCG@10 baseline below `baseline − ε`.
+- [ ] The end-to-end `useful-context@k` metric (top-k contains the correct, current, non-conflicting memory) improves over the pre-058 baseline, and no term regresses the committed recall@5 / MRR / nDCG@10 baseline below `baseline − ε`.
 - [ ] A live dogfood run (not just isolated-mount unit tests) exercises all lifecycle paths end to end against a real daemon and a real DeepLake store.
 
 ## Related

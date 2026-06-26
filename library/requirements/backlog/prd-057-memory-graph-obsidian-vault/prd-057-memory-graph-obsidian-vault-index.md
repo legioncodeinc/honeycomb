@@ -1,4 +1,4 @@
-# PRD-051: Memory Graph → Obsidian Vault
+# PRD-057: Memory Graph → Obsidian Vault
 
 > **Status:** Backlog
 > **Priority:** P2
@@ -29,7 +29,7 @@ This is a follow-up in the graph lineage (PRD-041 graph page → the memory-awar
 cap solved *"the in-app canvas cannot render a large graph"*, this PRD answers the user's real
 question — *"what do I actually DO with the graph?"* — by handing the graph to a tool built to explore
 it. Notably, the SVG-render cap does **not** apply here: Obsidian handles large vaults natively, so the
-export is unbounded by design (see 051a).
+export is unbounded by design (see 057a).
 
 ## Goals
 
@@ -49,22 +49,22 @@ export is unbounded by design (see 051a).
 
 - Building or changing the PRD-008 ontology itself (entities, dependencies, supersession, the
   `/api/ontology/*` surface, the pollinating writer). This PRD **reads** that graph; it never authors it.
-- Exporting the **codebase** graph to a vault. The writer is built source-agnostic (051a OQ), but the
+- Exporting the **codebase** graph to a vault. The writer is built source-agnostic (057a OQ), but the
   codebase-graph vault is out of scope for v1 — the memory graph is the high-value, unique target.
 - Bundling, installing, or requiring any Obsidian community plugin. v1 is stock-Obsidian-only; plugins
-  are an explicitly optional, future layer (051c).
+  are an explicitly optional, future layer (057c).
 - Two-way sync / writing the user's Obsidian edits back into the ontology. The vault is a **derived,
   read-only projection** — re-export overwrites it; user edits are not ingested.
-- Continuous/watched re-export on every pollinate convergence (051c open question; v1 is on-demand).
+- Continuous/watched re-export on every pollinate convergence (057c open question; v1 is on-demand).
 - A hosted/cloud vault or any network publish. The vault is a local-filesystem artifact only.
 
 ## Sub-features
 
 | Sub-PRD | Scope | Status |
 |---|---|---|
-| [`prd-051a-…-markdown-export`](./prd-051a-memory-graph-obsidian-vault-markdown-export.md) | The export engine: ontology → Markdown vault (notes + wikilinks + frontmatter), canonical vault dir, CLI + daemon endpoint, safety. | Draft |
-| [`prd-051b-…-open-in-obsidian`](./prd-051b-memory-graph-obsidian-vault-open-in-obsidian.md) | The dashboard "Open in Obsidian" deep-link via the `obsidian://` URI scheme, vault registration UX, and the not-installed fallback. | Draft |
-| [`prd-051c-…-plugins-and-sync`](./prd-051c-memory-graph-obsidian-vault-plugins-and-sync.md) | Exploration: optional Obsidian-plugin enhancements (Dataview/Juggl/Breadcrumbs/Advanced URI/bespoke) + continuous/watched export. Open-questions, not v1. | Draft |
+| [`prd-057a-…-markdown-export`](./prd-057a-memory-graph-obsidian-vault-markdown-export.md) | The export engine: ontology → Markdown vault (notes + wikilinks + frontmatter), canonical vault dir, CLI + daemon endpoint, safety. | Draft |
+| [`prd-057b-…-open-in-obsidian`](./prd-057b-memory-graph-obsidian-vault-open-in-obsidian.md) | The dashboard "Open in Obsidian" deep-link via the `obsidian://` URI scheme, vault registration UX, and the not-installed fallback. | Draft |
+| [`prd-057c-…-plugins-and-sync`](./prd-057c-memory-graph-obsidian-vault-plugins-and-sync.md) | Exploration: optional Obsidian-plugin enhancements (Dataview/Juggl/Breadcrumbs/Advanced URI/bespoke) + continuous/watched export. Open-questions, not v1. | Draft |
 
 ## Acceptance criteria
 
@@ -74,16 +74,16 @@ export is unbounded by design (see 051a).
 | AC-2 | Given a vault has been exported, when the user clicks "Open in Obsidian" on the dashboard, then Obsidian launches focused on that vault (or shows the honest fallback when Obsidian is not installed/registered). |
 | AC-3 | Given an empty memory graph (`built:false`), when the user attempts to export, then the surface shows the honest "no memory graph yet — run `honeycomb pollinate trigger --compact`" state and writes no vault, never a faked one. |
 | AC-4 | Given untrusted entity names/text (path separators, `]]`, frontmatter-breaking chars), when the vault is written, then filenames are sanitized (no traversal), wikilinks/frontmatter are escaped, and no secret/token appears in any file. |
-| AC-5 | Given the export runs twice, then it is idempotent into the canonical dir (a re-export reflects the current graph; stale notes for deleted entities are removed or tombstoned per 051a's reconciliation rule). |
+| AC-5 | Given the export runs twice, then it is idempotent into the canonical dir (a re-export reflects the current graph; stale notes for deleted entities are removed or tombstoned per 057a's reconciliation rule). |
 
 ## Open questions (module-level)
 
 - [ ] **Source scope:** v1 ships the *memory* graph only; do we generalize the writer to also emit the
-  codebase-graph vault behind one `--source` flag now, or defer? (051a OQ-1.)
+  codebase-graph vault behind one `--source` flag now, or defer? (057a OQ-1.)
 - [ ] **Canonical dir vs. user-chosen:** is `~/.honeycomb/obsidian/<scope>/` the right default, and do we
-  let the user point it at an existing vault (subfolder) instead? (051a OQ-2 / 051b.)
+  let the user point it at an existing vault (subfolder) instead? (057a OQ-2 / 057b.)
 - [ ] **Refresh model:** on-demand only for v1 (decided), but is a "re-export on pollinate convergence"
-  watcher worth a fast-follow? (051c.)
+  watcher worth a fast-follow? (057c.)
 
 ## Related
 

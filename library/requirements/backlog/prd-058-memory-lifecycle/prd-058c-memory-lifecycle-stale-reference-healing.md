@@ -1,6 +1,6 @@
-# PRD-055c: Stale code-reference detection and healing
+# PRD-058c: Stale code-reference detection and healing
 
-> **Parent:** [PRD-055 Memory Lifecycle](./prd-055-memory-lifecycle-index.md)
+> **Parent:** [PRD-058 Memory Lifecycle](./prd-058-memory-lifecycle-index.md)
 > **Implements:** the `σ(m,t)` term of [`memory-lifecycle-scoring.md`](../../../knowledge/private/ai/memory-lifecycle-scoring.md)
 > **Status:** Draft
 > **Priority:** P1
@@ -15,7 +15,7 @@
 
 A memory that names code that no longer exists is silently wrong. A memory that says "embeddings flow through `src/daemon/storage/noopEmbedClient`" reads as authoritative right up until an agent follows the path and finds nothing there, having burned a turn. This sub-PRD implements the **staleness term `σ(m,t)`** from the scoring model: it extracts the code references a memory makes, resolves each against the live codebase-graph snapshot (PRD-014), and turns the fraction that no longer resolve into a bounded staleness probability that demotes the memory in recall.
 
-The work runs as a diagnostic in the existing maintenance worker (`observe` / `execute`), so detection ships visible-but-inert first and only changes ranking once an operator trusts it. Staleness never deletes a row: it is a soft re-ranking signal that composes with 055a's recency multiplier, and a reference that returns (a branch switch restores a file, a rename is reverted) flips the memory back to fresh on the next snapshot. Detection and healing append to `memory_history` exactly like every other lifecycle action, so the audit trail is total even though salience changes.
+The work runs as a diagnostic in the existing maintenance worker (`observe` / `execute`), so detection ships visible-but-inert first and only changes ranking once an operator trusts it. Staleness never deletes a row: it is a soft re-ranking signal that composes with 058a's recency multiplier, and a reference that returns (a branch switch restores a file, a rename is reverted) flips the memory back to fresh on the next snapshot. Detection and healing append to `memory_history` exactly like every other lifecycle action, so the audit trail is total even though salience changes.
 
 ### The equation this implements
 
@@ -41,7 +41,7 @@ Staleness is the probability that *at least one* in-scope reference is dangling,
 v(m,t) = 2^( −(t − verified_at(m)) / h_verify )      h_verify default 14 d
 ```
 
-When `v` falls below a re-verification threshold the memory is re-queued for a fresh snapshot check (spaced re-verification, the staleness analogue of 055e's reinforcement). The master equation's contribution is the demotion `(1 − σ)^s`, where `s` is the staleness exponent: under the maintenance worker's `observe` posture `s = 0` (the factor is the identity, staleness is visible but inert), under `execute` `s > 0` (measured, demotion applied). Crucially `(1 − σ)^s` feeds the **same recency-multiplier stage** 055a owns, not a second independent score path: staleness is one more bounded `(0,1]` input multiplied into that single demotion step, so the two signals compose and never fight. `P ≤ R` still holds; staleness can only demote, never invent relevance.
+When `v` falls below a re-verification threshold the memory is re-queued for a fresh snapshot check (spaced re-verification, the staleness analogue of 058e's reinforcement). The master equation's contribution is the demotion `(1 − σ)^s`, where `s` is the staleness exponent: under the maintenance worker's `observe` posture `s = 0` (the factor is the identity, staleness is visible but inert), under `execute` `s > 0` (measured, demotion applied). Crucially `(1 − σ)^s` feeds the **same recency-multiplier stage** 058a owns, not a second independent score path: staleness is one more bounded `(0,1]` input multiplied into that single demotion step, so the two signals compose and never fight. `P ≤ R` still holds; staleness can only demote, never invent relevance.
 
 ### Scope
 
@@ -49,21 +49,21 @@ When `v` falls below a re-verification threshold the memory is re-queued for a f
 - A conservative reference extractor that pulls candidate references from memory content. Over-matching is safe by construction: a token that *looks* like indexed code but is absent becomes `stale`, a token outside the indexed graph becomes `unknown`, never `stale`.
 - The verification-freshness factor `v(m,t)` and a `verified_at` timestamp, so trust in a check decays and spaced re-verification is driven by `h_verify`.
 - A `ref_status` signal (`fresh` / `stale` / `unknown`) and the specific unresolved `stale_refs`, written via additive lazy-healed columns.
-- Staleness fed as an input into the 055a recency-multiplier stage, gated by posture: `observe` (`s = 0`, flag only), `execute` (`s > 0`, demote, never hard-drop). All actions recorded to `memory_history`.
+- Staleness fed as an input into the 058a recency-multiplier stage, gated by posture: `observe` (`s = 0`, flag only), `execute` (`s > 0`, demote, never hard-drop). All actions recorded to `memory_history`.
 
 ### Out of scope
 
-- The recency math itself and the demotion mechanics of the multiplier stage (sub-PRD 055a); this sub-PRD only feeds `(1 − σ)` into that stage.
-- Auto-rewriting the memory's text to the new path. Detection and demotion only; a rewrite is a supersession and belongs to the conflict path (sub-PRD 055b).
+- The recency math itself and the demotion mechanics of the multiplier stage (sub-PRD 058a); this sub-PRD only feeds `(1 − σ)` into that stage.
+- Auto-rewriting the memory's text to the new path. Detection and demotion only; a rewrite is a supersession and belongs to the conflict path (sub-PRD 058b).
 - References to code outside the indexed graph (third-party libs, npm specifiers, external URLs). Those are `excluded` from the product and surface as `unknown`, never `stale`.
 - Fuzzy-rename similarity tuning beyond a documented default `sim`; the rename-candidate threshold is a sweep point, not a fixed assertion.
 - Hard time-based deletion or expiry of stale memories -> retention worker, PRD-030.
-- The activation-paced re-verification *scheduler* (which memories get re-checked how often) -> sub-PRD 055e drives the cadence from activation; this sub-PRD provides the per-check `σ` and the `verified_at` it reads.
+- The activation-paced re-verification *scheduler* (which memories get re-checked how often) -> sub-PRD 058e drives the cadence from activation; this sub-PRD provides the per-check `σ` and the `verified_at` it reads.
 
 ### Dependencies
 
 - **Blocked by:** PRD-014 codebase graph (resolution snapshot + the synthesized `graph/` query surface). Already shipped.
-- **Composes with:** sub-PRD 055a (its recency multiplier is the stage staleness demotes through), sub-PRD 055e (activation paces re-verification frequency; `verified_at` is the staleness analogue of `last_reinforced_at`), sub-PRD 055d (dashboard surface, the `s` exponent config).
+- **Composes with:** sub-PRD 058a (its recency multiplier is the stage staleness demotes through), sub-PRD 058e (activation paces re-verification frequency; `verified_at` is the staleness analogue of `last_reinforced_at`), sub-PRD 058d (dashboard surface, the `s` exponent config).
 
 ---
 
@@ -86,7 +86,7 @@ When `v` falls below a re-verification threshold the memory is re-queued for a f
 
 **Acceptance criteria:**
 - AC-55c.2.1 Given the worker posture is `observe` (`s = 0`), when a stale ref is found, then `(1 − σ)^s = (1 − σ)^0 = 1`: the memory is flagged and surfaced in the dashboard but its recall ranking is unchanged.
-- AC-55c.2.2 Given the posture is `execute` (`s > 0`) and demotion is enabled, when a stale ref is found, then `(1 − σ)^s < 1` is fed into the 055a recency-multiplier stage so the memory's effective recall score is demoted, never hard-dropped and never removed from the result set by staleness alone.
+- AC-55c.2.2 Given the posture is `execute` (`s > 0`) and demotion is enabled, when a stale ref is found, then `(1 − σ)^s < 1` is fed into the 058a recency-multiplier stage so the memory's effective recall score is demoted, never hard-dropped and never removed from the result set by staleness alone.
 - AC-55c.2.3 Given a reference returns in a later snapshot (a branch switch restored the file, a rename was reverted), when re-verification runs, then `resolve` climbs back to `1`, `σ` falls, `ref_status` flips back to `fresh`, and any demotion is lifted.
 - AC-55c.2.4 Given any detection or heal action, when it is applied, then it is appended to `memory_history` (actor, reason, the `σ` value and `stale_refs`), so the change is auditable and reversible.
 
@@ -109,13 +109,13 @@ When `v` falls below a re-verification threshold the memory is re-queued for a f
 | `memories` | `verified_at` | `timestamptz` (drives `v(m,t)` and spaced re-verification) | yes | null | no |
 | `memories` | `stale_refs` | `text[]` (the specific unresolved references) | yes | null | no |
 
-Added via additive lazy schema-healing (`healMissingColumns`), consistent with the way the pipeline creates tables and columns lazily on first write (see `memory-pipeline.md`). No migration step, no backfill. Existing rows read as `null` and are treated as `unknown` until first verified, which keeps them neutral in ranking (an `unknown` memory is not demoted). `verified_at` is the staleness analogue of 055e's `last_reinforced_at`: the timestamp the freshness factor `v` decays from.
+Added via additive lazy schema-healing (`healMissingColumns`), consistent with the way the pipeline creates tables and columns lazily on first write (see `memory-pipeline.md`). No migration step, no backfill. Existing rows read as `null` and are treated as `unknown` until first verified, which keeps them neutral in ranking (an `unknown` memory is not demoted). `verified_at` is the staleness analogue of 058e's `last_reinforced_at`: the timestamp the freshness factor `v` decays from.
 
 ---
 
 ## API / Endpoint Specs
 
-No new public write endpoint. Detection runs inside the maintenance worker, so staleness cannot be spoofed by a client. The `ref_status`, `verified_at`, and `stale_refs` fields are exposed **read-only** on the memory shape returned by the existing memories API and on the recall response, so the dashboard (sub-PRD 055d) and agent consumers can render them alongside `freshnessScore` (055a) and the other health signals.
+No new public write endpoint. Detection runs inside the maintenance worker, so staleness cannot be spoofed by a client. The `ref_status`, `verified_at`, and `stale_refs` fields are exposed **read-only** on the memory shape returned by the existing memories API and on the recall response, so the dashboard (sub-PRD 058d) and agent consumers can render them alongside `freshnessScore` (058a) and the other health signals.
 
 A manual trigger is exposed through the existing maintenance `observe` / `execute` diagnostic runner (consistent with the other maintenance diagnostics described in `memory-pipeline.md`), not a bespoke endpoint. Recall responses gain a per-hit `staleness` (the `σ` value) and `refStatus`, so a consumer can see why a memory was demoted:
 
@@ -144,8 +144,8 @@ A manual trigger is exposed through the existing maintenance `observe` / `execut
 - **Snapshot is the oracle, not the filesystem.** Resolution is a lookup against the codebase-graph resolution snapshot for the workspace via the PRD-014 query surface (`find/`, `show/`, the node id format `<source_file>:<symbol>:<kind>`), not a `stat` of the working tree. This respects the daemon's indexed view and the org/workspace/agent tenancy every stage threads, and it means staleness reflects what the graph knows, not what one checkout happens to have on disk. The graph's own honest caveat (a "0 incoming" node is not proof of dead code) is why absence is scored as a dangling reference only for exact-id misses, with fuzzy-rename `sim` catching the common rename case.
 - **Verification-freshness drives re-checks.** `v(m,t)` decays trust in `verified_at` on a `h_verify`-day half-life. A memory verified fresh weeks ago is not trusted indefinitely; once `v` crosses the threshold it is re-queued. This is the staleness analogue of reinforcement: trust is earned by a recent check, not a one-time stamp.
 - **Eventual-consistency poll-to-convergence.** Per the repo's hard rule, snapshot read-backs poll until convergence. A single immediate read can see a stale segment and wrongly flag a live symbol; the diagnostic never acts on one read.
-- **Composition, not duplication, with 055a recency.** Demotion is expressed as the `(1 − σ)^s` factor fed *into* the single 055a recency-multiplier stage, not as a parallel score path. The two signals multiply into one demotion step, so they compose cleanly and a memory is never double-penalized through two competing pipelines.
-- **Fail-soft everywhere.** If the codebase graph is unavailable for a workspace, the diagnostic marks nothing `stale` (everything stays `unknown`), logs, and returns; it never mass-flags on a missing oracle. Recall never throws or hangs on this path, a missing or unparseable `σ` is treated as `unknown` (neutral), exactly as 055a treats a missing timestamp as maximally fresh. A degraded staleness estimate beats a 500.
+- **Composition, not duplication, with 058a recency.** Demotion is expressed as the `(1 − σ)^s` factor fed *into* the single 058a recency-multiplier stage, not as a parallel score path. The two signals multiply into one demotion step, so they compose cleanly and a memory is never double-penalized through two competing pipelines.
+- **Fail-soft everywhere.** If the codebase graph is unavailable for a workspace, the diagnostic marks nothing `stale` (everything stays `unknown`), logs, and returns; it never mass-flags on a missing oracle. Recall never throws or hangs on this path, a missing or unparseable `σ` is treated as `unknown` (neutral), exactly as 058a treats a missing timestamp as maximally fresh. A degraded staleness estimate beats a 500.
 
 ---
 
@@ -159,7 +159,7 @@ A manual trigger is exposed through the existing maintenance `observe` / `execut
 
 ### Modified files
 - the maintenance worker registration (per `memory-pipeline.md`, the diagnostics runner) - register the diagnostic and its `observe` / `execute` wiring and the manual-trigger path.
-- `src/daemon/runtime/memories/recall.ts` - accept the `(1 − σ)^s` staleness demotion as an input into the existing 055a recency-multiplier stage (not a new stage); emit `staleness`, `refStatus`, `staleRefs` on each hit.
+- `src/daemon/runtime/memories/recall.ts` - accept the `(1 − σ)^s` staleness demotion as an input into the existing 058a recency-multiplier stage (not a new stage); emit `staleness`, `refStatus`, `staleRefs` on each hit.
 - `src/daemon/storage/schema` source - additive `ref_status` / `verified_at` / `stale_refs` ColumnDefs, healed via `healMissingColumns`.
 - the eval harness (`src/eval/*`) - the staleness precision / recall / F1 slice against a labeled dangling-ref set.
 
@@ -171,7 +171,7 @@ A manual trigger is exposed through the existing maintenance `observe` / `execut
 - **Integration:** a memory referencing a symbol present in the snapshot, then the symbol deleted from the snapshot, then re-added, asserting `ref_status` transitions `fresh -> stale -> fresh` and the demotion is applied then lifted (AC-55c.2.3).
 - **Consistency:** assert the diagnostic polls the snapshot to convergence rather than single-reading, and that a transient stale segment does not produce a persisted `stale` verdict (AC-55c.3.3).
 - **Eval:** a staleness slice in the lifecycle eval suite computing staleness precision / recall / F1 against a labeled dangling-ref set (do we flag the dead references and only those?); commit the slice result so the choice of `sim` threshold and `s` is auditable, not asserted.
-- **Live dogfood:** against a real repo index, delete a referenced symbol, run maintenance under `observe` and confirm `stale` surfaces in the dashboard with the right `stale_refs` and recall ranking unchanged; flip to `execute` and confirm the memory demotes through the 055a stage and never hard-drops; re-add the symbol, run re-verification, and confirm it flips back to `fresh` and the demotion lifts.
+- **Live dogfood:** against a real repo index, delete a referenced symbol, run maintenance under `observe` and confirm `stale` surfaces in the dashboard with the right `stale_refs` and recall ranking unchanged; flip to `execute` and confirm the memory demotes through the 058a stage and never hard-drops; re-add the symbol, run re-verification, and confirm it flips back to `fresh` and the demotion lifts.
 
 ---
 
@@ -186,7 +186,7 @@ A manual trigger is exposed through the existing maintenance `observe` / `execut
 ## Related
 
 - [`memory-lifecycle-scoring.md`](../../../knowledge/private/ai/memory-lifecycle-scoring.md) - the `σ(m,t)` term (Term 3), the `resolve` cases, and the `(1 − σ)^s` demotion this implements.
-- [`prd-055-memory-lifecycle-index.md`](./prd-055-memory-lifecycle-index.md) - the parent feature PRD.
-- [`prd-055a-memory-lifecycle-recency-decay.md`](./prd-055a-memory-lifecycle-recency-decay.md) - the recency-multiplier stage staleness demotes through.
+- [`prd-058-memory-lifecycle-index.md`](./prd-058-memory-lifecycle-index.md) - the parent feature PRD.
+- [`prd-058a-memory-lifecycle-recency-decay.md`](./prd-058a-memory-lifecycle-recency-decay.md) - the recency-multiplier stage staleness demotes through.
 - [`codebase-graph.md`](../../../knowledge/private/data/codebase-graph.md) - the resolution snapshot and `graph/` query surface this diagnostic resolves against.
 - [`memory-pipeline.md`](../../../knowledge/private/ai/memory-pipeline.md) - the maintenance worker `observe` / `execute` model and the lazy schema-healing this reuses.
