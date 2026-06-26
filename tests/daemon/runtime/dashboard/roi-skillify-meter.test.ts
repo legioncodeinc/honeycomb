@@ -99,6 +99,24 @@ describe("d-AC-1: skillify usage meter accumulation", () => {
 		expect(byModel["claude-sonnet-4-6"]?.inputTokens).toBe(200);
 		expect(byModel["claude-sonnet-4-6"]?.recorded).toBe(1);
 	});
+
+	// Finding (meter-per-model follow-up): a blank-model report adds to the aggregate sums but NOT to a
+	// per-model bucket. Since the composer prices `perModel` EXCLUSIVELY when present, an incomplete
+	// `perModel` would silently drop the blank-model tokens. The meter therefore suppresses `perModel`
+	// unless it fully accounts for every recorded call, falling back to the aggregate (which counts all).
+	it("omits perModel when a blank-model call was metered (no undercount on a mixed run)", () => {
+		const meter = createSkillifyUsageMeter();
+		meter.record(report({ model: "claude-haiku-4-5", inputTokens: 100, outputTokens: 10, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 }));
+		meter.record(report({ model: "", inputTokens: 40, outputTokens: 4, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 }));
+
+		const snap = meter.snapshot();
+		// The aggregate counts BOTH calls' tokens — nothing is dropped.
+		expect(snap.recorded).toBe(2);
+		expect(snap.inputTokens).toBe(140);
+		// perModel is suppressed (the blank-model call is unbucketed), so the composer prices the full
+		// 140 via the aggregate path rather than only the 100 in the named bucket.
+		expect(snap.perModel).toBeUndefined();
+	});
 });
 
 describe("d-AC-1: snapshot sources for the composer", () => {

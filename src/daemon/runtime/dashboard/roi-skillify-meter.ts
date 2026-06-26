@@ -60,7 +60,9 @@ export interface SkillifyUsageSnapshot {
 	 * Finding (meter-per-model): the per-MODEL token buckets. The aggregate token sums above are kept for
 	 * back-compat display, but pricing MUST use this so a router/model swap mid-run prices each model's
 	 * tokens at ITS OWN rate (the prior single-`model` field mis-priced all accumulated tokens at the
-	 * last-seen model). One entry per distinct model id seen; empty until the first record.
+	 * last-seen model). One entry per distinct model id seen. Present ONLY when these buckets fully account
+	 * for every recorded call; if any blank-model call was metered it is `undefined` so the composer falls
+	 * back to the aggregate path (which counts all tokens) rather than dropping the unbucketed usage.
 	 */
 	readonly perModel?: readonly SkillifyUsageBucket[];
 }
@@ -158,6 +160,14 @@ export function createSkillifyUsageMeter(): SkillifyUsageMeter {
 		},
 		snapshot(): SkillifyUsageSnapshot {
 			const buckets: SkillifyUsageBucket[] = [...perModel.entries()].map(([m, b]) => ({ model: m, ...b }));
+			// Finding (meter-per-model follow-up): a blank-model report adds to the aggregate sums above but
+			// NOT to any per-model bucket, so `perModel` would under-represent total usage on a mixed run.
+			// Since the composer prices `perModel` EXCLUSIVELY when present, emitting an incomplete `perModel`
+			// would silently DROP the blank-model tokens from pricing. Only emit `perModel` when it fully
+			// accounts for EVERY recorded call (Σ bucket.recorded === recorded); otherwise fall back to the
+			// aggregate single-model path, which prices ALL tokens (no undercount).
+			const bucketRecorded = buckets.reduce((sum, b) => sum + b.recorded, 0);
+			const perModelComplete = buckets.length > 0 && bucketRecorded === recorded;
 			return {
 				recorded,
 				inputTokens,
@@ -165,7 +175,7 @@ export function createSkillifyUsageMeter(): SkillifyUsageMeter {
 				cacheReadInputTokens,
 				cacheCreationInputTokens,
 				...(model !== undefined ? { model } : {}),
-				...(buckets.length > 0 ? { perModel: buckets } : {}),
+				...(perModelComplete ? { perModel: buckets } : {}),
 			};
 		},
 		reset(): void {
