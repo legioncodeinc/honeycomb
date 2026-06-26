@@ -158,6 +158,19 @@ Serialization rationale: `recall.ts` is edited by 058a/058e/058c/058b and the sc
 - Version bumped to 0.1.6 across all manifests + README (commit 06bd1dc). v0.1.6 tag created locally, HELD until #125 merges (push triggers the real npm publish).
 - QA report reconciled with a post-audit resolution note (C-1/W-1/W-2 resolved); ledger is authority.
 
+## CodeRabbit review loop (PR #125), converged
+- Round 1: 29 findings (28 fixed + 1 documented false positive) - tenancy, compaction idempotency, conflict-path, dashboard H, CLI.
+- Round 2: 6 (watermark error-vs-absent, (at,id) cursor, scoped-pkg, prior-verdict read-error, test, doc).
+- Round 3: 4 (access_count single-owner double-count, abort-on-missing-row, 2 tests).
+- Round 4: 1 minor (invariant-test fake driven by the real append).
+- Round 5: CLEAN (no actionable). CodeQL: 0 open alerts on #125; the one pre-existing sqlLike finding is fixed in PR #129 (green).
+
+## Final close-out (HEAD ad9a29c)
+- security-worker-bee: CLEAN. No Critical/High, zero code changes. All 8 categories verified (SQL injection, tenancy, authz, input validation, data-integrity fail-soft, prompt-injection, PII/secrets, dangerous-sinks/ReDoS).
+- quality-worker-bee: PASS. 61/64 ACs verified, 0 real gaps; math verified term-for-term; C-1/W-1/W-2 resolutions + CodeRabbit rounds 1-4 verified in code. Final report: qa/2026-06-26-qa-report-final.md. IDX-1/7/8 BLOCKED-on-creds only.
+- Gates: typecheck, dup, audit:sql clean; the 2 full-suite failures are pre-existing environmental flakes (hook-runtime, secrets/exec), green on CI.
+- VERDICT: PR #125 is ship-ready modulo the credential-gated live verification.
+
 ## The one remaining ask (to reach 56/56 and promote to completed)
 Run, on a machine with the gitignored live creds + the embed daemon up:
   `set -a; . ./.env.local; set +a; HONEYCOMB_EMBEDDINGS=true npm run eval:recall`
