@@ -51,18 +51,34 @@ export function sqlStr(value: string): string {
 /**
  * Escape a string for use inside a `LIKE` / `ILIKE` pattern (FR-2 / b-AC-3).
  *
- * Layers `%` and `_` escaping on top of {@link sqlStr}, so a literal substring
- * search is never reinterpreted as a wildcard match. The escape character is the
- * backslash, which is DeepLake/Postgres's `LIKE` default — no explicit `ESCAPE`
+ * Escapes the `LIKE` metacharacters (`%` and `_`) so a literal substring search
+ * is never reinterpreted as a wildcard match. The escape character is the
+ * backslash, which is DeepLake/Postgres's `LIKE` default, so no explicit `ESCAPE`
  * clause is required at the call site.
  *
- * The `%` / `_` escaping runs AFTER `sqlStr` has already doubled backslashes, so
- * the `\` we prepend here is a single backslash in the SQL text — exactly the
- * one `LIKE` consumes as the escape. (Doubling it would make `LIKE` treat the
- * backslash itself as the literal and leave the wildcard live.)
+ * The escaping is COMPLETE and LOCAL: the first pass escapes the backslash itself
+ * ALONGSIDE the `%` and `_` it introduces, in one `replace` over the raw input
+ * (`/[\\%_]/g` -> `\$&`). Escaping the escape character in the same pass is what
+ * makes this a recognized full sanitizer. A backslash in the input becomes `\\`
+ * (one literal backslash after `LIKE` un-escapes), and every `%`/`_` gets exactly
+ * one escape backslash in front. There is no order dependence on another helper:
+ * the wildcard-and-escape layer stands on its own.
+ *
+ * The remaining passes are the literal layer (the same quote-doubling and control
+ * stripping {@link sqlStr} performs, minus the backslash-doubling already done
+ * above so the metacharacter escapes are never re-escaped): single quotes are
+ * doubled, NUL is dropped, and the C0/C1 control chars are stripped. The output
+ * is byte-for-byte identical to layering `%`/`_` escaping on top of `sqlStr`,
+ * because both compose the same per-character substitutions over disjoint
+ * character classes.
  */
 export function sqlLike(value: string): string {
-	return sqlStr(value).replace(/%/g, "\\%").replace(/_/g, "\\_");
+	return value
+		.replace(/[\\%_]/g, "\\$&")
+		.replace(/'/g, "''")
+		.replace(/\0/g, "")
+		// Drop C0 controls except \t (0x09) \n (0x0A) \r (0x0D), plus DEL (0x7f).
+		.replace(/[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
 }
 
 /**

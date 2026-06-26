@@ -42,8 +42,31 @@ describe("PRD-002b SQL safety escaping", () => {
 		expect(sqlLike("100%")).toBe("100\\%");
 		expect(sqlLike("a_b")).toBe("a\\_b");
 		expect(sqlLike("50%_off")).toBe("50\\%\\_off");
-		// A quote inside a LIKE term is still escaped by the underlying sqlStr.
+		// A quote inside a LIKE term is still escaped by the same literal layer.
 		expect(sqlLike("o'_%")).toBe("o''\\_\\%");
+	});
+
+	it("b-AC-3 sqlLike escapes backslashes in the input (regression: incomplete-sanitization)", () => {
+		// A lone backslash is the escape char itself. It MUST be doubled so LIKE reads
+		// it as one literal backslash and does not consume a following metacharacter as
+		// escaped. One backslash in -> "\\\\" (two backslashes) in the SQL text.
+		expect(sqlLike("\\")).toBe("\\\\");
+		// "\%" in the input is a literal backslash THEN a literal percent. The backslash
+		// is doubled and the percent gets its own escape backslash, so neither the input
+		// backslash nor the wildcard is ever live: "\\\\\\%" = \\ + \% in the SQL text.
+		expect(sqlLike("\\%")).toBe("\\\\\\%");
+		// Same for a literal backslash then underscore.
+		expect(sqlLike("\\_")).toBe("\\\\\\_");
+		// "100\%": digits pass through, the input backslash is doubled, the percent is
+		// escaped. Every wildcard ends up with EXACTLY one escape backslash; the input
+		// backslash is doubled. No metacharacter reaches LIKE live.
+		expect(sqlLike("100\\%")).toBe("100\\\\\\%");
+		// Backslash adjacent to a quote: the backslash is doubled by the first pass and
+		// the quote is doubled by the literal-layer pass, independently. No statement
+		// breakout is possible (the quote can never close the literal early), and the
+		// backslash cannot escape the closing quote because it is itself doubled.
+		expect(sqlLike("\\'")).toBe("\\\\''");
+		expect(sqlLike("'\\")).toBe("''\\\\");
 	});
 
 	it("b-AC-4 E'...' body round-trips \\n and other escapes to intended bytes", () => {
