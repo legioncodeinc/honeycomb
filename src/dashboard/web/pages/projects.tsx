@@ -45,9 +45,21 @@ const SURFACE: React.CSSProperties = {
 	borderRadius: "var(--radius-lg)",
 };
 
-/** A muted "not available yet" placeholder for a per-project field the Wave-1 daemon does not aggregate. */
-function NotYet(): React.JSX.Element {
+/** A muted em-dash for a per-project field the daemon serves empty/absent (no path, no remote, no captures). */
+function Dash(): React.JSX.Element {
 	return <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-tertiary)" }}>—</span>;
+}
+
+/**
+ * Humanize the per-project `lastCapture` ISO timestamp (PRD-059c c-AC-1). `null` ⇒ the project has never
+ * captured (or the aggregate flapped) → "never"; a malformed value degrades to the raw em-dash rather than
+ * a thrown `Invalid Date`. A valid ISO renders as the locale date so the operator sees real recency.
+ */
+function humanizeCapture(iso: string | null): React.ReactNode {
+	if (iso === null || iso === "") return <span style={{ color: "var(--text-tertiary)" }}>never</span>;
+	const t = Date.parse(iso);
+	if (Number.isNaN(t)) return <Dash />;
+	return new Date(t).toLocaleString();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -118,14 +130,14 @@ function ProjectRow({ project, wire, onOpen, onUnbound }: ProjectRowProps): Reac
 				</Button>
 			</div>
 
-			{/* Per-project state. The wire serves name + boundLocally today; the richer aggregates (paths,
-			    remote, last-capture, counts) are not yet served by the Wave-1 daemon, so they read "—"
-			    honestly rather than fabricated. */}
+			{/* Per-project state (PRD-059c c-AC-1) — the real values the Wave-3 daemon now aggregates onto
+			    each registry row. A field the daemon serves empty/absent (no local path, no git remote, no
+			    captures) renders the honest fallback ("—"/"never"), never a fabricated value. */}
 			<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8, paddingTop: 4, borderTop: "1px solid var(--border-subtle)" }}>
-				<MetaCell label="bound path" value={<NotYet />} />
-				<MetaCell label="git remote" value={<NotYet />} />
-				<MetaCell label="last capture" value={<NotYet />} />
-				<MetaCell label="memories / sessions" value={<NotYet />} />
+				<MetaCell label="bound path" value={<BoundPaths paths={project.boundPaths} />} />
+				<MetaCell label="git remote" value={project.remote !== "" ? project.remote : <Dash />} />
+				<MetaCell label="last capture" value={humanizeCapture(project.lastCapture)} />
+				<MetaCell label="memories / sessions" value={`${project.memoryCount} / ${project.sessionCount}`} />
 			</div>
 
 			{unbinding && (
@@ -150,6 +162,24 @@ function ProjectRow({ project, wire, onOpen, onUnbound }: ProjectRowProps): Reac
 	);
 }
 
+/**
+ * The "bound path" cell value (PRD-059c c-AC-1): this device's bound folder path(s) for the project. Empty
+ * (an importable/registry-only project, or none recorded on this device) ⇒ the honest em-dash. Each path is
+ * ESCAPED text (React default) and ellipsis-clipped so a long absolute path never blows out the cell.
+ */
+function BoundPaths({ paths }: { paths: readonly string[] }): React.JSX.Element {
+	if (paths.length === 0) return <Dash />;
+	return (
+		<span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+			{paths.map((p) => (
+				<span key={p} title={p} style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>
+					{p}
+				</span>
+			))}
+		</span>
+	);
+}
+
 /** A labeled metadata cell (mono caption + value). */
 function MetaCell({ label, value }: { label: string; value: React.ReactNode }): React.JSX.Element {
 	return (
@@ -164,8 +194,13 @@ function MetaCell({ label, value }: { label: string; value: React.ReactNode }): 
 // The __unsorted__ inbox row (059c c-AC-2)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** The reserved inbox shown DISTINCTLY with its size (c-AC-2). `present` = the inbox exists in the registry. */
-function InboxRow(): React.JSX.Element {
+/**
+ * The reserved inbox shown DISTINCTLY with its size (PRD-059c c-AC-2). The size is the daemon's aggregated
+ * `sessionCount` for the `__unsorted__` row (the `''`/`__unsorted__` capture buckets summed) — the count of
+ * unsorted captured turns waiting to be assigned to a real project. Best-effort: `0` when empty or on a
+ * backend flap, never a fabricated value.
+ */
+function InboxRow({ inbox }: { inbox: ScopeProjectWire }): React.JSX.Element {
 	return (
 		<div data-testid="inbox-row" style={{ ...SURFACE, display: "flex", alignItems: "center", gap: 10, borderStyle: "dashed" }}>
 			<span style={{ fontFamily: "var(--font-mono)", fontSize: 14, fontWeight: 600, color: "var(--text-secondary)" }}>(unsorted inbox)</span>
@@ -173,8 +208,7 @@ function InboxRow(): React.JSX.Element {
 				{UNSORTED_PROJECT_ID}
 			</Badge>
 			<span style={{ flex: 1 }} />
-			{/* The inbox size (row count) is not served by the Wave-1 registry read — surfaced honestly as "—". */}
-			<span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-tertiary)" }}>size —</span>
+			<span data-testid="inbox-size" style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-tertiary)" }}>size {inbox.sessionCount}</span>
 		</div>
 	);
 }
@@ -548,9 +582,10 @@ export function ProjectsPage({ wire }: PageProps): React.JSX.Element {
 		void reList();
 	}, [reList]);
 
-	// ACTIVE = locally-bound, non-inbox projects (c-AC-1). The inbox is shown distinctly (c-AC-2).
+	// ACTIVE = locally-bound, non-inbox projects (c-AC-1). The inbox is shown distinctly (c-AC-2) with its
+	// daemon-aggregated size (its `sessionCount`) — resolved here so the row can render the real count.
 	const active = projects.filter((p) => p.boundLocally && p.projectId !== UNSORTED_PROJECT_ID);
-	const inboxPresent = projects.some((p) => p.projectId === UNSORTED_PROJECT_ID);
+	const inbox = projects.find((p) => p.projectId === UNSORTED_PROJECT_ID);
 
 	// c-AC-5: open a project → re-scope the other surfaces (memories/graph/sync) to it (049e view scope).
 	const onOpen = React.useCallback(
@@ -605,8 +640,8 @@ export function ProjectsPage({ wire }: PageProps): React.JSX.Element {
 					active.map((p) => <ProjectRow key={p.projectId} project={p} wire={wire} onOpen={onOpen} onUnbound={() => void reList()} />)
 				)}
 
-				{/* c-AC-2: the reserved inbox, shown distinctly with its size, when present. */}
-				{inboxPresent && <InboxRow />}
+				{/* c-AC-2: the reserved inbox, shown distinctly with its daemon-aggregated size, when present. */}
+				{inbox !== undefined && <InboxRow inbox={inbox} />}
 			</div>
 		</PageFrame>
 	);

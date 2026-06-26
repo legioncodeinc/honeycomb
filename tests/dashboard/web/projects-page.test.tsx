@@ -35,10 +35,10 @@ function mockWire(opts: {
 	bindExistingProject?: ReturnType<typeof vi.fn>;
 } = {}): WireClient {
 	const all = opts.all ?? [
-		{ projectId: "api", name: "API", boundLocally: true },
-		{ projectId: "web", name: "Web", boundLocally: true },
-		{ projectId: "__unsorted__", name: "unsorted", boundLocally: false },
-		{ projectId: "cloudonly", name: "Cloud Only", boundLocally: false },
+		{ projectId: "api", name: "API", boundLocally: true, boundPaths: ["/home/me/api"], remote: "github.com/acme/api", memoryCount: 12, sessionCount: 4, lastCapture: "2026-06-25T10:00:00.000Z" },
+		{ projectId: "web", name: "Web", boundLocally: true, boundPaths: ["/home/me/web"], remote: "github.com/acme/web", memoryCount: 7, sessionCount: 2, lastCapture: null },
+		{ projectId: "__unsorted__", name: "unsorted", boundLocally: false, boundPaths: [], remote: "", memoryCount: 0, sessionCount: 9, lastCapture: "2026-06-26T08:00:00.000Z" },
+		{ projectId: "cloudonly", name: "Cloud Only", boundLocally: false, boundPaths: [], remote: "github.com/acme/cloud", memoryCount: 3, sessionCount: 1, lastCapture: null },
 	];
 	const scopeProjects =
 		opts.scopeProjects ??
@@ -129,8 +129,34 @@ describe("PRD-059c the Projects page lists active projects + the inbox (c-AC-1 /
 		expect(container.textContent ?? "").toContain("__unsorted__");
 	});
 
+	it("renders the REAL per-project state the daemon serves (paths, remote, counts), not placeholders", async () => {
+		const wire = mockWire();
+		await mount(wire);
+		const apiRow = container.querySelector('[data-project-id="api"]') as HTMLElement;
+		const apiText = apiRow.textContent ?? "";
+		// c-AC-1: the bound folder path renders verbatim.
+		expect(apiText).toContain("/home/me/api");
+		// c-AC-1: the git remote renders.
+		expect(apiText).toContain("github.com/acme/api");
+		// c-AC-1: the memory / session counts render as "<mem> / <sess>".
+		expect(apiText).toContain("12 / 4");
+		// A project that has never captured shows "never", not a fabricated date.
+		const webRow = container.querySelector('[data-project-id="web"]') as HTMLElement;
+		expect(webRow.textContent ?? "").toContain("never");
+		expect(webRow.textContent ?? "").toContain("7 / 2");
+	});
+
+	it("renders the inbox SIZE from its aggregated sessionCount (c-AC-2)", async () => {
+		const wire = mockWire();
+		await mount(wire);
+		const size = container.querySelector('[data-testid="inbox-size"]');
+		expect(size, "the inbox size cell renders").not.toBeNull();
+		// The default mock seeds the __unsorted__ row with sessionCount 9 (the inbox bucket size).
+		expect(size?.textContent ?? "").toContain("9");
+	});
+
 	it("renders an honest empty state when no project is locally bound", async () => {
-		const wire = mockWire({ all: [{ projectId: "__unsorted__", name: "unsorted", boundLocally: false }] });
+		const wire = mockWire({ all: [{ projectId: "__unsorted__", name: "unsorted", boundLocally: false, boundPaths: [], remote: "", memoryCount: 0, sessionCount: 0, lastCapture: null }] });
 		await mount(wire);
 		expect(container.querySelector('[data-testid="projects-empty"]'), "the empty state renders").not.toBeNull();
 		expect(container.querySelectorAll('[data-testid="project-row"]')).toHaveLength(0);
@@ -163,8 +189,8 @@ describe("PRD-059d the import modal lists registry-only projects (d-AC-1)", () =
 	it("Import existing opens the modal listing projects with NO local binding", async () => {
 		const scopeProjects = vi.fn(async (o?: { unbound?: boolean }) =>
 			o?.unbound === true
-				? [{ projectId: "cloudonly", name: "Cloud Only", boundLocally: false }]
-				: [{ projectId: "api", name: "API", boundLocally: true }],
+				? [{ projectId: "cloudonly", name: "Cloud Only", boundLocally: false, boundPaths: [], remote: "", memoryCount: 0, sessionCount: 0, lastCapture: null }]
+				: [{ projectId: "api", name: "API", boundLocally: true, boundPaths: ["/home/me/api"], remote: "", memoryCount: 0, sessionCount: 0, lastCapture: null }],
 		);
 		const wire = mockWire({ scopeProjects });
 		await mount(wire);

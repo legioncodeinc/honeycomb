@@ -138,3 +138,33 @@ export function buildDedupCheckSql(hash: string): string {
 	const id = sqlIdent("id");
 	return `SELECT ${id} FROM "${tbl}" WHERE ${col} = ${sLiteral(hash)} LIMIT 1`;
 }
+
+/**
+ * Build the per-project memory-count aggregate (PRD-059c c-AC-1 / c-AC-2): ONE
+ * grouped read over `memories` that returns `(project_id, count, last_capture)`
+ * for every project in the active org/workspace partition in a single round-trip,
+ * rather than N per-project COUNTs. The caller (`scope-enumeration-api.ts`) passes
+ * the active {@link QueryScope}, so the storage client's partition layer scopes the
+ * read to the org/workspace — `memories` is an ENGINE table (no `org_id`/
+ * `workspace_id` column), isolation comes from the partition header, not a WHERE.
+ *
+ * Soft-deleted facts (`is_deleted = 1`) are excluded so the count matches what
+ * recall would surface. The empty/`''` `project_id` group is the workspace
+ * `__unsorted__` inbox (D5: a row with no resolved project falls to the inbox);
+ * the caller maps the `''` bucket onto {@link UNSORTED_PROJECT_ID} for c-AC-2's
+ * inbox size. `last_capture` is `max(created_at)` (an ISO-8601 TEXT sort, which is
+ * lexicographically chronological) — a cheap by-product of the same GROUP BY.
+ *
+ * All identifiers route through `sqlIdent`; there is NO interpolated VALUE (the
+ * only literal is the constant `is_deleted` flag), so `audit:sql` stays clean.
+ */
+export function buildMemoryCountsByProjectSql(): string {
+	const tbl = sqlIdent("memories");
+	const pid = sqlIdent("project_id");
+	const del = sqlIdent("is_deleted");
+	const created = sqlIdent("created_at");
+	return (
+		`SELECT ${pid}, count(*) AS n, max(${created}) AS last_capture ` +
+		`FROM "${tbl}" WHERE ${del} = ${NOT_SOFT_DELETED} GROUP BY ${pid}`
+	);
+}

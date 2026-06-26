@@ -50,6 +50,7 @@ import { loadDiskCredentials } from "../auth/credentials-store.js";
 import { getRequestIdentity } from "../middleware/permission.js";
 import { loadProjectsCache } from "../../../hooks/shared/index.js";
 import { syncRegistryToCache } from "./registry-sync.js";
+import { type ProjectCounts, ZERO_PROJECT_COUNTS, readProjectCounts } from "./project-counts.js";
 
 /** The route group the scope-enumeration reads attach to (already mounted + protected in `server.ts`). */
 export const SCOPE_ENUM_GROUP = "/api/diagnostics" as const;
@@ -84,6 +85,38 @@ export interface ScopeProject {
 	 * `boundLocally:true` ones. Computed from the local `bindings[]` the resolver reads.
 	 */
 	readonly boundLocally: boolean;
+	/**
+	 * PRD-059c c-AC-1: this device's local folder binding(s) for the project — the absolute path
+	 * prefix(es) a `honeycomb project bind` / folder-pick recorded for it on THIS device. Read from the
+	 * local `projects.json` resolver cache (the `bindings[]` plus the registry copy's `boundPaths`),
+	 * cheap and NETWORK-FREE. Empty for a registry-only project not bound here. The Projects page renders
+	 * these as the "paths" state cell.
+	 */
+	readonly boundPaths: readonly string[];
+	/**
+	 * PRD-059c c-AC-1: the project's canonical git `remote_signal` (`host/owner/repo`, e.g.
+	 * `github.com/acme/api`) from the synced registry copy, or `''` when the project has no git signal.
+	 * Read from local cache, NETWORK-FREE. The Projects page renders this as the "remote" state cell.
+	 */
+	readonly remote: string;
+	/**
+	 * PRD-059c c-AC-1: distilled-`memories` rows scoped to this project (excl. soft-deleted), via the
+	 * fail-soft grouped aggregate. BEST-EFFORT: `0` when the project has no memories OR the aggregate
+	 * failed soft on a backend flap (the read never 500s on counts — paths/remote are always served).
+	 */
+	readonly memoryCount: number;
+	/**
+	 * PRD-059c c-AC-1: raw `sessions` capture-event rows scoped to this project, via the fail-soft
+	 * grouped aggregate. BEST-EFFORT: `0` when none OR the aggregate failed soft. For the `__unsorted__`
+	 * inbox row this is the c-AC-2 inbox size (the `''`/`__unsorted__` buckets summed).
+	 */
+	readonly sessionCount: number;
+	/**
+	 * PRD-059c (optional STATE): the most-recent capture timestamp across this project's memories +
+	 * sessions (ISO-8601), or `null` when it has no captured rows or the aggregate failed soft. A cheap
+	 * by-product of the same grouped aggregate (`max(created_at)` / `max(creation_date)`).
+	 */
+	readonly lastCapture: string | null;
 }
 
 /** `GET /scope/orgs` body. `orgs` is empty when no credential resolves; `error` is a redacted reason. */
@@ -246,8 +279,39 @@ export function mountScopeEnumerationApi(daemon: Daemon, options: MountScopeEnum
 		// 059d "Import project from cloud" list) — registry projects with no local binding on this device.
 		const locallyBound = new Set(cache.bindings.map((b) => b.projectId));
 		const unboundOnly = (c.req.query("unbound") ?? "") === "1";
+
+		// PRD-059c c-AC-1: this device's local folder binding(s) per project — the `bindings[]` paths
+		// (the deliberate local assignment) UNIONED with the registry copy's `boundPaths` (a daemon-synced
+		// binding), deduped. NETWORK-FREE — read entirely from the local resolver cache.
+		const localPathsByProject = new Map<string, string[]>();
+		const addPath = (projectId: string, path: string): void => {
+			if (projectId.length === 0 || path.length === 0) return;
+			const list = localPathsByProject.get(projectId) ?? [];
+			if (!list.includes(path)) list.push(path);
+			localPathsByProject.set(projectId, list);
+		};
+		for (const b of cache.bindings) addPath(b.projectId, b.path);
+		for (const p of cache.projects) for (const bp of p.boundPaths) addPath(p.projectId, bp);
+
+		// PRD-059c c-AC-1 / c-AC-2: per-project capture counts via TWO fail-soft grouped aggregates.
+		// BEST-EFFORT — a backend flap zeroes counts but NEVER 500s the read (paths/remote always served).
+		const counts = await readProjectCounts(options.storage, scope);
+		const countsFor = (projectId: string): ProjectCounts => counts.byProjectId.get(projectId) ?? ZERO_PROJECT_COUNTS;
+
 		const projects: ScopeProject[] = cache.projects
-			.map((p) => ({ projectId: p.projectId, name: p.name, boundLocally: locallyBound.has(p.projectId) }))
+			.map((p) => {
+				const cnt = countsFor(p.projectId);
+				return {
+					projectId: p.projectId,
+					name: p.name,
+					boundLocally: locallyBound.has(p.projectId),
+					boundPaths: localPathsByProject.get(p.projectId) ?? [],
+					remote: p.remoteSignal,
+					memoryCount: cnt.memoryCount,
+					sessionCount: cnt.sessionCount,
+					lastCapture: cnt.lastCapture,
+				};
+			})
 			.filter((p) => (unboundOnly ? !p.boundLocally : true));
 		const body: ScopeProjectsBody = {
 			projects,

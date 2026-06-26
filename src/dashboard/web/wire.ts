@@ -868,6 +868,18 @@ export const ScopeProjectSchema = z.object({
 	projectId: z.string().catch(""),
 	name: z.string().catch(""),
 	boundLocally: z.boolean().catch(false),
+	// PRD-059c c-AC-1 — the per-project STATE the Wave-3 daemon now aggregates onto each registry row.
+	// Every field `.catch()`-defaults so an OLDER daemon that predates the enrichment (or a partial body)
+	// degrades to a safe empty/zero value rather than throwing into React — the page renders the honest
+	// fallback ("—"/"never") for the missing field. NO secret rides any of these (paths, a git remote
+	// slug, integer counts, an ISO timestamp). `boundPaths` is this device's bound folder path(s) (empty
+	// for an importable/registry-only project); `remote` is `host/owner/repo` or `''`; the counts are
+	// best-effort (`0` on a backend flap); `lastCapture` is an ISO timestamp or `null` ("never captured").
+	boundPaths: z.array(z.string()).catch([]),
+	remote: z.string().catch(""),
+	memoryCount: z.number().catch(0),
+	sessionCount: z.number().catch(0),
+	lastCapture: z.string().nullable().catch(null),
 });
 export type ScopeProjectWire = z.infer<typeof ScopeProjectSchema>;
 
