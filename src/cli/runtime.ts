@@ -122,8 +122,17 @@ function resolveDaemonEntry(): string {
 	return process.env.HONEYCOMB_DAEMON_ENTRY ?? bundledSibling ?? devSibling;
 }
 
-/** How long ensure-running / `daemon start` waits for the daemon to answer `/health` after spawn. */
-const DEFAULT_START_TIMEOUT_MS = 8_000;
+/**
+ * How long ensure-running / `daemon start` waits for the daemon to answer `/health` after spawn.
+ * A COLD boot does real warmup off the critical path before binding — spawn the embeddings child
+ * + bounded liveness wait, wire the queue/pipeline/summary/skillify workers, and run the first
+ * DeepLake round-trips — which measured ~26s on a warm cache (longer on the first-ever run that
+ * downloads the embed model). The old 8s budget expired mid-boot and made `daemon start` print
+ * "failed to start" for a daemon that was simply still coming up. The budget now comfortably
+ * exceeds a normal warm boot; the poll returns the instant `/health` answers, so a fast boot is
+ * still fast, and a boot that exceeds even this is reported as "still warming up" (not "failed").
+ */
+const DEFAULT_START_TIMEOUT_MS = 45_000;
 /** The `/health` poll cadence while waiting for a freshly-spawned daemon to bind. */
 const START_POLL_INTERVAL_MS = 150;
 
