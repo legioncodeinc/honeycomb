@@ -13,7 +13,7 @@
  * DeepLake. A fixed git-remote reader drives the name suggestion deterministically.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -39,7 +39,11 @@ function cfg(over: Partial<RuntimeConfig> = {}): RuntimeConfig {
 let browseRoot: string;
 let cacheDir: string;
 beforeEach(() => {
-	browseRoot = mkdtempSync(join(tmpdir(), "hc-browse-"));
+	// `realpathSync` so the test's `browseRoot` MATCHES the handler's symlink-resolved canonical root
+	// (the traversal guard now compares REAL on-disk paths). On platforms whose tmpdir is itself a
+	// symlink (macOS `/var` → `/private/var`) the raw mkdtemp path and the canonical path differ; using
+	// the canonical form here keeps every `path === browseRoot` assertion correct cross-platform.
+	browseRoot = realpathSync(mkdtempSync(join(tmpdir(), "hc-browse-")));
 	cacheDir = mkdtempSync(join(tmpdir(), "hc-onb-cache-"));
 });
 afterEach(() => {
@@ -104,6 +108,37 @@ describe("PRD-059b GET /api/diagnostics/fs/browse (b-AC-2 / b-AC-3)", () => {
 		const body = (await res.json()) as BrowseBody;
 		expect(body.path).toBe(browseRoot); // clamped to the root, never above it.
 		expect(body.parent).toBeNull(); // at the root → no climb above.
+	});
+
+	it("refuses to traverse outside the root through a symlink/junction planted INSIDE it (CWE-22)", async () => {
+		// Plant a directory OUTSIDE the allowed root holding a secret child, then a symlink/junction
+		// INSIDE the root that targets it. A purely-lexical clamp would let `?path=<root>/escape` pass
+		// (it is lexically under root) and the OS would happily enumerate the outside target. The guard
+		// must compare REAL on-disk paths so the link's outside target is refused.
+		const outside = mkdtempSync(join(tmpdir(), "hc-outside-"));
+		mkdirSync(join(outside, "secret-dir"));
+		let linkMade = true;
+		try {
+			symlinkSync(outside, join(browseRoot, "escape"), "junction");
+		} catch {
+			linkMade = false; // unprivileged Windows runner without symlink rights — skip the assertion.
+		}
+		try {
+			if (!linkMade) return;
+			const daemon = buildDaemon();
+			// Browse the in-root link directly: its REAL target is outside → clamp back to the root.
+			const res = await daemon.app.request(`/api/diagnostics/fs/browse?path=${encodeURIComponent(join(browseRoot, "escape"))}`);
+			expect(res.status).toBe(200);
+			const body = (await res.json()) as BrowseBody;
+			// The clamp returned the root, NOT the outside target — so the outside "secret-dir" never leaks.
+			expect(body.path).toBe(browseRoot);
+			expect(body.children.map((ch) => ch.name)).not.toContain("secret-dir");
+			// And a deeper climb through the link (escape/secret-dir) is equally refused.
+			const deep = await daemon.app.request(`/api/diagnostics/fs/browse?path=${encodeURIComponent(join(browseRoot, "escape", "secret-dir"))}`);
+			expect(((await deep.json()) as BrowseBody).path).toBe(browseRoot);
+		} finally {
+			rmSync(outside, { recursive: true, force: true });
+		}
 	});
 
 	it("is NOT served in team mode (local-mode-only — security F-1)", async () => {

@@ -40,7 +40,7 @@
  * absolute path it recorded.
  */
 
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
 
@@ -166,18 +166,52 @@ function suggestProjectId(absPath: string, readRemote: GitRemoteReader): string 
 }
 
 /**
+ * Canonicalize an absolute path by resolving every symlink/junction in it to its REAL on-disk target
+ * ({@link realpathSync}). For a path that does not yet exist on disk, walk up to the deepest EXISTING
+ * ancestor, realpath THAT, and re-append the non-existent tail — so a path inside the root that points
+ * at nothing still canonicalizes deterministically without throwing. Trailing separator stripped.
+ *
+ * This is the load-bearing half of the traversal guard: `resolve()` is purely LEXICAL and does NOT
+ * follow links, so a symlink/junction that lives lexically inside the root but targets a directory
+ * OUTSIDE it would pass a string-prefix clamp while the OS happily reads the outside target. Comparing
+ * REAL paths closes that hole (CWE-22 symlink traversal) — the daemon never enumerates outside the
+ * real allowed root, even through a link planted inside it.
+ */
+function canonicalize(absPath: string): string {
+	let head = resolve(absPath);
+	const tail: string[] = [];
+	// Walk up to the deepest ancestor that actually exists, collecting the non-existent tail segments.
+	for (;;) {
+		try {
+			const real = realpathSync(head);
+			return stripTrailingSep(tail.length > 0 ? join(real, ...tail.reverse()) : real);
+		} catch {
+			const parent = resolve(head, "..");
+			if (parent === head) return stripTrailingSep(head); // reached a root with no realpath — give back the lexical form.
+			tail.push(head.slice(parent.length + 1));
+			head = parent;
+		}
+	}
+}
+
+/**
  * Resolve + clamp a requested browse path to the allowed root (059b traversal guard). Returns the
- * absolute path WHEN it is the root itself or a descendant of it; otherwise returns the root (refusing
- * to traverse outside it). A blank/absent `?path` resolves to the root. NEVER returns a path outside
- * the allowed root — the daemon must not become an arbitrary-filesystem reader for any caller.
+ * canonical (symlink-resolved) absolute path WHEN it is the root itself or a descendant of it;
+ * otherwise returns the root (refusing to traverse outside it). A blank/absent `?path` resolves to the
+ * root. NEVER returns a path outside the allowed root — the daemon must not become an arbitrary-
+ * filesystem reader for any caller, and a symlink/junction planted inside the root cannot smuggle an
+ * outside target past the clamp because BOTH sides are compared on their REAL on-disk paths.
  */
 function clampToRoot(requested: string | undefined, root: string): string {
-	const normalizedRoot = stripTrailingSep(resolve(root));
+	// `root` is already canonicalized at mount time; canonicalize the request the SAME way so a
+	// symlinked tmpdir (e.g. macOS `/var` → `/private/var`) compares like-for-like.
+	const normalizedRoot = root;
 	if (requested === undefined || requested.trim() === "") return normalizedRoot;
-	const abs = stripTrailingSep(resolve(requested));
+	const abs = canonicalize(requested);
 	if (abs === normalizedRoot) return normalizedRoot;
 	// A descendant must start with `root + sep`; anything else (a sibling, a parent, an absolute
-	// escape, a `..` climb that resolve() already collapsed) clamps back to the root.
+	// escape, a `..` climb that resolve() collapsed, or a symlink whose REAL target lands outside)
+	// clamps back to the root.
 	if (abs.startsWith(normalizedRoot + sep)) return abs;
 	return normalizedRoot;
 }
@@ -189,9 +223,10 @@ function stripTrailingSep(p: string): string {
 
 /** The parent of `dir` within the allowed root, or `null` when `dir` IS the root (no climb above). */
 function parentWithinRoot(dir: string, root: string): string | null {
-	const normalizedRoot = stripTrailingSep(resolve(root));
+	// `root` is the canonical (mount-time) root; `dir` is already the canonical, in-root browse path.
+	const normalizedRoot = root;
 	if (dir === normalizedRoot) return null;
-	const parent = stripTrailingSep(resolve(dir, ".."));
+	const parent = canonicalize(resolve(dir, ".."));
 	return parent === normalizedRoot || parent.startsWith(normalizedRoot + sep) ? parent : normalizedRoot;
 }
 
@@ -236,7 +271,11 @@ export function mountOnboardingApi(daemon: Daemon, options: MountOnboardingOptio
 	const group = daemon.group(ONBOARDING_GROUP);
 	if (group === undefined) return;
 	const mode: DeploymentMode = daemon.config.mode;
-	const root = stripTrailingSep(resolve(options.browseRoot ?? homedir()));
+	// Canonicalize the allowed root ONCE (symlink-resolved). The browse clamp compares the request's
+	// REAL path against THIS, so a symlink/junction planted inside the root cannot smuggle an outside
+	// target past the guard (CWE-22 symlink traversal). A non-existent override root falls back to its
+	// lexical form via `canonicalize`.
+	const root = canonicalize(options.browseRoot ?? homedir());
 	const readRemote = options.readRemote ?? defaultGitRemoteReader;
 	const notLocal = (): boolean => mode !== "local";
 
