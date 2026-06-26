@@ -12,7 +12,8 @@
  *   - clicking a node selects it and surfaces a detail block with its id / kind / label + the
  *     neighbor labels matching the snapshot edges (AC-3);
  *   - clicking the selected node again / clicking the canvas clears the selection (AC-4);
- *   - the `built: false` branch still renders the `honeycomb graph build` prompt (AC-5).
+ *   - the `built: false` branch renders the wired "Build graph" button, and with no wire threaded
+ *     (defensive) an honest pointer to the Graph page — never the dead `honeycomb graph build` command.
  *
  * The pure {@link layout} / {@link neighborsOf} helpers are unit-asserted directly too (FR-8) so the
  * deterministic placement PRD-041 reuses is locked down without a DOM.
@@ -219,7 +220,7 @@ describe("GraphCanvas empty state (built: false)", () => {
 		expect(wire.buildGraph).toHaveBeenCalledTimes(2);
 	});
 
-	it("a failed build keeps the empty state, shows the inline error + the CLI hint for power users", async () => {
+	it("a failed build keeps the empty state, shows the inline error, and offers NO dead CLI hint", async () => {
 		const onBuilt = vi.fn();
 		const wire = buildWire({ built: false, nodeCount: 0, edgeCount: 0, fileCount: 0 });
 		mountWithWire({ built: false, nodes: [], edges: [] }, wire, onBuilt);
@@ -231,13 +232,15 @@ describe("GraphCanvas empty state (built: false)", () => {
 		});
 		expect(onBuilt).not.toHaveBeenCalled();
 		expect(container.querySelector('[data-testid="build-graph-error"]')).not.toBeNull();
-		expect(container.textContent ?? "").toContain("honeycomb graph build");
+		// The button is right there to retry — we never surface the non-existent `honeycomb graph build` command.
+		expect(container.textContent ?? "").not.toContain("honeycomb graph build");
 	});
 
-	it("without a wire (defensive direct mount), falls back to the CLI prompt unchanged (AC-5)", () => {
+	it("without a wire (defensive direct mount), points at the Graph page button — never the dead CLI command (AC-5)", () => {
 		mount({ built: false, nodes: [], edges: [] });
-		expect(container.textContent ?? "").toContain("honeycomb graph build");
+		expect(container.textContent ?? "").not.toContain("honeycomb graph build");
 		expect(container.textContent ?? "").toContain("No graph built for this workspace.");
+		expect(container.textContent ?? "").toContain("Use the Build graph button on the Graph page.");
 		// No canvas / node groups in the empty state.
 		expect(container.querySelector("svg")).toBeNull();
 		expect(container.querySelectorAll('g[role="button"]')).toHaveLength(0);
