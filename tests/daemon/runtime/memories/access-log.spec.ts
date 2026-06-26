@@ -355,8 +355,22 @@ describe("PRD-058e access_count is counted EXACTLY ONCE across compaction (round
 		const state = { accessCount: 0, compactedAt: "", compactedId: "", rows: [...initial.rows] };
 		const storage: StorageQuery = {
 			async query(statement: string): Promise<QueryResult> {
-				// Append: a new raw event row + the caller's separate access_count +1 UPDATE applies the bump.
-				if (/^INSERT INTO "memory_access"/.test(statement)) return ok([], 0);
+				// Append: the raw event row is populated FROM the actual INSERT (never a manual pre-seed), so
+				// the invariant fails if recordAccess ever drops the append-only event while still bumping
+				// access_count via its separate UPDATE (the cross-step contract this test guards).
+				if (/^INSERT INTO "memory_access"/.test(statement)) {
+					const m = /\(([^)]+)\) VALUES \((.+)\)$/.exec(statement);
+					if (m) {
+						const cols = m[1]!.split(/,\s*/).map((c) => c.trim());
+						const vals = m[2]!.split(/,\s*/).map((v) => v.trim().replace(/^'([\s\S]*)'$/, "$1"));
+						const row: StorageRow = {};
+						cols.forEach((c, i) => {
+							row[c] = vals[i] ?? "";
+						});
+						state.rows.push(row);
+					}
+					return ok([], 0);
+				}
 				// The watermark/count read over "memories": return the live cell (a present row).
 				if (/^SELECT .* FROM "memories"/.test(statement)) {
 					return ok([{ access_count: state.accessCount, access_compacted_at: state.compactedAt, access_compacted_id: state.compactedId, last_reinforced_at: "" }], 0);
@@ -394,8 +408,7 @@ describe("PRD-058e access_count is counted EXACTLY ONCE across compaction (round
 		const N = 5;
 		for (let i = 0; i < N; i++) {
 			const at = new Date(NOW - (N - i) * MS_PER_DAY);
-			// Pre-seed the raw row the (separate) compaction read will later see (the fake append is a no-op).
-			state.rows.push({ id: `e${i}`, at: at.toISOString(), kind: "recall" });
+			// The raw row is populated by the fake's INSERT handler from the real append, not pre-seeded.
 			await recordAccess(`mem-1`, 1, "recall", { storage, now: () => at, newId: () => `e${i}` }, SCOPE);
 		}
 		// INVARIANT before compaction: every append counted once.
