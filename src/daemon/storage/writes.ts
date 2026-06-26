@@ -26,10 +26,10 @@
  * table identity + ColumnDef array (a `HealTarget`) and the column values.
  */
 
-import type { QueryScope, StorageQuery } from "./client.js";
+import type { QueryOptions, QueryScope, StorageQuery } from "./client.js";
 import type { HealTarget } from "./heal.js";
 import { withHeal } from "./heal.js";
-import { isOk, type QueryResult, type StorageRow } from "./result.js";
+import { isOk, ok, type QueryResult, type StorageRow } from "./result.js";
 import { eLiteral, sLiteral, sqlColumnList, sqlIdent, sqlStr } from "./sql.js";
 
 /**
@@ -112,6 +112,72 @@ export function appendOnlyInsert(
 ): Promise<QueryResult> {
 	const sql = buildInsert(target.table, row);
 	return withHeal(client, target, scope, () => client.query(sql, scope));
+}
+
+/**
+ * Build a single multi-row `INSERT INTO "<table>" (cols) VALUES (vals1), (vals2), …`
+ * statement (PRD-062c L-C1): ONE append that lands N rows, instead of N separate
+ * single-row INSERTs. Every column name routes through `sqlIdent` and every value
+ * through `renderValue` (the same guarded path {@link buildInsert} uses), so the
+ * SQL-safety floor is unchanged — a batched append is exactly N single appends
+ * fused into one statement, not a new injection surface.
+ *
+ * The shared column list is taken from the FIRST row and EVERY subsequent row must
+ * carry the same columns in the same order — the caller (capture) builds each row
+ * from the same `buildRow`, so this holds by construction; a row with a divergent
+ * column shape throws rather than silently writing a misaligned tuple.
+ */
+export function buildInsertMany(table: string, rows: readonly RowValues[]): string {
+	if (rows.length === 0) {
+		throw new Error("buildInsertMany: at least one row is required");
+	}
+	const tbl = sqlIdent(table);
+	const first = rows[0] as RowValues;
+	const colNames = first.map(([name]) => name);
+	// Validate every row's column shape up front so a misaligned tuple is never built.
+	for (const row of rows) assertSameColumns(colNames, row);
+	const cols = colNames.map((name) => sqlIdent(name)).join(", ");
+	// `vals` is wholly routed through `renderValue` (the guarded value path), so the
+	// SQL-safety audit recognizes the binding as pre-escaped, exactly like `buildColsVals`.
+	const vals = rows.map((row) => `(${row.map(([, v]) => renderValue(v)).join(", ")})`).join(", ");
+	return `INSERT INTO "${tbl}" (${cols}) VALUES ${vals}`;
+}
+
+/** Throw when a batched-append row's columns diverge from the shared header (name or order). */
+function assertSameColumns(expected: readonly string[], row: RowValues): void {
+	if (row.length !== expected.length) {
+		throw new Error(`buildInsertMany: row column count ${row.length} != expected ${expected.length}`);
+	}
+	for (let i = 0; i < expected.length; i++) {
+		const actual = (row[i] as readonly [string, ColumnValue])[0];
+		if (actual !== expected[i]) {
+			throw new Error(`buildInsertMany: row column "${actual}" != expected "${expected[i]}" at index ${i}`);
+		}
+	}
+}
+
+/**
+ * Append-only MULTI-ROW INSERT (PRD-062c L-C1 / AC-5): the batched form of
+ * {@link appendOnlyInsert}. Lands every row in `rows` with ONE multi-row append
+ * instead of one INSERT per row, so a burst of captured events is a single
+ * DeepLake write. Heal-aware via `withHeal` exactly like the single-row append (a
+ * missing `sessions` table is CREATEd and the batched INSERT retried once).
+ *
+ * Additive: it does NOT change {@link appendOnlyInsert}'s signature or behavior —
+ * a caller batching writes opts in by calling this; everyone else is unaffected.
+ * An empty `rows` is a no-op that resolves OK (nothing to write) so a flush of an
+ * empty window never issues a statement.
+ */
+export function appendOnlyInsertMany(
+	client: StorageQuery,
+	target: HealTarget,
+	scope: QueryScope,
+	rows: readonly RowValues[],
+	opts?: QueryOptions,
+): Promise<QueryResult> {
+	if (rows.length === 0) return Promise.resolve(ok([], 0));
+	const sql = buildInsertMany(target.table, rows);
+	return withHeal(client, target, scope, () => client.query(sql, scope, opts));
 }
 
 /**

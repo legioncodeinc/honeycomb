@@ -95,7 +95,13 @@ describe("PRD-019b attachHooksHandlers wires /api/hooks/* onto the route group",
 		});
 
 		// The attach seam — storage + queue only; the sessions target is defaulted.
-		const handler = attachHooksHandlers(daemon, { storage, queue });
+		// PRD-062c: pin the flags-OFF write path so the INSERT reaches the wire synchronously
+		// within this request (AC-9 parity); the batched path is proven in its own suite.
+		const handler = attachHooksHandlers(daemon, {
+			storage,
+			queue,
+			captureConfig: { batch: false, windowMs: 1_000, maxEvents: 25, envelopeBudgetBytes: 0 },
+		});
 		expect(handler.counters).toBeDefined();
 
 		const res = await daemon.app.request("/api/hooks/capture", { method: "POST", headers: sessionHeaders(), body: JSON.stringify(body()) });

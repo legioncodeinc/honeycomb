@@ -230,7 +230,14 @@ function buildSlice() {
 	// The REAL daemon-side attach step (the deferred daemon-assembly seam). Before it
 	// the `/api/hooks/capture` route 501s; after it the handler serves.
 	const sessionsTarget: HealTarget = healTargetFor("sessions");
-	const handler = attachHooksHandlers(daemon, { storage, queue, sessionsTarget });
+	// PRD-062c: this round-trip parses the INSERT off the wire synchronously, so pin the
+	// flags-OFF write path (one immediate append-only INSERT per event) — AC-9 parity.
+	const handler = attachHooksHandlers(daemon, {
+		storage,
+		queue,
+		sessionsTarget,
+		captureConfig: { batch: false, windowMs: 1_000, maxEvents: 25, envelopeBudgetBytes: 0 },
+	});
 
 	// The authored transport adapter (the deferred glue) → in-process daemon dispatch.
 	const daemonClient = createDaemonHookClient(daemon, { org: ORG, workspace: WORKSPACE });

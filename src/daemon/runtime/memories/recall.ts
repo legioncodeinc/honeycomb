@@ -84,9 +84,44 @@ import {
 } from "../recall/config.js";
 import type { EmbedClient } from "../services/embed-client.js";
 import type { RecallMode } from "../vault/api.js";
+import { Semaphore } from "./bounded-pool.js";
+import { amplificationConfig } from "./amplification-config.js";
+import type { QuerySource } from "../../storage/query-meter.js";
 import { actrActivation, type AccessEvent, type ActrParams, DEFAULT_ACTR_PARAMS } from "./activation.js";
 import { applyCalibration, type CalibrationModel } from "./calibration.js";
 import type { RefStatus } from "../../storage/catalog/memories.js";
+
+/**
+ * The `source` label every recall-arm DeepLake read carries through `StorageClient.query`'s
+ * options (PRD-062a / PRD-062d). The 062a query meter attributes the recall amplification
+ * (semantic `<#>` + the lexical arms + hydrate + rerank/dedup fetch) to `recall-arm` so the
+ * before/after compute story is measurable. The label is meter-only — it NEVER changes the
+ * query result (parity, AC-62d.2.2).
+ */
+const SOURCE_RECALL_ARM: QuerySource = "recall-arm";
+
+/**
+ * The process-wide bounded pool that caps in-flight DeepLake queries across ALL recall arms
+ * (PRD-062d / L-D2 / AC-62d.2.1). Lazily built from {@link amplificationConfig} the first time
+ * a recall runs without an injected pool, so a burst of concurrent recalls SHARES one ceiling
+ * (a per-recall pool would let N recalls fire N×width queries — the shared pool is the real
+ * cap, and mirrors the PRD's "a shared limit also caps total DeepLake concurrency"). A unit
+ * test injects its own {@link Semaphore} via {@link MemoryRecallDeps.recallPool} for a
+ * deterministic in-flight assertion; this shared default is the production wiring.
+ */
+let sharedRecallPool: Semaphore | undefined;
+
+/** Resolve the recall pool: the injected one, else the lazily-built process-wide shared pool. */
+function resolveRecallPool(deps: MemoryRecallDeps): Semaphore {
+	if (deps.recallPool !== undefined) return deps.recallPool;
+	if (sharedRecallPool === undefined) sharedRecallPool = new Semaphore(amplificationConfig().recallMaxConcurrency);
+	return sharedRecallPool;
+}
+
+/** Reset the shared recall pool (test-only seam, paired with `resetAmplificationConfigCache`). */
+export function resetSharedRecallPool(): void {
+	sharedRecallPool = undefined;
+}
 
 /** The default number of recall hits returned when the caller supplies no limit. */
 export const DEFAULT_RECALL_LIMIT = 20;
@@ -684,6 +719,16 @@ export interface MemoryRecallDeps {
 	 * byte-for-byte as before (e-AC-4 back-compat). ABSENT → defaults to {@link DEFAULT_MMR_LAMBDA}.
 	 */
 	readonly contextAssembly?: ContextAssemblyConfig;
+	/**
+	 * PRD-062d (L-D2 / AC-62d.2.1): the bounded-concurrency pool that caps how many DeepLake
+	 * queries the recall arms have in flight at once. ABSENT → recall uses the process-wide
+	 * shared pool sized from {@link amplificationConfig} (`HONEYCOMB_RECALL_MAX_CONCURRENCY`,
+	 * default 6) — the production wiring, so a burst of recalls shares ONE ceiling. A unit test
+	 * injects its own {@link Semaphore} for a deterministic in-flight assertion. The pool is a
+	 * PURE timing control: it changes WHEN an arm's query runs, never the merged result
+	 * (parity, AC-62d.2.2 / AC-8). With a width ≥ the arm count it is a no-op on output.
+	 */
+	readonly recallPool?: Semaphore;
 }
 
 /** A recall request as it enters the adapter (the zod-validated, scoped body). */
@@ -747,7 +792,12 @@ function projectConjunctFor(request: MemoryRecallRequest): string {
  * exist must NOT erase the hits from the arms whose tables DO.
  */
 async function runArm(sql: string, request: MemoryRecallRequest, deps: MemoryRecallDeps): Promise<StorageRow[]> {
-	const result = await deps.storage.query(sql, request.scope);
+	// PRD-062d (L-D2 / AC-62d.2.1): every recall-arm read runs UNDER the bounded pool so the
+	// in-flight DeepLake-query count has a ceiling across all arms (semantic hydrate, the three
+	// lexical arms, and the rerank/dedup batch fetches all flow through here). PRD-062a: tag the
+	// read `recall-arm` so the meter attributes it. The pool changes timing, not the result rows.
+	const pool = resolveRecallPool(deps);
+	const result = await pool.run(() => deps.storage.query(sql, request.scope, { source: SOURCE_RECALL_ARM }));
 	return isOk(result) ? result.rows : [];
 }
 
@@ -846,16 +896,21 @@ async function runSemanticArm(
 	try {
 		// vectorSearch validates the dim (asserts 768) + over-fetches; the org/workspace
 		// partition rides the QueryScope, so the in-row scope filter is empty here EXCEPT for
-		// the project-segment conjunct ANDed inline (49b-AC-2).
-		const recall = await vectorSearch(deps.storage, request.scope, {
-			table: spec.table,
-			idColumn: spec.idColumn,
-			embeddingColumn: spec.embeddingColumn,
-			queryVector,
-			scope: {},
-			limit,
-			...(projectClause !== "" ? { extraClause: projectClause } : {}),
-		});
+		// the project-segment conjunct ANDed inline (49b-AC-2). PRD-062d (L-D2): the `<#>` match
+		// runs UNDER the same bounded pool as the lexical arms so the semantic fan-out (two arms
+		// concurrently, each over a table) counts against the shared in-flight ceiling (AC-62d.2.1).
+		const pool = resolveRecallPool(deps);
+		const recall = await pool.run(() =>
+			vectorSearch(deps.storage, request.scope, {
+				table: spec.table,
+				idColumn: spec.idColumn,
+				embeddingColumn: spec.embeddingColumn,
+				queryVector,
+				scope: {},
+				limit,
+				...(projectClause !== "" ? { extraClause: projectClause } : {}),
+			}),
+		);
 		scored = recall.ids;
 	} catch {
 		// A missing embedding column / table or any query error degrades THIS arm to

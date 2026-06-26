@@ -228,6 +228,23 @@ export {
 	resolveListLimit,
 } from "./reads.js";
 
+// ── PRD-062d: fan-out coalescing + recall concurrency caps ───────────────────
+export { Semaphore, mapBounded } from "./bounded-pool.js";
+export {
+	type AmplificationConfig,
+	type AmplificationConfigProvider,
+	type RawAmplificationConfig,
+	AmplificationConfigError,
+	AmplificationConfigSchema,
+	DEFAULT_FANOUT_BATCH,
+	DEFAULT_RECALL_MAX_CONCURRENCY,
+	MIN_RECALL_MAX_CONCURRENCY,
+	amplificationConfig,
+	envAmplificationConfigProvider,
+	resetAmplificationConfigCache,
+	resolveAmplificationConfig,
+} from "./amplification-config.js";
+
 // ── Resolve adapter (PRD-046e) ────────────────────────────────────────────────
 export {
 	DEFAULT_RESOLVE_TURNS,

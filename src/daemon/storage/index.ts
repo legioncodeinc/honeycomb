@@ -15,6 +15,7 @@ import {
 	resolveStorageConfig,
 	type StorageConfig,
 } from "./config.js";
+import { QueryMeter } from "./query-meter.js";
 import { connectionError, type QueryResult } from "./result.js";
 import { type DeepLakeTransport, HttpDeepLakeTransport } from "./transport.js";
 
@@ -43,6 +44,15 @@ export {
 	StorageConfigError,
 	StorageConfigSchema,
 } from "./config.js";
+export {
+	DEFAULT_QUERY_SOURCE,
+	type MeterSnapshot,
+	type MeterSnapshotEntry,
+	QUERY_SOURCES,
+	QueryMeter,
+	type QuerySource,
+	type SourceCounts,
+} from "./query-meter.js";
 export {
 	type ConnectionError,
 	connectionError,
@@ -201,12 +211,18 @@ export function createStorageClient(
 		 * a test passes a no-op so the bounded backoff is instant and deterministic.
 		 */
 		sleep?: SleepFn;
+		/**
+		 * Inject a shared query meter (PRD-062a). Defaults to a fresh in-memory
+		 * {@link QueryMeter}; the daemon may pass a single shared instance so its
+		 * diagnostics surface and the idle-baseline harness read the SAME counts.
+		 */
+		meter?: QueryMeter;
 	} = {},
 ): StorageClient {
 	const provider = options.provider ?? defaultCredentialProvider();
 	const config: StorageConfig = resolveStorageConfig(provider);
 	const transport: DeepLakeTransport = options.transport ?? new HttpDeepLakeTransport(config.endpoint, config.token);
-	return new StorageClient(transport, config, options.sleep);
+	return new StorageClient(transport, config, options.sleep, options.meter);
 }
 
 /**

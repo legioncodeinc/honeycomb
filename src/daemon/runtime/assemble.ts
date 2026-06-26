@@ -55,6 +55,7 @@ import { createJobQueueService } from "./services/job-queue.js";
 import { type CreateDaemonOptions, type Daemon, type DaemonServices, createDaemon } from "./server.js";
 
 import { attachHooksHandlers } from "./capture/attach.js";
+import type { CaptureHandler } from "./capture/capture-handler.js";
 import { mountGraphApi } from "./codebase/api.js";
 import { mountOntologyApi } from "./ontology/api.js";
 import { mountSkillPropagationApi } from "./skillify/propagation-api.js";
@@ -117,6 +118,8 @@ import {
 import { resolvePollinatingConfig } from "./pollinating/config.js";
 import { createPollinatingTrigger } from "./pollinating/trigger.js";
 import { createPollinatingWorker, type PollinatingJobWorker } from "./pollinating/worker.js";
+import { type PollBackoffConfig, resolvePollBackoffConfig } from "./services/poll-backoff.js";
+import { createLeaseCoordinator, type LeaseCoordinator, resolvePollConsolidateConfig } from "./services/lease-coordinator.js";
 
 // ── The PRD-046a summary-worker mount (the deferred-assembly seam PRD-017 left) ──
 import { createSummaryJobWorker, type SummaryJobWorker } from "./summaries/index.js";
@@ -729,7 +732,7 @@ export function assembleSeams(
 	logStore: LogStore,
 	seams: SeamFns = defaultSeamFns,
 	vault?: VaultSettingsReader,
-): void {
+): CaptureHandler {
 	// The daemon's configured default tenancy scope (the single LOCAL tenant) is RESOLVED ONCE
 	// at the composition root (`assembleDaemon`) from the SAME credential source the storage
 	// client connected through, then THREADED in here — never re-resolved independently. (The
@@ -755,7 +758,10 @@ export function assembleSeams(
 	//    the extraction → decision → controlled-write → graph-persist pipeline. The
 	//    enqueue is fail-soft in the capture handler (a pipeline enqueue failure never
 	//    breaks the captured turn).
-	seams.attachHooks(daemon, {
+	// PRD-062c (AC-5 / AC-62c.1.2): hold the constructed capture handler so the graceful
+	// shutdown path can FORCE-FLUSH its write buffer, draining any batched-but-unwritten
+	// captured rows before the daemon stops (so a clean stop never loses a buffered event).
+	const captureHandler = seams.attachHooks(daemon, {
 		storage,
 		queue: daemon.services.queue,
 		embed,
@@ -1110,6 +1116,10 @@ export function assembleSeams(
 			process.stderr.write(`honeycomb: skill propagation API mount failed (non-fatal): ${reason}\n`);
 		}
 	}
+
+	// PRD-062c (AC-5 / AC-62c.1.2): return the capture handler so the composition root can
+	// force-flush its write buffer in the graceful-shutdown path (drain batched-but-unwritten rows).
+	return captureHandler;
 }
 
 /**
@@ -1355,6 +1365,7 @@ async function buildGatedPollinatingWorker(
 	scope: QueryScope,
 	queue: DaemonServices["queue"],
 	vault: VaultSettingsReader | undefined,
+	backoff: PollBackoffConfig,
 ): Promise<PollinatingJobWorker | null> {
 	// Resolve the env gate fail-soft FIRST: a malformed pollinating-config knob must NEVER take the
 	// daemon down — treat it as disabled (the false-safe default the schema already documents).
@@ -1418,7 +1429,7 @@ async function buildGatedPollinatingWorker(
 
 	// The consumer: leases ONLY `["pollinating"]`, runs the runner with the real model + the 008c
 	// apply (inside the runner) + the append-only state update, completes/fails the job.
-	return createPollinatingWorker({ queue, storage, scope, config, model, trigger });
+	return createPollinatingWorker({ queue, storage, scope, config, model, trigger, backoff });
 }
 
 /**
@@ -1502,6 +1513,7 @@ async function buildPipelineWorker(
 	scope: QueryScope,
 	queue: DaemonServices["queue"],
 	embed: EmbedAttachment,
+	backoff: PollBackoffConfig,
 ): Promise<StageWorker> {
 	// Resolve the pipeline config fail-soft: a malformed knob must NEVER take the daemon
 	// down — degrade to the schema's false-safe defaults (every stage gate defaults OFF,
@@ -1553,7 +1565,7 @@ async function buildPipelineWorker(
 		retention: { storage, scope: queryScope, config },
 	});
 
-	return createStageWorker({ queue, handlers });
+	return createStageWorker({ queue, handlers, backoff });
 }
 
 /**
@@ -1743,7 +1755,9 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// ── a-AC-2 / d-AC-1: fire the seams EXACTLY ONCE, after construction (the four core
 	// seams + the /api/logs reader always; the /dashboard host local-mode only per security
 	// F-1; PLUS the three data-API seams — memories/vfs/product-data — always, 022d).
-	assembleSeams(
+	// PRD-062c: hold the capture handler the seams construct so `shutdown()` can drain its
+	// write buffer (AC-5). `assembleSeams` returns it from its `attachHooks` step.
+	const captureHandler = assembleSeams(
 		daemon,
 		storage,
 		scope,
@@ -1895,6 +1909,13 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// UNCONDITIONALLY (the per-stage gates inside the config decide what actually runs) inside
 	// `start()` AFTER the queue is up, and stopped in `shutdown()`. Null until `start()` runs.
 	let pipelineWorker: StageWorker | null = null;
+	// PRD-062b L-B3 (AC-4): the single combined lease coordinator. When
+	// `HONEYCOMB_POLL_CONSOLIDATE` is on AND pollinating is enabled, the pipeline +
+	// pollinating workers are registered as participants and this coordinator runs ONE
+	// combined lease pass over the union of their kinds instead of two independent
+	// scans. Null when consolidation is off (the two workers start independently — the
+	// AC-9 parity path) or when pollinating is disabled (only the pipeline worker exists).
+	let leaseCoordinator: LeaseCoordinator | null = null;
 	// PRD-045f f-AC-1: the daemon-resident SKILLIFY worker — the live CONSUMER of `skillify`
 	// jobs capture enqueues when the turn-counter threshold is crossed. Built + started
 	// UNCONDITIONALLY (core feature, not gated) inside `start()` AFTER the queue is up, and
@@ -1926,6 +1947,25 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// Start the daemon's real services (queue → watcher → runtime-path).
 			await daemon.startServices();
 
+			// ── PRD-062b: resolve the adaptive-backoff + consolidation knobs ONCE, fail-soft.
+			// A malformed knob must NEVER take the daemon down — degrade to the schema's
+			// safe defaults (backoff still default-ON per the env provider; consolidation
+			// default-ON). Both are threaded into the workers below; consolidation also
+			// decides whether the pipeline + pollinating workers run under one combined
+			// lease pass (AC-4) or two independent ones (the AC-9 parity path).
+			let pollBackoff: PollBackoffConfig;
+			try {
+				pollBackoff = resolvePollBackoffConfig();
+			} catch {
+				pollBackoff = resolvePollBackoffConfig({ read: () => ({}) });
+			}
+			let consolidatePoll = false;
+			try {
+				consolidatePoll = resolvePollConsolidateConfig().enabled;
+			} catch {
+				consolidatePoll = false;
+			}
+
 			// ── PRD-046a a-AC-1: build + start the SUMMARY worker, the live CONSUMER of
 			// `summary` jobs. It is built AFTER `startServices()` so it leases from a started
 			// queue. Summaries are a CORE feature (not gated like pollinating), so it starts
@@ -1951,8 +1991,12 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				// dependency degrades to the no-op client when no `agent.yaml`/`inference:` is present
 				// (zero-mutation passes), exactly as the pollinating worker does (constraint).
 				try {
-					pipelineWorker = await buildPipelineWorker(options, storage, scope, daemon.services.queue, embed);
-					pipelineWorker.start();
+					pipelineWorker = await buildPipelineWorker(options, storage, scope, daemon.services.queue, embed, pollBackoff);
+					// PRD-062b (AC-4): when consolidation is ON, DEFER starting the pipeline
+					// worker's own loop — the single lease coordinator (built at the pollinating
+					// block below, once we know whether pollinating is enabled) drives it. When
+					// consolidation is OFF, start it independently now (the AC-9 two-pass path).
+					if (!consolidatePoll) pipelineWorker.start();
 				} catch (err: unknown) {
 					const reason = err instanceof Error ? err.message : String(err);
 					process.stderr.write(`honeycomb: memory-pipeline worker start failed (non-fatal): ${reason}\n`);
@@ -2011,8 +2055,43 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// rather than propagated. When the gate is closed, `buildGatedPollinatingWorker`
 			// returns null and we start nothing.
 			try {
-				pollinatingWorker = await buildGatedPollinatingWorker(options, storage, scope, daemon.services.queue, vault);
-				pollinatingWorker?.start();
+				pollinatingWorker = await buildGatedPollinatingWorker(options, storage, scope, daemon.services.queue, vault, pollBackoff);
+				// PRD-062b (AC-4): consolidate ONLY the REAL production workers. An explicitly
+				// INJECTED test worker (`options.pollinatingWorker`) is a lifecycle-recording fake
+				// whose own `start()`/`stop()` the test asserts — it is not a real lease participant,
+				// so consolidation must respect its standalone lifecycle and never route it through
+				// the coordinator. So consolidation runs only when (a) the flag is on AND (b) the
+				// pollinating worker was the REAL build (not injected).
+				const pollinatingInjected = options.pollinatingWorker !== undefined;
+				if (consolidatePoll && !pollinatingInjected) {
+					// If consolidation is ON, do NOT start the pollinating worker's own loop —
+					// register it (with the already-built pipeline worker) as a participant of a
+					// SINGLE lease coordinator that runs ONE combined pass over the union of their
+					// kinds. Kind isolation is preserved: the union lease only leases a kind a
+					// participant owns, and each leased job is dispatched to its owner. The pipeline
+					// worker was deferred above under the same flag.
+					const participants = [pipelineWorker, pollinatingWorker].filter(
+						(p): p is StageWorker | PollinatingJobWorker => p !== null,
+					);
+					if (participants.length > 0) {
+						leaseCoordinator = createLeaseCoordinator({
+							queue: daemon.services.queue,
+							participants,
+							backoff: pollBackoff,
+							flatIntervalMs: 1_000,
+						});
+						leaseCoordinator.start();
+					}
+				} else {
+					// Consolidation OFF (the two-pass AC-9 parity path) OR an injected test worker:
+					// start the pollinating worker independently. When consolidation was selected but
+					// the pollinating worker was injected, the pipeline worker's start was deferred
+					// above, so start it here too so it is never left un-pumped.
+					pollinatingWorker?.start();
+					if (consolidatePoll && pollinatingInjected && pipelineWorker !== null) {
+						pipelineWorker.start();
+					}
+				}
 			} catch (err: unknown) {
 				// A pollinating wiring failure is surfaced to stderr (never silently swallowed) but is
 				// NOT fatal: the daemon is already up and serving; pollinating simply stays off this
@@ -2022,13 +2101,32 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				const reason = err instanceof Error ? err.message : String(err);
 				process.stderr.write(`honeycomb: pollinating worker start failed (non-fatal): ${reason}\n`);
 				pollinatingWorker = null;
+				// If consolidation was selected but the coordinator never started (the pollinating
+				// build threw), fall back to starting the pipeline worker's own loop so the pipeline
+				// is never left un-pumped after its start was deferred under the consolidation flag.
+				if (consolidatePoll && leaseCoordinator === null && pipelineWorker !== null) {
+					pipelineWorker.start();
+				}
 			}
 		},
 
 		async shutdown(): Promise<void> {
+			// PRD-062c (AC-5 / AC-62c.1.2): FIRST drain the capture write buffer while the storage
+			// client is still up, so any batched-but-unwritten captured rows are flushed before the
+			// services stop — a clean shutdown never loses a buffered event. `flush()` is idempotent
+			// and never throws (a flush failure is logged inside the handler, not surfaced here). The
+			// `?.` tolerates a test seam whose fake capture handler does not implement `flush`.
+			await captureHandler.flush?.();
 			// a-AC-5: graceful shutdown — stop the pollinating worker + the refresher, drain the
 			// services, and remove the lock so no stale lock survives. Idempotent + never throws
 			// on a missing lock.
+			// PRD-062b (AC-4): stop the single combined lease coordinator first when it owns the
+			// poll loop. The individual workers' own `stop()` below is an idempotent no-op when
+			// consolidation was on (their loops were never started — the coordinator drove them).
+			if (leaseCoordinator !== null) {
+				leaseCoordinator.stop();
+				leaseCoordinator = null;
+			}
 			if (pollinatingWorker !== null) {
 				pollinatingWorker.stop();
 				pollinatingWorker = null;

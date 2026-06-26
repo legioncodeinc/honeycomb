@@ -33,6 +33,8 @@
  */
 
 import type { MemoryAccessKind } from "../../storage/catalog/memory-lifecycle.js";
+import { mapBounded, Semaphore } from "./bounded-pool.js";
+import { amplificationConfig } from "./amplification-config.js";
 
 /** The default usefulness for an injected, non-contradicted, non-ignored recall (the documented `u ≈ 1`). */
 export const USEFULNESS_CONFIRMED = 1.0;
@@ -114,10 +116,40 @@ export interface UsefulnessGraderDeps {
 	 * {@link DEFAULT_DETECT_TIMEOUT_MS}; a test injects a tiny value.
 	 */
 	readonly detectTimeoutMs?: number;
+	/**
+	 * PRD-062d (L-D2 / AC-62d.2.1): the bounded pool that caps how many {@link gradeUsefulness}
+	 * calls (and therefore how many contradiction-detector queries) {@link gradeRecallBatch} runs
+	 * at once. ABSENT → the batch uses the process-wide ceiling from {@link amplificationConfig}
+	 * (`HONEYCOMB_RECALL_MAX_CONCURRENCY`, default 6), so a large batch can no longer fire an
+	 * unbounded `Promise.all` of detector calls. A test injects its own {@link Semaphore} for a
+	 * deterministic in-flight assertion. PURE timing control: grades are still returned in INPUT
+	 * ORDER, one per signal — the cap changes WHEN a grade runs, never the result (parity, AC-8).
+	 */
+	readonly gradePool?: Semaphore;
 }
 
 /** The default per-detect timeout (ms): a hung NLI judge degrades to "no contradiction" after this. */
 export const DEFAULT_DETECT_TIMEOUT_MS = 5_000;
+
+/**
+ * The process-wide bounded pool for the grader batch (PRD-062d / L-D2). Lazily built from
+ * {@link amplificationConfig} the first time a batch runs without an injected pool, mirroring
+ * the recall side's shared pool. A test injects {@link UsefulnessGraderDeps.gradePool} for a
+ * deterministic cap assertion.
+ */
+let sharedGradePool: Semaphore | undefined;
+
+/** Resolve the grade pool: the injected one, else the lazily-built process-wide shared pool. */
+function resolveGradePool(deps: UsefulnessGraderDeps): Semaphore {
+	if (deps.gradePool !== undefined) return deps.gradePool;
+	if (sharedGradePool === undefined) sharedGradePool = new Semaphore(amplificationConfig().recallMaxConcurrency);
+	return sharedGradePool;
+}
+
+/** Reset the shared grade pool (test-only seam, paired with `resetAmplificationConfigCache`). */
+export function resetSharedGradePool(): void {
+	sharedGradePool = undefined;
+}
 
 /** Clamp a value into `[0,1]`; non-finite → 0. */
 function clampUnit(value: number): number {
@@ -205,7 +237,13 @@ export async function gradeRecallBatch(
 	signals: readonly RecallOutcomeSignals[],
 	deps: UsefulnessGraderDeps = {},
 ): Promise<UsefulnessGrade[]> {
-	return Promise.all(signals.map((s) => gradeUsefulness(s, deps)));
+	// PRD-062d (L-D2 / AC-62d.2.1): cap concurrent grades (and thus concurrent detector queries)
+	// with the bounded pool instead of an unbounded `Promise.all`. `mapBounded` preserves INPUT
+	// ORDER, so the returned grades are byte-identical to the old `Promise.all` — only the
+	// in-flight ceiling differs (parity, AC-8). Each per-memory grade is already fail-soft inside
+	// `gradeUsefulness`, so the batch never aborts.
+	const pool = resolveGradePool(deps);
+	return mapBounded(signals, pool, (s) => gradeUsefulness(s, deps));
 }
 
 /**

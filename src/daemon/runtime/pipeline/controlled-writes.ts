@@ -139,6 +139,18 @@ export interface ControlledWriteConflictHook {
 const silentLogger: ControlledWriteLogger = { event(): void {} };
 
 /**
+ * The payload key a BATCHED `memory_controlled_write` job carries its per-fact proposals
+ * under (PRD-062d / L-D1). When `decisionFanOut` runs with `HONEYCOMB_FANOUT_BATCH` ON it
+ * emits ONE job whose payload is `{ <scope envelope>, [CONTROLLED_WRITE_BATCH_KEY]: [<per-fact
+ * payload>, …] }`; the handler detects this key and processes each fact with its OWN
+ * append/version-bumped write (AC-62d.1.2 — the batch is a DISPATCH coalescing, never a row
+ * coalescing: distinct memories are NEVER merged into one row and NO in-place UPDATE is
+ * introduced). A payload WITHOUT this key is the legacy single-proposal shape (batch OFF, or
+ * the explicit `/api/memories` store) and is processed exactly as before.
+ */
+export const CONTROLLED_WRITE_BATCH_KEY = "proposals" as const;
+
+/**
  * The version column appended to a `memories` row by the version-bumped UPDATE /
  * DELETE path. It is NOT in the catalog's `MEMORIES_COLUMNS` (PRD-003a records
  * `memories` as update-or-insert); this stage composes it into the HealTarget so
@@ -805,47 +817,112 @@ export const noopControlledWriteHandler: StageHandler = async (_job: StageJob): 
  */
 export function createControlledWriteHandler(deps?: ControlledWriteHandlerDeps): StageHandler {
 	if (deps === undefined) return noopControlledWriteHandler;
+	const handlerDeps = deps;
 	const logger = deps.logger ?? silentLogger;
 	return async (job: StageJob): Promise<void> => {
-		const parsed = readControlledWriteInput(job.payload);
-		if (parsed === null) {
-			logger.event("controlled_write.unparseable_payload", { id: job.id });
-			return; // drop-invalid: complete the job, do not mutate, do not throw.
-		}
-		// FR-11: thread the full scope from the job envelope — org/workspace as the
-		// storage partition (the QueryScope) and agent_id as the engine scope column
-		// on the row. A payload-supplied agentId wins; otherwise the job scope's.
-		const input: ControlledWriteInput = {
-			...parsed,
-			agentId: parsed.agentId ?? job.scope.agentId,
-		};
-		const scope: QueryScope = { org: job.scope.org, workspace: job.scope.workspace };
-		const outcome = await applyControlledWrite(input, scope, deps);
-		// The memory write is now COMMITTED (an ADD inserted, or an UPDATE/DELETE version-bumped).
-		// The fan-out enqueue (`onOutcome`) is a SEPARATE, recoverable effect — graph-persist is
-		// idempotent and the pollinating pass re-consolidates — so its failure must NOT throw out of
-		// this handler. If it did, the stage handler would throw → the worker fails+retries the job
-		// → `applyControlledWrite` runs AGAIN. That replay is a no-op for an ADD (the content-hash
-		// dedup returns the existing id), but an UPDATE/DELETE is an APPEND-ONLY version bump that
-		// is NOT idempotent on replay — a second apply would write an extra, spurious version. So a
-		// fan-out failure is caught + logged here, never propagated, keeping the committed write
-		// un-replayed. (A transactional outbox / idempotency-token redesign is the larger follow-up;
-		// this is the minimal correct guard.)
-		if (deps.onOutcome) {
-			try {
-				await deps.onOutcome(job, outcome);
-			} catch (err: unknown) {
-				const reason = err instanceof Error ? err.message : String(err);
-				logger.event("controlled_write.fan_out_failed", {
-					id: job.id,
-					action: outcome.action,
-					memoryId: outcome.memoryId,
-					reason,
-				});
-				// Swallow deliberately: the write is committed; the lost fan-out is recoverable via
-				// the idempotent graph-persist + the pollinating re-consolidation. Re-throwing would
-				// duplicate the committed write on the retry (the bug this guard exists to prevent).
+		// PRD-062d (L-D1): a BATCHED job carries its per-fact proposals under the batch key. Apply each
+		// fact as its OWN controlled write (AC-62d.1.2 — distinct memories stay distinct rows, each an
+		// append/version-bump, never a coalesced in-place UPDATE). A payload without the key is the
+		// legacy single-proposal shape and runs the original one-write path. The DISPATCH is what was
+		// batched, never the writes.
+		const batch = readBatchPayloads(job.payload);
+		if (batch !== null) {
+			for (const factPayload of batch) {
+				// Each per-fact payload inherits the BATCH job's tenancy envelope (org/workspace/agent),
+				// stamped once on the outer job by `decisionFanOut`. Project a per-fact StageJob whose
+				// `payload` IS the merged per-fact payload, so `readControlledWriteInput`, the scope
+				// thread, AND `onOutcome` (which reads `entities`/`content` off `job.payload` to fan out
+				// graph-persist per memory) all resolve exactly as the unbatched single-job path did.
+				const merged: Record<string, unknown> = { ...envelopeOf(job.payload), ...factPayload };
+				const factJob: StageJob = { ...job, payload: merged };
+				await applyOneControlledWrite(factJob, handlerDeps, logger);
 			}
+			return;
 		}
+		await applyOneControlledWrite(job, handlerDeps, logger);
 	};
+}
+
+/**
+ * The per-payload tenancy envelope a batched job stamps ONCE (org/workspace/agent_id +
+ * the resolved project segment). Read off the batch job's payload so each per-fact payload
+ * inherits the SAME scope the unbatched per-job payload carried (PRD-062d). A field absent
+ * on the batch job is simply omitted (the per-fact payload / job scope supplies the default).
+ */
+function envelopeOf(payload: Record<string, unknown>): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	for (const key of ["org", "workspace", "agent_id", "project_id"]) {
+		if (typeof payload[key] === "string") out[key] = payload[key];
+	}
+	return out;
+}
+
+/**
+ * Read the batched per-fact payloads off a `memory_controlled_write` job, or `null` when the
+ * job is the legacy single-proposal shape (PRD-062d / L-D1). A non-array under the batch key
+ * (or an empty array) yields `null` so the caller falls through to the single-write path —
+ * a malformed batch degrades to "no batch", never a throw. Each element is returned as a
+ * plain record for {@link readControlledWriteInput} to parse defensively (drop-invalid).
+ */
+function readBatchPayloads(payload: Record<string, unknown>): Array<Record<string, unknown>> | null {
+	const raw = payload[CONTROLLED_WRITE_BATCH_KEY];
+	if (!Array.isArray(raw) || raw.length === 0) return null;
+	const out: Array<Record<string, unknown>> = [];
+	for (const item of raw) {
+		if (item !== null && typeof item === "object" && !Array.isArray(item)) {
+			out.push(item as Record<string, unknown>);
+		}
+	}
+	return out.length > 0 ? out : null;
+}
+
+/**
+ * Apply ONE controlled write from a job payload (single-sourced for the single and the
+ * per-fact-of-a-batch paths — jscpd-safe). Parses the payload, threads the scope (FR-11),
+ * applies the write, and runs the `onOutcome` fan-out fail-soft.
+ *
+ * The fan-out enqueue (`onOutcome`) is a SEPARATE, recoverable effect — graph-persist is
+ * idempotent and the pollinating pass re-consolidates — so its failure must NOT throw out of
+ * the handler. If it did, the stage handler would throw → the worker fails+retries the job
+ * → `applyControlledWrite` runs AGAIN. That replay is a no-op for an ADD (the content-hash
+ * dedup returns the existing id), but an UPDATE/DELETE is an APPEND-ONLY version bump that is
+ * NOT idempotent on replay — a second apply would write an extra, spurious version. So a
+ * fan-out failure is caught + logged here, never propagated, keeping the committed write
+ * un-replayed. (A transactional outbox / idempotency-token redesign is the larger follow-up.)
+ */
+async function applyOneControlledWrite(
+	job: StageJob,
+	deps: ControlledWriteHandlerDeps,
+	logger: ControlledWriteLogger,
+): Promise<void> {
+	const parsed = readControlledWriteInput(job.payload);
+	if (parsed === null) {
+		logger.event("controlled_write.unparseable_payload", { id: job.id });
+		return; // drop-invalid: complete the job, do not mutate, do not throw.
+	}
+	// FR-11: thread the full scope from the job envelope — org/workspace as the
+	// storage partition (the QueryScope) and agent_id as the engine scope column
+	// on the row. A payload-supplied agentId wins; otherwise the job scope's.
+	const input: ControlledWriteInput = {
+		...parsed,
+		agentId: parsed.agentId ?? job.scope.agentId,
+	};
+	const scope: QueryScope = { org: job.scope.org, workspace: job.scope.workspace };
+	const outcome = await applyControlledWrite(input, scope, deps);
+	if (deps.onOutcome) {
+		try {
+			await deps.onOutcome(job, outcome);
+		} catch (err: unknown) {
+			const reason = err instanceof Error ? err.message : String(err);
+			logger.event("controlled_write.fan_out_failed", {
+				id: job.id,
+				action: outcome.action,
+				memoryId: outcome.memoryId,
+				reason,
+			});
+			// Swallow deliberately: the write is committed; the lost fan-out is recoverable via
+			// the idempotent graph-persist + the pollinating re-consolidation. Re-throwing would
+			// duplicate the committed write on the retry (the bug this guard exists to prevent).
+		}
+	}
 }
