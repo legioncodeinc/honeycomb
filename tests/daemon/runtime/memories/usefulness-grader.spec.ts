@@ -33,6 +33,15 @@ function fixedDetector(p: number): ContradictionDetector {
 	return { async detect() { return p; } };
 }
 
+/** A detector that records whether it was invoked (to prove the short-circuit paths never call it). */
+function recordingDetector(): { detector: ContradictionDetector; called: () => boolean } {
+	let invoked = false;
+	return {
+		detector: { async detect() { invoked = true; return 1; } },
+		called: () => invoked,
+	};
+}
+
 describe("PRD-058e gradeUsefulness", () => {
 	it("injected + not contradicted → u ≈ 1, kind reinforce (the documented default)", async () => {
 		const grade = await gradeUsefulness(injectedKept("m1"), { detector: noContradictionDetector });
@@ -47,18 +56,22 @@ describe("PRD-058e gradeUsefulness", () => {
 		expect(grade.kind).toBe("downweight");
 	});
 
-	it("58e.1.3 explicitly ignored → u → 0, downweight (never even consults the detector)", async () => {
+	it("58e.1.3 explicitly ignored → u → 0, downweight AND the detector is NEVER consulted (short-circuit)", async () => {
+		const { detector, called } = recordingDetector();
 		const signals: RecallOutcomeSignals = { ...injectedKept("m3"), ignored: true };
-		const grade = await gradeUsefulness(signals, { detector: fixedDetector(0) });
+		const grade = await gradeUsefulness(signals, { detector });
 		expect(grade.usefulness).toBe(USEFULNESS_REJECTED);
 		expect(grade.kind).toBe("downweight");
+		expect(called()).toBe(false); // the ignored path must short-circuit BEFORE any detect() call.
 	});
 
-	it("never injected (surfaced-but-dropped) → u → 0, downweight", async () => {
+	it("never injected (surfaced-but-dropped) → u → 0, downweight AND the detector is NEVER consulted", async () => {
+		const { detector, called } = recordingDetector();
 		const signals: RecallOutcomeSignals = { ...injectedKept("m4"), injected: false };
-		const grade = await gradeUsefulness(signals);
+		const grade = await gradeUsefulness(signals, { detector });
 		expect(grade.usefulness).toBe(USEFULNESS_REJECTED);
 		expect(grade.kind).toBe("downweight");
+		expect(called()).toBe(false); // a never-injected memory must not reach the detector.
 	});
 
 	it("partial contradiction → partial weight u = 1 − P, in [0,1]", async () => {
@@ -84,6 +97,23 @@ describe("PRD-058e gradeUsefulness", () => {
 		const grade = await gradeUsefulness(injectedKept("m8"), { detector: throwing });
 		expect(grade.usefulness).toBe(USEFULNESS_CONFIRMED);
 		expect(grade.kind).toBe("reinforce");
+	});
+
+	it("a detector that NEVER resolves degrades to no-contradiction via the bounded timeout (no hang)", async () => {
+		// A hung NLI judge must not wedge the grader (nor the Promise.all batch). With a tiny timeout the
+		// race resolves to the fail-soft "no contradiction" → confirmed useful, and the test returns
+		// promptly rather than hanging forever.
+		const hung: ContradictionDetector = { detect: () => new Promise<number>(() => {}) };
+		const grade = await gradeUsefulness(injectedKept("m9"), { detector: hung, detectTimeoutMs: 5 });
+		expect(grade.usefulness).toBe(USEFULNESS_CONFIRMED);
+		expect(grade.kind).toBe("reinforce");
+	});
+
+	it("gradeRecallBatch does NOT hang when one memory's detector never resolves (bounded per-detect)", async () => {
+		const hung: ContradictionDetector = { detect: () => new Promise<number>(() => {}) };
+		const grades = await gradeRecallBatch([injectedKept("a"), injectedKept("b")], { detector: hung, detectTimeoutMs: 5 });
+		expect(grades.map((g) => g.memoryId)).toEqual(["a", "b"]);
+		expect(grades.every((g) => g.kind === "reinforce")).toBe(true); // all degraded to confirmed useful.
 	});
 });
 

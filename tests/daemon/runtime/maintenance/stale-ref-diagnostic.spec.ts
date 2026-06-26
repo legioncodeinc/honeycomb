@@ -122,6 +122,27 @@ describe("PRD-058c resolveReference — the resolve(r, G_t) classification", () 
 		expect(r.resolve).toBe(1); // excluded contributes nothing (neutral).
 	});
 
+	it("58c.1.3 a bare package `module#symbol` (react#createRoot) is EXCLUDED → unknown, NEVER scored stale", () => {
+		// The bare `module#symbol` extractor rule emits a `file-symbol` whose `file` is a package
+		// specifier (`react`), NOT a repo path. Such an external reference must be EXCLUDED (unknown),
+		// never resolved against the graph and scored dangling/stale — the false-stale PRD-058c.1.3 forbids.
+		const [ref] = extractReferences("we call react#createRoot to mount");
+		expect(ref!.kind).toBe("file-symbol");
+		expect(ref!.file).toBe("react"); // bare module, no repo path.
+		const r = resolveReference(ref!, index);
+		expect(r.excluded).toBe(true); // out-of-graph → neutral.
+		expect(r.resolve).toBe(1); // contributes nothing to σ (never a false stale).
+	});
+
+	it("58c a REPO-shaped file-symbol (src/foo/bar.ts#sym) is still in-graph — the exclusion only narrows bare modules", () => {
+		// Guard against over-narrowing: a real repo path with a #symbol must STILL be treated as indexed
+		// (so a genuinely-absent in-repo symbol can be scored dangling). Only the bare-module case is excluded.
+		const [ref] = extractReferences("see src/foo/bar.ts#gone");
+		const r = resolveReference(ref!, index);
+		expect(r.excluded).toBe(false); // repo-shaped → in-graph; absence is meaningful.
+		expect(r.resolve).toBe(0); // indexed-but-absent → dangling.
+	});
+
 	it("58c.1.5 a close fuzzy rename candidate resolves to sim ∈ (0,1)", () => {
 		const [ref] = extractReferences("see src/foo/bar.ts#doThng"); // typo of doThing
 		const r = resolveReference(ref!, index);

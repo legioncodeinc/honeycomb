@@ -585,7 +585,12 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 	group.get("/calibration", async (c) => {
 		const scope = resolveScope(c);
 		if (scope === null) return c.json(NO_ORG_BODY, 400);
-		const introspection = await readCalibrationIntrospection(storage, scope);
+		// PRD-058e D-2: `memory_calibration` is agent-scoped, so the introspection read narrows to the
+		// owning agent's slice (an `?agent_id=` query selects it; absent → the schema default agent).
+		// Without this an operator could read another agent's calibration curve in a shared workspace.
+		const agentId = c.req.query("agent_id");
+		const agent = agentId !== undefined && agentId !== "" ? { agentId } : undefined;
+		const introspection = await readCalibrationIntrospection(storage, scope, undefined, agent);
 		return c.json(introspection);
 	});
 

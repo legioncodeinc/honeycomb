@@ -107,6 +107,16 @@ export const MEMORIES_COLUMNS = Object.freeze([
 	// at {@link MAX_STALE_REFS} entries with an overflow marker so a reference-dense memory does
 	// not store an unbounded token list. Nullable (NULL/`'[]'` = nothing unresolved).
 	{ name: "stale_refs", sql: "TEXT" },
+	// PRD-058e: the access-log COMPACTION WATERMARK — the `at` of the newest raw `memory_access`
+	// event already folded into `access_count` (`access-log.ts` `compactAccessLog`). DeepLake has
+	// no multi-statement transaction, so compaction folds the count then deletes the raw rows in
+	// two steps; this watermark makes that pair IDEMPOTENT across a partial failure: a fold only
+	// counts events STRICTLY NEWER than the watermark and advances the watermark in the SAME cache
+	// write, so a re-run after a failed delete re-deletes the (already-folded) rows but never
+	// re-folds them (no double count), and a failed cache-write simply leaves the watermark
+	// unadvanced for a clean retry (no loss). Nullable (NULL = nothing folded yet — every event is
+	// newer than an absent watermark, so the first compaction folds normally). Heal-safe ALTER ADD.
+	{ name: "access_compacted_at", sql: "TIMESTAMPTZ" },
 ]);
 
 /**

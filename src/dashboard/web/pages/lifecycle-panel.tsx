@@ -107,6 +107,16 @@ export function assembleStoreHealth(inputs: { freshness?: number; calibrationCon
 	return clamp(inputs.freshness, 1) * clamp(inputs.calibrationConfidence, 1) * (1 - clamp(inputs.staleness, 0)) * clamp(inputs.kappa, 1);
 }
 
+/**
+ * Render the freshness (`A`) stat value: the bounded score when a read-side activation/freshness
+ * aggregate is available, else the inert dash (the wire carries no per-store `A` today, so freshness
+ * is dormant, NOT calibrated confidence mislabeled). Kept as a small pure helper so the freshness term
+ * threads cleanly the day the wire surfaces an `A` aggregate. Pure.
+ */
+export function freshnessLabel(freshness: number | undefined): string {
+	return freshness !== undefined && Number.isFinite(freshness) ? Math.min(1, Math.max(0, freshness)).toFixed(2) : "—";
+}
+
 /** Props for {@link LifecycleHealthPanel}. */
 export interface LifecycleHealthPanelProps {
 	/** The shared wire (the page passes its injected `wire`). */
@@ -245,12 +255,16 @@ export function LifecycleHealthPanel({ wire }: LifecycleHealthPanelProps): React
 		[wire, reloadConflicts],
 	);
 
-	// The store-level health badge: freshness from the calibration-trust proxy + the stale-ref fraction
-	// + the open-conflict κ proxy. Each dormant term is its identity (058d read-side projection).
+	// The store-level health badge `H = A · C · (1 − σ) · κ` (058d read-side projection). Each dormant
+	// term is its IDENTITY. The wire feeds this panel conflicts (κ), stale refs (σ), and calibration (C)
+	// only; it carries NO per-store freshness/activation aggregate (A), so A is genuinely UNAVAILABLE
+	// here: it stays `undefined` (→ identity 1 in `assembleStoreHealth`) and the freshness Stat renders
+	// INERT ("—") rather than mislabeling C as freshness. C (calibrated confidence) gets its OWN row.
+	const freshness: number | undefined = undefined; // A: no read-side store freshness aggregate on the wire (058d).
 	const staleness = staleRefs.length > 0 ? Math.min(1, staleRefs.length / Math.max(staleRefs.length, 8)) : 0;
 	const calibrationConfidence = calibration.identity ? 1 : Math.max(0, 1 - calibration.ece);
 	const kappa = conflicts.length > 0 ? 0.5 : 1;
-	const health = assembleStoreHealth({ calibrationConfidence, staleness, kappa });
+	const health = assembleStoreHealth({ freshness, calibrationConfidence, staleness, kappa });
 
 	return (
 		<div data-testid="lifecycle-panel" style={{ ...SURFACE, display: "flex", flexDirection: "column", gap: 16 }}>
@@ -261,9 +275,11 @@ export function LifecycleHealthPanel({ wire }: LifecycleHealthPanelProps): React
 				</Badge>
 			</div>
 
-			{/* US-55d.2.1: the store-level health summary row. */}
+			{/* US-55d.2.1: the store-level health summary row. `freshness` shows A (inert when no read-side
+			    activation aggregate is available); `calibrated confidence` shows C, distinct rows, no mislabel. */}
 			<div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
-				<Stat label="freshness" value={calibration.identity ? "—" : calibrationConfidence.toFixed(2)} />
+				<Stat label="freshness" value={freshnessLabel(freshness)} />
+				<Stat label="calibrated confidence" value={calibration.identity ? "—" : calibrationConfidence.toFixed(2)} />
 				<Stat label="open conflicts" value={String(conflicts.length)} />
 				<Stat label="stale refs" value={String(staleRefs.length)} />
 				<Stat label="ECE" value={calibration.identity ? "dormant" : calibration.ece.toFixed(3)} />
@@ -319,8 +335,8 @@ export function LifecycleHealthPanel({ wire }: LifecycleHealthPanelProps): React
 							<Stat label="samples" value={String(calibration.nSamples)} />
 						</div>
 						<div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-							{calibration.reliabilityDiagram.map((b, i) => (
-								<ReliabilityRow key={i} lower={b.lower} upper={b.upper} accuracy={b.accuracy} />
+							{calibration.reliabilityDiagram.map((b) => (
+								<ReliabilityRow key={`${b.lower}-${b.upper}`} lower={b.lower} upper={b.upper} accuracy={b.accuracy} />
 							))}
 						</div>
 					</div>

@@ -1984,8 +1984,14 @@ export async function recallMemories(
 	// PRD-058e: stamp the calibrated confidence C(m) = g(f) on the surviving hits when a calibration model
 	// is wired (the IDENTITY/cold-start model is a no-op that still surfaces C = f; it NEVER reorders here —
 	// the `c` exponent stays 0 until eval-gated, AC-55e.2.2 / 55e.2.3). ABSENT → no C surfaced (dormant).
+	// Run the calibration stage whenever a model is wired — INCLUDING the IDENTITY/cold-start model. The
+	// stage already defines the identity case as `C = f` (it stamps rawConfidence + calibratedConfidence
+	// from the stored confidence), so skipping it for identity left those fields UNSET and forced
+	// downstream consumers (the dashboard / `H`) onto the `C = 1` default instead of the real stored
+	// confidence. The `c` exponent stays dormant (no reorder) until eval-gated; this only ensures `C` is
+	// always emitted once a model is present.
 	const calibrated =
-		deps.calibration !== undefined && !deps.calibration.identity
+		deps.calibration !== undefined
 			? await applyCalibrationStage(activated, deps.calibration, request, deps)
 			: activated;
 
@@ -1996,12 +2002,6 @@ export async function recallMemories(
 	// degrades to returning BOTH sides, never a 500. ABSENT source → byte-for-byte the pre-058b path.
 	const dampened = await applyConflictGate(calibrated, deps, request.scope);
 
-	// PRD-058e: record a `recall` access event for each surviving hit (the recall half of the reinforcement
-	// loop — the usefulness grade arrives later from the session-end worker). FAIL-SOFT + off the answer path:
-	// recording is fire-and-forget and a recorder throw never fails the recall. Only the durable memories the
-	// store path tracks (`memories` source) carry a usable id for the access log.
-	await recordRecallAccessEvents(dampened, deps);
-
 	// PRD-047e: OPTIONAL token-budget + MMR context assembly. ADDITIVE + OPT-IN — it engages ONLY
 	// when the request carries a positive `tokenBudget`. With NO budget the row-`limit` path runs
 	// BYTE-FOR-BYTE as before (the dampened top-`limit` list), which is what keeps the live eval (it
@@ -2010,9 +2010,17 @@ export async function recallMemories(
 	// embeddings are self-sourced via the SAME `fetchCandidateEmbeddings` dedup/rerank use (no extra
 	// embed calls), the top hit is always kept (rank-1 seed), and ANY failure degrades to the fixed
 	// top-`limit` list — never a 500 (e-AC-4).
+	//
+	// PRD-058e: the `recall` access event is recorded AFTER token-budget assembly so reinforcement is
+	// credited to the hits ACTUALLY INJECTED, not the pre-budget set. Recording the dampened set before
+	// trimming would log (and bump `access_count` for) memories that the budget then dropped, inflating
+	// the access log and biasing later ACT-R activation toward never-injected hits. Recording stays
+	// FAIL-SOFT + off the answer path: a recorder throw never fails the recall. Only `memories`-source
+	// hits carry a usable id for the access log.
 	const budget = request.tokenBudget;
 	if (typeof budget !== "number" || !Number.isFinite(budget) || budget <= 0) {
-		// No budget → the unchanged fixed top-k path (e-AC-4 back-compat).
+		// No budget → the unchanged fixed top-k path (e-AC-4 back-compat). The injected set IS `dampened`.
+		await recordRecallAccessEvents(dampened, deps);
 		return { hits: dampened, sources: dedupedSources, degraded };
 	}
 	try {
@@ -2020,9 +2028,13 @@ export async function recallMemories(
 		const embByKey = await fetchCandidateEmbeddings(dampened, request, deps);
 		const assembled = selectWithinTokenBudget(dampened, budget, lambda, embByKey);
 		const assembledSources = assembled.length === dampened.length ? dedupedSources : [...new Set(assembled.map((h) => h.source))];
+		// Credit reinforcement to the post-budget injected set only.
+		await recordRecallAccessEvents(assembled, deps);
 		return { hits: assembled, sources: assembledSources, degraded };
 	} catch {
-		// e-AC-4: an MMR/budget failure degrades to the fixed top-`limit` list, never a throw.
+		// e-AC-4: an MMR/budget failure degrades to the fixed top-`limit` list, never a throw. The injected
+		// set in this degraded path is `dampened`, so reinforcement is credited to it.
+		await recordRecallAccessEvents(dampened, deps);
 		return { hits: dampened, sources: dedupedSources, degraded };
 	}
 }

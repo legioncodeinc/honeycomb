@@ -326,5 +326,13 @@ export function deserializeModel(blob: string): CalibrationModel {
 	}
 	if (knots.length === 0) return IDENTITY_MODEL;
 	knots.sort((a, b) => a.x - b.x);
+	// FAIL-SAFE monotonicity: an isotonic calibration curve is non-decreasing by contract (higher raw
+	// confidence never maps to lower calibrated confidence). Sorting by `x` alone does NOT enforce that —
+	// a corrupt/tampered blob could store a `y` that decreases as `x` rises, INVERTING confidence. Reject
+	// any non-monotone-y sequence and fall back to the IDENTITY model (`C = f`) rather than honor a curve
+	// that flips the ordering.
+	for (let i = 1; i < knots.length; i++) {
+		if (knots[i]!.y < knots[i - 1]!.y) return IDENTITY_MODEL;
+	}
 	return { identity: false, knots };
 }

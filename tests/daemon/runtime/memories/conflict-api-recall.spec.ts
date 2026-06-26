@@ -133,8 +133,15 @@ describe("PRD-058b ResolveSchema — zod boundary", () => {
 	it("rejects an unknown verdict", () => {
 		expect(ResolveSchema.safeParse({ verdict: "nuke" }).success).toBe(false);
 	});
-	it("rejects a non-uuid winnerId", () => {
-		expect(ResolveSchema.safeParse({ verdict: "supersede", winnerId: "not-a-uuid" }).success).toBe(false);
+	it("ACCEPTS an opaque (non-uuid) winnerId — memory ids are not UUIDs, the resolver only matches the pair", () => {
+		// The resolver compares winnerId against memory_a_id / memory_b_id, which are opaque ids like
+		// `mem_…`, `a`, `m/1 a` — NOT UUIDs. A `z.uuid()` would reject every real supersede at the boundary.
+		expect(ResolveSchema.safeParse({ verdict: "supersede", winnerId: "mem_abc" }).success).toBe(true);
+		expect(ResolveSchema.safeParse({ verdict: "supersede", winnerId: "a" }).success).toBe(true);
+		expect(ResolveSchema.safeParse({ verdict: "supersede", winnerId: "m/1 a" }).success).toBe(true);
+	});
+	it("still rejects an EMPTY winnerId (min(1))", () => {
+		expect(ResolveSchema.safeParse({ verdict: "supersede", winnerId: "" }).success).toBe(false);
 	});
 });
 
@@ -166,6 +173,20 @@ describe("PRD-058b createConflictSuppressionSource — the κ = ρ loser set", (
 		const source = createConflictSuppressionSource(storage);
 		const suppressed = await source.loadSuppressed([hit("a", 1), hit("b", 0.9)], SCOPE);
 		expect(suppressed.size).toBe(0);
+	});
+
+	it("an open KEEP-BOTH conflict (winner set, kappa_loser = 1) suppresses NEITHER side — the loser stays live", async () => {
+		// detectAndProject can project an OPEN keep-both row WITH a winner_id but kappa_loser = 1 (the
+		// resolver chose to keep both live). Suppressing on winner_id alone would hide a kept memory; the
+		// κ gate must honor kappa_loser and leave both sides visible.
+		const { storage } = makeStorage((req) =>
+			/FROM\s+"memory_conflicts"/i.test(req.sql)
+				? [{ memory_a_id: "a", memory_b_id: "b", winner_id: "a", kappa_loser: 1, verdict: "keep-both", status: "open", version: 1 }]
+				: [],
+		);
+		const source = createConflictSuppressionSource(storage);
+		const suppressed = await source.loadSuppressed([hit("a", 1), hit("b", 0.9)], SCOPE);
+		expect(suppressed.size).toBe(0); // kappa_loser = 1 → the loser is NOT suppressed.
 	});
 
 	it("fail-soft: a missing/unreadable memory_conflicts table → empty set (both sides returned)", async () => {

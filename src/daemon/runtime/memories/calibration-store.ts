@@ -23,8 +23,8 @@
  */
 
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
-import { isOk, type StorageRow } from "../../storage/result.js";
-import { buildLatestCalibrationSql } from "../../storage/catalog/memory-lifecycle.js";
+import { isOk, type QueryResult, type StorageRow } from "../../storage/result.js";
+import { buildLatestCalibrationSql, type CalibrationAgentScope } from "../../storage/catalog/memory-lifecycle.js";
 import {
 	applyCalibration,
 	deserializeModel,
@@ -67,15 +67,21 @@ function coldStart(bins: number): CalibrationIntrospection {
  * latest snapshot's metrics + a reliability diagram of its curve, or the
  * cold-start shape when no snapshot exists / any read error (fail-soft). Never
  * throws.
+ *
+ * `agent` scopes the read to the OWNING agent's calibration slice (D-2): `memory_calibration` is an
+ * agent-scoped engine table, so a global "newest snapshot" read could return ANOTHER agent's curve in a
+ * multi-agent workspace. ABSENT → the schema defaults (`'default'` / `'global'`), so an un-scoped caller
+ * reads one consistent agent slice rather than the whole partition.
  */
 export async function readCalibrationIntrospection(
 	storage: StorageQuery,
 	scope: QueryScope,
 	bins: number = DEFAULT_ECE_BINS,
+	agent?: CalibrationAgentScope,
 ): Promise<CalibrationIntrospection> {
-	let res;
+	let res: QueryResult;
 	try {
-		res = await storage.query(buildLatestCalibrationSql(), scope);
+		res = await storage.query(buildLatestCalibrationSql(agent), scope);
 	} catch {
 		return coldStart(bins);
 	}

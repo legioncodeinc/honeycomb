@@ -174,12 +174,41 @@ export function buildAccessHistorySql(memoryId: string): string {
 }
 
 /**
- * Build the "current calibration curve" read (PRD-058e): the highest-`fit_at`
- * snapshot. Mirrors the version-bumped `buildHighestActiveVersionSql` reader
- * convention, even though older snapshots remain, the latest `fit_at` is the
- * live curve. No value to interpolate; every identifier through `sqlIdent`.
+ * The agent-scope columns every engine-table row carries (D-2): `agent_id` + `visibility`. The
+ * org/workspace partition rides the {@link import("../client.js").QueryScope}; these two are the only
+ * scope COLUMNS, so an agent-scoped read MUST AND them in or it returns another agent's row.
  */
-export function buildLatestCalibrationSql(): string {
+export interface CalibrationAgentScope {
+	/** The owning agent id (`memory_calibration.agent_id`). */
+	readonly agentId?: string;
+	/** The row visibility (`memory_calibration.visibility`). */
+	readonly visibility?: string;
+}
+
+/**
+ * Build the `agent_id = … AND visibility = …` scope conjunct for the calibration read (D-2). Defaults to
+ * the schema defaults (`'default'` / `'global'`) so an un-scoped caller still reads a single consistent
+ * agent slice rather than the whole partition. Every value through `sLiteral`, every identifier through
+ * `sqlIdent` (SQL-safety floor).
+ */
+function calibrationScopeClause(agent?: CalibrationAgentScope): string {
+	const agentId = agent?.agentId !== undefined && agent.agentId !== "" ? agent.agentId : "default";
+	const visibility = agent?.visibility !== undefined && agent.visibility !== "" ? agent.visibility : "global";
+	return `${sqlIdent("agent_id")} = ${sLiteral(agentId)} AND ${sqlIdent("visibility")} = ${sLiteral(visibility)}`;
+}
+
+/**
+ * Build the "current calibration curve" read (PRD-058e): the highest-`fit_at`
+ * snapshot FOR THE OWNING AGENT. Mirrors the version-bumped `buildHighestActiveVersionSql` reader
+ * convention, even though older snapshots remain, the latest `fit_at` is the live curve.
+ *
+ * `memory_calibration` is an AGENT-scoped engine table (D-2), so the read MUST AND the
+ * `agent_id`/`visibility` scope in — a global `ORDER BY fit_at DESC LIMIT 1` returns the newest row in
+ * the whole partition, which in a multi-agent workspace can be ANOTHER agent's calibration blob/ECE
+ * (a cross-agent leak). The org/workspace partition rides the query scope; this conjunct narrows to the
+ * agent slice. The scope values route through `sLiteral`; every identifier through `sqlIdent`.
+ */
+export function buildLatestCalibrationSql(agent?: CalibrationAgentScope): string {
 	const tbl = sqlIdent(MEMORY_CALIBRATION_TABLE);
 	const fitAtCol = sqlIdent("fit_at");
 	const modelBlobCol = sqlIdent("model_blob");
@@ -190,6 +219,7 @@ export function buildLatestCalibrationSql(): string {
 		`SELECT ${fitAtCol} AS fit_at, ${modelBlobCol} AS model_blob, ${eceCol} AS ece, ` +
 		`${brierCol} AS brier, ${nSamplesCol} AS n_samples ` +
 		`FROM "${tbl}" ` +
+		`WHERE ${calibrationScopeClause(agent)} ` +
 		`ORDER BY ${fitAtCol} DESC LIMIT 1`
 	);
 }

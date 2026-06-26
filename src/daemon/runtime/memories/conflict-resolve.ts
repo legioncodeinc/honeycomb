@@ -433,6 +433,11 @@ export async function supersedeLoser(
  * un-tombstoning it), refresh the `memory_conflicts` projection to `status = 'reversed'`, and append a
  * `conflict_reverse` `memory_history` event. NEVER a destructive delete or in-place mutate — the restore is
  * a NEW version, exactly as the supersession was, so history stays total.
+ *
+ * The `reversed` projection + audit are written ONLY when the loser RESTORE actually committed: if
+ * `modifyMemory` is skipped or fails (no `version_bumped` outcome), the conflict is LEFT as-is and `false`
+ * is returned, never marked `reversed` over a still-superseded row (which would leave `memory_conflicts`
+ * out of sync with the memory). Returns whether the reversal landed.
  */
 export async function reverseSupersession(
 	args: {
@@ -449,9 +454,14 @@ export async function reverseSupersession(
 	persist: ConflictPersistDeps,
 	writeDeps: MemoryWriteDeps,
 	scope: QueryScope,
-): Promise<void> {
+): Promise<boolean> {
 	// Restore the loser as a NEW live version (append-only) — un-tombstones it so `MAX(version)` is live again.
-	await modifyMemory({ id: args.loserId, content: args.restoredContent, reason: args.reason, scope }, writeDeps);
+	// GUARD: only proceed to mark the conflict `reversed` when the restore actually committed (the same
+	// `version_bumped` success signal `supersedeLoser` checks). A failed/skipped restore must NOT leave a
+	// `reversed` projection over a still-superseded memory row.
+	const restore = await modifyMemory({ id: args.loserId, content: args.restoredContent, reason: args.reason, scope }, writeDeps);
+	if (restore.outcome.action !== "version_bumped") return false;
+
 	const createdAt = (persist.now ?? (() => new Date()))().toISOString();
 	await projectConflict(
 		{
@@ -475,6 +485,7 @@ export async function reverseSupersession(
 		persist,
 		scope,
 	);
+	return true;
 }
 
 // ── Decision-stage detect-and-project orchestration (the candidate-set seam) ─
@@ -610,6 +621,15 @@ export function createConflictSuppressionSource(storage: StorageQuery): Conflict
 			for (const row of result.rows) {
 				const winnerId = row.winner_id === null || row.winner_id === undefined ? "" : String(row.winner_id);
 				if (winnerId === "") continue; // no winner yet → suppress neither (conservative).
+				// RESPECT kappa_loser: an open `keep-both` projects a winner_id AND `kappa_loser = 1` (the
+				// resolver explicitly decided to KEEP the loser live). Suppressing on winner_id alone would
+				// hide a memory the resolver chose to keep. Only a kappa_loser that INDICATES suppression
+				// (κ < 1 — the `review` ρ-suppression or a supersede) removes the loser; a NULL κ (no verdict
+				// yet) is conservative → suppress neither.
+				const kappaRaw = row.kappa_loser;
+				if (kappaRaw === null || kappaRaw === undefined) continue; // no κ assigned yet → suppress neither.
+				const kappaLoser = typeof kappaRaw === "number" ? kappaRaw : Number(kappaRaw);
+				if (!Number.isFinite(kappaLoser) || kappaLoser >= 1) continue; // keep-both (κ = 1) → loser stays live.
 				const aId = String(row.memory_a_id ?? "");
 				const bId = String(row.memory_b_id ?? "");
 				const loserId = winnerId === aId ? bId : winnerId === bId ? aId : "";

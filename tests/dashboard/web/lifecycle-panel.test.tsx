@@ -102,6 +102,32 @@ describe("PRD-058d lifecycle panel — health summary (AC-55d.2.1)", () => {
 		expect(text).toContain("Conflicts (1)");
 		expect(text).toContain("Stale references (1)");
 		expect(text).toContain("0.040"); // ECE
+		// The summary carries a distinct freshness row AND a distinct calibrated-confidence row (no mislabel).
+		expect(text).toContain("freshness");
+		expect(text).toContain("calibrated confidence");
+	});
+
+	it("renders the badge as H = A·C·(1−σ)·κ with freshness shown honestly (A), never C mislabeled as freshness", async () => {
+		const { wire } = mockWire({
+			conflicts: [CONFLICT], // one open conflict → κ = 0.5
+			staleRefs: [{ memoryId: "mem-9", refStatus: "stale", staleRefs: ["src/gone.ts"], verifiedAt: null }], // σ = 1/8
+			calibration: CALIBRATED, // C = 1 − ece = 0.96
+		});
+		render(wire);
+		await flush();
+		// A is unavailable on the read side → identity 1; H = 1 · 0.96 · (1 − 0.125) · 0.5 = 0.42.
+		const badge = container.querySelector('[data-testid="health-badge"]');
+		expect(badge?.textContent).toContain("0.42");
+		// The freshness stat tile reads inert (A dormant), NOT the calibrated-confidence value 0.96. The
+		// `Stat` tile is the leaf div whose FIRST span is exactly the "freshness" label; its value span follows.
+		const freshnessTile = Array.from(container.querySelectorAll("div")).find(
+			(d) => d.querySelector("span")?.textContent?.toLowerCase() === "freshness",
+		);
+		expect(freshnessTile).toBeDefined();
+		const freshnessValue = freshnessTile?.querySelectorAll("span")[1]?.textContent ?? "";
+		expect(freshnessValue).not.toBe("0.96"); // freshness must NOT show C.
+		// C (0.96) is rendered under its OWN calibrated-confidence label.
+		expect(container.textContent ?? "").toContain("0.96");
 	});
 
 	it("an all-engines-off install renders INERT (empty conflicts, no stale refs, dormant calibration), not an error", async () => {

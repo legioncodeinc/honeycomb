@@ -196,9 +196,12 @@ export const MEMORY_CONFLICTS_TABLES: readonly CatalogTable[] = defineGroup([
  * for the scope. Recall reads this to suppress a `κ = ρ` loser (the non-winner side of an open
  * `review` conflict). `version-bumped` semantics: the live row per pair is the highest version,
  * so the read takes the MAX(version) row per `(memory_a_id, memory_b_id)`. Every identifier
- * routes through `sqlIdent` (SQL-safety floor); no value is interpolated here (the scope rides
- * the partition + the ANDed scope clause the caller appends). FAIL-SOFT at the call site: a
- * missing table degrades to "no suppression" (recall returns both sides), never a throw.
+ * routes through `sqlIdent` (SQL-safety floor); no value is interpolated here. Tenancy: the
+ * org/workspace partition rides the `storage.query(sql, scope)` call (the hard isolation boundary
+ * enforced at the transport), and the recall caller only suppresses ids that are ALSO in its own
+ * scope-clause-filtered hit set, so a cross-agent conflict row cannot false-suppress another
+ * agent's recall. FAIL-SOFT at the call site: a missing table degrades to "no suppression"
+ * (recall returns both sides), never a throw.
  */
 export function buildOpenConflictProjectionSql(): string {
 	const tbl = sqlIdent(MEMORY_CONFLICTS_TABLE);

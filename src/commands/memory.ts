@@ -78,14 +78,30 @@ function flagValue(argv: readonly string[], flag: string): string | undefined {
 	return v !== undefined && !v.startsWith("--") ? v : undefined;
 }
 
+/** The value-bearing flags whose following token is CONSUMED (so it never folds into a positional). */
+const MEMORY_VALUE_FLAGS: ReadonlySet<string> = new Set(["--status", "--verdict", "--winner", "--reason"]);
+
 /**
  * Parse a raw `memory` argv tail (everything AFTER the `memory` word) into a typed
  * {@link MemoryCliInvocation}. The first non-flag word is the subcommand; the next two non-flag
  * words are the action/id positionals; the `--status`/`--verdict`/`--winner`/`--reason` pairs and the
- * `--lifecycle` boolean are recognized flags. Pure: no IO, fully testable.
+ * `--lifecycle` boolean are recognized flags. The scan SKIPS a value-flag's following token so a
+ * paired value (e.g. `--verdict supersede`) interleaved BEFORE or BETWEEN positionals never shifts the
+ * sub/arg/id positions (CodeRabbit #125: `conflicts resolve --verdict supersede c1` must parse `c1` as
+ * the id, not `supersede`). Pure: no IO, fully testable.
  */
 export function parseMemoryCliArgs(argv: readonly string[]): MemoryCliInvocation {
-	const positionals = argv.filter((a) => !a.startsWith("--"));
+	const positionals: string[] = [];
+	for (let i = 0; i < argv.length; i += 1) {
+		const tok = argv[i];
+		if (tok === undefined) continue;
+		if (MEMORY_VALUE_FLAGS.has(tok)) {
+			i += 1; // consume the flag's value so it is never treated as a positional.
+			continue;
+		}
+		if (tok.startsWith("--")) continue; // a boolean flag (e.g. `--lifecycle`) or an unknown flag.
+		positionals.push(tok);
+	}
 	return {
 		sub: positionals[0] ?? "",
 		arg: positionals[1] ?? "",

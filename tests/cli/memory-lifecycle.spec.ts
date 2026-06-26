@@ -39,6 +39,33 @@ describe("PRD-058d memory CLI — arg parsing", () => {
 		});
 		expect(parseMemoryCliArgs(["inspect", "mem-1", "--lifecycle"])).toMatchObject({ sub: "inspect", arg: "mem-1", lifecycle: true });
 	});
+
+	it("does NOT fold a consumed flag value into the positionals (interleaved flag order)", () => {
+		// CodeRabbit #125: a paired-flag value (`supersede`, `m9`) interleaved BEFORE/BETWEEN positionals
+		// must be CONSUMED, never treated as a positional, so the conflict id stays the sole id positional.
+		expect(parseMemoryCliArgs(["conflicts", "resolve", "--verdict", "supersede", "c1"])).toMatchObject({
+			sub: "conflicts",
+			arg: "resolve",
+			id: "c1",
+			verdict: "supersede",
+		});
+		expect(parseMemoryCliArgs(["conflicts", "resolve", "--verdict", "supersede", "--winner", "m9", "c1"])).toMatchObject({
+			sub: "conflicts",
+			arg: "resolve",
+			id: "c1",
+			verdict: "supersede",
+			winner: "m9",
+		});
+	});
+
+	it("`conflicts resolve <id> --verdict supersede --winner <id>` parses the id as the SOLE positional id", () => {
+		// The canonical resolve invocation: the only positional id is the conflict id, the flag values are consumed.
+		const parsed = parseMemoryCliArgs(["conflicts", "resolve", "c1", "--verdict", "supersede", "--winner", "m2"]);
+		expect(parsed).toMatchObject({ sub: "conflicts", arg: "resolve", id: "c1", verdict: "supersede", winner: "m2" });
+		// Neither flag value leaked into a positional field.
+		expect(parsed.id).not.toBe("supersede");
+		expect(parsed.id).not.toBe("m2");
+	});
 });
 
 describe("PRD-058d memory CLI — conflicts list (AC-55d.3.1)", () => {

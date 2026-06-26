@@ -256,7 +256,17 @@ async function hydrateCandidateContents(
 	if (candidates.length === 0) return candidates;
 	const ids = candidates.map((c) => c.id).filter((id) => id !== "");
 	if (ids.length === 0) return candidates;
-	const result = await deps.storage.query(buildCandidateContentSql(ids), deps.scope);
+	// FAIL-SOFT over BOTH failure shapes: a typed non-ok result AND a REJECTED promise. The storage query
+	// can reject (a transport throw past the result union), and this optional hydration is documented
+	// fail-soft, so a rejection must degrade to the un-hydrated candidates — never throw into the
+	// decision / controlled-write path (this is the C-1 live wiring; a hydration hiccup cannot 500 a write).
+	let result: QueryResult;
+	try {
+		result = await deps.storage.query(buildCandidateContentSql(ids), deps.scope);
+	} catch (e: unknown) {
+		deps.logger?.event("decision.candidate_hydrate_failed", { kind: e instanceof Error ? e.message : "rejected" });
+		return candidates; // fail-soft: a rejected query degrades to fewer candidates, never a throw.
+	}
 	if (!isOk(result)) {
 		deps.logger?.event("decision.candidate_hydrate_failed", { kind: result.kind });
 		return candidates; // fail-soft: detection runs over fewer candidates, never a throw.

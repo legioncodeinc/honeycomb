@@ -170,13 +170,19 @@ describe("PRD-058e recall wiring, calibrated confidence + recall-event recording
 		expect(hit.rawConfidence).toBe(0.9);
 	});
 
-	it("the dormant IDENTITY model surfaces NO calibrated confidence (the c exponent stays 0)", async () => {
+	it("the dormant IDENTITY model STILL surfaces calibratedConfidence = f (C = f), the c exponent stays 0", async () => {
+		// AC-55e.2.2: once a calibration model is wired, a consumer always sees a `C` — the IDENTITY model
+		// is the dormant `C = f` case, NOT a "skip emitting C" case. The dashboard / store-health `H` need
+		// the calibrated value even at cold-start, so identity stamps calibratedConfidence = rawConfidence
+		// = the stored f. The `c` exponent stays 0 (no reorder) — identity must not mean "drop C".
 		const { storage } = lexicalStorage([memRow("m1", daysAgo(1))], { m1: 0.9 });
 		const result = await recallMemories(
 			{ query: "x", scope: SCOPE, limit: 10 },
 			{ storage, now: () => NOW, calibration: IDENTITY_MODEL },
 		);
-		expect(result.hits[0]!.calibratedConfidence).toBeUndefined(); // dormant → not stamped.
+		const hit = result.hits.find((h) => h.id === "m1")!;
+		expect(hit.calibratedConfidence).toBe(0.9); // identity → C = f, still emitted.
+		expect(hit.rawConfidence).toBe(0.9);
 	});
 
 	it("records a `recall` access event per memories hit, fail-soft on a recorder throw", async () => {
@@ -222,16 +228,23 @@ describe("PRD-058e schema (58e.schema), additive lazy-heal, no migration", () =>
 		}
 	});
 
-	it("the two new memories columns ALTER-ADD cleanly (additive heal, no backfill failure)", () => {
-		const lastReinforced = MEMORIES_COLUMNS.find((c) => c.name === "last_reinforced_at");
-		const accessCount = MEMORIES_COLUMNS.find((c) => c.name === "access_count");
-		expect(lastReinforced).toBeDefined();
-		expect(accessCount).toBeDefined();
-		// Both are nullable (or DEFAULT) so ALTER ADD COLUMN on a populated table backfills cleanly.
-		expect(buildAddColumnSql("memories", lastReinforced!)).toContain('ALTER TABLE "memories" ADD COLUMN last_reinforced_at');
-		expect(buildAddColumnSql("memories", accessCount!)).toContain('ALTER TABLE "memories" ADD COLUMN access_count');
-		// Neither is NOT NULL-without-DEFAULT (that would fail the load-time guard / heal backfill).
-		expect(/NOT\s+NULL/i.test(lastReinforced!.sql) && !/DEFAULT/i.test(lastReinforced!.sql)).toBe(false);
+	it("ALL new memories lifecycle columns ALTER-ADD cleanly (additive heal, no backfill failure)", () => {
+		// Every 058c/058e lifecycle column the catalog added to `memories`: the reinforcement cache
+		// (last_reinforced_at, access_count), the staleness layer (ref_status, verified_at, stale_refs),
+		// and the compaction watermark (access_compacted_at). Each must be additive-heal-safe so an
+		// ALTER ADD COLUMN backfills a populated table without failing the load-time guard.
+		const names = ["last_reinforced_at", "access_count", "ref_status", "verified_at", "stale_refs", "access_compacted_at"];
+		const columns = names.map((name) => {
+			const col = MEMORIES_COLUMNS.find((c) => c.name === name);
+			expect(col, `column ${name} is registered`).toBeDefined();
+			return col!;
+		});
+		for (const col of columns) {
+			// Nullable (or DEFAULT) → ALTER ADD COLUMN on a populated table backfills cleanly.
+			expect(buildAddColumnSql("memories", col)).toContain(`ALTER TABLE "memories" ADD COLUMN ${col.name}`);
+			// None is NOT NULL-without-DEFAULT (that would fail the load-time guard / heal backfill).
+			expect(/NOT\s+NULL/i.test(col.sql) && !/DEFAULT/i.test(col.sql), `${col.name} heal-safe`).toBe(false);
+		}
 	});
 
 	it("healTargetFor resolves the new tables (the write primitives can heal them)", () => {

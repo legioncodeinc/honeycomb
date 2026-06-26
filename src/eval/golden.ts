@@ -46,6 +46,7 @@ import {
 	firstRelevantRank,
 	freshRanksFirst,
 	freshnessSliceScore,
+	RECALL_K_VALUES,
 	stalenessMetrics,
 	usefulContextAtK,
 	type AggregateMetrics,
@@ -721,7 +722,7 @@ export async function runUsefulContextSlice(
 		const result: RankedResult = { ids };
 		const useful: UsefulContextCase = { caseId: pair.key, correctIds: pair.correctIds, excludedIds: pair.excludedIds };
 		const usefulAtK: Record<string, number> = {};
-		for (const k of [1, 5, 10]) usefulAtK[String(k)] = usefulContextAtK(result, useful, k);
+		for (const k of RECALL_K_VALUES) usefulAtK[String(k)] = usefulContextAtK(result, useful, k);
 		cases.push({ key: pair.key, query: pair.query, usefulAtK });
 		scored.push({ result, useful });
 	}

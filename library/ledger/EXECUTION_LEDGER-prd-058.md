@@ -150,6 +150,14 @@ Serialization rationale: `recall.ts` is edited by 058a/058e/058c/058b and the sc
 - CI: Quality gate Node 22.x + 24.x GREEN, Windows smoke GREEN, CodeQL GREEN, Secret gate GREEN. Full suite passed on CI runners (local flakes did not recur). DeepLake live jobs skipped (creds-gated).
 - RESULT: 53/56 ACs VERIFIED. IDX-1/IDX-7/IDX-8 BLOCKED on HONEYCOMB_DEEPLAKE_TOKEN + embed daemon (live numeric eval verdict + dogfood). PRD stays in-work until that live run promotes it to completed.
 
+## Post-ship review remediation (PR #125)
+- CodeQL: 1 finding (`js/incomplete-sanitization` in `sqlLike`), PRE-EXISTING on main, not from #125. Fixed in a separate PR #129 (output-identical local-backslash refactor + regression tests). CodeQL now 0 open alerts on both branches.
+- CodeRabbit review (29 findings): 28 real, 1 false positive (documented + locked with a test).
+  - Wave A (retrieval-worker-bee, daemon internals): 2 TENANCY leaks fixed (calibration read + access-log now agent_id/visibility-scoped), Critical compaction idempotency fixed (persisted `access_compacted_at` watermark, additive heal), append-ordering + concurrency-atomic increments, conflict-path correctness (margin/timestamp preserve, reversed-only-on-restore, kappa_loser-respecting suppression, self-candidate exclusion, non-rejecting hydration), calibration monotone-guard, grader timeout, reference-extract module#symbol exclusion, reverify clamp, typing, + test rigor. 120 targeted tests green.
+  - Wave B (typescript-node-worker-bee, surfaces): dashboard health now H=A*C*(1-sigma)*kappa with freshness labeled honestly (A row distinct from C; A read-side aggregate not yet on the wire, surfaced honestly not faked), CLI positional/flag-value parsing fixed, eval recall-K DRY, reliability-bin stable key. 520 tests green.
+- Version bumped to 0.1.6 across all manifests + README (commit 06bd1dc). v0.1.6 tag created locally, HELD until #125 merges (push triggers the real npm publish).
+- QA report reconciled with a post-audit resolution note (C-1/W-1/W-2 resolved); ledger is authority.
+
 ## The one remaining ask (to reach 56/56 and promote to completed)
 Run, on a machine with the gitignored live creds + the embed daemon up:
   `set -a; . ./.env.local; set +a; HONEYCOMB_EMBEDDINGS=true npm run eval:recall`

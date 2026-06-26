@@ -47,6 +47,19 @@ describe("PRD-058b deriveClaimOutcome — the resolver's competing-vs-agreeing s
 		// two negation markers ("not" + "no") → even → affirm.
 		expect(deriveClaimOutcome("it is not true that we have no deploys")).toBe(OUTCOME_AFFIRM);
 	});
+
+	it("an OVERLAP token (in BOTH the negation set AND an antonym negative pole) flips exactly ONCE, not twice", () => {
+		// `remove` is in NEGATION_TOKENS and is the negative pole of `add`/`remove`; `stop` and `false`
+		// likewise. The parity counts each token at most once (the `||` dedupes the overlap), so a single
+		// such token is ONE flip → negate. A double-count regression would make these even → affirm, which
+		// would WRONGLY make "add X" and "remove X" agree and break the resolver's winner/loser split.
+		expect(deriveClaimOutcome("remove the cache flag")).toBe(OUTCOME_NEGATE); // one flip, not two.
+		expect(deriveClaimOutcome("stop the worker")).toBe(OUTCOME_NEGATE);
+		expect(deriveClaimOutcome("the value is false")).toBe(OUTCOME_NEGATE);
+		// The competing pair the resolver relies on: an affirmative add vs its remove land OPPOSITE outcomes.
+		expect(deriveClaimOutcome("add the cache flag")).toBe(OUTCOME_AFFIRM);
+		expect(deriveClaimOutcome("add the cache flag")).not.toBe(deriveClaimOutcome("remove the cache flag"));
+	});
 });
 
 /** A fixed 768-dim vector so the detector's claim-slot `sim` is high (the same-subject signal). */

@@ -156,8 +156,19 @@ export function decisionFanOut(
 			// the controlled-write stage runs conflict detection over the SAME candidates the decision
 			// model saw — no new scan. Only candidates that hydrated their content are forwarded (a
 			// content-less candidate cannot feed the detector's sim/opp signals).
+			// Exclude the UPDATE target itself: on an `update` the proposal's `targetId` is still in the
+			// candidate set (the stale PRE-update row). Forwarding it would let the controlled-write hook
+			// detect the just-committed row as conflicting with its own prior version — a bogus self-conflict
+			// projected into `memory_conflicts`. Drop it alongside the empty-id / empty-content filters.
+			const targetId = decision.proposal.targetId;
 			const candidates = decision.candidates
-				.filter((c) => c.id !== "" && typeof c.content === "string" && c.content !== "")
+				.filter(
+					(c) =>
+						c.id !== "" &&
+						c.id !== targetId &&
+						typeof c.content === "string" &&
+						c.content !== "",
+				)
 				.map((c) => ({ id: c.id, content: c.content as string }));
 			await queue.enqueue({
 				kind: "memory_controlled_write",

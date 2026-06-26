@@ -48,6 +48,7 @@ import { randomUUID } from "node:crypto";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import { isOk } from "../../storage/result.js";
 import { appendOnlyInsert, updateOrInsertByKey, val, type RowValues } from "../../storage/writes.js";
+import { sLiteral, sqlIdent } from "../../storage/sql.js";
 import { healTargetFor } from "../../storage/catalog/index.js";
 import { MAX_STALE_REFS, type RefStatus, staleRefsOverflowMarker } from "../../storage/catalog/memories.js";
 import type { Snapshot } from "../codebase/contracts.js";
@@ -105,6 +106,19 @@ export function buildResolutionIndex(snapshot: Snapshot): ResolutionIndex {
  * Conservative: when in doubt, NOT-indexed (→ `unknown`), because the failure mode we forbid is a
  * false `stale`, never a false `unknown`.
  */
+/** Source-file extensions that mark a left-hand path as repo-shaped (the nine graph languages). */
+const REPO_PATH_EXT_RE = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|py|go|rs|java|rb|c|h|cc|cpp|cxx|hpp)$/i;
+
+/**
+ * Is a `file-symbol`'s left-hand side a REPO-SHAPED path (so an absence is meaningful = `stale`), rather
+ * than a bare package/module specifier (e.g. `react`, `lodash`) that must score `unknown`? Repo-shaped =
+ * it carries a path separator OR ends in a known source extension. A bare module token (no `/`, no
+ * extension) is an external package reference, never indexed code (PRD-058c.1.3 — out-of-graph → unknown).
+ */
+function isRepoShapedPath(file: string): boolean {
+	return file.includes("/") || REPO_PATH_EXT_RE.test(file);
+}
+
 export function looksIndexed(ref: CodeReference): boolean {
 	// An external URL or a bare npm specifier is never indexed code.
 	if (/^[a-z]+:\/\//i.test(ref.raw)) return false; // http(s)://, file://, etc.
@@ -112,6 +126,13 @@ export function looksIndexed(ref: CodeReference): boolean {
 		const file = ref.file ?? "";
 		// A node_modules path or a bare package specifier (no slash, or `@scope/pkg`) is external.
 		if (/(^|\/)node_modules\//.test(file)) return false;
+		// A `file-symbol` from the bare `module#symbol` rule (e.g. `react#createRoot`) has a LEFT side
+		// that is a package/module specifier, NOT a repo path: no path separator and no source extension.
+		// Such an external reference must score `unknown` (NEUTRAL), never `stale` — the failure mode
+		// PRD-058c.1.3 forbids. Only a REPO-SHAPED left side (a `/`-separated path or a source-extension
+		// file) is in-graph-shaped. The `path` kind always carried a slash + extension (the extractor
+		// required it), so this only narrows the bare-`module#symbol` `file-symbol` case.
+		if (ref.kind === "file-symbol" && !isRepoShapedPath(file)) return false;
 		return true; // a slash + source extension path is in-graph-shaped (the extractor required it).
 	}
 	// A flag/qualified symbol: indexed-shaped. (A bare npm name would not have matched the
@@ -414,10 +435,18 @@ export async function runStaleRefDiagnostic(
 }
 
 /**
- * Write ONE memory's verdict: update `ref_status` / `verified_at` / `stale_refs` on the `memories`
- * row, then append a `memory_history` audit row (US-55c.2.4: actor, reason, σ, stale_refs). The
- * column update goes through `updateOrInsertByKey` (heal-aware, guarded SQL); the audit row
- * through `appendOnlyInsert`. FAIL-SOFT: a write error is caught and reported as `written: false`,
+ * Write ONE memory's verdict (US-55c.2.4) — RECONSTRUCTABLE across a partial failure. DeepLake has no
+ * multi-statement transaction, so the audit append and the `ref_status` / `verified_at` / `stale_refs`
+ * projection update cannot be one atomic write. To guarantee a ranking change NEVER lands without a
+ * recoverable audit trail, the steps are ORDERED audit-FIRST:
+ *  1. read the memory's CURRENT verdict fields (the prior state, for `before_payload`);
+ *  2. append the `memory_history` row carrying BOTH the prior (`before_payload`) and the new
+ *     (`after_payload`) verdict — so the transition is fully reconstructable / reversible from the audit;
+ *  3. ONLY THEN update the projection columns on the `memories` row.
+ * A crash after (2) but before (3) leaves an audit row whose `after_payload` records the INTENDED
+ * verdict while the projection still holds the prior state — observable and replayable, never a silent
+ * ranking change with no audit. A failed audit append aborts BEFORE the projection mutates (returns
+ * `false`), so the row is never mutated without its history. FAIL-SOFT: any error → `written: false`,
  * never thrown (one memory failing must not abort the batch).
  */
 async function writeVerdict(
@@ -432,6 +461,16 @@ async function writeVerdict(
 	const nowIso = new Date(nowMs).toISOString();
 	const staleRefsJson = JSON.stringify(verdict.staleRefs);
 	try {
+		// (1) Capture the PRIOR verdict fields so the audit's before_payload makes the transition reversible.
+		const before = await readPriorVerdict(memoryId, scope, deps);
+
+		// (2) Append the audit FIRST. If it fails, abort BEFORE the projection mutates — no ranking change
+		// without its history row.
+		const audited = await appendStaleHistory(memoryId, verdict, posture, before, nowIso, scope, deps);
+		if (!audited) return false;
+
+		// (3) Project the new verdict onto the memories row. A crash here leaves the audit ahead of the
+		// projection (the recoverable direction: replay the after_payload), never a silent mutation.
 		const update: RowValues = [
 			["id", val.str(memoryId)],
 			["ref_status", val.str(verdict.refStatus)],
@@ -443,28 +482,61 @@ async function writeVerdict(
 			keyValue: memoryId,
 			row: update,
 		});
-		if (!isOk(updated)) return false;
-		return await appendStaleHistory(memoryId, verdict, posture, nowIso, scope, deps);
+		return isOk(updated);
 	} catch {
 		return false; // fail-soft: a write hiccup never aborts the batch.
 	}
 }
 
+/** The prior verdict fields read off a memory's row (for the audit `before_payload`). Empty when absent. */
+interface PriorVerdict {
+	readonly refStatus: string;
+	readonly verifiedAt: string;
+	readonly staleRefs: string;
+}
+
+/**
+ * Read a memory's CURRENT `ref_status` / `verified_at` / `stale_refs` (the prior verdict the diagnostic
+ * is about to overwrite) so the audit `before_payload` captures the reversible pre-state. FAIL-SOFT: a
+ * missing row / read error → empty fields (a never-verified memory simply has no prior verdict to record).
+ */
+async function readPriorVerdict(memoryId: string, scope: QueryScope, deps: StaleRefDiagnosticDeps): Promise<PriorVerdict> {
+	const tbl = sqlIdent("memories");
+	const idCol = sqlIdent("id");
+	const readSql =
+		`SELECT ${sqlIdent("ref_status")} AS ref_status, ${sqlIdent("verified_at")} AS verified_at, ` +
+		`${sqlIdent("stale_refs")} AS stale_refs FROM "${tbl}" WHERE ${idCol} = ${sLiteral(memoryId)} LIMIT 1`;
+	const res = await deps.storage.query(readSql, scope);
+	if (!isOk(res) || res.rows.length === 0) return { refStatus: "", verifiedAt: "", staleRefs: "" };
+	const row = res.rows[0] as Record<string, unknown>;
+	const str = (v: unknown): string => (v === undefined || v === null ? "" : String(v));
+	return { refStatus: str(row.ref_status), verifiedAt: str(row.verified_at), staleRefs: str(row.stale_refs) };
+}
+
 /**
  * Append the `memory_history` audit row for a detection/heal action (US-55c.2.4). Records the
  * `pipeline` actor (the maintenance worker is a pipeline-class change — in the catalog actor
- * allowlist), the `stale-ref-detect` operation, and a JSON `after_payload` carrying the reason,
- * σ, posture, ref_status, and the stale_refs so the audit is total and reversible.
+ * allowlist), the `stale-ref-detect` operation, the PRIOR verdict in `before_payload` (so the
+ * transition is reconstructable / reversible), and the NEW verdict in `after_payload` (reason, σ,
+ * posture, ref_status, stale_refs). Returns whether the append landed.
  */
 async function appendStaleHistory(
 	memoryId: string,
 	verdict: StalenessVerdict,
 	posture: StalePosture,
+	before: PriorVerdict,
 	nowIso: string,
 	scope: QueryScope,
 	deps: StaleRefDiagnosticDeps,
 ): Promise<boolean> {
 	const auditId = (deps.newId ?? randomUUID)();
+	// before_payload captures the prior verdict so the transition can be reversed/reconstructed from the
+	// audit alone (CodeRabbit: a non-empty before_payload is what makes the ranking change reversible).
+	const beforePayload = JSON.stringify({
+		refStatus: before.refStatus,
+		verifiedAt: before.verifiedAt,
+		staleRefs: before.staleRefs,
+	});
 	const after = JSON.stringify({
 		reason: "stale-ref-diagnostic",
 		posture,
@@ -477,7 +549,7 @@ async function appendStaleHistory(
 		["memory_id", val.str(memoryId)],
 		["changed_by", val.str("pipeline")],
 		["operation", val.str("stale-ref-detect")],
-		["before_payload", val.text("")],
+		["before_payload", val.text(beforePayload)],
 		["after_payload", val.text(after)],
 		["created_at", val.str(nowIso)],
 	];

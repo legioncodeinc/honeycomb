@@ -89,7 +89,11 @@ export interface MountConflictsOptions {
 /** The zod body for the resolve endpoint (PRD-058b API spec). */
 export const ResolveSchema = z.object({
 	verdict: z.enum(CONFLICT_VERDICTS),
-	winnerId: z.string().uuid().optional(), // required when verdict = 'supersede' (enforced post-parse).
+	// A plain non-empty string, NOT a UUID: memory ids in this system are opaque (`mem_…`, `a`, `b`,
+	// `m/1 a`), not UUIDs, and the resolver only checks `winnerId` against `memory_a_id` / `memory_b_id`.
+	// A `z.uuid()` here would reject every valid supersede request at the API boundary. Required when
+	// verdict = 'supersede' (enforced post-parse).
+	winnerId: z.string().min(1).optional(),
 	reason: z.string().max(500).optional(),
 });
 
@@ -176,7 +180,13 @@ export async function applyConflictResolution(
 	}
 
 	// Project the resolved state as a fresh version-bumped row (the live verdict is MAX(version)).
-	const createdAt = (deps.persist.now ?? (() => new Date()))().toISOString();
+	// PRESERVE the DETECTION provenance: reuse the conflict's ORIGINAL created_at (its detection time)
+	// rather than stamping a fresh one on every resolve — `buildConflictListSql()` orders by created_at,
+	// so re-stamping would reorder the queue on resolution. And keep `margin` NULLABLE: it is NULL until a
+	// real margin exists, so a `null` margin must stay NULL, never be coerced to 0 (which corrupts the
+	// current-state projection). `margin` is an OPTIONAL field on the projection (undefined → NULL).
+	const createdAt = str(row.created_at) || (deps.persist.now ?? (() => new Date()))().toISOString();
+	const hasMargin = row.margin !== null && row.margin !== undefined;
 	await projectConflict(
 		{
 			conflictId,
@@ -185,7 +195,7 @@ export async function applyConflictResolution(
 			...(claimSlot !== undefined ? { claimSlot } : {}),
 			signal: (str(row.signal) || "lexical") as ConflictSignal,
 			contraScore: contra,
-			margin: num(row.margin, 0),
+			...(hasMargin ? { margin: num(row.margin, 0) } : {}),
 			verdict,
 			...(winnerId !== undefined ? { winnerId } : {}),
 			kappaLoser,

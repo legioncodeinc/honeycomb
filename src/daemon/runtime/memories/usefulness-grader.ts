@@ -107,12 +107,49 @@ export interface UsefulnessGrade {
 export interface UsefulnessGraderDeps {
 	/** The 058b contradiction detector; defaults to {@link noContradictionDetector}. */
 	readonly detector?: ContradictionDetector;
+	/**
+	 * The bounded wall-clock budget (ms) for ONE `detector.detect()` call. A detector that NEVER resolves
+	 * must not wedge the grader (and the `Promise.all` in {@link gradeRecallBatch}), so the call races a
+	 * timeout that resolves to the fail-soft "no contradiction" sentinel. Default
+	 * {@link DEFAULT_DETECT_TIMEOUT_MS}; a test injects a tiny value.
+	 */
+	readonly detectTimeoutMs?: number;
 }
+
+/** The default per-detect timeout (ms): a hung NLI judge degrades to "no contradiction" after this. */
+export const DEFAULT_DETECT_TIMEOUT_MS = 5_000;
 
 /** Clamp a value into `[0,1]`; non-finite → 0. */
 function clampUnit(value: number): number {
 	if (!Number.isFinite(value)) return 0;
 	return Math.min(1, Math.max(0, value));
+}
+
+/** A sentinel the detect-timeout resolves to (a number outside `[0,1]` so the caller can spot the timeout). */
+const DETECT_TIMED_OUT = Number.NaN;
+
+/**
+ * Race a `detect()` call against a bounded timeout (PRD-058e fail-soft). Resolves to the detector's
+ * probability, or {@link DETECT_TIMED_OUT} when the budget elapses first — so a detector that NEVER
+ * resolves cannot wedge `gradeUsefulness` (nor the `Promise.all` batch). The timer is cleared on the
+ * winning path so a settled detect does not leak a pending timer. A detector REJECTION propagates (the
+ * caller's `try/catch` maps it to the same fail-soft default).
+ */
+async function detectWithTimeout(
+	detector: ContradictionDetector,
+	injectedText: string,
+	outcomeText: string,
+	timeoutMs: number,
+): Promise<number> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<number>((resolve) => {
+		timer = setTimeout(() => resolve(DETECT_TIMED_OUT), Math.max(0, timeoutMs));
+	});
+	try {
+		return await Promise.race([detector.detect(injectedText, outcomeText), timeout]);
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+	}
 }
 
 /**
@@ -138,11 +175,16 @@ export async function gradeUsefulness(
 		return { memoryId: signals.memoryId, usefulness: USEFULNESS_REJECTED, kind: "downweight" };
 	}
 
-	// (2) Injected + kept → consult the contradiction detector. A throw → no contradiction.
+	// (2) Injected + kept → consult the contradiction detector, BOUNDED by a timeout. A throw OR a
+	// timeout (a detector that never resolves) → no contradiction (the conservative confirmed grade),
+	// so a hung/failing judge can never wedge the grader or the `Promise.all` batch.
 	const detector = deps.detector ?? noContradictionDetector;
+	const timeoutMs = deps.detectTimeoutMs ?? DEFAULT_DETECT_TIMEOUT_MS;
 	let pContradiction = 0;
 	try {
-		pContradiction = clampUnit(await detector.detect(signals.injectedText, signals.outcomeText));
+		const raw = await detectWithTimeout(detector, signals.injectedText, signals.outcomeText, timeoutMs);
+		// A timeout sentinel (NaN) or any non-finite value clamps to 0 → "no contradiction" (fail-soft).
+		pContradiction = clampUnit(raw);
 	} catch {
 		pContradiction = 0; // fail-soft: a detector hiccup never wrongly punishes the memory.
 	}

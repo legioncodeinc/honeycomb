@@ -62,9 +62,12 @@ export const DEFAULT_REVERIFY_SCHEDULE: ReverifyScheduleConfig = Object.freeze({
  */
 export function reverifyIntervalMs(activation: number, config: ReverifyScheduleConfig = DEFAULT_REVERIFY_SCHEDULE): number {
 	const a = Number.isFinite(activation) ? Math.min(1, Math.max(0, activation)) : 0;
-	// Normalize bounds so min ≤ max even if a hand-built config inverted them.
+	// Normalize bounds so 0 ≤ lo ≤ hi even if a hand-built config inverted them OR made BOTH negative.
+	// `hi` is floored at `lo` (already ≥ 0) so a config with both bounds negative cannot leave `hi`
+	// negative and return a negative interval (an invalid config must look "longest interval", never
+	// "already overdue by a negative amount").
 	const lo = Math.max(0, Math.min(config.minIntervalMs, config.maxIntervalMs));
-	const hi = Math.max(config.minIntervalMs, config.maxIntervalMs);
+	const hi = Math.max(lo, config.minIntervalMs, config.maxIntervalMs);
 	const raw = hi * (1 - a); // A=1 → 0 (clamped up to lo); A=0 → hi.
 	return Math.min(hi, Math.max(lo, raw));
 }
