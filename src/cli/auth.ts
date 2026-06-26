@@ -138,6 +138,11 @@ export function parseAuthArgs(argv: readonly string[]): AuthInvocation {
 				if (next !== undefined && !next.startsWith("--")) {
 					flags[name] = next;
 					i += 1;
+				} else {
+					// A bare `--<flag>` (no value, or followed by another flag): record it
+					// as empty so a value-less `--endpoint` is rejected by the caller
+					// rather than silently ignored (which would fall back to hosted login).
+					flags[name] = "";
 				}
 				consumed = true;
 				break;
@@ -197,7 +202,14 @@ async function login(inv: AuthInvocation, deps: ReturnType<typeof withDefaults>)
 	// WITHOUT dialing api.deeplake.ai. SKIPS the device flow AND the `GET /me` validation,
 	// and writes the shared credential directly with the supplied apiUrl. Purely additive:
 	// with NO `--endpoint`, every existing login behavior below is unchanged.
-	if (inv.endpoint !== undefined && inv.endpoint.length > 0) {
+	// An explicit but empty `--endpoint` (a bare flag or `--endpoint=`) means the user
+	// asked for the self-hosted path but gave no URL. Reject it instead of silently
+	// falling back to the hosted flow, which could dial api.deeplake.ai.
+	if (inv.endpoint !== undefined && inv.endpoint.length === 0) {
+		out("error: login --endpoint requires a URL (e.g. --endpoint https://host or --endpoint postgres://host/db)");
+		return { exitCode: 1, wrote: false };
+	}
+	if (inv.endpoint !== undefined) {
 		return loginSelfHosted(inv, inv.endpoint, deps);
 	}
 	// The headless token: the explicit `--token` arg wins, else `HONEYCOMB_TOKEN` (AC-2 / parity).
@@ -264,8 +276,14 @@ function loginSelfHosted(inv: AuthInvocation, endpoint: string, deps: ReturnType
 	const workspace = inv.workspace !== undefined && inv.workspace.length > 0 ? inv.workspace : "default";
 	// The token: an explicit `--token` (or `HONEYCOMB_TOKEN`) wins; otherwise mint a LOCAL stub
 	// bound to this org/workspace so no Activeloop token is needed for a self-hosted backend.
-	const token =
-		inv.token ?? deps.env.HONEYCOMB_TOKEN ?? encodeStubToken({ org, workspace, agentId: "default", role: "admin" });
+	// Empty strings (`--token=` or `HONEYCOMB_TOKEN=""`) are treated as ABSENT, so we mint the
+	// stub instead of persisting a broken empty bearer token (`??` alone would keep the "").
+	const explicitToken = inv.token !== undefined && inv.token.length > 0 ? inv.token : undefined;
+	const envToken =
+		deps.env.HONEYCOMB_TOKEN !== undefined && deps.env.HONEYCOMB_TOKEN.length > 0
+			? deps.env.HONEYCOMB_TOKEN
+			: undefined;
+	const token = explicitToken ?? envToken ?? encodeStubToken({ org, workspace, agentId: "default", role: "admin" });
 
 	const creds: Credentials = {
 		token,

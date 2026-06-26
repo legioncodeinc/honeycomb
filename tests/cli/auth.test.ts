@@ -325,4 +325,31 @@ describe("self-hosted login (--endpoint): writes the credential directly WITHOUT
 		expect(text).not.toContain("secret-token-zzz");
 		expect(text).toContain("https://deeplake.internal");
 	});
+
+	it("rejects a value-less --endpoint instead of falling back to hosted login", async () => {
+		// A bare `--endpoint` parses to an empty string; it must error, NOT silently run the
+		// hosted flow (which could dial api.deeplake.ai via throwingFetch).
+		expect(parseAuthArgs(["login", "--endpoint"])).toEqual({ command: "login", endpoint: "" });
+		const cap = captured();
+		const res = await runAuthCommand(
+			{ command: "login", endpoint: "" },
+			{ dir, clock: clock(), env: {}, out: cap.out, fetch: throwingFetch },
+		);
+		expect(res.exitCode).toBe(1);
+		expect(res.wrote).toBe(false);
+		expect(existsSync(credentialsPath(dir))).toBe(false);
+		expect(cap.lines.join("\n")).toContain("--endpoint requires a URL");
+	});
+
+	it("treats an empty --token / HONEYCOMB_TOKEN as absent and mints a stub (no empty bearer)", async () => {
+		const cap = captured();
+		const res = await runAuthCommand(
+			{ command: "login", endpoint: "https://deeplake.internal", token: "" },
+			{ dir, clock: clock(), env: { HONEYCOMB_TOKEN: "" }, out: cap.out, fetch: throwingFetch },
+		);
+		expect(res.exitCode).toBe(0);
+		const onDisk = JSON.parse(readFileSync(credentialsPath(dir), "utf8")) as DiskCredentials;
+		expect(onDisk.token.length).toBeGreaterThan(0);
+		expect(verifyTokenClaims(onDisk.token)?.org).toBe("local");
+	});
 });

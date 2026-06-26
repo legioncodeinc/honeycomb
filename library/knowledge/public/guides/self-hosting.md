@@ -55,7 +55,7 @@ If you front `pg_deeplake` with an HTTP gateway that exposes the Deep Lake query
 honeycomb login --endpoint "https://deeplake.internal.example.com"
 ```
 
-Any non-`postgres://` endpoint uses the HTTP transport.
+Any endpoint that does not start with `postgres://` or `postgresql://` uses the HTTP transport.
 
 ### Flags
 
