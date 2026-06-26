@@ -55,6 +55,7 @@ import { createJobQueueService } from "./services/job-queue.js";
 import { type CreateDaemonOptions, type Daemon, type DaemonServices, createDaemon } from "./server.js";
 
 import { attachHooksHandlers } from "./capture/attach.js";
+import type { CaptureHandler } from "./capture/capture-handler.js";
 import { mountGraphApi } from "./codebase/api.js";
 import { mountOntologyApi } from "./ontology/api.js";
 import { mountSkillPropagationApi } from "./skillify/propagation-api.js";
@@ -69,6 +70,7 @@ import { mountSetupMigrate } from "./dashboard/setup-migrate.js";
 import { mountPollinateApi } from "./pollinating/api.js";
 import { mountOnboardingApi, mountProjectsSyncApi, mountScopeEnumerationApi, mountScopeSwitchApi } from "./projects/index.js";
 import { mountCompactApi } from "./maintenance/compact-api.js";
+import { mountStaleRefApi } from "./maintenance/stale-ref-api.js";
 import { mountLogsApi } from "./logs/api.js";
 import { type LogStore, NULL_LOG_STORE, openLogStore } from "./logs/log-store.js";
 import { mountNotificationsApi } from "./notifications/api.js";
@@ -76,6 +78,10 @@ import { attachSessionsPrune } from "./sessions/prune.js";
 
 // ── Data-API mount seams (PRD-022a / 022b / 022c) the composition root fires (D-2 / d-AC-1) ──
 import { mountMemoriesApi, mountMemoriesPrimeApi } from "./memories/index.js";
+import { createConflictSuppressionSource } from "./memories/conflict-resolve.js";
+import { createControlledWriteConflictHook } from "./memories/conflict-hook.js";
+import { mountConflictsApi } from "./memories/conflicts-api.js";
+import { mountLifecycleApi } from "./memories/lifecycle-api.js";
 import { mountVfsApi } from "./vfs/api.js";
 import { mountProductDataApi } from "./product/index.js";
 import { type SecretsApiDeps } from "./secrets/api.js";
@@ -112,6 +118,8 @@ import {
 import { resolvePollinatingConfig } from "./pollinating/config.js";
 import { createPollinatingTrigger } from "./pollinating/trigger.js";
 import { createPollinatingWorker, type PollinatingJobWorker } from "./pollinating/worker.js";
+import { type PollBackoffConfig, resolvePollBackoffConfig } from "./services/poll-backoff.js";
+import { createLeaseCoordinator, type LeaseCoordinator, resolvePollConsolidateConfig } from "./services/lease-coordinator.js";
 
 // ── The PRD-046a summary-worker mount (the deferred-assembly seam PRD-017 left) ──
 import { createSummaryJobWorker, type SummaryJobWorker } from "./summaries/index.js";
@@ -377,6 +385,22 @@ export interface SeamFns {
 	 * tests; `assembleSeams` fires it only when present (always present in {@link defaultSeamFns}).
 	 */
 	readonly mountMemoriesPrime?: typeof mountMemoriesPrimeApi;
+	/**
+	 * PRD-058b: the conflict-resolution endpoint — `POST /api/memories/conflicts/:id/resolve`. Fires onto
+	 * the SAME `/api/memories` SESSION group, inheriting auth/RBAC + the session gate. OPTIONAL on the seam
+	 * record (like {@link mountMemoriesPrime}) so a pre-existing recording-fake `SeamFns` stays
+	 * type-compatible WITHOUT editing those out-of-scope suites; `assembleSeams` fires it only when present
+	 * (always present in {@link defaultSeamFns}).
+	 */
+	readonly mountConflicts?: typeof mountConflictsApi;
+	/**
+	 * PRD-058d — the lifecycle READ endpoints (conflicts list / stale-refs / lifecycle history) on the
+	 * SAME `/api/memories` SESSION group, inheriting auth/RBAC + the session gate. OPTIONAL on the seam
+	 * record (like {@link mountConflicts}) so a pre-existing recording-fake `SeamFns` stays type-compatible
+	 * WITHOUT editing those out-of-scope suites; `assembleSeams` fires it only when present (always present
+	 * in {@link defaultSeamFns}). Reads-only: it defines NO write path (the resolve goes through 058b).
+	 */
+	readonly mountLifecycle?: typeof mountLifecycleApi;
 	/** The `/memory/*` VFS browse reads (022b). Fires UNCONDITIONALLY — its group is a protected session group. */
 	readonly mountVfs: typeof mountVfsApi;
 	/** The product-data surface — goals/kpis/skills/rules (+secrets) (022c). Fires UNCONDITIONALLY. */
@@ -403,6 +427,14 @@ export interface SeamFns {
 	 * `local`, gated in team/hybrid). Fail-soft — a mount error never crashes the daemon.
 	 */
 	readonly mountCompact: typeof mountCompactApi;
+	/**
+	 * The PRD-058c stale-reference diagnostic trigger — `POST /api/diagnostics/stale-refs`. Fires
+	 * UNCONDITIONALLY: its `/api/diagnostics` group is already `protect:true`, so it inherits the same
+	 * auth/RBAC as the dashboard's JSON views (open in `local`, gated in team/hybrid). It runs the
+	 * `σ(m,t)` diagnostic over the daemon-scope memories against the converged codebase-graph snapshot.
+	 * Fail-soft — a mount error never crashes the daemon; a missing graph oracle marks nothing stale.
+	 */
+	readonly mountStaleRef: typeof mountStaleRefApi;
 	/**
 	 * The protected per-subsystem health detail — `GET /api/diagnostics/health` (PRD-029 /
 	 * AC-3). Fires UNCONDITIONALLY: its `/api/diagnostics` group is already `protect:true`, so
@@ -503,11 +535,14 @@ export const defaultSeamFns: SeamFns = {
 	mountSetupMigrate,
 	mountMemories: mountMemoriesApi,
 	mountMemoriesPrime: mountMemoriesPrimeApi,
+	mountConflicts: mountConflictsApi,
+	mountLifecycle: mountLifecycleApi,
 	mountVfs: mountVfsApi,
 	mountProductData: mountProductDataApi,
 	mountPollinate: mountPollinateApi,
 	mountProjectsSync: mountProjectsSyncApi,
 	mountCompact: mountCompactApi,
+	mountStaleRef: mountStaleRefApi,
 	mountDiagnosticsHealth: mountDiagnosticsHealthApi,
 	mountGraph: mountGraphApi,
 	mountHarness: mountHarnessApi,
@@ -697,7 +732,7 @@ export function assembleSeams(
 	logStore: LogStore,
 	seams: SeamFns = defaultSeamFns,
 	vault?: VaultSettingsReader,
-): void {
+): CaptureHandler {
 	// The daemon's configured default tenancy scope (the single LOCAL tenant) is RESOLVED ONCE
 	// at the composition root (`assembleDaemon`) from the SAME credential source the storage
 	// client connected through, then THREADED in here — never re-resolved independently. (The
@@ -723,7 +758,10 @@ export function assembleSeams(
 	//    the extraction → decision → controlled-write → graph-persist pipeline. The
 	//    enqueue is fail-soft in the capture handler (a pipeline enqueue failure never
 	//    breaks the captured turn).
-	seams.attachHooks(daemon, {
+	// PRD-062c (AC-5 / AC-62c.1.2): hold the constructed capture handler so the graceful
+	// shutdown path can FORCE-FLUSH its write buffer, draining any batched-but-unwritten
+	// captured rows before the daemon stops (so a clean stop never loses a buffered event).
+	const captureHandler = seams.attachHooks(daemon, {
 		storage,
 		queue: daemon.services.queue,
 		embed,
@@ -844,13 +882,38 @@ export function assembleSeams(
 	// PRD-044c: thread the vault `setting`-class READER so the LIVE recall handler reads the
 	// user-selected `recallMode` at recall time and honors it (`keyword` → lexical-only, NOT degraded).
 	// Present-only spread — an absent vault (the deterministic suite) leaves the read path UNSET (no-op).
+	// PRD-058b: the κ(m,t) gate's conflict-suppression source — recall drops the κ = ρ open-conflict loser
+	// as the LAST currentness filter (the κ = 0 hard-superseded losers are already excluded by supersession).
+	// FAIL-SOFT by construction: a missing/unreadable `memory_conflicts` table → no suppression (both sides
+	// returned), never a 500. Threaded into the recall handler's engine deps.
+	const conflictSuppression = createConflictSuppressionSource(storage);
 	seams.mountMemories(daemon, {
 		storage,
 		defaultScope,
 		embed: embed.client,
 		logger: daemon.logger,
+		conflictSuppression,
 		...(vault !== undefined ? { vault } : {}),
 	});
+
+	// 7a-bis. The conflict-resolution endpoint (PRD-058b): `POST /api/memories/conflicts/:id/resolve`
+	//    attaches onto the SAME `/api/memories` SESSION group, inheriting its auth/RBAC + session gate.
+	//    The operator applies a verdict (supersede/review/keep-both); supersede version-bumps the loser
+	//    (append-only, never a destructive delete), every path appends `memory_history` + projects the
+	//    new state, and the read-back polls to convergence. Guarded + present-only (like the prime seam).
+	if (seams.mountConflicts !== undefined) {
+		seams.mountConflicts(daemon, { storage, defaultScope });
+	}
+
+	// 7a-ter. The lifecycle READ endpoints (PRD-058d): `GET /api/memories/conflicts`,
+	//    `GET /api/memories/stale-refs`, `GET /api/memories/history?type=lifecycle` attach onto the
+	//    SAME `/api/memories` SESSION group, inheriting its auth/RBAC + session gate. Reads-only +
+	//    scope-enforced (org/workspace partition before any content) + paginated; every resolve still
+	//    goes through the 058b POST endpoint above (058d defines NO new write path). Guarded +
+	//    present-only (like the conflicts seam) so an out-of-scope fake `SeamFns` is unaffected.
+	if (seams.mountLifecycle !== undefined) {
+		seams.mountLifecycle(daemon, { storage, defaultScope });
+	}
 
 	// 7b. The session-priming PRIME digest (PRD-046c): `GET /api/memories/prime` attaches onto the
 	//    SAME `/api/memories` SESSION group, inheriting its auth/RBAC + session gate. The prime is a
@@ -923,6 +986,21 @@ export function assembleSeams(
 	} catch (err: unknown) {
 		const reason = err instanceof Error ? err.message : String(err);
 		process.stderr.write(`honeycomb: compaction route mount failed (non-fatal): ${reason}\n`);
+	}
+
+	// 11b. The PRD-058c stale-reference diagnostic trigger: `POST /api/diagnostics/stale-refs`.
+	//      Attaches onto the SAME already-mounted, protected `/api/diagnostics` group (NO `server.ts`
+	//      edit), inheriting the dashboard JSON views' auth/RBAC. It runs the staleness diagnostic over
+	//      the daemon-scope memories against the CONVERGED local codebase-graph snapshot (poll-to-
+	//      convergence), writing `ref_status` / `verified_at` / `stale_refs` + a `memory_history` row,
+	//      gated by the request posture (`observe` default = detection visible-but-inert; `execute` =
+	//      the recall demotion is live). FAIL-SOFT: a mount error never crashes the daemon, and a
+	//      missing graph oracle marks NOTHING stale (everything `unknown`), never a mass-flag.
+	try {
+		seams.mountStaleRef(daemon, { storage, defaultScope, workspaceDir });
+	} catch (err: unknown) {
+		const reason = err instanceof Error ? err.message : String(err);
+		process.stderr.write(`honeycomb: stale-ref route mount failed (non-fatal): ${reason}\n`);
 	}
 
 	// 12. The protected per-subsystem health detail — `GET /api/diagnostics/health` (PRD-029 /
@@ -1038,6 +1116,10 @@ export function assembleSeams(
 			process.stderr.write(`honeycomb: skill propagation API mount failed (non-fatal): ${reason}\n`);
 		}
 	}
+
+	// PRD-062c (AC-5 / AC-62c.1.2): return the capture handler so the composition root can
+	// force-flush its write buffer in the graceful-shutdown path (drain batched-but-unwritten rows).
+	return captureHandler;
 }
 
 /**
@@ -1283,6 +1365,7 @@ async function buildGatedPollinatingWorker(
 	scope: QueryScope,
 	queue: DaemonServices["queue"],
 	vault: VaultSettingsReader | undefined,
+	backoff: PollBackoffConfig,
 ): Promise<PollinatingJobWorker | null> {
 	// Resolve the env gate fail-soft FIRST: a malformed pollinating-config knob must NEVER take the
 	// daemon down — treat it as disabled (the false-safe default the schema already documents).
@@ -1346,7 +1429,7 @@ async function buildGatedPollinatingWorker(
 
 	// The consumer: leases ONLY `["pollinating"]`, runs the runner with the real model + the 008c
 	// apply (inside the runner) + the append-only state update, completes/fails the job.
-	return createPollinatingWorker({ queue, storage, scope, config, model, trigger });
+	return createPollinatingWorker({ queue, storage, scope, config, model, trigger, backoff });
 }
 
 /**
@@ -1430,6 +1513,7 @@ async function buildPipelineWorker(
 	scope: QueryScope,
 	queue: DaemonServices["queue"],
 	embed: EmbedAttachment,
+	backoff: PollBackoffConfig,
 ): Promise<StageWorker> {
 	// Resolve the pipeline config fail-soft: a malformed knob must NEVER take the daemon
 	// down — degrade to the schema's false-safe defaults (every stage gate defaults OFF,
@@ -1462,17 +1546,26 @@ async function buildPipelineWorker(
 
 	const queryScope: QueryScope = scope;
 
+	// PRD-058b LIVE (C-1): the post-commit conflict-detection hook. Built over the SAME storage + embed +
+	// model the pipeline already uses, it makes detection RUN on the real write path — a committed fact
+	// runs the detector over the decision stage's forwarded candidate set and PROJECTS any flagged pair
+	// into `memory_conflicts`, so recall's κ gate (createConflictSuppressionSource, wired at the memories
+	// mount) finally reads a non-empty projection. Fail-soft by construction (a down judge / missing table
+	// never costs a memory). The decision stage's `hydrateCandidates` is turned on IN LOCKSTEP so the
+	// forwarded candidates carry the claim text the detector needs (the two travel together).
+	const conflictHook = createControlledWriteConflictHook({ storage, embed: embed.client, model });
+
 	// The real stage handlers, CHAINED via the fan-out enqueuers (045a). Each stage's
 	// optional forward seam is wired to enqueue the next stage's job onto the same queue.
 	const handlers = createPipelineHandlers({
 		extraction: { config, model, onResult: extractionFanOut(queue) },
-		decision: { storage, scope: queryScope, model, config, embed: embed.client, onDecisions: decisionFanOut(queue) },
-		controlledWrite: { storage, config, embed: embed.client, onOutcome: controlledWriteFanOut(queue) },
+		decision: { storage, scope: queryScope, model, config, embed: embed.client, hydrateCandidates: true, onDecisions: decisionFanOut(queue) },
+		controlledWrite: { storage, config, embed: embed.client, onOutcome: controlledWriteFanOut(queue), onConflict: conflictHook },
 		graphPersist: { storage, scope: queryScope, config },
 		retention: { storage, scope: queryScope, config },
 	});
 
-	return createStageWorker({ queue, handlers });
+	return createStageWorker({ queue, handlers, backoff });
 }
 
 /**
@@ -1662,7 +1755,9 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// ── a-AC-2 / d-AC-1: fire the seams EXACTLY ONCE, after construction (the four core
 	// seams + the /api/logs reader always; the /dashboard host local-mode only per security
 	// F-1; PLUS the three data-API seams — memories/vfs/product-data — always, 022d).
-	assembleSeams(
+	// PRD-062c: hold the capture handler the seams construct so `shutdown()` can drain its
+	// write buffer (AC-5). `assembleSeams` returns it from its `attachHooks` step.
+	const captureHandler = assembleSeams(
 		daemon,
 		storage,
 		scope,
@@ -1814,6 +1909,13 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// UNCONDITIONALLY (the per-stage gates inside the config decide what actually runs) inside
 	// `start()` AFTER the queue is up, and stopped in `shutdown()`. Null until `start()` runs.
 	let pipelineWorker: StageWorker | null = null;
+	// PRD-062b L-B3 (AC-4): the single combined lease coordinator. When
+	// `HONEYCOMB_POLL_CONSOLIDATE` is on AND pollinating is enabled, the pipeline +
+	// pollinating workers are registered as participants and this coordinator runs ONE
+	// combined lease pass over the union of their kinds instead of two independent
+	// scans. Null when consolidation is off (the two workers start independently — the
+	// AC-9 parity path) or when pollinating is disabled (only the pipeline worker exists).
+	let leaseCoordinator: LeaseCoordinator | null = null;
 	// PRD-045f f-AC-1: the daemon-resident SKILLIFY worker — the live CONSUMER of `skillify`
 	// jobs capture enqueues when the turn-counter threshold is crossed. Built + started
 	// UNCONDITIONALLY (core feature, not gated) inside `start()` AFTER the queue is up, and
@@ -1845,6 +1947,25 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// Start the daemon's real services (queue → watcher → runtime-path).
 			await daemon.startServices();
 
+			// ── PRD-062b: resolve the adaptive-backoff + consolidation knobs ONCE, fail-soft.
+			// A malformed knob must NEVER take the daemon down — degrade to the schema's
+			// safe defaults (backoff still default-ON per the env provider; consolidation
+			// default-ON). Both are threaded into the workers below; consolidation also
+			// decides whether the pipeline + pollinating workers run under one combined
+			// lease pass (AC-4) or two independent ones (the AC-9 parity path).
+			let pollBackoff: PollBackoffConfig;
+			try {
+				pollBackoff = resolvePollBackoffConfig();
+			} catch {
+				pollBackoff = resolvePollBackoffConfig({ read: () => ({}) });
+			}
+			let consolidatePoll = false;
+			try {
+				consolidatePoll = resolvePollConsolidateConfig().enabled;
+			} catch {
+				consolidatePoll = false;
+			}
+
 			// ── PRD-046a a-AC-1: build + start the SUMMARY worker, the live CONSUMER of
 			// `summary` jobs. It is built AFTER `startServices()` so it leases from a started
 			// queue. Summaries are a CORE feature (not gated like pollinating), so it starts
@@ -1870,8 +1991,12 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				// dependency degrades to the no-op client when no `agent.yaml`/`inference:` is present
 				// (zero-mutation passes), exactly as the pollinating worker does (constraint).
 				try {
-					pipelineWorker = await buildPipelineWorker(options, storage, scope, daemon.services.queue, embed);
-					pipelineWorker.start();
+					pipelineWorker = await buildPipelineWorker(options, storage, scope, daemon.services.queue, embed, pollBackoff);
+					// PRD-062b (AC-4): when consolidation is ON, DEFER starting the pipeline
+					// worker's own loop — the single lease coordinator (built at the pollinating
+					// block below, once we know whether pollinating is enabled) drives it. When
+					// consolidation is OFF, start it independently now (the AC-9 two-pass path).
+					if (!consolidatePoll) pipelineWorker.start();
 				} catch (err: unknown) {
 					const reason = err instanceof Error ? err.message : String(err);
 					process.stderr.write(`honeycomb: memory-pipeline worker start failed (non-fatal): ${reason}\n`);
@@ -1930,8 +2055,43 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// rather than propagated. When the gate is closed, `buildGatedPollinatingWorker`
 			// returns null and we start nothing.
 			try {
-				pollinatingWorker = await buildGatedPollinatingWorker(options, storage, scope, daemon.services.queue, vault);
-				pollinatingWorker?.start();
+				pollinatingWorker = await buildGatedPollinatingWorker(options, storage, scope, daemon.services.queue, vault, pollBackoff);
+				// PRD-062b (AC-4): consolidate ONLY the REAL production workers. An explicitly
+				// INJECTED test worker (`options.pollinatingWorker`) is a lifecycle-recording fake
+				// whose own `start()`/`stop()` the test asserts — it is not a real lease participant,
+				// so consolidation must respect its standalone lifecycle and never route it through
+				// the coordinator. So consolidation runs only when (a) the flag is on AND (b) the
+				// pollinating worker was the REAL build (not injected).
+				const pollinatingInjected = options.pollinatingWorker !== undefined;
+				if (consolidatePoll && !pollinatingInjected) {
+					// If consolidation is ON, do NOT start the pollinating worker's own loop —
+					// register it (with the already-built pipeline worker) as a participant of a
+					// SINGLE lease coordinator that runs ONE combined pass over the union of their
+					// kinds. Kind isolation is preserved: the union lease only leases a kind a
+					// participant owns, and each leased job is dispatched to its owner. The pipeline
+					// worker was deferred above under the same flag.
+					const participants = [pipelineWorker, pollinatingWorker].filter(
+						(p): p is StageWorker | PollinatingJobWorker => p !== null,
+					);
+					if (participants.length > 0) {
+						leaseCoordinator = createLeaseCoordinator({
+							queue: daemon.services.queue,
+							participants,
+							backoff: pollBackoff,
+							flatIntervalMs: 1_000,
+						});
+						leaseCoordinator.start();
+					}
+				} else {
+					// Consolidation OFF (the two-pass AC-9 parity path) OR an injected test worker:
+					// start the pollinating worker independently. When consolidation was selected but
+					// the pollinating worker was injected, the pipeline worker's start was deferred
+					// above, so start it here too so it is never left un-pumped.
+					pollinatingWorker?.start();
+					if (consolidatePoll && pollinatingInjected && pipelineWorker !== null) {
+						pipelineWorker.start();
+					}
+				}
 			} catch (err: unknown) {
 				// A pollinating wiring failure is surfaced to stderr (never silently swallowed) but is
 				// NOT fatal: the daemon is already up and serving; pollinating simply stays off this
@@ -1941,13 +2101,32 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				const reason = err instanceof Error ? err.message : String(err);
 				process.stderr.write(`honeycomb: pollinating worker start failed (non-fatal): ${reason}\n`);
 				pollinatingWorker = null;
+				// If consolidation was selected but the coordinator never started (the pollinating
+				// build threw), fall back to starting the pipeline worker's own loop so the pipeline
+				// is never left un-pumped after its start was deferred under the consolidation flag.
+				if (consolidatePoll && leaseCoordinator === null && pipelineWorker !== null) {
+					pipelineWorker.start();
+				}
 			}
 		},
 
 		async shutdown(): Promise<void> {
+			// PRD-062c (AC-5 / AC-62c.1.2): FIRST drain the capture write buffer while the storage
+			// client is still up, so any batched-but-unwritten captured rows are flushed before the
+			// services stop — a clean shutdown never loses a buffered event. `flush()` is idempotent
+			// and never throws (a flush failure is logged inside the handler, not surfaced here). The
+			// `?.` tolerates a test seam whose fake capture handler does not implement `flush`.
+			await captureHandler.flush?.();
 			// a-AC-5: graceful shutdown — stop the pollinating worker + the refresher, drain the
 			// services, and remove the lock so no stale lock survives. Idempotent + never throws
 			// on a missing lock.
+			// PRD-062b (AC-4): stop the single combined lease coordinator first when it owns the
+			// poll loop. The individual workers' own `stop()` below is an idempotent no-op when
+			// consolidation was on (their loops were never started — the coordinator drove them).
+			if (leaseCoordinator !== null) {
+				leaseCoordinator.stop();
+				leaseCoordinator = null;
+			}
 			if (pollinatingWorker !== null) {
 				pollinatingWorker.stop();
 				pollinatingWorker = null;

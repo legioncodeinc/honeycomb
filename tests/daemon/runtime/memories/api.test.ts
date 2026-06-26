@@ -640,4 +640,36 @@ describe("PRD-049b recall handler project scoping (49b-AC-2 / D8)", () => {
 			expect(r.sql).toContain("project_id = '__unsorted__'");
 		}
 	});
+
+	// ── PRD-058e: the calibration introspection endpoint ────────────────────────
+	it("58e: GET /api/memories/calibration returns the cold-start shape when no curve is fit", async () => {
+		const { daemon, storage } = makeDaemon("anything");
+		mountMemoriesApi(daemon, { storage });
+		const res = await daemon.app.request("/api/memories/calibration", { method: "GET", headers: headers() });
+		expect(res.status).toBe(200);
+		const json = (await res.json()) as {
+			ece: number;
+			brier: number;
+			nSamples: number;
+			identity: boolean;
+			fitAt: string | null;
+			reliabilityDiagram: { lower: number; upper: number }[];
+		};
+		// No memory_calibration row in the fake → the cold-start identity introspection.
+		expect(json.identity).toBe(true);
+		expect(json.ece).toBe(0);
+		expect(json.brier).toBe(0);
+		expect(json.nSamples).toBe(0);
+		expect(json.fitAt).toBeNull();
+		expect(json.reliabilityDiagram.length).toBeGreaterThan(0);
+	});
+
+	it("58e: GET /api/memories/calibration is tenancy fail-closed (no org → 400)", async () => {
+		const { daemon, storage } = makeDaemon("anything");
+		mountMemoriesApi(daemon, { storage });
+		const noOrg = headers();
+		delete noOrg["x-honeycomb-org"];
+		const res = await daemon.app.request("/api/memories/calibration", { method: "GET", headers: noOrg });
+		expect(res.status).toBe(400);
+	});
 });

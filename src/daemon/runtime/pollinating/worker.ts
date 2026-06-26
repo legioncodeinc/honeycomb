@@ -57,7 +57,10 @@ import { POLLINATING_JOB_KIND, parsePollinatingJobPayload, type PollinatingJobPa
 import { createIncrementalStrategy } from "./incremental.js";
 import { createPollinatingRunner, type PollinatingPayloadStrategy, type PollinatingStateUpdater } from "./runner.js";
 import type { PollinatingScope, PollinatingState } from "./trigger.js";
-import type { JobQueueService } from "../services/job-queue.js";
+import type { JobQueueService, LeasedJob } from "../services/job-queue.js";
+import type { LeaseParticipant } from "../services/lease-coordinator.js";
+import type { PollBackoffConfig } from "../services/poll-backoff.js";
+import { buildWorkerPollLoop, type PollLoop } from "../services/poll-loop.js";
 
 /**
  * The narrow trigger seam the worker drives — exactly the two
@@ -123,6 +126,16 @@ export interface PollinatingWorkerDeps {
 	readonly clock?: PollinatingWorkerClock;
 	/** Poll interval in ms when running the continuous loop. Default 1000. */
 	readonly pollIntervalMs?: number;
+	/**
+	 * PRD-062b adaptive poll backoff (L-B1 / AC-2 / AC-3 / AC-9). When supplied with
+	 * `enabled: true`, the continuous loop self-reschedules with exponential backoff
+	 * (idle → ~30s ceiling, reset-to-floor on any leased job) instead of a flat
+	 * `pollIntervalMs` interval. DEFAULTS to a DISABLED config (the schema's
+	 * false-safe default), so an un-passed `backoff` reproduces the exact pre-PRD flat
+	 * cadence — the AC-9 parity contract. The daemon-assembly resolves the real
+	 * (default-ON) config from the env and passes it here.
+	 */
+	readonly backoff?: PollBackoffConfig;
 	/** Injected timer scheduler (real `setInterval` otherwise) — for tests. */
 	readonly setTimer?: (cb: () => void, ms: number) => unknown;
 	/** Injected timer canceller (real `clearInterval` otherwise) — for tests. */
@@ -135,7 +148,7 @@ export interface PollinatingWorkerDeps {
  * drives) and `start()` / `stop()` (the continuous poll loop the daemon-assembly
  * uses). The single SHAPE is the PRD-006 `StageWorker`.
  */
-export interface PollinatingJobWorker {
+export interface PollinatingJobWorker extends LeaseParticipant {
 	/**
 	 * Lease the next `pollinating` job, run its pass, and complete/fail it. Returns
 	 * `true` when a job was processed (completed OR failed), `false` when nothing was
@@ -170,6 +183,8 @@ function stateUpdaterFromTrigger(trigger: PollinatingTriggerSeam): PollinatingSt
 
 /** The concrete worker. */
 class PollinatingJobWorkerImpl implements PollinatingJobWorker {
+	/** Public for the lease coordinator's union — the single `pollinating` kind. */
+	readonly leaseKinds: readonly string[] = LEASE_KINDS;
 	private readonly queue: JobQueueService;
 	private readonly storage: StorageQuery;
 	private readonly scope: QueryScope;
@@ -179,12 +194,7 @@ class PollinatingJobWorkerImpl implements PollinatingJobWorker {
 	private readonly stateUpdater: PollinatingStateUpdater;
 	private readonly logger?: PollinatingWorkerLogger;
 	private readonly clock: PollinatingWorkerClock;
-	private readonly pollIntervalMs: number;
-	private readonly setTimer: (cb: () => void, ms: number) => unknown;
-	private readonly clearTimer: (handle: unknown) => void;
-	private handle: unknown;
-	/** Guards against overlapping `runOnce` invocations on the poll loop. */
-	private running = false;
+	private readonly loop: PollLoop;
 
 	constructor(deps: PollinatingWorkerDeps) {
 		this.queue = deps.queue;
@@ -199,21 +209,36 @@ class PollinatingJobWorkerImpl implements PollinatingJobWorker {
 		this.stateUpdater = deps.stateUpdater ?? stateUpdaterFromTrigger(deps.trigger);
 		this.logger = deps.logger;
 		this.clock = deps.clock ?? { now: () => Date.now() };
-		this.pollIntervalMs = deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-		this.setTimer = deps.setTimer ?? ((cb, ms) => setInterval(cb, ms));
-		this.clearTimer =
-			deps.clearTimer ??
-			((handle) => {
-				if (handle !== undefined) clearInterval(handle as ReturnType<typeof setInterval>);
-			});
+		// PRD-062b: `buildWorkerPollLoop` is the shared cadence wiring (see the stage
+		// worker) — flat interval when backoff is off (AC-9), adaptive otherwise.
+		this.loop = buildWorkerPollLoop({
+			tick: () => this.runOnce(),
+			flatIntervalMs: deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+			backoff: deps.backoff,
+			setTimer: deps.setTimer,
+			clearTimer: deps.clearTimer,
+		});
 	}
 
 	async runOnce(): Promise<boolean> {
 		// Lease ONLY a pollinating job (the kind filter) — a foreign summary/skillify job is
 		// left queued for its own worker, never grabbed-and-failed here.
-		const leased = await this.queue.lease(LEASE_KINDS);
+		const leased = await this.queue.lease(this.leaseKinds);
 		if (leased === null) return false;
+		await this.processLeased(leased);
+		return true;
+	}
 
+	/**
+	 * PRD-062b (AC-4): process ONE already-leased `pollinating` job — parse it, select
+	 * the strategy, run the pass, and complete/fail it. Split out of {@link runOnce} so
+	 * the single combined lease coordinator can dispatch a job IT leased (over the
+	 * union of kinds) to this participant without a second lease. The standalone
+	 * `runOnce` leases then calls this; both share the identical parse+run+complete/fail
+	 * body, so kind isolation and the no-swallowed-error contract hold whether
+	 * consolidation is on or off.
+	 */
+	async processLeased(leased: LeasedJob): Promise<void> {
 		// Parse the queued payload at the boundary. A malformed body is a corruption/wiring
 		// bug worth surfacing — fail it with a clear reason rather than silently completing
 		// a job we never ran (never a swallowed error).
@@ -221,7 +246,7 @@ class PollinatingJobWorkerImpl implements PollinatingJobWorker {
 		if (job === null) {
 			this.logger?.event("pollinating.worker.bad_payload", { id: leased.id });
 			await this.queue.fail(leased.id, "malformed pollinating job payload");
-			return true;
+			return;
 		}
 
 		try {
@@ -249,7 +274,6 @@ class PollinatingJobWorkerImpl implements PollinatingJobWorker {
 			this.logger?.event("pollinating.worker.failed", { id: leased.id, attempt: leased.attempt, reason });
 			await this.queue.fail(leased.id, reason);
 		}
-		return true;
 	}
 
 	/**
@@ -281,21 +305,11 @@ class PollinatingJobWorkerImpl implements PollinatingJobWorker {
 	}
 
 	start(): void {
-		this.handle = this.setTimer(() => {
-			// Skip a tick if the previous lease+run is still in flight; never overlap.
-			if (this.running) return;
-			this.running = true;
-			void this.runOnce().finally(() => {
-				this.running = false;
-			});
-		}, this.pollIntervalMs);
+		this.loop.start();
 	}
 
 	stop(): void {
-		if (this.handle !== undefined) {
-			this.clearTimer(this.handle);
-			this.handle = undefined;
-		}
+		this.loop.stop();
 	}
 }
 

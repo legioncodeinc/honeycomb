@@ -32,13 +32,36 @@
 import { z } from "zod";
 
 import {
+	type CalibrationModel,
+	type CalibrationSample,
+	IDENTITY_MODEL,
+	brierScore,
+	expectedCalibrationError,
+} from "../daemon/runtime/memories/calibration.js";
+import {
 	aggregateMetrics,
+	aggregateUsefulContext,
+	conflictResolutionAccuracy,
+	contradictionMetrics,
 	firstRelevantRank,
+	freshRanksFirst,
+	freshnessSliceScore,
+	RECALL_K_VALUES,
+	stalenessMetrics,
+	usefulContextAtK,
 	type AggregateMetrics,
+	type ConflictResolutionCase,
+	type ConflictResolutionMetrics,
+	type ContradictionCase,
+	type FreshnessCase,
 	type RankedResult,
 	type RelevanceClasses,
 	type RelevanceJudgements,
 	type ScoredQuery,
+	type StalenessCase,
+	type StalenessMetrics,
+	type UsefulContextCase,
+	type UsefulContextMetrics,
 } from "./metrics.js";
 
 /**
@@ -399,4 +422,384 @@ export function compareSemanticVsLexical(
 	const noRegression = recallAt5Delta >= 0 && mrrDelta >= 0;
 	const improvesOne = recallAt5Delta > 0 || mrrDelta > 0;
 	return { beats: noRegression && improvesOne, recallAt5Delta, mrrDelta };
+}
+
+// ── PRD-058a, the freshness-sensitivity slice (the recency eval gate) ─────────
+
+/**
+ * One freshness-slice pair (PRD-058a Test Plan / AC-55a.1.1): a query plus the FRESH and STALE ids it
+ * should surface, where both are equally relevant to the query (the same fact at two ages). The slice
+ * asserts the recency activation ranks `freshId` ABOVE `staleId`. The caller seeds a fresh copy and a
+ * stale copy of one memory under controlled `created_at`s, maps each to its landed id, and runs the
+ * query; the live numeric run injects the real recall (SKIPs without creds), the unit suite drives a
+ * deterministic fake.
+ */
+export interface FreshnessPair {
+	/** A stable slug for the pair (the per-case report key). */
+	readonly key: string;
+	/** The natural-language query both the fresh + stale copies answer. */
+	readonly query: string;
+	/** The id of the FRESHER seeded copy, must rank first. */
+	readonly freshId: string;
+	/** The id of the STALER seeded copy, must rank below the fresh copy. */
+	readonly staleId: string;
+}
+
+/** One freshness case's report line. */
+export interface FreshnessCaseReport {
+	/** The pair key. */
+	readonly key: string;
+	/** The query text. */
+	readonly query: string;
+	/** `true` iff the fresher copy ranked strictly above the staler one (AC-55a.1.1). */
+	readonly freshFirst: boolean;
+}
+
+/** The freshness-slice result: per-case lines + the aggregate pass fraction + the gate verdict. */
+export interface FreshnessSliceReport {
+	/** One line per freshness pair. */
+	readonly cases: readonly FreshnessCaseReport[];
+	/** The fraction of cases where the fresher copy ranked first (`1` = all passed). */
+	readonly passFraction: number;
+	/** `true` iff EVERY case passed (the slice gate, recency must order fresher-first at equal relevance). */
+	readonly passed: boolean;
+}
+
+/**
+ * Run the freshness-sensitivity slice (PRD-058a): for each pair, run the injected recall, reduce to a
+ * ranked id list, and score whether the fresher copy ranked above the staler one ({@link freshRanksFirst}).
+ * Engine-agnostic, the unit suite injects a deterministic fake, the live caller injects `recallMemories`
+ * mapped to `hit.id`s after seeding aged fixtures + polling to convergence. The slice GATE passes only
+ * when every case passes (the recency term must demote the staler copy at equal relevance). A pure score
+ * step: the caller owns seeding/polling, this owns the scoring.
+ */
+export async function runFreshnessSlice(
+	pairs: readonly FreshnessPair[],
+	recall: SeededRecall,
+): Promise<FreshnessSliceReport> {
+	const cases: FreshnessCaseReport[] = [];
+	const scored: { result: RankedResult; freshCase: FreshnessCase }[] = [];
+	for (const pair of pairs) {
+		const ids = await recall(pair.query);
+		const result: RankedResult = { ids };
+		const freshCase: FreshnessCase = { caseId: pair.key, freshId: pair.freshId, staleId: pair.staleId };
+		const freshFirst = freshRanksFirst(result, freshCase);
+		cases.push({ key: pair.key, query: pair.query, freshFirst });
+		scored.push({ result, freshCase });
+	}
+	const passFraction = freshnessSliceScore(scored);
+	return { cases, passFraction, passed: passFraction === 1 };
+}
+
+// ── PRD-058c, the staleness precision/recall/F1 slice (the `σ` detection gate) ─
+
+/**
+ * One staleness-slice pair (PRD-058c Test Plan): a memory id, its GROUND-TRUTH `labeledStale` (does it
+ * genuinely name a dangling reference?), and the memory `content` the diagnostic extracts references from.
+ * The caller seeds the memory + the codebase-graph snapshot, runs the real stale-ref diagnostic, and maps
+ * its verdict to `predictedStale`; the unit suite drives a deterministic predictor. The committed slice
+ * makes the choice of `sim` threshold and `s` AUDITABLE rather than asserted.
+ */
+export interface StalenessPair {
+	/** A stable slug for the pair (the per-case report key). */
+	readonly key: string;
+	/** The memory content (the diagnostic extracts references from this). */
+	readonly content: string;
+	/** Ground truth: `true` iff the memory genuinely names a reference that no longer resolves. */
+	readonly labeledStale: boolean;
+}
+
+/**
+ * The staleness predictor seam: given a memory's content, return whether the diagnostic flagged it `stale`
+ * (`ref_status === 'stale'`). The LIVE numeric run wires the real {@link import("../daemon/runtime/maintenance/stale-ref-diagnostic.js").runStaleRefDiagnostic}
+ * against a seeded snapshot (and SKIPs without creds); the unit suite injects a deterministic fake. Async
+ * because the live diagnostic reads the snapshot.
+ */
+export type StalenessPredictor = (content: string) => Promise<boolean>;
+
+/** One staleness case's report line. */
+export interface StalenessCaseReport {
+	/** The pair key. */
+	readonly key: string;
+	/** Ground truth. */
+	readonly labeledStale: boolean;
+	/** The diagnostic's verdict. */
+	readonly predictedStale: boolean;
+}
+
+/** The staleness-slice result: per-case lines + the precision/recall/F1 over the labeled set. */
+export interface StalenessSliceReport {
+	/** One line per staleness pair. */
+	readonly cases: readonly StalenessCaseReport[];
+	/** The precision/recall/F1 (and the tp/fp/fn breakdown) over the slice. */
+	readonly metrics: StalenessMetrics;
+}
+
+/**
+ * Run the staleness slice (PRD-058c): for each labeled pair, ask the predictor whether the diagnostic
+ * flags it `stale`, pair the prediction with the ground-truth label, and reduce to precision/recall/F1 via
+ * {@link stalenessMetrics} ("do we flag the dead references and ONLY those?"). Engine-agnostic: the unit
+ * suite injects a deterministic predictor, the live caller wires the real diagnostic after seeding the
+ * memory + snapshot and polling to convergence. A pure score step: the caller owns seeding, this owns the
+ * scoring + the committed numbers.
+ */
+export async function runStalenessSlice(
+	pairs: readonly StalenessPair[],
+	predict: StalenessPredictor,
+): Promise<StalenessSliceReport> {
+	const cases: StalenessCaseReport[] = [];
+	const scored: StalenessCase[] = [];
+	for (const pair of pairs) {
+		const predictedStale = await predict(pair.content);
+		cases.push({ key: pair.key, labeledStale: pair.labeledStale, predictedStale });
+		scored.push({ caseId: pair.key, labeledStale: pair.labeledStale, predictedStale });
+	}
+	return { cases, metrics: stalenessMetrics(scored) };
+}
+
+// ── PRD-058b — the conflict slice (CRA + contradiction-detection PR/F1) ───────
+
+/**
+ * One conflict-slice pair (PRD-058b Test Plan): a labeled memory PAIR — the two texts, their ground-truth
+ * `labeledConflict` (do they genuinely assert contradictory outcomes about the same claim?), and the
+ * ground-truth `expectedWinnerId` (which memory should win if they DO conflict). The caller seeds the two
+ * memories, runs the real detector + resolver, and maps the verdicts; the unit suite injects deterministic
+ * predictors. The committed slice makes the choice of `θ_detect` (detection) and `τ` thresholds
+ * (resolution) AUDITABLE rather than asserted.
+ */
+export interface ConflictPair {
+	/** A stable slug for the pair (the per-case report key). */
+	readonly key: string;
+	/** The first memory id. */
+	readonly aId: string;
+	/** The second memory id. */
+	readonly bId: string;
+	/** Ground truth: `true` iff the pair genuinely asserts contradictory outcomes about the same claim. */
+	readonly labeledConflict: boolean;
+	/** Ground truth: the memory id that should win the conflict (only meaningful when `labeledConflict`). */
+	readonly expectedWinnerId: string;
+}
+
+/**
+ * The conflict-detection predictor seam: given a pair's two ids, return whether the detector flags it
+ * (`Contra > θ_detect`). The LIVE run wires the real {@link import("../daemon/runtime/memories/conflict-detect.js").detectConflicts}
+ * against seeded memories (and SKIPs without creds); the unit suite injects a deterministic fake. Async
+ * because the live detector embeds + may call the model judge.
+ */
+export type ContradictionPredictor = (aId: string, bId: string) => Promise<boolean>;
+
+/**
+ * The conflict-resolution predictor seam: given a pair's two ids, return the winner the policy picked. The
+ * LIVE run wires the real {@link import("../daemon/runtime/memories/conflict-resolve.js").resolveConflict};
+ * the unit suite injects a deterministic fake. Async to mirror the live resolver's reads.
+ */
+export type ConflictWinnerPredictor = (aId: string, bId: string) => Promise<string>;
+
+/** One conflict case's report line. */
+export interface ConflictCaseReport {
+	/** The pair key. */
+	readonly key: string;
+	/** Ground truth: was it a genuine conflict? */
+	readonly labeledConflict: boolean;
+	/** The detector's verdict. */
+	readonly predictedConflict: boolean;
+	/** Ground truth winner. */
+	readonly expectedWinnerId: string;
+	/** The policy's winner (only scored for genuine conflicts the detector also flagged). */
+	readonly predictedWinnerId: string;
+}
+
+/** The conflict-slice result: per-case lines + the detection PR/F1 + the Conflict Resolution Accuracy. */
+export interface ConflictSliceReport {
+	/** One line per conflict pair. */
+	readonly cases: readonly ConflictCaseReport[];
+	/** The contradiction-detection precision/recall/F1 over the labeled set ("detect the right pairs?"). */
+	readonly detection: StalenessMetrics;
+	/** The Conflict Resolution Accuracy over the labeled-conflict subset ("pick the right winner?"). */
+	readonly resolution: ConflictResolutionMetrics;
+}
+
+/**
+ * Run the conflict slice (PRD-058b): for each labeled pair, ask the detection predictor whether the
+ * detector flags it (reduced to contradiction-detection PR/F1 via {@link contradictionMetrics}), and — for
+ * the GENUINE conflicts the detector also caught — ask the winner predictor whom the policy picked (reduced
+ * to CRA via {@link conflictResolutionAccuracy}). Engine-agnostic: the unit suite injects deterministic
+ * predictors, the live caller wires the real detector + resolver after seeding the memories and polling to
+ * convergence. CRA is scored over the genuine-conflict subset (a non-conflict pair has no "right winner" to
+ * pick). A pure score step: the caller owns seeding, this owns the scoring + the committed numbers.
+ */
+export async function runConflictSlice(
+	pairs: readonly ConflictPair[],
+	detect: ContradictionPredictor,
+	pickWinner: ConflictWinnerPredictor,
+): Promise<ConflictSliceReport> {
+	const cases: ConflictCaseReport[] = [];
+	const detectionScored: ContradictionCase[] = [];
+	const resolutionScored: ConflictResolutionCase[] = [];
+	for (const pair of pairs) {
+		const predictedConflict = await detect(pair.aId, pair.bId);
+		// CRA is scored only over GENUINE conflicts that were actually detected (a missed or non-conflict
+		// pair has no winner to resolve). The detector must catch it before the resolver is asked.
+		let predictedWinnerId = "";
+		if (pair.labeledConflict && predictedConflict) {
+			predictedWinnerId = await pickWinner(pair.aId, pair.bId);
+			resolutionScored.push({ caseId: pair.key, expectedWinnerId: pair.expectedWinnerId, predictedWinnerId });
+		}
+		cases.push({
+			key: pair.key,
+			labeledConflict: pair.labeledConflict,
+			predictedConflict,
+			expectedWinnerId: pair.expectedWinnerId,
+			predictedWinnerId,
+		});
+		detectionScored.push({ caseId: pair.key, labeledConflict: pair.labeledConflict, predictedConflict });
+	}
+	return {
+		cases,
+		detection: contradictionMetrics(detectionScored),
+		resolution: conflictResolutionAccuracy(resolutionScored),
+	};
+}
+
+// ── PRD-058 — useful-context@k (the scoring-doc HEADLINE end-to-end metric) ───
+
+/**
+ * One useful-context@k slice pair (the scoring-doc headline): a query plus the CORRECT answer ids and the
+ * EXCLUDED ids (stale copies + open-conflict losers) that must NOT count even if surfaced. The slice asks
+ * the end-to-end question the four per-term slices decompose — "does the top-k surface a memory that is
+ * correct AND current AND non-conflicting?". The caller seeds the fresh/correct copy, the stale copy, and
+ * the conflict loser, maps each to its landed id, and runs the query; the live numeric run injects the
+ * real recall (and SKIPs without creds), the unit suite drives a deterministic fake. The CODE + its unit
+ * coverage ship now (the live numeric run is creds-gated).
+ */
+export interface UsefulContextPair {
+	/** A stable slug for the pair (the per-case report key). */
+	readonly key: string;
+	/** The natural-language query run through recall. */
+	readonly query: string;
+	/** The ids that are CORRECT, CURRENT, NON-CONFLICTING answers — a top-k hit on one is "useful". */
+	readonly correctIds: readonly string[];
+	/** The ids that must NOT count even when surfaced: stale/superseded copies + open-conflict losers. */
+	readonly excludedIds: readonly string[];
+}
+
+/** One useful-context case's report line. */
+export interface UsefulContextCaseReport {
+	/** The pair key. */
+	readonly key: string;
+	/** The query text. */
+	readonly query: string;
+	/** useful-context@k keyed by k for THIS case (1 = the top-k surfaced a correct, non-excluded memory). */
+	readonly usefulAtK: Readonly<Record<string, number>>;
+}
+
+/** The useful-context slice result: per-case lines + the aggregate useful-context@k. */
+export interface UsefulContextSliceReport {
+	/** One line per useful-context pair. */
+	readonly cases: readonly UsefulContextCaseReport[];
+	/** The aggregate useful-context@k over the slice (the headline numbers). */
+	readonly metrics: UsefulContextMetrics;
+}
+
+/**
+ * Run the useful-context@k slice (PRD-058 headline): for each pair, run the injected recall, reduce to a
+ * ranked id list, and score whether the top-k surfaced a memory that is correct AND not excluded (not
+ * stale, not a conflict loser) via {@link usefulContextAtK} / {@link aggregateUsefulContext}. This is the
+ * end-to-end conjunction of the freshness / staleness / contradiction / CRA slices — the single number the
+ * scoring doc commits as the headline. Engine-agnostic: the unit suite injects a deterministic fake, the
+ * live caller injects `recallMemories` mapped to `hit.id`s after seeding the fresh/correct copy, the stale
+ * copy, and the conflict loser, then polling to convergence. A pure score step: the caller owns seeding +
+ * polling, this owns the scoring.
+ */
+export async function runUsefulContextSlice(
+	pairs: readonly UsefulContextPair[],
+	recall: SeededRecall,
+): Promise<UsefulContextSliceReport> {
+	const cases: UsefulContextCaseReport[] = [];
+	const scored: { result: RankedResult; useful: UsefulContextCase }[] = [];
+	for (const pair of pairs) {
+		const ids = await recall(pair.query);
+		const result: RankedResult = { ids };
+		const useful: UsefulContextCase = { caseId: pair.key, correctIds: pair.correctIds, excludedIds: pair.excludedIds };
+		const usefulAtK: Record<string, number> = {};
+		for (const k of RECALL_K_VALUES) usefulAtK[String(k)] = usefulContextAtK(result, useful, k);
+		cases.push({ key: pair.key, query: pair.query, usefulAtK });
+		scored.push({ result, useful });
+	}
+	return { cases, metrics: aggregateUsefulContext(scored) };
+}
+
+// ── PRD-058e / IDX-5 — the ECE-over-time slice (the calibration trend curve) ──
+
+/**
+ * One ECE-over-time WINDOW (PRD-058e / IDX-5: "commit the ECE-over-time curve"): a labeled time window of
+ * resolved calibration observations (`(f, y)` pairs — the raw confidence + the observed correctness the
+ * lifecycle yields) plus the calibration MODEL in force during that window. The slice computes the
+ * held-out ECE (and Brier) per window and reports the trend, so the scoring doc's claim that calibration
+ * IMPROVES over time is MEASURED, not asserted. Windows are ordered oldest-first; the curve is the ECE per
+ * window. The `model` is the curve fitted by the END of the window (the identity model for a cold-start
+ * window); supplying it lets the slice show ECE FALLING as the fitted curve replaces the identity default.
+ */
+export interface EceWindow {
+	/** A stable label for the window (e.g. an ISO date or a window index) — the per-point report key. */
+	readonly label: string;
+	/** The resolved `(f, y)` observations that landed in this window. */
+	readonly samples: readonly CalibrationSample[];
+	/** The calibration model in force during the window (default identity — the cold-start `C = f`). */
+	readonly model?: CalibrationModel;
+}
+
+/** One ECE-over-time curve point: the window label, its sample count, its ECE, and its Brier score. */
+export interface EceCurvePoint {
+	/** The window label. */
+	readonly label: string;
+	/** How many `(f, y)` observations fell in the window. */
+	readonly count: number;
+	/** The window's Expected Calibration Error (lower = better calibrated). */
+	readonly ece: number;
+	/** The window's Brier score (lower = better). */
+	readonly brier: number;
+}
+
+/** The ECE-over-time slice result: the per-window curve + whether the trend is non-worsening. */
+export interface EceOverTimeReport {
+	/** The ECE/Brier per window, oldest-first (the committed curve). */
+	readonly curve: readonly EceCurvePoint[];
+	/** The ECE of the FIRST window (the baseline, usually the cold-start identity model). */
+	readonly firstEce: number;
+	/** The ECE of the LAST window (the latest fitted curve). */
+	readonly lastEce: number;
+	/**
+	 * `true` iff the LAST window's ECE is `≤` the FIRST window's (calibration did not get WORSE over time —
+	 * the monotone-improvement property `shouldAdoptRefit` enforces, observed end-to-end). A single-window
+	 * curve is trivially non-worsening. The eval reports this; it never silently fails a creds-gated run.
+	 */
+	readonly improved: boolean;
+}
+
+/**
+ * Run the ECE-over-time slice (PRD-058e / IDX-5): for each window oldest-first, compute the held-out ECE
+ * and Brier of its observations under the window's calibration model ({@link expectedCalibrationError} /
+ * {@link brierScore} from `calibration.ts` — the SAME math the 58e gate uses), and reduce to the committed
+ * curve + the "did it improve?" verdict (last-window ECE ≤ first-window ECE). This is the standalone trend
+ * the per-fit `shouldAdoptRefit` gate implies, made into an eval-visible curve. Pure: the caller supplies
+ * the windowed observations (the live numeric run reads resolved outcomes from `memory_history` and SKIPs
+ * without creds); this owns the scoring. An empty window set → an empty curve with `improved: true`
+ * (nothing measured, never NaN).
+ */
+export function runEceOverTimeSlice(windows: readonly EceWindow[]): EceOverTimeReport {
+	const curve: EceCurvePoint[] = windows.map((w) => {
+		const model = w.model ?? IDENTITY_MODEL;
+		return {
+			label: w.label,
+			count: w.samples.length,
+			ece: expectedCalibrationError(w.samples, model),
+			brier: brierScore(w.samples, model),
+		};
+	});
+	const firstEce = curve[0]?.ece ?? 0;
+	const lastEce = curve[curve.length - 1]?.ece ?? 0;
+	// Non-worsening: the latest ECE is at most the baseline ECE (calibration did not regress over time).
+	const improved = curve.length === 0 ? true : lastEce <= firstEce;
+	return { curve, firstEce, lastEce, improved };
 }

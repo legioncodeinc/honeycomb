@@ -81,6 +81,7 @@ export const VERB_TABLE: readonly VerbSpec[] = Object.freeze([
 	{ verb: "maintenance", cls: "storage", summary: "run version-history compaction over version-bumped tables (030)" },
 	{ verb: "remember", cls: "storage", summary: "write a memory through the daemon (--type fact|convention|preference|decision|gotcha|reference)" },
 	{ verb: "recall", cls: "storage", summary: "recall memories through the daemon" },
+	{ verb: "memory", cls: "storage", summary: "lifecycle: conflicts (list/resolve), stale-refs (list), inspect <id> --lifecycle (058d)" },
 	{ verb: "agent", cls: "storage", summary: "run an agent turn through the daemon" },
 	{ verb: "ontology", cls: "storage", summary: "inspect/propose ontology changes through the daemon" },
 	{ verb: "secret", cls: "storage", summary: "manage named secrets through the daemon" },

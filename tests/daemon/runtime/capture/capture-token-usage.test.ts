@@ -97,6 +97,12 @@ function buildDaemon(opts: { responder?: (req: TransportRequest) => Record<strin
 		storage,
 		sessionsTarget: healTargetFor("sessions"),
 		queue: new RecordingQueue(),
+		// PRD-062c (merged after 060a) defaults capture write-batching ON (rows buffer and
+		// flush as a multi-row append). These a-AC-* tests assert the per-turn token columns
+		// ride ONE synchronous append-only INSERT — the pre-062c / flags-OFF parity path
+		// (AC-9), identical token-column behavior. Pin batching off so the single-INSERT
+		// assertions hold (same pattern as capture-handler.test.ts).
+		captureConfig: { batch: false, windowMs: 1_000, maxEvents: 25, envelopeBudgetBytes: 0 },
 	});
 	handler.register(daemon);
 	return { daemon, fake };

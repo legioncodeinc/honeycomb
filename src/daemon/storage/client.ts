@@ -28,6 +28,7 @@
 
 import { setTimeout as delay } from "node:timers/promises";
 import { redactToken, type StorageConfig } from "./config.js";
+import { type MeterSnapshot, QueryMeter, type QuerySource } from "./query-meter.js";
 import { connectionError, isOk, ok, type QueryResult, queryError, timeoutResult } from "./result.js";
 import { type DeepLakeTransport, TransportError, type TransportRequest } from "./transport.js";
 
@@ -48,6 +49,14 @@ export interface QueryScope {
 export interface QueryOptions {
 	/** Override the per-statement timeout (ms) for this call only. */
 	readonly timeoutMs?: number;
+	/**
+	 * Attribution label for the query meter (PRD-062a). OPTIONAL — an un-set
+	 * `source` is counted under `"other"` by the meter, so no existing call site
+	 * has to change and an unlabeled query is visibly "unlabeled" until a later
+	 * wave threads the right label. The meter only OBSERVES; passing a `source`
+	 * never changes the query's behavior or its result.
+	 */
+	readonly source?: QuerySource;
 }
 
 /**
@@ -335,15 +344,44 @@ export class StorageClient {
 	 * the real timer; a test injects a no-op so the bounded backoff costs zero
 	 * wall-clock time and the retry count stays deterministic.
 	 */
+	/** Per-source DeepLake query meter (PRD-062a). Always present; default mode is in-memory + log only. */
+	private readonly meter: QueryMeter;
+
+	/**
+	 * @param sleep injectable backoff clock for the read-retry layer. Defaults to
+	 * the real timer; a test injects a no-op so the bounded backoff costs zero
+	 * wall-clock time and the retry count stays deterministic.
+	 * @param meter injectable query meter (PRD-062a). Defaults to a fresh in-memory
+	 * {@link QueryMeter}; the daemon may inject a shared one so diagnostics and a
+	 * later persistence path observe the SAME counts. The meter is a pure observer:
+	 * supplying it never changes any query's behavior or result.
+	 */
 	constructor(
 		private readonly transport: DeepLakeTransport,
 		private readonly config: StorageConfig,
 		private readonly sleep: SleepFn = realSleep,
-	) {}
+		meter: QueryMeter = new QueryMeter(),
+	) {
+		this.meter = meter;
+	}
 
 	/** The endpoint the client is bound to (for diagnostics; no secrets). */
 	get endpoint(): string {
 		return this.config.endpoint;
+	}
+
+	/**
+	 * Snapshot the per-source query counts (PRD-062a, AC-62a.1.3). The diagnostic
+	 * surface and the idle-baseline harness read the meter through here without
+	 * touching the live counter, so a snapshot is stable even as traffic continues.
+	 */
+	meterSnapshot(): MeterSnapshot {
+		return this.meter.snapshot();
+	}
+
+	/** Render the current per-source counts as one structured log line (PRD-062a). */
+	meterLogLine(): string {
+		return this.meter.formatLogLine();
 	}
 
 	/**
@@ -381,7 +419,18 @@ export class StorageClient {
 	async query(sql: string, scope: QueryScope, opts: QueryOptions = {}): Promise<QueryResult> {
 		// Classify by statement shape. Only a read or a PROVABLY-idempotent write is
 		// retry-eligible; an INSERT / unsafe-write runs exactly once (no duplicate risk).
-		if (statementRetryability(sql) === "unsafe-write") return this.attemptOnce(sql, scope, opts);
+		const retryability = statementRetryability(sql);
+
+		// Meter ONE logical operation per `query()` call (PRD-062a) — BEFORE the
+		// retry loop so a transient-flap retry never double-counts. Read vs write is
+		// the same statement-shape tag the retry layer uses: a `"read"` is a SELECT /
+		// read-only WITH; everything else (INSERT/UPDATE/DELETE/DDL/CTE-write) is a
+		// write. The increment is in-memory only and adds NO DeepLake query, so this
+		// is a pure observation that cannot change the result the caller gets back.
+		this.meter.record(opts.source, retryability !== "read");
+
+		// An INSERT / unsafe-write runs exactly once (no duplicate risk).
+		if (retryability === "unsafe-write") return this.attemptOnce(sql, scope, opts);
 
 		let last: QueryResult | undefined;
 		for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {

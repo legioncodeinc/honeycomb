@@ -50,6 +50,8 @@ import {
 	createCaptureHandler,
 	HOOKS_GROUP,
 } from "./capture-handler.js";
+import type { BufferClock } from "./capture-buffer.js";
+import type { CaptureConfig } from "./capture-config.js";
 
 /** The session-start context route, relative to {@link HOOKS_GROUP} (PRD-021c c-AC-3). */
 export const CONTEXT_PATH = "/context" as const;
@@ -99,6 +101,17 @@ export interface AttachHooksOptions {
 	/** Optional structured-log sink. */
 	readonly logger?: CaptureLogger;
 	/**
+	 * PRD-062c (L-C1 / L-C2 / L-X1): the capture write-batching + envelope-trim config.
+	 * Defaults (in the capture handler) to {@link resolveCaptureConfig} — the `HONEYCOMB_CAPTURE_*`
+	 * env flags, DEFAULT-ON. Threaded so a test can force batch on/off + a deterministic budget.
+	 */
+	readonly captureConfig?: CaptureConfig;
+	/**
+	 * PRD-062c: injected clock/timer seam for the flush window so a test advances the window with
+	 * no real sleep. Defaults (in the handler) to the real timer. Threaded straight through.
+	 */
+	readonly bufferClock?: BufferClock;
+	/**
 	 * The `/api/hooks/context` handler (PRD-021c c-AC-3). Defaults to a renderer that
 	 * returns an EMPTY context block (`{ additionalContext: "" }`, status 200) — so the
 	 * session-start renderer's read SUCCEEDS and the lifecycle composes; 021d/021e
@@ -136,6 +149,8 @@ export function attachHooksHandlers(daemon: Daemon, options: AttachHooksOptions)
 		...(options.firstRunGate !== undefined ? { firstRunGate: options.firstRunGate } : {}),
 		...(options.projectsDir !== undefined ? { projectsDir: options.projectsDir } : {}),
 		...(options.logger !== undefined ? { logger: options.logger } : {}),
+		...(options.captureConfig !== undefined ? { captureConfig: options.captureConfig } : {}),
+		...(options.bufferClock !== undefined ? { bufferClock: options.bufferClock } : {}),
 	});
 	handler.register(daemon);
 

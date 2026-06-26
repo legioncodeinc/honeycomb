@@ -104,6 +104,9 @@ function buildDaemon(projectsDir: string, firstRunGate = true): BuiltDaemon {
 		},
 		projectsDir,
 		firstRunGate,
+		// PRD-062c: this gate suite asserts the synchronous "no INSERT issued" contract, so pin
+		// the flags-OFF write path (one immediate INSERT per event, no buffer) — AC-9 parity.
+		captureConfig: { batch: false, windowMs: 1_000, maxEvents: 25, envelopeBudgetBytes: 0 },
 		// A pipeline-entry seam that records it was called — to prove the gate suppresses it too.
 		enqueuePipelineEntry: async () => {
 			enqueued.push("pipeline-entry");

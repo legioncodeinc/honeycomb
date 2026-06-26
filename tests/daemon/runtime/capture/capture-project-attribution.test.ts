@@ -86,6 +86,8 @@ function buildDaemon(projectsDir?: string): { daemon: Daemon; fake: FakeDeepLake
 		storage,
 		sessionsTarget: healTargetFor("sessions"),
 		queue: { async enqueue() { return "j"; }, async lease() { return null; }, async complete() {}, async fail() {}, start() {}, stop() {} },
+		// PRD-062c: assert the pre-062c synchronous single-INSERT path (flags-OFF parity, AC-9).
+		captureConfig: { batch: false, windowMs: 1_000, maxEvents: 25, envelopeBudgetBytes: 0 },
 		...(projectsDir !== undefined ? { projectsDir } : {}),
 	});
 	handler.register(daemon);

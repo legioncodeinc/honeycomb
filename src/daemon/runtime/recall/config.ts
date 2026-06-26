@@ -130,6 +130,38 @@ export const DEFAULT_RECENCY_HALF_LIFE_DAYS = 36_500;
 /** The floor for the recency half-life: a sub-1-day half-life is clamped up (no div-by-zero / inversion). */
 export const MIN_RECENCY_HALF_LIFE_DAYS = 1;
 
+// ── PRD-058a, class-aware recency activation (the `A(m,t)` Stage-1 term) ──────
+/**
+ * The per-CLASS recency half-lives in DAYS (PRD-058a, AC-55a.2.1 / 55a.2.3). PRD-058a promotes
+ * recency from the OFF-equivalent neutral knob (PRD-047d, {@link DEFAULT_RECENCY_HALF_LIFE_DAYS})
+ * into a measured, class-aware default: a hit's half-life is chosen by the TABLE that surfaced it
+ * ({@link import("../memories/recall.js").RecallSource}), so durable distilled facts decay slower
+ * than ephemeral raw dialogue.
+ *
+ *  - `memories` (kept, distilled facts): the slowest decay, `180 d`.
+ *  - `memory` (AI session summaries): faster, `45 d`.
+ *  - `sessions` (raw captured turns): the fastest, `10 d`.
+ *
+ * The ordering `h(sessions) < h(memory) < h(memories)` is the load-bearing invariant (AC-55a.2.1):
+ * at equal age a raw `sessions` hit is penalized harder than a distilled `memories` hit. These are
+ * the STARTING points from the scoring model; the eval sweep (PRD-058a Test Plan) finalizes them.
+ * A class with NO configured half-life falls back to ITS documented default here, NEVER to the
+ * 100-year neutral value (AC-55a.2.3).
+ */
+export const DEFAULT_RECENCY_HALF_LIFE_DAYS_BY_CLASS = Object.freeze({
+	memories: 180,
+	memory: 45,
+	sessions: 10,
+} as const);
+
+/**
+ * The default activation exponent `a` in the master equation's `A^a` contribution (PRD-058a). `1.0`
+ * applies the raw activation multiplier; `0` is neutral (`A^0 = 1`, recency off); a value in `(0,1)`
+ * gentles the demotion. The eval freshness-slice sweep decides whether `1.0` ships or a softer value
+ * does (PRD-058a open question). A single named, eval-tunable knob, env-overridable + clamped `≥ 0`.
+ */
+export const DEFAULT_RECENCY_ACTIVATION_EXPONENT = 1.0;
+
 // ── PRD-047e — token-budget + MMR context assembly ───────────────────────────
 /**
  * The MMR relevance/diversity trade-off knob λ (PRD-047e / e-AC-2). MMR selects the next
@@ -210,6 +242,23 @@ function ClampedHalfLifeDays(def: number, min: number) {
 	}, z.number());
 }
 
+/**
+ * An OPTIONAL per-class half-life knob (PRD-058a): a positive float in DAYS, or `undefined` when the
+ * class is not configured. UNLIKE {@link ClampedHalfLifeDays} this carries NO numeric default, an
+ * absent or unparseable value resolves to `undefined`, which the runtime reads as "use the DOCUMENTED
+ * per-class default" ({@link DEFAULT_RECENCY_HALF_LIFE_DAYS_BY_CLASS}, AC-55a.2.3), never the neutral
+ * 100-year value. A present-but-too-small value is clamped UP to `min` so the decay can never divide
+ * by zero or invert (a typo never bites).
+ */
+function OptionalClampedHalfLifeDays(min: number) {
+	return z.preprocess((raw) => {
+		if (raw === undefined || raw === null || raw === "") return undefined;
+		const n = typeof raw === "number" ? raw : Number(raw);
+		if (!Number.isFinite(n)) return undefined; // unparseable → fall back to the documented default.
+		return Math.max(min, n);
+	}, z.number().positive().optional());
+}
+
 /** D-3 traversal budgets, grouped so the traversal phase reads one object. */
 export const TraversalConfigSchema = z.object({
 	/** Max aspects per focal entity. */
@@ -244,11 +293,47 @@ export const DedupConfigSchema = z.object({
 	similarityThreshold: ClampedFloat(DEFAULT_DEDUP_SIMILARITY_THRESHOLD).default(DEFAULT_DEDUP_SIMILARITY_THRESHOLD),
 });
 
-/** PRD-047d recency config, grouped so the recall adapter reads one object. */
+/**
+ * The per-class half-life sub-config (PRD-058a, AC-55a.2.1 / 55a.2.2). Every class is OPTIONAL: a
+ * configured class uses its value, an UNCONFIGURED class falls back at runtime to the documented
+ * default ({@link DEFAULT_RECENCY_HALF_LIFE_DAYS_BY_CLASS}, AC-55a.2.3), never the neutral 100-year
+ * value. A caller's `memory.lifecycle.halfLifeDaysByClass` override (or the per-request override)
+ * is honored over the defaults (AC-55a.2.2).
+ */
+export const RecencyHalfLifeByClassSchema = z.object({
+	/** Half-life in DAYS for the `memories` (kept, distilled facts) class; absent → documented default. */
+	memories: OptionalClampedHalfLifeDays(MIN_RECENCY_HALF_LIFE_DAYS),
+	/** Half-life in DAYS for the `memory` (AI session summaries) class; absent → documented default. */
+	memory: OptionalClampedHalfLifeDays(MIN_RECENCY_HALF_LIFE_DAYS),
+	/** Half-life in DAYS for the `sessions` (raw captured turns) class; absent → documented default. */
+	sessions: OptionalClampedHalfLifeDays(MIN_RECENCY_HALF_LIFE_DAYS),
+});
+
+/**
+ * PRD-047d + PRD-058a recency config, grouped so the recall adapter reads one object.
+ *
+ * PRD-058a (the `A(m,t)` Stage-1 term) layers CLASS-AWARE decay on top of the original PRD-047d flat
+ * knob. The live recency stage prefers `halfLifeDaysByClass[class]` (or the documented per-class
+ * default when a class is unconfigured), and applies the contribution `A^activationExponent`. The
+ * legacy flat {@link halfLifeDays} remains a BACK-COMPAT fallback only (consumed by the original
+ * {@link import("../memories/recall.js").applyRecencyDampening} path + its suite); it is NOT the live
+ * default anymore (AC-55a.2.3 forbids the 100-year neutral as a class fallback).
+ */
 export const RecencyConfigSchema = z.object({
-	/** The recency half-life in DAYS (PRD-047d / d-AC-4); OFF-equivalent by default. */
+	/**
+	 * The legacy flat recency half-life in DAYS (PRD-047d / d-AC-4); OFF-equivalent by default. Retained
+	 * as a back-compat fallback for the flat {@link import("../memories/recall.js").applyRecencyDampening}
+	 * path only, the live PRD-058a stage reads {@link halfLifeDaysByClass} + the documented per-class
+	 * defaults instead, so this neutral value is never a CLASS fallback (AC-55a.2.3).
+	 */
 	halfLifeDays: ClampedHalfLifeDays(DEFAULT_RECENCY_HALF_LIFE_DAYS, MIN_RECENCY_HALF_LIFE_DAYS).default(
 		DEFAULT_RECENCY_HALF_LIFE_DAYS,
+	),
+	/** Per-class half-lives (PRD-058a); an unconfigured class falls back to its documented default. */
+	halfLifeDaysByClass: RecencyHalfLifeByClassSchema.default(() => RecencyHalfLifeByClassSchema.parse({})),
+	/** The activation exponent `a` in `A^a` (PRD-058a); `1.0` default, `0` neutral, clamped `≥ 0`. */
+	activationExponent: ClampedFloat(DEFAULT_RECENCY_ACTIVATION_EXPONENT, Number.POSITIVE_INFINITY).default(
+		DEFAULT_RECENCY_ACTIVATION_EXPONENT,
 	),
 });
 
@@ -313,8 +398,10 @@ export type RerankerConfig = z.infer<typeof RerankerConfigSchema>;
 export type DampeningConfig = z.infer<typeof DampeningConfigSchema>;
 /** The validated dedup sub-config (PRD-047c). */
 export type DedupConfig = z.infer<typeof DedupConfigSchema>;
-/** The validated recency sub-config (PRD-047d). */
+/** The validated recency sub-config (PRD-047d + PRD-058a). */
 export type RecencyConfig = z.infer<typeof RecencyConfigSchema>;
+/** The validated per-class half-life sub-config (PRD-058a). */
+export type RecencyHalfLifeByClass = z.infer<typeof RecencyHalfLifeByClassSchema>;
 /** The validated context-assembly sub-config (PRD-047e). */
 export type ContextAssemblyConfig = z.infer<typeof ContextAssemblyConfigSchema>;
 
@@ -376,6 +463,12 @@ export interface RawRecallConfig {
 	};
 	readonly recency?: {
 		readonly halfLifeDays?: unknown;
+		readonly halfLifeDaysByClass?: {
+			readonly memories?: unknown;
+			readonly memory?: unknown;
+			readonly sessions?: unknown;
+		};
+		readonly activationExponent?: unknown;
 	};
 	readonly contextAssembly?: {
 		readonly mmrLambda?: unknown;
@@ -423,6 +516,14 @@ export function envRecallConfigProvider(env: NodeJS.ProcessEnv = process.env): R
 				},
 				recency: {
 					halfLifeDays: env.HONEYCOMB_RECALL_RECENCY_HALF_LIFE_DAYS,
+					// PRD-058a: per-class half-lives + the activation exponent. Each is optional, an
+					// unset class env var resolves to undefined → the documented per-class default.
+					halfLifeDaysByClass: {
+						memories: env.HONEYCOMB_RECALL_RECENCY_HALF_LIFE_DAYS_MEMORIES,
+						memory: env.HONEYCOMB_RECALL_RECENCY_HALF_LIFE_DAYS_MEMORY,
+						sessions: env.HONEYCOMB_RECALL_RECENCY_HALF_LIFE_DAYS_SESSIONS,
+					},
+					activationExponent: env.HONEYCOMB_RECALL_RECENCY_ACTIVATION_EXPONENT,
 				},
 				contextAssembly: {
 					mmrLambda: env.HONEYCOMB_RECALL_MMR_LAMBDA,

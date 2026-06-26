@@ -1,6 +1,6 @@
 # PRD-058: Memory Lifecycle (Recency, Conflict Resolution, Stale-Reference Healing)
 
-> **Status:** Backlog
+> **Status:** In-Work
 > **Priority:** P1
 > **Effort:** L
 > **Schema changes:** Additive (lazy-healed columns + two new tables)
