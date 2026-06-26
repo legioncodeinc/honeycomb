@@ -1,7 +1,7 @@
 # PRD-033a: Registry and Identity Model
 
 > **Parent:** [PRD-033](./prd-033-asset-sync-substrate-index.md)
-> **Status:** Draft
+> **Status:** Completed (2026-06-25)
 > **Priority:** P2
 > **Effort:** M
 
@@ -67,9 +67,18 @@ Define the source-of-truth registry (`.honeycomb/registry.json`), the identity a
 
 ## Open questions
 
-- [ ] What is the stable device-identity source (machine-id vs a generated UUID persisted in `~/.honeycomb`), and how does a user list and revoke a device?
-- [ ] Should the existing skillify pull manifest be migrated into `registry.json`, or coexist during a transition?
-- [ ] Can agent frontmatter carry `honeycomb_id` across all six harnesses without confusing any native parser?
+All three questions resolved 2026-06-25 by explicit owner ruling.
+
+- [x] **Device identity (resolved 2026-06-25):** Device identity is a generated UUID persisted at
+  `~/.honeycomb/device.json`. No OS machine-id read is used. A user lists and revokes devices via
+  `honeycomb asset device`. Already shipped.
+- [x] **Pull manifest migration (resolved 2026-06-25):** The skillify pull manifest is MIGRATED into the
+  unified `.honeycomb/registry.json` as the single source of truth. The prior "coexist during a transition"
+  answer is superseded. A one-time idempotent migration folds legacy `pull-manifest.json` entries in;
+  `skill unpull` and `backfillSymlinks` are unchanged.
+- [x] **`honeycomb_id` in frontmatter (resolved 2026-06-25):** `honeycomb_id` is stamped into the artifact
+  YAML frontmatter for skills and agents. The registry remains the authoritative fallback for harnesses that
+  cannot carry frontmatter.
 
 ## Related
 

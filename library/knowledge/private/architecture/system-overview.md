@@ -11,6 +11,8 @@ The master view of Honeycomb: the planes, the daemon at the center, the DeepLake
 - [`../data/schema.md`](../data/schema.md)
 - [`../ai/memory-pipeline.md`](../ai/memory-pipeline.md)
 - [`../integrations/harness-integration.md`](../integrations/harness-integration.md)
+- [`multi-project-and-context-switching.md`](multi-project-and-context-switching.md)
+- [`../operations/install-and-onboarding.md`](../operations/install-and-onboarding.md)
 
 ---
 
@@ -66,6 +68,8 @@ flowchart TB
 
 Four planes. Surfaces are how a human drives Honeycomb. Integrations are how external harnesses reach it. The daemon is the runtime where all logic lives. DeepLake is the storage substrate. The arrows that matter: everything points at the daemon, and only the daemon points at DeepLake.
 
+Getting in is one command. The installer detects and sets up a Node runtime, installs the global package, brings the daemon up, and lands the user on the dashboard, with the DeepLake login driven from the UI rather than the terminal. See [`../operations/install-and-onboarding.md`](../operations/install-and-onboarding.md).
+
 ## Component summary
 
 | Component | Location / name | Responsibility |
@@ -75,9 +79,10 @@ Four planes. Surfaces are how a human drives Honeycomb. Integrations are how ext
 | Capture shims | per-harness hooks | Map native lifecycle events to capture/recall calls on the daemon. |
 | Skillify miner | daemon worker | Mine recurring traces into reusable skills. See [`../ai/skillify-pipeline.md`](../ai/skillify-pipeline.md). |
 | Codebase graph | daemon worker | Live graph of files, symbols, imports. See [`../data/codebase-graph.md`](../data/codebase-graph.md). |
-| CLI | `honeycomb` | Setup, status, recall, agents, ontology, sources, skills, org/workspace. |
+| CLI | `honeycomb` | Install, setup, status, recall, agents, ontology, sources, skills, assets, org/workspace/project. |
 | MCP + SDK | MCP server, `@honeycomb/sdk` | Tool-based and typed access. See [`../integrations/mcp-and-sdk.md`](../integrations/mcp-and-sdk.md). |
-| Cursor extension | `frontend/` | Hooks bundle and dashboard surface for Cursor. |
+| Cursor extension | `harnesses/cursor/extension/` | Shipped Cursor/VS Code extension: hooks bundle, status bar, and the dashboard webview. See [`../frontend/cursor-extension-architecture.md`](../frontend/cursor-extension-architecture.md). |
+| Dashboard | daemon-served at `127.0.0.1:3850/dashboard` | Token-free loopback web UI: home, harnesses, memories, graph, sync, logs, settings, plus guided setup. See [`../frontend/dashboard-architecture.md`](../frontend/dashboard-architecture.md). |
 
 ## The two halves: engine and product
 
@@ -89,7 +94,7 @@ The product subsystems, inherited from Hivemind, are what make the engine a team
 
 ## State and storage
 
-All durable state lives in DeepLake tables. The capture and recall substrate (`sessions`, `memory`) sits alongside the engine's model (memories and facts, the entity ontology, sources and artifacts, the job queue, the agent roster, api keys) and the product tables (`skills`, `rules`, `goals`, `kpis`, `codebase`). Every row carries org and workspace identity for tenant isolation, and engine rows additionally carry `agent_id` for within-workspace scoping. The full catalog is [`../data/schema.md`](../data/schema.md), and the write patterns that keep it consistent under concurrent workers are in [`../data/deeplake-storage.md`](../data/deeplake-storage.md).
+All durable state lives in DeepLake tables. The capture and recall substrate (`sessions`, `memory`) sits alongside the engine's model (memories and facts, the entity ontology, sources and artifacts, the job queue, the agent roster, api keys) and the product tables (`skills`, `rules`, `goals`, `kpis`, `codebase`, `synced_assets`). A `projects` registry backs per-project scoping, and memory rows carry a one-line Tier-1 `key` column that powers fast session priming alongside the summary and the raw session. Every row carries org and workspace identity for tenant isolation, and engine rows additionally carry `agent_id` for within-workspace scoping. The full catalog is [`../data/schema.md`](../data/schema.md), and the write patterns that keep it consistent under concurrent workers, including converged reads over DeepLake's eventual consistency, are in [`../data/deeplake-storage.md`](../data/deeplake-storage.md).
 
 ## Contracts that keep the planes apart
 
@@ -97,6 +102,6 @@ The daemon is the only DeepLake client. No hook, shim, or SDK call touches stora
 
 A session uses one active runtime path. Connectors send `x-honeycomb-runtime-path: plugin|legacy`, and once a session is claimed by one path a request from the other path returns `409`. This stops two integration surfaces from double-writing one session.
 
-Org and workspace isolation is enforced at the storage layer, not just the API. Two workspaces never share a row, partition, or index. Within a workspace, `agent_id` and visibility separate agents.
+Tenancy is a three-level ring: org, then workspace, then project. Org and workspace isolation is enforced at the storage layer, not just the API, two workspaces never share a row, partition, or index. Project is the soft inner ring: it scopes recall to the repo the agent is working in without ever dropping a capture. Within a workspace, `agent_id` and visibility separate agents. See [`multi-project-and-context-switching.md`](multi-project-and-context-switching.md).
 
 For the end-to-end flow these components produce, continue to [`request-lifecycle.md`](request-lifecycle.md).

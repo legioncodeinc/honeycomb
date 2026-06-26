@@ -10,6 +10,7 @@ Architecture of the Honeycomb unified command-line tool, subcommand dispatching,
 - [`../overview.md`](../overview.md)
 - [`../architecture/system-overview.md`](../architecture/system-overview.md)
 - [`notifications-and-health.md`](notifications-and-health.md)
+- [`install-and-onboarding.md`](install-and-onboarding.md)
 - [`../infrastructure/monorepo-build-release.md`](../infrastructure/monorepo-build-release.md)
 
 ---
@@ -34,6 +35,7 @@ The merged Honeycomb CLI consolidates the hivemind product verbs with our memory
 
 | Command | Purpose |
 |---|---|
+| `install` | Bootstrap entry: health-gate the daemon up, stamp the onboarding marker + referral code, open the dashboard |
 | `setup` | Detect installed assistants, wire hooks, and bring up the daemon |
 | `status` | Report daemon connectivity, login state, and environment health |
 | `dashboard` | Open the local dashboard webview / TUI |
@@ -54,6 +56,20 @@ The merged Honeycomb CLI consolidates the hivemind product verbs with our memory
 | `update` | Self-update the CLI, daemon, and bundles |
 
 Skillify operations that the hivemind docs referenced as `hivemind skillify ...` are reached under `honeycomb skill ...` in the merged surface (for example `honeycomb skill scope team --users alice,bob` and `honeycomb skill pull --force`). The `org` and `workspace` verbs are the merged home of the multi-tenant administration that used to live behind the auth passthrough.
+
+---
+
+## The `install` verb: bootstrap entry
+
+`honeycomb install [--ref <code>]` (`src/commands/install.ts`) is the verb the one-command installer scripts hand off to once the global package is laid down. It is the "open logic lives once" seam: the two shell entrypoints (`install.sh`/`install.ps1`) own only the host bootstrap (detect/install Node+npm, pull embedding deps, `npm i -g`), then invoke this verb for everything between "package installed" and "browser open on the dashboard," so the daemon-ensure + health-gate + dashboard-open logic stays in one unit-tested TypeScript place rather than duplicated across two shell dialects.
+
+The verb composes existing seams, it is a thin daemon client, never a daemon-core import:
+
+1. **Health-gate the daemon** via `ensureDaemonRunning` (the same PID/lock-guarded path `setup` and the first storage-touching call use). It is idempotent, an already-healthy daemon is a no-op, never a second bind of `127.0.0.1:3850`. If the daemon never becomes reachable, the verb prints "daemon didn't start" + a retry hint and exits non-zero.
+2. **Persist the onboarding marker**, `phase: "installed"` + the effective referral code, into `~/.deeplake/onboarding.json` (fail-soft: a write hiccup never fails the install).
+3. **Open the dashboard** at `honeycomb.local` best-effort, always falling back to the `http://127.0.0.1:3850/dashboard` loopback, via a fixed-argv opener that refuses any non-local URL.
+
+The effective referral code resolves `--ref <code>` → `onboarding.ref` → the build-time default (`__HONEYCOMB_REF_DEFAULT__`, shipped `mario`). The verb only *persists* the ref; the device-flow attribution header is the login flow's job, driven from the dashboard's "First time setup" button rather than the terminal. The full onboarding lifecycle, the one-daemon/two-phase model, the on-page device flow, Hivemind migration, and adoption telemetry, is documented in [Install and Onboarding](install-and-onboarding.md).
 
 ---
 
@@ -104,7 +120,7 @@ async function main(): Promise<void> {
 If a command matches one of the organization or workspace subcommands, the dispatcher forwards the complete arguments array to the auth-login router:
 
 ```486:491:src/cli/index.ts
-  // org / workspace subcommands — passthrough to the auth-login dispatcher.
+  // org / workspace subcommands, passthrough to the auth-login dispatcher.
   if (AUTH_SUBCOMMANDS.has(cmd)) {
     await runAuthCommand(args);
     return;
@@ -122,7 +138,7 @@ The flow operates as follows:
 2. **User Authorization:** The client opens the default browser pointing to the complete URI or instructs the user to open it manually.
 3. **Token Polling:** The client polls the `/auth/device/token` endpoint at the prescribed interval. If the authorization is pending, it continues; if verified, it receives a short-lived token.
 4. **Credential Storage:** The token is validated against the `/me` endpoint, a preferred organization is selected (supporting overrides like `HONEYCOMB_ORG_ID`), and a long-lived API token is minted through the `/users/me/tokens` endpoint.
-5. **Serialization:** Credentials are written to `~/.honeycomb/credentials.json` with user-private filesystem permissions (`0600`).
+5. **Serialization:** Credentials are written to the shared `~/.deeplake/credentials.json` (byte-compatible with Hivemind; PRD-023) with user-private filesystem permissions (`0600`). See [`../security/credential-storage.md`](../security/credential-storage.md).
 
 The daemon reads the same credential file at startup, so once the CLI logs in, every hook and the daemon share one authenticated identity.
 
@@ -141,12 +157,12 @@ export async function healDriftedOrgToken(
   const payload = decodeJwtPayload(creds.token);
   const claimOrg = payload && typeof payload.org_id === "string" ? payload.org_id : undefined;
   if (!claimOrg || claimOrg === creds.orgId) return creds;
-  log(`token org drift detected: jwt.org_id=${claimOrg} creds.orgId=${creds.orgId} — re-minting`);
+  log(`token org drift detected: jwt.org_id=${claimOrg} creds.orgId=${creds.orgId}, re-minting`);
   try {
     const apiUrl = creds.apiUrl ?? DEFAULT_API_URL;
     // Per-mint unique name. DeepLake rejects duplicate (user_id, name) with
     // a 500 ("token creation failed"), and the heal runs on EVERY session
-    // start across multiple agents — a date-only suffix would collide as
+    // start across multiple agents, a date-only suffix would collide as
     // soon as the second agent heals on the same day. Date.now() suffices:
     // resolution is ms, only one heal per session, single process per agent.
     const tokenName = `deeplake-plugin-heal-${Date.now()}`;

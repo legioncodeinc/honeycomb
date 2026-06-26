@@ -1,5 +1,5 @@
 /**
- * React bindings entry point — PRD-019e Wave 2 (`@honeycomb/sdk/react`).
+ * React bindings entry point — PRD-019e Wave 2 (`@legioncodeinc/honeycomb/react`).
  *
  * A SEPARATE entry point (FR-7 / e-AC-4) so the core client stays dependency-free
  * for browser use; React is only pulled in by an app that imports THIS module, and

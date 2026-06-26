@@ -1,11 +1,11 @@
-# DeepLake `deeplake_hybrid_record` — zero-score report
+# DeepLake `deeplake_hybrid_record`, zero-score report
 
 > Category: Ai | Version: 1.1 | Date: June 2026 | Status: RESOLVED (fixed by DeepLake, verified 2026-06-24) | Audience: Activeloop / DeepLake engineering
 
 > **✅ RESOLVED 2026-06-24.** DeepLake has fixed the operator. A re-run of the same benchmark
 > (`npm run bench:hybrid`, live) shows `deeplake_hybrid_record` now returns real, varying,
 > **weight-sensitive** scores and ranks at parity with our post-query RRF (recall@5 0.611 vs 0.611,
-> MRR 0.589 vs 0.593) — the constant-zero degeneracy described below is gone. This report is retained
+> MRR 0.589 vs 0.593), the constant-zero degeneracy described below is gone. This report is retained
 > as the historical root-cause record. Honeycomb still keeps RRF as the default (parity, not a win)
 > per [ADR-0001](../architecture/adr/0001-retrieval-fusion-rrf-vs-native-hybrid.md); the operator is
 > now a viable candidate to revisit. See the re-run section of the
@@ -26,7 +26,7 @@ The `deeplake_hybrid_record` operator **parses and executes without error** (`ki
 `memories` table, but **returns `score = 0.000000` for every row**, regardless of vector-literal
 format or weight split. As a result, `ORDER BY score DESC` produces an arbitrary ordering. On the
 same table and the same `content_embedding` column, the plain `<#>` vector operator returns correct,
-varying similarity scores — so the embeddings are present, 768-dim, and queryable. The hybrid
+varying similarity scores, so the embeddings are present, 768-dim, and queryable. The hybrid
 operator is the only component producing degenerate output.
 
 ---
@@ -71,7 +71,7 @@ ORDER BY score DESC
 LIMIT 15;
 ```
 
-**Observed top scores:** `0.7933, 0.7929, 0.7921, 0.7898, 0.7886, …` — varying, correctly ordered.
+**Observed top scores:** `0.7933, 0.7929, 0.7921, 0.7898, 0.7886, …`, varying, correctly ordered.
 This confirms the embeddings are stored, 768-dim, non-null, and semantically queryable on this
 column.
 
@@ -122,11 +122,11 @@ vector arm, on a 36-pair labeled recall set (live, embeddings on, reads polled t
 
 | Path | recall@1 | recall@5 | MRR |
 |---|---|---|---|
-| RRF over the `<#>` arm (our current) | 0.583–0.611 | 0.722–0.778 | 0.644–0.664 |
+| RRF over the `<#>` arm (our current) | 0.583-0.611 | 0.722-0.778 | 0.644-0.664 |
 | `deeplake_hybrid_record` (0.5/0.5) | 0.028 | 0.139 | 0.081 |
 | `deeplake_hybrid_record` (0.9/0.1) | 0.028 | 0.167 | 0.083 |
 
-`recall@1 = 0.028 ≈ 1/36`, i.e. ordering uncorrelated with relevance — the expected consequence of a
+`recall@1 = 0.028 ≈ 1/36`, i.e. ordering uncorrelated with relevance, the expected consequence of a
 constant `0` score under `ORDER BY score DESC`.
 
 ---
@@ -152,9 +152,9 @@ above, the questions that would let us resolve or close this:
    require the embedding column to be a dedicated vector type (vs. our plain `FLOAT4[]`) or the text
    column to be of a specific/indexed type? The plain `<#>` operator works on our `FLOAT4[]` column;
    please confirm hybrid's requirements.
-5. **A minimal end-to-end example.** A runnable sequence — `CREATE TABLE … USING deeplake` → any
+5. **A minimal end-to-end example.** A runnable sequence, `CREATE TABLE … USING deeplake` → any
    required index DDL → `INSERT` with an embedding → the hybrid query returning **non-zero, ordered**
-   scores — that we can diff against our setup.
+   scores, that we can diff against our setup.
 6. **Score semantics.** Confirm whether the operator yields a similarity (`ORDER BY … DESC`) or a
    distance (`ASC`), and the value range. (Currently moot while every score is `0`, but needed for
    correct adoption.)

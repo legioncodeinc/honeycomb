@@ -10,6 +10,7 @@ The storage substrate: DeepLake as a GPU-backed SQL and vector store, the write 
 - [`../architecture/system-overview.md`](../architecture/system-overview.md)
 - [`../multi-tenant/org-workspace-model.md`](../multi-tenant/org-workspace-model.md)
 - [`../security/trust-boundaries.md`](../security/trust-boundaries.md)
+- [`../operations/observability-and-degradation.md`](../operations/observability-and-degradation.md)
 
 ---
 
@@ -36,6 +37,8 @@ export function sqlIdent(name: string): string {
 
 Second, DeepLake has an UPDATE-coalescing quirk: two rapid UPDATEs to the same row within microseconds can silently drop one. Tables that expect concurrent edits therefore avoid in-place UPDATE and use append-only, version-bumped writes instead.
 
+A third property, eventual consistency on reads, is handled by the convergence seam described below.
+
 ## The write patterns
 
 Every table uses one of a few patterns, chosen by how it expects to be written.
@@ -52,6 +55,33 @@ The version-bumped pattern is the important one for the memory engine. Because D
 ## Vectors
 
 Embeddings are 768-dimension `nomic-embed-text-v1.5` vectors stored as DeepLake tensor columns (for example `sessions.message_embedding` and `memory.summary_embedding`), nullable so that recall degrades to lexical search when embedding is disabled or fails. Vector search runs on the GPU-backed engine against those columns, so semantic recall and the structured filters that scope it happen in one query. The retrieval flow that consumes this is [`../ai/retrieval.md`](../ai/retrieval.md).
+
+## Read consistency: converging on your own writes
+
+DeepLake is eventually consistent. It flaps stale segments, so a read issued immediately after a write can land on a segment that has not yet caught up and *under-report*: the just-written row is missing, a counter looks un-incremented, a row count comes back short, then a beat later it is there. A single immediate read-back is therefore unsafe: it does not return wrong data so much as *premature* data, and nothing flags that the read was early.
+
+The naive fix, a "poll until it shows up" loop, was being hand-rolled in every live integration test that did a write-then-read-back, each copy drifting its own retry budget (the jscpd-duplication trap). The convergence guarantee belongs once, in the storage seam every read flows through, not scattered as test scaffolding. That seam is `readConverged` (`src/daemon/storage/converge.ts`).
+
+```mermaid
+flowchart TD
+    write["controlled write emits a watermark (id + version)"] --> read["readConverged(client, sql, scope, predicate)"]
+    read --> q["client.query"]
+    q --> pred{"predicate holds? (row present / version >= N / count >= k)"}
+    pred -->|yes| ok["return the fresh QueryResult"]
+    pred -->|no| budget{"budget left? (max attempts + wall-clock)"}
+    budget -->|yes| backoff["jittered backoff, then re-poll"]
+    backoff --> q
+    budget -->|no| soft["return the last real QueryResult (fail-soft, never invent)"]
+```
+
+The contract has a few deliberate properties:
+
+- **Watermark-driven, not fuzzy.** The write path (the controlled-write primitives `appendVersionBumped` / `updateOrInsertByKey`) emits a watermark, the just-written id and version, and the read path derives an *exact* freshness predicate from it ("row id X present", "version ≥ N", "count ≥ k"). DeepLake exposes no read-after-write token at the transport, so the write supplies the cursor that makes the predicate precise rather than a wait-and-hope.
+- **Opt-in per read.** `query` stays the default. Most reads (recall, dashboard views) are already fail-soft and tolerate slight staleness, and forcing convergence on every request would tax every read for a guarantee only the read-your-writes paths need. `readConverged` is the explicit choice a read-your-writes caller makes.
+- **Bounded and fail-soft.** The seam polls until the predicate holds or a bounded budget is exhausted, roughly 2 seconds of wall-clock or ten attempts with jittered, capped backoff, all env-overridable (`HONEYCOMB_READ_CONVERGE_*`). On exhaustion it returns the *last real* `QueryResult` (typically a smaller-than-expected `ok`). It never fabricates the awaited row and never throws past the closed `QueryResult` union. A stale read under-reports; it must not lie.
+- **Complementary to transport retry.** `StorageClient.query` already retries on transport failures (connection error, timeout, transient 5xx), a non-ok result. `readConverged` is different: it polls on *ok* results until a freshness predicate holds, the stale-segment under-report case where the read succeeded but the data is not yet fresh. A transport failure short-circuits naturally, because the predicate will not hold against a non-ok result.
+
+The seam is live and consumed where read-your-writes matters: asset-sync confirms a write through it, the dashboard sync API reads back convergently before reporting success, and the live integration tests poll through it instead of each re-deriving a loop. The same discipline appears in [`../operations/observability-and-degradation.md`](../operations/observability-and-degradation.md): a premature read is a degradation that must never pass silently.
 
 ## Lazy schema healing
 

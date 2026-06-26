@@ -1,6 +1,6 @@
 # Architecture Decision Records (ADRs)
 
-Standing records of significant, hard-to-reverse architecture decisions — the *why* behind a choice,
+Standing records of significant, hard-to-reverse architecture decisions, the *why* behind a choice,
 captured once so it doesn't have to be re-litigated from memory.
 
 ## Convention
@@ -11,7 +11,7 @@ captured once so it doesn't have to be re-litigated from memory.
 - `Status`: `Proposed` → `Accepted` → `Superseded by ADR-XXXX` (never edit a superseded ADR's
   substance; write a new one that supersedes it).
 - ADRs record the decision; the supporting measurements/PRDs live in `library/requirements/` and the
-  detailed knowledge docs alongside this folder — link them, don't duplicate them.
+  detailed knowledge docs alongside this folder, link them, don't duplicate them.
 
 ## Index
 

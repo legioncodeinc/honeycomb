@@ -12,6 +12,7 @@ How Honeycomb wires into Cursor 1.7+ via hooks.json, what each hook does, and ho
 - [`../architecture/daemon-surface.md`](../architecture/daemon-surface.md)
 - [`../multi-tenant/org-workspace-model.md`](../multi-tenant/org-workspace-model.md)
 - [`../collaboration/team-skills-sharing.md`](../collaboration/team-skills-sharing.md)
+- [`dashboard-architecture.md`](dashboard-architecture.md)
 
 ---
 
@@ -178,12 +179,34 @@ sequenceDiagram
 
 ## Editor extension (`harnesses/cursor/extension/`)
 
-The hooks integration above is sufficient for capture, recall, skillify, and graph builds. The optional **Honeycomb for Cursor** extension adds operator UX on top:
+The hooks integration above is sufficient for capture, recall, skillify, and graph builds. The **Honeycomb for Cursor** extension ships operator UX on top, a status bar, a no-terminal login, a dashboard webview, and hook/skill wiring, built on the same shared engines so nothing is duplicated.
 
-- Status bar health for CLI, `cursor-agent`, login, daemon connectivity, and hook wiring
-- **Wire / Refresh Hooks** copies `harnesses/cursor/bundle/` into `~/.cursor/honeycomb/bundle/` and idempotently merges `~/.cursor/hooks.json`
-- Browser or API-key login without a terminal
-- Dashboard webview: KPIs, settings, sessions, graph canvas, rules list, skill sync state
-- On activation, syncs symlinks into `~/.cursor/skills-cursor/` and `<project>/.cursor/skills/`
+### VS Code / Cursor manifest
 
-User-facing install and command reference: [harnesses/cursor/extension/README.md](../../../../harnesses/cursor/extension/README.md). Product requirements: `library/requirements/backlog/prd-002-cursor-extension-core/` through `prd-005-cursor-skillify-bridge/`.
+The extension's `package.json` is a standard VS Code manifest:
+
+- `engines.vscode` targets Cursor 1.7+ (the version that introduced the `hooks.json` lifecycle).
+- `main` points at the bundled adapter entry, and the `activate(host, deps)` function in `harnesses/cursor/extension/extension.ts` is the entry that wires everything.
+- `activationEvents` fire on load so the four commands register and the status bar paints immediately.
+- `extensionKind` is `ui` (it owns a status bar and a webview), and the design-system assets are bundled in.
+
+The `contributes` block declares four commands:
+
+| Command id | Title | Effect |
+|---|---|---|
+| `honeycomb.wireHooks` | Wire / Refresh Hooks | Copies `harnesses/cursor/bundle/` into `~/.cursor/honeycomb/bundle/` and idempotently merges `~/.cursor/hooks.json` (delegates to the 019a connector). |
+| `honeycomb.login` | Login | Browser device flow or API-key entry; writes the shared `~/.deeplake/credentials.json` at mode `0o600`; opens the verification URL via the host. |
+| `honeycomb.openDashboard` | Open Dashboard | Renders the canonical dashboard view tree into a webview panel titled "Honeycomb Dashboard". |
+| `honeycomb.syncSkills` | Sync Skills | Symlinks org/team skills into `~/.cursor/skills-cursor/` and `<project>/.cursor/skills/` without clobbering. |
+
+### esbuild entry and activation
+
+The extension's TypeScript shell (`extension.ts`, `contracts.ts`, `bindings.ts`, `render.ts`, `index.ts`) compiles in the repo `tsc` pass and is packaged by the editor's own bundler from the `extension.ts` entry. The separate hook binary is built by the root `esbuild.config.mjs` from `dist/harnesses/cursor/src/index.js` into `harnesses/cursor/bundle/` (aliased as `session-start.js`, `capture.js`, `pre-tool-use.js`, `session-end.js`), the same bundle the **Wire / Refresh Hooks** command copies into `~/.cursor/honeycomb/bundle/`.
+
+`activate(host, deps)` is constructed over injectable seams, `hooks` (wiring), `skills` (sync), `dashboard` (webview render), `health` (status-bar health source), and `login`, so the whole extension is testable without the editor. On activation it self-heals the bundle symlink (in case a marketplace upgrade dropped it), syncs org/team skills, and paints the status bar; then it registers the four commands. It returns an instance exposing `refreshStatusBar()`, `openDashboard()`, and `dispose()`.
+
+### Status bar and dashboard webview
+
+The status bar item paints five health dimensions as a glyph row (e.g. `Honeycomb ✓✓✗✓✓`) with a per-dimension tooltip: CLI install, daemon connectivity, `cursor-agent` availability, `cursor-agent` login, and hook wiring. Any failing dimension flips a `hasFailure` flag the host colors red. The dashboard command renders the *same* canonical dashboard view tree the daemon serves at `127.0.0.1:3850/dashboard` (KPIs, sessions, settings, graph canvas, rules, skill-sync state) into a webview, carrying a `data-connectivity="reachable" | "unreachable"` attribute so a daemon-down state shows a connectivity banner rather than a blank panel. The shared view tree is documented in [dashboard-architecture.md](dashboard-architecture.md).
+
+Product requirements: `library/requirements/in-work/prd-020-surfaces/prd-020c-surfaces-cursor-extension.md`.

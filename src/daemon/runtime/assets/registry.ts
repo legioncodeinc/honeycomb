@@ -4,10 +4,32 @@
  * The SINGLE SOURCE OF TRUTH for every substrate-managed artifact's tier, style,
  * harness, version, identity, hashes, provenance, and device set. It EVOLVES the
  * skillify pull manifest's shape (adds tier/style/3-hashes/`honeycomb_id`/device-
- * set) but COEXISTS with it — D-2: the skillify pull manifest
- * (`~/.honeycomb/state/skillify/pull-manifest.json`) is left UNTOUCHED; this
- * registry is a NEW, separate file (`.honeycomb/registry.json`) that never
- * migrates or deletes it.
+ * set) AND now SUBSUMES it — the unified-registry migration (R-2) folds the legacy
+ * skillify pull manifest (`~/.honeycomb/state/skillify/pull-manifest.json`) INTO
+ * this one file so `.honeycomb/registry.json` is the ONE source of truth for both
+ * registered assets AND pulled skills.
+ *
+ * ── How a pulled-skill row coexists with a registered-asset row (R-2) ───────
+ * A pulled-skill row is a normal {@link RegistryEntry} whose `honeycombId` is the
+ * skill's canonical `<name>--<author>` dir name and whose ADDITIVE, OPTIONAL
+ * {@link PulledManifest} block carries the reversibility fields `skill unpull` /
+ * `backfillSymlinks` depend on (symlinks, installRoot, install, remoteVersion,
+ * name/author, projectKey, pulledAt). The base fields take skill-shaped defaults
+ * (`assetType:"skill"`, `tier:"Local"`, `style:"User"|"Repository"`, empty hashes)
+ * so the SAME zod read-validation accepts both kinds — a registered-asset row has
+ * NO `pulledManifest`; a pulled-skill row DOES. Nothing about the existing
+ * registered-asset path changes: every prior field is untouched and the new field
+ * is optional, so pre-R-2 entries (and every `registerAsset`/`transitionAsset`
+ * call site) stay valid by construction.
+ *
+ * ── Thin-client note (why the manifest adapter does NOT import this module) ──
+ * `createPullManifestStore` (`src/daemon-client/skillify/manifest.ts`) presents the
+ * old `PullManifestStore` surface backed by this SAME `registry.json` file, but it
+ * CANNOT import this module: `registry.ts` imports `daemon/storage/catalog`, which
+ * the thin-client invariant (`tests/daemon/storage/invariant.test.ts`) bans from
+ * `src/daemon-client/**`. The shared shape is therefore agreed by VALUE (the
+ * `pulledManifest` block + the skill-row defaults), validated independently on each
+ * side; both readers round-trip the other's rows losslessly.
  *
  * The store mirrors `createPullManifestStore` (the proven thin-client pattern):
  *   - `read()`   — every entry, EMPTY on a missing/garbled file (never throws).
@@ -29,6 +51,41 @@ import { z } from "zod";
 
 import { STYLES, TIERS } from "./contracts.js";
 import { SYNCED_ASSET_TYPES } from "../../storage/catalog/synced-assets.js";
+
+/**
+ * The reversibility block a PULLED-SKILL registry row carries (R-2). ADDITIVE +
+ * OPTIONAL: a registered-asset row omits it; a pulled-skill row sets it. It mirrors
+ * the legacy `PullManifestEntry` fields `skill unpull` + `backfillSymlinks` depend
+ * on (`src/daemon-client/skillify/contracts.ts`) so the migration is LOSSLESS:
+ *
+ *   - `install`      — `project` | `global` (backfill/fan-out gate on `global`).
+ *   - `installRoot`  — the canonical root the SKILL.md dir was written under.
+ *   - `symlinks`     — the absolute fanned-out link paths (for `unpull`'s reversal).
+ *   - `name`/`author`— the `<name>--<author>` halves (the row's `honeycombId` IS the
+ *                      joined dir name, but the halves are kept verbatim for render).
+ *   - `projectKey`   — provenance: the project key the pull ran under.
+ *   - `pulledAt`     — ISO timestamp the pull wrote the row.
+ *   - `remoteVersion`— the remote version the row was written at (drives the compare).
+ *
+ * The DAEMON side never acts on this block (it is opaque to the asset lifecycle); it
+ * exists so the one `registry.json` file losslessly round-trips a pulled-skill row
+ * the thin-client manifest adapter writes. Every field is required WITHIN the block
+ * (so a partial block is dropped rather than half-trusted), but the block itself is
+ * optional on the entry.
+ */
+export const PulledManifestSchema = z.object({
+	install: z.enum(["project", "global"]),
+	installRoot: z.string(),
+	symlinks: z.array(z.string()),
+	name: z.string(),
+	author: z.string(),
+	projectKey: z.string(),
+	pulledAt: z.string(),
+	remoteVersion: z.number(),
+});
+
+/** The reversibility block a pulled-skill registry row carries (R-2) — inferred type. */
+export type PulledManifest = z.infer<typeof PulledManifestSchema>;
 
 /**
  * One artifact's registry entry (FR-1 / a-AC-1). Zod-validated on read so a
@@ -68,6 +125,13 @@ export const RegistryEntrySchema = z.object({
 	 * native bytes (F-3). Optional so pre-existing entries (and tests) stay valid.
 	 */
 	sourcePath: z.string().optional(),
+	/**
+	 * The pulled-skill reversibility block (R-2). ADDITIVE + OPTIONAL: present ONLY on a
+	 * row migrated/written from the skillify pull manifest; a registered-asset row omits it.
+	 * Its presence is what distinguishes a pulled-skill row from a registered-asset row in
+	 * the unified registry.
+	 */
+	pulledManifest: PulledManifestSchema.optional(),
 });
 
 /** One artifact's registry entry (FR-1 / a-AC-1) — the inferred type of the schema. */

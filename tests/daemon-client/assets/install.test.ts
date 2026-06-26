@@ -8,7 +8,9 @@
  *   c-AC-3  an artifact installs ONLY on a MATCHING harness (a `(skill,claude_code)` row
  *           does NOT install into a different harness root).
  *   c-AC-4  the identity adapter round-trips (`parse(render(x)) === x`).
- *   c-AC-5  a tombstone for a locally-present artifact retracts it (`.bak` then remove, D-4).
+ *   c-AC-5  a tombstone for a locally-present artifact retracts it: the live file is LEFT IN
+ *           PLACE (UNMANAGED — marker removed), never deleted or renamed. The user keeps the
+ *           file; future pulls skip it as unmanaged.
  *   c-AC-6  a no-change pull is a no-op; a slow/absent table → within budget, errors swallowed.
  *   path-safety: a malicious `honeycomb_id` can never escape the install root.
  */
@@ -151,7 +153,7 @@ describe("PRD-033c thin-client install/retract (c-AC-2..6)", () => {
 		expect(existsSync(`${file}.bak`)).toBe(false);
 	});
 
-	it("c-AC-5 a tombstone for a locally-present artifact retracts it (.bak then remove, D-4)", async () => {
+	it("c-AC-5 a tombstone for a locally-present artifact leaves the live file in place (UNMANAGED)", async () => {
 		const roots = createDefaultHarnessRoots({ home, projectDir });
 		await pullAndInstall({ api: fakeApi([asset({ version: 1, native: "live", contentHash: "h1" })]), roots, scope: SCOPE });
 		const file = claudeSkillFile();
@@ -163,11 +165,25 @@ describe("PRD-033c thin-client install/retract (c-AC-2..6)", () => {
 			scope: SCOPE,
 		});
 		expect(out.retracted).toBe(1);
-		// The live file is gone; the user's content is preserved at .bak.
-		expect(existsSync(file)).toBe(false);
-		expect(readFileSync(`${file}.bak`, "utf-8")).toBe("live");
-		// The marker is removed too (the artifact is no longer managed).
-		expect(existsSync(join(projectDir, ".claude", "skills", ID, ".honeycomb-asset.json"))).toBe(false);
+		// The live file is STILL PRESENT with its original bytes — never deleted or renamed.
+		expect(existsSync(file)).toBe(true);
+		expect(readFileSync(file, "utf-8")).toBe("live");
+		// No .bak is created on retraction (the file was not moved).
+		expect(existsSync(`${file}.bak`)).toBe(false);
+		// The marker IS removed: the artifact is now UNMANAGED (future pulls skip it).
+		const markerPath = join(projectDir, ".claude", "skills", ID, ".honeycomb-asset.json");
+		expect(existsSync(markerPath)).toBe(false);
+		// A subsequent tombstone pull with the file present but no marker → skipped (not re-retracted).
+		const out2 = await pullAndInstall({
+			api: fakeApi([asset({ version: 2, tombstone: true, native: "", contentHash: "" })]),
+			roots,
+			scope: SCOPE,
+		});
+		// The file still exists but marker is absent, so decideInstall on a tombstone sees existsSync(file)
+		// still true — retract is called again but is idempotent (marker already absent → true, counted).
+		// The live file remains untouched throughout.
+		expect(existsSync(file)).toBe(true);
+		expect(readFileSync(file, "utf-8")).toBe("live");
 	});
 
 	it("c-AC-6 table-absent → no-op within budget (no install, no throw)", async () => {

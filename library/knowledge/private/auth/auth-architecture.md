@@ -10,6 +10,7 @@ How Honeycomb authenticates and authorizes: device-flow login bound to an org, t
 - [`../security/scoping-and-visibility.md`](../security/scoping-and-visibility.md)
 - [`../security/secrets.md`](../security/secrets.md)
 - [`../architecture/daemon-surface.md`](../architecture/daemon-surface.md)
+- [`../operations/install-and-onboarding.md`](../operations/install-and-onboarding.md)
 
 ---
 
@@ -36,6 +37,14 @@ sequenceDiagram
 ```
 
 Tokens can drift when an org changes. The daemon heals a drifted org token on session start: it decodes the token's org claim, compares it to the active org, and re-mints if they disagree, realigning the org name and workspace afterward. The tenancy mechanics are documented in [`../multi-tenant/org-workspace-model.md`](../multi-tenant/org-workspace-model.md).
+
+### Driving the flow from the dashboard
+
+The same device flow can now be driven from the **dashboard UI**, not just the terminal. The pre-auth dashboard's "First time setup" button POSTs to a loopback, local-mode-only `POST /setup/login`, which begins the flow and returns *only* the `user_code` + verification URIs for the dashboard to render on the page, so a new user reads the code on a familiar surface instead of copying it out of a shell. The browser opens the (https-only validated) verification page; the flow polls in the background; on approval it mints and persists the **same** shared credential through the identical `persistFromToken` path. The response never carries the device/bearer token, and the reporter sink is swallowed so no token-adjacent line is logged. The end state is byte-identical to a terminal login, only the prompt surface changed. The full pre-auth/authenticated phase model lives in [`../operations/install-and-onboarding.md`](../operations/install-and-onboarding.md).
+
+### Referral attribution on the device-code request
+
+The device-code request (`POST /auth/device/code`) carries referral-attribution headers so signups from this repo / the `@legioncodeinc/honeycomb` package are attributed to the operator. Honeycomb sends **both** `X-Hivemind-Referrer` (recognized by the Activeloop backend today) and `X-Honeycomb-Referrer` (the forward-looking namespaced header), each set to the trimmed referral code, and both omitted when the ref is empty (trim-and-omit). The headers ride **only** on the device-code request (attribution-on-registration), never on `/me`, mint, or any data-plane call, and the ref is never placed in a URL or a log line. The effective ref resolves `--ref` override → `onboarding.ref` → the build-injected default (shipped `mario`).
 
 ## The three daemon modes
 

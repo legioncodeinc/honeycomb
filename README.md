@@ -207,7 +207,7 @@ Four ways to reach the same daemon and the same shared memory:
 - **CLI.** The unified `honeycomb` binary. Core verbs: `install`, `setup`, `status`, `daemon start|stop|status`, `remember`, `recall`, `sessions`, `skill`, `goal`, `sources`, `graph`, `dashboard`. Run `honeycomb --help` for the full list.
 - **Dashboard.** A local web UI the daemon serves at **`http://127.0.0.1:3850/dashboard`**: KPIs (memories, turns, est. savings, team skills), memory recall, the codebase graph, captured turns, skill-sync, and settings, with a live request log. It's also the guided-setup surface for first-time login.
 - **MCP server.** A [Model Context Protocol](https://modelcontextprotocol.io) server (bundled to `mcp/bundle`) exposing Honeycomb's read/resolve and search/mine tools to any MCP-capable host.
-- **TypeScript SDK.** The `@honeycomb/sdk` client with framework subpath entries (`/react`, `/vercel`, `/openai`). The core entry is fetch-only and browser-safe; `react` and `ai` are optional peers.
+- **TypeScript SDK.** The `@legioncodeinc/honeycomb` client with framework subpath entries (`/react`, `/vercel`, `/openai`). The core entry is fetch-only and browser-safe; `react` and `ai` are optional peers.
 
 ---
 

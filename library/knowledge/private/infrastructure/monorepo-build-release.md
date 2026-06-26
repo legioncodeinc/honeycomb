@@ -11,6 +11,7 @@ How Honeycomb compiles, bundles, and packages its monorepo core, the daemon, and
 - [`../integrations/hook-lifecycle.md`](../integrations/hook-lifecycle.md)
 - [`../operations/cli-command-architecture.md`](../operations/cli-command-architecture.md)
 - [`../integrations/mcp-and-sdk.md`](../integrations/mcp-and-sdk.md)
+- [`npm-publishing.md`](npm-publishing.md)
 
 ---
 
@@ -178,7 +179,7 @@ To eliminate unreachable code that would trigger security warnings on the ClawHu
     // Dead-code elimination for transitively bundled CC/Codex-only features.
     // harnesses/openclaw/src/index.ts imports shared modules from ../../src/ (daemon
     // client, grep-core, virtual-table-query, auth device-flow). Several of those
-    // modules also host CC-specific helpers that shell out with execSync —
+    // modules also host CC-specific helpers that shell out with execSync:
     // opening the browser for SSO, nudging plugin-update, spawning the
     // wiki-worker daemon. Those helpers are never called through the openclaw
     // entry point (openclaw is a pure HTTP/WebSocket gateway; it has no local
@@ -229,7 +230,7 @@ The ClawHub scanner blocks uploads containing raw `process.env` lookups alongsid
     // `HONEYCOMB_STATE_DIR` is the test-isolation override that points
     // `~/.honeycomb/state/skillify` at a `mkdtempSync()` dir. OpenClaw has
     // no testing surface and no reason to redirect state, so it always
-    // resolves to `undefined` at runtime — the call-site `??
+    // resolves to `undefined` at runtime, the call-site `??
     // homedir()/...` fallback produces the production path. The rewrite
     // matters mainly to keep the ClawHub `env-harvesting` scanner happy:
     // a literal `process.env.HONEYCOMB_STATE_DIR` substring in the same
@@ -242,8 +243,18 @@ The ClawHub scanner blocks uploads containing raw `process.env` lookups alongsid
 
 ## Distribution and Post-Install Processes
 
-When the user runs `npm install -g @honeycomb/cli`, the global package is laid down on their machine.
+When the user runs `npm install -g @legioncodeinc/honeycomb`, the global package is laid down on their machine.
 
-A `postinstall` script immediately invokes `node scripts/ensure-tree-sitter.mjs`. This script checks the host OS, ensures that correct binary prebuilds for `tree-sitter` and the language grammars are download-resolved, and handles potential compilation fallback steps.
+A `postinstall` script immediately invokes `node scripts/ensure-tree-sitter.mjs` (and `node scripts/ensure-embed-deps.mjs`). This checks the host OS, ensures the correct binary prebuilds for `tree-sitter` and the language grammars are download-resolved, and handles potential compilation fallback steps.
 
-The CLI binary is exposed via the `bin` field in `package.json`, which points to `bundle/cli.js`. This file is generated with an executable permission stamp `0755` and a standard hash-bang line pointing to the Node.js interpreter, ensuring a seamless terminal execution experience. The first CLI invocation that needs storage will start the daemon if it is not already running, so users never have to launch it by hand.
+The CLI binary is exposed via the `bin` field in `package.json`, which points to `bundle/cli.js`. The `bin` name stays `honeycomb` regardless of the package name, so consumers always get a `honeycomb` command. This file is generated with an executable permission stamp `0755` and a standard hash-bang line pointing to the Node.js interpreter, ensuring a seamless terminal execution experience. The first CLI invocation that needs storage will start the daemon if it is not already running, so users never have to launch it by hand.
+
+---
+
+## Publishing and Release
+
+The built artifacts above are published to the public npm registry as the scoped package **`@legioncodeinc/honeycomb`**. Publishing is **allowlist-driven**: the `files` array in `package.json` is the exact set of paths that reach the tarball, the built `bundle`/`daemon`/`sdk`/`mcp`/`embeddings` outputs, the per-harness bundles, and the runtime `assets/` (CSS, design tokens, brand logo, fonts) the daemon-served dashboard reads. The embedding runtime (`@huggingface/transformers`, ~600 MB) is an **optional dependency** kept *out* of the allowlist, so the tarball stays lean and the model downloads on first warmup.
+
+`prepack` runs `npm run build`, so the tarball is always rebuilt from the just-checked-out tree, published bundles never lag the source.
+
+The release is cut by `.github/workflows/release.yaml`, which runs the same full gate as CI, then a tarball scan (`pack:check`: no secrets, all required runtime files present), a tag-vs-version guard, and a fails-closed publishability preflight, before publishing **tokenlessly via OIDC Trusted Publishing with npm provenance**, no `NPM_TOKEN`. A real publish happens only on a pushed `vX.Y.Z` tag; a `workflow_dispatch` always rehearses with `npm publish --dry-run`. The `"version"` lifecycle script wires `sync-versions` into `npm version` so a bump propagates the version into every harness manifest *and* stages it, keeping the tagged commit internally consistent. The full pipeline, the OIDC model, and the preflight are documented in [npm Publishing](npm-publishing.md).

@@ -1,5 +1,5 @@
 /**
- * Vercel AI SDK helper entry point — PRD-019e Wave 2 (`@honeycomb/sdk/vercel`).
+ * Vercel AI SDK helper entry point — PRD-019e Wave 2 (`@legioncodeinc/honeycomb/vercel`).
  *
  * A SEPARATE entry point (FR-8 / e-AC-5) exposing Honeycomb memory as Vercel AI SDK
  * tools, so they drop into an existing agent loop. It REUSES the core

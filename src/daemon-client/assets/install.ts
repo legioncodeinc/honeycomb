@@ -13,8 +13,10 @@
  *   - {@link pullAndInstall} — pull, then for each NON-tombstone asset install the
  *     VERBATIM native artifact via the {@link AssetAdapter} (identity, c-AC-4) onto a
  *     MATCHING harness only (c-AC-3); for each TOMBSTONE asset present locally, RETRACT
- *     per D-4 (back up to `.bak`, then remove). Last-writer-wins + `.bak` (c-AC-2 / FR-5)
- *     mirrors skillify's `decideAction`. Idempotent + fail-soft.
+ *     per D-4 (leave the live file in place, drop the managed marker so the artifact
+ *     becomes UNMANAGED — the user keeps the file, future pulls no longer sync it).
+ *     Last-writer-wins + `.bak` (c-AC-2 / FR-5) mirrors skillify's `decideAction`.
+ *     Idempotent + fail-soft.
  *   - {@link autoPull} — the session-start wrapper: a 5s budget, swallows ALL errors →
  *     no-op, NEVER blocks session start (c-AC-6 / FR-7) — lifted from skillify `autoPull`.
  *
@@ -134,7 +136,7 @@ export interface InstallOutcome {
 	readonly skipped: number;
 	/** Artifacts whose prior copy was backed up to `.bak` before a newer write (c-AC-2). */
 	readonly backedUp: number;
-	/** Locally-present artifacts retracted by a tombstone (`.bak` then remove, c-AC-5 / D-4). */
+	/** Locally-present artifacts retracted by a tombstone (left in place, marked UNMANAGED — c-AC-5 / D-4). */
 	readonly retracted: number;
 	/** True when the SELECT was skipped because `synced_assets` was absent (fail-soft no-op, FR-7). */
 	readonly tableAbsent: boolean;
@@ -147,7 +149,9 @@ export interface InstallOutcome {
  * (c-AC-2..6 / FR-2..7).
  *
  * For each pulled asset:
- *   - TOMBSTONE present locally → RETRACT (back up to `.bak`, then remove — D-4 / c-AC-5);
+ *   - TOMBSTONE present locally → RETRACT (leave the live file in place, drop the managed
+ *     marker so the artifact is UNMANAGED — D-4 / c-AC-5). The user's file is never deleted
+ *     or renamed; future pulls skip it as unmanaged; a re-publish can cleanly re-adopt it.
  *   - NON-tombstone on a MATCHING harness → install per {@link decideInstall}
  *     (local-absent → write; remote.version>local && hash-divergent → `.bak`+write;
  *     ≤ → skip; force → `.bak`+write — c-AC-2 / FR-5);
@@ -342,19 +346,29 @@ function backupExisting(file: string): boolean {
 }
 
 /**
- * Retract a locally-present artifact a tombstone selected (c-AC-5 / D-4): back the file up
- * to `<file>.bak`, THEN remove the LIVE file + its marker. The user's content is preserved
- * via `.bak` (mirrors the LWW backup discipline). Returns true when the retraction landed.
- * Everything happens INSIDE the already-contained `dir`, so neither the `.bak` nor the
- * removal can escape the install root (D-4). The `.bak` itself is left in place (the user's
- * copy); only the managed live file + marker are removed.
+ * Retract a locally-present artifact a tombstone selected (c-AC-5 / D-4).
+ *
+ * BEHAVIOR (post-ruling): the live artifact file (`SKILL.md` / `AGENT.md`) is LEFT IN
+ * PLACE, untouched. Only the managed marker (`.honeycomb-asset.json`) is removed so the
+ * install engine treats the artifact as UNMANAGED going forward:
+ *   - {@link decideInstall} calls `readLocalMarker`, which returns `null` when the marker
+ *     is absent; with no marker, `localExists` is still true but `localVersion` is null.
+ *     A subsequent tombstone pull sees the same tombstone row (highest version) and finds
+ *     no live file to retract further → `skipped`. A new non-tombstone publish for the
+ *     same id will execute a `write` or `backup-write` path that re-creates the marker,
+ *     cleanly re-adopting the artifact.
+ *   - The LWW `.bak` backup on a remote-newer OVERWRITE (`backupExisting` / `decideInstall`
+ *     `"backup-write"`) is a SEPARATE path and is UNCHANGED — this change is retraction only.
+ *
+ * Returns true when the marker was removed (or was already absent). Fail-soft: an fs error
+ * drops the marker and returns false so the caller's `retracted` count stays accurate for
+ * artifacts that were actually transitioned to unmanaged.
  */
-function retract(dir: string, file: string): boolean {
+function retract(dir: string, _file: string): boolean {
 	try {
-		// Back up the live file first (preserve the user's content), then drop the marker so the
-		// next pull sees the artifact as absent and would re-install only on a fresh (non-tombstone)
-		// publish. The `.bak` is the user's keepsake; the managed artifact is gone.
-		if (existsSync(file)) renameSync(file, `${file}${BAK_SUFFIX}`);
+		// Drop ONLY the managed marker. The live artifact file stays where it is — the user
+		// keeps using it. Without the marker, the next pull cannot LWW-compare and will not
+		// overwrite the file; a re-publish is required to re-adopt it as managed.
 		const marker = join(dir, ASSET_MARKER);
 		if (existsSync(marker)) rmSync(marker, { force: true });
 		return true;

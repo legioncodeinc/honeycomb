@@ -188,29 +188,59 @@ describe.skipIf(!HAS_TOKEN)("live asset-sync propagation proof (opt-in, real bac
 		expect(otherWs.assets.find((a) => a.honeycombId === id)).toBeUndefined();
 	});
 
-	it("AC-5 tombstone → the next pull retracts the local copy across the radius", async () => {
-		const id = assetId("tomb");
-		await api.publish({
-			honeycombId: id,
-			assetType: "skill",
-			harness: "claude_code",
-			native: "doomed-body",
-			canonical: "doomed-body",
-			contentHash: "kh1",
-			cell: TEAM_REPO,
-			scope: scopeFor(),
-			deviceSet: [],
-		});
-		// Wait for it to land as a live (non-tombstone) row first.
-		const live = await pullUntil(scopeFor(), id, (a) => a !== undefined && !a.tombstone);
-		expect(live, "the artifact must land live before tombstoning").not.toBeNull();
+	it("AC-5 tombstone → the next pull leaves the local file in place (UNMANAGED — never deletes user files)", async () => {
+		const tmp = mkdtempSync(join(tmpdir(), "hc-assets-live-tomb-"));
+		try {
+			const roots = createDefaultHarnessRoots({ home: tmp, projectDir: tmp });
+			const id = assetId("tomb");
 
-		await api.tombstone({ honeycombId: id, assetType: "skill", harness: "claude_code", cell: TEAM_REPO, scope: scopeFor(), deviceSet: [] });
+			// Publish the artifact and install it locally via the thin-client path.
+			await api.publish({
+				honeycombId: id,
+				assetType: "skill",
+				harness: "claude_code",
+				native: "doomed-body",
+				canonical: "doomed-body",
+				contentHash: "kh1",
+				cell: TEAM_REPO,
+				scope: scopeFor(),
+				deviceSet: [],
+			});
+			// Wait for it to land as a live (non-tombstone) row first.
+			const live = await pullUntil(scopeFor(), id, (a) => a !== undefined && !a.tombstone);
+			expect(live, "the artifact must land live before tombstoning").not.toBeNull();
 
-		// The next converged pull sees the highest version as a TOMBSTONE.
-		const tomb = await pullUntil(scopeFor(), id, (a) => a !== undefined && a.tombstone);
-		expect(tomb, "the next pull must surface the tombstone (highest version)").not.toBeNull();
-		expect(tomb?.tombstone).toBe(true);
+			// Install it locally via the thin-client so there is a file on disk to retract.
+			await installFromEngine(api, roots, scopeFor());
+			const skillFile = join(tmp, ".claude", "skills", id, "SKILL.md");
+			const markerFile = join(tmp, ".claude", "skills", id, ".honeycomb-asset.json");
+			expect(existsSync(skillFile), "skill file must be installed before tombstone pull").toBe(true);
+
+			// Tombstone the artifact (the demotion side writes the append-only row to DeepLake).
+			await api.tombstone({ honeycombId: id, assetType: "skill", harness: "claude_code", cell: TEAM_REPO, scope: scopeFor(), deviceSet: [] });
+
+			// Wait until the converged pull surfaces the tombstone as the highest version.
+			const tomb = await pullUntil(scopeFor(), id, (a) => a !== undefined && a.tombstone);
+			expect(tomb, "the next pull must surface the tombstone (highest version)").not.toBeNull();
+			expect(tomb?.tombstone).toBe(true);
+
+			// Run the install path with the tombstone row — this is what retract() is called from.
+			await installFromEngine(api, roots, scopeFor());
+
+			// NEW BEHAVIOR: the live artifact file is LEFT IN PLACE with its original bytes.
+			// The user's file is never deleted or renamed on tombstone retraction.
+			expect(existsSync(skillFile), "live file must remain after tombstone pull (leave-in-place)").toBe(true);
+			expect(readFileSync(skillFile, "utf-8"), "live file bytes must be unchanged").toBe("doomed-body");
+
+			// No .bak is created — retraction no longer renames the file.
+			expect(existsSync(`${skillFile}.bak`), "no .bak must be created on retraction").toBe(false);
+
+			// The managed marker IS removed: the artifact is UNMANAGED going forward.
+			// A future pull will not overwrite the file unless a new non-tombstone publish re-adopts it.
+			expect(existsSync(markerFile), "marker must be removed (artifact is now UNMANAGED)").toBe(false);
+		} finally {
+			rmSync(tmp, { recursive: true, force: true });
+		}
 	});
 
 	it("AC-4 LWW `.bak` on a real pull → install backs up a hash-divergent local copy", async () => {

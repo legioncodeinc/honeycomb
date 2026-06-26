@@ -1,18 +1,21 @@
 # PRD-033: Asset Sync Substrate
 
-> **Status:** In Work (reopened 2026-06-22)
+> **Status:** Completed (2026-06-25)
 > **Priority:** P2
 > **Effort:** L
 > **Schema changes:** Additive
 
 ---
 
-> **⚠ Reopened 2026-06-22 — partial implementation.** A daemon-wiring liveness audit found this PRD only
-> partially live; moved back to `in-work/`. See
-> [`../prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md`](../prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md).
-> **Remaining:** `/api/assets` + the `honeycomb asset` CLI are live, but the session-start asset auto-pull is
-> dead code (`daemon-client/assets/install.ts:258` is never called; `session-start.ts:72` auto-pulls only
-> skills). Coordinate the shared session-start seam fix with [PRD-045g](../prd-045-daemon-wiring-closeout/prd-045g-daemon-wiring-closeout-team-skill-sharing.md).
+> **Resolved 2026-06-25: reopen close-out complete.** The PRD was reopened on 2026-06-22 after a
+> daemon-wiring liveness audit (see
+> [`../prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md`](../prd-045-daemon-wiring-closeout/reports/2026-06-22-daemon-wiring-liveness-audit.md))
+> found the session-start asset auto-pull was dead code. The reopen run wired R-1 (session-start auto-pull
+> now live), migrated the pull manifest into the unified registry (R-2, superseding the prior coexist
+> answer), stamped `honeycomb_id` into artifact frontmatter (R-3), and settled retraction: demotion leaves
+> the local file in place and marks it UNMANAGED, never deleting or moving it (R-4, superseding the prior
+> backup-then-remove answer). Security 0 Critical / 0 High; quality VERIFIED; live propagation dogfood
+> passed 5/5 against real DeepLake. All four open questions closed 2026-06-25.
 
 ---
 
@@ -42,9 +45,9 @@ This substrate is **distinct from skillify (PRD-016)**: skillify *produces* new 
 
 | Sub-PRD | Scope | Status |
 |---|---|---|
-| [`prd-033a-asset-sync-substrate-registry-identity`](./prd-033a-asset-sync-substrate-registry-identity.md) | Registry, identity, hashing, and the additive DeepLake synced-assets schema. | Draft |
-| [`prd-033b-asset-sync-substrate-promotion-lifecycle`](./prd-033b-asset-sync-substrate-promotion-lifecycle.md) | Promotion/demotion lifecycle, tombstone retraction, and CLI. | Draft |
-| [`prd-033c-asset-sync-substrate-sync-engine`](./prd-033c-asset-sync-substrate-sync-engine.md) | Sync engine (publish + pull) with the adapter seam and last-writer-wins backup. | Draft |
+| [`prd-033a-asset-sync-substrate-registry-identity`](./prd-033a-asset-sync-substrate-registry-identity.md) | Registry, identity, hashing, and the additive DeepLake synced-assets schema. | Completed |
+| [`prd-033b-asset-sync-substrate-promotion-lifecycle`](./prd-033b-asset-sync-substrate-promotion-lifecycle.md) | Promotion/demotion lifecycle, tombstone retraction, and CLI. | Completed |
+| [`prd-033c-asset-sync-substrate-sync-engine`](./prd-033c-asset-sync-substrate-sync-engine.md) | Sync engine (publish + pull) with the adapter seam and last-writer-wins backup. | Completed |
 
 ## Acceptance criteria
 
@@ -68,16 +71,27 @@ Additive daemon endpoints for publishing a synced-asset version, selecting newer
 
 ## Open questions
 
-- [ ] What is the stable device-identity source — a machine-id read, or a generated UUID persisted in `~/.honeycomb` — and how does a user list and revoke a device from their "my devices" set?
-- [ ] Should the existing skillify pull manifest be migrated into the unified `registry.json`, or should the two coexist during a transition window?
-- [ ] Can agent frontmatter safely carry `honeycomb_id` across all six harnesses without confusing any native parser, or must some harnesses fall back to registry-only identity?
-- [ ] On demotion, is the correct retraction UX to delete the local file outright, or to leave it in place but mark it unmanaged?
+All four questions resolved 2026-06-25 by explicit owner ruling.
+
+- [x] **Device identity (resolved 2026-06-25):** Device identity is a generated UUID persisted at
+  `~/.honeycomb/device.json`. No OS machine-id read is used. A user lists and revokes devices via
+  `honeycomb asset device`. Already shipped.
+- [x] **Pull manifest migration (resolved 2026-06-25):** The skillify pull manifest is MIGRATED into the
+  unified `.honeycomb/registry.json` as the single source of truth. The prior "coexist during a transition"
+  answer is superseded. A one-time idempotent migration folds legacy `pull-manifest.json` entries in;
+  `skill unpull` and `backfillSymlinks` are unchanged.
+- [x] **`honeycomb_id` in frontmatter (resolved 2026-06-25):** `honeycomb_id` is stamped into the artifact
+  YAML frontmatter for skills and agents. The registry remains the authoritative fallback for harnesses that
+  cannot carry frontmatter.
+- [x] **Demotion retraction UX (resolved 2026-06-25):** Demotion leaves the local artifact file in place
+  and marks it UNMANAGED. The engine never deletes or moves user files. The prior "back up to .bak then
+  remove" answer is superseded.
 
 ## Related
 
 - [Skillify Pipeline](../../../knowledge/private/ai/skillify-pipeline.md)
 - [Team Skills Sharing](../../../knowledge/private/collaboration/team-skills-sharing.md)
-- [PRD-016 Skillify](../../in-work/prd-016-skillify/prd-016-skillify-index.md)
-- [PRD-018 Team Skill Sharing](../../in-work/prd-018-team-skill-sharing/prd-018-team-skill-sharing-index.md)
+- [PRD-016 Skillify](../../completed/prd-016-skillify/prd-016-skillify-index.md)
+- [PRD-018 Team Skill Sharing](../../completed/prd-018-team-skill-sharing/prd-018-team-skill-sharing-index.md)
 - [DeepLake Storage](../../../knowledge/private/data/deeplake-storage.md)
 - [Org and Workspace Model](../../../knowledge/private/multi-tenant/org-workspace-model.md)

@@ -58,4 +58,8 @@ export {
 } from "./config.js";
 
 // ── PRD-018b pull manifest (reversible pull record + 018c backfill source) ──
-export { createPullManifestStore, defaultManifestBaseDir } from "./manifest.js";
+// R-2: now a thin adapter over the unified `~/.honeycomb/registry.json` (the single SoT), with a
+// one-time idempotent fold of the legacy `pull-manifest.json`. The `PullManifestStore` surface is
+// unchanged, so `pull` / `unpullSkill` / `backfillSymlinks` are unaffected.
+export { createPullManifestStore, defaultManifestBaseDir, legacyManifestPaths } from "./manifest.js";
+export { migrateLegacyManifest, MIGRATED_SUFFIX } from "./migrate-manifest.js";
