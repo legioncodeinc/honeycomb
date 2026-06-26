@@ -38,7 +38,7 @@ import type { PageProps } from "../page-frame.js";
 import { PageFrame } from "../page-frame.js";
 import { useScope } from "../scope-context.js";
 import { NeedsProjectSelection } from "../needs-project.js";
-import { EMPTY_GRAPH, type GraphWire, type WireClient } from "../wire.js";
+import { capGraphForRender, EMPTY_GRAPH, MAX_RENDER_NODES, type GraphWire, type WireClient } from "../wire.js";
 
 /** How often the page re-hydrates the active graph source (ms). Light refresh, stopped on unmount. */
 const GRAPH_POLL_MS = 8000;
@@ -49,28 +49,6 @@ const GRAPH_POLL_MS = 8000;
  * container via `viewBox`; pan/zoom transforms this base box (it is NOT the rendered pixel size).
  */
 const GRAPH_VIEW = { width: 1600, height: 1000 } as const;
-
-/**
- * The client-side render cap (the graph memory cap — memory-aware). The daemon already bounds `GET /api/graph` to
- * ~750 nodes, but this is defense-in-depth: the page NEVER mounts more than this many SVG node groups,
- * whatever the source (a large memory graph, an older uncapped daemon, a future endpoint). Set above the
- * daemon budget so the daemon's cap is normally the one that governs, and this only catches outliers.
- */
-const MAX_RENDER_NODES = 1500;
-
-/**
- * Bound a graph to `limit` nodes for rendering. Under the limit → returned unchanged (same ref, so the
- * memoized layout is not invalidated). Over it → the first `limit` nodes plus only the edges between
- * them, with `capped:true`. Pure — the order is whatever the caller already settled (the daemon ships
- * its bounded set importance-ranked, so "first N" here is already the meaningful head).
- */
-function capForRender(graph: GraphWire, limit: number): { graph: GraphWire; capped: boolean } {
-	if (graph.nodes.length <= limit) return { graph, capped: false };
-	const nodes = graph.nodes.slice(0, limit);
-	const kept = new Set(nodes.map((n) => n.id));
-	const edges = graph.edges.filter((e) => kept.has(e.from) && kept.has(e.to));
-	return { graph: { ...graph, nodes, edges }, capped: true };
-}
 
 /** Zoom bounds (D-3): the viewBox scale never goes below/above these so the graph can never invert/vanish. */
 const MIN_ZOOM = 0.25;
@@ -581,10 +559,14 @@ export function GraphPage({ wire }: PageProps): React.JSX.Element {
 	// graph memory cap: bound what the canvas actually draws. The daemon already caps the payload (`graph.meta`);
 	// this is the client-side backstop so the page never mounts an unbounded number of SVG nodes. This
 	// `rendered` set is what the canvas, counts, selection, and search all read.
-	const { graph: rendered, capped } = React.useMemo(() => capForRender(visible, MAX_RENDER_NODES), [visible]);
-	// graph memory cap: the graph is truncated when EITHER the daemon dropped nodes (meta.truncated) OR the client
-	// cap fired. `totalNodes` is the full snapshot size when the daemon reported it, else what we hold.
-	const truncated = (graph.meta?.truncated ?? false) || capped;
+	const { graph: rendered, capped } = React.useMemo(() => capGraphForRender(visible, MAX_RENDER_NODES), [visible]);
+	// graph memory cap — TWO distinct, separately-reported reductions (never conflated with the kind FILTER,
+	// which is a user action, not truncation):
+	//   • serverTruncated — the daemon dropped nodes from the snapshot; its honest counts are in `graph.meta`
+	//     (shownNodes of totalNodes), independent of any local filter.
+	//   • capped — the client render backstop fired (the fetched graph still exceeded MAX_RENDER_NODES).
+	const serverTruncated = graph.meta?.truncated ?? false;
+	const truncated = serverTruncated || capped;
 	const totalNodes = graph.meta?.totalNodes ?? graph.nodes.length;
 	// The selected node still present in the RENDERED graph (clears if it was filtered/capped away).
 	const selectedNode = selected !== null ? rendered.nodes.find((n) => n.id === selected) ?? null : null;
@@ -632,8 +614,8 @@ export function GraphPage({ wire }: PageProps): React.JSX.Element {
 				<GraphEmptyState source={source} wire={wire} onBuilt={refreshGraph} />
 			) : (
 				<>
-					{/* graph memory cap: when the graph is bounded (daemon cap and/or client cap), say so honestly —
-					    "showing N of M" — and point at the tools that focus it, rather than silently hiding nodes. */}
+					{/* graph memory cap: when the graph is bounded, say so honestly — and source the "N of M" from the
+					    daemon's `meta` (NOT the post-filter render count, which the kind filter also shrinks). */}
 					{truncated && (
 						<div
 							data-testid="graph-truncation-notice"
@@ -652,7 +634,9 @@ export function GraphPage({ wire }: PageProps): React.JSX.Element {
 							}}
 						>
 							<span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--severity-warning)", flex: "none" }} />
-							Showing the {rendered.nodes.length.toLocaleString()} most-connected of {totalNodes.toLocaleString()} nodes. Use search and kind filters to focus.
+							{serverTruncated
+								? `Showing the ${(graph.meta?.shownNodes ?? graph.nodes.length).toLocaleString()} most-connected of ${(graph.meta?.totalNodes ?? graph.nodes.length).toLocaleString()} nodes. Use search and kind filters to focus.`
+								: `Rendering is capped at ${MAX_RENDER_NODES.toLocaleString()} nodes. Use search and kind filters to focus.`}
 						</div>
 					)}
 

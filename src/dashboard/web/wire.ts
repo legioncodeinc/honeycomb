@@ -1182,6 +1182,31 @@ export const EMPTY_SETTINGS: SettingsWire = { orgId: "", orgName: "", workspace:
 /** The empty graph (renders the kit's "no graph built" empty-state). */
 export const EMPTY_GRAPH: GraphWire = { built: false, nodes: [], edges: [] };
 
+/**
+ * The client-side render cap (the graph memory cap — memory-aware). The daemon already bounds the
+ * codebase graph (`GET /api/graph` ships ≤ ~750 nodes), but this is the shared defense-in-depth backstop
+ * so NO consumer mounts an unbounded number of SVG node groups, whatever the source (a large memory
+ * graph, an older uncapped daemon, a future endpoint). Set above the daemon budget so the daemon's cap
+ * normally governs and this only catches outliers. Single source for both the full Graph page and the
+ * mini-widget so the policy can never drift between them.
+ */
+export const MAX_RENDER_NODES = 1500;
+
+/**
+ * Bound a graph to `limit` nodes for rendering (the shared cap helper). Under the limit → returned
+ * unchanged (same ref, so a memoized layout is not invalidated). Over it → the first `limit` nodes plus
+ * only the edges whose both endpoints survive, with `capped:true`. Pure — the order is whatever the
+ * caller already settled (the daemon ships its bounded set importance-ranked, so "first N" here is
+ * already the meaningful head).
+ */
+export function capGraphForRender(graph: GraphWire, limit: number): { graph: GraphWire; capped: boolean } {
+	if (graph.nodes.length <= limit) return { graph, capped: false };
+	const nodes = graph.nodes.slice(0, limit);
+	const kept = new Set(nodes.map((n) => n.id));
+	const edges = graph.edges.filter((e) => kept.has(e.from) && kept.has(e.to));
+	return { graph: { ...graph, nodes, edges }, capped: true };
+}
+
 /** The empty log-history page the table shows before the first load (or on failure / unavailable store). */
 export const EMPTY_LOGS_HISTORY: LogsHistoryWire = Object.freeze({ records: [], count: 0, nextCursor: null, persistent: false });
 

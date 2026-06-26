@@ -84,9 +84,14 @@ Per the [Obsidian URI docs](https://help.obsidian.md/Extending+Obsidian/Obsidian
 - **Wire:** add `wire.exportVault()` → `POST /api/vault/export` in `src/dashboard/web/wire.ts`
   (zod-validated `{ vaultPath, entityCount, edgeCount, builtFalse? }`, fail-soft), stamping the same
   session/project headers the other writes use.
-- **URI build:** `obsidian://open?path=` + `encodeURIComponent(join(vaultPath, "Home.md"))`. Navigate via
-  a real `<a href>` (lets the OS handle the protocol) rather than `fetch`; a hidden anchor click avoids
-  a blocked-popup. The browser shows its own "open external app?" prompt — acceptable, expected.
+- **URI build:** `obsidian://open?path=` + `encodeURIComponent(<posix-path>)`, where `<posix-path>` is
+  `join(vaultPath, "Home.md")` **with backslashes normalized to forward slashes** (`.replaceAll("\\", "/")`).
+  This matters on Windows: `path.join` emits `C:\…\Home.md`, but the Obsidian URI scheme expects POSIX
+  separators before percent-encoding (a backslash path resolves to "vault not found"). `encodeURIComponent`
+  then correctly encodes the drive colon (`:` → `%3A`) and slashes. Navigate via a real `<a href>` (lets the
+  OS handle the protocol) rather than `fetch`; a hidden anchor click avoids a blocked-popup. The browser
+  shows its own "open external app?" prompt — acceptable, expected. (The `path=` form also requires the
+  folder to be a *registered* vault — see the registration note above.)
 - **Fallback:** there is no reliable cross-platform "is Obsidian installed?" probe from a browser, so
   design for it: render the path + a copy button always (small, secondary), and surface the first-run
   hint. Optionally the daemon can expose "does `~/.honeycomb/obsidian/<scope>/.obsidian` exist?" as a

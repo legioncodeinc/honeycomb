@@ -53,7 +53,7 @@ SVG.
 
 ## Vault layout (the format this PRD owns)
 
-```
+```text
 ~/.honeycomb/obsidian/<scope-key>/            ← canonical per-scope vault root (see OQ-2)
   Home.md                                     ← index/landing note (the 051b deep-link target)
   Entities/
@@ -107,7 +107,7 @@ tags: ["honeycomb/entity/project"]  # derived, plugin-agnostic
 | a-AC-2 | Writing the vault produces a directory openable in stock Obsidian: the graph view shows the entities connected by the wikilinks; no plugin is needed for graph/backlinks/search. |
 | a-AC-3 | A `built:false` (empty) graph writes NO vault and returns the honest "no memory graph yet — run `honeycomb pollinate trigger --compact`" message (parity with the in-app empty state). |
 | a-AC-4 | Entity names are sanitized to safe single-segment filenames (no `/ \ .. : *` traversal/illegal chars); a name collision after sanitization is disambiguated by an id suffix; the original name is preserved in `aliases:` so wikilinks still resolve. |
-| a-AC-5 | Untrusted entity text cannot break the file: frontmatter values are YAML-escaped/quoted, wikilink targets with `]]`/`[[`/`|` are escaped or aliased, and a scan of the output contains no secret/token (reuse the dashboard no-secret guard). |
+| a-AC-5 | Untrusted entity text cannot break the file: frontmatter values are YAML-escaped/quoted, wikilink targets with `]]`/`[[`/`\|` are escaped or aliased, and a scan of the output contains no secret/token (reuse the dashboard no-secret guard). |
 | a-AC-6 | Re-exporting reconciles: notes for entities no longer in the graph are removed (or moved to an `_archive/`), so a stale note never lingers. The op is idempotent for an unchanged graph (no spurious diffs). |
 | a-AC-7 | `honeycomb vault export` (CLI) and `POST /api/vault/export` (daemon) both run the writer and report the vault root path + counts (`{ vaultPath, entityCount, edgeCount }`); the daemon writes daemon-side only (local FS), never the client. |
 

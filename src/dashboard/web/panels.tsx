@@ -19,6 +19,7 @@ import React from "react";
 import { BuildGraphButton } from "./build-graph-button.js";
 import { layout, neighborsOf } from "./graph-layout.js";
 import { Badge, type BadgeTone } from "./primitives.js";
+import { capGraphForRender, MAX_RENDER_NODES } from "./wire.js";
 import type { GraphWire, LogRecordWire, ProviderEntryWire, RuleRowWire, SessionRowWire, SettingValueWire, SkillRowWire, WireClient } from "./wire.js";
 
 // ── Panel shell ────────────────────────────────────────────────────────────────
@@ -260,23 +261,6 @@ export const KIND_COLOR_FALLBACK = "var(--text-tertiary)" as const;
 const GRAPH_VIEW = { width: 540, height: 200 } as const;
 
 /**
- * The render cap (the graph memory cap). A real snapshot is tens of thousands of nodes; mounting one SVG group per
- * node froze the browser. The daemon now bounds `GET /api/graph`, but this is a local backstop so the
- * canvas never mounts an unbounded node count regardless of what it is handed. The graph is no longer on
- * the dashboard home (the graph memory cap), but this component is still reusable/tested — so it defends itself.
- */
-const MAX_RENDER_NODES = 1500;
-
-/** Bound a graph to `limit` nodes for rendering (first-N + only the edges between them). Pure. */
-function capForRender(graph: GraphWire, limit: number): GraphWire {
-	if (graph.nodes.length <= limit) return graph;
-	const nodes = graph.nodes.slice(0, limit);
-	const kept = new Set(nodes.map((n) => n.id));
-	const edges = graph.edges.filter((e) => kept.has(e.from) && kept.has(e.to));
-	return { ...graph, nodes, edges };
-}
-
-/**
  * The in-panel node-detail surface (D-3 / OQ-3): a compact block below the canvas that shows the
  * SELECTED node's `id`, `kind`, `label`, and its neighbor labels. Rendered only when a node is
  * selected. Pure presentation — selection state lives in {@link GraphCanvas}.
@@ -359,7 +343,7 @@ export function GraphCanvas({
 	}
 
 	// graph memory cap: bound what is drawn so a large snapshot never mounts an unbounded SVG node count.
-	const view = capForRender(graph, MAX_RENDER_NODES);
+	const view = capGraphForRender(graph, MAX_RENDER_NODES).graph;
 	// Computed positions for EVERY rendered node (D-1) — keyed by real id, so an arbitrary-id snapshot draws.
 	const positions = layout(view.nodes, view.edges, GRAPH_VIEW);
 	// The selected node still present in the rendered snapshot (clears defensively if it vanished).
