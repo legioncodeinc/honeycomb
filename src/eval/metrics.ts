@@ -202,6 +202,269 @@ export function ndcgAtK(
 	return dcgAtK(result, judgements, k, classes) / idcg;
 }
 
+// ── PRD-058a, the freshness-sensitivity slice (recency ordering) ─────────────
+
+/**
+ * One freshness-sensitivity case (PRD-058a Test Plan / AC-55a.1.1): a FRESH id and a STALE id that are
+ * EQUALLY relevant to the same query (same fact, different age). The recency activation must rank the
+ * fresher member ABOVE the staler one, the eval-gated proof that the `A(m,t)` term reshapes order by
+ * age at equal relevance. The eval reduces the engine output to a ranked id list and scores these pairs
+ * with {@link freshRanksFirst}; the numeric LIVE run injects the real recall (and SKIPs without creds),
+ * while the slice CODE + its unit coverage ship now.
+ */
+export interface FreshnessCase {
+	/** A stable id for the case (used in the per-case report line). */
+	readonly caseId: string;
+	/** The id of the FRESHER row (smaller `t − t_ref`), must rank first. */
+	readonly freshId: string;
+	/** The id of the STALER row (larger `t − t_ref`), must rank below `freshId`. */
+	readonly staleId: string;
+}
+
+/**
+ * Score ONE freshness case against a ranked result (PRD-058a / AC-55a.1.1): `true` iff the FRESH id
+ * appears in `result` and ranks strictly ABOVE the STALE id. A case where the fresh id is absent, or
+ * ranks below/equal-to the stale id, is a FAIL (the recency term did not demote the staler row). A
+ * stale id absent from the result while the fresh id is present is a PASS (the fresher row surfaced
+ * and the staler did not outrank it). Pure: a deterministic transform of the ranked ids.
+ */
+export function freshRanksFirst(result: RankedResult, freshCase: FreshnessCase): boolean {
+	const freshRank = indexOfId(result, freshCase.freshId);
+	if (freshRank === null) return false; // the fresher row must surface to be scored a pass.
+	const staleRank = indexOfId(result, freshCase.staleId);
+	if (staleRank === null) return true; // fresh present, stale absent → fresh is not outranked.
+	return freshRank < staleRank; // 0-based positions: a smaller index ranks higher.
+}
+
+/** The 0-based position of `id` in the ranked result, or `null` when it does not appear. */
+function indexOfId(result: RankedResult, id: string): number | null {
+	const i = result.ids.indexOf(id);
+	return i === -1 ? null : i;
+}
+
+/**
+ * Aggregate a freshness slice (PRD-058a): the fraction of cases where the fresher member ranked first.
+ * `1` = every case passed (the slice gate); `0` on an empty slice (nothing to measure, never NaN). The
+ * caller maps each case's query through the engine to a {@link RankedResult} and pairs it here.
+ */
+export function freshnessSliceScore(cases: readonly { result: RankedResult; freshCase: FreshnessCase }[]): number {
+	if (cases.length === 0) return 0;
+	const passes = cases.reduce((n, c) => n + (freshRanksFirst(c.result, c.freshCase) ? 1 : 0), 0);
+	return passes / cases.length;
+}
+
+// ── PRD-058c, the staleness precision/recall/F1 slice (the `σ` detection gate) ─
+
+/**
+ * One staleness-detection case (PRD-058c Test Plan / scoring-model metrics table): a memory's GROUND-TRUTH
+ * label (`labeledStale` — does it genuinely name a dangling reference?) paired with the diagnostic's
+ * PREDICTION (`predictedStale` — did `σ` cross the stale threshold?). The slice answers "do we flag the
+ * dead references and ONLY those?" — the staleness analogue of the freshness ordering gate. The unit suite
+ * drives deterministic fakes; the LIVE numeric run labels a dangling-ref set, runs the real diagnostic,
+ * and SKIPs without creds, while the slice CODE + its coverage ship now.
+ */
+export interface StalenessCase {
+	/** A stable id for the case (used in the per-case report line). */
+	readonly caseId: string;
+	/** Ground truth: `true` iff the memory genuinely names a reference that no longer resolves. */
+	readonly labeledStale: boolean;
+	/** The diagnostic's verdict: `true` iff `σ` crossed the stale threshold (`ref_status === 'stale'`). */
+	readonly predictedStale: boolean;
+}
+
+/** The precision/recall/F1 of a staleness slice over the labeled set (the committed, auditable numbers). */
+export interface StalenessMetrics {
+	/** The number of cases scored. */
+	readonly count: number;
+	/** True positives: labeled stale AND predicted stale. */
+	readonly truePositives: number;
+	/** False positives: NOT labeled stale BUT predicted stale (the failure mode we forbid most). */
+	readonly falsePositives: number;
+	/** False negatives: labeled stale BUT NOT predicted stale (a dangling ref we missed). */
+	readonly falseNegatives: number;
+	/** `tp / (tp + fp)` — of the memories we flagged, how many were genuinely stale. `1` when no flags. */
+	readonly precision: number;
+	/** `tp / (tp + fn)` — of the genuinely stale memories, how many we flagged. `1` when none labeled. */
+	readonly recall: number;
+	/** The harmonic mean `2·p·r / (p + r)` — `0` when both precision and recall are `0`. */
+	readonly f1: number;
+}
+
+/**
+ * Compute the staleness precision/recall/F1 over a labeled set (PRD-058c). RULES (no NaN, ever):
+ *  - precision `tp/(tp+fp)` → `1` when we flagged nothing (`tp+fp === 0`): a no-flag run is vacuously
+ *    precise (it raised no false alarm), which is the conservative-default-honoring reading.
+ *  - recall `tp/(tp+fn)` → `1` when nothing was labeled stale (`tp+fn === 0`): there was nothing to miss.
+ *  - F1 `2pr/(p+r)` → `0` when `p+r === 0`.
+ * Pure: a deterministic transform of the labeled/predicted booleans.
+ */
+export function stalenessMetrics(cases: readonly StalenessCase[]): StalenessMetrics {
+	let tp = 0;
+	let fp = 0;
+	let fn = 0;
+	for (const c of cases) {
+		if (c.labeledStale && c.predictedStale) tp++;
+		else if (!c.labeledStale && c.predictedStale) fp++;
+		else if (c.labeledStale && !c.predictedStale) fn++;
+	}
+	const precision = tp + fp === 0 ? 1 : tp / (tp + fp);
+	const recall = tp + fn === 0 ? 1 : tp / (tp + fn);
+	const f1 = precision + recall === 0 ? 0 : (2 * precision * recall) / (precision + recall);
+	return { count: cases.length, truePositives: tp, falsePositives: fp, falseNegatives: fn, precision, recall, f1 };
+}
+
+// ── PRD-058b, the conflict slice (CRA + contradiction-detection PR/F1) ────────
+
+/**
+ * One contradiction-detection case (PRD-058b Test Plan / scoring-model metrics table): a memory PAIR's
+ * GROUND-TRUTH label (`labeledConflict` — do the two genuinely assert contradictory outcomes?) paired with
+ * the detector's PREDICTION (`predictedConflict` — did `Contra` cross `θ_detect`?). The slice answers "do
+ * we detect the right contradiction pairs and ONLY those?" — the conflict analogue of the staleness
+ * detection gate. The unit suite drives deterministic fakes; the LIVE numeric run labels a contradiction
+ * set, runs the real detector, and SKIPs without creds, while the slice CODE + its coverage ship now.
+ */
+export interface ContradictionCase {
+	/** A stable id for the case (the per-case report key). */
+	readonly caseId: string;
+	/** Ground truth: `true` iff the pair genuinely asserts contradictory outcomes about the same claim. */
+	readonly labeledConflict: boolean;
+	/** The detector's verdict: `true` iff `Contra(a,b) > θ_detect`. */
+	readonly predictedConflict: boolean;
+}
+
+/**
+ * Compute the contradiction-detection precision/recall/F1 over a labeled PAIR set (PRD-058b). Identical
+ * math to {@link stalenessMetrics} (no NaN, ever): precision/recall vacuously `1` when nothing was
+ * flagged/labeled, F1 `0` when `p+r === 0`. Reuses {@link stalenessMetrics} by projecting the
+ * contradiction labels onto its `{labeledStale, predictedStale}` shape so there is ONE precision/recall/F1
+ * implementation — a contradiction false positive (flagging an independent fact) is the failure mode the
+ * `κ`-is-the-only-zeroing-term posture forbids most, so its precision must be auditable, not asserted-away.
+ */
+export function contradictionMetrics(cases: readonly ContradictionCase[]): StalenessMetrics {
+	return stalenessMetrics(
+		cases.map((c) => ({ caseId: c.caseId, labeledStale: c.labeledConflict, predictedStale: c.predictedConflict })),
+	);
+}
+
+/**
+ * One Conflict-Resolution-Accuracy (CRA) case (PRD-058b Test Plan): a labeled conflict's GROUND-TRUTH
+ * winner id paired with the WINNER the resolution policy actually picked. CRA answers "do we pick the
+ * right winner?" — the headline conflict-resolution metric. The unit suite drives deterministic resolutions;
+ * the LIVE numeric run resolves a labeled conflict set and SKIPs without creds.
+ */
+export interface ConflictResolutionCase {
+	/** A stable id for the case (the per-case report key). */
+	readonly caseId: string;
+	/** Ground truth: the memory id that SHOULD win the conflict. */
+	readonly expectedWinnerId: string;
+	/** The winner the policy picked (the resolver's `winnerId`). */
+	readonly predictedWinnerId: string;
+}
+
+/** Conflict Resolution Accuracy: the fraction of labeled conflicts whose winner the policy picked correctly. */
+export interface ConflictResolutionMetrics {
+	/** The number of conflicts scored. */
+	readonly count: number;
+	/** The number whose predicted winner matched the labeled winner. */
+	readonly correct: number;
+	/** `correct / count` — the headline CRA. `1` on an empty set (nothing to get wrong, never NaN). */
+	readonly accuracy: number;
+}
+
+/**
+ * Compute Conflict Resolution Accuracy (CRA) over a labeled conflict set (PRD-058b): the fraction whose
+ * predicted winner matched the labeled winner. An empty set is vacuously `1` (nothing to mis-resolve, never
+ * NaN) — the caller treats `count: 0` as "nothing measured", not a passing gate. Pure: a deterministic
+ * transform of the labeled/predicted winner ids (exact string equality).
+ */
+export function conflictResolutionAccuracy(cases: readonly ConflictResolutionCase[]): ConflictResolutionMetrics {
+	let correct = 0;
+	for (const c of cases) if (c.expectedWinnerId === c.predictedWinnerId) correct++;
+	const accuracy = cases.length === 0 ? 1 : correct / cases.length;
+	return { count: cases.length, correct, accuracy };
+}
+
+// ── The headline metric: useful-context@k (PRD-058 scoring-doc IDX) ──────────
+
+/**
+ * One useful-context@k case (the scoring-doc HEADLINE metric): a query whose top-k must contain a memory
+ * that is simultaneously CORRECT, CURRENT, and NON-CONFLICTING. The four per-term slices
+ * (freshness / staleness / contradiction / CRA) each measure ONE failure mode in isolation; this case
+ * composes them into the end-to-end product question the scoring doc poses — "did the top-k surface a
+ * memory the agent can actually trust?".
+ *
+ * A surfaced id "counts" as useful-context for the query iff it is BOTH:
+ *   - RELEVANT — a member of `correctIds` (the correct answer set for the query), AND
+ *   - TRUSTWORTHY — NOT in `excludedIds`, the set of ids that should NOT count even when surfaced: the
+ *     STALE copies (058c — superseded / dangling-ref), and the CONFLICT LOSERS (058b — the κ = ρ side an
+ *     open conflict suppresses). A fresh, non-conflicting CORRECT id is the only thing that satisfies the
+ *     metric; surfacing only a stale copy, or only the losing side of a contradiction, is a MISS even
+ *     though a "relevant" id appeared.
+ *
+ * The caller builds `excludedIds` from the SAME ground truth the per-term slices use (the staler copy of a
+ * freshness pair, the labeled-stale memory, the labeled conflict loser), so useful-context@k is the
+ * conjunction the four slices decompose — measured, not asserted.
+ */
+export interface UsefulContextCase {
+	/** A stable id for the case (the per-case report key). */
+	readonly caseId: string;
+	/** The ids that are CORRECT answers to the query (relevant). A top-k hit must be one of these. */
+	readonly correctIds: readonly string[];
+	/**
+	 * The ids that must NOT count as useful even when surfaced: stale/superseded copies (058c) and open-
+	 * conflict LOSERS (058b). A surfaced correct id in this set is "relevant but untrustworthy" → not useful.
+	 */
+	readonly excludedIds: readonly string[];
+}
+
+/**
+ * useful-context@k for ONE query (the scoring-doc headline): `1` iff the top-k of `result` contains an id
+ * that is a CORRECT answer AND is NOT excluded (not stale, not a conflict loser), else `0`. The
+ * end-to-end conjunction of correctness + currentness + non-conflict the four per-term slices decompose.
+ * `k` is clamped to `≥ 1`; a top-k longer than the result simply considers the whole list. Pure.
+ */
+export function usefulContextAtK(result: RankedResult, c: UsefulContextCase, k: number): number {
+	const topK = Math.max(1, Math.trunc(k));
+	const limit = Math.min(topK, result.ids.length);
+	const correct = new Set(c.correctIds);
+	const excluded = new Set(c.excludedIds);
+	for (let i = 0; i < limit; i++) {
+		const id = result.ids[i];
+		if (id !== undefined && correct.has(id) && !excluded.has(id)) return 1; // correct AND trustworthy.
+	}
+	return 0;
+}
+
+/** The aggregate useful-context@k over a case set: the mean per-case score keyed by k, + the count. */
+export interface UsefulContextMetrics {
+	/** The number of cases scored (the denominator). */
+	readonly count: number;
+	/** useful-context@k keyed by k (e.g. `{ "1": 0.6, "5": 0.9 }`) — the mean over cases. */
+	readonly usefulAtK: Readonly<Record<string, number>>;
+}
+
+/**
+ * Aggregate useful-context@k over a case set at each `k` in {@link RECALL_K_VALUES} (PRD-058 headline).
+ * Each k's number is the fraction of cases whose top-k surfaced a correct, non-excluded memory. An empty
+ * set yields all-zero with `count: 0` (never NaN) — the caller treats that as "nothing measured", not a
+ * passing gate. Pure: a deterministic transform of the ranked results + the case ground truth.
+ */
+export function aggregateUsefulContext(
+	cases: readonly { result: RankedResult; useful: UsefulContextCase }[],
+): UsefulContextMetrics {
+	const usefulAtK: Record<string, number> = {};
+	for (const k of RECALL_K_VALUES) usefulAtK[String(k)] = 0;
+	const n = cases.length;
+	if (n === 0) return { count: 0, usefulAtK };
+	const sums: Record<string, number> = {};
+	for (const k of RECALL_K_VALUES) sums[String(k)] = 0;
+	for (const c of cases) {
+		for (const k of RECALL_K_VALUES) sums[String(k)] += usefulContextAtK(c.result, c.useful, k);
+	}
+	for (const k of RECALL_K_VALUES) usefulAtK[String(k)] = sums[String(k)]! / n;
+	return { count: n, usefulAtK };
+}
+
 /** One query paired with the engine's ranked result + its relevance judgements. */
 export interface ScoredQuery {
 	/** A stable id for the query (used in the per-query report). */

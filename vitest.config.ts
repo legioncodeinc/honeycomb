@@ -37,8 +37,10 @@ export default defineConfig({
 		},
 		// `.test.ts` is the bulk of the suite; `.test.tsx` is the PRD-024 dashboard web-app
 		// DOM suite (it mounts React into jsdom via a per-file `@vitest-environment jsdom`
-		// docblock — the default env stays `node` for every other test).
-		include: ["tests/**/*.test.ts", "tests/**/*.test.tsx"],
+		// docblock, the default env stays `node` for every other test). `.spec.ts` is also
+		// collected (PRD-058a ships `recency-decay.spec.ts`) so a `.spec.ts` suite is a
+		// first-class member of the default `npm run test` run, never a silently-skipped file.
+		include: ["tests/**/*.test.ts", "tests/**/*.test.tsx", "tests/**/*.spec.ts"],
 		exclude: ["tests/integration/**"],
 		// GLOBAL HOME ISOLATION (data-loss guard): runs in every worker BEFORE any test,
 		// redirecting os.homedir() to a throwaway temp dir so credentialsPath() /

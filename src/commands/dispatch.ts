@@ -30,6 +30,7 @@ import {
 import { parseSessionsArgs, runSessionsCommand } from "./sessions.js";
 import { runPollinateVerb } from "./pollinate.js";
 import { runMaintenanceVerb } from "./maintenance.js";
+import { runMemoryVerb } from "./memory.js";
 import { runSettingsVerb } from "./settings.js";
 import { runAssetVerb } from "./asset.js";
 import { runStorageVerb } from "./storage-handlers.js";
@@ -160,6 +161,12 @@ async function dispatchStorage(inv: CommandInvocation, deps: CommandDeps): Promi
 	// `/api/<verb>` storage convention — so it has its own thin-client handler (PRD-030 D-2).
 	if (inv.verb === "maintenance") {
 		return runMaintenanceVerb(inv.argv, deps);
+	}
+	// `memory` is the PRD-058d lifecycle surface: conflicts (list/resolve via the 058b endpoint),
+	// stale-refs (list), and `inspect <id> --lifecycle`. It has its own thin-client handler because it
+	// spans GET reads + the 058b resolve POST, not the generic `/api/<verb>` storage convention.
+	if (inv.verb === "memory") {
+		return runMemoryVerb(inv.argv, deps, inv.flags.json);
 	}
 	// `settings` hits the vault `/api/settings` group (list/get/set + the provider→model selector),
 	// not the `/api/<verb>` storage convention — so it has its own thin-client handler (PRD-032b).

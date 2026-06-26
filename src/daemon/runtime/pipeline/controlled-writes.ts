@@ -92,6 +92,49 @@ export interface ControlledWriteLogger {
 	event(name: string, fields?: Record<string, unknown>): void;
 }
 
+/**
+ * One candidate the decision stage already fetched per extracted fact (PRD-058b: detection runs
+ * over "the candidate set the decision stage already fetches" — NO new table scan). Forwarded on
+ * the `memory_controlled_write` job payload from `decisionFanOut`, so the post-commit conflict hook
+ * runs the detector against the SAME small candidate set the decision model saw, never a fresh scan.
+ */
+export interface ControlledWriteCandidate {
+	/** The candidate memory's durable `memories.id`. */
+	readonly id: string;
+	/** The candidate's claim text (its `content`) the detector's `sim`/`opp` signals run over. */
+	readonly content: string;
+}
+
+/**
+ * The post-commit CONFLICT-DETECTION seam (PRD-058b live wiring). After a controlled write LANDS a
+ * fact (an `inserted` ADD or a `version_bumped` UPDATE), the handler calls this with the just-committed
+ * memory `{id, content}` + the candidate set the decision stage forwarded, so detection runs over those
+ * candidates and PROJECTS any flagged pair into `memory_conflicts` (+ appends `memory_history`).
+ *
+ * A PLAIN callback type — controlled-writes does NOT import the detector (that would invert the
+ * `memories → pipeline` dependency arrow + cycle through `store.ts`). The real hook is built on the
+ * `memories` side ({@link import("../memories/conflict-hook.js").createControlledWriteConflictHook})
+ * and injected here, exactly as `onOutcome` injects the graph-persist fan-out.
+ *
+ * CONTRACT (the invariants C-1 mandates): the hook runs AFTER the write is committed and OFF its
+ * critical section, and it MUST be fail-soft — a slow/failing model judge or a missing `memory_conflicts`
+ * table can NEVER throw into the write or cost the user a memory. The handler wraps the call in a
+ * try/catch as defense-in-depth, but the hook itself owns the fail-soft + append-only + poll-to-convergence
+ * discipline (it reuses {@link import("../memories/conflict-resolve.js").detectAndProject}, which is
+ * fail-soft by construction).
+ */
+export interface ControlledWriteConflictHook {
+	/**
+	 * Detect conflicts between the just-committed memory and its candidate set, projecting any flagged
+	 * pair into `memory_conflicts`. Never throws (fail-soft); the return value is advisory (test-observable).
+	 */
+	detect(
+		committed: { readonly id: string; readonly content: string; readonly arm?: "memory" | "session" },
+		candidates: readonly ControlledWriteCandidate[],
+		scope: QueryScope,
+	): Promise<{ readonly projectedIds: readonly string[] }>;
+}
+
 /** A no-op logger (default when the daemon does not inject one). */
 const silentLogger: ControlledWriteLogger = { event(): void {} };
 
@@ -170,6 +213,15 @@ export interface ControlledWriteInput {
 	 * on this column (49b-AC-2); `project` (the raw cwd path, D5) is unaffected.
 	 */
 	readonly projectId?: string;
+	/**
+	 * PRD-058b LIVE wiring (C-1): the existing-candidate set the decision stage already fetched for
+	 * this fact (forwarded on the job payload from `decisionFanOut`). The post-commit conflict hook
+	 * ({@link ControlledWriteConflictHook}) runs detection over THIS set against the just-committed
+	 * memory — NO new table scan (PRD-058b: "call the detector on the existing candidate set"). ABSENT
+	 * / empty → nothing to detect against (e.g. the deliberate `/api/memories` store, or a novel fact
+	 * with zero candidates), so the hook is a no-op — never a failure.
+	 */
+	readonly candidates?: readonly ControlledWriteCandidate[];
 }
 
 /** Construction deps for {@link createControlledWriteHandler} + {@link applyControlledWrite}. */
@@ -197,6 +249,16 @@ export interface ControlledWriteHandlerDeps {
 	 * the stage applies the write but does not fan out (the Wave-1 inert posture).
 	 */
 	readonly onOutcome?: (job: StageJob, outcome: ControlledWriteOutcome) => Promise<void> | void;
+	/**
+	 * PRD-058b LIVE wiring (C-1): the post-commit conflict-detection hook. When present AND a write
+	 * actually LANDED a fact (`inserted` / `version_bumped`), the handler runs detection over the
+	 * candidate set the decision stage forwarded (NOT a new scan) and projects any flagged pair into
+	 * `memory_conflicts`. Optional: ABSENT → no detection runs (the prior inert posture, so a test or
+	 * the explicit user store path that does not inject it is unchanged). Fail-soft by contract (see
+	 * {@link ControlledWriteConflictHook}); the handler additionally guards the call so a hook failure
+	 * NEVER throws into — or replays — the committed write.
+	 */
+	readonly onConflict?: ControlledWriteConflictHook;
 }
 
 // ── D-7 contradiction heuristic ─────────────────────────────────────────────────
@@ -206,7 +268,7 @@ export interface ControlledWriteHandlerDeps {
  * proposal reason carries one of these (with lexical overlap to the fact) is a
  * likely contradiction worth flagging (D-7). Lowercased, matched as whole words.
  */
-const NEGATION_TOKENS = Object.freeze([
+export const NEGATION_TOKENS = Object.freeze([
 	"not", "no", "never", "none", "cannot", "can't", "cant", "won't", "wont",
 	"isn't", "isnt", "aren't", "arent", "doesn't", "doesnt", "don't", "dont",
 	"didn't", "didnt", "wasn't", "wasnt", "without", "stop", "stopped", "remove",
@@ -218,7 +280,7 @@ const NEGATION_TOKENS = Object.freeze([
  * contradiction even without an explicit negation (D-7). Symmetric: each pair is
  * checked both directions.
  */
-const ANTONYM_PAIRS: ReadonlyArray<readonly [string, string]> = Object.freeze([
+export const ANTONYM_PAIRS: ReadonlyArray<readonly [string, string]> = Object.freeze([
 	["enable", "disable"], ["enabled", "disabled"], ["on", "off"],
 	["allow", "deny"], ["allowed", "denied"], ["true", "false"],
 	["add", "remove"], ["increase", "decrease"], ["start", "stop"],
@@ -226,16 +288,16 @@ const ANTONYM_PAIRS: ReadonlyArray<readonly [string, string]> = Object.freeze([
 	["active", "inactive"], ["valid", "invalid"], ["present", "absent"],
 ]);
 
-/** Tokenize to lowercase word tokens (alphanumerics), dropping punctuation. */
-function tokenize(text: string): string[] {
+/** Tokenize to lowercase word tokens (alphanumerics), dropping punctuation. Shared with 058b's detector. */
+export function tokenize(text: string): string[] {
 	return text
 		.toLowerCase()
 		.split(/[^a-z0-9']+/)
 		.filter((t) => t.length > 0);
 }
 
-/** Jaccard-style lexical overlap ratio over two token sets (0..1). */
-function lexicalOverlap(a: readonly string[], b: readonly string[]): number {
+/** Jaccard-style lexical overlap ratio over two token sets (0..1). Shared with 058b's detector. */
+export function lexicalOverlap(a: readonly string[], b: readonly string[]): number {
 	const setA = new Set(a);
 	const setB = new Set(b);
 	if (setA.size === 0 || setB.size === 0) return 0;
@@ -435,7 +497,44 @@ async function applyAdd(
 		throw new Error(`controlled-write insert failed: ${result.kind}`);
 	}
 	logger.event("controlled_write.inserted", { id });
+	// PRD-058b LIVE (C-1): the write is COMMITTED. Run conflict detection over the decision stage's
+	// forwarded candidate set OFF the critical section + fail-soft — a flagged pair projects into
+	// `memory_conflicts` so recall's κ gate can suppress the loser. Never throws into the write.
+	await runConflictHook(id, input.content, input, scope, deps, logger);
 	return { action: "inserted", memoryId: id };
+}
+
+/**
+ * PRD-058b LIVE wiring (C-1): run the post-commit conflict-detection hook for a just-committed memory.
+ * Invoked AFTER the durable write lands (off its critical section). FAIL-SOFT by construction: the hook
+ * is wrapped so a slow/failing model judge, a missing `memory_conflicts` table, or any throw degrades to
+ * "no conflict detected this write" — it NEVER throws into (and so never replays) the committed write,
+ * and never costs the user a memory. A no-op when no hook is wired or no candidates were forwarded
+ * (nothing to detect against). The `memory` arm class is stamped: a controlled write lands a DISTILLED
+ * `memory`, the high-provenance arm the resolver weights at `PROV_DISTILLED`.
+ */
+async function runConflictHook(
+	committedId: string,
+	committedContent: string,
+	input: ControlledWriteInput,
+	scope: QueryScope,
+	deps: ControlledWriteHandlerDeps,
+	logger: ControlledWriteLogger,
+): Promise<void> {
+	const hook = deps.onConflict;
+	if (hook === undefined) return;
+	const candidates = input.candidates ?? [];
+	if (candidates.length === 0) return; // nothing to detect against — the no-candidate short-circuit.
+	try {
+		const { projectedIds } = await hook.detect({ id: committedId, content: committedContent, arm: "memory" }, candidates, scope);
+		if (projectedIds.length > 0) {
+			logger.event("controlled_write.conflict_projected", { id: committedId, projected: projectedIds.length });
+		}
+	} catch (err: unknown) {
+		// Defense-in-depth: the hook owns fail-soft, but a hook bug must STILL never break the write.
+		const reason = err instanceof Error ? err.message : String(err);
+		logger.event("controlled_write.conflict_hook_failed", { id: committedId, reason });
+	}
 }
 
 /**
@@ -504,6 +603,12 @@ async function applyUpdateOrDelete(
 		throw new Error(`controlled-write ${proposal.action} failed: ${result.kind}`);
 	}
 	logger.event("controlled_write.version_bumped", { action: proposal.action, targetId, version });
+	// PRD-058b LIVE (C-1): an UPDATE landed NEW content — run conflict detection over the candidate
+	// set (off the critical section, fail-soft). A DELETE is a tombstone (it removes a fact), so it
+	// detects nothing — there is no live content to contradict its candidates.
+	if (!isDelete) {
+		await runConflictHook(targetId, input.content, input, scope, deps, logger);
+	}
 	return { action: "version_bumped", memoryId: targetId, contradiction };
 }
 
@@ -617,6 +722,8 @@ interface ControlledWritePayload {
 	readonly agent_id?: unknown;
 	/** PRD-049b: the resolved project segment carried on the scope envelope (`__unsorted__` default). */
 	readonly project_id?: unknown;
+	/** PRD-058b LIVE (C-1): the decision-stage candidate set forwarded for post-commit conflict detection. */
+	readonly candidates?: unknown;
 }
 
 /** Read a string field off a payload defensively ("" when absent / non-string). */
@@ -643,6 +750,7 @@ export function readControlledWriteInput(payload: Record<string, unknown>): Cont
 	if (proposal === null) return null;
 	const content = readString(p.content);
 	const normalized = readString(p.normalized_content) || content;
+	const candidates = readCandidates(p.candidates);
 	return {
 		proposal,
 		content,
@@ -652,7 +760,29 @@ export function readControlledWriteInput(payload: Record<string, unknown>): Cont
 		agentId: readString(p.agent_id) || undefined,
 		// PRD-049b: the resolved project segment (absent → controlled-writes defaults to inbox).
 		projectId: readString(p.project_id) || undefined,
+		// PRD-058b LIVE (C-1): the forwarded candidate set the post-commit conflict hook detects over.
+		...(candidates.length > 0 ? { candidates } : {}),
 	};
+}
+
+/**
+ * Read the decision-stage candidate set off a controlled-write payload (PRD-058b LIVE / C-1). Each
+ * item is `{ id, content }` (the candidate's durable id + its claim text). Defensive (drop-invalid):
+ * a non-array, or an item missing a non-empty string `id`/`content`, is skipped — a malformed
+ * candidate payload degrades to "no candidates" (the conflict hook is a no-op), never a throw.
+ */
+function readCandidates(value: unknown): ControlledWriteCandidate[] {
+	if (!Array.isArray(value)) return [];
+	const out: ControlledWriteCandidate[] = [];
+	for (const item of value) {
+		if (item === null || typeof item !== "object") continue;
+		const rec = item as Record<string, unknown>;
+		const id = readString(rec.id);
+		const content = readString(rec.content);
+		if (id === "" || content === "") continue;
+		out.push({ id, content });
+	}
+	return out;
 }
 
 /**

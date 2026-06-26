@@ -295,7 +295,9 @@ export async function hybridRecall(
 		// PRD-047d: this BENCH-ONLY path is intentionally untouched by recency dampening (it is
 		// unwired, W0). It carries no creation timestamp, so `createdAt` is "" — which the
 		// dampener (if ever applied) treats as `decay = 1`. No SQL/behavior change here.
-		hits.push({ source: doc.source, id: doc.id, text: doc.text, score: doc.score, kind, secondary: kind === "session", createdAt: "" });
+		// PRD-058a: this bench-only path carries no timestamp (`createdAt: ""` → A = 1), so the
+		// no-penalty `freshnessScore: 1` is the honest value; the field is always present + in [0,1].
+		hits.push({ source: doc.source, id: doc.id, text: doc.text, score: doc.score, kind, secondary: kind === "session", createdAt: "", freshnessScore: 1 });
 		sourceSet.add(doc.source);
 	}
 	return { hits, sources: [...sourceSet], degraded: false };

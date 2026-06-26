@@ -152,6 +152,24 @@ export function decisionFanOut(
 			if (decision.proposal.targetId !== undefined && decision.proposal.targetId !== "") {
 				proposal.target_id = decision.proposal.targetId;
 			}
+			// PRD-058b LIVE (C-1): forward the decision stage's candidate set (id + hydrated content) so
+			// the controlled-write stage runs conflict detection over the SAME candidates the decision
+			// model saw — no new scan. Only candidates that hydrated their content are forwarded (a
+			// content-less candidate cannot feed the detector's sim/opp signals).
+			// Exclude the UPDATE target itself: on an `update` the proposal's `targetId` is still in the
+			// candidate set (the stale PRE-update row). Forwarding it would let the controlled-write hook
+			// detect the just-committed row as conflicting with its own prior version — a bogus self-conflict
+			// projected into `memory_conflicts`. Drop it alongside the empty-id / empty-content filters.
+			const targetId = decision.proposal.targetId;
+			const candidates = decision.candidates
+				.filter(
+					(c) =>
+						c.id !== "" &&
+						c.id !== targetId &&
+						typeof c.content === "string" &&
+						c.content !== "",
+				)
+				.map((c) => ({ id: c.id, content: c.content as string }));
 			await queue.enqueue({
 				kind: "memory_controlled_write",
 				payload: {
@@ -162,6 +180,7 @@ export function decisionFanOut(
 					fact_confidence: decision.fact.confidence,
 					fact_type: decision.fact.type,
 					entities: serializeEntities(entities),
+					...(candidates.length > 0 ? { candidates } : {}),
 				},
 			});
 		}

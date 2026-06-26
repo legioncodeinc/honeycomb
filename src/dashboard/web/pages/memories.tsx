@@ -29,6 +29,7 @@
 import React from "react";
 
 import { Badge, Button, Input, MemoryCard } from "../primitives.js";
+import { LifecycleHealthPanel } from "./lifecycle-panel.js";
 import { PageFrame, type PageProps } from "../page-frame.js";
 import { useScope } from "../scope-context.js";
 import { NeedsProjectSelection } from "../needs-project.js";
@@ -855,6 +856,8 @@ export function MemoriesPage({ wire, pollinating = false }: PageProps): React.JS
 					{/* ── ADD (040b) + LIFECYCLE (040c) — below the browse area ── */}
 					<div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
 						<AddForm onAdd={onAdd} />
+						{/* PRD-058d: the lifecycle HEALTH panel (H badge, conflicts+resolve, stale-refs, calibration). */}
+						<LifecycleHealthPanel wire={wire} />
 						<LifecyclePanel
 							pollinating={pollinating}
 							onCompact={onCompact}
