@@ -44,7 +44,7 @@ import {
 	type RoutingHistoryStore,
 } from "./contracts.js";
 import { createInferenceRouter, RouterModelClient } from "./router.js";
-import { createAnthropicTransport } from "./transport-anthropic.js";
+import { createAnthropicTransport, type UsageSink } from "./transport-anthropic.js";
 
 /** A resolved {@link InferenceConfig}, or a filesystem path to load `agent.yaml` from. */
 export type InferenceConfigSource = InferenceConfig | string;
@@ -85,6 +85,15 @@ export interface InferenceModelClientDeps {
 	 * (or the no-op client) stands — the daemon never throws on a bad override.
 	 */
 	readonly providerModelOverride?: ProviderModelOverride;
+	/**
+	 * An optional usage meter the Anthropic transport reports each successful call's token
+	 * usage to (PRD-060d / d-AC-1). This is how Honeycomb's OWN inference (the Haiku skillify
+	 * gate, and any other own-inference workload routed here) threads its metered token counts
+	 * into the pollination read-model. Absent → the transport's default no-op sink (no metering,
+	 * zero behavior change). SELECTION/metering only — it never touches routing, the gate, or
+	 * the `${SECRET_REF}` credential path.
+	 */
+	readonly usageSink?: UsageSink;
 }
 
 /**
@@ -167,7 +176,12 @@ export async function buildInferenceModelClient(deps: InferenceModelClientDeps):
 			? applyProviderModelOverride(config, deps.providerModelOverride)
 			: config;
 	const secrets = createSecretResolver(deps.secretsStore, deps.scope);
-	const transport = createAnthropicTransport();
+	// PRD-060d / d-AC-1: thread the optional usage meter into the transport so Honeycomb's own
+	// inference (the Haiku skillify gate) surfaces its token usage to the pollination read-model.
+	// Absent → the transport's default no-op sink (no metering, byte-for-byte prior behavior).
+	const transport = createAnthropicTransport(
+		deps.usageSink !== undefined ? { usageSink: deps.usageSink } : {},
+	);
 	const router = createInferenceRouter({
 		config: effectiveConfig,
 		transport,

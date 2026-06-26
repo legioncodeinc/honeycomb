@@ -72,10 +72,10 @@ describe("037a AC-2: all nav items render from the registry in order", () => {
 	it("renders Dashboard…Settings, each with a label, in registry order", () => {
 		mountSidebar();
 		const items = [...container.querySelectorAll("[data-route]")];
-		// PRD-059c adds the Projects nav item right after Dashboard.
-		expect(items.map((el) => el.getAttribute("data-route"))).toEqual(["/", "/projects", "/harnesses", "/memories", "/graph", "/sync", "/logs", "/settings"]);
+		// PRD-059c adds the Projects nav item right after Dashboard; PRD-060e adds ROI right after Logs.
+		expect(items.map((el) => el.getAttribute("data-route"))).toEqual(["/", "/projects", "/harnesses", "/memories", "/graph", "/sync", "/logs", "/roi", "/settings"]);
 		const text = container.textContent ?? "";
-		for (const label of ["Dashboard", "Projects", "Harnesses", "Memories", "Graph", "Sync", "Logs", "Settings"]) {
+		for (const label of ["Dashboard", "Projects", "Harnesses", "Memories", "Graph", "Sync", "Logs", "ROI", "Settings"]) {
 			expect(text).toContain(label);
 		}
 	});

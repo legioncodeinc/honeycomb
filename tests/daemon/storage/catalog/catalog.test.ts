@@ -67,12 +67,14 @@ describe("PRD-003 catalog barrel + registry", () => {
 			"memory_entity_mentions",
 			"ontology_proposals",
 		]);
-		// 003e agents/auth/telemetry: 5 tables.
+		// 003e agents/auth/telemetry: 5 tables + PRD-060f roi_metrics/teams: 2 tables.
 		expect(TENANCY_TABLES.map((t) => t.name).sort()).toEqual([
 			"agents",
 			"api_keys",
 			"recall_qa_ledger",
+			"roi_metrics",
 			"router_history",
+			"teams",
 			"telemetry_counters",
 		]);
 		// Every table in the catalog has a valid pattern + create DDL.

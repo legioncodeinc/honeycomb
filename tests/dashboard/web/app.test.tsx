@@ -150,8 +150,8 @@ describe("037 AC-1: the left-nav shell renders all seven nav items + the chrome"
 		expect(text).toContain("Activeloop");
 		expect(text).toContain("deeplake-core");
 		expect(text).toContain("Pollinate now");
-		// The nav items are present as routes (eight since PRD-059c added Projects).
-		expect(container.querySelectorAll("[data-route]")).toHaveLength(8);
+		// The nav items are present as routes (nine since PRD-059c added Projects + PRD-060e added ROI).
+		expect(container.querySelectorAll("[data-route]")).toHaveLength(9);
 	});
 });
 
@@ -249,8 +249,8 @@ describe("037b AC-2/AC-3/AC-4: client-side routing — swap without reload, deep
 		expect(container.querySelector('[data-testid="needs-project-selection"]'), "the real Graph page is mounted (needs-selection)").not.toBeNull();
 		expect(text).toContain("No project selected.");
 		expect(text).not.toContain("Recall"); // the Dashboard body is no longer mounted
-		// The sidebar (the eight items) is STILL mounted — only the content region swapped.
-		expect(container.querySelectorAll("[data-route]")).toHaveLength(8);
+		// The sidebar (the nine items) is STILL mounted — only the content region swapped.
+		expect(container.querySelectorAll("[data-route]")).toHaveLength(9);
 	});
 
 	it("AC-3: deep-linking — loading #/logs mounts the Logs route directly", async () => {
@@ -305,8 +305,8 @@ describe("037 AC-6 / 037b AC-6: daemon-down swaps the CONTENT for the banner; si
 		// The banner replaced the CONTENT region…
 		expect(container.textContent ?? "").toContain("Daemon not reachable");
 		expect(container.textContent ?? "").not.toContain("Skill-sync"); // the Dashboard body is suspended
-		// …but the SIDEBAR stays mounted (the eight nav items are still there).
-		expect(container.querySelectorAll("[data-route]")).toHaveLength(8);
+		// …but the SIDEBAR stays mounted (the nine nav items are still there).
+		expect(container.querySelectorAll("[data-route]")).toHaveLength(9);
 
 		// Recover + click Retry → the active page restores.
 		healthOk = true;

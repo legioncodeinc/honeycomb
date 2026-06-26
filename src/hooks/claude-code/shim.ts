@@ -25,6 +25,7 @@ import type { ContextChannel, HarnessShim, HostCli, RuntimePath } from "../contr
 import {
 	assistantMessageData,
 	createShim,
+	extractTurnUsage,
 	nested,
 	nestedString,
 	pickString,
@@ -85,7 +86,11 @@ export function claudeCodeExtractData(raw: unknown, logical: LogicalEvent): unkn
 				nested(raw, "tool_response"),
 			);
 		case "assistant_message":
-			return assistantMessageData(pickString(raw, "text", "message"));
+			// PRD-060a (a-AC-2): carry the per-message token/cache `usage` block from the
+			// Claude Code transcript JSONL alongside the assistant text. Absent/partial
+			// usage → omitted, never zero-filled (the column stays NULL = "token data
+			// absent", a-AC-6); a measured 0 survives (zero ≠ absent).
+			return assistantMessageData(pickString(raw, "text", "message"), extractTurnUsage(raw));
 		case "session-end":
 			return sessionEndData(pickString(raw, "reason") || "Stop");
 		default:

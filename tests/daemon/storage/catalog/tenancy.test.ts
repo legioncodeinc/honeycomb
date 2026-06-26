@@ -409,7 +409,7 @@ describe("PRD-003e tenancy catalog", () => {
 	});
 
 	// ── Registry wiring ──────────────────────────────────────────────────────
-	it("registry: all 5 tenancy tables are wired with the correct pattern and appear in CATALOG", () => {
+	it("registry: the PRD-003e tenancy tables are wired with the correct pattern and appear in CATALOG", () => {
 		// agents → update-or-insert
 		expect(REGISTRY.patternFor("agents")).toBe("update-or-insert");
 		expect(REGISTRY.primitiveFor("agents")).toBe("updateOrInsertByKey");
@@ -431,8 +431,8 @@ describe("PRD-003e tenancy catalog", () => {
 			expect(CATALOG.some((t) => t.name === name), `CATALOG should contain "${name}"`).toBe(true);
 		}
 
-		// TENANCY_TABLES has exactly 5 entries.
-		expect(TENANCY_TABLES.length).toBe(5);
+		// TENANCY_TABLES has the original 5 PRD-003e tables + 2 PRD-060f tables (roi_metrics, teams).
+		expect(TENANCY_TABLES.length).toBe(7);
 	});
 
 	// ── DDL shape ────────────────────────────────────────────────────────────

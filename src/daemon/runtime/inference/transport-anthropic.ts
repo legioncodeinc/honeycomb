@@ -38,6 +38,19 @@
  * `fetch` and the `baseUrl` are injectable. Tests inject a fake `fetch` so NO unit
  * test touches the network; a later OpenAI-compatible/OpenRouter transport can reuse
  * the same reshaping by overriding `baseUrl` (and, if needed, the header builder).
+ *
+ * ── The usage-surfacing seam (PRD-060d / d-AC-1) ─────────────────────────────
+ * The Anthropic Messages response carries a top-level `usage` object
+ * (`{ input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens }`)
+ * that this transport historically PARSED ONLY `content` from and DISCARDED. PRD-060d
+ * needs Honeycomb's OWN inference (the Haiku skillify gate) token cost, so this module
+ * now ADDITIVELY surfaces that `usage` through an injectable {@link UsageSink}: on every
+ * successful `execute`/`stream` the parsed token counts + the call's model id are reported
+ * to the sink. This is a PURE SIDE-CHANNEL — it changes NOTHING about routing, retries,
+ * the KEEP/MERGE/SKIP gate, the model choice, or the returned {@link ProviderResult}: a
+ * transport built WITHOUT a sink behaves byte-for-byte as before (the default is a no-op).
+ * The sink is fed only on the success path (a thrown {@link ProviderError} reports nothing),
+ * and a missing/malformed `usage` object surfaces zero counts rather than throwing.
  */
 
 import { z } from "zod";
@@ -83,6 +96,49 @@ export interface FetchResponseLike {
 	text(): Promise<string>;
 }
 
+/**
+ * One usage report surfaced to a {@link UsageSink} after a successful provider call
+ * (PRD-060d / d-AC-1). The four token counts mirror the Anthropic `usage` object the
+ * transport historically discarded; `model` is the target model id the call ran against
+ * (so the meter can attribute Haiku-vs-other and 060b's rate table can price the right
+ * row), and `workload` is the routing workload (e.g. `memory_pollinating`) so a sink can
+ * scope to a particular own-inference path. Every count is a non-negative integer.
+ */
+export interface UsageReport {
+	/** The target model id this call ran against (the rate-table key + Haiku discriminant). */
+	readonly model: string;
+	/** The routing workload this call served (e.g. `memory_pollinating`). */
+	readonly workload: string;
+	/** Uncached prompt (input) tokens billed for this call. */
+	readonly inputTokens: number;
+	/** Completion (output) tokens billed for this call. */
+	readonly outputTokens: number;
+	/** Cache-READ (cache-hit) input tokens billed at the cache-read rate. */
+	readonly cacheReadInputTokens: number;
+	/** Cache-WRITE (cache-creation) input tokens billed at the cache-write rate. */
+	readonly cacheCreationInputTokens: number;
+}
+
+/**
+ * The usage-surfacing SEAM (PRD-060d / d-AC-1). The transport reports one
+ * {@link UsageReport} per SUCCESSFUL call so a downstream meter (the skillify usage
+ * sink) can roll up Honeycomb's own-inference token cost. `record` MUST be total +
+ * non-throwing — it is called on the hot path and a sink failure must never break an
+ * inference call. The production default is a no-op (no metering until a sink is wired),
+ * so the seam is invisible to every existing caller and test.
+ */
+export interface UsageSink {
+	/** Record one successful call's token usage. Total + non-throwing (hot-path safe). */
+	record(report: UsageReport): void;
+}
+
+/** A no-op {@link UsageSink} — the default when no meter is wired (zero behavior change). */
+export const noopUsageSink: UsageSink = {
+	record(): void {
+		/* discard — the historical behavior (usage was dropped) is preserved by default. */
+	},
+};
+
 /** Construction deps for {@link createAnthropicTransport}. Everything IO-touching is injectable. */
 export interface AnthropicTransportDeps {
 	/** The `fetch` implementation; defaults to `globalThis.fetch`. Tests inject a fake. */
@@ -91,6 +147,12 @@ export interface AnthropicTransportDeps {
 	readonly baseUrl?: string;
 	/** The default `max_tokens` when a request omits its own; defaults to {@link DEFAULT_MAX_TOKENS}. */
 	readonly defaultMaxTokens?: number;
+	/**
+	 * The usage sink the transport reports each successful call's token usage to (PRD-060d /
+	 * d-AC-1). Defaults to {@link noopUsageSink} so a transport built without one behaves
+	 * EXACTLY as before — usage is surfaced ONLY when a meter is injected.
+	 */
+	readonly usageSink?: UsageSink;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -109,9 +171,29 @@ const AnthropicContentBlockSchema = z.object({
 	text: z.string().optional(),
 });
 
+/**
+ * The Anthropic Messages `usage` object (PRD-060d / d-AC-1) — the token counts the
+ * transport historically discarded. Each field is an optional non-negative integer that
+ * defaults to `0` (a response omitting `usage`, or a field, surfaces zero rather than a
+ * NaN/throw). The shape is lenient on extra fields the provider may add.
+ */
+const AnthropicUsageSchema = z.object({
+	input_tokens: z.number().int().nonnegative().catch(0).default(0),
+	output_tokens: z.number().int().nonnegative().catch(0).default(0),
+	cache_read_input_tokens: z.number().int().nonnegative().catch(0).default(0),
+	cache_creation_input_tokens: z.number().int().nonnegative().catch(0).default(0),
+});
+
 /** The Anthropic Messages success-response shape (only the fields we read). */
 const AnthropicMessagesResponseSchema = z.object({
 	content: z.array(AnthropicContentBlockSchema).default([]),
+	/** The token-usage block (PRD-060d). Absent ⇒ all-zero usage (surfaced, never thrown). */
+	usage: AnthropicUsageSchema.default({
+		input_tokens: 0,
+		output_tokens: 0,
+		cache_read_input_tokens: 0,
+		cache_creation_input_tokens: 0,
+	}),
 });
 
 /**
@@ -165,8 +247,15 @@ export function createAnthropicTransport(deps: AnthropicTransportDeps = {}): Pro
 	const doFetch: FetchLike = deps.fetch ?? (globalThis.fetch as unknown as FetchLike);
 	const url = deps.baseUrl ?? ANTHROPIC_MESSAGES_URL;
 	const defaultMaxTokens = deps.defaultMaxTokens ?? DEFAULT_MAX_TOKENS;
+	const usageSink: UsageSink = deps.usageSink ?? noopUsageSink;
 
-	async function post(call: ProviderCall): Promise<string> {
+	/**
+	 * POST the call and return BOTH the joined completion text AND the parsed `usage`
+	 * (PRD-060d / d-AC-1). The usage is surfaced to the caller (which feeds the sink on the
+	 * success path) rather than discarded. Throws a {@link ProviderError} on any failure — a
+	 * thrown call surfaces NO usage (the sink is fed only on success).
+	 */
+	async function post(call: ProviderCall): Promise<{ output: string; usage: UsageReport }> {
 		const body = toAnthropicBody(call, defaultMaxTokens);
 		let res: FetchResponseLike;
 		try {
@@ -197,12 +286,34 @@ export function createAnthropicTransport(deps: AnthropicTransportDeps = {}): Pro
 		if (!parsed.success) {
 			throw new ProviderError(502, "anthropic transport: malformed provider response");
 		}
-		return joinContentText(parsed.data.content);
+		// Surface the `usage` the transport historically discarded (PRD-060d). Attribute it to
+		// the call's target model + workload so the meter can price Haiku tokens (060b) and a
+		// sink can scope to a particular own-inference path.
+		const u = parsed.data.usage;
+		const usage: UsageReport = {
+			model: call.target.model,
+			workload: call.request.workload,
+			inputTokens: u.input_tokens,
+			outputTokens: u.output_tokens,
+			cacheReadInputTokens: u.cache_read_input_tokens,
+			cacheCreationInputTokens: u.cache_creation_input_tokens,
+		};
+		return { output: joinContentText(parsed.data.content), usage };
+	}
+
+	/** Feed the sink defensively — a sink fault must NEVER break an inference call (hot-path safe). */
+	function reportUsage(usage: UsageReport): void {
+		try {
+			usageSink.record(usage);
+		} catch {
+			/* a sink fault is swallowed: metering is best-effort and never breaks inference. */
+		}
 	}
 
 	return {
 		async execute(call: ProviderCall): Promise<ProviderResult> {
-			const output = await post(call);
+			const { output, usage } = await post(call);
+			reportUsage(usage);
 			return { output };
 		},
 		stream(call: ProviderCall): AsyncIterable<ProviderChunk> {
@@ -211,7 +322,8 @@ export function createAnthropicTransport(deps: AnthropicTransportDeps = {}): Pro
 			// full text. The seam shape is preserved; a real SSE body can replace this
 			// later without touching the router (documented in the module header).
 			async function* gen(): AsyncIterable<ProviderChunk> {
-				const output = await post(call);
+				const { output, usage } = await post(call);
+				reportUsage(usage);
 				yield { delta: output };
 			}
 			return gen();
