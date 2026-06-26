@@ -83,6 +83,17 @@ export {
 } from "./maintenance.js";
 
 export {
+	MEMORY_CONFLICTS_LIST_ROUTE,
+	MEMORY_CONFLICTS_RESOLVE_ROUTE,
+	MEMORY_CONFLICT_VERDICTS,
+	MEMORY_STALE_REFS_ROUTE,
+	type MemoryCliInvocation,
+	type MemoryConflictVerdict,
+	parseMemoryCliArgs,
+	runMemoryVerb,
+} from "./memory.js";
+
+export {
 	coerceSettingValue,
 	parseSettingsCliArgs,
 	runSettingsVerb,

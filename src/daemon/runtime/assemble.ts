@@ -69,6 +69,7 @@ import { mountSetupMigrate } from "./dashboard/setup-migrate.js";
 import { mountPollinateApi } from "./pollinating/api.js";
 import { mountProjectsSyncApi, mountScopeEnumerationApi } from "./projects/index.js";
 import { mountCompactApi } from "./maintenance/compact-api.js";
+import { mountStaleRefApi } from "./maintenance/stale-ref-api.js";
 import { mountLogsApi } from "./logs/api.js";
 import { type LogStore, NULL_LOG_STORE, openLogStore } from "./logs/log-store.js";
 import { mountNotificationsApi } from "./notifications/api.js";
@@ -76,6 +77,10 @@ import { attachSessionsPrune } from "./sessions/prune.js";
 
 // ── Data-API mount seams (PRD-022a / 022b / 022c) the composition root fires (D-2 / d-AC-1) ──
 import { mountMemoriesApi, mountMemoriesPrimeApi } from "./memories/index.js";
+import { createConflictSuppressionSource } from "./memories/conflict-resolve.js";
+import { createControlledWriteConflictHook } from "./memories/conflict-hook.js";
+import { mountConflictsApi } from "./memories/conflicts-api.js";
+import { mountLifecycleApi } from "./memories/lifecycle-api.js";
 import { mountVfsApi } from "./vfs/api.js";
 import { mountProductDataApi } from "./product/index.js";
 import { type SecretsApiDeps } from "./secrets/api.js";
@@ -377,6 +382,22 @@ export interface SeamFns {
 	 * tests; `assembleSeams` fires it only when present (always present in {@link defaultSeamFns}).
 	 */
 	readonly mountMemoriesPrime?: typeof mountMemoriesPrimeApi;
+	/**
+	 * PRD-058b: the conflict-resolution endpoint — `POST /api/memories/conflicts/:id/resolve`. Fires onto
+	 * the SAME `/api/memories` SESSION group, inheriting auth/RBAC + the session gate. OPTIONAL on the seam
+	 * record (like {@link mountMemoriesPrime}) so a pre-existing recording-fake `SeamFns` stays
+	 * type-compatible WITHOUT editing those out-of-scope suites; `assembleSeams` fires it only when present
+	 * (always present in {@link defaultSeamFns}).
+	 */
+	readonly mountConflicts?: typeof mountConflictsApi;
+	/**
+	 * PRD-058d — the lifecycle READ endpoints (conflicts list / stale-refs / lifecycle history) on the
+	 * SAME `/api/memories` SESSION group, inheriting auth/RBAC + the session gate. OPTIONAL on the seam
+	 * record (like {@link mountConflicts}) so a pre-existing recording-fake `SeamFns` stays type-compatible
+	 * WITHOUT editing those out-of-scope suites; `assembleSeams` fires it only when present (always present
+	 * in {@link defaultSeamFns}). Reads-only: it defines NO write path (the resolve goes through 058b).
+	 */
+	readonly mountLifecycle?: typeof mountLifecycleApi;
 	/** The `/memory/*` VFS browse reads (022b). Fires UNCONDITIONALLY — its group is a protected session group. */
 	readonly mountVfs: typeof mountVfsApi;
 	/** The product-data surface — goals/kpis/skills/rules (+secrets) (022c). Fires UNCONDITIONALLY. */
@@ -403,6 +424,14 @@ export interface SeamFns {
 	 * `local`, gated in team/hybrid). Fail-soft — a mount error never crashes the daemon.
 	 */
 	readonly mountCompact: typeof mountCompactApi;
+	/**
+	 * The PRD-058c stale-reference diagnostic trigger — `POST /api/diagnostics/stale-refs`. Fires
+	 * UNCONDITIONALLY: its `/api/diagnostics` group is already `protect:true`, so it inherits the same
+	 * auth/RBAC as the dashboard's JSON views (open in `local`, gated in team/hybrid). It runs the
+	 * `σ(m,t)` diagnostic over the daemon-scope memories against the converged codebase-graph snapshot.
+	 * Fail-soft — a mount error never crashes the daemon; a missing graph oracle marks nothing stale.
+	 */
+	readonly mountStaleRef: typeof mountStaleRefApi;
 	/**
 	 * The protected per-subsystem health detail — `GET /api/diagnostics/health` (PRD-029 /
 	 * AC-3). Fires UNCONDITIONALLY: its `/api/diagnostics` group is already `protect:true`, so
@@ -503,11 +532,14 @@ export const defaultSeamFns: SeamFns = {
 	mountSetupMigrate,
 	mountMemories: mountMemoriesApi,
 	mountMemoriesPrime: mountMemoriesPrimeApi,
+	mountConflicts: mountConflictsApi,
+	mountLifecycle: mountLifecycleApi,
 	mountVfs: mountVfsApi,
 	mountProductData: mountProductDataApi,
 	mountPollinate: mountPollinateApi,
 	mountProjectsSync: mountProjectsSyncApi,
 	mountCompact: mountCompactApi,
+	mountStaleRef: mountStaleRefApi,
 	mountDiagnosticsHealth: mountDiagnosticsHealthApi,
 	mountGraph: mountGraphApi,
 	mountHarness: mountHarnessApi,
@@ -838,13 +870,38 @@ export function assembleSeams(
 	// PRD-044c: thread the vault `setting`-class READER so the LIVE recall handler reads the
 	// user-selected `recallMode` at recall time and honors it (`keyword` → lexical-only, NOT degraded).
 	// Present-only spread — an absent vault (the deterministic suite) leaves the read path UNSET (no-op).
+	// PRD-058b: the κ(m,t) gate's conflict-suppression source — recall drops the κ = ρ open-conflict loser
+	// as the LAST currentness filter (the κ = 0 hard-superseded losers are already excluded by supersession).
+	// FAIL-SOFT by construction: a missing/unreadable `memory_conflicts` table → no suppression (both sides
+	// returned), never a 500. Threaded into the recall handler's engine deps.
+	const conflictSuppression = createConflictSuppressionSource(storage);
 	seams.mountMemories(daemon, {
 		storage,
 		defaultScope,
 		embed: embed.client,
 		logger: daemon.logger,
+		conflictSuppression,
 		...(vault !== undefined ? { vault } : {}),
 	});
+
+	// 7a-bis. The conflict-resolution endpoint (PRD-058b): `POST /api/memories/conflicts/:id/resolve`
+	//    attaches onto the SAME `/api/memories` SESSION group, inheriting its auth/RBAC + session gate.
+	//    The operator applies a verdict (supersede/review/keep-both); supersede version-bumps the loser
+	//    (append-only, never a destructive delete), every path appends `memory_history` + projects the
+	//    new state, and the read-back polls to convergence. Guarded + present-only (like the prime seam).
+	if (seams.mountConflicts !== undefined) {
+		seams.mountConflicts(daemon, { storage, defaultScope });
+	}
+
+	// 7a-ter. The lifecycle READ endpoints (PRD-058d): `GET /api/memories/conflicts`,
+	//    `GET /api/memories/stale-refs`, `GET /api/memories/history?type=lifecycle` attach onto the
+	//    SAME `/api/memories` SESSION group, inheriting its auth/RBAC + session gate. Reads-only +
+	//    scope-enforced (org/workspace partition before any content) + paginated; every resolve still
+	//    goes through the 058b POST endpoint above (058d defines NO new write path). Guarded +
+	//    present-only (like the conflicts seam) so an out-of-scope fake `SeamFns` is unaffected.
+	if (seams.mountLifecycle !== undefined) {
+		seams.mountLifecycle(daemon, { storage, defaultScope });
+	}
 
 	// 7b. The session-priming PRIME digest (PRD-046c): `GET /api/memories/prime` attaches onto the
 	//    SAME `/api/memories` SESSION group, inheriting its auth/RBAC + session gate. The prime is a
@@ -917,6 +974,21 @@ export function assembleSeams(
 	} catch (err: unknown) {
 		const reason = err instanceof Error ? err.message : String(err);
 		process.stderr.write(`honeycomb: compaction route mount failed (non-fatal): ${reason}\n`);
+	}
+
+	// 11b. The PRD-058c stale-reference diagnostic trigger: `POST /api/diagnostics/stale-refs`.
+	//      Attaches onto the SAME already-mounted, protected `/api/diagnostics` group (NO `server.ts`
+	//      edit), inheriting the dashboard JSON views' auth/RBAC. It runs the staleness diagnostic over
+	//      the daemon-scope memories against the CONVERGED local codebase-graph snapshot (poll-to-
+	//      convergence), writing `ref_status` / `verified_at` / `stale_refs` + a `memory_history` row,
+	//      gated by the request posture (`observe` default = detection visible-but-inert; `execute` =
+	//      the recall demotion is live). FAIL-SOFT: a mount error never crashes the daemon, and a
+	//      missing graph oracle marks NOTHING stale (everything `unknown`), never a mass-flag.
+	try {
+		seams.mountStaleRef(daemon, { storage, defaultScope, workspaceDir });
+	} catch (err: unknown) {
+		const reason = err instanceof Error ? err.message : String(err);
+		process.stderr.write(`honeycomb: stale-ref route mount failed (non-fatal): ${reason}\n`);
 	}
 
 	// 12. The protected per-subsystem health detail — `GET /api/diagnostics/health` (PRD-029 /
@@ -1456,12 +1528,21 @@ async function buildPipelineWorker(
 
 	const queryScope: QueryScope = scope;
 
+	// PRD-058b LIVE (C-1): the post-commit conflict-detection hook. Built over the SAME storage + embed +
+	// model the pipeline already uses, it makes detection RUN on the real write path — a committed fact
+	// runs the detector over the decision stage's forwarded candidate set and PROJECTS any flagged pair
+	// into `memory_conflicts`, so recall's κ gate (createConflictSuppressionSource, wired at the memories
+	// mount) finally reads a non-empty projection. Fail-soft by construction (a down judge / missing table
+	// never costs a memory). The decision stage's `hydrateCandidates` is turned on IN LOCKSTEP so the
+	// forwarded candidates carry the claim text the detector needs (the two travel together).
+	const conflictHook = createControlledWriteConflictHook({ storage, embed: embed.client, model });
+
 	// The real stage handlers, CHAINED via the fan-out enqueuers (045a). Each stage's
 	// optional forward seam is wired to enqueue the next stage's job onto the same queue.
 	const handlers = createPipelineHandlers({
 		extraction: { config, model, onResult: extractionFanOut(queue) },
-		decision: { storage, scope: queryScope, model, config, embed: embed.client, onDecisions: decisionFanOut(queue) },
-		controlledWrite: { storage, config, embed: embed.client, onOutcome: controlledWriteFanOut(queue) },
+		decision: { storage, scope: queryScope, model, config, embed: embed.client, hydrateCandidates: true, onDecisions: decisionFanOut(queue) },
+		controlledWrite: { storage, config, embed: embed.client, onOutcome: controlledWriteFanOut(queue), onConflict: conflictHook },
 		graphPersist: { storage, scope: queryScope, config },
 		retention: { storage, scope: queryScope, config },
 	});

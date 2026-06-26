@@ -24,6 +24,8 @@ import { POLLINATING_STATE_TABLES } from "./pollinating-state.js"; // PRD-009a (
 // ── The five group arrays. Wave 1 implemented a + c; b/d/e are wired stubs. ──
 import { KNOWLEDGE_GRAPH_TABLES } from "./knowledge-graph.js"; // PRD-003b (stub)
 import { MEMORIES_TABLES } from "./memories.js"; // PRD-003a (implemented)
+import { MEMORY_CONFLICTS_TABLES } from "./memory-conflicts.js"; // PRD-058b (semantic-conflict projection)
+import { MEMORY_LIFECYCLE_TABLES } from "./memory-lifecycle.js"; // PRD-058e (access log + calibration)
 import { PRODUCT_TABLES } from "./product.js"; // PRD-003d (stub)
 import { PROJECTS_TABLES } from "./projects.js"; // PRD-049a (project registry)
 import { buildRegistry, type CatalogRegistry } from "./registry.js";
@@ -42,6 +44,8 @@ import { type CatalogTable } from "./types.js";
  */
 export const CATALOG: readonly CatalogTable[] = Object.freeze([
 	...MEMORIES_TABLES,
+	...MEMORY_CONFLICTS_TABLES,
+	...MEMORY_LIFECYCLE_TABLES,
 	...SESSIONS_SUMMARIES_TABLES,
 	...KNOWLEDGE_GRAPH_TABLES,
 	...PRODUCT_TABLES,
@@ -99,6 +103,37 @@ export {
 	TRANSCRIPT_PATH_PREFIX,
 	transcriptPath,
 } from "./sessions-summaries.js";
+export {
+	buildAccessHistorySql,
+	buildLatestCalibrationSql,
+	isMemoryAccessKind,
+	MEMORY_ACCESS_COLUMNS,
+	MEMORY_ACCESS_KINDS,
+	MEMORY_ACCESS_TABLE,
+	type MemoryAccessKind,
+	MEMORY_CALIBRATION_COLUMNS,
+	MEMORY_CALIBRATION_TABLE,
+	MEMORY_LIFECYCLE_TABLES,
+} from "./memory-lifecycle.js";
+export {
+	buildConflictByIdSql,
+	buildOpenConflictProjectionSql,
+	CONFLICT_SIGNALS,
+	CONFLICT_STATUSES,
+	CONFLICT_VERDICTS,
+	type ConflictSignal,
+	type ConflictStatus,
+	type ConflictVerdict,
+	DEFAULT_CONFLICT_STATUS,
+	DEFAULT_CONFLICT_VERDICT,
+	isConflictSignal,
+	isConflictStatus,
+	isConflictVerdict,
+	MEMORY_CONFLICTS_COLUMNS,
+	MEMORY_CONFLICTS_TABLE,
+	MEMORY_CONFLICTS_TABLES,
+	normalizeConflictPair,
+} from "./memory-conflicts.js";
 export { KNOWLEDGE_GRAPH_TABLES } from "./knowledge-graph.js";
 export { PRODUCT_TABLES } from "./product.js";
 export {

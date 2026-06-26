@@ -78,7 +78,63 @@ export const MEMORIES_COLUMNS = Object.freeze([
 	embeddingColumn("content_embedding"),
 	{ name: "created_at", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "updated_at", sql: "TEXT NOT NULL DEFAULT ''" },
+	// PRD-058e (reinforcement + ACT-R activation): the reinforcement-aware reference time
+	// `t_ref = max(created_at, last_reinforced_at)` 058a already reads forward-compatibly.
+	// Nullable (no DEFAULT needed — NULL is its implicit default, heal-safe): a never-
+	// reinforced row reads NULL and `t_ref` falls back to `created_at`. Maintained by the
+	// access-log compaction (`access-log.ts`) from the `memory_access` event stream.
+	{ name: "last_reinforced_at", sql: "TIMESTAMPTZ" },
+	// PRD-058e: the denormalized access-count cache. Folds the compacted raw access events
+	// so activation has a frequency signal after the `memory_access` log is pruned to the
+	// last N=32 events per memory. Nullable default 0 (heal-safe ALTER ADD COLUMN backfill).
+	{ name: "access_count", sql: "BIGINT DEFAULT 0" },
+	// PRD-058c (stale code-reference healing — the `σ(m,t)` term): the staleness verdict for
+	// the memory's extracted code references. A LOGICAL enum `fresh` | `stale` | `unknown`
+	// stored as TEXT (DeepLake has no native ENUM DDL; the value set is enforced in code by
+	// {@link REF_STATUS_VALUES}). Nullable (NULL is its implicit default — heal-safe, no
+	// backfill): a never-verified row reads NULL and recall treats it as `unknown` (NEUTRAL,
+	// never demoted), exactly as 058a treats a missing timestamp as maximally fresh. Set by the
+	// stale-ref diagnostic (`runtime/maintenance/stale-ref-diagnostic.ts`).
+	{ name: "ref_status", sql: "TEXT" },
+	// PRD-058c: the wall-clock the diagnostic last resolved this memory's references against a
+	// snapshot. Drives the verification-freshness factor `v(m,t) = 2^(−(t − verified_at)/h_verify)`
+	// and the spaced re-verification cadence (058e paces WHEN; this is the timestamp it reads).
+	// Nullable (NULL = never verified → `v` treated as fully decayed → due for a fresh check).
+	// The staleness analogue of 058e's `last_reinforced_at`.
+	{ name: "verified_at", sql: "TIMESTAMPTZ" },
+	// PRD-058c: the specific unresolved references behind a `stale` verdict, stored as a JSON
+	// array string (the catalog encodes list-valued columns as TEXT JSON, like `tags`). Capped
+	// at {@link MAX_STALE_REFS} entries with an overflow marker so a reference-dense memory does
+	// not store an unbounded token list. Nullable (NULL/`'[]'` = nothing unresolved).
+	{ name: "stale_refs", sql: "TEXT" },
 ]);
+
+/**
+ * The LOGICAL value set for {@link MEMORIES_COLUMNS}'s `ref_status` column (PRD-058c). The
+ * column is TEXT (DeepLake has no ENUM DDL); this frozen set is the in-code constraint a writer
+ * stamps and a reader narrows against:
+ *   - `fresh`   — every extracted indexed reference resolves; `σ ≈ 0`.
+ *   - `stale`   — at least one indexed reference is dangling; `σ > 0`.
+ *   - `unknown` — no indexed references, or the graph oracle was unavailable; NEUTRAL (never
+ *                 demoted). A NULL row (never verified) reads as `unknown`.
+ */
+export const REF_STATUS_VALUES = Object.freeze(["fresh", "stale", "unknown"] as const);
+
+/** One of the {@link REF_STATUS_VALUES}. */
+export type RefStatus = (typeof REF_STATUS_VALUES)[number];
+
+/**
+ * The cap on how many unresolved references `stale_refs` stores for one memory (PRD-058c open
+ * question — "cap at a small N, record the overflow as a count"). A memory with more than this
+ * many dangling refs stores the first `MAX_STALE_REFS` plus a synthetic overflow marker
+ * (`+<n> more`) so the array never grows unbounded on a reference-dense memory.
+ */
+export const MAX_STALE_REFS = 16 as const;
+
+/** The overflow marker appended to a capped `stale_refs` list (records the dropped count). */
+export function staleRefsOverflowMarker(dropped: number): string {
+	return `+${dropped} more`;
+}
 
 /**
  * `memory_history` — append-only audit trail (FR-5 / a-AC-2). Records every

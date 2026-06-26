@@ -101,6 +101,15 @@ export interface Candidate {
 	readonly id: string;
 	/** The blended relevance score, 0..1. */
 	readonly score: number;
+	/**
+	 * PRD-058b LIVE (C-1): the candidate's claim text (its `content`), hydrated for the post-commit
+	 * conflict detector to run `sim`/`opp` over. Optional: the candidate-search arms return ids+scores
+	 * only ({@link searchCandidates}); {@link hydrateCandidateContents} fills this via ONE bounded
+	 * `id IN (<=limit)` read over the SAME candidate ids — never a table scan. ABSENT when hydration is
+	 * not wired (the conflict hook is off) or the read failed (fail-soft → that candidate is dropped
+	 * from detection, never a thrown decision).
+	 */
+	readonly content?: string;
 }
 
 /**
@@ -175,6 +184,15 @@ export interface DecisionHandlerDeps {
 	/** Optional structured-log sink for warnings. */
 	readonly logger?: DecisionLogger;
 	/**
+	 * PRD-058b LIVE (C-1): when set, the decision stage HYDRATES each candidate's `content` (one bounded
+	 * `id IN (<=limit)` read over the candidate ids it already selected — never a table scan) so the
+	 * forwarded candidate set carries the claim text the post-commit conflict detector needs. The daemon
+	 * sets this WHENEVER it wires the conflict hook into controlled-writes (the two travel together).
+	 * ABSENT/false → candidates carry ids+scores only (the prior behavior; the conflict hook then has no
+	 * candidate text and is inert). Hydration is FAIL-SOFT: a failed read leaves `content` absent.
+	 */
+	readonly hydrateCandidates?: boolean;
+	/**
 	 * Where decision hands its proposals to the next stage (006c controlled-writes).
 	 * The daemon wires this to enqueue one `memory_controlled_write` job per proposal
 	 * (the fan-out seam); a test injects a recorder to assert what would be enqueued.
@@ -205,6 +223,52 @@ function toCandidates(result: QueryResult): Candidate[] {
 		const rawScore = typeof row.score === "number" ? row.score : Number(row.score);
 		const score = Number.isFinite(rawScore) ? Math.min(1, Math.max(0, rawScore)) : 0;
 		return { id: String(row.id ?? ""), score };
+	});
+}
+
+/**
+ * Build the bounded candidate-content hydration read (PRD-058b LIVE / C-1): the `(id, content)` of the
+ * memories whose ids are in `ids` (the ≤`candidateLimit` set the candidate search ALREADY selected). An
+ * `id IN (...)` lookup over that small set — NOT a table scan (PRD-058b: detection runs over the existing
+ * candidate set, no new scan). Every id routes through `sLiteral`, every identifier through `sqlIdent` (no
+ * hand-quoted value — `audit:sql` clean). Returns `""` when `ids` is empty so the caller skips the read.
+ */
+export function buildCandidateContentSql(ids: readonly string[]): string {
+	if (ids.length === 0) return "";
+	const tbl = sqlIdent("memories");
+	const idCol = sqlIdent("id");
+	const contentCol = sqlIdent("content");
+	const inList = ids.map((id) => sLiteral(id)).join(", ");
+	return `SELECT ${idCol} AS id, ${contentCol} AS content FROM "${tbl}" WHERE ${idCol} IN (${inList})`;
+}
+
+/**
+ * Hydrate each candidate's `content` (PRD-058b LIVE / C-1) so the forwarded candidate set carries the
+ * claim text the post-commit conflict detector runs over. ONE bounded `id IN (<=limit)` read over the
+ * candidate ids the search already selected (never a table scan). FAIL-SOFT: a failed/empty read returns
+ * the candidates UNCHANGED (content absent) — a hydration hiccup degrades detection to fewer candidates,
+ * never a thrown decision. A candidate whose content did not come back is returned without `content`.
+ */
+async function hydrateCandidateContents(
+	candidates: Candidate[],
+	deps: DecisionHandlerDeps,
+): Promise<Candidate[]> {
+	if (candidates.length === 0) return candidates;
+	const ids = candidates.map((c) => c.id).filter((id) => id !== "");
+	if (ids.length === 0) return candidates;
+	const result = await deps.storage.query(buildCandidateContentSql(ids), deps.scope);
+	if (!isOk(result)) {
+		deps.logger?.event("decision.candidate_hydrate_failed", { kind: result.kind });
+		return candidates; // fail-soft: detection runs over fewer candidates, never a throw.
+	}
+	const contentById = new Map<string, string>();
+	for (const row of result.rows as StorageRow[]) {
+		const id = String(row.id ?? "");
+		if (id !== "") contentById.set(id, String(row.content ?? ""));
+	}
+	return candidates.map((c) => {
+		const content = contentById.get(c.id);
+		return content !== undefined && content !== "" ? { ...c, content } : c;
 	});
 }
 
@@ -326,7 +390,13 @@ export function blendCandidates(vector: Candidate[], lexical: Candidate[], limit
  * caller's job ({@link decideForFacts}).
  */
 export async function decideForFact(fact: Fact, job: StageJob, deps: DecisionHandlerDeps): Promise<FactDecision> {
-	const { candidates, degraded } = await searchCandidates(fact, job.scope, deps);
+	const searched = await searchCandidates(fact, job.scope, deps);
+	const degraded = searched.degraded;
+	// PRD-058b LIVE (C-1): when the conflict hook is wired, hydrate candidate content (one bounded read
+	// over the already-selected ids) so the forwarded set carries the claim text the detector needs.
+	const candidates = deps.hydrateCandidates === true
+		? await hydrateCandidateContents(searched.candidates, deps)
+		: searched.candidates;
 
 	// b-AC-2: no candidates → immediate `add` WITHOUT a model call.
 	if (candidates.length === 0) {

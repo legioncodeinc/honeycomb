@@ -51,6 +51,13 @@ export const ENDPOINTS = Object.freeze({
 	// appending `/:id`[`/modify`|`/forget`] to it. `compact` is the version-history reaper trigger.
 	memories: "/api/memories",
 	compact: "/api/diagnostics/compact",
+	// PRD-058d — the lifecycle operator surface reads (all on the `/api/memories` session group). The
+	// conflict QUEUE + stale-ref list + lifecycle-filtered audit + the 058e calibration introspection.
+	// The resolve action POSTs the 058b `/api/memories/conflicts/:id/resolve` (built off `memories`).
+	lifecycleConflicts: "/api/memories/conflicts",
+	lifecycleStaleRefs: "/api/memories/stale-refs",
+	lifecycleHistory: "/api/memories/history",
+	calibration: "/api/memories/calibration",
 	logs: "/api/logs",
 	// PRD-042c / PRD-021d — the Server-Sent-Events follow stream off the SAME ring buffer as `logs`.
 	// `GET /api/logs/stream` backfills the recent records then emits each NEW record (`event: "log"`,
@@ -373,6 +380,88 @@ export const CompactSummarySchema = z.object({
 	skippedTables: z.array(z.string()).catch([]),
 });
 export type CompactSummaryWire = z.infer<typeof CompactSummarySchema>;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRD-058d — the lifecycle operator-surface wire shapes. Every field `.catch()`-
+// defaults so a partial/older/malformed payload degrades to a safe value (never a
+// throw into React). No secret rides these shapes — ids, an enum verdict/status, a
+// bounded score, a ref string, an ISO timestamp, the calibration metrics.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** One conflict row from `GET /api/memories/conflicts` (the pair + verdict + status). */
+export const LifecycleConflictSchema = z.object({
+	id: z.string().catch(""),
+	memoryAId: z.string().catch(""),
+	memoryBId: z.string().catch(""),
+	verdict: z.string().catch("review"),
+	winnerId: z.string().nullable().catch(null),
+	status: z.string().catch("open"),
+	contraScore: z.number().catch(0),
+});
+export type LifecycleConflictWire = z.infer<typeof LifecycleConflictSchema>;
+export const LifecycleConflictsResponseSchema = z.object({
+	conflicts: z.array(LifecycleConflictSchema).catch([]),
+	status: z.string().catch("open"),
+});
+
+/** One stale-ref row from `GET /api/memories/stale-refs` (the memory id + its unresolved refs). */
+export const LifecycleStaleRefSchema = z.object({
+	memoryId: z.string().catch(""),
+	refStatus: z.string().catch("stale"),
+	staleRefs: z.array(z.string()).catch([]),
+	verifiedAt: z.string().nullable().catch(null),
+});
+export type LifecycleStaleRefWire = z.infer<typeof LifecycleStaleRefSchema>;
+export const LifecycleStaleRefsResponseSchema = z.object({
+	staleRefs: z.array(LifecycleStaleRefSchema).catch([]),
+});
+
+/** One lifecycle audit row from `GET /api/memories/history?type=lifecycle`. */
+export const LifecycleHistorySchema = z.object({
+	id: z.string().catch(""),
+	memoryId: z.string().catch(""),
+	actor: z.string().catch("pipeline"),
+	operation: z.string().catch(""),
+	reason: z.string().catch(""),
+	confidence: z.number().catch(0),
+	timestamp: z.string().catch(""),
+});
+export type LifecycleHistoryWire = z.infer<typeof LifecycleHistorySchema>;
+export const LifecycleHistoryResponseSchema = z.object({
+	history: z.array(LifecycleHistorySchema).catch([]),
+	type: z.string().catch("lifecycle"),
+});
+
+/** One reliability-diagram bin from `GET /api/memories/calibration` (the 058e introspection payload). */
+export const ReliabilityBinSchema = z.object({
+	lower: z.number().catch(0),
+	upper: z.number().catch(0),
+	meanConfidence: z.number().catch(0),
+	accuracy: z.number().catch(0),
+	count: z.number().catch(0),
+});
+export type ReliabilityBinWire = z.infer<typeof ReliabilityBinSchema>;
+
+/** The `GET /api/memories/calibration` body (ece/brier/n_samples + reliability diagram, 058e). */
+export const CalibrationSchema = z.object({
+	ece: z.number().catch(0),
+	brier: z.number().catch(0),
+	nSamples: z.number().catch(0),
+	fitAt: z.string().nullable().catch(null),
+	identity: z.boolean().catch(true),
+	reliabilityDiagram: z.array(ReliabilityBinSchema).catch([]),
+});
+export type CalibrationWire = z.infer<typeof CalibrationSchema>;
+
+/** The cold-start calibration view the panel shows before the first load (or on failure). */
+export const EMPTY_CALIBRATION: CalibrationWire = Object.freeze({
+	ece: 0,
+	brier: 0,
+	nSamples: 0,
+	fitAt: null,
+	identity: true,
+	reliabilityDiagram: [],
+});
 
 /** One `/api/logs` record (the `RequestLogRecord` the ring buffer serves; no secret in it). */
 export const LogRecordSchema = z.object({
@@ -1013,6 +1102,30 @@ export interface WireClient {
 	 * the daemon matches it against the allow-list, so no attacker-controlled identifier rides this.
 	 */
 	compact(table?: string): Promise<CompactSummaryWire | null>;
+	/**
+	 * PRD-058d — list the scoped conflict queue (`GET /api/memories/conflicts?status=open`). A
+	 * malformed/absent body degrades to `[]` (the panel renders its honest empty state). Scope is
+	 * resolved daemon-side from the session — the read is scope-filtered before any content.
+	 */
+	lifecycleConflicts(status?: string): Promise<LifecycleConflictWire[]>;
+	/**
+	 * PRD-058d — resolve a conflict through the SAME 058b endpoint the CLI uses
+	 * (`POST /api/memories/conflicts/:id/resolve`). NO new write path — the daemon applies the κ
+	 * assignment, the append-only supersession, the audit append, and the poll-to-convergence
+	 * read-back. Returns `true` iff the daemon accepted (2xx); the caller re-reads + polls to
+	 * convergence, never an optimistic flip.
+	 */
+	resolveConflict(id: string, input: { verdict: string; winnerId?: string; reason?: string }): Promise<boolean>;
+	/** PRD-058d — list the scoped memories with `ref_status='stale'` + their unresolved refs. Degrades to `[]`. */
+	lifecycleStaleRefs(): Promise<LifecycleStaleRefWire[]>;
+	/** PRD-058d — read the lifecycle-filtered audit (`GET /api/memories/history?type=lifecycle`). Degrades to `[]`. */
+	lifecycleHistory(): Promise<LifecycleHistoryWire[]>;
+	/**
+	 * PRD-058d / 058e — read the calibration introspection (`GET /api/memories/calibration`): ECE,
+	 * Brier, n_samples, and the reliability-diagram payload. A malformed/absent/cold-start body
+	 * degrades to {@link EMPTY_CALIBRATION} (the panel shows "calibration dormant"), never a throw.
+	 */
+	calibration(): Promise<CalibrationWire>;
 	logs(limit?: number): Promise<LogRecordWire[]>;
 	/**
 	 * PRD-042c / PRD-021d — FOLLOW the `/api/logs/stream` SSE tail (c-AC-2). Subscribes a browser
@@ -1362,6 +1475,46 @@ export function createWireClient(options: WireClientOptions = {}): WireClient {
 			// matches it against its allow-list, so the page sends only a known name — no attacker SQL.
 			const body = table !== undefined && table !== "" ? { table } : {};
 			return postJson(fetchImpl, url(ENDPOINTS.compact), body, CompactSummarySchema);
+		},
+		async lifecycleConflicts(status = "open"): Promise<LifecycleConflictWire[]> {
+			// GET the scoped conflict queue; a malformed/absent body degrades to []. `status` is
+			// encodeURIComponent-escaped (one safe query value); the daemon scope-filters the read.
+			const v = await getJson(
+				fetchImpl,
+				url(`${ENDPOINTS.lifecycleConflicts}?status=${encodeURIComponent(status)}`),
+				LifecycleConflictsResponseSchema,
+			);
+			return v?.conflicts ?? [];
+		},
+		async resolveConflict(id: string, input: { verdict: string; winnerId?: string; reason?: string }): Promise<boolean> {
+			try {
+				// POST the 058b resolve endpoint — the SAME path/code the CLI uses (no parallel logic).
+				// The id is path-encoded (one safe segment); the verdict/winner/reason ride the body.
+				const body: Record<string, string> = { verdict: input.verdict };
+				if (input.winnerId !== undefined && input.winnerId !== "") body.winnerId = input.winnerId;
+				if (input.reason !== undefined && input.reason !== "") body.reason = input.reason;
+				const res = await fetchImpl(url(`${ENDPOINTS.lifecycleConflicts}/${encodeURIComponent(id)}/resolve`), {
+					method: "POST",
+					headers: { "content-type": "application/json", accept: "application/json", ...DASHBOARD_SESSION_HEADERS },
+					body: JSON.stringify(body),
+				});
+				// 2xx → accepted; any non-2xx (400 invalid verdict, 404 not found, 409 already resolved)
+				// reads as "not accepted" so the caller re-reads + polls rather than optimistically flipping.
+				return res.ok;
+			} catch {
+				return false;
+			}
+		},
+		async lifecycleStaleRefs(): Promise<LifecycleStaleRefWire[]> {
+			const v = await getJson(fetchImpl, url(ENDPOINTS.lifecycleStaleRefs), LifecycleStaleRefsResponseSchema);
+			return v?.staleRefs ?? [];
+		},
+		async lifecycleHistory(): Promise<LifecycleHistoryWire[]> {
+			const v = await getJson(fetchImpl, url(`${ENDPOINTS.lifecycleHistory}?type=lifecycle`), LifecycleHistoryResponseSchema);
+			return v?.history ?? [];
+		},
+		async calibration(): Promise<CalibrationWire> {
+			return (await getJson(fetchImpl, url(ENDPOINTS.calibration), CalibrationSchema)) ?? EMPTY_CALIBRATION;
 		},
 		async logs(limit = 40): Promise<LogRecordWire[]> {
 			const v = await getJson(fetchImpl, url(`${ENDPOINTS.logs}?limit=${limit}`), LogsResponseSchema);

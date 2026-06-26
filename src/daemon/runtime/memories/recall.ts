@@ -70,17 +70,23 @@ import {
 	DEFAULT_DEDUP_ENABLED,
 	DEFAULT_DEDUP_SIMILARITY_THRESHOLD,
 	DEFAULT_MMR_LAMBDA,
+	DEFAULT_RECENCY_ACTIVATION_EXPONENT,
 	DEFAULT_RECENCY_HALF_LIFE_DAYS,
+	DEFAULT_RECENCY_HALF_LIFE_DAYS_BY_CLASS,
 	DEFAULT_RERANKER,
 	DEFAULT_RERANKER_TIMEOUT_MS,
 	DEFAULT_RERANKER_WINDOW,
 	type ContextAssemblyConfig,
 	type DedupConfig,
 	type RecencyConfig,
+	type RecencyHalfLifeByClass,
 	type RerankerConfig,
 } from "../recall/config.js";
 import type { EmbedClient } from "../services/embed-client.js";
 import type { RecallMode } from "../vault/api.js";
+import { actrActivation, type AccessEvent, type ActrParams, DEFAULT_ACTR_PARAMS } from "./activation.js";
+import { applyCalibration, type CalibrationModel } from "./calibration.js";
+import type { RefStatus } from "../../storage/catalog/memories.js";
 
 /** The default number of recall hits returned when the caller supplies no limit. */
 export const DEFAULT_RECALL_LIMIT = 20;
@@ -171,6 +177,72 @@ export interface MemoryRecallHit {
 	 * (d-AC-3).
 	 */
 	readonly createdAt: string;
+	/**
+	 * The recency-activation multiplier `A_simple(m,t) ∈ [0,1]` that was applied to this hit's fused
+	 * score (PRD-058a, AC-55a.3.1). `A_simple = 2^(−Δt / h(class))` with `Δt = max(0, now − t_ref)` and
+	 * the half-life `h` chosen by the hit's {@link source} class. It is the EXACT multiplier the recency
+	 * stage applied (before the `A^activationExponent` exponent re-weights it for ordering), surfaced so
+	 * the dashboard + agent consumers can render/reason about staleness. ALWAYS present and in `[0,1]`:
+	 *  - computed from row AGE alone, so it is emitted even when embeddings are off (degraded recall),
+	 *    independent of the embed path (AC-55a.3.2);
+	 *  - a missing/unparseable {@link createdAt} → `1` (maximally fresh), never dropped/errored (AC-55a.3.3).
+	 * Constructed at `1` (the no-penalty default) before the recency stage runs and overwritten there.
+	 */
+	readonly freshnessScore: number;
+	/**
+	 * PRD-058e: the ACT-R base-level activation `A_actr ∈ [A_min, 1]` actually applied to this hit, when
+	 * the reinforcement machinery is wired (an {@link MemoryRecallDeps.activationSource} is injected).
+	 * `A_actr` is the Stage-2 upgrade of {@link freshnessScore}'s Stage-1 `A_simple`, computed from the
+	 * memory's usefulness-weighted access history (`activation.ts`) rather than row age alone. It is
+	 * surfaced separately so the dashboard / consumers can distinguish the reinforcement-aware activation
+	 * from the age-only freshness. ABSENT (the field omitted) when no activation source is wired — recall
+	 * then runs the byte-for-byte 058a Stage-1 path and only {@link freshnessScore} is emitted. When the
+	 * source IS wired, `freshnessScore` carries the SAME `A_actr` value (the swap is behind that field per
+	 * the PRD) and this field mirrors it for explicitness.
+	 */
+	readonly activation?: number;
+	/**
+	 * PRD-058e: the memory's reinforcement count — the number of useful accesses folded into activation
+	 * (the `access_count` cache + retained `memory_access` events). Surfaced on the hit + response so the
+	 * dashboard renders "used N times". ABSENT when no activation source is wired (058a path).
+	 */
+	readonly accessCount?: number;
+	/**
+	 * PRD-058e: the CALIBRATED confidence `C(m) = g(f(m)) ∈ [0,1]` — the raw extraction confidence mapped
+	 * through the fitted isotonic calibration curve (`calibration.ts`). Surfaced so a consumer sees the
+	 * trustworthy confidence, not the raw model value. ABSENT when no calibration model is wired (the
+	 * dormant cold-start default — `c` exponent 0 — so calibration never perturbs ranking, AC-55e.2.2).
+	 */
+	readonly calibratedConfidence?: number;
+	/**
+	 * PRD-058e: the RAW extraction confidence `f(m)` carried from `memories.confidence` so the calibration
+	 * stage can map it to {@link calibratedConfidence}. `""`/absent on arms that carry no confidence
+	 * column (`memory` summaries, `sessions` raw turns). Internal carrier — defaults to `undefined`.
+	 */
+	readonly rawConfidence?: number;
+	/**
+	 * PRD-058c: the staleness probability `σ(m,t) ∈ [0,1]` — the chance ≥ 1 of the memory's indexed code
+	 * references no longer resolves against the codebase-graph snapshot. The `(1 − σ)^s` demotion is fed
+	 * INTO the SAME recency-multiplier stage as one more bounded `(0,1]` multiplier (NOT a parallel score
+	 * path), so staleness and recency compose into ONE demotion step. ABSENT when no
+	 * {@link MemoryRecallDeps.stalenessSource} is wired (the dormant default); a memory the source has no
+	 * verdict for, or whose σ is missing/unparseable, is treated as `unknown` (σ NEUTRAL, factor 1 — never
+	 * demoted), exactly as 058a treats a missing timestamp as maximally fresh.
+	 */
+	readonly staleness?: number;
+	/**
+	 * PRD-058c: the `fresh` / `stale` / `unknown` reference-status the diagnostic stamped on the memory.
+	 * Surfaced so the dashboard + agent consumers can render WHY a memory was demoted. ABSENT when no
+	 * staleness source is wired; `unknown` (NEUTRAL) for a memory with no indexed refs or an unavailable
+	 * graph oracle.
+	 */
+	readonly refStatus?: RefStatus;
+	/**
+	 * PRD-058c: the specific unresolved references behind a `stale` verdict (the `stale_refs` payload),
+	 * surfaced so a consumer can see the dangling tokens. ABSENT when no staleness source is wired or the
+	 * memory is not `stale`.
+	 */
+	readonly staleRefs?: readonly string[];
 }
 
 /** The result of a recall: the surfaced hits, the arms that produced them, and the fallback flag. */
@@ -338,6 +410,9 @@ function fuseHits(arms: readonly RankedArm[], limit: number): { hits: MemoryReca
 			kind,
 			secondary: kind === "session",
 			createdAt: doc.createdAt, // PRD-047d: carried for the recency dampener.
+			// PRD-058a: seed the no-penalty default; the recency-activation stage overwrites it with the
+			// real `A_simple` for every hit it returns, so the field is ALWAYS present + in [0,1].
+			freshnessScore: 1,
 		});
 		sourceSet.add(doc.source);
 	}
@@ -382,6 +457,91 @@ function rowsToRankedArm(rows: readonly StorageRow[]): RankedArm {
 		createdAt: cell(row.created_at), // PRD-047d: the projected creation timestamp (or "").
 	}));
 	return { entries };
+}
+
+/**
+ * PRD-058e: the per-memory access history + folded count the ACT-R activation needs, plus the params.
+ * Returned by the {@link ActivationSource} for each hit so {@link applyActrActivation} can compute
+ * `A_actr` from the usefulness-weighted series. A `null`/empty history → the memory floors at `A_min`.
+ */
+export interface MemoryActivationInputs {
+	/** The retained access events `(t_k, u_k)` for the memory, oldest-first (`access-log.ts`). */
+	readonly history: readonly AccessEvent[];
+	/** The denormalized reinforcement count (folded + retained), surfaced as {@link MemoryRecallHit.accessCount}. */
+	readonly accessCount: number;
+}
+
+/**
+ * PRD-058e: the ACT-R activation seam. Given the hit ids that survived to the activation stage, return
+ * the per-memory {@link MemoryActivationInputs} (access history + count). A daemon implementation reads
+ * the `memory_access` log (`access-log.ts`) in one batched pass; a unit test injects a fixed map. The
+ * returned map is keyed by `source+id` ({@link fusionKey}) so it aligns with the hit identity. A memory
+ * absent from the map (or a thrown source) degrades that hit to the 058a Stage-1 activation (fail-soft).
+ */
+export interface ActivationSource {
+	/** The ACT-R params (`d`, `A_min`, `B*`); defaults to {@link DEFAULT_ACTR_PARAMS}. */
+	readonly params?: ActrParams;
+	/** Fetch the activation inputs for the given hits, keyed by `source+id`. Fail-soft: a throw → 058a path. */
+	load(hits: readonly MemoryRecallHit[], scope: QueryScope): Promise<Map<string, MemoryActivationInputs>>;
+}
+
+/**
+ * PRD-058c: one memory's staleness verdict as the {@link StalenessSource} surfaces it to recall — the
+ * `σ` the stale-ref diagnostic wrote to `memories.ref_status` / `stale_refs`, read back so recall can
+ * feed `(1 − σ)^s` into the recency-multiplier stage. A memory ABSENT from the source map (or a verdict
+ * with a missing/unparseable σ) is treated as `unknown` (NEUTRAL — factor 1, never demoted).
+ */
+export interface StalenessVerdictInput {
+	/** `σ(m,t) ∈ [0,1]`. A non-finite / out-of-range value is clamped/neutralized by the stage. */
+	readonly sigma: number;
+	/** The `fresh` / `stale` / `unknown` classification (surfaced on the hit). */
+	readonly refStatus: RefStatus;
+	/** The unresolved references (surfaced on the hit when `stale`). */
+	readonly staleRefs?: readonly string[];
+}
+
+/**
+ * PRD-058c: the staleness seam. Given the hits that survived to the activation stage, return each
+ * memory's {@link StalenessVerdictInput} keyed by `source+id` ({@link fusionKey}). A daemon
+ * implementation reads the `memories.ref_status` / `stale_refs` columns the diagnostic wrote, in one
+ * batched pass; a unit test injects a fixed map. FAIL-SOFT: a memory absent from the map degrades to
+ * `unknown` (NEUTRAL) for that hit, and a source THROW degrades the WHOLE staleness stage to neutral —
+ * never a thrown recall, exactly mirroring the {@link ActivationSource} contract.
+ */
+export interface StalenessSource {
+	/**
+	 * The staleness exponent `s` (the master equation's `(1 − σ)^s`). POSTURE-GATED by the caller:
+	 * `observe` → `s = 0` (the factor is the identity, staleness is VISIBLE but INERT, ranking
+	 * UNCHANGED — AC-55c.2.1); `execute` → `s > 0` (DEMOTE — AC-55c.2.2). Defaults to
+	 * {@link DEFAULT_STALENESS_EXPONENT} (0 — dormant) when omitted, so an un-tuned source never perturbs
+	 * ranking. Floored ≥ 0 by the stage (a negative would BOOST a stale row, forbidden).
+	 */
+	readonly exponent?: number;
+	/** Fetch each hit's staleness verdict, keyed by `source+id`. Fail-soft: a throw → neutral for all. */
+	load(hits: readonly MemoryRecallHit[], scope: QueryScope): Promise<Map<string, StalenessVerdictInput>>;
+}
+
+/**
+ * PRD-058b: the conflict-suppression seam (the `κ(m,t)` gate). Given the hits that survived to the
+ * FINAL currentness filter, return the set of memory IDS to SUPPRESS — the `κ = ρ` (ρ = 0) losing
+ * side of an OPEN conflict. `κ = 0` hard-superseded losers are ALREADY excluded upstream by the
+ * `MAX(version)` / supersession path (they never reach recall as live rows), so this seam handles
+ * ONLY the open-conflict ρ-suppression. A daemon implementation reads the open-conflict projection
+ * (`memory_conflicts`, status `open`, the non-winner side); a unit test injects a fixed set.
+ *
+ * MUST be FAIL-SOFT (PRD-058b Technical Considerations): if `memory_conflicts` is missing or
+ * unreadable, the source returns an EMPTY set so recall degrades to returning BOTH sides, never a
+ * 500. The gate is the LAST currentness filter, layered OVER (not replacing) the `MAX(version)`
+ * invariant. A source THROW degrades the whole gate to neutral (no suppression).
+ */
+export interface ConflictSuppressionSource {
+	/**
+	 * Return the set of suppressed loser memory IDs (`κ = ρ` open-conflict losers) among `hits`,
+	 * for the scope. Keyed by the durable `memories.id` (only the `memories` arm carries a
+	 * suppressable id; `memory`/`sessions` hits are never conflict losers). Fail-soft: a throw or a
+	 * missing table → an empty set (both sides returned).
+	 */
+	loadSuppressed(hits: readonly MemoryRecallHit[], scope: QueryScope): Promise<ReadonlySet<string>>;
 }
 
 /** Construction deps for {@link recallMemories}. */
@@ -451,19 +611,72 @@ export interface MemoryRecallDeps {
 	 */
 	readonly dedup?: DedupConfig;
 	/**
-	 * The recency-dampening config (PRD-047d / d-AC-1..4). When ABSENT, the dampener runs with
-	 * its OFF-EQUIVALENT default half-life ({@link DEFAULT_RECENCY_HALF_LIFE_DAYS} = 100 years),
-	 * so the LIVE route and the eval are NEUTRAL on the age-agnostic synthetic golden set until
-	 * the eval tunes the knob (d-AC-4 — "measured before it bites"). A caller passes a short
-	 * `{ halfLifeDays }` to activate the age-decay.
+	 * The recency config (PRD-047d + PRD-058a). The LIVE recency stage is the PRD-058a class-aware
+	 * ACTIVATION ({@link applyRecencyActivation}): when ABSENT, every class falls back to its DOCUMENTED
+	 * per-class default ({@link DEFAULT_RECENCY_HALF_LIFE_DAYS_BY_CLASS}: `memories` 180d / `memory` 45d /
+	 * `sessions` 10d) and the activation exponent defaults to {@link DEFAULT_RECENCY_ACTIVATION_EXPONENT}
+	 *, so recency is LIVE by default, never the 100-year neutral (AC-55a.2.3). A caller passes
+	 * `{ halfLifeDaysByClass }` to override per-class half-lives (AC-55a.2.2) and/or `{ activationExponent }`
+	 * to re-weight `A^a` (`0` = neutral). The legacy flat `{ halfLifeDays }` feeds only the original
+	 * {@link applyRecencyDampening} back-compat path, not the live stage.
 	 *
-	 * The dampener runs LAST — after {@link fuseHits}, the rerank, AND dedup — so it never
-	 * disturbs dedup's provenance-based keep-decision ({@link outranksForKeep}). It multiplies
-	 * each surviving hit's fused score by `0.5 ^ (age_days / half_life_days)` and re-orders by
-	 * the dampened score; it DEMOTES the oldest hit but never DROPS it (d-AC-2). A hit with no
-	 * usable {@link MemoryRecallHit.createdAt} gets `decay = 1` (no penalty), never a throw (d-AC-3).
+	 * The activation runs LAST, after {@link fuseHits}, the rerank, AND dedup, so it never disturbs
+	 * dedup's provenance-based keep-decision (AC-55a.1.3). It stamps each hit's
+	 * {@link MemoryRecallHit.freshnessScore} = `A_simple = 2^(−Δt / h(class))`, multiplies the fused score
+	 * by `A^activationExponent`, and re-orders; it DEMOTES the oldest hit but never DROPS it (AC-55a.1.2).
+	 * A hit with no usable {@link MemoryRecallHit.createdAt} gets `A = 1` (no penalty), never a throw
+	 * (AC-55a.3.3).
 	 */
 	readonly recency?: RecencyConfig;
+	/**
+	 * PRD-058e: the ACT-R activation seam. When injected, recall computes each hit's reinforcement-aware
+	 * activation `A_actr` from its usefulness-weighted access history (`activation.ts` over the
+	 * `memory_access` log) and uses it IN PLACE of the 058a Stage-1 `A_simple` behind the SAME
+	 * {@link MemoryRecallHit.freshnessScore} field + the SAME `a` exponent — the swap is invisible to
+	 * callers (PRD-058e Scope). ABSENT → recall runs the byte-for-byte 058a Stage-1 path
+	 * ({@link applyRecencyActivation}), so every existing caller + test is unchanged. The seam is the
+	 * single async dependency the upgrade adds; it is FAIL-SOFT — a source throw / empty history degrades
+	 * that hit to the 058a Stage-1 activation, never a throw.
+	 */
+	readonly activationSource?: ActivationSource;
+	/**
+	 * PRD-058c: the staleness seam (the `σ(m,t)` term). When injected, recall reads each surviving hit's
+	 * staleness verdict (the `memories.ref_status` / `stale_refs` the stale-ref diagnostic wrote) and feeds
+	 * `(1 − σ)^s` INTO the SAME recency-multiplier stage as one more bounded `(0,1]` multiplier — NOT a
+	 * parallel score path — so staleness and recency compose into ONE demotion step. The `s` exponent is
+	 * POSTURE-GATED on the source ({@link StalenessSource.exponent}): `observe` ships `s = 0` (the factor is
+	 * the identity, staleness VISIBLE but INERT — AC-55c.2.1), `execute` ships `s > 0` (DEMOTE, never
+	 * hard-drop — AC-55c.2.2). ABSENT → no staleness factor is applied and no `staleness`/`refStatus` is
+	 * surfaced (the dormant default, byte-for-byte the pre-058c path). FAIL-SOFT: a source throw degrades
+	 * the staleness stage to neutral; a hit absent from the verdict map is `unknown` (factor 1, never
+	 * demoted), exactly as a missing timestamp is treated as maximally fresh by 058a.
+	 */
+	readonly stalenessSource?: StalenessSource;
+	/**
+	 * PRD-058b: the conflict-suppression seam (the `κ(m,t)` gate). When injected, recall applies the κ
+	 * gate as the LAST currentness filter — it drops the `κ = ρ` (ρ = 0) losing side of any OPEN conflict
+	 * among the surviving hits (the `κ = 0` hard-superseded losers are already excluded upstream by
+	 * `MAX(version)`). ABSENT → no κ gate (the dormant default, byte-for-byte the pre-058b path). FAIL-SOFT:
+	 * a missing/unreadable `memory_conflicts` table degrades to returning BOTH sides (never a 500), and a
+	 * source throw degrades the gate to neutral.
+	 */
+	readonly conflictSuppression?: ConflictSuppressionSource;
+	/**
+	 * PRD-058e: the fitted calibration model `g` (`calibration.ts`). When injected (and non-identity),
+	 * recall maps each hit's raw `memories.confidence` `f` through `C = g(f)` and emits it as
+	 * {@link MemoryRecallHit.calibratedConfidence}. ABSENT or the IDENTITY model → calibration is DORMANT
+	 * (`C = f`, the `c` exponent stays 0), so an unproven curve never perturbs ranking (AC-55e.2.2). The
+	 * calibration NEVER reorders here in this wave — it is surfaced for the dashboard + downstream `c`
+	 * activation, eval-gated separately (AC-55e.2.3).
+	 */
+	readonly calibration?: CalibrationModel;
+	/**
+	 * PRD-058e: the access-log recorder. When injected, recall records a `recall` access event for each
+	 * INJECTED hit (the recall half of the reinforcement loop — the usefulness grade arrives later from
+	 * the session-end worker). ABSENT → no event is recorded (the deterministic unit path). FAIL-SOFT: a
+	 * recorder throw never fails the recall (recording is best-effort, off the answer path).
+	 */
+	readonly recordRecallAccess?: (memoryId: string) => Promise<void>;
 	/**
 	 * The context-assembly config (PRD-047e / e-AC-1..4): the MMR lambda knob the token-budget
 	 * selection uses. It bites ONLY when the request carries a {@link MemoryRecallRequest.tokenBudget}
@@ -1095,7 +1308,7 @@ export function applyRecencyDampening(
 		const decay = recencyDecay(parseCreatedAtMs(hit.createdAt), nowMs, halfLifeDays);
 		return {
 			hit,
-			index, // the INCOMING rank (RRF → rerank → dedup) — the authoritative order to preserve.
+			index, // the INCOMING rank (RRF → rerank → dedup), the authoritative order to preserve.
 			decay,
 			score: hit.score * decay,
 		};
@@ -1117,6 +1330,421 @@ export function applyRecencyDampening(
 	});
 	// Re-emit with the dampened score on the hit so a downstream threshold sees the age-aware value.
 	return dampened.map(({ hit, score }) => ({ ...hit, score }));
+}
+
+// ── PRD-058c, the staleness factor `(1 − σ)^s` fed INTO the recency stage ─────
+
+/**
+ * The default staleness exponent `s` (the master equation's `(1 − σ)^s`). `0` makes the factor the
+ * IDENTITY (`(1 − σ)^0 = 1`) so staleness ships DORMANT — visible but inert — exactly as 058a's terms
+ * default to their neutral value. The maintenance `observe` posture ships `s = 0`; `execute` ships `s > 0`.
+ */
+export const DEFAULT_STALENESS_EXPONENT = 0;
+
+/**
+ * The resolved staleness inputs the activation stage folds in (PRD-058c): the per-hit verdict map (keyed
+ * by `source+id` via {@link fusionKey}) the {@link StalenessSource} returned, plus the posture-gated `s`
+ * exponent. Built ONCE before the activation stage runs (one batched source read) and passed into BOTH
+ * the Stage-1 ({@link applyRecencyActivation}) and Stage-2 ({@link applyActrActivation}) paths so the
+ * `(1 − σ)^s` factor multiplies into the SAME single demotion step, never a parallel score path.
+ */
+export interface ResolvedStaleness {
+	/** The per-hit staleness verdict, keyed by `fusionKey(source, id)`. */
+	readonly byKey: Map<string, StalenessVerdictInput>;
+	/** The staleness exponent `s`, floored ≥ 0 (a negative would BOOST a stale row, forbidden). */
+	readonly exponent: number;
+}
+
+/** Clamp a σ into `[0,1]`, mapping a missing/unparseable value to `0` (NEUTRAL — `unknown`, never demoted). */
+function normalizeSigma(sigma: number | undefined): number {
+	if (sigma === undefined || !Number.isFinite(sigma)) return 0;
+	return Math.min(1, Math.max(0, sigma));
+}
+
+/**
+ * The per-hit staleness contribution (PRD-058c): the bounded `(0,1]` factor `(1 − σ)^s` to MULTIPLY into
+ * the recency ordering weight, plus the verdict fields to STAMP on the hit. When `resolved` is absent (no
+ * staleness source) or the hit has no verdict, the factor is `1` (NEUTRAL) and no fields are stamped — the
+ * pre-058c behavior byte-for-byte. RULES:
+ *  - `s = 0` (observe posture / dormant) → factor `(1 − σ)^0 = 1`: ranking UNCHANGED, but σ/refStatus are
+ *    STILL surfaced for the dashboard (AC-55c.2.1: visible but inert).
+ *  - `s > 0` (execute) → factor `(1 − σ)^s ∈ (0,1]`: a stale memory is DEMOTED, never zeroed by staleness
+ *    alone (σ = 1 with finite `s` still leaves the hit in the set — it sinks to the floor, AC-55c.2.2).
+ *  - missing/unparseable σ → `unknown`, factor 1 (AC-55c.1.4 / the neutral-on-missing rule).
+ * Pure.
+ */
+function stalenessContribution(
+	hit: MemoryRecallHit,
+	resolved: ResolvedStaleness | undefined,
+): { factor: number; fields: Partial<MemoryRecallHit> } {
+	if (resolved === undefined) return { factor: 1, fields: {} };
+	const verdict = resolved.byKey.get(fusionKey(hit.source, hit.id));
+	if (verdict === undefined) return { factor: 1, fields: {} };
+	const sigma = normalizeSigma(verdict.sigma);
+	// (1 − σ)^s. s = 0 → 1 (identity). σ = 0 → 1. Both bounded into (0,1]; σ = 1, s > 0 → 0 (floor, the hit
+	// stays in the set, demoted — never removed by staleness alone).
+	const base = 1 - sigma;
+	const factor = resolved.exponent === 0 ? 1 : resolved.exponent === 1 ? base : Math.pow(base, resolved.exponent);
+	const fields: Partial<MemoryRecallHit> = {
+		staleness: sigma,
+		refStatus: verdict.refStatus,
+		...(verdict.staleRefs !== undefined ? { staleRefs: verdict.staleRefs } : {}),
+	};
+	return { factor, fields };
+}
+
+/**
+ * Resolve the staleness verdicts for the surviving hits (PRD-058c), to be folded into the recency stage.
+ * Returns `undefined` when no {@link StalenessSource} is wired (the dormant default → the stage runs the
+ * byte-for-byte pre-058c path). FAIL-SOFT: a source throw yields a NEUTRAL `ResolvedStaleness` (an empty
+ * verdict map → every hit `unknown`, factor 1), never a thrown recall. The `s` exponent is floored ≥ 0 (a
+ * negative would BOOST a stale row, forbidden) and defaults to {@link DEFAULT_STALENESS_EXPONENT} (0,
+ * dormant) so an un-tuned source never perturbs ranking.
+ */
+async function resolveStaleness(
+	hits: readonly MemoryRecallHit[],
+	deps: MemoryRecallDeps,
+	scope: QueryScope,
+): Promise<ResolvedStaleness | undefined> {
+	const source = deps.stalenessSource;
+	if (source === undefined) return undefined;
+	const rawExp = source.exponent ?? DEFAULT_STALENESS_EXPONENT;
+	const exponent = Math.max(0, Number.isFinite(rawExp) ? rawExp : DEFAULT_STALENESS_EXPONENT);
+	try {
+		const byKey = await source.load(hits, scope);
+		return { byKey, exponent };
+	} catch {
+		// Fail-soft: a staleness-source failure leaves recall neutral (no demotion), never a thrown recall.
+		return { byKey: new Map(), exponent };
+	}
+}
+
+/**
+ * PRD-058b: apply the `κ(m,t)` gate as the LAST currentness filter (AC-55b.1.1 / 55b.1.3). Drops the
+ * `κ = ρ` (ρ = 0) losing side of any OPEN conflict among `hits` — so a recall that matches BOTH sides
+ * of a contradiction returns at most the winner. The `κ = 0` hard-superseded losers are already excluded
+ * upstream by `MAX(version)` (they are not live rows), so this gate handles only the open-conflict
+ * ρ-suppression. ONLY the durable `memories` arm carries a suppressable id; a `memory`/`sessions` hit is
+ * never a conflict loser, so it is never dropped here. FAIL-SOFT: no source wired → `hits` unchanged; a
+ * source throw / missing table → an empty suppression set → BOTH sides returned, never a thrown recall.
+ */
+async function applyConflictGate(
+	hits: readonly MemoryRecallHit[],
+	deps: MemoryRecallDeps,
+	scope: QueryScope,
+): Promise<MemoryRecallHit[]> {
+	const source = deps.conflictSuppression;
+	if (source === undefined) return [...hits];
+	let suppressed: ReadonlySet<string>;
+	try {
+		suppressed = await source.loadSuppressed(hits, scope);
+	} catch {
+		// Fail-soft: a conflict-source failure leaves recall returning both sides, never a thrown recall.
+		return [...hits];
+	}
+	if (suppressed.size === 0) return [...hits];
+	// Drop only the `memories`-arm losers; other arms can never be a conflict loser id.
+	return hits.filter((h) => !(h.source === "memories" && suppressed.has(h.id)));
+}
+
+// ── PRD-058a, class-aware recency activation (the `A(m,t)` Stage-1 term) ──────
+
+/** `ln 2`, precomputed for the `λ = ln 2 / h` half-life conversion (PRD-058a). */
+const LN2 = Math.LN2;
+
+/**
+ * The reinforcement-aware reference timestamp `t_ref = max(created_at, last_reinforced_at)` for a hit
+ * (PRD-058a). 058a reads `last_reinforced_at` as nullable-defaulting-to-`created_at`: until PRD-058e
+ * adds the column the field is absent, so `t_ref = created_at` and 058a is correct + self-contained.
+ * When 058e lands the reinforced timestamp, the LATER of the two wins (a reinforced row is "fresher").
+ * Returns epoch ms, or `null` when NEITHER timestamp is usable → the activation treats the hit as
+ * maximally fresh (`A = 1`, AC-55a.3.3), never a throw.
+ */
+function refTimestampMs(createdAt: string, lastReinforcedAt: string | null | undefined): number | null {
+	const createdMs = parseCreatedAtMs(createdAt);
+	const reinforcedMs =
+		lastReinforcedAt === null || lastReinforcedAt === undefined ? null : parseCreatedAtMs(lastReinforcedAt);
+	if (createdMs === null) return reinforcedMs; // no created stamp → fall to reinforced (or null).
+	if (reinforcedMs === null) return createdMs;
+	return Math.max(createdMs, reinforcedMs); // the LATER of the two is the freshness reference.
+}
+
+/**
+ * Resolve the half-life in DAYS for a hit's class (PRD-058a, AC-55a.2.2 / 55a.2.3). The class is the
+ * TABLE that surfaced the hit ({@link RecallSource}): `memories` → memories, `memory` → memory,
+ * `sessions` → sessions. Precedence: the caller's `halfLifeDaysByClass[class]` override → the DOCUMENTED
+ * per-class default ({@link DEFAULT_RECENCY_HALF_LIFE_DAYS_BY_CLASS}). A class with no configured
+ * half-life falls back to ITS documented default, NEVER to the 100-year neutral (AC-55a.2.3). The
+ * returned value is floored ≥ {@link MIN_RECENCY_HALF_LIFE_FLOOR} so the `λ = ln2/h` math is finite.
+ */
+export function halfLifeForSource(source: RecallSource, byClass: RecencyHalfLifeByClass | undefined): number {
+	const configured = byClass?.[source];
+	const resolved = typeof configured === "number" && configured > 0 ? configured : DEFAULT_RECENCY_HALF_LIFE_DAYS_BY_CLASS[source];
+	return Math.max(MIN_RECENCY_HALF_LIFE_FLOOR, resolved);
+}
+
+/**
+ * The Stage-1 activation multiplier `A_simple(m,t) = 2^(−Δt / h) = exp(−λ · Δt_days)`, `λ = ln2/h`
+ * (PRD-058a). RULES (AC-55a.1.2 / 55a.3.3):
+ *  - `t_ref === null` (no usable timestamp) → `A = 1` (maximally fresh), never a throw / NaN.
+ *  - `Δt` is clamped to `≥ 0`, so a FUTURE `t_ref` (clock skew) yields `A = 1`, never `A > 1` (a skewed
+ *    row is never BOOSTED above a present-day one).
+ *  - `h` is floored ≥ 1 day by {@link halfLifeForSource}, so the exponent is finite and `A ∈ (0,1]` , 
+ *    a smooth multiplier with NO cutoff (recency never drops a row by age alone).
+ * By construction `A(Δt = h) = exp(−ln2) = 0.5`, the half-life is exactly the age at which A halves.
+ */
+export function recencyActivation(refMs: number | null, nowMs: number, halfLifeDays: number): number {
+	if (refMs === null || !Number.isFinite(refMs)) return 1; // AC-55a.3.3: missing/unparseable → maximally fresh.
+	const ageDays = Math.max(0, (nowMs - refMs) / MS_PER_DAY); // AC-55a.1.x clamp: future → age 0 → A 1.
+	const halfLife = Math.max(MIN_RECENCY_HALF_LIFE_FLOOR, halfLifeDays);
+	const lambda = LN2 / halfLife;
+	return Math.exp(-lambda * ageDays);
+}
+
+/**
+ * Apply the PRD-058a class-aware recency ACTIVATION to the final hit list, the live Stage-1 form of
+ * the `A(m,t)` term that SUPERSEDES the OFF-equivalent flat {@link applyRecencyDampening} as the live
+ * default. For each surviving hit it:
+ *  1. resolves the half-life by the hit's CLASS ({@link halfLifeForSource}: `sessions` decays fastest,
+ *     `memories` slowest, AC-55a.2.1), honoring a caller override over the documented default;
+ *  2. computes `A_simple = 2^(−Δt / h)` from `t_ref = max(created_at, last_reinforced_at)` ({@link
+ *     refTimestampMs}, 058e-forward-compatible, reads `last_reinforced_at` as nullable-defaulting-to-
+ *     created), STAMPS it on the hit as {@link MemoryRecallHit.freshnessScore} (AC-55a.3.1), and
+ *  3. multiplies the fused `score` by `A^activationExponent` (the master equation's `P = R · A^a`,
+ *     AC-55a.1.1) then re-orders by the adjusted score DESC.
+ *
+ * INVARIANTS:
+ *  - This is the LAST score adjustment (AC-55a.1.3): it runs after fuse/rerank/dedup so it can never
+ *    perturb dedup's provenance keep-decision.
+ *  - It is a soft, multiplicative DEMOTION: `A ∈ (0,1]`, NO cutoff, every input hit is present in the
+ *    output, the oldest is merely pushed down (AC-55a.1.2). A hit with no usable timestamp keeps its
+ *    score unchanged (`A = 1`, AC-55a.3.3) and `freshnessScore = 1`.
+ *  - `freshnessScore` is the raw `A_simple` (the EXACT multiplier semantics the dashboard renders),
+ *    computed from row age, emitted even when embeddings are off (AC-55a.3.2). The ORDERING uses
+ *    `A^activationExponent`; with the default exponent `1.0` the two coincide.
+ *  - Stable tie-break: equally-activated hits keep their incoming (rerank/dedup/RRF) order.
+ * Pure + sync, no I/O, no throw.
+ */
+export function applyRecencyActivation(
+	hits: readonly MemoryRecallHit[],
+	byClass: RecencyHalfLifeByClass | undefined,
+	activationExponent: number,
+	nowMs: number,
+	staleness?: ResolvedStaleness,
+): MemoryRecallHit[] {
+	// The exponent `a` in `A^a` (AC-55a.1.1): floored ≥ 0 (a negative would BOOST stale rows, forbidden).
+	// `0` is the neutral escape hatch (`A^0 = 1`), but `freshnessScore` still carries the real `A`.
+	const exponent = Math.max(0, Number.isFinite(activationExponent) ? activationExponent : DEFAULT_RECENCY_ACTIVATION_EXPONENT);
+	const activated = hits.map((hit, index) => {
+		const halfLife = halfLifeForSource(hit.source, byClass);
+		// PRD-058a: t_ref = max(created_at, last_reinforced_at). 058e adds last_reinforced_at later; until
+		// then it is absent and t_ref = created_at. The hit type carries only createdAt today, so read the
+		// optional reinforced field defensively without widening the public contract before 058e.
+		const lastReinforcedAt = (hit as { lastReinforcedAt?: string | null }).lastReinforcedAt;
+		const activation = recencyActivation(refTimestampMs(hit.createdAt, lastReinforcedAt), nowMs, halfLife);
+		// PRD-058c: the staleness factor `(1 − σ)^s` is multiplied INTO this SAME ordering weight (one
+		// demotion step, not a parallel path); it stamps σ/refStatus/staleRefs on the hit and is `1`
+		// (NEUTRAL) when no source is wired, the hit has no verdict, or s = 0 (observe — visible but inert).
+		const stale = stalenessContribution(hit, staleness);
+		// The ORDERING weight is A^a · (1 − σ)^s; freshnessScore is the raw A (the multiplier semantics the
+		// dashboard renders). With the default a = 1 and no staleness the two coincide.
+		const orderingWeight = (exponent === 1 ? activation : Math.pow(activation, exponent)) * stale.factor;
+		return {
+			hit,
+			index, // the INCOMING rank (RRF → rerank → dedup), the authoritative order to preserve.
+			activation,
+			staleFields: stale.fields,
+			orderingWeight,
+			score: hit.score * orderingWeight,
+		};
+	});
+
+	// NO-PENALTY no-op (AC-55a.1.3): when NO hit carries a real age penalty (every ordering weight is
+	// ~1, all hits maximally fresh, no usable timestamps, or activationExponent 0), the activation is a
+	// strict NO-OP on ORDERING. This is load-bearing: the authoritative upstream order (rerank, dedup) is
+	// encoded in POSITION, not in the (RRF) `score`; a blind score re-sort would UNDO the rerank/dedup
+	// reorder. We still STAMP freshnessScore + the staleness fields on every hit (AC-55a.3.1 / AC-55c.2.1).
+	const anyPenalty = activated.some((a) => a.orderingWeight < 1);
+	if (!anyPenalty) {
+		return activated.map(({ hit, activation, staleFields }) => ({ ...hit, ...staleFields, freshnessScore: activation }));
+	}
+
+	// At least one hit is genuinely aged or stale: order by the adjusted score DESC, using the INCOMING
+	// index as the stable tie-break so equally-adjusted hits keep their upstream (rerank/dedup) order.
+	// NEVER drops a hit (AC-55a.1.2 / AC-55c.2.2): the oldest/stalest is demoted, never removed.
+	activated.sort((a, b) => {
+		if (b.score !== a.score) return b.score - a.score; // adjusted score DESC (the age-aware order).
+		return a.index - b.index; // stable: preserve the incoming rerank/dedup/RRF order on a tie.
+	});
+	// Re-emit with the adjusted score AND the stamped freshnessScore (raw A_simple) + staleness fields.
+	return activated.map(({ hit, activation, score, staleFields }) => ({ ...hit, ...staleFields, score, freshnessScore: activation }));
+}
+
+// ── PRD-058e — ACT-R activation (Stage 2): A_actr behind freshnessScore ──────
+
+/**
+ * Apply the PRD-058e ACT-R activation, the Stage-2 upgrade that SUPERSEDES the 058a Stage-1
+ * {@link applyRecencyActivation} WHEN an {@link ActivationSource} is wired. For each surviving hit it:
+ *  1. loads the memory's usefulness-weighted access history + count from the source (one batched pass);
+ *  2. computes `A_actr = clamp(exp(B − B*), A_min, 1)` from that history (`activation.ts`), where `B` is
+ *     the base-level activation that rises with recency AND frequency and from which the spacing effect
+ *     falls out (AC-55e.1.1 / 55e.1.2); a contradicted/ignored access (`u_k → 0`) does not inflate it
+ *     (AC-55e.1.3); a cold memory floors at `A_min` (AC-55e.1.4);
+ *  3. STAMPS `A_actr` on the hit as BOTH {@link MemoryRecallHit.freshnessScore} (the swap is behind that
+ *     field per the PRD — invisible to callers) AND the explicit {@link MemoryRecallHit.activation}, and
+ *     sets {@link MemoryRecallHit.accessCount}; then
+ *  4. multiplies the fused score by `A_actr^activationExponent` and re-orders by the adjusted score DESC
+ *     (the SAME ordering discipline + stable tie-break as the Stage-1 path).
+ *
+ * INVARIANTS (identical to Stage 1): runs LAST after fuse/rerank/dedup; a soft multiplicative DEMOTION,
+ * never a cutoff (every hit present, AC-55e.1.2 via the `A_min` floor); a hit with no activation input
+ * (absent from the source map) FALLS BACK to the 058a Stage-1 `A_simple` for that hit (fail-soft), so a
+ * partial source never zeroes a hit. Async only because the source read is async; the math is pure.
+ */
+async function applyActrActivation(
+	hits: readonly MemoryRecallHit[],
+	source: ActivationSource,
+	byClass: RecencyHalfLifeByClass | undefined,
+	activationExponent: number,
+	nowMs: number,
+	scope: QueryScope,
+	staleness?: ResolvedStaleness,
+): Promise<MemoryRecallHit[]> {
+	const exponent = Math.max(0, Number.isFinite(activationExponent) ? activationExponent : DEFAULT_RECENCY_ACTIVATION_EXPONENT);
+	const params = source.params ?? DEFAULT_ACTR_PARAMS;
+
+	// Load the per-memory activation inputs in one pass. A source throw degrades the WHOLE stage to the
+	// 058a Stage-1 path (fail-soft) — never a thrown recall. The staleness factor still rides along there.
+	let inputs: Map<string, MemoryActivationInputs>;
+	try {
+		inputs = await source.load(hits, scope);
+	} catch {
+		return applyRecencyActivation(hits, byClass, activationExponent, nowMs, staleness);
+	}
+
+	const computed = hits.map((hit, index) => {
+		const key = fusionKey(hit.source, hit.id);
+		const input = inputs.get(key);
+		if (input === undefined) {
+			// No activation input for this hit → fall back to the 058a Stage-1 A_simple (per-hit fail-soft).
+			const halfLife = halfLifeForSource(hit.source, byClass);
+			const lastReinforcedAt = (hit as { lastReinforcedAt?: string | null }).lastReinforcedAt;
+			const a = recencyActivation(refTimestampMs(hit.createdAt, lastReinforcedAt), nowMs, halfLife);
+			return { hit, index, activation: a, accessCount: undefined as number | undefined };
+		}
+		// Stage-2: A_actr from the usefulness-weighted access history.
+		const a = actrActivation(input.history, nowMs, params);
+		return { hit, index, activation: a, accessCount: input.accessCount };
+	});
+
+	const adjusted = computed.map((c) => {
+		// PRD-058c: fold `(1 − σ)^s` into the SAME ordering weight as A_actr^a (one demotion step); stamp
+		// the staleness fields. Neutral (factor 1, no fields) when no source / no verdict / s = 0.
+		const stale = stalenessContribution(c.hit, staleness);
+		const orderingWeight = (exponent === 1 ? c.activation : Math.pow(c.activation, exponent)) * stale.factor;
+		return { ...c, staleFields: stale.fields, orderingWeight, score: c.hit.score * orderingWeight };
+	});
+
+	// Stamp every hit (A_actr behind freshnessScore + the explicit activation/accessCount + staleness
+	// fields), then order by the adjusted score DESC with the incoming index as the stable tie-break
+	// (preserves rerank/dedup order on a tie). Never drops a hit. Mirrors applyRecencyActivation exactly.
+	const stamp = (c: (typeof adjusted)[number]): MemoryRecallHit => ({
+		...c.hit,
+		...c.staleFields,
+		score: c.score,
+		freshnessScore: c.activation, // the swap: A_actr behind the SAME field 058a used (PRD-058e).
+		activation: c.activation,
+		...(c.accessCount !== undefined ? { accessCount: c.accessCount } : {}),
+	});
+
+	const anyPenalty = adjusted.some((c) => c.orderingWeight < 1);
+	if (!anyPenalty) {
+		// No ordering change (all weights ~1 or exponent 0), but still stamp the activation fields.
+		return adjusted.map(stamp);
+	}
+	const ordered = [...adjusted].sort((a, b) => {
+		if (b.score !== a.score) return b.score - a.score;
+		return a.index - b.index;
+	});
+	return ordered.map(stamp);
+}
+
+// ── PRD-058e — calibrated confidence C(m) = g(f) (dormant until the curve is proven) ──
+
+/**
+ * Build the guarded batch-fetch of `(id, confidence)` for the `memories`-source hits (PRD-058e). Only
+ * the `memories` table carries a `confidence` column (the distilled-fact raw `f`); `memory` summaries and
+ * `sessions` raw turns carry none, so they get no calibrated confidence. Every id routes through
+ * `sLiteral`, every identifier through `sqlIdent` (audit:sql-safe), mirroring {@link buildRerankEmbeddingSql}.
+ */
+export function buildConfidenceFetchSql(ids: readonly string[]): string {
+	const tbl = sqlIdent("memories");
+	const idCol = sqlIdent("id");
+	const confCol = sqlIdent("confidence");
+	const inList = ids.map((id) => sLiteral(id)).join(", ");
+	return `SELECT ${idCol} AS id, ${confCol} AS confidence FROM "${tbl}" WHERE ${idCol} IN (${inList})`;
+}
+
+/**
+ * Apply the PRD-058e calibration stage: map each `memories` hit's raw confidence `f` through the fitted
+ * curve `C = g(f)` and stamp it as {@link MemoryRecallHit.calibratedConfidence}. RULES:
+ *  - The IDENTITY model (cold-start / dormant) → `C = f`, the calibration is a NO-OP that still surfaces
+ *    `f` as the calibrated value, so a consumer always sees a `C` once the model is wired (AC-55e.2.2).
+ *  - It NEVER reorders (this wave): the `c` exponent stays 0 until eval-gated (AC-55e.2.3); calibration is
+ *    surfaced for the dashboard + downstream activation only.
+ *  - Only `memories` hits get a `C` (the only arm with a confidence column); other hits are unchanged.
+ *  - FAIL-SOFT: a confidence-fetch failure leaves the hits without a `C`, never a throw. The raw `f` is
+ *    fetched here (not threaded through fuse/rerank) so the stage is self-contained, like the rerank fetch.
+ */
+async function applyCalibrationStage(
+	hits: readonly MemoryRecallHit[],
+	model: CalibrationModel,
+	request: MemoryRecallRequest,
+	deps: MemoryRecallDeps,
+): Promise<MemoryRecallHit[]> {
+	const memoryIds = hits.filter((h) => h.source === "memories" && h.id !== "").map((h) => h.id);
+	if (memoryIds.length === 0) return [...hits];
+	let confById = new Map<string, number>();
+	try {
+		const rows = await runArm(buildConfidenceFetchSql(memoryIds), request, deps);
+		for (const row of rows) {
+			const id = cell(row.id);
+			if (id === "") continue;
+			const f = typeof row.confidence === "number" ? row.confidence : Number(row.confidence);
+			if (Number.isFinite(f)) confById.set(id, f);
+		}
+	} catch {
+		return [...hits]; // fail-soft: no calibrated confidence rather than a thrown recall.
+	}
+	return hits.map((hit) => {
+		if (hit.source !== "memories") return hit;
+		const f = confById.get(hit.id);
+		if (f === undefined) return hit;
+		const c = applyCalibration(model, f);
+		return { ...hit, rawConfidence: f, calibratedConfidence: c };
+	});
+}
+
+/**
+ * Record a `recall` access event for each surviving `memories` hit (PRD-058e). The recall is the FIRST
+ * half of the reinforcement loop: it logs that the memory was injected; the session-end worker grades
+ * its usefulness later (reinforce/downweight). FAIL-SOFT + off the answer path — a recorder throw is
+ * swallowed so recording never fails the recall. ABSENT recorder → no-op (the deterministic unit path).
+ * Only `memories`-source hits carry the durable id the access log keys on; summaries/sessions are skipped.
+ */
+async function recordRecallAccessEvents(hits: readonly MemoryRecallHit[], deps: MemoryRecallDeps): Promise<void> {
+	const record = deps.recordRecallAccess;
+	if (record === undefined) return;
+	const ids = hits.filter((h) => h.source === "memories" && h.id !== "").map((h) => h.id);
+	await Promise.all(
+		ids.map(async (id) => {
+			try {
+				await record(id);
+			} catch {
+				// best-effort: a recording hiccup never fails the recall (off the answer path).
+			}
+		}),
+	);
 }
 
 // ── PRD-047e — token-budget + MMR context assembly ───────────────────────────
@@ -1326,16 +1954,53 @@ export async function recallMemories(
 	const deduped = await dedupHits(ranked, dedupConfig, request, deps);
 	const dedupedSources = deduped.length === ranked.length ? sources : [...new Set(deduped.map((h) => h.source))];
 
-	// PRD-047d: apply the recency dampener LAST — after fusion, rerank, AND dedup — so it
-	// never disturbs dedup's provenance-based keep-decision. It multiplies each surviving
-	// hit's fused score by an age-decay (`0.5 ^ age_days / half_life_days`) and re-orders by
-	// the dampened score. The half-life DEFAULTS to OFF-equivalent (100 years), so this is
-	// NEUTRAL on the age-agnostic synthetic golden set until the eval tunes it (d-AC-4). It
-	// DEMOTES the oldest hit, never DROPS it (d-AC-2); a hit with no usable timestamp gets
-	// `decay = 1` (d-AC-3). Pure + sync — no I/O, no throw.
-	const halfLifeDays = deps.recency?.halfLifeDays ?? DEFAULT_RECENCY_HALF_LIFE_DAYS;
+	// PRD-058a: apply the class-aware recency ACTIVATION LAST, after fusion, rerank, AND dedup, so it
+	// never disturbs dedup's provenance-based keep-decision (AC-55a.1.3). It stamps each surviving hit's
+	// `freshnessScore = A_simple = 2^(−Δt / h(class))` (AC-55a.3.1), multiplies the fused score by
+	// `A^activationExponent` (`P = R · A^a`, AC-55a.1.1), and re-orders by the adjusted score. The
+	// half-life is chosen by the hit's CLASS, `sessions` decays fastest, `memories` slowest (AC-55a.2.1)
+	//, using the caller override when present, else the DOCUMENTED per-class default (never the 100-year
+	// neutral, AC-55a.2.3). This supersedes the OFF-equivalent flat PRD-047d dampener as the live default.
+	// It DEMOTES the oldest hit, never DROPS it (AC-55a.1.2); a hit with no usable timestamp gets `A = 1`
+	// (AC-55a.3.3). Computed from row age, so it runs even on a degraded (embeddings-off) recall
+	// (AC-55a.3.2). Pure + sync, no I/O, no throw.
+	const byClass = deps.recency?.halfLifeDaysByClass;
+	const activationExponent = deps.recency?.activationExponent ?? DEFAULT_RECENCY_ACTIVATION_EXPONENT;
 	const nowMs = (deps.now ?? Date.now)();
-	const dampened = applyRecencyDampening(deduped, halfLifeDays, nowMs);
+	// PRD-058c: resolve the staleness verdicts ONCE (one batched source read) so the `(1 − σ)^s` factor can
+	// be folded INTO the recency-multiplier stage below (the SAME single demotion step, not a parallel
+	// path). FAIL-SOFT: a source throw → no staleness factor (neutral), never a thrown recall. ABSENT
+	// source → undefined → the stage runs the byte-for-byte pre-058c path.
+	const staleness = await resolveStaleness(deduped, deps, request.scope);
+	// PRD-058e: when an activationSource is wired, swap the Stage-1 A_simple for the ACT-R Stage-2 A_actr
+	// BEHIND the same freshnessScore field + `a` exponent (invisible to callers). ABSENT → the byte-for-byte
+	// 058a Stage-1 path runs, so every existing caller/test is unchanged. Both are fail-soft + never drop a
+	// hit, and both fold the PRD-058c `(1 − σ)^s` staleness factor into the SAME ordering weight.
+	const activated =
+		deps.activationSource !== undefined
+			? await applyActrActivation(deduped, deps.activationSource, byClass, activationExponent, nowMs, request.scope, staleness)
+			: applyRecencyActivation(deduped, byClass, activationExponent, nowMs, staleness);
+
+	// PRD-058e: stamp the calibrated confidence C(m) = g(f) on the surviving hits when a calibration model
+	// is wired (the IDENTITY/cold-start model is a no-op that still surfaces C = f; it NEVER reorders here —
+	// the `c` exponent stays 0 until eval-gated, AC-55e.2.2 / 55e.2.3). ABSENT → no C surfaced (dormant).
+	const calibrated =
+		deps.calibration !== undefined && !deps.calibration.identity
+			? await applyCalibrationStage(activated, deps.calibration, request, deps)
+			: activated;
+
+	// PRD-058b: apply the `κ(m,t)` gate as the LAST currentness filter, layered OVER (not replacing) the
+	// `MAX(version)` invariant (AC-55b.1.1 / 55b.1.3). A `κ = ρ` open-conflict loser is dropped so a recall
+	// matching BOTH sides of a contradiction returns at most the winner; the `κ = 0` hard-superseded losers
+	// are already excluded by supersession upstream. FAIL-SOFT: a missing/unreadable `memory_conflicts`
+	// degrades to returning BOTH sides, never a 500. ABSENT source → byte-for-byte the pre-058b path.
+	const dampened = await applyConflictGate(calibrated, deps, request.scope);
+
+	// PRD-058e: record a `recall` access event for each surviving hit (the recall half of the reinforcement
+	// loop — the usefulness grade arrives later from the session-end worker). FAIL-SOFT + off the answer path:
+	// recording is fire-and-forget and a recorder throw never fails the recall. Only the durable memories the
+	// store path tracks (`memories` source) carry a usable id for the access log.
+	await recordRecallAccessEvents(dampened, deps);
 
 	// PRD-047e: OPTIONAL token-budget + MMR context assembly. ADDITIVE + OPT-IN — it engages ONLY
 	// when the request carries a positive `tokenBudget`. With NO budget the row-`limit` path runs

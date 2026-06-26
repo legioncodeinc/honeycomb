@@ -60,10 +60,12 @@ import {
 	type RequestProjectScope,
 } from "../scope.js";
 import { recallMemories, type MemoryRecallResult } from "./recall.js";
+import { RecencyConfigSchema, type RecencyConfig } from "../recall/config.js";
 import { isValidRecallMode, type RecallMode } from "../vault/api.js";
 import type { VaultStore } from "../vault/store.js";
 import type { SecretScope } from "../secrets/contracts.js";
 import { getMemory, listMemories, resolveListLimit } from "./reads.js";
+import { readCalibrationIntrospection } from "./calibration-store.js";
 import {
 	forgetMemory,
 	modifyMemory,
@@ -138,6 +140,15 @@ export interface MountMemoriesOptions {
 	 * mount omits it (the deterministic suite is unchanged). Narrowed to the single `getSetting` method.
 	 */
 	readonly vault?: VaultSettingsReader;
+	/**
+	 * PRD-058b: the conflict-suppression seam (the `κ(m,t)` gate). When supplied, the recall handler threads
+	 * it into {@link recallMemories} so the LAST currentness filter drops the `κ = ρ` open-conflict loser
+	 * (the `κ = 0` hard-superseded losers are already excluded by supersession). ABSENT → no κ gate (the
+	 * dormant pre-058b path). FAIL-SOFT inside the engine: a missing/unreadable `memory_conflicts` table
+	 * degrades to returning BOTH sides, never a 500. The composition root threads
+	 * `createConflictSuppressionSource(storage)`.
+	 */
+	readonly conflictSuppression?: import("./recall.js").ConflictSuppressionSource;
 }
 
 /**
@@ -173,10 +184,37 @@ export const MAX_RECALL_TOKEN_BUDGET = 10_000_000;
  * out-of-range, or garbage value is rejected (zod 400) rather than silently coerced, and the
  * engine ALSO guards it (defense in depth).
  */
+/**
+ * The OPTIONAL per-request recency override (PRD-058a API spec). A caller may override the per-class
+ * half-lives (AC-55a.2.2) and/or the activation exponent `a` in `A^a` for THIS recall; an absent field
+ * (or an absent `recency` object) falls back to the engine default, the DOCUMENTED per-class half-life
+ * and `activationExponent = 1.0`, so recency stays LIVE, never the 100-year neutral (AC-55a.2.3). Each
+ * half-life is a positive number in DAYS; `activationExponent` is `≥ 0` (`0` = neutral). Validated at the
+ * boundary (zod 400 on a structurally-bad value); the engine ALSO clamps (defense in depth).
+ */
+const RecencyOverrideSchema = z
+	.object({
+		halfLifeDaysByClass: z
+			.object({
+				memories: z.number().positive().optional(),
+				memory: z.number().positive().optional(),
+				sessions: z.number().positive().optional(),
+			})
+			.optional(),
+		activationExponent: z.number().min(0).optional(), // the `a` in A^a; 0 = neutral.
+	})
+	.optional();
+
 const RecallBodySchema = z.object({
 	query: z.string().min(1, "query is required"),
 	limit: z.number().int().positive().optional(),
 	tokenBudget: z.number().int().positive().max(MAX_RECALL_TOKEN_BUDGET).optional(),
+	/**
+	 * PRD-058a: the OPTIONAL per-request recency override ({@link RecencyOverrideSchema}). ABSENT → the
+	 * engine's per-class defaults + `activationExponent = 1.0` (recency live by default). Threaded into
+	 * the engine deps as the `recency` config so the override is honored over the defaults (AC-55a.2.2).
+	 */
+	recency: RecencyOverrideSchema,
 	/**
 	 * PRD-049b (49b-AC-2): the session working directory the recall ran in. The daemon resolves
 	 * the project from it (049a `resolveScope(cwd)`) and ANDs the project-segment predicate into
@@ -361,6 +399,27 @@ async function readRecallMode(
 }
 
 /**
+ * Resolve the optional per-request recency override (PRD-058a) into the engine's {@link RecencyConfig},
+ * or `undefined` when no override is supplied (→ the engine applies its per-class defaults +
+ * activationExponent 1.0). The override's `halfLifeDaysByClass` / `activationExponent` are parsed
+ * through {@link RecencyConfigSchema} so they clamp + default identically to a config-sourced recency
+ * config (the zod boundary already rejected a structurally-bad value with a 400). An empty override
+ * object (`{}`) is treated as "no override" → `undefined`, so the defaults stand.
+ */
+function resolveRecencyOverride(
+	override: { halfLifeDaysByClass?: { memories?: number; memory?: number; sessions?: number }; activationExponent?: number } | undefined,
+): RecencyConfig | undefined {
+	if (override === undefined) return undefined;
+	const hasClass = override.halfLifeDaysByClass !== undefined;
+	const hasExponent = override.activationExponent !== undefined;
+	if (!hasClass && !hasExponent) return undefined; // an empty `{}` override → keep the engine defaults.
+	return RecencyConfigSchema.parse({
+		...(hasClass ? { halfLifeDaysByClass: override.halfLifeDaysByClass } : {}),
+		...(hasExponent ? { activationExponent: override.activationExponent } : {}),
+	});
+}
+
+/**
  * Attach the `/api/memories/*` handlers onto the daemon's already-mounted
  * `/api/memories` route group (the 022a mount seam). Mirrors `mountDashboardApi`:
  * every handler resolves the request scope (fail-closed 400), zod-validates the
@@ -402,6 +461,10 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 		// `x-honeycomb-cwd` header) so the project-segment predicate is ANDed into every arm.
 		// No resolvable cwd falls to inbox + workspace-global with the D8 warning.
 		const project = resolveRequestProject(c, scope, parsed.data.cwd);
+		// PRD-058a: build the per-request recency config from the optional override. ABSENT → undefined
+		// so the engine applies its per-class defaults + activationExponent 1.0 (recency live by default,
+		// AC-55a.2.3). A present override is honored over the defaults (AC-55a.2.2).
+		const recency = resolveRecencyOverride(parsed.data.recency);
 		const result = await recallMemories(
 			{
 				query: parsed.data.query,
@@ -418,6 +481,10 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 				storage,
 				...(options.embed !== undefined ? { embed: options.embed } : {}),
 				...(recallMode !== undefined ? { recallMode } : {}),
+				// PRD-058a: the per-request recency override (per-class half-lives + activation exponent).
+				...(recency !== undefined ? { recency } : {}),
+				// PRD-058b: the κ gate's conflict-suppression seam (drops the κ = ρ open-conflict loser).
+				...(options.conflictSuppression !== undefined ? { conflictSuppression: options.conflictSuppression } : {}),
 			},
 		);
 		// PRD-029 (AC-4): when this recall ran DEGRADED (lexical fallback), emit one
@@ -507,6 +574,19 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 			return c.json({ found: true, ref, depth: 2, source: "episodic", turns: result.turns, turnLimit }, 200);
 		}
 		return c.json({ found: true, ref, depth: 2, source: "durable", row: result.row }, 200);
+	});
+
+	// ── PRD-058e: GET /api/memories/calibration → calibration introspection. ────
+	// MUST be registered BEFORE GET /:id — "calibration" is a literal segment that
+	// would otherwise be captured as the :id parameter (same ordering rule as /resolve).
+	// Scope-enforced (fail-closed 400 with no resolvable tenancy); FAIL-SOFT read (no
+	// curve yet → the cold-start identity shape, never a 500). NO write surface here:
+	// `recordAccess` is daemon-internal so reinforcement cannot be spoofed (PRD-058e).
+	group.get("/calibration", async (c) => {
+		const scope = resolveScope(c);
+		if (scope === null) return c.json(NO_ORG_BODY, 400);
+		const introspection = await readCalibrationIntrospection(storage, scope);
+		return c.json(introspection);
 	});
 
 	// ── FR-4: GET /api/memories/:id → get one memory by id. ─────────────────────
