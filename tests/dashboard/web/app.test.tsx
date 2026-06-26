@@ -21,6 +21,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { Shell } from "../../../src/dashboard/web/app.js";
 import { createWireClient } from "../../../src/dashboard/web/wire.js";
+import { ROUTES } from "../../../src/dashboard/web/registry.js";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -151,7 +152,7 @@ describe("037 AC-1: the left-nav shell renders all seven nav items + the chrome"
 		expect(text).toContain("deeplake-core");
 		expect(text).toContain("Pollinate now");
 		// The nav items are present as routes (nine since PRD-059c added Projects + PRD-060e added ROI).
-		expect(container.querySelectorAll("[data-route]")).toHaveLength(9);
+		expect(container.querySelectorAll("[data-route]")).toHaveLength(ROUTES.length);
 	});
 });
 
@@ -250,7 +251,7 @@ describe("037b AC-2/AC-3/AC-4: client-side routing — swap without reload, deep
 		expect(text).toContain("No project selected.");
 		expect(text).not.toContain("Recall"); // the Dashboard body is no longer mounted
 		// The sidebar (the nine items) is STILL mounted — only the content region swapped.
-		expect(container.querySelectorAll("[data-route]")).toHaveLength(9);
+		expect(container.querySelectorAll("[data-route]")).toHaveLength(ROUTES.length);
 	});
 
 	it("AC-3: deep-linking — loading #/logs mounts the Logs route directly", async () => {
@@ -306,7 +307,7 @@ describe("037 AC-6 / 037b AC-6: daemon-down swaps the CONTENT for the banner; si
 		expect(container.textContent ?? "").toContain("Daemon not reachable");
 		expect(container.textContent ?? "").not.toContain("Skill-sync"); // the Dashboard body is suspended
 		// …but the SIDEBAR stays mounted (the nine nav items are still there).
-		expect(container.querySelectorAll("[data-route]")).toHaveLength(9);
+		expect(container.querySelectorAll("[data-route]")).toHaveLength(ROUTES.length);
 
 		// Recover + click Retry → the active page restores.
 		healthOk = true;

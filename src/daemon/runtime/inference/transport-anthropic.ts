@@ -184,16 +184,23 @@ const AnthropicUsageSchema = z.object({
 	cache_creation_input_tokens: z.number().int().nonnegative().catch(0).default(0),
 });
 
+/** The all-zero usage fallback (a response with absent/null/malformed `usage` surfaces this, not a throw). */
+const ZERO_USAGE = {
+	input_tokens: 0,
+	output_tokens: 0,
+	cache_read_input_tokens: 0,
+	cache_creation_input_tokens: 0,
+} as const;
+
 /** The Anthropic Messages success-response shape (only the fields we read). */
 const AnthropicMessagesResponseSchema = z.object({
 	content: z.array(AnthropicContentBlockSchema).default([]),
-	/** The token-usage block (PRD-060d). Absent ⇒ all-zero usage (surfaced, never thrown). */
-	usage: AnthropicUsageSchema.default({
-		input_tokens: 0,
-		output_tokens: 0,
-		cache_read_input_tokens: 0,
-		cache_creation_input_tokens: 0,
-	}),
+	// Finding (usage-failsoft): `.default(ZERO_USAGE)` only covers `usage === undefined`. A response with
+	// `usage: null` or a malformed `usage` object would FAIL the object parse and -- because this field is
+	// part of the whole-response schema -- bubble up to a 502 that DROPS an otherwise-valid completion.
+	// `.catch(ZERO_USAGE)` makes ANY invalid value (null, a string, a malformed object) fall back to
+	// zero-usage so a valid completion is NEVER dropped over its (side-channel) usage block.
+	usage: AnthropicUsageSchema.default(ZERO_USAGE).catch(ZERO_USAGE),
 });
 
 /**

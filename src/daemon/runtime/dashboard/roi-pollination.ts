@@ -44,7 +44,7 @@
 import type { BillingStatus, InfraCostReadModel, SessionType, SessionTypeLine } from "./roi-billing.js";
 import { sessionTypeTotalCents } from "./roi-billing.js";
 import { resolveRate } from "./roi-rates.js";
-import type { SkillifyUsageSnapshot, SkillifyUsageSource } from "./roi-skillify-meter.js";
+import type { SkillifyUsageBucket, SkillifyUsageSnapshot, SkillifyUsageSource } from "./roi-skillify-meter.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The skillify model identity (d-AC-2 / open-question answer).
@@ -177,12 +177,30 @@ function tokensAtRate(tokens: number, centsPerMtok: number): number {
  * never zero-prices a real token count via a `0` rate).
  */
 export function priceHaikuTokens(snapshot: SkillifyUsageSnapshot): number {
+	// Finding (meter-per-model): when the snapshot carries PER-MODEL buckets, price each bucket at ITS
+	// OWN model's rate and sum -- a router/model swap mid-run no longer mis-prices history at the
+	// last-seen model. With no buckets (a hand-built single-model snapshot) fall back to pricing the
+	// aggregate sums at the snapshot's single `model` (back-compat, identical result for one model).
+	if (snapshot.perModel !== undefined && snapshot.perModel.length > 0) {
+		return snapshot.perModel.reduce((sum, b) => sum + priceBucket(b), 0);
+	}
 	const rate = resolveRate(SKILLIFY_PROVIDER, snapshot.model ?? SKILLIFY_HAIKU_MODEL);
 	return (
 		tokensAtRate(snapshot.inputTokens, rate.input_cents_per_mtok) +
 		tokensAtRate(snapshot.outputTokens, rate.output_cents_per_mtok) +
 		tokensAtRate(snapshot.cacheReadInputTokens, rate.cache_read_cents_per_mtok) +
 		tokensAtRate(snapshot.cacheCreationInputTokens, rate.cache_write_cents_per_mtok)
+	);
+}
+
+/** Price ONE per-model bucket at its own model's 060b rate (Finding meter-per-model), in integer cents. */
+function priceBucket(b: SkillifyUsageBucket): number {
+	const rate = resolveRate(SKILLIFY_PROVIDER, b.model.length > 0 ? b.model : SKILLIFY_HAIKU_MODEL);
+	return (
+		tokensAtRate(b.inputTokens, rate.input_cents_per_mtok) +
+		tokensAtRate(b.outputTokens, rate.output_cents_per_mtok) +
+		tokensAtRate(b.cacheReadInputTokens, rate.cache_read_cents_per_mtok) +
+		tokensAtRate(b.cacheCreationInputTokens, rate.cache_write_cents_per_mtok)
 	);
 }
 
@@ -198,7 +216,14 @@ export function priceHaikuTokens(snapshot: SkillifyUsageSnapshot): number {
  * to zero, which is an honest measured zero distinct from absent).
  */
 export function composeHaikuContribution(snapshot: SkillifyUsageSnapshot): HaikuSkillifyContribution {
-	const model = snapshot.model ?? SKILLIFY_HAIKU_MODEL;
+	// Finding (meter-per-model): the figure prices each per-model bucket at its own rate (priceHaikuTokens).
+	// The `model` label reflects the single model when there is one, else a "mixed" marker so the page does
+	// not imply one model priced a multi-model run.
+	const buckets = snapshot.perModel;
+	const model =
+		buckets !== undefined && buckets.length > 1
+			? "mixed"
+			: (buckets !== undefined && buckets.length === 1 ? buckets[0]!.model : snapshot.model ?? SKILLIFY_HAIKU_MODEL);
 	if (snapshot.recorded === 0) {
 		// No data yet → `absent`, NOT a confident `0` (d-AC-5).
 		return {

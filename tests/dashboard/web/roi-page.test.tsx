@@ -39,7 +39,7 @@ import {
 	netSignColor,
 	RoiPage,
 } from "../../../src/dashboard/web/pages/roi.js";
-import { seriesPolylinePoints } from "../../../src/dashboard/web/pages/roi-chart.js";
+import { seriesCentsRange, seriesPolylinePoints, zeroBaselineY } from "../../../src/dashboard/web/pages/roi-chart.js";
 import { ROUTES, matchRoute } from "../../../src/dashboard/web/registry.js";
 import type { PageProps } from "../../../src/dashboard/web/page-frame.js";
 import type { WireClient } from "../../../src/dashboard/web/wire.js";
@@ -225,15 +225,41 @@ describe("isDashStatus: absent/unreachable/unauthenticated → a DASH, ok/partia
 
 describe("e-AC-10: the inline-SVG chart maps integer cents to a bounded polyline (pure)", () => {
 	it("seriesPolylinePoints spreads points across the box; higher cents sit higher (smaller y)", () => {
-		const series = TREND.series[0]!; // measured-savings: 100000 → 240000 (rising)
-		const pts = seriesPolylinePoints(series, 240000).split(" ");
+		const series = TREND.series[0]!; // measured-savings: 100000 -> 240000 (rising)
+		const range = seriesCentsRange(TREND.series);
+		const pts = seriesPolylinePoints(series, range).split(" ");
 		expect(pts).toHaveLength(2);
 		const y0 = Number(pts[0]!.split(",")[1]);
 		const y1 = Number(pts[1]!.split(",")[1]);
-		// The second point (higher cents) is drawn higher → a smaller y.
+		// The second point (higher cents) is drawn higher -> a smaller y.
 		expect(y1).toBeLessThan(y0);
 		// An empty series yields no points (the chart renders its empty state instead).
-		expect(seriesPolylinePoints({ label: "x", modeled: false, points: [] }, 1)).toBe("");
+		expect(seriesPolylinePoints({ label: "x", modeled: false, points: [] }, range)).toBe("");
+	});
+
+	// Finding (chart-negative): the net trend CAN be negative (PRD). The scale must span [min, max]
+	// INCLUDING 0, so a loss period draws BELOW the zero baseline rather than flattening onto it.
+	it("scales against both min and max (incl. 0): a negative point sits BELOW the zero baseline, never clamped", () => {
+		const netSeries: RoiTrendView["series"][number] = {
+			label: "net",
+			modeled: true,
+			points: [
+				{ period: "2026-05", cents: 20000 }, // a GAIN (positive)
+				{ period: "2026-06", cents: -10000 }, // a LOSS (negative) -- must not clamp to the baseline
+			],
+		};
+		const range = seriesCentsRange([netSeries]);
+		expect(range.min).toBeLessThan(0); // the range spans the negative point
+		expect(range.max).toBeGreaterThan(0);
+		const baselineY = zeroBaselineY(range);
+		const pts = seriesPolylinePoints(netSeries, range).split(" ");
+		const yGain = Number(pts[0]!.split(",")[1]);
+		const yLoss = Number(pts[1]!.split(",")[1]);
+		// The gain sits ABOVE the zero baseline (smaller y); the loss sits BELOW it (larger y), distinct.
+		expect(yGain).toBeLessThan(baselineY);
+		expect(yLoss).toBeGreaterThan(baselineY);
+		// The loss is NOT flattened onto the baseline (the old clamp-to-0 bug would make yLoss === baselineY).
+		expect(yLoss).not.toBeCloseTo(baselineY, 1);
 	});
 });
 
@@ -350,6 +376,28 @@ describe("e-AC-4: the rendered net color encodes sign with verified/critical, ne
 // ─────────────────────────────────────────────────────────────────────────────
 // e-AC-6 — billing-unreachable: dash for the line + the net + a scoped Retry.
 // ─────────────────────────────────────────────────────────────────────────────
+
+describe("Finding (retry-cta): Retry shows ONLY on net.status === 'unreachable', not on absent/initial", () => {
+	it("an ABSENT (not-yet-computed) net shows a plain caption and NO Retry button", async () => {
+		const absentNet: RoiView = {
+			...OK_VIEW,
+			savings: { ...OK_VIEW.savings, status: "absent" },
+			net: { status: "absent", computed: false, netCents: 0, modeled: true, costBasis: "none" },
+		};
+		await mountPage(mockWire(absentNet));
+		expect(el('[data-testid="net-figure"]')?.getAttribute("data-computed")).toBe("false");
+		// No Retry on a non-unreachable (absent) net -- a plain "not computed yet" caption instead.
+		expect(el('[data-testid="net-retry"]'), "no Retry on an absent net").toBeNull();
+		expect(txt('[data-testid="net-hero"]')).toContain("not computed yet");
+	});
+
+	it("the INITIAL empty view (EMPTY_ROI_VIEW net) shows NO Retry before first load", async () => {
+		// EMPTY_ROI_VIEW.net is the initial/empty state (computed:false). It must not show a Retry.
+		const initial: RoiView = { ...EMPTY_ROI_VIEW, savings: { ...EMPTY_ROI_VIEW.savings, status: "absent" } };
+		await mountPage(mockWire(initial));
+		expect(el('[data-testid="net-retry"]'), "no Retry on the initial empty view").toBeNull();
+	});
+});
 
 describe("e-AC-6: billing-unreachable dashes the line + the net and offers a scoped Retry", () => {
 	it("the net is NOT computed; a Retry button is present and re-reads the view", async () => {
@@ -488,6 +536,12 @@ describe("e-AC-14: per-user is shown ONLY when perUserAvailable; else a 'require
 		expect(empty, "the per-user-requires-login empty state shows").not.toBeNull();
 		expect(empty?.textContent).toContain("Per-user requires verified login");
 		expect(empty?.textContent).not.toContain("$0");
+		// Finding (peruser-leak / e-AC-14): the gate MUST short-circuit BEFORE any agent row renders.
+		// NO `rollup-row-agent-*` row and NO agent label/figure may leak in this gated state.
+		expect(el('[data-testid="rollup-row-agent-claude-code"]'), "no agent row leaks while gated").toBeNull();
+		expect(container.querySelector('[data-testid^="rollup-row-agent-"]'), "no agent row at all").toBeNull();
+		// The agent label "Claude Code" (the per-user figure's name) must not appear in the rollup region.
+		expect(el('[data-testid="rollup-agent"]')?.textContent ?? "").not.toContain("Claude Code");
 	});
 
 	it("with the flag true, the agent rollup does NOT show the empty state", async () => {

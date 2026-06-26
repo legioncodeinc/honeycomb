@@ -78,6 +78,27 @@ describe("d-AC-1: skillify usage meter accumulation", () => {
 		expect(snap.inputTokens).toBe(0);
 		expect(snap.model).toBeUndefined();
 	});
+
+	// Finding (meter-per-model): tokens are tracked PER MODEL so a router/model swap mid-run does not
+	// mis-price history at the last-seen model.
+	it("accumulates token sums PER MODEL (a model swap mid-run keeps separate buckets)", () => {
+		const meter = createSkillifyUsageMeter();
+		meter.record(report({ model: "claude-haiku-4-5", inputTokens: 100, outputTokens: 10, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 }));
+		meter.record(report({ model: "claude-sonnet-4-6", inputTokens: 200, outputTokens: 20, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 }));
+		meter.record(report({ model: "claude-haiku-4-5", inputTokens: 50, outputTokens: 5, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 }));
+
+		const snap = meter.snapshot();
+		// Aggregate sums are still exposed (back-compat display).
+		expect(snap.inputTokens).toBe(350);
+		expect(snap.recorded).toBe(3);
+		// Per-model buckets keep each model distinct.
+		expect(snap.perModel).toBeDefined();
+		const byModel = Object.fromEntries((snap.perModel ?? []).map((b) => [b.model, b]));
+		expect(byModel["claude-haiku-4-5"]?.inputTokens).toBe(150); // 100 + 50
+		expect(byModel["claude-haiku-4-5"]?.recorded).toBe(2);
+		expect(byModel["claude-sonnet-4-6"]?.inputTokens).toBe(200);
+		expect(byModel["claude-sonnet-4-6"]?.recorded).toBe(1);
+	});
 });
 
 describe("d-AC-1: snapshot sources for the composer", () => {

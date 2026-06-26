@@ -529,3 +529,55 @@ describe("PRD-060f shared spend ledger + teams roster", () => {
 		expect(TEAM_ACTIVE).toBe(1);
 	});
 });
+
+
+describe("CodeRabbit findings: team-active ordering, canonical tie-break, isolated fail-closed, project scope", () => {
+	// Finding (team-active-order): pick the LATEST version FIRST, THEN apply `active`. A newer
+	// deactivation (active=0) row must mean NO team_id resolves, even though an older active row exists.
+	it("a newer active=0 row means NO team_id resolves (latest version wins before the active check)", async () => {
+		// The resolver's query ANDs active=1 with `version = (SELECT MAX(version) ...)`. The fake returns
+		// rows that satisfy the WHOLE predicate; a backend honoring the subquery returns none when the
+		// MAX-version row is inactive. We assert the SQL shape that enforces the order.
+		const fake = new FakeDeepLakeTransport();
+		fake.enqueueRows([]); // backend: latest version is active=0 -> the active+MAX(version) predicate matches nothing
+		const resolved = await resolveTeamId(client(fake), SCOPE, "agent-A");
+		expect(resolved).toBe(""); // no active latest -> unassigned, never a stale active row.
+		const sql = fake.requests[0].sql;
+		// The active check is ANDed with a MAX(version) subquery for the SAME (member_type, member_id)
+		// pair, so version is resolved BEFORE active is applied (not active-filtered then ordered).
+		expect(sql).toMatch(/active = 1/);
+		expect(sql).toMatch(/MAX\(version\)/i);
+		expect(sql).toMatch(/version = \(SELECT MAX\(version\)/i);
+		// It no longer relies on ORDER BY version DESC LIMIT 1 AFTER an active filter (the buggy form).
+		expect(sql).not.toMatch(/active = 1 ORDER BY version DESC LIMIT 1/i);
+	});
+
+	// Finding (canonical-tie): two re-price rows with the SAME created_at must not BOTH survive. The
+	// NOT EXISTS predicate adds an `id` tie-breaker so exactly one row (greatest id) is canonical.
+	it("the canonical-row NOT EXISTS carries a stable id tie-breaker for equal created_at", async () => {
+		const fake = new FakeDeepLakeTransport();
+		fake.enqueueRows([{ id: "roi-2", session_id: "s1", created_at: "t1", agent_id: "agent-A" }]);
+		await readRoiMetrics(client(fake), SCOPE, { agentId: "agent-A", readPolicy: "isolated" });
+		const sql = fake.requests[0].sql;
+		// On a created_at tie, the greater id wins -> deterministic, no double-count.
+		expect(sql).toMatch(/n\.created_at = m\.created_at AND n\.id > m\.id/);
+		expect(sql).toMatch(/n\.created_at > m\.created_at/);
+	});
+
+	// Finding (isolated-agentid): an isolated read with NO agent to pin to FAILS CLOSED to a guarded
+	// false (no rows), never `agent_id = ''` and never a filter on the org id.
+	it("isolated with a blank agent id is a guarded-false predicate (no rows), not agent_id = ''", () => {
+		const blank = buildRoiReadScopeSql({ agentId: "", readPolicy: "isolated" });
+		expect(blank.policyApplied).toBe("isolated");
+		expect(blank.sql).not.toMatch(/agent_id = ''/); // never matches the empty-agent rows.
+		expect(blank.sql).toMatch(/'1' = '0'/); // a guarded always-false predicate => empty result.
+	});
+
+	// Finding (project-scope): a selected project narrows the ledger read to roi_metrics.project_id.
+	it("a selected projectId narrows the ledger read to roi_metrics.project_id", async () => {
+		const fake = new FakeDeepLakeTransport();
+		fake.enqueueRows([{ id: "r1", agent_id: "agent-A", session_id: "s1", created_at: "t1", project_id: "proj-X" }]);
+		await readRoiMetrics(client(fake), SCOPE, { agentId: "agent-A", readPolicy: "shared", projectId: "proj-X" });
+		expect(fake.requests[0].sql).toMatch(/m\.project_id = 'proj-X'/);
+	});
+});

@@ -79,6 +79,12 @@ function unreachableInfra(): InfraCostReadModel {
 	return { status: "unreachable", missing: ["/billing/summary", "/billing/usage/compute"], sessionTypes: [], fetchedAt: 1 };
 }
 
+/** A PARTIAL infra snapshot (060c `partial`) - some billing endpoints read, some missing. */
+function partialInfra(totalCents = 1234): InfraCostReadModel {
+	const ok = okInfra(totalCents);
+	return { ...ok, status: "partial", missing: ["/billing/usage/compute"] };
+}
+
 /** A measured usage snapshot so the Haiku half is `measured` (a real token figure). */
 function measuredUsage() {
 	return snapshotSource({
@@ -285,5 +291,80 @@ describe("PRD-060e composite ROI read-model (daemon data half)", () => {
 			{ org_id: "o1", team_id: "team-A", agent_id: "ag-1", project_id: "p", measured_cache_savings_cents: 100, modeled_savings_cents: 0, infra_cost_cents: 10, gross_cost_cents: 0, cost_basis: "measured" },
 		] as never);
 		expect(single.every((r) => !r.mixedBasis)).toBe(true);
+	});
+});
+
+
+describe("CodeRabbit findings: net-all-ok gate, isolated fail-closed, ordered sample, project scope", () => {
+	// Finding (net-status): the confident net (status ok, computed true) is emitted ONLY when ALL THREE
+	// inputs are FULLY `ok` -- a `partial` cost is NOT good enough (it would understate the bill).
+	it("net is NOT ok/computed when any input is merely `partial` (only all-ok qualifies)", () => {
+		// Infra partial -> net not computed even though savings + pollination are ok.
+		const infraPartial = assembleRoiView({
+			turns: [turn(), turn(), turn()],
+			infra: partialInfra(),
+			usage: measuredUsage(),
+			ledger: ledgerOk([]),
+			readPolicy: "shared",
+		});
+		expect(infraPartial.infra.status).toBe("partial");
+		expect(infraPartial.net.computed).toBe(false);
+		expect(infraPartial.net.status).not.toBe("ok");
+		expect(infraPartial.net.status).toBe("partial"); // reflects the partial input.
+
+		// All three ok -> net IS ok + computed.
+		const allOk = assembleRoiView({
+			turns: [turn(), turn(), turn()],
+			infra: okInfra(),
+			usage: measuredUsage(),
+			ledger: ledgerOk([]),
+			readPolicy: "shared",
+		});
+		expect(allOk.net.status).toBe("ok");
+		expect(allOk.net.computed).toBe(true);
+	});
+
+	// Finding (isolated-agentid): an `isolated` read with NO agent id does NOT filter on the org id and
+	// returns no ledger rows (fails closed) rather than the wrong rows.
+	it("isolated read with no agent id fails closed: the ledger SQL is not pinned to the org id", async () => {
+		const fake = new FakeDeepLakeTransport((req: TransportRequest) => {
+			if (/FROM\s+"roi_metrics"/i.test(req.sql)) return [{ org_id: "o1", agent_id: "agent-A", session_id: "s1", created_at: "t1", measured_cache_savings_cents: 10, cost_basis: "measured" }];
+			return [];
+		});
+		// No agentId provided + isolated policy.
+		const view = await fetchRoiView(client(fake), SCOPE, { readPolicy: "isolated" });
+		const ledgerSql = fake.requests.find((r) => /FROM\s+"roi_metrics"/i.test(r.sql))?.sql ?? "";
+		// NEVER filters on the org id, and never `agent_id = ''` -- it is a guarded-false predicate.
+		expect(ledgerSql).not.toMatch(/agent_id = 'o1'/);
+		expect(ledgerSql).not.toMatch(/agent_id = ''/);
+		expect(ledgerSql).toMatch(/'1' = '0'/); // fail-closed empty predicate.
+		// The rollups are empty (no rows admitted by the fail-closed predicate would be returned).
+		expect(view.scopedAcrossDevices).toBe(false);
+	});
+
+	// Finding (unordered-limit): the capped savings read carries a deterministic ORDER BY so the bounded
+	// sample is stable across reads (newest turns), not an arbitrary backend slice.
+	it("the savings read is a deterministically-ordered, capped sample (ORDER BY ... LIMIT)", async () => {
+		const fake = new FakeDeepLakeTransport((req: TransportRequest) => {
+			if (/FROM\s+"sessions"/i.test(req.sql)) return [];
+			return [];
+		});
+		await fetchRoiView(client(fake), SCOPE, { readPolicy: "shared" });
+		const sessionsSql = fake.requests.find((r) => /FROM\s+"sessions"/i.test(r.sql))?.sql ?? "";
+		expect(sessionsSql).toMatch(/ORDER BY\s+"?creation_date"?\s+DESC/i);
+		expect(sessionsSql).toMatch(/LIMIT\s+\d+/i);
+		// The ORDER BY precedes the LIMIT (a stable cap, not an arbitrary slice).
+		expect(sessionsSql.search(/ORDER BY/i)).toBeLessThan(sessionsSql.search(/LIMIT/i));
+	});
+
+	// Finding (project-scope): a project-scoped request narrows BOTH the savings read (sessions) AND the
+	// ledger read (roi_metrics) to the selected project_id.
+	it("a project-scoped request narrows BOTH the sessions and roi_metrics reads to the project", async () => {
+		const fake = new FakeDeepLakeTransport((req: TransportRequest) => []);
+		await fetchRoiView(client(fake), SCOPE, { readPolicy: "shared", projectId: "proj-X", agentId: "agent-A" });
+		const sessionsSql = fake.requests.find((r) => /FROM\s+"sessions"/i.test(r.sql))?.sql ?? "";
+		const ledgerSql = fake.requests.find((r) => /FROM\s+"roi_metrics"/i.test(r.sql))?.sql ?? "";
+		expect(sessionsSql).toMatch(/project_id = 'proj-X'/);
+		expect(ledgerSql).toMatch(/m\.project_id = 'proj-X'/);
 	});
 });

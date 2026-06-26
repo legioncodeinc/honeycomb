@@ -56,6 +56,29 @@ export interface SkillifyUsageSnapshot {
 	readonly cacheCreationInputTokens: number;
 	/** The model id the metered calls ran against (the 060b rate-table key); `undefined` until first record. */
 	readonly model?: string;
+	/**
+	 * Finding (meter-per-model): the per-MODEL token buckets. The aggregate token sums above are kept for
+	 * back-compat display, but pricing MUST use this so a router/model swap mid-run prices each model's
+	 * tokens at ITS OWN rate (the prior single-`model` field mis-priced all accumulated tokens at the
+	 * last-seen model). One entry per distinct model id seen; empty until the first record.
+	 */
+	readonly perModel?: readonly SkillifyUsageBucket[];
+}
+
+/** One per-model token bucket (Finding meter-per-model) — the unit the composer prices at its own rate. */
+export interface SkillifyUsageBucket {
+	/** The model id these tokens were billed against (the 060b rate-table key). */
+	readonly model: string;
+	/** How many calls for THIS model were metered. */
+	readonly recorded: number;
+	/** Sum input tokens for this model. */
+	readonly inputTokens: number;
+	/** Sum output tokens for this model. */
+	readonly outputTokens: number;
+	/** Sum cache-read tokens for this model. */
+	readonly cacheReadInputTokens: number;
+	/** Sum cache-write (cache-creation) tokens for this model. */
+	readonly cacheCreationInputTokens: number;
 }
 
 /** One usage record the meter ingests (the transport's {@link UsageReport}, re-exported for the seam). */
@@ -100,6 +123,13 @@ export function createSkillifyUsageMeter(): SkillifyUsageMeter {
 	let cacheReadInputTokens = 0;
 	let cacheCreationInputTokens = 0;
 	let model: string | undefined;
+	// Finding (meter-per-model): accumulate token sums PER MODEL id (insertion order preserved) so the
+	// composer can price each model's tokens at its own 060b rate. The aggregate sums above stay for
+	// back-compat display; pricing reads `perModel`.
+	const perModel = new Map<
+		string,
+		{ recorded: number; inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number }
+	>();
 
 	/** Clamp a reported count to a non-negative integer (defensive; the transport already does this). */
 	const clamp = (n: number): number => (Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0);
@@ -107,13 +137,27 @@ export function createSkillifyUsageMeter(): SkillifyUsageMeter {
 	return {
 		record(report: SkillifyUsageRecord): void {
 			recorded += 1;
-			inputTokens += clamp(report.inputTokens);
-			outputTokens += clamp(report.outputTokens);
-			cacheReadInputTokens += clamp(report.cacheReadInputTokens);
-			cacheCreationInputTokens += clamp(report.cacheCreationInputTokens);
-			if (report.model.length > 0) model = report.model;
+			const ci = clamp(report.inputTokens);
+			const co = clamp(report.outputTokens);
+			const cr = clamp(report.cacheReadInputTokens);
+			const cc = clamp(report.cacheCreationInputTokens);
+			inputTokens += ci;
+			outputTokens += co;
+			cacheReadInputTokens += cr;
+			cacheCreationInputTokens += cc;
+			if (report.model.length > 0) {
+				model = report.model;
+				const b = perModel.get(report.model) ?? { recorded: 0, inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
+				b.recorded += 1;
+				b.inputTokens += ci;
+				b.outputTokens += co;
+				b.cacheReadInputTokens += cr;
+				b.cacheCreationInputTokens += cc;
+				perModel.set(report.model, b);
+			}
 		},
 		snapshot(): SkillifyUsageSnapshot {
+			const buckets: SkillifyUsageBucket[] = [...perModel.entries()].map(([m, b]) => ({ model: m, ...b }));
 			return {
 				recorded,
 				inputTokens,
@@ -121,6 +165,7 @@ export function createSkillifyUsageMeter(): SkillifyUsageMeter {
 				cacheReadInputTokens,
 				cacheCreationInputTokens,
 				...(model !== undefined ? { model } : {}),
+				...(buckets.length > 0 ? { perModel: buckets } : {}),
 			};
 		},
 		reset(): void {
@@ -130,6 +175,7 @@ export function createSkillifyUsageMeter(): SkillifyUsageMeter {
 			cacheReadInputTokens = 0;
 			cacheCreationInputTokens = 0;
 			model = undefined;
+			perModel.clear();
 		},
 	};
 }

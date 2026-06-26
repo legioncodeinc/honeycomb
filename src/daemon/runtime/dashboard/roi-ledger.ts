@@ -117,12 +117,22 @@ export async function resolveTeamId(
 	const memberType = sqlIdent("member_type");
 	const memberId = sqlIdent("member_id");
 	const activeCol = sqlIdent("active");
+	const versionCol = sqlIdent("version");
+	// Finding (team-active-order): pick the LATEST-version row for this (member_type, member_id) pair
+	// FIRST, THEN apply the `active` check. The prior form filtered `active = 1` BEFORE ordering, so a
+	// later DEACTIVATION row (a newer version with active=0) was skipped and a STALE active row still
+	// resolved a team_id. The version-resolution is an inner subquery (the latest version for the pair);
+	// the outer SELECT returns the team_id only when THAT latest row is active. Every value SQL-guarded.
 	const sql =
-		`SELECT team_id FROM "${tbl}" ` +
+		`SELECT team_id FROM "${tbl}" AS t ` +
 		`WHERE ${memberType} = ${sLiteral("agent")} ` +
 		`AND ${memberId} = ${sLiteral(agentId)} ` +
 		`AND ${activeCol} = ${TEAM_ACTIVE} ` +
-		"ORDER BY version DESC LIMIT 1";
+		`AND ${versionCol} = (` +
+		`SELECT MAX(${versionCol}) FROM "${tbl}" AS u ` +
+		`WHERE u.${memberType} = ${sLiteral("agent")} AND u.${memberId} = ${sLiteral(agentId)}` +
+		`) ` +
+		`LIMIT 1`;
 
 	let res: QueryResult;
 	try {
@@ -324,6 +334,11 @@ export type RoiReadResult =
 export interface RoiReadInput {
 	/** The requesting agent (scopes an `isolated` read to its own rows). */
 	readonly agentId: string;
+	/**
+	 * PRD-049e -- the SELECTED project to narrow the read to (`roi_metrics.project_id`). ABSENT/blank
+	 * => no project filter (workspace-wide, back-compat). ANDed in alongside the read-policy scope.
+	 */
+	readonly projectId?: string;
 	/** The read policy. `isolated` → own rows only; `shared` → workspace-wide (f-AC-13). */
 	readonly readPolicy: string;
 }
@@ -351,11 +366,20 @@ export function buildRoiReadScopeSql(
 	// Both the alias and the column route through `sqlIdent` so neither is raw.
 	const agentCol = tableAlias !== undefined ? `${sqlIdent(tableAlias)}.${sqlIdent("agent_id")}` : sqlIdent("agent_id");
 	const ownSql = `${agentCol} = ${sLiteral(input.agentId)}`;
+	// Finding (isolated-agentid): a BLANK agent id has no own-rows to scope to. The dashboard layer has
+	// no real agent identity to fall back on (the org id is a TENANT id, not an agent id), so an
+	// `isolated` read with no agent FAILS CLOSED to a guarded-FALSE predicate (empty result) rather than
+	// matching the empty-agent rows or silently filtering on the org. `shared` is unaffected (it admits
+	// all workspace rows regardless of agent).
+	const noRows = `(${sLiteral("1")} = ${sLiteral("0")})`;
 	const policy = asReadPolicy(input.readPolicy);
 
 	// Fail-closed: missing/malformed agent id OR unknown policy → isolated (own-only).
 	if (input.agentId.trim() === "" || policy === null || policy === "isolated") {
-		return { sql: `(${ownSql})`, policyApplied: "isolated" };
+		// Fail-closed: an `isolated` read with NO agent to pin to returns NO rows (guarded false),
+		// never the empty-agent rows and never a filter on the org id.
+		const ownClause = input.agentId.trim() === "" ? noRows : ownSql;
+		return { sql: `(${ownClause})`, policyApplied: "isolated" };
 	}
 	if (policy === "shared") {
 		// Workspace-wide: the outer-ring QueryScope partition already bounds rows to this
@@ -386,14 +410,27 @@ export async function readRoiMetrics(
 	const tbl = sqlIdent("roi_metrics");
 	// Qualify the scope predicate against the `m` self-join alias (f-AC-13).
 	const { sql: scopeSql } = buildRoiReadScopeSql(input, "m");
+	// Finding (project-scope): when a SELECTED project is present (PRD-049e), narrow the ledger read to
+	// that project's rows (`m.project_id = '<sel>'`) so switching projects re-scopes the rollups. ABSENT
+	// => no project conjunct (workspace-wide, back-compat). The value routes through `sLiteral`.
+	const projectClause =
+		input.projectId !== undefined && input.projectId.trim() !== ""
+			? ` AND ${sqlIdent("m")}.${sqlIdent("project_id")} = ${sLiteral(input.projectId.trim())}`
+			: "";
 	// Canonical per session_id = MAX(created_at): keep a row iff no newer row shares its
 	// session_id. The original re-priced row is RETAINED on disk (auditable), just not
 	// returned here.
+	// Finding (canonical-tie): the NOT EXISTS keeps a row iff no NEWER row shares its session_id. Two
+	// re-price rows with the SAME `created_at` would BOTH survive (each sees the other as not-greater)
+	// and double-count. Add a stable tie-breaker on `id`: a row is superseded when another shares its
+	// session_id and has either a greater `created_at`, OR the same `created_at` AND a greater `id`. So
+	// on a created_at tie exactly ONE row (the lexicographically-greatest id) survives -- deterministic.
 	const sql =
 		`SELECT m.* FROM "${tbl}" AS m ` +
-		`WHERE ${scopeSql} ` +
+		`WHERE ${scopeSql}${projectClause} ` +
 		`AND NOT EXISTS (SELECT 1 FROM "${tbl}" AS n ` +
-		`WHERE n.session_id = m.session_id AND n.created_at > m.created_at)`;
+		`WHERE n.session_id = m.session_id ` +
+		`AND (n.created_at > m.created_at OR (n.created_at = m.created_at AND n.id > m.id)))`;
 
 	let res: QueryResult;
 	try {

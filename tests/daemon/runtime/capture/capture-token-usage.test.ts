@@ -146,6 +146,49 @@ function insertSql(fake: FakeDeepLakeTransport): string {
 	return insert?.sql ?? "";
 }
 
+/**
+ * Parse an INSERT INTO "sessions" (cols) VALUES (vals) into a column->value map so a test can tie an
+ * assertion to a SPECIFIC column slot (not a free-floating substring an unrelated value could satisfy).
+ */
+function insertColumnValues(sql: string): Record<string, string> {
+	const m = /INSERT INTO "sessions" \(([^)]*)\) VALUES \((.*)\)\s*$/s.exec(sql);
+	if (m === null) return {};
+	const cols = m[1].split(",").map((c) => c.trim());
+	const vals: string[] = [];
+	let depth = 0;
+	let inStr = false; // inside a single-quoted SQL string literal (skip commas there)
+	let cur = "";
+	const body = m[2];
+	for (let i = 0; i < body.length; i++) {
+		const ch = body[i];
+		if (ch === "'") {
+			// A doubled '' is an escaped quote INSIDE the string, not a terminator.
+			if (inStr && body[i + 1] === "'") {
+				cur += "''";
+				i++;
+				continue;
+			}
+			inStr = !inStr;
+			cur += ch;
+			continue;
+		}
+		if (!inStr && ch === "(") depth++;
+		if (!inStr && ch === ")") depth--;
+		if (!inStr && ch === "," && depth === 0) {
+			vals.push(cur.trim());
+			cur = "";
+		} else {
+			cur += ch;
+		}
+	}
+	if (cur.trim() !== "") vals.push(cur.trim());
+	const out: Record<string, string> = {};
+	cols.forEach((c, i) => {
+		out[c] = vals[i] ?? "";
+	});
+	return out;
+}
+
 describe("PRD-060a a-AC-5: token counts persist on the SAME append-only INSERT as the turn", () => {
 	it("a-AC-5 the four counts ride the one INSERT — no second write, no UPDATE", async () => {
 		const { daemon, fake } = buildDaemon();
@@ -179,8 +222,11 @@ describe("PRD-060a a-AC-5: token counts persist on the SAME append-only INSERT a
 		// The cache columns are present and carry the literal 0 (a real measurement), NOT NULL/absent.
 		expect(sql).toMatch(/cache_read_input_tokens/);
 		expect(sql).toMatch(/cache_creation_input_tokens/);
-		// Pull the VALUES tuple and assert the measured zeros are inlined.
-		expect(sql).toMatch(/VALUES\s*\(.*\b0\b.*\)/s);
+		// Finding (zero-assert): tie the measured-zero to the SPECIFIC cache column slots. The old
+		// VALUES(...0...) match could false-pass on an unrelated 0 (e.g. the "0.1.0" pluginVersion).
+		const cv = insertColumnValues(sql);
+		expect(cv.cache_read_input_tokens, "cache_read slot carries a literal 0").toBe("0");
+		expect(cv.cache_creation_input_tokens, "cache_creation slot carries a literal 0").toBe("0");
 	});
 });
 
@@ -209,6 +255,19 @@ describe("PRD-060a a-AC-6: absent usage → NULL token columns, never a silent 0
 		expect(sql).toContain("42");
 	});
 
+	// Finding (empty-usage): an EMPTY usage block (usage: {}) carries no information and must NOT
+	// persist a distinct "present but empty" usage -- it round-trips with the token columns ABSENT.
+	it("empty-usage: an empty usage block writes NO token columns (round-trips ABSENT)", async () => {
+		const { daemon, fake } = buildDaemon();
+		const res = await post(daemon, assistantBody({}));
+		expect(res.status).toBe(201);
+		const sql = insertSql(fake);
+		expect(sql).not.toMatch(/input_tokens/);
+		expect(sql).not.toMatch(/output_tokens/);
+		expect(sql).not.toMatch(/cache_read_input_tokens/);
+		expect(sql).not.toMatch(/cache_creation_input_tokens/);
+	});
+
 	it("a-AC-6 a non-assistant turn (user_message) carries no token columns", async () => {
 		const { daemon, fake } = buildDaemon();
 		await post(daemon, {
@@ -227,7 +286,11 @@ describe("PRD-060a a-AC-7: every Claude-Code-captured row carries source_tool='c
 		await post(daemon, assistantBody({ input: 1 }));
 		const sql = insertSql(fake);
 		expect(sql).toMatch(/source_tool/);
-		expect(sql).toContain("claude-code");
+		// Finding (source-tool-assert): tie the value to the source_tool COLUMN slot. The `agent`
+		// metadata value is ALSO "claude-code", so a bare toContain passes even if source_tool were
+		// never written -- assert the source_tool slot specifically carries the discriminant.
+		const cv = insertColumnValues(sql);
+		expect(cv.source_tool, "source_tool slot carries the claude-code discriminant").toBe("'claude-code'");
 	});
 });
 

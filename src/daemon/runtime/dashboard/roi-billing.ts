@@ -185,7 +185,12 @@ export const ComputeSessionSchema = z.object({
 	gpu_hours: numberField,
 	gpu_units: numberField,
 	price_cents_per_gpu_hour: centsField,
-	total_cost_cents: centsField,
+	// Finding (billing-zero): keep `total_cost_cents` OPTIONAL/nullish so a MISSING field (absent on the
+	// wire) stays `undefined` and is distinguishable from a legitimate explicit `0` (a free session). The
+	// `.catch(undefined)` keeps a present-but-malformed value from throwing while NOT collapsing it to 0
+	// -- `buildSessionTypeBreakdown` derives a cost ONLY when the field is truly absent, never over an
+	// explicit 0 (which would overwrite a legitimately-free session with gpu_hours x price).
+	total_cost_cents: centsField.optional().nullable().catch(undefined),
 });
 export type ComputeSession = z.infer<typeof ComputeSessionSchema>;
 
@@ -313,7 +318,11 @@ function resolveBillingApiUrl(creds: DiskCredentials): string {
 function buildSessionTypeBreakdown(usage: ComputeUsage): SessionTypeLine[] {
 	return usage.sessions.map((s) => {
 		const derived = Math.round(s.gpu_hours * s.price_cents_per_gpu_hour);
-		const cost_cents = s.total_cost_cents > 0 ? s.total_cost_cents : derived;
+		// Finding (billing-zero): derive `gpu_hours x price` ONLY when the upstream `total_cost_cents` is
+		// truly ABSENT (`null`/`undefined`). A present explicit `0` (a legitimately-free session) is
+		// PRESERVED verbatim, never recomputed -- the prior `> 0` test collapsed a real 0 into a derived
+		// cost and overstated the bill.
+		const cost_cents = s.total_cost_cents !== undefined && s.total_cost_cents !== null ? s.total_cost_cents : derived;
 		return {
 			session_type: s.session_type,
 			gpu_hours: s.gpu_hours,

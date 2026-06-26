@@ -122,6 +122,28 @@ describe("PRD-060e/060f per-session ROI writer (the summary/skillify completion 
 		expect(fake.requests.filter((r) => /FROM\s+"sessions"/i.test(r.sql))).toHaveLength(0);
 	});
 
+	// Finding (path-fallback): the turns read filters the `path` column. A BLANK path -- even with a
+	// non-blank sessionId -- must SKIP + log, NEVER fall back to querying WHERE path = '<sessionId>'.
+	it("skips (logs roi.write.skipped) when path is blank even if sessionId is present -- never an unscoped read", async () => {
+		const events: { name: string; fields?: Record<string, unknown> }[] = [];
+		const fake = new FakeDeepLakeTransport(() => []);
+		const writer = createRoiSessionWriter({
+			storage: client(fake),
+			scope: SCOPE,
+			clock: CLOCK,
+			logger: { event: (name, fields) => events.push({ name, fields }) },
+		});
+		// Non-blank sessionId, BLANK path.
+		await writer.writeForSession({ sessionId: "sess-only", path: "", agentId: "a" });
+		// NO sessions read (the writer never queried WHERE path = 'sess-only') and NO INSERT.
+		expect(fake.requests.filter((r) => /FROM\s+"sessions"/i.test(r.sql))).toHaveLength(0);
+		expect(fake.requests.filter((r) => /^INSERT INTO "roi_metrics"/.test(r.sql))).toHaveLength(0);
+		// It logged the skip with the blank-path reason.
+		const skip = events.find((e) => e.name === "roi.write.skipped");
+		expect(skip, "roi.write.skipped emitted").toBeDefined();
+		expect(skip?.fields?.reason).toBe("blank path");
+	});
+
 	// ── the skillify worker fires the writer EXACTLY ONCE on a successful run ──────────────────────
 	it("the skillify worker fires the ROI writer once at completion (with the session's id/path/agent)", async () => {
 		const calls: RoiSessionWriteInput[] = [];
@@ -157,6 +179,44 @@ describe("PRD-060e/060f per-session ROI writer (the summary/skillify completion 
 		expect(calls[0]?.sessionId).toBe("sess-W");
 		expect(calls[0]?.path).toBe("conv-W");
 		expect(calls[0]?.agentId).toBe("agent-A");
+	});
+
+	// Finding (worker-trycatch): a THROWING roiWriter must NOT fail the skillify job. The skill write +
+	// watermark advance already succeeded, so the job COMPLETES and the throw is caught + logged.
+	it("a throwing roiWriter does NOT fail the skillify job (the job still completes)", async () => {
+		const events: string[] = [];
+		const throwingRoiWriter: RoiSessionWriter = {
+			async writeForSession(): Promise<void> {
+				throw new Error("roi ledger flap");
+			},
+		};
+		const queue = fakeQueue();
+		const store = fakeSkillStore();
+		await queue.enqueue(skillifyJob("sess-T", "conv-T"));
+
+		const worker = createSkillifyJobWorker({
+			queue,
+			storage: UNUSED_STORAGE,
+			scope: SCOPE,
+			gateSpec: { command: "noop", args: [] },
+			lock: { acquire: () => ({ release: () => {} }) },
+			watermark: { read: () => null, advance: () => null },
+			author: "agent-A",
+			gateOverride: createFakeGateCli(keepVerdict()),
+			fetcherOverride: fakeFetcher(sixPairs("conv-T", "sess-T")),
+			storeOverride: store,
+			roiWriter: throwingRoiWriter,
+			logger: { event: (name) => events.push(name) },
+		});
+
+		const processed = await worker.runOnce();
+		expect(processed).toBe(true);
+		// The job COMPLETED (not failed) despite the ROI-write throw -- it was caught + logged.
+		expect(queue.completed).toHaveLength(1);
+		expect(queue.failed).toHaveLength(0);
+		expect(events).toContain("skillify.worker.roi_write_failed");
+		// The skill was still written (the real work succeeded before the ROI write).
+		expect(store.rows.length).toBeGreaterThan(0);
 	});
 });
 

@@ -72,7 +72,18 @@ export const TurnUsageSchema = z
 	})
 	// `.strict()` would reject a future harness adding a field; stay permissive but
 	// only the four known counts are read downstream. No unknown field is persisted.
-	.optional();
+	.optional()
+	// Finding (empty-usage): an EMPTY `usage: {}` (every field absent) carries no information and must
+	// NEVER persist as a distinct "present but empty" usage block. Normalize `{}` (or any object with no
+	// known count) -> `undefined`, so the "no-usage turn round-trips with the field ABSENT" behavior is
+	// preserved and a `{}` never reaches the row. A block with at least one of input/output/cacheRead/
+	// cacheCreation passes through unchanged.
+	.transform((u) =>
+		u !== undefined &&
+		(u.input !== undefined || u.output !== undefined || u.cacheRead !== undefined || u.cacheCreation !== undefined)
+			? u
+			: undefined,
+	);
 
 /**
  * `user_message` — a captured user prompt (FR-2). `text` is the prompt body; it

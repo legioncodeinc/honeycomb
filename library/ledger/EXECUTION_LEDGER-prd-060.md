@@ -71,7 +71,7 @@
 | f-AC-5 | measured/modeled/allocated separate cols; `cost_basis`+`allocation_method`; mixed-basis detectable via `COUNT(DISTINCT cost_basis)>1` | OPEN |
 | f-AC-6 | `user_id` set ONLY when `verifiedClaim?.source==='backend-token'`, else `''`; git-email/$USER/OS never consulted | OPEN |
 | f-AC-7 | No historical backfill: pre-claim rows keep `user_id=''` forever | OPEN |
-| f-AC-8 | `teams` table `scope:"tenant"`, version-bumped, one row/(team,member), `member_type` agent|user union; agent row resolves today, user row inert | OPEN |
+| f-AC-8 | `teams` table `scope:"tenant"`, version-bumped, one row/(team,member), `member_type` agent\|user union; agent row resolves today, user row inert | OPEN |
 | f-AC-9 | `team_id` resolved at write time by roster lookup; assigned->resolved, unassigned->`''`, fail-soft never throws | OPEN |
 | f-AC-10 | Additive-heal: every NOT NULL col has DEFAULT; both tables heal onto legacy dataset; missing table/col -> "shared ledger absent", daemon boots | OPEN |
 | f-AC-11 | SQL-guarded writes via `sqlStr`/`sqlLike`/`sqlIdent` under active QueryScope; no raw interpolation | OPEN |

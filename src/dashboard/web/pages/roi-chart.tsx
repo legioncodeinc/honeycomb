@@ -33,30 +33,49 @@ function seriesColor(label: string, modeled: boolean): string {
 	return modeled ? "var(--severity-warning)" : "var(--verified)";
 }
 
-/** The max cents across every point of every series (the shared y-scale; ≥1 so we never divide by 0). */
-function seriesMaxCents(series: readonly RoiTrendSeries[]): number {
-	let max = 1;
+/**
+ * The cents range [min, max] across every point of every series, ALWAYS including 0 so the zero axis is
+ * on-scale (pure, exported for tests). Finding (chart-negative): net trend CAN be negative (PRD), so the
+ * scale must span both negative and positive cents -- the prior max-only/clamp-to-0 flattened loss
+ * periods onto the baseline. `min <= 0 <= max` is guaranteed (0 is folded in), and `max > min` is
+ * guaranteed (a degenerate all-zero series widens to [0, 1]) so we never divide by 0.
+ */
+export function seriesCentsRange(series: readonly RoiTrendSeries[]): { min: number; max: number } {
+	let min = 0;
+	let max = 0;
 	for (const s of series) {
 		for (const p of s.points) {
+			if (p.cents < min) min = p.cents;
 			if (p.cents > max) max = p.cents;
 		}
 	}
-	return max;
+	// Degenerate (all points exactly 0, or no points): widen so max > min and the divide is safe.
+	if (max === min) max = min + 1;
+	return { min, max };
+}
+
+/** The viewBox y-coordinate of the ZERO line for a given range (where the baseline is drawn). */
+export function zeroBaselineY(range: { min: number; max: number }): number {
+	const innerH = CHART_VIEW.height - PAD.top - PAD.bottom;
+	const frac = (0 - range.min) / (range.max - range.min); // fraction of the range that 0 sits at
+	return PAD.top + innerH - frac * innerH;
 }
 
 /** Map one series' points to an SVG `points` string over the bounded box (pure, exported for tests). */
-export function seriesPolylinePoints(series: RoiTrendSeries, maxCents: number): string {
+export function seriesPolylinePoints(series: RoiTrendSeries, range: { min: number; max: number }): string {
 	const pts = series.points;
 	if (pts.length === 0) return "";
 	const innerW = CHART_VIEW.width - PAD.left - PAD.right;
 	const innerH = CHART_VIEW.height - PAD.top - PAD.bottom;
-	// A single point sits at the left edge; ≥2 points spread evenly across the inner width.
+	// A single point sits at the left edge; >=2 points spread evenly across the inner width.
 	const stepX = pts.length > 1 ? innerW / (pts.length - 1) : 0;
+	const span = range.max - range.min;
 	return pts
 		.map((p, i) => {
 			const x = PAD.left + i * stepX;
-			// cents → y: higher cents sit HIGHER (smaller y). Clamp to [0, max] so a stray value never escapes.
-			const frac = Math.max(0, Math.min(1, p.cents / maxCents));
+			// cents -> y: map against the FULL [min, max] range (which includes 0). Higher cents sit
+			// HIGHER (smaller y); a NEGATIVE cents value sits BELOW the zero line, never clamped to it.
+			const frac = Math.max(0, Math.min(1, (p.cents - range.min) / span));
 			const y = PAD.top + innerH - frac * innerH;
 			return `${x.toFixed(1)},${y.toFixed(1)}`;
 		})
@@ -108,7 +127,10 @@ export function RoiTrendChart({ trend }: RoiTrendChartProps): React.JSX.Element 
 		);
 	}
 
-	const maxCents = seriesMaxCents(trend.series);
+	const range = seriesCentsRange(trend.series);
+	// Finding (chart-negative): the baseline is the ZERO crossing within the [min,max] range, not a
+	// fixed bottom edge -- so a loss period draws BELOW it and a gain ABOVE it.
+	const baselineY = zeroBaselineY(range);
 
 	return (
 		<div data-testid="roi-trend-chart">
@@ -116,14 +138,14 @@ export function RoiTrendChart({ trend }: RoiTrendChartProps): React.JSX.Element 
 				{/* Baseline (zero axis) — a quiet rule the lines sit above. */}
 				<line
 					x1={PAD.left}
-					y1={CHART_VIEW.height - PAD.bottom}
+					y1={baselineY}
 					x2={CHART_VIEW.width - PAD.right}
-					y2={CHART_VIEW.height - PAD.bottom}
+					y2={baselineY}
 					stroke="var(--border-subtle)"
 					strokeWidth="1"
 				/>
 				{trend.series.map((s) => {
-					const points = seriesPolylinePoints(s, maxCents);
+					const points = seriesPolylinePoints(s, range);
 					if (points === "") return null;
 					const color = seriesColor(s.label, s.modeled);
 					return (

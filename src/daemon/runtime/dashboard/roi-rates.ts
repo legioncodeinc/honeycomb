@@ -98,6 +98,18 @@ export const RATE_TABLE: readonly RateRow[] = Object.freeze([
 		cache_read_cents_per_mtok: anthropicCacheRate(1500, ANTHROPIC_CACHE_READ_MULTIPLIER),
 		cache_write_cents_per_mtok: anthropicCacheRate(1500, ANTHROPIC_CACHE_WRITE_MULTIPLIER),
 	}),
+	// Finding (haiku-rate): the skillify gate runs `claude-haiku-4-5` (roi-pollination.ts
+	// SKILLIFY_HAIKU_MODEL). Without its own row, `priceHaikuTokens` fell back to the Sonnet default and
+	// MIS-priced Honeycomb's own-inference cost. Anthropic Haiku per-Mtok: $1 in / $5 out; the cache
+	// columns are derived from input via the SAME 0.1x / 1.25x multipliers (the invariant a test asserts).
+	Object.freeze({
+		provider: "anthropic",
+		model: "claude-haiku-4-5",
+		input_cents_per_mtok: 100,
+		output_cents_per_mtok: 500,
+		cache_read_cents_per_mtok: anthropicCacheRate(100, ANTHROPIC_CACHE_READ_MULTIPLIER),
+		cache_write_cents_per_mtok: anthropicCacheRate(100, ANTHROPIC_CACHE_WRITE_MULTIPLIER),
+	}),
 ]);
 
 /**

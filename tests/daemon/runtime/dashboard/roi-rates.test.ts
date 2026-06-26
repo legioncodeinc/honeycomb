@@ -57,6 +57,22 @@ describe("roi-rates — the provider→model rate table (b-AC-1)", () => {
 		expect(sonnet?.cache_write_cents_per_mtok).toBe(375);
 	});
 
+	// Finding (haiku-rate): the skillify gate runs `claude-haiku-4-5`. It MUST resolve to its OWN row
+	// (not fall back to the Sonnet default) priced at $1 in / $5 out, with the cache columns derived from
+	// input via the same 0.1x / 1.25x multipliers.
+	it("prices claude-haiku-4-5 at its OWN row (not the Sonnet fallback)", () => {
+		const haiku = rateRowFor("anthropic", "claude-haiku-4-5");
+		expect(haiku).toBeDefined();
+		expect(haiku?.input_cents_per_mtok).toBe(100);
+		expect(haiku?.output_cents_per_mtok).toBe(500);
+		expect(haiku?.cache_read_cents_per_mtok).toBe(10); // 0.1x input
+		expect(haiku?.cache_write_cents_per_mtok).toBe(125); // 1.25x input
+		// resolveRate returns the Haiku row itself, NOT the Sonnet default.
+		const resolved = resolveRate("anthropic", "claude-haiku-4-5");
+		expect(resolved.model).toBe("claude-haiku-4-5");
+		expect(resolved).not.toBe(defaultRateRow()); // distinct object => not the Sonnet fallback.
+	});
+
 	it("b-AC-6: every rate column is an INTEGER cent (no float column)", () => {
 		for (const row of RATE_TABLE) {
 			expect(Number.isInteger(row.input_cents_per_mtok)).toBe(true);

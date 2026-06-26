@@ -394,12 +394,23 @@ class SkillifyJobWorkerImpl implements SkillifyJobWorker {
 			// (`cost_basis:'none'` — the honest option, see roi-session-writer.ts). FAIL-SOFT by
 			// construction: `writeForSession` never throws, so an ROI-write hiccup can never fail the
 			// skillify job (it fires AFTER the skill write + watermark advance, before the job completes).
-			await this.roiWriter.writeForSession({
-				sessionId: payload.sessionId,
-				path: payload.path,
-				agentId: this.author,
-				projectId,
-			});
+			// Finding (worker-trycatch): wrap the ROI write in its OWN try/catch. It is fail-soft only by
+			// convention today; a THROWING writer would drop into the outer catch and `queue.fail` the job
+			// AFTER the skill write + watermark advance already succeeded -- failing a job whose real work
+			// is done. This guard makes the job complete regardless of an ROI-write fault.
+			try {
+				await this.roiWriter.writeForSession({
+					sessionId: payload.sessionId,
+					path: payload.path,
+					agentId: this.author,
+					projectId,
+				});
+			} catch (roiErr: unknown) {
+				this.logger?.event("skillify.worker.roi_write_failed", {
+					id: job.id,
+					reason: roiErr instanceof Error ? roiErr.message : String(roiErr),
+				});
+			}
 
 			await this.queue.complete(job.id);
 			this.logger?.event("skillify.worker.completed", {

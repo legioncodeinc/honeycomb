@@ -252,3 +252,58 @@ describe("d-AC-6: every pollination value is integer cents (no float-cents)", ()
 		}
 	});
 });
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// Finding (meter-per-model) — per-model token buckets priced at each model's own rate.
+// ════════════════════════════════════════════════════════════════════════════
+
+describe("Finding (meter-per-model): each per-model bucket is priced at its OWN model's rate", () => {
+	it("prices a multi-model snapshot by per-model bucket, not all tokens at the last-seen model", () => {
+		// 1 Mtok input for Haiku + 1 Mtok input for Sonnet, recorded across two models.
+		const snap: SkillifyUsageSnapshot = {
+			recorded: 2,
+			inputTokens: 2_000_000,
+			outputTokens: 0,
+			cacheReadInputTokens: 0,
+			cacheCreationInputTokens: 0,
+			model: "claude-sonnet-4-6", // last-seen model (the prior bug would price ALL tokens here)
+			perModel: [
+				{ model: "claude-haiku-4-5", recorded: 1, inputTokens: 1_000_000, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
+				{ model: "claude-sonnet-4-6", recorded: 1, inputTokens: 1_000_000, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
+			],
+		};
+
+		const haikuRate = resolveRate("anthropic", "claude-haiku-4-5");
+		const sonnetRate = resolveRate("anthropic", "claude-sonnet-4-6");
+		// Correct: 1 Mtok at Haiku input + 1 Mtok at Sonnet input.
+		const expectedPerModel = haikuRate.input_cents_per_mtok + sonnetRate.input_cents_per_mtok;
+		// The BUGGY single-model figure (all 2 Mtok at the last-seen Sonnet rate) is different + higher.
+		const buggySingleModel = 2 * sonnetRate.input_cents_per_mtok;
+
+		expect(priceHaikuTokens(snap)).toBe(expectedPerModel);
+		expect(priceHaikuTokens(snap)).not.toBe(buggySingleModel);
+		expect(priceHaikuTokens(snap)).toBeLessThan(buggySingleModel); // Haiku is cheaper than Sonnet.
+
+		// The composed Haiku contribution is `measured` and reflects the per-model figure; the label is
+		// "mixed" (more than one model) so the page does not imply a single model priced it.
+		const haiku = composeHaikuContribution(snap);
+		expect(haiku.status).toBe("measured");
+		expect(haiku.cents).toBe(expectedPerModel);
+		expect(haiku.model).toBe("mixed");
+	});
+
+	it("a single-model snapshot WITHOUT perModel still prices at its single model (back-compat)", () => {
+		const snap: SkillifyUsageSnapshot = {
+			recorded: 1,
+			inputTokens: 1_000_000,
+			outputTokens: 0,
+			cacheReadInputTokens: 0,
+			cacheCreationInputTokens: 0,
+			model: "claude-haiku-4-5",
+		};
+		const rate = resolveRate("anthropic", "claude-haiku-4-5");
+		expect(priceHaikuTokens(snap)).toBe(rate.input_cents_per_mtok);
+		expect(composeHaikuContribution(snap).model).toBe("claude-haiku-4-5");
+	});
+});

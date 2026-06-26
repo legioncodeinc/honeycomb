@@ -39,7 +39,7 @@ import type { Context } from "hono";
 import { sLiteral, sqlIdent } from "../../storage/sql.js";
 import { isOk, type StorageRow } from "../../storage/result.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
-import { resolveScopeOrLocalDefault } from "../scope.js";
+import { resolveRequestProject, resolveScopeOrLocalDefault } from "../scope.js";
 import type {
 	GraphView,
 	KpisView,
@@ -642,11 +642,21 @@ export async function fetchSkillSyncView(
 /** Options for {@link fetchRoiView} / {@link fetchRoiTrendView} (the scope/seam injection). */
 export interface FetchRoiOptions {
 	/**
-	 * The requesting agent the `read_policy`-scoped ledger read pins to (060f). Defaults to the
-	 * scope's org when blank (the daemon's single local agent identity, matching the skillify worker
-	 * precedent). An `isolated` policy returns only this agent's ledger rows; `shared` is workspace-wide.
+	 * The requesting agent the `read_policy`-scoped ledger read pins to (060f). An `isolated` policy
+	 * returns ONLY this agent's ledger rows; `shared` is workspace-wide. This is NO LONGER defaulted to
+	 * `scope.org`: the org id is a TENANT identifier, not an agent identity, and filtering
+	 * `roi_metrics.agent_id = <org>` would return the wrong rows (typically none). When this is absent or
+	 * blank AND the policy is `isolated`, the read FAILS CLOSED (no agent to scope to => empty), never a
+	 * silent filter on the org id. `shared` does not depend on the agent id and is unaffected.
 	 */
 	readonly agentId?: string;
+	/**
+	 * PRD-049e -- the SELECTED project the dashboard stamped via the `x-honeycomb-project` header. When
+	 * present, BOTH the savings read (sessions.project_id) AND the ledger read (roi_metrics.project_id)
+	 * narrow to it, so switching projects re-scopes the ROI figure instead of returning workspace-wide
+	 * data. ABSENT/blank => no project filter (the prior workspace-wide behaviour; back-compat).
+	 */
+	readonly projectId?: string;
 	/**
 	 * The `read_policy` the ledger read is scoped through (`isolated` | `shared` | `group`, e-AC-12).
 	 * Defaults to `shared` so the LOCAL dashboard shows the ACROSS-DEVICE aggregate (the whole point of
@@ -708,14 +718,21 @@ const ROI_SESSIONS_LIMIT = 5000;
  * only the four nullable token counts + `source_tool` (never a transcript/JSONB body). Fail-soft
  * via `selectRows` (`[]` on any non-ok result). Identifiers via `sqlIdent`; no interpolated value.
  */
-async function readCapturedTurns(storage: StorageQuery, scope: QueryScope): Promise<CapturedTurn[]> {
+async function readCapturedTurns(storage: StorageQuery, scope: QueryScope, projectId?: string): Promise<CapturedTurn[]> {
 	const tbl = sqlIdent("sessions");
+	const dateCol = sqlIdent("creation_date");
+	const idCol = sqlIdent("id");
+	// PRD-049e: narrow to the selected project when one was stamped (value via `sLiteral`).
+	const projClause =
+		projectId !== undefined && projectId !== ""
+			? ` WHERE ${sqlIdent("project_id")} = ${sLiteral(projectId)}`
+			: "";
 	// Identifiers inlined through `sqlIdent` directly into the template (the audit:sql floor — a
 	// pre-joined `cols` variable reads as a raw interpolation to the scanner even when guarded).
 	const sql =
 		`SELECT ${sqlIdent("input_tokens")}, ${sqlIdent("output_tokens")}, ` +
 		`${sqlIdent("cache_read_input_tokens")}, ${sqlIdent("cache_creation_input_tokens")}, ${sqlIdent("source_tool")} ` +
-		`FROM "${tbl}" LIMIT ${ROI_SESSIONS_LIMIT}`;
+		`FROM "${tbl}"${projClause} ORDER BY ${dateCol} DESC, ${idCol} DESC LIMIT ${ROI_SESSIONS_LIMIT}`;
 	const rows = await selectRows(storage, sql, scope);
 	return rows.map(rowToCapturedTurn);
 }
@@ -804,10 +821,15 @@ export async function fetchRoiView(
 	scope: QueryScope,
 	options: FetchRoiOptions = {},
 ): Promise<RoiView> {
-	const agentId = options.agentId !== undefined && options.agentId.trim() !== "" ? options.agentId : scope.org;
+	// Finding (isolated-agentid): do NOT default the agent id to `scope.org`. The org is a TENANT
+	// identifier, not an agent identity; filtering `roi_metrics.agent_id = <org>` returns the wrong
+	// rows. `agentId` is the explicit requesting agent or `""` (no agent). `readRoiMetrics` FAILS CLOSED
+	// to empty when an `isolated` read has no agent to pin to, rather than silently filtering on the org.
+	const agentId = options.agentId !== undefined && options.agentId.trim() !== "" ? options.agentId.trim() : "";
 	const readPolicy = options.readPolicy ?? DEFAULT_ROI_READ_POLICY;
 	const infraModel = options.infra ?? createInfraCostReadModel();
 	const usage = options.usage ?? emptyUsageSource;
+	const projectId = options.projectId !== undefined && options.projectId.trim() !== "" ? options.projectId.trim() : undefined;
 
 	// Fail-soft fan-out (parity with fetchKpisView): each read is independently guarded so one
 	// failure degrades its section rather than nuking the whole view. `infraModel.read()` is itself
@@ -815,9 +837,9 @@ export async function fetchRoiView(
 	// (both fail-soft). A belt-and-braces try wraps the whole assembly → EMPTY_ROI_VIEW on any surprise.
 	try {
 		const [turns, infra, ledger] = await Promise.all([
-			readCapturedTurns(storage, scope),
+			readCapturedTurns(storage, scope, projectId),
 			infraModel.read(),
-			readRoiMetrics(storage, scope, { agentId, readPolicy }),
+			readRoiMetrics(storage, scope, { agentId, readPolicy, ...(projectId !== undefined ? { projectId } : {}) }),
 		]);
 
 		return assembleRoiView({ turns, infra, usage, ledger, readPolicy });
@@ -891,9 +913,13 @@ export function assembleRoiView(input: RoiAssemblyInputs): RoiView {
 	// Required inputs: a real measured capture (savings ok/partial) AND a confident cost on BOTH the
 	// infra and pollination halves (ok/partial, not unreachable/unauthenticated/absent). A missing
 	// input leaves the net reflecting it (not `ok`) with `computed:false` and a dash on the page.
-	const savingsPresent = savingsStatus === "ok" || savingsStatus === "partial";
-	const infraConfident = infraStatus === "ok" || infraStatus === "partial";
-	const pollinationConfident = pollinationSection.status === "ok" || pollinationSection.status === "partial";
+	// PRD honesty contract: a confident net (status "ok", computed true) is emitted ONLY when ALL
+	// THREE inputs are FULLY confident ("ok") - savings AND infra AND pollination. A "partial" cost
+	// would understate the bill and overstate net ROI (the dishonest direction), so it does NOT
+	// qualify even though each section's own dash threshold tolerates partial.
+	const savingsPresent = savingsStatus === "ok";
+	const infraConfident = infraStatus === "ok";
+	const pollinationConfident = pollinationSection.status === "ok";
 	const netComputable = savingsPresent && infraConfident && pollinationConfident;
 	let netSection: RoiView["net"];
 	if (netComputable) {
@@ -1083,21 +1109,30 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 	// infra read-model + usage meter are threaded from the composition root (daemon = sole billing egress).
 	const roi = daemon.group(DASHBOARD_GROUPS.roi);
 	if (roi !== undefined) {
-		const roiOptions = (c: Context): FetchRoiOptions => ({
-			...(options.roiInfra !== undefined ? { infra: options.roiInfra } : {}),
-			...(options.roiUsage !== undefined ? { usage: options.roiUsage } : {}),
-			readPolicy: resolveRoiReadPolicy(c.req.query("policy")),
-		});
+		// Finding (project-scope): read the SELECTED project header (PRD-049e -- the same
+		// `x-honeycomb-project` header every other dashboard read-model honors via
+		// `resolveRequestProject`) and thread it into the ROI reads so switching projects narrows the
+		// figure. Only a REAL selection (`!degraded`) applies a filter; with no selection the read stays
+		// workspace-wide (back-compat for a non-dashboard caller). The header carries no cwd for ROI.
+		const roiOptions = (c: Context, scope: QueryScope): FetchRoiOptions => {
+			const project = resolveRequestProject(c, scope);
+			return {
+				...(options.roiInfra !== undefined ? { infra: options.roiInfra } : {}),
+				...(options.roiUsage !== undefined ? { usage: options.roiUsage } : {}),
+				readPolicy: resolveRoiReadPolicy(c.req.query("policy")),
+				...(!project.degraded ? { projectId: project.projectId } : {}),
+			};
+		};
 		roi.get("/roi", async (c) => {
 			const scope = resolveScope(c);
 			if (scope === null) return c.json(NO_ORG_BODY, 400);
-			return c.json(await fetchRoiView(storage, scope, roiOptions(c)));
+			return c.json(await fetchRoiView(storage, scope, roiOptions(c, scope)));
 		});
 		roi.get("/roi/trend", async (c) => {
 			const scope = resolveScope(c);
 			if (scope === null) return c.json(NO_ORG_BODY, 400);
 			const range = c.req.query("range") ?? "";
-			return c.json(await fetchRoiTrendView(storage, scope, range, roiOptions(c)));
+			return c.json(await fetchRoiTrendView(storage, scope, range, roiOptions(c, scope)));
 		});
 	}
 }

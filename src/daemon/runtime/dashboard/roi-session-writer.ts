@@ -43,7 +43,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
-import { isOk, type StorageRow } from "../../storage/result.js";
+import { isOk, type QueryResult, type StorageRow } from "../../storage/result.js";
 import { sLiteral, sqlIdent } from "../../storage/sql.js";
 import { appendRoiMetric } from "./roi-ledger.js";
 import {
@@ -129,7 +129,7 @@ async function readSessionTurns(storage: StorageQuery, scope: QueryScope, path: 
 		`SELECT ${sqlIdent("input_tokens")}, ${sqlIdent("output_tokens")}, ` +
 		`${sqlIdent("cache_read_input_tokens")}, ${sqlIdent("cache_creation_input_tokens")}, ${sqlIdent("source_tool")} ` +
 		`FROM "${tbl}" WHERE ${pathCol} = ${sLiteral(path)} LIMIT ${SESSION_TURNS_LIMIT}`;
-	let result;
+	let result: QueryResult;
 	try {
 		result = await storage.query(sql, scope);
 	} catch {
@@ -155,12 +155,15 @@ export function createRoiSessionWriter(deps: {
 			try {
 				// Read this session's turns by its grouping key. A blank key cannot identify a
 				// session → skip the write (never an unscoped read of the whole table).
-				const key = input.path.trim() !== "" ? input.path : input.sessionId;
-				if (key.trim() === "") {
-					deps.logger?.event("roi.write.skipped", { reason: "no session key", sessionId: input.sessionId });
+				// Finding (path-fallback): `readSessionTurns` filters the `path` column, so the key MUST be the
+				// `path` -- never `sessionId`. Falling back to `sessionId` would query WHERE path = sessionId,
+				// matching nothing (or an unrelated row). A BLANK path cannot identify the turns -> SKIP the
+				// write + log, never an unscoped read of the whole table.
+				if (input.path.trim() === "") {
+					deps.logger?.event("roi.write.skipped", { reason: "blank path", sessionId: input.sessionId });
 					return;
 				}
-				const turns = await readSessionTurns(deps.storage, deps.scope, key);
+				const turns = await readSessionTurns(deps.storage, deps.scope, input.path);
 
 				// MEASURED cache savings (060b) — a real per-session billed fact. MODELED savings for the
 				// single session, tagged via the assumption ref so the disclosure reads one source.

@@ -279,7 +279,7 @@ describe("c-AC-5 the session_type breakdown is itemized and summable (integer ce
 		expect(sessionTypeTotalCents(model.sessionTypes)).toBe(5_000);
 	});
 
-	it("derives cost from gpu_hours × price_cents_per_gpu_hour when total_cost_cents is absent/zero", async () => {
+	it("derives cost from gpu_hours x price_cents_per_gpu_hour ONLY when total_cost_cents is ABSENT (missing)", async () => {
 		const fetch = vi.fn<BillingFetch>((url) => {
 			if (url.endsWith("/billing/summary")) return Promise.resolve(ok(summaryBody()));
 			return Promise.resolve(
@@ -287,8 +287,8 @@ describe("c-AC-5 the session_type breakdown is itemized and summable (integer ce
 					total_cost_cents: 0,
 					total_gpu_hours: 4,
 					sessions: [
-						// total_cost_cents 0 → derive round(2.5 × 120) = 300 cents.
-						{ session_type: "embedding", gpu_hours: 2.5, gpu_units: 1, price_cents_per_gpu_hour: 120, total_cost_cents: 0 },
+						// total_cost_cents OMITTED (absent on the wire) -> derive round(2.5 * 120) = 300 cents.
+						{ session_type: "embedding", gpu_hours: 2.5, gpu_units: 1, price_cents_per_gpu_hour: 120 },
 					],
 				}),
 			);
@@ -297,6 +297,27 @@ describe("c-AC-5 the session_type breakdown is itemized and summable (integer ce
 		const model = await rm.read();
 		expect(model.sessionTypes[0]?.cost_cents).toBe(300);
 		expect(Number.isInteger(model.sessionTypes[0]?.cost_cents)).toBe(true);
+	});
+
+	// Finding (billing-zero): an EXPLICIT total_cost_cents: 0 is a legitimately-FREE session and MUST be
+	// preserved verbatim -- never recomputed from gpu_hours * price (which would overstate the bill).
+	it("PRESERVES an explicit total_cost_cents: 0 (a free session), never recomputing it from gpu_hours x price", async () => {
+		const fetch = vi.fn<BillingFetch>((url) => {
+			if (url.endsWith("/billing/summary")) return Promise.resolve(ok(summaryBody()));
+			return Promise.resolve(
+				ok({
+					total_cost_cents: 0,
+					total_gpu_hours: 4,
+					sessions: [
+						// EXPLICIT 0 -- gpu_hours * price would be 300, but upstream said this session was free.
+						{ session_type: "embedding", gpu_hours: 2.5, gpu_units: 1, price_cents_per_gpu_hour: 120, total_cost_cents: 0 },
+					],
+				}),
+			);
+		});
+		const rm = createInfraCostReadModel(deps(fetch));
+		const model = await rm.read();
+		expect(model.sessionTypes[0]?.cost_cents).toBe(0); // preserved, NOT the derived 300.
 	});
 });
 

@@ -335,13 +335,18 @@ function NetHero({ net, onRetry, retrying }: { net: RoiNetSection; onRetry: () =
 					<Badge tone="warning" mono>
 						est.
 					</Badge>
-				) : (
+				) : net.status === "unreachable" ? (
+					// Finding (retry-cta): a scoped Retry is shown ONLY when the net is UNREACHABLE (a
+					// transient billing failure worth retrying). An `absent`/initial-empty/legitimate-absent
+					// net is NOT retryable -- it shows a plain "not computed yet" caption, no Retry button.
 					<>
-						<Caption>net not computed — an input is missing or unreachable</Caption>
+						<Caption>net not computed - billing is unreachable</Caption>
 						<Button variant="ghost" size="sm" data-testid="net-retry" disabled={retrying} onClick={onRetry}>
-							{retrying ? "retrying…" : "Retry"}
+							{retrying ? "retrying..." : "Retry"}
 						</Button>
 					</>
+				) : (
+					<Caption>net not computed yet</Caption>
 				)}
 				{computed && allocated && (
 					<Caption>includes an allocated (estimated) infra share</Caption>
@@ -527,6 +532,19 @@ function DimTab({ label, active, onClick, testid }: { label: string; active: boo
 const DIMENSIONS: readonly RoiRollupDimension[] = ["org", "team", "agent", "project"];
 
 function RollupTable({ rollup, perUserAvailable }: { rollup: RoiRollup; perUserAvailable: boolean }): React.JSX.Element {
+	// Finding (peruser-leak / e-AC-14): the per-user gate MUST short-circuit BEFORE any agent row renders.
+	// When the dimension is `agent` and per-user is NOT available, render ONLY the "per-user requires
+	// verified login" empty state -- NEVER a `rollup-row-agent-*` row or agent label/figure (the prior
+	// code rendered the rows first and showed the gate AFTER, leaking per-user data and breaking e-AC-14).
+	if (rollup.dimension === "agent" && !perUserAvailable) {
+		return (
+			<div data-testid={`rollup-${rollup.dimension}`}>
+				<div data-testid="per-user-empty" style={{ marginTop: 10, padding: "10px 12px", background: "var(--severity-info-bg)", border: "1px solid var(--severity-info)", borderRadius: "var(--radius-md)" }}>
+					<Caption color="var(--severity-info)">Per-user requires verified login - sign in to attribute ROI per person.</Caption>
+				</div>
+			</div>
+		);
+	}
 	return (
 		<div data-testid={`rollup-${rollup.dimension}`}>
 			{/* e-AC-15: a mixed-basis rollup is flagged with a caption, not blended into one net. */}
@@ -572,12 +590,6 @@ function RollupTable({ rollup, perUserAvailable }: { rollup: RoiRollup; perUserA
 						);
 					})}
 				</>
-			)}
-			{/* e-AC-14: per-user is shown ONLY when the availability flag is true; else an info empty state. */}
-			{rollup.dimension === "agent" && !perUserAvailable && (
-				<div data-testid="per-user-empty" style={{ marginTop: 10, padding: "10px 12px", background: "var(--severity-info-bg)", border: "1px solid var(--severity-info)", borderRadius: "var(--radius-md)" }}>
-					<Caption color="var(--severity-info)">Per-user requires verified login — sign in to attribute ROI per person.</Caption>
-				</div>
 			)}
 		</div>
 	);

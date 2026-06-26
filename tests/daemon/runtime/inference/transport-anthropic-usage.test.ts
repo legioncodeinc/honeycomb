@@ -172,6 +172,32 @@ describe("d-AC-1: usage is surfaced ONLY on success + degrades safely", () => {
 		expect(sink.reports[0]?.outputTokens).toBe(99); // the good field still lands
 	});
 
+	// Finding (usage-failsoft): `.default(...)` only covers `usage === undefined`. A `usage: null` or a
+	// non-object `usage` would FAIL the object parse and -- being part of the whole-response schema --
+	// throw a 502 that DROPS an otherwise-valid completion. `.catch(ZERO_USAGE)` must keep the completion.
+	it("a `usage: null` does NOT drop the completion (usage zeroed, never a 502)", async () => {
+		const sink = recordingSink();
+		const transport = createAnthropicTransport({
+			fetch: fetchReturning(okResponse([{ type: "text", text: "ok" }], null)),
+			usageSink: sink,
+		});
+		// The completion is RETURNED (not dropped to a ProviderError) and usage is zeroed.
+		await expect(transport.execute(call())).resolves.toEqual({ output: "ok" });
+		expect(sink.reports).toHaveLength(1);
+		expect(sink.reports[0]).toMatchObject({ inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 });
+	});
+
+	it("a non-object (garbage) `usage` does NOT drop the completion (usage zeroed, never a 502)", async () => {
+		const sink = recordingSink();
+		const transport = createAnthropicTransport({
+			fetch: fetchReturning(okResponse([{ type: "text", text: "ok" }], "totally-not-usage")),
+			usageSink: sink,
+		});
+		await expect(transport.execute(call())).resolves.toEqual({ output: "ok" });
+		expect(sink.reports).toHaveLength(1);
+		expect(sink.reports[0]?.inputTokens).toBe(0);
+	});
+
 	it("a sink that throws never breaks the inference call (hot-path safe)", async () => {
 		const throwingSink: UsageSink = {
 			record: () => {
