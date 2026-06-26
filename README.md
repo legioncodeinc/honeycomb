@@ -14,7 +14,7 @@
 
 <p align="center">
   <a href="https://github.com/legioncodeinc/honeycomb/actions"><img src="https://img.shields.io/github/actions/workflow/status/legioncodeinc/honeycomb/ci.yaml?branch=main&label=CI&style=flat-square" alt="CI"></a>
-  <img src="https://img.shields.io/badge/version-0.1.0-F7A823?style=flat-square" alt="Version 0.1.0">
+  <img src="https://img.shields.io/badge/version-0.1.5-F7A823?style=flat-square" alt="Version 0.1.5">
   <img src="https://img.shields.io/badge/node-%E2%89%A522-339933?style=flat-square&logo=node.js&logoColor=white" alt="Node ≥ 22">
   <a href="https://deeplake.ai"><img src="https://img.shields.io/badge/powered%20by-Deep%20Lake-ff5a1f?style=flat-square" alt="Powered by Deep Lake"></a>
   <a href="#license"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="AGPL-3.0"></a>
