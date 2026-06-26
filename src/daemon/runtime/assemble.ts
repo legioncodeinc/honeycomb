@@ -67,7 +67,7 @@ import { mountSetupLogin } from "./dashboard/setup-login.js";
 import { mountSetupStateApi } from "./dashboard/setup-state.js";
 import { mountSetupMigrate } from "./dashboard/setup-migrate.js";
 import { mountPollinateApi } from "./pollinating/api.js";
-import { mountProjectsSyncApi, mountScopeEnumerationApi } from "./projects/index.js";
+import { mountOnboardingApi, mountProjectsSyncApi, mountScopeEnumerationApi, mountScopeSwitchApi } from "./projects/index.js";
 import { mountCompactApi } from "./maintenance/compact-api.js";
 import { mountLogsApi } from "./logs/api.js";
 import { type LogStore, NULL_LOG_STORE, openLogStore } from "./logs/log-store.js";
@@ -728,6 +728,12 @@ export function assembleSeams(
 		queue: daemon.services.queue,
 		embed,
 		enqueuePipelineEntry: makePipelineEntryEnqueuer(daemon.services.queue),
+		// PRD-059a / IRD-123: the first-run capture gate is ON in production. Until the active
+		// workspace binds its first project (via the dashboard folder-picker or `honeycomb project
+		// bind`), a capture NO-OPs rather than hoarding unscoped sessions in `__unsorted__`. The gate
+		// reads the local `~/.deeplake/projects.json` cache (NO DeepLake call); once a project is bound
+		// it opens and the 049a inbox fallback for unbound folders resumes (a-AC-4 / a-AC-5).
+		firstRunGate: true,
 	});
 
 	// 2. The dashboard data API (020b) — the daemon-served view-models. Threads the
@@ -1717,6 +1723,42 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			const reason = err instanceof Error ? err.message : String(err);
 			process.stderr.write(`honeycomb: scope enumeration API mount failed (non-fatal): ${reason}\n`);
 		}
+
+			// PRD-059b/059c/059d: FIRE the dashboard ONBOARDING folder-browse + bind routes ONCE so the
+			// folder-picker (`GET /api/diagnostics/fs/browse`), the "Add a project" bind (`POST
+			// /api/diagnostics/projects/bind`), the cross-device import (`POST .../projects/bind-existing`),
+			// and the unbind (`POST .../projects/unbind`) are LIVE. They attach onto the already-mounted,
+			// protected `/api/diagnostics` group (NO `server.ts` edit) and SELF-GATE to local mode (a
+			// non-local request 404s), mirroring the scope-enumeration reads. The bind routes write the SAME
+			// thin-client `~/.deeplake/projects.json` the CLI `honeycomb project bind` writes (single-sourced
+			// store); the browse route refuses to traverse outside the home dir. NO DeepLake call, NO secret
+			// in any body. FAIL-SOFT: a mount error never crashes the daemon (the picker falls back to the
+			// CLI), and every handler returns a clean 400/200 rather than a 500.
+			try {
+				mountOnboardingApi(daemon, {
+					org: scope.org,
+					workspace: scope.workspace ?? "",
+				});
+			} catch (err: unknown) {
+				const reason = err instanceof Error ? err.message : String(err);
+				process.stderr.write(`honeycomb: onboarding API mount failed (non-fatal): ${reason}\n`);
+			}
+
+			// IRD-122 (122-AC-1 / 122-AC-2 / 122-AC-4): FIRE the dashboard SCOPE-SWITCH persistence routes
+			// ONCE so an Org/Workspace switch in the dashboard PERSISTS a real scope change instead of a
+			// viewer-only no-op — `POST /api/diagnostics/scope/{org-switch,workspace-switch}`. They attach
+			// onto the already-mounted, protected `/api/diagnostics` group (NO `server.ts` edit) and SELF-GATE
+			// to local mode. The org switch RE-MINTS an org-bound token (PRD-011) + persists it via the SAME
+			// `saveDiskCredentials` writer the CLI `honeycomb org switch` uses (122-AC-2); the workspace switch
+			// persists the workspace id (no re-mint). The bearer token rides ONLY in the auth client's
+			// Authorization header + the shared credential file — NEVER in a body (D-4). FAIL-SOFT: a mount
+			// error never crashes the daemon, and every handler returns a clean ack rather than a 500.
+			try {
+				mountScopeSwitchApi(daemon, {});
+			} catch (err: unknown) {
+				const reason = err instanceof Error ? err.message : String(err);
+				process.stderr.write(`honeycomb: scope switch API mount failed (non-fatal): ${reason}\n`);
+			}
 
 	// ── PRD-033c / FR-1/FR-2/FR-6: FIRE the `/api/assets` mount ONCE so the asset-sync
 	// substrate (publish/pull/tombstone) is LIVE against this daemon — the ONLY DeepLake path

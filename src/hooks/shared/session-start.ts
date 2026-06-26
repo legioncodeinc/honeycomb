@@ -23,11 +23,55 @@
 import { shouldCapture } from "../../shared/capture-gate.js";
 import {
 	createNoopSessionStartSeams,
+	type HookCredential,
 	type HookInput,
 	type HookResult,
+	type HookSessionMeta,
+	type OnboardingNoticeGate,
 	type SessionStartDeps,
 	type SessionStartSeams,
 } from "./contracts.js";
+import { hasBoundProjectOnDisk } from "./project-resolver.js";
+
+/**
+ * The single, quiet "bind a project to start" notice (PRD-059a a-AC-2 / IRD-123). Rendered ONCE per
+ * session at session-start (the session-start seam, NOT per turn) when the workspace has bound no
+ * project yet, so a brand-new user learns capture is paused until they pick a folder. Plain prose, no
+ * secret, no path — the actionable next step (the dashboard "Pick a folder to start" CTA or the CLI
+ * `honeycomb project bind`).
+ */
+export const BIND_PROJECT_NOTICE =
+	"Honeycomb is paused: no project is bound to this workspace yet, so nothing is being captured. " +
+	'Bind a folder to start — open the Honeycomb dashboard and pick a folder, or run "honeycomb project bind" in the folder you want Honeycomb to remember.';
+
+/**
+ * The default production {@link OnboardingNoticeGate}: read the thin-client `~/.deeplake/projects.json`
+ * cache and report whether the active workspace has ≥1 locally-bound project, with NO DeepLake call
+ * (a-AC-3). FAIL-SOFT: a throw reads as "has a bound project" (notice SUPPRESSED) so the notice never
+ * appears spuriously and never breaks session-start. `dir` overrides the cache directory (tests).
+ */
+export function createOnboardingNoticeGate(dir?: string): OnboardingNoticeGate {
+	return {
+		hasBoundProject(_meta: HookSessionMeta, credential: HookCredential | undefined): boolean {
+			// The notice is for a LOGGED-IN user who has not yet bound a project — `honeycomb login`
+			// precedes "bind a project to start". When no credential/token is resolved (not logged in),
+			// report "bound" so NO notice appears (login, not bind, is the next step). This also keeps a
+			// not-logged-in / hermetic test from seeing the notice via the real `~/.deeplake` read.
+			if (credential === undefined || credential.token === undefined || credential.token.length === 0) {
+				return true;
+			}
+			try {
+				return hasBoundProjectOnDisk({
+					...(credential.workspace !== undefined ? { workspace: credential.workspace } : {}),
+					...(dir !== undefined ? { dir } : {}),
+				});
+			} catch {
+				// Fail-soft: never show the notice (or break session-start) because the local read hiccuped.
+				return true;
+			}
+		},
+	};
+}
 
 /**
  * Run the session-start lifecycle (FR-3 / b-AC-3). Returns the {@link HookResult}
@@ -84,10 +128,18 @@ export async function runSessionStart(input: HookInput, deps: SessionStartDeps):
 				)
 			: "";
 
+	// PRD-059a / IRD-123 (a-AC-2): the once-per-session "bind a project to start" notice. When the
+	// onboarding-notice gate is wired AND the workspace has bound no project yet, prepend the single
+	// notice so a brand-new user learns capture is paused until they pick a folder. This runs at
+	// SESSION-START only (not per turn). FAIL-SOFT: the gate's own try/catch absorbs a read error
+	// (no notice), and the whole step is wrapped so it can never break session-start.
+	const noticeBlock = await safe(() => Promise.resolve(renderOnboardingNotice(deps.onboardingNotice, meta, credential)), "");
+
 	// The injected `additionalContext` is the rendered rules/goals block plus the prime
 	// digest, joined when both are present so neither is lost. Either alone is returned
-	// as-is; both empty omits `additionalContext` entirely.
-	const additionalContext = joinBlocks(contextBlock, primeBlock);
+	// as-is; all empty omits `additionalContext` entirely. The first-run notice (when shown)
+	// leads so it is the first thing the user sees.
+	const additionalContext = joinBlocks(noticeBlock, joinBlocks(contextBlock, primeBlock));
 
 	// Step 7: pull team/org skills. Fail-soft.
 	await safeVoid(() => seams.autoPullSkills(credential));
@@ -115,6 +167,26 @@ function joinBlocks(context: string, prime: string): string {
 	if (context === "") return prime;
 	if (prime === "") return context;
 	return `${context}\n\n${prime}`;
+}
+
+/**
+ * Render the first-run "bind a project to start" notice (PRD-059a a-AC-2 / IRD-123), or `""` when it
+ * should not show. Returns the notice ONLY when the gate is wired AND reports no bound project (the
+ * zero-projects first-run state). When the gate is absent (a unit-constructed session-start) or the
+ * workspace already has a bound project, returns `""` so no notice appears. The gate itself is
+ * fail-soft; this wrapper additionally guards so a throw yields `""` (never break session-start).
+ */
+function renderOnboardingNotice(
+	gate: OnboardingNoticeGate | undefined,
+	meta: HookSessionMeta,
+	credential: HookCredential | undefined,
+): string {
+	if (gate === undefined) return "";
+	try {
+		return gate.hasBoundProject(meta, credential) ? "" : BIND_PROJECT_NOTICE;
+	} catch {
+		return "";
+	}
 }
 
 /** Run a producing step, returning `fallback` if it throws (fail-soft, FR-10). */

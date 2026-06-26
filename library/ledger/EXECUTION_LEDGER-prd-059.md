@@ -14,42 +14,46 @@
 
 | ID | Source | Criterion (abbrev) | Layer | Owner | Status |
 |---|---|---|---|---|---|
-| M-AC-1 | 059 | Zero bound projects → no row written, "bind to start" prompt | daemon+hooks | typescript-node-worker-bee | OPEN |
+| M-AC-1 | 059 | Zero bound projects → no row written, "bind to start" prompt | daemon+hooks | typescript-node-worker-bee | DONE — capture gate + session-start notice (`capture-handler.ts` `firstRunGateClosed`, `session-start.ts` `BIND_PROJECT_NOTICE`) |
 | M-AC-2 | 059 | Zero-state → dashboard shows "Pick a folder to start" CTA | dashboard UI | **BLOCKED (no UI Bee)** | BLOCKED |
-| M-AC-3 | 059 | Pick folder → absolute path bound, capture begins, project appears | daemon + UI | split | OPEN |
+| M-AC-3 | 059 | Pick folder → absolute path bound, capture begins, project appears | daemon + UI | split | DONE (daemon half) — `POST projects/bind` writes the absolute path + gate opens (`onboarding-api.ts`); UI half BLOCKED |
 | M-AC-4 | 059 | Projects page lists sourced projects + Add a project | dashboard UI | **BLOCKED (no UI Bee)** | BLOCKED |
-| M-AC-5 | 059 | Import existing registry project → this device binds same project_id | daemon + UI | split | OPEN |
-| M-AC-6 | 059 | Switcher persists a real scope change or is labeled view-filter | daemon + UI | split | OPEN |
-| a-AC-1 | 059a | Zero projects → no `sessions`/`memory`/`memory_jobs` row, no job | hooks/daemon | typescript-node-worker-bee | OPEN |
-| a-AC-2 | 059a | Suppressed → one "bind a project" notice per session | hooks | typescript-node-worker-bee | OPEN |
-| a-AC-3 | 059a | Gate check resolves from local store, no DeepLake call | hooks | typescript-node-worker-bee | OPEN |
-| a-AC-4 | 059a | After first bind → capture proceeds and persists | hooks/daemon | typescript-node-worker-bee | OPEN |
-| a-AC-5 | 059a | ≥1 project → unbound folder still hits `__unsorted__` inbox | hooks | typescript-node-worker-bee | OPEN |
+| M-AC-5 | 059 | Import existing registry project → this device binds same project_id | daemon + UI | split | DONE (daemon half) — `POST projects/bind-existing` (`onboarding-api.ts`); UI half BLOCKED |
+| M-AC-6 | 059 | Switcher persists a real scope change or is labeled view-filter | daemon + UI | split | DONE (daemon half) — `POST scope/{org,workspace}-switch` persists (`scope-switch-api.ts`); UI relabel BLOCKED |
+| a-AC-1 | 059a | Zero projects → no `sessions`/`memory`/`memory_jobs` row, no job | hooks/daemon | typescript-node-worker-bee | DONE — `capture-handler.ts` no-ops on closed gate (`capture-first-run-gate.test.ts`) |
+| a-AC-2 | 059a | Suppressed → one "bind a project" notice per session | hooks | typescript-node-worker-bee | DONE — session-start seam notice (`session-start.ts`, `onboarding-notice.test.ts`) |
+| a-AC-3 | 059a | Gate check resolves from local store, no DeepLake call | hooks | typescript-node-worker-bee | DONE — `hasBoundProjectOnDisk` pure local read (`project-resolver.ts`) |
+| a-AC-4 | 059a | After first bind → capture proceeds and persists | hooks/daemon | typescript-node-worker-bee | DONE — gate opens with ≥1 binding (`capture-first-run-gate.test.ts`) |
+| a-AC-5 | 059a | ≥1 project → unbound folder still hits `__unsorted__` inbox | hooks | typescript-node-worker-bee | DONE — inbox fallback resumes (`capture-first-run-gate.test.ts`) |
 | b-AC-1 | 059b | Zero projects → CTA is primary dashboard content | dashboard UI | **BLOCKED (no UI Bee)** | BLOCKED |
-| b-AC-2 | 059b | Picker enumerated by daemon (loopback), yields absolute path | daemon | typescript-node-worker-bee | OPEN |
-| b-AC-3 | 059b | Git folder → name pre-filled from canonical remote | daemon | typescript-node-worker-bee | OPEN |
-| b-AC-4 | 059b | Confirm → bind written, gate opens, advances to Projects page | daemon + UI | split | OPEN |
-| b-AC-5 | 059b | Daemon down/local-mode off → plain message + CLI fallback | daemon + UI | split | OPEN |
+| b-AC-2 | 059b | Picker enumerated by daemon (loopback), yields absolute path | daemon | typescript-node-worker-bee | DONE — `GET fs/browse` (`onboarding-api.ts`, `onboarding-api.test.ts`) |
+| b-AC-3 | 059b | Git folder → name pre-filled from canonical remote | daemon | typescript-node-worker-bee | DONE — `suggestProjectId` + git marker on browse (`onboarding-api.ts`) |
+| b-AC-4 | 059b | Confirm → bind written, gate opens, advances to Projects page | daemon + UI | split | DONE (daemon half) — `POST projects/bind` writes absolute path + opens gate; UI advance BLOCKED |
+| b-AC-5 | 059b | Daemon down/local-mode off → plain message + CLI fallback | daemon + UI | split | DONE (daemon half) — routes self-gate to local mode (404 in team); UI message BLOCKED |
 | c-AC-1 | 059c | Projects page lists projects + state (paths, remote, counts) | dashboard UI | **BLOCKED (no UI Bee)** | BLOCKED |
 | c-AC-2 | 059c | `__unsorted__` inbox shown distinctly with size | dashboard UI | **BLOCKED (no UI Bee)** | BLOCKED |
 | c-AC-3 | 059c | Add a project (top-right) runs folder-pick→bind | dashboard UI | **BLOCKED (no UI Bee)** | BLOCKED |
-| c-AC-4 | 059c | Unbind → folder binding removed, registry+data untouched | daemon + UI | split | OPEN |
+| c-AC-4 | 059c | Unbind → folder binding removed, registry+data untouched | daemon + UI | split | DONE (daemon half) — `POST projects/unbind` removes local binding only (`onboarding-api.ts`); UI BLOCKED |
 | c-AC-5 | 059c | Open project → other surfaces re-scope | dashboard UI | **BLOCKED (no UI Bee)** | BLOCKED |
-| d-AC-1 | 059d | Import lists registry projects without a local binding | daemon + UI | split | OPEN |
-| d-AC-2 | 059d | Select registry project + folder → binds same project_id | daemon | typescript-node-worker-bee | OPEN |
-| d-AC-3 | 059d | Imported project recall includes other-device memories | daemon | typescript-node-worker-bee | OPEN |
-| d-AC-4 | 059d | Git-remote match surfaced as suggestion (hint only) | daemon | typescript-node-worker-bee | OPEN |
-| 122-AC-1 | IRD-122 | Org/workspace switch persists via daemon, or labeled view-only | daemon + UI | split | OPEN |
-| 122-AC-2 | IRD-122 | Org change persists → re-mints org-bound token | daemon | typescript-node-worker-bee | OPEN |
+| d-AC-1 | 059d | Import lists registry projects without a local binding | daemon + UI | split | DONE (daemon half) — `GET scope/projects?unbound=1` + `boundLocally` (`scope-enumeration-api.ts`); UI list BLOCKED |
+| d-AC-2 | 059d | Select registry project + folder → binds same project_id | daemon | typescript-node-worker-bee | DONE — `POST projects/bind-existing` (`onboarding-api.ts`, `onboarding-api.test.ts`) |
+| d-AC-3 | 059d | Imported project recall includes other-device memories | daemon | typescript-node-worker-bee | DONE — bind-to-existing writes the shared `project_id`; recall scope is the existing 049 path (no new code; binding proven in `onboarding-api.test.ts`) |
+| d-AC-4 | 059d | Git-remote match surfaced as suggestion (hint only) | daemon | typescript-node-worker-bee | DONE — browse marks git repos + `suggestProjectId` derives from canonical remote (`onboarding-api.ts`) |
+| 122-AC-1 | IRD-122 | Org/workspace switch persists via daemon, or labeled view-only | daemon + UI | split | DONE (daemon half) — `POST scope/{org,workspace}-switch` persists (`scope-switch-api.ts`); UI relabel BLOCKED |
+| 122-AC-2 | IRD-122 | Org change persists → re-mints org-bound token | daemon | typescript-node-worker-bee | DONE — `org-switch` re-mints + `saveDiskCredentials` (`scope-switch-api.ts`, `scope-switch-api.test.ts`) |
 | 122-AC-3 | IRD-122 | Project dropdown clearly a view filter | dashboard UI | **BLOCKED (no UI Bee)** | BLOCKED |
-| 122-AC-4 | IRD-122 | No switcher change is a silent no-op | daemon + UI | split | OPEN |
-| 123-AC-1 | IRD-123 | Zero projects → no capture rows/jobs (== a-AC-1) | hooks/daemon | typescript-node-worker-bee | OPEN |
-| 123-AC-2 | IRD-123 | One "bind a project" notice per session (== a-AC-2) | hooks | typescript-node-worker-bee | OPEN |
-| 123-AC-3 | IRD-123 | Gate from local store, no network (== a-AC-3) | hooks | typescript-node-worker-bee | OPEN |
-| 123-AC-4 | IRD-123 | After first bind → capture proceeds (== a-AC-4) | hooks/daemon | typescript-node-worker-bee | OPEN |
-| 123-AC-5 | IRD-123 | ≥1 project → inbox fallback resumes (== a-AC-5) | hooks | typescript-node-worker-bee | OPEN |
+| 122-AC-4 | IRD-122 | No switcher change is a silent no-op | daemon + UI | split | DONE (daemon half) — org/workspace switches persist real changes (`scope-switch-api.ts`); UI relabel BLOCKED |
+| 123-AC-1 | IRD-123 | Zero projects → no capture rows/jobs (== a-AC-1) | hooks/daemon | typescript-node-worker-bee | DONE — (== a-AC-1) `capture-first-run-gate.test.ts` |
+| 123-AC-2 | IRD-123 | One "bind a project" notice per session (== a-AC-2) | hooks | typescript-node-worker-bee | DONE — (== a-AC-2) `onboarding-notice.test.ts` |
+| 123-AC-3 | IRD-123 | Gate from local store, no network (== a-AC-3) | hooks | typescript-node-worker-bee | DONE — (== a-AC-3) `hasBoundProjectOnDisk` |
+| 123-AC-4 | IRD-123 | After first bind → capture proceeds (== a-AC-4) | hooks/daemon | typescript-node-worker-bee | DONE — (== a-AC-4) `capture-first-run-gate.test.ts` |
+| 123-AC-5 | IRD-123 | ≥1 project → inbox fallback resumes (== a-AC-5) | hooks | typescript-node-worker-bee | DONE — (== a-AC-5) `capture-first-run-gate.test.ts` |
 
 **Totals:** 34 ACs · 13 cleanly roster-ownable (TS/Node) · 8 BLOCKED (pure UI, no Bee) · 13 split (daemon part ownable now, UI part blocked).
+
+## Wave 1 — independent verification (orchestrator, VERIFIED)
+
+All Wave-1 daemon/hooks ACs flipped DONE→**VERIFIED**: typecheck clean, jscpd 0.51% (<7), audit:sql clean, the 29 new Wave-1 tests pass, neighborhood (capture+projects+hooks) 261/274. The only failures are **13 pre-existing timeouts in `tests/hooks/runtime/hook-runtime.test.ts`** — reproduced identically on a clean baseline (all Wave-1 changes stashed → 13 failed / 10 passed), so NOT a Wave-1 regression. They are slow loopback-I/O tests exceeding the default 5s `vitest` timeout on this machine. **Pre-existing-flake finding (not blocking 059):** the hook-runtime suite needs a raised `--test-timeout` or to be de-flaked; file a separate issue.
 
 ## Wave plan
 

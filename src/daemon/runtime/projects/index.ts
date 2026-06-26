@@ -33,3 +33,25 @@ export {
 	SCOPE_WORKSPACES_PATH,
 	mountScopeEnumerationApi,
 } from "./scope-enumeration-api.js";
+export {
+	type BindAck,
+	type BrowseBody,
+	type BrowseChild,
+	type MountOnboardingOptions,
+	type UnbindAck,
+	FS_BROWSE_PATH,
+	ONBOARDING_GROUP,
+	PROJECTS_BIND_EXISTING_PATH,
+	PROJECTS_BIND_PATH,
+	PROJECTS_UNBIND_PATH,
+	mountOnboardingApi,
+} from "./onboarding-api.js";
+export {
+	type MountScopeSwitchOptions,
+	type OrgSwitchAck,
+	type WorkspaceSwitchAck,
+	SCOPE_ORG_SWITCH_PATH,
+	SCOPE_SWITCH_GROUP,
+	SCOPE_WORKSPACE_SWITCH_PATH,
+	mountScopeSwitchApi,
+} from "./scope-switch-api.js";

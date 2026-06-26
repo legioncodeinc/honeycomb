@@ -51,7 +51,7 @@ import type { JobQueueService } from "../services/job-queue.js";
 import { type EmbedAttachment, noopEmbedAttachment } from "../services/embed-client.js";
 import { type CaptureEvent, type CaptureMetadata, parseCaptureRequest } from "./event-contract.js";
 import { type MemoryCue, TurnCounters, type TurnCounterConfig, tryStopCounterTrigger } from "./turn-counters.js";
-import { resolveScopeFromDisk, UNSORTED_PROJECT_ID } from "../../../hooks/shared/project-resolver.js";
+import { hasBoundProjectOnDisk, resolveScopeFromDisk, UNSORTED_PROJECT_ID } from "../../../hooks/shared/project-resolver.js";
 
 /** The route group the capture handler attaches to (FR-1). */
 export const HOOKS_GROUP = "/api/hooks" as const;
@@ -107,6 +107,22 @@ export interface CaptureHandlerDeps {
 	 * to the `__unsorted__` inbox (49b-AC-3, capture never dropped).
 	 */
 	readonly projectsDir?: string;
+	/**
+	 * PRD-059a / IRD-123: the first-run capture gate. When `true` (the default), a capture whose
+	 * active workspace has ZERO locally-bound projects NO-OPs — it writes no `sessions`/`memory`/
+	 * `memory_jobs` row and enqueues no pipeline job (a-AC-1), returning a `{ ok: true, gated: true }`
+	 * ack so the shim does not treat the suppression as a failure. The gate reads the SAME local
+	 * `~/.deeplake/projects.json` cache the project resolver reads ({@link hasBoundProjectOnDisk}) with
+	 * NO DeepLake call (a-AC-3). The moment the first project is bound the gate opens and capture —
+	 * including the 049a `__unsorted__` inbox fallback for unbound folders — resumes (a-AC-4 / a-AC-5).
+	 *
+	 * OPT-IN: the gate suppresses ONLY when explicitly `true` (the production posture the daemon
+	 * assembly wires). Unset/`false` → always capture, so a direct-construction unit test that does not
+	 * exercise onboarding keeps the pre-059a behaviour. FAIL-OPEN on an unexpected throw: a set-up user
+	 * is never hard-blocked because a cache read hiccuped (059a impl-note); only a genuinely empty/absent
+	 * store (the unambiguous zero-state) suppresses when the gate is on.
+	 */
+	readonly firstRunGate?: boolean;
 	/**
 	 * Wait for the fire-and-forget embed continuation. ONLY for tests — production
 	 * NEVER awaits it (b-AC-4). The handler returns the HTTP response before this
@@ -176,6 +192,17 @@ class CaptureRouteHandler {
 		}
 		const { event, metadata } = parsed.value;
 		const scope: QueryScope = { org: metadata.org, workspace: metadata.workspace };
+
+		// PRD-059a / IRD-123 — first-run capture gate. Before ANY write, check the local store: while
+		// the active workspace has zero locally-bound projects, capture NO-OPs (no `sessions`/`memory`/
+		// `memory_jobs` row, no pipeline job, no embed) and returns a clean gated ack — the shim treats
+		// this as success, not a failure, and the once-per-session "bind a project to start" notice is
+		// emitted by the session-start seam (a-AC-2), never per turn here. The check is a local cache
+		// read with NO DeepLake call (a-AC-3). Once the first project is bound, the gate opens and the
+		// 049a inbox fallback for unbound folders resumes (a-AC-4 / a-AC-5).
+		if (this.firstRunGateClosed(metadata)) {
+			return c.json({ ok: true, gated: true, path: metadata.path, enqueued: [] }, 200);
+		}
 
 		const id = this.makeRowId(metadata);
 		const nowIso = new Date(this.now()).toISOString();
@@ -285,6 +312,34 @@ class CaptureRouteHandler {
 	 * NEVER dropped: a blank cwd, a missing/malformed cache, or any throw falls to the workspace
 	 * {@link UNSORTED_PROJECT_ID} inbox (the write-side asymmetry — never fail-closed on capture).
 	 */
+	/**
+	 * Is the first-run capture gate CLOSED for this event's workspace? (PRD-059a a-AC-1 / a-AC-3 /
+	 * IRD-123.) The gate is closed when it is ENABLED (`firstRunGate` defaults ON) AND the active
+	 * workspace has no locally-bound project ({@link hasBoundProjectOnDisk}, a pure local-cache read —
+	 * NO DeepLake call). When closed, the caller no-ops the capture (writes nothing, enqueues nothing).
+	 *
+	 * FAIL-OPEN on an unexpected throw: a transient cache-read error must NOT hard-block a set-up user,
+	 * so a throw is treated as "gate open" (capture proceeds, the 049a inbox fallback applies). Only a
+	 * genuinely empty/absent store — the unambiguous zero-state the loader returns WITHOUT throwing —
+	 * keeps the gate closed.
+	 */
+	private firstRunGateClosed(meta: CaptureMetadata): boolean {
+		// The gate is OPT-IN: it only suppresses when EXPLICITLY enabled (`firstRunGate === true`, the
+		// production posture wired by the daemon assembly). An unset/false flag → always capture, so a
+		// direct-construction unit test that does not exercise onboarding keeps the pre-059a behaviour.
+		if (this.deps.firstRunGate !== true) return false;
+		try {
+			const bound = hasBoundProjectOnDisk({
+				workspace: meta.workspace,
+				...(this.deps.projectsDir !== undefined ? { dir: this.deps.projectsDir } : {}),
+			});
+			return !bound; // no bound project → gate CLOSED (suppress); ≥1 bound → gate OPEN.
+		} catch {
+			// Fail-open: never hard-block a set-up user because the local store read hiccuped.
+			return false;
+		}
+	}
+
 	private resolveCaptureProjectId(meta: CaptureMetadata): string {
 		if (meta.cwd.trim() === "") return UNSORTED_PROJECT_ID; // no cwd → inbox (never dropped).
 		try {

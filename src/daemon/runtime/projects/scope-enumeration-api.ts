@@ -77,6 +77,13 @@ export interface ScopeWorkspace {
 export interface ScopeProject {
 	readonly projectId: string;
 	readonly name: string;
+	/**
+	 * PRD-059d: true when this registry project has NO local folder binding on THIS device — i.e. it is
+	 * IMPORTABLE (created on another device, not yet attached here). The dashboard "Import project from
+	 * cloud" list (059d) shows the `boundLocally:false` projects; the Projects page (059c) shows the
+	 * `boundLocally:true` ones. Computed from the local `bindings[]` the resolver reads.
+	 */
+	readonly boundLocally: boolean;
 }
 
 /** `GET /scope/orgs` body. `orgs` is empty when no credential resolves; `error` is a redacted reason. */
@@ -233,7 +240,15 @@ export function mountScopeEnumerationApi(daemon: Daemon, options: MountScopeEnum
 			...(options.projectsDir !== undefined ? { dir: options.projectsDir } : {}),
 		});
 		const cache = loadProjectsCache(options.projectsDir);
-		const projects: ScopeProject[] = cache.projects.map((p) => ({ projectId: p.projectId, name: p.name }));
+		// PRD-059d: a project is "bound locally on this device" when a local folder→project binding
+		// targets it (the resolver's `bindings[]`), so the dashboard can split ACTIVE (boundLocally) from
+		// IMPORTABLE (registry-only, no local binding). `?unbound=1` filters to the importable set (the
+		// 059d "Import project from cloud" list) — registry projects with no local binding on this device.
+		const locallyBound = new Set(cache.bindings.map((b) => b.projectId));
+		const unboundOnly = (c.req.query("unbound") ?? "") === "1";
+		const projects: ScopeProject[] = cache.projects
+			.map((p) => ({ projectId: p.projectId, name: p.name, boundLocally: locallyBound.has(p.projectId) }))
+			.filter((p) => (unboundOnly ? !p.boundLocally : true));
 		const body: ScopeProjectsBody = {
 			projects,
 			org: scope.org,
