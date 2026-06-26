@@ -40,7 +40,7 @@ stateDiagram-v2
     Bound --> ZeroProjects: unbind the last folder
 
     note right of ZeroProjects
-        Capture GATED OFF.
+        Capture GATED OFF for the initial first-run state only.
         Hooks no-op with a once-per-session
         "bind a project to start" notice.
         Dashboard shows "Pick a folder to start".
@@ -51,7 +51,7 @@ stateDiagram-v2
     end note
 ```
 
-The gate is keyed on **local** bindings, not the synced registry. A workspace can have registry projects created on another device while this device has bound nothing yet; that device is still in the zero-projects state and onboards via import (see [Cross-device import](#cross-device-import-bind-this-device-to-an-existing-project)).
+The gate is keyed on **local** bindings, not the synced registry. A workspace can have registry projects created on another device while this device has bound nothing yet; that device is still in the zero-projects state and onboards via import (see [Cross-device import](#cross-device-import-bind-this-device-to-an-existing-project-prd-059d)).
 
 ## The capture gate (PRD-059a / IRD-123)
 

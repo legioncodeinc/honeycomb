@@ -1,7 +1,6 @@
 # Memory Lifecycle As-Built
 
 > Category: Ai | Version: 1.0 | Date: June 2026 | Status: Built on the PR #125 branch, NOT yet merged to main
-
 > **Ship state (June 2026).** Everything below describes the PRD-058 code as built and CI-green on the PR #125 branch (`legion/zealous-payne-b1e0d3`, feature commit `6fc192d`). That branch was **never merged into `main`**: only the PRD documents reached main (committed as "PRD-055" in `a151c56`). On `main` today none of the source files, Deep Lake tables, columns, config keys, or routes named in this doc exist, and the live recall path is the pre-058 PRD-047 version. Read this as the design-of-record for the built-but-unassembled feature, not as a description of the current shipped daemon. The doc flips to Status: Active when the feature branch lands on main.
 
 How the running daemon implements the four lifecycle terms: where each term is computed in the live recall path, which terms ship active vs dormant and why, the Deep Lake tables and columns PRD-058 added, the reinforcement and conflict and staleness wiring, the `memory.lifecycle.*` config surface, the dashboard and CLI surfaces, and the fail-soft guarantee that keeps degraded recall answering.
