@@ -82,6 +82,13 @@ const INFERENCE_EXTERNAL = [
   "sharp",
 ];
 
+// The OPTIONAL self-hosted Postgres driver. `pg` powers PgDeepLakeTransport
+// (src/daemon/storage/pg-transport.ts), reached only when the storage endpoint
+// is a postgres:// URL (a self-hosted Activeloop pg_deeplake backend). It is an
+// optionalDependency, dynamic-imported at first query, so it stays external: the
+// cloud daemon bundle must not pull in pg when the HTTP transport is used.
+const SELF_HOSTED_PG_EXTERNAL = ["pg"];
+
 // Daemon: the ONLY bundle that links the DeepLake access path (FR-3). It parses
 // code (tree-sitter) and owns the inference-adjacent native deps, so it carries
 // the full external surface.
@@ -90,6 +97,7 @@ const DAEMON_EXTERNAL = [
   ...NATIVE_COMPRESSION_EXTERNAL,
   ...INFERENCE_EXTERNAL,
   ...TREE_SITTER_EXTERNAL,
+  ...SELF_HOSTED_PG_EXTERNAL,
 ];
 
 // Harness / MCP thin clients: no native parsing or inference deps reachable —
