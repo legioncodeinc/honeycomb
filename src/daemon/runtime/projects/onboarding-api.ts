@@ -188,7 +188,11 @@ function canonicalize(absPath: string): string {
 		} catch {
 			const parent = resolve(head, "..");
 			if (parent === head) return stripTrailingSep(head); // reached a root with no realpath — give back the lexical form.
-			tail.push(head.slice(parent.length + 1));
+			// A filesystem-root parent (e.g. "/" or "C:\\") already ends with `sep`, so `parent.length + 1`
+			// skips the first real segment ("/x".slice(2) === ""), collapsing the path to the root and
+			// WIDENING the allowed browse root. Start at `parent.length` when the parent is sep-terminated.
+			const segmentStart = parent.endsWith(sep) ? parent.length : parent.length + sep.length;
+			tail.push(head.slice(segmentStart));
 			head = parent;
 		}
 	}

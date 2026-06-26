@@ -8,10 +8,10 @@
  *   059c — LIST + STATE. Every project the workspace is sourcing (from `GET /api/diagnostics/scope/projects`,
  *          split on `boundLocally`: the ACTIVE list is the locally-bound projects). The reserved
  *          `__unsorted__` inbox is shown DISTINCTLY with its size (c-AC-2). Each project carries its
- *          name + the per-project state the live wire honestly provides; fields the Wave-1 daemon does
- *          NOT yet aggregate (bound paths, git remote, last-capture, memory/session counts) render as an
- *          honest "—" rather than fabricated values (the 059c implementation note defers those daemon
- *          aggregate reads; the page surfaces what the registry copy actually serves).
+ *          name + the per-project state the daemon serves: `scope/projects` aggregates bound path(s),
+ *          git remote, last-capture, and memory/session counts (paths/remote from the local store +
+ *          registry, counts best-effort fail-soft to 0 on a backend flap). A field served empty/absent
+ *          (no path, no remote) renders as an honest "—"; a missing last-capture renders as "never".
  *   059c — ADD (top-right "+"). A menu with two options (parent lean: one "+" with two options) — "New
  *          folder" runs the 059b daemon-served folder-pick → bind flow ({@link FolderPicker}); "Import
  *          existing" opens the 059d import modal. On a successful add the list re-hydrates (c-AC-3).
@@ -77,11 +77,10 @@ interface ProjectRowProps {
 }
 
 /**
- * One ACTIVE project row (059c). Shows the project name + the per-project state the live wire provides;
- * the daemon-not-yet-aggregated fields (bound path(s), git remote, last capture, memory/session counts)
- * render as an honest "—" (the Wave-1 registry read serves name + boundLocally only — the per-project
- * aggregates are a deferred daemon read per the 059c implementation note). Per-row OPEN (re-scope) +
- * UNBIND actions.
+ * One ACTIVE project row (059c). Shows the project name + the per-project state the daemon serves:
+ * bound path(s), git remote, last capture, and memory/session counts (from `scope/projects`). A field
+ * served empty/absent renders as an honest "—"; a missing last-capture renders as "never". Per-row OPEN
+ * (re-scope) + UNBIND actions.
  *
  * UNBIND is binding-driven (the daemon's `projects/unbind` keys on the absolute folder PATH, not the
  * project id — and the registry read does not serve the path). So Unbind opens the folder picker to
