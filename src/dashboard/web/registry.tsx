@@ -34,6 +34,7 @@ import { GraphPage } from "./pages/graph.js";
 import { HarnessesPage, resolveHarnessSubItems } from "./pages/harnesses.js";
 import { LogsPage } from "./pages/logs.js";
 import { MemoriesPage } from "./pages/memories.js";
+import { ProjectsPage } from "./pages/projects.js";
 import { SettingsPage } from "./pages/settings.js";
 import { SyncPage } from "./pages/sync.js";
 import type { PageProps } from "./page-frame.js";
@@ -119,6 +120,13 @@ const HarnessesIcon = (
 	</Icon>
 );
 
+/** Projects — stacked folders (the bound-folder manager, PRD-059). */
+const ProjectsIcon = (
+	<Icon>
+		<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+	</Icon>
+);
+
 /** Memories — a honeycomb cell (the signature Honeycomb surface). */
 const MemoriesIcon = (
 	<Icon>
@@ -172,8 +180,15 @@ const SettingsIcon = (
  *   Logs (`/logs`)          → PRD-043
  *   Settings (`/settings`)  → PRD-044
  */
+/** The Projects page hash route (PRD-059c) — exported so the first-run CTA can navigate to it (b-AC-4). */
+export const PROJECTS_ROUTE = "/projects" as const;
+
 export const ROUTES: readonly RouteEntry[] = [
 	{ route: "/", label: "Dashboard", icon: DashboardIcon, component: DashboardPage },
+	// PRD-059c: the Projects management page (bound-folder list + Add/Import/Unbind/Open). Slotted right
+	// after Dashboard — the home for "what is Honeycomb sourcing". One registry entry is the whole wiring
+	// (037c contract): the sidebar renders the nav item and the outlet routes the hash, no sidebar edit.
+	{ route: PROJECTS_ROUTE, label: "Projects", icon: ProjectsIcon, component: ProjectsPage },
 	// PRD-039 (D-6): the `#/harnesses` route is the STATIC top-level entry; its per-harness sub-entries
 	// (`#/harnesses/<name>`) are the 037c DYNAMIC group, resolved at render from 039a's live harness
 	// list (`resolveHarnessSubItems`). The parent's OQ-3 answer: 039a IS the dynamic data source.

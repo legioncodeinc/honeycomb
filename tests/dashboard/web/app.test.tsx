@@ -88,6 +88,15 @@ function makeMockFetch(opts: { healthOk?: boolean; pollinate?: unknown } = {}): 
 			return json(PAYLOADS.recall);
 		}
 		if (url.includes("/api/logs")) return json(PAYLOADS.logs);
+		// PRD-059b: the scope-projects read drives the first-run CTA gate. The Dashboard-parity suite needs
+		// a workspace that ALREADY has a locally-bound project so the Dashboard page renders (not the
+		// first-run "pick a folder" CTA). Return one bound project (+ the inbox) so parity holds; the CTA's
+		// own zero-bound behavior is covered by the dedicated needs-project / first-run suite.
+		if (url.includes("/api/diagnostics/scope/projects")) {
+			return json({ projects: [{ projectId: "honeycomb", name: "honeycomb", boundLocally: true }], org: "org_8f3a21", workspace: "deeplake-core" });
+		}
+		if (url.includes("/api/diagnostics/scope/orgs")) return json({ orgs: [{ id: "org_8f3a21", name: "Activeloop" }] });
+		if (url.includes("/api/diagnostics/scope/workspaces")) return json({ workspaces: [{ id: "deeplake-core", name: "deeplake-core" }], org: "org_8f3a21", reminted: false });
 		if (url.endsWith("/api/settings") || url.includes("/api/settings?")) return json({ settings: {}, catalog: [] });
 		if (url.endsWith("/api/secrets") || url.includes("/api/secrets?")) return json({ names: [] });
 		return new Response("not found", { status: 404 });
@@ -141,8 +150,8 @@ describe("037 AC-1: the left-nav shell renders all seven nav items + the chrome"
 		expect(text).toContain("Activeloop");
 		expect(text).toContain("deeplake-core");
 		expect(text).toContain("Pollinate now");
-		// The seven nav items are present as routes.
-		expect(container.querySelectorAll("[data-route]")).toHaveLength(7);
+		// The nav items are present as routes (eight since PRD-059c added Projects).
+		expect(container.querySelectorAll("[data-route]")).toHaveLength(8);
 	});
 });
 
@@ -240,8 +249,8 @@ describe("037b AC-2/AC-3/AC-4: client-side routing — swap without reload, deep
 		expect(container.querySelector('[data-testid="needs-project-selection"]'), "the real Graph page is mounted (needs-selection)").not.toBeNull();
 		expect(text).toContain("No project selected.");
 		expect(text).not.toContain("Recall"); // the Dashboard body is no longer mounted
-		// The sidebar (the seven items) is STILL mounted — only the content region swapped.
-		expect(container.querySelectorAll("[data-route]")).toHaveLength(7);
+		// The sidebar (the eight items) is STILL mounted — only the content region swapped.
+		expect(container.querySelectorAll("[data-route]")).toHaveLength(8);
 	});
 
 	it("AC-3: deep-linking — loading #/logs mounts the Logs route directly", async () => {
@@ -285,6 +294,8 @@ describe("037 AC-6 / 037b AC-6: daemon-down swaps the CONTENT for the banner; si
 			if (url.includes("/api/diagnostics/harnesses")) return json(PAYLOADS.harnesses);
 			if (url.includes("/api/graph")) return json(PAYLOADS.graph);
 			if (url.includes("/api/logs")) return json(PAYLOADS.logs);
+			// PRD-059b: a bound project so the Dashboard route renders the page (not the first-run CTA).
+			if (url.includes("/api/diagnostics/scope/projects")) return json({ projects: [{ projectId: "honeycomb", name: "honeycomb", boundLocally: true }], org: "o", workspace: "w" });
 			if (url.endsWith("/api/settings")) return json({ settings: {}, catalog: [] });
 			if (url.endsWith("/api/secrets")) return json({ names: [] });
 			return new Response("not found", { status: 404 });
@@ -294,8 +305,8 @@ describe("037 AC-6 / 037b AC-6: daemon-down swaps the CONTENT for the banner; si
 		// The banner replaced the CONTENT region…
 		expect(container.textContent ?? "").toContain("Daemon not reachable");
 		expect(container.textContent ?? "").not.toContain("Skill-sync"); // the Dashboard body is suspended
-		// …but the SIDEBAR stays mounted (the seven nav items are still there).
-		expect(container.querySelectorAll("[data-route]")).toHaveLength(7);
+		// …but the SIDEBAR stays mounted (the eight nav items are still there).
+		expect(container.querySelectorAll("[data-route]")).toHaveLength(8);
 
 		// Recover + click Retry → the active page restores.
 		healthOk = true;
@@ -361,6 +372,8 @@ describe("PRD-029 D-2 (parity): the per-subsystem health strip still renders on 
 			if (url.includes("/api/diagnostics/harnesses")) return json(PAYLOADS.harnesses);
 			if (url.includes("/api/graph")) return json(PAYLOADS.graph);
 			if (url.includes("/api/logs")) return json(PAYLOADS.logs);
+			// PRD-059b: a bound project so the Dashboard route renders the page (not the first-run CTA).
+			if (url.includes("/api/diagnostics/scope/projects")) return json({ projects: [{ projectId: "honeycomb", name: "honeycomb", boundLocally: true }], org: "o", workspace: "w" });
 			if (url.endsWith("/api/settings")) return json({ settings: {}, catalog: [] });
 			if (url.endsWith("/api/secrets")) return json({ names: [] });
 			return new Response("not found", { status: 404 });

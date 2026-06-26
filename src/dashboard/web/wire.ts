@@ -94,6 +94,23 @@ export const ENDPOINTS = Object.freeze({
 	scopeOrgs: "/api/diagnostics/scope/orgs",
 	scopeWorkspaces: "/api/diagnostics/scope/workspaces",
 	scopeProjects: "/api/diagnostics/scope/projects",
+	// PRD-059b/059c/059d — the daemon-served folder-picker + bind surface (local-mode-only loopback,
+	// mirroring the scope-enumeration reads). `fsBrowse` is the dirs-only directory browser the picker
+	// renders (a browser cannot hand back an absolute path; the daemon serves the tree). `projectsBind`
+	// binds a chosen absolute folder to a NEW/named project (059b); `projectsBindExisting` binds it to an
+	// EXISTING registry project_id (059d import); `projectsUnbind` removes the LOCAL binding only (059c) —
+	// the registry row is never touched. Every body carries paths + ids + names only — NO token/secret.
+	fsBrowse: "/api/diagnostics/fs/browse",
+	projectsBind: "/api/diagnostics/projects/bind",
+	projectsBindExisting: "/api/diagnostics/projects/bind-existing",
+	projectsUnbind: "/api/diagnostics/projects/unbind",
+	// IRD-122 — the scope-switch PERSISTENCE routes (the honest counterpart to the viewer-only
+	// enumeration reads). `scopeOrgSwitch` re-mints an org-bound token + persists it to the shared
+	// credential (122-AC-2); `scopeWorkspaceSwitch` persists the workspace id (no re-mint). The token
+	// rides ONLY in the daemon's Authorization header + credential file — the ack bodies are ids/names
+	// only, NO token (D-4). These make the switcher persist a real scope change instead of a no-op.
+	scopeOrgSwitch: "/api/diagnostics/scope/org-switch",
+	scopeWorkspaceSwitch: "/api/diagnostics/scope/workspace-switch",
 } as const);
 
 /**
@@ -839,10 +856,18 @@ export const ScopeWorkspacesSchema = z.object({
 });
 export type ScopeWorkspacesWire = z.infer<typeof ScopeWorkspacesSchema>;
 
-/** One enumerated project (the workspace's synced 049a registry copy) — id + display name. */
+/**
+ * One enumerated project (the workspace's synced 049a registry copy) — id + display name + the
+ * PRD-059d `boundLocally` bit. `boundLocally` is true when a local folder→project binding targets
+ * this project on THIS device (the Projects page shows those as ACTIVE); false ⇒ registry-only,
+ * IMPORTABLE (the 059d "Import project from cloud" list shows those). `.catch(false)` so an OLDER
+ * daemon payload that predates the field degrades to "not bound here" (safe: it would appear in the
+ * import list, never silently as active) rather than throwing into React.
+ */
 export const ScopeProjectSchema = z.object({
 	projectId: z.string().catch(""),
 	name: z.string().catch(""),
+	boundLocally: z.boolean().catch(false),
 });
 export type ScopeProjectWire = z.infer<typeof ScopeProjectSchema>;
 
@@ -853,6 +878,100 @@ export const ScopeProjectsSchema = z.object({
 	workspace: z.string().catch(""),
 });
 export type ScopeProjectsWire = z.infer<typeof ScopeProjectsSchema>;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRD-059b/059c/059d — the folder-picker + bind schemas. Every field `.catch()`-defaults so a
+// partial/failed/non-local (404) body degrades to a SAFE empty/false state (never a throw into
+// React). NO token rides any of these bodies by construction (the daemon serves paths + ids only).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** One immediate child directory in a browse listing (059b) — basename + absolute path + git-repo marker. */
+export const BrowseChildSchema = z.object({
+	name: z.string().catch(""),
+	path: z.string().catch(""),
+	isGitRepo: z.boolean().catch(false),
+});
+export type BrowseChildWire = z.infer<typeof BrowseChildSchema>;
+
+/**
+ * The `GET /api/diagnostics/fs/browse` body (059b): the resolved dir + its immediate child
+ * directories. `parent` is null at the allowed root (no traversal above it); `error` is a redacted
+ * reason when the dir could not be read (still a clean body with empty children). A
+ * malformed/absent/non-local body degrades to {@link EMPTY_BROWSE} so the picker shows an honest
+ * empty/unavailable state (never a throw).
+ */
+export const BrowseBodySchema = z.object({
+	path: z.string().catch(""),
+	root: z.string().catch(""),
+	parent: z.string().nullable().catch(null),
+	children: z.array(BrowseChildSchema).catch([]),
+	error: z.string().optional(),
+});
+export type BrowseBodyWire = z.infer<typeof BrowseBodySchema>;
+
+/** The honest empty browse body the picker shows when the daemon is unreachable / local-mode is off (b-AC-5). */
+export const EMPTY_BROWSE: BrowseBodyWire = Object.freeze({ path: "", root: "", parent: null, children: [] });
+
+/**
+ * The `POST /api/diagnostics/projects/bind` (+ `/bind-existing`) ack (059b/059d): the recorded
+ * absolute path + the project it bound to. `bound` is false on a rejected bind (the reserved inbox,
+ * a degenerate name, a non-absolute path), with a redacted `error`. A malformed/failed body degrades
+ * to a not-bound ack so the caller surfaces an honest failure (never a throw).
+ */
+export const BindAckSchema = z.object({
+	bound: z.boolean().catch(false),
+	path: z.string().catch(""),
+	projectId: z.string().catch(""),
+	error: z.string().optional(),
+});
+export type BindAckWire = z.infer<typeof BindAckSchema>;
+
+/** The honest "bind failed" ack the picker shows on a non-2xx / network failure (never a throw). */
+export const FAILED_BIND_ACK: BindAckWire = Object.freeze({ bound: false, path: "", projectId: "", error: "unavailable" });
+
+/** The `POST /api/diagnostics/projects/unbind` ack (059c): whether a LOCAL binding was removed. */
+export const UnbindAckSchema = z.object({
+	unbound: z.boolean().catch(false),
+	path: z.string().catch(""),
+});
+export type UnbindAckWire = z.infer<typeof UnbindAckSchema>;
+
+/** The honest "unbind failed" ack the page shows on a non-2xx / network failure (never a throw). */
+export const FAILED_UNBIND_ACK: UnbindAckWire = Object.freeze({ unbound: false, path: "" });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IRD-122 — the scope-switch PERSISTENCE acks. Every field `.catch()`-defaults so a partial/failed/
+// non-local body degrades to a SAFE not-switched ack (never a throw). NO token rides either body.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The `POST /api/diagnostics/scope/org-switch` ack (122-AC-2): the now-active org + whether a token
+ * re-mint ran. `switched:false` with a redacted `error` on a failed switch (no credential / unknown
+ * org / re-mint error). `reminted` is true when a fresh org-bound token was minted (the org changed).
+ * NO token in the body by construction.
+ */
+export const OrgSwitchAckSchema = z.object({
+	switched: z.boolean().catch(false),
+	org: z.string().catch(""),
+	orgName: z.string().optional(),
+	reminted: z.boolean().catch(false),
+	error: z.string().optional(),
+});
+export type OrgSwitchAckWire = z.infer<typeof OrgSwitchAckSchema>;
+
+/** The honest "org switch failed" ack the switcher shows on a non-2xx / network failure (never a throw). */
+export const FAILED_ORG_SWITCH_ACK: OrgSwitchAckWire = Object.freeze({ switched: false, org: "", reminted: false, error: "unavailable" });
+
+/** The `POST /api/diagnostics/scope/workspace-switch` ack (IRD-122): the now-active workspace (no re-mint). */
+export const WorkspaceSwitchAckSchema = z.object({
+	switched: z.boolean().catch(false),
+	workspace: z.string().catch(""),
+	error: z.string().optional(),
+});
+export type WorkspaceSwitchAckWire = z.infer<typeof WorkspaceSwitchAckSchema>;
+
+/** The honest "workspace switch failed" ack the switcher shows on a non-2xx / network failure (never a throw). */
+export const FAILED_WORKSPACE_SWITCH_ACK: WorkspaceSwitchAckWire = Object.freeze({ switched: false, workspace: "", error: "unavailable" });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The typed fetch client. Every method validates its payload through zod, so the
@@ -1166,11 +1285,55 @@ export interface WireClient {
 	 */
 	scopeWorkspaces(org?: string): Promise<ScopeWorkspacesWire>;
 	/**
-	 * PRD-049e (49e-AC-1) — list the workspace's registry projects
+	 * PRD-049e (49e-AC-1) / PRD-059d — list the workspace's registry projects
 	 * (`GET /api/diagnostics/scope/projects`), the daemon-synced 049a `projects.json` copy (incl. the
-	 * `__unsorted__` inbox). A failed/absent read degrades to `[]`, never a throw.
+	 * `__unsorted__` inbox + each project's `boundLocally` bit). `opts.unbound` stamps `?unbound=1` to
+	 * filter to the IMPORTABLE set (registry-only, no local binding on this device — the 059d import
+	 * list); omitted ⇒ the full list (the Projects page splits active vs importable on `boundLocally`).
+	 * A failed/absent read degrades to `[]`, never a throw.
 	 */
-	scopeProjects(): Promise<ScopeProjectWire[]>;
+	scopeProjects(opts?: { unbound?: boolean }): Promise<ScopeProjectWire[]>;
+	/**
+	 * PRD-059b — browse a directory's immediate child DIRECTORIES (`GET /api/diagnostics/fs/browse`).
+	 * The daemon serves the dirs-only tree (a browser cannot return an absolute path), each child marked
+	 * if it is a git repo, clamped to an allowed root (home by default). `path` (when set) browses that
+	 * dir; omitted ⇒ the root. A failed/absent/non-local (404) read degrades to {@link EMPTY_BROWSE} so
+	 * the picker shows its honest empty/unavailable state (the CLI fallback — b-AC-5), never a throw.
+	 */
+	fsBrowse(path?: string): Promise<BrowseBodyWire>;
+	/**
+	 * PRD-059b — bind a chosen ABSOLUTE folder to a NEW/named project (`POST /api/diagnostics/projects/bind`).
+	 * `name` (when set) is the explicit project name; omitted ⇒ the daemon's CLI-identical suggestion
+	 * (git remote repo, else basename). Returns the `{ bound, path, projectId, error? }` ack; degrades
+	 * to {@link FAILED_BIND_ACK} on a non-2xx / network failure so the caller surfaces an honest error.
+	 */
+	bindProject(input: { path: string; name?: string }): Promise<BindAckWire>;
+	/**
+	 * PRD-059d — bind a chosen ABSOLUTE folder to an EXISTING registry project_id
+	 * (`POST /api/diagnostics/projects/bind-existing`) — the cross-device import. Returns the bind ack;
+	 * degrades to {@link FAILED_BIND_ACK} on failure. The existing project keeps its registry remote.
+	 */
+	bindExistingProject(input: { path: string; projectId: string }): Promise<BindAckWire>;
+	/**
+	 * PRD-059c — remove the LOCAL folder binding for `path` (`POST /api/diagnostics/projects/unbind`).
+	 * Capture stops for that folder; the registry project + its existing data are UNTOUCHED. Returns the
+	 * `{ unbound, path }` ack; degrades to {@link FAILED_UNBIND_ACK} on a non-2xx / network failure.
+	 */
+	unbindProject(input: { path: string }): Promise<UnbindAckWire>;
+	/**
+	 * IRD-122 (122-AC-1/122-AC-2) — persist an ORG switch (`POST /api/diagnostics/scope/org-switch`).
+	 * The daemon re-mints a fresh org-bound token (PRD-011) and saves it + the org to the shared
+	 * credential — the SAME mechanic as `honeycomb org switch`, so `whoami` reflects it immediately. The
+	 * ack carries the now-active org + `reminted` (NO token). Degrades to {@link FAILED_ORG_SWITCH_ACK}
+	 * on a non-2xx / network failure so the switcher surfaces an honest "could not switch" (never a no-op).
+	 */
+	switchOrg(org: string): Promise<OrgSwitchAckWire>;
+	/**
+	 * IRD-122 — persist a WORKSPACE switch (`POST /api/diagnostics/scope/workspace-switch`). Writes only
+	 * the shared credential's workspace id (NO re-mint — the workspace resolves server-side), exactly as
+	 * `honeycomb workspace switch` does. Degrades to {@link FAILED_WORKSPACE_SWITCH_ACK} on failure.
+	 */
+	switchWorkspace(workspace: string): Promise<WorkspaceSwitchAckWire>;
 }
 
 /** The empty/zero KPIs the UI shows before the first load resolves (or on failure). */
@@ -1585,11 +1748,49 @@ export function createWireClient(options: WireClientOptions = {}): WireClient {
 				const v = await getJson(fetchImpl, url(`${ENDPOINTS.scopeWorkspaces}${qs}`), ScopeWorkspacesSchema);
 				return v ?? { workspaces: [], org: org ?? "", reminted: false };
 			},
-			async scopeProjects(): Promise<ScopeProjectWire[]> {
-				// GET the workspace's synced registry projects (049a cache). A failed/absent read degrades
-				// to [] so the switcher shows no projects (and the pages render the needs-selection state).
-				const v = await getJson(fetchImpl, url(ENDPOINTS.scopeProjects), ScopeProjectsSchema);
+			async scopeProjects(opts: { unbound?: boolean } = {}): Promise<ScopeProjectWire[]> {
+				// GET the workspace's synced registry projects (049a cache). `unbound` stamps `?unbound=1`
+				// for the 059d import list (registry-only projects). A failed/absent read degrades to [] so
+				// the switcher shows no projects (and the pages render the needs-selection state).
+				const qs = opts.unbound === true ? "?unbound=1" : "";
+				const v = await getJson(fetchImpl, url(`${ENDPOINTS.scopeProjects}${qs}`), ScopeProjectsSchema);
 				return v?.projects ?? [];
+			},
+			async fsBrowse(path?: string): Promise<BrowseBodyWire> {
+				// GET the daemon-served dirs-only tree (059b). The `path` query is encodeURIComponent-escaped
+				// (one safe value). A failed/absent/non-local (404) read degrades to EMPTY_BROWSE so the picker
+				// renders its honest empty/unavailable state (the CLI fallback — b-AC-5), never a throw.
+				const qs = path !== undefined && path !== "" ? `?path=${encodeURIComponent(path)}` : "";
+				return (await getJson(fetchImpl, url(`${ENDPOINTS.fsBrowse}${qs}`), BrowseBodySchema)) ?? EMPTY_BROWSE;
+			},
+			async bindProject(input: { path: string; name?: string }): Promise<BindAckWire> {
+				// POST the chosen absolute path (+ optional name) → bind a NEW/named project (059b). The
+				// daemon's zod is the source of truth (a 400 degrades to the failed ack). NO secret in the body.
+				const body: Record<string, string> = { path: input.path };
+				if (input.name !== undefined && input.name !== "") body.name = input.name;
+				return (await postJson(fetchImpl, url(ENDPOINTS.projectsBind), body, BindAckSchema)) ?? FAILED_BIND_ACK;
+			},
+			async bindExistingProject(input: { path: string; projectId: string }): Promise<BindAckWire> {
+				// POST the chosen absolute path + the existing registry project_id → the 059d import. A non-2xx
+				// degrades to the failed ack so the modal surfaces an honest error (never an optimistic flip).
+				const body = { path: input.path, projectId: input.projectId };
+				return (await postJson(fetchImpl, url(ENDPOINTS.projectsBindExisting), body, BindAckSchema)) ?? FAILED_BIND_ACK;
+			},
+			async unbindProject(input: { path: string }): Promise<UnbindAckWire> {
+				// POST the absolute path → remove the LOCAL binding only (059c); the registry row is untouched.
+				// A non-2xx degrades to the failed ack so the page re-reads and reflects what actually persisted.
+				return (await postJson(fetchImpl, url(ENDPOINTS.projectsUnbind), { path: input.path }, UnbindAckSchema)) ?? FAILED_UNBIND_ACK;
+			},
+			async switchOrg(org: string): Promise<OrgSwitchAckWire> {
+				// POST the target org → the daemon re-mints + persists (IRD-122 / 122-AC-2). A non-2xx /
+				// network failure degrades to the failed ack so the switcher shows an honest "could not
+				// switch" rather than a silent no-op (122-AC-4). NO token rides the ack.
+				return (await postJson(fetchImpl, url(ENDPOINTS.scopeOrgSwitch), { org }, OrgSwitchAckSchema)) ?? FAILED_ORG_SWITCH_ACK;
+			},
+			async switchWorkspace(workspace: string): Promise<WorkspaceSwitchAckWire> {
+				// POST the target workspace → the daemon persists the workspace id (no re-mint). A failure
+				// degrades to the failed ack so the switcher surfaces an honest error, never a no-op.
+				return (await postJson(fetchImpl, url(ENDPOINTS.scopeWorkspaceSwitch), { workspace }, WorkspaceSwitchAckSchema)) ?? FAILED_WORKSPACE_SWITCH_ACK;
 			},
 	};
 }

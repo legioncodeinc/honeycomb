@@ -35,7 +35,8 @@ import { matchRoute, ROUTES, type RouteEntry } from "./registry.js";
 import { Sidebar } from "./sidebar.js";
 import { useHashRoute } from "./router.js";
 import { PAGE_MAX_WIDTH, type PageProps } from "./page-frame.js";
-import { ScopeProvider } from "./scope-context.js";
+import { FirstRunBindCTA } from "./needs-project.js";
+import { ScopeProvider, useScopeSwitcher } from "./scope-context.js";
 import { createWireClient, EMPTY_SETTINGS, type SettingsWire, type WireClient } from "./wire.js";
 
 /** How often the shell probes `/health` for coarse liveness (ms). */
@@ -55,18 +56,31 @@ export interface ShellProps {
  * The content OUTLET — looks up the registry-matched page for the active route and mounts it with the
  * shared {@link PageProps} (037b). Capped at the readable page max-width (D-8). When the daemon is
  * down the shell renders the banner INSTEAD of this (so this only ever renders for an up daemon).
+ *
+ * PRD-059b (b-AC-1 / M-AC-2): on the DASHBOARD route, when the projects enumeration has resolved with
+ * ZERO locally-bound projects, the PRIMARY content is the first-run "Pick a folder to start" CTA — not
+ * an empty page. It keys off the switcher's `projectsHydrated` flag so it never flashes before the read
+ * resolves, and is gated to the Dashboard route so the Projects/Settings pages stay reachable to bind.
  */
-function Outlet({ route, pageProps }: { route: string; pageProps: PageProps }): React.JSX.Element {
+function Outlet({ route, pageProps, navigate }: { route: string; pageProps: PageProps; navigate: (r: string) => void }): React.JSX.Element {
 	const entry: RouteEntry = matchRoute(route);
 	const PageComponent = entry.component;
+	const { projects, projectsHydrated } = useScopeSwitcher();
 	// 037c OQ-2: per-route document title from the registry label (cheap, nice for deep links).
 	React.useEffect(() => {
 		if (typeof document !== "undefined") document.title = `honeycomb · ${entry.label}`;
 	}, [entry.label]);
+
+	// b-AC-1: zero locally-bound projects (after the read resolved) + the Dashboard route → the first-run
+	// CTA is the primary content. `boundLocally` is the per-device binding bit (the inbox/registry-only
+	// projects don't count as "active"); an unbound workspace shows the CTA, a bound one shows the page.
+	const hasBound = projects.some((p) => p.boundLocally && p.projectId !== "__unsorted__");
+	const showFirstRun = entry.route === "/" && projectsHydrated && !hasBound;
+
 	return (
 		<div style={{ flex: 1, minWidth: 0, padding: "28px 28px 48px" }}>
 			<div style={{ maxWidth: PAGE_MAX_WIDTH, margin: "0 auto" }}>
-				<PageComponent {...pageProps} />
+				{showFirstRun ? <FirstRunBindCTA wire={pageProps.wire} navigate={navigate} /> : <PageComponent {...pageProps} />}
 			</div>
 		</div>
 	);
@@ -214,7 +228,7 @@ export function Shell({ client, assetBase = "assets" }: ShellProps = {}): React.
 				{/* D-5: daemon-down → the content region swaps for the banner; the sidebar stays mounted.
 				    Retry re-probes; a reachable result restores the active page (it re-hydrates on remount). */}
 				{daemonUp ? (
-					<Outlet route={route} pageProps={pageProps} />
+					<Outlet route={route} pageProps={pageProps} navigate={navigate} />
 				) : (
 					<div style={{ flex: 1, minWidth: 0, padding: "28px 28px 48px" }}>
 						<div style={{ maxWidth: PAGE_MAX_WIDTH, margin: "0 auto" }}>

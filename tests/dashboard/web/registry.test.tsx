@@ -34,10 +34,11 @@ afterEach(() => {
 	container.remove();
 });
 
-describe("037c AC-2: ROUTES lists the seven static entries in nav order", () => {
-	it("has exactly the seven routes/labels in order, each with a component + icon", () => {
-		expect(ROUTES.map((r) => r.route)).toEqual(["/", "/harnesses", "/memories", "/graph", "/sync", "/logs", "/settings"]);
-		expect(ROUTES.map((r) => r.label)).toEqual(["Dashboard", "Harnesses", "Memories", "Graph", "Sync", "Logs", "Settings"]);
+describe("037c AC-2: ROUTES lists the static entries in nav order", () => {
+	it("has exactly the routes/labels in order, each with a component + icon", () => {
+		// PRD-059c inserts the Projects route right after Dashboard (the home for "what is Honeycomb sourcing").
+		expect(ROUTES.map((r) => r.route)).toEqual(["/", "/projects", "/harnesses", "/memories", "/graph", "/sync", "/logs", "/settings"]);
+		expect(ROUTES.map((r) => r.label)).toEqual(["Dashboard", "Projects", "Harnesses", "Memories", "Graph", "Sync", "Logs", "Settings"]);
 		for (const r of ROUTES) {
 			expect(typeof r.component, `${r.label} has a component`).toBe("function");
 			expect(r.icon, `${r.label} has an icon`).toBeTruthy();
