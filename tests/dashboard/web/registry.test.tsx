@@ -39,7 +39,7 @@ describe("037c AC-2: ROUTES lists the static entries in nav order", () => {
 		// PRD-059c inserts the Projects route right after Dashboard (the home for "what is Honeycomb sourcing").
 		// PRD-060e inserts the ROI route right after Logs (the Net-ROI ledger), before Settings.
 		expect(ROUTES.map((r) => r.route)).toEqual(["/", "/projects", "/harnesses", "/memories", "/graph", "/sync", "/logs", "/roi", "/settings"]);
-		expect(ROUTES.map((r) => r.label)).toEqual(["Dashboard", "Projects", "Harnesses", "Memories", "Graph", "Sync", "Logs", "ROI", "Settings"]);
+		expect(ROUTES.map((r) => r.label)).toEqual(["Dashboard", "Projects", "Harnesses", "Memories", "Memory Graph", "Sync", "Logs", "ROI", "Settings"]);
 		for (const r of ROUTES) {
 			expect(typeof r.component, `${r.label} has a component`).toBe("function");
 			expect(r.icon, `${r.label} has an icon`).toBeTruthy();

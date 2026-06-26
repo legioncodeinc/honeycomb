@@ -56,7 +56,7 @@ import { type CreateDaemonOptions, type Daemon, type DaemonServices, createDaemo
 
 import { attachHooksHandlers } from "./capture/attach.js";
 import type { CaptureHandler } from "./capture/capture-handler.js";
-import { mountGraphApi } from "./codebase/api.js";
+import { buildCodebaseGraphSnapshot, mountGraphApi } from "./codebase/api.js";
 import { mountOntologyApi } from "./ontology/api.js";
 import { mountSkillPropagationApi } from "./skillify/propagation-api.js";
 import { mountDashboardApi } from "./dashboard/api.js";
@@ -166,6 +166,15 @@ export const PID_FILE_NAME = "daemon.pid";
 
 /** How often the cheap live `/health` probe refreshes the cached health bit (a-AC-4). */
 const DEFAULT_HEALTH_PROBE_INTERVAL_MS = 15_000;
+
+/**
+ * How often the daemon auto-rebuilds the codebase-graph snapshot (PRD-041 follow-up). The Graph
+ * page is now memory-only, so the manual "Build graph" button is gone — the daemon keeps the
+ * codebase snapshot fresh on this interval (plus once on start) for the stale-ref / lifecycle
+ * σ(m,t) diagnostic that reads it. One hour: a full-repo tree-sitter parse is not free, and the
+ * graph it feeds tolerates hour-scale staleness.
+ */
+const DEFAULT_GRAPH_BUILD_INTERVAL_MS = 60 * 60 * 1_000;
 
 /** The coarse pipeline status the cached `/health` bit reports (mirrors server.ts). */
 type PipelineStatus = "ok" | "degraded" | "unconfigured";
@@ -1901,6 +1910,34 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		}
 	}
 
+	// ── PRD-041 (codebase graph): auto-build the snapshot so it stays fresh without the (now
+	// retired) "Build graph" UI button. The Graph page is memory-only; the codebase snapshot is
+	// still read by the stale-ref / lifecycle σ(m,t) diagnostic, so the daemon builds it once on
+	// start and then on the interval. Gated to the REAL production assembly in LOCAL mode (no
+	// injected `storage`) so the hermetic unit suite never triggers a real full-repo tree-sitter
+	// parse / snapshot write, and team/hybrid daemons don't each re-parse the repo on a timer.
+	// Fail-soft + in-flight-guarded: a build error never crashes the daemon, and overlapping ticks
+	// never stack a second parse.
+	const autoBuildGraph = options.storage === undefined && config.mode === "local";
+	let graphBuildTimer: ReturnType<typeof setInterval> | null = null;
+	let graphBuildInFlight = false;
+	async function rebuildCodebaseGraph(): Promise<void> {
+		if (graphBuildInFlight) return;
+		graphBuildInFlight = true;
+		try {
+			await buildCodebaseGraphSnapshot(scope, {
+				storage,
+				defaultScope: scope,
+				workspaceDir: options.workspaceDir ?? process.cwd(),
+			});
+		} catch (err: unknown) {
+			const reason = err instanceof Error ? err.message : String(err);
+			process.stderr.write(`honeycomb: codebase graph auto-build failed (non-fatal): ${reason}\n`);
+		} finally {
+			graphBuildInFlight = false;
+		}
+	}
+
 	let started = false;
 	let locked = false;
 	// PRD-026 AC-W: the daemon-resident pollinating worker. Built + started ONLY when
@@ -1950,6 +1987,20 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			}, probeIntervalMs);
 			if (typeof (probeTimer as NodeJS.Timeout).unref === "function") {
 				(probeTimer as NodeJS.Timeout).unref();
+			}
+
+			// PRD-041: kick the initial codebase-graph build OFF the readiness path (fire-and-forget
+			// — a full-repo parse must not delay the daemon binding), then refresh on the interval.
+			// Unref'd so it never keeps the process alive. Gated to the real local assembly (see
+			// `autoBuildGraph`), so the unit suite never triggers a real parse.
+			if (autoBuildGraph) {
+				void rebuildCodebaseGraph();
+				graphBuildTimer = setInterval(() => {
+					void rebuildCodebaseGraph();
+				}, DEFAULT_GRAPH_BUILD_INTERVAL_MS);
+				if (typeof (graphBuildTimer as NodeJS.Timeout).unref === "function") {
+					(graphBuildTimer as NodeJS.Timeout).unref();
+				}
 			}
 
 			// Start the daemon's real services (queue → watcher → runtime-path).
@@ -2157,6 +2208,10 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			if (probeTimer !== null) {
 				clearInterval(probeTimer);
 				probeTimer = null;
+			}
+			if (graphBuildTimer !== null) {
+				clearInterval(graphBuildTimer);
+				graphBuildTimer = null;
 			}
 			if (started) {
 				await daemon.stopServices();

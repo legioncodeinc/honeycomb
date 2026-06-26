@@ -279,6 +279,21 @@ async function runGraphBuild(
 }
 
 /**
+ * Build the codebase-graph snapshot ONCE for `scope` over the daemon's workspace and persist it —
+ * the SAME end-to-end worker `POST /api/graph/build` runs ({@link runGraphBuild}), exposed so the
+ * composition root can drive an AUTOMATIC background build (PRD-041 follow-up). The manual "Build
+ * graph" UI button was retired when the Graph page became memory-only; the codebase snapshot is
+ * still read by the stale-ref / memory-lifecycle σ(m,t) diagnostic, so the daemon keeps it fresh by
+ * building on start + on a timer instead. Throws on a build error exactly like the endpoint — the
+ * caller (the daemon lifecycle) wraps it fail-soft so a build failure never crashes the daemon.
+ */
+export async function buildCodebaseGraphSnapshot(scope: QueryScope, options: MountGraphOptions): Promise<BuildResultBody> {
+	const workspaceDir = options.workspaceDir ?? process.cwd();
+	const identity = options.identity ?? resolveSnapshotIdentity(workspaceDir, scope);
+	return runGraphBuild(identity, scope, options);
+}
+
+/**
  * Attach the `/api/graph/*` handlers onto the daemon's already-mounted `/api/graph` route
  * group (the PRD-014 assembly seam). Mirrors `mountMemoriesApi`: every handler resolves the
  * request scope (fail-closed 400 outside local), then delegates to the existing worker. Call

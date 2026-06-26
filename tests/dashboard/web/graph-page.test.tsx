@@ -1,20 +1,19 @@
 // @vitest-environment jsdom
 /**
- * PRD-041a (full-page codebase graph) + PRD-041b (memory-graph toggle) — the Graph page DOM suite.
+ * PRD-041 (the full-page graph) — the Memory Graph page DOM suite.
  *
- * Mounts the REAL {@link GraphPage} into jsdom against a MOCKED wire client and asserts the ACs through
- * the rendered DOM, plus the pure helpers the page is built from:
- *   - a-AC-1: a built `GraphView` (arbitrary-id nodes/edges) renders ALL N nodes + M edges (no skip),
- *     reusing the shared pure `layout(...)`.
- *   - a-AC-2: pan/zoom changes the SVG viewBox; fit/reset re-frames; bounded zoom is clamped.
- *   - a-AC-3: clicking a node opens the side detail panel with id/label/kind + neighbors split by
- *     relation/direction + the cross-file-`calls` caveat; clearing works.
- *   - a-AC-4: kind filters come from the snapshot's REAL kinds; toggling hides nodes + incident edges +
- *     updates counts; arbitrary-string ids render.
- *   - a-AC-5: search by id/label focuses + selects the match.
- *   - a-AC-6: built:false → the full-page `honeycomb graph build` empty state.
- *   - b-AC-3/b-AC-4: the Codebase ↔ Memory toggle swaps the source; the memory graph renders on the
- *     SAME canvas; an empty memory graph shows the honest "no memory graph yet" state.
+ * The page is MEMORY-ONLY (the codebase view + the Codebase↔Memory toggle + the "Build graph" button
+ * were removed; the daemon still auto-builds the codebase graph in the background). This suite mounts the
+ * REAL {@link GraphPage} into jsdom against a MOCKED wire client whose `memoryGraph()` feeds the page,
+ * and asserts the surviving behavior through the rendered DOM, plus the pure helpers:
+ *   - renders ALL N nodes + M edges of the built graph (no skip), reusing the shared pure `layout(...)`.
+ *   - pan/zoom changes the SVG viewBox; fit/reset re-frames; bounded zoom is clamped.
+ *   - clicking a node opens the side detail panel with id/label/kind + neighbors split by
+ *     relation/direction; clearing works.
+ *   - kind filters come from the snapshot's REAL kinds; toggling hides nodes + incident edges + counts.
+ *   - search by id/label focuses + selects the match.
+ *   - built:false → the honest "no memory graph yet" empty state (no faked graph, no build command).
+ *   - no project selected → the needs-selection state (never another scope's graph).
  */
 
 import { act } from "react";
@@ -36,10 +35,12 @@ import type { GraphWire, WireClient } from "../../../src/dashboard/web/wire.js";
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 /**
- * A built codebase graph whose ids are ARBITRARY real-world strings (file paths + a symbol) — NOT any
- * legacy hardcoded ids — with `imports` and `calls` edges so the relation/direction split has data.
+ * A built graph whose ids are ARBITRARY real-world strings (file paths + a symbol) with two kinds and
+ * `imports`/`calls` edges so the relation/direction split + kind filter have data. (The page is
+ * memory-only now, but the canvas machinery is source-agnostic — this is the fixture `memoryGraph()`
+ * returns.)
  */
-const CODEBASE_GRAPH: GraphWire = {
+const GRAPH: GraphWire = {
 	built: true,
 	nodes: [
 		{ id: "src/daemon/server.ts", label: "server.ts", kind: "file" },
@@ -54,7 +55,7 @@ const CODEBASE_GRAPH: GraphWire = {
 	],
 };
 
-/** A built memory graph (entities + a dependency edge) — the SAME GraphView shape, ontology kinds. */
+/** A built memory graph (entities + a dependency edge) — exercises ontology relation kinds in the split. */
 const MEMORY_GRAPH: GraphWire = {
 	built: true,
 	nodes: [
@@ -69,31 +70,31 @@ const EMPTY: GraphWire = { built: false, nodes: [], edges: [] };
 /** A built graph the daemon TRUNCATED: the shipped nodes are few, but `meta` reports the full snapshot size. */
 const TRUNCATED_GRAPH: GraphWire = {
 	built: true,
-	nodes: CODEBASE_GRAPH.nodes,
-	edges: CODEBASE_GRAPH.edges,
+	nodes: GRAPH.nodes,
+	edges: GRAPH.edges,
 	meta: { totalNodes: 2000, totalEdges: 1500, shownNodes: 4, shownEdges: 3, truncated: true },
 };
 
 /**
- * A mock wire client returning the given codebase + memory graphs. `graph()` returns whatever the test's
- * `codebaseRef` currently holds (so a test can flip the source from `EMPTY` to a built graph to simulate a
- * build re-hydrate); `buildGraph` is a vi.fn the test overrides per-case.
+ * A mock wire client whose `memoryGraph()` returns the given graph (the page's only source now). The
+ * retired `graph()`/`buildGraph()` are kept as inert stubs so the WireClient shape is satisfied — the
+ * page no longer calls them.
  */
-function mockWire(codebase: GraphWire, memory: GraphWire, buildGraph?: () => Promise<{ built: boolean; nodeCount: number; edgeCount: number; fileCount: number }>): WireClient {
+function mockWire(memory: GraphWire): WireClient {
 	return {
 		kpis: vi.fn(),
 		sessions: vi.fn(),
 		settings: vi.fn(),
 		rules: vi.fn(),
 		skills: vi.fn(),
-		graph: vi.fn(async () => codebase),
+		graph: vi.fn(async () => EMPTY),
 		memoryGraph: vi.fn(async () => memory),
 		recall: vi.fn(),
 		logs: vi.fn(async () => []),
 		harnesses: vi.fn(),
 		health: vi.fn(),
 		pollinate: vi.fn(),
-		buildGraph: buildGraph ? vi.fn(buildGraph) : vi.fn(async () => ({ built: false, nodeCount: 0, edgeCount: 0, fileCount: 0 })),
+		buildGraph: vi.fn(async () => ({ built: false, nodeCount: 0, edgeCount: 0, fileCount: 0 })),
 		vaultSettings: vi.fn(),
 		setSetting: vi.fn(),
 		secretNames: vi.fn(),
@@ -125,12 +126,18 @@ const SCOPE_WITH_PROJECT: ScopeContextValue = {
 	setScope: () => {},
 };
 
-/** Mount the page and flush the usePoll fetch-on-mount microtask so state settles. */
-async function mountPage(wire: WireClient): Promise<void> {
+/** A scope with NO active project — the page renders the needs-selection state. */
+const SCOPE_NO_PROJECT: ScopeContextValue = {
+	scope: { org: "acme", workspace: "backend" },
+	setScope: () => {},
+};
+
+/** Mount the page (with the given scope) and flush the fetch-on-mount microtask so state settles. */
+async function mountPage(wire: WireClient, scopeValue: ScopeContextValue = SCOPE_WITH_PROJECT): Promise<void> {
 	await act(async () => {
 		root = createRoot(container);
 		root.render(
-			<ScopeContext.Provider value={SCOPE_WITH_PROJECT}>
+			<ScopeContext.Provider value={scopeValue}>
 				<GraphPage {...pageProps(wire)} />
 			</ScopeContext.Provider>,
 		);
@@ -160,41 +167,41 @@ function typeSearch(value: string): void {
 
 // ── Pure helpers ──────────────────────────────────────────────────────────────
 
-describe("PRD-041a pure helpers (layout reuse + filter/search/viewbox)", () => {
-	it("distinctKinds returns the snapshot's real kinds in first-seen order (a-AC-4 — not hardcoded)", () => {
-		expect(distinctKinds(CODEBASE_GRAPH)).toEqual(["file", "function"]);
+describe("PRD-041 pure helpers (layout reuse + filter/search/viewbox)", () => {
+	it("distinctKinds returns the snapshot's real kinds in first-seen order (not hardcoded)", () => {
+		expect(distinctKinds(GRAPH)).toEqual(["file", "function"]);
 		expect(distinctKinds(MEMORY_GRAPH)).toEqual(["entity"]);
 		expect(distinctKinds(EMPTY)).toEqual([]);
 	});
 
-	it("applyKindFilter hides a kind's nodes AND edges incident only to hidden nodes (a-AC-4)", () => {
-		const filtered = applyKindFilter(CODEBASE_GRAPH, new Set(["function"]));
+	it("applyKindFilter hides a kind's nodes AND edges incident only to hidden nodes", () => {
+		const filtered = applyKindFilter(GRAPH, new Set(["function"]));
 		// fetchGraphView (the only `function`) is dropped; both `calls` edges into it are dropped too.
 		expect(filtered.nodes.map((n) => n.id)).not.toContain("fetchGraphView");
 		expect(filtered.nodes).toHaveLength(3);
 		expect(filtered.edges).toHaveLength(1); // only server.ts→api.ts (imports) survives
 		expect(filtered.edges[0]?.kind).toBe("imports");
 		// No hidden kinds → the graph is returned unchanged.
-		expect(applyKindFilter(CODEBASE_GRAPH, new Set())).toBe(CODEBASE_GRAPH);
+		expect(applyKindFilter(GRAPH, new Set())).toBe(GRAPH);
 	});
 
-	it("findNode locates by id OR label, case-insensitive substring; empty query → null (a-AC-5)", () => {
-		expect(findNode(CODEBASE_GRAPH, "SERVER")).toBe("src/daemon/server.ts"); // label match, case-insensitive
-		expect(findNode(CODEBASE_GRAPH, "dashboard/api")).toBe("src/daemon/runtime/dashboard/api.ts"); // id substring
-		expect(findNode(CODEBASE_GRAPH, "")).toBeNull();
-		expect(findNode(CODEBASE_GRAPH, "   ")).toBeNull();
-		expect(findNode(CODEBASE_GRAPH, "no-such-node")).toBeNull();
+	it("findNode locates by id OR label, case-insensitive substring; empty query → null", () => {
+		expect(findNode(GRAPH, "SERVER")).toBe("src/daemon/server.ts"); // label match, case-insensitive
+		expect(findNode(GRAPH, "dashboard/api")).toBe("src/daemon/runtime/dashboard/api.ts"); // id substring
+		expect(findNode(GRAPH, "")).toBeNull();
+		expect(findNode(GRAPH, "   ")).toBeNull();
+		expect(findNode(GRAPH, "no-such-node")).toBeNull();
 	});
 
-	it("viewBoxFor reflects scale (zoom shows less) + translate (pan) — deterministic (a-AC-2)", () => {
+	it("viewBoxFor reflects scale (zoom shows less) + translate (pan) — deterministic", () => {
 		// Identity: the whole base box (1600×1000) from the origin.
 		expect(viewBoxFor({ scale: 1, tx: 0, ty: 0 })).toBe("0 0 1600 1000");
 		// 2× zoom shows half the box; a pan translates the origin.
 		expect(viewBoxFor({ scale: 2, tx: 100, ty: 50 })).toBe("100 50 800 500");
 	});
 
-	it("splitNeighbors splits by direction AND relation; works for memory relations too (a-AC-3 / b-AC-3)", () => {
-		const api = splitNeighbors("src/daemon/runtime/dashboard/api.ts", CODEBASE_GRAPH.edges);
+	it("splitNeighbors splits by direction AND relation; works for memory relations (no special-casing)", () => {
+		const api = splitNeighbors("src/daemon/runtime/dashboard/api.ts", GRAPH.edges);
 		// incoming: server.ts via `imports`; outgoing: fetchGraphView via `calls`.
 		expect(api.incoming).toEqual([{ kind: "imports", ids: ["src/daemon/server.ts"] }]);
 		expect(api.outgoing).toEqual([{ kind: "calls", ids: ["fetchGraphView"] }]);
@@ -205,20 +212,28 @@ describe("PRD-041a pure helpers (layout reuse + filter/search/viewbox)", () => {
 	});
 });
 
-// ── Render-all (a-AC-1) ─────────────────────────────────────────────────────────
+// ── Render-all ──────────────────────────────────────────────────────────────────
 
-describe("PRD-041a: the page renders the FULL graph (every node + every edge)", () => {
-	it("a-AC-1 draws all N nodes and all M edges of the built GraphView (arbitrary ids, no skip)", async () => {
-		await mountPage(mockWire(CODEBASE_GRAPH, EMPTY));
-		expect(container.querySelectorAll('g[role="button"]')).toHaveLength(CODEBASE_GRAPH.nodes.length);
-		expect(container.querySelectorAll("line")).toHaveLength(CODEBASE_GRAPH.edges.length);
+describe("the page renders the FULL memory graph (every node + every edge)", () => {
+	it("draws all N nodes and all M edges of the built graph (arbitrary ids, no skip)", async () => {
+		await mountPage(mockWire(GRAPH));
+		expect(container.querySelectorAll('g[role="button"]')).toHaveLength(GRAPH.nodes.length);
+		expect(container.querySelectorAll("line")).toHaveLength(GRAPH.edges.length);
 		// One node-fill circle per node (no selection → no extra ring circle).
-		expect(container.querySelectorAll("circle")).toHaveLength(CODEBASE_GRAPH.nodes.length);
+		expect(container.querySelectorAll("circle")).toHaveLength(GRAPH.nodes.length);
 		// Arbitrary-id labels render as text.
 		expect(container.textContent ?? "").toContain("server.ts");
 		expect(container.textContent ?? "").toContain("fetchGraphView()");
-		// The eyebrow reflects the live counts + the active source.
-		expect(container.textContent ?? "").toContain("codebase · 4 nodes · 3 edges");
+		// The eyebrow reflects the live counts (no source prefix).
+		expect(container.textContent ?? "").toContain("4 nodes · 3 edges");
+	});
+
+	it("fetches the memory endpoint, never the retired codebase graph endpoint", async () => {
+		const wire = mockWire(MEMORY_GRAPH);
+		await mountPage(wire);
+		expect(wire.memoryGraph).toHaveBeenCalled();
+		expect(wire.graph).not.toHaveBeenCalled();
+		expect(container.textContent ?? "").toContain("Alex");
 	});
 });
 
@@ -226,21 +241,20 @@ describe("PRD-041a: the page renders the FULL graph (every node + every edge)", 
 
 describe("graph memory cap: the truncation notice reports the daemon meta counts, not post-filter counts", () => {
 	it("shows 'shownNodes of totalNodes' from meta, and a kind filter does NOT change those numbers", async () => {
-		await mountPage(mockWire(TRUNCATED_GRAPH, EMPTY));
+		await mountPage(mockWire(TRUNCATED_GRAPH));
 		const notice = container.querySelector('[data-testid="graph-truncation-notice"]');
 		expect(notice).not.toBeNull();
 		// Sourced from graph.meta (4 of 2,000), NOT the rendered node count.
 		expect(notice?.textContent).toContain("4 most-connected of 2,000");
 
-		// Hiding a kind shrinks the RENDERED set, but the daemon-cap counts in the banner must not move
-		// (the regression CodeRabbit caught: rendered.nodes.length was leaking into the cap message).
+		// Hiding a kind shrinks the RENDERED set, but the daemon-cap counts in the banner must not move.
 		const fnToggle = container.querySelector('[data-testid="kind-toggle-function"]') as HTMLButtonElement;
 		act(() => fnToggle.click());
 		expect(container.querySelector('[data-testid="graph-truncation-notice"]')?.textContent).toContain("4 most-connected of 2,000");
 	});
 
 	it("does NOT show the notice for an untruncated graph (meta.truncated=false / no meta)", async () => {
-		await mountPage(mockWire(CODEBASE_GRAPH, EMPTY));
+		await mountPage(mockWire(GRAPH));
 		expect(container.querySelector('[data-testid="graph-truncation-notice"]')).toBeNull();
 	});
 
@@ -249,10 +263,10 @@ describe("graph memory cap: the truncation notice reports the daemon meta counts
 		// "Rendering is capped at …" branch (the client-only render backstop).
 		const huge: GraphWire = {
 			built: true,
-			nodes: Array.from({ length: 1600 }, (_, i) => ({ id: `n${i}`, label: `n${i}`, kind: "file" })),
+			nodes: Array.from({ length: 1600 }, (_, i) => ({ id: `n${i}`, label: `n${i}`, kind: "entity" })),
 			edges: [],
 		};
-		await mountPage(mockWire(huge, EMPTY));
+		await mountPage(mockWire(huge));
 		const notice = container.querySelector('[data-testid="graph-truncation-notice"]');
 		expect(notice).not.toBeNull();
 		expect(notice?.textContent).toContain("Rendering is capped at 1,500 nodes");
@@ -261,11 +275,11 @@ describe("graph memory cap: the truncation notice reports the daemon meta counts
 	});
 });
 
-// ── Pan / zoom / fit (a-AC-2) ────────────────────────────────────────────────────
+// ── Pan / zoom / fit ─────────────────────────────────────────────────────────────
 
-describe("PRD-041a: pan + bounded zoom + fit/reset (a-AC-2)", () => {
+describe("pan + bounded zoom + fit/reset", () => {
 	it("a wheel zoom changes the canvas viewBox; fit resets it", async () => {
-		await mountPage(mockWire(CODEBASE_GRAPH, EMPTY));
+		await mountPage(mockWire(GRAPH));
 		const svg = container.querySelector('[data-testid="graph-canvas"]') as SVGSVGElement;
 		const initial = svg.getAttribute("viewBox");
 		expect(initial).toBe("0 0 1600 1000");
@@ -283,7 +297,7 @@ describe("PRD-041a: pan + bounded zoom + fit/reset (a-AC-2)", () => {
 	});
 
 	it("zoom is bounded — repeated zoom-out never inverts/blows up the viewBox", async () => {
-		await mountPage(mockWire(CODEBASE_GRAPH, EMPTY));
+		await mountPage(mockWire(GRAPH));
 		const zoomOut = container.querySelector('[aria-label="zoom out"]') as HTMLButtonElement;
 		for (let i = 0; i < 20; i++) act(() => zoomOut.click());
 		const vb = (container.querySelector('[data-testid="graph-canvas"]') as SVGSVGElement).getAttribute("viewBox") ?? "";
@@ -295,11 +309,11 @@ describe("PRD-041a: pan + bounded zoom + fit/reset (a-AC-2)", () => {
 	});
 });
 
-// ── Click → detail (a-AC-3) ─────────────────────────────────────────────────────
+// ── Click → detail ───────────────────────────────────────────────────────────────
 
-describe("PRD-041a: click-to-select → detail panel with split neighbors + caveat (a-AC-3)", () => {
-	it("clicking a node opens the panel with id/label/kind + outgoing/incoming relations + the caveat", async () => {
-		await mountPage(mockWire(CODEBASE_GRAPH, EMPTY));
+describe("click-to-select → detail panel with split neighbors", () => {
+	it("clicking a node opens the panel with id/label/kind + outgoing/incoming relations", async () => {
+		await mountPage(mockWire(GRAPH));
 		expect(container.querySelector('[data-testid="graph-detail-panel"]')).toBeNull();
 
 		clickNode("api.ts");
@@ -312,12 +326,10 @@ describe("PRD-041a: click-to-select → detail panel with split neighbors + cave
 		// Outgoing `calls` → fetchGraphView; incoming `imports` ← server.ts (split by direction+relation).
 		expect(container.querySelector('[data-testid="detail-outgoing"]')?.textContent).toContain("fetchGraphView()");
 		expect(container.querySelector('[data-testid="detail-incoming"]')?.textContent).toContain("server.ts");
-		// The honest cross-file-calls caveat is shown.
-		expect(container.querySelector('[data-testid="calls-caveat"]')?.textContent).toContain("not proof of dead code");
 	});
 
-	it("a-AC-3 clearing the selection (re-click) removes the detail panel", async () => {
-		await mountPage(mockWire(CODEBASE_GRAPH, EMPTY));
+	it("clearing the selection (re-click) removes the detail panel", async () => {
+		await mountPage(mockWire(GRAPH));
 		clickNode("server.ts");
 		expect(container.querySelector('[data-testid="graph-detail-panel"]')).not.toBeNull();
 		clickNode("server.ts");
@@ -325,11 +337,11 @@ describe("PRD-041a: click-to-select → detail panel with split neighbors + cave
 	});
 });
 
-// ── Kind filters (a-AC-4) ────────────────────────────────────────────────────────
+// ── Kind filters ─────────────────────────────────────────────────────────────────
 
-describe("PRD-041a: kind filters from real kinds; toggle hides nodes + edges + updates counts (a-AC-4)", () => {
+describe("kind filters from real kinds; toggle hides nodes + edges + updates counts", () => {
 	it("renders a toggle per REAL kind and toggling a kind off removes its nodes + incident edges", async () => {
-		await mountPage(mockWire(CODEBASE_GRAPH, EMPTY));
+		await mountPage(mockWire(GRAPH));
 		// Toggles for the real distinct kinds only (file, function) — no hardcoded class/etc.
 		expect(container.querySelector('[data-testid="kind-toggle-file"]')).not.toBeNull();
 		expect(container.querySelector('[data-testid="kind-toggle-function"]')).not.toBeNull();
@@ -340,15 +352,15 @@ describe("PRD-041a: kind filters from real kinds; toggle hides nodes + edges + u
 		act(() => fnToggle.click());
 		expect(container.querySelectorAll('g[role="button"]')).toHaveLength(3); // 4 − 1
 		expect(container.querySelectorAll("line")).toHaveLength(1); // 3 − 2 calls
-		expect(container.textContent ?? "").toContain("codebase · 3 nodes · 1 edges");
+		expect(container.textContent ?? "").toContain("3 nodes · 1 edges");
 	});
 });
 
-// ── Search (a-AC-5) ──────────────────────────────────────────────────────────────
+// ── Search ───────────────────────────────────────────────────────────────────────
 
-describe("PRD-041a: search focuses + selects the matching node (a-AC-5)", () => {
+describe("search focuses + selects the matching node", () => {
 	it("typing a query selects the matching node (its detail panel opens)", async () => {
-		await mountPage(mockWire(CODEBASE_GRAPH, EMPTY));
+		await mountPage(mockWire(GRAPH));
 		typeSearch("panels");
 		// panels.tsx is selected → its detail panel is shown.
 		const panel = container.querySelector('[data-testid="graph-detail-panel"]');
@@ -357,148 +369,27 @@ describe("PRD-041a: search focuses + selects the matching node (a-AC-5)", () => 
 	});
 });
 
-// ── Empty state (a-AC-6) ─────────────────────────────────────────────────────────
+// ── Empty state + needs-selection ──────────────────────────────────────────────────
 
-describe("PRD-041a: built:false → the full-page empty state with a working Build graph button (a-AC-6)", () => {
-	it("renders the Build graph button (not a dead CLI prompt), not an error or a blank canvas", async () => {
-		await mountPage(mockWire(EMPTY, EMPTY));
-		expect(container.querySelector('[data-testid="graph-empty-state"]')).not.toBeNull();
-		expect(container.textContent ?? "").toContain("No graph built for this workspace.");
-		// The empty state now offers a real Build graph BUTTON (replacing the old `honeycomb graph build` hint).
-		const buildBtn = container.querySelector('[data-testid="build-graph-button"]');
-		expect(buildBtn, "the Build graph button is present").not.toBeNull();
-		expect(buildBtn?.textContent).toBe("Build graph");
-		// No canvas in the empty state; no dead CLI prompt shown by default (it only appears on failure).
-		expect(container.querySelector('[data-testid="graph-canvas"]')).toBeNull();
-		expect(container.textContent ?? "").not.toContain("honeycomb graph build");
-	});
-
-	it("the memory-source empty state shows NO build button (no build command exists for it)", async () => {
-		const wire = mockWire(EMPTY, EMPTY);
-		await mountPage(wire);
-		const toMem = container.querySelector('[data-testid="source-memory"]') as HTMLButtonElement;
-		await act(async () => {
-			toMem.click();
-			await Promise.resolve();
-			await Promise.resolve();
-		});
+describe("the honest empty + needs-selection states (no codebase view, no build command)", () => {
+	it("built:false → the 'no memory graph yet' state with NO build button and no canvas", async () => {
+		await mountPage(mockWire(EMPTY));
 		expect(container.querySelector('[data-testid="graph-empty-state"]')).not.toBeNull();
 		expect(container.textContent ?? "").toContain("No memory graph yet for this workspace.");
-		// The memory empty state stays UNCHANGED — no build button, no CLI hint.
+		// The retired codebase "Build graph" button must NOT appear, nor a dead CLI hint.
 		expect(container.querySelector('[data-testid="build-graph-button"]')).toBeNull();
-	});
-});
-
-// ── Build graph button behavior (the new wired build) ─────────────────────────────
-
-describe("PRD-041a: the Build graph button triggers the daemon build and re-hydrates on success", () => {
-	it("clicking Build graph calls wire.buildGraph() once (even on a double-click) and shows the in-flight label", async () => {
-		// graph() returns EMPTY first (empty state), then the built graph after a successful build — so the
-		// re-hydrate swaps the empty state for the drawn graph.
-		let built = false;
-		const wire = mockWire(EMPTY, EMPTY);
-		(wire.graph as ReturnType<typeof vi.fn>).mockImplementation(async () => (built ? CODEBASE_GRAPH : EMPTY));
-		let resolveBuild: (v: { built: boolean; nodeCount: number; edgeCount: number; fileCount: number }) => void = () => {};
-		(wire.buildGraph as ReturnType<typeof vi.fn>).mockImplementation(
-			() =>
-				new Promise((resolve) => {
-					resolveBuild = resolve;
-				}),
-		);
-		await mountPage(wire);
-
-		const btn = container.querySelector('[data-testid="build-graph-button"]') as HTMLButtonElement;
-		// Double-click rapidly — the synchronous re-entry guard must fire exactly one POST.
-		await act(async () => {
-			btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-			btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-		});
-		// In-flight label + disabled, and buildGraph called exactly once despite two clicks.
-		expect(container.querySelector('[data-testid="build-graph-button"]')?.textContent).toBe("Building…");
-		expect(wire.buildGraph).toHaveBeenCalledTimes(1);
-
-		// Resolve the build successfully → the page re-hydrates and the graph (not the empty state) renders.
-		built = true;
-		await act(async () => {
-			resolveBuild({ built: true, nodeCount: 4, edgeCount: 3, fileCount: 3 });
-			await Promise.resolve();
-			await Promise.resolve();
-			await Promise.resolve();
-		});
-		expect(container.querySelector('[data-testid="graph-empty-state"]')).toBeNull();
-		expect(container.querySelector('[data-testid="graph-canvas"]')).not.toBeNull();
-		expect(container.textContent ?? "").toContain("server.ts");
-	});
-
-	it("a { built: false } ack shows the inline error (no dead CLI hint), and the empty state stays", async () => {
-		const wire = mockWire(EMPTY, EMPTY, async () => ({ built: false, nodeCount: 0, edgeCount: 0, fileCount: 0 }));
-		await mountPage(wire);
-		const btn = container.querySelector('[data-testid="build-graph-button"]') as HTMLButtonElement;
-		await act(async () => {
-			btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-			await Promise.resolve();
-			await Promise.resolve();
-		});
-		// The empty state is still shown (no build happened) with an honest error inviting a retry.
-		expect(container.querySelector('[data-testid="graph-empty-state"]')).not.toBeNull();
-		expect(container.querySelector('[data-testid="build-graph-error"]')).not.toBeNull();
-		// The button is right there to retry — we never surface the non-existent `honeycomb graph build` command.
+		expect(container.querySelector('[data-testid="source-codebase"]')).toBeNull();
+		expect(container.querySelector('[data-testid="source-memory"]')).toBeNull();
 		expect(container.textContent ?? "").not.toContain("honeycomb graph build");
-		// The button returns to its idle label (not a forever spinner).
-		expect(container.querySelector('[data-testid="build-graph-button"]')?.textContent).toBe("Build graph");
-	});
-});
-
-// ── 041b: the Codebase ↔ Memory toggle ───────────────────────────────────────────
-
-describe("PRD-041b: the Codebase ↔ Memory toggle swaps the source on the SAME canvas", () => {
-	it("b-AC-3 switching to Memory fetches the memory endpoint and renders it; back restores codebase", async () => {
-		const wire = mockWire(CODEBASE_GRAPH, MEMORY_GRAPH);
-		await mountPage(wire);
-		// Start on codebase: server.ts is drawn.
-		expect(container.textContent ?? "").toContain("server.ts");
-
-		// Switch to Memory.
-		const toMem = container.querySelector('[data-testid="source-memory"]') as HTMLButtonElement;
-		await act(async () => {
-			toMem.click();
-			await Promise.resolve();
-			await Promise.resolve();
-		});
-		expect(wire.memoryGraph).toHaveBeenCalled();
-		// The memory graph renders on the SAME canvas (entity nodes drawn, eyebrow says memory).
-		expect(container.querySelectorAll('g[role="button"]')).toHaveLength(MEMORY_GRAPH.nodes.length);
-		expect(container.textContent ?? "").toContain("Alex");
-		expect(container.textContent ?? "").toContain("memory · 2 nodes · 1 edges");
-
-		// A memory node's detail panel shows the `depends_on` relation (no special-casing).
-		clickNode("Alex");
-		expect(container.querySelector('[data-testid="detail-outgoing"]')?.textContent).toContain("depends_on");
-
-		// Switch back to Codebase → the codebase graph is restored.
-		const toCode = container.querySelector('[data-testid="source-codebase"]') as HTMLButtonElement;
-		await act(async () => {
-			toCode.click();
-			await Promise.resolve();
-			await Promise.resolve();
-		});
-		expect(container.textContent ?? "").toContain("server.ts");
-		expect(container.textContent ?? "").toContain("codebase · 4 nodes · 3 edges");
+		expect(container.querySelector('[data-testid="graph-canvas"]')).toBeNull();
 	});
 
-	it("b-AC-4 an empty memory graph shows the honest 'no memory graph yet' state (no faked graph, no fake command)", async () => {
-		const wire = mockWire(CODEBASE_GRAPH, EMPTY);
-		await mountPage(wire);
-		const toMem = container.querySelector('[data-testid="source-memory"]') as HTMLButtonElement;
-		await act(async () => {
-			toMem.click();
-			await Promise.resolve();
-			await Promise.resolve();
-		});
-		expect(container.querySelector('[data-testid="graph-empty-state"]')).not.toBeNull();
-		expect(container.textContent ?? "").toContain("No memory graph yet for this workspace.");
-		// It must NOT invent a build command that does not exist (OQ-6) — no `honeycomb` graph command here.
-		expect(container.textContent ?? "").not.toContain("honeycomb graph build");
+	it("no project selected → the needs-selection state, and the memory endpoint is NOT fetched", async () => {
+		const wire = mockWire(GRAPH);
+		await mountPage(wire, SCOPE_NO_PROJECT);
+		expect(container.querySelector('[data-testid="needs-project-selection"]')).not.toBeNull();
+		expect(container.textContent ?? "").toContain("memory graph");
+		expect(wire.memoryGraph).not.toHaveBeenCalled();
 		expect(container.querySelector('[data-testid="graph-canvas"]')).toBeNull();
 	});
 });

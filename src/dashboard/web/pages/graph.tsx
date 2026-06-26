@@ -1,36 +1,35 @@
 /**
- * The GRAPH page — PRD-041a (full-page codebase graph) + PRD-041b (memory-graph foundation).
+ * The MEMORY GRAPH page — PRD-041 (the full-page interactive graph), memory-only.
  *
- * Mounted at the PRD-037 `#/graph` slot (replacing 037's ComingSoon placeholder). It renders the FULL
- * `GraphView` full-viewport — every node and edge the snapshot holds — with a real interactive layout,
- * pan + bounded zoom, click-to-select with a side detail panel, kind filters, and search-to-node.
+ * Mounted at the PRD-037 `#/graph` slot. It renders the daemon's MEMORY/knowledge graph full-viewport —
+ * every entity and relation the snapshot holds — with a real interactive layout, pan + bounded zoom,
+ * click-to-select with a side detail panel, kind filters, and search-to-node.
+ *
+ * ── Codebase view removed (PRD-041 follow-up) ─────────────────────────────────
+ *   This page previously carried a Codebase ↔ Memory toggle. The codebase graph was too dense to be
+ *   useful to look at, so the UI now shows ONLY the memory graph (`wire.memoryGraph()`). The codebase
+ *   graph is NOT abandoned: the daemon keeps building it in the background (assemble.ts auto-build) so
+ *   the stale-ref / memory-lifecycle σ(m,t) diagnostic that reads the snapshot stays fed — it simply no
+ *   longer has a viewer here.
  *
  * ── REUSE, do not fork (D-1) ──────────────────────────────────────────────────
  *   Positioning is the SHIPPED pure `layout(nodes, edges, viewBox)` from `graph-layout.ts`
  *   (PRD-035c), parameterized here with full-page dimensions — there is ONE layout function, no
  *   second NODE_POS. Neighbor derivation reuses `neighborsOf` / the `splitNeighbors` direction+relation
  *   split (also pure, in `graph-layout.ts`). The legend reuses the `KIND_COLOR` map exported from
- *   `panels.tsx` (the SAME swatches the mini-widget draws). The page does NOT re-implement the canvas
- *   render bug or its fix; it builds the full-page experience on the shared primitives.
+ *   `panels.tsx`. The page builds the full-page experience on the shared primitives.
  *
- * ── 041b — Codebase ↔ Memory toggle (the same canvas, two sources) ────────────
- *   A toggle swaps which view-model the page fetches (`wire.graph()` vs `wire.memoryGraph()`) and feeds
- *   the SAME layout/pan-zoom/selection/kind-filter/search machinery. The memory graph is a
- *   `GraphView`-shaped source (`MemoryGraphView`); it draws with NO canvas changes. Empty memory graph
- *   → an honest "no memory graph yet" state (NOT a faked graph, NOT a build command that does not exist).
- *
- * ── Security (D-8 / 041b D-6) ─────────────────────────────────────────────────
- *   Local-mode-only + XSS-safe: every label (file path, symbol, AND memory/entity text — higher-risk)
- *   renders as React TEXT, never `dangerouslySetInnerHTML`. The page reads ONLY the two loopback graph
- *   endpoints through the injected `wire` (never `createWireClient`); it adds no token/secret. The shell
- *   owns the daemon-down view-swap (D-9) — this page renders its empty/loading state until the fetch
- *   resolves. Every visual value is an existing `var(--…)` DS token; no new dependency (pan/zoom is
- *   hand-rolled over the SVG viewBox transform).
+ * ── Security (D-8) ────────────────────────────────────────────────────────────
+ *   Local-mode-only + XSS-safe: every label (memory/entity text — higher-risk) renders as React TEXT,
+ *   never `dangerouslySetInnerHTML`. The page reads ONLY the loopback memory-graph endpoint through the
+ *   injected `wire` (never `createWireClient`); it adds no token/secret. The shell owns the daemon-down
+ *   view-swap (D-9) — this page renders its empty/loading state until the fetch resolves. Every visual
+ *   value is an existing `var(--…)` DS token; no new dependency (pan/zoom is hand-rolled over the SVG
+ *   viewBox transform).
  */
 
 import React from "react";
 
-import { BuildGraphButton } from "../build-graph-button.js";
 import { layout, neighborsOf, splitNeighbors, type Point } from "../graph-layout.js";
 import { KIND_COLOR, KIND_COLOR_FALLBACK } from "../panels.js";
 import { Badge } from "../primitives.js";
@@ -38,14 +37,14 @@ import type { PageProps } from "../page-frame.js";
 import { PageFrame } from "../page-frame.js";
 import { useScope } from "../scope-context.js";
 import { NeedsProjectSelection } from "../needs-project.js";
-import { capGraphForRender, EMPTY_GRAPH, MAX_RENDER_NODES, type GraphWire, type WireClient } from "../wire.js";
+import { capGraphForRender, EMPTY_GRAPH, MAX_RENDER_NODES, type GraphWire } from "../wire.js";
 
-/** How often the page re-hydrates the active graph source (ms). Light refresh, stopped on unmount. */
+/** How often the page re-hydrates the memory graph (ms). Light refresh, stopped on unmount. */
 const GRAPH_POLL_MS = 8000;
 
 /**
  * The full-page layout canvas extent — the pure `layout(...)` fits node positions inside this box. Far
- * larger than the mini-widget's 540×200 so a real codebase set spreads out (D-2). The SVG scales to its
+ * larger than the mini-widget's 540×200 so a real entity set spreads out (D-2). The SVG scales to its
  * container via `viewBox`; pan/zoom transforms this base box (it is NOT the rendered pixel size).
  */
 const GRAPH_VIEW = { width: 1600, height: 1000 } as const;
@@ -55,9 +54,6 @@ const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 4;
 /** The multiplicative zoom step per wheel notch / button press. */
 const ZOOM_STEP = 1.15;
-
-/** The two graph sources the toggle switches between (041b D-3). */
-export type GraphSource = "codebase" | "memory";
 
 /** The pan/zoom view transform over the SVG viewBox: a scale + an (x,y) translate of the base box. */
 interface ViewTransform {
@@ -197,10 +193,9 @@ function RelationRow({ kind, labels }: { kind: string; labels: readonly string[]
 
 /**
  * The right-hand node DETAIL panel (D-4 / OQ-4). Shows the selected node's `id`, `label`, `kind`, and
- * its neighbors split by DIRECTION (outgoing/incoming) and RELATION (`imports`/`calls` for the codebase
- * graph; `depends_on`/`supersedes`/… for the memory graph — no special-casing). EVERY rendered value is
- * React text (XSS-safe). Surfaces the honest cross-file-`calls` caveat (an empty incoming list is not
- * proof of dead code — PRD-014d / FR-4). `mapLabel` resolves a neighbor id to its display label.
+ * its neighbors split by DIRECTION (outgoing/incoming) and RELATION (`depends_on`/`supersedes`/… for the
+ * memory graph — no special-casing). EVERY rendered value is React text (XSS-safe). `mapLabel` resolves a
+ * neighbor id to its display label.
  */
 function NodeDetailPanel({
 	node,
@@ -265,21 +260,10 @@ function NodeDetailPanel({
 				</div>
 			)}
 
-			{/* The honest cross-file-`calls` caveat (FR-4 / PRD-014d): an empty incoming list is NOT dead-code proof. */}
-			<div
-				data-testid="calls-caveat"
-				style={{ marginTop: "auto", padding: "8px 10px", background: "var(--bg-elevated)", border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-md)" }}
-			>
-				<span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-tertiary)", lineHeight: "16px" }}>
-					Cross-file <code style={{ color: "var(--text-secondary)" }}>calls</code> resolve only for relative named/namespace
-					imports — an empty incoming list is not proof of dead code.
-				</span>
-			</div>
-
 			<button
 				type="button"
 				onClick={onClear}
-				style={{ height: 28, padding: "0 12px", background: "transparent", border: "1px solid var(--border-default)", borderRadius: "var(--radius-md)", color: "var(--text-secondary)", fontFamily: "var(--font-mono)", fontSize: 12, cursor: "pointer", alignSelf: "flex-start" }}
+				style={{ height: 28, padding: "0 12px", background: "transparent", border: "1px solid var(--border-default)", borderRadius: "var(--radius-md)", color: "var(--text-secondary)", fontFamily: "var(--font-mono)", fontSize: 12, cursor: "pointer", alignSelf: "flex-start", marginTop: "auto" }}
 			>
 				clear selection
 			</button>
@@ -390,15 +374,14 @@ function GraphCanvasFull({
 	);
 }
 
-// ── Empty states (D-7 / 041b FR-4) ────────────────────────────────────────────
+// ── Empty state (D-7) ──────────────────────────────────────────────────────────
 
 /**
- * The full-page empty state. Codebase → a working "Build graph" button (wired to the daemon via the
- * shared `wire`; on success `onBuilt` re-hydrates the page's graph source so the graph appears without a
- * reload). Memory → an honest note (no build command exists for the memory graph). `wire`/`onBuilt` are
- * only used by the codebase branch.
+ * The full-page memory-graph empty state. The knowledge graph is populated automatically as memories and
+ * entities accrue (PRD-008) — there is no build command to invent (OQ-6), so this is an honest neutral
+ * note, never a faked graph or a dead command.
  */
-function GraphEmptyState({ source, wire, onBuilt }: { source: GraphSource; wire: WireClient; onBuilt: () => void | Promise<void> }): React.JSX.Element {
+function GraphEmptyState(): React.JSX.Element {
 	return (
 		<div
 			data-testid="graph-empty-state"
@@ -416,21 +399,10 @@ function GraphEmptyState({ source, wire, onBuilt }: { source: GraphSource; wire:
 				textAlign: "center",
 			}}
 		>
-			{source === "codebase" ? (
-				<>
-					<div style={{ fontSize: 15, color: "var(--text-tertiary)" }}>No graph built for this workspace.</div>
-					<BuildGraphButton wire={wire} onBuilt={onBuilt} />
-				</>
-			) : (
-				<>
-					{/* 041b OQ-6: do NOT invent a build command that does not exist — the knowledge graph is
-					    populated as memories accrue (PRD-008, In-Work). An honest neutral message. */}
-					<div style={{ fontSize: 15, color: "var(--text-tertiary)" }}>No memory graph yet for this workspace.</div>
-					<span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-tertiary)", maxWidth: 460 }}>
-						The knowledge graph is populated automatically as memories and entities accrue.
-					</span>
-				</>
-			)}
+			<div style={{ fontSize: 15, color: "var(--text-tertiary)" }}>No memory graph yet for this workspace.</div>
+			<span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-tertiary)", maxWidth: 460 }}>
+				The knowledge graph is populated automatically as memories and entities accrue.
+			</span>
 		</div>
 	);
 }
@@ -451,72 +423,29 @@ function ToolButton({ label, ariaLabel, onClick }: { label: string; ariaLabel: s
 	);
 }
 
-/** The Codebase ↔ Memory source toggle (041b D-3 / FR-3). Two segmented buttons; the active one is honey. */
-function SourceToggle({ source, onPick }: { source: GraphSource; onPick: (s: GraphSource) => void }): React.JSX.Element {
-	const seg = (s: GraphSource, label: string): React.JSX.Element => {
-		const active = source === s;
-		return (
-			<button
-				type="button"
-				role="tab"
-				aria-selected={active}
-				data-testid={`source-${s}`}
-				onClick={() => onPick(s)}
-				style={{
-					height: 30,
-					padding: "0 14px",
-					background: active ? "var(--honey-subtle)" : "transparent",
-					border: `1px solid ${active ? "var(--honey-border)" : "var(--border-default)"}`,
-					color: active ? "var(--honey)" : "var(--text-secondary)",
-					fontFamily: "var(--font-mono)",
-					fontSize: 12,
-					fontWeight: 600,
-					cursor: "pointer",
-				}}
-			>
-				{label}
-			</button>
-		);
-	};
-	return (
-		<div role="tablist" aria-label="graph source" style={{ display: "inline-flex", gap: 0, borderRadius: "var(--radius-md)", overflow: "hidden" }}>
-			{seg("codebase", "Codebase")}
-			{seg("memory", "Memory")}
-		</div>
-	);
-}
-
 // ── The routed page ───────────────────────────────────────────────────────────
 
 /**
- * The Graph page (041a + 041b). Hydrates the ACTIVE source (codebase via `wire.graph()`, memory via
- * `wire.memoryGraph()`) through the shared `wire`, and renders the full-page interactive graph: the
- * shared pure `layout(...)`, pan/zoom over the SVG viewBox, click-to-select → side detail panel, kind
- * filters from the snapshot's real kinds, and search-to-node. The toggle swaps the source feeding the
- * SAME machinery. `built:false` → the honest full-page empty state for the active source. The shell
- * owns the daemon-down swap (D-9), so this page just renders empty/loading until its fetch resolves.
+ * The Memory Graph page (PRD-041, memory-only). Hydrates the memory graph via `wire.memoryGraph()`
+ * through the shared `wire`, and renders the full-page interactive graph: the shared pure `layout(...)`,
+ * pan/zoom over the SVG viewBox, click-to-select → side detail panel, kind filters from the snapshot's
+ * real kinds, and search-to-node. `built:false` → the honest full-page empty state. The shell owns the
+ * daemon-down swap (D-9), so this page just renders empty/loading until its fetch resolves.
  */
 export function GraphPage({ wire }: PageProps): React.JSX.Element {
-	// PRD-049e (49e-AC-2): the dashboard-selected project. Threaded into the graph fetchers (so a scope
+	// PRD-049e (49e-AC-2): the dashboard-selected project. Threaded into the graph fetcher (so a scope
 	// switch re-queries for the new project on the NEXT render) and gating the needs-selection state.
 	const { scope } = useScope();
 	const project = scope.project;
-	const [source, setSource] = React.useState<GraphSource>("codebase");
 	const [graph, setGraph] = React.useState<GraphWire>(EMPTY_GRAPH);
 	const [selected, setSelected] = React.useState<string | null>(null);
 	const [hiddenKinds, setHiddenKinds] = React.useState<ReadonlySet<string>>(new Set());
 	const [search, setSearch] = React.useState("");
 	const [transform, setTransform] = React.useState<ViewTransform>(IDENTITY_TRANSFORM);
-	// A monotonically-bumped refetch trigger: bumping it re-runs the hydrate effect at once (used by the
-	// "Build graph" button to re-hydrate the active source immediately after a successful build — the
-	// fresh snapshot is a LOCAL file the next `wire.graph()` reads, no eventual-consistency wait).
-	const [refetchTrigger, setRefetchTrigger] = React.useState(0);
 
-	// Hydrate the ACTIVE source. Fetches IMMEDIATELY whenever the source flips (the effect is keyed on
-	// `source`, so a Codebase↔Memory toggle re-fetches at once — not on the next poll tick) OR when the
-	// refetch trigger bumps (a successful build), then a light poll keeps it fresh. A failure degrades to
-	// EMPTY_GRAPH (the wire is fail-soft) → the empty state. An `alive` guard prevents a late-resolving
-	// fetch from the PRIOR source updating after a switch.
+	// Hydrate the MEMORY graph. Fetches immediately, then a light poll keeps it fresh. A failure degrades
+	// to EMPTY_GRAPH (the wire is fail-soft) → the empty state. An `alive` guard prevents a late-resolving
+	// fetch from updating after unmount/scope-switch.
 	React.useEffect(() => {
 		// 49e-AC-5: with NO project selected, do not fetch (and below we render the needs-selection
 		// state) — never show another project's graph. The effect is keyed on `project` so a scope
@@ -527,7 +456,7 @@ export function GraphPage({ wire }: PageProps): React.JSX.Element {
 		}
 		let alive = true;
 		const tick = async (): Promise<void> => {
-			const next = source === "memory" ? await wire.memoryGraph(project) : await wire.graph(project);
+			const next = await wire.memoryGraph(project);
 			if (alive) setGraph(next);
 		};
 		void tick();
@@ -536,22 +465,7 @@ export function GraphPage({ wire }: PageProps): React.JSX.Element {
 			alive = false;
 			clearInterval(id);
 		};
-	}, [wire, source, refetchTrigger, project]);
-
-	// The refresh the "Build graph" button calls on a successful build: bump the trigger so the active
-	// source re-hydrates at once (the codebase graph appears without a manual reload).
-	const refreshGraph = React.useCallback((): void => setRefetchTrigger((n) => n + 1), []);
-
-	// Switching source resets the per-source view (selection, filters, search, pan/zoom) so the new
-	// graph frames cleanly and a stale selection from the other source never lingers.
-	const pickSource = React.useCallback((s: GraphSource): void => {
-		setSource(s);
-		setGraph(EMPTY_GRAPH);
-		setSelected(null);
-		setHiddenKinds(new Set());
-		setSearch("");
-		setTransform(IDENTITY_TRANSFORM);
-	}, []);
+	}, [wire, project]);
 
 	const kinds = React.useMemo(() => distinctKinds(graph), [graph]);
 	// The visible sub-graph after the kind filter (D-5).
@@ -600,17 +514,15 @@ export function GraphPage({ wire }: PageProps): React.JSX.Element {
 	const onSelect = React.useCallback((id: string): void => setSelected((cur) => (cur === id ? null : id)), []);
 	const clearSelection = React.useCallback((): void => setSelected(null), []);
 
-	const eyebrow = `${source} · ${rendered.nodes.length} nodes · ${rendered.edges.length} edges`;
-
-	const toolbar = <SourceToggle source={source} onPick={pickSource} />;
+	const eyebrow = `${rendered.nodes.length} nodes · ${rendered.edges.length} edges`;
 
 	return (
-		<PageFrame title="Graph" eyebrow={project === undefined ? "graph" : eyebrow} right={toolbar}>
+		<PageFrame title="Memory Graph" eyebrow={project === undefined ? "memory graph" : eyebrow}>
 			{project === undefined ? (
 				// 49e-AC-5: no project selected → the explicit needs-selection state, never another scope's graph.
-				<NeedsProjectSelection surface="codebase & memory graph" />
+				<NeedsProjectSelection surface="memory graph" />
 			) : !graph.built ? (
-				<GraphEmptyState source={source} wire={wire} onBuilt={refreshGraph} />
+				<GraphEmptyState />
 			) : (
 				<>
 					{/* graph memory cap: when the graph is bounded, say so honestly — and source the "N of M" from the

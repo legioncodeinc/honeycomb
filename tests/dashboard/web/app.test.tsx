@@ -144,7 +144,7 @@ describe("037 AC-1: the left-nav shell renders all seven nav items + the chrome"
 		const text = container.textContent ?? "";
 		// Brand chrome + the seven nav items.
 		expect(text).toContain("honeycomb");
-		for (const label of ["Dashboard", "Harnesses", "Memories", "Graph", "Sync", "Logs", "Settings"]) {
+		for (const label of ["Dashboard", "Harnesses", "Memories", "Memory Graph", "Sync", "Logs", "Settings"]) {
 			expect(text).toContain(label);
 		}
 		// The org/workspace identity + the relocated Pollinate now live in the shell chrome.

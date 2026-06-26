@@ -136,7 +136,7 @@ const MemoriesIcon = (
 	</Icon>
 );
 
-/** Graph — connected nodes (the codebase graph). */
+/** Memory Graph — connected nodes (the knowledge/memory graph). */
 const GraphIcon = (
 	<Icon>
 		<circle cx={6} cy={6} r={2.5} />
@@ -204,7 +204,10 @@ export const ROUTES: readonly RouteEntry[] = [
 	// list (`resolveHarnessSubItems`). The parent's OQ-3 answer: 039a IS the dynamic data source.
 	{ route: "/harnesses", label: "Harnesses", icon: HarnessesIcon, component: HarnessesPage, dynamic: { resolve: resolveHarnessSubItems } },
 	{ route: "/memories", label: "Memories", icon: MemoriesIcon, component: MemoriesPage },
-	{ route: "/graph", label: "Graph", icon: GraphIcon, component: GraphPage },
+	// PRD-041 follow-up: the codebase-graph view was removed from the dashboard (it was too dense to be
+	// useful); this page now shows ONLY the memory/knowledge graph. The daemon still builds the codebase
+	// graph in the background (assemble.ts auto-build) for the stale-ref/lifecycle diagnostic.
+	{ route: "/graph", label: "Memory Graph", icon: GraphIcon, component: GraphPage },
 	{ route: "/sync", label: "Sync", icon: SyncIcon, component: SyncPage },
 	{ route: "/logs", label: "Logs", icon: LogsIcon, component: LogsPage },
 	// PRD-060e: the ROI page (the Net-ROI ledger — measured/modeled savings vs infra + pollination cost,
