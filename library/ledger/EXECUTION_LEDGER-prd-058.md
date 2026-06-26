@@ -136,5 +136,21 @@ Serialization rationale: `recall.ts` is edited by 058a/058e/058c/058b and the sc
 ---
 
 ## Wave log
-- Phase 0 complete: all five sub-PRDs + scoring doc + recall pipeline read; ledger built; gates identified.
-- (waves pending)
+- Phase 0: all five sub-PRDs + scoring doc + recall pipeline read; ledger built; gates identified.
+- Wave 1 (058a recency): VERIFIED. tsc + 34 tests + audit:sql + dup green.
+- Wave 2 (058e reinforcement/calibration): VERIFIED. tsc + 304 tests (incl. storage heal) + gates green.
+- Wave 3 (058c stale-ref): VERIFIED. tsc + 75 tests + gates green.
+- Wave 4 (058b conflict): VERIFIED. tsc + 137 tests (incl. 058a/c/e regression) + gates green.
+- Wave 5 (058d surfaces): VERIFIED. tsc + 58 tests + gates green. Ledger em-dashes fixed (prose rule).
+- Close-out security: CLEAN (no Critical/High; zero code changes).
+- Close-out quality: found Critical C-1 (conflict detection not wired live) + W-1/W-2 eval gaps.
+- Wave 6 (reopen): C-1 wired into controlled-writes decision stage + assemble.ts (LIVE); live-path test proves IDX-2; W-1 useful-context@k + W-2 ECE-over-time slices added. VERIFIED (148 + 64 tests).
+- Full suite: 3538 pass / 14 fail / 8 skip; all 14 failures are pre-existing environmental flakes (hook-runtime, json-parsers) NOT in this change set; both pass 30/30 in isolation.
+- Ship: commit 6fc192d (79 files, +12471). Pushed. PR #125 (legioncodeinc/honeycomb).
+- CI: Quality gate Node 22.x + 24.x GREEN, Windows smoke GREEN, CodeQL GREEN, Secret gate GREEN. Full suite passed on CI runners (local flakes did not recur). DeepLake live jobs skipped (creds-gated).
+- RESULT: 53/56 ACs VERIFIED. IDX-1/IDX-7/IDX-8 BLOCKED on HONEYCOMB_DEEPLAKE_TOKEN + embed daemon (live numeric eval verdict + dogfood). PRD stays in-work until that live run promotes it to completed.
+
+## The one remaining ask (to reach 56/56 and promote to completed)
+Run, on a machine with the gitignored live creds + the embed daemon up:
+  `set -a; . ./.env.local; set +a; HONEYCOMB_EMBEDDINGS=true npm run eval:recall`
+plus the live dogfood loop each sub-PRD describes (store a fact + its contradiction + a stale ref against a real daemon; confirm suppression, demotion, dashboard + CLI surfaces, memory_history). That closes IDX-1 (recency half-life passes the gate), IDX-7 (useful-context@k uplift, no baseline regression), and IDX-8 (live dogfood).
