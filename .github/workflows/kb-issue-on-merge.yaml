@@ -60,6 +60,21 @@ jobs:
           EOF
           )"
 
+          # Idempotency guard: a manual rerun or post-failure retry must not open
+          # a second issue for the same PR. Match on the stable title prefix.
+          existing_issue="$(gh issue list \
+            --repo "$REPO" \
+            --label knowledge \
+            --state all \
+            --search "\"KB: review merged PR #${PR_NUMBER}\" in:title" \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [ -n "$existing_issue" ]; then
+            echo "Knowledge issue already exists: #${existing_issue} - skipping."
+            exit 0
+          fi
+
           gh issue create \
             --repo "$REPO" \
             --title "KB: review merged PR #${PR_NUMBER} - ${PR_TITLE}" \
