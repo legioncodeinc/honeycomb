@@ -219,32 +219,44 @@ describe("PRD-047d end-to-end — the timestamp flows onto the hit and dampens t
 		expect(sessionsSql).toMatch(/creation_date::text AS created_at/i);
 	});
 
-	it("the hit carries createdAt and a SHORT half-life re-orders newest-first, dropping nothing", async () => {
-		// Two equally-matched memories of different age. Lexical-only (no embed seam) → RRF order is
-		// the arm's storage order. We pass them OLDEST-first so the dampener has to re-order.
+	it("the hit carries createdAt and a SHORT class half-life re-orders newest-first, dropping nothing", async () => {
+		// Two equally-matched memories of different age. Lexical-only (no embed seam) → RRF order is the
+		// arm's storage order. We pass them OLDEST-first so the recency stage has to re-order. PRD-058a:
+		// the LIVE stage reads the per-CLASS half-life, so override the `memories` class (not the legacy
+		// flat `halfLifeDays`, which the live path no longer consults).
 		const { storage } = lexicalStorage({
 			memories: ok([memRow("old", daysAgo(120)), memRow("new", daysAgo(1))], 0),
 		});
 		const result = await recallMemories(
 			{ query: "anything", scope: SCOPE, limit: 10 },
-			{ storage, recency: { halfLifeDays: 30 }, now: () => NOW },
+			{ storage, recency: { halfLifeDaysByClass: { memories: 30 } }, now: () => NOW },
 		);
 		// The creation timestamp made it onto the hit (sourced from the arm SQL).
 		expect(result.hits.find((h) => h.id === "new")!.createdAt).toBe(daysAgo(1));
-		// Newest-first under the dampener, and BOTH hits present (no age cutoff — d-AC-2).
+		// Newest-first under the activation, and BOTH hits present (no age cutoff, 58a.1.2 / d-AC-2).
 		expect(result.hits.map((h) => h.id)).toEqual(["new", "old"]);
 		expect(result.hits).toHaveLength(2);
+		// PRD-058a: every hit carries a freshnessScore in (0,1]; the fresher hit's is strictly higher.
+		const fresh = result.hits.find((h) => h.id === "new")!.freshnessScore;
+		const stale = result.hits.find((h) => h.id === "old")!.freshnessScore;
+		expect(fresh).toBeGreaterThan(stale);
 	});
 
-	it("with the DEFAULT (OFF-equivalent) half-life, ordering is byte-for-byte the pre-dampener RRF order", async () => {
-		// No `recency` dep → default 100-year half-life → decay ≈ 1 for all → the dampener is a no-op
-		// on the ranking. The RRF order (arm storage order, equal scores → id tie-break) stands.
+	it("PRD-058a: with NO recency dep the LIVE class-aware default demotes the stale hit (supersedes the OFF-equivalent default)", async () => {
+		// No `recency` dep → PRD-058a applies the DOCUMENTED per-class default (memories = 180d), NOT the
+		// retired 100-year neutral. The 400-day-old "b" is materially demoted; "a" (1 day) stays fresh, so
+		// "a" leads and both survive (a demotion, never a cutoff, 58a.1.2). This REPLACES the old PRD-047d
+		// "byte-for-byte OFF-equivalent" assertion, which 058a deliberately supersedes.
 		const { storage } = lexicalStorage({
 			memories: ok([memRow("a", daysAgo(1)), memRow("b", daysAgo(400))], 0),
 		});
 		const result = await recallMemories({ query: "anything", scope: SCOPE, limit: 10 }, { storage, now: () => NOW });
-		// Equal RRF scores → deterministic id tie-break ("a" < "b"); the year-old "b" is NOT demoted
-		// past "a" because the default half-life is OFF-equivalent.
 		expect(result.hits.map((h) => h.id)).toEqual(["a", "b"]);
+		expect(result.hits).toHaveLength(2);
+		// The stale "b" was genuinely demoted by age: its freshnessScore is well below the fresh "a"'s.
+		const aFresh = result.hits.find((h) => h.id === "a")!.freshnessScore;
+		const bFresh = result.hits.find((h) => h.id === "b")!.freshnessScore;
+		expect(aFresh).toBeGreaterThan(0.99); // ~1 day old under a 180d half-life → ≈ 0.996.
+		expect(bFresh).toBeLessThan(0.3); // 400 days old under a 180d half-life → 2^(-400/180) ≈ 0.214.
 	});
 });

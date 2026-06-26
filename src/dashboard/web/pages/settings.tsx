@@ -39,6 +39,7 @@ import { Badge, Button, Input } from "../primitives.js";
 import { Panel, PROVIDER_KEY_NAME, SETTING_KEY, SettingsPanel } from "../panels.js";
 import type { PageProps } from "../page-frame.js";
 import { PageFrame } from "../page-frame.js";
+import { LIFECYCLE_FLAG_REFERENCE } from "../../../shared/lifecycle-flags.js";
 import {
 	DISCONNECTED_AUTH_STATUS,
 	EMPTY_VAULT_SETTINGS,
@@ -400,6 +401,55 @@ export function SearchAndInferenceSection({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PRD-058d — the lifecycle config REFERENCE section (AC-55d.1.3): every
+// `memory.lifecycle.*` flag with its symbol, default, master-equation effect, and
+// env override. Read-only on the settings page (the values are governed by
+// `agent.yaml` / `HONEYCOMB_LIFECYCLE_*` per the documented precedence); the table
+// is the SINGLE-SOURCED {@link LIFECYCLE_FLAG_REFERENCE} the config doc also lists,
+// so the symbol/default/effect can never drift between the surface and the doc.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** One flag-reference row (symbol · config path · default · effect · env). Escaped text. */
+function LifecycleFlagRow({ symbol, configPath, envOverride, defaultValue, effect }: (typeof LIFECYCLE_FLAG_REFERENCE)[number]): React.JSX.Element {
+	return (
+		<div data-testid="lifecycle-flag" data-config-path={configPath} style={{ display: "flex", flexDirection: "column", gap: 2, padding: "8px 0", borderBottom: "1px solid var(--border-subtle)" }}>
+			<div style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
+				<Badge tone="honey" mono>
+					{symbol}
+				</Badge>
+				<span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-secondary)", wordBreak: "break-all" }}>{configPath}</span>
+				<span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-tertiary)" }}>default: {defaultValue}</span>
+			</div>
+			<div style={{ fontSize: 12, color: "var(--text-tertiary)" }}>{effect}</div>
+			<div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-tertiary)" }}>env: {envOverride}</div>
+		</div>
+	);
+}
+
+/**
+ * The lifecycle config reference (PRD-058d AC-55d.1.3): the full `memory.lifecycle.*` flag table on the
+ * settings page. Each flag shows its symbol, config path, default, master-equation effect, and env
+ * override. Read from the single-sourced {@link LIFECYCLE_FLAG_REFERENCE} so the surface and the config
+ * doc never drift. Precedence is documented inline (env > yaml > default) per the `HONEYCOMB_PIPELINE_*`
+ * precedent. Non-destructive defaults are visible: `a = 1`, `c = 0`, `s = 0`, auto-resolve `false`.
+ */
+function LifecycleConfigSection(): React.JSX.Element {
+	return (
+		<Panel title="Memory lifecycle" eyebrow="memory.lifecycle.* · symbol · default · effect">
+			<div data-testid="lifecycle-config-reference" style={{ display: "flex", flexDirection: "column" }}>
+				<div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-tertiary)", marginBottom: 8 }}>
+					Precedence: HONEYCOMB_LIFECYCLE_* env &gt; agent.yaml memory.lifecycle.* &gt; the documented default. Defaults are
+					non-destructive — a = 1, c = 0, s = 0 (posture observe), auto-resolve off.
+				</div>
+				{LIFECYCLE_FLAG_REFERENCE.map((flag) => (
+					<LifecycleFlagRow key={flag.configPath} {...flag} />
+				))}
+			</div>
+		</Panel>
+	);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // The routed page.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -446,6 +496,8 @@ export function SettingsPage({ wire }: PageProps): React.JSX.Element {
 				<DeeplakeAuthSection wire={wire} />
 				<ProviderKeysSection wire={wire} secretNames={secretNames} onSaved={() => void hydrateSecretNames()} />
 				<SearchAndInferenceSection settings={vault.settings} catalog={vault.catalog} secretNames={secretNames} onSave={onSaveSetting} />
+				{/* PRD-058d (AC-55d.1.3): the memory.lifecycle.* config reference (symbol · default · effect · env). */}
+				<LifecycleConfigSection />
 			</div>
 		</PageFrame>
 	);

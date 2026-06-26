@@ -75,6 +75,13 @@ function mockWire(opts: {
 		modifyMemory: vi.fn(async () => ("modifyAck" in opts ? opts.modifyAck : { id: "mem-1", action: "modified", audited: true })),
 		forgetMemory: vi.fn(async () => ("forgetAck" in opts ? opts.forgetAck : { id: "mem-1", action: "forgotten", audited: true })),
 		compact: vi.fn(async () => ("compact" in opts ? opts.compact : null)),
+		// PRD-058d: the lifecycle HEALTH panel now mounts on this page; its reads degrade to empty
+		// (the panel renders its honest inert state) so the 040 suites are unaffected.
+		lifecycleConflicts: vi.fn(async () => []),
+		lifecycleStaleRefs: vi.fn(async () => []),
+		lifecycleHistory: vi.fn(async () => []),
+		resolveConflict: vi.fn(async () => true),
+		calibration: vi.fn(async () => ({ ece: 0, brier: 0, nSamples: 0, fitAt: null, identity: true, reliabilityDiagram: [] })),
 		pollinate: vi.fn(async () => opts.pollinate ?? { triggered: true, status: "enqueued" }),
 		logs: vi.fn(async () => opts.logs ?? []),
 		harnesses: vi.fn(),

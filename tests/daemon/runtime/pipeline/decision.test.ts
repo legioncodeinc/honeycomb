@@ -160,6 +160,39 @@ describe("b-AC-1 fact with candidates → add/update/delete/none with target id,
 		expect(model.calls).toHaveLength(1);
 		expect(decisions[0].proposal.action).toBe("none");
 	});
+
+	it("a REJECTING candidate-content hydration query degrades fail-soft — the decision still returns, never throws (C-1)", async () => {
+		// The candidate search serves rows, but the C-1 content-hydration read (the `id IN (...)` fetch)
+		// REJECTS at the storage seam (a thrown promise past the result union, e.g. a transport bug the
+		// retry layer does not wrap). hydrateCandidateContents must CATCH the rejection and return the
+		// un-hydrated candidates, so the decision stage never throws on the live controlled-write path.
+		const { storage: backing } = makeStorage([{ id: "mem-1", score: 0.9 }]);
+		// Wrap the backing client so the hydration read (the `id IN (...)` content fetch) REJECTS, while
+		// every other query passes through to the candidate-search-serving fake. `sawHydrationRead` records
+		// that the hydration query was actually issued AND matched here, so the assertions below prove the
+		// try/catch around hydration was EXERCISED, not vacuously green because the read never ran.
+		let sawHydrationRead = false;
+		const rejectingStorage: ReturnType<typeof createStorageClient> = {
+			query: ((sql: string, scope: QueryScope, opts?: unknown) => {
+				if (/SELECT[\s\S]*\bcontent\b[\s\S]*FROM\s+"memories"[\s\S]*\bIN\s*\(/i.test(sql)) {
+					sawHydrationRead = true;
+					return Promise.reject(new Error("hydration boom"));
+				}
+				return (backing.query as (s: string, sc: QueryScope, o?: unknown) => Promise<unknown>)(sql, scope, opts);
+			}) as ReturnType<typeof createStorageClient>["query"],
+		} as ReturnType<typeof createStorageClient>;
+		const model = createFakeModelClient({ memory_decision: UPDATE_DECISION_JSON });
+
+		// Must NOT throw, and must still produce a decision (the candidates are un-hydrated, detection runs
+		// over fewer candidates — never a thrown decision). `hydrateCandidates: true` engages the C-1 path.
+		const baseDeps = deps({ storage: rejectingStorage, model, embed: fakeEmbed(vec768()) });
+		const decisions = await decideForFacts([FACT], decisionJob([FACT]), { ...baseDeps, hydrateCandidates: true });
+		expect(decisions).toHaveLength(1);
+		expect(decisions[0].proposal.action).toBe("update");
+		// The binding assertion: the hydration read was ACTUALLY issued and intercepted (it rejected). Without
+		// this, the test would pass even if hydration never ran: the catch path would be vacuously green.
+		expect(sawHydrationRead).toBe(true);
+	});
 });
 
 // ── b-AC-2 ──────────────────────────────────────────────────────────────────
