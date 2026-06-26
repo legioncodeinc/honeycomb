@@ -138,27 +138,40 @@ export function mountDashboardHost(daemon: Daemon, options: MountDashboardHostOp
 	const assets = options.assets ?? createWebAssets();
 
 	// GET /dashboard — the index shell (the app mounts into #root and self-hydrates).
-	root.get(DASHBOARD_HOST_PATH, (c) => c.html(renderShell()));
+	// `no-cache` (revalidate every load): the shell + app.js + css filenames are NOT
+	// content-hashed, so a daemon UPGRADE rebuilds them in place at the SAME URL. Without a
+	// revalidation directive the browser HEURISTICALLY caches the bundle (no Cache-Control,
+	// no Last-Modified) and keeps running a STALE app.js across a daemon restart — the exact
+	// trap behind a "fixed in the bundle but still broken in my tab" report. `no-cache` forces
+	// the browser to re-pull on each load (cheap over loopback), so a rebuilt dashboard is
+	// always the one that runs. The brand mark + fonts stay long-lived `immutable` below —
+	// their bytes are content-stable, and the mark is fetched by URL from the fresh app.js.
+	root.get(DASHBOARD_HOST_PATH, (c) => {
+		c.header("cache-control", "no-cache");
+		return c.html(renderShell());
+	});
 
 	// GET /dashboard/app.js — the esbuild bundle (React + ReactDOM + the dashboard app).
 	root.get(DASHBOARD_APP_PATH, (c) => {
 		const asset = assets.appJs();
 		if (asset === null) return c.text("dashboard bundle not built", 404);
-		return c.body(asset.body, 200, { "content-type": asset.contentType });
+		return c.body(asset.body, 200, { "content-type": asset.contentType, "cache-control": "no-cache" });
 	});
 
 	// GET /dashboard/styles.css — the concatenated design-system CSS.
 	root.get(DASHBOARD_CSS_PATH, (c) => {
 		const asset = assets.css();
 		if (asset === null) return c.text("dashboard styles unavailable", 404);
-		return c.body(asset.body, 200, { "content-type": asset.contentType });
+		return c.body(asset.body, 200, { "content-type": asset.contentType, "cache-control": "no-cache" });
 	});
 
-	// GET /dashboard/honeycomb-memory-cluster.svg — the brand mark.
+	// GET /dashboard/honeycomb-memory-cluster.svg — the brand mark. Content-stable bytes, but
+	// served `no-cache` too: it shares the un-hashed URL contract with the shell, and revalidating
+	// a ~1 KB SVG over loopback is free — cheaper than another stale-asset report.
 	root.get(DASHBOARD_LOGO_PATH, (c) => {
 		const asset = assets.logo();
 		if (asset === null) return c.text("dashboard logo unavailable", 404);
-		return c.body(asset.body, 200, { "content-type": asset.contentType });
+		return c.body(asset.body, 200, { "content-type": asset.contentType, "cache-control": "no-cache" });
 	});
 
 	// GET /dashboard/fonts/<file> — the brand fonts (Inter + JetBrains Mono). The DS CSS's
