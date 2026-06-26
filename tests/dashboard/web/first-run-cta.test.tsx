@@ -57,7 +57,7 @@ async function flush(): Promise<void> {
 async function mount(wire: WireClient, navigate: (r: string) => void): Promise<void> {
 	await act(async () => {
 		root = createRoot(container);
-		root.render(<FirstRunBindCTA wire={wire} navigate={navigate} />);
+		root.render(<FirstRunBindCTA wire={wire} navigate={navigate} assetBase="/dashboard" />);
 	});
 	await flush();
 }
@@ -77,6 +77,11 @@ describe("PRD-059b the first-run CTA (b-AC-1)", () => {
 		expect(text).toContain("No active projects?");
 		expect(text).toContain("Pick a folder to start");
 		expect(container.querySelector('[data-testid="first-run-pick"]'), "the pick button is present").not.toBeNull();
+		// Regression: the brand mark MUST resolve against the host-stamped `assetBase` (`/dashboard`),
+		// not a hardcoded relative `assets/…` (which resolves to the unserved `/assets/…` → 404).
+		const mark = container.querySelector('img[src*="honeycomb-memory-cluster.svg"]') as HTMLImageElement | null;
+		expect(mark, "the brand mark renders").not.toBeNull();
+		expect(mark?.getAttribute("src")).toBe("/dashboard/honeycomb-memory-cluster.svg");
 	});
 
 	it("clicking the pick button reveals the daemon-served folder picker", async () => {

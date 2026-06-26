@@ -80,7 +80,7 @@ function Outlet({ route, pageProps, navigate }: { route: string; pageProps: Page
 	return (
 		<div style={{ flex: 1, minWidth: 0, padding: "28px 28px 48px" }}>
 			<div style={{ maxWidth: PAGE_MAX_WIDTH, margin: "0 auto" }}>
-				{showFirstRun ? <FirstRunBindCTA wire={pageProps.wire} navigate={navigate} /> : <PageComponent {...pageProps} />}
+				{showFirstRun ? <FirstRunBindCTA wire={pageProps.wire} navigate={navigate} assetBase={pageProps.assetBase} /> : <PageComponent {...pageProps} />}
 			</div>
 		</div>
 	);

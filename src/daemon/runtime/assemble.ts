@@ -47,7 +47,7 @@ import {
 	type Identity,
 	type PresentedCredentials,
 } from "./auth/index.js";
-import { type RuntimeConfig, resolveRuntimeConfig } from "./config.js";
+import { type DeploymentMode, type RuntimeConfig, resolveRuntimeConfig } from "./config.js";
 import { type RequestLogger, createRequestLogger } from "./logger.js";
 import { createRuntimePathService } from "./middleware/runtime-path.js";
 import { createFileWatcherService, type HarnessTarget } from "./services/file-watcher.js";
@@ -84,7 +84,7 @@ import { mountConflictsApi } from "./memories/conflicts-api.js";
 import { mountLifecycleApi } from "./memories/lifecycle-api.js";
 import { mountVfsApi } from "./vfs/api.js";
 import { mountProductDataApi } from "./product/index.js";
-import { type SecretsApiDeps } from "./secrets/api.js";
+import { localDefaultScopeResolver, type SecretsApiDeps } from "./secrets/api.js";
 import { type SourcesApiDeps } from "./sources/api.js";
 import { buildSourcesApiDeps } from "./sources/registry.js";
 import { SecretsStore, createMachineKeyProvider } from "./secrets/store.js";
@@ -941,7 +941,7 @@ export function assembleSeams(
 	//    surface this run" (the 501 scaffold) rather than crashing the daemon.
 	seams.mountProductData(
 		daemon,
-		resolveProductDataDeps(storage, defaultScope, daemon.services.queue, embed.client),
+		resolveProductDataDeps(storage, defaultScope, daemon.services.queue, embed.client, daemon.config.mode),
 	);
 
 	// 10. The "Pollinate now" trigger — `POST /api/diagnostics/pollinate` (PRD-024 / AC-6 backend).
@@ -1146,6 +1146,7 @@ function resolveProductDataDeps(
 	defaultScope: QueryScope,
 	queue: DaemonServices["queue"],
 	embed: EmbedClient,
+	mode: DeploymentMode,
 ): {
 	storage: StorageClient;
 	secrets?: SecretsApiDeps;
@@ -1157,6 +1158,10 @@ function resolveProductDataDeps(
 	const baseDir = process.env.HONEYCOMB_WORKSPACE ?? process.cwd();
 	const secrets: SecretsApiDeps = {
 		store: new SecretsStore({ baseDir, machineKey: createMachineKeyProvider() }),
+		// PRD-022 local-mode default: the dashboard's `GET /api/secrets` (names-only) carries no
+		// `x-honeycomb-org` header, so resolve the daemon's single local tenant instead of 400ing.
+		// Team/hybrid stay fail-closed (a missing org still 400s) — cross-tenant access is rejected.
+		scope: localDefaultScopeResolver(mode, defaultScope),
 	};
 
 	// PRD-045e: build the sources deps (registry + providers resolver + document worker)
@@ -1780,7 +1785,10 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// with an injected reader that is also a full {@link VaultStore} mounts it too.
 	if (vault !== undefined && vault instanceof VaultStore) {
 		try {
-			mountSettingsApi(daemon, { store: vault });
+			// Thread the LOCAL default-scope resolver (PRD-022) so the dashboard web app — a loopback
+			// thin client that sends NO `x-honeycomb-org` header — resolves the single local tenant
+			// instead of 400ing on `GET /api/settings`. In team/hybrid the resolver stays fail-closed.
+			mountSettingsApi(daemon, { store: vault, scope: localDefaultScopeResolver(daemon.config.mode, scope) });
 		} catch (err: unknown) {
 			const reason = err instanceof Error ? err.message : String(err);
 			process.stderr.write(`honeycomb: settings API mount failed (non-fatal): ${reason}\n`);

@@ -62,6 +62,12 @@ export interface FirstRunBindCTAProps {
 	 * page (b-AC-4). The shell passes its 037b `navigate`; a test passes a spy.
 	 */
 	readonly navigate: (route: string) => void;
+	/**
+	 * The host-stamped asset base (`data-asset-base`, `/dashboard` in production). The brand mark MUST
+	 * be resolved against it — a hardcoded relative `assets/…` resolves to the unserved `/assets/…`
+	 * (a 404), unlike the sidebar/setup-gate which already use `assetBase`. Threaded from `PageProps`.
+	 */
+	readonly assetBase: string;
 }
 
 /**
@@ -72,7 +78,7 @@ export interface FirstRunBindCTAProps {
  * On a successful bind it advances to the Projects page (b-AC-4); capture begins because the 059a gate
  * opens the moment the binding is written (daemon-side).
  */
-export function FirstRunBindCTA({ wire, navigate }: FirstRunBindCTAProps): React.JSX.Element {
+export function FirstRunBindCTA({ wire, navigate, assetBase }: FirstRunBindCTAProps): React.JSX.Element {
 	const [picking, setPicking] = React.useState(false);
 
 	const onBound = React.useCallback(
@@ -99,7 +105,7 @@ export function FirstRunBindCTA({ wire, navigate }: FirstRunBindCTAProps): React
 				textAlign: "center",
 			}}
 		>
-			<img src="assets/honeycomb-memory-cluster.svg" width={48} height={48} alt="" />
+			<img src={`${assetBase}/honeycomb-memory-cluster.svg`} width={48} height={48} alt="" />
 			<div style={{ display: "flex", flexDirection: "column", gap: 8, maxWidth: 480 }}>
 				<div style={{ fontSize: 17, fontWeight: 700, color: "var(--text-primary)", letterSpacing: "-0.02em" }}>No active projects?</div>
 				<div style={{ fontSize: 14, color: "var(--text-secondary)", lineHeight: 1.5 }}>

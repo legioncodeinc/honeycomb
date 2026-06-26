@@ -33,6 +33,8 @@
 import type { Context } from "hono";
 import type { Hono } from "hono";
 
+import type { DeploymentMode } from "../config.js";
+import type { QueryScope } from "../../storage/client.js";
 import type { SecretScope } from "./contracts.js";
 import type { SecretExecRequest, SecretExecRunner } from "./exec.js";
 import type { SecretsStore } from "./store.js";
@@ -50,6 +52,32 @@ export const SECRETS_GROUP = "/api/secrets" as const;
 export interface ScopeResolver {
 	/** Resolve the scope, or `null` if the request has no resolvable tenancy. */
 	resolve(c: Context): SecretScope | null;
+}
+
+/**
+ * A scope resolver that reads the `x-honeycomb-*` headers first and, ONLY in `local` mode,
+ * falls back to the daemon's configured `defaultScope` when the request carries no tenancy
+ * header (PRD-022 local-mode default). This is the SAME precedence the data-API mounts use
+ * via {@link import("../scope.js").resolveScopeOrLocalDefault} — header → (local) default →
+ * null/400. It exists because the dashboard web app is a loopback thin client that sends NO
+ * `x-honeycomb-org` header; without this fallback the `/api/settings` + `/api/secrets` reads
+ * 400 in local mode (the empty Settings page bug). In team/hybrid the fallback never fires
+ * (a missing org still 400s fail-closed), so cross-tenant access stays rejected at the edge.
+ */
+export function localDefaultScopeResolver(
+	mode: DeploymentMode,
+	defaultScope: QueryScope | undefined,
+): ScopeResolver {
+	return {
+		resolve(c: Context): SecretScope | null {
+			const fromHeader = headerScopeResolver.resolve(c);
+			if (fromHeader !== null) return fromHeader;
+			if (mode === "local" && defaultScope !== undefined) {
+				return { org: defaultScope.org, workspace: defaultScope.workspace ?? "default" };
+			}
+			return null;
+		},
+	};
 }
 
 /** The default header-based scope resolver (mirrors capture-handler's tenancy read). */
