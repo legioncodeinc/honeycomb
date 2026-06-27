@@ -1,0 +1,251 @@
+name: Release HiveDoctor
+
+# The npm-publish workflow for the SEPARATE @legioncodeinc/hivedoctor package
+# (PRD-063 OD-6: HiveDoctor is its own dependency-light package with its own
+# release job). It mirrors release.yaml exactly (same OIDC Trusted-Publishing
+# auth, same fail-closed gating, same provenance) but scoped to the `hivedoctor/`
+# subdirectory and triggered by a HiveDoctor-specific tag so the two packages
+# release independently and never collide.
+#
+# AUTH: npm TRUSTED PUBLISHING (OIDC), no NPM_TOKEN. The publish authenticates
+# tokenlessly: GitHub Actions presents a short-lived OIDC identity (via the
+# `id-token: write` permission below) that npm verifies against the trusted
+# publisher configured on the @legioncodeinc/hivedoctor package (org + repo
+# `honeycomb` + this workflow filename `release-hivedoctor.yaml`). There is NO
+# long-lived automation token anywhere in this workflow or in repo secrets.
+# Provenance stays ON (the same OIDC identity signs the supply-chain attestation).
+# Trusted Publishing REQUIRES npm >= 11.5.1, which Node 22 does NOT ship (it
+# bundles npm 10.x); see the "Upgrade npm" step. The trusted publisher must be
+# configured on npm BEFORE the first CI publish, and that config requires the
+# package to already exist, so the FIRST publish is a one-time MANUAL publish
+# (2FA bootstrap, the chicken-egg); every subsequent CI publish is tokenless.
+# See RELEASING.md.
+#
+# DRAFT / INT STATUS, FAILS CLOSED (read before going live): HiveDoctor is at
+# INT (PRD-063), version still 0.0.0. This workflow is authored and structurally
+# complete, but a real publish is blocked three ways and will NOT fire by
+# accident:
+#   * the publishability preflight aborts if the version is still 0.0.0 (the
+#     deliberate not-cut-yet sentinel) or if the name is not the scoped
+#     @legioncodeinc/hivedoctor, so a stray tag push cannot publish a 0.0.0 or a
+#     wrong-named package.
+#   * a real `npm publish` only happens on a tag push (`hivedoctor-vX.Y.Z`) AND
+#     when this is not a dry run; a workflow_dispatch always rehearses (gate +
+#     `npm publish --dry-run`) and stays green. The publish intent is the TRIGGER
+#     (a tag = go live), not a token.
+#   * `dry_run` defaults to TRUE so the manual button is safe by default; a
+#     maintainer must opt IN to a real publish (and even then, only a pushed tag
+#     publishes for real).
+#
+# Two ways in:
+#   * push a tag `hivedoctor-vX.Y.Z` -> a real publish attempt (still gated above).
+#   * workflow_dispatch with dry_run -> rehearse the whole pipeline without
+#     publishing. `dry_run` defaults to TRUE.
+
+on:
+  push:
+    # HiveDoctor-specific tag namespace so it never collides with the main
+    # package's `v*` tags (release.yaml). A `hivedoctor-vX.Y.Z` tag releases ONLY
+    # this package.
+    tags: ['hivedoctor-v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Rehearse only: run the gate + `npm publish --dry-run`, never publish for real.'
+        type: boolean
+        required: false
+        default: true
+
+# Cancel a superseded manual rehearse on the same ref. Tag pushes are unique
+# refs, so in practice this only coalesces repeated workflow_dispatch runs.
+concurrency:
+  group: release-hivedoctor-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+# Least privilege (mirrors release.yaml), scoped UP only for what a publish needs:
+#   * contents: write  to create the GitHub Release for the pushed tag (only).
+#   * id-token: write  the short-lived OIDC identity, double duty: (1) the
+#                       publish AUTH for npm Trusted Publishing (replaces
+#                       NPM_TOKEN), and (2) provenance signs against it
+#                       (`npm publish --provenance`). Without it both fail.
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    name: Publish HiveDoctor to npm
+    runs-on: ubuntu-latest
+    # Every step runs inside the hivedoctor/ package: its own package.json,
+    # lockfile, build, gate, and pack-check. The main package is never touched.
+    defaults:
+      run:
+        working-directory: hivedoctor
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+
+      # `registry-url` is REQUIRED for OIDC Trusted Publishing to engage (writes
+      # the explicit registry into ~/.npmrc so npm enters the npmjs auth path).
+      # setup-node ALSO scaffolds a DUMMY `_authToken`; the next step strips JUST
+      # that line so npm is OIDC-capable AND credential-free (identical handling
+      # to release.yaml). Dependency caching is deliberately OFF on this publish
+      # job (cache-poisoning hardening); `npm ci` installs from the committed
+      # lockfile. `working-directory` does not affect setup-node's ~/.npmrc, which
+      # is global (correct: the publish reads the global npmrc).
+      - name: Setup Node
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: '22.x'
+          registry-url: 'https://registry.npmjs.org'
+
+      # Node 22 bundles npm 10.x, but Trusted Publishing (OIDC) requires
+      # npm >= 11.5.1. Upgrade BEFORE npm ci / build / publish so every npm
+      # invocation is OIDC-capable. Pinned to an EXACT version (must stay
+      # >= 11.5.1); bump deliberately. The upgrade is global, not package-scoped,
+      # so it is harmless under working-directory: hivedoctor.
+      - name: Upgrade npm (Trusted Publishing needs npm >= 11.5.1)
+        run: npm install -g npm@11.6.2
+
+      # Strip setup-node's dummy `_authToken` line so OIDC authenticates the
+      # publish (npm uses OIDC only when NO credential is configured). The
+      # registry line is KEPT. Diagnostics printed (token redacted) for a future
+      # auth failure. The npmrc is global ($HOME), so use an absolute path.
+      - name: Enable OIDC trusted publishing (strip scaffolded auth token)
+        run: |
+          npmrc="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
+          if [ -f "$npmrc" ]; then
+            sed -i '/:_authToken=/d' "$npmrc"
+          fi
+          echo "npm version: $(npm --version)"
+          echo "registry:    $(npm config get registry)"
+          echo "----- effective .npmrc ($npmrc) -----"
+          sed -E 's/(_authToken=).*/\1<redacted>/' "$npmrc" 2>/dev/null || echo "(no .npmrc)"
+
+      - name: Install (npm ci)
+        run: npm ci
+
+      # The FULL package gate, identical recipe to the hivedoctor CI job. A
+      # release must clear the same bar as a PR before any tarball is built.
+      - name: HiveDoctor gate (typecheck + test)
+        run: npm run ci
+
+      # Build-time telemetry config (PRD-063d, mirrors release.yaml). Scoped to
+      # JUST the build/publish steps that consume it. esbuild bakes the PostHog
+      # destination in via `define` (__HONEYCOMB_POSTHOG_KEY__ /
+      # __HONEYCOMB_POSTHOG_HOST__); an UNSET key compiles to "" which the
+      # telemetry chokepoint treats as DISABLED (fail-soft), so a tokenless/fork
+      # run emits nothing. Release-only ON PURPOSE: ci.yaml must NOT set these.
+      # The key is a PUBLIC write-only ingest key, embedded in the published
+      # tarball by design; the secret only keeps it out of logs/fork PRs. The
+      # bundle is built TWICE in this job (this step AND again inside `npm publish`
+      # via `prepack`), so the env is repeated on each consumer.
+      - name: Build (tsc + esbuild bin)
+        run: npm run build
+        env:
+          HONEYCOMB_POSTHOG_KEY: ${{ secrets.HONEYCOMB_POSTHOG_KEY }}
+          HONEYCOMB_POSTHOG_HOST: ${{ vars.HONEYCOMB_POSTHOG_HOST }}
+
+      - name: Pack-check (tarball secret/forbidden-file + bin scan)
+        run: npm run pack:check
+
+      # Tag-vs-package.json version guard. On a tag push the pushed tag
+      # `hivedoctor-vX.Y.Z` MUST equal hivedoctor's package.json version. A
+      # mismatch means the tag and the artifact disagree, so abort rather than
+      # publish a mislabeled package. Skipped on workflow_dispatch (no tag ref).
+      - name: Guard - pushed tag matches package.json version
+        if: ${{ github.ref_type == 'tag' }}
+        run: |
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          # Strip the `hivedoctor-v` prefix to get the bare semver.
+          TAG_VERSION="${GITHUB_REF_NAME#hivedoctor-v}"
+          echo "package.json version: $PKG_VERSION"
+          echo "pushed tag:           $GITHUB_REF_NAME (-> $TAG_VERSION)"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Tag/version mismatch: tag '$GITHUB_REF_NAME' implies version '$TAG_VERSION' but hivedoctor/package.json is '$PKG_VERSION'. Bump the version (npm version) and re-tag so the tag and the published artifact agree."
+            exit 1
+          fi
+          echo "OK - tag and package.json agree on $PKG_VERSION"
+
+      # Publishability preflight, FAILS CLOSED. Keeps the INT draft from ever
+      # publishing a broken or unnamed package. It aborts (before any publish) if
+      # EITHER:
+      #   * the version is still 0.0.0 (the deliberate not-cut-yet sentinel;
+      #     PRD-063 AC-6 keeps it 0.0.0 until a release is deliberately cut); OR
+      #   * `name` is not the scoped @legioncodeinc/hivedoctor (a scoped public
+      #     package must publish under its scoped name with access=public).
+      # A real cut bumps the version (npm version) AND tags hivedoctor-vX.Y.Z.
+      - name: Preflight - publishability (version + scoped-name guard)
+        run: |
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          PKG_NAME="$(node -p "require('./package.json').name")"
+          echo "name:    $PKG_NAME"
+          echo "version: $PKG_VERSION"
+          FAIL=0
+          if [ "$PKG_VERSION" = "0.0.0" ]; then
+            echo "::error::hivedoctor/package.json version is still the 0.0.0 not-cut-yet sentinel. Bump it (npm version <x.y.z>) and tag hivedoctor-v<x.y.z> to cut a real release; see RELEASING.md."
+            FAIL=1
+          fi
+          if [ "$PKG_NAME" != "@legioncodeinc/hivedoctor" ]; then
+            echo "::error::hivedoctor/package.json name is '$PKG_NAME', expected the scoped '@legioncodeinc/hivedoctor'. A scoped public publish requires the scoped name + publishConfig.access=public."
+            FAIL=1
+          fi
+          if [ "$FAIL" = "1" ]; then
+            echo "Refusing to publish: the go-live conditions have not all been met."
+            exit 1
+          fi
+          echo "OK - package is publishable (cut version, scoped name)."
+
+      # Resolve publish mode, gated on the TRIGGER, not a token. A real publish
+      # requires ALL THREE: a `push` event (NOT a manual dispatch), a tag ref
+      # (`hivedoctor-vX.Y.Z`), and not a dispatch dry_run. The manual dispatch
+      # button always rehearses. Real publishes only come from a pushed
+      # `hivedoctor-vX.Y.Z` tag.
+      - name: Resolve publish mode
+        id: mode
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          DRY_RUN_INPUT: ${{ github.event.inputs.dry_run }}
+        run: |
+          if [ "$EVENT_NAME" = "push" ] && [ "$REF_TYPE" = "tag" ] && [ "$DRY_RUN_INPUT" != "true" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "Mode: REAL publish (pushed tag, not a dry run), authenticating via OIDC Trusted Publishing."
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Mode: DRY-RUN (event=$EVENT_NAME, ref_type=$REF_TYPE, dry_run_input=$DRY_RUN_INPUT), running npm publish --dry-run, not publishing."
+          fi
+
+      # Publish. `prepack` (= npm run build) runs again inside `npm publish`, so
+      # the tarball is always built from the just-checked-out tree.
+      #   --provenance   : emit the OIDC supply-chain attestation (needs id-token).
+      #   --access public: scoped packages default to restricted; publish public.
+      # Auth is TOKENLESS via OIDC (npm >= 11.5.1, ensured above).
+      - name: Publish (real)
+        if: ${{ steps.mode.outputs.publish == 'true' }}
+        run: npm publish --provenance --access public
+        env:
+          # `prepack` rebuilds the bundle here, so the published tarball needs the
+          # telemetry define present on THIS step too.
+          HONEYCOMB_POSTHOG_KEY: ${{ secrets.HONEYCOMB_POSTHOG_KEY }}
+          HONEYCOMB_POSTHOG_HOST: ${{ vars.HONEYCOMB_POSTHOG_HOST }}
+
+      # Rehearse: same command minus the real upload. Runs whenever we are NOT in
+      # real-publish mode so the pipeline is exercised end-to-end and stays green.
+      - name: Publish (dry-run rehearsal)
+        if: ${{ steps.mode.outputs.publish != 'true' }}
+        run: npm publish --provenance --access public --dry-run
+        env:
+          HONEYCOMB_POSTHOG_KEY: ${{ secrets.HONEYCOMB_POSTHOG_KEY }}
+          HONEYCOMB_POSTHOG_HOST: ${{ vars.HONEYCOMB_POSTHOG_HOST }}
+
+      # GitHub Release. Only on a real tag push AND only after a real publish (a
+      # dry-run or a rehearsal should not mint a Release). Pinned official action;
+      # contents: write (above) is the scope this needs.
+      - name: Create GitHub Release
+        if: ${{ github.ref_type == 'tag' && steps.mode.outputs.publish == 'true' }}
+        uses: softprops/action-gh-release@v2.4.1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true

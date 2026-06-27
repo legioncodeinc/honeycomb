@@ -62,6 +62,13 @@ import { buildRealTokenIssuer } from "./token-issuer.js";
 import { buildConnectorRunner } from "./connector-runner.js";
 import { buildStatusHealthSource } from "./health-probes.js";
 import { launchDashboard } from "../dashboard/launch.js";
+import {
+	type DaemonServiceController,
+	type ServiceManager,
+	type ServiceSpec,
+	createDaemonServiceController,
+	detectServiceManager,
+} from "./daemon-service.js";
 
 /** The full dep bundle the bin hands `dispatch` — `CommandDeps` plus the local/status/daemon seams. */
 export interface RuntimeDeps extends CommandDeps {
@@ -201,61 +208,213 @@ function isPidAlive(pid: number): boolean {
 }
 
 /**
- * Build the real {@link DaemonLifecycle} (b-AC-2 / b-AC-3). `start` spawns the bundled
- * `daemon/index.js` DETACHED (so it outlives the CLI invocation) and waits for `/health` to answer;
- * the 021a PID/lock guard inside the spawned process makes a concurrent start a no-op rather than a
- * double-bind. `stop` signals the recorded pid to drain gracefully (SIGTERM → 021a SIGTERM handler).
- * `status` reads the PID/lock + reports the port. Never imports the composition root (D-2).
+ * Build the {@link ServiceSpec} the OS-service unit is rendered from (PRD-063h). Pins the
+ * caller-resolved WRITABLE workspace (AC-063h.4) and the bundled daemon entry + Node flags. Resolved
+ * here (the same place `start()` resolves them for the spawn fallback), so service mode and spawn
+ * mode agree on the entry, flags, and workspace.
  */
-export function buildDaemonLifecycle(client: DaemonClient): DaemonLifecycle {
+function buildServiceSpec(): ServiceSpec {
+	return {
+		nodePath: process.execPath,
+		entry: resolveDaemonEntry(),
+		nodeFlags: DAEMON_NODE_FLAGS,
+		workspace: resolveDaemonWorkspace(),
+	};
+}
+
+/**
+ * Spawn the bundled `daemon/index.js` DETACHED and wait for `/health` (the documented FALLBACK path,
+ * PRD-063h HC-1). Extracted from the original `start()` so service mode and the fallback share ONE
+ * spawn implementation. Pins BOTH `cwd` and `HONEYCOMB_WORKSPACE` to the writable workspace (the
+ * `C:\WINDOWS\system32` 502 footgun close). The 021a PID/lock guard inside the spawned process makes
+ * a concurrent start a no-op rather than a double-bind.
+ */
+async function spawnDaemonAndWait(
+	client: DaemonClient,
+): Promise<{ readonly started: boolean; readonly alreadyRunning: boolean }> {
+	const entry = resolveDaemonEntry();
+	const workspace = resolveDaemonWorkspace();
+	const child = spawn(process.execPath, [...DAEMON_NODE_FLAGS, entry], {
+		detached: true,
+		stdio: "ignore",
+		cwd: workspace,
+		env: { ...process.env, HONEYCOMB_WORKSPACE: workspace },
+		// Hide the transient console window on Windows: a detached daemon spawn is never an
+		// interactive terminal the user needs to see.
+		windowsHide: true,
+	});
+	// Let the daemon outlive this CLI process (b-AC-2: `start` brings it up and returns).
+	child.unref();
+
+	// Wait for the spawned daemon to bind + answer /health (or exhaust the budget).
+	const deadline = Date.now() + DEFAULT_START_TIMEOUT_MS;
+	while (Date.now() < deadline) {
+		await new Promise((r) => setTimeout(r, START_POLL_INTERVAL_MS));
+		if (await client.ping()) return { started: true, alreadyRunning: false };
+	}
+	return { started: false, alreadyRunning: false };
+}
+
+/** Poll `/health` until it answers or the start budget is exhausted (shared by the service path). */
+async function waitForHealth(client: DaemonClient): Promise<boolean> {
+	const deadline = Date.now() + DEFAULT_START_TIMEOUT_MS;
+	while (Date.now() < deadline) {
+		if (await client.ping()) return true;
+		await new Promise((r) => setTimeout(r, START_POLL_INTERVAL_MS));
+	}
+	return false;
+}
+
+/** Signal the recorded daemon pid to drain gracefully (SIGTERM → 021a shutdown). Shared helper. */
+async function signalDaemonStop(): Promise<boolean> {
+	const pid = await readDaemonPid();
+	if (pid === null || !isPidAlive(pid)) return false;
+	try {
+		// SIGTERM → the 021a graceful-shutdown handler drains services, closes the socket, and removes
+		// the lock. No SIGKILL: a clean drain is the contract (a-AC-5).
+		process.kill(pid, "SIGTERM");
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * The injectable seams the service-aware lifecycle resolves the OS service manager + controller
+ * through (PRD-063h test discipline). Production leaves these UNSET → real env detection + the real
+ * `createDaemonServiceController` (which shells out fixed-argv behind its own injected runner). A
+ * unit test injects a fixed `manager` + a recording `controllerFor` so the argv/path is asserted
+ * WITHOUT touching the host's service manager, and the spawn fallback is exercised by forcing
+ * `manager: null`.
+ */
+export interface DaemonLifecycleOptions {
+	/**
+	 * The resolved OS service manager, or `null` to force the detached-spawn fallback (CI, locked-down
+	 * hosts, the existing tests). Defaults to {@link detectServiceManager} (cheap + side-effect-free).
+	 */
+	readonly serviceManager?: ServiceManager | null;
+	/** Build the controller for a manager. Defaults to the real {@link createDaemonServiceController}. */
+	readonly controllerFor?: (manager: ServiceManager) => DaemonServiceController;
+}
+
+/**
+ * Build the real {@link DaemonLifecycle} (b-AC-2 / b-AC-3 + PRD-063h AC-063h.5/.6).
+ *
+ * ── Service-preferred, spawn-fallback (PRD-063h HC-1) ────────────────────────
+ * When an OS service manager is available ({@link detectServiceManager} returns non-null), `start`
+ * REGISTERS + starts the daemon as a userland service (launchd LaunchAgent / systemd --user /
+ * per-user Scheduled Task), making the service the LIVENESS FLOOR (restart-on-crash + start-on-boot).
+ * Where registration is impossible / opted out (`HONEYCOMB_DAEMON_SERVICE=spawn`, CI, the tests),
+ * detection returns `null` and `start` falls back to the existing detached spawn. A service
+ * register/start that THROWS (binary missing, permission denied) also falls back to spawn, so a
+ * half-configured host never strands the user with no daemon.
+ *
+ * `stop`/`status` reflect+control the SAME path: in service mode they go through the manager (and
+ * status reports the supervising manager); in fallback mode they use the 021a PID/lock + SIGTERM.
+ * `restart` (AC-063h.5) prefers the service manager (`kickstart`/`restart`/task re-run) so HiveDoctor's
+ * rung-1 never double-spawns; the 021a single-instance guard prevents any double-bind. Never imports
+ * the composition root (D-2).
+ */
+export function buildDaemonLifecycle(client: DaemonClient, options: DaemonLifecycleOptions = {}): DaemonLifecycle {
+	const manager: ServiceManager | null = options.serviceManager !== undefined ? options.serviceManager : detectServiceManager();
+	const controllerFor = options.controllerFor ?? ((m: ServiceManager): DaemonServiceController => createDaemonServiceController(m));
+	// Lazily build the controller once (only when a manager is present). A controller construction
+	// that throws (e.g. a missing runner dep) degrades to spawn, never crashes `start`.
+	let controller: DaemonServiceController | null = null;
+	function serviceController(): DaemonServiceController | null {
+		if (manager === null) return null;
+		if (controller === null) {
+			try {
+				controller = controllerFor(manager);
+			} catch {
+				return null;
+			}
+		}
+		return controller;
+	}
+
 	return {
 		async start(): Promise<{ readonly started: boolean; readonly alreadyRunning: boolean }> {
 			if (await client.ping()) return { started: false, alreadyRunning: true };
 
-			const entry = resolveDaemonEntry();
-			// Pin a writable workspace so a detached daemon never inherits a stray, non-writable cwd
-			// (the `C:\WINDOWS\system32` footgun that 502s every secret save). Pinning BOTH `cwd` and
-			// `HONEYCOMB_WORKSPACE` is belt-and-suspenders: the daemon resolves its `.secrets/` root
-			// from `HONEYCOMB_WORKSPACE ?? process.cwd()`, so either alone would suffice.
-			const workspace = resolveDaemonWorkspace();
-			const child = spawn(process.execPath, [...DAEMON_NODE_FLAGS, entry], {
-				detached: true,
-				stdio: "ignore",
-				cwd: workspace,
-				env: { ...process.env, HONEYCOMB_WORKSPACE: workspace },
-				// Hide the transient console window on Windows — a detached daemon spawn is never
-				// an interactive terminal the user needs to see.
-				windowsHide: true,
-			});
-			// Let the daemon outlive this CLI process (b-AC-2: `start` brings it up and returns).
-			child.unref();
-
-			// Wait for the spawned daemon to bind + answer /health (or exhaust the budget).
-			const deadline = Date.now() + DEFAULT_START_TIMEOUT_MS;
-			while (Date.now() < deadline) {
-				await new Promise((r) => setTimeout(r, START_POLL_INTERVAL_MS));
-				if (await client.ping()) return { started: true, alreadyRunning: false };
+			// Service-preferred (PRD-063h): register + start through the OS manager so the service is the
+			// liveness floor. A register that throws (binary missing / permission) falls back to spawn.
+			const svc = serviceController();
+			if (svc !== null) {
+				try {
+					svc.register(buildServiceSpec());
+					// The manager (RunAtLoad/enable --now/`/Run`) starts it; wait for /health to confirm.
+					if (await waitForHealth(client)) return { started: true, alreadyRunning: false };
+					// Registered but not yet answering: report not-yet-started; status() distinguishes
+					// "warming up" from "failed" exactly as the spawn path does. Do NOT also spawn, that
+					// would race the service for the 3850 bind.
+					return { started: false, alreadyRunning: false };
+				} catch {
+					// Service registration unavailable on this host → fall through to the spawn fallback.
+				}
 			}
-			return { started: false, alreadyRunning: false };
+
+			// FALLBACK (HC-1): the documented detached spawn for hosts without a service manager.
+			return spawnDaemonAndWait(client);
 		},
 
 		async stop(): Promise<{ readonly stopped: boolean }> {
-			const pid = await readDaemonPid();
-			if (pid === null || !isPidAlive(pid)) return { stopped: false };
-			try {
-				// SIGTERM → the 021a graceful-shutdown handler drains services, closes the socket, and
-				// removes the lock. No SIGKILL: a clean drain is the contract (a-AC-5).
-				process.kill(pid, "SIGTERM");
-				return { stopped: true };
-			} catch {
-				return { stopped: false };
+			// Service mode: stop THROUGH the manager so it does not immediately restart the daemon
+			// (KeepAlive/Restart=always would otherwise treat a SIGTERM as a crash and respawn).
+			const svc = serviceController();
+			if (svc !== null) {
+				try {
+					svc.stop(buildServiceSpec());
+					return { stopped: true };
+				} catch {
+					// Fall through to the PID/lock signal path if the manager stop is unavailable.
+				}
 			}
+			return { stopped: await signalDaemonStop() };
 		},
 
 		async status(): Promise<DaemonStatus> {
 			const pid = await readDaemonPid();
 			const running = pid !== null && isPidAlive(pid);
-			return running ? { running, pid, port: DAEMON_PORT } : { running: false, port: DAEMON_PORT };
+			// Reflect the supervising manager when the daemon runs as a registered service, so
+			// `daemon status` can say "running as a launchd service" honestly.
+			const svc = serviceController();
+			let serviceManager: ServiceManager | undefined;
+			if (svc !== null) {
+				try {
+					if (svc.isRegistered(buildServiceSpec())) serviceManager = svc.manager;
+				} catch {
+					// A status probe failure must never throw out of `status()`, omit the manager bit.
+				}
+			}
+			if (running) {
+				return serviceManager !== undefined
+					? { running, pid, port: DAEMON_PORT, serviceManager }
+					: { running, pid, port: DAEMON_PORT };
+			}
+			return serviceManager !== undefined
+				? { running: false, port: DAEMON_PORT, serviceManager }
+				: { running: false, port: DAEMON_PORT };
+		},
+
+		async restart(): Promise<{ readonly restarted: boolean; readonly viaService: boolean }> {
+			// AC-063h.5: prefer the service manager (kickstart / systemctl restart / schtasks stop+run)
+			// so HiveDoctor's rung-1 restart goes THROUGH the service, never a second spawn that would
+			// fight the service for the 3850 bind. The 021a PID/lock guard prevents any double-bind.
+			const svc = serviceController();
+			if (svc !== null && svc.isRegistered(buildServiceSpec())) {
+				try {
+					svc.restart(buildServiceSpec());
+					const ok = await waitForHealth(client);
+					return { restarted: ok, viaService: true };
+				} catch {
+					// Fall through to the spawn-based stop+start if the manager restart is unavailable.
+				}
+			}
+			// FALLBACK: stop (SIGTERM via PID/lock) then start (which itself prefers service, else spawn).
+			await signalDaemonStop();
+			const { started, alreadyRunning } = await spawnDaemonAndWait(client);
+			return { restarted: started || alreadyRunning, viaService: false };
 		},
 	};
 }

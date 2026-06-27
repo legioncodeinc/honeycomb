@@ -120,6 +120,74 @@ describe("PRD-050a — honeycomb install (a-AC-4 health-gated open)", () => {
 	});
 });
 
+describe("PRD-063h: install reports daemon supervision (fail-soft, additive)", () => {
+	it("AC-063h.6 reports the supervising OS service manager when status surfaces one", async () => {
+		const lines: string[] = [];
+		// A lifecycle whose status() reports a service manager (the service-mode outcome).
+		const lifecycle: DaemonLifecycle = {
+			async start() {
+				return { started: false, alreadyRunning: true };
+			},
+			async stop() {
+				return { stopped: false };
+			},
+			async status(): Promise<DaemonStatus> {
+				return { running: true, pid: 7, port: 3850, serviceManager: "launchd" };
+			},
+		};
+		const res = await runInstallCommand([], {
+			daemon: createFakeDaemonClient({ alive: true }),
+			lifecycle,
+			openDashboard: () => true,
+			dir: tmpDir,
+			out: (l) => lines.push(l),
+		});
+		expect(res.exitCode).toBe(0);
+		const text = lines.join("\n");
+		expect(text).toMatch(/registered as an OS service \(launchd\)/);
+		// Still ready: the supervision line never changes the install outcome.
+		expect(text).toMatch(/Honeycomb is ready/);
+	});
+
+	it("notes the detached-spawn fallback when status surfaces no manager (HC-1)", async () => {
+		const lines: string[] = [];
+		const res = await runInstallCommand([], {
+			daemon: createFakeDaemonClient({ alive: true }),
+			// The default fakeLifecycle().status() returns no serviceManager → fallback note.
+			lifecycle: fakeLifecycle({}),
+			openDashboard: () => true,
+			dir: tmpDir,
+			out: (l) => lines.push(l),
+		});
+		expect(res.exitCode).toBe(0);
+		expect(lines.join("\n")).toMatch(/detached process/);
+	});
+
+	it("a status() that throws never affects the install (the line is simply skipped)", async () => {
+		const lines: string[] = [];
+		const lifecycle: DaemonLifecycle = {
+			async start() {
+				return { started: false, alreadyRunning: true };
+			},
+			async stop() {
+				return { stopped: false };
+			},
+			async status(): Promise<DaemonStatus> {
+				throw new Error("status probe blew up");
+			},
+		};
+		const res = await runInstallCommand([], {
+			daemon: createFakeDaemonClient({ alive: true }),
+			lifecycle,
+			openDashboard: () => true,
+			dir: tmpDir,
+			out: (l) => lines.push(l),
+		});
+		expect(res.exitCode).toBe(0);
+		expect(lines.join("\n")).toMatch(/Honeycomb is ready/);
+	});
+});
+
 describe("PRD-050a — honeycomb install (a-AC-2 idempotency)", () => {
 	it("a-AC-2 an already-healthy daemon triggers NO second start/bind, just re-opens", async () => {
 		const opener = recordingOpener(() => true);

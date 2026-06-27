@@ -35,6 +35,12 @@ export interface DaemonStatus {
 	readonly pid?: number;
 	/** The port the daemon is bound to (3850 in production). */
 	readonly port: number;
+	/**
+	 * PRD-063h: the OS service manager supervising the daemon when it runs as a service
+	 * (`launchd` / `systemd-user` / `schtasks`), or omitted in the detached-spawn fallback. Lets
+	 * `daemon status` report "running as a launchd service" vs "running (detached)" honestly.
+	 */
+	readonly serviceManager?: "launchd" | "systemd-user" | "schtasks";
 }
 
 /**
@@ -54,6 +60,16 @@ export interface DaemonLifecycle {
 	stop(): Promise<{ readonly stopped: boolean }>;
 	/** Read the current run state from the 021a PID/lock guard (b-AC-2). */
 	status(): Promise<DaemonStatus>;
+	/**
+	 * Restart the daemon (PRD-063h AC-063h.5). OPTIONAL on the seam (additive): when the daemon runs
+	 * as an OS service the real impl restarts it THROUGH the service manager (`launchctl kickstart` /
+	 * `systemctl --user restart` / schtasks stop+run) so HiveDoctor's rung-1 never spawns a second
+	 * process that would fight the service for the 3850 bind; in the detached-spawn fallback it
+	 * stop+starts via the PID/lock path. The 021a single-instance guard prevents any double-bind.
+	 * Resolves `{ restarted, viaService }` so the caller / HiveDoctor knows which path ran. A seam
+	 * that does not implement it (an older recording fake) simply omits it; callers guard with `?.`.
+	 */
+	restart?(): Promise<{ readonly restarted: boolean; readonly viaService: boolean }>;
 }
 
 /** The deps the `daemon` verb runs against — the daemon HTTP seam + the lifecycle seam. */

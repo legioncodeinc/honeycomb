@@ -1,0 +1,24 @@
+{
+	"//": "HiveDoctor's OWN compiler config, mirroring the repo-root canon (Node16 resolution, ES2022 target, strict). It is deliberately self-contained: the root tsconfig does NOT include hivedoctor/**, and this config does NOT extend the root, so `npm run typecheck` at the repo root never compiles this package and this package's gate never depends on the root tree. Wave 0 is 100% additive and reversible.",
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "Node16",
+		"moduleResolution": "Node16",
+		"lib": ["ES2022"],
+		"outDir": "./dist",
+		"rootDir": ".",
+		"strict": true,
+		"types": ["node"],
+		"esModuleInterop": true,
+		"skipLibCheck": true,
+		"forceConsistentCasingInFileNames": true,
+		"declaration": true,
+		"declarationMap": true,
+		"sourceMap": true,
+		"noUncheckedIndexedAccess": true,
+		"noImplicitOverride": true,
+		"verbatimModuleSyntax": true
+	},
+	"include": ["src/**/*", "tests/**/*", "vitest.config.ts"],
+	"exclude": ["node_modules", "dist"]
+}

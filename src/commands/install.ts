@@ -215,6 +215,28 @@ function openDashboardWithFallback(opener: DashboardOpener, out: OutputSink): vo
 }
 
 /**
+ * Report how the now-running daemon is supervised (PRD-063h, AC-063h.6 surfaced at install). A pure,
+ * FAIL-SOFT read of `lifecycle.status()`: when the daemon runs as a registered OS service it prints
+ * the supervising manager (the liveness floor); otherwise it notes the detached-spawn fallback. It
+ * NEVER changes the install result: no lifecycle seam, or a status read that throws, simply skips
+ * the line. The daemon was already registered+started by `ensureDaemonRunning` → `lifecycle.start()`
+ * (service-preferred), so this only narrates the outcome.
+ */
+async function reportDaemonSupervision(deps: InstallVerbDeps, out: OutputSink): Promise<void> {
+	if (deps.lifecycle === undefined) return;
+	try {
+		const status = await deps.lifecycle.status();
+		if (status.serviceManager !== undefined) {
+			out(`✓ daemon registered as an OS service (${status.serviceManager}): it restarts on crash and starts on boot.`);
+		} else {
+			out("note: daemon running as a detached process (OS service registration unavailable on this host).");
+		}
+	} catch {
+		// A status read must never affect the install outcome: swallow and continue.
+	}
+}
+
+/**
  * Run `honeycomb install [--ref <code>]` (a-AC-1..6). Health-gates the daemon up (idempotent, no
  * double-bind), persists the onboarding "installed" marker + effective ref, then opens the dashboard
  * (`honeycomb.local` best-effort → loopback fallback). Every effect goes through an injected seam;
@@ -242,6 +264,15 @@ export async function runInstallCommand(argv: readonly string[], deps: InstallVe
 		return { exitCode: 1 };
 	}
 	out(`✓ daemon up on ${DAEMON_HOST}:${DAEMON_PORT}.`);
+
+	// 1b) Report how the daemon is supervised (PRD-063h). `lifecycle.start()` (reached via
+	//     ensureDaemonRunning above) PREFERS registering the daemon as an OS-native service (launchd /
+	//     systemd --user / per-user Scheduled Task): the liveness floor that restarts it on crash and
+	//     starts it on boot, and FALLS BACK to a detached spawn where registration is impossible (CI,
+	//     locked-down machines). This is a pure, fail-soft READ of the now-running daemon's status so
+	//     the user learns which path took effect; it NEVER alters the install outcome (a status read
+	//     that throws is swallowed, and an absent lifecycle seam simply skips the line).
+	await reportDaemonSupervision(deps, out);
 
 	// 2) Persist the onboarding "installed" marker + effective ref (a-AC-5). Fail-soft.
 	const wrote = writeInstalledMarker(ref, deps.dir, out);
