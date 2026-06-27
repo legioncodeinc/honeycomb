@@ -106,9 +106,14 @@ import { CATALOG } from "../storage/catalog/index.js";
 import {
 	buildInferenceModelClient,
 	PORTKEY_API_KEY_NAME,
+	PORTKEY_API_KEY_REF,
 	type PortkeySelection,
 	type ProviderModelOverride,
 } from "./inference/model-client-factory.js";
+import { createSecretResolver } from "./secrets/store.js";
+import { RecallConfigSchema, resolveRecallConfig } from "./recall/config.js";
+import { buildCohereRerankSeam, createPortkeyRerankClient } from "./recall/rerank-portkey.js";
+import type { CohereRerankSeam } from "./memories/recall.js";
 import type { ModelClient } from "./pipeline/model-client.js";
 import {
 	controlledWriteFanOut,
@@ -747,6 +752,7 @@ export function assembleSeams(
 	logStore: LogStore,
 	seams: SeamFns = defaultSeamFns,
 	vault?: VaultSettingsReader,
+	rerankerDeps?: RerankerMountDeps,
 ): CaptureHandler {
 	// The daemon's configured default tenancy scope (the single LOCAL tenant) is RESOLVED ONCE
 	// at the composition root (`assembleDaemon`) from the SAME credential source the storage
@@ -909,6 +915,13 @@ export function assembleSeams(
 		logger: daemon.logger,
 		conflictSuppression,
 		...(vault !== undefined ? { vault } : {}),
+		// PRD-063c: the operator-selected reranker config + the late-bound Cohere-via-Portkey seam.
+		// The `cohere` strategy only does anything when BOTH the strategy is `cohere` (env) AND the
+		// gateway is ON (the seam's inner transport is wired in `start()`); otherwise RRF / local
+		// cosine, byte-identical to today (c-AC-4). Absent rerankerDeps (a unit mount) → engine default.
+		...(rerankerDeps !== undefined
+			? { reranker: rerankerDeps.reranker, cohereRerank: rerankerDeps.cohereRerank }
+			: {}),
 	});
 
 	// 7a-bis. The conflict-resolution endpoint (PRD-058b): `POST /api/memories/conflicts/:id/resolve`
@@ -1521,6 +1534,20 @@ interface PortkeyWorkerDeps {
 }
 
 /**
+ * PRD-063c: the rerank deps the composition root threads into the `/api/memories/recall` mount. The
+ * `reranker` config carries the operator-selected strategy (`HONEYCOMB_RECALL_RERANKER`, e.g.
+ * `cohere`) + the timeouts/window/model; `cohereRerank` is the STABLE late-bound Cohere-via-Portkey
+ * seam (its inner transport is wired inside `start()` only when the gateway is ON). Absent → the
+ * engine applies the DEFAULT (`none`, RRF-only), byte-identical to today (c-AC-4).
+ */
+interface RerankerMountDeps {
+	/** The env-resolved reranker config (strategy + timeouts + window + cohere model). */
+	readonly reranker: import("./recall/config.js").RerankerConfig;
+	/** The stable late-bound Cohere-via-Portkey rerank seam (consumed by shape). */
+	readonly cohereRerank: CohereRerankSeam;
+}
+
+/**
  * Build the gated pollinating subsystem (AC-W + AC-T) — the real inference {@link ModelClient}
  * + the real {@link PollinatingTrigger} + the {@link PollinatingJobWorker} — and return the worker
  * to START, or `null` when pollinating is disabled.
@@ -1937,13 +1964,32 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// live value on each `/health` call. Initial `off` is the conservative "Portkey not in force" state
 	// the daemon reports until the assembly-time resolution below runs.
 	let portkeyHealth: PortkeyHealth = "off";
-	/** The cached last-failure signal (b-AC-7): a real Portkey call failed → `/health` reports `unreachable`. */
+	/** The cached last-failure signal (b-AC-7 / c-AC-3): a real Portkey call failed → `/health` reports `unreachable`. */
 	const recordPortkeyUnreachable = (_statusCode: number): void => {
 		portkeyHealth = "unreachable";
 	};
 
 	const healthDetail = (): HealthDetail =>
 		buildHealthDetail({ status: healthBit, embeddingsEnabled: embeddingsReason(), portkey: portkeyHealth });
+
+	// ── PRD-063c (c-D-2 / c-AC-1 / c-AC-3): the Cohere-via-Portkey rerank seam, late-bound.
+	// The seam handed to the `/api/memories/recall` mount is a STABLE delegating object whose `rerank`
+	// forwards to a mutable inner seam. The inner seam is BUILT inside `start()` (the SAME async place
+	// `portkeyHealth` + the inference Portkey selection resolve), ONLY when the gateway is ON — it
+	// closes over `createSecretResolver` (so `PORTKEY_API_KEY` decrypts at call time, never seen by the
+	// recall engine, c-AC-2), the Portkey config, the env-resolved Cohere model, and the SAME
+	// `recordPortkeyUnreachable` last-failure signal the chat transport uses (c-AC-3). Until/unless the
+	// gateway is ON, the inner seam is absent and `rerank` reports `ok: false` → the engine keeps the
+	// RRF order (c-AC-4 / fail-soft). The reranker STRATEGY is selected separately via the env
+	// `HONEYCOMB_RECALL_RERANKER` (the recall config threaded into the mount below).
+	let cohereRerankInner: CohereRerankSeam | undefined;
+	const cohereRerankSeam: CohereRerankSeam = {
+		rerank(query, documents, topN) {
+			const inner = cohereRerankInner;
+			if (inner === undefined) return Promise.resolve({ ok: false } as const);
+			return inner.rerank(query, documents, topN);
+		},
+	};
 
 
 	const { authenticator, policy } = authForMode(config.mode, storage, scope);
@@ -2001,6 +2047,24 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// ── a-AC-2 / d-AC-1: fire the seams EXACTLY ONCE, after construction (the four core
 	// seams + the /api/logs reader always; the /dashboard host local-mode only per security
 	// F-1; PLUS the three data-API seams — memories/vfs/product-data — always, 022d).
+	// PRD-063c: resolve the reranker config from the env ONCE (fail-soft: a bad knob clamps/defaults,
+	// never throws — `resolveRecallConfig` already coerces). The operator selects the strategy via
+	// `HONEYCOMB_RECALL_RERANKER` (`cohere` activates the provider rerank); the DEFAULT is `none`
+	// (RRF-only), so an unset env is byte-identical to today (c-AC-4). Threaded into the recall mount
+	// alongside the late-bound Cohere seam declared above.
+	let rerankerMountDeps: RerankerMountDeps;
+	try {
+		rerankerMountDeps = { reranker: resolveRecallConfig().reranker, cohereRerank: cohereRerankSeam };
+	} catch {
+		// A structurally-impossible explicit env value (e.g. an out-of-enum strategy) → the documented
+		// default config, so the recall mount never fails to wire. The seam still rides (harmless when
+		// the strategy is not `cohere`).
+		rerankerMountDeps = {
+			reranker: RecallConfigSchema.parse({}).reranker,
+			cohereRerank: cohereRerankSeam,
+		};
+	}
+
 	// PRD-062c: hold the capture handler the seams construct so `shutdown()` can drain its
 	// write buffer (AC-5). `assembleSeams` returns it from its `attachHooks` step.
 	const captureHandler = assembleSeams(
@@ -2015,6 +2079,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		logStore,
 		options.seams ?? defaultSeamFns,
 		vault,
+		rerankerMountDeps,
 	);
 
 	// ── PRD-032d / AC-6: FIRE the Wave-1 `/api/settings` mount ONCE so the CLI/dashboard
@@ -2292,6 +2357,31 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 					...(portkeySelection !== undefined ? { selection: portkeySelection } : {}),
 					onUnreachable: recordPortkeyUnreachable,
 				};
+				// ── PRD-063c (c-D-2 / c-AC-1 / c-AC-2 / c-AC-3): wire the late-bound Cohere rerank seam
+				// ONLY when the gateway is ON. It reuses 063b's foundation: the SAME `${SECRET_REF}`
+				// resolver (`createSecretResolver` under the daemon scope) decrypts `PORTKEY_API_KEY` at
+				// CALL time (never seen by the recall engine, c-AC-2); the rerank transport posts to
+				// `/v1/rerank` with the SAME `x-portkey-api-key` + `x-portkey-config` headers; and the
+				// SAME `recordPortkeyUnreachable` last-failure signal flips `/health` `reasons.portkey`
+				// on a rerank failure (c-AC-3). The Cohere model is the env-resolved `cohereModel`. With
+				// the gateway off, the inner seam stays absent → the `cohere` strategy keeps the RRF
+				// order (c-AC-4). Fail-soft: a build error leaves the inner seam absent (RRF order).
+				if (portkeySelection !== undefined) {
+					const rerankSecrets = createSecretResolver(
+						new SecretsStore({ baseDir: resolveWorkspaceBaseDir(), machineKey: createMachineKeyProvider() }),
+						secretScopeFromQueryScope(scope),
+					);
+					const rerankClient = createPortkeyRerankClient({
+						config: portkeySelection.config,
+						onTransportError: recordPortkeyUnreachable,
+					});
+					cohereRerankInner = buildCohereRerankSeam({
+						client: rerankClient,
+						secrets: rerankSecrets,
+						apiKeyRef: PORTKEY_API_KEY_REF,
+						model: rerankerMountDeps.reranker.cohereModel,
+					});
+				}
 			} catch {
 				portkeyHealth = "off";
 			}

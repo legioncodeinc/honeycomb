@@ -70,14 +70,35 @@ import {
 	usageReportingTransport,
 } from "./transport-anthropic.js";
 
+/** The Portkey gateway base host (confirmed vs Portkey docs). The chat + rerank endpoints hang off it. */
+export const PORTKEY_BASE_URL = "https://api.portkey.ai/v1" as const;
+
 /** The Portkey OpenAI-compatible chat-completions endpoint (default `baseUrl`). Confirmed vs Portkey docs. */
-export const PORTKEY_CHAT_COMPLETIONS_URL = "https://api.portkey.ai/v1/chat/completions" as const;
+export const PORTKEY_CHAT_COMPLETIONS_URL = `${PORTKEY_BASE_URL}/chat/completions` as const;
+
+/** The Portkey Cohere-rerank endpoint (PRD-063c / c-D-1) — SAME host + auth as chat, only the path differs. */
+export const PORTKEY_RERANK_URL = `${PORTKEY_BASE_URL}/rerank` as const;
 
 /** The Portkey auth header carrying the resolved `PORTKEY_API_KEY` (confirmed vs Portkey docs). */
 export const PORTKEY_API_KEY_HEADER = "x-portkey-api-key" as const;
 
 /** The Portkey header carrying the `portkey.config` / virtual-key id (confirmed vs Portkey docs). */
 export const PORTKEY_CONFIG_HEADER = "x-portkey-config" as const;
+
+/**
+ * Build the Portkey request headers SHARED by the chat transport and the PRD-063c rerank transport
+ * (the SAME auth pair `x-portkey-api-key` + `x-portkey-config`, c-D-1). Factored so the two
+ * transports do NOT each hand-roll the identical header object (jscpd discipline). `apiKey` is the
+ * resolved `PORTKEY_API_KEY`, placed ONLY in the auth header here and never logged/thrown (b-AC-3 /
+ * c-AC-2); `configId` is the non-secret `portkey.config` id. Pure + total.
+ */
+export function buildPortkeyHeaders(apiKey: string, configId: string): Record<string, string> {
+	return {
+		[PORTKEY_API_KEY_HEADER]: apiKey,
+		[PORTKEY_CONFIG_HEADER]: configId,
+		"content-type": "application/json",
+	};
+}
 
 /**
  * The fallback `max_tokens` when a request omits its own. Unlike the Anthropic Messages API,
@@ -223,11 +244,7 @@ export function createPortkeyTransport(deps: PortkeyTransportDeps): ProviderTran
 		try {
 			res = await doFetch(url, {
 				method: "POST",
-				headers: {
-					[PORTKEY_API_KEY_HEADER]: call.apiKey,
-					[PORTKEY_CONFIG_HEADER]: configId,
-					"content-type": "application/json",
-				},
+				headers: buildPortkeyHeaders(call.apiKey, configId),
 				body: JSON.stringify(body),
 			});
 		} catch (err) {

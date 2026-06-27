@@ -118,11 +118,11 @@ or indexes.
 
 ## Open questions
 
-- [ ] **OQ-4, Rerank seam readiness (063c).** Cohere rerank is NOT wired today (rerank = embedding-cosine | `none`).
-  Does 063c depend on a PRD-027/047 deliverable that lands a `cohere` reranker option in the recall config, or does
-  063c itself introduce the rerank-provider seam? Proposed: 063c ships the Portkey-routed Cohere rerank ONLY behind a
-  flag and only once the recall config exposes a provider-rerank hook; otherwise it documents the dependency and
-  stays dark. Confirm ownership split with `retrieval-worker-bee`.
+- [x] **OQ-4, Rerank seam readiness (063c) — RESOLVED 2026-06-27.** 063c OWNS the rerank transport, reusing 063b's
+  Portkey foundation, and adds a new `cohere` reranker strategy at the existing `rerankHits` dispatch point (it does
+  NOT wait on a separate recall PRD). Confirmed Portkey exposes Cohere rerank via `POST /v1/rerank` (same auth as
+  063b). 063c is UNBLOCKED and ready to build; default reranker stays `none` (turning `cohere` on by default is gated
+  behind a recall-quality eval). See 063c Decisions c-D-1/c-D-2/c-D-3.
 - [ ] **OQ-5, Usage/cost extraction from Portkey.** PRD-060 ROI needs tokens + cost. Portkey returns usage in the
   response (and cost via its analytics); confirm the exact field the `UsageSink` reads from a Portkey response so ROI
   stays populated (063b).

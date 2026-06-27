@@ -1,79 +1,116 @@
-# PRD-063c: Portkey Gateway, Reranking (Cohere via Portkey, gated)
+# PRD-063c: Portkey Gateway, Reranking (Cohere via Portkey)
 
 > **Parent:** [PRD-063 Portkey Gateway](./prd-063-portkey-gateway-index.md)
-> **Status:** Draft (gated, depends on the recall rerank seam)
+> **Status:** Backlog (UNBLOCKED 2026-06-27, ready to build)
 > **Priority:** P3
 > **Effort:** M
 > **Schema changes:** None
 
 ## Overview
 
-The reranking half of the one-stop Portkey configuration: route a Cohere reranker through the same Portkey gateway
-and key, so the user configures the rerank model in Portkey alongside inference, superseding a standalone Cohere
-rerank key. This is the genuinely forward-looking piece of PRD-063, because **Cohere reranking is not wired today**:
-the recall pipeline runs an EMBEDDING-COSINE reranker or `none` (`src/daemon/runtime/recall/config.ts`,
-`DEFAULT_RERANKER = "none"`), and there is no provider-rerank call site. So 063c is explicitly GATED, it lights up
-only once the recall config exposes a provider-rerank hook, and otherwise stays dark and honest rather than shipping
-a half-wired rerank.
+Route a Cohere reranker through the same Portkey gateway and `PORTKEY_API_KEY` that 063b already wired for inference,
+so the operator configures the rerank model in Portkey alongside inference, superseding a standalone Cohere rerank
+key. Today Honeycomb's recall pipeline reranks with a LOCAL embedding-cosine pass or `none` (no provider/HTTP
+reranker exists). This sub-PRD adds the FIRST provider reranker: a `cohere` strategy that, when Portkey is on, sends
+the query + candidate document TEXTS to Cohere through Portkey's gateway and reorders the fused top-N window by the
+returned relevance scores.
+
+This was blocked on two open questions; both are now resolved (see Decisions). The Portkey HTTP plumbing, auth, and
+secret resolution from 063b are reused, so the new surface is a rerank transport (different path + payload) plus a
+single branch at the existing rerank dispatch point and one new dependency: the rerank stage gains access to the
+`${SECRET_REF}` resolver it does not have today.
+
+## Decisions (the unblock)
+
+- **c-D-1, Portkey exposes Cohere rerank (resolves c-OQ-2).** Verified against current Portkey docs (Gateway to Other
+  APIs): `POST https://api.portkey.ai/v1/rerank`, authenticated with the SAME `x-portkey-api-key` + config/virtual-key
+  header pair 063b uses. Body is Cohere's rerank shape `{ model, query, documents: string[], top_n }`; the response
+  carries `results: [{ index, relevance_score }]`. So the gateway host + auth are identical to inference, only the
+  path (`/v1/rerank`) and the request/response shape differ.
+- **c-D-2, 063c owns the rerank transport, reusing 063b (resolves parent OQ-4).** The rerank HTTP call is built in
+  THIS sub-PRD on top of 063b's `transport-portkey.ts` foundation (shared base host, the `x-portkey-api-key` +
+  `x-portkey-config` header builder, the `${SECRET_REF}` resolution, and the `reasons.portkey` health signal). The
+  recall-engine fusion/scoring stays in PRD-027/047 territory and is NOT touched.
+- **c-D-3, a new `cohere` reranker strategy, default OFF.** Add `cohere` to `RERANKER_STRATEGIES`
+  (`recall/config.ts`). When the strategy is `cohere` AND `portkey.enabled`, rerank routes through Portkey with
+  `PORTKEY_API_KEY` (superseding a standalone Cohere key). The DEFAULT reranker stays `none` (PRD-047b); turning
+  `cohere` on by default is gated behind a recall-quality eval (see Open questions), because PRD-047b's eval found the
+  local embedding-cosine rerank did not beat RRF on Honeycomb's data, so a provider reranker must EARN the default.
 
 ## Goals
 
-- Add a `cohere-via-portkey` reranker option to the recall rerank seam so, when `portkey.enabled` is on, reranking
-  calls Cohere THROUGH the Portkey gateway using the resolved `PORTKEY_API_KEY` + `portkey.config`.
-- Supersede a standalone Cohere rerank key the same way inference supersedes provider keys: with Portkey on, rerank
-  uses the Portkey path and no separate `COHERE_API_KEY` is required.
-- Keep the gate honest: when the recall rerank seam is unavailable, 063c does not execute; the Settings/health surface
-  reports rerank as "not yet routed through Portkey" rather than implying it works.
+- Build a Cohere-via-Portkey reranker (`POST /v1/rerank`) reusing 063b's Portkey transport foundation, selected by the
+  new `cohere` strategy and the `portkey.enabled` toggle.
+- Wire it into the single existing rerank dispatch point (`rerankHits`, `memories/recall.ts`) behind the new branch,
+  threading the `${SECRET_REF}` resolver into the rerank stage (its one new dependency).
+- Make it LATENCY-BOUNDED and FAIL-SOFT: an outbound rerank call that times out, errors, or hits an unreachable
+  gateway falls back to the RRF order and never breaks or stalls recall beyond the timeout; failures feed
+  `reasons.portkey`.
+- Supersede a standalone Cohere rerank key: with Portkey on, rerank uses `PORTKEY_API_KEY`; no separate
+  `COHERE_API_KEY` is required.
 
 ## Non-Goals
 
-- Designing the reranker's scoring/fusion, window, or eval, that is PRD-027 / PRD-047 (recall). 063c only routes an
-  existing provider-rerank hook through Portkey.
-- Turning rerank ON by default. The recall default stays as PRD-027/047 set it; 063c only changes WHERE a Cohere
-  rerank call goes when rerank is enabled AND Portkey is on.
-- Inference routing (063b) and the Settings surface (063a).
+- Designing the reranker's fusion/scoring or changing RRF, the window, or the dedup. 063c only adds a provider rerank
+  call behind the existing seam (PRD-027/047 own the recall algorithm).
+- Turning `cohere` rerank ON by default. Default stays `none`; flipping the default is a separate, eval-gated change.
+- A direct (non-Portkey) `COHERE_API_KEY` rerank path. Out of scope; if wanted later it is its own small PRD.
+- Inference routing (063b) and the settings surface (063a), which are shipped.
 
 ## User stories
 
-- *As an operator with Portkey on and rerank enabled,* my reranking uses the Cohere model I configured in Portkey,
-  billed and observed through Portkey, with no separate Cohere key in Honeycomb.
-- *As an operator on a build where the rerank seam is not ready,* the UI tells me rerank-through-Portkey is not yet
-  available rather than silently doing nothing or pretending it routed.
+- *As an operator with Portkey on and `cohere` rerank selected,* my recall reranks via the Cohere model I configured
+  in Portkey, billed and observed through Portkey, with no separate Cohere key in Honeycomb, and recall never stalls
+  if the gateway is slow (it falls back to the unranked-fused order within the timeout).
+- *As an operator who has not enabled Portkey or selected `cohere`,* my reranking is byte-identical to today.
 
 ## Acceptance criteria
 
 | ID | Criterion |
 |---|---|
-| c-AC-1 | When the recall config exposes a provider-rerank hook AND `portkey.enabled` is on, reranking routes a Cohere rerank request through the Portkey gateway with the resolved `PORTKEY_API_KEY` + `portkey.config`; no `COHERE_API_KEY` is required. |
-| c-AC-2 | The Portkey key is resolved via the `${SECRET_REF}` resolver and never inlined, logged, or returned (same discipline as 063b). |
-| c-AC-3 | **Gated + honest.** When the rerank seam is unavailable, 063c is inert: no rerank call is attempted through Portkey, and the Settings/health surface reports "rerank not routed through Portkey (seam unavailable)", never a fabricated or half-wired rerank. A test asserts the inert path. |
-| c-AC-4 | With `portkey.enabled` off, rerank behavior is exactly as PRD-027/047 define it (no Portkey path). |
-| c-AC-5 | Security + gate: no secret in any page/response/log; `security-worker-bee` then `quality-worker-bee` sign off; `npm run ci` green. |
+| c-AC-1 | With reranker strategy `cohere` AND `portkey.enabled`, `rerankHits` sends `{ model, query, documents, top_n }` (documents = the fused top-N candidate texts) to `POST https://api.portkey.ai/v1/rerank` with the resolved `PORTKEY_API_KEY` + config header, and reorders the window by the returned `results[].relevance_score`. No `COHERE_API_KEY` is required. A fake-fetch test asserts the request shape, the auth header, and the reorder. |
+| c-AC-2 | `PORTKEY_API_KEY` is resolved via the `${SECRET_REF}` resolver threaded into the rerank stage; it appears in no log line, error, telemetry, or response (grep-proven, same discipline as 063b). |
+| c-AC-3 | **Bounded + fail-soft.** A rerank call that exceeds the rerank timeout, errors, or hits an unreachable gateway returns the RRF order unchanged (recall never breaks or blocks beyond the timeout); the failure flips `reasons.portkey` to `unreachable`. Tested with a hanging/error fake fetch. |
+| c-AC-4 | With any strategy other than `cohere` (or `portkey.enabled` off), rerank behavior is byte-identical to today: `embedding-cosine` and `none` paths unchanged; no Portkey rerank call is made. Tested. |
+| c-AC-5 | Security (`security-worker-bee`) then quality (`quality-worker-bee`) sign off; no secret in any page/response/log; `npm run ci` green. |
 
 ## Implementation notes
 
-- **Dependency first.** Confirm with `retrieval-worker-bee` whether a `cohere` (provider) reranker option lands in
-  `recall/config.ts` via PRD-027/047, or whether 063c introduces the provider-rerank seam itself (parent OQ-4). 063c
-  should NOT invent a rerank engine; it routes an existing hook.
-- **Reuse 063b's transport surface** for the Portkey HTTP call where possible (the gateway base URL + auth headers are
-  identical; only the endpoint/payload differs, rerank vs chat-completions). Confirm Portkey's rerank route + payload
-  against current Portkey docs (do not hard-code from memory).
-- **Key reuse.** No new secret: rerank reuses `PORTKEY_API_KEY`. A standalone `COHERE_API_KEY` is only relevant on the
-  non-Portkey path (out of scope here; if/when a direct Cohere rerank lands, it is a separate PRD).
-- **Observability.** Fold rerank reachability into the parent `reasons.portkey` health signal (or a sub-reason) so a
-  misconfigured rerank is visible, not silent.
+- **Strategy token** (`src/daemon/runtime/recall/config.ts`): add `"cohere"` to `RERANKER_STRATEGIES`
+  (currently `["embedding-cosine", "llm", "none"]`); it is selectable via the existing `HONEYCOMB_RECALL_RERANKER`
+  env and the `recallMode`/reranker setting path. `DEFAULT_RERANKER` stays `none`.
+- **Rerank transport** (new, e.g. `src/daemon/runtime/inference/transport-portkey-rerank.ts` or a `recall/` sibling):
+  reuse 063b's Portkey base host + `x-portkey-api-key`/`x-portkey-config` header builder + injectable `fetch`. The ONE
+  difference from the chat transport is the path (`/v1/rerank`) and the Cohere body/response shape. Confirm the exact
+  `model` id format (e.g. `rerank-v3.5` / `rerank-v4.0`) against current Portkey/Cohere docs at build.
+- **Dispatch branch** (`src/daemon/runtime/memories/recall.ts`, `rerankHits` ~line 1108): today
+  `if (config.strategy !== "embedding-cosine") return rrfOrder;`. Add a `cohere` branch that, when `portkey.enabled`,
+  builds `documents` from the fused candidates' `text`, calls the rerank transport with a bounded timeout, and maps
+  `results[].index` back onto the candidate order. Any failure → `return rrfOrder` (fail-soft).
+- **Resolver threading** (the one new dependency): the rerank stage currently has no vault/secret dependency. Thread
+  the `SecretResolver` (or the resolved key callback) from assembly into the recall config/rerank path, the same
+  `${SECRET_REF}` seam 063b uses. Keep it injected for tests.
+- **Timeout/latency** (hot-path discipline): the local `DEFAULT_RERANKER_TIMEOUT_MS = 300` is too tight for an
+  outbound call. Add a rerank-specific timeout (propose ~1000ms, configurable) and ALWAYS fall back to RRF on exceed,
+  so a slow gateway adds at most the timeout to a recall, never a hang. This is the conscious latency/cost trade-off
+  of an external reranker on every recall.
+- **Observability**: fold rerank reachability into `reasons.portkey` (reuse the 063b `recordPortkeyUnreachable`
+  signal) so a misconfigured rerank is visible.
 
 ## Open questions
 
-- [ ] **c-OQ-1 (→ parent OQ-4).** Ownership of the rerank seam: does the `cohere`/provider reranker option come from a
-  recall PRD (027/047) or does 063c add it? Resolve before scheduling 063c.
-- [ ] **c-OQ-2.** Does Portkey expose Cohere rerank via a first-class `/rerank` gateway route, or only via provider
-  passthrough? Confirm against current Portkey docs; it determines the transport payload shape.
+- [ ] **c-OQ-1, the rerank-quality eval (gates default-on).** PRD-047b found the local embedding-cosine reranker did
+  not beat RRF on Honeycomb's data (hence `DEFAULT_RERANKER = "none"`). Before `cohere` is ever made the default, run
+  a recall-quality eval (`eval:recall`) on real data to confirm Cohere rerank actually improves results enough to
+  justify the per-query latency + cost. Owned by `retrieval-worker-bee`. v1 ships the capability default-OFF.
+- [ ] **c-OQ-2, rerank timeout + window defaults.** Confirm the latency budget (proposed 1000ms timeout, window 50)
+  against a real Portkey+Cohere round-trip; tune via the eval above.
 
 ## Related
 
+- [PRD-063b Inference Routing](./prd-063b-portkey-gateway-inference-routing.md): the Portkey transport + key
+  resolution + `reasons.portkey` this reuses.
 - [PRD-027 Recall Ranking and Eval](../../completed/prd-027-recall-ranking-and-eval/prd-027-recall-ranking-and-eval-index.md)
   and [PRD-047 Retrieval Quality Upgrades](../../completed/prd-047-retrieval-quality-upgrades/prd-047-retrieval-quality-upgrades-index.md):
-  where rerank lives today and the seam this depends on.
-- [PRD-063b Inference Routing](./prd-063b-portkey-gateway-inference-routing.md), the Portkey transport + key
-  resolution this reuses.
+  the rerank dispatch point (`rerankHits`), the strategies, and the eval discipline that gates default-on.
+- Portkey rerank reference: Gateway to Other APIs (`POST /v1/rerank`), Cohere Rerank API.
