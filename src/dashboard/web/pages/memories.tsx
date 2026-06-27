@@ -30,7 +30,7 @@ import React from "react";
 
 import { Badge, Button, Input, MemoryCard } from "../primitives.js";
 import { LifecycleHealthPanel } from "./lifecycle-panel.js";
-import { PageFrame, type PageProps } from "../page-frame.js";
+import { isTabHidden, PageFrame, type PageProps } from "../page-frame.js";
 import { useScope } from "../scope-context.js";
 import { NeedsProjectSelection } from "../needs-project.js";
 import {
@@ -611,6 +611,7 @@ export function MemoriesPage({ wire, pollinating = false }: PageProps): React.JS
 		if (!watching) return;
 		let alive = true;
 		const tick = async (): Promise<void> => {
+			if (!alive || isTabHidden()) return; // background-tab pause: no watch poll while hidden
 			const recs = await wire.logs(40);
 			if (!alive) return;
 			const lines = recs.filter((r) => isMemoryRoute(r.path)).slice(-MAX_WATCH_LINES).reverse().map(formatLogLine);
