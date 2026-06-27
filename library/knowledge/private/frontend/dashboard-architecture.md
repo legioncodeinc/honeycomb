@@ -5,7 +5,9 @@
 How Honeycomb's daemon-served web dashboard is built and shipped: the loopback-only HTTP host, the token-free self-hydrating React shell at `127.0.0.1:3850/dashboard`, the hash-routed page registry, and the eight surfaces (nav shell plus seven pages) that present memory, harnesses, graph, sync, logs, and settings.
 
 **Related:**
+- [`dashboard-actions-surface.md`](dashboard-actions-surface.md)
 - [`../dashboard/adding-a-page.md`](../dashboard/adding-a-page.md)
+- [`../architecture/multi-project-and-context-switching.md`](../architecture/multi-project-and-context-switching.md)
 - [`cursor-extension-architecture.md`](cursor-extension-architecture.md)
 - [`../architecture/daemon-surface.md`](../architecture/daemon-surface.md)
 - [`../architecture/system-overview.md`](../architecture/system-overview.md)
@@ -78,7 +80,7 @@ The seven pages, each a component under `src/dashboard/web/pages/`:
 
 | Route | Page | What it shows |
 |---|---|---|
-| `/` | Dashboard (home) | The overview: KPIs and at-a-glance health for the workspace. |
+| `/` | Dashboard (home) | The overview: KPIs (Memories / Turns / Est. savings) and at-a-glance health, project-scoped to the active selection (team skills stay workspace-wide). See the scope switcher in [`../architecture/multi-project-and-context-switching.md`](../architecture/multi-project-and-context-switching.md). |
 | `/harnesses` | Harnesses | Per-harness wiring state, with dynamic sub-items per detected harness (`/harnesses/<harness>`). |
 | `/memories` | Memories | The captured memory corpus for the workspace. |
 | `/graph` | Graph | The codebase graph canvas (build-graph affordance + visualization). |
