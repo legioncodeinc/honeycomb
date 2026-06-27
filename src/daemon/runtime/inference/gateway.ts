@@ -37,6 +37,7 @@
 
 import type { Context, Hono } from "hono";
 
+import { getRequestIdentity } from "../middleware/permission.js";
 import type { InferenceConfig } from "./contracts.js";
 import {
 	type ChatMessage,
@@ -529,10 +530,28 @@ function noServingTargetResponse(c: Context, decision: RoutingDecision): Respons
  * from the same `x-honeycomb-*` headers the rest of the daemon reads (FR-10). The
  * org is required; the workspace defaults to empty (the partition the store wrote
  * with an absent workspace). Returns `null` when the org is missing.
+ *
+ * ── Cross-tenant guard (PRD-022 security) ────────────────────────────────────
+ * When a validated Identity is present, the resolved org MUST equal `identity.org`;
+ * a mismatch returns `null` → the handler fails closed (400).
+ *
+ * ── Cross-workspace guard (PRD-022 security hardening) ───────────────────────
+ * When a validated Identity is present, the workspace is taken from `identity.workspace`
+ * (the token's own workspace), NOT from the header. The header is trusted ONLY in local
+ * mode (no Identity).
  */
 function historyScope(c: Context): RoutingHistoryScope | null {
 	const org = c.req.header("x-honeycomb-org");
 	if (org === undefined || org.length === 0) return null;
+	// Cross-tenant guard: a forged org header can never cross the token's own org boundary.
+	const identity = getRequestIdentity(c);
+	if (identity !== undefined && org !== identity.org) return null;
+	// When an authenticated Identity is present, use its workspace rather than trusting
+	// the header — a forged workspace header must not allow cross-workspace access.
+	if (identity !== undefined) {
+		return { org: identity.org, workspace: identity.workspace };
+	}
+	// Local mode (no Identity): trust the header, defaulting to empty string when absent.
 	const workspace = c.req.header("x-honeycomb-workspace") ?? "";
 	return { org, workspace };
 }
