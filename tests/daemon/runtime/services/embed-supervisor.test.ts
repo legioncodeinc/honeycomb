@@ -221,6 +221,77 @@ describe("D-1 opt-out + D-4 never-hang", () => {
 	});
 });
 
+describe("setEnabled (dashboard live toggle) + boot enabled override", () => {
+	it("deps.enabled=false overrides the env default → inert at boot, then setEnabled(true) spawns", async () => {
+		const spawnChild = vi.fn(() => fakeChild());
+		const sup = createEmbedSupervisor({
+			spawnChild,
+			probeHealth: async () => ({ ok: true, ready: true }),
+			clock: instantClock,
+			// env would default ON, but the persisted preference (deps.enabled) wins → disabled at boot.
+			env: {},
+			enabled: false,
+		});
+		expect(sup.disabled).toBe(true);
+		await sup.start();
+		expect(spawnChild).not.toHaveBeenCalled();
+
+		// The live toggle flips it on: a child is spawned and the supervisor reports live/enabled.
+		await sup.setEnabled(true);
+		expect(spawnChild).toHaveBeenCalledTimes(1);
+		expect(sup.disabled).toBe(false);
+		expect(sup.live).toBe(true);
+		await sup.stop();
+	});
+
+	it("setEnabled(false) on a running supervisor stops the child; setEnabled(true) respawns", async () => {
+		let spawns = 0;
+		const made: ReturnType<typeof fakeChild>[] = [];
+		const sup = createEmbedSupervisor({
+			spawnChild: () => {
+				spawns += 1;
+				const c = fakeChild(3000 + spawns);
+				made.push(c);
+				return c;
+			},
+			probeHealth: async () => ({ ok: true, ready: true }),
+			clock: instantClock,
+			env: {},
+		});
+		await sup.start();
+		expect(spawns).toBe(1);
+		expect(sup.live).toBe(true);
+
+		// Disable live → the child is killed and the supervisor reports disabled + not-live.
+		await sup.setEnabled(false);
+		expect(made[0].killed.length).toBeGreaterThanOrEqual(1);
+		expect(sup.disabled).toBe(true);
+		expect(sup.live).toBe(false);
+
+		// Re-enable → a fresh child spawns.
+		await sup.setEnabled(true);
+		expect(spawns).toBe(2);
+		expect(sup.disabled).toBe(false);
+		expect(sup.live).toBe(true);
+		await sup.stop();
+	});
+
+	it("setEnabled is idempotent: enabling an already-running supervisor does not double-spawn", async () => {
+		const spawnChild = vi.fn(() => fakeChild());
+		const sup = createEmbedSupervisor({
+			spawnChild,
+			probeHealth: async () => ({ ok: true, ready: true }),
+			clock: instantClock,
+			env: {},
+		});
+		await sup.start();
+		expect(spawnChild).toHaveBeenCalledTimes(1);
+		await sup.setEnabled(true); // already on + running → no-op
+		expect(spawnChild).toHaveBeenCalledTimes(1);
+		await sup.stop();
+	});
+});
+
 describe("scrubChildEnv (security: DeepLake credentials never enter the embed child)", () => {
 	it("strips every DeepLake/Activeloop credential var while keeping what the child needs", () => {
 		const env: NodeJS.ProcessEnv = {

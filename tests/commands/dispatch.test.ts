@@ -14,11 +14,15 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+	AUTH_SUBCOMMANDS,
 	type AuthPassthrough,
 	type CommandDeps,
 	createDispatcher,
 	createFakeDaemonClient,
 	parseInvocation,
+	usageText,
+	VERB_GROUPS,
+	VERB_TABLE,
 } from "../../src/commands/index.js";
 
 /** A recording auth-passthrough fake that captures the FULL arg array forwarded (FR-4). */
@@ -141,5 +145,39 @@ describe("PRD-020a a-AC-1 — the unified dispatcher parses + routes", () => {
 		const res = await d.dispatch(d.parse(["frobnicate"]), deps);
 		expect(res.exitCode).toBe(1);
 		expect(lines.join("\n")).toMatch(/unknown command/);
+	});
+});
+
+describe("FR-2 — `--help` lists EVERY command, branded + grouped", () => {
+	it("renders the ASCII honeycomb banner atop the usage", () => {
+		const help = usageText();
+		expect(help).toMatch(/H O N E Y C O M B/);
+		// The two-row honeycomb cells render before the version line.
+		expect(help.indexOf("\\__/")).toBeLessThan(help.indexOf("usage: honeycomb"));
+	});
+
+	it("lists every VERB_TABLE verb (no command silently missing from help)", () => {
+		const help = usageText();
+		for (const spec of VERB_TABLE) {
+			expect(help.includes(`  ${spec.verb} `) || new RegExp(`\\n  ${spec.verb}\\s`).test(help)).toBe(true);
+		}
+	});
+
+	it("surfaces the auth verbs that regressed — login + logout — in the listing", () => {
+		const help = usageText();
+		expect(help).toMatch(/\n {2}login\s/);
+		expect(help).toMatch(/\n {2}logout\s/);
+	});
+
+	it("every auth-passthrough subcommand is also a listed verb (table ⊇ passthrough set)", () => {
+		const listed = new Set(VERB_TABLE.map((s) => s.verb));
+		for (const sub of AUTH_SUBCOMMANDS) expect(listed.has(sub)).toBe(true);
+	});
+
+	it("prints a header for every non-empty group", () => {
+		const help = usageText();
+		for (const { key, label } of VERB_GROUPS) {
+			if (VERB_TABLE.some((s) => s.group === key)) expect(help).toContain(`${label}:`);
+		}
 	});
 });
