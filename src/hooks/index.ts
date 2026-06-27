@@ -64,6 +64,13 @@ export {
 	createClaudeCodeShim,
 } from "./claude-code/shim.js";
 
+// ── PRD-060 ROI fix: the Claude Code transcript reader (per-turn usage + model) ──
+export {
+	parseTurnUsage,
+	readTranscriptTurnUsage,
+	type TranscriptTurnUsage,
+} from "./claude-code/transcript.js";
+
 // ── Codex shim (FR-3 / c-AC-4) ──────────────────────────────────────────────────
 export {
 	CODEX_CONTEXT_CHANNEL,

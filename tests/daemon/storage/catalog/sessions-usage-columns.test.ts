@@ -41,6 +41,15 @@ describe("PRD-060a a-AC-3: the sessions group gains the five additive usage colu
 		expect(colSql("source_tool")).toBe("TEXT NOT NULL DEFAULT ''");
 	});
 
+	it("PRD-060 ROI fix: model is TEXT NOT NULL DEFAULT '' ('' = model unknown), healed additively", () => {
+		expect(colSql("model")).toBe("TEXT NOT NULL DEFAULT ''");
+		const def = SESSIONS_COLUMNS.find((c) => c.name === "model")!;
+		// Additive heal via the SAME ALTER ADD COLUMN path; '' backfills on a populated legacy table.
+		expect(buildAddColumnSql("sessions", def)).toBe(`ALTER TABLE "sessions" ADD COLUMN model TEXT NOT NULL DEFAULT ''`);
+		// Reachable through healTargetFor('sessions') (single-sourced via the barrel spread).
+		expect(healTargetFor("sessions").columns.map((c) => c.name)).toContain("model");
+	});
+
 	it("a-AC-3 the whole sessions array still validates (nullable BIGINT is exempt from the NOT-NULL-DEFAULT guard)", () => {
 		expect(() => validateColumnDefs("sessions", SESSIONS_COLUMNS)).not.toThrow();
 	});
@@ -77,14 +86,15 @@ describe("PRD-060a a-AC-3 / a-AC-4: the heal is ADDITIVE (ALTER ADD COLUMN) and 
 		expect(create).toMatch(/\bsource_tool TEXT NOT NULL DEFAULT ''/);
 	});
 
-	it("a-AC-4 a legacy dataset missing the columns diffs to exactly the five additive columns (no rewrite of existing)", () => {
-		// Simulate `information_schema.columns` for a pre-060a table: every column EXCEPT the five new ones.
-		const newNames = new Set<string>([...TOKEN_COLUMNS, "source_tool"]);
+	it("a-AC-4 a legacy dataset missing the columns diffs to exactly the additive columns (no rewrite of existing)", () => {
+		// Simulate `information_schema.columns` for a pre-060a / pre-060-ROI table: every column EXCEPT
+		// the 060a five AND the PRD-060 ROI `model` column. The diff must be EXACTLY those additive
+		// columns — the existing columns are untouched (no drop/rewrite).
+		const newNames = new Set<string>([...TOKEN_COLUMNS, "source_tool", "model"]);
 		const legacyPresent = new Set(
 			SESSIONS_COLUMNS.filter((c) => !newNames.has(c.name)).map((c) => c.name.toLowerCase()),
 		);
 		const missing = SESSIONS_COLUMNS.filter((c) => !legacyPresent.has(c.name.toLowerCase())).map((c) => c.name);
-		// The diff is EXACTLY the five additive columns — the existing columns are untouched (no drop/rewrite).
 		expect(new Set(missing)).toEqual(newNames);
 	});
 

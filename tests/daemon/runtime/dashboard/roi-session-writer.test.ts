@@ -85,6 +85,23 @@ describe("PRD-060e/060f per-session ROI writer (the summary/skillify completion 
 		expect(sql).toMatch(/'ws1'/);
 	});
 
+	// ── transcript-model fix: the ledger WRITE prices at the captured model's rate, not Sonnet ────
+	it("prices the ledger row at the captured model's rate (Opus), not the Sonnet default", async () => {
+		// One Opus turn with 1,000,000 cache-read tokens. The write path now reads `sessions.model` and
+		// resolves the per-turn rate (parity with the dashboard read path), so the shared ledger is NOT
+		// underpriced for Opus sessions.
+		const fake = writeTransport([
+			{ input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 1_000_000, cache_creation_input_tokens: 0, source_tool: "claude-code", model: "claude-opus-4-8" },
+		]);
+		const writer = createRoiSessionWriter({ storage: client(fake), scope: SCOPE, clock: CLOCK });
+		await writer.writeForSession({ sessionId: "sess-opus", path: "conv/sess-opus", agentId: "agent-A" });
+		const sql = fake.requests.find((r) => /^INSERT INTO "roi_metrics"/.test(r.sql))?.sql ?? "";
+		const values = sql.slice(sql.indexOf("VALUES"));
+		// 1,000,000 × (Opus input 1500 − cache-read 150)/1e6 = 1350 cents (the OPUS rate). At the Sonnet
+		// default it would be 270 — so finding 1350 proves the captured model gated the rate.
+		expect(values, "the row is priced at the Opus rate (1350c), not the Sonnet default (270c)").toMatch(/\b1350\b/);
+	});
+
 	// ── absent capture → measured savings is 0 (status absent upstream), still one honest row ─────
 	it("a session with absent (NULL) token columns writes measured savings 0 — never a fabricated figure", async () => {
 		const fake = writeTransport([

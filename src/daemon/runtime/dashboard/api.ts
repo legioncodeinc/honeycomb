@@ -698,14 +698,28 @@ function tokenCountOrNull(value: unknown): number | null {
 	return Number.isFinite(n) ? Math.trunc(n) : null;
 }
 
-/** Map one `sessions` row (060a token columns) to a 060b {@link CapturedTurn}, preserving NULL=absent. */
+/**
+ * Map one `sessions` row (060a token columns) to a 060b {@link CapturedTurn}, preserving NULL=absent.
+ *
+ * PRD-060 ROI fix: the per-turn `model` (and the `provider` it implies) now ride along so
+ * `resolveRate(turn.provider, turn.model)` prices the turn at its REAL model's rate instead of the
+ * Sonnet default. `model` is set ONLY when the column carried a non-empty id ('' = "model unknown");
+ * `provider` is `"anthropic"` when the turn was captured by Claude Code (`source_tool === "claude-code"`)
+ * or the model id starts with `"claude-"` — otherwise both stay undefined and `resolveRate` falls back
+ * to the conservative default. The rate table keys on (`provider`, `model`), so BOTH must be present
+ * for a non-default rate to resolve.
+ */
 function rowToCapturedTurn(r: StorageRow): CapturedTurn {
 	const sourceTool = toStr(r.source_tool);
+	const model = toStr(r.model);
+	const isAnthropic = sourceTool === "claude-code" || model.startsWith("claude-");
 	return {
 		input_tokens: tokenCountOrNull(r.input_tokens),
 		output_tokens: tokenCountOrNull(r.output_tokens),
 		cache_read_input_tokens: tokenCountOrNull(r.cache_read_input_tokens),
 		cache_creation_input_tokens: tokenCountOrNull(r.cache_creation_input_tokens),
+		...(model !== "" ? { model } : {}),
+		...(model !== "" && isAnthropic ? { provider: "anthropic" } : {}),
 		...(sourceTool !== "" ? { sourceTool } : {}),
 	};
 }
@@ -715,8 +729,9 @@ const ROI_SESSIONS_LIMIT = 5000;
 
 /**
  * Read the captured `sessions` token columns (060a) for the savings math. METADATA-shaped read:
- * only the four nullable token counts + `source_tool` (never a transcript/JSONB body). Fail-soft
- * via `selectRows` (`[]` on any non-ok result). Identifiers via `sqlIdent`; no interpolated value.
+ * only the four nullable token counts + `source_tool` + the per-turn `model` (PRD-060 ROI fix) —
+ * never a transcript/JSONB body. Fail-soft via `selectRows` (`[]` on any non-ok result). Identifiers
+ * via `sqlIdent`; no interpolated value.
  */
 async function readCapturedTurns(storage: StorageQuery, scope: QueryScope, projectId?: string): Promise<CapturedTurn[]> {
 	const tbl = sqlIdent("sessions");
@@ -731,7 +746,8 @@ async function readCapturedTurns(storage: StorageQuery, scope: QueryScope, proje
 	// pre-joined `cols` variable reads as a raw interpolation to the scanner even when guarded).
 	const sql =
 		`SELECT ${sqlIdent("input_tokens")}, ${sqlIdent("output_tokens")}, ` +
-		`${sqlIdent("cache_read_input_tokens")}, ${sqlIdent("cache_creation_input_tokens")}, ${sqlIdent("source_tool")} ` +
+		`${sqlIdent("cache_read_input_tokens")}, ${sqlIdent("cache_creation_input_tokens")}, ` +
+		`${sqlIdent("source_tool")}, ${sqlIdent("model")} ` +
 		`FROM "${tbl}"${projClause} ORDER BY ${dateCol} DESC, ${idCol} DESC LIMIT ${ROI_SESSIONS_LIMIT}`;
 	const rows = await selectRows(storage, sql, scope);
 	return rows.map(rowToCapturedTurn);
