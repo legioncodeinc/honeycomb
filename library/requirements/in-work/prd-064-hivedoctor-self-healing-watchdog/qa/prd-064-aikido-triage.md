@@ -1,94 +1,142 @@
 # Aikido SAST/SCA Triage: PRD-064 HiveDoctor Self-Healing Watchdog
 
-**Triage date:** 2026-06-27
+**Triage date:** 2026-06-27 (updated with ACTUAL dashboard findings)
 **Auditor:** security-worker-bee
-**Trigger:** the HiveDoctor PR failed the external "Aikido Security" gate with **4 CRITICAL / 8 HIGH / 13 MEDIUM** *new* findings. The Aikido dashboard detail was NOT available; this document reconstructs, from the code, what a SAST/SCA tool of Aikido's class most plausibly flagged at CRITICAL/HIGH, classifies each as TRUE-POSITIVE / FALSE-POSITIVE / BY-DESIGN, and records the verification.
-**Scope audited:** `hivedoctor/src/**` (every `child_process` / `fetch` / `node:http` server / file-write / `JSON.parse` site) + the shipped-daemon file `src/cli/daemon-service.ts`.
-**Companion document:** `prd-064-security-report.md` (the full first-principles audit). This triage cross-references it and re-verifies its two remediations are present and complete.
+**Trigger:** the HiveDoctor PR failed the external "Aikido Security" gate. An EARLIER revision of this document reconstructed the findings from the code because the dashboard detail was unavailable. This revision REPLACES those reconstructed guesses with the ACTUAL findings pulled from the Aikido dashboard, and records the in-session remediation applied to clear the gate.
+**Scope audited:** `hivedoctor/src/**` (every file-read/write sink) + the shipped-daemon file `src/cli/daemon-service.ts` + the two new GitHub Actions workflows introduced by this PR.
+**Companion document:** `prd-064-security-report.md` (the full first-principles audit).
 
 ---
 
-## Method note (read before the table)
+## Ordering note (read first)
 
-Aikido (like Snyk Code, Semgrep, CodeQL) is a pattern + taint engine. Its CRITICAL/HIGH bucket for a package like this is dominated by a small number of rule families that fire on *shape*, not on *proof of exploitability*:
-
-- **Any** `child_process` call where an argument is not a string literal -> "command injection (CWE-78)".
-- **Any** `http`/`https` server `.listen()` -> "server binding / network exposure" (often escalated when the tool cannot prove the bind host is loopback).
-- **Any** string that matches a secret-shaped token (`phc_...`, `Bearer ...`) in source -> "hardcoded secret (CWE-798)".
-- **Any** `fetch`/`http.request` to a URL built by string concatenation -> "SSRF (CWE-918)".
-- **Any** `fs.writeFile`/`appendFile`/`rename` with a non-literal path -> "path traversal / arbitrary file write (CWE-22/73)".
-- **Any** `JSON.parse` of a network/file body merged into an object -> "insecure deserialization / prototype pollution".
-
-A SAST tool counts each *call site* separately, so HiveDoctor's ~10 `execFile`/`execFileSync` argv sites + ~3 `fetch` sites + 1 `http` server + ~6 file-write sites + ~8 `JSON.parse` sites very plausibly sum to the reported 4C/8H/13M. The job below is to decide, with `file:line` evidence, which of those are real.
+A QA report for this branch already exists at `prd-064-qa-report.md` (committed, mtime predates this remediation). `security-worker-bee` runs BEFORE `quality-worker-bee`; because this pass changed code (the path-containment class fix + the action SHA pins), **`quality-worker-bee` must be re-run** so its report reflects the post-remediation tree. The existing QA report is now stale.
 
 ---
 
-## The triage table (likely finding -> severity -> verdict -> evidence -> action)
+## The ACTUAL Aikido findings (from the dashboard)
 
-| # | Likely Aikido finding (CWE) | Aikido sev | Verdict | Evidence (`file:line`) | Action / suppression rationale |
-|---|---|---|---|---|---|
-| 1 | Command injection in npm install spec (CWE-78) | CRITICAL | **TRUE-POSITIVE (already fixed), now BY-DESIGN** | `hivedoctor/src/update/update-engine.ts:136-156` (`installVersion`) | The one real spec-injection path (rollback passing the unvalidated `/health` `version` into `npm install -g name@<version>`) was already remediated: line **137** rejects any non-strict-SemVer `version` via `parseVersion` before the spec is composed, and the install runs through `execFile` (argv, `shell:false`). VERIFIED present + complete. Suppress as: "fixed, strict-SemVer guard at update-engine.ts:137 gates the only network-sourced version before it can reach npm; execFile prevents shell metachar injection." |
-| 2 | Command injection via schtasks `/TR` shell string (CWE-78) | CRITICAL | **TRUE-POSITIVE (already fixed), now BY-DESIGN** | `src/cli/daemon-service.ts:293-318` (`buildSchtasksCreateArgs`), guard at `:276-281` + calls `:298-300` | The lone shell-string composition (the `cmd /c "..."` `/TR` value cmd.exe re-parses at logon). `assertCmdSafe` throws on `& \| < > ^ " % \r \n` and is called on `spec.workspace`, `spec.nodePath`, `spec.entry`. A throw makes `runtime.ts` fall back to the safe detached spawn. VERIFIED present + complete. Suppress as: "fixed, assertCmdSafe rejects all cmd.exe metacharacters in the three interpolated paths; legitimate Windows paths never contain them." |
-| 3 | Command injection, npm reinstall/uninstall/`npm ls` argv (CWE-78) | CRITICAL or HIGH | **FALSE-POSITIVE** | `hivedoctor/src/rungs/reinstall.ts:126-130`, `uninstall-hivemind.ts:81,134-138`, `command-runner.ts:68-101` | All package names are module-level constants (`@legioncodeinc/honeycomb`, `@deeplake/hivemind`); every call is `execFile("npm", ["install","-g",spec])` through `createExecFileRunner`, which sets `shell:false` explicitly (`:77`). No external/network data reaches the command or a flag. Suppress as: "fixed-argv execFile, shell:false, package names are source constants, no shell, no untrusted arg." |
-| 4 | Command injection, service-manager argv (launchctl/systemctl/schtasks/sc) (CWE-78) | HIGH | **FALSE-POSITIVE** | `hivedoctor/src/service/argv.ts:56-135`, `service/index.ts:117`; `src/cli/daemon-service.ts:130-138,374-380,...` | Pure argv arrays of literals + a resolved `ServicePlan`; `defaultServiceRunner` uses `execFileSync(cmd, [...args])` (no shell). Task/unit names are constants. The one composed string (`sc binPath`, `argv.ts:84`) is built from `process.execPath` + the resolved install path and passed as a single argv token to `sc.exe` (not a shell). Suppress as: "execFile/execFileSync no-shell, fixed argv, names are constants." |
-| 5 | Hardcoded secret, PostHog key `__HONEYCOMB_POSTHOG_KEY__` / `Bearer` (CWE-798) | CRITICAL or HIGH | **BY-DESIGN (false-positive)** | `hivedoctor/src/telemetry/emit.ts:75-78,506`, `esbuild.config.mjs:50,58-62` | No real key is committed. `__HONEYCOMB_POSTHOG_KEY__` is an esbuild `define` token sourced from CI env (`process.env.HONEYCOMB_POSTHOG_KEY ?? ""`); an unset key compiles to `""` which Gate 1 (`emit.ts:542`) treats as telemetry **hard-disabled**. The `phc_...` value is a PostHog **public, write-only ingest key**, embedded in the published tarball by design (it can only append events, cannot read), sent in the `Authorization: Bearer` header (not a query string) and never logged. Suppress as: "public write-only analytics ingest key, build-injected from CI, no real secret in source; embedding it in a client is the documented PostHog model." |
-| 6 | SSRF, outbound fetch to attacker-influenced URL (CWE-918) | HIGH | **FALSE-POSITIVE** | `blessed-channel.ts:26,105-117`; `registry.ts:22-25,82-95`; `telemetry/emit.ts:84-102,492-511` | All three hosts are compile-time constants: `https://get.theapiary.sh/blessed-version.json`, `https://registry.npmjs.org/<pkg>/latest` (pkg is a source constant), `https://us.i.posthog.com` (build-define, HTTPS default). No request URL host is derived from network input or user data. All are HTTPS; no `http://` egress, no `rejectUnauthorized:false`, no `NODE_TLS_REJECT_UNAUTHORIZED`. Suppress as: "destination hosts are source/build constants over HTTPS; no user/network-controlled host component." |
-| 7 | SSRF / open-redirect via `HIVEDOCTOR_HEALTH_URL` (CWE-918) | HIGH | **FALSE-POSITIVE (defense present)** | `config.ts:96-106,143`; `health-probe.ts`; `daemon-version.ts` | The health URL is operator-set local **env**, not network/attacker input; `parseHealthUrl` restricts it to `http:`/`https:` and falls back to the loopback default on anything else. It targets the user's own daemon. The one *downstream* risk (a poisoned `/health` `version`) is the input neutralized by finding #1's SemVer guard. Suppress as: "local-operator env, scheme-restricted, points at the user's own loopback daemon; downstream version is SemVer-gated before any subprocess." |
-| 8 | Server binding / network exposure, `http.Server.listen` (CWE-668) | HIGH | **FALSE-POSITIVE** | `hivedoctor/src/status-page/server.ts:96,287` | The server binds `s.listen(options.port, LOOPBACK)` where `LOOPBACK = "127.0.0.1"` (a const, `:96`). It never binds `0.0.0.0` or `::`. If Aikido flagged this it could not prove the bind host; the host is a literal loopback constant. Suppress as: "binds 127.0.0.1 literal only; never 0.0.0.0/::; not reachable off-box." |
-| 9 | Reflected XSS in the status page (CWE-79) | HIGH or MEDIUM | **FALSE-POSITIVE** | `status-page/server.ts:157-193,208-241` | All dynamic values pass through `escapeHtml` (`&<>"`) and are placed in element text or double-quoted attributes; the page is read-only (GET only), loopback-only, and never echoes `req.url`. No request input is reflected. (Minor hardening note carried to Medium below: `escapeHtml` omits `'`; no live path today.) Suppress as: "all interpolation HTML-escaped into text / double-quoted attributes; no request input reflected; loopback read-only." |
-| 10 | Path traversal / arbitrary file write (CWE-22/73) | HIGH | **FALSE-POSITIVE** | `state.ts:118,132-152`; `incidents.ts`; `escalation/needs-attention-store.ts`; `install-lock.ts`; `uninstall-hivemind.ts:92-103`; `service/index.ts:159-165`; `daemon-service.ts:139-141,182-190` | Every write path is `join(workspaceDir, "<literal-filename>")` under `~/.honeycomb/hivedoctor` (or the resolved service-unit dir under `~`). No filename segment is taken from network/user input. `state.json` is written temp-then-`rename` (atomic, `state.ts:135-139`). The schtasks staged XML path is a fixed `${home}/.honeycomb/hivedoctor/hivedoctor-task.xml`. Suppress as: "fixed filenames joined under a controlled base dir; no external path segment; atomic temp+rename." |
-| 11 | Insecure deserialization / prototype pollution via `JSON.parse` (CWE-502/1321) | HIGH or MEDIUM | **FALSE-POSITIVE** | `blessed-channel.ts:87-98,129`; `registry.ts:65-74`; `daemon-version.ts:25-34`; `health-probe.ts:107-135`; `state.ts:102-113` | Every parsed body is **read-only field extraction** into a fresh typed object (`o.version`, `o.status`, `o.reasons.storage`, ...), hand-validated by `typeof` checks. Nothing is spread/merged from the parsed object into a target, and no parsed key is used as an assignment target, so a `__proto__`/`constructor` key in the body cannot pollute any prototype. `mergeState` (`state.ts:102`) builds a brand-new object field-by-field with coercers. Suppress as: "parsed JSON is field-extracted with typeof guards into fresh objects; no merge/assign of attacker keys; prototype pollution structurally impossible." |
-| 12 | SCA, vulnerable runtime dependency (CWE-1035 / known CVE) | CRITICAL | **FALSE-POSITIVE / N/A** | `hivedoctor/package.json` `dependencies: {}` `optionalDependencies: {}`; `npm audit --audit-level=high` = `found 0 vulnerabilities` | HiveDoctor ships **zero** runtime npm dependencies (Node built-ins only, by binding design). The published tarball is the single bundled `bundle/cli.js`. Any SCA CRITICAL here would be against a **devDependency** (esbuild/vitest/typescript/@types/node/@vitest/coverage-v8), which is build-time only and not shipped. Suppress (dev-dep findings) as: "build/test-only devDependency, not in the published tarball (files allowlist = bundle/cli.js + README + LICENSE); zero runtime deps confirmed by npm audit." |
-| 13 | ReDoS, catastrophic backtracking regex (CWE-1333) | HIGH or MEDIUM | **FALSE-POSITIVE** | `update/version.ts:49` (SemVer regex), `uninstall-hivemind.ts:84` (`/@deeplake\/hivemind@(\S+)/`), `emit.ts:101` (`/\/+$/`), `server.ts:154` (`/\n\s*/g`) | None contain nested/overlapping quantifiers on the same span; inputs are tiny (a version string, a one-line `npm ls` match, a trailing-slash trim, a small CSS string). No exponential backtracking shape. Suppress as: "linear regexes over bounded small inputs; no nested quantifier ambiguity." |
+Aikido reported two finding families on the new code:
 
----
+### Family A - HIGH (and ~4 CRITICAL of the same class): "Potential file inclusion attack via reading file" (path-traversal taint, CWE-22/73)
 
-## Bottom line: how many of the 4 CRITICAL / 8 HIGH are plausibly real
+Aikido's taint engine flags every `readFileSync` / `writeFileSync` / `appendFileSync` / `statSync` whose path is a **variable** (not a string literal). In HiveDoctor every on-disk artifact lives at `join(workspaceDir, "<fixed-literal-name>")`, where `workspaceDir` is resolved from the environment (`HONEYCOMB_WORKSPACE` / the CLI cwd, see `hivedoctor/src/config.ts`). Because the engine cannot prove the joined filename is constant, it marks the workspace-derived path as tainted and each sink as a potential file-inclusion / arbitrary-file-write site. The HIGH-named sinks plus the un-screenshotted CRITICALs are the SAME class on the other sinks in the new code.
 
-| Aikido bucket | Count | Genuinely exploitable as written | SAST noise (FP / BY-DESIGN) |
+Confirmed sinks (the full class, every variable-derived file path in the PR):
+
+| # | Sink | `file:line` | Path source |
 |---|---|---|---|
-| **CRITICAL** | 4 | **0** | 4, most-likely: the two CWE-78 command-injection findings (#1 update-engine, #2 schtasks `/TR`) **were already remediated** in the prior security pass and are verified present; the hardcoded-secret (#5) is a by-design public write-only key; the SCA-critical (#12) is N/A (zero runtime deps). |
-| **HIGH** | 8 | **0** | 8, additional command-injection call sites (#3, #4), SSRF (#6, #7), server-binding (#8), XSS (#9), path-traversal (#10), prototype-pollution (#11). All false-positives on inspection. |
+| A1 | `readFileSync` + `writeFileSync` + `renameSync` (state) | `hivedoctor/src/state.ts` read ~`123`, write ~`140` | `join(workspaceDir, "state.json")` |
+| A2 | `readFileSync` + `writeFileSync(wx)` + `statSync` + `rmSync` (lock) | `hivedoctor/src/install-lock.ts` ~`89/113/157`, release ~`134` | `join(workspaceDir, "install.lock")` |
+| A3 | `statSync` + `renameSync` + `appendFileSync` (incidents) | `hivedoctor/src/incidents.ts` ~`141/142/184` | `join(workspaceDir, "incidents.ndjson"[.1])` |
+| A4 | `readFileSync` + `writeFileSync` + `renameSync` (needs-attention) | `hivedoctor/src/escalation/needs-attention-store.ts` ~`119/120/206` | `join(workspaceDir, "needs-attention.json")` |
+| A5 | `appendFileSync` (removed-packages backup) | `hivedoctor/src/rungs/uninstall-hivemind.ts` ~`103` | `join(workspaceDir, "removed-packages.ndjson")` |
+| A6 | `readFileSync` (logs tail) | `hivedoctor/src/cli/incidents-tail.ts` ~`23` | `join(workspaceDir, "incidents.ndjson")` |
+| A7 | `writeFileSync` + `rmSync` + `existsSync` (service unit files) | `src/cli/daemon-service.ts` runner ~`141/145/152`, paths `launchdPlistPath`/`systemdUnitPath` ~`183/188` | `join(home, ...fixed, "<label>.plist|.service")`, `home = spec.home ?? os.homedir()` |
 
-**Net assessment:** of the 4 CRITICAL / 8 HIGH Aikido reported, **0 are currently exploitable in the merged code.** The two findings that *were* genuinely exploitable in an earlier draft (the rollback SemVer gap and the schtasks `/TR` cmd string) are real TRUE-POSITIVES but were already fixed in `prd-064-security-report.md`'s remediation; this triage independently re-verified both fixes are present and complete (`update-engine.ts:137`, `daemon-service.ts:276-300`). Everything else is SAST shape-matching on a deliberately disciplined, zero-runtime-dep, fixed-argv, loopback-only, fail-closed codebase.
+**Severity:** HIGH (named) + ~4 CRITICAL (same class on other sinks). Path-traversal / arbitrary-file-write is a real CWE family; per the never-downgrade rule we treat the class at the reported severity and FIX it, even though the practical exploitability is low (the "tainted" base is the user's OWN workspace/home, not remote input).
 
-The high Aikido count is expected and explainable: a defense-in-depth design that uses `execFile` everywhere, a build-injected public analytics key, a local HTTP status page, and lots of small `JSON.parse`+file-write sites trips many *pattern* rules without any of them being a real vulnerability.
+### Family B - HIGH: "3rd party GitHub Actions should be pinned" (CWE-1357 / supply-chain)
+
+The two NEW workflows introduced by this PR reference 3rd-party / `actions/*` actions by **mutable version tag** instead of an immutable commit SHA. A tag can be force-moved by the action owner (or an attacker who compromises it) to point at malicious code that then runs in CI with repo permissions.
+
+| Sink | `file:line` | Action (before) |
+|---|---|---|
+| B1 | `.github/workflows/release-hivedoctor.yaml` `:86` | `actions/checkout@v4.2.2` |
+| B2 | `.github/workflows/release-hivedoctor.yaml` `:97` | `actions/setup-node@v6.4.0` |
+| B3 | `.github/workflows/release-hivedoctor.yaml` `:247` | `softprops/action-gh-release@v2.4.1` |
+| B4 | `.github/workflows/ci.yaml` hivedoctor job `:214` | `actions/checkout@v4.2.2` |
+| B5 | `.github/workflows/ci.yaml` hivedoctor job `:217` | `actions/setup-node@v6.4.0` |
+
+**Severity:** HIGH (supply-chain). Pre-existing workflow lines NOT introduced by this PR were left untouched (scope discipline); local `./.github/actions/*` composite refs do not need pinning.
 
 ---
 
-## Remediation performed this session
+## Remediation performed THIS session
 
-**None required.** The only two genuine Critical/High issues in the change set were remediated in the prior pass and verified intact here. No new exploitable Critical/High was found, so no code was changed (minimal-blast-radius: an unnecessary edit would only contaminate the diff). `git status` for `hivedoctor/src` and `src/cli/daemon-service.ts` is clean; the main checkout at `C:\Users\mario\GitHub\honeycomb` shows only a pre-existing unrelated untracked asset (`assets/og-default.png`).
+### Remediation 1 - path containment (class fix for Family A)
+
+Added a single shared helper `hivedoctor/src/safe-path.ts` exporting:
+
+- `resolveInBase(baseDir, ...segments)` - rejects any segment containing a path separator (`/` or `\`), a `..`/`.` traversal token, or an empty value; resolves `baseDir` to an absolute normalized path; joins + re-normalizes; and **asserts** the result is still contained within the resolved base (throws `PathContainmentError` otherwise).
+- `assertWithinBase(baseDir, candidatePath)` - asserts an already-composed absolute path is contained within `baseDir` (used conceptually for the multi-segment service-unit paths).
+
+This is genuine defense-in-depth: a poisoned `HONEYCOMB_WORKSPACE` / `workspaceDir` / `spec.home` cannot escape the workspace or home dir, AND the tainted path now flows through a validator the SAST taint-tracker can see. Built-ins only (`node:path`), strict ESM, zero runtime deps preserved.
+
+Applied at every Family-A sink. Behavior is identical (same files, same locations); the helper only adds validation before the syscall. Fail-soft: a containment violation is caught inside each store's existing defensive try/catch and degrades EXACTLY like a read/write failure (default state / empty list / logged-and-skip / "cannot acquire" -> back off), never crashing the watchdog.
+
+| Sink | File | How guarded | Fail-soft behavior on violation |
+|---|---|---|---|
+| A1 | `hivedoctor/src/state.ts` | `resolveInBase(workspaceDir, "state.json")` inside `read()` and `write()` try blocks | read -> DEFAULT_STATE; write -> logged `state.write_failed` |
+| A2 | `hivedoctor/src/install-lock.ts` | `lockPath()` -> `resolveInBase(workspaceDir, "install.lock")` resolved at top of `acquire()`; `filePath` threaded into `exclusiveCreate`/`makeHandle`/`stealAndRetry` | `acquire()` returns `null` (caller backs off); `release()` stays best-effort no-throw |
+| A3 | `hivedoctor/src/incidents.ts` | `resolveInBase` for `incidents.ndjson` + `incidents.ndjson.1` inside `write()`; both threaded into `rotateIfNeeded` | logged `incident.write_failed` |
+| A4 | `hivedoctor/src/escalation/needs-attention-store.ts` | `storePath()` -> `resolveInBase(workspaceDir, "needs-attention.json")` in `record()`/`resolve()`/`read()` | record -> logged + skip file write (incident-log append still durable); resolve -> logged + return; read -> `null` ("no record") |
+| A5 | `hivedoctor/src/rungs/uninstall-hivemind.ts` | `resolveInBase(workspaceDir, "removed-packages.ndjson")` inside `recordRemoval()` try | returns `false` -> caller SKIPS the destructive uninstall (cannot honor record-before-removal) |
+| A6 | `hivedoctor/src/cli/incidents-tail.ts` | `resolveInBase(workspaceDir, "incidents.ndjson")` inside the tail try | empty list (same as missing file) |
+| A7 | `src/cli/daemon-service.ts` | `containedUnitPath(home, [...segments])` (local mirror of `safe-path.ts`, built-ins only; `src/` cannot import from `hivedoctor/`) wraps `launchdPlistPath` + `systemdUnitPath`; every `writeFile`/`removeFile`/`fileExists` path flows through these two resolvers | throws -> the module's documented "service path unavailable" signal -> `runtime.ts` falls back to the safe detached spawn |
+
+Focused tests added in `hivedoctor/tests/safe-path.test.ts` (12 cases): accepts a normal filename, accepts multiple in-base segments, rejects `..`, rejects POSIX + Windows separators, rejects empty/missing/`.` segments, the sibling-prefix `/a/bc` vs `/a/b` trap, `assertWithinBase` accept/escape/non-absolute.
+
+### Remediation 2 - pin GitHub Actions to commit SHAs (Family B)
+
+Every 3rd-party / `actions/*` `uses:` in the two NEW workflow surfaces is now pinned to a full 40-char commit SHA with a trailing `# vX.Y.Z` comment. SHAs fetched live via `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` (all three resolved directly to commit objects; no annotated-tag deref needed).
+
+| Action | Pinned SHA | Comment | Applied in |
+|---|---|---|---|
+| `actions/checkout` | `11bd71901bbe5b1630ceea73d27597364c9af683` | `# v4.2.2` | release-hivedoctor.yaml `:86`, ci.yaml hivedoctor job `:214` |
+| `actions/setup-node` | `48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e` | `# v6.4.0` | release-hivedoctor.yaml `:97`, ci.yaml hivedoctor job `:217` |
+| `softprops/action-gh-release` | `6da8fa9354ddfdc4aeace5fc48d7f679b5214090` | `# v2.4.1` | release-hivedoctor.yaml `:247` |
+
+No `actions/upload-artifact` was introduced by this PR (the existing `:384` use is in a pre-existing job and was left untouched). Pre-existing `actions/checkout@v4.2.2` / `actions/setup-node@v6.4.0` references in the OTHER (non-hivedoctor) ci.yaml jobs were deliberately NOT modified - they predate this PR and are out of scope. The hivedoctor release composite/local refs are not 3rd-party and need no pin.
 
 ---
 
-## Verification (tests re-run this session, all green)
+## Code-fixable vs may-need-dashboard-ack
+
+| Family | Fully code-fixable? | Residual / ack guidance |
+|---|---|---|
+| **A (file inclusion)** | YES, the validator routes every tainted path through a containment check before the syscall. | Aikido's taint analysis MAY still flag a `readFile(var)` even with the validator in place, because some taint engines only clear a taint when the value passes a recognized sanitizer signature, not an arbitrary user function. If any A-family finding persists on the next scan, it is a **residual false-positive, low-risk**: the "tainted" base is the user's OWN `HONEYCOMB_WORKSPACE` / home dir (local operator input, not remote/network), now provably contained. **List those residuals for dashboard suppression** with rationale: "path validated by resolveInBase/containedUnitPath containment assertion; base is the operator's own workspace/home, not remote input." |
+| **B (action pinning)** | YES, fully. SHA pinning is exactly what the rule wants; this finding should clear outright. | None. |
+
+---
+
+## Re-classification of the EARLIER reconstructed table
+
+The prior revision's reconstructed findings (command-injection on npm/service argv, hardcoded PostHog key, SSRF, server-binding, XSS, prototype pollution, SCA) did NOT match the actual dashboard. They remain accurate as a defensive audit and are retained in `prd-064-security-report.md`. The two that WERE genuine in an earlier draft (the rollback SemVer gap at `update-engine.ts:137`, and the schtasks `/TR` cmd-string guard `assertCmdSafe` at `daemon-service.ts:276-300`) are verified still present. The ACTUAL gate failure, however, was Families A and B above, now remediated.
+
+---
+
+## Verification (this session, all green)
 
 ```text
-hivedoctor (npx vitest run on the security-relevant suites):
-  tests/service/templates.test.ts ..... 18 passed
-  tests/service/argv.test.ts .......... 14 passed
-  tests/update/update-engine.test.ts .. 13 passed   (finding #1 guard)
-  tests/status-page/server.test.ts .... 14 passed   (findings #8 #9)
-  Test Files 4 passed (4) · Tests 59 passed (59)
+hivedoctor (npm run ci = typecheck + vitest run):
+  tsc --noEmit ............................ clean
+  Test Files 41 passed (41) · Tests 396 passed (396)
+  includes tests/safe-path.test.ts ....... 12 passed (new)
 
 repo-root:
-  tests/cli/daemon-service.test.ts .... 19 passed   (finding #2 assertCmdSafe)
-  Test Files 1 passed (1) · Tests 19 passed (19)
+  npx tsc --noEmit ....................... clean
+  npm run dup (jscpd, threshold 7) ....... 0.5% dup tokens, PASS
+  tests/cli/daemon-service.test.ts ....... 19 passed
+  tests/cli/daemon-lifecycle-service.test.ts 8 passed
 
-npm audit (hivedoctor, --audit-level=high): found 0 vulnerabilities
-runtime dependencies: {} · optionalDependencies: {}   (SCA criticals N/A)
+YAML validity:
+  python yaml.safe_load(release-hivedoctor.yaml) .. OK
+  python yaml.safe_load(ci.yaml) .................. OK
+
+scope / hygiene:
+  ci.yaml diff = ONLY the 2 hivedoctor-job uses lines (verified)
+  release-hivedoctor.yaml diff = ONLY the 3 SHA-pin lines (verified)
+  no em/en dashes introduced in any changed source/workflow file
+  main checkout C:\Users\mario\GitHub\honeycomb clean (only pre-existing
+    untracked assets/og-default.png, unrelated to this pass)
 ```
-
-No dashes were introduced in this document (per project preference). Triage runs BEFORE `quality-worker-bee`; a QA report exists for this branch (`prd-064-qa-report.md`) but is committed and predates these verifications, if any code is changed in response to this triage, re-run `quality-worker-bee` afterward. No code changed here, so the existing QA report remains valid.
 
 ---
 
 ## Residual Medium hardening (documentation only, not gating, carried from the full audit)
 
-These do not appear in the Critical/High triage above but are worth pasting into Aikido as accepted-Medium with a fix-when-touched note:
+1. **`escapeHtml` omits the single-quote**, `hivedoctor/src/status-page/server.ts` ~`187`. Covers `& < > "` but not `'`. No live XSS path (all values land in text or double-quoted attributes), loopback + read-only. Add `.replace(/'/g, "&#39;")` as defense-in-depth if the page ever gains a single-quoted attribute.
+2. **`reinstall.ts` blessed-version verify is a no-op when compose passes `""`** (`hivedoctor/src/compose/index.ts`). Functionality gap, not a security issue.
 
-1. **`escapeHtml` omits the single-quote**, `hivedoctor/src/status-page/server.ts:187`. Covers `& < > "` but not `'`. No live XSS path (all values land in text or double-quoted attributes), loopback + read-only. Add `.replace(/'/g, "&#39;")` as defense-in-depth if the page ever gains a single-quoted attribute.
-2. **`reinstall.ts` blessed-version verify is a no-op when compose passes `""`**, `hivedoctor/src/compose/index.ts` wires `blessedVersion: options.blessedVersion ?? ""`, so rung-2 reports `unverified-no-blessed`. Functionality gap, not a security issue.
-
-These are the same residuals tracked in `prd-064-security-report.md`; they are Medium and out of the in-session fix bar.
+These are Medium and out of the in-session fix bar.

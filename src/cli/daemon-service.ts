@@ -39,7 +39,7 @@
 
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, normalize, resolve, sep } from "node:path";
 
 /** The three OS service managers this module can target (the resolved per-OS default). */
 export type ServiceManager = "launchd" | "systemd-user" | "schtasks";
@@ -179,14 +179,35 @@ export interface ServiceSpec {
 	readonly home?: string;
 }
 
+/**
+ * Assert that a resolved unit/plist path stays CONTAINED within `home`, then return it
+ * (PRD-064 Aikido SAST hardening). The `home` here is `spec.home ?? os.homedir()` - a
+ * caller-supplied, variable-derived base - so the unit-path builders below thread it
+ * through this validator before the path ever reaches a file syscall (`writeFileSync` /
+ * `rmSync` / `existsSync` in {@link defaultServiceRunner}). The fixed sub-segments are
+ * literals we control, so the ONLY way the result escapes `home` is a hostile `home`,
+ * which we reject. Built-ins only (node:path). Mirrors hivedoctor/src/safe-path.ts.
+ */
+function containedUnitPath(home: string, segments: readonly string[]): string {
+	const resolvedHome = normalize(resolve(home));
+	const candidate = normalize(resolve(resolvedHome, ...segments));
+	const homeWithSep = resolvedHome.endsWith(sep) ? resolvedHome : resolvedHome + sep;
+	if (candidate !== resolvedHome && !candidate.startsWith(homeWithSep)) {
+		// A throw is this module's documented "service path unavailable" signal; runtime.ts
+		// falls back to the safe detached spawn rather than touching an out-of-home unit file.
+		throw new Error("resolved service unit path escapes the home dir");
+	}
+	return candidate;
+}
+
 /** Resolve the launchd LaunchAgent plist path (`~/Library/LaunchAgents/<label>.plist`). */
 export function launchdPlistPath(home: string): string {
-	return join(home, "Library", "LaunchAgents", `${SERVICE_LABEL}.plist`);
+	return containedUnitPath(home, ["Library", "LaunchAgents", `${SERVICE_LABEL}.plist`]);
 }
 
 /** Resolve the systemd --user unit path (`~/.config/systemd/user/<label>.service`). */
 export function systemdUnitPath(home: string): string {
-	return join(home, ".config", "systemd", "user", `${SERVICE_LABEL}.service`);
+	return containedUnitPath(home, [".config", "systemd", "user", `${SERVICE_LABEL}.service`]);
 }
 
 /** XML-escape a value bound into a plist `<string>` (the entry/workspace can contain `&`/`<`). */

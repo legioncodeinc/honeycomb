@@ -21,9 +21,9 @@
 
 import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 
 import type { Logger } from "./logger.js";
+import { resolveInBase } from "./safe-path.js";
 
 /** The last-observed coarse daemon health HiveDoctor recorded. */
 export type LastKnownHealth = "ok" | "degraded" | "unreachable" | "unknown";
@@ -115,11 +115,13 @@ export function mergeState(parsed: unknown): HiveDoctorState {
 
 /** Build a state store bound to a workspace dir. */
 export function createStateStore(options: StateStoreOptions): StateStore {
-	const filePath = join(options.workspaceDir, "state.json");
-
 	return {
 		read(): HiveDoctorState {
 			try {
+				// Containment: the fixed "state.json" name is joined under the variable workspace
+				// dir and asserted to stay inside it (defense-in-depth + SAST taint visibility). A
+				// containment violation throws and is caught here, degrading exactly like a read error.
+				const filePath = resolveInBase(options.workspaceDir, "state.json");
 				const raw = readFileSync(filePath, "utf8");
 				return mergeState(JSON.parse(raw));
 			} catch {
@@ -130,20 +132,27 @@ export function createStateStore(options: StateStoreOptions): StateStore {
 		},
 
 		write(state: HiveDoctorState): void {
-			// Atomic write: serialize to a uniquely-named temp file in the same dir, then rename
-			// over the target. A crash mid-write thus never leaves a half-written state.json.
-			const tmpPath = `${filePath}.${randomBytes(6).toString("hex")}.tmp`;
+			let tmpPath: string | null = null;
 			try {
+				// Containment: the fixed "state.json" name is joined under the variable workspace
+				// dir and asserted to stay inside it (defense-in-depth + SAST taint visibility). A
+				// containment violation throws and is caught below, degrading like a write failure.
+				const filePath = resolveInBase(options.workspaceDir, "state.json");
+				// Atomic write: serialize to a uniquely-named temp file in the same dir, then rename
+				// over the target. A crash mid-write thus never leaves a half-written state.json.
+				tmpPath = `${filePath}.${randomBytes(6).toString("hex")}.tmp`;
 				mkdirSync(options.workspaceDir, { recursive: true });
 				writeFileSync(tmpPath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
 				renameSync(tmpPath, filePath);
 			} catch (error) {
 				// Defensive (design principle 1): a read-only/wrong cwd must NOT crash the watchdog.
 				// Best-effort cleanup of the temp file, then report + continue.
-				try {
-					rmSync(tmpPath, { force: true });
-				} catch {
-					// Temp cleanup is itself best-effort; a leftover .tmp is harmless and rare.
+				if (tmpPath !== null) {
+					try {
+						rmSync(tmpPath, { force: true });
+					} catch {
+						// Temp cleanup is itself best-effort; a leftover .tmp is harmless and rare.
+					}
 				}
 				options.logger.error("state.write_failed", {
 					reason: error instanceof Error ? error.message : "unknown",

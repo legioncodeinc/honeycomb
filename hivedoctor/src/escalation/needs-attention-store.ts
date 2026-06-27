@@ -27,10 +27,10 @@
 
 import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 
 import type { IncidentLog } from "../incidents.js";
 import type { Logger } from "../logger.js";
+import { resolveInBase } from "../safe-path.js";
 import type { EscalationRecord } from "../rungs/escalation.js";
 
 // ── Dashboard read-seam file shape ───────────────────────────────────────────
@@ -134,7 +134,15 @@ function atomicWrite(targetPath: string, content: string, workspaceDir: string, 
 /** Build the store. */
 export function createNeedsAttentionStore(options: NeedsAttentionStoreOptions): NeedsAttentionStore {
 	const now = options.now ?? Date.now;
-	const filePath = join(options.workspaceDir, "needs-attention.json");
+
+	/**
+	 * Resolve `needs-attention.json` under the variable workspace dir, asserting it stays
+	 * inside (defense-in-depth + SAST taint visibility). Throws on a containment violation;
+	 * callers catch / fail-soft so the watchdog never crashes.
+	 */
+	function storePath(): string {
+		return resolveInBase(options.workspaceDir, "needs-attention.json");
+	}
 
 	return {
 		record(escalation: EscalationRecord): void {
@@ -147,7 +155,20 @@ export function createNeedsAttentionStore(options: NeedsAttentionStoreOptions): 
 				resolved: false,
 				recordedAt,
 			};
-			atomicWrite(filePath, JSON.stringify(file, null, 2), options.workspaceDir, options.logger);
+			let filePath: string;
+			try {
+				filePath = storePath();
+			} catch (error) {
+				// Containment violation: cannot safely write. Log + skip the file write (the
+				// incident-log append below still records the escalation durably).
+				options.logger.error("needs-attention.write_failed", {
+					reason: error instanceof Error ? error.message : "unknown",
+				});
+				filePath = "";
+			}
+			if (filePath !== "") {
+				atomicWrite(filePath, JSON.stringify(file, null, 2), options.workspaceDir, options.logger);
+			}
 
 			// (2) Also append an escalation step to incidents.ndjson so the record is
 			// durable across needs-attention.json replacements.
@@ -197,12 +218,23 @@ export function createNeedsAttentionStore(options: NeedsAttentionStoreOptions): 
 				resolved: true,
 				resolvedAt,
 			};
+			let filePath: string;
+			try {
+				filePath = storePath();
+			} catch (error) {
+				options.logger.error("needs-attention.write_failed", {
+					reason: error instanceof Error ? error.message : "unknown",
+				});
+				return;
+			}
 			atomicWrite(filePath, JSON.stringify(updated, null, 2), options.workspaceDir, options.logger);
 			options.logger.info("needs-attention.resolved", { resolvedAt });
 		},
 
 		read(): NeedsAttentionFile | null {
 			try {
+				// Containment first; a violation throws and is caught here (returns null, "no record").
+				const filePath = storePath();
 				const raw = readFileSync(filePath, "utf8");
 				const parsed = JSON.parse(raw) as unknown;
 				if (

@@ -29,9 +29,9 @@
  */
 
 import { appendFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
 
 import type { Rung, RungContext, RungResult } from "../remediation.js";
+import { resolveInBase } from "../safe-path.js";
 import type { CommandRunner } from "./command-runner.js";
 
 /** The conflicting Hivemind npm package rung 3 removes (NEVER the `~/.deeplake/` state). */
@@ -89,7 +89,6 @@ export function createNpmHivemindDetector(runner: CommandRunner): DetectHivemind
 /** Build rung 3 (uninstall conflicting Hivemind). */
 export function createUninstallHivemindRung(deps: UninstallHivemindRungDeps): Rung {
 	const now = deps.now ?? Date.now;
-	const backupPath = join(deps.workspaceDir, "removed-packages.ndjson");
 
 	/** Append the timestamped removal record BEFORE the uninstall (AC-064c.5). Defensive. */
 	function recordRemoval(version: string | null): boolean {
@@ -99,6 +98,10 @@ export function createUninstallHivemindRung(deps: UninstallHivemindRungDeps): Ru
 			at: new Date(now()).toISOString(),
 		};
 		try {
+			// Containment: the fixed name is joined under the variable workspace dir and asserted
+			// to stay inside it (defense-in-depth + SAST taint visibility). A containment violation
+			// throws here and is caught below, returning false (caller skips the destructive step).
+			const backupPath = resolveInBase(deps.workspaceDir, "removed-packages.ndjson");
 			mkdirSync(deps.workspaceDir, { recursive: true });
 			appendFileSync(backupPath, `${JSON.stringify(record)}\n`, "utf8");
 			return true;

@@ -10,16 +10,19 @@
  */
 
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
 
+import { resolveInBase } from "../safe-path.js";
 import type { TailIncidentsFn } from "./context.js";
 
 /** Build a {@link TailIncidentsFn} bound to a workspace dir. */
 export function createIncidentsTail(workspaceDir: string): TailIncidentsFn {
-	const filePath = join(workspaceDir, "incidents.ndjson");
 	return async (limit: number): Promise<readonly string[]> => {
 		const n = Number.isInteger(limit) && limit > 0 ? limit : 20;
 		try {
+			// Containment: the fixed name is joined under the variable workspace dir and asserted
+			// to stay inside it (defense-in-depth + SAST taint visibility). A violation throws and
+			// is caught below, resolving to an empty list (same as a missing file).
+			const filePath = resolveInBase(workspaceDir, "incidents.ndjson");
 			const raw = readFileSync(filePath, "utf8");
 			const lines = raw.split("\n").filter((l) => l.trim() !== "");
 			return lines.slice(-n);

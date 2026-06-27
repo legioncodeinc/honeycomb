@@ -27,9 +27,9 @@
 
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 
 import type { Logger } from "./logger.js";
+import { resolveInBase } from "./safe-path.js";
 
 /** The default age past which a held lock is considered abandoned (10 minutes). */
 const DEFAULT_STALE_MS = 10 * 60 * 1000;
@@ -104,17 +104,25 @@ function readLockBody(filePath: string): InstallLockBody | null {
 export function createInstallLock(options: InstallLockOptions): InstallLock {
 	const now = options.clock?.now ?? Date.now;
 	const staleMs = options.staleMs ?? DEFAULT_STALE_MS;
-	const filePath = join(options.workspaceDir, "install.lock");
+
+	/**
+	 * Resolve `install.lock` under the variable workspace dir, asserting it stays inside
+	 * (defense-in-depth + SAST taint visibility). A containment violation throws; every
+	 * caller below treats that as "cannot acquire" (returns null) - never a crash.
+	 */
+	function lockPath(): string {
+		return resolveInBase(options.workspaceDir, "install.lock");
+	}
 
 	/** Write the lock file with the exclusive-create flag. Throws iff it already exists. */
-	function exclusiveCreate(body: InstallLockBody): void {
+	function exclusiveCreate(filePath: string, body: InstallLockBody): void {
 		mkdirSync(options.workspaceDir, { recursive: true });
 		// `wx`: create + fail with EEXIST if present. This IS the atomic test-and-set.
 		writeFileSync(filePath, `${JSON.stringify(body)}\n`, { encoding: "utf8", flag: "wx" });
 	}
 
 	/** Make a handle that releases ONLY the lock it owns (match-on-owner). */
-	function makeHandle(owner: string): InstallLockHandle {
+	function makeHandle(filePath: string, owner: string): InstallLockHandle {
 		return {
 			owner,
 			release(): void {
@@ -134,13 +142,22 @@ export function createInstallLock(options: InstallLockOptions): InstallLock {
 
 	return {
 		acquire(holder: string): InstallLockHandle | null {
+			// Containment first: a poisoned workspace that escapes the base cannot acquire.
+			let filePath: string;
+			try {
+				filePath = lockPath();
+			} catch {
+				// A containment violation means we cannot safely touch the lock file; back off.
+				return null;
+			}
+
 			const owner = randomUUID();
 			const body: InstallLockBody = { owner, holder, acquiredAt: now() };
 
 			try {
-				exclusiveCreate(body);
+				exclusiveCreate(filePath, body);
 				options.logger.info("install_lock.acquired", { holder });
-				return makeHandle(owner);
+				return makeHandle(filePath, owner);
 			} catch {
 				// The file already exists (or, rarely, a transient FS error). Inspect it: if it
 				// is stale, steal it; otherwise the lock is genuinely held and we back off.
@@ -162,13 +179,13 @@ export function createInstallLock(options: InstallLockOptions): InstallLock {
 				} catch {
 					// statSync failed (file vanished between calls): fall through to the steal retry.
 				}
-				return stealAndRetry(holder, owner, body);
+				return stealAndRetry(filePath, holder, owner, body);
 			}
 
 			const age = now() - existing.acquiredAt;
 			if (age >= staleMs) {
 				options.logger.warn("install_lock.stale_steal", { holder, prevHolder: existing.holder, ageMs: age });
-				return stealAndRetry(holder, owner, body);
+				return stealAndRetry(filePath, holder, owner, body);
 			}
 
 			options.logger.info("install_lock.held", { holder, byHolder: existing.holder });
@@ -177,12 +194,17 @@ export function createInstallLock(options: InstallLockOptions): InstallLock {
 	};
 
 	/** Remove an abandoned lock and try the exclusive create once more. */
-	function stealAndRetry(holder: string, owner: string, body: InstallLockBody): InstallLockHandle | null {
+	function stealAndRetry(
+		filePath: string,
+		holder: string,
+		owner: string,
+		body: InstallLockBody,
+	): InstallLockHandle | null {
 		try {
 			rmSync(filePath, { force: true });
-			exclusiveCreate(body);
+			exclusiveCreate(filePath, body);
 			options.logger.info("install_lock.acquired", { holder, stolen: true });
-			return makeHandle(owner);
+			return makeHandle(filePath, owner);
 		} catch {
 			// Lost the steal race to another process: that is fine, they hold a fresh lock now.
 			return null;

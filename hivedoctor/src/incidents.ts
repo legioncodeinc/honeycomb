@@ -20,10 +20,10 @@
 
 import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
-import { join } from "node:path";
 
 import type { HealthClassification, ProbeHealthReasons } from "./health-probe.js";
 import type { Logger } from "./logger.js";
+import { resolveInBase } from "./safe-path.js";
 
 /** The trigger that opened an incident (why the loop decided to remediate). */
 export type IncidentTrigger = "unreachable" | "timeout" | "degraded" | "unknown";
@@ -132,11 +132,9 @@ export function triggerForClassification(kind: HealthClassification["kind"]): In
 export function createIncidentLog(options: IncidentLogOptions): IncidentLog {
 	const now = options.now ?? Date.now;
 	const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
-	const filePath = join(options.workspaceDir, "incidents.ndjson");
-	const rotatedPath = join(options.workspaceDir, "incidents.ndjson.1");
 
 	/** Rotate when the existing file is at/over the cap. Defensive; failure is non-fatal. */
-	function rotateIfNeeded(): void {
+	function rotateIfNeeded(filePath: string, rotatedPath: string): void {
 		try {
 			const size = statSync(filePath).size;
 			if (size >= maxBytes) renameSync(filePath, rotatedPath);
@@ -179,8 +177,13 @@ export function createIncidentLog(options: IncidentLogOptions): IncidentLog {
 
 		write(incident: Incident): void {
 			try {
+				// Containment: both fixed names are joined under the variable workspace dir and
+				// asserted to stay inside it (defense-in-depth + SAST taint visibility). A
+				// containment violation throws and is caught below, degrading like a write failure.
+				const filePath = resolveInBase(options.workspaceDir, "incidents.ndjson");
+				const rotatedPath = resolveInBase(options.workspaceDir, "incidents.ndjson.1");
 				mkdirSync(options.workspaceDir, { recursive: true });
-				rotateIfNeeded();
+				rotateIfNeeded(filePath, rotatedPath);
 				appendFileSync(filePath, `${JSON.stringify(incident)}\n`, "utf8");
 			} catch (error) {
 				// Defensive (design principle 1): a read-only/missing/full disk must NOT crash the
