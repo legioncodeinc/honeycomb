@@ -59,6 +59,7 @@ import {
 	resolveRequestProject,
 	type RequestProjectScope,
 } from "../scope.js";
+import { getRequestIdentity } from "../middleware/permission.js";
 import { recallMemories, type MemoryRecallResult } from "./recall.js";
 import { RecencyConfigSchema, type RecencyConfig } from "../recall/config.js";
 import { isValidRecallMode, type RecallMode } from "../vault/api.js";
@@ -288,6 +289,21 @@ export function resolveMemoryScope(c: Context): QueryScope | null {
 /** The 400 body for a request with no resolvable tenancy. */
 const NO_ORG_BODY = { error: "bad_request", reason: "x-honeycomb-org header is required" } as const;
 
+/**
+ * The 403 response for a project-scoped identity attempting to access a different project
+ * (PRD-011c c-AC-5). Returned when the resolved project (from `cwd`) does not match the
+ * authenticated Identity's project binding.
+ */
+function projectScopeForbidden(c: Context): Response {
+	return c.json(
+		{
+			error: "forbidden",
+			reason: "project scope violation: the resolved project does not match your identity's project binding",
+		},
+		403,
+	);
+}
+
 /** Read + JSON-parse the request body, tolerating an empty/invalid body (returns `{}`). */
 async function readJsonBody(c: Context): Promise<unknown> {
 	try {
@@ -420,6 +436,33 @@ function resolveRecencyOverride(
 }
 
 /**
+ * Validate that a project-scoped identity is authorized to access the resolved project
+ * (PRD-011c project-scope gate, c-AC-5). When an authenticated Identity has a `project`
+ * binding (project-scoped), the resolved request project MUST match that binding — a
+ * mismatch is forbidden (403). Admin identities bypass this check (c-AC-5). Unscoped
+ * identities (no `project` binding) may access any project. Returns `true` when the
+ * request is authorized, `false` when it should be denied (403).
+ *
+ * This is a DEFENSE-IN-DEPTH check that closes the bypass where a project-scoped caller
+ * omits the explicit project hint (so `ctx.project` is undefined and the RBAC policy's
+ * `clearsProjectScope` gate passes) but supplies a `cwd` that resolves to a different
+ * project. The authorization middleware only validates against the explicit hint
+ * (query/header); this function validates against the ACTUAL resolved project the query
+ * will execute against.
+ */
+function isAuthorizedForResolvedProject(c: Context, resolvedProject: RequestProjectScope): boolean {
+	const identity = getRequestIdentity(c);
+	// No identity (local mode) → always authorized (the mode gate already passed).
+	if (identity === undefined) return true;
+	// Admin bypasses project scope (c-AC-5).
+	if (identity.role === "admin") return true;
+	// Unscoped identity (no project binding) → may access any project.
+	if (identity.project === undefined) return true;
+	// Project-scoped identity → the resolved project MUST match the identity's project.
+	return resolvedProject.projectId === identity.project;
+}
+
+/**
  * Attach the `/api/memories/*` handlers onto the daemon's already-mounted
  * `/api/memories` route group (the 022a mount seam). Mirrors `mountDashboardApi`:
  * every handler resolves the request scope (fail-closed 400), zod-validates the
@@ -461,6 +504,15 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 		// `x-honeycomb-cwd` header) so the project-segment predicate is ANDed into every arm.
 		// No resolvable cwd falls to inbox + workspace-global with the D8 warning.
 		const project = resolveRequestProject(c, scope, parsed.data.cwd);
+		// PRD-011c (c-AC-5): validate that a project-scoped identity is authorized to access
+		// the resolved project. This closes the bypass where a project-scoped caller omits the
+		// explicit project hint (so the RBAC policy's `clearsProjectScope` gate passes) but
+		// supplies a `cwd` that resolves to a different project. The authorization middleware
+		// only validates against the explicit hint (query/header); this validates against the
+		// ACTUAL resolved project the query will execute against.
+		if (!isAuthorizedForResolvedProject(c, project)) {
+			return projectScopeForbidden(c);
+		}
 		// PRD-058a: build the per-request recency config from the optional override. ABSENT → undefined
 		// so the engine applies its per-class defaults + activationExponent 1.0 (recency live by default,
 		// AC-55a.2.3). A present override is honored over the defaults (AC-55a.2.2).
@@ -506,6 +558,11 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 		// PRD-049b (49b-AC-1): resolve the store's project from the cwd so the memory is segmented
 		// by the SAME project a recall in that folder narrows to (no cwd → the `__unsorted__` inbox).
 		const storeProject = resolveRequestProject(c, scope, parsed.data.cwd);
+		// PRD-011c (c-AC-5): validate that a project-scoped identity is authorized to access
+		// the resolved project (same defense-in-depth check as recall).
+		if (!isAuthorizedForResolvedProject(c, storeProject)) {
+			return projectScopeForbidden(c);
+		}
 		const result = await storeMemory(
 			{
 				content: parsed.data.content,
@@ -532,6 +589,13 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 		// back-compat) so a non-dashboard caller (the CLI/SDK list) is unchanged. A real selection (bound,
 		// or the explicit inbox) narrows the list.
 		const project = resolveRequestProject(c, scope);
+		// PRD-011c (c-AC-5): validate that a project-scoped identity is authorized to access
+		// the resolved project. When the project is degraded (no explicit selection, no cwd), we
+		// skip the check to preserve back-compat (the list stays project-agnostic for CLI/SDK).
+		// A real selection (bound or explicit inbox) is validated.
+		if (!project.degraded && !isAuthorizedForResolvedProject(c, project)) {
+			return projectScopeForbidden(c);
+		}
 		const memories = await listMemories(
 			limit,
 			scope,
