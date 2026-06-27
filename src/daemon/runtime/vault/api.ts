@@ -52,7 +52,14 @@ export const SETTINGS_GROUP = "/api/settings" as const;
  *     PRD-025 runtime default (behavior-neutral), so the key exists to OPT IN to an explicit mode.
  *   - `dashboard.*`    — free-form scalar dashboard prefs (validated only by the class schema).
  */
-export const KNOWN_SETTING_KEYS = ["activeProvider", "activeModel", "pollinating.enabled", "recallMode"] as const;
+/**
+ * The `setting`-class key the embeddings on/off preference persists under (dashboard actions). The
+ * single source of truth shared by the `/api/settings` allow-list (below), the boot read that seeds
+ * the embed supervisor (`assemble.ts`), and the `POST /api/actions/embeddings` toggle that writes it.
+ */
+export const EMBEDDINGS_ENABLED_KEY = "embeddings.enabled" as const;
+
+export const KNOWN_SETTING_KEYS = ["activeProvider", "activeModel", "pollinating.enabled", EMBEDDINGS_ENABLED_KEY, "recallMode"] as const;
 
 /**
  * The closed `recallMode` enum (PRD-044c). The recall pipeline reads this `setting` at recall

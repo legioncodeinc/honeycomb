@@ -45,6 +45,8 @@ import {
 	EMPTY_VAULT_SETTINGS,
 	type AuthStatusWire,
 	type SettingValueWire,
+	type SetupLoginWire,
+	type UninstallResultWire,
 	type VaultSettingsWire,
 } from "../wire.js";
 
@@ -88,17 +90,69 @@ function expiryLabel(expiresAt: number | undefined): string {
 }
 
 /**
- * The connect affordance (OQ-1 RESOLVED — CLI hand-off, NO in-page device-flow). Shows the exact
- * commands a user runs to connect; the section re-reads `authStatus()` on its poll so the login
- * reflects here. There is NO mock/fabricated success path — connecting happens in the CLI.
+ * The connect affordance — an IN-PAGE device flow (the dashboard is now a peer of the CLI for login).
+ * "Connect to DeepLake" POSTs `wire.setupLogin()` (the existing 050c device-flow endpoint) and renders
+ * the returned `user_code` + verification link; the daemon polls → mints → persists in the background,
+ * and the parent {@link DeeplakeAuthSection}'s `authStatus()` poll flips the section to connected the
+ * moment the credential lands — same tab, no `honeycomb login`. The exact CLI command is kept as a
+ * secondary hint. NO token ever crosses the wire (the setup-login schema has no token field).
  */
-function ConnectHandoff(): React.JSX.Element {
+function ConnectHandoff({ wire }: { wire: PageProps["wire"] }): React.JSX.Element {
+	const [grant, setGrant] = React.useState<SetupLoginWire | null>(null);
+	const [busy, setBusy] = React.useState(false);
+	const [error, setError] = React.useState(false);
+	// A synchronous in-flight guard so a rapid double-click never starts two device flows.
+	const inFlightRef = React.useRef(false);
+
+	const begin = React.useCallback(async (): Promise<void> => {
+		if (inFlightRef.current) return;
+		inFlightRef.current = true;
+		setBusy(true);
+		setError(false);
+		const result = await wire.setupLogin();
+		if (result === null) {
+			setError(true);
+			setBusy(false);
+			inFlightRef.current = false;
+			return;
+		}
+		// Leave `busy` true: the section now waits for the background `authStatus()` poll to flip to
+		// connected once the credential lands. The button stays disabled meanwhile.
+		setGrant(result);
+	}, [wire]);
+
 	return (
-		<div data-testid="auth-connect" style={{ display: "flex", flexDirection: "column", gap: 8, padding: "10px 6px" }}>
-			<span style={{ fontSize: 13, color: "var(--text-secondary)" }}>Connect to DeepLake from your terminal, then this page reflects it:</span>
-			<code style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--honey)" }}>honeycomb login</code>
-			<span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>or, headless (CI / a server):</span>
-			<code style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--honey)" }}>HONEYCOMB_TOKEN=… honeycomb …</code>
+		<div data-testid="auth-connect" style={{ display: "flex", flexDirection: "column", gap: 10, padding: "10px 6px" }}>
+			<span style={{ fontSize: 13, color: "var(--text-secondary)" }}>Not connected to DeepLake.</span>
+			{grant === null ? (
+				<>
+					<Button variant="primary" size="sm" disabled={busy} onClick={() => void begin()} data-testid="auth-connect-button">
+						{busy ? "Starting…" : "Connect to DeepLake"}
+					</Button>
+					{error && (
+						<span data-testid="auth-connect-error" style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--severity-critical)" }}>
+							Could not start sign-in. Retry, or run <code>honeycomb login</code> in your terminal.
+						</span>
+					)}
+				</>
+			) : (
+				<div data-testid="auth-connect-grant" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+					<span style={{ fontSize: 13, color: "var(--text-secondary)" }}>Enter this code to finish signing in:</span>
+					<code style={{ fontFamily: "var(--font-mono)", fontSize: 16, color: "var(--honey)", letterSpacing: "0.08em" }}>{grant.user_code}</code>
+					<a
+						href={grant.verification_uri_complete ?? grant.verification_uri}
+						target="_blank"
+						rel="noreferrer"
+						style={{ fontSize: 13, color: "var(--text-secondary)" }}
+					>
+						Open the verification page
+					</a>
+					<span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>Waiting for you to finish in the browser…</span>
+				</div>
+			)}
+			<span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+				or, from your terminal: <code style={{ fontFamily: "var(--font-mono)", color: "var(--honey)" }}>honeycomb login</code>
+			</span>
 		</div>
 	);
 }
@@ -112,6 +166,7 @@ function ConnectHandoff(): React.JSX.Element {
 export function DeeplakeAuthSection({ wire }: { wire: PageProps["wire"] }): React.JSX.Element {
 	const [status, setStatus] = React.useState<AuthStatusWire>(DISCONNECTED_AUTH_STATUS);
 	const [loading, setLoading] = React.useState(true);
+	const [loggingOut, setLoggingOut] = React.useState(false);
 
 	const load = React.useCallback(async (): Promise<void> => {
 		// `authStatus()` never throws — it degrades to DISCONNECTED on any failure (AC-4).
@@ -119,6 +174,15 @@ export function DeeplakeAuthSection({ wire }: { wire: PageProps["wire"] }): Reac
 		setStatus(next);
 		setLoading(false);
 	}, [wire]);
+
+	// Log out (dashboard action): remove the shared credential through the daemon, then RE-READ the
+	// status so the section flips to the disconnected/connect state on success (never an optimistic flip).
+	const onLogout = React.useCallback(async (): Promise<void> => {
+		setLoggingOut(true);
+		await wire.logout();
+		await load();
+		setLoggingOut(false);
+	}, [wire, load]);
 
 	// Fetch on mount + re-read on a poll (so a CLI login reflects here) + on window focus.
 	React.useEffect(() => {
@@ -161,11 +225,16 @@ export function DeeplakeAuthSection({ wire }: { wire: PageProps["wire"] }): Reac
 					<MetaRow label="source">{sourceLabel(status.source)}</MetaRow>
 					<MetaRow label="last login">{status.savedAt || "unknown"}</MetaRow>
 					<MetaRow label="token expiry">{expiryLabel(status.expiresAt)}</MetaRow>
+					{/* Log out (dashboard action): remove the shared credential so the user can re-auth here. */}
+					<div style={{ display: "flex", justifyContent: "flex-end", paddingTop: 10 }}>
+						<Button variant="secondary" size="sm" disabled={loggingOut} onClick={() => void onLogout()} data-testid="auth-logout-button">
+							{loggingOut ? "Logging out…" : "Log out"}
+						</Button>
+					</div>
 				</div>
 			) : (
 				<div data-testid="auth-disconnected">
-					<div style={{ padding: "8px 6px", fontSize: 14, color: "var(--text-primary)" }}>Not connected to DeepLake.</div>
-					<ConnectHandoff />
+					<ConnectHandoff wire={wire} />
 				</div>
 			)}
 		</Panel>
@@ -450,6 +519,168 @@ function LifecycleConfigSection(): React.JSX.Element {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Embeddings on/off (dashboard action) — turn semantic recall on/off LIVE + persisted.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The embeddings toggle. Reads the LIVE on/off state from `wire.health()` (`reasons.embeddings`) and
+ * flips it through `wire.setEmbeddings(...)`, which actuates the daemon's embed supervisor (spawn+warm
+ * / stop) AND persists the choice so it survives a restart. Off = lexical (BM25) recall only. The
+ * state re-reads from `health()` after a toggle so the badge reflects the persisted truth, never an
+ * optimistic flip.
+ */
+export function EmbeddingsSection({ wire }: { wire: PageProps["wire"] }): React.JSX.Element {
+	// `null` while the first health read is in flight (so we never render a wrong default).
+	const [on, setOn] = React.useState<boolean | null>(null);
+	const [busy, setBusy] = React.useState(false);
+
+	const load = React.useCallback(async (): Promise<void> => {
+		// Fail-soft like the rest of the dashboard: a failed/absent health read degrades to "off"
+		// rather than throwing into React (the badge shows off; the toggle still works).
+		try {
+			const health = await wire.health();
+			setOn(health?.reasons?.embeddings === "on");
+		} catch {
+			setOn(false);
+		}
+	}, [wire]);
+
+	React.useEffect(() => {
+		void load();
+	}, [load]);
+
+	const toggle = React.useCallback(async (): Promise<void> => {
+		if (on === null) return;
+		setBusy(true);
+		const want = !on;
+		const ok = await wire.setEmbeddings(want);
+		if (ok) setOn(want);
+		setBusy(false);
+		// Re-read the live truth (a disabled toggle may already be reflected; an enable warms async).
+		void load();
+	}, [on, wire, load]);
+
+	const label = on === null ? "…" : on ? "on" : "off";
+
+	return (
+		<Panel
+			title="Embeddings"
+			eyebrow="semantic recall · local model"
+			right={
+				<Badge tone={on ? "verified" : "neutral"} mono dot>
+					{label}
+				</Badge>
+			}
+		>
+			<div data-testid="embeddings-section" style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 6px", flexWrap: "wrap" }}>
+				<div style={{ display: "flex", flexDirection: "column", minWidth: 200, flex: 1 }}>
+					<span style={{ fontSize: 14, color: "var(--text-primary)" }}>Semantic vector recall</span>
+					<span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>
+						On runs the local embedding model for semantic search. Off falls back to lexical (BM25) recall only.
+					</span>
+				</div>
+				<Button
+					variant={on ? "secondary" : "primary"}
+					size="sm"
+					disabled={busy || on === null}
+					onClick={() => void toggle()}
+					data-testid="embeddings-toggle"
+				>
+					{busy ? "saving…" : on ? "Turn off" : "Turn on"}
+				</Button>
+			</div>
+		</Panel>
+	);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// System actions (dashboard) — restart the daemon + uninstall (two-step confirm).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The destructive system actions, each gated behind an inline two-step confirm (no new modal
+ * dependency). Restart respawns the daemon (the page then waits for `/health` to recover); Uninstall
+ * returns the guided removal (detected harnesses + the exact `honeycomb uninstall` command — the
+ * daemon does not self-remove the page out from under itself). Both POST through the origin/CSRF +
+ * local-mode gated `/api/actions` surface.
+ */
+export function SystemActionsSection({ wire }: { wire: PageProps["wire"] }): React.JSX.Element {
+	const [restartConfirm, setRestartConfirm] = React.useState(false);
+	const [restarting, setRestarting] = React.useState(false);
+	const [uninstallConfirm, setUninstallConfirm] = React.useState(false);
+	const [uninstalling, setUninstalling] = React.useState(false);
+	const [uninstallResult, setUninstallResult] = React.useState<UninstallResultWire | null>(null);
+
+	const doRestart = React.useCallback(async (): Promise<void> => {
+		setRestartConfirm(false);
+		setRestarting(true);
+		const ok = await wire.restartDaemon();
+		// Leave `restarting` true on success — the daemon is going down + coming back; the rest of the
+		// dashboard re-hydrates from live endpoints once it answers again. On failure, clear it.
+		if (!ok) setRestarting(false);
+	}, [wire]);
+
+	const doUninstall = React.useCallback(async (): Promise<void> => {
+		setUninstallConfirm(false);
+		setUninstalling(true);
+		const result = await wire.uninstall();
+		setUninstallResult(result);
+		setUninstalling(false);
+	}, [wire]);
+
+	return (
+		<Panel title="System" eyebrow="restart · uninstall">
+			{/* Restart */}
+			<div data-testid="system-restart" style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 6px", borderBottom: "1px solid var(--border-subtle)", flexWrap: "wrap" }}>
+				<div style={{ display: "flex", flexDirection: "column", minWidth: 200, flex: 1 }}>
+					<span style={{ fontSize: 14, color: "var(--text-primary)" }}>Restart the daemon</span>
+					<span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>Stops and relaunches the background daemon. The dashboard reconnects automatically.</span>
+				</div>
+				{restarting ? (
+					<span data-testid="system-restarting" style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-secondary)" }}>restarting…</span>
+				) : restartConfirm ? (
+					<div style={{ display: "flex", gap: 8 }}>
+						<Button variant="secondary" size="sm" onClick={() => setRestartConfirm(false)}>Cancel</Button>
+						<Button variant="danger" size="sm" onClick={() => void doRestart()} data-testid="system-restart-confirm">Confirm restart</Button>
+					</div>
+				) : (
+					<Button variant="secondary" size="sm" onClick={() => setRestartConfirm(true)} data-testid="system-restart-button">Restart</Button>
+				)}
+			</div>
+
+			{/* Uninstall */}
+			<div data-testid="system-uninstall" style={{ display: "flex", flexDirection: "column", gap: 8, padding: "10px 6px" }}>
+				<div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+					<div style={{ display: "flex", flexDirection: "column", minWidth: 200, flex: 1 }}>
+						<span style={{ fontSize: 14, color: "var(--text-primary)" }}>Uninstall Honeycomb</span>
+						<span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>Reverses Honeycomb's changes to your coding assistants. Your DeepLake login is left intact.</span>
+					</div>
+					{uninstallConfirm ? (
+						<div style={{ display: "flex", gap: 8 }}>
+							<Button variant="secondary" size="sm" onClick={() => setUninstallConfirm(false)}>Cancel</Button>
+							<Button variant="danger" size="sm" disabled={uninstalling} onClick={() => void doUninstall()} data-testid="system-uninstall-confirm">
+								{uninstalling ? "Working…" : "Confirm uninstall"}
+							</Button>
+						</div>
+					) : (
+						<Button variant="danger" size="sm" onClick={() => setUninstallConfirm(true)} data-testid="system-uninstall-button">Uninstall</Button>
+					)}
+				</div>
+				{uninstallResult !== null && (
+					<div data-testid="system-uninstall-result" style={{ display: "flex", flexDirection: "column", gap: 6, padding: "8px 0" }}>
+						<span style={{ fontSize: 13, color: "var(--text-secondary)" }}>{uninstallResult.note}</span>
+						{uninstallResult.harnesses.length > 0 && (
+							<span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>Detected: {uninstallResult.harnesses.join(", ")}</span>
+						)}
+						<code style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--honey)" }}>{uninstallResult.command}</code>
+					</div>
+				)}
+			</div>
+		</Panel>
+	);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // The routed page.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -495,9 +726,13 @@ export function SettingsPage({ wire }: PageProps): React.JSX.Element {
 			<div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
 				<DeeplakeAuthSection wire={wire} />
 				<ProviderKeysSection wire={wire} secretNames={secretNames} onSaved={() => void hydrateSecretNames()} />
+				{/* Dashboard action: turn semantic embeddings on/off (live + persisted). */}
+				<EmbeddingsSection wire={wire} />
 				<SearchAndInferenceSection settings={vault.settings} catalog={vault.catalog} secretNames={secretNames} onSave={onSaveSetting} />
 				{/* PRD-058d (AC-55d.1.3): the memory.lifecycle.* config reference (symbol · default · effect · env). */}
 				<LifecycleConfigSection />
+				{/* Dashboard actions: restart the daemon + uninstall (two-step confirm). */}
+				<SystemActionsSection wire={wire} />
 			</div>
 		</PageFrame>
 	);
