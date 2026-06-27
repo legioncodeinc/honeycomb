@@ -183,6 +183,12 @@ export function DashboardPage({ wire, pollinating = false }: PageProps): React.J
 		setNotes((prev) => [`${clockPrefix()}  ${text}`, ...prev].slice(0, MAX_LOG_LINES));
 	}, []);
 
+	// PRD-049e: a monotonic request token guarding `hydrate` against a stale-overwrite race. Since the
+	// hydrate effect now re-runs on `scope.project` change, a SLOWER response for the PREVIOUS project can
+	// resolve AFTER the newer selection's and repaint the band with stale data. Each hydrate bumps this and
+	// captures its own token; only the LATEST run commits its state (older in-flight runs bail post-await).
+	const hydrateSeqRef = React.useRef(0);
+
 	/**
 	 * Hydrate the diagnostics views + the vault settings from the live endpoints (AC-2), in ONE
 	 * batched `Promise.all` round-trip (parity with the old app). The org/workspace `settings` view
@@ -190,6 +196,7 @@ export function DashboardPage({ wire, pollinating = false }: PageProps): React.J
 	 * its own settings; this page hydrates only what its body renders.
 	 */
 	const hydrate = React.useCallback(async (): Promise<void> => {
+		const seq = ++hydrateSeqRef.current;
 		const [k, sess, r, sk, vs, sn] = await Promise.all([
 			wire.kpis(scope.project),
 			wire.sessions(),
@@ -198,6 +205,9 @@ export function DashboardPage({ wire, pollinating = false }: PageProps): React.J
 			wire.vaultSettings(),
 			wire.secretNames(),
 		]);
+		// A newer hydrate (a faster project switch) superseded this one → drop this stale result wholesale
+		// so the band never flickers back to the previous project's numbers.
+		if (seq !== hydrateSeqRef.current) return;
 		setKpis(k);
 		setSessions(sess);
 		setRules(r);
