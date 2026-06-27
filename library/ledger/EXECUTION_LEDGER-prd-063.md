@@ -89,7 +89,9 @@ INT-2 DONE(authored)/BLOCKED(live) - .github/workflows/release-hivedoctor.yaml (
 - security-worker-bee: DONE - 2 High remediated in place (rollback semver validation in update-engine.ts; Windows schtasks /TR command-injection in daemon-service.ts via assertCmdSafe), 0 Critical. Tests green (378 hivedoctor + 27 daemon-service). Report: qa/prd-063-security-report.md. Medium/Low follow-ups noted.
 - quality-worker-bee: DONE - 41/56 VERIFIED, 15 BLOCKED (external B-1..B-5), 0 PARTIAL/MISSING, 0 Critical, 2 Warnings (W-1 compose blessedVersion:"" no-op verify; W-2 systemd ExecStart unquoted), S-2 em dashes in code comments. Ledger judged honest; all ODs conform; no regressions. Report: qa/prd-063-qa-report.md.
 - remediation pass (W-1/W-2/S-2): DONE - blessed version threaded into rung-2 verify (fail-soft/fail-closed, degrades to unverified-no-blessed until B-3); systemd ExecStart quoted; all PRD-063-authored em/en dashes removed. 384 hivedoctor tests + 43 daemon tests green; root typecheck/dup pass; dash grep clean. Close-out CLEAN (0 Critical, 0 open Warnings >= medium).
-- SHIP: in progress (commit/push/PR/CI).
+- SHIP: committed + pushed; PR #159 open (https://github.com/legioncodeinc/honeycomb/pull/159). CodeQL + CLA green. TWO CI blockers, both external (parked BLOCKED, need Mario):
+  - B-6 PRD-NUMBER COLLISION: origin/main already shipped prd-063 = "Portkey Gateway" (concurrent smoker run). This HiveDoctor PRD must renumber 063 -> 064 (next free on main). Causes the only merge conflict (the ledger file), which is why the pull_request CI workflow shows 0 runs (GitHub cannot build the merge commit while conflicting). Fix: renumber + merge origin/main (4 commits ahead, ledger-only conflict) + push.
+  - B-7 AIKIDO: 4 CRITICAL / 8 HIGH / 13 MEDIUM flagged (dashboard auth-gated). Our security-worker-bee found only 2 High (both fixed). Aikido criticals are most likely the dual-use watchdog patterns already reviewed safe (fixed-argv execFile child_process, loopback-only http server, constant-URL fetch, public write-only PostHog key define). Needs dashboard triage / decision.
 
 ---
 
