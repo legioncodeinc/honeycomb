@@ -1,6 +1,16 @@
 # Portkey gateway and the privacy-tier trade-off
 
-> Audience: operators + maintainers. Scope: the optional Portkey gateway (PRD-063). Status: shipped with 063a/063b/063c.
+> Category: Security | Version: 1.1 | Date: June 2026 | Status: Active
+
+For operators and maintainers: what the per-provider privacy floor stops enforcing once the optional Portkey gateway (PRD-063) is turned on, why that is intentional, and how to keep Honeycomb-side enforcement if you need it. Covers both egress channels: inference (063a/063b) and recall reranking (063c).
+
+**Related:**
+- [`../ai/portkey-gateway.md`](../ai/portkey-gateway.md)
+- [`../ai/model-provider-router.md`](../ai/model-provider-router.md)
+- [`../ai/retrieval.md`](../ai/retrieval.md)
+- [`secrets.md`](secrets.md)
+
+---
 
 ## The trade-off, stated plainly
 
