@@ -2351,11 +2351,6 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// Fail-soft: any error leaves the conservative `off`.
 			let portkeyWorkerDeps: PortkeyWorkerDeps = { onUnreachable: recordPortkeyUnreachable };
 			try {
-				// Clear any prior rerank seam FIRST (c-AC-4): this block only ASSIGNS `cohereRerankInner`
-				// on `portkeySelection !== undefined`, so without this reset a stop/start cycle that turns
-				// the gateway OFF would leave a stale Portkey reranker active and keep egressing recall
-				// text. Resetting up front makes "gateway off ⇒ no provider rerank" unconditional.
-				cohereRerankInner = undefined;
 				const portkeySelection = await readPortkeySelection(vault, secretScopeFromQueryScope(scope));
 				portkeyHealth = await resolvePortkeyAssemblyStatus(portkeySelection, scope);
 				portkeyWorkerDeps = {
@@ -2386,6 +2381,12 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 						apiKeyRef: PORTKEY_API_KEY_REF,
 						model: rerankerMountDeps.reranker.cohereModel,
 					});
+				} else {
+					// Gateway OFF ⇒ EXPLICITLY clear any prior seam in the gateway-off branch itself, so a
+					// stop/start cycle that disables Portkey cannot leave a stale reranker egressing recall
+					// text. The assignment is now TOTAL (set on, cleared off): "gateway off ⇒ no provider
+					// rerank" is guaranteed locally by this decision, not by an upstream reset (c-AC-4).
+					cohereRerankInner = undefined;
 				}
 			} catch {
 				portkeyHealth = "off";
