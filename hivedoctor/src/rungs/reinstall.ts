@@ -1,5 +1,5 @@
 /**
- * Rung 2: reinstall the primary (PRD-063c, AC-063c.1 / AC-063c.4 / AC-063c.6).
+ * Rung 2: reinstall the primary (PRD-064c, AC-064c.1 / AC-064c.4 / AC-064c.6).
  *
  * Fires AFTER 3 consecutive failed restarts (the ladder advances to rung 2 via OD-4).
  * It does a clean GLOBAL reinstall of `@legioncodeinc/honeycomb` to fix a corrupted /
@@ -11,15 +11,15 @@
  *
  * Authority (OD-4): autonomous, no confirm gate. Concurrency: the install runs ONLY
  * while holding the shared {@link file://../install-lock.ts} mutex, so it can never
- * race the 063e auto-update engine's npm install. If the lock is held it SKIPS (the
+ * race the 064e auto-update engine's npm install. If the lock is held it SKIPS (the
  * other installer is already doing the work).
  *
- * Idempotency (AC-063c.4): `npm i -g <pkg>` is itself idempotent (a second run with the
+ * Idempotency (AC-064c.4): `npm i -g <pkg>` is itself idempotent (a second run with the
  * version already present is a no-op reinstall). Re-running the rung when the running
  * version ALREADY matches the blessed version short-circuits to a skip before touching
  * npm, so a healthy box is never needlessly reinstalled.
  *
- * Absent blessed version (fail-soft, PRD-063e/B-3): the blessed version is single-sourced
+ * Absent blessed version (fail-soft, PRD-064e/B-3): the blessed version is single-sourced
  * from the blessed channel, which is unreachable until the CDN object exists. When the
  * caller has no blessed version (an empty string), the rung still reinstalls (the repair
  * is valuable on its own) but DEGRADES the verify step to "performed, cannot verify"
@@ -106,7 +106,7 @@ export function createReinstallRung(deps: ReinstallRungDeps): Rung {
 				const blessedVersion = await resolveBlessedVersion(deps, ctx);
 
 				// Idempotency short-circuit: if the running version already matches the blessed one,
-				// the install is fine - do NOT reinstall a healthy box (AC-063c.4). With no blessed
+				// the install is fine - do NOT reinstall a healthy box (AC-064c.4). With no blessed
 				// version known we cannot prove the box is healthy, so we never short-circuit here.
 				const before = await deps.readInstalledVersion();
 				if (before !== null && blessedVersion.length > 0 && before === blessedVersion) {
@@ -134,7 +134,7 @@ export function createReinstallRung(deps: ReinstallRungDeps): Rung {
 					}
 
 					// Verify the install took: the running version must now be the blessed one
-					// (AC-063c.1, "version reported by /health matches the blessed version").
+					// (AC-064c.1, "version reported by /health matches the blessed version").
 					const after = await deps.readInstalledVersion();
 					// Fail-soft when no blessed version is known (empty channel): the reinstall still
 					// ran, but there is nothing to compare against, so report "performed, cannot verify"

@@ -1,6 +1,6 @@
 /**
- * Daemon-version reader tests (PRD-063f `status`): parse the /health version field
- * defensively; an unreachable daemon yields null (AC-063f.6).
+ * Daemon-version reader tests (PRD-064f `status`): parse the /health version field
+ * defensively; an unreachable daemon yields null (AC-064f.6).
  */
 
 import { describe, expect, it } from "vitest";

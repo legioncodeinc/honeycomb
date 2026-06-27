@@ -1,5 +1,5 @@
 /**
- * The blessed-version channel (PRD-063e, OD-3). The fail-closed safety: an unreachable
+ * The blessed-version channel (PRD-064e, OD-3). The fail-closed safety: an unreachable
  * or unparseable channel must yield a non-ok result so the caller stays on current.
  */
 

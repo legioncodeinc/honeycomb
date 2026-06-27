@@ -1,18 +1,18 @@
 /**
- * Tests for the HiveDoctor telemetry chokepoint (PRD-063d AC-063d.1 .. AC-063d.7).
+ * Tests for the HiveDoctor telemetry chokepoint (PRD-064d AC-064d.1 .. AC-064d.7).
  *
  * All tests use a mock fetch (never hits the network). The mock records the
  * outbound request so tests can assert on the payload shape, the URL, and the
  * Authorization header. `vi.fn()` / vitest spies are used for the fetch seam.
  *
  * AC coverage:
- *   AC-063d.1 -- error record -> ERROR OTLP log at /i/v1/logs
- *   AC-063d.2 -- install-health record -> INFO OTLP log
- *   AC-063d.3 -- episode record -> OTLP log carrying device_id
- *   AC-063d.4 -- opt-out (DO_NOT_TRACK, HONEYCOMB_TELEMETRY=0, state toggle)
- *   AC-063d.5 -- payload contains no creds/PII/token (allow-list enforced)
- *   AC-063d.6 -- sink unreachable -> swallowed, caller unaffected
- *   AC-063d.7 -- no @opentelemetry/* dep (covered in otlp-serializer.test.ts)
+ *   AC-064d.1 -- error record -> ERROR OTLP log at /i/v1/logs
+ *   AC-064d.2 -- install-health record -> INFO OTLP log
+ *   AC-064d.3 -- episode record -> OTLP log carrying device_id
+ *   AC-064d.4 -- opt-out (DO_NOT_TRACK, HONEYCOMB_TELEMETRY=0, state toggle)
+ *   AC-064d.5 -- payload contains no creds/PII/token (allow-list enforced)
+ *   AC-064d.6 -- sink unreachable -> swallowed, caller unaffected
+ *   AC-064d.7 -- no @opentelemetry/* dep (covered in otlp-serializer.test.ts)
  */
 
 import { describe, expect, it } from "vitest";
@@ -121,10 +121,10 @@ describe("isOptedOut", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// AC-063d.1 -- error stream -> ERROR severity OTLP log at /i/v1/logs
+// AC-064d.1 -- error stream -> ERROR severity OTLP log at /i/v1/logs
 // ────────────────────────────────────────────────────────────────────────────
 
-describe("AC-063d.1 error stream", () => {
+describe("AC-064d.1 error stream", () => {
 	it("sends an ERROR-severity OTLP log record to /i/v1/logs", async () => {
 		const { mock, calls } = makeMockFetch();
 		const deps = testDeps({ fetch: mock });
@@ -208,10 +208,10 @@ describe("AC-063d.1 error stream", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// AC-063d.2 -- install-health stream -> INFO OTLP log
+// AC-064d.2 -- install-health stream -> INFO OTLP log
 // ────────────────────────────────────────────────────────────────────────────
 
-describe("AC-063d.2 install-health stream", () => {
+describe("AC-064d.2 install-health stream", () => {
 	it("sends an INFO-severity OTLP log record", async () => {
 		const { mock, calls } = makeMockFetch();
 		const deps = testDeps({ fetch: mock });
@@ -326,10 +326,10 @@ describe("AC-063d.2 install-health stream", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// AC-063d.3 -- episode stream -> OTLP log carrying device_id
+// AC-064d.3 -- episode stream -> OTLP log carrying device_id
 // ────────────────────────────────────────────────────────────────────────────
 
-describe("AC-063d.3 episode stream", () => {
+describe("AC-064d.3 episode stream", () => {
 	it("sends an OTLP log record carrying device_id in resource attributes", async () => {
 		const { mock, calls } = makeMockFetch();
 		const deps = testDeps({ fetch: mock });
@@ -442,10 +442,10 @@ describe("AC-063d.3 episode stream", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// AC-063d.4 -- opt-out suppresses all streams
+// AC-064d.4 -- opt-out suppresses all streams
 // ────────────────────────────────────────────────────────────────────────────
 
-describe("AC-063d.4 opt-out", () => {
+describe("AC-064d.4 opt-out", () => {
 	const errorInput = {
 		kind: "error" as const,
 		errorClass: "TestError",
@@ -524,10 +524,10 @@ describe("AC-063d.4 opt-out", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// AC-063d.5 -- allow-list: no creds/PII/token in serialized payload
+// AC-064d.5 -- allow-list: no creds/PII/token in serialized payload
 // ────────────────────────────────────────────────────────────────────────────
 
-describe("AC-063d.5 allow-list scrubbing", () => {
+describe("AC-064d.5 allow-list scrubbing", () => {
 	/**
 	 * Helper: emit all three streams and collect every POST body.
 	 * Returns the concatenated JSON strings for substring scanning.
@@ -631,10 +631,10 @@ describe("AC-063d.5 allow-list scrubbing", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// AC-063d.6 -- sink unreachable -> swallowed, caller unaffected
+// AC-064d.6 -- sink unreachable -> swallowed, caller unaffected
 // ────────────────────────────────────────────────────────────────────────────
 
-describe("AC-063d.6 fail-soft on unreachable sink", () => {
+describe("AC-064d.6 fail-soft on unreachable sink", () => {
 	it("a fetch that throws never propagates -- emitTelemetry resolves to send_failed", async () => {
 		const throwingFetch: TelemetryFetch = async () => {
 			throw new Error("ECONNREFUSED");

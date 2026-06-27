@@ -1,13 +1,13 @@
 /**
- * The update/rollback telemetry seam (PRD-063e AC-063e.5).
+ * The update/rollback telemetry seam (PRD-064e AC-064e.5).
  *
  * Every update and every rollback emits a telemetry event recording from-version,
  * to-version, and outcome. The event is emitted through an injected {@link UpdateEmit}
- * seam so AC-063e.5 can be asserted with a mock (the test injects a recorder and reads
+ * seam so AC-064e.5 can be asserted with a mock (the test injects a recorder and reads
  * the from/to/outcome it captured) and so the engine never depends on a live network.
  *
  * The production seam ({@link createDefaultUpdateEmit}) adapts these events onto the
- * existing 063d telemetry chokepoint ({@link file://../telemetry/emit.ts}) -- the ONE
+ * existing 064d telemetry chokepoint ({@link file://../telemetry/emit.ts}) -- the ONE
  * place anything leaves the box -- by mapping an update event onto the `error` stream
  * (it reuses the chokepoint's allow-listed `error_class` / `error_detail` fields, which
  * already pass the closed allow-list, rather than widening that allow-list from this
@@ -21,7 +21,7 @@
 
 import { emitTelemetry, type EmitDeps } from "../telemetry/emit.js";
 
-/** The outcome of an update or rollback transaction (the `outcome` of AC-063e.5). */
+/** The outcome of an update or rollback transaction (the `outcome` of AC-064e.5). */
 export type UpdateOutcome =
 	| "updated" // installed + post-update /health verified healthy
 	| "rolled_back" // post-update /health failed; reinstalled the prior version, healthy again
@@ -30,7 +30,7 @@ export type UpdateOutcome =
 	| "skipped" // a transaction was attempted but short-circuited (e.g. lock held)
 	;
 
-/** One update/rollback telemetry event (from/to/outcome, AC-063e.5). */
+/** One update/rollback telemetry event (from/to/outcome, AC-064e.5). */
 export interface UpdateTelemetryEvent {
 	/** The kind of transaction this event describes. */
 	readonly kind: "update" | "rollback";
@@ -46,11 +46,11 @@ export interface UpdateTelemetryEvent {
 	readonly timestampMs: number;
 }
 
-/** The injectable emit seam. Tests inject a recorder; production adapts onto 063d. */
+/** The injectable emit seam. Tests inject a recorder; production adapts onto 064d. */
 export type UpdateEmit = (event: UpdateTelemetryEvent) => Promise<void>;
 
 /**
- * Build the production emit seam that adapts an update/rollback event onto the 063d
+ * Build the production emit seam that adapts an update/rollback event onto the 064d
  * telemetry chokepoint. The from/to/outcome triple is packed into the allow-listed
  * `error_class` (a stable label) + `error_detail` (the compact fact string). Fail-soft:
  * `emitTelemetry` swallows all transport errors and never throws.

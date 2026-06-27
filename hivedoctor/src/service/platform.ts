@@ -1,5 +1,5 @@
 /**
- * Platform + scope resolution for the OS service manager (PRD-063b).
+ * Platform + scope resolution for the OS service manager (PRD-064b).
  *
  * HiveDoctor registers itself with the OS so it survives its own crash and a reboot
  * (parent AC-1). WHICH service manager and at WHICH scope is decided here, once, from
@@ -13,7 +13,7 @@
  *   - Windows -> Scheduled Task (per-user, NO admin / NO UAC) is the DEFAULT; a Windows
  *               Service (`sc.exe`) is the enterprise opt-in, never the userland default.
  *
- * User scope is the default everywhere (AC-063b.6): it needs no root/admin and matches a
+ * User scope is the default everywhere (AC-064b.6): it needs no root/admin and matches a
  * per-user `npm i -g`. A privileged context MAY use system scope, but an UNprivileged
  * context MUST fall back to user scope rather than failing the install - that fallback
  * ordering is computed by {@link resolveServicePlan}.
@@ -143,7 +143,7 @@ function systemUnitPath(platform: ServicePlatform): string {
 }
 
 /**
- * Resolve the service plan from the environment. The fallback ordering (AC-063b.6):
+ * Resolve the service plan from the environment. The fallback ordering (AC-064b.6):
  *   1. If system scope was requested AND the process is privileged -> system scope.
  *   2. Otherwise -> user scope (LaunchAgent / systemd --user / per-user Scheduled Task),
  *      recording `fellBackToUser` when a system unit was wanted but privilege was absent.

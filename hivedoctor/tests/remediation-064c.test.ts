@@ -1,6 +1,6 @@
 /**
- * Ladder-integration tests for the 063c rungs: the registry runs the real rung 2 + 3,
- * each rung's before/after state is recorded into incidents.ndjson (AC-063c.6), and the
+ * Ladder-integration tests for the 064c rungs: the registry runs the real rung 2 + 3,
+ * each rung's before/after state is recorded into incidents.ndjson (AC-064c.6), and the
  * ladder's terminal escalate() hand-off is crash-safe.
  */
 
@@ -24,7 +24,7 @@ const BLESSED = "0.1.9";
 let dir: string;
 let clock = 0;
 beforeEach(() => {
-	dir = mkdtempSync(join(tmpdir(), "hivedoctor-063c-"));
+	dir = mkdtempSync(join(tmpdir(), "hivedoctor-064c-"));
 	clock = 1_700_000_000_000;
 });
 afterEach(() => {
@@ -37,7 +37,7 @@ function readIncident(): { steps: Array<{ rung: number; action: string; outcome:
 	return JSON.parse(raw);
 }
 
-describe("ladder runs the 063c rungs + records before/after into incidents.ndjson (AC-063c.6)", () => {
+describe("ladder runs the 064c rungs + records before/after into incidents.ndjson (AC-064c.6)", () => {
 	it("rung 2 reinstall: the incident step captures the verified outcome", async () => {
 		const runner = createFakeRunner();
 		const versions = ["0.1.7-stale", BLESSED];

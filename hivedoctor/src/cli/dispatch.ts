@@ -1,5 +1,5 @@
 /**
- * The hand-rolled command dispatcher (PRD-063f Scope command table; AC-063f.1 .. .6).
+ * The hand-rolled command dispatcher (PRD-064f Scope command table; AC-064f.1 .. .6).
  *
  * One `dispatch(argv, ctx)` maps the parsed command to its handler. There is NO CLI
  * framework (technical consideration: built-ins only), just a switch over the
@@ -13,11 +13,11 @@
  * so a test asserts the code without the process dying.
  *
  * Binding rulings enforced here:
- *   - AC-063f.3 `diagnose` takes NO action: it only reads the classification + decides the
+ *   - AC-064f.3 `diagnose` takes NO action: it only reads the classification + decides the
  *     rung; it NEVER calls `ladder.run`.
- *   - AC-063f.4 `uninstall-hivemind` confirms before acting; there is NO `clear-credentials`
+ *   - AC-064f.4 `uninstall-hivemind` confirms before acting; there is NO `clear-credentials`
  *     command anywhere in this switch (deferred, OD-4).
- *   - AC-063f.5 `self-update` is the ONLY case that calls `deps.update.selfUpdate`.
+ *   - AC-064f.5 `self-update` is the ONLY case that calls `deps.update.selfUpdate`.
  */
 
 import { parseArgs, hasFlag, type ParsedArgs } from "./arg-parse.js";
@@ -53,11 +53,11 @@ function isUnhealthy(c: HealthClassification): boolean {
 	return c.kind !== "ok";
 }
 
-/** `status` (AC-063f.2 / AC-063f.6): health, service state, both versions, last heal, opt-out. */
+/** `status` (AC-064f.2 / AC-064f.6): health, service state, both versions, last heal, opt-out. */
 async function runStatus(ctx: CliContext): Promise<number> {
 	const { io, colors, deps } = ctx;
 	// Probe + version reads are injected and ALWAYS resolve a value, so this works when the
-	// daemon is down (AC-063f.6) - a down daemon shows as unreachable, not a crash.
+	// daemon is down (AC-064f.6) - a down daemon shows as unreachable, not a crash.
 	const classification = await deps.probe();
 	const daemonVersion = await deps.readDaemonVersion();
 	const state = deps.readStatusState();
@@ -69,7 +69,7 @@ async function runStatus(ctx: CliContext): Promise<number> {
 	io.out(`  HiveDoctor version: ${deps.hivedoctorVersion}`);
 	io.out(`  Last heal:          ${state.lastHealAt ?? colors.dim("never")}`);
 
-	// Opt-out flags - honest about which layer disabled auto-update (OD-5 / AC-063e.4).
+	// Opt-out flags - honest about which layer disabled auto-update (OD-5 / AC-064e.4).
 	const autoUpdate = deps.optOut.autoUpdateDisabled
 		? colors.yellow(`disabled (${deps.optOut.source})`)
 		: colors.green("enabled");
@@ -80,7 +80,7 @@ async function runStatus(ctx: CliContext): Promise<number> {
 	return EXIT_OK;
 }
 
-/** `diagnose` (AC-063f.3): classify + recommend a rung, take NO action. */
+/** `diagnose` (AC-064f.3): classify + recommend a rung, take NO action. */
 async function runDiagnose(ctx: CliContext): Promise<number> {
 	const { io, colors, deps } = ctx;
 	const classification = await deps.probe();
@@ -93,7 +93,7 @@ async function runDiagnose(ctx: CliContext): Promise<number> {
 		return EXIT_OK;
 	}
 
-	// Decide the rung WITHOUT running it (AC-063f.3: takes no action). This consults the
+	// Decide the rung WITHOUT running it (AC-064f.3: takes no action). This consults the
 	// pure decision only - ladder.run is never called here.
 	const failures = deps.readConsecutiveFailures();
 	const decision = deps.decideRung(failures);
@@ -152,7 +152,7 @@ async function runRung(ctx: CliContext, rung: number, gated: boolean, parsed: Pa
 	return result.ok || result.skipped === true ? EXIT_OK : EXIT_ERROR;
 }
 
-/** `uninstall-hivemind` (AC-063f.4): rung 3, ALWAYS confirms before acting. */
+/** `uninstall-hivemind` (AC-064f.4): rung 3, ALWAYS confirms before acting. */
 async function runUninstallHivemind(ctx: CliContext, parsed: ParsedArgs): Promise<number> {
 	const { io, colors } = ctx;
 	io.out(
@@ -164,7 +164,7 @@ async function runUninstallHivemind(ctx: CliContext, parsed: ParsedArgs): Promis
 	return runRung(ctx, 3, true, parsed);
 }
 
-/** `update [--check]`: primary-daemon update via the blessed gate (063e). */
+/** `update [--check]`: primary-daemon update via the blessed gate (064e). */
 async function runUpdate(ctx: CliContext, parsed: ParsedArgs): Promise<number> {
 	const { io, deps } = ctx;
 	if (hasFlag(parsed, "check")) {
@@ -175,13 +175,13 @@ async function runUpdate(ctx: CliContext, parsed: ParsedArgs): Promise<number> {
 	return EXIT_OK;
 }
 
-/** `self-update` (AC-063f.5): THE ONLY path that updates HiveDoctor's own package. */
+/** `self-update` (AC-064f.5): THE ONLY path that updates HiveDoctor's own package. */
 async function runSelfUpdate(ctx: CliContext): Promise<number> {
 	ctx.io.out(await ctx.deps.update.selfUpdate());
 	return EXIT_OK;
 }
 
-/** `install-service` / `uninstall-service`: delegate to 063b if wired, else print stub. */
+/** `install-service` / `uninstall-service`: delegate to 064b if wired, else print stub. */
 async function runService(ctx: CliContext, kind: "install" | "uninstall"): Promise<number> {
 	const { io, deps } = ctx;
 	if (deps.serviceModule === undefined) {
@@ -263,7 +263,7 @@ export async function dispatch(argv: readonly string[], ctx: CliContext): Promis
 	const parsed = parseArgs(argv);
 	const command = resolveCommand(parsed.command);
 
-	// Bare invocation (no command) -> banner + menu (AC-063f.1).
+	// Bare invocation (no command) -> banner + menu (AC-064f.1).
 	if (command === null && parsed.command === undefined) {
 		return runHelp(ctx);
 	}

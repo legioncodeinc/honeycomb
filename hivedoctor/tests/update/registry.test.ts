@@ -1,5 +1,5 @@
 /**
- * The npm-registry `@latest` reader (PRD-063e version source). Fail-soft: any error
+ * The npm-registry `@latest` reader (PRD-064e version source). Fail-soft: any error
  * resolves to null ("latest unknown") so a registry hiccup never triggers an update.
  */
 

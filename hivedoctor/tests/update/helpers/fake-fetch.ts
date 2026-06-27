@@ -1,5 +1,5 @@
 /**
- * Test-only fake fetch seams for the 063e update tests, so NO test ever hits the network
+ * Test-only fake fetch seams for the 064e update tests, so NO test ever hits the network
  * (binding constraint: registry/CDN/health behind injectable interfaces). Built-ins only.
  *
  * Both the blessed-channel and registry readers consume the same minimal response shape

@@ -1,5 +1,5 @@
 /**
- * HiveDoctor needs-attention store (PRD-063g).
+ * HiveDoctor needs-attention store (PRD-064g).
  *
  * Persists the latest structured escalation record so the dashboard can surface
  * a "needs attention" banner on recovery. Two outputs per escalation:
@@ -19,7 +19,7 @@
  * Both writes are defensive (design principle 1, "incapable of crashing"): any I/O
  * failure is swallowed and reported via the injected logger, never thrown.
  *
- * resolve() marks the current needs-attention record resolved (AC-063g.5) so the
+ * resolve() marks the current needs-attention record resolved (AC-064g.5) so the
  * dashboard banner clears on the next read.
  *
  * Built-ins only: node:fs + node:path + node:crypto (for the atomic temp suffix).
@@ -86,13 +86,13 @@ export interface NeedsAttentionStore {
 	 *   - writes `needs-attention.json` (atomic, dashboard read seam)
 	 *   - appends an escalation step to `incidents.ndjson` via the incident log
 	 *
-	 * AC-063g.1: called by the escalation hook when the ladder exhausts.
+	 * AC-064g.1: called by the escalation hook when the ladder exhausts.
 	 * Defensive: never throws.
 	 */
 	record(escalation: EscalationRecord): void;
 
 	/**
-	 * Mark the current needs-attention record resolved (AC-063g.5).
+	 * Mark the current needs-attention record resolved (AC-064g.5).
 	 * Updates `needs-attention.json` with `resolved: true` + `resolvedAt`.
 	 * A no-op (with a logged debug) when no record exists.
 	 * Defensive: never throws.

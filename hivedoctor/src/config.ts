@@ -1,5 +1,5 @@
 /**
- * HiveDoctor configuration resolution (PRD-063a, foundation).
+ * HiveDoctor configuration resolution (PRD-064a, foundation).
  *
  * Resolves the watchdog's runtime config from environment variables layered over
  * built-in defaults, hand-validated with no zod (design principle 1: runtime is
@@ -8,16 +8,16 @@
  * back to the default rather than throwing, so a typo in an env var can never wedge
  * the watchdog at startup.
  *
- * Defaults mirror the PRD-063 / 063a rulings:
- *   - probe interval        30s  (063a goal)
+ * Defaults mirror the PRD-064 / 064a rulings:
+ *   - probe interval        30s  (064a goal)
  *   - target /health URL    http://127.0.0.1:3850/health  (the primary daemon)
- *   - backoff floor / ceil  1s / 30s  (063a scope: geometric, floor 1s, ceiling 30s)
+ *   - backoff floor / ceil  1s / 30s  (064a scope: geometric, floor 1s, ceiling 30s)
  *   - restart give-up        3   (OD-4 resolved: reinstall after 3 failed restarts)
- *   - workspace dir          ~/.honeycomb/hivedoctor  (PRD-063 data-model section)
+ *   - workspace dir          ~/.honeycomb/hivedoctor  (PRD-064 data-model section)
  *
  * Secret-free by construction: no value here is a credential. The daemon PID/lock
- * path (~/.honeycomb/daemon.pid) is included because rung 1 must respect it (063a
- * AC-063a.6 idempotency), and it mirrors the daemon's own `runtimeDir()/daemon.pid`.
+ * path (~/.honeycomb/daemon.pid) is included because rung 1 must respect it (064a
+ * AC-064a.6 idempotency), and it mirrors the daemon's own `runtimeDir()/daemon.pid`.
  */
 
 import { homedir } from "node:os";
@@ -56,7 +56,7 @@ export interface ConfigDefaults {
 	readonly restartCooldownMs: number;
 }
 
-/** The canonical Wave-0 defaults (PRD-063 / 063a). */
+/** The canonical Wave-0 defaults (PRD-064 / 064a). */
 export const DEFAULTS: ConfigDefaults = {
 	probeIntervalMs: 30_000,
 	probeTimeoutMs: 2_000,

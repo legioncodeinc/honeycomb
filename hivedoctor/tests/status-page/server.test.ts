@@ -1,8 +1,8 @@
 /**
- * Tests for the local status page server (PRD-063g AC-063g.4).
+ * Tests for the local status page server (PRD-064g AC-064g.4).
  *
  * AC coverage:
- *   AC-063g.4 -- daemon-down -> local status page returns current health +
+ *   AC-064g.4 -- daemon-down -> local status page returns current health +
  *                escalation + suggested commands (spin up on ephemeral port,
  *                GET / and /status.json)
  *
@@ -84,9 +84,9 @@ afterEach(() => {
 	server = null;
 });
 
-// ── AC-063g.4: status page serves health + escalation + suggested commands ────
+// ── AC-064g.4: status page serves health + escalation + suggested commands ────
 
-describe("AC-063g.4: status page GET /status.json returns health + escalation + commands", () => {
+describe("AC-064g.4: status page GET /status.json returns health + escalation + commands", () => {
 	it("returns 200 with health, escalation, and suggestedCommands at /status.json", async () => {
 		const escalation = makeEscalationFile(false);
 		server = createStatusPageServer({
@@ -165,7 +165,7 @@ describe("AC-063g.4: status page GET /status.json returns health + escalation + 
 	});
 });
 
-describe("AC-063g.4: GET / returns HTML status page", () => {
+describe("AC-064g.4: GET / returns HTML status page", () => {
 	it("returns 200 with text/html content type", async () => {
 		server = createStatusPageServer({
 			port: 0,
@@ -221,7 +221,7 @@ describe("AC-063g.4: GET / returns HTML status page", () => {
 	});
 });
 
-describe("AC-063g.4: server lifecycle", () => {
+describe("AC-064g.4: server lifecycle", () => {
 	it("returns 404 for an unknown path", async () => {
 		server = createStatusPageServer({
 			port: 0,

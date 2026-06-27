@@ -1,11 +1,11 @@
 /**
- * HiveDoctor geometric backoff (PRD-063a scope + technical considerations).
+ * HiveDoctor geometric backoff (PRD-064a scope + technical considerations).
  *
  * "Geometric with jitter, floor 1s, ceiling 30s; persisted rung; reset on healthy"
- * (063a). Mirrors the bounded-backoff precedent in src/daemon/runtime/services/
+ * (064a). Mirrors the bounded-backoff precedent in src/daemon/runtime/services/
  * embed-supervisor.ts (a fixed `restartBackoffMs` there; HiveDoctor generalizes it to
  * a geometric schedule with jitter and a persisted rung so a reboot does not reset a
- * crash loop's memory - 063a technical considerations).
+ * crash loop's memory - 064a technical considerations).
  *
  * The "rung" here is the BACKOFF rung (the geometric step count), distinct from the
  * REMEDIATION rung (which ladder action runs). It is a pure, injectable-RNG value
@@ -45,7 +45,7 @@ export interface Backoff {
 	delayMs(): number;
 	/** Advance to the next rung (call after a failed attempt). Returns the new rung. */
 	advance(): number;
-	/** Reset to rung 0 (call on a confirmed return to healthy - 063a). */
+	/** Reset to rung 0 (call on a confirmed return to healthy - 064a). */
 	reset(): void;
 }
 

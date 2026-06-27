@@ -1,5 +1,5 @@
 /**
- * Injectable command-runner boundary for the npm-touching rungs (PRD-063c).
+ * Injectable command-runner boundary for the npm-touching rungs (PRD-064c).
  *
  * Rung 2 (reinstall) and rung 3 (uninstall conflicting Hivemind) both shell out to
  * `npm`. To keep the rungs hermetic and testable - and to honor the binding rule that

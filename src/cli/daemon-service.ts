@@ -1,9 +1,9 @@
 /**
- * The primary-daemon OS-native service helper, PRD-063h (AC-063h.1..6).
+ * The primary-daemon OS-native service helper, PRD-064h (AC-064h.1..6).
  *
- * ── Why this module exists (OD-1 / 063h) ─────────────────────────────────────
+ * ── Why this module exists (OD-1 / 064h) ─────────────────────────────────────
  * The shipped daemon lifecycle (`src/cli/runtime.ts`) brings the daemon up by a DETACHED
- * `spawn()`, which dies with the machine and is not restarted on crash. 063h makes the OS
+ * `spawn()`, which dies with the machine and is not restarted on crash. 064h makes the OS
  * service manager the LIVENESS FLOOR: it restarts the daemon on crash and starts it on boot,
  * while HiveDoctor stays the intelligent healing layer above it. This module is the small,
  * pure, per-OS surface that registers / unregisters / starts / stops / restarts / reports the
@@ -20,7 +20,7 @@
  * 2. CHEAP, SIDE-EFFECT-FREE DETECTION. {@link detectServiceManager} only reads `platform` + a
  *    couple of env probes (it does NOT shell out, write files, or spawn work). An explicit
  *    `HONEYCOMB_DAEMON_SERVICE=spawn` opt-out forces the spawn fallback everywhere.
- * 3. WRITABLE WORKSPACE PINNED INTO THE UNIT (AC-063h.4). The generated unit pins BOTH the
+ * 3. WRITABLE WORKSPACE PINNED INTO THE UNIT (AC-064h.4). The generated unit pins BOTH the
  *    working directory and `HONEYCOMB_WORKSPACE` to the caller-resolved writable workspace, so a
  *    service-started daemon never boots from `C:\WINDOWS\system32` (the documented "secrets 502"
  *    class). The workspace is RESOLVED BY THE CALLER (`runtime.ts`, which owns the writable-probe)
@@ -32,7 +32,7 @@
  *    shell string, always fixed-argv.
  *
  * ── Scope boundary ───────────────────────────────────────────────────────────
- * This is the PRIMARY daemon's service. HiveDoctor's OWN service is 063b (a sibling, separate
+ * This is the PRIMARY daemon's service. HiveDoctor's OWN service is 064b (a sibling, separate
  * unit). The two share the same approach and acceptably-duplicated templates; this module lives
  * in the MAIN package (`src/`) and does not import from `hivedoctor/`.
  */
@@ -170,7 +170,7 @@ export interface ServiceSpec {
 	readonly nodeFlags: readonly string[];
 	/**
 	 * The guaranteed-WRITABLE workspace pinned into the unit's working-dir AND `HONEYCOMB_WORKSPACE`
-	 * (AC-063h.4). Resolved by `runtime.ts` (which owns the create-write-unlink probe); never
+	 * (AC-064h.4). Resolved by `runtime.ts` (which owns the create-write-unlink probe); never
 	 * `C:\WINDOWS\system32`. Both are pinned as defense-in-depth (the daemon resolves its `.secrets/`
 	 * root from `HONEYCOMB_WORKSPACE ?? cwd`, so either alone would suffice).
 	 */
@@ -199,7 +199,7 @@ function xmlEscape(value: string): string {
 }
 
 /**
- * Render the launchd LaunchAgent plist (AC-063h.4: pins `WorkingDirectory` + the `HONEYCOMB_WORKSPACE`
+ * Render the launchd LaunchAgent plist (AC-064h.4: pins `WorkingDirectory` + the `HONEYCOMB_WORKSPACE`
  * env to the writable workspace; `KeepAlive`+`RunAtLoad` make launchd the liveness floor , 
  * restart-on-crash + start-on-login).
  */
@@ -235,7 +235,7 @@ ${argvXml}
 }
 
 /**
- * Render the systemd --user unit (AC-063h.4: `WorkingDirectory` + `Environment=HONEYCOMB_WORKSPACE`
+ * Render the systemd --user unit (AC-064h.4: `WorkingDirectory` + `Environment=HONEYCOMB_WORKSPACE`
  * pin the writable workspace; `Restart=always`+`RestartSec` + the `[Install] WantedBy` make systemd
  * the liveness floor, restart-on-crash + start-on-login when the unit is `enable`d).
  */
@@ -262,7 +262,7 @@ WantedBy=default.target
 
 /**
  * Reject a path bound into the Windows `/TR` command string if it carries a cmd.exe
- * metacharacter (PRD-063h security hardening). The `/TR` value is the ONE place this module
+ * metacharacter (PRD-064h security hardening). The `/TR` value is the ONE place this module
  * composes a SHELL string instead of fixed argv: schtasks stores it and cmd.exe RE-PARSES it
  * at every logon. `spec.workspace` is derived from `HONEYCOMB_WORKSPACE` / the CLI cwd
  * (src/cli/runtime.ts resolveDaemonWorkspace), and `spec.entry` can be overridden via
@@ -281,7 +281,7 @@ function assertCmdSafe(value: string): void {
 }
 
 /**
- * Build the `schtasks /Create` argv for the per-user Scheduled Task (AC-063h.4: the task's command
+ * Build the `schtasks /Create` argv for the per-user Scheduled Task (AC-064h.4: the task's command
  * pins `HONEYCOMB_WORKSPACE` via a `cmd /c set ... &&` prefix so the daemon never inherits system32,
  * and `/SC ONLOGON` makes the task the start-on-boot/login liveness floor). `/F` is idempotent
  * (overwrites an existing task), `/RL LIMITED` keeps it userland (no admin / no UAC).
@@ -332,7 +332,7 @@ export interface DaemonServiceController {
 	register(spec: ServiceSpec): ServiceOpResult;
 	/** Deregister the service (unload/disable + remove the unit). Idempotent + never throws. */
 	unregister(spec: ServiceSpec): ServiceOpResult;
-	/** Ask the manager to (re)start the daemon, the rung-1 path HiveDoctor calls (AC-063h.5). */
+	/** Ask the manager to (re)start the daemon, the rung-1 path HiveDoctor calls (AC-064h.5). */
 	restart(spec: ServiceSpec): ServiceOpResult;
 	/** Ask the manager to stop the daemon. */
 	stop(spec: ServiceSpec): ServiceOpResult;
@@ -385,7 +385,7 @@ function launchdController(runner: ServiceRunner): DaemonServiceController {
 			return { ok: true, manager: "launchd" };
 		},
 		restart(_spec): ServiceOpResult {
-			// kickstart -k kills + restarts the service THROUGH launchd (AC-063h.5: no second spawn).
+			// kickstart -k kills + restarts the service THROUGH launchd (AC-064h.5: no second spawn).
 			runner.run("launchctl", ["kickstart", "-k", `${domain()}/${SERVICE_LABEL}`]);
 			return { ok: true, manager: "launchd" };
 		},
@@ -427,7 +427,7 @@ function systemdController(runner: ServiceRunner): DaemonServiceController {
 			return { ok: true, manager: "systemd-user" };
 		},
 		restart(_spec): ServiceOpResult {
-			// restart goes THROUGH systemd (AC-063h.5: no second spawn, no double-bind).
+			// restart goes THROUGH systemd (AC-064h.5: no second spawn, no double-bind).
 			runner.run("systemctl", ["--user", "restart", unit]);
 			return { ok: true, manager: "systemd-user" };
 		},
@@ -466,7 +466,7 @@ function schtasksController(runner: ServiceRunner): DaemonServiceController {
 			return { ok: true, manager: "schtasks" };
 		},
 		restart(spec): ServiceOpResult {
-			// AC-063h.5: stop THEN start the SAME task, no second daemon spawn. The single-instance
+			// AC-064h.5: stop THEN start the SAME task, no second daemon spawn. The single-instance
 			// PID/lock guard in the daemon prevents a double-bind even if the old process lingers a beat.
 			try {
 				runner.run("schtasks", ["/End", "/TN", SERVICE_TASK_NAME]);

@@ -1,5 +1,5 @@
 /**
- * self-update tests (PRD-063f AC-063f.5): the SOLE path that installs HiveDoctor's
+ * self-update tests (PRD-064f AC-064f.5): the SOLE path that installs HiveDoctor's
  * own package, and only when explicitly invoked.
  */
 

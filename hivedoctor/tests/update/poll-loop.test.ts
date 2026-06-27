@@ -1,5 +1,5 @@
 /**
- * The 30-minute auto-update poll loop (PRD-063e AC-063e.1 cadence / .4 opt-out). The
+ * The 30-minute auto-update poll loop (PRD-064e AC-064e.1 cadence / .4 opt-out). The
  * clock + jitter are injected so ticks are deterministic and no real timer is armed.
  */
 
@@ -55,7 +55,7 @@ describe("jitteredDelay", () => {
 	});
 });
 
-describe("tick (AC-063e.1 cadence)", () => {
+describe("tick (AC-064e.1 cadence)", () => {
 	it("runs exactly one transaction per tick", async () => {
 		const fe = fakeEngine();
 		const loop = createUpdatePollLoop({
@@ -74,7 +74,7 @@ describe("tick (AC-063e.1 cadence)", () => {
 	});
 });
 
-describe("opt-out (AC-063e.4)", () => {
+describe("opt-out (AC-064e.4)", () => {
 	it("a disabled loop never ticks (no registry/CDN poll at all)", async () => {
 		const fe = fakeEngine();
 		const loop = createUpdatePollLoop({

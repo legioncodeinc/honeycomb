@@ -1,5 +1,5 @@
 /**
- * The npm-registry `@latest` reader (PRD-063e version source).
+ * The npm-registry `@latest` reader (PRD-064e version source).
  *
  * The auto-update poll needs the version npm currently tags `@latest` for
  * `@legioncodeinc/honeycomb`. We read it from the registry's JSON metadata endpoint

@@ -1,5 +1,5 @@
 /**
- * Hand-rolled arg parser tests (PRD-063f: built-in arg parsing, no framework).
+ * Hand-rolled arg parser tests (PRD-064f: built-in arg parsing, no framework).
  */
 
 import { describe, expect, it } from "vitest";

@@ -1,7 +1,7 @@
 /**
- * CLI <-> 063b delegation tests (PRD-063b + PRD-063f seam).
+ * CLI <-> 064b delegation tests (PRD-064b + PRD-064f seam).
  *
- * Proves the `install-service` / `uninstall-service` CLI commands now run the REAL 063b
+ * Proves the `install-service` / `uninstall-service` CLI commands now run the REAL 064b
  * service module (createServiceModule) end-to-end - i.e. the service-stub seam delegates
  * to the real implementation, not the "not yet available" message. The module is wired
  * over the injected runner + in-memory fs so nothing real touches the OS.
@@ -15,7 +15,7 @@ import { createServiceModule } from "../../src/service/index.js";
 import { buildCliHarness } from "../cli/helpers/fake-cli.js";
 import { createMemoryFs, createRecordingRunner, fixedEnv } from "./helpers.js";
 
-describe("install-service / uninstall-service delegate to the real 063b module", () => {
+describe("install-service / uninstall-service delegate to the real 064b module", () => {
 	it("install-service runs the real module and prints its result line (not the stub)", async () => {
 		const runner = createRecordingRunner();
 		const fs = createMemoryFs();

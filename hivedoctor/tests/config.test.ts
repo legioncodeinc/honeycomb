@@ -1,4 +1,4 @@
-/** Config resolution tests (PRD-063a defaults + defensive env parsing). */
+/** Config resolution tests (PRD-064a defaults + defensive env parsing). */
 
 import { describe, expect, it } from "vitest";
 
@@ -7,7 +7,7 @@ import { DEFAULTS, resolveConfig } from "../src/config.js";
 const HOME = "/home/test";
 
 describe("resolveConfig", () => {
-	it("returns the PRD-063a defaults when env is empty", () => {
+	it("returns the PRD-064a defaults when env is empty", () => {
 		const cfg = resolveConfig({}, HOME);
 		expect(cfg.probeIntervalMs).toBe(DEFAULTS.probeIntervalMs); // 30s
 		expect(cfg.healthUrl).toBe("http://127.0.0.1:3850/health");

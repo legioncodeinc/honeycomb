@@ -1,10 +1,10 @@
 /**
- * `self-update`: THE ONLY path that updates HiveDoctor's own package (PRD-063f AC-063f.5,
+ * `self-update`: THE ONLY path that updates HiveDoctor's own package (PRD-064f AC-064f.5,
  * parent AC-6).
  *
- * "Never surprise-update itself" is sacred (PRD-063 design principle / parent AC-6):
+ * "Never surprise-update itself" is sacred (PRD-064 design principle / parent AC-6):
  * HiveDoctor is built NOT to need updating, and no autonomous code path - not the watch
- * loop, not rung 2, not the 063e auto-update engine - ever installs
+ * loop, not rung 2, not the 064e auto-update engine - ever installs
  * `@legioncodeinc/hivedoctor`. The auto-update engine's package is HARD-WIRED to the
  * PRIMARY daemon (`@legioncodeinc/honeycomb`); it cannot target HiveDoctor. This module is
  * the single, deliberate exception, reachable only by the explicit `hivedoctor self-update`

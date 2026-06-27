@@ -1,5 +1,5 @@
 /**
- * argv-construction tests (PRD-063b): the EXACT launchctl / systemctl / schtasks / sc
+ * argv-construction tests (PRD-064b): the EXACT launchctl / systemctl / schtasks / sc
  * command lines for install, uninstall, and status, per platform + scope.
  */
 

@@ -1,5 +1,5 @@
 /**
- * Minimal hand-rolled argv parsing (PRD-063f technical consideration: "no heavy CLI
+ * Minimal hand-rolled argv parsing (PRD-064f technical consideration: "no heavy CLI
  * framework - keep arg parsing minimal (built-ins) to honor the can't-crash principle").
  *
  * No `yargs`, no `commander`, no `minimist` - those are runtime deps and are banned from

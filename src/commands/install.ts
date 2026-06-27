@@ -215,7 +215,7 @@ function openDashboardWithFallback(opener: DashboardOpener, out: OutputSink): vo
 }
 
 /**
- * Report how the now-running daemon is supervised (PRD-063h, AC-063h.6 surfaced at install). A pure,
+ * Report how the now-running daemon is supervised (PRD-064h, AC-064h.6 surfaced at install). A pure,
  * FAIL-SOFT read of `lifecycle.status()`: when the daemon runs as a registered OS service it prints
  * the supervising manager (the liveness floor); otherwise it notes the detached-spawn fallback. It
  * NEVER changes the install result: no lifecycle seam, or a status read that throws, simply skips
@@ -265,7 +265,7 @@ export async function runInstallCommand(argv: readonly string[], deps: InstallVe
 	}
 	out(`✓ daemon up on ${DAEMON_HOST}:${DAEMON_PORT}.`);
 
-	// 1b) Report how the daemon is supervised (PRD-063h). `lifecycle.start()` (reached via
+	// 1b) Report how the daemon is supervised (PRD-064h). `lifecycle.start()` (reached via
 	//     ensureDaemonRunning above) PREFERS registering the daemon as an OS-native service (launchd /
 	//     systemd --user / per-user Scheduled Task): the liveness floor that restarts it on crash and
 	//     starts it on boot, and FALLS BACK to a detached spawn where registration is impossible (CI,

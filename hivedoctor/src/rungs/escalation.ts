@@ -1,13 +1,13 @@
 /**
- * Rung 4: escalation handoff (PRD-063c, AC-063c.3 / AC-063c.6).
+ * Rung 4: escalation handoff (PRD-064c, AC-064c.3 / AC-064c.6).
  *
  * When the ladder cannot restore health - or when the action HiveDoctor believes is
  * needed is the DEFERRED credential purge - it stops climbing and ESCALATES. The
- * escalation surface itself (dashboard "needs attention" + telemetry) is 063g; this
+ * escalation surface itself (dashboard "needs attention" + telemetry) is 064g; this
  * module owns only the structured {@link EscalationRecord} and the injected
- * {@link EscalationHook} that hands it off, so 063g can plug in a real sink later.
+ * {@link EscalationHook} that hands it off, so 064g can plug in a real sink later.
  *
- * The binding constraint (OD-4 + AC-063c.3): clearing credentials is DEFERRED and NOT
+ * The binding constraint (OD-4 + AC-064c.3): clearing credentials is DEFERRED and NOT
  * BUILT. There is no credential-purge code path anywhere in HiveDoctor. On a suspected
  * credential fault the ladder escalates with `recommendedAction: "clear-credentials"`
  * and `wouldHaveTaken` describing the action it deliberately did NOT take - so we learn
@@ -25,9 +25,9 @@ import type { RungResult } from "../remediation.js";
 import type { Logger } from "../logger.js";
 
 /**
- * The action HiveDoctor recommends a human (or 063g) take, INCLUDING the deferred one
+ * The action HiveDoctor recommends a human (or 064g) take, INCLUDING the deferred one
  * it is not allowed to perform itself. `clear-credentials` is the deferred action: it
- * is only ever RECOMMENDED here, never executed (AC-063c.3).
+ * is only ever RECOMMENDED here, never executed (AC-064c.3).
  */
 export type RecommendedAction =
 	| "investigate"
@@ -37,7 +37,7 @@ export type RecommendedAction =
 	| "manual-intervention";
 
 /**
- * A structured, secret-free escalation record handed to 063g. It is a snapshot of the
+ * A structured, secret-free escalation record handed to 064g. It is a snapshot of the
  * episode: why we are escalating, what was tried and how it went, and what we
  * recommend - including the action we WOULD have taken but deliberately did not.
  */
@@ -59,7 +59,7 @@ export interface EscalationRecord {
 }
 
 /**
- * The injected escalation sink. 063g plugs in the real dashboard/telemetry handoff;
+ * The injected escalation sink. 064g plugs in the real dashboard/telemetry handoff;
  * tests inject a spy. It may be async (a network post) and MAY throw - the caller
  * isolates it. Returns nothing meaningful; delivery is best-effort.
  */

@@ -1,14 +1,14 @@
 /**
- * The real OS-service manager (PRD-063b) - the module the CLI's `install-service` /
+ * The real OS-service manager (PRD-064b) - the module the CLI's `install-service` /
  * `uninstall-service` commands delegate to via the {@link ServiceModule} seam declared in
  * src/cli/service-stub.ts.
  *
- * It does the three things the stub promised would land in 063b:
+ * It does the three things the stub promised would land in 064b:
  *   - installService()  : resolve the platform plan, write the unit file (when file-based),
  *                         then run the manager's install argv. Userland scope by default,
  *                         privileged fallback ordering computed in {@link resolveServicePlan}.
  *   - uninstallService(): run the manager's uninstall argv, then delete the unit file, so
- *                         the unit does not resurrect on next boot (AC-063b.5).
+ *                         the unit does not resurrect on next boot (AC-064b.5).
  *   - serviceStatus()   : run the manager's status argv and classify the result.
  *
  * Crash-safe (parent AC-8 / design principle 1): every shell-out is the injected
@@ -188,7 +188,7 @@ export function createServiceModule(deps: ServiceModuleDeps): ServiceModule {
 			// 1) Stop + deregister via the manager (idempotent - a missing unit is tolerated).
 			const { allOk, firstFailure } = await runAll(runner, uninstallCommands(p, uid));
 
-			// 2) Delete the unit file so it cannot resurrect on next boot (AC-063b.5). For schtasks the
+			// 2) Delete the unit file so it cannot resurrect on next boot (AC-064b.5). For schtasks the
 			//    staged XML lives beside the workspace; remove that too.
 			const stagedXml = p.manager === "schtasks" ? `${p.home}/.honeycomb/hivedoctor/hivedoctor-task.xml` : "";
 			try {
@@ -211,7 +211,7 @@ export function createServiceModule(deps: ServiceModuleDeps): ServiceModule {
 }
 
 /**
- * Probe the current service status (used by `hivedoctor status` once 063b is wired). Returns
+ * Probe the current service status (used by `hivedoctor status` once 064b is wired). Returns
  * a coarse {@link ServiceStatus}; never throws. Exposed separately because the CLI's
  * `serviceState` dep reads status without the full install/uninstall surface.
  */

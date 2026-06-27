@@ -102,7 +102,7 @@ export interface CliHarnessOptions {
 	readonly optOut?: ResolvedOptOut;
 	/** Incident log tail lines (default: none). */
 	readonly incidents?: readonly string[];
-	/** Whether a 063b service module is wired (default: absent). */
+	/** Whether a 064b service module is wired (default: absent). */
 	readonly serviceModule?: CliDeps["serviceModule"];
 	/** Force color on/off (default off, so assertions are plain text). */
 	readonly color?: boolean;

@@ -1,12 +1,12 @@
 /**
- * Opt-out precedence resolution (PRD-063e AC-063e.4, PRD-063 OD-5).
+ * Opt-out precedence resolution (PRD-064e AC-064e.4, PRD-064 OD-5).
  *
  * The watch loop, the auto-update poll loop, and the `status` command all need ONE
  * answer to "is auto-update disabled, and is there a version pin?" computed from three
  * sources with a defined precedence. Centralizing it here means the composition root and
  * the CLI agree on exactly one resolution, and a test can pin every branch.
  *
- * Precedence (highest wins), per OD-5 + AC-063e.4:
+ * Precedence (highest wins), per OD-5 + AC-064e.4:
  *   1. CLI flag `--no-auto-update`           - the operator's explicit, in-the-moment choice.
  *   2. Env `HONEYCOMB_NO_AUTO_UPDATE=1`      - an install/service-level toggle.
  *   3. state.json `autoUpdateDisabled: true` - the persisted dashboard toggle (OD-5).
@@ -15,7 +15,7 @@
  *
  * A pin (a version HiveDoctor must stay on) also disables forward auto-update; its source
  * is the same env/state layering. A pin present at ANY layer disables forward motion
- * (AC-063e.4 "a pinned version that disables forward updates").
+ * (AC-064e.4 "a pinned version that disables forward updates").
  *
  * Pure: takes the three already-read inputs and returns the resolved booleans + the pin.
  * No I/O, never throws. Built-ins only.

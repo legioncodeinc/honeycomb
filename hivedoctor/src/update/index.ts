@@ -1,7 +1,7 @@
 /**
- * The auto-update engine (PRD-063e) public surface.
+ * The auto-update engine (PRD-064e) public surface.
  *
- * One barrel so a later wave (063f CLI / the supervisor wiring) imports the engine, the
+ * One barrel so a later wave (064f CLI / the supervisor wiring) imports the engine, the
  * poll loop, the gate, and the version source from a single path. Everything here is
  * additive and self-contained: it imports install-lock + telemetry + the command-runner
  * boundary as read-only collaborators and touches no shipped daemon code.

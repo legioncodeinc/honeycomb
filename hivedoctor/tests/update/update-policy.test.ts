@@ -1,5 +1,5 @@
 /**
- * The auto-update gate decision (PRD-063e AC-063e.1 / .2 / .4). Pure decision logic --
+ * The auto-update gate decision (PRD-064e AC-064e.1 / .2 / .4). Pure decision logic --
  * no seams. This is where the blessed gate, the opt-out, and the pin are proven in
  * isolation; the engine test then proves the transaction that hangs off a go decision.
  */
@@ -16,7 +16,7 @@ const blessed = (version: string, minVersion?: string): BlessedFetchResult => ({
 const blessedFailed: BlessedFetchResult = { ok: false, reason: "unreachable" };
 const ON: UpdateOptOut = { autoUpdateDisabled: false };
 
-describe("decideUpdate go path (AC-063e.1)", () => {
+describe("decideUpdate go path (AC-064e.1)", () => {
 	it("updates to the blessed version when @latest === blessed and blessed is newer", () => {
 		const d = decideUpdate({
 			installedVersion: "0.1.7",
@@ -38,7 +38,7 @@ describe("decideUpdate go path (AC-063e.1)", () => {
 	});
 });
 
-describe("decideUpdate gate holds (AC-063e.2)", () => {
+describe("decideUpdate gate holds (AC-064e.2)", () => {
 	it("does NOT update when @latest is newer but NOT blessed", () => {
 		// latest leapt to 0.2.0 but the blessed channel still points at 0.1.9.
 		const d = decideUpdate({
@@ -91,7 +91,7 @@ describe("decideUpdate gate holds (AC-063e.2)", () => {
 	});
 });
 
-describe("decideUpdate opt-out + pin (AC-063e.4)", () => {
+describe("decideUpdate opt-out + pin (AC-064e.4)", () => {
 	it("does not update when auto-update is disabled", () => {
 		const d = decideUpdate({
 			installedVersion: "0.1.7",

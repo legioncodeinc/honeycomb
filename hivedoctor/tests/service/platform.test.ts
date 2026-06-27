@@ -1,6 +1,6 @@
 /**
- * Service-plan resolution tests (PRD-063b): correct manager per platform, userland
- * default scope, and the AC-063b.6 unprivileged -> userland fallback ordering.
+ * Service-plan resolution tests (PRD-064b): correct manager per platform, userland
+ * default scope, and the AC-064b.6 unprivileged -> userland fallback ordering.
  */
 
 import { describe, expect, it } from "vitest";
@@ -38,7 +38,7 @@ describe("resolveServicePlan - manager + scope per platform", () => {
 	});
 });
 
-describe("AC-063b.6 - unprivileged falls back to userland rather than failing", () => {
+describe("AC-064b.6 - unprivileged falls back to userland rather than failing", () => {
 	it("system requested but unprivileged -> user scope, fellBackToUser flagged", () => {
 		const plan = resolveServicePlan(
 			fixedEnv({ platform: "linux", home: "/home/t", privileged: false, preferSystemScope: true }),

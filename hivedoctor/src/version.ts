@@ -1,5 +1,5 @@
 /**
- * HiveDoctor's OWN package version, single-sourced (PRD-063f / PRD-063 OD-6).
+ * HiveDoctor's OWN package version, single-sourced (PRD-064f / PRD-064 OD-6).
  *
  * The version is build-injected via esbuild `define` (`__HIVEDOCTOR_VERSION__`),
  * mirroring the parent package's `__HONEYCOMB_VERSION__` discipline. The `typeof`

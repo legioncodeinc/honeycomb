@@ -1,5 +1,5 @@
 /**
- * The `--no-hivedoctor` install-time opt-out guard (PRD-063b, OD-5 / parent AC-10).
+ * The `--no-hivedoctor` install-time opt-out guard (PRD-064b, OD-5 / parent AC-10).
  *
  * `--no-hivedoctor` is the ONLY install-time switch. When it is passed (as a flag) OR set
  * via the env equivalent (`HONEYCOMB_NO_HIVEDOCTOR=1`), the bootstrap installer must NOT

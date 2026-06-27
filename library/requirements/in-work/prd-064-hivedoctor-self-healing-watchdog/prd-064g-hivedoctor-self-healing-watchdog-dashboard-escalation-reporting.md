@@ -1,6 +1,6 @@
-# PRD-063g: HiveDoctor - Dashboard Escalation Reporting
+# PRD-064g: HiveDoctor - Dashboard Escalation Reporting
 
-> **Parent:** [PRD-063](./prd-063-hivedoctor-self-healing-watchdog-index.md)
+> **Parent:** [PRD-064](./prd-064-hivedoctor-self-healing-watchdog-index.md)
 > **Status:** Draft
 > **Priority:** P2
 > **Effort:** M (3-8h)
@@ -19,27 +19,27 @@ When auto-heal cannot restore the install, the user (and we) must learn about it
 All three reachability paths ship in v1 (OD-7 resolved: local status page + hosted sink + incident file):
 
 1. **Incident file the dashboard renders on recovery:** HiveDoctor writes the escalation to `incidents.ndjson` / a `needs-attention.json`; once the daemon is back, the dashboard reads and renders a banner/health card. Survives daemon-down because it is just a file.
-2. **Hosted escalation sink (resolved: reuse PostHog + alert):** the escalation is a high-severity OTLP log record on the 063d PostHog Logs path; we add a PostHog **alert** on it so we are notified remotely even if the user never opens the local dashboard. Correlate broken-auth installs by the stable per-install `device_id` (PRD-033 UUID), not org id. Graduate to a richer operator view in [PRD-061](../prd-061-hosted-roi-admin-surface/prd-061-hosted-roi-admin-surface-index.md) later.
+2. **Hosted escalation sink (resolved: reuse PostHog + alert):** the escalation is a high-severity OTLP log record on the 064d PostHog Logs path; we add a PostHog **alert** on it so we are notified remotely even if the user never opens the local dashboard. Correlate broken-auth installs by the stable per-install `device_id` (PRD-033 UUID), not org id. Graduate to a richer operator view in [PRD-061](../prd-061-hosted-roi-admin-surface/prd-061-hosted-roi-admin-surface-index.md) later.
 3. **Minimal local status page:** HiveDoctor serves a tiny read-only status page on its own loopback port so the user has *something* to look at while the primary daemon (and its dashboard) is down.
 
 ## Out of scope
 
-- The healing itself - [063a](./prd-063a-hivedoctor-self-healing-watchdog-supervisor-core-and-lifecycle.md)/[063c](./prd-063c-hivedoctor-self-healing-watchdog-remediation-ladder.md).
-- The telemetry wire format - [063d](./prd-063d-hivedoctor-self-healing-watchdog-telemetry-and-observability.md).
+- The healing itself - [064a](./prd-064a-hivedoctor-self-healing-watchdog-supervisor-core-and-lifecycle.md)/[064c](./prd-064c-hivedoctor-self-healing-watchdog-remediation-ladder.md).
+- The telemetry wire format - [064d](./prd-064d-hivedoctor-self-healing-watchdog-telemetry-and-observability.md).
 
 ## Acceptance criteria
 
-- AC-063g.1 Given the ladder exhausts, when escalation fires, then a structured needs-attention record (diagnosis + steps + outcomes + recommended action) is persisted locally (AC-3 parent).
-- AC-063g.2 Given the daemon recovers after an escalation, when the dashboard loads, then it renders the most recent needs-attention report and its resolution state.
-- AC-063g.3 Given the user is credentialed and the hosted sink is enabled, when escalation fires, then the report reaches the hosted surface so we see it remotely.
-- AC-063g.4 Given the daemon is down and the local status page is enabled, when the user hits HiveDoctor's loopback port, then they see current health + the escalation + suggested commands.
-- AC-063g.5 Given an escalation is later resolved (heal succeeds on a subsequent loop), when resolution occurs, then the report is marked resolved so the dashboard banner clears.
+- AC-064g.1 Given the ladder exhausts, when escalation fires, then a structured needs-attention record (diagnosis + steps + outcomes + recommended action) is persisted locally (AC-3 parent).
+- AC-064g.2 Given the daemon recovers after an escalation, when the dashboard loads, then it renders the most recent needs-attention report and its resolution state.
+- AC-064g.3 Given the user is credentialed and the hosted sink is enabled, when escalation fires, then the report reaches the hosted surface so we see it remotely.
+- AC-064g.4 Given the daemon is down and the local status page is enabled, when the user hits HiveDoctor's loopback port, then they see current health + the escalation + suggested commands.
+- AC-064g.5 Given an escalation is later resolved (heal succeeds on a subsequent loop), when resolution occurs, then the report is marked resolved so the dashboard banner clears.
 
 ## Technical considerations
 
 - **Daemon-down is the design case, not the edge case.** Path 1 (file) must not require the daemon; path 2 (hosted) is how *we* learn without the user. Path 3 is comfort UX.
 - **Dashboard read seam:** prefer having the daemon read HiveDoctor's incident file (no new write path into the daemon) over HiveDoctor calling into the daemon - keeps the dependency one-directional.
-- **Scrubbing:** the same allow-list as 063d; a report shown locally may carry more detail than what is emitted remotely.
+- **Scrubbing:** the same allow-list as 064d; a report shown locally may carry more detail than what is emitted remotely.
 
 ## Open questions
 

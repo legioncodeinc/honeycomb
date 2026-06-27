@@ -1,5 +1,5 @@
 /**
- * Incident-tail tests (PRD-063f `logs`): tail the last N NDJSON lines; a missing file
+ * Incident-tail tests (PRD-064f `logs`): tail the last N NDJSON lines; a missing file
  * is an empty list, never a throw.
  */
 

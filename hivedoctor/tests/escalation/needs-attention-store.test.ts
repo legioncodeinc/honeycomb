@@ -1,20 +1,20 @@
 /**
- * Tests for the needs-attention store (PRD-063g).
+ * Tests for the needs-attention store (PRD-064g).
  *
  * AC coverage:
- *   AC-063g.1 -- ladder-exhaust escalation -> structured needs-attention persisted
+ *   AC-064g.1 -- ladder-exhaust escalation -> structured needs-attention persisted
  *                (file + incident)
- *   AC-063g.2 -- after recovery, the read-seam file exposes the most recent report
+ *   AC-064g.2 -- after recovery, the read-seam file exposes the most recent report
  *                (assert file shape; live dashboard render is BLOCKED: the dashboard
  *                reads this file only when the daemon is running, which is out of
  *                scope for unit tests -- see BLOCKER note below)
- *   AC-063g.5 -- resolved escalation marked resolved (banner-clear semantics)
+ *   AC-064g.5 -- resolved escalation marked resolved (banner-clear semantics)
  *
- * BLOCKER (AC-063g.2): the live dashboard render of the needs-attention banner
+ * BLOCKER (AC-064g.2): the live dashboard render of the needs-attention banner
  * depends on the daemon mounting a route that reads `needs-attention.json`. That
  * route has not been authored yet (it is a future task in the dashboard integration
  * wave). These tests assert the FILE SHAPE the dashboard will read, which is the
- * complete 063g contract on the HiveDoctor side.
+ * complete 064g contract on the HiveDoctor side.
  */
 
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -73,9 +73,9 @@ function makeStore(clockFn?: () => number) {
 	});
 }
 
-// ── AC-063g.1: ladder-exhaust escalation -> structured needs-attention persisted ──
+// ── AC-064g.1: ladder-exhaust escalation -> structured needs-attention persisted ──
 
-describe("AC-063g.1: record() persists needs-attention.json + incident", () => {
+describe("AC-064g.1: record() persists needs-attention.json + incident", () => {
 	it("writes needs-attention.json with the correct shape on first record", () => {
 		const store = makeStore();
 		const escalation = makeEscalation();
@@ -140,14 +140,14 @@ describe("AC-063g.1: record() persists needs-attention.json + incident", () => {
 	});
 });
 
-// ── AC-063g.2: read-seam file exposes the most recent report after recovery ──
+// ── AC-064g.2: read-seam file exposes the most recent report after recovery ──
 
-describe("AC-063g.2: read-seam file shape after escalation (dashboard integration BLOCKED)", () => {
+describe("AC-064g.2: read-seam file shape after escalation (dashboard integration BLOCKED)", () => {
 	/**
 	 * BLOCKER: The live dashboard render of the needs-attention banner requires a
 	 * daemon route that reads this file. That route has not been authored yet and is
 	 * a future task in the dashboard integration wave. These tests assert the FILE
-	 * SHAPE the dashboard will read -- the full 063g contract from HiveDoctor's side.
+	 * SHAPE the dashboard will read -- the full 064g contract from HiveDoctor's side.
 	 */
 	it("read() returns the escalation record with resolved:false before recovery", () => {
 		const store = makeStore();
@@ -186,9 +186,9 @@ describe("AC-063g.2: read-seam file shape after escalation (dashboard integratio
 	});
 });
 
-// ── AC-063g.5: resolved escalation marked resolved (banner-clear semantics) ──
+// ── AC-064g.5: resolved escalation marked resolved (banner-clear semantics) ──
 
-describe("AC-063g.5: resolve() marks the record resolved", () => {
+describe("AC-064g.5: resolve() marks the record resolved", () => {
 	it("sets resolved:true and resolvedAt after resolve()", () => {
 		const store = makeStore();
 		store.record(makeEscalation());

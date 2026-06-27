@@ -1,8 +1,8 @@
 /**
- * HiveDoctor shared install mutex (PRD-063c scope; imported by 063e).
+ * HiveDoctor shared install mutex (PRD-064c scope; imported by 064e).
  *
  * A file-based, single-host mutex that guarantees rung 2's reinstall
- * ({@link file://./rungs/reinstall.ts}) and the future auto-update engine (063e)
+ * ({@link file://./rungs/reinstall.ts}) and the future auto-update engine (064e)
  * NEVER run two `npm i -g` operations concurrently. Two concurrent global installs
  * race the same `node_modules/.bin` shims and can leave a half-written, unrunnable
  * binary - exactly the "stale global daemon serves old routes" failure mode rung 2

@@ -1,5 +1,5 @@
 /**
- * Composition-root smoke test (PRD-063f production assembly).
+ * Composition-root smoke test (PRD-064f production assembly).
  *
  * Asserts that createHiveDoctor() wires the whole watchdog together:
  *   - the remediation ladder has rungs 1/2/3 REGISTERED (not just slots);

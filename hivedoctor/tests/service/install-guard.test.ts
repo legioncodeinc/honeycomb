@@ -1,5 +1,5 @@
 /**
- * AC-063b.4 / parent AC-10: `--no-hivedoctor` opt-out guard.
+ * AC-064b.4 / parent AC-10: `--no-hivedoctor` opt-out guard.
  *
  * Asserts the pure decision the two shell installers mirror: when the flag or the env
  * equivalent is present, the HiveDoctor bootstrap (npm install + service registration) is
@@ -14,7 +14,7 @@ import { createServiceModule } from "../../src/service/index.js";
 import { buildCliHarness } from "../cli/helpers/fake-cli.js";
 import { createMemoryFs, createRecordingRunner, fixedEnv } from "./helpers.js";
 
-describe("shouldBootstrapHiveDoctor (AC-063b.4)", () => {
+describe("shouldBootstrapHiveDoctor (AC-064b.4)", () => {
 	it("defaults to true with a plain install argv + clean env", () => {
 		expect(shouldBootstrapHiveDoctor({ argv: ["--ref", "mario"], env: {} })).toBe(true);
 		expect(shouldBootstrapHiveDoctor({ argv: [], env: {} })).toBe(true);
@@ -38,7 +38,7 @@ describe("shouldBootstrapHiveDoctor (AC-063b.4)", () => {
 	});
 });
 
-describe("AC-063b.4: opted out -> the service module is never invoked", () => {
+describe("AC-064b.4: opted out -> the service module is never invoked", () => {
 	/**
 	 * The installer's contract: if shouldBootstrapHiveDoctor is false, it neither installs the
 	 * package nor calls `hivedoctor install-service`. We model that here: the install-service

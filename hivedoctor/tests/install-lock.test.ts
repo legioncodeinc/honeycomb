@@ -1,6 +1,6 @@
 /**
- * Shared install-lock tests (PRD-063c): the file-based mutex that serializes rung 2's
- * reinstall and the future 063e auto-update so two `npm i -g` never race. Built-ins only.
+ * Shared install-lock tests (PRD-064c): the file-based mutex that serializes rung 2's
+ * reinstall and the future 064e auto-update so two `npm i -g` never race. Built-ins only.
  */
 
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";

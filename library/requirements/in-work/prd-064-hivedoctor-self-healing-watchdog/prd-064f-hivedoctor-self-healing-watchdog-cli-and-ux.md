@@ -1,6 +1,6 @@
-# PRD-063f: HiveDoctor - CLI and UX
+# PRD-064f: HiveDoctor - CLI and UX
 
-> **Parent:** [PRD-063](./prd-063-hivedoctor-self-healing-watchdog-index.md)
+> **Parent:** [PRD-064](./prd-064-hivedoctor-self-healing-watchdog-index.md)
 > **Status:** Draft
 > **Priority:** P2
 > **Effort:** M (3-8h)
@@ -28,24 +28,24 @@ Command surface (names indicative):
 | `hivedoctor restart` | rung 1 only |
 | `hivedoctor reinstall` | rung 2 only |
 | `hivedoctor uninstall-hivemind` | rung 3 - remove a conflicting `@deeplake/hivemind` |
-| `hivedoctor update [--check]` | check/apply primary-daemon update (063e), respecting the blessed gate |
+| `hivedoctor update [--check]` | check/apply primary-daemon update (064e), respecting the blessed gate |
 | `hivedoctor self-update` | **explicit-only** update of `@legioncodeinc/hivedoctor` itself |
-| `hivedoctor install-service` / `uninstall-service` | 063b service registration |
+| `hivedoctor install-service` / `uninstall-service` | 064b service registration |
 | `hivedoctor logs` | tail the local incident log |
 
 ## Out of scope
 
-- The auto behaviors behind these commands - [063a](./prd-063a-hivedoctor-self-healing-watchdog-supervisor-core-and-lifecycle.md)/[063c](./prd-063c-hivedoctor-self-healing-watchdog-remediation-ladder.md)/[063e](./prd-063e-hivedoctor-self-healing-watchdog-auto-update-engine.md).
-- Dashboard rendering - [063g](./prd-063g-hivedoctor-self-healing-watchdog-dashboard-escalation-reporting.md).
+- The auto behaviors behind these commands - [064a](./prd-064a-hivedoctor-self-healing-watchdog-supervisor-core-and-lifecycle.md)/[064c](./prd-064c-hivedoctor-self-healing-watchdog-remediation-ladder.md)/[064e](./prd-064e-hivedoctor-self-healing-watchdog-auto-update-engine.md).
+- Dashboard rendering - [064g](./prd-064g-hivedoctor-self-healing-watchdog-dashboard-escalation-reporting.md).
 
 ## Acceptance criteria
 
-- AC-063f.1 Given `hivedoctor` with no args, when run, then the ASCII art renders and a command menu is shown (AC-7 parent).
-- AC-063f.2 Given `hivedoctor status`, when run, then it prints daemon health, service state, both package versions, last heal, and opt-out flags.
-- AC-063f.3 Given `hivedoctor diagnose`, when run, then it reports the recommended rung and takes NO action.
-- AC-063f.4 Given `uninstall-hivemind`, when run interactively, then it confirms before removing the conflicting package and never deletes shared `~/.deeplake/` state. (No `clear-credentials` command in v1 - credential purge is deferred, OD-4.)
-- AC-063f.5 Given `hivedoctor self-update`, when and only when run explicitly, then `@legioncodeinc/hivedoctor` is updated; no other code path updates it (AC-6 parent).
-- AC-063f.6 Given the daemon is down, when `hivedoctor status`/`diagnose` run, then they still work (HiveDoctor does not depend on the daemon to report).
+- AC-064f.1 Given `hivedoctor` with no args, when run, then the ASCII art renders and a command menu is shown (AC-7 parent).
+- AC-064f.2 Given `hivedoctor status`, when run, then it prints daemon health, service state, both package versions, last heal, and opt-out flags.
+- AC-064f.3 Given `hivedoctor diagnose`, when run, then it reports the recommended rung and takes NO action.
+- AC-064f.4 Given `uninstall-hivemind`, when run interactively, then it confirms before removing the conflicting package and never deletes shared `~/.deeplake/` state. (No `clear-credentials` command in v1 - credential purge is deferred, OD-4.)
+- AC-064f.5 Given `hivedoctor self-update`, when and only when run explicitly, then `@legioncodeinc/hivedoctor` is updated; no other code path updates it (AC-6 parent).
+- AC-064f.6 Given the daemon is down, when `hivedoctor status`/`diagnose` run, then they still work (HiveDoctor does not depend on the daemon to report).
 
 ## Technical considerations
 

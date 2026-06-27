@@ -30,7 +30,7 @@ $HoneycombNodeVersion = '22'
 # The published npm package the global install pulls (PRD-048 publishes it; this consumes it).
 $HoneycombNpmPackage = '@legioncodeinc/honeycomb@latest'
 
-# HiveDoctor (PRD-063b): a SECOND global package -- the self-healing watchdog that keeps the
+# HiveDoctor (PRD-064b): a SECOND global package -- the self-healing watchdog that keeps the
 # primary daemon alive and registers itself with the OS (a per-user Scheduled Task on Windows,
 # no admin / no UAC) so it survives crashes + reboots. Independent lifecycle (OD-6: a second
 # global), installed after the primary unless the user opts out with -NoHiveDoctor.
@@ -163,7 +163,7 @@ function Resolve-HoneycombBin {
 }
 
 # -----------------------------------------------------------------------------
-# Step 3b -- HiveDoctor bootstrap (PRD-063b). After the primary is installed, install the
+# Step 3b -- HiveDoctor bootstrap (PRD-064b). After the primary is installed, install the
 #            HiveDoctor watchdog (a second global) and register its per-user Scheduled Task,
 #            UNLESS the user opted out. The opt-out is `-NoHiveDoctor` / a bare `--no-hivedoctor`
 #            in $args, or the env equivalent $env:HONEYCOMB_NO_HIVEDOCTOR=1 (the ONLY install-time
@@ -251,7 +251,7 @@ function Invoke-Main([string[]]$InvocationArgs) {
     return 1
   }
 
-  # HiveDoctor bootstrap (PRD-063b), guarded by -NoHiveDoctor / HONEYCOMB_NO_HIVEDOCTOR. Runs BEFORE
+  # HiveDoctor bootstrap (PRD-064b), guarded by -NoHiveDoctor / HONEYCOMB_NO_HIVEDOCTOR. Runs BEFORE
   # the verb hand-off so the watchdog is in place by the time the user sees the dashboard.
   if (Test-HiveDoctorOptedOut $InvocationArgs) {
     Write-Step 'skipping HiveDoctor (--no-hivedoctor).'

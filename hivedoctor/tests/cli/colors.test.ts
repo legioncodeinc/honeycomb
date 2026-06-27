@@ -1,5 +1,5 @@
 /**
- * Color gate tests (PRD-063f UX): NO_COLOR / FORCE_COLOR / TTY resolution; identity
+ * Color gate tests (PRD-064f UX): NO_COLOR / FORCE_COLOR / TTY resolution; identity
  * helpers when disabled so output stays plain and assertable.
  */
 

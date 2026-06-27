@@ -120,8 +120,8 @@ describe("PRD-050a — honeycomb install (a-AC-4 health-gated open)", () => {
 	});
 });
 
-describe("PRD-063h: install reports daemon supervision (fail-soft, additive)", () => {
-	it("AC-063h.6 reports the supervising OS service manager when status surfaces one", async () => {
+describe("PRD-064h: install reports daemon supervision (fail-soft, additive)", () => {
+	it("AC-064h.6 reports the supervising OS service manager when status surfaces one", async () => {
 		const lines: string[] = [];
 		// A lifecycle whose status() reports a service manager (the service-mode outcome).
 		const lifecycle: DaemonLifecycle = {

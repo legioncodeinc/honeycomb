@@ -1,17 +1,17 @@
 /**
- * The HiveDoctor composition root (PRD-063f - the production assembly).
+ * The HiveDoctor composition root (PRD-064f - the production assembly).
  *
  * `createHiveDoctor()` constructs the WHOLE watchdog from the wave-built primitives and
- * returns a `{ start, stop }` handle the OS service (063b/063h) execs. It wires:
+ * returns a `{ start, stop }` handle the OS service (064b/064h) execs. It wires:
  *
- *   - the supervisor watch loop (063a) over the real probe + the remediation ladder with
+ *   - the supervisor watch loop (064a) over the real probe + the remediation ladder with
  *     rungs 1/2/3 REGISTERED for production (the prior wave left rungs 2/3 as ladder slots
  *     in the supervisor path; this is where they are plugged in);
- *   - the escalation hook (063c -> 063g) wired to BOTH the local needs-attention store and
+ *   - the escalation hook (064c -> 064g) wired to BOTH the local needs-attention store and
  *     the hosted PostHog sink, so a give-up reaches a human even when the daemon is down;
- *   - the auto-update poll loop (063e), respecting the resolved opt-out precedence
+ *   - the auto-update poll loop (064e), respecting the resolved opt-out precedence
  *     (--no-auto-update flag > env > state > pin) computed here;
- *   - the local status page (063g) on the loopback comfort port.
+ *   - the local status page (064g) on the loopback comfort port.
  *
  * EVERYTHING is fail-soft (design principle 1, "incapable of crashing"): every external
  * action is behind an injected seam that resolves a value, the crash net is installed, and
@@ -20,7 +20,7 @@
  * The `self-update` boundary is SACRED here too: this assembly wires the auto-update engine
  * HARD-CODED to the PRIMARY daemon package (`@legioncodeinc/honeycomb`). There is no code
  * path in this composition that installs `@legioncodeinc/hivedoctor`; that is reachable
- * ONLY through the explicit CLI `self-update` command (AC-063f.5 / parent AC-6).
+ * ONLY through the explicit CLI `self-update` command (AC-064f.5 / parent AC-6).
  *
  * Built-ins only; all I/O behind seams so the smoke test drives the whole assembly hermetic.
  */
@@ -106,15 +106,15 @@ export interface CreateHiveDoctorOptions {
 	readonly statusPagePort?: number;
 
 	// ── Injectable production seams (tests override these so nothing real runs) ──
-	/** The restart action (063b/063h owns the real OS restart; default is a logged no-op). */
+	/** The restart action (064b/064h owns the real OS restart; default is a logged no-op). */
 	readonly restart?: RestartFn;
 	/** The command runner used by rungs 2/3 + auto-update (default: execFile, no shell). */
 	readonly runner?: CommandRunner;
 	/** Override the probe (default: the real node:http probe against config.healthUrl). */
 	readonly probe?: () => ReturnType<typeof probeHealth>;
-	/** Override the auto-update engine (default: the real 063e engine). */
+	/** Override the auto-update engine (default: the real 064e engine). */
 	readonly updateEngine?: UpdateEngine;
-	/** Override the hosted escalation sink (default: emit through the 063d chokepoint). */
+	/** Override the hosted escalation sink (default: emit through the 064d chokepoint). */
 	readonly hostedEscalation?: EscalationHook;
 }
 
@@ -154,7 +154,7 @@ export function createHiveDoctor(options: CreateHiveDoctorOptions = {}): HiveDoc
 	const incidents = createIncidentLog({ workspaceDir: config.workspaceDir, logger });
 	const installLock = createInstallLock({ workspaceDir: config.workspaceDir, logger });
 
-	// The needs-attention store (063g) - the dashboard read seam + incident append.
+	// The needs-attention store (064g) - the dashboard read seam + incident append.
 	const needsAttention: NeedsAttentionStore = createNeedsAttentionStore({
 		workspaceDir: config.workspaceDir,
 		incidentLog: incidents,
@@ -167,7 +167,7 @@ export function createHiveDoctor(options: CreateHiveDoctorOptions = {}): HiveDoc
 		readDaemonVersion({ healthUrl: config.healthUrl, timeoutMs: config.probeTimeoutMs });
 	const isHealthy = async (): Promise<boolean> => (await probe()).kind === "ok";
 
-	// Restart: 063b/063h owns the real OS restart; default to a logged no-op that reports it
+	// Restart: 064b/064h owns the real OS restart; default to a logged no-op that reports it
 	// could not act, so the give-up path still escalates rather than silently "succeeding".
 	const restart: RestartFn =
 		options.restart ??
@@ -180,7 +180,7 @@ export function createHiveDoctor(options: CreateHiveDoctorOptions = {}): HiveDoc
 	let lastRestartAt: number | null = null;
 	const restartRung = createRestartRung({
 		restart,
-		readDaemonPid: async () => null, // 063b owns the PID/lock read; null = "no lock observed".
+		readDaemonPid: async () => null, // 064b owns the PID/lock read; null = "no lock observed".
 		isHealthy,
 		cooldownMs: config.restartCooldownMs,
 		clock,
@@ -209,7 +209,7 @@ export function createHiveDoctor(options: CreateHiveDoctorOptions = {}): HiveDoc
 		workspaceDir: config.workspaceDir,
 	});
 
-	// The escalation hook (063c -> 063g): record locally AND emit to the hosted sink, both
+	// The escalation hook (064c -> 064g): record locally AND emit to the hosted sink, both
 	// fail-soft. This is the give-up surface the ladder calls when it cannot heal.
 	const hostedEscalation: EscalationHook =
 		options.hostedEscalation ??
@@ -249,7 +249,7 @@ export function createHiveDoctor(options: CreateHiveDoctorOptions = {}): HiveDoc
 		probeIntervalMs: config.probeIntervalMs,
 	});
 
-	// ── Auto-update poll loop (063e), respecting the resolved opt-out precedence ───
+	// ── Auto-update poll loop (064e), respecting the resolved opt-out precedence ───
 	const optOut = resolveOptOut({
 		cliNoAutoUpdate: options.cliNoAutoUpdate ?? false,
 		env,
@@ -284,7 +284,7 @@ export function createHiveDoctor(options: CreateHiveDoctorOptions = {}): HiveDoc
 		autoUpdateDisabled: optOut.autoUpdateDisabled,
 	});
 
-	// ── Local status page (063g) on the loopback comfort port ─────────────────────
+	// ── Local status page (064g) on the loopback comfort port ─────────────────────
 	const statusPage = createStatusPageServer({
 		port: options.statusPagePort ?? DEFAULT_STATUS_PAGE_PORT,
 		state: {

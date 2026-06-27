@@ -1,5 +1,5 @@
 /**
- * Rung 3: uninstall a conflicting Hivemind global (PRD-063c, AC-063c.2 / .4 / .5 / .6).
+ * Rung 3: uninstall a conflicting Hivemind global (PRD-064c, AC-064c.2 / .4 / .5 / .6).
  *
  * Honeycomb and Hivemind (`@deeplake/hivemind`) are siblings that share one credential
  * folder but CANNOT run side-by-side (duplicate capture/recall hooks, competing
@@ -7,19 +7,19 @@
  * hivemind` global is detected, this rung removes the PACKAGE automatically (OD-4:
  * autonomous, always when detected).
  *
- * The single hard safety boundary (AC-063c.2 + Technical considerations): rung 3
+ * The single hard safety boundary (AC-064c.2 + Technical considerations): rung 3
  * removes the npm PACKAGE only. It NEVER touches the shared `~/.deeplake/` state -
  * credentials and onboarding live there and Honeycomb still depends on them. There is
  * literally no code path in this rung that writes to or deletes `~/.deeplake/`; the
  * only filesystem write is the timestamped backup record under HiveDoctor's OWN
  * workspace dir.
  *
- * Backup-before-removal (AC-063c.5): before issuing the uninstall, a timestamped JSON
+ * Backup-before-removal (AC-064c.5): before issuing the uninstall, a timestamped JSON
  * record of exactly what is being removed (package + detected version + when) is
  * appended to `removed-packages.ndjson` in the workspace dir, so the removal is
  * auditable and the coexistence migration is reversible-by-record.
  *
- * Idempotency (AC-063c.4): detection runs first. No conflicting global present -> a
+ * Idempotency (AC-064c.4): detection runs first. No conflicting global present -> a
  * safe no-op skip (no backup, no uninstall). A second run after a successful removal
  * therefore detects nothing and skips.
  *
@@ -40,7 +40,7 @@ export const HIVEMIND_PACKAGE = "@deeplake/hivemind";
 /** Detects a conflicting Hivemind global: its installed version, or null when absent. Injected. */
 export type DetectHivemindFn = () => Promise<string | null>;
 
-/** One appended backup record of a removed package (AC-063c.5). */
+/** One appended backup record of a removed package (AC-064c.5). */
 export interface RemovedPackageRecord {
 	/** The package removed. */
 	readonly package: string;
@@ -91,7 +91,7 @@ export function createUninstallHivemindRung(deps: UninstallHivemindRungDeps): Ru
 	const now = deps.now ?? Date.now;
 	const backupPath = join(deps.workspaceDir, "removed-packages.ndjson");
 
-	/** Append the timestamped removal record BEFORE the uninstall (AC-063c.5). Defensive. */
+	/** Append the timestamped removal record BEFORE the uninstall (AC-064c.5). Defensive. */
 	function recordRemoval(version: string | null): boolean {
 		const record: RemovedPackageRecord = {
 			package: HIVEMIND_PACKAGE,
@@ -116,14 +116,14 @@ export function createUninstallHivemindRung(deps: UninstallHivemindRungDeps): Ru
 		async run(ctx: RungContext): Promise<RungResult> {
 			try {
 				// Detection first: idempotency lives here. No conflicting global -> safe no-op skip
-				// (AC-063c.4). A second run after a removal detects nothing and lands here.
+				// (AC-064c.4). A second run after a removal detects nothing and lands here.
 				const version = await deps.detectHivemind();
 				if (version === null) {
 					ctx.logger.info("rung3.skip_not_detected");
 					return { ok: true, skipped: true, action: ACTION, detail: "no-conflicting-hivemind" };
 				}
 
-				// Backup the removal record BEFORE deleting anything (AC-063c.5). If we cannot record
+				// Backup the removal record BEFORE deleting anything (AC-064c.5). If we cannot record
 				// it, do NOT proceed to the destructive step - skip and let escalation surface it.
 				if (!recordRemoval(version)) {
 					ctx.logger.error("rung3.backup_failed");

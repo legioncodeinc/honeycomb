@@ -1,6 +1,6 @@
 /**
- * Remediation rung 1 + ladder tests (PRD-063a AC-063a.6 idempotency + cooldown,
- * AC-063a.3 advance, AC-063a.5 crash-safety at the ladder boundary).
+ * Remediation rung 1 + ladder tests (PRD-064a AC-064a.6 idempotency + cooldown,
+ * AC-064a.3 advance, AC-064a.5 crash-safety at the ladder boundary).
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -46,7 +46,7 @@ function makeDeps(overrides: Partial<DepOverrides> = {}): {
 	};
 }
 
-describe("rung 1 restart - idempotency + cooldown (AC-063a.6)", () => {
+describe("rung 1 restart - idempotency + cooldown (AC-064a.6)", () => {
 	it("does NOT start a second daemon when the PID/lock is held AND /health answers", async () => {
 		const restart = vi.fn(async () => true);
 		const { deps } = makeDeps({
@@ -117,7 +117,7 @@ describe("remediation ladder", () => {
 		expect(result.detail).toBe("later-wave-slot");
 	});
 
-	it("run() wraps a throwing rung into a failed result (AC-063a.5)", async () => {
+	it("run() wraps a throwing rung into a failed result (AC-064a.5)", async () => {
 		const throwingRung = {
 			rung: 1,
 			name: "restart-daemon",

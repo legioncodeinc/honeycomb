@@ -1,5 +1,5 @@
 /**
- * The vendored per-OS service-unit TEMPLATES (PRD-063b Scope).
+ * The vendored per-OS service-unit TEMPLATES (PRD-064b Scope).
  *
  * The binding technical consideration: PREFER shelling out to `launchctl` / `systemctl
  * --user` / `schtasks` / `sc.exe` over taking a dependency, and vendor ONLY the small

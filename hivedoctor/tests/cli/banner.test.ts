@@ -1,5 +1,5 @@
 /**
- * Banner + menu rendering tests (PRD-063f AC-063f.1).
+ * Banner + menu rendering tests (PRD-064f AC-064f.1).
  */
 
 import { describe, expect, it } from "vitest";

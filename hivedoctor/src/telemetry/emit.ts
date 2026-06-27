@@ -1,20 +1,20 @@
 /**
- * HiveDoctor's SINGLE telemetry-egress chokepoint (PRD-063d).
+ * HiveDoctor's SINGLE telemetry-egress chokepoint (PRD-064d).
  *
  * `emitTelemetry(record, deps)` is the ONLY function that posts to the PostHog
  * Logs OTLP endpoint. Three streams flow through it:
  *
- *   1. errors         - severity ERROR  (AC-063d.1)
- *   2. install-health - severity INFO   (AC-063d.2)
- *   3. episodes       - severity INFO/WARN sourced from incidents.ndjson (AC-063d.3)
+ *   1. errors         - severity ERROR  (AC-064d.1)
+ *   2. install-health - severity INFO   (AC-064d.2)
+ *   3. episodes       - severity INFO/WARN sourced from incidents.ndjson (AC-064d.3)
  *
  * ALL three flow through this ONE function so opt-out is verifiable in a single
- * place (AC-063d.4, design principle 6 "honest opt-out").
+ * place (AC-064d.4, design principle 6 "honest opt-out").
  *
  * ── Transport (OD-2 resolved) ──────────────────────────────────────────────
  * PostHog Logs over OTLP/HTTP+JSON at `{host}/i/v1/logs`. We hand-roll the
  * `LogsData` envelope (see `./otlp-serializer.ts`) and POST via the global
- * `fetch` so there is NO OpenTelemetry SDK dependency (AC-063d.7, design
+ * `fetch` so there is NO OpenTelemetry SDK dependency (AC-064d.7, design
  * principle 1 "incapable of crashing -- Node built-ins only").
  *
  * ── Gates, in order ────────────────────────────────────────────────────────
@@ -22,14 +22,14 @@
  *   2. DO_NOT_TRACK=1                                     -> opted out.
  *   3. HONEYCOMB_TELEMETRY=0                              -> opted out.
  *   4. state.json `telemetryDisabled: true`               -> opted out (OD-5).
- * Any gate hit: nothing leaves the box (AC-063d.4).
+ * Any gate hit: nothing leaves the box (AC-064d.4).
  *
- * ── Fire-and-forget, fail-soft (AC-063d.6) ─────────────────────────────────
+ * ── Fire-and-forget, fail-soft (AC-064d.6) ─────────────────────────────────
  * The POST is wrapped in an AbortController timeout + a try/catch that swallows
  * all errors. `emitTelemetry` resolves to a structured `EmitOutcome` but NEVER
  * rejects and NEVER throws into the calling healing loop.
  *
- * ── Allow-list scrubbing (AC-063d.5) ───────────────────────────────────────
+ * ── Allow-list scrubbing (AC-064d.5) ───────────────────────────────────────
  * Only fields on ALLOWED_ATTRIBUTE_KEYS leave the box. Credential contents,
  * tokens, file paths, and PII are structurally impossible: they are not on the
  * allow-list and `buildAllowedAttributes` drops anything not on it. The
@@ -102,7 +102,7 @@ export function otlpLogsUrl(host: string = POSTHOG_HOST): string {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Opt-out gate (AC-063d.4)
+// Opt-out gate (AC-064d.4)
 // ────────────────────────────────────────────────────────────────────────────
 
 /** The Honeycomb-wide opt-out env var name. `HONEYCOMB_TELEMETRY=0` = opted out. */
@@ -122,11 +122,11 @@ export function isOptedOut(env: NodeJS.ProcessEnv = process.env): boolean {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Allow-list scrubbing (AC-063d.5)
+// Allow-list scrubbing (AC-064d.5)
 // ────────────────────────────────────────────────────────────────────────────
 
 /**
- * The CLOSED allow-list of attribute keys that may leave the machine (AC-063d.5).
+ * The CLOSED allow-list of attribute keys that may leave the machine (AC-064d.5).
  * Any attribute not on this list is DROPPED by `buildAllowedAttributes`. Adding
  * a new telemetry field means adding a key here first -- there is no other egress
  * path.
@@ -175,7 +175,7 @@ export type AllowedAttributeKey = (typeof ALLOWED_ATTRIBUTE_KEYS)[number];
 const ALLOWED_KEY_SET: ReadonlySet<string> = new Set(ALLOWED_ATTRIBUTE_KEYS);
 
 /**
- * The BANNED key/value-shape set (AC-063d.5). The negative enumeration the
+ * The BANNED key/value-shape set (AC-064d.5). The negative enumeration the
  * `payload-no-pii` test asserts absent from every serialized payload. Grows as
  * the allow-list grows; the assertion stays one test.
  */
@@ -233,7 +233,7 @@ export function platformFacts(): { os: string; arch: string } {
 // Telemetry record types (the three streams)
 // ────────────────────────────────────────────────────────────────────────────
 
-/** An error event to emit as an ERROR-severity OTLP log (AC-063d.1). */
+/** An error event to emit as an ERROR-severity OTLP log (AC-064d.1). */
 export interface ErrorRecord {
 	readonly kind: "error";
 	/** A stable, scrubbed error class label (e.g. "ProbeTimeoutError"). Never a stack trace. */
@@ -246,7 +246,7 @@ export interface ErrorRecord {
 	readonly timestampMs: number;
 }
 
-/** An install-health snapshot to emit as an INFO OTLP log (AC-063d.2). */
+/** An install-health snapshot to emit as an INFO OTLP log (AC-064d.2). */
 export interface InstallHealthRecord {
 	readonly kind: "install-health";
 	/** The device_id (PRD-033 UUID) for correlation. */
@@ -263,7 +263,7 @@ export interface InstallHealthRecord {
 	readonly daemonVersion: string;
 }
 
-/** A completed remediation episode to emit as an INFO/WARN OTLP log (AC-063d.3). */
+/** A completed remediation episode to emit as an INFO/WARN OTLP log (AC-064d.3). */
 export interface EpisodeRecord {
 	readonly kind: "episode";
 	/** The source incident object (from incidents.ndjson). */
@@ -322,7 +322,7 @@ export interface EmitDeps {
 	readonly now?: () => number;
 	/**
 	 * The state.json telemetry-disabled flag. When true the gate opts out.
-	 * Passed separately (not the full state) so 063d stays independent of the
+	 * Passed separately (not the full state) so 064d stays independent of the
 	 * supervisor loop's state hydration cycle.
 	 */
 	readonly stateTelemetryDisabled?: boolean;
@@ -384,7 +384,7 @@ function buildResourceAttributes(input: {
 // ────────────────────────────────────────────────────────────────────────────
 
 /**
- * Build one OTLP log record for the error stream (AC-063d.1, severity ERROR).
+ * Build one OTLP log record for the error stream (AC-064d.1, severity ERROR).
  * The body is the error class; the per-record attributes carry the stream id and
  * the optional scrubbed detail. Credential contents never appear: the only field
  * that carries a free-form string is `error_detail`, which the caller must supply
@@ -406,7 +406,7 @@ function buildErrorLogRecord(rec: ErrorRecord) {
 }
 
 /**
- * Build one OTLP log record for the install-health stream (AC-063d.2, severity INFO).
+ * Build one OTLP log record for the install-health stream (AC-064d.2, severity INFO).
  * Carries daemon+HD versions, OS, health state, and a bucketed last-heal age so we
  * can spot boxes that never healed without leaking an exact timestamp.
  */
@@ -447,7 +447,7 @@ function bucketHealAge(seconds: number | null): string {
 }
 
 /**
- * Build one OTLP log record for the episode stream (AC-063d.3). The severity is
+ * Build one OTLP log record for the episode stream (AC-064d.3). The severity is
  * WARN when the episode was NOT resolved (daemon still unhealthy), INFO when it was.
  * The per-record attributes carry the ordered step outcomes as a comma-separated
  * fact list ("rung:outcome") -- no credential contents, no paths, just the structural
@@ -523,7 +523,7 @@ async function postOtlpLogs(body: string, key: string, url: string, deps: EmitDe
 // ────────────────────────────────────────────────────────────────────────────
 
 /**
- * THE SINGLE TELEMETRY EGRESS CHOKEPOINT (PRD-063d AC-063d.1 .. AC-063d.7).
+ * THE SINGLE TELEMETRY EGRESS CHOKEPOINT (PRD-064d AC-064d.1 .. AC-064d.7).
  *
  * All three telemetry streams (error, install-health, episode) flow through this
  * one function. Apply the gates in order, build the OTLP envelope, POST, and
@@ -583,7 +583,7 @@ export async function emitTelemetry(record: TelemetryRecord, deps: EmitDeps = {}
 
 		const body = serializeLogsData(logsData);
 
-		// Fire-and-forget POST (fail-soft, AC-063d.6).
+		// Fire-and-forget POST (fail-soft, AC-064d.6).
 		const ok = await postOtlpLogs(body, key, url, deps);
 		if (!ok) {
 			deps.logger?.warn("telemetry.send_failed", { stream: record.kind });
@@ -606,7 +606,7 @@ export async function emitTelemetry(record: TelemetryRecord, deps: EmitDeps = {}
 // Convenience typed helpers (each delegates to emitTelemetry)
 // ────────────────────────────────────────────────────────────────────────────
 
-/** Emit an error event (AC-063d.1). */
+/** Emit an error event (AC-064d.1). */
 export async function emitError(
 	input: Omit<ErrorRecord, "kind">,
 	deps?: EmitDeps,
@@ -614,7 +614,7 @@ export async function emitError(
 	return emitTelemetry({ kind: "error", ...input }, deps);
 }
 
-/** Emit an install-health snapshot (AC-063d.2). */
+/** Emit an install-health snapshot (AC-064d.2). */
 export async function emitInstallHealth(
 	input: Omit<InstallHealthRecord, "kind">,
 	deps?: EmitDeps,
@@ -622,7 +622,7 @@ export async function emitInstallHealth(
 	return emitTelemetry({ kind: "install-health", ...input }, deps);
 }
 
-/** Emit a completed remediation episode (AC-063d.3). */
+/** Emit a completed remediation episode (AC-064d.3). */
 export async function emitEpisode(
 	input: Omit<EpisodeRecord, "kind">,
 	deps?: EmitDeps,

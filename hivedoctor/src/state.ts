@@ -1,11 +1,11 @@
 /**
- * HiveDoctor durable state (`state.json`) - defensive read/write (PRD-063 data-model
- * section; PRD-063a "persist current rung + last-heal").
+ * HiveDoctor durable state (`state.json`) - defensive read/write (PRD-064 data-model
+ * section; PRD-064a "persist current rung + last-heal").
  *
  * `state.json` is HiveDoctor's memory across its own restarts: the current backoff
  * rung, the consecutive-restart-failure count, the last-known daemon health, and the
  * last successful heal. Persisting it means a reboot does NOT reset a crash loop's
- * memory (063a technical consideration: "persisted across HiveDoctor restarts so a
+ * memory (064a technical consideration: "persisted across HiveDoctor restarts so a
  * reboot does not reset a crash loop's memory").
  *
  * Both read and write are defensive (design principle 1, "incapable of crashing"):

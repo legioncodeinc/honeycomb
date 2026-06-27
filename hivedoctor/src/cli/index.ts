@@ -1,5 +1,5 @@
 /**
- * The `hivedoctor` CLI entry point (PRD-063f - the bin target).
+ * The `hivedoctor` CLI entry point (PRD-064f - the bin target).
  *
  * Builds the PRODUCTION {@link CliContext} - real stdout/stderr, a readline confirm
  * prompt, and live injected deps wired from the resolved config + the same primitives the
@@ -8,7 +8,7 @@
  * The heavy assembly (probe, ladder, update engine) is constructed here lazily for the CLI
  * surface; the long-running watchdog assembly lives in src/compose. Keeping the CLI's deps
  * here (rather than spinning the whole supervisor) means `status`/`diagnose` are cheap and
- * work with the daemon down (AC-063f.6).
+ * work with the daemon down (AC-064f.6).
  *
  * Built-ins only: node:readline/promises for the confirm prompt, node:process for argv +
  * streams. The `self-update` action is the SOLE path wired to HiveDoctor's own package.
@@ -96,7 +96,7 @@ export function buildCliContext(argv: readonly string[]): CliContext {
 	let lastRestartAt: number | null = null;
 	const clock = { now: () => Date.now() };
 	const restartRung = createRestartRung({
-		// The CLI cannot itself restart the OS service (063b); a manual `restart` reports it.
+		// The CLI cannot itself restart the OS service (064b); a manual `restart` reports it.
 		restart: async () => {
 			logger.warn("cli.restart_no_os_service");
 			return false;
@@ -143,7 +143,7 @@ export function buildCliContext(argv: readonly string[]): CliContext {
 
 	const selfUpdate = createSelfUpdate({ runner, logger });
 
-	// The real 063b OS-service module. The unit it registers execs `node <this-script> run`,
+	// The real 064b OS-service module. The unit it registers execs `node <this-script> run`,
 	// so the exec path is the running CLI script (process.argv[1]); the bundled bin resolves to
 	// the same path under a global install. Userland scope is the default; an operator opts into
 	// a system unit via HIVEDOCTOR_SERVICE_SYSTEM=1 (the enterprise path, parent index ruling).
@@ -170,7 +170,7 @@ export function buildCliContext(argv: readonly string[]): CliContext {
 				return { lastHealAt: s.lastHealAt, lastKnownHealth: s.lastKnownHealth };
 			},
 			// serviceState is the SYNC coarse read `status` prints; the real async probe is
-			// serviceStatus() (exported from src/service), wired for 063g/063f follow-up. Kept
+			// serviceStatus() (exported from src/service), wired for 064g/064f follow-up. Kept
 			// "unknown" here so a sync `status` never blocks on a shell-out.
 			serviceState: () => "unknown",
 			serviceModule,
@@ -200,8 +200,8 @@ export function buildCliContext(argv: readonly string[]): CliContext {
 }
 
 /**
- * The long-running `run` entry the OS service execs (PRD-063b). It is NOT a return-then-exit
- * command: it builds the full watchdog assembly (compose root, 063f) and keeps the process
+ * The long-running `run` entry the OS service execs (PRD-064b). It is NOT a return-then-exit
+ * command: it builds the full watchdog assembly (compose root, 064f) and keeps the process
  * alive until the service manager sends SIGTERM/SIGINT, then stops every loop gracefully so
  * the OS records a clean shutdown rather than a crash. Resolves with an exit code only after
  * the process is asked to stop. Crash-safe: a wiring error is caught and mapped to exit 1.
@@ -223,7 +223,7 @@ async function runWatchdog(argv: readonly string[]): Promise<number> {
 /** Run the CLI: build the context, dispatch, resolve the exit code. Never throws. */
 export async function runCli(argv: readonly string[]): Promise<number> {
 	try {
-		// `run` is the long-running OS-service entry (063b); it bypasses the return-then-exit
+		// `run` is the long-running OS-service entry (064b); it bypasses the return-then-exit
 		// dispatcher and stays alive until a termination signal.
 		if (argv[0] === "run") {
 			return await runWatchdog(argv);

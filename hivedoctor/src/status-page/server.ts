@@ -1,5 +1,5 @@
 /**
- * HiveDoctor local status page (PRD-063g AC-063g.4).
+ * HiveDoctor local status page (PRD-064g AC-064g.4).
  *
  * A minimal read-only HTTP server bound to 127.0.0.1 on a config-driven port
  * (distinct from 3850/3851 used by the primary daemon and its dashboard). The
@@ -12,7 +12,7 @@
  *   GET /status.json  -- the same data as JSON; machine-readable.
  *   Any other path    -- 404 with a short JSON body.
  *
- * Design constraints (PRD-063g hard constraints):
+ * Design constraints (PRD-064g hard constraints):
  *   - Node built-ins ONLY: `node:http`. Zero new runtime deps.
  *   - Bind errors are SWALLOWED + LOGGED; a port-conflict or EACCES must never
  *     crash HiveDoctor (design principle 1, "incapable of crashing").
@@ -36,7 +36,7 @@ import type { NeedsAttentionFile } from "../escalation/needs-attention-store.js"
 /** Coarse health snapshot the status page reads from the supervisor. */
 export type StatusPageHealth = "ok" | "degraded" | "unreachable" | "unknown";
 
-/** The JSON shape served at GET /status.json (AC-063g.4). */
+/** The JSON shape served at GET /status.json (AC-064g.4). */
 export interface StatusJson {
 	readonly health: StatusPageHealth;
 	/** Null when no escalation has occurred. */
@@ -119,7 +119,7 @@ function buildSuggestedCommands(
 				cmds.push("npm uninstall -g @deeplake/hivemind");
 				break;
 			case "clear-credentials":
-				// Deferred action -- we recommend but do not perform it (AC-063c.3 / OD-4).
+				// Deferred action -- we recommend but do not perform it (AC-064c.3 / OD-4).
 				cmds.push("# Review ~/.deeplake/credentials.json (HiveDoctor cannot clear it automatically)");
 				break;
 			case "investigate":

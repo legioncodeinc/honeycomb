@@ -1,5 +1,5 @@
 /**
- * Template-generation tests (PRD-063b): the rendered plist / systemd unit / Scheduled
+ * Template-generation tests (PRD-064b): the rendered plist / systemd unit / Scheduled
  * Task XML carry the correct label, exec path, restart-on-crash, and start-on-boot
  * directives per platform. Snapshot-style content assertions.
  */

@@ -1,5 +1,5 @@
 /**
- * Tail the local incident log for the `logs` command (PRD-063f Scope).
+ * Tail the local incident log for the `logs` command (PRD-064f Scope).
  *
  * Reads the last N lines of `incidents.ndjson` from HiveDoctor's workspace dir. The
  * file is append-only NDJSON written by src/incidents.ts; this reader is read-only and

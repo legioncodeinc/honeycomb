@@ -1,14 +1,14 @@
 /**
- * The 30-minute auto-update poll loop (PRD-063e AC-063e.1 / .4 / .6).
+ * The 30-minute auto-update poll loop (PRD-064e AC-064e.1 / .4 / .6).
  *
  * Wakes on a 30-minute TTL, jittered to avoid a thundering herd against npm + the
- * install CDN (PRD-063e Scope: "jittered to avoid a thundering herd"), and on each tick
+ * install CDN (PRD-064e Scope: "jittered to avoid a thundering herd"), and on each tick
  * runs ONE update transaction through {@link file://./update-engine.ts}. The loop owns
  * the cadence; the engine owns the gate + the transaction. Serialization with the watch
  * loop's rung-2 reinstall is the engine's job (the shared install lock), so two installs
- * can never overlap even though the poll runs on its own timer (AC-063e.6).
+ * can never overlap even though the poll runs on its own timer (AC-064e.6).
  *
- * Opt-out (AC-063e.4): when `autoUpdateDisabled` is true the loop NEVER ticks -- it is a
+ * Opt-out (AC-064e.4): when `autoUpdateDisabled` is true the loop NEVER ticks -- it is a
  * no-op `start()` -- so a disabled box does no registry/CDN polling at all. (The engine
  * ALSO declines via the gate; this is belt-and-suspenders so a disabled install is
  * completely quiet on the network.)
@@ -25,7 +25,7 @@
 import type { Logger } from "../logger.js";
 import type { UpdateEngine, UpdateTransactionResult } from "./update-engine.js";
 
-/** The default poll TTL: 30 minutes (PRD-063e). */
+/** The default poll TTL: 30 minutes (PRD-064e). */
 export const DEFAULT_POLL_INTERVAL_MS = 30 * 60 * 1000;
 
 /** The default jitter fraction: up to +/-10% of the interval. */
@@ -49,7 +49,7 @@ export interface UpdatePollLoopDeps {
 	readonly clock: PollClock;
 	/**
 	 * True when auto-update is disabled (`--no-auto-update`, env, or a pin). A disabled
-	 * loop never ticks and never polls the network (AC-063e.4).
+	 * loop never ticks and never polls the network (AC-064e.4).
 	 */
 	readonly autoUpdateDisabled: boolean;
 	/** Base poll TTL in ms (default {@link DEFAULT_POLL_INTERVAL_MS}). */
@@ -95,7 +95,7 @@ export function createUpdatePollLoop(deps: UpdatePollLoopDeps): UpdatePollLoop {
 	let running = false;
 
 	async function tick(): Promise<UpdateTransactionResult | null> {
-		// A disabled loop never ticks -- no registry/CDN poll at all (AC-063e.4).
+		// A disabled loop never ticks -- no registry/CDN poll at all (AC-064e.4).
 		if (deps.autoUpdateDisabled) return null;
 		try {
 			const result = await deps.engine.runUpdateTransaction();

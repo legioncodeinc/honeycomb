@@ -1,4 +1,4 @@
-# PRD-063: HiveDoctor - Self-Healing Watchdog Daemon (v1)
+# PRD-064: HiveDoctor - Self-Healing Watchdog Daemon (v1)
 
 > **Status:** Backlog
 > **Priority:** P1
@@ -44,14 +44,14 @@ Source of truth for the failure modes this addresses: the operator-pain memory s
 
 | Sub-PRD | Scope | Status |
 |---|---|---|
-| [`prd-063a-supervisor-core-and-lifecycle`](./prd-063a-hivedoctor-self-healing-watchdog-supervisor-core-and-lifecycle.md) | The watch loop, health probing, exponential-backoff restart, and the troubleshooting state machine | Draft |
-| [`prd-063b-self-supervision-and-install-integration`](./prd-063b-hivedoctor-self-healing-watchdog-self-supervision-and-install-integration.md) | "Who watches the watchdog" - OS service / scheduled-task registration, baked into the bootstrap installer, opt-out | Draft |
-| [`prd-063c-remediation-ladder`](./prd-063c-hivedoctor-self-healing-watchdog-remediation-ladder.md) | The escalating repair actions: reinstall primary, clear credentials, uninstall Hivemind - with authority tiers + idempotency | Draft |
-| [`prd-063d-telemetry-and-observability`](./prd-063d-hivedoctor-self-healing-watchdog-telemetry-and-observability.md) | PostHog error events, OTLP installation-health, OTLP troubleshooting spans, and the opt-out contract | Draft |
-| [`prd-063e-auto-update-engine`](./prd-063e-hivedoctor-self-healing-watchdog-auto-update-engine.md) | 30-min npm `@latest` poll for the primary daemon, blessed-version gate, post-update health verify + rollback | Draft |
-| [`prd-063f-cli-and-ux`](./prd-063f-hivedoctor-self-healing-watchdog-cli-and-ux.md) | The ASCII art, diagnostic + manual-fix commands, and the explicit `self-update` for HiveDoctor's own package | Draft |
-| [`prd-063g-dashboard-escalation-reporting`](./prd-063g-hivedoctor-self-healing-watchdog-dashboard-escalation-reporting.md) | How an unhealable state reaches the dashboard when the daemon is down: local status page + hosted escalation sink + incident file | Draft |
-| [`prd-063h-primary-daemon-os-native-service`](./prd-063h-hivedoctor-self-healing-watchdog-primary-daemon-os-native-service.md) | Make the Honeycomb primary daemon itself an OS-native service (liveness floor under HiveDoctor's intelligent healing) | Draft |
+| [`prd-064a-supervisor-core-and-lifecycle`](./prd-064a-hivedoctor-self-healing-watchdog-supervisor-core-and-lifecycle.md) | The watch loop, health probing, exponential-backoff restart, and the troubleshooting state machine | Draft |
+| [`prd-064b-self-supervision-and-install-integration`](./prd-064b-hivedoctor-self-healing-watchdog-self-supervision-and-install-integration.md) | "Who watches the watchdog" - OS service / scheduled-task registration, baked into the bootstrap installer, opt-out | Draft |
+| [`prd-064c-remediation-ladder`](./prd-064c-hivedoctor-self-healing-watchdog-remediation-ladder.md) | The escalating repair actions: reinstall primary, clear credentials, uninstall Hivemind - with authority tiers + idempotency | Draft |
+| [`prd-064d-telemetry-and-observability`](./prd-064d-hivedoctor-self-healing-watchdog-telemetry-and-observability.md) | PostHog error events, OTLP installation-health, OTLP troubleshooting spans, and the opt-out contract | Draft |
+| [`prd-064e-auto-update-engine`](./prd-064e-hivedoctor-self-healing-watchdog-auto-update-engine.md) | 30-min npm `@latest` poll for the primary daemon, blessed-version gate, post-update health verify + rollback | Draft |
+| [`prd-064f-cli-and-ux`](./prd-064f-hivedoctor-self-healing-watchdog-cli-and-ux.md) | The ASCII art, diagnostic + manual-fix commands, and the explicit `self-update` for HiveDoctor's own package | Draft |
+| [`prd-064g-dashboard-escalation-reporting`](./prd-064g-hivedoctor-self-healing-watchdog-dashboard-escalation-reporting.md) | How an unhealable state reaches the dashboard when the daemon is down: local status page + hosted escalation sink + incident file | Draft |
+| [`prd-064h-primary-daemon-os-native-service`](./prd-064h-hivedoctor-self-healing-watchdog-primary-daemon-os-native-service.md) | Make the Honeycomb primary daemon itself an OS-native service (liveness floor under HiveDoctor's intelligent healing) | Draft |
 
 ---
 
@@ -76,24 +76,24 @@ Source of truth for the failure modes this addresses: the operator-pain memory s
 
 ```
             OS service manager (launchd / systemd / Windows service or Scheduled Task)
-                                   │ supervises + restarts on crash/reboot  (063b)
+                                   │ supervises + restarts on crash/reboot  (064b)
                                    ▼
    ┌───────────────────────────  hivedoctor process  ───────────────────────────┐
-   │  watch loop (063a) ── probe http://127.0.0.1:3850/health every N s          │
+   │  watch loop (064a) ── probe http://127.0.0.1:3850/health every N s          │
    │        │ unhealthy                                                          │
    │        ▼                                                                    │
-   │  remediation ladder (063a + 063c), exponential backoff between rungs:       │
+   │  remediation ladder (064a + 064c), exponential backoff between rungs:       │
    │    1. restart daemon (precedent: src/daemon/restart-helper.ts)   [auto]      │
    │    2. reinstall primary, after 3 failed restarts                 [auto]      │
    │    3. uninstall conflicting Hivemind (@deeplake/hivemind)        [auto]      │
-   │    4. escalate → dashboard + telemetry "needs attention"  (063g) [auto]      │
+   │    4. escalate → dashboard + telemetry "needs attention"  (064g) [auto]      │
    │    (clear-credentials: DEFERRED, not in v1 - escalate instead)              │
    │                                                                            │
-   │  auto-update engine (063e) ── 30-min npm @latest poll, blessed-gate,        │
+   │  auto-update engine (064e) ── 30-min npm @latest poll, blessed-gate,        │
    │                               verify /health, rollback on fail              │
    │                                                                            │
-   │  telemetry (063d) ── PostHog errors + OTLP install-health + OTLP steps      │
-   │  CLI + ASCII art (063f) ── manual diagnostics, fixes, explicit self-update  │
+   │  telemetry (064d) ── PostHog errors + OTLP install-health + OTLP steps      │
+   │  CLI + ASCII art (064f) ── manual diagnostics, fixes, explicit self-update  │
    └────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -105,7 +105,7 @@ Source of truth for the failure modes this addresses: the operator-pain memory s
 2. **More reliable than the watched.** HiveDoctor is supervised by the OS, not by the primary daemon. The two never depend on each other to stay alive.
 3. **Loopback + registry only.** HiveDoctor reaches the daemon over `127.0.0.1` and the world over npm + the telemetry sink. No new inbound ports, no new auth surface.
 4. **Silent on the happy path, loud on the hard path.** A successful restart is a low-noise log line; an unhealable install is a high-signal escalation.
-5. **Least blast radius.** Destructive actions are gated by an authority tier (063c). A bad auto-update cannot propagate fleet-wide without passing the blessed-version gate (063e).
+5. **Least blast radius.** Destructive actions are gated by an authority tier (064c). A bad auto-update cannot propagate fleet-wide without passing the blessed-version gate (064e).
 6. **Honest opt-out.** Telemetry and auto-actions honor `DO_NOT_TRACK` / `HONEYCOMB_TELEMETRY=0` / the install flag, verifiable by a single egress chokepoint.
 
 ---
@@ -115,13 +115,13 @@ Source of truth for the failure modes this addresses: the operator-pain memory s
 Selection rule (per Mario, 2026-06-26): **fold code from MIT-licensed projects only**; Apache-2.0 and AGPL are study-only. Licenses to be re-verified at implementation time.
 
 **Fold / fork candidates (MIT) - pending verification:**
-- `node-windows` / `node-mac` / `node-linux` (MIT) - service-registration helpers for the three OS service managers (063b). Strong candidate, but weigh against the "Node-built-ins-only" principle: prefer shelling out to `launchctl` / `systemctl --user` / `sc.exe` / `schtasks` directly and vendoring only the tiny plist/unit/XML templates, to avoid taking on a dependency in the can't-crash process.
+- `node-windows` / `node-mac` / `node-linux` (MIT) - service-registration helpers for the three OS service managers (064b). Strong candidate, but weigh against the "Node-built-ins-only" principle: prefer shelling out to `launchctl` / `systemctl --user` / `sc.exe` / `schtasks` directly and vendoring only the tiny plist/unit/XML templates, to avoid taking on a dependency in the can't-crash process.
 
 **Study only (ideas free, code not vendored):**
-- **systemd** unit semantics (`Restart=always`, `RestartSec`, `StartLimitIntervalSec`/`StartLimitBurst`) - the canonical model for "restart with backoff, give up after a burst, surface failure." HiveDoctor's self-supervision (063b) and ladder backoff (063a) mirror this.
+- **systemd** unit semantics (`Restart=always`, `RestartSec`, `StartLimitIntervalSec`/`StartLimitBurst`) - the canonical model for "restart with backoff, give up after a burst, surface failure." HiveDoctor's self-supervision (064b) and ladder backoff (064a) mirror this.
 - **PM2** (AGPL) - god-daemon supervision, exponential restart delay, and the `pm2 resurrect` reboot-persistence pattern. Study its backoff and crash-loop detection; do not vendor.
-- **Sentry SDK** crash-reporting ergonomics (breadcrumbs, before-send scrubbing) - informs the telemetry scrubbing contract in 063d. We do NOT adopt Sentry (OD-2 resolved: PostHog only); PostHog Error Tracking covers exception grouping via `$exception` events.
-- **OpenTelemetry** semantic conventions for spans/resource attributes - the wire shape for installation-health and troubleshooting telemetry (063d).
+- **Sentry SDK** crash-reporting ergonomics (breadcrumbs, before-send scrubbing) - informs the telemetry scrubbing contract in 064d. We do NOT adopt Sentry (OD-2 resolved: PostHog only); PostHog Error Tracking covers exception grouping via `$exception` events.
+- **OpenTelemetry** semantic conventions for spans/resource attributes - the wire shape for installation-health and troubleshooting telemetry (064d).
 
 **What we reuse from our own code:**
 - Restart precedent: [`src/daemon/restart-helper.ts`](../../../../src/daemon/restart-helper.ts) (waits for old `/health` down, then spawns fresh detached) and the bounded-backoff pattern in [`embed-supervisor.ts`](../../../../src/daemon/runtime/services/embed-supervisor.ts) and [`poll-backoff.ts`](../../../../src/daemon/runtime/services/poll-backoff.ts).
@@ -137,7 +137,7 @@ Selection rule (per Mario, 2026-06-26): **fold code from MIT-licensed projects o
 No Deep Lake changes. HiveDoctor keeps a small local **incident log + state file** under its own workspace dir (default `~/.honeycomb/hivedoctor/`):
 
 - `state.json` - last-known daemon health, current backoff rung, last successful heal, auto-update channel + pinned/blessed version, opt-out flags.
-- `incidents.ndjson` - append-only, bounded (size-capped + rotated) record of each remediation episode: timestamp, trigger, `/health` reasons, ordered steps attempted, outcomes. This is the source for the dashboard escalation report (063g) and the OTLP troubleshooting spans (063d).
+- `incidents.ndjson` - append-only, bounded (size-capped + rotated) record of each remediation episode: timestamp, trigger, `/health` reasons, ordered steps attempted, outcomes. This is the source for the dashboard escalation report (064g) and the OTLP troubleshooting spans (064d).
 
 Both are plain files written defensively (the same `canWriteDir()` fallback discipline the daemon uses) so a read-only or wrong cwd never wedges HiveDoctor.
 
@@ -147,18 +147,18 @@ Both are plain files written defensively (the same `canWriteDir()` fallback disc
 
 No new inbound daemon routes are strictly required for the watch loop (it consumes the existing `/health`). Two small additions are scoped in sub-PRDs and remain open:
 
-- **(063g)** A way for the dashboard to read HiveDoctor's incident log when the daemon is up (read a file the daemon already exposes, or a tiny localhost status endpoint HiveDoctor serves) - chosen in 063g, see Open Questions.
-- **(063e)** A "blessed version" lookup the auto-update engine consults before pulling `@latest` (a static JSON on the install CDN, or the telemetry/control-plane host) - chosen in 063e, see Open Questions.
+- **(064g)** A way for the dashboard to read HiveDoctor's incident log when the daemon is up (read a file the daemon already exposes, or a tiny localhost status endpoint HiveDoctor serves) - chosen in 064g, see Open Questions.
+- **(064e)** A "blessed version" lookup the auto-update engine consults before pulling `@latest` (a static JSON on the install CDN, or the telemetry/control-plane host) - chosen in 064e, see Open Questions.
 
 ---
 
 ## Risks
 
-- **Auto-update fleet brick.** A bad `@latest` publish auto-propagating to every install within 30 minutes is the single highest risk. Mitigated by the blessed-version gate + post-update `/health` verify + rollback (063e). The gate is mandatory, not optional.
-- **Destructive auto-action data/UX loss.** Clearing credentials logs the user out; uninstalling Hivemind touches a different product. Mitigated by the authority tier (063c): only the low-blast rungs auto-fire; the high-blast rungs need explicit or remote authorization.
+- **Auto-update fleet brick.** A bad `@latest` publish auto-propagating to every install within 30 minutes is the single highest risk. Mitigated by the blessed-version gate + post-update `/health` verify + rollback (064e). The gate is mandatory, not optional.
+- **Destructive auto-action data/UX loss.** Clearing credentials logs the user out; uninstalling Hivemind touches a different product. Mitigated by the authority tier (064c): only the low-blast rungs auto-fire; the high-blast rungs need explicit or remote authorization.
 - **Watchdog war / double-restart.** HiveDoctor and the daemon's own lock/restart-helper racing to restart could loop. Mitigated by respecting the PID/lock (`~/.honeycomb/daemon.pid`) and a cooldown after any restart HiveDoctor did not initiate.
-- **The "who watches the watchdog" gap.** If self-supervision (063b) is weak, the whole premise fails. The OS service manager is the answer; a userland self-relaunch is a fallback, not the design.
-- **Telemetry trust.** Shipping a process that phones home by default is a trust risk; the opt-out must be honest, documented at install, and verifiable (single chokepoint, 063d).
+- **The "who watches the watchdog" gap.** If self-supervision (064b) is weak, the whole premise fails. The OS service manager is the answer; a userland self-relaunch is a fallback, not the design.
+- **Telemetry trust.** Shipping a process that phones home by default is a trust risk; the opt-out must be honest, documented at install, and verifiable (single chokepoint, 064d).
 
 ---
 
@@ -166,22 +166,22 @@ No new inbound daemon routes are strictly required for the watch loop (it consum
 
 The eight ODs that shaped the build are now resolved. Recorded here as the binding rulings; residual sub-questions are in the "Remaining sub-questions" list below.
 
-- **OD-1 (self-supervision model) - RESOLVED: OS-native.** HiveDoctor is supervised by the OS service manager per platform (launchd / systemd-user / Windows Service or Scheduled Task). Userland self-relaunch is a fallback only; mutual daemon-and-doctor supervision is rejected. **Extension:** the Honeycomb primary daemon should *also* be OS-native - see new sub-PRD [063h](./prd-063h-hivedoctor-self-healing-watchdog-primary-daemon-os-native-service.md). The OS service gives a liveness floor; HiveDoctor remains the intelligent healing layer above it (wedged-but-alive, stale routes, version updates, escalation).
+- **OD-1 (self-supervision model) - RESOLVED: OS-native.** HiveDoctor is supervised by the OS service manager per platform (launchd / systemd-user / Windows Service or Scheduled Task). Userland self-relaunch is a fallback only; mutual daemon-and-doctor supervision is rejected. **Extension:** the Honeycomb primary daemon should *also* be OS-native - see new sub-PRD [064h](./prd-064h-hivedoctor-self-healing-watchdog-primary-daemon-os-native-service.md). The OS service gives a liveness floor; HiveDoctor remains the intelligent healing layer above it (wedged-but-alive, stale routes, version updates, escalation).
 - **OD-2 (telemetry sinks) - RESOLVED: PostHog only, via PostHog Logs (OTLP).** No Sentry. HiveDoctor's three streams flow as OTLP **log records** to PostHog Logs (`{host}/i/v1/logs`, Bearer `phc_` project token, OTLP/HTTP). The logs exporter is OTLP/HTTP+**JSON**, so we hand-roll a zero-dependency JSON POST and honor the built-ins-only principle without dropping OTLP. Real exceptions may additionally go to PostHog Error Tracking (`captureException` → `$exception`) for issue-grouping. PostHog Logs is free to 50GB/mo. (Verified against PostHog Logs docs, 2026-06-27.)
 - **OD-3 (auto-update safety) - RESOLVED: on by default + blessed-version gate + verify + rollback.** The 30-min `@latest` poll stands; the server-controlled blessed channel is the mandatory safety so a bad publish cannot auto-propagate fleet-wide.
 - **OD-4 (remediation authority) - RESOLVED.** restart = auto; reinstall = auto **after 3 failed restarts**; uninstall conflicting Hivemind = **auto, always** (whenever a conflicting `@deeplake/hivemind` is detected); **clear-credentials = deferred, not in v1** (escalate instead of purging).
 - **OD-5 (opt-out granularity) - RESOLVED: master switch + dashboard toggles.** `--no-hivedoctor` at install is the only install-time switch. Finer toggles (telemetry, auto-update, observe-only) live in the dashboard (telemetry env opt-outs `DO_NOT_TRACK` / `HONEYCOMB_TELEMETRY=0` are still honored).
 - **OD-6 (package boundary) - RESOLVED.** `@legioncodeinc/hivedoctor` is a new top-level `hivedoctor/` directory in this repo, its own dependency-light package with its own release job.
-- **OD-7 (dashboard reachability when daemon is down) - RESOLVED: all three paths in v1.** A minimal local status page on HiveDoctor's own loopback port, a hosted escalation sink (so we see failures remotely), and the incident file the dashboard renders on recovery. See [063g](./prd-063g-hivedoctor-self-healing-watchdog-dashboard-escalation-reporting.md).
+- **OD-7 (dashboard reachability when daemon is down) - RESOLVED: all three paths in v1.** A minimal local status page on HiveDoctor's own loopback port, a hosted escalation sink (so we see failures remotely), and the incident file the dashboard renders on recovery. See [064g](./prd-064g-hivedoctor-self-healing-watchdog-dashboard-escalation-reporting.md).
 - **OD-8 (embeddings scope) - RESOLVED: indirect.** Heal embeddings by restarting the primary, which restarts its embed child. No second supervisor over `3851` in v1.
 
 ### Sub-questions (resolved 2026-06-27)
 
-- **OTLP transport (063d) - RESOLVED: PostHog Logs, hand-rolled OTLP/JSON, zero deps.** Stream telemetry as OTLP log records to `{host}/i/v1/logs`; the OTLP/HTTP+JSON encoding lets us POST via `fetch` with no OpenTelemetry SDK dependency, honoring built-ins-only. Exceptions may also hit Error Tracking for grouping.
-- **Blessed-channel (063e) - RESOLVED: static JSON on the install CDN.** A `blessed-version.json` on `get.theapiary.sh`, flipped by a CI "bless" step gated on canary + smoke health. Fail-closed (stay on current version) if unreachable.
-- **Hosted escalation sink (063g) - RESOLVED: reuse PostHog + alert.** An escalation is a high-severity log record/event we already send; add a PostHog alert on it. Correlate broken-auth installs by the stable per-install `device_id` (PRD-033 UUID), not org id. Graduate to PRD-061's surface later.
-- **Windows default (063b/063h) - RESOLVED: per-user Scheduled Task.** No admin / no UAC, lowest install friction, for both HiveDoctor and the primary daemon. Windows Service offered as an enterprise opt-in.
-- **Bootstrap mechanic (063b) - default: second global.** `npm i -g @legioncodeinc/hivedoctor`, keeping HiveDoctor's lifecycle independent of the Honeycomb tarball (revisit only if the second global proves fragile on install).
+- **OTLP transport (064d) - RESOLVED: PostHog Logs, hand-rolled OTLP/JSON, zero deps.** Stream telemetry as OTLP log records to `{host}/i/v1/logs`; the OTLP/HTTP+JSON encoding lets us POST via `fetch` with no OpenTelemetry SDK dependency, honoring built-ins-only. Exceptions may also hit Error Tracking for grouping.
+- **Blessed-channel (064e) - RESOLVED: static JSON on the install CDN.** A `blessed-version.json` on `get.theapiary.sh`, flipped by a CI "bless" step gated on canary + smoke health. Fail-closed (stay on current version) if unreachable.
+- **Hosted escalation sink (064g) - RESOLVED: reuse PostHog + alert.** An escalation is a high-severity log record/event we already send; add a PostHog alert on it. Correlate broken-auth installs by the stable per-install `device_id` (PRD-033 UUID), not org id. Graduate to PRD-061's surface later.
+- **Windows default (064b/064h) - RESOLVED: per-user Scheduled Task.** No admin / no UAC, lowest install friction, for both HiveDoctor and the primary daemon. Windows Service offered as an enterprise opt-in.
+- **Bootstrap mechanic (064b) - default: second global.** `npm i -g @legioncodeinc/hivedoctor`, keeping HiveDoctor's lifecycle independent of the Honeycomb tarball (revisit only if the second global proves fragile on install).
 
 ---
 
@@ -189,7 +189,7 @@ The eight ODs that shaped the build are now resolved. Recorded here as the bindi
 
 - [`prd-050-quick-install-and-guided-setup`](../../completed/prd-050-quick-install-and-guided-setup/prd-050-quick-install-and-guided-setup-index.md) - the installer HiveDoctor bootstraps into; [`prd-050d`](../../completed/prd-050-quick-install-and-guided-setup/prd-050d-quick-install-and-guided-setup-hivemind-coexistence-and-migration.md) (Hivemind coexistence) and [`prd-050e`](../../completed/prd-050-quick-install-and-guided-setup/prd-050e-quick-install-and-guided-setup-operator-adoption-telemetry.md) (adoption telemetry chokepoint we mirror).
 - [`prd-054-fleet-observation-control-plane`](../prd-054-fleet-observation-control-plane/prd-054-fleet-observation-control-plane-index.md) and [`prd-055`](../prd-055-fleet-control-enrollment-and-mint-authority/prd-055-fleet-control-enrollment-and-mint-authority-index.md) - the fleet observe/command halves HiveDoctor stays clear of (it is local self-healing, not remote command).
-- [`prd-061-hosted-roi-admin-surface`](../prd-061-hosted-roi-admin-surface/prd-061-hosted-roi-admin-surface-index.md) - candidate hosted escalation sink for 063g.
+- [`prd-061-hosted-roi-admin-surface`](../prd-061-hosted-roi-admin-surface/prd-061-hosted-roi-admin-surface-index.md) - candidate hosted escalation sink for 064g.
 - `library/knowledge/private/operations/observability-and-degradation.md` - the degradation/health model HiveDoctor reads.
 - `library/knowledge/private/data/deeplake-storage.md` - why presence/incident state must stay off the Deep Lake substrate.
 - Operator-pain precedents this PRD exists to fix: daemon boot wedge on memory_jobs backlog; secrets 502 = daemon cwd is system32; stale global daemon serves old routes; active workspace authority is `~/.deeplake/credentials.json`.

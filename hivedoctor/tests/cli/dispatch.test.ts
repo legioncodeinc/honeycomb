@@ -1,5 +1,5 @@
 /**
- * CLI dispatcher acceptance tests (PRD-063f AC-063f.1 .. AC-063f.6).
+ * CLI dispatcher acceptance tests (PRD-064f AC-064f.1 .. AC-064f.6).
  *
  * Each test drives the REAL dispatcher over a fully-faked context (captured stdout,
  * scripted confirm, spy-able deps). No process is spawned, no network/npm/daemon touched.
@@ -11,8 +11,8 @@ import { dispatch, EXIT_OK, EXIT_DECLINED, EXIT_ERROR } from "../../src/cli/disp
 import { buildCliHarness, fakeLadder } from "./helpers/fake-cli.js";
 import { resolveOptOut } from "../../src/cli/opt-out.js";
 
-describe("dispatch (PRD-063f)", () => {
-	describe("AC-063f.1: bare invocation -> ASCII art + menu", () => {
+describe("dispatch (PRD-064f)", () => {
+	describe("AC-064f.1: bare invocation -> ASCII art + menu", () => {
 		it("renders the banner art and the command menu with no args", async () => {
 			const h = buildCliHarness();
 			const code = await dispatch([], h.ctx);
@@ -36,7 +36,7 @@ describe("dispatch (PRD-063f)", () => {
 		});
 	});
 
-	describe("AC-063f.2: status prints health/service/versions/last-heal/opt-out", () => {
+	describe("AC-064f.2: status prints health/service/versions/last-heal/opt-out", () => {
 		it("prints every required field", async () => {
 			const h = buildCliHarness({
 				classification: { kind: "degraded", reasons: { storage: "unreachable" } },
@@ -65,7 +65,7 @@ describe("dispatch (PRD-063f)", () => {
 		});
 	});
 
-	describe("AC-063f.3: diagnose recommends a rung and takes NO action", () => {
+	describe("AC-064f.3: diagnose recommends a rung and takes NO action", () => {
 		it("reports the recommended rung without running the ladder", async () => {
 			const ladder = fakeLadder({ decideResult: { rung: 2, advanced: true } });
 			const h = buildCliHarness({
@@ -92,7 +92,7 @@ describe("dispatch (PRD-063f)", () => {
 		});
 	});
 
-	describe("AC-063f.4: uninstall-hivemind confirms before acting; no clear-credentials command", () => {
+	describe("AC-064f.4: uninstall-hivemind confirms before acting; no clear-credentials command", () => {
 		it("confirms, then runs rung 3 on yes", async () => {
 			const ladder = fakeLadder({ runResult: { ok: true, action: "uninstall-conflicting-hivemind" } });
 			const h = buildCliHarness({
@@ -132,7 +132,7 @@ describe("dispatch (PRD-063f)", () => {
 		});
 	});
 
-	describe("AC-063f.5: self-update is the ONLY path that updates HiveDoctor's own package", () => {
+	describe("AC-064f.5: self-update is the ONLY path that updates HiveDoctor's own package", () => {
 		it("`self-update` calls the self-update action", async () => {
 			const h = buildCliHarness();
 			const code = await dispatch(["self-update"], h.ctx);
@@ -182,7 +182,7 @@ describe("dispatch (PRD-063f)", () => {
 		});
 	});
 
-	describe("AC-063f.6: status/diagnose work when the daemon is down", () => {
+	describe("AC-064f.6: status/diagnose work when the daemon is down", () => {
 		it("status works with an unreachable daemon (null version)", async () => {
 			const h = buildCliHarness({
 				classification: { kind: "unreachable-refused", detail: "ECONNREFUSED" },
@@ -207,14 +207,14 @@ describe("dispatch (PRD-063f)", () => {
 	});
 
 	describe("service stubs + restart + logs", () => {
-		it("install-service prints 'not yet available' when 063b is not wired", async () => {
+		it("install-service prints 'not yet available' when 064b is not wired", async () => {
 			const h = buildCliHarness();
 			const code = await dispatch(["install-service"], h.ctx);
 			expect(code).toBe(EXIT_OK);
 			expect(h.out.text()).toContain("not yet available");
 		});
 
-		it("install-service delegates to the 063b module when wired", async () => {
+		it("install-service delegates to the 064b module when wired", async () => {
 			const h = buildCliHarness({
 				serviceModule: {
 					install: async () => "service registered",

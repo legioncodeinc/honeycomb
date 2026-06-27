@@ -1,8 +1,8 @@
 /**
- * Tests for the hosted escalation sink (PRD-063g AC-063g.3).
+ * Tests for the hosted escalation sink (PRD-064g AC-064g.3).
  *
  * AC coverage:
- *   AC-063g.3 -- credentialed -> hosted sink (telemetry emit) receives the report
+ *   AC-064g.3 -- credentialed -> hosted sink (telemetry emit) receives the report
  *                with device_id (assert via mock emit)
  */
 
@@ -54,9 +54,9 @@ function baseEmitDeps(overrides: Partial<EmitDeps> = {}): EmitDeps {
 	};
 }
 
-// ── AC-063g.3 ─────────────────────────────────────────────────────────────────
+// ── AC-064g.3 ─────────────────────────────────────────────────────────────────
 
-describe("AC-063g.3: credentialed -> hosted sink receives the report with device_id", () => {
+describe("AC-064g.3: credentialed -> hosted sink receives the report with device_id", () => {
 	it("returns true and posts to the OTLP endpoint when credentialed", async () => {
 		const { mock, calls } = makeMockFetch(200);
 		const result = await emitEscalationToHostedSink({

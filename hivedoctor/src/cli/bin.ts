@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * The `hivedoctor` bin shebang entry (PRD-063f).
+ * The `hivedoctor` bin shebang entry (PRD-064f).
  *
  * The thinnest possible wrapper: parse argv (stripping `node` + the script path), run the
  * CLI, and exit with the returned code. ALL logic lives in {@link runCli} so it is unit

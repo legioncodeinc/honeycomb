@@ -1,11 +1,11 @@
 /**
- * PRD-063h AC-063h.5 / AC-063h.6 + HC-1, the service-aware daemon lifecycle in `src/cli/runtime.ts`.
+ * PRD-064h AC-064h.5 / AC-064h.6 + HC-1, the service-aware daemon lifecycle in `src/cli/runtime.ts`.
  *
  * Proves with an injected DaemonClient + an injected service controller (NO real launchctl/schtasks,
  * NO real spawn):
- *   - AC-063h.6: in service mode, `start` REGISTERS via the manager (not a spawn) and `status`
+ *   - AC-064h.6: in service mode, `start` REGISTERS via the manager (not a spawn) and `status`
  *     reflects the supervising manager.
- *   - AC-063h.5: `restart` goes THROUGH the manager when the service is registered.
+ *   - AC-064h.5: `restart` goes THROUGH the manager when the service is registered.
  *   - HC-1 FALLBACK: with `serviceManager: null`, `start` uses the detached-spawn path (no controller
  *     is ever consulted), the behavior the existing tests + CI depend on.
  *   - fail-open: a controller whose `register` throws falls back to spawn rather than crashing.
@@ -65,7 +65,7 @@ function recordingController(opts?: { registered?: boolean; registerThrows?: boo
 	};
 }
 
-describe("PRD-063h AC-063h.6, service-preferred start + status reflects the manager", () => {
+describe("PRD-064h AC-064h.6, service-preferred start + status reflects the manager", () => {
 	it("start REGISTERS via the manager (no spawn) and resolves started once /health answers", async () => {
 		const ctl = recordingController({ registered: true });
 		// down on the pre-check, then up after register (waitForHealth's first poll).
@@ -111,7 +111,7 @@ describe("PRD-063h AC-063h.6, service-preferred start + status reflects the mana
 	});
 });
 
-describe("PRD-063h AC-063h.5, restart goes through the service manager", () => {
+describe("PRD-064h AC-064h.5, restart goes through the service manager", () => {
 	it("restart calls the manager's restart (not a spawn) when the service is registered", async () => {
 		const ctl = recordingController({ registered: true });
 		const lifecycle = buildDaemonLifecycle(scriptedClient([true]), {
@@ -124,7 +124,7 @@ describe("PRD-063h AC-063h.5, restart goes through the service manager", () => {
 	});
 });
 
-describe("PRD-063h HC-1, detached-spawn FALLBACK when no service manager is available", () => {
+describe("PRD-064h HC-1, detached-spawn FALLBACK when no service manager is available", () => {
 	it("start NEVER consults a controller when serviceManager is null (the spawn fallback path)", async () => {
 		// The controllerFor is a spy that MUST NOT be called, null manager forces the spawn path.
 		const controllerFor = vi.fn(() => recordingController());
@@ -149,7 +149,7 @@ describe("PRD-063h HC-1, detached-spawn FALLBACK when no service manager is avai
 	});
 });
 
-describe("PRD-063h fail-open, a throwing service register degrades to the spawn fallback", () => {
+describe("PRD-064h fail-open, a throwing service register degrades to the spawn fallback", () => {
 	it("a register that throws does not crash start (it falls through to the spawn path)", async () => {
 		const ctl = recordingController({ registerThrows: true });
 		// Pre-check down → register throws → spawn fallback. The spawn path then polls /health; we keep

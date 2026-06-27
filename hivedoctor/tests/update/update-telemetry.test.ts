@@ -1,6 +1,6 @@
 /**
- * The update/rollback telemetry seam (PRD-063e AC-063e.5). The default seam adapts onto
- * the 063d chokepoint; this test injects a fake fetch (no network) and asserts the
+ * The update/rollback telemetry seam (PRD-064e AC-064e.5). The default seam adapts onto
+ * the 064d chokepoint; this test injects a fake fetch (no network) and asserts the
  * from/to/outcome triple reaches the OTLP body through the existing allow-list.
  */
 
@@ -24,8 +24,8 @@ function recordingFetch(): {
 	};
 }
 
-describe("createDefaultUpdateEmit (AC-063e.5)", () => {
-	it("routes an update event through the 063d chokepoint with from/to/outcome encoded", async () => {
+describe("createDefaultUpdateEmit (AC-064e.5)", () => {
+	it("routes an update event through the 064d chokepoint with from/to/outcome encoded", async () => {
 		const rec = recordingFetch();
 		// Inject a fake key + host + fetch so the chokepoint's gates pass and no network is hit.
 		const emit = createDefaultUpdateEmit({

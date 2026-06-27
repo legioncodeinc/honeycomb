@@ -1,24 +1,24 @@
 /**
- * HiveDoctor remediation ladder (PRD-063a scope; rung definitions cross-ref 063c).
+ * HiveDoctor remediation ladder (PRD-064a scope; rung definitions cross-ref 064c).
  *
  * A {@link Rung} is one repair action; a {@link RemediationLadder} holds the ordered
  * registry and decides which rung to run for a given health classification, advancing
- * off rung 1 to rung 2 after 3 consecutive failed restarts (OD-4 / AC-063a.3).
+ * off rung 1 to rung 2 after 3 consecutive failed restarts (OD-4 / AC-064a.3).
  *
  * Wave 0 implements ONLY rung 1 (restart), behind an INJECTED {@link RestartFn}: the
- * real OS-service restart is 063b/063h, so here we accept a function the supervisor
+ * real OS-service restart is 064b/064h, so here we accept a function the supervisor
  * (and later waves) plug in. That keeps rung 1 testable with a fake restart and keeps
  * the OS coupling out of Wave 0. Rungs 2+ are declared as interface SLOTS only - the
- * ladder records "advance to rung N" so a test (and 063c) can observe the request.
+ * ladder records "advance to rung N" so a test (and 064c) can observe the request.
  *
- * Idempotency + the watchdog-war guard (063a AC-063a.6, parent AC-9): rung 1 does NOT
+ * Idempotency + the watchdog-war guard (064a AC-064a.6, parent AC-9): rung 1 does NOT
  * start a second daemon when the PID/lock is held AND `/health` is answering. It also
  * honors a cooldown after a restart HiveDoctor itself performed, so it never fights the
  * daemon's own restart-helper.ts (parent Risk "Watchdog war / double-restart").
  *
  * Crash-safety (design principle 1): every rung runs inside the ladder's try/catch; a
  * thrown rung becomes a `failed` {@link RungResult}, recorded in the incident, and the
- * loop continues (AC-063a.5). Built-ins only; all I/O (restart, PID read, health
+ * loop continues (AC-064a.5). Built-ins only; all I/O (restart, PID read, health
  * re-probe, clock) is injected so the ladder itself is pure-ish and hermetic.
  */
 
@@ -27,10 +27,10 @@ import type { Logger } from "./logger.js";
 import { runEscalation } from "./rungs/escalation.js";
 import type { EscalationHook, EscalationRecord } from "./rungs/escalation.js";
 
-// ── Rung registry re-exports (PRD-063c) ──────────────────────────────────────
+// ── Rung registry re-exports (PRD-064c) ──────────────────────────────────────
 // remediation.ts is the single entry point to the ladder, so the higher-rung
 // factories live in ./rungs/* but are re-exported here beside createRestartRung.
-// Wave 0 (063a) shipped rung 1; Wave 1 (063c) adds rung 2 (reinstall), rung 3
+// Wave 0 (064a) shipped rung 1; Wave 1 (064c) adds rung 2 (reinstall), rung 3
 // (uninstall conflicting Hivemind), and the terminal escalation hand-off (rung 4),
 // each behind injected runners/hooks so they are hermetic and testable.
 export { createReinstallRung, PRIMARY_PACKAGE } from "./rungs/reinstall.js";
@@ -86,7 +86,7 @@ export interface Rung {
 }
 
 /**
- * The injected restart function (the real OS-service restart is 063b/063h). It returns
+ * The injected restart function (the real OS-service restart is 064b/064h). It returns
  * `true` when it believes it kicked a restart, `false`/throw when it could not. The
  * supervisor wires the real implementation; tests wire a fake.
  */
@@ -122,7 +122,7 @@ export interface RestartRungDeps {
 }
 
 /**
- * Build rung 1 (restart). Idempotency + watchdog-war guard order (063a AC-063a.6):
+ * Build rung 1 (restart). Idempotency + watchdog-war guard order (064a AC-064a.6):
  *   1. If we restarted within the cooldown window, SKIP (do not fight our own/the
  *      daemon's restart-helper).
  *   2. If the PID/lock is held AND `/health` answers, SKIP (a second daemon would just
@@ -169,16 +169,16 @@ export interface LadderDecision {
 
 /** Construction deps for the ladder. */
 export interface LadderDeps {
-	/** The registered rungs, in ascending order. Wave 0 registers only rung 1; Wave 1 (063c) adds 2 + 3. */
+	/** The registered rungs, in ascending order. Wave 0 registers only rung 1; Wave 1 (064c) adds 2 + 3. */
 	readonly rungs: readonly Rung[];
 	/** Consecutive failed restarts before advancing off rung 1 (default 3, OD-4). */
 	readonly restartGiveUpThreshold: number;
 	/** Logger. */
 	readonly logger: Logger;
 	/**
-	 * The terminal escalation hand-off (rung 4). Injected by the supervisor; 063g plugs
+	 * The terminal escalation hand-off (rung 4). Injected by the supervisor; 064g plugs
 	 * in the real dashboard/telemetry sink. Optional so Wave-0 callers that never escalate
-	 * (and the existing 063a tests) construct the ladder unchanged; when absent,
+	 * (and the existing 064a tests) construct the ladder unchanged; when absent,
 	 * {@link RemediationLadder.escalate} resolves to a skipped result naming the missing hook.
 	 */
 	readonly escalationHook?: EscalationHook;
@@ -194,15 +194,15 @@ export interface RemediationLadder {
 	decide(consecutiveRestartFailures: number): LadderDecision;
 	/**
 	 * Run a chosen rung, wrapped crash-safe. A thrown rung becomes a failed RungResult
-	 * (AC-063a.5) - never propagates. A rung index with no registered rung (a later-wave
+	 * (AC-064a.5) - never propagates. A rung index with no registered rung (a later-wave
 	 * slot, e.g. rung 2 in Wave 0) returns a `skipped` result naming the slot, so a test
-	 * can assert "the ladder REQUESTED rung 2" without that rung existing yet (AC-063a.3).
+	 * can assert "the ladder REQUESTED rung 2" without that rung existing yet (AC-064a.3).
 	 */
 	run(rung: number, ctx: RungContext): Promise<RungResult>;
 	/**
-	 * Terminal escalation hand-off (rung 4, PRD-063c). Called when the numbered rungs
+	 * Terminal escalation hand-off (rung 4, PRD-064c). Called when the numbered rungs
 	 * cannot restore health, or when the action HiveDoctor believes is needed is the
-	 * DEFERRED credential purge (AC-063c.3). Hands the structured {@link EscalationRecord}
+	 * DEFERRED credential purge (AC-064c.3). Hands the structured {@link EscalationRecord}
 	 * to the injected hook crash-safely - a thrown hook becomes a failed result, never a
 	 * thrown error. When no hook was injected, resolves to a skipped result so the caller
 	 * still records the escalation intent in the incident. NEVER performs a deferred
@@ -230,14 +230,14 @@ export function createRemediationLadder(deps: LadderDeps): RemediationLadder {
 			if (impl === undefined) {
 				// A declared-but-unimplemented slot (rungs 2+ in Wave 0). Record the request so the
 				// supervisor logs the escalation and the incident shows "advanced to rung N"; the
-				// real action lands in a later wave (063c).
+				// real action lands in a later wave (064c).
 				deps.logger.warn("ladder.rung_not_implemented", { rung });
 				return { ok: false, skipped: true, action: `rung-${rung}-not-implemented`, detail: "later-wave-slot" };
 			}
 			try {
 				return await impl.run(ctx);
 			} catch (error) {
-				// Crash-safety (AC-063a.5): a thrown rung is caught here, surfaced as a failed
+				// Crash-safety (AC-064a.5): a thrown rung is caught here, surfaced as a failed
 				// result for the incident, and the loop continues. The watchdog never dies on a
 				// remediation failure.
 				const detail = error instanceof Error ? error.message : "unknown";
@@ -248,7 +248,7 @@ export function createRemediationLadder(deps: LadderDeps): RemediationLadder {
 
 		async escalate(record: EscalationRecord): Promise<RungResult> {
 			if (deps.escalationHook === undefined) {
-				// No sink wired (Wave-0 callers / 063g not yet plugged in). Record the intent so the
+				// No sink wired (Wave-0 callers / 064g not yet plugged in). Record the intent so the
 				// incident still shows the escalation, without an action having been delivered.
 				deps.logger.warn("ladder.escalate_no_hook", { recommendedAction: record.recommendedAction });
 				return { ok: false, skipped: true, action: "escalate", detail: "no-escalation-hook" };

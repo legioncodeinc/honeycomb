@@ -1,9 +1,9 @@
 /**
- * HiveDoctor health probe (PRD-063a scope + technical considerations).
+ * HiveDoctor health probe (PRD-064a scope + technical considerations).
  *
  * Probes `GET http://127.0.0.1:3850/health` over node:http with a short timeout and
  * classifies the result into one of four kinds so the loop drives the RIGHT rung
- * instead of blindly restarting (063a goal: "targeted, not blind"):
+ * instead of blindly restarting (064a goal: "targeted, not blind"):
  *
  *   - ok                    - the daemon answered 200 with status `ok`.
  *   - degraded              - the daemon answered but a subsystem is down; carries the
@@ -11,7 +11,7 @@
  *   - unreachable-refused   - the connection was refused/reset (daemon is down).
  *   - unreachable-timeout   - the socket accepted but never responded (daemon is wedged).
  *
- * The refused-vs-timeout distinction is load-bearing (063a technical considerations:
+ * The refused-vs-timeout distinction is load-bearing (064a technical considerations:
  * "treat connection-refused, timeout, and non-200 distinctly - refused vs hung vs
  * degraded drive different rungs"): a refused daemon is simply down (restart), a hung
  * one is wedged (the memory_jobs-backlog failure mode this PRD exists to fix).

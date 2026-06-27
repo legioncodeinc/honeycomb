@@ -1,9 +1,9 @@
 /**
- * Dependency-free semantic-version compare for the auto-update engine (PRD-063e).
+ * Dependency-free semantic-version compare for the auto-update engine (PRD-064e).
  *
  * The blessed gate must answer one question: "is the candidate version strictly
- * NEWER than what is installed?" (AC-063e.1 / AC-063e.2). The `semver` npm package
- * would answer it, but the watchdog runtime is Node built-ins ONLY (PRD-063 design
+ * NEWER than what is installed?" (AC-064e.1 / AC-064e.2). The `semver` npm package
+ * would answer it, but the watchdog runtime is Node built-ins ONLY (PRD-064 design
  * principle 1, "incapable of crashing -- zero runtime deps"). So this module parses
  * and compares the small slice of SemVer 2.0.0 that npm `@latest` tags actually use:
  * `MAJOR.MINOR.PATCH` with an optional `-prerelease` and an ignored `+build`.

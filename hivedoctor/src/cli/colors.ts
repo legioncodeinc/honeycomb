@@ -1,5 +1,5 @@
 /**
- * Tiny ANSI styling helpers for the CLI (PRD-063f, branded UX).
+ * Tiny ANSI styling helpers for the CLI (PRD-064f, branded UX).
  *
  * Built-ins only - no `chalk`, no `picocolors`, no runtime dep (binding constraint:
  * zero runtime deps in the can't-crash package). A handful of SGR escape codes wrapped

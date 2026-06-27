@@ -1,5 +1,5 @@
 /**
- * Ambient declaration for HiveDoctor's build-time version token (PRD-063f).
+ * Ambient declaration for HiveDoctor's build-time version token (PRD-064f).
  *
  * The later-wave esbuild bundle step replaces `__HIVEDOCTOR_VERSION__` with a string
  * literal via esbuild `define`, mirroring the parent package's `__HONEYCOMB_VERSION__`

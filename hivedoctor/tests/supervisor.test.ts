@@ -1,9 +1,9 @@
 /**
- * Supervisor watch-loop acceptance tests (PRD-063a AC-063a.1 .. AC-063a.5).
+ * Supervisor watch-loop acceptance tests (PRD-064a AC-064a.1 .. AC-064a.5).
  *
  * Each test drives the REAL loop (probe -> classify -> heal -> incident -> persist)
  * over a real ephemeral node:http `/health` server + a deterministic fake clock, and
- * an injected RestartFn standing in for the OS-service restart (063b/063h).
+ * an injected RestartFn standing in for the OS-service restart (064b/064h).
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -17,7 +17,7 @@ import { degradedBody, okBody, startMockHealthServer, type MockHealthServer } fr
 
 const probeFor = (url: string) => () => probeHealth({ healthUrl: url, timeoutMs: 1_000 });
 
-describe("supervisor watch loop (PRD-063a)", () => {
+describe("supervisor watch loop (PRD-064a)", () => {
 	let harness: Harness | undefined;
 	let server: MockHealthServer | undefined;
 
@@ -28,7 +28,7 @@ describe("supervisor watch loop (PRD-063a)", () => {
 		server = undefined;
 	});
 
-	it("AC-063a.1: healthy -> no action + low-verbosity log", async () => {
+	it("AC-064a.1: healthy -> no action + low-verbosity log", async () => {
 		server = await startMockHealthServer(okBody);
 		const debug = vi.fn();
 		const info = vi.fn();
@@ -49,7 +49,7 @@ describe("supervisor watch loop (PRD-063a)", () => {
 		expect(harness.readIncidents()).toHaveLength(0);
 	});
 
-	it("AC-063a.2: unreachable -> restart -> next probe healthy -> backoff resets", async () => {
+	it("AC-064a.2: unreachable -> restart -> next probe healthy -> backoff resets", async () => {
 		// Start with the daemon DOWN (no server) so the first probe is unreachable.
 		const restart = vi.fn(async () => true);
 		// A swappable probe: down first, then healthy after the "restart".
@@ -84,7 +84,7 @@ describe("supervisor watch loop (PRD-063a)", () => {
 		expect(state.lastHealAt).not.toBeNull();
 	});
 
-	it("AC-063a.3: 3 consecutive failed restarts -> advances to rung 2", async () => {
+	it("AC-064a.3: 3 consecutive failed restarts -> advances to rung 2", async () => {
 		// The daemon is always unreachable and every restart FAILS, so the failure count climbs.
 		const restart = vi.fn(async () => false);
 		const probe = async () => ({ kind: "unreachable-refused" as const, detail: "ECONNREFUSED" });
@@ -121,7 +121,7 @@ describe("supervisor watch loop (PRD-063a)", () => {
 		expect(lastIncident?.steps[0]).toMatchObject({ rung: 2, action: "reinstall-primary" });
 	});
 
-	it("AC-063a.4: degraded with a specific subsystem reason -> classification routes to the matching rung (targeted)", async () => {
+	it("AC-064a.4: degraded with a specific subsystem reason -> classification routes to the matching rung (targeted)", async () => {
 		server = await startMockHealthServer(() => degradedBody({ schema: "missing_table" }));
 
 		// A rung that inspects the classification handed to it, proving the degraded subsystem
@@ -152,7 +152,7 @@ describe("supervisor watch loop (PRD-063a)", () => {
 		expect(incidents[0]?.healthReasons?.schema).toBe("missing_table");
 	});
 
-	it("AC-063a.5: a remediation step that throws -> caught, recorded in incident, loop continues", async () => {
+	it("AC-064a.5: a remediation step that throws -> caught, recorded in incident, loop continues", async () => {
 		const probe = async () => ({ kind: "unreachable-refused" as const, detail: "ECONNREFUSED" });
 		// rung 1 restart THROWS.
 		const restart = vi.fn(async () => {

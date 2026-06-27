@@ -1,6 +1,6 @@
 /**
  * Test-only fake {@link CommandRunner}: records every argv and returns canned results,
- * so a rung test NEVER actually runs npm (binding constraint, PRD-063c). Built-ins only.
+ * so a rung test NEVER actually runs npm (binding constraint, PRD-064c). Built-ins only.
  */
 
 import type { CommandResult, CommandRunner } from "../../src/rungs/command-runner.js";

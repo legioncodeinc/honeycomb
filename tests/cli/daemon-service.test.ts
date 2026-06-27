@@ -1,13 +1,13 @@
 /**
- * PRD-063h, the primary-daemon OS-native service helper (`src/cli/daemon-service.ts`).
+ * PRD-064h, the primary-daemon OS-native service helper (`src/cli/daemon-service.ts`).
  *
  * Proves with a recording {@link ServiceRunner} (NO real launchctl/systemctl/schtasks, NO real file
  * IO) and pure template assertions:
  *   - detectServiceManager picks the right per-OS manager, is side-effect-free, and honors the
  *     `HONEYCOMB_DAEMON_SERVICE=spawn` opt-out + the no-user-bus-on-linux fallback (HC-1 fallback).
- *   - AC-063h.4: every generated unit (launchd plist / systemd unit / schtasks /TR) PINS the
+ *   - AC-064h.4: every generated unit (launchd plist / systemd unit / schtasks /TR) PINS the
  *     writable workspace into BOTH the working dir AND HONEYCOMB_WORKSPACE.
- *   - AC-063h.5: restart goes THROUGH the manager (kickstart / systemctl restart / schtasks stop+run),
+ *   - AC-064h.5: restart goes THROUGH the manager (kickstart / systemctl restart / schtasks stop+run),
  *     never a second spawn, and the schtasks restart is stop-then-run on the SAME task.
  *   - register/unregister/status argv is the exact fixed-argv the manager expects.
  */
@@ -77,7 +77,7 @@ const WIN_SPEC: ServiceSpec = {
 	home: "C:\\Users\\ada",
 };
 
-describe("PRD-063h detectServiceManager, cheap, side-effect-free, per-OS + fallback", () => {
+describe("PRD-064h detectServiceManager, cheap, side-effect-free, per-OS + fallback", () => {
 	it("picks launchd on darwin, schtasks on win32", () => {
 		expect(detectServiceManager({}, "darwin")).toBe("launchd");
 		expect(detectServiceManager({}, "win32")).toBe("schtasks");
@@ -100,7 +100,7 @@ describe("PRD-063h detectServiceManager, cheap, side-effect-free, per-OS + fallb
 	});
 });
 
-describe("PRD-063h AC-063h.4, launchd plist pins the writable workspace", () => {
+describe("PRD-064h AC-064h.4, launchd plist pins the writable workspace", () => {
 	const plist = renderLaunchdPlist(SPEC);
 	it("pins WorkingDirectory AND HONEYCOMB_WORKSPACE to the workspace (never system32)", () => {
 		expect(plist).toContain("<key>WorkingDirectory</key>");
@@ -118,7 +118,7 @@ describe("PRD-063h AC-063h.4, launchd plist pins the writable workspace", () => 
 	});
 });
 
-describe("PRD-063h AC-063h.4, systemd --user unit pins the writable workspace", () => {
+describe("PRD-064h AC-064h.4, systemd --user unit pins the writable workspace", () => {
 	const unit = renderSystemdUnit(SPEC);
 	it("pins WorkingDirectory AND Environment=HONEYCOMB_WORKSPACE", () => {
 		expect(unit).toContain("WorkingDirectory=/home/ada/.honeycomb");
@@ -131,7 +131,7 @@ describe("PRD-063h AC-063h.4, systemd --user unit pins the writable workspace", 
 	});
 });
 
-describe("PRD-063h AC-063h.4, schtasks /Create pins the writable workspace", () => {
+describe("PRD-064h AC-064h.4, schtasks /Create pins the writable workspace", () => {
 	const args = buildSchtasksCreateArgs(WIN_SPEC);
 	it("is fixed-argv: /Create /TN <task> /TR <cmd> /SC ONLOGON /RL LIMITED /F", () => {
 		expect(args[0]).toBe("/Create");
@@ -151,7 +151,7 @@ describe("PRD-063h AC-063h.4, schtasks /Create pins the writable workspace", () 
 	});
 });
 
-describe("PRD-063h launchd controller, register/restart/status argv (injected runner)", () => {
+describe("PRD-064h launchd controller, register/restart/status argv (injected runner)", () => {
 	it("register writes the plist then bootstraps it (no execution)", () => {
 		const runner = recordingRunner();
 		const ctl = createDaemonServiceController("launchd", runner);
@@ -162,7 +162,7 @@ describe("PRD-063h launchd controller, register/restart/status argv (injected ru
 		expect(runner.runs[0]?.args[0]).toBe("bootstrap");
 	});
 
-	it("AC-063h.5 restart goes THROUGH launchctl kickstart -k (no second spawn)", () => {
+	it("AC-064h.5 restart goes THROUGH launchctl kickstart -k (no second spawn)", () => {
 		const runner = recordingRunner();
 		const ctl = createDaemonServiceController("launchd", runner);
 		ctl.restart(SPEC);
@@ -176,7 +176,7 @@ describe("PRD-063h launchd controller, register/restart/status argv (injected ru
 	});
 });
 
-describe("PRD-063h systemd controller, register/restart argv (injected runner)", () => {
+describe("PRD-064h systemd controller, register/restart argv (injected runner)", () => {
 	it("register writes the unit, daemon-reloads, then enable --now (start-on-login + start now)", () => {
 		const runner = recordingRunner();
 		const ctl = createDaemonServiceController("systemd-user", runner);
@@ -188,7 +188,7 @@ describe("PRD-063h systemd controller, register/restart argv (injected runner)",
 		]);
 	});
 
-	it("AC-063h.5 restart goes THROUGH systemctl --user restart (no second spawn)", () => {
+	it("AC-064h.5 restart goes THROUGH systemctl --user restart (no second spawn)", () => {
 		const runner = recordingRunner();
 		createDaemonServiceController("systemd-user", runner).restart(SPEC);
 		expect(runner.runs[0]?.cmd).toBe("systemctl");
@@ -196,7 +196,7 @@ describe("PRD-063h systemd controller, register/restart argv (injected runner)",
 	});
 });
 
-describe("PRD-063h schtasks controller, register/restart/status argv (injected runner)", () => {
+describe("PRD-064h schtasks controller, register/restart/status argv (injected runner)", () => {
 	it("register creates the task then runs it", () => {
 		const runner = recordingRunner();
 		const ctl = createDaemonServiceController("schtasks", runner);
@@ -205,7 +205,7 @@ describe("PRD-063h schtasks controller, register/restart/status argv (injected r
 		expect(runner.runs[1]?.args).toEqual(["/Run", "/TN", SERVICE_TASK_NAME]);
 	});
 
-	it("AC-063h.5 restart is stop-then-run on the SAME task (no second spawn, no double-bind)", () => {
+	it("AC-064h.5 restart is stop-then-run on the SAME task (no second spawn, no double-bind)", () => {
 		const runner = recordingRunner();
 		createDaemonServiceController("schtasks", runner).restart(WIN_SPEC);
 		expect(runner.runs[0]?.args).toEqual(["/End", "/TN", SERVICE_TASK_NAME]);

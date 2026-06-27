@@ -1,12 +1,12 @@
 /**
- * HiveDoctor hosted escalation sink (PRD-063g AC-063g.3).
+ * HiveDoctor hosted escalation sink (PRD-064g AC-064g.3).
  *
  * When the ladder exhausts and an escalation fires, this module emits a high-severity
- * OTLP log record to PostHog via the 063d telemetry chokepoint so we are notified
+ * OTLP log record to PostHog via the 064d telemetry chokepoint so we are notified
  * remotely even when the user never opens the local dashboard.
  *
  * Design decisions:
- *   - Reuses `emitTelemetry` from src/telemetry/emit.ts (the 063d chokepoint).
+ *   - Reuses `emitTelemetry` from src/telemetry/emit.ts (the 064d chokepoint).
  *     An escalation is an "episode" with `resolved: false` and a step that records the
  *     recommended action. We do NOT invent a new OTLP stream; instead we synthesize a
  *     minimal Incident that carries the escalation facts so PostHog can alert on it.
@@ -72,10 +72,10 @@ function synthesizeIncident(escalation: EscalationRecord, nowMs: number): Incide
 }
 
 /**
- * Emit the escalation to the PostHog hosted sink via the 063d telemetry chokepoint.
+ * Emit the escalation to the PostHog hosted sink via the 064d telemetry chokepoint.
  * Resolves to true on 2xx, false on any failure. Never rejects.
  *
- * AC-063g.3: credentialed -> hosted sink receives the report with device_id.
+ * AC-064g.3: credentialed -> hosted sink receives the report with device_id.
  */
 export async function emitEscalationToHostedSink(options: HostedSinkOptions): Promise<boolean> {
 	const timestampMs = options.timestampMs ?? Date.now();

@@ -1,5 +1,5 @@
 /**
- * Read the primary daemon's reported version from `/health` (PRD-063f, `status` command).
+ * Read the primary daemon's reported version from `/health` (PRD-064f, `status` command).
  *
  * The daemon's `/health` body carries `{ status, version, ... }` (src/daemon/runtime/
  * server.ts). HiveDoctor reads that `version` field so `status` can show the daemon's
@@ -8,7 +8,7 @@
  *
  * Built-ins ONLY: node:http, no fetch wrapper (mirrors src/health-probe.ts). NEVER throws:
  * any transport error, non-2xx, or missing/garbage version field resolves to `null`
- * ("version unknown"), so a down daemon never breaks `status` (AC-063f.6).
+ * ("version unknown"), so a down daemon never breaks `status` (AC-064f.6).
  */
 
 import { request } from "node:http";

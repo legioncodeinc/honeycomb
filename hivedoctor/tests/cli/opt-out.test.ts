@@ -1,5 +1,5 @@
 /**
- * Opt-out precedence tests (PRD-063e AC-063e.4, OD-5): CLI flag > env > state > pin.
+ * Opt-out precedence tests (PRD-064e AC-064e.4, OD-5): CLI flag > env > state > pin.
  */
 
 import { describe, expect, it } from "vitest";

@@ -1,5 +1,5 @@
 /**
- * The HiveDoctor ASCII banner + command menu (PRD-063f AC-063f.1 / parent AC-7).
+ * The HiveDoctor ASCII banner + command menu (PRD-064f AC-064f.1 / parent AC-7).
  *
  * A cute "hive doctor" - a bee wearing a head-mirror and carrying a little doctor's
  * bag - rendered on bare invocation, followed by a focused command menu. Aligned with
@@ -59,7 +59,7 @@ export function renderMenu(colors: Colors): string {
 	return [header, usage, "", commandsHeader, ...lines, ""].join("\n");
 }
 
-/** Build the full bare-invocation output: banner + menu (AC-063f.1). */
+/** Build the full bare-invocation output: banner + menu (AC-064f.1). */
 export function renderBannerWithMenu(colors: Colors): string {
 	return `${renderBanner(colors)}\n${renderMenu(colors)}`;
 }

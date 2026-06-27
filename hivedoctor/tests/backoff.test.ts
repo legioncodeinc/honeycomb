@@ -22,7 +22,7 @@ describe("createBackoff", () => {
 		expect(b.delayMs()).toBe(5_000);
 	});
 
-	it("reset() returns to rung 0 (063a reset-on-healthy)", () => {
+	it("reset() returns to rung 0 (064a reset-on-healthy)", () => {
 		const b = createBackoff({ floorMs: 1_000, ceilingMs: 30_000, jitter: 0 });
 		b.advance();
 		b.advance();

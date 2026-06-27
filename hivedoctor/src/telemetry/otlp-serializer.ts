@@ -1,5 +1,5 @@
 /**
- * Hand-rolled OTLP Logs JSON serializer (PRD-063d AC-063d.7).
+ * Hand-rolled OTLP Logs JSON serializer (PRD-064d AC-064d.7).
  *
  * PostHog Logs is an OTLP/HTTP+JSON receiver at `{host}/i/v1/logs`. Because
  * HiveDoctor's design principle 1 forbids runtime npm dependencies, we hand-roll

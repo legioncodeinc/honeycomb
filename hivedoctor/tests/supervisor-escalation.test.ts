@@ -1,9 +1,9 @@
 /**
- * Supervisor escalate-on-give-up test (PRD-063f wiring; PRD-063c rung 4).
+ * Supervisor escalate-on-give-up test (PRD-064f wiring; PRD-064c rung 4).
  *
  * The prior wave's heal() advanced off rung 1 but never handed the episode to the
  * escalation hook when the higher rung also failed. This verifies the minimal wiring
- * added in 063f: once the ladder advances AND the higher rung genuinely fails, the
+ * added in 064f: once the ladder advances AND the higher rung genuinely fails, the
  * supervisor calls ladder.escalate() (the give-up hand-off), and the escalation step is
  * recorded in the incident. The escalation NEVER performs a deferred action.
  */
@@ -31,7 +31,7 @@ function fixedClock(): SupervisorClock {
 	return { now: () => 1_000, sleep: async () => undefined };
 }
 
-describe("supervisor escalate-on-give-up (PRD-063f wiring)", () => {
+describe("supervisor escalate-on-give-up (PRD-064f wiring)", () => {
 	const dirs: string[] = [];
 	afterEach(() => {
 		for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });

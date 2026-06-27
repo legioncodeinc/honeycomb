@@ -208,8 +208,8 @@ function isPidAlive(pid: number): boolean {
 }
 
 /**
- * Build the {@link ServiceSpec} the OS-service unit is rendered from (PRD-063h). Pins the
- * caller-resolved WRITABLE workspace (AC-063h.4) and the bundled daemon entry + Node flags. Resolved
+ * Build the {@link ServiceSpec} the OS-service unit is rendered from (PRD-064h). Pins the
+ * caller-resolved WRITABLE workspace (AC-064h.4) and the bundled daemon entry + Node flags. Resolved
  * here (the same place `start()` resolves them for the spawn fallback), so service mode and spawn
  * mode agree on the entry, flags, and workspace.
  */
@@ -224,7 +224,7 @@ function buildServiceSpec(): ServiceSpec {
 
 /**
  * Spawn the bundled `daemon/index.js` DETACHED and wait for `/health` (the documented FALLBACK path,
- * PRD-063h HC-1). Extracted from the original `start()` so service mode and the fallback share ONE
+ * PRD-064h HC-1). Extracted from the original `start()` so service mode and the fallback share ONE
  * spawn implementation. Pins BOTH `cwd` and `HONEYCOMB_WORKSPACE` to the writable workspace (the
  * `C:\WINDOWS\system32` 502 footgun close). The 021a PID/lock guard inside the spawned process makes
  * a concurrent start a no-op rather than a double-bind.
@@ -281,7 +281,7 @@ async function signalDaemonStop(): Promise<boolean> {
 
 /**
  * The injectable seams the service-aware lifecycle resolves the OS service manager + controller
- * through (PRD-063h test discipline). Production leaves these UNSET → real env detection + the real
+ * through (PRD-064h test discipline). Production leaves these UNSET → real env detection + the real
  * `createDaemonServiceController` (which shells out fixed-argv behind its own injected runner). A
  * unit test injects a fixed `manager` + a recording `controllerFor` so the argv/path is asserted
  * WITHOUT touching the host's service manager, and the spawn fallback is exercised by forcing
@@ -298,9 +298,9 @@ export interface DaemonLifecycleOptions {
 }
 
 /**
- * Build the real {@link DaemonLifecycle} (b-AC-2 / b-AC-3 + PRD-063h AC-063h.5/.6).
+ * Build the real {@link DaemonLifecycle} (b-AC-2 / b-AC-3 + PRD-064h AC-064h.5/.6).
  *
- * ── Service-preferred, spawn-fallback (PRD-063h HC-1) ────────────────────────
+ * ── Service-preferred, spawn-fallback (PRD-064h HC-1) ────────────────────────
  * When an OS service manager is available ({@link detectServiceManager} returns non-null), `start`
  * REGISTERS + starts the daemon as a userland service (launchd LaunchAgent / systemd --user /
  * per-user Scheduled Task), making the service the LIVENESS FLOOR (restart-on-crash + start-on-boot).
@@ -311,7 +311,7 @@ export interface DaemonLifecycleOptions {
  *
  * `stop`/`status` reflect+control the SAME path: in service mode they go through the manager (and
  * status reports the supervising manager); in fallback mode they use the 021a PID/lock + SIGTERM.
- * `restart` (AC-063h.5) prefers the service manager (`kickstart`/`restart`/task re-run) so HiveDoctor's
+ * `restart` (AC-064h.5) prefers the service manager (`kickstart`/`restart`/task re-run) so HiveDoctor's
  * rung-1 never double-spawns; the 021a single-instance guard prevents any double-bind. Never imports
  * the composition root (D-2).
  */
@@ -337,7 +337,7 @@ export function buildDaemonLifecycle(client: DaemonClient, options: DaemonLifecy
 		async start(): Promise<{ readonly started: boolean; readonly alreadyRunning: boolean }> {
 			if (await client.ping()) return { started: false, alreadyRunning: true };
 
-			// Service-preferred (PRD-063h): register + start through the OS manager so the service is the
+			// Service-preferred (PRD-064h): register + start through the OS manager so the service is the
 			// liveness floor. A register that throws (binary missing / permission) falls back to spawn.
 			const svc = serviceController();
 			if (svc !== null) {
@@ -398,7 +398,7 @@ export function buildDaemonLifecycle(client: DaemonClient, options: DaemonLifecy
 		},
 
 		async restart(): Promise<{ readonly restarted: boolean; readonly viaService: boolean }> {
-			// AC-063h.5: prefer the service manager (kickstart / systemctl restart / schtasks stop+run)
+			// AC-064h.5: prefer the service manager (kickstart / systemctl restart / schtasks stop+run)
 			// so HiveDoctor's rung-1 restart goes THROUGH the service, never a second spawn that would
 			// fight the service for the 3850 bind. The 021a PID/lock guard prevents any double-bind.
 			const svc = serviceController();

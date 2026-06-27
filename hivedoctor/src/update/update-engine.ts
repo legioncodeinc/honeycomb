@@ -1,5 +1,5 @@
 /**
- * The auto-update transaction engine (PRD-063e AC-063e.1 / .3 / .5 / .6).
+ * The auto-update transaction engine (PRD-064e AC-064e.1 / .3 / .5 / .6).
  *
  * `runUpdateTransaction` performs ONE update attempt, atomically-as-npm-allows:
  *
@@ -7,17 +7,17 @@
  *   2. consult the gate ({@link file://./update-policy.ts}) -- it decides go/no-go from
  *      installed + latest + blessed + opt-out (the engine just supplies the I/O);
  *   3. ACQUIRE the shared install lock ({@link file://../install-lock.ts}) so the update
- *      can never race rung 2's reinstall-as-repair (AC-063e.6) -- if the lock is held,
+ *      can never race rung 2's reinstall-as-repair (AC-064e.6) -- if the lock is held,
  *      SKIP (the other installer is already doing the work);
  *   4. `npm i -g @legioncodeinc/honeycomb@<blessed>` through the injected runner;
  *   5. restart the daemon (injected) so it picks up the new binary;
- *   6. poll `/health` (injected) -- on healthy, DONE (outcome "updated", AC-063e.1);
+ *   6. poll `/health` (injected) -- on healthy, DONE (outcome "updated", AC-064e.1);
  *   7. on a FAILED post-update health, ROLL BACK: reinstall the recorded prior version,
  *      restart, and re-verify, so the daemon returns to healthy on the OLD version
- *      (AC-063e.3); emit a rollback telemetry event either way (AC-063e.5).
+ *      (AC-064e.3); emit a rollback telemetry event either way (AC-064e.5).
  *
  * npm global installs are not transactional; the recorded-prior-version + verify +
- * rollback loop is how we APPROXIMATE atomicity (PRD-063e Technical considerations).
+ * rollback loop is how we APPROXIMATE atomicity (PRD-064e Technical considerations).
  *
  * Crash-safety (design principle 1): every external call is behind an injected seam that
  * resolves a value rather than throwing, and the whole body is wrapped so any unexpected
@@ -45,7 +45,7 @@ export const PRIMARY_PACKAGE = "@legioncodeinc/honeycomb";
 /** Reads the currently-installed primary version, or null when undeterminable. Injected. */
 export type ReadInstalledVersionFn = () => Promise<string | null>;
 
-/** Restarts the primary daemon so it picks up a freshly-installed binary. Injected (063a path). */
+/** Restarts the primary daemon so it picks up a freshly-installed binary. Injected (064a path). */
 export type RestartDaemonFn = () => Promise<void>;
 
 /** Polls `/health` after a restart; resolves true when the daemon is healthy. Injected. */
@@ -53,15 +53,15 @@ export type VerifyHealthyFn = () => Promise<boolean>;
 
 /** Construction deps for {@link createUpdateEngine}. All I/O behind injectable seams. */
 export interface UpdateEngineDeps {
-	/** The command runner (the ONLY thing that runs npm). Reuses the 063c rungs' boundary. */
+	/** The command runner (the ONLY thing that runs npm). Reuses the 064c rungs' boundary. */
 	readonly runner: CommandRunner;
-	/** The shared install mutex, so auto-update + reinstall never run concurrently (AC-063e.6). */
+	/** The shared install mutex, so auto-update + reinstall never run concurrently (AC-064e.6). */
 	readonly installLock: InstallLock;
 	/** Reads npm `@latest` for the primary package (fail-soft; null = unknown). */
 	readonly readLatestVersion: ReadLatestVersionFn;
 	/** Reads the currently-installed primary version (fail-soft; null = unknown). */
 	readonly readInstalledVersion: ReadInstalledVersionFn;
-	/** Restart the daemon after an install (063a restart path). */
+	/** Restart the daemon after an install (064a restart path). */
 	readonly restartDaemon: RestartDaemonFn;
 	/** Poll `/health` and report whether the daemon is healthy. */
 	readonly verifyHealthy: VerifyHealthyFn;
@@ -71,7 +71,7 @@ export interface UpdateEngineDeps {
 	readonly optOut: UpdateOptOut;
 	/** The stable per-install device id (PRD-033 UUID) stamped on telemetry events. */
 	readonly deviceId: string;
-	/** The update/rollback telemetry seam (default: the 063d chokepoint adapter). */
+	/** The update/rollback telemetry seam (default: the 064d chokepoint adapter). */
 	readonly emit?: UpdateEmit;
 	/** Logger. */
 	readonly logger: Logger;
@@ -83,12 +83,12 @@ export interface UpdateEngineDeps {
 
 /** The terminal status of one transaction attempt. */
 export type UpdateTransactionStatus =
-	| "updated" // installed + verified healthy on the new version (AC-063e.1)
-	| "rolled_back" // post-update health failed; recovered on the prior version (AC-063e.3)
+	| "updated" // installed + verified healthy on the new version (AC-064e.1)
+	| "rolled_back" // post-update health failed; recovered on the prior version (AC-064e.3)
 	| "rollback_failed" // post-update health failed AND rollback did not recover
 	| "install_failed" // the npm install itself failed
 	| "no_update" // the gate declined (opt-out / pin / not blessed / already current / fail-closed)
-	| "skipped_lock_held" // the shared install lock was held (AC-063e.6: serialized, no concurrent install)
+	| "skipped_lock_held" // the shared install lock was held (AC-064e.6: serialized, no concurrent install)
 	;
 
 /** The structured result of one transaction. Never thrown; failure is a value. */
@@ -110,7 +110,7 @@ export interface UpdateEngine {
 	runUpdateTransaction(): Promise<UpdateTransactionResult>;
 }
 
-/** Map a transaction status to the telemetry outcome (AC-063e.5). */
+/** Map a transaction status to the telemetry outcome (AC-064e.5). */
 function outcomeOf(status: UpdateTransactionStatus): UpdateOutcome | null {
 	switch (status) {
 		case "updated":
@@ -166,7 +166,7 @@ export function createUpdateEngine(deps: UpdateEngineDeps): UpdateEngine {
 	}
 
 	/**
-	 * Roll back to `priorVersion` after a failed post-update health (AC-063e.3). Reinstall
+	 * Roll back to `priorVersion` after a failed post-update health (AC-064e.3). Reinstall
 	 * the prior bits, restart, and re-verify. Returns the terminal status + emits the
 	 * rollback telemetry event with the observed outcome.
 	 */
@@ -198,7 +198,7 @@ export function createUpdateEngine(deps: UpdateEngineDeps): UpdateEngine {
 	return {
 		async runUpdateTransaction(): Promise<UpdateTransactionResult> {
 			try {
-				// 1. Record the current version FIRST -- it is the rollback target (AC-063e.3).
+				// 1. Record the current version FIRST -- it is the rollback target (AC-064e.3).
 				const installedVersion = await deps.readInstalledVersion();
 				if (installedVersion === null) {
 					// Cannot establish a rollback target -> refuse to update (we could not recover).
@@ -217,7 +217,7 @@ export function createUpdateEngine(deps: UpdateEngineDeps): UpdateEngine {
 				}
 				const toVersion = decision.toVersion;
 
-				// 3. Serialize against rung 2: only one global npm install at a time (AC-063e.6).
+				// 3. Serialize against rung 2: only one global npm install at a time (AC-064e.6).
 				const handle = deps.installLock.acquire("auto-update");
 				if (handle === null) {
 					deps.logger.warn("autoupdate.skip_lock_held");
@@ -244,10 +244,10 @@ export function createUpdateEngine(deps: UpdateEngineDeps): UpdateEngine {
 						};
 					}
 
-					// 5. Restart so the daemon picks up the new binary (063a restart path).
+					// 5. Restart so the daemon picks up the new binary (064a restart path).
 					await deps.restartDaemon();
 
-					// 6. Verify post-update health. Healthy -> done (AC-063e.1).
+					// 6. Verify post-update health. Healthy -> done (AC-064e.1).
 					const healthy = await deps.verifyHealthy();
 					if (healthy) {
 						deps.logger.info("autoupdate.updated", { from: installedVersion, to: toVersion });
@@ -255,7 +255,7 @@ export function createUpdateEngine(deps: UpdateEngineDeps): UpdateEngine {
 						return { status: "updated", fromVersion: installedVersion, toVersion, detail: `updated-${toVersion}` };
 					}
 
-					// 7. Post-update health FAILED -> roll back to the recorded prior version (AC-063e.3).
+					// 7. Post-update health FAILED -> roll back to the recorded prior version (AC-064e.3).
 					//    The update event records the failed attempt; rollback() emits its own event.
 					deps.logger.warn("autoupdate.verify_failed", { to: toVersion });
 					return await rollback(installedVersion, toVersion);

@@ -1,5 +1,5 @@
 /**
- * Dependency-free semver compare (PRD-063e version source). Pure logic; no seams.
+ * Dependency-free semver compare (PRD-064e version source). Pure logic; no seams.
  */
 
 import { describe, expect, it } from "vitest";

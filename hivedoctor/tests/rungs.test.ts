@@ -1,6 +1,6 @@
 /**
  * Rung 2 (reinstall) + rung 3 (uninstall conflicting Hivemind) + escalation hand-off
- * tests (PRD-063c, AC-063c.1 .. AC-063c.5). Every npm-touching path runs through a fake
+ * tests (PRD-064c, AC-064c.1 .. AC-064c.5). Every npm-touching path runs through a fake
  * {@link createFakeRunner} - no test ever runs real npm.
  */
 
@@ -38,7 +38,7 @@ function lock() {
 	return createInstallLock({ workspaceDir: dir, logger: silentLogger });
 }
 
-describe("rung 2 reinstall (AC-063c.1)", () => {
+describe("rung 2 reinstall (AC-064c.1)", () => {
 	it("reinstalls the primary and verifies the post-install version matches the blessed version", async () => {
 		const runner = createFakeRunner();
 		// Before: a stale version; after the install: the blessed version (stale-route symptom gone).
@@ -91,7 +91,7 @@ describe("rung 2 reinstall (AC-063c.1)", () => {
 
 	it("skips when the shared install lock is already held (no concurrent npm install)", async () => {
 		const sharedLock = lock();
-		// Simulate 063e's auto-update engine holding the lock.
+		// Simulate 064e's auto-update engine holding the lock.
 		const held = sharedLock.acquire("auto-update");
 		expect(held).not.toBeNull();
 
@@ -148,7 +148,7 @@ describe("rung 2 reinstall blessed-channel threading + fail-soft (W-1)", () => {
 		const result = await rung.run(ctx);
 
 		// The reinstall ran and is reported a SUCCESS that simply could not be verified - not a
-		// hard failure - so a missing blessed channel never blocks the repair (AC-063c.1 fail-soft).
+		// hard failure - so a missing blessed channel never blocks the repair (AC-064c.1 fail-soft).
 		expect(result.ok).toBe(true);
 		expect(result.detail).toBe("unverified-no-blessed");
 		expect(runner.calls).toEqual([{ command: "npm", args: ["install", "-g", PRIMARY_PACKAGE] }]);
@@ -177,7 +177,7 @@ describe("rung 2 reinstall blessed-channel threading + fail-soft (W-1)", () => {
 	});
 });
 
-describe("rung 2 reinstall idempotency (AC-063c.4)", () => {
+describe("rung 2 reinstall idempotency (AC-064c.4)", () => {
 	it("second run is a safe no-op when the running version already matches blessed", async () => {
 		const runner = createFakeRunner();
 		const rung = createReinstallRung({
@@ -198,7 +198,7 @@ describe("rung 2 reinstall idempotency (AC-063c.4)", () => {
 	});
 });
 
-describe("rung 3 uninstall conflicting Hivemind (AC-063c.2 / .5)", () => {
+describe("rung 3 uninstall conflicting Hivemind (AC-064c.2 / .5)", () => {
 	it("removes the @deeplake/hivemind package and leaves ~/.deeplake/ untouched", async () => {
 		const runner = createFakeRunner();
 		const rung = createUninstallHivemindRung({
@@ -220,7 +220,7 @@ describe("rung 3 uninstall conflicting Hivemind (AC-063c.2 / .5)", () => {
 		expect(everyArg).not.toContain("credentials");
 	});
 
-	it("writes a timestamped backup record BEFORE removal (AC-063c.5)", async () => {
+	it("writes a timestamped backup record BEFORE removal (AC-064c.5)", async () => {
 		// The runner records the uninstall; assert the backup file already exists when it runs.
 		let backupExistedAtUninstall = false;
 		const backupPath = join(dir, "removed-packages.ndjson");
@@ -245,7 +245,7 @@ describe("rung 3 uninstall conflicting Hivemind (AC-063c.2 / .5)", () => {
 	});
 });
 
-describe("rung 3 idempotency (AC-063c.4)", () => {
+describe("rung 3 idempotency (AC-064c.4)", () => {
 	it("no conflicting global -> safe no-op skip, no backup, no uninstall", async () => {
 		const runner = createFakeRunner();
 		const rung = createUninstallHivemindRung({
@@ -302,7 +302,7 @@ describe("npm-based Hivemind detector", () => {
 	});
 });
 
-describe("escalation hand-off (AC-063c.3)", () => {
+describe("escalation hand-off (AC-064c.3)", () => {
 	it("a suspected credential fault escalates and records the deferred action WITHOUT purging", async () => {
 		const delivered: unknown[] = [];
 		const hook = vi.fn(async (record) => {

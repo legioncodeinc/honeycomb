@@ -1,7 +1,7 @@
 /**
- * Service-module behaviour tests (PRD-063b): the install/uninstall/status flow over the
+ * Service-module behaviour tests (PRD-064b): the install/uninstall/status flow over the
  * injected runner + fs, asserting the unit file is written before the manager runs, the
- * uninstall removes the file (AC-063b.5), and every failure mode is a returned message
+ * uninstall removes the file (AC-064b.5), and every failure mode is a returned message
  * (never a throw, design principle 1).
  */
 
@@ -118,7 +118,7 @@ describe("install - writes the unit file then runs the manager argv", () => {
 	});
 });
 
-describe("uninstall - deregisters then removes the unit file (AC-063b.5)", () => {
+describe("uninstall - deregisters then removes the unit file (AC-064b.5)", () => {
 	it("Linux: disables the unit, then deletes the unit file so it cannot resurrect", async () => {
 		const runner = createRecordingRunner();
 		const fs = createMemoryFs();

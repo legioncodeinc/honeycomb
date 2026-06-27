@@ -1,5 +1,5 @@
 /**
- * The CLI execution context: IO seams + injected dependencies (PRD-063f).
+ * The CLI execution context: IO seams + injected dependencies (PRD-064f).
  *
  * Every command runs against a {@link CliContext} so the whole CLI is hermetic: stdout,
  * the confirm prompt, and every external action (probe, ladder run, npm install, version
@@ -7,7 +7,7 @@
  * asserts which deps were called. The real `process.stdout` / interactive prompt / live
  * deps are wired by the entry point ({@link file://./index.ts}) and the composition root.
  *
- * AC-063f.6 falls out of this design: `status` and `diagnose` only ever call the injected
+ * AC-064f.6 falls out of this design: `status` and `diagnose` only ever call the injected
  * probe/version seams, each of which resolves a value when the daemon is down - so they
  * work with no daemon present.
  *
@@ -48,7 +48,7 @@ export interface UpdateActions {
 	/** Apply the primary-daemon update through the blessed gate (`update`). */
 	applyPrimaryUpdate(): Promise<string>;
 	/**
-	 * The ONE path that updates HiveDoctor's own package (`self-update`, AC-063f.5).
+	 * The ONE path that updates HiveDoctor's own package (`self-update`, AC-064f.5).
 	 * Implemented in {@link file://./self-update.ts}; injected so tests assert it is the
 	 * only command that ever calls it.
 	 */
@@ -69,7 +69,7 @@ export interface StatusStateSnapshot {
 /** Reads the durable state snapshot for `status`. */
 export type ReadStatusStateFn = () => StatusStateSnapshot;
 
-/** Coarse HiveDoctor service state for `status` (063b owns the real registration). */
+/** Coarse HiveDoctor service state for `status` (064b owns the real registration). */
 export type ServiceState = "running" | "not-running" | "unknown";
 
 /** The injected dependencies every command shares. */
@@ -90,7 +90,7 @@ export interface CliDeps {
 	readonly readConsecutiveFailures: () => number;
 	/** Read the status-state snapshot (last heal, last-known health). */
 	readonly readStatusState: ReadStatusStateFn;
-	/** Coarse HiveDoctor service state (063b owns the real source). */
+	/** Coarse HiveDoctor service state (064b owns the real source). */
 	readonly serviceState: () => ServiceState;
 	/** The resolved opt-out + pin (auto-update disabled? pinned? which layer?). */
 	readonly optOut: ResolvedOptOut;
@@ -98,7 +98,7 @@ export interface CliDeps {
 	readonly update: UpdateActions;
 	/** Tail recent incident-log lines for `logs`. */
 	readonly tailIncidents: TailIncidentsFn;
-	/** The 063b service module, when wired in; absent today (prints "not yet available"). */
+	/** The 064b service module, when wired in; absent today (prints "not yet available"). */
 	readonly serviceModule?: ServiceModule;
 }
 

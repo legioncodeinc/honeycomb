@@ -1,6 +1,6 @@
-# PRD-063d: HiveDoctor - Telemetry and Observability
+# PRD-064d: HiveDoctor - Telemetry and Observability
 
-> **Parent:** [PRD-063](./prd-063-hivedoctor-self-healing-watchdog-index.md)
+> **Parent:** [PRD-064](./prd-064-hivedoctor-self-healing-watchdog-index.md)
 > **Status:** Draft
 > **Priority:** P1
 > **Effort:** M (3-8h)
@@ -26,18 +26,18 @@ Give us the remote eyes we lack today, while keeping an honest, single-chokepoin
 
 ## Out of scope
 
-- The dashboard rendering of escalations - [063g](./prd-063g-hivedoctor-self-healing-watchdog-dashboard-escalation-reporting.md).
-- Generating the incidents themselves - [063a](./prd-063a-hivedoctor-self-healing-watchdog-supervisor-core-and-lifecycle.md)/[063c](./prd-063c-hivedoctor-self-healing-watchdog-remediation-ladder.md).
+- The dashboard rendering of escalations - [064g](./prd-064g-hivedoctor-self-healing-watchdog-dashboard-escalation-reporting.md).
+- Generating the incidents themselves - [064a](./prd-064a-hivedoctor-self-healing-watchdog-supervisor-core-and-lifecycle.md)/[064c](./prd-064c-hivedoctor-self-healing-watchdog-remediation-ladder.md).
 
 ## Acceptance criteria
 
-- AC-063d.1 Given default settings, when HiveDoctor catches an error, then a scrubbed ERROR-severity OTLP log record reaches PostHog Logs at `/i/v1/logs`.
-- AC-063d.2 Given default settings, when the install-health timer fires, then an INFO OTLP log record (version, health, OS, last-heal age, `device_id`) is emitted.
-- AC-063d.3 Given a remediation episode completes, when it ends, then an OTLP log record is emitted reflecting the ordered steps and outcomes, carrying the `device_id`.
-- AC-063d.7 Given the emitter runs, when it sends, then it uses no OpenTelemetry SDK dependency (hand-rolled OTLP/JSON over `fetch`), verified by the dependency list.
-- AC-063d.4 Given `DO_NOT_TRACK=1` or `HONEYCOMB_TELEMETRY=0` or `--no-telemetry`, when any of the three streams would fire, then nothing leaves the box (verifiable at the single chokepoint) (AC-4 parent).
-- AC-063d.5 Given any emission, when serialized, then no credential, token, or PII field is present (allow-list enforced).
-- AC-063d.6 Given the telemetry sink is unreachable, when emission fails, then HiveDoctor swallows the error and continues healing (telemetry never blocks).
+- AC-064d.1 Given default settings, when HiveDoctor catches an error, then a scrubbed ERROR-severity OTLP log record reaches PostHog Logs at `/i/v1/logs`.
+- AC-064d.2 Given default settings, when the install-health timer fires, then an INFO OTLP log record (version, health, OS, last-heal age, `device_id`) is emitted.
+- AC-064d.3 Given a remediation episode completes, when it ends, then an OTLP log record is emitted reflecting the ordered steps and outcomes, carrying the `device_id`.
+- AC-064d.7 Given the emitter runs, when it sends, then it uses no OpenTelemetry SDK dependency (hand-rolled OTLP/JSON over `fetch`), verified by the dependency list.
+- AC-064d.4 Given `DO_NOT_TRACK=1` or `HONEYCOMB_TELEMETRY=0` or `--no-telemetry`, when any of the three streams would fire, then nothing leaves the box (verifiable at the single chokepoint) (AC-4 parent).
+- AC-064d.5 Given any emission, when serialized, then no credential, token, or PII field is present (allow-list enforced).
+- AC-064d.6 Given the telemetry sink is unreachable, when emission fails, then HiveDoctor swallows the error and continues healing (telemetry never blocks).
 
 ## Technical considerations
 

@@ -1,15 +1,15 @@
 /**
- * The single-sourced HiveDoctor command surface (PRD-063f Scope command table).
+ * The single-sourced HiveDoctor command surface (PRD-064f Scope command table).
  *
  * ONE list defines every command name, its menu summary, and the canonical set of
  * known commands. The dispatcher ({@link file://./dispatch.ts}) and the banner menu
  * ({@link file://./banner.ts}) both read this list, so the menu can never drift from
  * what actually dispatches.
  *
- * Binding rulings encoded here (PRD-063 Decisions, OD-4):
+ * Binding rulings encoded here (PRD-064 Decisions, OD-4):
  *   - There is NO `clear-credentials` command. Credential purge is DEFERRED, not in v1;
- *     it is only ever RECOMMENDED via escalation, never offered as a command (AC-063f.4).
- *   - `self-update` is the ONLY command that updates HiveDoctor's own package (AC-063f.5).
+ *     it is only ever RECOMMENDED via escalation, never offered as a command (AC-064f.4).
+ *   - `self-update` is the ONLY command that updates HiveDoctor's own package (AC-064f.5).
  *
  * Pure data + a tiny lookup; no I/O. Built-ins only.
  */
@@ -40,7 +40,7 @@ export interface CommandMenuEntry {
 
 /**
  * The command menu, in display order. This is the dispatch surface and the menu surface.
- * Deliberately ABSENT: `clear-credentials` (deferred, OD-4 / AC-063f.4).
+ * Deliberately ABSENT: `clear-credentials` (deferred, OD-4 / AC-064f.4).
  */
 export const COMMAND_MENU: readonly CommandMenuEntry[] = [
 	{ invocation: "run", summary: "Run the supervised watchdog (the OS service entry; not for manual use)." },
@@ -52,8 +52,8 @@ export const COMMAND_MENU: readonly CommandMenuEntry[] = [
 	{ invocation: "uninstall-hivemind", summary: "Remove a conflicting @deeplake/hivemind global (rung 3, confirms)." },
 	{ invocation: "update", summary: "Update the primary daemon via the blessed gate (--check to preview)." },
 	{ invocation: "self-update", summary: "Update HiveDoctor's own package (the ONLY path that does)." },
-	{ invocation: "install-service", summary: "Register HiveDoctor as an OS service (063b)." },
-	{ invocation: "uninstall-service", summary: "Unregister the HiveDoctor OS service (063b)." },
+	{ invocation: "install-service", summary: "Register HiveDoctor as an OS service (064b)." },
+	{ invocation: "uninstall-service", summary: "Unregister the HiveDoctor OS service (064b)." },
 	{ invocation: "logs", summary: "Tail the local incident log (incidents.ndjson)." },
 	{ invocation: "help", summary: "Show this banner and command menu." },
 ];

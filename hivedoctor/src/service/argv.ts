@@ -1,5 +1,5 @@
 /**
- * Exact argv construction for every service-manager command (PRD-063b Scope).
+ * Exact argv construction for every service-manager command (PRD-064b Scope).
  *
  * The service module shells out to the OS service manager (technical consideration:
  * shell out, do NOT take a dependency). Each operation - install, uninstall, status -

@@ -1,10 +1,10 @@
 /**
- * The blessed-version channel (PRD-063e, OD-3 resolved -- the safety, not the TTL).
+ * The blessed-version channel (PRD-064e, OD-3 resolved -- the safety, not the TTL).
  *
  * Before the auto-update engine installs npm `@latest`, it must confirm that version is
  * BLESSED for auto-rollout: a static `blessed-version.json` object on the install CDN
  * (`get.theapiary.sh`), flipped by a CI "bless" step gated on canary + smoke health.
- * `@latest` on npm is necessary but NOT sufficient (PRD-063e Scope). A 30-min poll
+ * `@latest` on npm is necessary but NOT sufficient (PRD-064e Scope). A 30-min poll
  * against raw `@latest` would fan a bad publish across the fleet in 30 minutes; the
  * blessed gate is what makes auto-update safe.
  *
@@ -12,7 +12,7 @@
  * If the channel is unreachable, times out, returns non-2xx, or returns a body that is
  * not parseable JSON with a valid `version` string, {@link fetchBlessedVersion} resolves
  * to `{ ok: false, reason }` -- NEVER a version. The caller treats any non-ok result as
- * "stay on the current version" (AC-063e.2, second half). Fetching the channel can never
+ * "stay on the current version" (AC-064e.2, second half). Fetching the channel can never
  * trigger an update; only a positively-parsed blessed version can.
  *
  * ── Built-ins ONLY ──────────────────────────────────────────────────────────
@@ -30,7 +30,7 @@ export const DEFAULT_BLESSED_TIMEOUT_MS = 5_000 as const;
 
 /**
  * The parsed, validated blessed-version manifest. The schema is deliberately minimal
- * (PRD-063e open question on schema): a single `version` string is required; an optional
+ * (PRD-064e open question on schema): a single `version` string is required; an optional
  * `minVersion` lets a later bless step express "auto-update only from >= minVersion"
  * without a code change. Unknown fields are ignored (forward-compatible).
  */

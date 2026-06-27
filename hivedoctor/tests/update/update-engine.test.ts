@@ -1,7 +1,7 @@
 /**
- * The auto-update transaction engine (PRD-063e AC-063e.1 / .3 / .5 / .6). Every npm /
+ * The auto-update transaction engine (PRD-064e AC-064e.1 / .3 / .5 / .6). Every npm /
  * registry / CDN / health call runs through a fake seam -- NO test runs npm or hits the
- * network. The real install-lock runs against a temp workspace so AC-063e.6 (serialized
+ * network. The real install-lock runs against a temp workspace so AC-064e.6 (serialized
  * with rung 2) is proven on the SAME mutex the supervisor uses.
  */
 
@@ -30,7 +30,7 @@ function blessedFetch(version: string): UpdateEngineDeps["blessedOptions"] {
 	};
 }
 
-/** A recording update-emit seam so AC-063e.5 can assert from/to/outcome. */
+/** A recording update-emit seam so AC-064e.5 can assert from/to/outcome. */
 function recordingEmit(): { emit: UpdateEmit; events: UpdateTelemetryEvent[] } {
 	const events: UpdateTelemetryEvent[] = [];
 	return {
@@ -79,7 +79,7 @@ function buildEngine(overrides: Partial<UpdateEngineDeps>): {
 	return { deps, runner, events: rec.events };
 }
 
-describe("update transaction happy path (AC-063e.1)", () => {
+describe("update transaction happy path (AC-064e.1)", () => {
 	it("installs the blessed version, restarts, verifies healthy, and reports updated", async () => {
 		const restartDaemon = vi.fn(async () => undefined);
 		const verifyHealthy = vi.fn(async () => true);
@@ -91,11 +91,11 @@ describe("update transaction happy path (AC-063e.1)", () => {
 		expect(result.status).toBe("updated");
 		expect(result.fromVersion).toBe(INSTALLED);
 		expect(result.toVersion).toBe(BLESSED);
-		// It ran exactly `npm install -g @legioncodeinc/honeycomb@<blessed>` (AC-063e.1).
+		// It ran exactly `npm install -g @legioncodeinc/honeycomb@<blessed>` (AC-064e.1).
 		expect(runner.calls).toEqual([{ command: "npm", args: ["install", "-g", `${PRIMARY_PACKAGE}@${BLESSED}`] }]);
 		expect(restartDaemon).toHaveBeenCalledTimes(1);
 		expect(verifyHealthy).toHaveBeenCalledTimes(1);
-		// A single update telemetry event, from/to/outcome (AC-063e.5).
+		// A single update telemetry event, from/to/outcome (AC-064e.5).
 		expect(events).toEqual([
 			{
 				kind: "update",
@@ -108,7 +108,7 @@ describe("update transaction happy path (AC-063e.1)", () => {
 		]);
 	});
 
-	it("does not update when @latest is newer but NOT blessed (gate holds, AC-063e.2)", async () => {
+	it("does not update when @latest is newer but NOT blessed (gate holds, AC-064e.2)", async () => {
 		const { deps, runner } = buildEngine({
 			readLatestVersion: async () => "0.2.0", // newer than blessed 0.1.9
 			blessedOptions: blessedFetch(BLESSED),
@@ -119,7 +119,7 @@ describe("update transaction happy path (AC-063e.1)", () => {
 		expect(runner.calls).toHaveLength(0); // npm never touched
 	});
 
-	it("fails closed (no update) when the blessed channel is unreachable (AC-063e.2)", async () => {
+	it("fails closed (no update) when the blessed channel is unreachable (AC-064e.2)", async () => {
 		const { deps, runner } = buildEngine({
 			blessedOptions: {
 				url: "https://cdn.test/blessed-version.json",
@@ -135,7 +135,7 @@ describe("update transaction happy path (AC-063e.1)", () => {
 	});
 });
 
-describe("rollback on failed post-update health (AC-063e.3)", () => {
+describe("rollback on failed post-update health (AC-064e.3)", () => {
 	it("reinstalls the prior version, restarts, and recovers healthy on the old version", async () => {
 		// First /health (post-update) fails; second /health (post-rollback) succeeds.
 		const healthSeq = [false, true];
@@ -154,7 +154,7 @@ describe("rollback on failed post-update health (AC-063e.3)", () => {
 		// Restart fired for both the update and the rollback; health checked twice.
 		expect(restartDaemon).toHaveBeenCalledTimes(2);
 		expect(verifyHealthy).toHaveBeenCalledTimes(2);
-		// Both an update (the failed forward) and a rollback event were emitted (AC-063e.5).
+		// Both an update (the failed forward) and a rollback event were emitted (AC-064e.5).
 		const kinds = events.map((e) => e.outcome);
 		expect(kinds).toContain("rolled_back");
 		const rollbackEvent = events.find((e) => e.kind === "rollback");
@@ -183,7 +183,7 @@ describe("rollback on failed post-update health (AC-063e.3)", () => {
 	});
 });
 
-describe("opt-out + pin (AC-063e.4)", () => {
+describe("opt-out + pin (AC-064e.4)", () => {
 	it("does not update (and never polls npm) when auto-update is disabled", async () => {
 		const { deps, runner } = buildEngine({ optOut: { autoUpdateDisabled: true } });
 		const result = await createUpdateEngine(deps).runUpdateTransaction();
@@ -201,7 +201,7 @@ describe("opt-out + pin (AC-063e.4)", () => {
 	});
 });
 
-describe("telemetry from/to/outcome (AC-063e.5)", () => {
+describe("telemetry from/to/outcome (AC-064e.5)", () => {
 	it("records from-version, to-version, and outcome on a successful update", async () => {
 		const { deps, events } = buildEngine({});
 		await createUpdateEngine(deps).runUpdateTransaction();
@@ -213,7 +213,7 @@ describe("telemetry from/to/outcome (AC-063e.5)", () => {
 	});
 });
 
-describe("serialization with the watch loop's rung 2 (AC-063e.6)", () => {
+describe("serialization with the watch loop's rung 2 (AC-064e.6)", () => {
 	it("skips when the shared install lock is already held (no concurrent npm install)", async () => {
 		const shared = lock();
 		// Simulate rung 2's reinstall holding the lock when the poll tick fires.

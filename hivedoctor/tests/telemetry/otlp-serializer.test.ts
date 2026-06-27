@@ -1,12 +1,12 @@
 /**
- * Unit tests for the hand-rolled OTLP LogsData JSON serializer (PRD-063d AC-063d.7).
+ * Unit tests for the hand-rolled OTLP LogsData JSON serializer (PRD-064d AC-064d.7).
  *
  * These tests validate the JSON shape against the OTLP Logs schema without any
  * network calls. The assertions are structural: they verify that the serializer
  * produces a valid OTLP envelope that PostHog Logs (a generic OTLP/HTTP+JSON
  * receiver) would accept.
  *
- * AC-063d.7: no @opentelemetry/* dependency -- asserted by checking that
+ * AC-064d.7: no @opentelemetry/* dependency -- asserted by checking that
  * hivedoctor/package.json has no such entry (last test in this file).
  */
 
@@ -354,10 +354,10 @@ describe("serializeLogsData", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// AC-063d.7 -- no @opentelemetry/* dependency in hivedoctor/package.json
+// AC-064d.7 -- no @opentelemetry/* dependency in hivedoctor/package.json
 // ────────────────────────────────────────────────────────────────────────────
 
-describe("AC-063d.7 no OpenTelemetry SDK dependency", () => {
+describe("AC-064d.7 no OpenTelemetry SDK dependency", () => {
 	it("hivedoctor/package.json has no @opentelemetry/* entry in any dep field", () => {
 		// Resolve the path relative to this test file so it works from any cwd.
 		const dir = fileURLToPath(new URL("../../", import.meta.url));

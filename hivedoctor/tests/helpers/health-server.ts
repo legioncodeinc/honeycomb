@@ -33,7 +33,7 @@ export function okBody(): { statusCode: number; body: string } {
 	};
 }
 
-/** A degraded body naming a specific failing subsystem (for AC-063a.4). */
+/** A degraded body naming a specific failing subsystem (for AC-064a.4). */
 export function degradedBody(reasons: { storage?: string; embeddings?: string; schema?: string }): {
 	statusCode: number;
 	body: string;

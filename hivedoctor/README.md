@@ -5,9 +5,9 @@ primary daemon. HiveDoctor probes the daemon's `/health`, restarts it with
 exponential backoff when it stops answering, escalates when it cannot heal, and is
 built to be effectively incapable of crashing.
 
-> Status: Wave 0 (foundation) + sub-PRD 063a (supervisor core and lifecycle). This
+> Status: Wave 0 (foundation) + sub-PRD 064a (supervisor core and lifecycle). This
 > package is not yet published, wired into an installer, or shipped. See
-> `library/requirements/in-work/prd-063-hivedoctor-self-healing-watchdog/`.
+> `library/requirements/in-work/prd-064-hivedoctor-self-healing-watchdog/`.
 
 ## Design principles (binding)
 
@@ -60,4 +60,4 @@ npm run test
 
 Rungs 2 to 5 (reinstall, uninstall conflicting Hivemind, escalate), telemetry, the
 CLI and ASCII art, the auto-update engine, OS-service registration, and any repo
-build/CI wiring. Those land in later sub-PRDs (063b through 063h).
+build/CI wiring. Those land in later sub-PRDs (064b through 064h).

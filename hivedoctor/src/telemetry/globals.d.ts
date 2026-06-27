@@ -1,7 +1,7 @@
 /**
- * Ambient declarations for the build-time PostHog ingest tokens (063d).
+ * Ambient declarations for the build-time PostHog ingest tokens (064d).
  *
- * HiveDoctor's esbuild bundle step (later wave, 063f) will replace these with
+ * HiveDoctor's esbuild bundle step (later wave, 064f) will replace these with
  * string literals via esbuild `define`, mirroring the pattern in
  * `src/shared/globals.d.ts` of the parent package. Until then (Wave 0) the
  * `typeof` guard in `emit.ts` reads the env fallback path and these declarations

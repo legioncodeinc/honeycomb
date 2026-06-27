@@ -1,5 +1,5 @@
 /**
- * HiveDoctor supervisor - the watch loop (PRD-063a, the beating heart).
+ * HiveDoctor supervisor - the watch loop (PRD-064a, the beating heart).
  *
  * Ties the pieces together: probe -> classify -> (heal via backoff + remediation
  * ladder) -> incident log, persisting state across HiveDoctor restarts. It is
@@ -12,7 +12,7 @@
  * tests run it deterministically with fake timers - no real 30s waits. `start()`
  * arms the loop; `stop()` disarms it; both are idempotent.
  *
- * Targeted-not-blind (AC-063a.4): the classification is handed to the ladder + each
+ * Targeted-not-blind (AC-064a.4): the classification is handed to the ladder + each
  * rung so a `degraded` with a specific subsystem reason routes to the matching rung
  * rather than a blind restart. In Wave 0 only rung 1 exists, so the routing surfaces
  * via the classification carried into the rung context + the incident; rungs 2+ are
@@ -137,10 +137,10 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
 				outcome: result.skipped === true ? "skipped" : result.ok ? "succeeded" : "failed",
 				detail: result.detail,
 			});
-			// Escalate-on-give-up (PRD-063c rung 4): when the higher rung GENUINELY failed (not a
+			// Escalate-on-give-up (PRD-064c rung 4): when the higher rung GENUINELY failed (not a
 			// deliberate skip, not a success), the numbered ladder could not restore health. Hand the
 			// episode off to the injected escalation hook crash-safely. The ladder resolves a skipped
-			// result when no hook is wired (Wave-0 callers / the existing 063a tests), so this is a
+			// result when no hook is wired (Wave-0 callers / the existing 064a tests), so this is a
 			// no-op for a registry without an escalation sink and only records the terminal escalation
 			// when one is present. It NEVER performs a deferred action.
 			if (!result.ok && result.skipped !== true) {
@@ -182,7 +182,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
 
 		if (result.ok) {
 			// A kicked restart: reset nothing yet (health is confirmed on the NEXT probe, per
-			// AC-063a.2). Record the restart time so the cooldown guard engages, and reset the
+			// AC-064a.2). Record the restart time so the cooldown guard engages, and reset the
 			// failure count to 0 only once health is confirmed (handled in tick on the ok branch).
 			return { ...state, lastRestartAt: new Date(deps.clock.now()).toISOString() };
 		}
@@ -200,7 +200,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
 	async function tick(): Promise<HealthClassification> {
 		// The whole tick is crash-safe: a probe that somehow throws (it shouldn't - probeHealth
 		// is total) still resolves to a usable classification here, and any unexpected throw is
-		// caught so the loop continues (AC-063a.5 / parent AC-8).
+		// caught so the loop continues (AC-064a.5 / parent AC-8).
 		let classification: HealthClassification = { kind: "unreachable-refused", detail: "probe-threw" };
 		try {
 			classification = await deps.probe();
@@ -212,8 +212,8 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
 			const state = deps.stateStore.read();
 
 			if (classification.kind === "ok") {
-				// Happy path (AC-063a.1): no action, low-verbosity log, and a confirmed return to
-				// healthy resets the backoff + the consecutive-failure count (063a "reset on healthy").
+				// Happy path (AC-064a.1): no action, low-verbosity log, and a confirmed return to
+				// healthy resets the backoff + the consecutive-failure count (064a "reset on healthy").
 				deps.logger.debug("tick.healthy");
 				const healed =
 					state.consecutiveRestartFailures > 0 || state.backoffRung > 0 || state.currentRung !== 1;

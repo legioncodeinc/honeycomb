@@ -30,7 +30,7 @@ HONEYCOMB_NODE_VERSION="22"
 # The published npm package the global install pulls (PRD-048 publishes it; this consumes it).
 HONEYCOMB_NPM_PACKAGE="@legioncodeinc/honeycomb@latest"
 
-# HiveDoctor (PRD-063b): a SECOND global package, the self-healing watchdog that keeps the
+# HiveDoctor (PRD-064b): a SECOND global package, the self-healing watchdog that keeps the
 # primary daemon alive and registers itself with the OS so it survives crashes + reboots. Its
 # lifecycle is deliberately INDEPENDENT of the Honeycomb tarball (OD-6: a second global), so it
 # is installed here as its own `npm i -g` after the primary, then registers its OS service.
@@ -164,7 +164,7 @@ resolve_honeycomb_bin() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 3b: HiveDoctor bootstrap (PRD-063b). After the primary is installed, install the
+# Step 3b: HiveDoctor bootstrap (PRD-064b). After the primary is installed, install the
 #           HiveDoctor watchdog (a second global) and register its OS service, UNLESS the
 #           user opted out with `--no-hivedoctor` (the ONLY install-time switch, OD-5) or the
 #           env equivalent HONEYCOMB_NO_HIVEDOCTOR=1. Idempotent: an existing hivedoctor bin
@@ -240,7 +240,7 @@ main() {
     exit 1
   fi
 
-  # HiveDoctor bootstrap (PRD-063b), guarded by --no-hivedoctor / HONEYCOMB_NO_HIVEDOCTOR. Runs
+  # HiveDoctor bootstrap (PRD-064b), guarded by --no-hivedoctor / HONEYCOMB_NO_HIVEDOCTOR. Runs
   # BEFORE the verb hand-off so the watchdog is in place by the time the user sees the dashboard.
   if hivedoctor_opted_out "$@"; then
     step "skipping HiveDoctor (--no-hivedoctor)."
