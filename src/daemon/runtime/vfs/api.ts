@@ -68,6 +68,7 @@ import {
 	resolveRequestProject,
 	type RequestProjectScope,
 } from "../scope.js";
+import { getRequestIdentity } from "../middleware/permission.js";
 import type { Daemon } from "../server.js";
 
 /** The route group the VFS browse handlers attach to (already mounted in `server.ts`). */
@@ -144,6 +145,37 @@ async function selectRows(storage: StorageQuery, sql: string, scope: QueryScope)
 
 /** The 400 body a browse handler returns when the request carries no resolvable org (fail-closed). */
 const NO_ORG_BODY = { error: "bad_request", reason: "x-honeycomb-org header is required" } as const;
+
+/**
+ * The 403 response for a project-scoped identity attempting to access a different project
+ * (PRD-011c c-AC-5). Returned when the resolved project (from `cwd`) does not match the
+ * authenticated Identity's project binding.
+ */
+function projectScopeForbidden(c: Context): Response {
+	return c.json(
+		{
+			error: "forbidden",
+			reason: "project scope violation: the resolved project does not match your identity's project binding",
+		},
+		403,
+	);
+}
+
+/**
+ * Validate that a project-scoped identity is authorized to access the resolved project
+ * (PRD-011c project-scope gate, c-AC-5). When an authenticated Identity has a `project`
+ * binding (project-scoped), the resolved request project MUST match that binding — a
+ * mismatch is forbidden (403). Admin identities bypass this check (c-AC-5). Unscoped
+ * identities (no `project` binding) may access any project. Returns `true` when the
+ * request is authorized, `false` when it should be denied (403).
+ */
+function isAuthorizedForResolvedProject(c: Context, resolvedProject: RequestProjectScope): boolean {
+	const identity = getRequestIdentity(c);
+	if (identity === undefined) return true;
+	if (identity.role === "admin") return true;
+	if (identity.project === undefined) return true;
+	return resolvedProject.projectId === identity.project;
+}
 
 /** The 400 body a browse handler returns when a required query param is missing/blank. */
 function missingParam(name: string): { error: string; reason: string } {
@@ -437,6 +469,11 @@ export function mountVfsApi(daemon: Daemon, options: MountVfsOptions): void {
 		// PRD-049b (49b-AC-2): resolve the session project from the `x-honeycomb-cwd` header so
 		// the fast-path grep is project-narrowed identically to the live recall. No cwd is the D8 inbox.
 		const project = resolveRequestProject(c, scope);
+		// PRD-011c (c-AC-5): validate that a project-scoped identity is authorized to access
+		// the resolved project (same defense-in-depth check as recall).
+		if (!isAuthorizedForResolvedProject(c, project)) {
+			return projectScopeForbidden(c);
+		}
 		return c.json(await fetchGrep(storage, scope, agentId, query, recallConfig, hints, project));
 	});
 

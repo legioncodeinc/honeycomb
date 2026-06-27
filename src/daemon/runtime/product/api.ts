@@ -41,6 +41,7 @@ import { isOk, type StorageRow } from "../../storage/result.js";
 import { sqlIdent } from "../../storage/sql.js";
 import type { DeploymentMode } from "../config.js";
 import { resolveRequestProject, resolveScopeOrLocalDefault } from "../scope.js";
+import { getRequestIdentity } from "../middleware/permission.js";
 import { buildProjectScopeClause } from "../recall/scope-clause.js";
 import type { Daemon } from "../server.js";
 
@@ -82,6 +83,37 @@ export interface ProductDataApiOptions {
 
 /** The 400 body for a request with no resolvable org (fail-closed — never a broad scope). */
 const NO_ORG_BODY = { error: "bad_request", reason: "x-honeycomb-org header is required" } as const;
+
+/**
+ * The 403 response for a project-scoped identity attempting to access a different project
+ * (PRD-011c c-AC-5). Returned when the resolved project (from `cwd`) does not match the
+ * authenticated Identity's project binding.
+ */
+function projectScopeForbidden(c: Context): Response {
+	return c.json(
+		{
+			error: "forbidden",
+			reason: "project scope violation: the resolved project does not match your identity's project binding",
+		},
+		403,
+	);
+}
+
+/**
+ * Validate that a project-scoped identity is authorized to access the resolved project
+ * (PRD-011c project-scope gate, c-AC-5). When an authenticated Identity has a `project`
+ * binding (project-scoped), the resolved request project MUST match that binding — a
+ * mismatch is forbidden (403). Admin identities bypass this check (c-AC-5). Unscoped
+ * identities (no `project` binding) may access any project. Returns `true` when the
+ * request is authorized, `false` when it should be denied (403).
+ */
+function isAuthorizedForResolvedProject(c: Context, resolvedProject: { projectId: string }): boolean {
+	const identity = getRequestIdentity(c);
+	if (identity === undefined) return true;
+	if (identity.role === "admin") return true;
+	if (identity.project === undefined) return true;
+	return resolvedProject.projectId === identity.project;
+}
 
 /** One mined-skill view row (016/018) + the PRD-049c project + cross-project provenance. */
 export interface SkillReadRow {
@@ -259,6 +291,11 @@ export function mountSkillsReadApi(daemon: Daemon, storage: StorageQuery, defaul
 		const scope = resolveScopeOrLocalDefault(c, mode, defaultScope);
 		if (scope === null) return c.json(NO_ORG_BODY, 400);
 		const project = resolveRequestProject(c, scope);
+		// PRD-011c (c-AC-5): validate that a project-scoped identity is authorized to access
+		// the resolved project (same defense-in-depth check as recall).
+		if (!isAuthorizedForResolvedProject(c, project)) {
+			return projectScopeForbidden(c);
+		}
 		const rows = await fetchSkills(storage, scope, { projectId: project.projectId, bound: project.bound });
 		return c.json({ skills: rows });
 	});
