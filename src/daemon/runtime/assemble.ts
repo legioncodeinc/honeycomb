@@ -85,7 +85,7 @@ import { mountConflictsApi } from "./memories/conflicts-api.js";
 import { mountLifecycleApi } from "./memories/lifecycle-api.js";
 import { mountVfsApi } from "./vfs/api.js";
 import { mountProductDataApi } from "./product/index.js";
-import { localDefaultScopeResolver, type SecretsApiDeps } from "./secrets/api.js";
+import { localDefaultScopeResolver, type ****Deps } from "./secrets/api.js";
 import { type SourcesApiDeps } from "./sources/api.js";
 import { buildSourcesApiDeps } from "./sources/registry.js";
 import { SecretsStore, createMachineKeyProvider } from "./secrets/store.js";
@@ -1159,7 +1159,7 @@ function resolveProductDataDeps(
 	mode: DeploymentMode,
 ): {
 	storage: StorageClient;
-	secrets?: SecretsApiDeps;
+	secrets?: ****Deps;
 	sources?: SourcesApiDeps;
 	defaultScope: QueryScope;
 } {
@@ -1169,7 +1169,7 @@ function resolveProductDataDeps(
 	// (the `C:\WINDOWS\system32` footgun) falls back to `~/.honeycomb` instead of 502ing every
 	// secret save — see {@link resolveWorkspaceBaseDir}.
 	const baseDir = resolveWorkspaceBaseDir();
-	const secrets: SecretsApiDeps = {
+	const secrets: ****Deps = {
 		store: new SecretsStore({ baseDir, machineKey: createMachineKeyProvider() }),
 		// PRD-022 local-mode default: the dashboard's `GET /api/secrets` (names-only) carries no
 		// `x-honeycomb-org` header, so resolve the daemon's single local tenant instead of 400ing.
@@ -1898,10 +1898,12 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// with an injected reader that is also a full {@link VaultStore} mounts it too.
 	if (vault !== undefined && vault instanceof VaultStore) {
 		try {
-			// Thread the LOCAL default-scope resolver (PRD-022) so the dashboard web app — a loopback
-			// thin client that sends NO `x-honeycomb-org` header — resolves the single local tenant
-			// instead of 400ing on `GET /api/settings`. In team/hybrid the resolver stays fail-closed.
-			mountSettingsApi(daemon, { store: vault, scope: localDefaultScopeResolver(daemon.config.mode, scope) });
+			// Thread the mode + defaultScope so the settings API uses the HARDENED scope resolver
+			// (PRD-022 cross-tenant guard: a forged `x-honeycomb-org` that disagrees with the
+			// token's own org → 400). The resolver falls back to `defaultScope` ONLY in local mode
+			// (so the dashboard web app — a loopback thin client that sends no org header — resolves
+			// the single local tenant instead of 400ing). In team/hybrid the resolver stays fail-closed.
+			mountSettingsApi(daemon, { store: vault, mode: daemon.config.mode, defaultScope: scope });
 		} catch (err: unknown) {
 			const reason = err instanceof Error ? err.message : String(err);
 			process.stderr.write(`honeycomb: settings API mount failed (non-fatal): ${reason}\n`);

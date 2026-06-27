@@ -30,8 +30,11 @@
 
 import type { Context, Hono } from "hono";
 
-import { headerScopeResolver, type ScopeResolver } from "../secrets/api.js";
+import type { ScopeResolver } from "../secrets/api.js";
 import type { Daemon } from "../server.js";
+import type { DeploymentMode } from "../config.js";
+import type { QueryScope } from "../../storage/client.js";
+import { resolveScopeFromHeaders, resolveScopeOrLocalDefault } from "../scope.js";
 import { catalogView, isValidProviderModel, providerEntry } from "./catalog.js";
 import type { SecretScope } from "./contracts.js";
 import { type SettingValue, SettingValueSchema } from "./registry.js";
@@ -91,15 +94,56 @@ export interface SettingsApiDeps {
 	readonly store: VaultStore;
 	/** The per-request scope resolver (default: the shared header-based resolver). */
 	readonly scope?: ScopeResolver;
+	/** The daemon's deployment mode (required for the hardened scope resolver). */
+	readonly mode?: DeploymentMode;
+	/** The daemon's default scope (for local-mode fallback, mirrors data-API mounts). */
+	readonly defaultScope?: QueryScope;
+}
+
+/**
+ * Create a hardened scope resolver for the settings API that validates the request org
+ * against the authenticated identity (PRD-022 cross-tenant hardening). This resolver:
+ *   1. Uses {@link resolveScopeOrLocalDefault} which includes the identity cross-check
+ *      (a forged `x-honeycomb-org` that disagrees with the token's own org → null → 400).
+ *   2. Converts the {@link QueryScope} result to {@link SecretScope} format (adding the
+ *      default workspace when absent).
+ *   3. Falls back to the daemon's `defaultScope` ONLY in local mode (mirrors the data-API
+ *      mounts), so a loopback thin client that sends no org header resolves the single
+ *      local tenant instead of 400ing.
+ *
+ * This is the SAME cross-tenant guard the `/api/assets`, `/api/sources`, and data handlers
+ * use — it prevents an authenticated caller for org A from writing settings into org B by
+ * forging `x-honeycomb-org: orgB`.
+ */
+function createHardenedScopeResolver(
+	mode: DeploymentMode,
+	defaultScope: QueryScope | undefined,
+): ScopeResolver {
+	return {
+		resolve(c: Context): SecretScope | null {
+			const scope = resolveScopeOrLocalDefault(c, mode, defaultScope);
+			if (scope === null) return null;
+			// Convert QueryScope to SecretScope: add the default workspace when absent.
+			return { org: scope.org, workspace: scope.workspace ?? "default" };
+		},
+	};
 }
 
 /**
  * Mount the `/api/settings` handlers onto a route group (AC-8). Call AFTER `createDaemon`
  * with `daemon.group("/api/settings")` so the handlers inherit the already-mounted auth/RBAC
  * middleware. The three routes are registered relative to the group base.
+ *
+ * ── Cross-tenant hardening (PRD-022 security) ────────────────────────────────
+ * The scope resolver defaults to the HARDENED resolver that validates the request org
+ * against the authenticated identity (via {@link createHardenedScopeResolver}). A forged
+ * `x-honeycomb-org` header that disagrees with the token's own org is rejected (→ null →
+ * 400), preventing an authenticated caller for org A from writing settings into org B.
+ * This is the SAME cross-tenant guard the `/api/assets`, `/api/sources`, and data handlers
+ * use. The resolver can be overridden via `deps.scope` for testing.
  */
 export function mountSettingsGroup(group: Hono, deps: SettingsApiDeps): void {
-	const scope = deps.scope ?? headerScopeResolver;
+	const scope = deps.scope ?? createHardenedScopeResolver(deps.mode ?? "local", deps.defaultScope);
 	const store = deps.store;
 
 	// GET /api/settings — list the current settings (key → value) + the catalog. NO secret.
