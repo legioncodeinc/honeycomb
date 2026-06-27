@@ -113,6 +113,9 @@ const SUBSYSTEMS: readonly { readonly key: keyof HealthReasonsWire; readonly lab
 	{ key: "storage", label: "storage", degraded: (r) => r.storage === "unreachable" },
 	{ key: "embeddings", label: "semantic", degraded: (r) => r.embeddings === "off" },
 	{ key: "schema", label: "schema", degraded: (r) => r.schema === "missing_table" },
+	// PRD-063b (b-AC-7): the Portkey gateway chip. `unconfigured` (on but no key) + `unreachable`
+	// (a real call failed) are the DOWN states → critical; `off` (not in force) + `ok` are healthy.
+	{ key: "portkey", label: "portkey", degraded: (r) => r.portkey === "unconfigured" || r.portkey === "unreachable" },
 ];
 
 /**

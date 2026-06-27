@@ -139,6 +139,70 @@ export const noopUsageSink: UsageSink = {
 	},
 };
 
+/**
+ * The result of one provider POST: the joined completion text + the parsed {@link UsageReport}.
+ * Both the Anthropic and the Portkey transports' `post` helpers return this shape (the per-provider
+ * request reshaping + response parsing differ; the post-call plumbing below is shared).
+ */
+export interface PostResult {
+	/** The joined completion text. */
+	readonly output: string;
+	/** The token usage parsed from the (provider-specific) response. */
+	readonly usage: UsageReport;
+}
+
+/**
+ * Build the `{ execute, stream }` {@link ProviderTransport} shape SHARED by every OpenAI/Anthropic-
+ * compatible transport (the post-call plumbing the router calls). Given a provider-specific
+ * `post(call) → { output, usage }` (which does the request reshaping + response parsing + error
+ * mapping) and a {@link UsageSink}, this wires:
+ *   - `execute` → await `post`, feed the sink (defensively), return `{ output }`;
+ *   - `stream`  → the thin non-stream wrapper that yields ONE terminal {@link ProviderChunk}
+ *                 carrying the full text (the pollinating path consumes a whole completion, not a
+ *                 token stream; a real SSE body can replace this later without touching the router).
+ * The sink is fed ONLY on the success path (a thrown {@link ProviderError} from `post` reports
+ * nothing) and a sink fault is swallowed (hot-path safe — metering never breaks an inference call).
+ *
+ * Extracted so the Anthropic + Portkey transports share this identical plumbing rather than each
+ * hand-rolling it (jscpd discipline): the transports differ in `post`, not in how `post` is wired.
+ */
+export function usageReportingTransport(
+	post: (call: ProviderCall) => Promise<PostResult>,
+	usageSink: UsageSink,
+): ProviderTransport {
+	function reportUsage(usage: UsageReport): void {
+		try {
+			usageSink.record(usage);
+		} catch {
+			/* a sink fault is swallowed: metering is best-effort and never breaks inference. */
+		}
+	}
+	return {
+		async execute(call: ProviderCall): Promise<ProviderResult> {
+			const { output, usage } = await post(call);
+			reportUsage(usage);
+			return { output };
+		},
+		stream(call: ProviderCall): AsyncIterable<ProviderChunk> {
+			async function* gen(): AsyncIterable<ProviderChunk> {
+				const { output, usage } = await post(call);
+				reportUsage(usage);
+				yield { delta: output };
+			}
+			return gen();
+		},
+	};
+}
+
+/** Parse text as JSON, returning `undefined` on failure (the zod boundary rejects it). Shared. */
+export function safeJsonParse(text: string): unknown {
+	try {
+		return JSON.parse(text);
+	} catch {
+		return undefined;
+	}
+}
+
 /** Construction deps for {@link createAnthropicTransport}. Everything IO-touching is injectable. */
 export interface AnthropicTransportDeps {
 	/** The `fetch` implementation; defaults to `globalThis.fetch`. Tests inject a fake. */
@@ -288,7 +352,7 @@ export function createAnthropicTransport(deps: AnthropicTransportDeps = {}): Pro
 			throw new ProviderError(res.status, `anthropic transport: provider returned status ${res.status}`);
 		}
 		// Parse the (untrusted) success body at the boundary via zod.
-		const raw: unknown = await res.text().then((t) => safeJson(t));
+		const raw: unknown = await res.text().then((t) => safeJsonParse(t));
 		const parsed = AnthropicMessagesResponseSchema.safeParse(raw);
 		if (!parsed.success) {
 			throw new ProviderError(502, "anthropic transport: malformed provider response");
@@ -308,41 +372,7 @@ export function createAnthropicTransport(deps: AnthropicTransportDeps = {}): Pro
 		return { output: joinContentText(parsed.data.content), usage };
 	}
 
-	/** Feed the sink defensively — a sink fault must NEVER break an inference call (hot-path safe). */
-	function reportUsage(usage: UsageReport): void {
-		try {
-			usageSink.record(usage);
-		} catch {
-			/* a sink fault is swallowed: metering is best-effort and never breaks inference. */
-		}
-	}
-
-	return {
-		async execute(call: ProviderCall): Promise<ProviderResult> {
-			const { output, usage } = await post(call);
-			reportUsage(usage);
-			return { output };
-		},
-		stream(call: ProviderCall): AsyncIterable<ProviderChunk> {
-			// The pollinating path consumes a whole completion, not a token stream, so this
-			// is a thin non-stream execute that yields one terminal chunk carrying the
-			// full text. The seam shape is preserved; a real SSE body can replace this
-			// later without touching the router (documented in the module header).
-			async function* gen(): AsyncIterable<ProviderChunk> {
-				const { output, usage } = await post(call);
-				reportUsage(usage);
-				yield { delta: output };
-			}
-			return gen();
-		},
-	};
-}
-
-/** Parse text as JSON, returning `undefined` on failure (the zod boundary rejects it). */
-function safeJson(text: string): unknown {
-	try {
-		return JSON.parse(text);
-	} catch {
-		return undefined;
-	}
+	// The `{ execute, stream }` plumbing is the SHARED OpenAI/Anthropic-compatible wrapper
+	// (jscpd discipline) — this transport supplies only the provider-specific `post`.
+	return usageReportingTransport(post, usageSink);
 }
