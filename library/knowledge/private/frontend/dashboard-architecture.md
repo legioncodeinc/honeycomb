@@ -5,6 +5,7 @@
 How Honeycomb's daemon-served web dashboard is built and shipped: the loopback-only HTTP host, the token-free self-hydrating React shell at `127.0.0.1:3850/dashboard`, the hash-routed page registry, and the eight surfaces (nav shell plus seven pages) that present memory, harnesses, graph, sync, logs, and settings.
 
 **Related:**
+- [`dashboard-actions-surface.md`](dashboard-actions-surface.md)
 - [`../dashboard/adding-a-page.md`](../dashboard/adding-a-page.md)
 - [`../architecture/multi-project-and-context-switching.md`](../architecture/multi-project-and-context-switching.md)
 - [`cursor-extension-architecture.md`](cursor-extension-architecture.md)
