@@ -35,7 +35,9 @@ export {
 	type OutputSink,
 	type RecordedDaemonCall,
 	type VerbClass,
+	type VerbGroup,
 	type VerbSpec,
+	VERB_GROUPS,
 	VERB_TABLE,
 } from "./contracts.js";
 
