@@ -38,7 +38,7 @@ import {
 // Shared test fixtures
 // ────────────────────────────────────────────────────────────────────────────
 
-const FAKE_KEY = "phc_test_fake_key_not_real";
+const FAKE_KEY = "test-fake-key-not-real";
 const FAKE_HOST = "https://test.posthog.example";
 const FAKE_DEVICE_ID = "a1b2c3d4-0000-0000-0000-000000000001";
 const FAKE_VERSION = "0.1.0-test";

@@ -30,7 +30,7 @@ describe("createDefaultUpdateEmit (AC-064e.5)", () => {
 		// Inject a fake key + host + fetch so the chokepoint's gates pass and no network is hit.
 		const emit = createDefaultUpdateEmit({
 			fetch: rec.fetch,
-			posthogKey: "phc_test",
+			posthogKey: "test-key",
 			posthogHost: "https://telemetry.test",
 			env: {}, // no opt-out env
 		});
@@ -55,7 +55,7 @@ describe("createDefaultUpdateEmit (AC-064e.5)", () => {
 		const rec = recordingFetch();
 		const emit = createDefaultUpdateEmit({
 			fetch: rec.fetch,
-			posthogKey: "phc_test",
+			posthogKey: "test-key",
 			env: { HONEYCOMB_TELEMETRY: "0" }, // opted out
 		});
 		await expect(

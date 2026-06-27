@@ -308,7 +308,7 @@ export interface EmitDeps {
 	readonly fetch?: TelemetryFetch;
 	/** The env the opt-out gate reads. Defaults to `process.env`. */
 	readonly env?: NodeJS.ProcessEnv;
-	/** Override the build-injected PostHog key (tests inject a fake `phc_test`). */
+	/** Override the build-injected PostHog key (tests inject a fake non-secret value). */
 	readonly posthogKey?: string;
 	/** Override the PostHog host (tests use a fake URL so no real network is hit). */
 	readonly posthogHost?: string;

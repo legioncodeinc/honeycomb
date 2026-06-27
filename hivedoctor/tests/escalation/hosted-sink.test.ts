@@ -15,7 +15,7 @@ import { silentLogger } from "../../src/logger.js";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
-const FAKE_KEY = "phc_test_hosted_sink_key";
+const FAKE_KEY = "test-hosted-sink-key";
 const FAKE_HOST = "https://test.posthog.example";
 const FAKE_DEVICE_ID = "deadbeef-0000-0000-0000-000000000001";
 const FAKE_NOW = 1_767_225_600_000;
