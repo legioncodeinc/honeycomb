@@ -11,7 +11,7 @@
  *   - b-AC-6: every seam `buildRuntimeDeps` assembles is bound (no undefined handler seam).
  */
 
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
