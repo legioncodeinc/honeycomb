@@ -23,6 +23,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -141,6 +142,40 @@ function runtimeDir(): string {
 	return join(homedir(), ".honeycomb");
 }
 
+/**
+ * Resolve a guaranteed-WRITABLE workspace to PIN onto the spawned daemon (the `C:\WINDOWS\system32`
+ * footgun). A detached daemon inherits the spawner's cwd, and `assemble.ts` resolves its `.secrets/`
+ * + `.daemon/` root from `HONEYCOMB_WORKSPACE ?? process.cwd()`. On Windows a CLI invoked from a
+ * service / stray shell can sit in `C:\WINDOWS\system32` — an unwritable root that makes every
+ * secret save EACCES (a 502 `store_failed` with no audit trail). So `start()` pins BOTH `cwd` and
+ * `HONEYCOMB_WORKSPACE` to the first writable of: an explicit `HONEYCOMB_WORKSPACE`, the CLI cwd,
+ * then `~/.honeycomb`. The daemon's own resolver applies the same fallback as defense-in-depth.
+ */
+export function resolveDaemonWorkspace(): string {
+	const fromEnv = process.env.HONEYCOMB_WORKSPACE;
+	const candidates = [fromEnv !== undefined && fromEnv.length > 0 ? fromEnv : process.cwd(), runtimeDir()];
+	for (const dir of candidates) {
+		if (canWriteDir(dir)) return dir;
+	}
+	return runtimeDir();
+}
+
+/**
+ * True iff `dir` accepts a real create-write-unlink probe. `accessSync(W_OK)` lies on Windows (it
+ * checks the read-only attribute, not the ACL), so the actual round-trip is the only honest test.
+ */
+export function canWriteDir(dir: string): boolean {
+	try {
+		mkdirSync(dir, { recursive: true });
+		const marker = join(dir, `.hc-spawn-probe-${process.pid}`);
+		writeFileSync(marker, "");
+		rmSync(marker, { force: true });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 /** Read the recorded daemon pid from the 021a lock file (or null when absent/garbage). */
 async function readDaemonPid(): Promise<number | null> {
 	const { readFile } = await import("node:fs/promises");
@@ -176,10 +211,16 @@ export function buildDaemonLifecycle(client: DaemonClient): DaemonLifecycle {
 			if (await client.ping()) return { started: false, alreadyRunning: true };
 
 			const entry = resolveDaemonEntry();
+			// Pin a writable workspace so a detached daemon never inherits a stray, non-writable cwd
+			// (the `C:\WINDOWS\system32` footgun that 502s every secret save). Pinning BOTH `cwd` and
+			// `HONEYCOMB_WORKSPACE` is belt-and-suspenders: the daemon resolves its `.secrets/` root
+			// from `HONEYCOMB_WORKSPACE ?? process.cwd()`, so either alone would suffice.
+			const workspace = resolveDaemonWorkspace();
 			const child = spawn(process.execPath, [...DAEMON_NODE_FLAGS, entry], {
 				detached: true,
 				stdio: "ignore",
-				env: process.env,
+				cwd: workspace,
+				env: { ...process.env, HONEYCOMB_WORKSPACE: workspace },
 				// Hide the transient console window on Windows — a detached daemon spawn is never
 				// an interactive terminal the user needs to see.
 				windowsHide: true,
