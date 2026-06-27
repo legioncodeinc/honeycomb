@@ -8,9 +8,13 @@
  *
  * a-AC-2 the API lists names only; no value-returning endpoint exists.
  * a-AC-5 no decrypted value is ever returned through the API surface.
+ *
+ * PRD-022 cross-tenant hardening: the scope resolver MUST reject a forged `x-honeycomb-org`
+ * header that disagrees with the validated Identity's own org, preventing an authenticated
+ * caller for org A from writing secrets under org B's namespace.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hono } from "hono";
@@ -20,6 +24,8 @@ import { createFakeMachineKeyProvider, createFakeVaultProvider } from "../../../
 import { mountSecretsApi, SECRETS_GROUP } from "../../../../src/daemon/runtime/secrets/api.js";
 import { SecretExecRunner } from "../../../../src/daemon/runtime/secrets/exec.js";
 import { SecretsStore } from "../../../../src/daemon/runtime/secrets/store.js";
+import { IDENTITY_CONTEXT_KEY } from "../../../../src/daemon/runtime/middleware/permission.js";
+import type { Identity } from "../../../../src/daemon/runtime/auth/contracts.js";
 
 const SECRET = "sk-OPENAI-do-not-leak";
 const HEADERS = { "x-honeycomb-org": "acme", "x-honeycomb-workspace": "backend" };
@@ -37,6 +43,30 @@ function build(): Hono {
 	// hits the handlers exactly as the daemon's group would route them.
 	const root = new Hono();
 	const group = new Hono();
+	mountSecretsApi(group, { store });
+	root.route(SECRETS_GROUP, group);
+	return root;
+}
+
+/**
+ * Build an app with a validated Identity stamped onto the context (mirrors what the
+ * permission middleware does in team/hybrid mode). This lets us test the cross-tenant
+ * hardening: the scope resolver MUST reject a forged org header that disagrees with
+ * the Identity's own org.
+ */
+function buildWithIdentity(identity: Identity): Hono {
+	const store = new SecretsStore({
+		baseDir: base,
+		machineKey: createFakeMachineKeyProvider("machine-A"),
+		clock: { now: () => "2026-06-18T00:00:00.000Z" },
+	});
+	const root = new Hono();
+	const group = new Hono();
+	// Stamp the validated Identity onto the context (what permission middleware does).
+	group.use("*", async (c, next) => {
+		c.set(IDENTITY_CONTEXT_KEY, identity);
+		await next();
+	});
 	mountSecretsApi(group, { store });
 	root.route(SECRETS_GROUP, group);
 	return root;
@@ -246,5 +276,229 @@ describe("b-AC-1 POST /api/secrets/exec → 202 + jobId; b-AC-3 GET status → r
 		expect(op.status).toBe(400);
 		expect(await bw.text()).not.toContain(SECRET);
 		expect(await op.text()).not.toContain(SECRET);
+	});
+});
+
+// ── PRD-022 cross-tenant hardening (prevents forged org header writes) ────────
+describe("PRD-022 cross-tenant hardening: forged x-honeycomb-org is rejected", () => {
+	it("an authenticated caller for org A cannot write secrets under org B by forging the header", async () => {
+		// The validated Identity says the caller is authenticated for org-a.
+		const identity: Identity = {
+			org: "org-a",
+			workspace: "ws-a",
+			agentId: "default",
+			role: "member",
+		};
+		const authedApp = buildWithIdentity(identity);
+
+		// The attacker tries to write a secret to org-b by forging the x-honeycomb-org header.
+		const res = await authedApp.request("/api/secrets/evil-secret", {
+			method: "POST",
+			headers: {
+				"x-honeycomb-org": "org-b", // FORGED: disagrees with identity.org
+				"x-honeycomb-workspace": "ws-b",
+				"content-type": "application/json",
+			},
+			body: JSON.stringify({ value: "attacker-controlled-value" }),
+		});
+
+		// THE SECURITY PROPERTY: the request is rejected (400 bad tenancy) because the
+		// header org disagrees with the validated Identity's org. The secret is NOT written
+		// under org-b's namespace.
+		expect(res.status).toBe(400);
+		const body = await res.json();
+		expect(body.error).toBe("bad_request");
+
+		// Verify the secret was NOT written to org-b's scope directory (org-b__ws-b).
+		const orgBScopeDir = join(base, ".secrets", "org-b__ws-b");
+		expect(existsSync(orgBScopeDir)).toBe(false);
+	});
+
+	it("a matching org header (identity.org === header org) allows the write", async () => {
+		const identity: Identity = {
+			org: "org-a",
+			workspace: "ws-a",
+			agentId: "default",
+			role: "member",
+		};
+		const authedApp = buildWithIdentity(identity);
+
+		// The header org MATCHES the validated Identity's org → allowed.
+		const res = await authedApp.request("/api/secrets/legit-secret", {
+			method: "POST",
+			headers: {
+				"x-honeycomb-org": "org-a", // MATCHES identity.org
+				"x-honeycomb-workspace": "ws-a",
+				"content-type": "application/json",
+			},
+			body: JSON.stringify({ value: "legitimate-value" }),
+		});
+
+		expect(res.status).toBe(201);
+		const body = await res.json();
+		expect(body.ok).toBe(true);
+		expect(body.name).toBe("legit-secret");
+
+		// Verify the secret WAS written to the correct scope directory (org-a__ws-a).
+		const scopeDir = join(base, ".secrets", "org-a__ws-a");
+		expect(existsSync(scopeDir)).toBe(true);
+		const files = readdirSync(scopeDir, { recursive: true });
+		expect(files.some((f) => String(f).includes("legit-secret"))).toBe(true);
+	});
+
+	it("GET /api/secrets with a forged org header is rejected (list isolation)", async () => {
+		const identity: Identity = {
+			org: "org-a",
+			workspace: "ws-a",
+			agentId: "default",
+			role: "member",
+		};
+		const authedApp = buildWithIdentity(identity);
+
+		// First, write a secret to org-a (the caller's own org).
+		await authedApp.request("/api/secrets/org-a-secret", {
+			method: "POST",
+			headers: {
+				"x-honeycomb-org": "org-a",
+				"x-honeycomb-workspace": "ws-a",
+				"content-type": "application/json",
+			},
+			body: JSON.stringify({ value: "org-a-value" }),
+		});
+
+		// Now try to list secrets for org-b by forging the header.
+		const listRes = await authedApp.request("/api/secrets", {
+			headers: {
+				"x-honeycomb-org": "org-b", // FORGED
+				"x-honeycomb-workspace": "ws-b",
+			},
+		});
+
+		// THE SECURITY PROPERTY: the list request is rejected (400) because the header
+		// org disagrees with the validated Identity's org. The caller cannot enumerate
+		// another tenant's secret names.
+		expect(listRes.status).toBe(400);
+		const body = await listRes.json();
+		expect(body.error).toBe("bad_request");
+	});
+
+	it("DELETE with a forged org header is rejected (cannot delete another tenant's secrets)", async () => {
+		const identity: Identity = {
+			org: "org-a",
+			workspace: "ws-a",
+			agentId: "default",
+			role: "member",
+		};
+		const authedApp = buildWithIdentity(identity);
+
+		// Write a secret to org-a.
+		await authedApp.request("/api/secrets/protected-secret", {
+			method: "POST",
+			headers: {
+				"x-honeycomb-org": "org-a",
+				"x-honeycomb-workspace": "ws-a",
+				"content-type": "application/json",
+			},
+			body: JSON.stringify({ value: "protected-value" }),
+		});
+
+		// Try to delete a secret from org-b by forging the header.
+		const delRes = await authedApp.request("/api/secrets/protected-secret", {
+			method: "DELETE",
+			headers: {
+				"x-honeycomb-org": "org-b", // FORGED
+				"x-honeycomb-workspace": "ws-b",
+			},
+		});
+
+		// THE SECURITY PROPERTY: the delete request is rejected (400).
+		expect(delRes.status).toBe(400);
+		const body = await delRes.json();
+		expect(body.error).toBe("bad_request");
+
+		// Verify the secret still exists in the correct scope directory (org-a__ws-a).
+		const scopeDir = join(base, ".secrets", "org-a__ws-a");
+		expect(existsSync(scopeDir)).toBe(true);
+		const files = readdirSync(scopeDir, { recursive: true });
+		expect(files.some((f) => String(f).includes("protected-secret"))).toBe(true);
+	});
+
+	it("local mode (no Identity stamped) still allows header-based scope (backward compat)", async () => {
+		// In local mode, no Identity is stamped, so the header-based scope is trusted.
+		// This test uses the original build() which does NOT stamp an Identity.
+		const localApp = build();
+
+		const res = await localApp.request("/api/secrets/local-secret", {
+			method: "POST",
+			headers: {
+				"x-honeycomb-org": "local-org",
+				"x-honeycomb-workspace": "local-ws",
+				"content-type": "application/json",
+			},
+			body: JSON.stringify({ value: "local-value" }),
+		});
+
+		// In local mode (no Identity), the header org is trusted → write succeeds.
+		expect(res.status).toBe(201);
+		const body = await res.json();
+		expect(body.ok).toBe(true);
+	});
+
+	it("an admin role does NOT bypass the org check (org boundary is absolute)", async () => {
+		// Even an admin for org-a cannot write to org-b by forging the header.
+		const identity: Identity = {
+			org: "org-a",
+			workspace: "ws-a",
+			agentId: "default",
+			role: "admin", // ADMIN role
+		};
+		const authedApp = buildWithIdentity(identity);
+
+		const res = await authedApp.request("/api/secrets/admin-evil", {
+			method: "POST",
+			headers: {
+				"x-honeycomb-org": "org-b", // FORGED
+				"x-honeycomb-workspace": "ws-b",
+				"content-type": "application/json",
+			},
+			body: JSON.stringify({ value: "admin-attacker-value" }),
+		});
+
+		// THE SECURITY PROPERTY: even an admin cannot cross the org boundary.
+		// The org check is absolute and happens before any role-based logic.
+		expect(res.status).toBe(400);
+		const body = await res.json();
+		expect(body.error).toBe("bad_request");
+
+		// Verify the secret was NOT written to org-b's scope directory (org-b__ws-b).
+		const orgBScopeDir = join(base, ".secrets", "org-b__ws-b");
+		expect(existsSync(orgBScopeDir)).toBe(false);
+	});
+
+	it("workspace mismatch is allowed (only org is cross-checked against Identity)", async () => {
+		// The cross-tenant guard checks ONLY the org, not the workspace.
+		// A caller for org-a can target any workspace within org-a.
+		const identity: Identity = {
+			org: "org-a",
+			workspace: "ws-a",
+			agentId: "default",
+			role: "member",
+		};
+		const authedApp = buildWithIdentity(identity);
+
+		const res = await authedApp.request("/api/secrets/cross-ws-secret", {
+			method: "POST",
+			headers: {
+				"x-honeycomb-org": "org-a", // MATCHES identity.org
+				"x-honeycomb-workspace": "ws-different", // Different workspace, but same org
+				"content-type": "application/json",
+			},
+			body: JSON.stringify({ value: "cross-ws-value" }),
+		});
+
+		// The write succeeds because the org matches (workspace is not cross-checked).
+		expect(res.status).toBe(201);
+		const body = await res.json();
+		expect(body.ok).toBe(true);
 	});
 });
