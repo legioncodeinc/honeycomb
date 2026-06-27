@@ -141,12 +141,14 @@ export function resolveRequestProject(
  * ── Cross-tenant hardening (PRD-022 security) ────────────────────────────────
  * In team/hybrid the permission middleware has already AUTHENTICATED the request and
  * stamped the VALIDATED {@link import("./auth/contracts.js").Identity} onto the context.
- * The data handlers partition storage by the header org, so a header that disagrees with
- * the token's own org would let an authenticated caller for org A read/write org B by
- * forging `x-honeycomb-org: orgB`. When a validated Identity is present, the resolved
- * org MUST equal `identity.org`; a mismatch returns `null` → the handler fails closed
- * (its existing 400/deny). In local mode no Identity is stamped, so the prior pure-header
- * behaviour is unchanged.
+ * The data handlers partition storage by the header org/workspace, so a header that disagrees
+ * with the token's own org or workspace would let an authenticated caller for org A read/write
+ * org B by forging `x-honeycomb-org: orgB`, or access workspace X by forging
+ * `x-honeycomb-workspace: workspaceX`. When a validated Identity is present, the resolved
+ * org MUST equal `identity.org` AND the resolved workspace (when supplied) MUST equal
+ * `identity.workspace`; a mismatch returns `null` → the handler fails closed (its existing
+ * 400/deny). In local mode no Identity is stamped, so the prior pure-header behaviour is
+ * unchanged.
  */
 export function resolveScopeFromHeaders(c: Context): QueryScope | null {
 	const org = c.req.header("x-honeycomb-org");
@@ -155,6 +157,12 @@ export function resolveScopeFromHeaders(c: Context): QueryScope | null {
 	const identity = getRequestIdentity(c);
 	if (identity !== undefined && org !== identity.org) return null;
 	const workspace = c.req.header("x-honeycomb-workspace");
+	// Cross-workspace guard: when a workspace is supplied AND an identity is present, the
+	// workspace header must match the token's own workspace. A mismatch is a cross-workspace
+	// access attempt and must be rejected (fail-closed).
+	if (identity !== undefined && workspace !== undefined && workspace.length > 0 && workspace !== identity.workspace) {
+		return null;
+	}
 	return workspace !== undefined && workspace.length > 0 ? { org, workspace } : { org };
 }
 
