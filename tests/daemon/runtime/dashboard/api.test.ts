@@ -399,6 +399,74 @@ describe("PRD-035b: estimated-savings is a real, explainable, fail-soft metric",
 	});
 });
 
+describe("PRD-049e: the KPI band is project-scoped (project-bearing counts only)", () => {
+	// A SQL-capturing daemon: each dashboard read routes through one responder; the transport records
+	// every request so a test can assert which counts carried the `project_id` filter.
+	function makeCapturingDaemon() {
+		const fake = new FakeDeepLakeTransport((req: TransportRequest): Record<string, unknown>[] => {
+			const sql = req.sql;
+			if (/SUM\(LENGTH/i.test(sql)) return [{ chars: 4000 }];
+			if (/FROM\s+"synced_assets"/i.test(sql)) return [{ n: 3 }];
+			if (/COUNT\(\*\).*FROM\s+"memories"/i.test(sql)) return [{ n: 42 }];
+			if (/COUNT\(\*\).*FROM\s+"sessions"/i.test(sql)) return [{ n: 7 }];
+			return [];
+		});
+		const storage = createStorageClient({ transport: fake, provider: stubProvider(fakeCredentialRecord()) });
+		const daemon = createDaemon({ config: cfg(), storage, logger: createRequestLogger({ silent: true }) });
+		mountDashboardApi(daemon, { storage });
+		return { daemon, fake };
+	}
+
+	const proj = (id: string): Record<string, string> => ({ ...headers(), "x-honeycomb-project": id });
+
+	it("fetchKpisView(projectId): memories + sessions counts AND the savings SUM carry WHERE project_id; synced_assets does NOT", async () => {
+		const seen: string[] = [];
+		const storage = fakeStorage((sql) => {
+			seen.push(sql);
+			return /SUM\(LENGTH/i.test(sql) ? [{ chars: 4000 }] : [{ n: 1 }];
+		});
+		await fetchKpisView(storage, SCOPE_OK, "proj-web");
+		const find = (re: RegExp): string => seen.find((s) => re.test(s)) ?? "";
+		expect(find(/COUNT\(\*\).*FROM\s+"memories"/i)).toMatch(/project_id = 'proj-web'/);
+		expect(find(/COUNT\(\*\).*FROM\s+"sessions"/i)).toMatch(/project_id = 'proj-web'/);
+		expect(find(/SUM\(LENGTH/i)).toMatch(/project_id = 'proj-web'/);
+		// Team skills is shared with the TEAM (synced_assets has no project segment) → never narrowed.
+		expect(find(/FROM\s+"synced_assets"/i)).not.toMatch(/project_id/);
+	});
+
+	it("fetchKpisView with NO project → no project filter anywhere (workspace-wide, back-compat)", async () => {
+		const seen: string[] = [];
+		const storage = fakeStorage((sql) => {
+			seen.push(sql);
+			return /SUM\(LENGTH/i.test(sql) ? [{ chars: 0 }] : [{ n: 1 }];
+		});
+		await fetchKpisView(storage, SCOPE_OK);
+		expect(seen.every((s) => !/project_id/.test(s))).toBe(true);
+	});
+
+	it("the route narrows the band when the dashboard stamps x-honeycomb-project", async () => {
+		const { daemon, fake } = makeCapturingDaemon();
+		const res = await daemon.app.request("/api/diagnostics/kpis", { headers: proj("proj-web") });
+		expect(res.status).toBe(200);
+		const find = (re: RegExp): string => fake.requests.find((r) => re.test(r.sql))?.sql ?? "";
+		expect(find(/COUNT\(\*\).*FROM\s+"memories"/i)).toMatch(/project_id = 'proj-web'/);
+		expect(find(/COUNT\(\*\).*FROM\s+"sessions"/i)).toMatch(/project_id = 'proj-web'/);
+		expect(find(/FROM\s+"synced_assets"/i)).not.toMatch(/project_id/);
+	});
+
+	it("the band is cached per (scope, project) within the TTL — a re-load does NOT re-query, a new project DOES", async () => {
+		const { daemon, fake } = makeCapturingDaemon();
+		await daemon.app.request("/api/diagnostics/kpis", { headers: proj("proj-web") });
+		const afterFirst = fake.requests.length;
+		// A second identical load is served from the cache → zero additional storage reads.
+		await daemon.app.request("/api/diagnostics/kpis", { headers: proj("proj-web") });
+		expect(fake.requests.length).toBe(afterFirst);
+		// A DIFFERENT project is a different cache key → it re-queries.
+		await daemon.app.request("/api/diagnostics/kpis", { headers: proj("proj-other") });
+		expect(fake.requests.length).toBeGreaterThan(afterFirst);
+	});
+});
+
 describe("PRD-036b: skill-sync view is the union (installed ∪ synced) with honest state", () => {
 	it("b-AC-1/b-AC-3: local disk skills render as `local`; synced rows keep their state", async () => {
 		const storage = fakeStorage((sql) => {

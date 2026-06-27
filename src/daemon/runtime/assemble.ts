@@ -60,6 +60,7 @@ import { buildCodebaseGraphSnapshot, mountGraphApi } from "./codebase/api.js";
 import { mountOntologyApi } from "./ontology/api.js";
 import { mountSkillPropagationApi } from "./skillify/propagation-api.js";
 import { mountDashboardApi } from "./dashboard/api.js";
+import { mountActionsApi } from "./dashboard/actions-api.js";
 import { mountHarnessApi } from "./dashboard/harness-api.js";
 import { mountSyncApi } from "./dashboard/sync-mount.js";
 import { detectInstalledHarnesses } from "./dashboard/harness-detect.js";
@@ -93,7 +94,7 @@ import type { SecretScope } from "./secrets/contracts.js";
 // ── The vault `setting` class (PRD-032d / AC-6) — assembly READS provider/model + pollinating ──
 import { VaultStore } from "./vault/store.js";
 import { createVaultRegistry } from "./vault/registry.js";
-import { mountSettingsApi } from "./vault/api.js";
+import { EMBEDDINGS_ENABLED_KEY, mountSettingsApi } from "./vault/api.js";
 import { isValidProviderModel, providerEntry } from "./vault/catalog.js";
 import { migrateDeeplakeToken } from "./vault/migrate.js";
 
@@ -1477,6 +1478,27 @@ async function readVaultPollinatingEnabled(
 	}
 }
 
+/**
+ * Resolve the BOOT embeddings-enabled decision (dashboard actions), VAULT-FIRST. Precedence:
+ *   1. the vault `setting` `embeddings.enabled` when PRESENT + readable → it WINS (a user's saved
+ *      dashboard choice persists across restarts);
+ *   2. else the env-resolved `resolveEmbedClientOptions().enabled` (the `HONEYCOMB_EMBEDDINGS`
+ *      opt-out, default-on — the prior behaviour, preserved when no preference was ever saved).
+ * NEVER throws: an unreadable/missing setting (a fresh vault, no creds) degrades to the env/default.
+ * The runtime `setEnabled` toggle can flip the live state afterward (and persists it for next boot).
+ */
+async function readBootEmbeddingsEnabled(vault: VaultSettingsReader | undefined, scope: SecretScope): Promise<boolean> {
+	if (vault !== undefined) {
+		try {
+			const res = await vault.getSetting(EMBEDDINGS_ENABLED_KEY, scope);
+			if (res.ok) return coerceSettingBool(res.value);
+		} catch {
+			// fall through to the env/default below
+		}
+	}
+	return resolveEmbedClientOptions().enabled;
+}
+
 /** Coerce a scalar `setting` value (boolean | number | string) to a boolean (`true`/`1` → true). */
 function coerceSettingBool(value: unknown): boolean {
 	if (typeof value === "boolean") return value;
@@ -1835,6 +1857,18 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	const scope = tenancy.scope;
 	const daemonOrgName = tenancy.orgName;
 
+	// ── PRD-032d / AC-6: construct the daemon's vault `setting`-class READER ONCE, over the
+	// SAME workspace base dir + machine-key + daemon scope the secrets store uses (so the vault,
+	// the `.secrets/` records, and the `${SECRET_REF}` resolver all agree on ONE location). A
+	// test injects a fake reader (`options.vault`); production builds the real {@link VaultStore}.
+	// When a fake `storage` is injected with NO `vault`, the read path is skipped — the vault is
+	// only built for the REAL assembly so the deterministic suite never touches the workspace.
+	// Built HERE (before the services block) so the embed supervisor can be seeded from the
+	// persisted `embeddings.enabled` preference, AND it threads into `assembleSeams` + the recall
+	// mount below (PRD-044c) — one reader, no second construction.
+	const vault: VaultSettingsReader | undefined =
+		options.vault ?? (options.storage === undefined ? buildVaultStore() : undefined);
+
 	// ── a-AC-3: the three REAL services replace the no-op stubs.
 	const services: Partial<DaemonServices> = {
 		queue: createJobQueueService({ storage, scope }),
@@ -1851,6 +1885,24 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		// fake supervisor so the hermetic assembly never spawns a real process.
 		embed: options.embedSupervisor ?? createEmbedSupervisor(),
 	};
+
+	// Dashboard actions: reconcile the embed supervisor to the PERSISTED `embeddings.enabled`
+	// preference (vault-first; the env/default is the seed `createEmbedSupervisor` already applied).
+	// `assembleDaemon` is SYNC and the vault read is async, so this is fire-and-forget: the supervisor
+	// boots from env/default and a saved dashboard choice (when present + different) is applied a tick
+	// later via the live `setEnabled`. Fail-soft — a missing vault / read error leaves env/default.
+	const embedSupervisor = services.embed;
+	if (embedSupervisor !== undefined && vault !== undefined) {
+		void readBootEmbeddingsEnabled(vault, secretScopeFromQueryScope(scope))
+			.then(async (enabled) => {
+				if (enabled !== !embedSupervisor.disabled) await embedSupervisor.setEnabled(enabled);
+			})
+			.catch((err: unknown) => {
+				// A failed reconcile must never become an unhandled rejection — the env/default state stands.
+				const reason = err instanceof Error ? err.message : String(err);
+				process.stderr.write(`honeycomb: embeddings boot reconciliation failed (non-fatal): ${reason}\n`);
+			});
+	}
 
 	// ── a-AC-4: the cached health bit. A cheap background `SELECT 1` refreshes a coarse
 	// status; `/health` reads the bit (NO per-request heavy query). Initial state is
@@ -1870,8 +1922,13 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// always-on missing-table signal at the health seam — conservative, never a false
 	// `missing_table`). The thunk reads live state on each call, so a probe flip to `degraded`
 	// is reflected on the next `/health` read.
-	const embeddingsEnabled =
-		options.embeddingsEnabled ?? (options.embed !== undefined ? false : resolveEmbedClientOptions().enabled);
+	// Dashboard actions: read the LIVE supervisor state (`!services.embed.disabled`) so a runtime
+	// `setEnabled` toggle is reflected on the next `/health` read. The test branches are preserved:
+	// an explicit `embeddingsEnabled` option still wins, and an injected `options.embed` attachment
+	// (the hermetic suite) still reports `off`.
+	const embeddingsReason = (): boolean =>
+		options.embeddingsEnabled ??
+		(options.embed !== undefined ? false : embedSupervisor !== undefined ? !embedSupervisor.disabled : resolveEmbedClientOptions().enabled);
 
 	// ── PRD-063b (b-AC-7): the Portkey gateway health reason. Mutable + live: it is SET to the
 	// assembly-time status (`off`/`ok`/`unconfigured`, derived from config below — NO probe) once the
@@ -1886,7 +1943,8 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	};
 
 	const healthDetail = (): HealthDetail =>
-		buildHealthDetail({ status: healthBit, embeddingsEnabled, portkey: portkeyHealth });
+		buildHealthDetail({ status: healthBit, embeddingsEnabled: embeddingsReason(), portkey: portkeyHealth });
+
 
 	const { authenticator, policy } = authForMode(config.mode, storage, scope);
 
@@ -1932,16 +1990,9 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				? detectInstalledHarnesses()
 				: new Set<string>());
 
-	// ── PRD-032d / AC-6: construct the daemon's vault `setting`-class READER ONCE, over the
-	// SAME workspace base dir + machine-key + daemon scope the secrets store uses (so the vault,
-	// the `.secrets/` records, and the `${SECRET_REF}` resolver all agree on ONE location). A
-	// test injects a fake reader (`options.vault`); production builds the real {@link VaultStore}.
-	// When a fake `storage` is injected with NO `vault`, the read path is skipped — the vault is
-	// only built for the REAL assembly so the deterministic suite never touches the workspace.
-	// Built BEFORE `assembleSeams` so the same reader threads into the `/api/memories/recall` mount
-	// (PRD-044c: the LIVE recall path reads the `recallMode` setting at recall time).
-	const vault: VaultSettingsReader | undefined =
-		options.vault ?? (options.storage === undefined ? buildVaultStore() : undefined);
+	// (The vault `setting`-class READER is constructed earlier, before the services block, so it can
+	// also seed the embed supervisor's boot enabled state. It threads into `assembleSeams` below — the
+	// SAME reader the `/api/memories/recall` mount reads `recallMode` from, PRD-044c.)
 
 	// ── PRD-063b (b-AC-7): the Portkey selection is resolved INSIDE `start()` (async, where the
 	// other vault reads live) — see `resolvePortkeyWorkerDeps`. The synchronous body only holds the
@@ -1998,6 +2049,24 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		} catch (err: unknown) {
 			const reason = err instanceof Error ? err.message : String(err);
 			process.stderr.write(`honeycomb: auth status API mount failed (non-fatal): ${reason}\n`);
+		}
+
+		// Dashboard actions: FIRE the `/api/actions` mount ONCE so the Settings page can log out,
+		// toggle embeddings (live + persisted), restart the daemon, and surface uninstall — the named
+		// CLI actions, now performable from the UI. It attaches onto the already-mounted, protected
+		// `/api/actions` group and SELF-GATES to local mode + an origin/CSRF guard inside the handlers.
+		// The embed supervisor + vault store + default scope are threaded so the toggle actuates live
+		// and persists. FAIL-SOFT: a mount error must NEVER crash the daemon — the surface stays
+		// unmounted this run (the page's action buttons degrade), the posture the other mounts use.
+		try {
+			mountActionsApi(daemon, {
+				embed: daemon.services.embed,
+				defaultScope: scope,
+				...(vault instanceof VaultStore ? { store: vault } : {}),
+			});
+		} catch (err: unknown) {
+			const reason = err instanceof Error ? err.message : String(err);
+			process.stderr.write(`honeycomb: actions API mount failed (non-fatal): ${reason}\n`);
 		}
 
 		// PRD-049e (49e-AC-1 / 49e-AC-3): FIRE the dashboard SCOPE-SWITCHER enumeration reads ONCE so the

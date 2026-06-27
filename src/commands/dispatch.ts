@@ -25,6 +25,7 @@ import {
 	isAuthPassthrough,
 	isStorageVerb,
 	lookupVerb,
+	VERB_GROUPS,
 	VERB_TABLE,
 } from "./contracts.js";
 import { parseSessionsArgs, runSessionsCommand } from "./sessions.js";
@@ -78,13 +79,38 @@ export function parseInvocation(argv: readonly string[]): CommandInvocation {
 	return { verb, argv: tail, flags };
 }
 
-/** Build the multi-line usage string from the merged verb table (FR-2). */
+/**
+ * The branded ASCII honeycomb mark printed atop `honeycomb` (no args) and `honeycomb --help`
+ * (FR-2). Plain ASCII on purpose: it renders identically across all six harnesses, when piped,
+ * and in non-TTY logs — no ANSI color or Unicode glyphs that a dumb terminal would mangle.
+ * Backslashes are doubled for the JS string literal; the rendered art is a two-row honeycomb.
+ */
+const HONEYCOMB_BANNER = [
+	"   __    __    __",
+	"  /  \\__/  \\__/  \\     H O N E Y C O M B",
+	"  \\__/  \\__/  \\__/",
+	"  /  \\__/  \\__/  \\     shared agent memory for your coding tools",
+	"  \\__/  \\__/  \\__/",
+].join("\n");
+
+/**
+ * Build the multi-line usage string from the merged verb table (FR-2): the branded banner, the
+ * version line, the usage line, then EVERY command grouped under its {@link VERB_GROUPS} section.
+ * Grouping (rather than one flat list) makes the full surface scannable and structurally proves
+ * no command is hidden — every `VERB_TABLE` row lands in exactly one printed section. The verb
+ * column is padded to the widest verb so summaries align.
+ */
 export function usageText(): string {
-	const lines = [`${PRODUCT_SLUG} v${HONEYCOMB_VERSION}`, "", "usage: honeycomb <command> [options]", "", "commands:"];
-	for (const spec of VERB_TABLE) {
-		lines.push(`  ${spec.verb.padEnd(11)} ${spec.summary}`);
+	const lines: string[] = [HONEYCOMB_BANNER, "", `${PRODUCT_SLUG} v${HONEYCOMB_VERSION}`, "", "usage: honeycomb <command> [options]", ""];
+	const pad = VERB_TABLE.reduce((w, s) => Math.max(w, s.verb.length), 0) + 2;
+	for (const { key, label } of VERB_GROUPS) {
+		const rows = VERB_TABLE.filter((s) => s.group === key);
+		if (rows.length === 0) continue;
+		lines.push(`${label}:`);
+		for (const spec of rows) lines.push(`  ${spec.verb.padEnd(pad)}${spec.summary}`);
+		lines.push("");
 	}
-	lines.push("", "global flags: --help  --version  --json  --dry-run");
+	lines.push("global flags: --help  --version  --json  --dry-run");
 	return lines.join("\n");
 }
 

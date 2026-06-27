@@ -96,6 +96,14 @@ export interface EmbedSupervisorDeps {
 	readonly env?: NodeJS.ProcessEnv;
 	/** Tuning knobs (all defaulted). */
 	readonly config?: EmbedSupervisorConfig;
+	/**
+	 * The BOOT enabled decision (PRD dashboard-actions). When supplied it OVERRIDES the env-derived
+	 * default so the composition root can seed the supervisor from the persisted `embeddings.enabled`
+	 * vault setting (precedence: persisted setting → `HONEYCOMB_EMBEDDINGS` → default-on). ABSENT →
+	 * the prior env-only behaviour (`!resolveEmbedClientOptions(env).enabled` decides `disabled`).
+	 * The runtime {@link EmbedSupervisor.setEnabled} toggle can flip this live afterward.
+	 */
+	readonly enabled?: boolean;
 }
 
 /** Supervisor tuning (D-6 / D-4). All optional. */
@@ -250,6 +258,15 @@ export interface EmbedSupervisor extends DaemonService {
 	 * recall degrades → restart → semantic back). Resets the bounded restart count.
 	 */
 	restart(): Promise<void>;
+	/**
+	 * Turn embeddings on/off LIVE (the dashboard toggle). `setEnabled(true)` spawns + warms the
+	 * child if it is not already running; `setEnabled(false)` stops it (recall degrades to lexical).
+	 * Idempotent: calling it with the already-current state is a no-op. Flips the supervisor's
+	 * `disabled` accessor so a subsequent `start()`/`restart()` honors the new state. Persistence of
+	 * the choice is the caller's concern (the action endpoint writes the `embeddings.enabled` vault
+	 * setting); this method only actuates the running process.
+	 */
+	setEnabled(enabled: boolean): Promise<void>;
 }
 
 /** Build the embed-daemon supervisor (PRD-025 Wave 2 / D-6). */
@@ -261,10 +278,18 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 	const spawnChild = deps.spawnChild ?? defaultSpawnChild(env);
 	const probeHealth = deps.probeHealth ?? defaultProbeHealth(env);
 
-	// D-1: an explicit `HONEYCOMB_EMBEDDINGS=false`/`0` makes the supervisor inert.
-	const disabled = !resolveEmbedClientOptions(env).enabled;
+	// D-1: an explicit `HONEYCOMB_EMBEDDINGS=false`/`0` makes the supervisor inert. The composition
+	// root may OVERRIDE this with `deps.enabled` (the persisted `embeddings.enabled` vault setting), and
+	// the dashboard `setEnabled` toggle flips it live afterward — so this is a MUTABLE runtime flag, not
+	// a construction-time const. `enabled === false` ⇒ `disabled` (no child; recall is cleanly lexical).
+	let enabled = deps.enabled ?? resolveEmbedClientOptions(env).enabled;
 
 	let started = false;
+	// True once the daemon lifecycle has called `start()` at least once. Unlike `started` (which
+	// `stop()` clears), this is sticky — so `setEnabled` can distinguish a PRE-start boot reconciliation
+	// (just record the desired state; let `start()` spawn within the lifecycle) from a live re-enable
+	// AFTER the lifecycle is up (spawn now). Prevents spawning embeddings outside the service lifecycle.
+	let lifecycleStarted = false;
 	let stopping = false;
 	let child: EmbedChild | null = null;
 	let live = false;
@@ -358,7 +383,7 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 		await spawnAndWatch();
 	}
 
-	return {
+	const api: EmbedSupervisor = {
 		get live(): boolean {
 			return live;
 		},
@@ -366,16 +391,17 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 			return warm;
 		},
 		get disabled(): boolean {
-			return disabled;
+			return !enabled;
 		},
 		get restarts(): number {
 			return restarts;
 		},
 
 		async start(): Promise<void> {
+			lifecycleStarted = true; // the service lifecycle is now up (sticky; stop() does not clear it)
 			if (started) return; // idempotent
 			started = true;
-			if (disabled) {
+			if (!enabled) {
 				// D-1 opt-out: inert. Never spawn; recall is cleanly lexical.
 				logger.event("embed.disabled");
 				return;
@@ -425,11 +451,34 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 			live = false;
 			warm = false;
 			restarts = 0;
-			if (disabled || stopping) return;
+			if (!enabled || stopping) return;
 			logger.event("embed.manual_restart");
 			await spawnAndWatch();
 		},
+
+		async setEnabled(want: boolean): Promise<void> {
+			// The dashboard live toggle. Flip the runtime flag, then actuate the child to match:
+			// enabling spawns (if the lifecycle is up and no child is running); disabling stops.
+			enabled = want;
+			if (want) {
+				logger.event("embed.enabled");
+				// PRE-start (boot reconciliation): only record the desired state — do NOT spawn outside
+				// the service lifecycle; `start()` will honor `enabled` when the lifecycle comes up.
+				if (!lifecycleStarted) return;
+				// Lifecycle is up: spawn iff no child is currently running. `stop()` cleared `started`, so
+				// reset it to false and route through `start()` (which re-arms `stopping` + spawns).
+				if (child === null) {
+					started = false;
+					await api.start();
+				}
+			} else {
+				logger.event("embed.disabled_live");
+				// Stop only when there is something to stop (a running child) — never a no-op stop pre-start.
+				if (child !== null) await api.stop();
+			}
+		},
 	};
+	return api;
 }
 
 /**
@@ -451,5 +500,8 @@ export const noopEmbedSupervisor: EmbedSupervisor = {
 	},
 	async restart(): Promise<void> {
 		/* no-op stub */
+	},
+	async setEnabled(): Promise<void> {
+		/* no-op stub — the inert supervisor never spawns a child */
 	},
 };

@@ -92,6 +92,10 @@ const ROUTE_GROUPS: readonly RouteGroupSpec[] = Object.freeze([
 	{ path: "/api/org", protect: true, session: false },
 	{ path: "/api/workspace", protect: true, session: false },
 	{ path: "/api/diagnostics", protect: true, session: false },
+	// The dashboard imperative-actions surface (logout / embeddings / restart / uninstall). Protected
+	// (inherits auth/RBAC) AND additionally local-mode + origin/CSRF gated inside the handlers
+	// (`dashboard/actions-api.ts`), since these are credential/process/lifecycle actions.
+	{ path: "/api/actions", protect: true, session: false },
 	{ path: "/api/pipeline", protect: true, session: false },
 	{ path: "/api/repair", protect: true, session: false },
 	{ path: "/api/inference", protect: true, session: false },

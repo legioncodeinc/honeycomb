@@ -126,6 +126,15 @@ export const ENDPOINTS = Object.freeze({
 	// (savings/infra/pollination/net + the org/team/agent/project rollups); the chart reads `roi/trend`.
 	roi: "/api/diagnostics/roi",
 	roiTrend: "/api/diagnostics/roi/trend",
+	// Dashboard imperative actions (`dashboard/actions-api.ts`, `/api/actions` group, local-mode +
+	// origin/CSRF gated). The named CLI lifecycle actions, now performable from the Settings page:
+	// `logout` removes the shared DeepLake credential; `embeddings` toggles + persists the on/off
+	// preference (live via the embed supervisor); `restart` respawns the daemon; `uninstall` returns
+	// the guided removal (detected harnesses + the exact CLI command). No token/secret crosses any.
+	actionsLogout: "/api/actions/logout",
+	actionsEmbeddings: "/api/actions/embeddings",
+	actionsRestart: "/api/actions/restart",
+	actionsUninstall: "/api/actions/uninstall",
 } as const);
 
 /**
@@ -788,6 +797,36 @@ export const FAILED_BUILD_GRAPH_ACK: BuildGraphAck = Object.freeze({ built: fals
  */
 export const BUILD_GRAPH_TIMEOUT_MS = 120_000 as const;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Dashboard imperative actions (`/api/actions/*`) — logout / embeddings / restart / uninstall.
+// Each ack body carries booleans / ids / a command string only; NO token/secret by construction.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The `POST /api/actions/logout` ack (`{ ok }`). */
+export const ActionOkSchema = z.object({ ok: z.boolean().catch(false) });
+
+/**
+ * The `POST /api/actions/embeddings` ack: `{ ok, enabled }` (the new persisted on/off state). Both
+ * fields are STRICT (no `.catch` default): a malformed/partial body must FAIL the parse → `postJson`
+ * returns null → `setEmbeddings` reports failure. Defaulting `enabled` to `false` would let a
+ * `setEmbeddings(false)` call falsely "succeed" against a response that never echoed the real state.
+ */
+export const EmbeddingsActionSchema = z.object({ ok: z.boolean(), enabled: z.boolean() });
+
+/** The `POST /api/actions/restart` ack: `{ ok, restarting }`. */
+export const RestartActionSchema = z.object({ ok: z.boolean().catch(false), restarting: z.boolean().catch(false) });
+
+/** The `POST /api/actions/uninstall` result: detected harnesses + the exact CLI command + a note. */
+export const UninstallResultSchema = z.object({
+	ok: z.boolean().catch(false),
+	harnesses: z.array(z.string()).catch([]),
+	removed: z.boolean().catch(false),
+	command: z.string().catch("honeycomb uninstall"),
+	note: z.string().catch(""),
+});
+/** The validated uninstall result the page renders honestly (paths/ids/command only — no secret). */
+export type UninstallResultWire = z.infer<typeof UninstallResultSchema>;
+
 /**
  * The PRD-029 per-subsystem `/health` `reasons` block (D-2 render). This MIRRORS the
  * Wave-1 daemon contract `HealthReasons` in `src/daemon/runtime/health.ts` verbatim — a
@@ -1397,7 +1436,10 @@ export function formatRecallSnippet(text: string, kind: "memory" | "session"): s
  * what the daemon chooses to serve.
  */
 export interface WireClient {
-	kpis(): Promise<KpisWire>;
+	/** The KPI band. PRD-049e: pass the selected project to re-scope the project-bearing counts
+	 *  (Memories / Turns / Est. savings); omit it for the workspace-wide view. Team skills is always
+	 *  workspace-wide (it has no project segment). */
+	kpis(projectId?: string): Promise<KpisWire>;
 	sessions(): Promise<SessionRowWire[]>;
 	settings(): Promise<SettingsWire>;
 	rules(): Promise<RuleRowWire[]>;
@@ -1589,6 +1631,34 @@ export interface WireClient {
 	 * stored key cannot be read back through any wire method (the load-bearing AC-3 invariant).
 	 */
 	setSecret(name: string, value: string): Promise<boolean>;
+	/**
+	 * Dashboard actions — log out of DeepLake (`POST /api/actions/logout`): remove the shared
+	 * credential so the user can re-authenticate from the dashboard. Returns `true` iff the daemon
+	 * accepted (2xx + `{ ok: true }`); a non-2xx / network failure reads as `false`. The caller
+	 * re-reads {@link authStatus} so the section flips to disconnected on success.
+	 */
+	logout(): Promise<boolean>;
+	/**
+	 * Dashboard actions — turn embeddings on/off (`POST /api/actions/embeddings` with `{ enabled }`).
+	 * The daemon actuates the embed supervisor LIVE (spawn+warm / stop) AND persists the choice so it
+	 * survives a restart. Returns `true` iff accepted (2xx + echoed `enabled` matches the request);
+	 * the caller reflects the requested state on success and re-reads {@link health} for the live truth.
+	 */
+	setEmbeddings(enabled: boolean): Promise<boolean>;
+	/**
+	 * Dashboard actions — restart the daemon (`POST /api/actions/restart`). The daemon spawns a
+	 * detached respawn helper, then gracefully shuts down; a fresh daemon comes back on the same port.
+	 * Returns `true` iff the restart was acknowledged (2xx + `{ restarting: true }`); the caller then
+	 * shows "restarting…" and polls {@link health} until the new daemon answers. Degrades to `false`.
+	 */
+	restartDaemon(): Promise<boolean>;
+	/**
+	 * Dashboard actions — uninstall (`POST /api/actions/uninstall`). Returns the guided removal: the
+	 * detected harnesses + the exact CLI command that fully reverses Honeycomb's footprint (v1 does not
+	 * perform the destructive hook removal from the daemon serving this page — see `actions-api.ts`).
+	 * A non-2xx / network failure degrades to `null` (the page surfaces an honest error). No secret rides it.
+	 */
+	uninstall(): Promise<UninstallResultWire | null>;
 	/**
 	 * PRD-044a — read the REDACTED DeepLake auth STATUS (`GET /api/auth/status`). Returns the
 	 * daemon's real connected identity (org/workspace/agent/source/savedAt + optional `expiresAt`)
@@ -1791,8 +1861,10 @@ export function createWireClient(options: WireClientOptions = {}): WireClient {
 	const url = (path: string): string => `${origin}${path}`;
 
 	return {
-		async kpis(): Promise<KpisWire> {
-			return (await getJson(fetchImpl, url(ENDPOINTS.kpis), KpisSchema)) ?? EMPTY_KPIS;
+		async kpis(projectId?: string): Promise<KpisWire> {
+			// PRD-049e: stamp the selected-project header so the KPI band re-scopes on a dashboard scope
+			// change (parity with graph/roi/recall/memories). An empty selection omits it → workspace-wide.
+			return (await getJson(fetchImpl, url(ENDPOINTS.kpis), KpisSchema, projectHeader(projectId))) ?? EMPTY_KPIS;
 		},
 		async sessions(): Promise<SessionRowWire[]> {
 			const v = await getJson(fetchImpl, url(ENDPOINTS.sessions), SessionsSchema);
@@ -2121,6 +2193,29 @@ export function createWireClient(options: WireClientOptions = {}): WireClient {
 				// A network error → not accepted (never a throw into React).
 				return false;
 			}
+		},
+		async logout(): Promise<boolean> {
+			// POST the logout action; the daemon removes the shared + legacy credential files. A 2xx +
+			// `{ ok: true }` is success; any non-2xx / network failure → false (the section stays as-is).
+			const ack = await postJson(fetchImpl, url(ENDPOINTS.actionsLogout), {}, ActionOkSchema);
+			return ack?.ok === true;
+		},
+		async setEmbeddings(enabled: boolean): Promise<boolean> {
+			// POST the toggle; the daemon actuates the supervisor live + persists the choice. Success is a
+			// 2xx whose echoed `enabled` matches the request; a non-2xx / network failure → false.
+			const ack = await postJson(fetchImpl, url(ENDPOINTS.actionsEmbeddings), { enabled }, EmbeddingsActionSchema);
+			return ack?.ok === true && ack.enabled === enabled;
+		},
+		async restartDaemon(): Promise<boolean> {
+			// POST the restart; the daemon respawns + shuts down. Success is a 2xx `{ restarting: true }`.
+			// (The connection may drop as the daemon goes down right after — postJson degrades that to null.)
+			const ack = await postJson(fetchImpl, url(ENDPOINTS.actionsRestart), {}, RestartActionSchema);
+			return ack?.restarting === true;
+		},
+		async uninstall(): Promise<UninstallResultWire | null> {
+			// POST the uninstall; the daemon returns the guided result (detected harnesses + the CLI
+			// command). A non-2xx / network / malformed body → null (the page shows an honest error).
+			return postJson(fetchImpl, url(ENDPOINTS.actionsUninstall), {}, UninstallResultSchema);
 		},
 		async authStatus(): Promise<AuthStatusWire> {
 			// GET the redacted auth status; a malformed/absent/failed body degrades to the

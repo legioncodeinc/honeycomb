@@ -27,6 +27,7 @@ import React from "react";
 import { Badge, Button, Input, Kpi, MemoryCard } from "../primitives.js";
 import { LiveLog, RulesPanel, SessionsPanel, SettingsPanel, SkillSyncPanel } from "../panels.js";
 import { HarnessStrip } from "../harness-strip.js";
+import { useScope } from "../scope-context.js";
 import type { PageProps } from "../page-frame.js";
 import {
 	EMPTY_KPIS,
@@ -152,6 +153,10 @@ function HealthStrip({ reasons }: { reasons: HealthReasonsWire | null }): React.
  * polling clears on unmount. NO header — the shell owns the chrome (D-5).
  */
 export function DashboardPage({ wire, pollinating = false }: PageProps): React.JSX.Element {
+	// PRD-049e: the active dashboard scope — the selected project re-scopes the KPI band's
+	// project-bearing counts (Memories / Turns / Est. savings). Absent → the workspace-wide view.
+	const { scope } = useScope();
+
 	// ── view state (hydrated from the shared wire) ──
 	const [healthReasons, setHealthReasons] = React.useState<HealthReasonsWire | null>(null);
 	const [kpis, setKpis] = React.useState<KpisWire>(EMPTY_KPIS);
@@ -181,6 +186,12 @@ export function DashboardPage({ wire, pollinating = false }: PageProps): React.J
 		setNotes((prev) => [`${clockPrefix()}  ${text}`, ...prev].slice(0, MAX_LOG_LINES));
 	}, []);
 
+	// PRD-049e: a monotonic request token guarding `hydrate` against a stale-overwrite race. Since the
+	// hydrate effect now re-runs on `scope.project` change, a SLOWER response for the PREVIOUS project can
+	// resolve AFTER the newer selection's and repaint the band with stale data. Each hydrate bumps this and
+	// captures its own token; only the LATEST run commits its state (older in-flight runs bail post-await).
+	const hydrateSeqRef = React.useRef(0);
+
 	/**
 	 * Hydrate the diagnostics views + the vault settings from the live endpoints (AC-2), in ONE
 	 * batched `Promise.all` round-trip (parity with the old app). The org/workspace `settings` view
@@ -188,21 +199,25 @@ export function DashboardPage({ wire, pollinating = false }: PageProps): React.J
 	 * its own settings; this page hydrates only what its body renders.
 	 */
 	const hydrate = React.useCallback(async (): Promise<void> => {
+		const seq = ++hydrateSeqRef.current;
 		const [k, sess, r, sk, vs, sn] = await Promise.all([
-			wire.kpis(),
+			wire.kpis(scope.project),
 			wire.sessions(),
 			wire.rules(),
 			wire.skills(),
 			wire.vaultSettings(),
 			wire.secretNames(),
 		]);
+		// A newer hydrate (a faster project switch) superseded this one → drop this stale result wholesale
+		// so the band never flickers back to the previous project's numbers.
+		if (seq !== hydrateSeqRef.current) return;
 		setKpis(k);
 		setSessions(sess);
 		setRules(r);
 		setSkills(sk);
 		setVaultSettings(vs);
 		setSecretNames(sn);
-	}, [wire]);
+	}, [wire, scope.project]);
 
 	/** PRD-032c (AC-5): persist one vault `setting` through the daemon, then RE-READ the persisted truth. */
 	const saveSetting = React.useCallback(

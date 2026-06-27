@@ -146,6 +146,25 @@ await build({
 stampEsm("daemon");
 
 // ---------------------------------------------------------------------------
+// 1a. Daemon RESTART helper -> daemon/restart-helper.js (beside the daemon entry).
+//     A tiny standalone process the `POST /api/actions/restart` handler spawns: it
+//     waits for the old daemon's /health to go down, then starts a fresh daemon
+//     detached. Dependency-free (node builtins + global fetch), so only node:*
+//     is external. Output lands in the SAME `daemon/` dir as index.js so the
+//     handler resolves it via `dirname(process.argv[1])` at runtime.
+// ---------------------------------------------------------------------------
+await build({
+  entryPoints: { "restart-helper": "dist/src/daemon/restart-helper.js" },
+  bundle: true,
+  platform: "node",
+  format: "esm",
+  outdir: "daemon",
+  external: ["node:*"],
+  define: VERSION_DEFINE,
+});
+stampExecutable("daemon/restart-helper.js");
+
+// ---------------------------------------------------------------------------
 // 1b. The viewable dashboard WEB APP (PRD-024 Wave 2, AC-1 production-clean).
 //
 //     The brand UI kit, recreated as a real React app, bundled for the BROWSER:
