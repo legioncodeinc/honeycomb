@@ -31,7 +31,7 @@
  * NOT fake it (see {@link assembleSeams}).
  */
 
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -1257,9 +1257,11 @@ function resolveWorkspaceBaseDir(): string {
 function isWritableDir(dir: string): boolean {
 	try {
 		mkdirSync(dir, { recursive: true });
-		const probe = join(dir, `.honeycomb-write-test-${process.pid}`);
-		writeFileSync(probe, "");
-		rmSync(probe, { force: true });
+		// Probe with an EXCLUSIVE, randomly-suffixed temp dir (mkdtemp guarantees a fresh name) so
+		// the check only ever creates + removes a path it owns — a deterministic `${pid}` marker
+		// could collide with a real workspace file and truncate/delete it.
+		const probe = mkdtempSync(join(dir, ".honeycomb-write-test-"));
+		rmSync(probe, { recursive: true, force: true });
 		return true;
 	} catch {
 		return false;

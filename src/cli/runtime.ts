@@ -23,7 +23,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -167,9 +167,11 @@ export function resolveDaemonWorkspace(): string {
 export function canWriteDir(dir: string): boolean {
 	try {
 		mkdirSync(dir, { recursive: true });
-		const marker = join(dir, `.hc-spawn-probe-${process.pid}`);
-		writeFileSync(marker, "");
-		rmSync(marker, { force: true });
+		// Probe with an EXCLUSIVE, randomly-suffixed temp dir (mkdtemp guarantees a fresh name) so
+		// the check only ever creates + removes a path it owns — never truncating or deleting a
+		// pre-existing workspace file the way a deterministic `${pid}` marker could.
+		const probe = mkdtempSync(join(dir, ".hc-spawn-probe-"));
+		rmSync(probe, { recursive: true, force: true });
 		return true;
 	} catch {
 		return false;
