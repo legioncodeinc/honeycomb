@@ -2351,6 +2351,11 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// Fail-soft: any error leaves the conservative `off`.
 			let portkeyWorkerDeps: PortkeyWorkerDeps = { onUnreachable: recordPortkeyUnreachable };
 			try {
+				// Clear any prior rerank seam FIRST (c-AC-4): this block only ASSIGNS `cohereRerankInner`
+				// on `portkeySelection !== undefined`, so without this reset a stop/start cycle that turns
+				// the gateway OFF would leave a stale Portkey reranker active and keep egressing recall
+				// text. Resetting up front makes "gateway off ⇒ no provider rerank" unconditional.
+				cohereRerankInner = undefined;
 				const portkeySelection = await readPortkeySelection(vault, secretScopeFromQueryScope(scope));
 				portkeyHealth = await resolvePortkeyAssemblyStatus(portkeySelection, scope);
 				portkeyWorkerDeps = {
@@ -2384,6 +2389,8 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				}
 			} catch {
 				portkeyHealth = "off";
+				// Belt-and-suspenders: a mid-build throw must also leave NO stale rerank seam (c-AC-4).
+				cohereRerankInner = undefined;
 			}
 
 			// ── PRD-046a a-AC-1: build + start the SUMMARY worker, the live CONSUMER of

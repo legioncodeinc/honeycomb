@@ -177,8 +177,9 @@ describe("PRD-063c c-AC-3 — every failure path is fail-soft (ok:false, never a
 			Promise.resolve({ status: 200, ok: true, text: () => Promise.resolve(JSON.stringify({ nope: true })) });
 		const client = createPortkeyRerankClient({ config: CONFIG_ID, fetch, onTransportError });
 		const out = await client.rerank(PORTKEY_KEY, { model: MODEL, query: "q", documents: ["a"], topN: 1 });
-		// `results` defaults to [] → ok:true with no scores (the caller keeps RRF). Either way: never a throw.
-		expect(out.ok === false || (out.ok === true && out.results.length === 0)).toBe(true);
+		// A wrong-shape 2xx body is malformed (no `results`) → it FAILS validation → ok:false (the caller
+		// keeps RRF). Never coerced to an empty-but-ok result; never a throw; never a transport signal.
+		expect(out).toEqual({ ok: false });
 		expect(onTransportError).not.toHaveBeenCalled();
 	});
 

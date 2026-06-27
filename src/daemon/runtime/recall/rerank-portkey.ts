@@ -116,9 +116,13 @@ const RerankResultSchema = z.object({
 	relevance_score: z.number(),
 });
 
-/** The Cohere rerank success-response shape (only the field we read). */
+/**
+ * The Cohere rerank success-response shape (only the field we read). `results` is REQUIRED (no
+ * `.default([])`): a 2xx body that omits it is malformed, and must FAIL validation (→ fail-soft to
+ * RRF) rather than be coerced to an empty rerank that silently drops the reorder.
+ */
 const RerankResponseSchema = z.object({
-	results: z.array(RerankResultSchema).default([]),
+	results: z.array(RerankResultSchema),
 });
 
 /**
@@ -173,10 +177,16 @@ export function createPortkeyRerankClient(deps: PortkeyRerankDeps): PortkeyReran
 				return RERANK_FAILED;
 			}
 			// A 2xx with a malformed/garbage body is NOT an unreachability (the gateway WAS reachable) — do
-			// NOT fire the signal; just fail soft to the RRF order (c-AC-3, mirrors the chat transport's 502).
-			const raw: unknown = await res.text().then((t) => safeJsonParse(t)).catch(() => undefined);
-			const parsed = RerankResponseSchema.safeParse(raw);
-			if (!parsed.success) return RERANK_FAILED;
+			// NOT fire the unreachable signal. But the failure must be OBSERVABLE, not silently swallowed:
+			// emit a BODY-FREE stderr line (the body could echo a credential, so it is never logged) and
+			// fail soft to the RRF order (c-AC-3, mirrors the chat transport's 502). `safeJsonParse` never
+			// throws (returns `undefined` on bad JSON); the `.catch` covers only a `res.text()` rejection.
+			const text = await res.text().catch(() => "");
+			const parsed = RerankResponseSchema.safeParse(safeJsonParse(text));
+			if (!parsed.success) {
+				process.stderr.write("honeycomb: portkey rerank returned an unusable 2xx body; failing soft to RRF order\n");
+				return RERANK_FAILED;
+			}
 			// Drop any index that points outside the request window (a defensive guard: a bad index must
 			// never leapfrog or crash the reorder). An empty surviving set is still `ok` — the caller keeps
 			// the un-moved candidates in RRF order.
@@ -229,7 +239,13 @@ export function buildCohereRerankSeam(deps: CohereRerankSeamDeps): CohereRerankS
 			} catch {
 				return { ok: false };
 			}
-			return deps.client.rerank(apiKey, { model: deps.model, query, documents, topN });
+			// The production client NEVER rejects, but an injected/future client might. Guard so the
+			// seam's "ALWAYS resolves" contract holds regardless of the client impl (fail-soft, c-AC-3).
+			try {
+				return await deps.client.rerank(apiKey, { model: deps.model, query, documents, topN });
+			} catch {
+				return RERANK_FAILED;
+			}
 		},
 	};
 }
