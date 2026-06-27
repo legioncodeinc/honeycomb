@@ -265,11 +265,26 @@ describe("PRD-029: health() threads the per-subsystem reasons through the IO bou
 
 	it("a local /health body with reasons → { up:true, reasons:{…} } parsed through zod", async () => {
 		const client = createWireClient({
-			fetchImpl: healthFetch(JSON.stringify({ status: "ok", pipeline: "ok", reasons: { storage: "reachable", embeddings: "off", schema: "ok" } })),
+			fetchImpl: healthFetch(JSON.stringify({ status: "ok", pipeline: "ok", reasons: { storage: "reachable", embeddings: "off", schema: "ok", portkey: "ok" } })),
 		});
 		const probe = await client.health();
 		expect(probe.up).toBe(true);
-		expect(probe.reasons).toEqual({ storage: "reachable", embeddings: "off", schema: "ok" });
+		expect(probe.reasons).toEqual({ storage: "reachable", embeddings: "off", schema: "ok", portkey: "ok" });
+	});
+
+	it("PRD-063b b-AC-7: the portkey reason parses each state; a pre-063b body (no portkey field) defaults to 'off'", async () => {
+		// Each Portkey state rides the wire and parses through zod.
+		for (const state of ["off", "ok", "unconfigured", "unreachable"] as const) {
+			const client = createWireClient({
+				fetchImpl: healthFetch(JSON.stringify({ status: "ok", pipeline: "ok", reasons: { storage: "reachable", embeddings: "on", schema: "ok", portkey: state } })),
+			});
+			expect((await client.health()).reasons?.portkey).toBe(state);
+		}
+		// A pre-063b daemon omits `portkey` → it defaults to "off" (additive, never a throw).
+		const legacy = createWireClient({
+			fetchImpl: healthFetch(JSON.stringify({ status: "ok", pipeline: "ok", reasons: { storage: "reachable", embeddings: "on", schema: "ok" } })),
+		});
+		expect((await legacy.health()).reasons?.portkey).toBe("off");
 	});
 
 	it("a public body WITHOUT reasons (mode-gated) → { up:true, reasons:null } — no throw", async () => {
@@ -294,8 +309,8 @@ describe("PRD-029: health() threads the per-subsystem reasons through the IO bou
 
 	it("a malformed reasons block degrades each field to its HEALTHY default (no throw into React)", () => {
 		// An unknown enum value / wrong type for a field `.catch()`es to the healthy literal.
-		const parsed = HealthReasonsSchema.parse({ storage: "weird", embeddings: 42, schema: null });
-		expect(parsed).toEqual({ storage: "reachable", embeddings: "on", schema: "ok" });
+		const parsed = HealthReasonsSchema.parse({ storage: "weird", embeddings: 42, schema: null, portkey: "bogus" });
+		expect(parsed).toEqual({ storage: "reachable", embeddings: "on", schema: "ok", portkey: "off" });
 	});
 
 	it("a network error → { up:false, reasons:null }", async () => {

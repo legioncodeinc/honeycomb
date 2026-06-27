@@ -305,3 +305,204 @@ describe("044c recall mode + migrated inference", () => {
 		expect(wire.setSetting).toHaveBeenCalledWith("pollinating.enabled", true);
 	});
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRD-063a  Portkey gateway section
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Portkey gateway tests (a-AC-1 through a-AC-6, dashboard half).
+ *
+ *   a-AC-1  The section renders with the toggle, config input, write-only key row, fallback toggle.
+ *   a-AC-2  Toggling `portkey.enabled` / `portkey.fallbackToProvider` persists via setSetting with
+ *           the correct key name. Editing + blurring the config persists `portkey.config`.
+ *   a-AC-4  The PORTKEY_API_KEY write-path calls setSecret with the conventional name.
+ *   a-AC-5  A partial/empty settings payload (`settings: {}`) degrades to enabled=false, config=""
+ *           (badge "not set") without throwing.
+ *   a-AC-6  Security: the key input is write-only (`type="password"`), CLEARED after a successful
+ *           save, the value NEVER appears in the DOM text, and the presence badge updates after save.
+ *   D-2    When `portkey.enabled` is on, the "superseded by Portkey" hint appears in the inference
+ *          section.
+ */
+
+describe("063a Portkey gateway section renders (a-AC-1)", () => {
+	it("renders the gateway section with all four controls", async () => {
+		await mountPage(mockWire());
+		const section = container.querySelector('[data-testid="portkey-gateway-section"]');
+		expect(section).not.toBeNull();
+		// portkey.enabled toggle
+		expect(container.querySelector('[aria-label="portkey enabled"]')).not.toBeNull();
+		// portkey.config text input
+		expect(container.querySelector('[data-testid="portkey-config-input"]')).not.toBeNull();
+		// PORTKEY_API_KEY write-only key input + save button
+		expect(container.querySelector('[data-testid="portkey-key-input"]')).not.toBeNull();
+		expect(container.querySelector('[data-testid="portkey-key-save"]')).not.toBeNull();
+		// portkey.fallbackToProvider toggle
+		expect(container.querySelector('[aria-label="portkey fallback to provider"]')).not.toBeNull();
+	});
+
+	it("key input is type=password (write-only contract, a-AC-6)", async () => {
+		await mountPage(mockWire());
+		const keyInput = container.querySelector('[data-testid="portkey-key-input"]') as HTMLInputElement;
+		expect(keyInput).not.toBeNull();
+		expect(keyInput.type).toBe("password");
+	});
+});
+
+describe("063a partial/empty payload degrades safely (a-AC-5)", () => {
+	it("with settings:{} the section renders enabled=false, config empty, key not set — no throw", async () => {
+		// EMPTY_VAULT has settings: {} — every portkey.* key is absent.
+		await mountPage(mockWire({ vault: EMPTY_VAULT }));
+		const section = container.querySelector('[data-testid="portkey-gateway-section"]');
+		expect(section).not.toBeNull();
+		// enabled toggle must be off — Toggle uses role="switch" + aria-checked (not aria-pressed).
+		const enabledToggle = container.querySelector('[aria-label="portkey enabled"]') as HTMLButtonElement;
+		expect(enabledToggle).not.toBeNull();
+		expect(enabledToggle.getAttribute("aria-checked")).toBe("false");
+		// config input must be empty (no crash from undefined configValue)
+		const configInput = container.querySelector('[data-testid="portkey-config-input"]') as HTMLInputElement;
+		expect(configInput.value).toBe("");
+		// presence badge must read "not set"
+		expect(container.querySelector('[data-testid="portkey-gateway-section"]')?.textContent).toContain("not set");
+	});
+});
+
+describe("063a portkey.enabled toggle persists (a-AC-2)", () => {
+	it("toggling portkey.enabled calls setSetting with 'portkey.enabled' and true", async () => {
+		// Start with portkey.enabled absent (defaults to false), toggle on.
+		const wire = mockWire({ vault: { settings: {}, catalog: [] } });
+		await mountPage(wire);
+		const toggle = container.querySelector('[aria-label="portkey enabled"]') as HTMLButtonElement;
+		expect(toggle).not.toBeNull();
+		await act(async () => {
+			toggle.click();
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		expect(wire.setSetting).toHaveBeenCalledWith("portkey.enabled", true);
+	});
+
+	it("toggling portkey.enabled when true calls setSetting with false", async () => {
+		const wire = mockWire({ vault: { settings: { "portkey.enabled": true }, catalog: [] } });
+		await mountPage(wire);
+		const toggle = container.querySelector('[aria-label="portkey enabled"]') as HTMLButtonElement;
+		// Toggle is currently ON — clicking turns it OFF.
+		await act(async () => {
+			toggle.click();
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		expect(wire.setSetting).toHaveBeenCalledWith("portkey.enabled", false);
+	});
+});
+
+describe("063a portkey.fallbackToProvider toggle persists (a-AC-2 / D-3)", () => {
+	it("toggling fallback toggle calls setSetting with 'portkey.fallbackToProvider' and true", async () => {
+		const wire = mockWire({ vault: { settings: {}, catalog: [] } });
+		await mountPage(wire);
+		const toggle = container.querySelector('[aria-label="portkey fallback to provider"]') as HTMLButtonElement;
+		expect(toggle).not.toBeNull();
+		await act(async () => {
+			toggle.click();
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		expect(wire.setSetting).toHaveBeenCalledWith("portkey.fallbackToProvider", true);
+	});
+});
+
+describe("063a portkey.config input persists on blur (a-AC-2)", () => {
+	it("editing and pressing Enter on the config input persists portkey.config", async () => {
+		const wire = mockWire({ vault: { settings: {}, catalog: [] } });
+		await mountPage(wire);
+		const configInput = container.querySelector('[data-testid="portkey-config-input"]') as HTMLInputElement;
+		await setInputValue(configInput, "pk-my-config-id");
+		// Dispatch a native KeyboardEvent for Enter — the onKeyDown handler calls commitConfig().
+		await act(async () => {
+			configInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		expect(wire.setSetting).toHaveBeenCalledWith("portkey.config", "pk-my-config-id");
+	});
+});
+
+describe("063a PORTKEY_API_KEY write-only discipline (a-AC-4 + a-AC-6)", () => {
+	it("saving a key calls setSecret('PORTKEY_API_KEY', value), clears the input on success, value never in DOM", async () => {
+		const SECRET = "portkey-sk-DO-NOT-LEAK";
+		const wire = mockWire({ secretNames: [], secretNamesAfter: ["PORTKEY_API_KEY"], setSecretOk: true });
+		await mountPage(wire);
+		const keyInput = container.querySelector('[data-testid="portkey-key-input"]') as HTMLInputElement;
+		await setInputValue(keyInput, SECRET);
+		const saveBtn = container.querySelector('[data-testid="portkey-key-save"]') as HTMLButtonElement;
+		await act(async () => {
+			saveBtn.click();
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		// Posted to the correct secret name (a-AC-4).
+		expect(wire.setSecret).toHaveBeenCalledWith("PORTKEY_API_KEY", SECRET);
+		// Input cleared after success (a-AC-6 write-only).
+		const keyInputAfter = container.querySelector('[data-testid="portkey-key-input"]') as HTMLInputElement;
+		expect(keyInputAfter.value).toBe("");
+		// Secret value must not appear anywhere in the DOM text.
+		expect(container.innerHTML).not.toContain(SECRET);
+		// Presence badge updated to "key set ✓" after the re-read.
+		const section = container.querySelector('[data-testid="portkey-gateway-section"]');
+		expect(section?.textContent).toContain("key set ✓");
+	});
+
+	it("empty value is rejected client-side and setSecret is never called", async () => {
+		const wire = mockWire({ secretNames: [] });
+		await mountPage(wire);
+		const saveBtn = container.querySelector('[data-testid="portkey-key-save"]') as HTMLButtonElement;
+		await act(async () => {
+			saveBtn.click();
+			await Promise.resolve();
+		});
+		expect(wire.setSecret).not.toHaveBeenCalled();
+		expect(container.querySelector('[data-testid="portkey-key-rejected"]')).not.toBeNull();
+	});
+
+	it("a rejected (non-2xx) write retains the input for retry, shows 'not accepted', value masked", async () => {
+		const SECRET = "portkey-sk-rejected-DO-NOT-LEAK";
+		const wire = mockWire({ secretNames: [], setSecretOk: false });
+		await mountPage(wire);
+		const keyInput = container.querySelector('[data-testid="portkey-key-input"]') as HTMLInputElement;
+		await setInputValue(keyInput, SECRET);
+		const saveBtn = container.querySelector('[data-testid="portkey-key-save"]') as HTMLButtonElement;
+		await act(async () => {
+			saveBtn.click();
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		// Rejected element visible.
+		expect(container.querySelector('[data-testid="portkey-key-rejected"]')).not.toBeNull();
+		// Input retained for retry (only SUCCESS clears it).
+		const keyInputAfter = container.querySelector('[data-testid="portkey-key-input"]') as HTMLInputElement;
+		expect(keyInputAfter.value).toBe(SECRET);
+		expect(keyInputAfter.type).toBe("password"); // still masked.
+		// Value must not appear in rendered text content.
+		expect(container.textContent ?? "").not.toContain(SECRET);
+	});
+});
+
+describe("063a D-2 Portkey-on de-emphasizes inference section", () => {
+	it("when portkey.enabled=true, the 'superseded by Portkey' hint appears in the inference section", async () => {
+		const wire = mockWire({ vault: { settings: { "portkey.enabled": true }, catalog: [] } });
+		await mountPage(wire);
+		const hint = container.querySelector('[data-testid="portkey-supersedes-hint"]');
+		expect(hint).not.toBeNull();
+		expect(hint?.textContent).toContain("superseded by Portkey");
+	});
+
+	it("when portkey.enabled=false, the supersedes hint is absent", async () => {
+		await mountPage(mockWire({ vault: { settings: { "portkey.enabled": false }, catalog: [] } }));
+		expect(container.querySelector('[data-testid="portkey-supersedes-hint"]')).toBeNull();
+	});
+
+	it("when portkey.enabled is absent (empty settings), the supersedes hint is absent", async () => {
+		await mountPage(mockWire({ vault: EMPTY_VAULT }));
+		expect(container.querySelector('[data-testid="portkey-supersedes-hint"]')).toBeNull();
+	});
+});

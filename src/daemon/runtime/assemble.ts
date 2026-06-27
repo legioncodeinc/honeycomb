@@ -102,7 +102,12 @@ import { mountAssetsApi } from "./assets/api.js";
 import { type TrustedTableProbe } from "./assets/sync.js";
 import { CATALOG } from "../storage/catalog/index.js";
 
-import { buildInferenceModelClient, type ProviderModelOverride } from "./inference/model-client-factory.js";
+import {
+	buildInferenceModelClient,
+	PORTKEY_API_KEY_NAME,
+	type PortkeySelection,
+	type ProviderModelOverride,
+} from "./inference/model-client-factory.js";
 import type { ModelClient } from "./pipeline/model-client.js";
 import {
 	controlledWriteFanOut,
@@ -140,7 +145,7 @@ import type { QueryScope, StorageClient } from "../storage/client.js";
 import { isOk } from "../storage/result.js";
 import { type EmbedAttachment, type EmbedClient, createEmbedAttachment, resolveEmbedClientOptions } from "./services/embed-client.js";
 import { type EmbedSupervisor, createEmbedSupervisor } from "./services/embed-supervisor.js";
-import { type HealthDetail, buildHealthDetail } from "./health.js";
+import { type HealthDetail, type PortkeyHealth, buildHealthDetail } from "./health.js";
 import { mountDiagnosticsHealthApi } from "./diagnostics-health.js";
 
 /**
@@ -1306,6 +1311,16 @@ export const VAULT_MODEL_KEY = "activeModel" as const;
 export const VAULT_POLLINATING_ENABLED_KEY = "pollinating.enabled" as const;
 
 /**
+ * The PRD-063b Portkey gateway `setting`-class keys the wire-back READS. These are the SAME keys
+ * the Settings surface (063a) WRITES via `/api/settings` (`KNOWN_SETTING_KEYS` in `vault/api.ts`)
+ * — single-sourced so a toggle written by a surface is the toggle assembly reads. The read is
+ * READ-ONLY + fail-soft, exactly like the provider/model + pollinating reads.
+ */
+export const VAULT_PORTKEY_ENABLED_KEY = "portkey.enabled" as const;
+export const VAULT_PORTKEY_CONFIG_KEY = "portkey.config" as const;
+export const VAULT_PORTKEY_FALLBACK_KEY = "portkey.fallbackToProvider" as const;
+
+/**
  * Construct the daemon's vault `setting`-class READER (AC-6), reusing the SAME workspace base
  * dir + machine-key provider the secrets store uses and a fresh default registry (the built-in
  * `secret` + `setting` classes). This is the ONE place assembly builds the vault; it is shared
@@ -1366,6 +1381,74 @@ async function readProviderModelOverride(
 }
 
 /**
+ * READ the Portkey gateway SELECTION (PRD-063b) from the vault `setting` class, fail-soft. Returns a
+ * {@link PortkeySelection} ONLY when the gateway is ON (`portkey.enabled === true`) AND a non-empty
+ * `portkey.config` id is present (063a validates the id non-empty on write when enabled; we re-check
+ * here as defense in depth). The requested `model` is the SAME vault `activeModel` the per-provider
+ * path reads (D-2). `fallbackToProvider` reads `portkey.fallbackToProvider` (default false, D-3).
+ *
+ * Returns `undefined` when the gateway is off, the config id is missing/empty, or the vault is
+ * unreadable — in every case the per-provider path stands UNCHANGED (b-AC-5). NEVER throws: any
+ * vault/decrypt error degrades to `undefined`. This reader NEVER touches `PORTKEY_API_KEY` (a
+ * `secret`-class value the setting accessor cannot read anyway); the key presence is checked at the
+ * factory via the names-only secret listing, so a missing key surfaces as the honest `unconfigured`
+ * health status, not a here-and-now failure.
+ */
+async function readPortkeySelection(
+	vault: VaultSettingsReader | undefined,
+	scope: SecretScope,
+): Promise<PortkeySelection | undefined> {
+	if (vault === undefined) return undefined;
+	try {
+		const enabledRes = await vault.getSetting(VAULT_PORTKEY_ENABLED_KEY, scope);
+		const enabled = enabledRes.ok && coerceSettingBool(enabledRes.value);
+		if (!enabled) return undefined;
+		const configRes = await vault.getSetting(VAULT_PORTKEY_CONFIG_KEY, scope);
+		const config = configRes.ok ? String(configRes.value) : "";
+		if (config.length === 0) return undefined;
+		const modelRes = await vault.getSetting(VAULT_MODEL_KEY, scope);
+		const model = modelRes.ok ? String(modelRes.value) : "";
+		const fallbackRes = await vault.getSetting(VAULT_PORTKEY_FALLBACK_KEY, scope);
+		const fallbackToProvider = fallbackRes.ok && coerceSettingBool(fallbackRes.value);
+		return { enabled: true, config, model, fallbackToProvider };
+	} catch {
+		// A malformed/undecryptable vault setting must never block boot — the per-provider path stands.
+		return undefined;
+	}
+}
+
+/**
+ * Derive the ASSEMBLY-TIME Portkey health status (PRD-063b / b-AC-7) from config + a names-only
+ * `PORTKEY_API_KEY` presence check — NO network probe (the `unreachable` state is supplied LATER by
+ * the runtime last-failure signal, never fabricated here). Mirrors the factory's fail-closed rule:
+ *   - selection absent / gateway off → `off` (the per-provider path is in force).
+ *   - gateway on, `PORTKEY_API_KEY` PRESENT → `ok`.
+ *   - gateway on, key ABSENT → `unconfigured` (fail-closed; no provider key is silently used).
+ *
+ * The presence check lists secret NAMES (never reads a value) under the daemon scope, using the SAME
+ * `.secrets/` store the factory + resolver use. For a hermetic test assembly (injected `storage`, so
+ * `portkeySelection` is `undefined`) this returns `off` WITHOUT touching the real workspace. NEVER
+ * throws: any store error degrades to `unconfigured` (on) — never a false `ok`.
+ */
+async function resolvePortkeyAssemblyStatus(
+	selection: PortkeySelection | undefined,
+	scope: QueryScope,
+): Promise<PortkeyHealth> {
+	if (selection === undefined || !selection.enabled) return "off";
+	try {
+		const secretsStore = new SecretsStore({
+			baseDir: resolveWorkspaceBaseDir(),
+			machineKey: createMachineKeyProvider(),
+		});
+		const names = secretsStore.listSecretNames(secretScopeFromQueryScope(scope));
+		return names.includes(PORTKEY_API_KEY_NAME as (typeof names)[number]) ? "ok" : "unconfigured";
+	} catch {
+		// A secrets-store error must never block boot and must never report a false `ok`.
+		return "unconfigured";
+	}
+}
+
+/**
  * Resolve the EFFECTIVE pollinating-enabled flag (AC-6 / FR-3 / d-AC-2), VAULT-FIRST. Precedence:
  *   1. the vault `setting` `pollinating.enabled` when PRESENT + readable → it WINS (a vault
  *      `true` enables pollinating WITHOUT `HONEYCOMB_POLLINATING_ENABLED`; a vault `false` disables
@@ -1403,6 +1486,19 @@ function coerceSettingBool(value: unknown): boolean {
 }
 
 /**
+ * The Portkey gateway deps the worker builders thread into {@link buildInferenceModelClient}
+ * (PRD-063b). `selection` is the resolved {@link PortkeySelection} (absent → the per-provider path
+ * stands unchanged, b-AC-5); `onUnreachable` is assembly's cached last-failure observer the Portkey
+ * transport calls on a real connect/auth failure so `/health` reports `unreachable` (b-AC-7).
+ */
+interface PortkeyWorkerDeps {
+	/** The resolved Portkey selection, or absent when the gateway is off / not configured. */
+	readonly selection?: PortkeySelection;
+	/** Assembly's last-failure observer (flips `reasons.portkey` to `unreachable`). Total + non-throwing. */
+	readonly onUnreachable: (statusCode: number) => void;
+}
+
+/**
  * Build the gated pollinating subsystem (AC-W + AC-T) — the real inference {@link ModelClient}
  * + the real {@link PollinatingTrigger} + the {@link PollinatingJobWorker} — and return the worker
  * to START, or `null` when pollinating is disabled.
@@ -1434,6 +1530,7 @@ async function buildGatedPollinatingWorker(
 	queue: DaemonServices["queue"],
 	vault: VaultSettingsReader | undefined,
 	backoff: PollBackoffConfig,
+	portkeyDeps?: PortkeyWorkerDeps,
 ): Promise<PollinatingJobWorker | null> {
 	// Resolve the env gate fail-soft FIRST: a malformed pollinating-config knob must NEVER take the
 	// daemon down — treat it as disabled (the false-safe default the schema already documents).
@@ -1481,11 +1578,18 @@ async function buildGatedPollinatingWorker(
 		baseDir: resolveWorkspaceBaseDir(),
 		machineKey: createMachineKeyProvider(),
 	});
+	// PRD-063b: when the Portkey gateway is ON (selection present), the factory routes inference
+	// through the Portkey transport (the SUPERSESSION) and BYPASSES `providerModelOverride`; the
+	// per-provider key is neither required nor read. Off/absent → the per-provider path, unchanged.
+	// The `onPortkeyUnreachable` observer threads the cached last-failure signal so `/health` flips
+	// to `unreachable` on a real gateway failure (b-AC-7).
 	const model: ModelClient = await buildInferenceModelClient({
 		scope: secretScopeFromQueryScope(scope),
 		secretsStore,
 		config: resolveAgentConfigPath(options),
 		...(providerModelOverride !== undefined ? { providerModelOverride } : {}),
+		...(portkeyDeps?.selection !== undefined ? { portkey: portkeyDeps.selection } : {}),
+		...(portkeyDeps !== undefined ? { onPortkeyUnreachable: portkeyDeps.onUnreachable } : {}),
 	});
 
 	// The REAL PRD-009a trigger: its `readState` feeds the worker's first-run backfill rule
@@ -1582,6 +1686,7 @@ async function buildPipelineWorker(
 	queue: DaemonServices["queue"],
 	embed: EmbedAttachment,
 	backoff: PollBackoffConfig,
+	portkeyDeps?: PortkeyWorkerDeps,
 ): Promise<StageWorker> {
 	// Resolve the pipeline config fail-soft: a malformed knob must NEVER take the daemon
 	// down — degrade to the schema's false-safe defaults (every stage gate defaults OFF,
@@ -1603,10 +1708,14 @@ async function buildPipelineWorker(
 			baseDir: resolveWorkspaceBaseDir(),
 			machineKey: createMachineKeyProvider(),
 		});
+		// PRD-063b: route the pipeline's extraction/decision inference through Portkey too when the
+		// gateway is on (the SUPERSESSION), with the same last-failure observer; off → unchanged.
 		model = await buildInferenceModelClient({
 			scope: secretScopeFromQueryScope(scope),
 			secretsStore,
 			config: resolveAgentConfigPath(options),
+			...(portkeyDeps?.selection !== undefined ? { portkey: portkeyDeps.selection } : {}),
+			...(portkeyDeps !== undefined ? { onPortkeyUnreachable: portkeyDeps.onUnreachable } : {}),
 		});
 	} catch {
 		model = noopModelClient;
@@ -1763,7 +1872,21 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// is reflected on the next `/health` read.
 	const embeddingsEnabled =
 		options.embeddingsEnabled ?? (options.embed !== undefined ? false : resolveEmbedClientOptions().enabled);
-	const healthDetail = (): HealthDetail => buildHealthDetail({ status: healthBit, embeddingsEnabled });
+
+	// ── PRD-063b (b-AC-7): the Portkey gateway health reason. Mutable + live: it is SET to the
+	// assembly-time status (`off`/`ok`/`unconfigured`, derived from config below — NO probe) once the
+	// vault is constructed, and FLIPPED to `unreachable` by `recordPortkeyUnreachable` when a REAL
+	// Portkey call fails to connect/authenticate (the cached last-failure signal). The thunk reads the
+	// live value on each `/health` call. Initial `off` is the conservative "Portkey not in force" state
+	// the daemon reports until the assembly-time resolution below runs.
+	let portkeyHealth: PortkeyHealth = "off";
+	/** The cached last-failure signal (b-AC-7): a real Portkey call failed → `/health` reports `unreachable`. */
+	const recordPortkeyUnreachable = (_statusCode: number): void => {
+		portkeyHealth = "unreachable";
+	};
+
+	const healthDetail = (): HealthDetail =>
+		buildHealthDetail({ status: healthBit, embeddingsEnabled, portkey: portkeyHealth });
 
 	const { authenticator, policy } = authForMode(config.mode, storage, scope);
 
@@ -1819,6 +1942,10 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// (PRD-044c: the LIVE recall path reads the `recallMode` setting at recall time).
 	const vault: VaultSettingsReader | undefined =
 		options.vault ?? (options.storage === undefined ? buildVaultStore() : undefined);
+
+	// ── PRD-063b (b-AC-7): the Portkey selection is resolved INSIDE `start()` (async, where the
+	// other vault reads live) — see `resolvePortkeyWorkerDeps`. The synchronous body only holds the
+	// mutable `portkeyHealth` (read by the `/health` thunk) + the last-failure observer declared above.
 
 	// ── a-AC-2 / d-AC-1: fire the seams EXACTLY ONCE, after construction (the four core
 	// seams + the /api/logs reader always; the /dashboard host local-mode only per security
@@ -2079,6 +2206,27 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				consolidatePoll = false;
 			}
 
+			// ── PRD-063b (b-AC-7): resolve the Portkey selection + assembly-time health status ONCE,
+			// here (async, alongside the other vault reads), so `/health` `reasons.portkey` is honest
+			// INDEPENDENT of whether pollinating/the pipeline is enabled (the gateway toggle is its own
+			// concern). A config read + a names-only secret presence check — NO network probe: `off`
+			// when the toggle is off, `unconfigured` when on but `PORTKEY_API_KEY` is absent
+			// (fail-closed), `ok` when on + keyed. Sets the mutable `portkeyHealth` the thunk reads; a
+			// later REAL call failure flips it to `unreachable` via `recordPortkeyUnreachable`. The
+			// resolved selection threads into BOTH worker builds so they route the SAME Portkey path.
+			// Fail-soft: any error leaves the conservative `off`.
+			let portkeyWorkerDeps: PortkeyWorkerDeps = { onUnreachable: recordPortkeyUnreachable };
+			try {
+				const portkeySelection = await readPortkeySelection(vault, secretScopeFromQueryScope(scope));
+				portkeyHealth = await resolvePortkeyAssemblyStatus(portkeySelection, scope);
+				portkeyWorkerDeps = {
+					...(portkeySelection !== undefined ? { selection: portkeySelection } : {}),
+					onUnreachable: recordPortkeyUnreachable,
+				};
+			} catch {
+				portkeyHealth = "off";
+			}
+
 			// ── PRD-046a a-AC-1: build + start the SUMMARY worker, the live CONSUMER of
 			// `summary` jobs. It is built AFTER `startServices()` so it leases from a started
 			// queue. Summaries are a CORE feature (not gated like pollinating), so it starts
@@ -2104,7 +2252,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				// dependency degrades to the no-op client when no `agent.yaml`/`inference:` is present
 				// (zero-mutation passes), exactly as the pollinating worker does (constraint).
 				try {
-					pipelineWorker = await buildPipelineWorker(options, storage, scope, daemon.services.queue, embed, pollBackoff);
+					pipelineWorker = await buildPipelineWorker(options, storage, scope, daemon.services.queue, embed, pollBackoff, portkeyWorkerDeps);
 					// PRD-062b (AC-4): when consolidation is ON, DEFER starting the pipeline
 					// worker's own loop — the single lease coordinator (built at the pollinating
 					// block below, once we know whether pollinating is enabled) drives it. When
@@ -2168,7 +2316,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// rather than propagated. When the gate is closed, `buildGatedPollinatingWorker`
 			// returns null and we start nothing.
 			try {
-				pollinatingWorker = await buildGatedPollinatingWorker(options, storage, scope, daemon.services.queue, vault, pollBackoff);
+				pollinatingWorker = await buildGatedPollinatingWorker(options, storage, scope, daemon.services.queue, vault, pollBackoff, portkeyWorkerDeps);
 				// PRD-062b (AC-4): consolidate ONLY the REAL production workers. An explicitly
 				// INJECTED test worker (`options.pollinatingWorker`) is a lifecycle-recording fake
 				// whose own `start()`/`stop()` the test asserts — it is not a real lease participant,
