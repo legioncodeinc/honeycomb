@@ -149,6 +149,23 @@ export interface MountMemoriesOptions {
 	 * `createConflictSuppressionSource(storage)`.
 	 */
 	readonly conflictSuppression?: import("./recall.js").ConflictSuppressionSource;
+	/**
+	 * PRD-063c: the resolved reranker config (strategy + timeouts + window + cohere model). When
+	 * supplied, the recall handler threads it into {@link recallMemories} so the operator-selected
+	 * strategy (`HONEYCOMB_RECALL_RERANKER`, e.g. `cohere`) is honored. ABSENT → the engine applies its
+	 * DEFAULT (`none`, RRF-only) — byte-identical to today (c-AC-4). The composition root resolves it
+	 * via `resolveRecallConfig().reranker`.
+	 */
+	readonly reranker?: import("../recall/config.js").RerankerConfig;
+	/**
+	 * PRD-063c: the Cohere-via-Portkey rerank seam (c-D-2). Supplied by the composition root ONLY when
+	 * the Portkey gateway is ON (`portkey.enabled`); it closes over the resolved `${SECRET_REF}` key +
+	 * the Portkey config + the unreachable health signal, so the recall engine never sees the key
+	 * (c-AC-2). Threaded into {@link recallMemories} as `cohereRerank`. ABSENT → the `cohere` strategy
+	 * has no transport and degrades to the RRF order (c-AC-4 / c-AC-3). The seam is consumed by SHAPE
+	 * (structurally satisfies the engine's `CohereRerankSeam`).
+	 */
+	readonly cohereRerank?: import("./recall.js").CohereRerankSeam;
 }
 
 /**
@@ -485,6 +502,12 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 				...(recency !== undefined ? { recency } : {}),
 				// PRD-058b: the κ gate's conflict-suppression seam (drops the κ = ρ open-conflict loser).
 				...(options.conflictSuppression !== undefined ? { conflictSuppression: options.conflictSuppression } : {}),
+				// PRD-063c: the operator-selected reranker config + the Cohere-via-Portkey seam. The
+				// `cohere` strategy activates ONLY when BOTH are present (the strategy is `cohere` AND the
+				// gateway-on seam is wired); otherwise the engine keeps the RRF order / runs the local
+				// cosine path — byte-identical to today (c-AC-4).
+				...(options.reranker !== undefined ? { reranker: options.reranker } : {}),
+				...(options.cohereRerank !== undefined ? { cohereRerank: options.cohereRerank } : {}),
 			},
 		);
 		// PRD-029 (AC-4): when this recall ran DEGRADED (lexical fallback), emit one

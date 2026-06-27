@@ -1,6 +1,6 @@
 # Portkey gateway and the privacy-tier trade-off
 
-> Audience: operators + maintainers. Scope: the optional Portkey gateway (PRD-063). Status: shipped with 063a/063b.
+> Audience: operators + maintainers. Scope: the optional Portkey gateway (PRD-063). Status: shipped with 063a/063b/063c.
 
 ## The trade-off, stated plainly
 
@@ -23,6 +23,23 @@ Portkey). It is recorded here so the trade-off is a CONSCIOUS operator decision,
   in your Portkey config (provider selection, regional routing, guardrails, redaction) instead.
 - If you require Honeycomb-side enforcement of a privacy floor, do NOT enable Portkey, or keep
   `portkey.fallbackToProvider` off and use the per-provider path whose tier the router enforces.
+
+## Rerank egresses RECALL CONTENT, not just inference (PRD-063c)
+
+The privacy trade-off above is about INFERENCE (the pollinating completion). PRD-063c adds a SECOND egress channel:
+when the `cohere` reranker strategy is selected (`HONEYCOMB_RECALL_RERANKER=cohere`) AND the Portkey gateway is ON,
+each recall sends the QUERY plus the fused top-N candidate memory TEXTS (your recalled `memories`/`memory`/`sessions`
+content) to Cohere THROUGH the Portkey gateway, to be relevance-scored. This is third-party egress of recalled
+trace content, governed by the SAME conscious-opt-in posture: the same `public`-tier admission applies (Portkey
+abstracts the downstream reranker), and you control redaction/regional routing/provider selection in your Portkey
+config, not in Honeycomb.
+
+- It is OFF by default twice over: the reranker strategy defaults to `none` (RRF-only), and the `cohere` strategy
+  only egresses when the gateway is ALSO on. An operator must opt in on both axes.
+- It fails SOFT: any rerank failure (timeout, HTTP error, unreachable, malformed, missing key) silently keeps the
+  local RRF order, so enabling it can never break or empty a recall.
+- If you do not want recall content leaving the host, leave the reranker at `none`/`embedding-cosine` (the local
+  in-process cosine path egresses nothing), or do not enable Portkey.
 
 ## Where it lives in code
 
