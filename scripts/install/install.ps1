@@ -30,6 +30,12 @@ $HoneycombNodeVersion = '22'
 # The published npm package the global install pulls (PRD-048 publishes it; this consumes it).
 $HoneycombNpmPackage = '@legioncodeinc/honeycomb@latest'
 
+# HiveDoctor (PRD-064b): a SECOND global package -- the self-healing watchdog that keeps the
+# primary daemon alive and registers itself with the OS (a per-user Scheduled Task on Windows,
+# no admin / no UAC) so it survives crashes + reboots. Independent lifecycle (OD-6: a second
+# global), installed after the primary unless the user opts out with -NoHiveDoctor.
+$HiveDoctorNpmPackage = '@legioncodeinc/hivedoctor'
+
 # Distribution base URL: the vanity domain that serves this installer surface (PRD-050a follow-up,
 # now RESOLVED). get.theapiary.sh is a Cloudflare Pages site (site/install/) that content-negotiates:
 # a shell client piping `/` gets the POSIX install.sh as text/plain; a browser gets an "inspect before
@@ -157,6 +163,72 @@ function Resolve-HoneycombBin {
 }
 
 # -----------------------------------------------------------------------------
+# Step 3b -- HiveDoctor bootstrap (PRD-064b). After the primary is installed, install the
+#            HiveDoctor watchdog (a second global) and register its per-user Scheduled Task,
+#            UNLESS the user opted out. The opt-out is `-NoHiveDoctor` / a bare `--no-hivedoctor`
+#            in $args, or the env equivalent $env:HONEYCOMB_NO_HIVEDOCTOR=1 (the ONLY install-time
+#            switch, OD-5). Idempotent + FAIL-SOFT: a HiveDoctor hiccup never fails the Honeycomb
+#            install -- the user still lands on a working dashboard.
+# -----------------------------------------------------------------------------
+
+# True when the user opted OUT of HiveDoctor. Mirrors hivedoctor/src/service/install-guard.ts
+# (shouldBootstrapHiveDoctor) -- keep in sync. Reads the passed invocation args (the bare flag)
+# + the env equivalent. Args are passed in explicitly because inside `irm | iex` there is no
+# script-level $args to read.
+function Test-HiveDoctorOptedOut([string[]]$InvocationArgs) {
+  if ($InvocationArgs -and ($InvocationArgs -contains '--no-hivedoctor' -or $InvocationArgs -contains '-NoHiveDoctor')) {
+    return $true
+  }
+  $envVal = $env:HONEYCOMB_NO_HIVEDOCTOR
+  if ($envVal) {
+    $v = $envVal.Trim().ToLowerInvariant()
+    if ($v -eq '1' -or $v -eq 'true') { return $true }
+  }
+  return $false
+}
+
+# Resolve the absolute hivedoctor bin shim (npm i -g does not refresh THIS session's PATH).
+function Resolve-HiveDoctorBin {
+  $cmd = Get-Command 'hivedoctor' -ErrorAction SilentlyContinue
+  if ($cmd) { return $cmd.Source }
+  $prefix = (npm prefix -g 2>$null)
+  if ($prefix) {
+    $candidate = Join-Path $prefix 'hivedoctor.cmd'
+    if (Test-Path $candidate) { return $candidate }
+  }
+  $appdataCmd = Join-Path $env:AppData 'npm\hivedoctor.cmd'
+  if (Test-Path $appdataCmd) { return $appdataCmd }
+  return $null
+}
+
+# Install the HiveDoctor global (idempotent) + register its per-user Scheduled Task. Every failure
+# is a soft note, never a hard return -- the primary install already succeeded.
+function Install-HiveDoctor {
+  if (Test-Have 'hivedoctor') {
+    Write-Ok "$HiveDoctorNpmPackage already installed."
+  } else {
+    Write-Step "installing the HiveDoctor watchdog ($HiveDoctorNpmPackage)..."
+    npm install -g $HiveDoctorNpmPackage 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      Write-Host "note: could not install $HiveDoctorNpmPackage (continuing -- Honeycomb itself is installed)."
+      return
+    }
+    Write-Ok "installed $HiveDoctorNpmPackage."
+  }
+
+  $hd = Resolve-HiveDoctorBin
+  if ($hd) {
+    Write-Step 'registering the HiveDoctor service (per-user Scheduled Task, no admin)...'
+    & $hd install-service 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+      Write-Ok 'HiveDoctor is watching (it will restart the daemon on crash and survive reboots).'
+    } else {
+      Write-Host 'note: HiveDoctor installed but its service did not register (continuing).'
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
 # Step 3 -- hand off to the CLI verb for the daemon-ensure + health-gate + dashboard
 #           open. The verb is idempotent + health-gated (a-AC-2 / a-AC-4) and opens
 #           honeycomb.local -> loopback (a-AC-6), writing onboarding "installed" (a-AC-5).
@@ -164,7 +236,7 @@ function Resolve-HoneycombBin {
 # Returns a status CODE (never calls `exit`): in the documented `irm ... | iex` bootstrap, `exit`
 # terminates the CALLER's PowerShell host and can close the user's terminal. The single process-exit
 # handling lives at the entrypoint below, which sets `$global:LASTEXITCODE` from this return value.
-function Invoke-Main {
+function Invoke-Main([string[]]$InvocationArgs) {
   if (-not (Ensure-Node))       { return 1 }
   if (-not (Install-Honeycomb)) { return 1 }
 
@@ -179,6 +251,14 @@ function Invoke-Main {
     return 1
   }
 
+  # HiveDoctor bootstrap (PRD-064b), guarded by -NoHiveDoctor / HONEYCOMB_NO_HIVEDOCTOR. Runs BEFORE
+  # the verb hand-off so the watchdog is in place by the time the user sees the dashboard.
+  if (Test-HiveDoctorOptedOut $InvocationArgs) {
+    Write-Step 'skipping HiveDoctor (--no-hivedoctor).'
+  } else {
+    Install-HiveDoctor
+  }
+
   # The verb prints its own friendly step log and returns a clean exit code; forward it verbatim. A
   # handled failure inside the verb is already a plain-language line + non-zero exit -- no raw trace.
   & $bin install
@@ -186,5 +266,6 @@ function Invoke-Main {
 }
 
 # Entrypoint: run main, then set the exit code ONCE without tearing down the host (so `irm | iex`
-# hands control back to the user's session instead of closing it).
-$global:LASTEXITCODE = Invoke-Main
+# hands control back to the user's session instead of closing it). $args is the script-level
+# invocation args (empty under the bare `irm | iex` pipe); forwarded so the opt-out switch is seen.
+$global:LASTEXITCODE = Invoke-Main $args

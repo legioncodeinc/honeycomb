@@ -30,6 +30,12 @@ HONEYCOMB_NODE_VERSION="22"
 # The published npm package the global install pulls (PRD-048 publishes it; this consumes it).
 HONEYCOMB_NPM_PACKAGE="@legioncodeinc/honeycomb@latest"
 
+# HiveDoctor (PRD-064b): a SECOND global package, the self-healing watchdog that keeps the
+# primary daemon alive and registers itself with the OS so it survives crashes + reboots. Its
+# lifecycle is deliberately INDEPENDENT of the Honeycomb tarball (OD-6: a second global), so it
+# is installed here as its own `npm i -g` after the primary, then registers its OS service.
+HIVEDOCTOR_NPM_PACKAGE="@legioncodeinc/hivedoctor"
+
 # Distribution base URL: the vanity domain that serves this installer surface (PRD-050a follow-up,
 # now RESOLVED). get.theapiary.sh is a Cloudflare Pages site (site/install/) that content-negotiates:
 # a shell client piping `/` gets this script as text/plain; a browser gets an "inspect before piping"
@@ -158,6 +164,66 @@ resolve_honeycomb_bin() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Step 3b: HiveDoctor bootstrap (PRD-064b). After the primary is installed, install the
+#           HiveDoctor watchdog (a second global) and register its OS service, UNLESS the
+#           user opted out with `--no-hivedoctor` (the ONLY install-time switch, OD-5) or the
+#           env equivalent HONEYCOMB_NO_HIVEDOCTOR=1. Idempotent: an existing hivedoctor bin
+#           is not reinstalled, and `hivedoctor install-service` converges (it overwrites its
+#           unit). FAIL-SOFT: a HiveDoctor hiccup never fails the Honeycomb install, the user
+#           still lands on a working dashboard (parent AC-10 spirit: opt-out is honest, and a
+#           watchdog failure is not a primary-install failure).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# True (returns 0) when the user opted OUT of HiveDoctor via the flag or the env equivalent.
+# Mirrors hivedoctor/src/service/install-guard.ts (shouldBootstrapHiveDoctor), keep in sync.
+hivedoctor_opted_out() {
+  case " $* " in
+    *" --no-hivedoctor "*) return 0 ;;
+  esac
+  case "${HONEYCOMB_NO_HIVEDOCTOR:-}" in
+    1|true|TRUE|True) return 0 ;;
+  esac
+  return 1
+}
+
+# Install the HiveDoctor global (idempotent) + register its OS service. All output is friendly;
+# every failure is a soft note, never a hard exit (the primary install already succeeded).
+install_hivedoctor() {
+  if have hivedoctor; then
+    ok "${HIVEDOCTOR_NPM_PACKAGE} already installed."
+  else
+    step "installing the HiveDoctor watchdog (${HIVEDOCTOR_NPM_PACKAGE})…"
+    if ! npm install -g "$HIVEDOCTOR_NPM_PACKAGE" >/dev/null 2>&1; then
+      printf 'note: could not install %s (continuing, Honeycomb itself is installed).\n' "$HIVEDOCTOR_NPM_PACKAGE"
+      return 0
+    fi
+    ok "installed ${HIVEDOCTOR_NPM_PACKAGE}."
+  fi
+
+  # Resolve + run `hivedoctor install-service` to register the OS service (userland scope by
+  # default; survives crash + reboot). `npm i -g` does not refresh THIS shell's PATH, so resolve
+  # the absolute bin the same way we do for honeycomb.
+  hd_bin=""
+  if have hivedoctor; then
+    hd_bin="$(command -v hivedoctor)"
+  else
+    hd_prefix="$(npm prefix -g 2>/dev/null)"
+    if [ -n "$hd_prefix" ] && [ -x "${hd_prefix}/bin/hivedoctor" ]; then
+      hd_bin="${hd_prefix}/bin/hivedoctor"
+    fi
+  fi
+  if [ -n "$hd_bin" ]; then
+    step "registering the HiveDoctor OS service…"
+    if "$hd_bin" install-service >/dev/null 2>&1; then
+      ok "HiveDoctor is watching (it will restart the daemon on crash and survive reboots)."
+    else
+      printf 'note: HiveDoctor installed but its service did not register (continuing).\n'
+    fi
+  fi
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Step 3 — hand off to the CLI verb for the daemon-ensure + health-gate + dashboard
 #          open. The open logic lives ONCE in the CLI (src/commands/install.ts), not
 #          here. The verb is idempotent + health-gated (a-AC-2 / a-AC-4) and opens
@@ -174,10 +240,32 @@ main() {
     exit 1
   fi
 
+  # HiveDoctor bootstrap (PRD-064b), guarded by --no-hivedoctor / HONEYCOMB_NO_HIVEDOCTOR. Runs
+  # BEFORE the verb hand-off so the watchdog is in place by the time the user sees the dashboard.
+  if hivedoctor_opted_out "$@"; then
+    step "skipping HiveDoctor (--no-hivedoctor)."
+  else
+    install_hivedoctor
+  fi
+
   # The verb prints its own friendly step log (daemon up / onboarding marked / opening dashboard) and
   # returns a clean exit code; we forward it verbatim. A handled failure inside the verb is already a
   # plain-language line + non-zero exit — no raw stack reaches the user here. Forward the caller's args
-  # ("$@") so a bootstrap `--ref <code>` (and any future install flag) reaches the CLI's install verb.
+  # MINUS the installer-only `--no-hivedoctor` switch (the verb does not know it), so a bootstrap
+  # `--ref <code>` (and any future verb flag) still reaches the CLI's install verb. The positional
+  # rebuild preserves args that contain spaces (string concatenation would not): append each KEPT arg,
+  # then drop the original leading args by their count.
+  _orig_count=$#
+  for a in "$@"; do
+    [ "$a" = "--no-hivedoctor" ] && continue
+    set -- "$@" "$a"
+  done
+  # Shift off the ORIGINAL args one at a time, leaving only the filtered copies we appended.
+  _i=0
+  while [ "$_i" -lt "$_orig_count" ]; do
+    shift
+    _i=$((_i + 1))
+  done
   "$bin" install "$@"
   exit $?
 }
