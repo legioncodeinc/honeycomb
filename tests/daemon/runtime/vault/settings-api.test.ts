@@ -201,3 +201,207 @@ describe("PRD-044c recallMode — closed-enum, fail-closed validation", () => {
 		expect(body.settings.recallMode).toBeUndefined();
 	});
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRD-022 SECURITY: cross-tenant hardening for /api/settings. When the permission
+// middleware has stamped a VALIDATED Identity (team/hybrid), a forged `x-honeycomb-org`
+// header that disagrees with the token's own org MUST fail closed. Stand in a stamping
+// middleware (what the real permission middleware does) and prove a header-forged tenancy
+// can never cross the token's boundary onto the settings surface.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const IDENTITY_CONTEXT_KEY = "honeycombIdentity" as const;
+const TOKEN_IDENTITY = { org: "token-org", workspace: "token-ws", agentId: "token-actor", role: "write" };
+
+/** Build the settings mount in team mode, stamping a fixed validated Identity (mirrors permission mw). */
+function buildAuthedSettings(identity: Record<string, unknown>): Hono {
+	const tempBase = mkdtempSync(join(tmpdir(), "hc-settings-authed-"));
+	const tempStore = new VaultStore({
+		baseDir: tempBase,
+		machineKey: createFakeMachineKeyProvider("machine-authed"),
+		registry: createVaultRegistry(),
+		clock: { now: () => "2026-06-21T00:00:00.000Z" },
+	});
+	const root = new Hono();
+	const group = new Hono();
+	group.use("*", async (c, next) => {
+		c.set(IDENTITY_CONTEXT_KEY, identity);
+		await next();
+	});
+	mountSettingsGroup(group, { store: tempStore, mode: "team" });
+	root.route(SETTINGS_GROUP, group);
+	return root;
+}
+
+describe("PRD-022 SECURITY: /api/settings tenancy cross-check against the validated Identity", () => {
+	it("a forged x-honeycomb-org that disagrees with the token's org fails closed (400) — no cross-tenant write", async () => {
+		const app = buildAuthedSettings(TOKEN_IDENTITY);
+		const res = await app.request("/api/settings/activeProvider", {
+			method: "POST",
+			// The token binds org=token-org; the caller forges a DIFFERENT org header.
+			headers: { "x-honeycomb-org": "victim-org", "content-type": "application/json" },
+			body: JSON.stringify({ value: "anthropic" }),
+		});
+		// The forged-org request is REJECTED (the handler's fail-closed 400 once the scope
+		// resolver refuses the mismatched org). It is NOT a 201 that writes to victim-org.
+		expect(res.status).toBe(400);
+	});
+
+	it("an org header that MATCHES the token's org is honored (no regression for the legitimate caller)", async () => {
+		const app = buildAuthedSettings(TOKEN_IDENTITY);
+		const res = await app.request("/api/settings/activeProvider", {
+			method: "POST",
+			// The token binds org=token-org; the caller sends the MATCHING org header.
+			headers: { "x-honeycomb-org": "token-org", "content-type": "application/json" },
+			body: JSON.stringify({ value: "anthropic" }),
+		});
+		// The legitimate request is ALLOWED (201 success).
+		expect(res.status).toBe(201);
+		const body = await res.json();
+		expect(body.ok).toBe(true);
+		expect(body.value).toBe("anthropic");
+	});
+
+	it("GET with forged org also fails closed (no cross-tenant read)", async () => {
+		const app = buildAuthedSettings(TOKEN_IDENTITY);
+		const res = await app.request("/api/settings", {
+			method: "GET",
+			headers: { "x-honeycomb-org": "victim-org" },
+		});
+		expect(res.status).toBe(400);
+	});
+
+	it("GET with matching org succeeds", async () => {
+		const app = buildAuthedSettings(TOKEN_IDENTITY);
+		const res = await app.request("/api/settings", {
+			method: "GET",
+			headers: { "x-honeycomb-org": "token-org" },
+		});
+		expect(res.status).toBe(200);
+	});
+
+	it("GET individual setting with forged org fails closed (no cross-tenant read)", async () => {
+		const app = buildAuthedSettings(TOKEN_IDENTITY);
+		// First write a setting with the legitimate org
+		await app.request("/api/settings/activeProvider", {
+			method: "POST",
+			headers: { "x-honeycomb-org": "token-org", "content-type": "application/json" },
+			body: JSON.stringify({ value: "anthropic" }),
+		});
+		// Then try to read it with a forged org
+		const res = await app.request("/api/settings/activeProvider", {
+			method: "GET",
+			headers: { "x-honeycomb-org": "victim-org" },
+		});
+		expect(res.status).toBe(400);
+	});
+
+	it("empty org header with identity present fails closed (no fallback to empty tenant)", async () => {
+		const app = buildAuthedSettings(TOKEN_IDENTITY);
+		const res = await app.request("/api/settings/activeProvider", {
+			method: "POST",
+			headers: { "x-honeycomb-org": "", "content-type": "application/json" },
+			body: JSON.stringify({ value: "anthropic" }),
+		});
+		// Empty org header → scope resolver returns null → 400
+		expect(res.status).toBe(400);
+	});
+
+	it("missing org header with identity present fails closed (no default in team mode)", async () => {
+		const app = buildAuthedSettings(TOKEN_IDENTITY);
+		const res = await app.request("/api/settings/activeProvider", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ value: "anthropic" }),
+		});
+		// No org header in team mode → scope resolver returns null → 400
+		expect(res.status).toBe(400);
+	});
+
+	it("forged org with matching workspace still fails (org mismatch is sufficient)", async () => {
+		const app = buildAuthedSettings(TOKEN_IDENTITY);
+		const res = await app.request("/api/settings/activeProvider", {
+			method: "POST",
+			// Forged org but correct workspace — still rejected because org doesn't match
+			headers: {
+				"x-honeycomb-org": "victim-org",
+				"x-honeycomb-workspace": "token-ws",
+				"content-type": "application/json",
+			},
+			body: JSON.stringify({ value: "anthropic" }),
+		});
+		expect(res.status).toBe(400);
+	});
+
+	it("multiple sequential forged requests all fail (no state pollution)", async () => {
+		const app = buildAuthedSettings(TOKEN_IDENTITY);
+		// Try multiple forged requests in sequence
+		for (let i = 0; i < 3; i++) {
+			const res = await app.request("/api/settings/activeProvider", {
+				method: "POST",
+				headers: { "x-honeycomb-org": `victim-org-${i}`, "content-type": "application/json" },
+				body: JSON.stringify({ value: "anthropic" }),
+			});
+			expect(res.status).toBe(400);
+		}
+		// Verify legitimate request still works after failed attempts
+		const legitRes = await app.request("/api/settings/activeProvider", {
+			method: "POST",
+			headers: { "x-honeycomb-org": "token-org", "content-type": "application/json" },
+			body: JSON.stringify({ value: "anthropic" }),
+		});
+		expect(legitRes.status).toBe(201);
+	});
+});
+
+describe("PRD-022 SECURITY: local mode behavior (no identity, no cross-check)", () => {
+	it("local mode with no identity allows any org header (backward compatibility)", async () => {
+		// Build a settings mount in LOCAL mode with NO identity stamping (mirrors local daemon)
+		const tempBase = mkdtempSync(join(tmpdir(), "hc-settings-local-"));
+		const tempStore = new VaultStore({
+			baseDir: tempBase,
+			machineKey: createFakeMachineKeyProvider("machine-local"),
+			registry: createVaultRegistry(),
+			clock: { now: () => "2026-06-21T00:00:00.000Z" },
+		});
+		const root = new Hono();
+		const group = new Hono();
+		// NO identity stamping middleware — local mode has no auth
+		mountSettingsGroup(group, { store: tempStore, mode: "local", defaultScope: { org: "local-org" } });
+		root.route(SETTINGS_GROUP, group);
+
+		// In local mode, any org header is accepted (no identity to cross-check against)
+		const res = await root.request("/api/settings/activeProvider", {
+			method: "POST",
+			headers: { "x-honeycomb-org": "any-org", "content-type": "application/json" },
+			body: JSON.stringify({ value: "anthropic" }),
+		});
+		expect(res.status).toBe(201);
+	});
+
+	it("local mode with no org header falls back to defaultScope", async () => {
+		// Build a settings mount in LOCAL mode with a defaultScope
+		const tempBase = mkdtempSync(join(tmpdir(), "hc-settings-local-fallback-"));
+		const tempStore = new VaultStore({
+			baseDir: tempBase,
+			machineKey: createFakeMachineKeyProvider("machine-local-fb"),
+			registry: createVaultRegistry(),
+			clock: { now: () => "2026-06-21T00:00:00.000Z" },
+		});
+		const root = new Hono();
+		const group = new Hono();
+		mountSettingsGroup(group, { store: tempStore, mode: "local", defaultScope: { org: "local-default-org" } });
+		root.route(SETTINGS_GROUP, group);
+
+		// In local mode with no org header, the defaultScope is used
+		const res = await root.request("/api/settings/activeProvider", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ value: "anthropic" }),
+		});
+		expect(res.status).toBe(201);
+		const body = await res.json();
+		expect(body.ok).toBe(true);
+	});
+});
+
