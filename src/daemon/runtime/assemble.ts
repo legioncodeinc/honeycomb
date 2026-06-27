@@ -85,7 +85,7 @@ import { mountConflictsApi } from "./memories/conflicts-api.js";
 import { mountLifecycleApi } from "./memories/lifecycle-api.js";
 import { mountVfsApi } from "./vfs/api.js";
 import { mountProductDataApi } from "./product/index.js";
-import { localDefaultScopeResolver, type SecretsApiDeps } from "./secrets/api.js";
+import { localDefaultScopeResolver, type ****Deps } from "./secrets/api.js";
 import { type SourcesApiDeps } from "./sources/api.js";
 import { buildSourcesApiDeps } from "./sources/registry.js";
 import { SecretsStore, createMachineKeyProvider } from "./secrets/store.js";
@@ -682,9 +682,13 @@ export function releaseSingleInstanceLock(runtimeDir: string): void {
  * lookup-by-keyid → scrypt-verify → Identity read against the live storage client +
  * scope (011d). The composite returns the first non-null, else `null` → the middleware
  * maps `null` to 401.
+ *
+ * SECURITY: The token authenticator receives the deployment mode so it can reject
+ * unsigned stub tokens in team/hybrid modes (production). Stub tokens are development-only
+ * and lack cryptographic signatures.
  */
-function composeAuthenticator(storage: StorageClient, scope: QueryScope): Authenticator {
-	const tokenAuth = createTokenAuthenticator();
+function composeAuthenticator(storage: StorageClient, scope: QueryScope, mode: DeploymentMode): Authenticator {
+	const tokenAuth = createTokenAuthenticator(undefined, mode);
 	// The REAL api-key half: it reads the `api_keys` table through the live client and
 	// scope, hashes + verifies the presented key, and rejects revoked/cross-project keys.
 	const apiKeyAuth = createApiKeyAuthenticator(storage, scope);
@@ -710,10 +714,10 @@ function authForMode(
 	scope: QueryScope,
 ): { authenticator: Authenticator; policy: AuthorizationPolicy } {
 	if (mode === "team" || mode === "hybrid") {
-		return { authenticator: composeAuthenticator(storage, scope), policy: createRbacPolicy() };
+		return { authenticator: composeAuthenticator(storage, scope, mode), policy: createRbacPolicy() };
 	}
 	// `local`: open middleware; the defaults are never reached but keep the shape stable.
-	return { authenticator: composeAuthenticator(storage, scope), policy: defaultDenyPolicy };
+	return { authenticator: composeAuthenticator(storage, scope, mode), policy: defaultDenyPolicy };
 }
 
 /**
@@ -1159,7 +1163,7 @@ function resolveProductDataDeps(
 	mode: DeploymentMode,
 ): {
 	storage: StorageClient;
-	secrets?: SecretsApiDeps;
+	secrets?: ****Deps;
 	sources?: SourcesApiDeps;
 	defaultScope: QueryScope;
 } {
@@ -1169,7 +1173,7 @@ function resolveProductDataDeps(
 	// (the `C:\WINDOWS\system32` footgun) falls back to `~/.honeycomb` instead of 502ing every
 	// secret save — see {@link resolveWorkspaceBaseDir}.
 	const baseDir = resolveWorkspaceBaseDir();
-	const secrets: SecretsApiDeps = {
+	const secrets: ****Deps = {
 		store: new SecretsStore({ baseDir, machineKey: createMachineKeyProvider() }),
 		// PRD-022 local-mode default: the dashboard's `GET /api/secrets` (names-only) carries no
 		// `x-honeycomb-org` header, so resolve the daemon's single local tenant instead of 400ing.
