@@ -1393,7 +1393,10 @@ export function formatRecallSnippet(text: string, kind: "memory" | "session"): s
  * what the daemon chooses to serve.
  */
 export interface WireClient {
-	kpis(): Promise<KpisWire>;
+	/** The KPI band. PRD-049e: pass the selected project to re-scope the project-bearing counts
+	 *  (Memories / Turns / Est. savings); omit it for the workspace-wide view. Team skills is always
+	 *  workspace-wide (it has no project segment). */
+	kpis(projectId?: string): Promise<KpisWire>;
 	sessions(): Promise<SessionRowWire[]>;
 	settings(): Promise<SettingsWire>;
 	rules(): Promise<RuleRowWire[]>;
@@ -1787,8 +1790,10 @@ export function createWireClient(options: WireClientOptions = {}): WireClient {
 	const url = (path: string): string => `${origin}${path}`;
 
 	return {
-		async kpis(): Promise<KpisWire> {
-			return (await getJson(fetchImpl, url(ENDPOINTS.kpis), KpisSchema)) ?? EMPTY_KPIS;
+		async kpis(projectId?: string): Promise<KpisWire> {
+			// PRD-049e: stamp the selected-project header so the KPI band re-scopes on a dashboard scope
+			// change (parity with graph/roi/recall/memories). An empty selection omits it → workspace-wide.
+			return (await getJson(fetchImpl, url(ENDPOINTS.kpis), KpisSchema, projectHeader(projectId))) ?? EMPTY_KPIS;
 		},
 		async sessions(): Promise<SessionRowWire[]> {
 			const v = await getJson(fetchImpl, url(ENDPOINTS.sessions), SessionsSchema);

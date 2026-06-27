@@ -25,6 +25,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DashboardPage } from "../../../src/dashboard/web/pages/dashboard.js";
 import type { PageProps } from "../../../src/dashboard/web/page-frame.js";
+import { DEFAULT_SCOPE, ScopeContext } from "../../../src/dashboard/web/scope-context.js";
 import type { HarnessStatusWire, KpisWire, LogRecordWire, RecalledMemory, WireClient } from "../../../src/dashboard/web/wire.js";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -126,6 +127,71 @@ describe("038a: three named area landmarks, ordered, with the KPI band at the to
 		expect(text).toContain("5");
 		// The KPI band still uses the existing .kpirow grid rhythm.
 		expect(band?.querySelector(".kpirow")).not.toBeNull();
+	});
+});
+
+describe("PRD-049e: a fast project switch never lets a stale KPI load overwrite the newer project", () => {
+	/** A mock wire whose `kpis(projectId)` returns a deferred promise per project (the test resolves the order). */
+	function deferredKpisWire(): { wire: WireClient; resolveKpis: (projectId: string, value: KpisWire) => void } {
+		const resolvers = new Map<string, (value: KpisWire) => void>();
+		const base = mockWire();
+		const kpis = vi.fn(
+			(projectId?: string) =>
+				new Promise<KpisWire>((resolve) => {
+					resolvers.set(projectId ?? "", resolve);
+				}),
+		);
+		return {
+			wire: { ...(base as object), kpis } as unknown as WireClient,
+			resolveKpis: (projectId, value) => resolvers.get(projectId)?.(value),
+		};
+	}
+
+	/** Render the page under a ScopeContext pinned to `project` (the switcher's selection the page reads). */
+	function renderAt(wire: WireClient, project: string): void {
+		const value = { scope: { ...DEFAULT_SCOPE, project }, setScope: () => {} };
+		root?.render(
+			<ScopeContext.Provider value={value}>
+				<DashboardPage {...pageProps(wire)} />
+			</ScopeContext.Provider>,
+		);
+	}
+
+	const flush = async (): Promise<void> => {
+		await act(async () => {
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+	};
+
+	const KPIS_A: KpisWire = { memoryCount: 111, sessionCount: 0, turnCount: 0, estimatedSavings: 0, teamSkillCount: 0 };
+	const KPIS_B: KpisWire = { memoryCount: 777, sessionCount: 0, turnCount: 0, estimatedSavings: 0, teamSkillCount: 0 };
+
+	it("resolves the OLD project's load AFTER the new one → the band keeps the NEW project's numbers", async () => {
+		const { wire, resolveKpis } = deferredKpisWire();
+		// Mount on proj-A; its KPI load stays in-flight (deferred, unresolved).
+		await act(async () => {
+			root = createRoot(container);
+			renderAt(wire, "proj-A");
+		});
+		await flush();
+
+		// Switch to proj-B BEFORE proj-A's load resolves (the fast-switch race).
+		await act(async () => renderAt(wire, "proj-B"));
+		await flush();
+
+		// proj-B resolves first → the band shows B's count.
+		await act(async () => resolveKpis("proj-B", KPIS_B));
+		await flush();
+		const band = (): string => container.querySelector('[data-area="kpi-band"]')?.textContent ?? "";
+		expect(band()).toContain("777");
+
+		// Now the STALE proj-A load resolves LAST — the seq guard must DROP it (no flicker back to A).
+		await act(async () => resolveKpis("proj-A", KPIS_A));
+		await flush();
+		expect(band()).toContain("777");
+		expect(band()).not.toContain("111");
 	});
 });
 
