@@ -243,15 +243,22 @@ const CHARS_PER_TOKEN = 4;
  * COUNT(DISTINCT honeycomb_id) over non-tombstone rows is name-independent and cheap; a missing
  * `synced_assets` table / storage error fails soft to `0`.
  */
-export async function fetchKpisView(storage: StorageQuery, scope: QueryScope): Promise<KpisView> {
+export async function fetchKpisView(storage: StorageQuery, scope: QueryScope, projectId?: string): Promise<KpisView> {
 	// The distilled-fact table is `memories` (PRD-003a `catalog/memories.ts`), not `memory` —
 	// a stale singular here silently returned 0 for the Memories KPI against the real backend.
 	const memTbl = sqlIdent("memories");
 	const sessTbl = sqlIdent("sessions");
+	// PRD-049e: narrow the project-BEARING counts (`memories` + `sessions` both carry `project_id`) to
+	// the selected project when the dashboard stamped one via the `x-honeycomb-project` header, so the
+	// band re-scopes per project instead of returning the same workspace-wide totals on every project.
+	// `synced_assets` has NO `project_id` (a skill is shared with the TEAM, not a project), so the
+	// Team-skills count below stays workspace-wide BY DESIGN. Absent/blank project → no clause (the
+	// prior workspace-wide behaviour; back-compat for a non-dashboard caller).
+	const projClause = projectWhereClause(projectId);
 	const [memRows, sessRows, savingsRows, teamSkillRows] = await Promise.all([
-		selectRows(storage, `SELECT COUNT(*) AS n FROM "${memTbl}"`, scope),
-		selectRows(storage, `SELECT COUNT(*) AS n FROM "${sessTbl}"`, scope),
-		selectRows(storage, buildEstimatedSavingsSql(), scope),
+		selectRows(storage, `SELECT COUNT(*) AS n FROM "${memTbl}"${projClause}`, scope),
+		selectRows(storage, `SELECT COUNT(*) AS n FROM "${sessTbl}"${projClause}`, scope),
+		selectRows(storage, buildEstimatedSavingsSql(projectId), scope),
 		selectRows(storage, buildTeamSkillCountSql(), scope),
 	]);
 	const sessionCount = toNum(sessRows[0]?.n);
@@ -274,10 +281,24 @@ export async function fetchKpisView(storage: StorageQuery, scope: QueryScope): P
  * human-readable summary text. Identifiers go through `sqlIdent` (the PRD-002b floor) — no value is
  * interpolated. A single `SUM` aggregate (no per-row N+1); NULL on an empty corpus.
  */
-function buildEstimatedSavingsSql(): string {
+function buildEstimatedSavingsSql(projectId?: string): string {
 	const tbl = sqlIdent("memories");
 	const col = sqlIdent("content");
-	return `SELECT SUM(LENGTH(${col})) AS chars FROM "${tbl}"`;
+	// PRD-049e: scope the corpus SUM to the selected project (same predicate as the Memories count) so
+	// the "Est. savings" KPI reflects the project's distilled corpus, not the whole workspace.
+	return `SELECT SUM(LENGTH(${col})) AS chars FROM "${tbl}"${projectWhereClause(projectId)}`;
+}
+
+/**
+ * Build the optional ` WHERE project_id = '<id>'` predicate for a project-BEARING table (PRD-049e —
+ * `memories` + `sessions` both carry `project_id`). Returns an EMPTY string when no project is
+ * selected, so the read stays workspace-wide (back-compat). The id rides through `sLiteral` and the
+ * column through `sqlIdent` (the PRD-002b floor — no value is raw-interpolated), so the composed
+ * clause is audit:sql safe. Centralized so the KPI count, the savings SUM, and the ROI savings read
+ * share ONE project-filter spelling that cannot drift.
+ */
+function projectWhereClause(projectId: string | undefined): string {
+	return projectId !== undefined && projectId !== "" ? ` WHERE ${sqlIdent("project_id")} = ${sLiteral(projectId)}` : "";
 }
 
 /**
@@ -722,11 +743,8 @@ async function readCapturedTurns(storage: StorageQuery, scope: QueryScope, proje
 	const tbl = sqlIdent("sessions");
 	const dateCol = sqlIdent("creation_date");
 	const idCol = sqlIdent("id");
-	// PRD-049e: narrow to the selected project when one was stamped (value via `sLiteral`).
-	const projClause =
-		projectId !== undefined && projectId !== ""
-			? ` WHERE ${sqlIdent("project_id")} = ${sLiteral(projectId)}`
-			: "";
+	// PRD-049e: narrow to the selected project when one was stamped (shared spelling — see projectWhereClause).
+	const projClause = projectWhereClause(projectId);
 	// Identifiers inlined through `sqlIdent` directly into the template (the audit:sql floor — a
 	// pre-joined `cols` variable reads as a raw interpolation to the scanner even when guarded).
 	const sql =
@@ -1006,12 +1024,21 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 
 	const kpis = daemon.group(DASHBOARD_GROUPS.kpis);
 	if (kpis !== undefined) {
+		// A per-(scope+project) short-TTL cache so re-landing on the home (the hash router REMOUNTS the
+		// page) does not re-run the four DeepLake aggregate scans every time. Each `mountDashboardApi`
+		// call gets its own instance (mirrors the installed-assets inventory cache, D-1).
+		const kpisCache = createKpisCache();
 		// Served at `/kpis` under the diagnostics group (full `/api/diagnostics/kpis`) so the
 		// canonical `/api/kpis` resource path is left to the PRD-022 product-data data-access API.
 		kpis.get("/kpis", async (c) => {
 			const scope = resolveScope(c);
 			if (scope === null) return c.json(NO_ORG_BODY, 400);
-			return c.json(await fetchKpisView(storage, scope));
+			// PRD-049e (project-scope): honor the SELECTED project header (the SAME `resolveRequestProject`
+			// the ROI read uses) so switching projects re-scopes the band. Only a REAL selection narrows;
+			// a degraded resolution (no selection, no cwd — the dashboard's default) stays workspace-wide.
+			const project = resolveRequestProject(c, scope);
+			const projectId = project.degraded ? undefined : project.projectId;
+			return c.json(await kpisCache(scope, projectId, () => fetchKpisView(storage, scope, projectId)));
 		});
 	}
 
@@ -1158,6 +1185,39 @@ function createInventoryCache(): () => Promise<LocalAssetInventory> {
 		if (cached !== undefined && now - cached.at < INSTALLED_ASSETS_TTL_MS) return cached.value;
 		const value = await scanInstalledAssets();
 		cached = { value, at: now };
+		return value;
+	};
+}
+
+/** The TTL for the KPI band cache. Short enough that a freshly-captured turn surfaces on the next
+ * load, long enough that re-navigating back to the home skips the four DeepLake aggregate scans. */
+const KPIS_TTL_MS = 10_000;
+/** A defensive cap on distinct cache keys so a long-lived daemon cannot grow the map unboundedly. */
+const KPIS_CACHE_MAX_KEYS = 64;
+
+/** The KPI-band cache reader: returns a fresh-enough cached view for the `(scope, project)` key, else
+ * computes + stores it. Keyed by org/workspace/project so each project view caches independently. */
+type KpisCache = (scope: QueryScope, projectId: string | undefined, compute: () => Promise<KpisView>) => Promise<KpisView>;
+
+/**
+ * Build a per-(scope+project) memoizing reader for the KPI band (mirrors {@link createInventoryCache},
+ * keyed). The KPI counts are four full-aggregate DeepLake reads; without this, every remount of the
+ * home (the hash router re-mounts on navigation) re-runs all four. Each distinct
+ * org/workspace/project view caches independently for {@link KPIS_TTL_MS}; the map is bounded by
+ * {@link KPIS_CACHE_MAX_KEYS} (cleared wholesale when exceeded — a coarse but correct backstop for the
+ * handful of scopes a local dashboard ever touches). Each `mountDashboardApi` call gets its own cache.
+ */
+function createKpisCache(): KpisCache {
+	const cache = new Map<string, { value: KpisView; at: number }>();
+	return async (scope, projectId, compute) => {
+		// NUL-joined so no org/workspace/project value can forge another key's boundary.
+		const key = [scope.org, scope.workspace ?? "", projectId ?? ""].join("\u0000");
+		const now = Date.now();
+		const hit = cache.get(key);
+		if (hit !== undefined && now - hit.at < KPIS_TTL_MS) return hit.value;
+		const value = await compute();
+		if (cache.size >= KPIS_CACHE_MAX_KEYS && !cache.has(key)) cache.clear();
+		cache.set(key, { value, at: now });
 		return value;
 	};
 }

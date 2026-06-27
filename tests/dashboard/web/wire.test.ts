@@ -93,6 +93,18 @@ describe("PRD-024 Wave 3: the wire client stamps the runtime-path + session head
 		expect(headers["x-honeycomb-org"]).toBeUndefined();
 	});
 
+	it("PRD-049e: kpis(projectId) stamps x-honeycomb-project; kpis() omits it (workspace-wide)", async () => {
+		const scoped = recordingFetch({ memoryCount: 0, sessionCount: 0, estimatedSavings: 0 });
+		await createWireClient({ fetchImpl: scoped.fetchImpl }).kpis("proj-web");
+		const scopedHeaders = headerRecord(scoped.calls.find((c) => c.url.includes("/api/diagnostics/kpis"))?.init);
+		expect(scopedHeaders["x-honeycomb-project"]).toBe("proj-web");
+
+		const wide = recordingFetch({ memoryCount: 0, sessionCount: 0, estimatedSavings: 0 });
+		await createWireClient({ fetchImpl: wide.fetchImpl }).kpis();
+		const wideHeaders = headerRecord(wide.calls.find((c) => c.url.includes("/api/diagnostics/kpis"))?.init);
+		expect(wideHeaders["x-honeycomb-project"]).toBeUndefined();
+	});
+
 	it("the exported header constant carries exactly the two non-credential session headers", () => {
 		// No token/secret/credential rides these (D-4): only the runtime-path + session id.
 		expect(DASHBOARD_SESSION_HEADERS["x-honeycomb-runtime-path"]).toBe("plugin");

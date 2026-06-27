@@ -27,6 +27,7 @@ import React from "react";
 import { Badge, Button, Input, Kpi, MemoryCard } from "../primitives.js";
 import { LiveLog, RulesPanel, SessionsPanel, SettingsPanel, SkillSyncPanel } from "../panels.js";
 import { HarnessStrip } from "../harness-strip.js";
+import { useScope } from "../scope-context.js";
 import type { PageProps } from "../page-frame.js";
 import {
 	EMPTY_KPIS,
@@ -149,6 +150,10 @@ function HealthStrip({ reasons }: { reasons: HealthReasonsWire | null }): React.
  * polling clears on unmount. NO header — the shell owns the chrome (D-5).
  */
 export function DashboardPage({ wire, pollinating = false }: PageProps): React.JSX.Element {
+	// PRD-049e: the active dashboard scope — the selected project re-scopes the KPI band's
+	// project-bearing counts (Memories / Turns / Est. savings). Absent → the workspace-wide view.
+	const { scope } = useScope();
+
 	// ── view state (hydrated from the shared wire) ──
 	const [healthReasons, setHealthReasons] = React.useState<HealthReasonsWire | null>(null);
 	const [kpis, setKpis] = React.useState<KpisWire>(EMPTY_KPIS);
@@ -186,7 +191,7 @@ export function DashboardPage({ wire, pollinating = false }: PageProps): React.J
 	 */
 	const hydrate = React.useCallback(async (): Promise<void> => {
 		const [k, sess, r, sk, vs, sn] = await Promise.all([
-			wire.kpis(),
+			wire.kpis(scope.project),
 			wire.sessions(),
 			wire.rules(),
 			wire.skills(),
@@ -199,7 +204,7 @@ export function DashboardPage({ wire, pollinating = false }: PageProps): React.J
 		setSkills(sk);
 		setVaultSettings(vs);
 		setSecretNames(sn);
-	}, [wire]);
+	}, [wire, scope.project]);
 
 	/** PRD-032c (AC-5): persist one vault `setting` through the daemon, then RE-READ the persisted truth. */
 	const saveSetting = React.useCallback(
