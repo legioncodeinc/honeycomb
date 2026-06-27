@@ -18,6 +18,10 @@
  *
  * The decisive cross-cutting assertion: the provider NEVER writes the vault — every
  * file's bytes are unchanged after a full index + a changes() diff.
+ *
+ * SECURITY: Path validation tests verify that the mitigation for the directory traversal
+ * vulnerability is effective. The provider MUST reject vault paths outside the workspace
+ * base directory (`$HONEYCOMB_WORKSPACE` or the daemon's cwd).
  */
 
 import { createHash } from "node:crypto";
@@ -25,7 +29,7 @@ import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import {
 	type ObsidianConfig,
@@ -36,6 +40,28 @@ import {
 import type { SourceArtifact } from "../../../../../src/daemon/runtime/sources/contracts.js";
 
 let vault: string;
+let workspaceBase: string;
+let originalEnv: string | undefined;
+
+// Create a single workspace base directory for ALL tests. This ensures that the
+// memoized workspace base directory in the provider module is consistent across
+// all tests. Each test will create its own vault within this workspace base.
+beforeAll(async () => {
+	workspaceBase = await mkdtemp(path.join(tmpdir(), "workspace-"));
+	originalEnv = process.env.HONEYCOMB_WORKSPACE;
+	process.env.HONEYCOMB_WORKSPACE = workspaceBase;
+});
+
+afterAll(async () => {
+	// Restore the original environment variable.
+	if (originalEnv === undefined) {
+		delete process.env.HONEYCOMB_WORKSPACE;
+	} else {
+		process.env.HONEYCOMB_WORKSPACE = originalEnv;
+	}
+	// Clean up the workspace base directory.
+	await rm(workspaceBase, { recursive: true, force: true });
+});
 
 /** Make a config pointing at the current temp vault. */
 function config(): ObsidianConfig {
@@ -63,10 +89,13 @@ function bySourcePath(artifacts: SourceArtifact[], rel: string): SourceArtifact 
 }
 
 beforeEach(async () => {
-	vault = await mkdtemp(path.join(tmpdir(), "obsidian-vault-"));
+	// Create a unique vault for this test within the shared workspace base.
+	vault = path.join(workspaceBase, `vault-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+	await mkdir(vault, { recursive: true });
 });
 
 afterEach(async () => {
+	// Clean up the vault (but not the workspace base).
 	await rm(vault, { recursive: true, force: true });
 });
 
@@ -291,5 +320,177 @@ describe("PRD-013c provider seam conformance", () => {
 		expect((await stub.health()).state).toBe("unreachable");
 		expect(() => stub.index({})).toThrow(/013c/);
 		await expect(stub.connect({ kind: "obsidian", org: "o", workspace: "w", root: "", settings: {} })).rejects.toThrow(/013c/);
+	});
+});
+
+describe("SECURITY: Path validation prevents directory traversal attacks", () => {
+	let secureVault: string;
+
+	beforeEach(async () => {
+		// Create a dedicated vault for security tests within the workspace.
+		secureVault = path.join(workspaceBase, "secure-vault");
+		await mkdir(secureVault, { recursive: true });
+	});
+
+	it("SECURITY: rejects a vault path outside the workspace base directory (absolute path escape)", async () => {
+		// Attempt to read /etc/passwd (or any absolute path outside the workspace).
+		const maliciousConfig = { vaultPath: "/etc", sourceId: "src-malicious", org: "acme", workspace: "backend" };
+		const provider = createObsidianProvider(maliciousConfig);
+
+		// The provider should report unreachable health (validation failed).
+		const health = await provider.health();
+		expect(health.state).toBe("unreachable");
+		expect(health.detail).toMatch(/invalid or outside the workspace/i);
+
+		// Indexing should yield a failure artifact (not crash, not read the path).
+		const artifacts: SourceArtifact[] = [];
+		for await (const artifact of provider.index({})) {
+			artifacts.push(artifact);
+		}
+		const failures = artifacts.filter((a) => a.failure !== undefined);
+		expect(failures.length).toBeGreaterThan(0);
+		expect(failures[0].failure?.reason).toMatch(/invalid or outside the workspace/i);
+	});
+
+	it("SECURITY: rejects a vault path with directory traversal (../ escape)", async () => {
+		// Attempt to escape the workspace using ../../../etc/passwd.
+		const maliciousPath = path.join(secureVault, "..", "..", "..", "etc");
+		const maliciousConfig = { vaultPath: maliciousPath, sourceId: "src-traversal", org: "acme", workspace: "backend" };
+		const provider = createObsidianProvider(maliciousConfig);
+
+		// The provider should report unreachable health (validation failed).
+		const health = await provider.health();
+		expect(health.state).toBe("unreachable");
+		expect(health.detail).toMatch(/invalid or outside the workspace/i);
+	});
+
+	it("SECURITY: rejects a vault path that equals the workspace root (not strictly within)", async () => {
+		// The workspace root itself is not a valid vault (must be a subdirectory).
+		const rootConfig = { vaultPath: workspaceBase, sourceId: "src-root", org: "acme", workspace: "backend" };
+		const provider = createObsidianProvider(rootConfig);
+
+		// The provider should report unreachable health (validation failed).
+		const health = await provider.health();
+		expect(health.state).toBe("unreachable");
+		expect(health.detail).toMatch(/invalid or outside the workspace/i);
+	});
+
+	it("SECURITY: rejects a vault path pointing to a file (not a directory)", async () => {
+		// Create a file in the secure vault and attempt to use it as the vault path.
+		const filePath = path.join(secureVault, "file.md");
+		await writeFile(filePath, "# File\n\nThis is a file, not a directory.\n", "utf8");
+		const fileConfig = { vaultPath: filePath, sourceId: "src-file", org: "acme", workspace: "backend" };
+		const provider = createObsidianProvider(fileConfig);
+
+		// The provider should report unreachable health (validation failed).
+		const health = await provider.health();
+		expect(health.state).toBe("unreachable");
+		expect(health.detail).toMatch(/invalid or outside the workspace/i);
+	});
+
+	it("SECURITY: rejects a vault path that does not exist", async () => {
+		// Attempt to use a non-existent path.
+		const nonExistentPath = path.join(secureVault, "does-not-exist");
+		const nonExistentConfig = { vaultPath: nonExistentPath, sourceId: "src-nonexistent", org: "acme", workspace: "backend" };
+		const provider = createObsidianProvider(nonExistentConfig);
+
+		// The provider should report unreachable health (validation failed).
+		const health = await provider.health();
+		expect(health.state).toBe("unreachable");
+		expect(health.detail).toMatch(/invalid or outside the workspace/i);
+	});
+
+	it("SECURITY: accepts a valid vault path strictly within the workspace", async () => {
+		// The secure vault is within the workspace base directory.
+		const validConfig = { vaultPath: secureVault, sourceId: "src-valid", org: "acme", workspace: "backend" };
+		const provider = createObsidianProvider(validConfig);
+
+		// The provider should report connected health (validation passed).
+		const health = await provider.health();
+		expect(health.state).toBe("connected");
+		expect(health.detail).toMatch(/vault:/i);
+	});
+
+	it("SECURITY: accepts a relative vault path that resolves within the workspace", async () => {
+		// Use a relative path that resolves to the secure vault.
+		const relativePath = path.relative(process.cwd(), secureVault);
+		const relativeConfig = { vaultPath: relativePath, sourceId: "src-relative", org: "acme", workspace: "backend" };
+		const provider = createObsidianProvider(relativeConfig);
+
+		// The provider should report connected health (validation passed).
+		const health = await provider.health();
+		expect(health.state).toBe("connected");
+		expect(health.detail).toMatch(/vault:/i);
+	});
+
+	it("SECURITY: symlink escape is prevented (symlink pointing outside workspace)", async () => {
+		// Create a symlink inside the secure vault that points outside the workspace.
+		// This test requires the ability to create symlinks, which may not be available
+		// on all platforms (e.g., Windows without admin rights). We'll skip if it fails.
+		const symlinkPath = path.join(secureVault, "symlink-escape");
+		try {
+			const { symlink } = await import("node:fs/promises");
+			await symlink("/etc", symlinkPath, "dir");
+		} catch {
+			// Skip this test if symlink creation fails (e.g., insufficient permissions).
+			return;
+		}
+
+		// Attempt to use the symlink as the vault path.
+		const symlinkConfig = { vaultPath: symlinkPath, sourceId: "src-symlink", org: "acme", workspace: "backend" };
+		const provider = createObsidianProvider(symlinkConfig);
+
+		// The provider should report unreachable health (validation failed).
+		const health = await provider.health();
+		expect(health.state).toBe("unreachable");
+		expect(health.detail).toMatch(/invalid or outside the workspace/i);
+	});
+
+	it("SECURITY: validation is performed before any file read operations", async () => {
+		// This test confirms that validation happens BEFORE any file reads, so an
+		// attacker-controlled path never reaches the file system read operations.
+		await writeFile(path.join(secureVault, "secret.md"), "# Secret\n\nThis should never be read.\n", "utf8");
+
+		// Attempt to read a path outside the workspace.
+		const maliciousConfig = { vaultPath: "/etc", sourceId: "src-prevalidation", org: "acme", workspace: "backend" };
+		const provider = createObsidianProvider(maliciousConfig);
+
+		// Indexing should yield a failure artifact (not crash, not read the path).
+		const artifacts: SourceArtifact[] = [];
+		for await (const artifact of provider.index({})) {
+			artifacts.push(artifact);
+		}
+
+		// The only artifact should be a failure artifact (no content read).
+		expect(artifacts.length).toBeGreaterThan(0);
+		const failures = artifacts.filter((a) => a.failure !== undefined);
+		expect(failures.length).toBeGreaterThan(0);
+		expect(failures[0].failure?.reason).toMatch(/invalid or outside the workspace/i);
+
+		// No successful note artifacts should be present (no files were read).
+		const notes = artifacts.filter((a) => a.failure === undefined && a.kind === "note");
+		expect(notes).toHaveLength(0);
+	});
+
+	it("SECURITY: connect() validates the path and rejects invalid configs", async () => {
+		// The connect() method should validate the path and reject invalid configs.
+		const maliciousConfig = { vaultPath: "/etc", sourceId: "src-connect", org: "acme", workspace: "backend" };
+		const provider = createObsidianProvider(maliciousConfig);
+
+		// Connect should return unreachable health (validation failed).
+		const sourceConfig = { kind: "obsidian" as const, org: "acme", workspace: "backend", root: "/etc", settings: {} };
+		const health = await provider.connect(sourceConfig);
+		expect(health.state).toBe("unreachable");
+		expect(health.detail).toMatch(/invalid or outside the workspace/i);
+	});
+
+	it("SECURITY: snapshot() validates the path before reading files", async () => {
+		// The snapshot() method should validate the path before reading files.
+		const maliciousConfig = { vaultPath: "/etc", sourceId: "src-snapshot", org: "acme", workspace: "backend" };
+		const provider = createObsidianProvider(maliciousConfig);
+
+		// Snapshot should return an empty object (validation failed, no files read).
+		const snapshot = await provider.snapshot();
+		expect(snapshot).toEqual({});
 	});
 });
