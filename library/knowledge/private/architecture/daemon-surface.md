@@ -41,7 +41,10 @@ The API is organized into coherent groups. Permission semantics are defined in [
 | `/api/diagnostics`, `/api/pipeline/*`, `/api/repair/*` | Health report, pipeline stats, operator repair | diagnostics/operator |
 | `/api/inference/*`, `/v1/*` | Native inference routing and OpenAI-compatible gateway (gateway implemented; external HTTP mount deferred, the router is reached internally via the `ModelClient` seam) | deferred |
 | `/api/tasks/*`, `/api/logs`, `/api/update/*`, `/api/git/*` | Scheduled tasks, logs, updates, git sync | local |
+| `/api/actions/*` | Dashboard lifecycle actions (logout, embeddings on/off, restart, uninstall) | local + CSRF |
 | `/` | Dashboard static assets | none |
+
+The `/api/actions/*` group gives the dashboard CLI-parity for the sharp lifecycle actions; it runs behind a stricter guard than a settings write (local-mode only plus origin/CSRF plus the dashboard session header). The surface and its guard are documented in [`../frontend/dashboard-actions-surface.md`](../frontend/dashboard-actions-surface.md).
 
 ## The file watcher
 
