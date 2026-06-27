@@ -285,6 +285,11 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 	let enabled = deps.enabled ?? resolveEmbedClientOptions(env).enabled;
 
 	let started = false;
+	// True once the daemon lifecycle has called `start()` at least once. Unlike `started` (which
+	// `stop()` clears), this is sticky — so `setEnabled` can distinguish a PRE-start boot reconciliation
+	// (just record the desired state; let `start()` spawn within the lifecycle) from a live re-enable
+	// AFTER the lifecycle is up (spawn now). Prevents spawning embeddings outside the service lifecycle.
+	let lifecycleStarted = false;
 	let stopping = false;
 	let child: EmbedChild | null = null;
 	let live = false;
@@ -393,6 +398,7 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 		},
 
 		async start(): Promise<void> {
+			lifecycleStarted = true; // the service lifecycle is now up (sticky; stop() does not clear it)
 			if (started) return; // idempotent
 			started = true;
 			if (!enabled) {
@@ -452,20 +458,23 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 
 		async setEnabled(want: boolean): Promise<void> {
 			// The dashboard live toggle. Flip the runtime flag, then actuate the child to match:
-			// enabling spawns (if not already running); disabling stops. Idempotent — a no-op when the
-			// child already matches the desired state, so a double-click never double-spawns.
+			// enabling spawns (if the lifecycle is up and no child is running); disabling stops.
 			enabled = want;
 			if (want) {
 				logger.event("embed.enabled");
-				if (!started || child === null) {
-					// Allow start() to proceed even if a prior stop() left `started` set, and clear any
-					// `stopping` latch (start() resets it) so spawnAndWatch runs.
+				// PRE-start (boot reconciliation): only record the desired state — do NOT spawn outside
+				// the service lifecycle; `start()` will honor `enabled` when the lifecycle comes up.
+				if (!lifecycleStarted) return;
+				// Lifecycle is up: spawn iff no child is currently running. `stop()` cleared `started`, so
+				// reset it to false and route through `start()` (which re-arms `stopping` + spawns).
+				if (child === null) {
 					started = false;
 					await api.start();
 				}
 			} else {
 				logger.event("embed.disabled_live");
-				if (started || child !== null) await api.stop();
+				// Stop only when there is something to stop (a running child) — never a no-op stop pre-start.
+				if (child !== null) await api.stop();
 			}
 		},
 	};

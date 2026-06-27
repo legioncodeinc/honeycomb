@@ -51,28 +51,33 @@ export function notImplemented(what: string): never {
 export type VerbClass = "storage" | "auth" | "local";
 
 /**
- * The user-facing help SECTION a verb is grouped under by `--help` (FR-2). This is a
- * PRESENTATION axis, independent of {@link VerbClass} (the routing axis) — e.g. `secret`
- * routes through storage but reads naturally under "Agents, routing & config". Every verb
- * carries exactly one group so the grouped help is exhaustive: a new verb that omits a
- * group fails the build, which is the structural guard against a command silently going
- * missing from `--help` (the login/logout regression this field prevents recurring).
+ * The help-section render order + human labels (FR-2), and the SINGLE SOURCE OF TRUTH for the set of
+ * help groups. `usageText` walks this list, printing each group's header followed by its verbs in
+ * {@link VERB_TABLE} order. Lead with memory (the product's heart), then the knowledge/skills surface,
+ * the agent/config surface, the account surface, and finally setup/system plumbing.
+ *
+ * {@link VerbGroup} is DERIVED from these `key`s (below) — so a group cannot drift: adding a section
+ * means adding an entry here, which extends `VerbGroup`, which forces every {@link VerbSpec} to carry a
+ * valid group; and `usageText` only ever renders groups that exist here, so no command's section can
+ * silently vanish from `--help`. `as const` makes the keys a literal union.
  */
-export type VerbGroup = "memory" | "knowledge" | "agents" | "account" | "system";
-
-/**
- * The help-section render order + human labels (FR-2). `usageText` walks this list, printing
- * each group's header followed by its verbs in {@link VERB_TABLE} order. Lead with memory (the
- * product's heart), then the knowledge/skills surface, the agent/config surface, the account
- * surface, and finally setup/system plumbing.
- */
-export const VERB_GROUPS: readonly { readonly key: VerbGroup; readonly label: string }[] = Object.freeze([
+export const VERB_GROUPS = Object.freeze([
 	{ key: "memory", label: "Memory & recall" },
 	{ key: "knowledge", label: "Knowledge & skills" },
 	{ key: "agents", label: "Agents, routing & config" },
 	{ key: "account", label: "Account & workspaces" },
 	{ key: "system", label: "Setup & system" },
-]);
+] as const);
+
+/**
+ * The user-facing help SECTION a verb is grouped under by `--help` (FR-2), DERIVED from
+ * {@link VERB_GROUPS} so the two can never disagree. This is a PRESENTATION axis, independent of
+ * {@link VerbClass} (the routing axis) — e.g. `secret` routes through storage but reads naturally under
+ * "Agents, routing & config". Every verb carries exactly one group so the grouped help is exhaustive: a
+ * verb whose group is not a {@link VERB_GROUPS} key fails the build (the structural guard against a
+ * command silently going missing from `--help` — the login/logout regression this prevents recurring).
+ */
+export type VerbGroup = (typeof VERB_GROUPS)[number]["key"];
 
 /** One row of the merged verb table — the verb word + its routing class + its help group. */
 export interface VerbSpec {

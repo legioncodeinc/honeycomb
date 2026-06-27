@@ -3,8 +3,8 @@
 - **Date:** 2026-06-27
 - **Auditor:** quality-worker-bee
 - **Branch:** `legion/vigilant-kepler-146553`
-- **Worktree:** `C:\Users\mario\GitHub\honeycomb\.claude\worktrees\vigilant-kepler-146553`
-- **Source plan:** `C:\Users\mario\.claude\plans\eventual-toasting-snail.md` (no PRD/IRD in `library/`)
+- **Worktree:** `<repo worktree>` (paths in this report are repo-relative)
+- **Source plan:** approved plan file under the contributor's `~/.claude/plans/` (no PRD/IRD in `library/`)
 - **Ordering:** `security-worker-bee` ran first (0 Critical / 0 High; 2 Medium, 3 Low documented, no code changed). Correct security → quality order. No prior QA report on this branch.
 
 ---
@@ -24,7 +24,7 @@ The five named actions (embeddings on/off, daemon restart, uninstall, DeepLake l
 | **Completeness** | PASS | All five actions present + wired UI→wire→daemon. Persistence, boot-seed, esbuild target, server route group all present. |
 | **Correctness** | PASS | `tsc --noEmit` clean; 29/29 targeted tests pass; guard logic, fail-soft, and echo-checks are sound. |
 | **Alignment** | PASS | Matches the plan's architecture, security posture, and sanctioned scope reductions (guided uninstall, graceful-stop fallback). |
-| **Gaps** | PARTIAL | Restart not live-exercised (plan-acknowledged). `setEnabled()` + boot-reconcile lack coverage in their home suites. |
+| **Gaps** | PARTIAL | Restart not live-exercised (plan-acknowledged). `setEnabled()` now has home-suite coverage (added post-audit); the `assemble.ts` boot-reconcile remains lightly covered. |
 | **Detrimental patterns** | PASS | No dead code, no secret leakage, consistent with surrounding conventions, well-documented. |
 
 ### Verification commands (all run, honest results)
@@ -45,7 +45,7 @@ The five named actions (embeddings on/off, daemon restart, uninstall, DeepLake l
 | **Logout** (§1) | `POST /api/actions/logout` → `defaultRemoveCredentials` rm of `credentialsPath()` + `legacyCredentialsPath()` (`actions-api.ts:215`, `:141`) | `wire.logout()` (`wire.ts:2183`) | "Log out" in `DeeplakeAuthSection` (`settings.tsx:229`) | guard ×5, logout ×1 (`actions-api.test.ts`); DOM logout flip (`settings-actions.test.tsx:98`) | ✅ Done |
 | **Login** (§2, UI-only) | reuses existing `POST /setup/login` + `GET /setup/state` (no new endpoint) | reuses existing `wire.setupLogin()` / `setupState()` | in-page device flow in `ConnectHandoff` (`settings.tsx:101`); CLI hint kept | DOM `setupLogin` + `user_code` render (`settings-actions.test.tsx:114`) | ✅ Done |
 | **Embeddings on/off** (§3) | `POST /api/actions/embeddings` → live `embed.setEnabled()` + persist `embeddings.enabled` (`actions-api.ts:223`) | `wire.setEmbeddings()` (`wire.ts:2189`) | toggle in `EmbeddingsSection` reading `health().reasons.embeddings` (`settings.tsx:531`) | live-actuate+persist, no-store, 400-malformed (`actions-api.test.ts:133`); DOM toggle (`settings-actions.test.tsx:125`) | ✅ Done |
-| **Embeddings persistence/boot-seed** (§3) | `EMBEDDINGS_ENABLED_KEY` registered in `KNOWN_SETTING_KEYS` (`vault/api.ts`); boot read `readBootEmbeddingsEnabled` + fire-and-forget reconcile (`assemble.ts:1353`, `:1731`) | n/a | n/a | **none in home suite** (see W-2) | ⚠️ Wired, untested |
+| **Embeddings persistence/boot-seed** (§3) | `EMBEDDINGS_ENABLED_KEY` registered in `KNOWN_SETTING_KEYS` (`vault/api.ts`); boot read `readBootEmbeddingsEnabled` + fire-and-forget reconcile (`assemble.ts`) | n/a | n/a | `setEnabled()` covered in `embed-supervisor.test.ts` (boot override, disable/re-enable, idempotent); the `assemble.ts` boot-reconcile diff still lacks a direct test (see W-2) | ✅ Wired, mostly tested |
 | **Restart** (§4) | `POST /api/actions/restart` → spawn helper + deferred SIGTERM (`actions-api.ts:248`); standalone `restart-helper.ts` + esbuild target (`esbuild.config.mjs:148`) | `wire.restartDaemon()` (`wire.ts:2195`) | "Restart" two-step confirm + "restarting…" in `SystemActionsSection` (`settings.tsx:625`) | spawn→ack→deferred shutdown via injected seams (`actions-api.test.ts:165`); DOM confirm flow (`settings-actions.test.tsx:137`) | ⚠️ Done, not live-exercised (W-1) |
 | **Uninstall** (§5, guided v1) | `POST /api/actions/uninstall` → `defaultUninstall` (detect harnesses + CLI command, `removed:false`) (`actions-api.ts:188`) | `wire.uninstall()` → `UninstallResultWire \| null` (`wire.ts:2201`) | "Uninstall" danger two-step confirm + honest result render (`settings.tsx:660`) | injected outcome (`actions-api.test.ts:187`); DOM render command+harnesses (`settings-actions.test.tsx:150`) | ✅ Done (scope-reduced per plan §5) |
 | **CLI `--help` (login/logout regression)** | n/a | n/a | `usageText()` grouped + ASCII banner; `login`/`logout` added to `VERB_TABLE` (`contracts.ts:97`); already in `AUTH_SUBCOMMANDS` | 5 new tests in `dispatch.test.ts:151` | ✅ Done |
@@ -67,11 +67,11 @@ None.
 - **Why it matters:** A subtle bug (helper resolves the wrong entry path under a given bundling, or the lock-release grace is too short and the new daemon hits "already running") would surface only at runtime as a daemon that stops and never comes back. Project memory (`deferred-assembly-completed-not-live`, `dogfood-surfaces-integration-bugs`) is explicit that wiring is not "live" until exercised.
 - **Recommendation:** Before declaring the feature done, run the plan's dogfood (build, click Restart, confirm `/health` recovers and the dashboard reconnects). The plan's own fallback (§4) is also acceptable: if respawn proves racy, ship graceful-stop with the "restarts on your next coding turn" message. Either way, record the outcome.
 
-**W-2 — `EmbedSupervisor.setEnabled()` and the boot reconcile have no coverage in their home suites.**
-- **Where:** `src/daemon/runtime/services/embed-supervisor.ts:445` (`setEnabled`); `src/daemon/runtime/assemble.ts:1353` (`readBootEmbeddingsEnabled`) + `:1731` (fire-and-forget reconcile).
-- **What:** `setEnabled()` is the real live-toggle (it manipulates `started`/`stopping`/`child`, calls `start()`/`stop()`, and is the load-bearing mechanism behind the embeddings action). It is exercised in tests only via a **fake** supervisor in `actions-api.test.ts:39` that records the boolean and does nothing — so the actual spawn/stop reconcile, the idempotency claim ("a double-click never double-spawns"), and the "clear the `stopping` latch / reset `started`" branch are untested. `embed-supervisor.test.ts` exists but was not extended. Likewise `readBootEmbeddingsEnabled` (vault-first precedence, fail-soft to env/default) and the boot reconcile diff (`enabled === !disabled ? skip : setEnabled`) added to `assemble.ts` have no direct test, though `assemble.test.ts` exists.
-- **Why it matters:** The plan (§3) makes persistence-survives-restart and live-actuation explicit acceptance behavior. The mechanism is correct on read, but a regression in `setEnabled`'s state machine or the boot precedence would pass CI silently.
-- **Recommendation:** Add a focused `embed-supervisor.test.ts` case for `setEnabled(true/false)` idempotency and re-enable-after-stop using the existing injected `spawnChild`/`probeHealth` seams, and an `assemble.test.ts` (or unit) case for `readBootEmbeddingsEnabled` precedence (persisted setting wins; missing → env/default). Low effort given the seams already exist.
+**W-2 — `setEnabled()` now covered in its home suite; the `assemble.ts` boot-reconcile remains lightly covered.** _(partially resolved post-audit)_
+- **Where:** `src/daemon/runtime/services/embed-supervisor.ts` (`setEnabled`); `src/daemon/runtime/assemble.ts` (`readBootEmbeddingsEnabled` + the fire-and-forget reconcile).
+- **Update (post-audit):** `embed-supervisor.test.ts` was extended with three `setEnabled` cases — boot `enabled:false` override (inert at boot, then `setEnabled(true)` spawns), live disable→re-enable (stop kills the child, re-enable respawns), and idempotent enable (no double-spawn). The CodeRabbit-flagged pre-start-spawn edge (`setEnabled(true)` spawning outside the service lifecycle) was also fixed (a sticky `lifecycleStarted` flag) so boot reconciliation never spawns before `start()`. The load-bearing live-toggle state machine is now directly tested.
+- **Remaining:** `readBootEmbeddingsEnabled` (vault-first precedence, fail-soft to env/default) and the reconcile diff (`enabled === !disabled ? skip : setEnabled`) still have no direct `assemble.test.ts` case — only exercised transitively. Low residual risk.
+- **Recommendation:** Add an `assemble.test.ts` (or unit) case for `readBootEmbeddingsEnabled` precedence (persisted setting wins; missing → env/default) when convenient. Not a blocker.
 
 ### Suggestions (nice-to-have)
 

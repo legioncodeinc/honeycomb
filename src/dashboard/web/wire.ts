@@ -805,8 +805,13 @@ export const BUILD_GRAPH_TIMEOUT_MS = 120_000 as const;
 /** The `POST /api/actions/logout` ack (`{ ok }`). */
 export const ActionOkSchema = z.object({ ok: z.boolean().catch(false) });
 
-/** The `POST /api/actions/embeddings` ack: `{ ok, enabled }` (the new persisted on/off state). */
-export const EmbeddingsActionSchema = z.object({ ok: z.boolean().catch(false), enabled: z.boolean().catch(false) });
+/**
+ * The `POST /api/actions/embeddings` ack: `{ ok, enabled }` (the new persisted on/off state). Both
+ * fields are STRICT (no `.catch` default): a malformed/partial body must FAIL the parse → `postJson`
+ * returns null → `setEmbeddings` reports failure. Defaulting `enabled` to `false` would let a
+ * `setEmbeddings(false)` call falsely "succeed" against a response that never echoed the real state.
+ */
+export const EmbeddingsActionSchema = z.object({ ok: z.boolean(), enabled: z.boolean() });
 
 /** The `POST /api/actions/restart` ack: `{ ok, restarting }`. */
 export const RestartActionSchema = z.object({ ok: z.boolean().catch(false), restarting: z.boolean().catch(false) });

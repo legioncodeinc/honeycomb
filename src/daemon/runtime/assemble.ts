@@ -1730,9 +1730,15 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// later via the live `setEnabled`. Fail-soft — a missing vault / read error leaves env/default.
 	const embedSupervisor = services.embed;
 	if (embedSupervisor !== undefined && vault !== undefined) {
-		void readBootEmbeddingsEnabled(vault, secretScopeFromQueryScope(scope)).then((enabled) =>
-			enabled === !embedSupervisor.disabled ? undefined : embedSupervisor.setEnabled(enabled),
-		);
+		void readBootEmbeddingsEnabled(vault, secretScopeFromQueryScope(scope))
+			.then(async (enabled) => {
+				if (enabled !== !embedSupervisor.disabled) await embedSupervisor.setEnabled(enabled);
+			})
+			.catch((err: unknown) => {
+				// A failed reconcile must never become an unhandled rejection — the env/default state stands.
+				const reason = err instanceof Error ? err.message : String(err);
+				process.stderr.write(`honeycomb: embeddings boot reconciliation failed (non-fatal): ${reason}\n`);
+			});
 	}
 
 	// ── a-AC-4: the cached health bit. A cheap background `SELECT 1` refreshes a coarse

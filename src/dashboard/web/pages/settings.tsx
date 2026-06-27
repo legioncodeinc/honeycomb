@@ -610,6 +610,7 @@ export function SystemActionsSection({ wire }: { wire: PageProps["wire"] }): Rea
 	const [uninstallConfirm, setUninstallConfirm] = React.useState(false);
 	const [uninstalling, setUninstalling] = React.useState(false);
 	const [uninstallResult, setUninstallResult] = React.useState<UninstallResultWire | null>(null);
+	const [uninstallError, setUninstallError] = React.useState(false);
 
 	const doRestart = React.useCallback(async (): Promise<void> => {
 		setRestartConfirm(false);
@@ -623,8 +624,12 @@ export function SystemActionsSection({ wire }: { wire: PageProps["wire"] }): Rea
 	const doUninstall = React.useCallback(async (): Promise<void> => {
 		setUninstallConfirm(false);
 		setUninstalling(true);
+		setUninstallError(false);
 		const result = await wire.uninstall();
+		// `uninstall()` returns null on a non-2xx / network failure — surface that honestly rather than
+		// silently rendering nothing, so the user knows to retry (the wire contract: null = failed).
 		setUninstallResult(result);
+		setUninstallError(result === null);
 		setUninstalling(false);
 	}, [wire]);
 
@@ -674,6 +679,11 @@ export function SystemActionsSection({ wire }: { wire: PageProps["wire"] }): Rea
 						)}
 						<code style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--honey)" }}>{uninstallResult.command}</code>
 					</div>
+				)}
+				{uninstallError && (
+					<span data-testid="system-uninstall-error" style={{ fontSize: 12, color: "var(--severity-critical)" }}>
+						Could not load uninstall guidance. Retry, or run <code style={{ fontFamily: "var(--font-mono)" }}>honeycomb uninstall</code> in your terminal.
+					</span>
 				)}
 			</div>
 		</Panel>

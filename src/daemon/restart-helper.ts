@@ -29,19 +29,31 @@ const entry = process.env.HONEYCOMB_RESTART_ENTRY ?? "";
 const POLL_INTERVAL_MS = 200;
 /** Hard cap on the wait so the helper can never hang forever. */
 const MAX_WAIT_MS = 30_000;
+/** Per-probe timeout so the outer wait cap is actually enforceable (a wedged socket can't hang us). */
+const POLL_TIMEOUT_MS = 1_000;
 /** Grace after `/health` goes down, so the old daemon's lock-file removal completes. */
 const LOCK_RELEASE_GRACE_MS = 800;
 
 const healthUrl = `http://127.0.0.1:${Number.isFinite(port) && port > 0 ? port : 3850}/health`;
 
-/** True iff the old daemon still answers `/health` (it is still up / holds the lock). */
+/**
+ * True iff the old daemon still answers `/health` (it is still up / holds the lock). Each probe is
+ * bounded by {@link POLL_TIMEOUT_MS}: a daemon that accepts the socket but never responds would
+ * otherwise hang this `fetch` forever and the helper would never reach the respawn step. A timed-out
+ * probe is treated as "still up" (keep waiting until the OUTER {@link MAX_WAIT_MS} deadline); a
+ * connection refused/reset means the daemon is genuinely down.
+ */
 async function stillUp(): Promise<boolean> {
+	const ac = new AbortController();
+	const timer = setTimeout(() => ac.abort(), POLL_TIMEOUT_MS);
 	try {
-		const res = await fetch(healthUrl, { method: "GET" });
+		const res = await fetch(healthUrl, { method: "GET", signal: ac.signal });
 		return res.ok;
-	} catch {
-		// Connection refused / reset → the daemon is down.
-		return false;
+	} catch (error) {
+		// An aborted (timed-out) probe → still wedged → keep waiting. Refused/reset → down.
+		return error instanceof Error && error.name === "AbortError";
+	} finally {
+		clearTimeout(timer);
 	}
 }
 
