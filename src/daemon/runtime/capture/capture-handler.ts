@@ -55,6 +55,7 @@ import { type BufferClock, CaptureBuffer } from "./capture-buffer.js";
 import { type CaptureConfig, resolveCaptureConfig } from "./capture-config.js";
 import { budgetedStringify } from "./budgeted-stringify.js";
 import { hasBoundProjectOnDisk, resolveScopeFromDisk, UNSORTED_PROJECT_ID } from "../../../hooks/shared/project-resolver.js";
+import { resolveScopeFromHeaders } from "../scope.js";
 
 /** The route group the capture handler attaches to (FR-1). */
 export const HOOKS_GROUP = "/api/hooks" as const;
@@ -312,12 +313,10 @@ class CaptureRouteHandler {
 		if (path === undefined || path.trim().length === 0) {
 			return c.json({ error: "bad_request", reason: "path query parameter is required" }, 400);
 		}
-		const org = c.req.header("x-honeycomb-org");
-		const workspace = c.req.header("x-honeycomb-workspace");
-		if (org === undefined || org.length === 0) {
+		const scope = resolveScopeFromHeaders(c);
+		if (scope === null) {
 			return c.json({ error: "bad_request", reason: "x-honeycomb-org header is required" }, 400);
 		}
-		const scope: QueryScope = workspace !== undefined && workspace.length > 0 ? { org, workspace } : { org };
 
 		const result = await readAppendOrdered(this.deps.storage, this.deps.sessionsTarget, scope, path.trim());
 		if (!isOk(result)) {
