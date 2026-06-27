@@ -84,8 +84,13 @@ const NO_ORG_BODY = { error: "bad_request", reason: "x-honeycomb-org header is r
  * DeepLake backend (the bearer token is bound to A's org), but — exactly as
  * {@link import("../scope.js").resolveScopeFromHeaders} does for the data handlers — we ALSO reject the
  * mismatch HERE, before the storage call: a forged `x-honeycomb-org` falls back to the daemon's own
- * `defaultScope` rather than being honored. In local mode no Identity is stamped, so the prior
- * pure-header loopback behaviour is unchanged.
+ * `defaultScope` rather than being honored.
+ *
+ * ── Cross-workspace hardening (PRD-022 security) ─────────────────────────────
+ * Similarly, an authenticated caller must not be able to forge `x-honeycomb-workspace` to sync
+ * projects from a different workspace within the same org. When a validated Identity is present,
+ * the workspace is taken from `identity.workspace` (the token's own workspace), NOT from the header.
+ * The header is trusted ONLY in local mode (no Identity).
  */
 function resolveSyncScope(c: Context, defaultScope: QueryScope): QueryScope | null {
 	const org = c.req.header("x-honeycomb-org");
@@ -93,6 +98,12 @@ function resolveSyncScope(c: Context, defaultScope: QueryScope): QueryScope | nu
 		// Cross-tenant guard: never honor a header org that disagrees with the validated token org.
 		const identity = getRequestIdentity(c);
 		if (identity === undefined || org === identity.org) {
+			// When an authenticated Identity is present, use its workspace rather than trusting
+			// the header — a forged workspace header must not allow cross-workspace access.
+			if (identity !== undefined) {
+				return { org: identity.org, workspace: identity.workspace };
+			}
+			// Local mode (no Identity): trust the header, with optional workspace.
 			const workspace = c.req.header("x-honeycomb-workspace");
 			return workspace !== undefined && workspace.length > 0 ? { org, workspace } : { org };
 		}

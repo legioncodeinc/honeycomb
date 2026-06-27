@@ -25,6 +25,7 @@ import type { Context } from "hono";
 import { sqlIdent, sqlStr } from "../../storage/sql.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import { isOk } from "../../storage/result.js";
+import { getRequestIdentity } from "../middleware/permission.js";
 import type { Daemon } from "../server.js";
 
 /** The route group the backend notifications API attaches to (already mounted, protected). */
@@ -70,11 +71,36 @@ export interface NotificationScopeResolver {
 	resolve(c: Context): QueryScope | null;
 }
 
-/** The default header-based scope resolver (mirrors the rest of the daemon's tenancy reader). */
+/** The default header-based scope resolver (mirrors the rest of the daemon's tenancy reader).
+ *
+ * ── Cross-tenant guard (PRD-022 security) ────────────────────────────────────
+ * In team/hybrid the permission middleware has already AUTHENTICATED the request and stamped
+ * the VALIDATED {@link import("../auth/contracts.js").Identity} onto the context. Without a
+ * cross-check an authenticated caller for org A could forge `x-honeycomb-org: orgB` and
+ * access org B's notifications. When a validated Identity is present, the resolved org MUST
+ * equal `identity.org`; a mismatch returns `null` → the handler fails closed (400).
+ *
+ * ── Cross-workspace guard (PRD-022 security hardening) ───────────────────────
+ * Similarly, an authenticated caller must not be able to forge `x-honeycomb-workspace` to
+ * access notifications in a different workspace within the same org. When a validated Identity
+ * is present, the workspace is taken from `identity.workspace` (the token's own workspace),
+ * NOT from the header. The header is trusted ONLY in local mode (no Identity). This mirrors
+ * the pattern in `assets/api.ts` and `dashboard/sync-mount.ts`.
+ */
 export const headerScopeResolver: NotificationScopeResolver = {
 	resolve(c: Context): QueryScope | null {
 		const org = c.req.header("x-honeycomb-org");
 		if (org === undefined || org.length === 0) return null;
+		// Cross-tenant guard: a forged org header can never cross the token's own org boundary.
+		const identity = getRequestIdentity(c);
+		if (identity !== undefined && org !== identity.org) return null;
+		// When an authenticated Identity is present, use its workspace (the token's own
+		// workspace) rather than trusting the header — a forged workspace header must not
+		// allow cross-workspace access within the same org (PRD-022 hardening).
+		if (identity !== undefined) {
+			return { org: identity.org, workspace: identity.workspace };
+		}
+		// Local mode (no Identity): trust the header, defaulting to "default" when absent.
 		const workspace = c.req.header("x-honeycomb-workspace");
 		const ws = workspace !== undefined && workspace.length > 0 ? workspace : "default";
 		return { org, workspace: ws };

@@ -248,3 +248,173 @@ describe("b-AC-1 POST /api/secrets/exec → 202 + jobId; b-AC-3 GET status → r
 		expect(await op.text()).not.toContain(SECRET);
 	});
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECURITY REGRESSION (PRD-022 cross-WORKSPACE guard): the pentest finding
+// "Sources API trusts x-honeycomb-workspace" applies to ALL scope resolvers,
+// including the secrets API. When a validated Identity is present, the workspace
+// MUST come from `identity.workspace`, NOT from the header.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const IDENTITY_CONTEXT_KEY = "honeycombIdentity" as const;
+const TOKEN_IDENTITY = { org: "token-org", workspace: "token-ws", agentId: "token-actor", role: "write" };
+
+/** Build the secrets mount stamping a fixed validated Identity (mirrors permission mw). */
+function buildAuthedSecrets(identity: Record<string, unknown>): Hono {
+	const store = new SecretsStore({
+		baseDir: base,
+		machineKey: createFakeMachineKeyProvider("machine-A"),
+		clock: { now: () => "2026-06-18T00:00:00.000Z" },
+	});
+	const root = new Hono();
+	const group = new Hono();
+	group.use("*", async (c, next) => {
+		c.set(IDENTITY_CONTEXT_KEY, identity);
+		await next();
+	});
+	mountSecretsApi(group, { store });
+	root.route(SECRETS_GROUP, group);
+	return root;
+}
+
+describe("PRD-022 SECURITY: /api/secrets cross-workspace guard (pentest finding mitigation)", () => {
+	it("a forged x-honeycomb-workspace is IGNORED when Identity is present — workspace comes from token", async () => {
+		const app = buildAuthedSecrets(TOKEN_IDENTITY);
+		// Store a secret with a forged workspace header.
+		const res = await app.request("/api/secrets/test-key", {
+			method: "POST",
+			headers: {
+				"x-honeycomb-org": "token-org",
+				"x-honeycomb-workspace": "victim-workspace", // ← forged workspace
+				"content-type": "application/json",
+			},
+			body: JSON.stringify({ value: "secret-value" }),
+		});
+		expect(res.status).toBe(201);
+
+		// List secrets — the scope resolver should use token-ws, not victim-workspace.
+		const listRes = await app.request("/api/secrets", {
+			headers: {
+				"x-honeycomb-org": "token-org",
+				"x-honeycomb-workspace": "token-ws", // ← legitimate workspace
+			},
+		});
+		expect(listRes.status).toBe(200);
+		const body = await listRes.json();
+		// The secret should be accessible because the scope resolver used token-ws for both POST and GET.
+		expect(body.names).toContain("test-key");
+	});
+
+	it("authenticated caller cannot access secrets from a different workspace by forging the header", async () => {
+		// Create two apps with different workspaces.
+		const appA = buildAuthedSecrets({ org: "shared-org", workspace: "workspace-a", agentId: "actor-a", role: "write" });
+		const appB = buildAuthedSecrets({ org: "shared-org", workspace: "workspace-b", agentId: "actor-b", role: "write" });
+
+		// Actor A stores a secret in workspace-a.
+		await appA.request("/api/secrets/secret-a", {
+			method: "POST",
+			headers: {
+				"x-honeycomb-org": "shared-org",
+				"x-honeycomb-workspace": "workspace-a",
+				"content-type": "application/json",
+			},
+			body: JSON.stringify({ value: "value-a" }),
+		});
+
+		// Actor B tries to list secrets by forging workspace-a header.
+		const res = await appB.request("/api/secrets", {
+			headers: {
+				"x-honeycomb-org": "shared-org",
+				"x-honeycomb-workspace": "workspace-a", // ← forged to access workspace-a
+			},
+		});
+		expect(res.status).toBe(200);
+		const body = await res.json();
+		// Actor B should NOT see secret-a (which is in workspace-a).
+		// The scope resolver uses workspace-b from the token, not the forged header.
+		expect(body.names).not.toContain("secret-a");
+	});
+
+	it("DELETE with forged workspace → deletes from token's workspace only", async () => {
+		const app = buildAuthedSecrets(TOKEN_IDENTITY);
+		// Store a secret in the token's workspace.
+		await app.request("/api/secrets/test-key", {
+			method: "POST",
+			headers: {
+				"x-honeycomb-org": "token-org",
+				"x-honeycomb-workspace": "token-ws",
+				"content-type": "application/json",
+			},
+			body: JSON.stringify({ value: "secret-value" }),
+		});
+
+		// DELETE with a forged workspace header.
+		const res = await app.request("/api/secrets/test-key", {
+			method: "DELETE",
+			headers: {
+				"x-honeycomb-org": "token-org",
+				"x-honeycomb-workspace": "victim-workspace", // ← forged
+			},
+		});
+		// The DELETE should succeed because the scope resolver uses token-ws.
+		expect(res.status).toBe(200);
+
+		// Verify the secret is gone from token-ws.
+		const listRes = await app.request("/api/secrets", {
+			headers: {
+				"x-honeycomb-org": "token-org",
+				"x-honeycomb-workspace": "token-ws",
+			},
+		});
+		const body = await listRes.json();
+		expect(body.names).not.toContain("test-key");
+	});
+
+	it("local mode (no Identity) still trusts the workspace header for backward compatibility", async () => {
+		// Build an app WITHOUT stamping an Identity (local mode).
+		const store = new SecretsStore({
+			baseDir: base,
+			machineKey: createFakeMachineKeyProvider("machine-A"),
+			clock: { now: () => "2026-06-18T00:00:00.000Z" },
+		});
+		const root = new Hono();
+		const group = new Hono();
+		// NO Identity stamping middleware (local mode).
+		mountSecretsApi(group, { store });
+		root.route(SECRETS_GROUP, group);
+
+		// POST with a workspace header (should be honored in local mode).
+		const res = await root.request("/api/secrets/local-key", {
+			method: "POST",
+			headers: {
+				"x-honeycomb-org": "local-org",
+				"x-honeycomb-workspace": "local-ws",
+				"content-type": "application/json",
+			},
+			body: JSON.stringify({ value: "local-value" }),
+		});
+		expect(res.status).toBe(201);
+
+		// GET should also honor the workspace header in local mode.
+		const listRes = await root.request("/api/secrets", {
+			headers: {
+				"x-honeycomb-org": "local-org",
+				"x-honeycomb-workspace": "local-ws",
+			},
+		});
+		expect(listRes.status).toBe(200);
+		const body = await listRes.json();
+		expect(body.names).toContain("local-key");
+	});
+
+	it("a forged x-honeycomb-org that disagrees with the token's org fails closed (400)", async () => {
+		const app = buildAuthedSecrets(TOKEN_IDENTITY);
+		const res = await app.request("/api/secrets", {
+			headers: {
+				"x-honeycomb-org": "victim-org", // ← forged org
+				"x-honeycomb-workspace": "token-ws",
+			},
+		});
+		expect(res.status).toBe(400);
+	});
+});

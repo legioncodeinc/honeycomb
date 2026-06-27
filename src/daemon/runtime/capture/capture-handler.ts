@@ -46,6 +46,7 @@ import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import { type HealTarget } from "../../storage/heal.js";
 import { isOk, type StorageRow } from "../../storage/result.js";
 import { appendOnlyInsertMany, type ColumnValue, readAppendOrdered, type RowValues, val } from "../../storage/writes.js";
+import { getRequestIdentity } from "../middleware/permission.js";
 import type { Daemon } from "../server.js";
 import type { JobQueueService } from "../services/job-queue.js";
 import { type EmbedAttachment, noopEmbedAttachment } from "../services/embed-client.js";
@@ -306,6 +307,15 @@ class CaptureRouteHandler {
 	 * org/workspace (via `readAppendOrdered`). Org/workspace come from the same
 	 * `x-honeycomb-*` headers the rest of the daemon reads, so the read-back stays
 	 * inside the requester's tenancy.
+	 *
+	 * ── Cross-tenant guard (PRD-022 security) ────────────────────────────────────
+	 * When a validated Identity is present, the resolved org MUST equal `identity.org`;
+	 * a mismatch returns 400.
+	 *
+	 * ── Cross-workspace guard (PRD-022 security hardening) ───────────────────────
+	 * When a validated Identity is present, the workspace is taken from `identity.workspace`
+	 * (the token's own workspace), NOT from the header. The header is trusted ONLY in local
+	 * mode (no Identity).
 	 */
 	async handleConversation(c: Context): Promise<Response> {
 		const path = c.req.query("path");
@@ -313,11 +323,23 @@ class CaptureRouteHandler {
 			return c.json({ error: "bad_request", reason: "path query parameter is required" }, 400);
 		}
 		const org = c.req.header("x-honeycomb-org");
-		const workspace = c.req.header("x-honeycomb-workspace");
 		if (org === undefined || org.length === 0) {
 			return c.json({ error: "bad_request", reason: "x-honeycomb-org header is required" }, 400);
 		}
-		const scope: QueryScope = workspace !== undefined && workspace.length > 0 ? { org, workspace } : { org };
+		// Cross-tenant guard: a forged org header can never cross the token's own org boundary.
+		const identity = getRequestIdentity(c);
+		if (identity !== undefined && org !== identity.org) {
+			return c.json({ error: "bad_request", reason: "org mismatch" }, 400);
+		}
+		// When an authenticated Identity is present, use its workspace rather than trusting
+		// the header — a forged workspace header must not allow cross-workspace access.
+		const scope: QueryScope = identity !== undefined
+			? { org: identity.org, workspace: identity.workspace }
+			: (() => {
+				// Local mode (no Identity): trust the header, with optional workspace.
+				const workspace = c.req.header("x-honeycomb-workspace");
+				return workspace !== undefined && workspace.length > 0 ? { org, workspace } : { org };
+			})();
 
 		const result = await readAppendOrdered(this.deps.storage, this.deps.sessionsTarget, scope, path.trim());
 		if (!isOk(result)) {
