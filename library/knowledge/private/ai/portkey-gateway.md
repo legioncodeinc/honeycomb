@@ -1,13 +1,14 @@
 # Portkey Gateway (optional one-stop inference)
 
-> Category: Ai | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Ai | Version: 1.1 | Date: June 2026 | Status: Active
 
-The optional AI-gateway path that, when an operator turns it on, supersedes the per-provider inference keys and routes every workload through a single [Portkey](https://portkey.ai) endpoint. Read this to understand what changes when `portkey.enabled` is on, how the supersession is wired at the model-client factory, and how precedence, fallback, health, and metering stay honest. Ships PRD-063a (settings surface) and PRD-063b (inference routing); PRD-063c (reranking) is parked.
+The optional AI-gateway path that, when an operator turns it on, supersedes the per-provider inference keys and routes every workload through a single [Portkey](https://portkey.ai) endpoint. Read this to understand what changes when `portkey.enabled` is on, how the supersession is wired at the model-client factory, and how precedence, fallback, health, and metering stay honest. Ships PRD-063a (settings surface), PRD-063b (inference routing), and PRD-063c (recall reranking through the same gateway).
 
 **Related:**
 - [`model-provider-router.md`](model-provider-router.md)
 - [`memory-pipeline.md`](memory-pipeline.md)
 - [`pollinating-loop.md`](pollinating-loop.md)
+- [`retrieval.md`](retrieval.md)
 - [`../security/portkey-privacy-tier.md`](../security/portkey-privacy-tier.md)
 - [`../security/secrets.md`](../security/secrets.md)
 
@@ -97,6 +98,16 @@ The first three are derived from config AT ASSEMBLY (the factory's `PortkeyStatu
 
 Usage and cost metering keep working under the gateway. Portkey returns OpenAI-shaped `usage`, and the transport surfaces those counts through the SAME `UsageSink` seam the Anthropic transport uses: `prompt_tokens` maps to input tokens, `completion_tokens` to output tokens, and `prompt_tokens_details.cached_tokens` to cache-read tokens. Portkey's OpenAI shape has no cache-write count, so that field stays zero rather than being fabricated. PRD-060 ROI capture therefore does not silently zero out when inference routes through Portkey.
 
-## Current state and the parked reranking phase
+## Reranking through the same gateway (PRD-063c)
 
-063a (settings surface) and 063b (inference routing) shipped in PR #147. 063c (Cohere reranking through the same gateway) is parked BLOCKED: there is no provider-rerank seam to plug into today (reranking is embedding-cosine or `none`, `DEFAULT_RERANKER="none"`), so lighting up a Portkey-routed reranker depends on a recall-side deliverable (PRD-027 / PRD-047). The recall path is zero-diff while 063c is dark. See OQ-4 in the PRD index for the ownership split with `retrieval-worker-bee`.
+063a (settings surface) and 063b (inference routing) shipped in PR #147; 063c (Cohere reranking through the same gateway) shipped in [PR #158](https://github.com/legioncodeinc/honeycomb/pull/158). 063c gives recall a SECOND egress path through the same `PORTKEY_API_KEY` + `portkey.config`: when the gateway is on **and** the `cohere` reranker strategy is selected (`HONEYCOMB_RECALL_RERANKER=cohere`), recall reranks its fused top-N candidates by sending the query + candidate texts to Cohere through Portkey's `POST /v1/rerank`. One Portkey config now owns both the inference model and the rerank model.
+
+The transport mirrors the inference one. `src/daemon/runtime/recall/rerank-portkey.ts` is a hand-rolled `fetch` (no `cohere`/`portkey-ai` SDK, per D-1) that reuses 063b's base host, the `buildPortkeyHeaders` helper (`x-portkey-api-key` + `x-portkey-config`), and the `${SECRET_REF}` resolver, so the rerank path never sees a plaintext key either. It POSTs to `PORTKEY_RERANK_URL` (`/v1/rerank`) with body `{ model, query, documents, top_n }` and zod-validates the `{ results: [{ index, relevance_score }] }` response. The Cohere model id defaults to `rerank-v3.5` (`DEFAULT_RERANKER_COHERE_MODEL`, env-overridable); the operator ultimately picks the rerank model inside their Portkey config.
+
+Three safety properties make 063c free to leave dormant:
+
+- **Off by default twice over.** `DEFAULT_RERANKER` stays `none`, and the `cohere` strategy only egresses when the gateway is ALSO on. The assembly seam injects the `cohereRerank` transport into the recall engine ONLY when both hold; absent the seam, a `cohere` strategy degrades to the RRF order (the recall path is byte-identical to today when not `cohere`).
+- **Fails soft, never breaks recall.** `rerankWithCohere` in `recall.ts` is a bounded `Promise.race` against the PROVIDER timeout (`DEFAULT_RERANKER_PROVIDER_TIMEOUT_MS = 1000`, distinct from the 300ms local-cosine budget). Any timeout, HTTP error, unreachable gateway, malformed response, or missing key silently keeps the local RRF order. Reranking can never stall or empty a recall.
+- **Health stays honest.** A rerank failure reuses `recordPortkeyUnreachable`, so it flips the same `reasons.portkey` = `unreachable` signal an inference failure does (mode-gated as before, no secret leaked).
+
+The privacy consequence is real and documented separately: reranking egresses recall *content* (your recalled `memories`/`memory`/`sessions` texts), not just the pollinating completion. See [`../security/portkey-privacy-tier.md`](../security/portkey-privacy-tier.md) for the trade-off. Default-ON for the `cohere` reranker is gated behind a live recall-quality eval (c-OQ-1/c-OQ-2): PRD-047b found the local cosine reranker sat inside the RRF-only noise band, so the strategy stays `none` until a measured lift justifies flipping it.
