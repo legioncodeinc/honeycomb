@@ -11,8 +11,8 @@
  *   - b-AC-6: every seam `buildRuntimeDeps` assembles is bound (no undefined handler seam).
  */
 
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -27,6 +27,8 @@ import {
 	buildDaemonLifecycle,
 	buildOrgDriftHealer,
 	buildRuntimeDeps,
+	canWriteDir,
+	resolveDaemonWorkspace,
 } from "../../src/cli/runtime.js";
 import { buildRealTokenIssuer } from "../../src/cli/token-issuer.js";
 import { authMain } from "../../src/cli/auth.js";
@@ -430,5 +432,51 @@ describe("PRD-021b b-AC-6 — every seam is bound", () => {
 		expect(typeof lifecycle.start).toBe("function");
 		expect(typeof lifecycle.stop).toBe("function");
 		expect(typeof lifecycle.status).toBe("function");
+	});
+});
+
+/**
+ * The `C:\WINDOWS\system32` footgun guard: `start()` must pin the spawned daemon to a WRITABLE
+ * workspace, because the daemon resolves its `.secrets/`/`.daemon/` root from `HONEYCOMB_WORKSPACE
+ * ?? process.cwd()` and a detached process can inherit an unwritable cwd (then every secret save
+ * 502s `store_failed` with no audit trail). These lock the resolver that feeds the spawn.
+ */
+describe("daemon workspace resolution (system32 footgun guard)", () => {
+	let tmp: string;
+	const prevWorkspace = process.env.HONEYCOMB_WORKSPACE;
+
+	beforeEach(() => {
+		tmp = mkdtempSync(join(tmpdir(), "hc-ws-"));
+	});
+	afterEach(() => {
+		if (prevWorkspace === undefined) delete process.env.HONEYCOMB_WORKSPACE;
+		else process.env.HONEYCOMB_WORKSPACE = prevWorkspace;
+		rmSync(tmp, { recursive: true, force: true });
+	});
+
+	it("canWriteDir is true for a writable dir and false for an unwritable path", () => {
+		expect(canWriteDir(tmp)).toBe(true);
+		// A path UNDER a regular file can never be a directory — mkdirSync throws (ENOTDIR), which
+		// is a reliable cross-platform stand-in for an unwritable target (Windows ACLs are not).
+		const asFile = join(tmp, "not-a-dir");
+		writeFileSync(asFile, "");
+		expect(canWriteDir(join(asFile, "child"))).toBe(false);
+	});
+
+	it("resolveDaemonWorkspace honors a writable HONEYCOMB_WORKSPACE", () => {
+		process.env.HONEYCOMB_WORKSPACE = tmp;
+		expect(resolveDaemonWorkspace()).toBe(tmp);
+	});
+
+	it("resolveDaemonWorkspace skips an UNWRITABLE HONEYCOMB_WORKSPACE and falls back to a writable dir", () => {
+		const asFile = join(tmp, "bad-workspace-file");
+		writeFileSync(asFile, "");
+		// An env path that cannot be a directory must be rejected, not blindly trusted; the resolver
+		// then lands on the (writable) cwd or `~/.honeycomb` — never the unwritable candidate.
+		process.env.HONEYCOMB_WORKSPACE = join(asFile, "sub");
+		const resolved = resolveDaemonWorkspace();
+		expect(resolved).not.toBe(join(asFile, "sub"));
+		expect([process.cwd(), join(homedir(), ".honeycomb")]).toContain(resolved);
+		expect(canWriteDir(resolved)).toBe(true);
 	});
 });

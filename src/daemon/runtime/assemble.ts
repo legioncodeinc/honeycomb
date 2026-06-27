@@ -31,7 +31,7 @@
  * NOT fake it (see {@link assembleSeams}).
  */
 
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -1163,8 +1163,11 @@ function resolveProductDataDeps(
 	defaultScope: QueryScope;
 } {
 	// The secrets store base dir is the workspace root ($HONEYCOMB_WORKSPACE), defaulting to
-	// the daemon's cwd when unset (the same default the secrets CONVENTIONS document).
-	const baseDir = process.env.HONEYCOMB_WORKSPACE ?? process.cwd();
+	// the daemon's cwd when unset (the same default the secrets CONVENTIONS document). Routed
+	// through the HARDENED resolver so a detached daemon that inherited a non-writable cwd
+	// (the `C:\WINDOWS\system32` footgun) falls back to `~/.honeycomb` instead of 502ing every
+	// secret save — see {@link resolveWorkspaceBaseDir}.
+	const baseDir = resolveWorkspaceBaseDir();
 	const secrets: SecretsApiDeps = {
 		store: new SecretsStore({ baseDir, machineKey: createMachineKeyProvider() }),
 		// PRD-022 local-mode default: the dashboard's `GET /api/secrets` (names-only) carries no
@@ -1208,10 +1211,61 @@ function resolveProductDataDeps(
  * `.secrets/` store (PRD-012a), the secrets API mount ({@link resolveProductDataDeps}), and
  * the inference {@link AGENT_CONFIG_FILE_NAME} all resolve under, so the `agent.yaml` the
  * operator edits and the `.secrets/` dir its `${ANTHROPIC_API_KEY}` ref decrypts from agree
- * on ONE root. Read at most once at assembly.
+ * on ONE root. Memoized — probed at most once.
+ *
+ * ── The `C:\WINDOWS\system32` footgun (the hardening) ────────────────────────
+ * A daemon spawned DETACHED inherits the spawner's cwd. On Windows a CLI launched from a
+ * service / stray shell commonly sits in `C:\WINDOWS\system32`, a root a normal user CANNOT
+ * write. Resolving `process.cwd()` blindly there makes every `.secrets/` + `.daemon/` write
+ * EACCES — which surfaces as a 502 `store_failed` on the first provider-key save, with the
+ * audit/log writes failing silently (no trail). So we PROBE the candidate for real writability
+ * and fall back to the guaranteed-writable `~/.honeycomb` runtime dir (which already holds the
+ * pid/lock + machine-key). The CLI spawn (`src/cli/runtime.ts`) ALSO pins a writable workspace,
+ * so this is defense-in-depth for a daemon brought up by any other launcher.
  */
+let workspaceBaseDirMemo: string | undefined;
 function resolveWorkspaceBaseDir(): string {
-	return process.env.HONEYCOMB_WORKSPACE ?? process.cwd();
+	if (workspaceBaseDirMemo !== undefined) return workspaceBaseDirMemo;
+	const fromEnv = process.env.HONEYCOMB_WORKSPACE;
+	const candidate = fromEnv !== undefined && fromEnv.length > 0 ? fromEnv : process.cwd();
+	if (isWritableDir(candidate)) {
+		workspaceBaseDirMemo = candidate;
+		return candidate;
+	}
+	const fallback = join(homedir(), ".honeycomb");
+	process.stderr.write(
+		`honeycomb: workspace "${candidate}" is not writable; using "${fallback}" for filesystem state (secrets, logs, agent.yaml)\n`,
+	);
+	// Best-effort ensure the fallback exists; even if this throws, return it — the individual
+	// stores are themselves fail-soft and will surface their own error rather than crash boot.
+	try {
+		mkdirSync(fallback, { recursive: true, mode: DIR_MODE });
+	} catch {
+		// ignore — a home dir this broken is beyond what this resolver can repair
+	}
+	workspaceBaseDirMemo = fallback;
+	return fallback;
+}
+
+/**
+ * Probe a directory for REAL writability via a create-write-unlink round-trip. `accessSync(W_OK)`
+ * is unreliable on Windows (it inspects the read-only ATTRIBUTE, not the ACL — `system32` reads as
+ * "writable" and then EACCESes on the actual write), so an actual probe is the only cross-platform
+ * truth. Creates the dir (recursive) if absent so a fresh-but-writable workspace passes; any throw
+ * (EACCES / EPERM / EROFS) → `false`.
+ */
+function isWritableDir(dir: string): boolean {
+	try {
+		mkdirSync(dir, { recursive: true });
+		// Probe with an EXCLUSIVE, randomly-suffixed temp dir (mkdtemp guarantees a fresh name) so
+		// the check only ever creates + removes a path it owns — a deterministic `${pid}` marker
+		// could collide with a real workspace file and truncate/delete it.
+		const probe = mkdtempSync(join(dir, ".honeycomb-write-test-"));
+		rmSync(probe, { recursive: true, force: true });
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 /**
