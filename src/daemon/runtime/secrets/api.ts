@@ -38,6 +38,7 @@ import type { QueryScope } from "../../storage/client.js";
 import type { SecretScope } from "./contracts.js";
 import type { SecretExecRequest, SecretExecRunner } from "./exec.js";
 import type { SecretsStore } from "./store.js";
+import { getRequestIdentity } from "../middleware/permission.js";
 
 /** The route group the secrets API attaches to (FR-5). */
 export const SECRETS_GROUP = "/api/secrets" as const;
@@ -80,11 +81,23 @@ export function localDefaultScopeResolver(
 	};
 }
 
-/** The default header-based scope resolver (mirrors capture-handler's tenancy read). */
+/**
+ * The default header-based scope resolver (mirrors capture-handler's tenancy read).
+ *
+ * Cross-tenant hardening (PRD-022): when a validated Identity is present (team/hybrid
+ * authenticated requests), the resolved org MUST equal `identity.org`. A forged
+ * `x-honeycomb-org` header that disagrees with the token's own org returns `null` →
+ * the handler fails closed (400). This prevents an authenticated caller for org A from
+ * writing secrets under org B's namespace by forging the tenancy header. In local mode
+ * no Identity is stamped, so the prior pure-header behaviour is unchanged.
+ */
 export const headerScopeResolver: ScopeResolver = {
 	resolve(c: Context): SecretScope | null {
 		const org = c.req.header("x-honeycomb-org");
 		if (org === undefined || org.length === 0) return null;
+		// Cross-tenant guard: a forged org header can never cross the token's own org boundary.
+		const identity = getRequestIdentity(c);
+		if (identity !== undefined && org !== identity.org) return null;
 		const workspace = c.req.header("x-honeycomb-workspace");
 		const agentId = c.req.header("x-honeycomb-agent");
 		const ws = workspace !== undefined && workspace.length > 0 ? workspace : "default";
