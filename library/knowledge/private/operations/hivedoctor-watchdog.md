@@ -1,6 +1,6 @@
 # HiveDoctor: the Self-Healing Watchdog
 
-> Category: Operations | Version: 1.0 | Date: June 2026 | Status: Active (code-complete; not yet published or wired into the installer)
+> Category: Operations | Version: 1.1 | Date: June 2026 | Status: Active (published to npm; standalone install available, bootstrap-installer wiring in progress)
 
 How Honeycomb keeps its primary daemon alive and gives us remote eyes when it cannot auto-heal. Read this if you operate, debug, or extend the watchdog, or if you need to understand the OS-native service lifecycle the primary daemon now prefers.
 
@@ -20,7 +20,7 @@ The Honeycomb primary daemon (`127.0.0.1:3850`, `src/daemon`) is the single proc
 
 HiveDoctor is a second, deliberately tiny, **separate package** (`@legioncodeinc/hivedoctor`, in the `hivedoctor/` directory) whose only job is to keep the install healthy and to tell us when it can't. It does the troubleshooting a careful human operator would: probe `/health`, restart with exponential backoff, escalate through a remediation ladder, keep the daemon current via a gated auto-update, and surface a structured "needs attention" report to the dashboard and to telemetry. It was built end to end from PRD-064 (`library/requirements/in-work/prd-064-hivedoctor-self-healing-watchdog/`, sub-PRDs 064a-064h).
 
-> **Shipping status.** The code is complete and gated in the repo, but HiveDoctor is **not yet released**: `hivedoctor/package.json` is pinned at `0.0.0` so a stray publish is obvious and the release workflow fails closed, and it is **not yet wired into the bootstrap installer**. It runs independently of the root `@legioncodeinc/honeycomb` package and versions independently. Treat the surfaces below as the implemented design, not a live customer feature.
+> **Shipping status.** HiveDoctor is now **published** as `@legioncodeinc/hivedoctor` (npm, currently `0.1.x`) and installable on its own (`npm install -g @legioncodeinc/hivedoctor`). It versions **independently** of the root `@legioncodeinc/honeycomb` package and **never auto-updates its own package** (PRD-063 OD-6 / AC-6): esbuild inlines `hivedoctor/package.json`'s version via `define` (`__HIVEDOCTOR_VERSION__`), that one manifest is the single source of truth, and a deliberate `npm version`-style bump is the only way it moves. Its release runs through a dedicated workflow (`.github/workflows/release-hivedoctor.yaml`) using the same OIDC Trusted-Publishing + provenance posture as the parent. What is still in flight is the **bootstrap-installer wiring** (the one-command installer registering HiveDoctor and its OS service automatically, with `--no-hivedoctor` / `HONEYCOMB_NO_HIVEDOCTOR=1` to opt out); until that lands, the standalone install above is the path.
 
 ## Five binding design principles
 
@@ -42,7 +42,7 @@ flowchart TD
         ladder["remediation ladder 064a+064c (exponential backoff)"]
         update["auto-update engine 064e: 30-min npm @latest poll"]
         tel["telemetry chokepoint 064d: PostHog Logs OTLP"]
-        cli["CLI + ASCII art 064f"]
+        cli["CLI + attribution banner 064f"]
     end
     loop -->|GET /health| daemon["primary daemon 127.0.0.1:3850"]
     ladder -->|exhausted| esc["escalation 064g: status page + hosted sink + incident file"]
@@ -129,7 +129,9 @@ Every shell-out to `launchctl` / `systemctl` / `schtasks` goes through an inject
 
 ## The operator surface (064f)
 
-Running `hivedoctor` with no args renders the branded ASCII art and a menu of diagnostic and repair commands (`hivedoctor/src/cli/*`, dispatched by `cli/dispatch.ts`). The CLI is the manual path over the same machinery the loop uses: tail incidents, run a fix-it command, toggle opt-outs (`cli/opt-out.ts`), and the explicit `self-update`. The composition root (`hivedoctor/src/compose/index.ts`) wires the real I/O implementations into the injectable seams the rest of the package is built around.
+Running `hivedoctor` with no args renders a branded **attribution banner** and a menu of diagnostic and repair commands (`hivedoctor/src/cli/*`, dispatched by `cli/dispatch.ts`). The banner is ASCII-only by design (`hivedoctor/src/cli/banner.ts`): it shows the Legion Code Inc. and Activeloop wordmarks on one ruled line plus a "powered by deeplake.ai" collaboration line, with `[LC]` / `[AL]` monogram stand-ins for the real logos a terminal cannot render. It replaced the earlier "hive doctor" bee figure so the output renders identically on every terminal and code page (no box-drawing or exotic glyphs to mojibake), and it is colorized through the injected `Colors` surface so it degrades cleanly under `NO_COLOR` / non-TTY. The banner and menu are pure string builders (no I/O), so tests capture the exact output without spawning a process.
+
+`dispatch.ts` resolves `--version` / `-v` / `-V` **before** the bare-invocation banner fallback, printing just the inlined `HIVEDOCTOR_VERSION` and exiting `EXIT_OK` (so `hivedoctor --version` is a clean version string, never the banner). The CLI is otherwise the manual path over the same machinery the loop uses: tail incidents, run a fix-it command, toggle opt-outs (`cli/opt-out.ts`), and the explicit `self-update`. The composition root (`hivedoctor/src/compose/index.ts`) wires the real I/O implementations into the injectable seams the rest of the package is built around.
 
 ## How an operator reads it
 
