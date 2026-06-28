@@ -22,6 +22,7 @@
  * gone from the live CLI path.
  */
 
+import { realpathSync } from "node:fs";
 import { createDispatcher } from "../commands/index.js";
 import { buildRuntimeDeps } from "./runtime.js";
 import { finalizeCliExit } from "./exit.js";
@@ -40,7 +41,22 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
 
 // Run when invoked directly as the `honeycomb` binary (PRD-001b FR-8 / b-AC-6).
 // The bundle is the bin target, so executing it must do work, not just export.
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("cli.js")) {
+// Resolve symlinks: npm global installs the bin as a symlink named `honeycomb` (not `cli.js`),
+// so both the raw argv[1] and its realpath must be considered.
+const argv1Real = (() => {
+	try {
+		return realpathSync(process.argv[1] ?? "");
+	} catch {
+		return process.argv[1];
+	}
+})();
+const argv1Basename = argv1Real?.split("/").pop() ?? "";
+if (
+	import.meta.url === `file://${process.argv[1]}` ||
+	import.meta.url === `file://${argv1Real}` ||
+	argv1Basename === "cli.js" ||
+	argv1Basename === "honeycomb"
+) {
 	// PRD-022d / d-AC-4: do NOT call `process.exit(code)` here. An abrupt `process.exit()`
 	// races libuv handle teardown on Windows — the detached daemon-spawn child handle and the
 	// undici keep-alive socket pool (from the loopback `fetch`) may still be mid-close, which
