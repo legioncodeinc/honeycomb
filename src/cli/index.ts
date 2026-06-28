@@ -22,6 +22,7 @@
  * gone from the live CLI path.
  */
 
+import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { createDispatcher } from "../commands/index.js";
 import { buildRuntimeDeps } from "./runtime.js";
@@ -41,26 +42,26 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
 
 /**
  * Whether this module is being executed directly as the `honeycomb` bin (the bundled
- * `bundle/cli.js`), as opposed to imported by a test or another module. Mirrors the
- * daemon's `isMainEntry` ({@link file://./../daemon/index.ts}): `import.meta.url` is the
- * realpath'd, always-forward-slash module URL, so `endsWith("/cli.js")` matches the
- * bundle whether it is reached directly, through the Unix npm bin SYMLINK
- * (`honeycomb` → `…/bundle/cli.js`), or the Windows npm SHIM (`node C:\…\bundle\cli.js`).
- * That symlink case is the one the original `process.argv[1].endsWith("cli.js")` guard
- * missed — it tested the symlink NAME instead of the realpath'd target — so every
- * command exited 0 in silence (the bug this fixes).
+ * `bundle/cli.js`), as opposed to imported by a test or another module. Only direct
+ * execution runs main(); importing must stay inert. PRD-001b FR-8 / b-AC-6.
  *
- * `pathToFileURL(argv1)` (Windows-correct, unlike a `file://${path}` string concat)
- * additionally covers `--preserve-symlinks-main`, where `import.meta.url` stays the
- * symlink path rather than the realpath. Exported + pure so the regression test can
- * assert every invocation path without a real global install. PRD-001b FR-8 / b-AC-6.
+ * Node sets `import.meta.url` to the REALPATH'd module URL. npm installs the bin as a
+ * SYMLINK (`honeycomb` → `…/bundle/cli.js`), so `process.argv[1]` is the symlink path,
+ * not the realpath — comparing it raw misses the match, which is the original silent-exit
+ * bug. We therefore resolve argv[1] through `realpathSync`, which lands on the same
+ * `…/cli.js` the module URL already points to; that realpath comparison is also what
+ * distinguishes execution from a plain import (on import, argv[1] is some OTHER entry).
+ * `pathToFileURL` (Windows-correct, unlike a `file://${path}` concat) also matches argv[1]
+ * RAW, covering `--preserve-symlinks-main` where import.meta.url stays the symlink path.
+ * Exported + pure so the regression test can assert every invocation path.
  */
 export function isCliEntry(importMetaUrl: string, argv1: string | undefined): boolean {
 	if (typeof argv1 !== "string" || argv1.length === 0) return false;
 	try {
-		return importMetaUrl === pathToFileURL(argv1).href || importMetaUrl.endsWith("/cli.js");
+		if (importMetaUrl === pathToFileURL(argv1).href) return true; // direct / --preserve-symlinks-main
+		return importMetaUrl === pathToFileURL(realpathSync(argv1)).href; // npm bin symlink → realpath
 	} catch {
-		return false;
+		return false; // argv1 not resolvable (embedded host / dangling symlink) → not the bin
 	}
 }
 
