@@ -70,6 +70,10 @@ jobs:
   release:
     name: Publish honeycomb to npm
     runs-on: ubuntu-latest
+    # Surface whether this run actually published (vs a dry-run rehearsal) so the
+    # post-publish smoke only runs against a real registry upload.
+    outputs:
+      published: ${{ steps.mode.outputs.publish }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4.2.2
@@ -272,3 +276,90 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           generate_release_notes: true
+
+  # ── Post-publish install smoke. ────────────────────────────────────────────
+  # The pre-publish gate (ci.yaml) and the unit tests never install the PUBLISHED
+  # tarball through the npm global bin, so a packaging regression that makes the
+  # `honeycomb` command exit silently can ship green — exactly the PRD #172 class
+  # of bug (a global install where every command printed 0 bytes and exited 0).
+  # This job installs `@legioncodeinc/honeycomb@<this version>` from the public
+  # registry on Linux, macOS, AND Windows (the bin is a SYMLINK on Unix and a
+  # `.cmd`/`.ps1` SHIM on Windows — different resolution paths the unit test can
+  # only simulate) and asserts the bin actually runs. It cannot un-publish a bad
+  # release, but it turns the release run RED immediately so a fix-up patch goes
+  # out fast instead of users hitting a dead CLI. Real publishes only.
+  post-publish-smoke:
+    name: Post-publish install smoke (${{ matrix.os }})
+    needs: release
+    if: ${{ needs.release.outputs.published == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Setup Node
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: '22.x'
+
+      - name: Resolve published version from the tag
+        id: ver
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # The registry can lag a few seconds behind a successful publish, so poll
+      # until the exact version is resolvable before installing it.
+      - name: Wait for the registry to serve this version
+        shell: bash
+        run: |
+          VER="${{ steps.ver.outputs.version }}"
+          for i in $(seq 1 30); do
+            if npm view "@legioncodeinc/honeycomb@$VER" version >/dev/null 2>&1; then
+              echo "Registry is serving @legioncodeinc/honeycomb@$VER."
+              exit 0
+            fi
+            echo "[$i/30] $VER not on the registry yet; waiting 10s…"
+            sleep 10
+          done
+          echo "::error::Timed out waiting for @legioncodeinc/honeycomb@$VER to appear on the registry."
+          exit 1
+
+      - name: Global install from the public registry
+        shell: bash
+        run: npm install -g "@legioncodeinc/honeycomb@${{ steps.ver.outputs.version }}"
+
+      # The global npm bin dir is normally on PATH on hosted runners, but make it
+      # explicit so the smoke invokes `honeycomb` exactly as a user would (through
+      # the symlink/shim), never via an absolute path that would mask the bug.
+      - name: Put the global npm bin on PATH
+        shell: bash
+        run: |
+          PREFIX="$(npm config get prefix)"
+          echo "$PREFIX" >> "$GITHUB_PATH"   # Windows: .cmd/.ps1 shims live here
+          echo "$PREFIX/bin" >> "$GITHUB_PATH" # Unix: bin symlinks live here
+
+      - name: Smoke — `honeycomb --version` runs through the bin (non-empty, correct version)
+        shell: bash
+        run: |
+          VER="${{ steps.ver.outputs.version }}"
+          OUT="$(honeycomb --version)"
+          echo "honeycomb --version => '$OUT'"
+          if [ -z "$OUT" ]; then
+            echo "::error::\`honeycomb --version\` printed nothing — the bin produced no output (the PR #172 silent-exit regression class)."
+            exit 1
+          fi
+          case "$OUT" in
+            *"$VER"*) echo "OK — output contains the published version $VER." ;;
+            *) echo "::error::\`honeycomb --version\` did not contain $VER (got '$OUT')." ; exit 1 ;;
+          esac
+
+      - name: Smoke — `honeycomb --help` prints non-empty
+        shell: bash
+        run: |
+          HELP="$(honeycomb --help)"
+          if [ -z "$HELP" ]; then
+            echo "::error::\`honeycomb --help\` printed nothing — the entry guard did not fire."
+            exit 1
+          fi
+          printf 'OK — help is non-empty (%s chars).\n' "${#HELP}"
