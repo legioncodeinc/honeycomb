@@ -49,6 +49,7 @@ export {
 	PRIMARY_PACKAGE,
 	type UpdateEngine,
 	type UpdateEngineDeps,
+	type UpdatePreview,
 	type UpdateTransactionResult,
 	type UpdateTransactionStatus,
 	type ReadInstalledVersionFn,

@@ -94,7 +94,8 @@ describe("update transaction happy path (AC-064e.1)", () => {
 		// It ran exactly `npm install -g @legioncodeinc/honeycomb@<blessed>` (AC-064e.1).
 		expect(runner.calls).toEqual([{ command: "npm", args: ["install", "-g", `${PRIMARY_PACKAGE}@${BLESSED}`] }]);
 		expect(restartDaemon).toHaveBeenCalledTimes(1);
-		expect(verifyHealthy).toHaveBeenCalledTimes(1);
+		// Health is probed twice now: once for the PRE-update baseline (FIX 2), once post-update.
+		expect(verifyHealthy).toHaveBeenCalledTimes(2);
 		// A single update telemetry event, from/to/outcome (AC-064e.5).
 		expect(events).toEqual([
 			{
@@ -137,8 +138,10 @@ describe("update transaction happy path (AC-064e.1)", () => {
 
 describe("rollback on failed post-update health (AC-064e.3)", () => {
 	it("reinstalls the prior version, restarts, and recovers healthy on the old version", async () => {
-		// First /health (post-update) fails; second /health (post-rollback) succeeds.
-		const healthSeq = [false, true];
+		// Health probes, in order: (1) pre-update baseline=HEALTHY (so a regression is real),
+		// (2) post-update=fails, (3) post-rollback=succeeds. The healthy->unhealthy regression
+		// on a supervised daemon is exactly the case that MUST roll back (AC-064e.3).
+		const healthSeq = [true, false, true];
 		const verifyHealthy = vi.fn(async () => healthSeq.shift() ?? true);
 		const restartDaemon = vi.fn(async () => undefined);
 		const { deps, runner, events } = buildEngine({ verifyHealthy, restartDaemon });
@@ -151,9 +154,10 @@ describe("rollback on failed post-update health (AC-064e.3)", () => {
 			{ command: "npm", args: ["install", "-g", `${PRIMARY_PACKAGE}@${BLESSED}`] },
 			{ command: "npm", args: ["install", "-g", `${PRIMARY_PACKAGE}@${INSTALLED}`] },
 		]);
-		// Restart fired for both the update and the rollback; health checked twice.
+		// Restart fired for both the update and the rollback; health checked three times now
+		// (baseline + post-update + post-rollback).
 		expect(restartDaemon).toHaveBeenCalledTimes(2);
-		expect(verifyHealthy).toHaveBeenCalledTimes(2);
+		expect(verifyHealthy).toHaveBeenCalledTimes(3);
 		// Both an update (the failed forward) and a rollback event were emitted (AC-064e.5).
 		const kinds = events.map((e) => e.outcome);
 		expect(kinds).toContain("rolled_back");
@@ -162,7 +166,10 @@ describe("rollback on failed post-update health (AC-064e.3)", () => {
 	});
 
 	it("reports rollback_failed when even the prior version cannot be restored", async () => {
-		const verifyHealthy = vi.fn(async () => false); // never healthy
+		// Baseline HEALTHY then every subsequent probe fails: the daemon was healthy before, so a
+		// post-update regression rolls back, and the rollback reinstall also fails to recover.
+		const healthSeq = [true, false, false];
+		const verifyHealthy = vi.fn(async () => healthSeq.shift() ?? false);
 		const { deps, events } = buildEngine({ verifyHealthy });
 		const result = await createUpdateEngine(deps).runUpdateTransaction();
 		expect(result.status).toBe("rollback_failed");
@@ -276,6 +283,172 @@ describe("installed = globally-installed PACKAGE version, not the daemon /health
 		const result = await createUpdateEngine(deps).runUpdateTransaction();
 		expect(result.noUpdateReason).toBe("installed_unknown");
 		expect(result.detail).toBe("installed-version-unknown");
+	});
+});
+
+describe("previewUpdate is a pure dry-run (FIX 1: `update --check` must not mutate)", () => {
+	/** Wrap a real lock so a test can assert acquire() was NEVER called by preview. */
+	function spyLock(): { installLock: ReturnType<typeof lock>; acquire: ReturnType<typeof vi.fn> } {
+		const real = lock();
+		const acquire = vi.fn((holder: string) => real.acquire(holder));
+		return { installLock: { acquire }, acquire };
+	}
+
+	it("returns eligible with from/to when installed < blessed and latest == blessed, touching NOTHING", async () => {
+		const restartDaemon = vi.fn(async () => undefined);
+		const verifyHealthy = vi.fn(async () => true);
+		const { installLock, acquire } = spyLock();
+		const { deps, runner } = buildEngine({
+			installLock,
+			restartDaemon,
+			verifyHealthy,
+			readInstalledVersion: async () => INSTALLED, // 0.1.7
+			readLatestVersion: async () => BLESSED, // 0.1.9
+			blessedOptions: blessedFetch(BLESSED), // 0.1.9
+		});
+
+		const preview = await createUpdateEngine(deps).previewUpdate();
+
+		expect(preview.eligible).toBe(true);
+		expect(preview.fromVersion).toBe(INSTALLED);
+		expect(preview.toVersion).toBe(BLESSED);
+		// The whole point: preview never installs, never locks, never restarts, never verifies.
+		expect(runner.calls).toHaveLength(0);
+		expect(acquire).not.toHaveBeenCalled();
+		expect(restartDaemon).not.toHaveBeenCalled();
+		expect(verifyHealthy).not.toHaveBeenCalled();
+	});
+
+	it("returns not-eligible `latest_not_blessed` when @latest is newer but not blessed", async () => {
+		const { installLock, acquire } = spyLock();
+		const { deps, runner } = buildEngine({
+			installLock,
+			readLatestVersion: async () => "0.2.0",
+			blessedOptions: blessedFetch(BLESSED),
+		});
+		const preview = await createUpdateEngine(deps).previewUpdate();
+		expect(preview.eligible).toBe(false);
+		expect(preview.reason).toBe("latest_not_blessed");
+		expect(preview.fromVersion).toBe(INSTALLED);
+		expect(runner.calls).toHaveLength(0);
+		expect(acquire).not.toHaveBeenCalled();
+	});
+
+	it("returns not-eligible `already_current` when blessed is not newer than installed", async () => {
+		const { deps, runner } = buildEngine({
+			readInstalledVersion: async () => BLESSED, // already on blessed
+			readLatestVersion: async () => BLESSED,
+			blessedOptions: blessedFetch(BLESSED),
+		});
+		const preview = await createUpdateEngine(deps).previewUpdate();
+		expect(preview.eligible).toBe(false);
+		expect(preview.reason).toBe("already_current");
+		expect(runner.calls).toHaveLength(0);
+	});
+
+	it("returns not-eligible `installed_unknown` (from=null) when the installed read fails", async () => {
+		const { deps, runner } = buildEngine({ readInstalledVersion: async () => null });
+		const preview = await createUpdateEngine(deps).previewUpdate();
+		expect(preview.eligible).toBe(false);
+		expect(preview.reason).toBe("installed_unknown");
+		expect(preview.fromVersion).toBeNull();
+		expect(runner.calls).toHaveLength(0);
+	});
+
+	it("returns not-eligible `opted_out` when auto-update is disabled (no mutation)", async () => {
+		const { installLock, acquire } = spyLock();
+		const { deps, runner } = buildEngine({ installLock, optOut: { autoUpdateDisabled: true } });
+		const preview = await createUpdateEngine(deps).previewUpdate();
+		expect(preview.eligible).toBe(false);
+		expect(preview.reason).toBe("opted_out");
+		expect(runner.calls).toHaveLength(0);
+		expect(acquire).not.toHaveBeenCalled();
+	});
+
+	it("is crash-safe: a throwing read seam resolves to a not-eligible preview, never throws", async () => {
+		const { deps } = buildEngine({
+			readLatestVersion: async () => {
+				throw new Error("registry exploded");
+			},
+		});
+		const preview = await createUpdateEngine(deps).previewUpdate();
+		expect(preview.eligible).toBe(false);
+		expect(preview.reason).toBe("latest_unknown");
+	});
+});
+
+describe("FIX 2: verify rule keyed on the PRE-update health baseline", () => {
+	it("pre-healthy + post-unhealthy + supervised restart -> ROLLS BACK (unchanged safety, AC-064e.3)", async () => {
+		// verifyHealthy is called: (1) pre-update baseline=healthy, (2) post-update=unhealthy,
+		// (3) post-rollback=healthy. The healthy->unhealthy regression must roll back.
+		const healthSeq = [true, false, true];
+		const verifyHealthy = vi.fn(async () => healthSeq.shift() ?? true);
+		const restartDaemon = vi.fn(async () => undefined); // void -> assumed supervised
+		const { deps, runner, events } = buildEngine({ verifyHealthy, restartDaemon });
+
+		const result = await createUpdateEngine(deps).runUpdateTransaction();
+
+		expect(result.status).toBe("rolled_back");
+		expect(runner.calls).toEqual([
+			{ command: "npm", args: ["install", "-g", `${PRIMARY_PACKAGE}@${BLESSED}`] },
+			{ command: "npm", args: ["install", "-g", `${PRIMARY_PACKAGE}@${INSTALLED}`] },
+		]);
+		const rollbackEvent = events.find((e) => e.kind === "rollback");
+		expect(rollbackEvent?.outcome).toBe("rolled_back");
+	});
+
+	it("pre-UNHEALTHY + post-still-unhealthy -> NO rollback, status `updated_unverified`, install KEPT", async () => {
+		// Baseline unhealthy, post-update still unhealthy. The update cannot make an already-down
+		// daemon worse, so it must NOT roll back: keep the new bits and report updated_unverified.
+		const healthSeq = [false, false];
+		const verifyHealthy = vi.fn(async () => healthSeq.shift() ?? false);
+		const restartDaemon = vi.fn(async () => undefined);
+		const { deps, runner, events } = buildEngine({ verifyHealthy, restartDaemon });
+
+		const result = await createUpdateEngine(deps).runUpdateTransaction();
+
+		expect(result.status).toBe("updated_unverified");
+		expect(result.fromVersion).toBe(INSTALLED);
+		expect(result.toVersion).toBe(BLESSED);
+		// Only ONE install (the forward one); the rollback reinstall NEVER happened.
+		expect(runner.calls).toEqual([
+			{ command: "npm", args: ["install", "-g", `${PRIMARY_PACKAGE}@${BLESSED}`] },
+		]);
+		// An update event was emitted with the honest updated_unverified outcome.
+		expect(events).toEqual([
+			expect.objectContaining({ kind: "update", outcome: "updated_unverified", fromVersion: INSTALLED, toVersion: BLESSED }),
+		]);
+	});
+
+	it("no OS service to restart through (restart reports false) + post-unhealthy -> `updated_unverified`, no rollback", async () => {
+		// Baseline healthy, but the restart seam reports false (no registered service / no daemon),
+		// and /health is still unhealthy afterward. With no supervised daemon, a destructive rollback
+		// would only discard the new version: keep it, report updated_unverified.
+		const healthSeq = [true, false];
+		const verifyHealthy = vi.fn(async () => healthSeq.shift() ?? false);
+		const restartDaemon = vi.fn(async () => false); // false = no service / nothing restarted
+		const { deps, runner } = buildEngine({ verifyHealthy, restartDaemon });
+
+		const result = await createUpdateEngine(deps).runUpdateTransaction();
+
+		expect(result.status).toBe("updated_unverified");
+		expect(runner.calls).toEqual([
+			{ command: "npm", args: ["install", "-g", `${PRIMARY_PACKAGE}@${BLESSED}`] },
+		]);
+	});
+
+	it("pre-healthy + post-healthy -> committed `updated` (the normal success path)", async () => {
+		const healthSeq = [true, true]; // baseline healthy, post-update healthy
+		const verifyHealthy = vi.fn(async () => healthSeq.shift() ?? true);
+		const { deps, runner } = buildEngine({ verifyHealthy });
+
+		const result = await createUpdateEngine(deps).runUpdateTransaction();
+
+		expect(result.status).toBe("updated");
+		expect(result.toVersion).toBe(BLESSED);
+		expect(runner.calls).toEqual([
+			{ command: "npm", args: ["install", "-g", `${PRIMARY_PACKAGE}@${BLESSED}`] },
+		]);
 	});
 });
 

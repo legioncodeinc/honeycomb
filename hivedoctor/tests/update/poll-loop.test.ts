@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { silentLogger } from "../../src/logger.js";
 import { createUpdatePollLoop, jitteredDelay, DEFAULT_POLL_INTERVAL_MS } from "../../src/update/poll-loop.js";
-import type { UpdateEngine, UpdateTransactionResult } from "../../src/update/update-engine.js";
+import type { UpdateEngine, UpdatePreview, UpdateTransactionResult } from "../../src/update/update-engine.js";
 
 /** A fake engine recording how many transactions ran. */
 function fakeEngine(result: UpdateTransactionResult = { status: "no_update" }): {
@@ -19,6 +19,10 @@ function fakeEngine(result: UpdateTransactionResult = { status: "no_update" }): 
 		async runUpdateTransaction(): Promise<UpdateTransactionResult> {
 			state.runs += 1;
 			return result;
+		},
+		// The poll loop only ticks runUpdateTransaction; preview is here to satisfy the interface.
+		async previewUpdate(): Promise<UpdatePreview> {
+			return { eligible: false, fromVersion: null, reason: "already_current" };
 		},
 	};
 	return {
@@ -134,6 +138,9 @@ describe("loop lifecycle", () => {
 			async runUpdateTransaction(): Promise<UpdateTransactionResult> {
 				runs += 1;
 				throw new Error("engine exploded");
+			},
+			async previewUpdate(): Promise<UpdatePreview> {
+				return { eligible: false, fromVersion: null, reason: "already_current" };
 			},
 		};
 		const loop = createUpdatePollLoop({

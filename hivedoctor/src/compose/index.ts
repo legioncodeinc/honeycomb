@@ -348,9 +348,11 @@ export function createHiveDoctor(options: CreateHiveDoctorOptions = {}): HiveDoc
 			// is down), NOT the daemon's `/health` version. This is the fix for the live bug where a
 			// down daemon made auto-update bail with "installed unknown".
 			readInstalledVersion: readInstalledPackageVersion,
-			restartDaemon: async () => {
-				await restart();
-			},
+			// Forward the restart's own success/failure so the engine's FIX-2 verify rule can tell a
+			// supervised restart from a no-op one: `restart()` resolves false when there is no OS
+			// service / nothing to restart, and the engine must then NOT roll back a still-unhealthy
+			// /health (the update cannot make an already-down daemon worse).
+			restartDaemon: async (): Promise<boolean> => restart(),
 			verifyHealthy: isHealthy,
 			optOut: {
 				autoUpdateDisabled: optOut.autoUpdateDisabled,

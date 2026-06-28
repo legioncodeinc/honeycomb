@@ -31,7 +31,7 @@ import type { Logger } from "../logger.js";
 import type { CommandRunner } from "../rungs/command-runner.js";
 import { fetchBlessedVersion, type BlessedChannelOptions } from "./blessed-channel.js";
 import type { ReadLatestVersionFn } from "./registry.js";
-import { decideUpdate, type NoUpdateReason, type UpdateOptOut } from "./update-policy.js";
+import { decideUpdate, type NoUpdateReason, type UpdateDecision, type UpdateOptOut } from "./update-policy.js";
 import { parseVersion } from "./version.js";
 import {
 	createDefaultUpdateEmit,
@@ -45,8 +45,17 @@ export const PRIMARY_PACKAGE = "@legioncodeinc/honeycomb";
 /** Reads the currently-installed primary version, or null when undeterminable. Injected. */
 export type ReadInstalledVersionFn = () => Promise<string | null>;
 
-/** Restarts the primary daemon so it picks up a freshly-installed binary. Injected (064a path). */
-export type RestartDaemonFn = () => Promise<void>;
+/**
+ * Restarts the primary daemon so it picks up a freshly-installed binary. Injected (064a path).
+ *
+ * May resolve a boolean: `true` = the restart was actually performed (a supervised daemon /
+ * registered OS service exists), `false` = there was no way to restart (no OS service, no
+ * running daemon to signal). `void` is treated as "unknown -> assume supervised" so existing
+ * callers that resolve nothing keep today's behavior. The boolean feeds the FIX-2 verify rule:
+ * when there is no daemon to restart, a still-unhealthy `/health` afterward must NOT trigger a
+ * destructive rollback (the update cannot have made an already-down daemon worse).
+ */
+export type RestartDaemonFn = () => Promise<void | boolean>;
 
 /** Polls `/health` after a restart; resolves true when the daemon is healthy. Injected. */
 export type VerifyHealthyFn = () => Promise<boolean>;
@@ -84,6 +93,7 @@ export interface UpdateEngineDeps {
 /** The terminal status of one transaction attempt. */
 export type UpdateTransactionStatus =
 	| "updated" // installed + verified healthy on the new version (AC-064e.1)
+	| "updated_unverified" // installed, but there was no healthy baseline / no supervised daemon to verify against, so health verification was skipped and the new version is KEPT (not rolled back)
 	| "rolled_back" // post-update health failed; recovered on the prior version (AC-064e.3)
 	| "rollback_failed" // post-update health failed AND rollback did not recover
 	| "install_failed" // the npm install itself failed
@@ -104,10 +114,35 @@ export interface UpdateTransactionResult {
 	readonly detail?: string;
 }
 
+/**
+ * A pure DRY-RUN of the update decision (`hivedoctor update --check`). It reads the same
+ * three inputs the real transaction reads (installed + latest + blessed) and runs the SAME
+ * gate ({@link decideUpdate}), but performs NO mutation: it never acquires the install lock,
+ * never runs `npm install`, never restarts, and never verifies/rolls back. A "check" must
+ * PREVIEW, never mutate.
+ */
+export interface UpdatePreview {
+	/** True when the gate would update (installed < blessed and latest == blessed, no opt-out). */
+	readonly eligible: boolean;
+	/** The currently-installed version, or null when the installed read failed this tick. */
+	readonly fromVersion: string | null;
+	/** The version an update would target (the blessed version), present only when eligible. */
+	readonly toVersion?: string;
+	/** The gate's no-go reason, present only when NOT eligible. */
+	readonly reason?: NoUpdateReason;
+}
+
 /** The update engine surface: one transaction per call. */
 export interface UpdateEngine {
 	/** Run ONE update attempt. Crash-safe: resolves a result, never throws. */
 	runUpdateTransaction(): Promise<UpdateTransactionResult>;
+	/**
+	 * Preview the update decision WITHOUT mutating anything: read installed + latest + blessed,
+	 * run the SAME gate as {@link runUpdateTransaction}, and return the decision. NEVER acquires
+	 * the install lock, runs npm, restarts, or rolls back. Crash-safe: resolves a value, never
+	 * throws. This is what `update --check` calls so a "check" can never install/restart/roll back.
+	 */
+	previewUpdate(): Promise<UpdatePreview>;
 }
 
 /** Map a transaction status to the telemetry outcome (AC-064e.5). */
@@ -115,6 +150,8 @@ function outcomeOf(status: UpdateTransactionStatus): UpdateOutcome | null {
 	switch (status) {
 		case "updated":
 			return "updated";
+		case "updated_unverified":
+			return "updated_unverified";
 		case "rolled_back":
 			return "rolled_back";
 		case "rollback_failed":
@@ -195,29 +232,69 @@ export function createUpdateEngine(deps: UpdateEngineDeps): UpdateEngine {
 		};
 	}
 
+	/**
+	 * Read the installed version then gather the gate inputs (latest + blessed) and run the
+	 * pure {@link decideUpdate} gate. Shared by `previewUpdate` (read + decide ONLY) and
+	 * `runUpdateTransaction` (which then acts on the decision). Performs reads but NO mutation:
+	 * no install lock, no npm, no restart. `installedVersion === null` short-circuits to the
+	 * honest `installed_unknown` no-go before any registry/CDN read.
+	 */
+	async function gatherDecision(): Promise<{
+		installedVersion: string | null;
+		decision: UpdateDecision;
+	}> {
+		const installedVersion = await deps.readInstalledVersion();
+		if (installedVersion === null) {
+			// Cannot establish a rollback target -> no-go. Honest label: the INSTALLED read failed
+			// (distinct from the gate's "latest_unknown" registry read).
+			return { installedVersion: null, decision: { update: false, reason: "installed_unknown" } };
+		}
+		const latestVersion = await deps.readLatestVersion();
+		const blessed = await fetchBlessedVersion(deps.blessedOptions);
+		const decision = decideUpdate({ installedVersion, latestVersion, blessed, optOut: deps.optOut });
+		return { installedVersion, decision };
+	}
+
 	return {
+		async previewUpdate(): Promise<UpdatePreview> {
+			try {
+				// Pure DRY-RUN: read installed + latest + blessed and run the SAME gate, but touch
+				// NOTHING -- no install lock, no npm, no restart, no rollback. A "check" only previews.
+				const { installedVersion, decision } = await gatherDecision();
+				if (decision.update) {
+					return { eligible: true, fromVersion: installedVersion, toVersion: decision.toVersion };
+				}
+				return { eligible: false, fromVersion: installedVersion, reason: decision.reason };
+			} catch (error) {
+				// Crash-safe: an unexpected throw in a read seam becomes a not-eligible preview, never
+				// a thrown error. The honest reason is the registry-read failure label.
+				deps.logger.warn("autoupdate.preview_threw", {
+					reason: error instanceof Error ? error.message : "unknown",
+				});
+				return { eligible: false, fromVersion: null, reason: "latest_unknown" };
+			}
+		},
+
 		async runUpdateTransaction(): Promise<UpdateTransactionResult> {
 			try {
-				// 1. Record the current version FIRST -- it is the rollback target (AC-064e.3).
-				const installedVersion = await deps.readInstalledVersion();
+				// 1. Read installed + gather the gate inputs and decide (the SAME gate preview runs).
+				const { installedVersion, decision } = await gatherDecision();
 				if (installedVersion === null) {
-					// Cannot establish a rollback target -> refuse to update (we could not recover).
-					// Honest reason label: the INSTALLED read failed (not the @latest read). This is
-					// distinct from the gate's "latest_unknown" (the registry read), which fires later.
 					deps.logger.warn("autoupdate.skip_unknown_installed");
 					return { status: "no_update", noUpdateReason: "installed_unknown", detail: "installed-version-unknown" };
 				}
-
-				// 2. Gather the gate inputs (latest + blessed) and decide. Pure decision, no I/O.
-				const latestVersion = await deps.readLatestVersion();
-				const blessed = await fetchBlessedVersion(deps.blessedOptions);
-				const decision = decideUpdate({ installedVersion, latestVersion, blessed, optOut: deps.optOut });
 
 				if (!decision.update) {
 					deps.logger.info("autoupdate.no_update", { reason: decision.reason });
 					return { status: "no_update", noUpdateReason: decision.reason, fromVersion: installedVersion };
 				}
 				const toVersion = decision.toVersion;
+
+				// 2. Capture the PRE-update health baseline BEFORE touching npm (FIX 2). The verify
+				//    rule below depends on whether the daemon was healthy to begin with: a regression
+				//    from healthy->unhealthy is a real failure (roll back); a daemon that was already
+				//    down cannot be made worse by the update (do NOT roll back, keep the new version).
+				const wasHealthyBefore = await deps.verifyHealthy();
 
 				// 3. Serialize against rung 2: only one global npm install at a time (AC-064e.6).
 				const handle = deps.installLock.acquire("auto-update");
@@ -246,8 +323,11 @@ export function createUpdateEngine(deps: UpdateEngineDeps): UpdateEngine {
 						};
 					}
 
-					// 5. Restart so the daemon picks up the new binary (064a restart path).
-					await deps.restartDaemon();
+					// 5. Restart so the daemon picks up the new binary (064a restart path). The seam
+					//    MAY report whether a restart actually happened: `false` = no OS service / no
+					//    daemon to restart through. `void`/`true` = assume a supervised restart fired.
+					const restartReport = await deps.restartDaemon();
+					const restartSupervised = restartReport !== false;
 
 					// 6. Verify post-update health. Healthy -> done (AC-064e.1).
 					const healthy = await deps.verifyHealthy();
@@ -257,10 +337,32 @@ export function createUpdateEngine(deps: UpdateEngineDeps): UpdateEngine {
 						return { status: "updated", fromVersion: installedVersion, toVersion, detail: `updated-${toVersion}` };
 					}
 
-					// 7. Post-update health FAILED -> roll back to the recorded prior version (AC-064e.3).
-					//    The update event records the failed attempt; rollback() emits its own event.
-					deps.logger.warn("autoupdate.verify_failed", { to: toVersion });
-					return await rollback(installedVersion, toVersion);
+					// 7. Post-update health FAILED. The verify rule (FIX 2) decides rollback vs keep:
+					//    - If the daemon was HEALTHY before AND there was a supervised daemon to restart,
+					//      a healthy->unhealthy regression is a real failure -> ROLL BACK (AC-064e.3).
+					//    - If the daemon was NOT healthy before (already down/unreachable), OR there was
+					//      no OS service to restart through, a destructive rollback would only discard the
+					//      new version (which may be the fix) for no gain -- the update cannot make an
+					//      already-down daemon worse. KEEP the install and return `updated_unverified`.
+					if (wasHealthyBefore && restartSupervised) {
+						deps.logger.warn("autoupdate.verify_failed", { to: toVersion });
+						return await rollback(installedVersion, toVersion);
+					}
+
+					const skipReason = !wasHealthyBefore ? "no-healthy-baseline" : "no-supervised-daemon";
+					deps.logger.warn("autoupdate.verify_skipped", {
+						to: toVersion,
+						reason: skipReason,
+						wasHealthyBefore,
+						restartSupervised,
+					});
+					await emitEvent("update", installedVersion, toVersion, "updated_unverified");
+					return {
+						status: "updated_unverified",
+						fromVersion: installedVersion,
+						toVersion,
+						detail: `updated-unverified-${toVersion}-${skipReason}`,
+					};
 				} finally {
 					// Always free the mutex, even if a step above threw.
 					handle.release();

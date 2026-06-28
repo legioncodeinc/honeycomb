@@ -24,6 +24,7 @@ import { emitTelemetry, type EmitDeps } from "../telemetry/emit.js";
 /** The outcome of an update or rollback transaction (the `outcome` of AC-064e.5). */
 export type UpdateOutcome =
 	| "updated" // installed + post-update /health verified healthy
+	| "updated_unverified" // installed, but no healthy baseline / no supervised daemon to verify against -> health verification skipped, new version KEPT (no rollback)
 	| "rolled_back" // post-update /health failed; reinstalled the prior version, healthy again
 	| "rollback_failed" // post-update /health failed AND the rollback reinstall did not recover
 	| "install_failed" // the npm install itself failed (no version change took effect)

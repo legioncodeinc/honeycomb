@@ -23,7 +23,7 @@ import { resolveConfig } from "../../src/config.js";
 import { silentLogger } from "../../src/logger.js";
 import type { SupervisorClock } from "../../src/supervisor.js";
 import type { CommandResult, CommandRunner } from "../../src/rungs/command-runner.js";
-import type { UpdateEngine, UpdateTransactionResult } from "../../src/update/update-engine.js";
+import type { UpdateEngine, UpdatePreview, UpdateTransactionResult } from "../../src/update/update-engine.js";
 import type { HealthClassification } from "../../src/health-probe.js";
 
 /** A fake clock whose sleep resolves immediately so loops do not really wait. */
@@ -57,6 +57,10 @@ function fakeUpdateEngine(): { engine: UpdateEngine; runs: () => number } {
 			async runUpdateTransaction(): Promise<UpdateTransactionResult> {
 				runs += 1;
 				return { status: "no_update" };
+			},
+			// The composition wires runUpdateTransaction into the poll loop; preview satisfies the interface.
+			async previewUpdate(): Promise<UpdatePreview> {
+				return { eligible: false, fromVersion: null, reason: "already_current" };
 			},
 		},
 	};

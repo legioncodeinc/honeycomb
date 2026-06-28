@@ -36,7 +36,6 @@ import {
 	createInstalledPackageVersionReader,
 	createRegistryLatestReader,
 	createUpdateEngine,
-	outcomeOf,
 	PRIMARY_PACKAGE,
 } from "../update/index.js";
 import { HIVEDOCTOR_VERSION } from "../version.js";
@@ -47,6 +46,7 @@ import { dispatch } from "./dispatch.js";
 import { createIncidentsTail } from "./incidents-tail.js";
 import { resolveOptOut } from "./opt-out.js";
 import { createSelfUpdate } from "./self-update.js";
+import { createUpdateActions } from "./update-actions.js";
 import type { CliContext, ConfirmFn, OutputSink } from "./context.js";
 import type { HealthClassification } from "../health-probe.js";
 import type { RungContext } from "../remediation.js";
@@ -147,8 +147,12 @@ export function buildCliContext(argv: readonly string[]): CliContext {
 		installLock,
 		readLatestVersion: createRegistryLatestReader({ pkg: PRIMARY_PACKAGE }),
 		readInstalledVersion: readInstalledPackageVersion,
-		restartDaemon: async () => {
+		// The CLI itself cannot restart the OS service (064b owns that); report `false` so the
+		// engine's FIX-2 verify rule knows there is no supervised daemon to restart through and
+		// does NOT roll back a still-unhealthy /health (it would only discard the new version).
+		restartDaemon: async (): Promise<boolean> => {
 			logger.warn("cli.update_restart_no_os_service");
+			return false;
 		},
 		verifyHealthy: isHealthy,
 		optOut: {
@@ -193,25 +197,9 @@ export function buildCliContext(argv: readonly string[]): CliContext {
 			serviceState: () => "unknown",
 			serviceModule,
 			optOut,
-			update: {
-				checkPrimaryUpdate: async () => {
-					const result = await updateEngine.runUpdateTransaction();
-					// --check should not install; the engine's gate already declines when not eligible,
-					// but for a clean preview we report the decision the gate would reach.
-					if (result.status === "no_update") {
-						return `No update: ${result.noUpdateReason ?? "not eligible"}.`;
-					}
-					return `Update available: ${result.fromVersion ?? "?"} -> ${result.toVersion ?? "?"} (${result.status}).`;
-				},
-				applyPrimaryUpdate: async () => {
-					const result = await updateEngine.runUpdateTransaction();
-					const outcome = outcomeOf(result.status);
-					return outcome === null
-						? `No update applied (${result.status}${result.noUpdateReason ? `: ${result.noUpdateReason}` : ""}).`
-						: `Update ${result.status}: ${result.fromVersion ?? "?"} -> ${result.toVersion ?? "?"}.`;
-				},
-				selfUpdate,
-			},
+			// `update --check` previews via previewUpdate() (READ-ONLY, never mutates); `update`
+			// applies via runUpdateTransaction(); `self-update` is the sole own-package path.
+			update: createUpdateActions(updateEngine, selfUpdate),
 			tailIncidents: createIncidentsTail(config.workspaceDir),
 		},
 	};
