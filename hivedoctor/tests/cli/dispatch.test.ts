@@ -19,13 +19,25 @@ describe("dispatch (PRD-064f)", () => {
 
 			expect(code).toBe(EXIT_OK);
 			const text = h.out.text();
-			// The art: the bee figure carries a recognizable fragment.
-			expect(text).toContain("bzz");
+			// The attribution banner carries both wordmarks.
+			expect(text).toContain("LEGION CODE INC.");
+			expect(text).toContain("ACTIVELOOP");
 			expect(text).toContain("HiveDoctor");
 			// The menu: a sampling of commands must be listed.
 			expect(text).toContain("status");
 			expect(text).toContain("diagnose");
 			expect(text).toContain("self-update");
+		});
+
+		it("--version prints just the version, not the banner", async () => {
+			const h = buildCliHarness();
+			const code = await dispatch(["--version"], h.ctx);
+
+			expect(code).toBe(EXIT_OK);
+			const text = h.out.text();
+			expect(text).toContain("0.0.0-dev"); // the test-mode version sentinel
+			expect(text).not.toContain("LEGION CODE INC."); // no banner
+			expect(text).not.toContain("Commands:"); // no menu
 		});
 
 		it("`help` renders the same banner + menu", async () => {

@@ -1,13 +1,16 @@
 /**
- * The HiveDoctor ASCII banner + command menu (PRD-064f AC-064f.1 / parent AC-7).
+ * The HiveDoctor banner + command menu (PRD-064f AC-064f.1 / parent AC-7).
  *
- * A cute "hive doctor" - a bee wearing a head-mirror and carrying a little doctor's
- * bag - rendered on bare invocation, followed by a focused command menu. Aligned with
- * the branded Honeycomb CLI voice (warm, amber, concise). Built-ins only; the art is a
- * plain template string, colorized through the injected {@link Colors} surface so it
- * degrades cleanly under NO_COLOR / non-TTY.
+ * A clean attribution banner - the Legion Code Inc. and Activeloop wordmarks with a
+ * collaboration line - rendered on bare invocation, followed by a focused command menu.
+ * Aligned with the branded Honeycomb CLI voice (warm, amber, concise). ASCII-only by
+ * design so it renders identically on every terminal and code page (no box-drawing or
+ * exotic glyphs to mojibake). The `[LC]` / `[AL]` marks are plain monogram stand-ins for
+ * the real brand logos, which a terminal cannot render; swap in proper glyphs if desired.
+ * Colorized through the injected {@link Colors} surface so it degrades cleanly under
+ * NO_COLOR / non-TTY.
  *
- * The art and the menu are pure string builders (no I/O), so a test can capture the
+ * The banner and the menu are pure string builders (no I/O), so a test can capture the
  * exact output without spawning a process.
  */
 
@@ -16,31 +19,26 @@ import { COMMAND_MENU } from "./command-table.js";
 import { HIVEDOCTOR_VERSION } from "../version.js";
 
 /**
- * The raw hive-doctor art. A bee with a doctor's head-mirror (the `(+)`), holding a
- * stethoscope, beside a small medical bag marked with a cross. Drawn with characters
- * that survive any code page (no box-drawing required for the figure itself).
+ * The attribution banner: the two wordmarks (with monogram marks) on one ruled line,
+ * then the collaboration line. ASCII-only so it survives any code page.
  */
 const ART = String.raw`
-        __        _,-._
-       /  \      / .-. \      .-=-.
-      |    |    | (+ +) |    /  +  \
-       \__/      \  ^  /     | _|_ |
-        ||    .===) ~ (===.  '-----'
-     ___||___ /  /     \  \   doctor's
-    | ~~~~~~ |(  ( bzz ) )    bag
-    |________| \  \_._/  /
-                '-.___.-'
+  ================================================================
+    [LC]  LEGION CODE INC.            [AL]  ACTIVELOOP
+  ================================================================
+  A collaboration between Legion Code Inc. x Activeloop,
+  powered by deeplake.ai
 `;
 
-/** The tagline under the figure (brand voice: warm, plain, a little playful). */
-const TAGLINE = "HiveDoctor - the little bee that keeps your hive healthy.";
+/** Product identity line shown beneath the collaboration banner. */
+const NAME = "HiveDoctor";
 
-/** Build the full banner: art + tagline + version line. Pure; colorized via `colors`. */
+/** Build the full banner: collaboration banner + product name + version. Pure; colorized via `colors`. */
 export function renderBanner(colors: Colors): string {
 	const art = colors.amber(ART.replace(/^\n/, ""));
-	const tagline = colors.bold(TAGLINE);
+	const name = colors.bold(NAME);
 	const version = colors.dim(`v${HIVEDOCTOR_VERSION}`);
-	return `${art}\n${tagline}  ${version}\n`;
+	return `${art}\n${name}  ${version}\n`;
 }
 
 /** Build the command-menu block from the single-sourced command table. Pure. */

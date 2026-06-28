@@ -10,10 +10,12 @@ import { createColors } from "../../src/cli/colors.js";
 const plain = createColors({ env: {}, isTty: false });
 
 describe("renderBanner", () => {
-	it("contains the hive-doctor figure and tagline", () => {
+	it("contains both wordmarks, the collaboration line, and the product name", () => {
 		const b = renderBanner(plain);
-		expect(b).toContain("bzz"); // the bee
-		expect(b).toContain("(+ +)"); // the doctor head-mirror eyes
+		expect(b).toContain("LEGION CODE INC.");
+		expect(b).toContain("ACTIVELOOP");
+		expect(b).toContain("A collaboration between Legion Code Inc. x Activeloop");
+		expect(b).toContain("deeplake.ai");
 		expect(b).toContain("HiveDoctor");
 	});
 

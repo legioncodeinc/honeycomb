@@ -216,6 +216,19 @@ jobs:
             echo "Mode: DRY-RUN (event=$EVENT_NAME, ref_type=$REF_TYPE, dry_run_input=$DRY_RUN_INPUT), running npm publish --dry-run, not publishing."
           fi
 
+      # Diagnostic: confirm GitHub is actually issuing an OIDC identity to this job.
+      # npm Trusted Publishing needs ACTIONS_ID_TOKEN_REQUEST_URL present; if this prints
+      # ABSENT, the fault is GitHub Actions permissions / org policy (no OIDC token), not
+      # npm. If it prints PRESENT but the publish still fails ENEEDAUTH, the fault is the
+      # npm-side trusted-publisher config. Prints only presence, never the token value.
+      - name: Debug - OIDC token availability
+        run: |
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "OIDC id-token endpoint: PRESENT (GitHub is issuing an OIDC identity to this job)"
+          else
+            echo "OIDC id-token endpoint: ABSENT (no OIDC identity - check 'id-token: write' + org Actions policy)"
+          fi
+
       # Publish. `prepack` (= npm run build) runs again inside `npm publish`, so
       # the tarball is always built from the just-checked-out tree.
       #   --provenance   : emit the OIDC supply-chain attestation (needs id-token).
