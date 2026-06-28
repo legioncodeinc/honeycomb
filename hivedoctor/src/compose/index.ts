@@ -55,6 +55,7 @@ import { createStatusPageServer, DEFAULT_STATUS_PAGE_PORT, type StatusPageServer
 import {
 	createUpdateEngine,
 	createUpdatePollLoop,
+	createInstalledPackageVersionReader,
 	createRegistryLatestReader,
 	fetchBlessedVersion,
 	PRIMARY_PACKAGE,
@@ -211,9 +212,16 @@ export function createHiveDoctor(options: CreateHiveDoctorOptions = {}): HiveDoc
 
 	// Probe + version reads (injected so the assembly is hermetic in tests).
 	const probe = options.probe ?? (() => probeHealth({ healthUrl: config.healthUrl, timeoutMs: config.probeTimeoutMs }));
+	// The RUNNING daemon's reported version (from `/health`). Used for the install-health snapshot
+	// + escalation DISPLAY ("what version is running"); null when the daemon is down.
 	const readInstalledVersion: () => Promise<string | null> =
 		options.readDaemonVersion ??
 		((): Promise<string | null> => readDaemonVersion({ healthUrl: config.healthUrl, timeoutMs: config.probeTimeoutMs }));
+	// The GLOBALLY-INSTALLED package version (from `npm ls -g`). This is what the update engine
+	// and the reinstall rung's post-install verify mean by "installed": it is on disk even when
+	// the daemon is DOWN, so auto-update/repair can still establish a rollback target then. Tests
+	// that inject `readDaemonVersion` also drive this reader by overriding the shared `runner`.
+	const readInstalledPackageVersion = createInstalledPackageVersionReader({ runner, pkg: PRIMARY_PACKAGE });
 	const isHealthy = async (): Promise<boolean> => (await probe()).kind === "ok";
 
 	// Restart: 064b/064h owns the real OS restart; default to a logged no-op that reports it
@@ -250,7 +258,9 @@ export function createHiveDoctor(options: CreateHiveDoctorOptions = {}): HiveDoc
 		installLock,
 		blessedVersion: options.blessedVersion ?? "",
 		resolveBlessedVersion,
-		readInstalledVersion,
+		// Verify the reinstall against the GLOBALLY-INSTALLED package version, not `/health`: the
+		// reinstall fires precisely when the daemon is sick, when `/health` cannot be trusted.
+		readInstalledVersion: readInstalledPackageVersion,
 	});
 	const uninstallRung = createUninstallHivemindRung({
 		runner,
@@ -334,7 +344,10 @@ export function createHiveDoctor(options: CreateHiveDoctorOptions = {}): HiveDoc
 			runner,
 			installLock,
 			readLatestVersion: createRegistryLatestReader({ pkg: PRIMARY_PACKAGE }),
-			readInstalledVersion,
+			// "Installed" = the globally-installed npm PACKAGE version (on disk even when the daemon
+			// is down), NOT the daemon's `/health` version. This is the fix for the live bug where a
+			// down daemon made auto-update bail with "installed unknown".
+			readInstalledVersion: readInstalledPackageVersion,
 			restartDaemon: async () => {
 				await restart();
 			},

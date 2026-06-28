@@ -202,8 +202,10 @@ export function createUpdateEngine(deps: UpdateEngineDeps): UpdateEngine {
 				const installedVersion = await deps.readInstalledVersion();
 				if (installedVersion === null) {
 					// Cannot establish a rollback target -> refuse to update (we could not recover).
+					// Honest reason label: the INSTALLED read failed (not the @latest read). This is
+					// distinct from the gate's "latest_unknown" (the registry read), which fires later.
 					deps.logger.warn("autoupdate.skip_unknown_installed");
-					return { status: "no_update", noUpdateReason: "latest_unknown", detail: "installed-version-unknown" };
+					return { status: "no_update", noUpdateReason: "installed_unknown", detail: "installed-version-unknown" };
 				}
 
 				// 2. Gather the gate inputs (latest + blessed) and decide. Pure decision, no I/O.

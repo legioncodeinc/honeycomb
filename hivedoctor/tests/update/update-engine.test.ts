@@ -239,6 +239,46 @@ describe("serialization with the watch loop's rung 2 (AC-064e.6)", () => {
 	});
 });
 
+describe("installed = globally-installed PACKAGE version, not the daemon /health version", () => {
+	it("proceeds to update when the daemon is DOWN but the package reader reports an installed version (the live bug)", async () => {
+		// The reproduced failure: daemon down -> /health version null, yet npm shows 0.1.7 on disk
+		// and 0.1.9 is blessed. With "installed" sourced from the PACKAGE (not /health), the engine
+		// must reach the apply path and update, NOT bail with skip_unknown_installed.
+		const restartDaemon = vi.fn(async () => undefined);
+		const verifyHealthy = vi.fn(async () => true);
+		const { deps, runner } = buildEngine({
+			// readInstalledVersion is the engine's seam; production wires the package reader here.
+			readInstalledVersion: async () => INSTALLED, // 0.1.7 on disk
+			readLatestVersion: async () => BLESSED, // 0.1.9 @latest
+			blessedOptions: blessedFetch(BLESSED), // 0.1.9 blessed
+			restartDaemon,
+			verifyHealthy,
+		});
+
+		const result = await createUpdateEngine(deps).runUpdateTransaction();
+
+		// It reached the apply/blessed-gate decision and updated, rather than skipping.
+		expect(result.status).toBe("updated");
+		expect(result.fromVersion).toBe(INSTALLED);
+		expect(result.toVersion).toBe(BLESSED);
+		expect(runner.calls).toEqual([{ command: "npm", args: ["install", "-g", `${PRIMARY_PACKAGE}@${BLESSED}`] }]);
+	});
+
+	it("still skips correctly when the package reader ALSO returns null (no rollback target at all)", async () => {
+		const { deps, runner } = buildEngine({ readInstalledVersion: async () => null });
+		const result = await createUpdateEngine(deps).runUpdateTransaction();
+		expect(result.status).toBe("no_update");
+		expect(runner.calls).toHaveLength(0);
+	});
+
+	it("labels the installed-unknown skip `installed_unknown`, NOT the mislabeled `latest_unknown`", async () => {
+		const { deps } = buildEngine({ readInstalledVersion: async () => null });
+		const result = await createUpdateEngine(deps).runUpdateTransaction();
+		expect(result.noUpdateReason).toBe("installed_unknown");
+		expect(result.detail).toBe("installed-version-unknown");
+	});
+});
+
 describe("crash-safety / unknown installed version", () => {
 	it("refuses to update when the installed version is unknown (no rollback target)", async () => {
 		const { deps, runner } = buildEngine({ readInstalledVersion: async () => null });

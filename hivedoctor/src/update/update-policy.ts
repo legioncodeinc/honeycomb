@@ -57,6 +57,7 @@ export interface UpdateDecisionInput {
 export type NoUpdateReason =
 	| "opted_out" // AC-064e.4: auto-update disabled
 	| "pinned" // AC-064e.4: a pin disables forward updates
+	| "installed_unknown" // the installed-package read failed this tick (no rollback target)
 	| "blessed_unavailable" // AC-064e.2 (fail-closed half): channel unreachable/unparseable
 	| "latest_unknown" // registry read failed this tick
 	| "latest_not_blessed" // AC-064e.2: @latest is newer but not blessed

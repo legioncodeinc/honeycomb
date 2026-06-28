@@ -30,6 +30,12 @@ export {
 } from "./registry.js";
 
 export {
+	createInstalledPackageVersionReader,
+	parseInstalledVersion,
+	type InstalledPackageReaderOptions,
+} from "./installed-version.js";
+
+export {
 	decideUpdate,
 	type UpdateDecision,
 	type UpdateDecisionInput,

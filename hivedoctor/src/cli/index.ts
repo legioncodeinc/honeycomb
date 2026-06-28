@@ -33,6 +33,7 @@ import {
 import { createServiceModule } from "../service/index.js";
 import { createStateStore } from "../state.js";
 import {
+	createInstalledPackageVersionReader,
 	createRegistryLatestReader,
 	createUpdateEngine,
 	outcomeOf,
@@ -100,8 +101,14 @@ export function buildCliContext(argv: readonly string[]): CliContext {
 
 	const probe = (): Promise<HealthClassification> =>
 		probeHealth({ healthUrl: config.healthUrl, timeoutMs: config.probeTimeoutMs });
-	const readInstalled = (): Promise<string | null> =>
+	// The RUNNING daemon's reported version (from `/health`). This is what `status` shows, and
+	// it is null when the daemon is down -- correct for a "what is running right now" display.
+	const readDaemonVersionFn = (): Promise<string | null> =>
 		readDaemonVersion({ healthUrl: config.healthUrl, timeoutMs: config.probeTimeoutMs });
+	// The GLOBALLY-INSTALLED package version (from `npm ls -g`). This is what the update engine
+	// and the reinstall rung's post-install verify mean by "installed": it is on disk even when
+	// the daemon is DOWN, so auto-update/repair can still establish a rollback target then.
+	const readInstalledPackageVersion = createInstalledPackageVersionReader({ runner, pkg: PRIMARY_PACKAGE });
 	const isHealthy = async (): Promise<boolean> => (await probe()).kind === "ok";
 
 	let lastRestartAt: number | null = null;
@@ -121,7 +128,7 @@ export function buildCliContext(argv: readonly string[]): CliContext {
 			lastRestartAt = at;
 		},
 	});
-	const reinstallRung = createReinstallRung({ runner, installLock, blessedVersion: "", readInstalledVersion: readInstalled });
+	const reinstallRung = createReinstallRung({ runner, installLock, blessedVersion: "", readInstalledVersion: readInstalledPackageVersion });
 	const uninstallRung = createUninstallHivemindRung({
 		runner,
 		detectHivemind: createNpmHivemindDetector(runner),
@@ -139,7 +146,7 @@ export function buildCliContext(argv: readonly string[]): CliContext {
 		runner,
 		installLock,
 		readLatestVersion: createRegistryLatestReader({ pkg: PRIMARY_PACKAGE }),
-		readInstalledVersion: readInstalled,
+		readInstalledVersion: readInstalledPackageVersion,
 		restartDaemon: async () => {
 			logger.warn("cli.update_restart_no_os_service");
 		},
@@ -170,7 +177,7 @@ export function buildCliContext(argv: readonly string[]): CliContext {
 		colors,
 		deps: {
 			probe,
-			readDaemonVersion: readInstalled,
+			readDaemonVersion: readDaemonVersionFn,
 			hivedoctorVersion: HIVEDOCTOR_VERSION,
 			ladder,
 			rungContextFor,
