@@ -1,6 +1,6 @@
 {
   "name": "@legioncodeinc/hivedoctor",
-  "version": "0.0.0",
+  "version": "0.1.1",
   "//version": "INT placeholder, still 0.0.0 so a stray publish is obvious AND the release workflow's preflight fails closed on it (a real cut bumps this deliberately, mirroring the parent's `npm version` flow). HiveDoctor versions INDEPENDENTLY of the root honeycomb package (PRD-063 OD-6) and never auto-updates its own package (AC-6); esbuild reads THIS version and inlines it via `define` (__HIVEDOCTOR_VERSION__). This one manifest IS the single source of truth - there is no cross-manifest sync to run.",
   "description": "HiveDoctor: a deliberately tiny, dependency-light, self-healing watchdog that keeps the Honeycomb primary daemon alive and reports when it cannot.",
   "license": "AGPL-3.0-or-later",

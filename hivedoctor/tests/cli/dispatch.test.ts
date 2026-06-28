@@ -29,6 +29,17 @@ describe("dispatch (PRD-064f)", () => {
 			expect(text).toContain("self-update");
 		});
 
+		it("--version prints just the version, not the banner", async () => {
+			const h = buildCliHarness();
+			const code = await dispatch(["--version"], h.ctx);
+
+			expect(code).toBe(EXIT_OK);
+			const text = h.out.text();
+			expect(text).toContain("0.0.0-dev"); // the test-mode version sentinel
+			expect(text).not.toContain("LEGION CODE INC."); // no banner
+			expect(text).not.toContain("Commands:"); // no menu
+		});
+
 		it("`help` renders the same banner + menu", async () => {
 			const h = buildCliHarness();
 			const code = await dispatch(["help"], h.ctx);

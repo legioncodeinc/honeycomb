@@ -23,6 +23,7 @@
 import { parseArgs, hasFlag, type ParsedArgs } from "./arg-parse.js";
 import { renderBannerWithMenu } from "./banner.js";
 import { resolveCommand, type CommandName } from "./command-table.js";
+import { HIVEDOCTOR_VERSION } from "../version.js";
 import type { CliContext } from "./context.js";
 import { SERVICE_NOT_AVAILABLE } from "./service-stub.js";
 import type { HealthClassification } from "../health-probe.js";
@@ -262,6 +263,13 @@ async function route(command: CommandName, ctx: CliContext, parsed: ParsedArgs):
 export async function dispatch(argv: readonly string[], ctx: CliContext): Promise<number> {
 	const parsed = parseArgs(argv);
 	const command = resolveCommand(parsed.command);
+
+	// `--version` / `-v` / `-V` -> print just the version string and exit, BEFORE the
+	// bare-invocation banner fallback (otherwise `hivedoctor --version` shows the banner).
+	if (hasFlag(parsed, "version") || argv.includes("-v") || argv.includes("-V")) {
+		ctx.io.out(HIVEDOCTOR_VERSION);
+		return EXIT_OK;
+	}
 
 	// Bare invocation (no command) -> banner + menu (AC-064f.1).
 	if (command === null && parsed.command === undefined) {
