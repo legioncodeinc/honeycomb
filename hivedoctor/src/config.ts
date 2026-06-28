@@ -39,6 +39,8 @@ export interface HiveDoctorConfig {
 	readonly restartGiveUpThreshold: number;
 	/** Cooldown after a restart HiveDoctor performed, in ms (default 5000), so it does not fight the daemon's own restart-helper. */
 	readonly restartCooldownMs: number;
+	/** How often the install-health telemetry snapshot is emitted, in ms (default 3600000 = 60 min, PRD-064d AC-064d.2). */
+	readonly installHealthIntervalMs: number;
 	/** HiveDoctor's own workspace dir (default ~/.honeycomb/hivedoctor). */
 	readonly workspaceDir: string;
 	/** The primary daemon PID/lock file HiveDoctor respects (default ~/.honeycomb/daemon.pid). */
@@ -54,6 +56,7 @@ export interface ConfigDefaults {
 	readonly backoffCeilingMs: number;
 	readonly restartGiveUpThreshold: number;
 	readonly restartCooldownMs: number;
+	readonly installHealthIntervalMs: number;
 }
 
 /** The canonical Wave-0 defaults (PRD-064 / 064a). */
@@ -65,6 +68,9 @@ export const DEFAULTS: ConfigDefaults = {
 	backoffCeilingMs: 30_000,
 	restartGiveUpThreshold: 3,
 	restartCooldownMs: 5_000,
+	// 60 minutes: a heartbeat coarse enough to be cheap, frequent enough to spot a box that
+	// never heals (PRD-064d AC-064d.2). Operator-overridable via HIVEDOCTOR_INSTALL_HEALTH_INTERVAL_MS.
+	installHealthIntervalMs: 3_600_000,
 };
 
 /**
@@ -119,6 +125,7 @@ function parseHealthUrl(raw: string | undefined, fallback: string): string {
  *   - HIVEDOCTOR_BACKOFF_CEILING_MS
  *   - HIVEDOCTOR_RESTART_GIVE_UP
  *   - HIVEDOCTOR_RESTART_COOLDOWN_MS
+ *   - HIVEDOCTOR_INSTALL_HEALTH_INTERVAL_MS
  *   - HIVEDOCTOR_WORKSPACE_DIR
  *   - HONEYCOMB_DAEMON_PID_PATH
  */
@@ -145,6 +152,7 @@ export function resolveConfig(
 		backoffCeilingMs: ceiling,
 		restartGiveUpThreshold: parsePositiveInt(env.HIVEDOCTOR_RESTART_GIVE_UP, DEFAULTS.restartGiveUpThreshold),
 		restartCooldownMs: parseNonNegativeInt(env.HIVEDOCTOR_RESTART_COOLDOWN_MS, DEFAULTS.restartCooldownMs),
+		installHealthIntervalMs: parsePositiveInt(env.HIVEDOCTOR_INSTALL_HEALTH_INTERVAL_MS, DEFAULTS.installHealthIntervalMs),
 		workspaceDir: workspaceRaw !== undefined && workspaceRaw.trim() !== "" ? workspaceRaw.trim() : defaultWorkspace,
 		daemonPidPath: pidRaw !== undefined && pidRaw.trim() !== "" ? pidRaw.trim() : defaultPidPath,
 	};

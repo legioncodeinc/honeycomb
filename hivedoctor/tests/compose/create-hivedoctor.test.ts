@@ -223,3 +223,157 @@ describe("createHiveDoctor (composition root)", () => {
 		await expect(clock.sleep(1)).resolves.toBeUndefined();
 	});
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+// Install-health telemetry timer (PRD-064d AC-064d.2) + error stream (AC-064d.1)
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A clock with a MANUALLY-DRIVEN sleep shared by ALL the compose loops (supervisor, poll,
+ * install-health -- they reuse one clock in production). Each `sleep()` parks on a fresh
+ * deferred. `tickAll()` resolves EVERY parked sleep so each loop runs exactly one more
+ * iteration and re-parks; the install-health recorder therefore gains exactly +1 per
+ * `tickAll()`. `releaseAll()` is the un-awaited drain used so `stop()` can unwind cleanly.
+ */
+function manualClock(): SupervisorClock & { tickAll(): Promise<void>; releaseAll(): void } {
+	let pending: Array<() => void> = [];
+	const drainOnce = (): void => {
+		const all = pending;
+		pending = [];
+		for (const r of all) r();
+	};
+	return {
+		now: () => 0,
+		sleep: (): Promise<void> =>
+			new Promise<void>((resolve) => {
+				pending.push(resolve);
+			}),
+		// Wait for the loops to park, resolve every parked sleep, then yield enough microtask
+		// turns for each loop's next iteration (state read -> await daemon-version -> await emit)
+		// to complete and re-park.
+		tickAll: async (): Promise<void> => {
+			for (let i = 0; i < 30 && pending.length === 0; i += 1) await Promise.resolve();
+			drainOnce();
+			for (let i = 0; i < 30; i += 1) await Promise.resolve();
+		},
+		releaseAll: drainOnce,
+	};
+}
+
+/** A fast daemon-version read so the install-health snapshot never touches the network. */
+const fastDaemonVersion = async (): Promise<string | null> => "0.1.9";
+
+describe("createHiveDoctor telemetry wiring (PRD-064d)", () => {
+	afterEach(() => {
+		for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+	});
+
+	/** A recorder matching the emitInstallHealth signature; captures each snapshot input. */
+	function installHealthRecorder() {
+		const calls: Array<Record<string, unknown>> = [];
+		const fn = (async (input: Record<string, unknown>) => {
+			calls.push(input);
+			return { sent: true };
+		}) as unknown as NonNullable<Parameters<typeof createHiveDoctor>[0]>["emitInstallHealthFn"];
+		return { calls, fn };
+	}
+
+	it("emits ONE install-health snapshot on start", async () => {
+		const rec = installHealthRecorder();
+		const clock = manualClock();
+		const doctor = buildDoctor({ clock, emitInstallHealthFn: rec.fn, readDaemonVersion: fastDaemonVersion });
+		await doctor.start();
+		// Let the loop's on-arm emit (which awaits the fast daemon-version read) settle + park.
+		for (let i = 0; i < 20; i += 1) await Promise.resolve();
+		expect(rec.calls).toHaveLength(1);
+		// The snapshot carries the shared device id + both versions + a coarse health.
+		const first = rec.calls[0];
+		expect(first).toBeDefined();
+		expect(typeof first?.["deviceId"]).toBe("string");
+		expect(first?.["deviceId"]).not.toBe("");
+		expect(first?.["deviceId"]).not.toBe("unknown-device");
+		expect(first).toHaveProperty("lastKnownHealth");
+		expect(first?.["hivedoctorVersion"]).toBeDefined();
+		expect(first?.["daemonVersion"]).toBe("0.1.9");
+		// Initiate stop (sets the stopped flag), then release the parked sleep so the loop
+		// observes the flag and exits; only then does stop's allSettled resolve.
+		const stopping = doctor.stop();
+		clock.releaseAll();
+		await stopping;
+	});
+
+	it("emits AGAIN on the interval, one snapshot per interval tick", async () => {
+		const rec = installHealthRecorder();
+		const clock = manualClock();
+		const doctor = buildDoctor({ clock, emitInstallHealthFn: rec.fn, readDaemonVersion: fastDaemonVersion });
+		await doctor.start();
+		// Drain the on-arm emit + let the loops park on their first interval sleep.
+		for (let i = 0; i < 20; i += 1) await Promise.resolve();
+		expect(rec.calls).toHaveLength(1);
+		// One interval tick -> exactly one more install-health snapshot.
+		await clock.tickAll();
+		expect(rec.calls).toHaveLength(2);
+		// And again -> a third.
+		await clock.tickAll();
+		expect(rec.calls).toHaveLength(3);
+		const stopping = doctor.stop();
+		clock.releaseAll();
+		await stopping;
+	});
+
+	it("opt-out suppresses install-health (no POST leaves the box)", async () => {
+		// Use the REAL emitInstallHealth via the chokepoint, but inject a recording fetch +
+		// an opted-out env. The chokepoint's gate must drop the emit before any fetch.
+		const fetchCalls: string[] = [];
+		const recordingFetch = async (url: string): Promise<{ ok: boolean; status: number }> => {
+			fetchCalls.push(url);
+			return { ok: true, status: 200 };
+		};
+		const clock = manualClock();
+		const doctor = buildDoctor({
+			clock,
+			readDaemonVersion: fastDaemonVersion,
+			emitDeps: {
+				posthogKey: "test-fake-key",
+				posthogHost: "https://test.posthog.example",
+				fetch: recordingFetch,
+				env: { DO_NOT_TRACK: "1" },
+			},
+		});
+		await doctor.start();
+		for (let i = 0; i < 20; i += 1) await Promise.resolve();
+		// Opted out: the chokepoint dropped the snapshot, so the fetch seam was never called.
+		expect(fetchCalls).toHaveLength(0);
+		const stopping = doctor.stop();
+		clock.releaseAll();
+		await stopping;
+	});
+
+	it("routes a supervisor probe-throw to the error stream via the wired onError seam", async () => {
+		const errorCalls: Array<{ errorClass: string }> = [];
+		const emitErrorFn = (async (input: { errorClass: string }) => {
+			errorCalls.push(input);
+			return { sent: true };
+		}) as unknown as NonNullable<Parameters<typeof createHiveDoctor>[0]>["emitErrorFn"];
+
+		const clock = manualClock();
+		const doctor = buildDoctor({
+			clock,
+			emitErrorFn,
+			readDaemonVersion: fastDaemonVersion,
+			// A probe that throws drives the supervisor tick's probe catch -> onError -> emitError.
+			probe: async (): Promise<HealthClassification> => {
+				throw new Error("compose-probe-threw");
+			},
+		});
+		// Step a single supervisor tick directly (no need to run the whole loop).
+		await doctor.supervisor.tick();
+		// Let the fire-and-forget onError microtask flush.
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(errorCalls.length).toBeGreaterThanOrEqual(1);
+		expect(errorCalls[0]?.errorClass).toBe("ProbeThrew");
+		clock.releaseAll();
+		await doctor.stop();
+	});
+});

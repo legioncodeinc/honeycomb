@@ -21,7 +21,7 @@ import {
 	type Rung,
 } from "../../src/remediation.js";
 import { createStateStore } from "../../src/state.js";
-import { createSupervisor, type ProbeFn, type Supervisor, type SupervisorClock } from "../../src/supervisor.js";
+import { createSupervisor, type ErrorSink, type ProbeFn, type Supervisor, type SupervisorClock } from "../../src/supervisor.js";
 
 /** A deterministic, advanceable fake clock. */
 export interface FakeClock extends SupervisorClock {
@@ -63,6 +63,8 @@ export interface HarnessOptions {
 	readonly extraRungs?: readonly Rung[];
 	/** Replace the default restart rung 1 with a custom rung (for the targeted-classification test). */
 	readonly rung1?: Rung;
+	/** Optional error-telemetry seam (PRD-064d) so a test asserts caught errors route to the error stream. */
+	readonly onError?: ErrorSink;
 }
 
 /** A built harness exposing the supervisor + the fakes the test asserts against. */
@@ -115,6 +117,7 @@ export function buildHarness(options: HarnessOptions): Harness {
 		logger,
 		clock,
 		probeIntervalMs: 30_000,
+		...(options.onError !== undefined ? { onError: options.onError } : {}),
 	});
 
 	return {
