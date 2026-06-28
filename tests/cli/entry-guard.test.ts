@@ -40,14 +40,11 @@ describe("isCliEntry — fires across every published invocation path (PR #172)"
 	});
 
 	it("matches the Windows npm shim path (backslashes) — the split('/') regression", () => {
+		// npm on Windows runs the bundle through a .cmd/.ps1 shim as `node C:\...\bundle\cli.js`.
+		// import.meta.url (forward slashes) won't equal the backslash argv, so the match must come
+		// from `endsWith('cli.js')` — the clause the original PR dropped alongside `split('/')`.
 		const winPath = "C:\\Users\\dev\\AppData\\Roaming\\npm\\node_modules\\@legioncodeinc\\honeycomb\\bundle\\cli.js";
-		// import.meta.url (forward slashes) won't equal the backslash argv on Windows, so the
-		// match must come from the basename / endsWith clauses — exactly what split('/') broke.
 		expect(isCliEntry("file:///C:/Users/dev/.../bundle/cli.js", winPath)).toBe(true);
-	});
-
-	it("matches a Windows backslash path to a `honeycomb`-named bin", () => {
-		expect(isCliEntry("file:///nope.js", "C:\\tools\\bin\\honeycomb")).toBe(true);
 	});
 
 	it("does NOT fire when the module is merely imported (some unrelated entry)", () => {

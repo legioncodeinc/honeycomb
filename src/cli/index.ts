@@ -23,6 +23,7 @@
  */
 
 import { realpathSync } from "node:fs";
+import { basename } from "node:path";
 import { createDispatcher } from "../commands/index.js";
 import { buildRuntimeDeps } from "./runtime.js";
 import { finalizeCliExit } from "./exit.js";
@@ -46,13 +47,15 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
  * global install. PRD-001b FR-8 / b-AC-6.
  *
  * Must fire for all three ways the published CLI is reached:
- *   1. directly as the bundle — `node bundle/cli.js`              (basename `cli.js`)
+ *   1. directly as the bundle — `node bundle/cli.js`              (ends with `cli.js`)
  *   2. the npm global bin SYMLINK on Unix — `honeycomb` → realpath `…/bundle/cli.js`
- *   3. the npm bin SHIM on Windows — `node C:\…\bundle\cli.js`    (backslash path)
+ *   3. the npm bin SHIM on Windows — `node C:\…\bundle\cli.js`    (ends with `cli.js`)
  *
- * Splitting the basename on BOTH `/` and `\` keeps the check host-independent. The
- * prior `split("/")` silently failed on Windows backslash paths, so the guard never
- * fired through the npm bin and every command exited 0 in silence (the bug this fixes).
+ * `node:path` `basename` is host-native (on Windows it splits both `/` and `\`), so the
+ * realpath'd bin name resolves correctly on every platform — unlike the original
+ * `split("/")`, which left Windows backslash paths unsplit and let every command exit 0
+ * in silence (the bug this fixes). The `endsWith("cli.js")` clause additionally covers the
+ * Windows shim, whose argv always ends in `cli.js` regardless of separator.
  */
 export function isCliEntry(importMetaUrl: string, argv1: string | undefined): boolean {
 	const raw = argv1 ?? "";
@@ -63,7 +66,6 @@ export function isCliEntry(importMetaUrl: string, argv1: string | undefined): bo
 	} catch {
 		// argv1 not on disk (test harness, deleted symlink): fall back to the raw path.
 	}
-	const basename = (p: string): string => p.split(/[/\\]/).pop() ?? "";
 	return (
 		importMetaUrl === `file://${raw}` ||
 		importMetaUrl === `file://${real}` ||
