@@ -39,24 +39,43 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
 	return result.exitCode;
 }
 
+/**
+ * Whether this module is being executed as the entry point (the `honeycomb` bin)
+ * rather than merely imported. Pure (modulo the `realpathSync` lookup) and exported
+ * so the regression test can assert it across every invocation path without a real
+ * global install. PRD-001b FR-8 / b-AC-6.
+ *
+ * Must fire for all three ways the published CLI is reached:
+ *   1. directly as the bundle — `node bundle/cli.js`              (basename `cli.js`)
+ *   2. the npm global bin SYMLINK on Unix — `honeycomb` → realpath `…/bundle/cli.js`
+ *   3. the npm bin SHIM on Windows — `node C:\…\bundle\cli.js`    (backslash path)
+ *
+ * Splitting the basename on BOTH `/` and `\` keeps the check host-independent. The
+ * prior `split("/")` silently failed on Windows backslash paths, so the guard never
+ * fired through the npm bin and every command exited 0 in silence (the bug this fixes).
+ */
+export function isCliEntry(importMetaUrl: string, argv1: string | undefined): boolean {
+	const raw = argv1 ?? "";
+	if (raw === "") return false; // no entry path (embedded host); never claim to be the bin.
+	let real = raw;
+	try {
+		real = realpathSync(raw);
+	} catch {
+		// argv1 not on disk (test harness, deleted symlink): fall back to the raw path.
+	}
+	const basename = (p: string): string => p.split(/[/\\]/).pop() ?? "";
+	return (
+		importMetaUrl === `file://${raw}` ||
+		importMetaUrl === `file://${real}` ||
+		raw.endsWith("cli.js") ||
+		basename(real) === "cli.js" ||
+		basename(real) === "honeycomb"
+	);
+}
+
 // Run when invoked directly as the `honeycomb` binary (PRD-001b FR-8 / b-AC-6).
 // The bundle is the bin target, so executing it must do work, not just export.
-// Resolve symlinks: npm global installs the bin as a symlink named `honeycomb` (not `cli.js`),
-// so both the raw argv[1] and its realpath must be considered.
-const argv1Real = (() => {
-	try {
-		return realpathSync(process.argv[1] ?? "");
-	} catch {
-		return process.argv[1];
-	}
-})();
-const argv1Basename = argv1Real?.split("/").pop() ?? "";
-if (
-	import.meta.url === `file://${process.argv[1]}` ||
-	import.meta.url === `file://${argv1Real}` ||
-	argv1Basename === "cli.js" ||
-	argv1Basename === "honeycomb"
-) {
+if (isCliEntry(import.meta.url, process.argv[1])) {
 	// PRD-022d / d-AC-4: do NOT call `process.exit(code)` here. An abrupt `process.exit()`
 	// races libuv handle teardown on Windows — the detached daemon-spawn child handle and the
 	// undici keep-alive socket pool (from the loopback `fetch`) may still be mid-close, which
