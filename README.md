@@ -30,7 +30,12 @@
     </picture>
   </a>
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://activeloop.ai"><img src="assets/logos/activeloop-full-mark-logo.svg" alt="Activeloop" height="26"></a>
+  <a href="https://activeloop.ai">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/logos/activeloop-full-mark-logo-on-dark.svg">
+      <img src="assets/logos/activeloop-full-mark-logo.svg" alt="Activeloop" height="26">
+    </picture>
+  </a>
 </p>
 
 <p align="center"><sub>A <a href="https://github.com/legioncodeinc"><strong>Legion Code</strong></a> &times; <a href="https://activeloop.ai"><strong>Activeloop</strong></a> collaboration · built on <a href="https://github.com/activeloopai/hivemind">Hivemind</a> &amp; <a href="https://deeplake.ai">Deep Lake</a></sub></p>
