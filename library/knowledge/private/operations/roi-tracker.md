@@ -1,6 +1,6 @@
 # ROI Tracker
 
-> Category: Operations | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Operations | Version: 1.1 | Date: June 2026 | Status: Active
 
 How Honeycomb proves the memory layer pays for itself: the `/roi` dashboard page and the read-model behind it. This is the credibility surface, it turns the value claim into a ledger, `Net ROI = estimated LLM $ saved − (DeepLake infra cost + Honeycomb pollination cost)`. The spine is an **honesty contract**: measured, modeled, and allocated numbers are structurally separated and a modeled figure can never masquerade as a billed fact. Read this if you are tuning the savings math, wiring a new capture harness into the token pipeline, touching the billing client, or extending the spend ledger. Shipped in PRD-060 (PR #138); the local loopback surface only, the hosted cross-org admin/leaderboard surface is the separate PRD-061.
 
@@ -55,7 +55,7 @@ The subsystem is six sub-PRDs, each a discrete seam:
 
 | Sub-PRD | Concern | Key source |
 |---|---|---|
-| **060a** | Token + cache capture (Claude Code first). Extends the capture contract to carry the per-turn `usage` object it used to discard; adds additive token columns to `sessions`. | [`event-contract.ts`](../../../../src/daemon/runtime/capture/event-contract.ts), [`normalize.ts`](../../../../src/hooks/normalize.ts), [`sessions-summaries.ts`](../../../../src/daemon/storage/catalog/sessions-summaries.ts) |
+| **060a** | Token + cache + model capture (Claude Code first). Extends the capture contract to carry the per-turn `usage` object and `model` id it used to discard; reads both from the transcript JSONL (the `Stop` hook payload has neither); adds additive token plus `model` columns to `sessions`. | [`transcript.ts`](../../../../src/hooks/claude-code/transcript.ts), [`shim.ts`](../../../../src/hooks/claude-code/shim.ts), [`event-contract.ts`](../../../../src/daemon/runtime/capture/event-contract.ts), [`normalize.ts`](../../../../src/hooks/normalize.ts), [`sessions-summaries.ts`](../../../../src/daemon/storage/catalog/sessions-summaries.ts) |
 | **060b** | Cost + savings engine + rate table. Measured cache savings, the labeled modeled estimator, the honesty witness. | [`roi-savings.ts`](../../../../src/daemon/runtime/dashboard/roi-savings.ts), [`roi-rates.ts`](../../../../src/daemon/runtime/dashboard/roi-rates.ts), [`roi-honesty-contract.ts`](../../../../src/daemon/runtime/dashboard/roi-honesty-contract.ts) |
 | **060c** | DeepLake billing client + infra read-model. Creds-gated, fail-soft, TTL-cached, `session_type` breakdown. | [`roi-billing.ts`](../../../../src/daemon/runtime/dashboard/roi-billing.ts) |
 | **060d** | Pollination cost metering. Haiku skillify token cost + DeepLake GPU-session cost composed. | [`roi-pollination.ts`](../../../../src/daemon/runtime/dashboard/roi-pollination.ts), [`roi-skillify-meter.ts`](../../../../src/daemon/runtime/dashboard/roi-skillify-meter.ts), [`transport-anthropic.ts`](../../../../src/daemon/runtime/inference/transport-anthropic.ts) |
@@ -84,8 +84,25 @@ The whole measured half rests on per-turn token counts, and **Honeycomb did not 
 060a is a **build, not a research** problem because the data exists at the source: Claude Code writes per-message `usage` (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`) to its transcript JSONL. The build:
 
 - Adds an **optional** `usage` field to the assistant-turn contract. **Absent ≠ zero**, a turn with no usage is "token data absent", structurally different from a real zero.
-- Extracts the counts from the Claude Code transcript and persists them on `sessions` via **additive schema healing**: five nullable-BIGINT columns plus a `source_tool` discriminant so Claude-Code rows are distinguishable from future Codex/Cursor rows. A missing/legacy column degrades the read to "token data absent" rather than throwing (the daemon boots and the page renders with or without the columns).
+- Extracts the counts from the Claude Code transcript and persists them on `sessions` via **additive schema healing**: four nullable-BIGINT token columns (`input_tokens` / `output_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens`) plus a `source_tool` discriminant so Claude-Code rows are distinguishable from future Codex/Cursor rows. A missing/legacy column degrades the read to "token data absent" rather than throwing (the daemon boots and the page renders with or without the columns).
 - **Claude Code first** is locked for v1 (richest cache data). Codex/Cursor are explicit follow-ups; Cursor in particular may not surface cache-read counts at all, capping its measured savings.
+
+### The transcript-read fix (PR #166)
+
+060a's *contract* shipped intact, but its first wiring quietly produced **zero measured savings on the real Claude Code path**, the canonical "completed != live" gap. The cause is where the `usage` lives. The `assistant_message` turn is captured off Claude Code's `Stop` / `SubagentStop` hook, and **that hook payload carries no message and no `usage`**: only `session_id`, `cwd`, and `transcript_path`. The shim's payload-level `extractTurnUsage` therefore read `undefined`, `cache_read_input_tokens` persisted `NULL`, and the headline savings were always `$0`. The unit tests had injected `usage` straight into the capture body, which masked the gap (a measured `0` and a structurally-absent value look the same to a test that fabricates the input).
+
+The real per-message `usage` **and the model id** live *inside* the transcript JSONL at `transcript_path`. The fix adds a dedicated reader, [`transcript.ts`](../../../../src/hooks/claude-code/transcript.ts):
+
+- `parseTurnUsage(jsonlText)` is **pure and fixture-tested** (no disk, no throw). It finds the **last `type:"user"` line** as the turn boundary, **sums** the token + cache counts across every `type:"assistant"` entry after it (a single `Stop` can span multiple assistant entries, one per tool-use round), and takes the **model id from the last assistant entry**. `readTranscriptTurnUsage(path)` is the thin **fail-soft** file reader: any error (missing/unreadable file, empty read, or a non-Claude-Code grouping key) degrades to `{}` and never throws, exactly like the pre-fix "no usage" path.
+- The shim's `assistant_message` branch now reads `meta.path` (the `transcript_path`) as the **primary** source, with the payload-level `extractTurnUsage` kept as a **fallback** so any wiring that *does* surface `usage` on the payload never regresses. The `zero != absent` discipline holds end to end: a real `0` survives; an absent count stays `NULL`.
+
+### Per-turn model pricing (PR #166)
+
+060a originally captured no model at all, so **every priced turn fell back to the Sonnet default**: an Opus turn was under-priced and its savings understated. The fix adds a `model` TEXT column to `sessions` (additive heal, `NOT NULL DEFAULT ''`, where `'' = "model unknown"`), threaded from the transcript reader, to the `assistant_message` event (zod-validated; blank/whitespace normalized to absent), to the capture INSERT (`modelFor`).
+
+Both read paths now resolve the rate **per turn by its captured model** so the live view and the shared ledger agree:
+
+- The dashboard read-model ([`api.ts`](../../../../src/daemon/runtime/dashboard/api.ts) `rowToCapturedTurn`) and the per-session ledger writer ([`roi-session-writer.ts`](../../../../src/daemon/runtime/dashboard/roi-session-writer.ts)) both surface `model` and infer `provider = "anthropic"` when `source_tool === "claude-code"` or the model is `claude-`-prefixed. The rate table keys on `(provider, model)`, so **both must be present** for a non-default rate to resolve; an unknown/blank model leaves both undefined and `resolveRate` falls back to the conservative Sonnet default (savings are never overstated). An Opus turn now prices at the Opus row in **both** the live `/roi` view and the shared `roi_metrics` ledger.
 
 ## The rate table (060b)
 
