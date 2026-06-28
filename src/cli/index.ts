@@ -22,6 +22,8 @@
  * gone from the live CLI path.
  */
 
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { createDispatcher } from "../commands/index.js";
 import { buildRuntimeDeps } from "./runtime.js";
 import { finalizeCliExit } from "./exit.js";
@@ -38,9 +40,34 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
 	return result.exitCode;
 }
 
+/**
+ * Whether this module is being executed directly as the `honeycomb` bin (the bundled
+ * `bundle/cli.js`), as opposed to imported by a test or another module. Only direct
+ * execution runs main(); importing must stay inert. PRD-001b FR-8 / b-AC-6.
+ *
+ * Node sets `import.meta.url` to the REALPATH'd module URL. npm installs the bin as a
+ * SYMLINK (`honeycomb` → `…/bundle/cli.js`), so `process.argv[1]` is the symlink path,
+ * not the realpath — comparing it raw misses the match, which is the original silent-exit
+ * bug. We therefore resolve argv[1] through `realpathSync`, which lands on the same
+ * `…/cli.js` the module URL already points to; that realpath comparison is also what
+ * distinguishes execution from a plain import (on import, argv[1] is some OTHER entry).
+ * `pathToFileURL` (Windows-correct, unlike a `file://${path}` concat) also matches argv[1]
+ * RAW, covering `--preserve-symlinks-main` where import.meta.url stays the symlink path.
+ * Exported + pure so the regression test can assert every invocation path.
+ */
+export function isCliEntry(importMetaUrl: string, argv1: string | undefined): boolean {
+	if (typeof argv1 !== "string" || argv1.length === 0) return false;
+	try {
+		if (importMetaUrl === pathToFileURL(argv1).href) return true; // direct / --preserve-symlinks-main
+		return importMetaUrl === pathToFileURL(realpathSync(argv1)).href; // npm bin symlink → realpath
+	} catch {
+		return false; // argv1 not resolvable (embedded host / dangling symlink) → not the bin
+	}
+}
+
 // Run when invoked directly as the `honeycomb` binary (PRD-001b FR-8 / b-AC-6).
 // The bundle is the bin target, so executing it must do work, not just export.
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("cli.js")) {
+if (isCliEntry(import.meta.url, process.argv[1])) {
 	// PRD-022d / d-AC-4: do NOT call `process.exit(code)` here. An abrupt `process.exit()`
 	// races libuv handle teardown on Windows — the detached daemon-spawn child handle and the
 	// undici keep-alive socket pool (from the loopback `fetch`) may still be mid-close, which
