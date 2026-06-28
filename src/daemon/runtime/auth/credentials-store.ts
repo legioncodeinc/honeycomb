@@ -222,17 +222,19 @@ function legacyToInternal(value: Record<string, unknown>): Credentials {
 /**
  * Map the in-memory {@link Credentials} onto the Hivemind on-disk shape for WRITE
  * (`workspace → workspaceId`, plus the additive `agentId`). `userName` is left unset
- * (Wave 2's `/me` validate supplies it) and `apiUrl` defaults to the canonical
- * DeepLake endpoint so a Hivemind read sees a complete record. `savedAt` is the
- * server-stamped value (b-AC-4). The token is carried verbatim — never logged here.
+ * (Wave 2's `/me` validate supplies it). `apiUrl` is the caller-supplied endpoint
+ * when given (the self-hosted-login path points honeycomb at a self-hosted backend),
+ * else the canonical DeepLake endpoint so a Hivemind read sees a complete record.
+ * `savedAt` is the server-stamped value (b-AC-4). The token is carried verbatim,
+ * never logged here.
  */
-function internalToDisk(c: Credentials, savedAt: string): DiskCredentials {
+function internalToDisk(c: Credentials, savedAt: string, apiUrl: string = DEFAULT_DEEPLAKE_API_URL): DiskCredentials {
 	return {
 		token: c.token,
 		orgId: c.orgId,
 		orgName: c.orgName,
 		workspaceId: c.workspace,
-		apiUrl: DEFAULT_DEEPLAKE_API_URL,
+		apiUrl,
 		agentId: c.agentId,
 		savedAt,
 	};
@@ -384,16 +386,22 @@ export function loadDiskCredentials(
  * `~/.deeplake` in the new shape — never the legacy path.
  *
  * The in-memory `workspace`/`agentId` are mapped to the on-disk `workspaceId` (+ the
- * additive `agentId`); `apiUrl` defaults to {@link DEFAULT_DEEPLAKE_API_URL} so a
- * Hivemind read sees an endpoint-complete record. The `savedAt` field on the passed
- * `creds` is IGNORED and overwritten with `clock.now()` (b-AC-4). The dir is created
+ * additive `agentId`); `apiUrl` is the caller-supplied endpoint when given (the
+ * self-hosted-login path), else {@link DEFAULT_DEEPLAKE_API_URL} so a Hivemind read
+ * sees an endpoint-complete record. The `savedAt` field on the passed `creds` is
+ * IGNORED and overwritten with `clock.now()` (b-AC-4). The dir is created
  * (recursively) at `0700` if absent and the file is written at `0600`; on POSIX these
  * mode bits are enforced, on win32 they are a documented best-effort no-op.
  *
  * Returns the in-memory credentials (with the stamped `savedAt`) so a caller can use
  * the canonical record without re-reading the file.
  */
-export function saveCredentials(creds: Credentials, dir?: string, clock: Clock = systemClock): Credentials {
+export function saveCredentials(
+	creds: Credentials,
+	dir?: string,
+	clock: Clock = systemClock,
+	apiUrl?: string,
+): Credentials {
 	const targetDir = credentialsDir(dir);
 	if (!existsSync(targetDir)) {
 		mkdirSync(targetDir, { recursive: true, mode: DIR_MODE });
@@ -402,7 +410,8 @@ export function saveCredentials(creds: Credentials, dir?: string, clock: Clock =
 	const stampedAt = clock.now();
 	const stamped: Credentials = { ...creds, savedAt: stampedAt };
 	// Map onto the Hivemind on-disk shape so the file is byte-cross-compatible (D-1).
-	const onDisk: DiskCredentials = internalToDisk(stamped, stampedAt);
+	// The caller-supplied apiUrl (self-hosted-login) overrides the default endpoint.
+	const onDisk: DiskCredentials = internalToDisk(stamped, stampedAt, apiUrl);
 	const path = credentialsPath(dir);
 	// `mode` on writeFileSync sets perms only when the file is CREATED; an existing
 	// file keeps its perms, so we explicitly write then the platform-correct perms

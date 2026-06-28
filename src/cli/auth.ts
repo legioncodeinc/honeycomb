@@ -36,19 +36,20 @@ import {
 	type AuthFetch,
 	type BrowserOpener,
 	type Clock,
-	type DiskCredentials,
-	type Sleeper,
+	type Credentials,
 	credentialsPath,
+	type DiskCredentials,
+	encodeStubToken,
 	legacyCredentialsPath,
 	loginWithDeviceFlow,
 	loginWithToken,
+	type Sleeper,
+	saveCredentials,
 	systemClock,
 } from "../daemon/runtime/auth/index.js";
 
 /** A line-sink so command output is capturable in tests (no direct stdout). */
-export interface OutputSink {
-	(line: string): void;
-}
+export type OutputSink = (line: string) => void;
 
 /**
  * The login-flow seams the CLI runs against (AC-1 / AC-2). Both default to the REAL
@@ -97,36 +98,71 @@ export interface AuthResult {
 	readonly wrote: boolean;
 }
 
-/** The parsed `login`/`logout` invocation: the verb + the optional `--token` value (AC-2). */
+/**
+ * The parsed `login`/`logout` invocation: the verb plus the optional value flags.
+ * `--token` is the headless token (AC-2); `--endpoint`/`--org`/`--workspace` drive
+ * the self-hosted-login path (point honeycomb at a self-hosted backend WITHOUT
+ * dialing api.deeplake.ai). All are absent for a plain `login`/`logout`.
+ */
 export interface AuthInvocation {
 	/** The sub-command word (`login` | `logout`). */
 	readonly command: string;
 	/** The `--token <key>` value, if supplied (AC-2 headless login). */
 	readonly token?: string;
+	/** The `--endpoint <url>` value: self-hosted backend URL (HTTP gateway or postgres://). */
+	readonly endpoint?: string;
+	/** The `--org <id>` value for the self-hosted credential (defaults to `local`). */
+	readonly org?: string;
+	/** The `--workspace <id>` value for the self-hosted credential (defaults to `default`). */
+	readonly workspace?: string;
 }
+
+/** The value-taking flags `parseAuthArgs` understands (`--flag value` or `--flag=value`). */
+const AUTH_VALUE_FLAGS = ["token", "endpoint", "org", "workspace"] as const;
 
 /**
  * Parse a raw argv tail into a typed {@link AuthInvocation}. The first non-flag word is the verb
- * (`login` | `logout`); `--token <key>` (or `--token=<key>`) supplies the headless token (AC-2).
+ * (`login` | `logout`); each `--<flag> <value>` (or `--<flag>=<value>`) in {@link AUTH_VALUE_FLAGS}
+ * is captured. `--token` supplies the headless token (AC-2); `--endpoint`/`--org`/`--workspace`
+ * select the self-hosted-login path.
  */
 export function parseAuthArgs(argv: readonly string[]): AuthInvocation {
 	let command = "";
-	let token: string | undefined;
+	const flags: Record<string, string> = {};
 	for (let i = 0; i < argv.length; i += 1) {
 		const a = argv[i];
-		if (a === "--token") {
-			const next = argv[i + 1];
-			if (next !== undefined && !next.startsWith("--")) {
-				token = next;
-				i += 1;
+		let consumed = false;
+		for (const name of AUTH_VALUE_FLAGS) {
+			if (a === `--${name}`) {
+				const next = argv[i + 1];
+				if (next !== undefined && !next.startsWith("--")) {
+					flags[name] = next;
+					i += 1;
+				} else {
+					// A bare `--<flag>` (no value, or followed by another flag): record it
+					// as empty so a value-less `--endpoint` is rejected by the caller
+					// rather than silently ignored (which would fall back to hosted login).
+					flags[name] = "";
+				}
+				consumed = true;
+				break;
 			}
-		} else if (a.startsWith("--token=")) {
-			token = a.slice("--token=".length);
-		} else if (!a.startsWith("--") && command === "") {
-			command = a;
+			if (a.startsWith(`--${name}=`)) {
+				flags[name] = a.slice(`--${name}=`.length);
+				consumed = true;
+				break;
+			}
 		}
+		if (consumed) continue;
+		if (!a.startsWith("--") && command === "") command = a;
 	}
-	return token === undefined ? { command } : { command, token };
+	return {
+		command,
+		...(flags.token !== undefined ? { token: flags.token } : {}),
+		...(flags.endpoint !== undefined ? { endpoint: flags.endpoint } : {}),
+		...(flags.org !== undefined ? { org: flags.org } : {}),
+		...(flags.workspace !== undefined ? { workspace: flags.workspace } : {}),
+	};
 }
 
 /** The dir argument the credentials helpers take (undefined = real home). */
@@ -135,7 +171,9 @@ function dirArg(dir?: string): string | undefined {
 }
 
 /** Resolve the deps with their real defaults. */
-function withDefaults(deps: AuthCommandDeps): Required<Pick<AuthCommandDeps, "clock" | "env" | "out" | "flows">> & AuthCommandDeps {
+function withDefaults(
+	deps: AuthCommandDeps,
+): Required<Pick<AuthCommandDeps, "clock" | "env" | "out" | "flows">> & AuthCommandDeps {
 	return {
 		...deps,
 		clock: deps.clock ?? systemClock,
@@ -160,6 +198,20 @@ function reportLoggedIn(out: OutputSink, disk: DiskCredentials): void {
  */
 async function login(inv: AuthInvocation, deps: ReturnType<typeof withDefaults>): Promise<AuthResult> {
 	const out = deps.out;
+	// Self-hosted-login path (`--endpoint`): point honeycomb at a self-hosted backend
+	// WITHOUT dialing api.deeplake.ai. SKIPS the device flow AND the `GET /me` validation,
+	// and writes the shared credential directly with the supplied apiUrl. Purely additive:
+	// with NO `--endpoint`, every existing login behavior below is unchanged.
+	// An explicit but empty `--endpoint` (a bare flag or `--endpoint=`) means the user
+	// asked for the self-hosted path but gave no URL. Reject it instead of silently
+	// falling back to the hosted flow, which could dial api.deeplake.ai.
+	if (inv.endpoint !== undefined && inv.endpoint.length === 0) {
+		out("error: login --endpoint requires a URL (e.g. --endpoint https://host or --endpoint postgres://host/db)");
+		return { exitCode: 1, wrote: false };
+	}
+	if (inv.endpoint !== undefined) {
+		return loginSelfHosted(inv, inv.endpoint, deps);
+	}
 	// The headless token: the explicit `--token` arg wins, else `HONEYCOMB_TOKEN` (AC-2 / parity).
 	const headlessToken = inv.token ?? deps.env.HONEYCOMB_TOKEN;
 
@@ -197,6 +249,63 @@ async function login(inv: AuthInvocation, deps: ReturnType<typeof withDefaults>)
 }
 
 /**
+ * `honeycomb login --endpoint <url> [--token <tok>] [--org <o>] [--workspace <w>]` (self-hosted).
+ *
+ * The one supported command to point honeycomb at a self-hosted backend instead of env-var or
+ * hand-edit gymnastics, and WITHOUT any call to api.deeplake.ai. It skips the device flow and the
+ * `GET /me` validation entirely and writes the shared `~/.deeplake/credentials.json` (0600) directly
+ * with `apiUrl = <endpoint>`, the token, the org (default `local`), and the workspace (default
+ * `default`), through the same {@link saveCredentials} discipline (dir 0700 / file 0600 / server-
+ * stamped `savedAt`) as every other login.
+ *
+ * When `--token` is omitted (and no `HONEYCOMB_TOKEN` is set) a LOCAL stub token is minted via the
+ * existing {@link encodeStubToken} machinery, bound to the supplied org/workspace, so a self-hoster
+ * needs no Activeloop token at all. The minted token round-trips `verifyTokenClaims`, so the daemon's
+ * tenancy-integrity gate (file orgId must match the token's org claim) passes for the default org.
+ *
+ * The token is NEVER printed (D-4): the success line names the endpoint, org, and workspace only.
+ *
+ * KNOWN LIMITATION (open question for the maintainer): only this direct-write login skips
+ * api.deeplake.ai. `honeycomb login` (device/headless) and `honeycomb org switch` still dial
+ * api.deeplake.ai for their auth/re-mint, so a fully self-hosted deployment must use THIS path to
+ * establish the credential and avoid those verbs until a self-hosted auth issuer exists.
+ */
+function loginSelfHosted(inv: AuthInvocation, endpoint: string, deps: ReturnType<typeof withDefaults>): AuthResult {
+	const out = deps.out;
+	const org = inv.org !== undefined && inv.org.length > 0 ? inv.org : "local";
+	const workspace = inv.workspace !== undefined && inv.workspace.length > 0 ? inv.workspace : "default";
+	// The token: an explicit `--token` (or `HONEYCOMB_TOKEN`) wins; otherwise mint a LOCAL stub
+	// bound to this org/workspace so no Activeloop token is needed for a self-hosted backend.
+	// Empty strings (`--token=` or `HONEYCOMB_TOKEN=""`) are treated as ABSENT, so we mint the
+	// stub instead of persisting a broken empty bearer token (`??` alone would keep the "").
+	const explicitToken = inv.token !== undefined && inv.token.length > 0 ? inv.token : undefined;
+	const envToken =
+		deps.env.HONEYCOMB_TOKEN !== undefined && deps.env.HONEYCOMB_TOKEN.length > 0
+			? deps.env.HONEYCOMB_TOKEN
+			: undefined;
+	const token = explicitToken ?? envToken ?? encodeStubToken({ org, workspace, agentId: "default", role: "admin" });
+
+	const creds: Credentials = {
+		token,
+		orgId: org,
+		orgName: org,
+		workspace,
+		agentId: "default",
+		savedAt: "", // stamped server-side by saveCredentials (b-AC-4).
+	};
+	try {
+		// Thread the endpoint through as the on-disk apiUrl (instead of the hardcoded default).
+		saveCredentials(creds, dirArg(deps.dir), deps.clock, endpoint);
+	} catch (err) {
+		const reason = err instanceof Error ? err.message : "could not write credentials";
+		out(`error: login failed: ${reason}`);
+		return { exitCode: 1, wrote: false };
+	}
+	out(`Logged in to self-hosted backend ${endpoint}. Org ${org}, workspace ${workspace}.`);
+	return { exitCode: 0, wrote: true };
+}
+
+/**
  * `honeycomb logout` — remove the SHARED `~/.deeplake/credentials.json` AND the legacy
  * `~/.honeycomb/credentials.json` if present (AC-6). Exits 0 even when neither exists; never throws
  * on a missing file. A removal failure (permission, EBUSY) is surfaced as a non-zero exit.
@@ -230,7 +339,7 @@ export async function runAuthCommand(inv: AuthInvocation, deps: AuthCommandDeps 
 	const resolved = withDefaults(deps);
 	if (inv.command === "login") return login(inv, resolved);
 	if (inv.command === "logout") return logout(resolved);
-	resolved.out("usage: honeycomb <login [--token <key>] | logout>");
+	resolved.out("usage: honeycomb <login [--token <key>] [--endpoint <url> [--org <o>] [--workspace <w>]] | logout>");
 	return { exitCode: inv.command === "" ? 0 : 1, wrote: false };
 }
 
