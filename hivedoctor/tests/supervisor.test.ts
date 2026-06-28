@@ -194,3 +194,60 @@ describe("crash net (design principle 1 / parent AC-8)", () => {
 		uninstall();
 	});
 });
+
+describe("error-stream routing (PRD-064d AC-064d.1)", () => {
+	let harness: Harness | undefined;
+
+	afterEach(() => {
+		harness?.cleanup();
+		harness = undefined;
+	});
+
+	it("a probe that throws routes to the onError seam (error stream) AND the loop continues", async () => {
+		const onError = vi.fn();
+		// A probe that throws drives the tick's probe catch (the heal path classifies it as
+		// unreachable-refused with detail "probe-threw" and continues).
+		const probe = async (): Promise<never> => {
+			throw new Error("getaddrinfo ENOTFOUND");
+		};
+		harness = buildHarness({ probe, restart: async () => true, onError });
+
+		const classification = await harness.supervisor.tick();
+		// The loop survived and produced a usable classification (never threw).
+		expect(classification.kind).toBe("unreachable-refused");
+		// The caught error was routed to the error stream with a stable class label + the reason.
+		expect(onError).toHaveBeenCalledWith("ProbeThrew", "getaddrinfo ENOTFOUND");
+	});
+
+	it("a throwing onError seam can never destabilize the tick (fail-soft)", async () => {
+		const onError = vi.fn(() => {
+			throw new Error("telemetry seam blew up");
+		});
+		const probe = async (): Promise<never> => {
+			throw new Error("ECONNREFUSED");
+		};
+		harness = buildHarness({ probe, restart: async () => true, onError });
+
+		// Even though the seam throws, the tick resolves normally (the seam call is guarded).
+		const classification = await harness.supervisor.tick();
+		expect(classification.kind).toBe("unreachable-refused");
+		expect(onError).toHaveBeenCalledTimes(1);
+	});
+
+	it("no onError seam is a no-op (the loop behaves identically)", async () => {
+		const probe = async (): Promise<never> => {
+			throw new Error("boom");
+		};
+		harness = buildHarness({ probe, restart: async () => true });
+		const classification = await harness.supervisor.tick();
+		expect(classification.kind).toBe("unreachable-refused");
+	});
+
+	it("installCrashNet routes a caught crash to the onError seam too", () => {
+		const onError = vi.fn();
+		const uninstall = installCrashNet({ debug() {}, info() {}, warn() {}, error() {} }, onError);
+		process.emit("uncaughtException", new Error("kaboom") as never);
+		expect(onError).toHaveBeenCalledWith("uncaughtException", "kaboom");
+		uninstall();
+	});
+});

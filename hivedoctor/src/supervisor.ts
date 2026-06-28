@@ -41,6 +41,15 @@ export interface SupervisorClock {
 /** One probe -> classify call, injected so the loop is hermetic. */
 export type ProbeFn = () => Promise<HealthClassification>;
 
+/**
+ * A fire-and-forget error-telemetry seam (PRD-064d AC-064d.1). The supervisor calls it
+ * ALONGSIDE its existing `logger.error(...)` whenever a caught exception would otherwise
+ * be only logged, so the `error` stream populates. It is injected (not a direct emit
+ * import) so the loop stays hermetic and so a test can assert the routed errors with a
+ * recorder. It MUST be fail-soft: the supervisor never awaits it and never lets it throw.
+ */
+export type ErrorSink = (errorClass: string, errorDetail: string) => void;
+
 /** Construction deps for {@link createSupervisor}. */
 export interface SupervisorDeps {
 	/** Probe + classify the daemon's `/health`. */
@@ -59,6 +68,12 @@ export interface SupervisorDeps {
 	readonly clock: SupervisorClock;
 	/** Probe interval in ms between healthy ticks. */
 	readonly probeIntervalMs: number;
+	/**
+	 * Optional error-telemetry seam (PRD-064d). When present, caught exceptions in the
+	 * tick are routed here in addition to the existing log line. Absent in Wave-0 tests
+	 * and any caller that does not want telemetry; the loop behaves identically either way.
+	 */
+	readonly onError?: ErrorSink;
 }
 
 /** The supervisor surface. */
@@ -83,16 +98,28 @@ export interface Supervisor {
  * cases). This is the net, NOT the primary defense - the primary defense is the
  * per-step try/catch in the loop and the ladder.
  */
-export function installCrashNet(logger: Logger): () => void {
+export function installCrashNet(logger: Logger, onError?: ErrorSink): () => void {
+	// Route a caught crash to the error stream too (PRD-064d), fail-soft: a telemetry
+	// failure here must never re-enter the crash net, so the sink call is itself guarded.
+	const report = (errorClass: string, errorDetail: string): void => {
+		if (onError === undefined) return;
+		try {
+			onError(errorClass, errorDetail);
+		} catch {
+			// A telemetry seam must never crash the last-resort crash net (design principle 1).
+		}
+	};
 	const onException = (err: unknown): void => {
 		logger.error("crashnet.uncaught_exception", {
 			reason: err instanceof Error ? err.message : "unknown",
 		});
+		report("uncaughtException", err instanceof Error ? err.message : "unknown");
 	};
 	const onRejection = (reason: unknown): void => {
 		logger.error("crashnet.unhandled_rejection", {
 			reason: reason instanceof Error ? reason.message : String(reason),
 		});
+		report("unhandledRejection", reason instanceof Error ? reason.message : String(reason));
 	};
 	process.on("uncaughtException", onException);
 	process.on("unhandledRejection", onRejection);
@@ -113,6 +140,21 @@ function coarseHealth(kind: HealthClassification["kind"]): HiveDoctorState["last
 export function createSupervisor(deps: SupervisorDeps): Supervisor {
 	let running = false;
 	let stopped = false;
+
+	/**
+	 * Route a caught error to the optional telemetry seam (PRD-064d AC-064d.1), fire-and-forget
+	 * and fail-soft. This is called ALONGSIDE the existing `logger.error(...)`; it changes no
+	 * control flow (the loop still catches + continues exactly as before). A missing seam is a
+	 * no-op; a throwing seam is swallowed so telemetry can never destabilize the watch loop.
+	 */
+	function reportError(errorClass: string, errorDetail: string): void {
+		if (deps.onError === undefined) return;
+		try {
+			deps.onError(errorClass, errorDetail);
+		} catch {
+			// Telemetry must never break the loop's crash-safety (design principle 1).
+		}
+	}
 
 	/**
 	 * Heal an unhealthy classification: decide the rung, run it, record the step, and
@@ -205,7 +247,9 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
 		try {
 			classification = await deps.probe();
 		} catch (error) {
-			deps.logger.error("tick.probe_threw", { reason: error instanceof Error ? error.message : "unknown" });
+			const reason = error instanceof Error ? error.message : "unknown";
+			deps.logger.error("tick.probe_threw", { reason });
+			reportError("ProbeThrew", reason);
 		}
 
 		try {
@@ -241,8 +285,11 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
 			return classification;
 		} catch (error) {
 			// Last-resort per-tick guard: any unexpected failure in the heal/persist path is logged
-			// and swallowed so the loop survives to the next tick (design principle 1).
-			deps.logger.error("tick.heal_threw", { reason: error instanceof Error ? error.message : "unknown" });
+			// and swallowed so the loop survives to the next tick (design principle 1). The error is
+			// also routed to the telemetry seam (PRD-064d) without changing the catch/continue behavior.
+			const reason = error instanceof Error ? error.message : "unknown";
+			deps.logger.error("tick.heal_threw", { reason });
+			reportError("HealThrew", reason);
 			return classification;
 		}
 	}

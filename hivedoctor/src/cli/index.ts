@@ -18,6 +18,7 @@ import { createInterface } from "node:readline/promises";
 
 import { createHiveDoctor } from "../compose/index.js";
 import { resolveConfig } from "../config.js";
+import { resolveDeviceId } from "../device-id.js";
 import { probeHealth } from "../health-probe.js";
 import { createInstallLock } from "../install-lock.js";
 import { createLogger } from "../logger.js";
@@ -87,6 +88,16 @@ export function buildCliContext(argv: readonly string[]): CliContext {
 	const stateStore = createStateStore({ workspaceDir: config.workspaceDir, logger });
 	const installLock = createInstallLock({ workspaceDir: config.workspaceDir, logger });
 
+	// The SHARED per-install device id (PRD-033/064d): the daemon and HiveDoctor read/mint the
+	// same ~/.honeycomb/device.json so every telemetry stream correlates to one install.
+	// resolveDeviceId never throws; the try/catch keeps "unknown-device" as the last-resort net.
+	let deviceId = "unknown-device";
+	try {
+		deviceId = resolveDeviceId();
+	} catch {
+		// Impossible (resolveDeviceId is defensive); the sentinel keeps the CLI build total.
+	}
+
 	const probe = (): Promise<HealthClassification> =>
 		probeHealth({ healthUrl: config.healthUrl, timeoutMs: config.probeTimeoutMs });
 	const readInstalled = (): Promise<string | null> =>
@@ -137,7 +148,7 @@ export function buildCliContext(argv: readonly string[]): CliContext {
 			autoUpdateDisabled: optOut.autoUpdateDisabled,
 			...(optOut.pinnedVersion !== undefined ? { pinnedVersion: optOut.pinnedVersion } : {}),
 		},
-		deviceId: "unknown-device",
+		deviceId,
 		logger,
 	});
 

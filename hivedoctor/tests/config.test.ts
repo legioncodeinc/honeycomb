@@ -14,8 +14,14 @@ describe("resolveConfig", () => {
 		expect(cfg.backoffFloorMs).toBe(1_000);
 		expect(cfg.backoffCeilingMs).toBe(30_000);
 		expect(cfg.restartGiveUpThreshold).toBe(3); // OD-4
+		expect(cfg.installHealthIntervalMs).toBe(DEFAULTS.installHealthIntervalMs); // 60 min (064d)
 		expect(cfg.workspaceDir).toContain("hivedoctor");
 		expect(cfg.daemonPidPath).toContain("daemon.pid");
+	});
+
+	it("reads the install-health interval env override", () => {
+		const cfg = resolveConfig({ HIVEDOCTOR_INSTALL_HEALTH_INTERVAL_MS: "120000" }, HOME);
+		expect(cfg.installHealthIntervalMs).toBe(120_000);
 	});
 
 	it("reads valid env overrides", () => {
