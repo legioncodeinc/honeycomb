@@ -38,7 +38,7 @@ import React from "react";
 import { Badge, Button, Input } from "../primitives.js";
 import { Panel, PortkeyGatewaySection, PROVIDER_KEY_NAME, SETTING_KEY, SettingsPanel } from "../panels.js";
 import type { PageProps } from "../page-frame.js";
-import { PageFrame } from "../page-frame.js";
+import { isTabHidden, PageFrame } from "../page-frame.js";
 import { LIFECYCLE_FLAG_REFERENCE } from "../../../shared/lifecycle-flags.js";
 import {
 	DISCONNECTED_AUTH_STATUS,
@@ -188,7 +188,7 @@ export function DeeplakeAuthSection({ wire }: { wire: PageProps["wire"] }): Reac
 	React.useEffect(() => {
 		let alive = true;
 		const tick = async (): Promise<void> => {
-			if (!alive) return;
+			if (!alive || isTabHidden()) return; // background-tab pause: no auth poll while hidden (focus still refreshes)
 			await load();
 		};
 		void tick();

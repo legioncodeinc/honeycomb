@@ -74,6 +74,8 @@ import {
 	DEFAULT_RECENCY_HALF_LIFE_DAYS,
 	DEFAULT_RECENCY_HALF_LIFE_DAYS_BY_CLASS,
 	DEFAULT_RERANKER,
+	DEFAULT_RERANKER_COHERE_MODEL,
+	DEFAULT_RERANKER_PROVIDER_TIMEOUT_MS,
 	DEFAULT_RERANKER_TIMEOUT_MS,
 	DEFAULT_RERANKER_WINDOW,
 	type ContextAssemblyConfig,
@@ -579,6 +581,34 @@ export interface ConflictSuppressionSource {
 	loadSuppressed(hits: readonly MemoryRecallHit[], scope: QueryScope): Promise<ReadonlySet<string>>;
 }
 
+/**
+ * The PRD-063c Cohere-via-Portkey rerank seam (c-D-2). The recall engine NEVER touches the secret
+ * store, the `${SECRET_REF}` resolver, or the Portkey config — assembly closes ALL of that over this
+ * one function and injects it, so the resolved `PORTKEY_API_KEY` is decrypted at call time inside the
+ * bound closure and NEVER enters the engine's scope (c-AC-2). The engine just hands the query + the
+ * fused top-N candidate TEXTS + the window size and receives the relevance-ordered indices.
+ *
+ * It is FAIL-SOFT by type: a failure is a typed `ok: false` result, NOT a throw — the engine maps
+ * any `ok: false` (and any thrown rejection, defensively) to the RRF order. The unreachable health
+ * signal is fired INSIDE the bound closure (it owns the transport), so the engine never sees the
+ * status code either. ABSENT → the `cohere` strategy has no transport and degrades to the RRF order
+ * (the seam is the one new dependency the rerank stage gains; a unit test injects a fake).
+ */
+export interface CohereRerankSeam {
+	/**
+	 * Run ONE rerank round-trip for `documents` (the fused top-N texts) against `query`. `topN` is the
+	 * window size. Resolves to the per-document relevance scores on success, or `ok: false` on ANY
+	 * failure (transport error, non-2xx, malformed body). SHOULD NOT reject — the engine still guards
+	 * with a try/catch defensively, but the contract is "always resolve".
+	 */
+	rerank(query: string, documents: readonly string[], topN: number): Promise<CohereRerankOutcome>;
+}
+
+/** The outcome of a {@link CohereRerankSeam.rerank} call (fail-soft by type, mirrors the transport). */
+export type CohereRerankOutcome =
+	| { readonly ok: true; readonly results: readonly { readonly index: number; readonly relevanceScore: number }[] }
+	| { readonly ok: false };
+
 /** Construction deps for {@link recallMemories}. */
 export interface MemoryRecallDeps {
 	/** The DeepLake storage client (daemon-only). Recall reads ONLY through this. */
@@ -624,7 +654,17 @@ export interface MemoryRecallDeps {
 	 */
 	readonly reranker?: RerankerConfig;
 	/**
-	 * Injectable monotonic clock (ms) for the rerank timeout budget (b-AC-2). Defaults
+	 * PRD-063c: the Cohere-via-Portkey rerank seam (c-D-2). Injected by assembly ONLY when the Portkey
+	 * gateway is ON (`portkey.enabled`); it closes over the resolved `${SECRET_REF}` key + the Portkey
+	 * config + the unreachable health signal, so the engine never sees the key (c-AC-2). The `cohere`
+	 * rerank branch ({@link rerankHits}) fires ONLY when BOTH the strategy is `cohere` AND this seam is
+	 * present — so a `cohere` strategy with the gateway OFF (no seam) degrades to the RRF order, never
+	 * an error (c-AC-4). ABSENT → no provider rerank is possible; `embedding-cosine`/`none` are
+	 * byte-identical to today. FAIL-SOFT: any failure → the RRF order (c-AC-3).
+	 */
+	readonly cohereRerank?: CohereRerankSeam;
+	/**
+	 * Injectable monotonic clock (ms) for the rerank timeout budget (b-AC-2 / c-AC-3). Defaults
 	 * to {@link Date.now}; a unit test injects a fake clock to drive the timeout
 	 * deterministically with no real waiting.
 	 */
@@ -1107,17 +1147,28 @@ async function fetchCandidateEmbeddings(
  */
 async function rerankHits(
 	hits: readonly MemoryRecallHit[],
-	queryVector: readonly number[],
+	queryVector: readonly number[] | null,
 	config: RerankerConfig,
 	request: MemoryRecallRequest,
 	deps: MemoryRecallDeps,
 ): Promise<MemoryRecallHit[]> {
 	const rrfOrder = [...hits];
+	if (hits.length === 0) return rrfOrder;
+
+	// PRD-063c (c-AC-1 / c-AC-3): the `cohere` provider rerank. It runs ONLY when the strategy is
+	// `cohere` AND the Portkey-backed seam is injected (assembly injects it ONLY with the gateway ON,
+	// so a `cohere` strategy with Portkey OFF has no seam → RRF order, c-AC-4). Unlike `embedding-cosine`
+	// it scores on the candidate TEXT (not the query vector), so it runs even on a lexical-only recall.
+	if (config.strategy === "cohere") {
+		if (deps.cohereRerank === undefined) return rrfOrder; // gateway off / no seam → RRF (c-AC-4).
+		return rerankWithCohere(rrfOrder, config, request, deps, deps.cohereRerank);
+	}
+
 	// `none` → RRF-only escape hatch; `llm` is a measured follow-up (not built here),
 	// so it falls through to the RRF order until its branch lands. `embedding-cosine`
-	// is the deterministic deliverable.
+	// is the deterministic deliverable — it requires a real query vector.
 	if (config.strategy !== "embedding-cosine") return rrfOrder;
-	if (hits.length === 0) return rrfOrder;
+	if (queryVector === null) return rrfOrder;
 
 	const now = deps.now ?? Date.now;
 	const start = now();
@@ -1168,6 +1219,91 @@ async function rerankHits(
 	} catch {
 		// Any failure in the fetch/score path degrades to the RRF order, never a throw (b-AC-4).
 		return rrfOrder;
+	}
+}
+
+/**
+ * The PRD-063c Cohere-via-Portkey rerank (c-AC-1 / c-AC-3). Sends the fused top-`window` candidate
+ * TEXTS + the query to Cohere through the injected {@link CohereRerankSeam} and reorders the window
+ * by the returned `relevance_score`, exactly like the cosine path reorders by cosine — only the
+ * SCORE SOURCE differs (a provider call vs an in-process cosine).
+ *
+ * Shape parity with the cosine path (deliberate, so the two reorders behave identically):
+ *  - only the top-`window` head is re-scored; the tail keeps RRF order and is appended after;
+ *  - a candidate the provider returned NO score for (e.g. a dropped/out-of-range index) keeps its
+ *    RRF slot — un-scored candidates never move (conservative);
+ *  - the reorder is STABLE within ties (provider tie → original RRF order);
+ *  - the stage is TIMEOUT-BOUNDED ({@link RerankerConfig.providerTimeoutMs}) and FAIL-SOFT: a
+ *    timeout, an `ok: false` outcome, or ANY throw returns the RRF order unchanged (c-AC-3). The
+ *    timeout RACES the call so a slow gateway adds AT MOST the budget to a recall, never a hang.
+ *
+ * The seam owns the secret + the transport + the unreachable health signal; this function never sees
+ * the key (c-AC-2) and never fires the signal itself.
+ */
+async function rerankWithCohere(
+	rrfOrder: readonly MemoryRecallHit[],
+	config: RerankerConfig,
+	request: MemoryRecallRequest,
+	deps: MemoryRecallDeps,
+	seam: CohereRerankSeam,
+): Promise<MemoryRecallHit[]> {
+	const baseOrder = [...rrfOrder];
+	const now = deps.now ?? Date.now;
+	const start = now();
+	const window = Math.max(1, Math.trunc(config.window));
+	const head = baseOrder.slice(0, window);
+	const tail = baseOrder.slice(window);
+	const documents = head.map((h) => h.text);
+
+	try {
+		// Race the rerank call against the provider budget: whichever resolves first wins. A slow
+		// gateway hits the timeout sentinel and we keep the RRF order (c-AC-3) — never a hang.
+		const timeoutMs = Math.max(1, Math.trunc(config.providerTimeoutMs));
+		const TIMED_OUT = Symbol("rerank-timeout");
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const timeout = new Promise<typeof TIMED_OUT>((resolve) => {
+			timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs);
+		});
+		let outcome: CohereRerankOutcome | typeof TIMED_OUT;
+		try {
+			outcome = await Promise.race([seam.rerank(request.query, documents, head.length), timeout]);
+		} finally {
+			if (timer !== undefined) clearTimeout(timer);
+		}
+		// Timeout, or a fail-soft `ok: false` from the seam → keep the RRF order (c-AC-3).
+		if (outcome === TIMED_OUT || outcome.ok === false) return baseOrder;
+
+		// Reorder the head by relevance_score DESC, mirroring the cosine path's TOTAL-ORDER construction
+		// (no non-transitive mixed sort): the scored candidates fill the slots they originally occupied,
+		// in score order; un-scored candidates stay fixed. `index` is the document's position in `head`.
+		const scoreByIndex = new Map<number, number>();
+		for (const r of outcome.results) {
+			if (r.index >= 0 && r.index < head.length && !scoreByIndex.has(r.index)) {
+				scoreByIndex.set(r.index, r.relevanceScore);
+			}
+		}
+		const scoredSlots: number[] = [];
+		for (let i = 0; i < head.length; i++) {
+			if (scoreByIndex.has(i)) scoredSlots.push(i);
+		}
+		const orderedByScore = scoredSlots
+			.map((index) => ({ index, score: scoreByIndex.get(index)! }))
+			.sort((a, b) => {
+				if (b.score !== a.score) return b.score - a.score;
+				return a.index - b.index; // tie → original RRF order (stable).
+			});
+
+		const reorderedHead = head.slice();
+		scoredSlots.forEach((slot, i) => {
+			reorderedHead[slot] = head[orderedByScore[i]!.index]!;
+		});
+
+		void start; // the clock is sampled so a fake-clock test can assert the budget race deterministically.
+		return [...reorderedHead, ...tail];
+	} catch {
+		// ANY failure (a seam that rejected despite the contract, a malformed result) degrades to the
+		// RRF order — reranking must NEVER break, stall, or empty a recall (c-AC-3).
+		return baseOrder;
 	}
 }
 
@@ -1982,21 +2118,34 @@ export async function recallMemories(
 	];
 	const { hits, sources } = fuseHits(arms, limit);
 
-	// PRD-047b: rerank the fused top-N by cosine(query vector, candidate embedding). The
-	// rerank runs ONLY when a real query vector exists (the semantic arm ran) — on a
-	// lexical-only / degraded / keyword recall there is no vector, so RRF order stands
-	// (b-AC-4). The strategy DEFAULTS to `none` (b-AC-3: embedding-cosine measured ~0
-	// lift on the synthetic golden set, so the eval-driven default keeps RRF order); a
-	// caller passes `{ strategy: "embedding-cosine" }` to activate the wired+tested
-	// rerank. The stage is timeout-budgeted (b-AC-2) and fail-soft to RRF order (b-AC-4).
+	// PRD-047b + PRD-063c: rerank the fused top-N. The `embedding-cosine` path re-scores by
+	// cosine(query vector, candidate embedding) and runs ONLY when a real query vector exists (the
+	// semantic arm ran) — on a lexical-only / degraded / keyword recall there is no vector, so the
+	// RRF order stands (b-AC-4). The `cohere` path (PRD-063c) re-scores by a Cohere-via-Portkey
+	// relevance call over the candidate TEXTS, so it runs even on a lexical-only recall (no vector
+	// needed) — gated INSIDE rerankHits on the injected seam (gateway ON), and FAIL-SOFT to the RRF
+	// order (c-AC-3). The strategy DEFAULTS to `none` (b-AC-3 / c-D-3: the eval-driven default keeps
+	// the RRF order; a provider reranker must EARN the default). The stage is timeout-budgeted and
+	// fail-soft to the RRF order in every strategy.
 	const rerankerConfig: RerankerConfig =
 		deps.reranker ??
-		({ strategy: DEFAULT_RERANKER, timeoutMs: DEFAULT_RERANKER_TIMEOUT_MS, window: DEFAULT_RERANKER_WINDOW } as const);
-	const ranked =
-		semanticRun === null || rerankerConfig.strategy === "none"
-			? // No query vector to rerank against, or RRF-only requested → keep the fused order.
-				hits
-			: await rerankHits(hits, semanticRun.queryVector, rerankerConfig, request, deps);
+		({
+			strategy: DEFAULT_RERANKER,
+			timeoutMs: DEFAULT_RERANKER_TIMEOUT_MS,
+			providerTimeoutMs: DEFAULT_RERANKER_PROVIDER_TIMEOUT_MS,
+			window: DEFAULT_RERANKER_WINDOW,
+			cohereModel: DEFAULT_RERANKER_COHERE_MODEL,
+		} as const);
+	// Skip the rerank stage entirely only for the RRF-only cases: an explicit `none`, OR an
+	// `embedding-cosine`/`llm` strategy with NO query vector (lexical-only / degraded / keyword). The
+	// `cohere` strategy is NOT skipped on a null vector — it scores on text, so rerankHits is invoked
+	// and either reranks via the seam or returns the RRF order (gateway off / fail-soft).
+	const skipRerank =
+		rerankerConfig.strategy === "none" ||
+		(rerankerConfig.strategy !== "cohere" && semanticRun === null);
+	const ranked = skipRerank
+		? hits
+		: await rerankHits(hits, semanticRun?.queryVector ?? null, rerankerConfig, request, deps);
 
 	// PRD-047c: collapse semantic near-duplicates over the fused/reranked top-N, keeping
 	// the highest-provenance copy of each fact (`memories` > `memory` > `sessions`). Runs

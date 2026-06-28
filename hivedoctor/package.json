@@ -5,7 +5,6 @@
   "description": "HiveDoctor: a deliberately tiny, dependency-light, self-healing watchdog that keeps the Honeycomb primary daemon alive and reports when it cannot.",
   "license": "AGPL-3.0-or-later",
   "type": "module",
-  "//publish-posture": "INT (PRD-063 INT-2): publish hygiene is authored but NOT yet exercised against the live registry. `private: true` is removed so the release-hivedoctor.yaml job CAN build + dry-run the publish, but a REAL publish is fail-closed three ways: (1) the version is still 0.0.0 and the workflow preflight aborts on it; (2) a real publish only fires on a pushed `vX.Y.Z` tag, never a workflow_dispatch (which always rehearses, dry_run default true); (3) Trusted-Publishing OIDC must be configured on npm first, which requires the package to already exist - so the FIRST publish is a deliberate one-time manual 2FA bootstrap (the chicken-egg), after which every CI publish is tokenless OIDC. See release-hivedoctor.yaml + RELEASING.md.",
   "publishConfig": {
     "access": "public",
     "provenance": true
@@ -13,13 +12,9 @@
   "engines": {
     "node": ">=22.5.0"
   },
-  "//runtime-deps": "BINDING (PRD-063 design principle 1, 'incapable of crashing'): zero runtime npm dependencies. The runtime uses Node built-ins ONLY (node:http, node:child_process, node:fs, node:os, node:timers, node:path, node:crypto). Only devDependencies are permitted, and only for typecheck + test + the esbuild bundle. The published tarball ships the SINGLE self-contained `bundle/cli.js` (esbuild inlines all first-party source; only node builtins stay external), so an `npm i -g @legioncodeinc/hivedoctor` pulls in NO runtime deps.",
-  "//main": "DELIBERATELY OMITTED. HiveDoctor is a pure CLI (a global bin), never imported as a library, so it has no package `main`/`exports`. This matters for the publish surface: npm FORCE-INCLUDES the `main` entry file in the tarball regardless of the `files` allowlist, so a `main` pointing into the un-shipped dist/ would drag a dist source file into the package (caught by pack-check's source-leak guard). With no `main`, the tarball is exactly the `files` allowlist: the bundled bin + README + LICENSE.",
   "bin": {
     "hivedoctor": "bundle/cli.js"
   },
-  "//bin": "The `hivedoctor` executable. Source entry is src/cli/bin.ts (shebang); the esbuild step (esbuild.config.mjs) bundles it to bundle/cli.js (the can't-crash single-file bin).",
-  "//files": "The npm publish allowlist - the ship contract (ci-release-stinger hard rule #4). ONLY the self-contained bin bundle ships, plus README + LICENSE. NOT src/, tests/, dist/, node_modules, the tsconfig, the vitest/esbuild configs, or the scripts/ (pack-check is a build-time gate, never a runtime file - unlike the parent, HiveDoctor has no consumer-side postinstall, so scripts/ stays OUT of the tarball). The per-OS service templates are pure string builders compiled INTO cli.js (src/service/templates.ts), so there is nothing else to ship. `npm pack --dry-run` + `npm run pack:check` verify this.",
   "files": [
     "bundle/cli.js",
     "bundle/package.json",
@@ -27,17 +22,13 @@
     "LICENSE"
   ],
   "scripts": {
-    "//build": "tsc emits the modular ESM to dist/, then esbuild bundles dist/cli/bin.js into the single bundle/cli.js bin with the version + telemetry defines inlined. Mirrors the parent's `tsc && node esbuild.config.mjs` two-step (ci-release-stinger principle #3: both steps run).",
     "build": "tsc && node esbuild.config.mjs",
     "bundle": "node esbuild.config.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "//ci": "The package gate, local-equals-CI (ci-release-stinger principle #4). Independent of the repo-root `npm run ci` - HiveDoctor has its OWN gates and is never typechecked/tested as part of the main package. No jscpd here: duplication discipline stays a root-package concern; this package's gate is typecheck + test.",
     "ci": "npm run typecheck && npm run test",
-    "//pack-check": "The publish gate: refuse forbidden/secret filenames, refuse a source/test leak, require the bin present. Runs `npm pack --dry-run` (which fires `prepack` -> a fresh build).",
     "pack:check": "node scripts/pack-check.mjs",
-    "//prepack": "Rebuilds before pack/publish so the tarball is never stale (ci-release-stinger principle: prepack guards the publish). Runs automatically before `npm pack` / `npm publish`.",
     "prepack": "npm run build"
   },
   "devDependencies": {

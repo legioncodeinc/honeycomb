@@ -30,7 +30,7 @@ import type { TransportRequest } from "../../../../src/daemon/storage/transport.
 import { type RuntimeConfig } from "../../../../src/daemon/runtime/config.js";
 import { createRequestLogger } from "../../../../src/daemon/runtime/logger.js";
 import { createDaemon } from "../../../../src/daemon/runtime/server.js";
-import { buildSettingsView, fetchKpisView, fetchMemoryGraphView, fetchSkillSyncView, mountDashboardApi } from "../../../../src/daemon/runtime/dashboard/api.js";
+import { buildSettingsView, fetchEstimatedSavings, fetchKpiCounts, fetchKpisView, fetchMemoryGraphView, fetchSkillSyncView, mountDashboardApi } from "../../../../src/daemon/runtime/dashboard/api.js";
 import type { QueryScope, StorageQuery } from "../../../../src/daemon/storage/client.js";
 import type { QueryResult, StorageRow } from "../../../../src/daemon/storage/result.js";
 import type { LocalAssetInventory } from "../../../../src/dashboard/contracts.js";
@@ -465,6 +465,64 @@ describe("PRD-049e: the KPI band is project-scoped (project-bearing counts only)
 		await daemon.app.request("/api/diagnostics/kpis", { headers: proj("proj-other") });
 		expect(fake.requests.length).toBeGreaterThan(afterFirst);
 	});
+});
+
+describe("PRD-049e perf: the KPI read is split into cached counts + a separately-cached savings SUM", () => {
+	it("fetchKpiCounts runs the COUNTS only (no savings SUM); fetchEstimatedSavings runs the SUM only", async () => {
+		const seenCounts: string[] = [];
+		const counts = await fetchKpiCounts(
+			fakeStorage((sql) => {
+				seenCounts.push(sql);
+				return [{ n: 7 }];
+			}),
+			SCOPE_OK,
+		);
+		// The counts read must NOT carry the heavy corpus SUM (that is the separately-cached path).
+		expect(seenCounts.some((s) => /SUM\(LENGTH/i.test(s))).toBe(false);
+		expect(seenCounts.some((s) => /COUNT\(\*\).*FROM\s+"memories"/i.test(s))).toBe(true);
+		expect(counts.turnCount).toBe(7);
+
+		const seenSavings: string[] = [];
+		const savings = await fetchEstimatedSavings(
+			fakeStorage((sql) => {
+				seenSavings.push(sql);
+				return [{ chars: 4000 }];
+			}),
+			SCOPE_OK,
+		);
+		// The savings path is exactly ONE query — the SUM — and divides by the documented divisor.
+		expect(seenSavings).toHaveLength(1);
+		expect(seenSavings[0]).toMatch(/SUM\(LENGTH/i);
+		expect(savings).toBe(1000);
+	});
+});
+
+describe("PRD-049e perf: the sessions/rules/skills diagnostics reads are short-TTL cached", () => {
+	function makeCachingDaemon() {
+		const fake = new FakeDeepLakeTransport((req: TransportRequest): Record<string, unknown>[] => {
+			const sql = req.sql;
+			if (/FROM\s+"sessions"/i.test(sql)) return [{ id: "s1", project: "p", creation_date: "2026-06-20", path: "x" }];
+			if (/FROM\s+"rules"/i.test(sql)) return [{ id: "r1", name: "Rule", status: "active" }];
+			if (/FROM\s+"skills"/i.test(sql)) return [{ name: "sk", scope: "team", visibility: "global" }];
+			return [];
+		});
+		const storage = createStorageClient({ transport: fake, provider: stubProvider(fakeCredentialRecord()) });
+		const daemon = createDaemon({ config: cfg(), storage, logger: createRequestLogger({ silent: true }) });
+		mountDashboardApi(daemon, { storage });
+		return { daemon, fake };
+	}
+
+	for (const ep of ["sessions", "rules", "skills"] as const) {
+		it(`/${ep}: a re-load within the TTL is served from cache (no new storage read)`, async () => {
+			const { daemon, fake } = makeCachingDaemon();
+			expect((await daemon.app.request(`/api/diagnostics/${ep}`, { headers: headers() })).status).toBe(200);
+			const afterFirst = fake.requests.length;
+			expect(afterFirst).toBeGreaterThan(0);
+			// Identical second request → cache hit → ZERO additional storage reads.
+			expect((await daemon.app.request(`/api/diagnostics/${ep}`, { headers: headers() })).status).toBe(200);
+			expect(fake.requests.length).toBe(afterFirst);
+		});
+	}
 });
 
 describe("PRD-036b: skill-sync view is the union (installed ∪ synced) with honest state", () => {

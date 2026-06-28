@@ -28,7 +28,7 @@ import { Badge, Button, Input, Kpi, MemoryCard } from "../primitives.js";
 import { LiveLog, RulesPanel, SessionsPanel, SettingsPanel, SkillSyncPanel } from "../panels.js";
 import { HarnessStrip } from "../harness-strip.js";
 import { useScope } from "../scope-context.js";
-import type { PageProps } from "../page-frame.js";
+import { usePoll, type PageProps } from "../page-frame.js";
 import {
 	EMPTY_KPIS,
 	EMPTY_VAULT_SETTINGS,
@@ -46,8 +46,6 @@ import {
 
 /** How often the live-log poll re-reads `/api/logs` (ms). Reasonable cadence, stopped on unmount. */
 const LOG_POLL_MS = 2500;
-/** How often the health poll probes `/health` for the per-subsystem strip reasons (ms). */
-const HEALTH_POLL_MS = 5000;
 /** How often the harness-strip poll re-reads `/api/diagnostics/harnesses` for last-seen recency (ms). */
 const HARNESS_POLL_MS = 5000;
 /** How many recent log lines the panel keeps. */
@@ -152,13 +150,14 @@ function HealthStrip({ reasons }: { reasons: HealthReasonsWire | null }): React.
  * runs recall (AC-3). The `pollinating` pulse is owned by the shell (D-5) and read from props. All
  * polling clears on unmount. NO header — the shell owns the chrome (D-5).
  */
-export function DashboardPage({ wire, pollinating = false }: PageProps): React.JSX.Element {
+export function DashboardPage({ wire, pollinating = false, healthReasons = null }: PageProps): React.JSX.Element {
 	// PRD-049e: the active dashboard scope — the selected project re-scopes the KPI band's
 	// project-bearing counts (Memories / Turns / Est. savings). Absent → the workspace-wide view.
 	const { scope } = useScope();
 
 	// ── view state (hydrated from the shared wire) ──
-	const [healthReasons, setHealthReasons] = React.useState<HealthReasonsWire | null>(null);
+	// `healthReasons` is no longer polled here — the SHELL owns the single /health poll and passes the
+	// reasons down via PageProps (the former double-poll is gone). It still feeds the subsystem strip.
 	const [kpis, setKpis] = React.useState<KpisWire>(EMPTY_KPIS);
 	const [sessions, setSessions] = React.useState<readonly SessionRowWire[]>([]);
 	const [rules, setRules] = React.useState<readonly RuleRowWire[]>([]);
@@ -236,54 +235,25 @@ export function DashboardPage({ wire, pollinating = false }: PageProps): React.J
 		void hydrate();
 	}, [hydrate]);
 
-	// AC-4: poll /api/logs and render real daemon log lines. Stops on unmount.
+	// Defer the below-the-fold harness area to a SECOND paint so the KPI band + recall (what the operator
+	// looks at) are interactive first. The flag flips in a passive effect (after the first commit paints),
+	// so the heavy strip/grid/log mount on the next render, not the first. The `harness-area` landmark
+	// itself always renders (stable layout); only its CONTENTS wait for this.
+	const [showSecondary, setShowSecondary] = React.useState(false);
 	React.useEffect(() => {
-		let alive = true;
-		const tick = async (): Promise<void> => {
-			const records = await wire.logs(MAX_LOG_LINES);
-			if (!alive) return;
-			setLogLines(records.slice(-MAX_LOG_LINES).reverse().map(formatLogLine));
-		};
-		void tick();
-		const id = setInterval(() => void tick(), LOG_POLL_MS);
-		return () => {
-			alive = false;
-			clearInterval(id);
-		};
-	}, [wire]);
+		setShowSecondary(true);
+	}, []);
 
-	// PRD-029 D-2: poll /health for the per-subsystem strip reasons (the SHELL owns liveness/up-down).
-	React.useEffect(() => {
-		let alive = true;
-		const tick = async (): Promise<void> => {
-			const { reasons } = await wire.health();
-			if (!alive) return;
-			setHealthReasons(reasons);
-		};
-		void tick();
-		const id = setInterval(() => void tick(), HEALTH_POLL_MS);
-		return () => {
-			alive = false;
-			clearInterval(id);
-		};
-	}, [wire]);
+	// AC-4: poll /api/logs and render real daemon log lines. Via `usePoll` → shared background-tab pause +
+	// stop-on-unmount (no hand-rolled interval/alive loop).
+	usePoll(async () => {
+		const records = await wire.logs(MAX_LOG_LINES);
+		setLogLines(records.slice(-MAX_LOG_LINES).reverse().map(formatLogLine));
+	}, LOG_POLL_MS);
 
-	// 038c: poll the PRD-039 harness registry/telemetry for the wired-in strip + per-harness tiles.
-	// A light poll keeps last-seen recency fresh; stops on unmount. A failure degrades to [] (wire-safe).
-	React.useEffect(() => {
-		let alive = true;
-		const tick = async (): Promise<void> => {
-			const rows = await wire.harnesses();
-			if (!alive) return;
-			setHarnesses(rows);
-		};
-		void tick();
-		const id = setInterval(() => void tick(), HARNESS_POLL_MS);
-		return () => {
-			alive = false;
-			clearInterval(id);
-		};
-	}, [wire]);
+	// 038c: poll the PRD-039 harness registry/telemetry for the wired-in strip + per-harness tiles. A light
+	// poll keeps last-seen recency fresh; a failure degrades to [] (wire-safe). Via `usePoll` (gated + cleaned).
+	usePoll(async () => setHarnesses(await wire.harnesses()), HARNESS_POLL_MS);
 
 	// AC-3: recall → POST /api/memories/recall → render the hits as MemoryCards.
 	const recall = React.useCallback(async (): Promise<void> => {
@@ -352,29 +322,35 @@ export function DashboardPage({ wire, pollinating = false }: PageProps): React.J
 			</section>
 
 			{/* ── AREA 3: the harness area (038c) — the strip, then the retained 2-col grid + live log ── */}
+			{/* The landmark always renders (stable layout); its CONTENTS wait for `showSecondary` so the
+			    KPI band + recall paint first (below-the-fold deferral). */}
 			<section data-area="harness-area" aria-label="Harnesses and activity">
-				{/* The wired-in chips + per-harness KPI tiles + short-tail stream (038c). */}
-				<div style={{ marginBottom: 16 }}>
-					<HarnessStrip harnesses={harnesses} streamLines={streamLines} />
-				</div>
+				{showSecondary && (
+					<>
+						{/* The wired-in chips + per-harness KPI tiles + short-tail stream (038c). */}
+						<div style={{ marginBottom: 16 }}>
+							<HarnessStrip harnesses={harnesses} streamLines={streamLines} />
+						</div>
 
-				{/* The existing 2-col grid — kept, reorganized into the zone (parent: retain the panels). */}
-				<div className="grid2" style={{ marginBottom: 16 }}>
-					<div className="col">
-						<SessionsPanel sessions={sessions} />
-						<RulesPanel rules={rules} />
-					</div>
-					<div className="col">
-						{/* The codebase-graph canvas is intentionally NOT on the home (the graph memory cap): a real snapshot is
-						    tens of thousands of nodes and rendering it here froze the browser. The graph lives on its
-						    own bounded, memory-aware `#/graph` page; the home stays light. */}
-						<SettingsPanel catalog={vaultSettings.catalog} settings={vaultSettings.settings} secretNames={secretNames} onSave={saveSetting} />
-						<SkillSyncPanel skills={skills} />
-					</div>
-				</div>
+						{/* The existing 2-col grid — kept, reorganized into the zone (parent: retain the panels). */}
+						<div className="grid2" style={{ marginBottom: 16 }}>
+							<div className="col">
+								<SessionsPanel sessions={sessions} />
+								<RulesPanel rules={rules} />
+							</div>
+							<div className="col">
+								{/* The codebase-graph canvas is intentionally NOT on the home (the graph memory cap): a real snapshot is
+								    tens of thousands of nodes and rendering it here froze the browser. The graph lives on its
+								    own bounded, memory-aware `#/graph` page; the home stays light. */}
+								<SettingsPanel catalog={vaultSettings.catalog} settings={vaultSettings.settings} secretNames={secretNames} onSave={saveSetting} />
+								<SkillSyncPanel skills={skills} />
+							</div>
+						</div>
 
-				{/* the full live log (AC-4) */}
-				<LiveLog lines={feed} />
+						{/* the full live log (AC-4) */}
+						<LiveLog lines={feed} />
+					</>
+				)}
 			</section>
 		</>
 	);

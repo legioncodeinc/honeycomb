@@ -244,34 +244,57 @@ const CHARS_PER_TOKEN = 4;
  * `synced_assets` table / storage error fails soft to `0`.
  */
 export async function fetchKpisView(storage: StorageQuery, scope: QueryScope, projectId?: string): Promise<KpisView> {
-	// The distilled-fact table is `memories` (PRD-003a `catalog/memories.ts`), not `memory` —
-	// a stale singular here silently returned 0 for the Memories KPI against the real backend.
+	// Composed of two INDEPENDENTLY-CACHEABLE reads (the route caches them at different TTLs — counts churn,
+	// the savings SUM is heavy + slow-moving): the cheap-ish counts and the corpus-length SUM. Composed here
+	// (uncached) so a direct caller / unit test gets the whole view in one call.
+	const [counts, estimatedSavings] = await Promise.all([
+		fetchKpiCounts(storage, scope, projectId),
+		fetchEstimatedSavings(storage, scope, projectId),
+	]);
+	return { ...counts, estimatedSavings };
+}
+
+/** The KPI band MINUS the estimated-savings metric — the three counts the route caches on the short TTL. */
+export type KpiCounts = Omit<KpisView, "estimatedSavings">;
+
+/**
+ * The three KPI COUNTS (PRD-035a/036c): Memories + Turns (`sessions`) + Team skills. The two
+ * project-BEARING counts (`memories` + `sessions` carry `project_id`) narrow to the selected project when
+ * one was stamped; `synced_assets` has NO `project_id` (a skill is shared with the TEAM, not a project) so
+ * the Team-skills count stays workspace-wide BY DESIGN. Absent/blank project → no clause (workspace-wide,
+ * back-compat). Each read is independently guarded via `selectRows` (fail-soft → 0), no N+1.
+ */
+export async function fetchKpiCounts(storage: StorageQuery, scope: QueryScope, projectId?: string): Promise<KpiCounts> {
+	// The distilled-fact table is `memories` (PRD-003a `catalog/memories.ts`), not `memory` — a stale
+	// singular here silently returned 0 for the Memories KPI against the real backend.
 	const memTbl = sqlIdent("memories");
 	const sessTbl = sqlIdent("sessions");
-	// PRD-049e: narrow the project-BEARING counts (`memories` + `sessions` both carry `project_id`) to
-	// the selected project when the dashboard stamped one via the `x-honeycomb-project` header, so the
-	// band re-scopes per project instead of returning the same workspace-wide totals on every project.
-	// `synced_assets` has NO `project_id` (a skill is shared with the TEAM, not a project), so the
-	// Team-skills count below stays workspace-wide BY DESIGN. Absent/blank project → no clause (the
-	// prior workspace-wide behaviour; back-compat for a non-dashboard caller).
 	const projClause = projectWhereClause(projectId);
-	const [memRows, sessRows, savingsRows, teamSkillRows] = await Promise.all([
+	const [memRows, sessRows, teamSkillRows] = await Promise.all([
 		selectRows(storage, `SELECT COUNT(*) AS n FROM "${memTbl}"${projClause}`, scope),
 		selectRows(storage, `SELECT COUNT(*) AS n FROM "${sessTbl}"${projClause}`, scope),
-		selectRows(storage, buildEstimatedSavingsSql(projectId), scope),
 		selectRows(storage, buildTeamSkillCountSql(), scope),
 	]);
 	const sessionCount = toNum(sessRows[0]?.n);
-	// 035b: chars → tokens via the documented divisor. SUM is NULL on an empty corpus → toNum → 0.
-	const estimatedSavings = Math.floor(toNum(savingsRows[0]?.chars) / CHARS_PER_TOKEN);
 	return {
 		memoryCount: toNum(memRows[0]?.n),
 		// 035a: same value, two names — `sessionCount` kept (additive), `turnCount` is what the UI reads.
 		sessionCount,
 		turnCount: sessionCount,
-		estimatedSavings,
 		teamSkillCount: toNum(teamSkillRows[0]?.n),
 	};
+}
+
+/**
+ * The PRD-035b estimated-savings metric (tokens): the memory corpus's total distilled-`content` length
+ * divided by {@link CHARS_PER_TOKEN}. This is the SINGLE most expensive KPI query (it sums a TEXT column
+ * across the corpus) AND it moves slowly, so the route caches it on a LONGER TTL than the counts. Scoped
+ * to the selected project (same predicate as the Memories count). `0` on an empty corpus or a storage error.
+ */
+export async function fetchEstimatedSavings(storage: StorageQuery, scope: QueryScope, projectId?: string): Promise<number> {
+	const savingsRows = await selectRows(storage, buildEstimatedSavingsSql(projectId), scope);
+	// 035b: chars → tokens via the documented divisor. SUM is NULL on an empty corpus → toNum → 0.
+	return Math.floor(toNum(savingsRows[0]?.chars) / CHARS_PER_TOKEN);
 }
 
 /**
@@ -1024,10 +1047,12 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 
 	const kpis = daemon.group(DASHBOARD_GROUPS.kpis);
 	if (kpis !== undefined) {
-		// A per-(scope+project) short-TTL cache so re-landing on the home (the hash router REMOUNTS the
-		// page) does not re-run the four DeepLake aggregate scans every time. Each `mountDashboardApi`
-		// call gets its own instance (mirrors the installed-assets inventory cache, D-1).
-		const kpisCache = createKpisCache();
+		// Two per-(scope+project) caches: the cheap COUNTS on the short TTL, the HEAVY savings SUM on a
+		// longer TTL (it moves slowly). So re-landing on the home (the hash router REMOUNTS the page) skips
+		// the DeepLake scans, and the expensive corpus SUM is recomputed far less often than the counts.
+		// Each `mountDashboardApi` call gets its own instances (mirrors the installed-assets cache, D-1).
+		const countsCache = createTtlViewCache<KpiCounts>(DIAG_TTL_MS);
+		const savingsCache = createTtlViewCache<number>(SAVINGS_TTL_MS);
 		// Served at `/kpis` under the diagnostics group (full `/api/diagnostics/kpis`) so the
 		// canonical `/api/kpis` resource path is left to the PRD-022 product-data data-access API.
 		kpis.get("/kpis", async (c) => {
@@ -1038,12 +1063,21 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 			// a degraded resolution (no selection, no cwd — the dashboard's default) stays workspace-wide.
 			const project = resolveRequestProject(c, scope);
 			const projectId = project.degraded ? undefined : project.projectId;
-			return c.json(await kpisCache(scope, projectId, () => fetchKpisView(storage, scope, projectId)));
+			const key = scopeCacheKey(scope, projectId);
+			const [counts, estimatedSavings] = await Promise.all([
+				countsCache(key, () => fetchKpiCounts(storage, scope, projectId)),
+				savingsCache(key, () => fetchEstimatedSavings(storage, scope, projectId)),
+			]);
+			return c.json({ ...counts, estimatedSavings });
 		});
 	}
 
 	const sessions = daemon.group(DASHBOARD_GROUPS.sessions);
 	if (sessions !== undefined) {
+		// A short-TTL cache so the home's sessions panel (and the Logs page's pages) skip the DeepLake read
+		// on re-navigation. The key includes the page coordinates (limit + cursor) so each browsable page
+		// caches INDEPENDENTLY — the default panel page never collides with a deep Logs page.
+		const sessionsCache = createTtlViewCache<Awaited<ReturnType<typeof fetchSessionsView>>>(DIAG_TTL_MS);
 		// Served at `/sessions` under the diagnostics group (full `/api/diagnostics/sessions`).
 		// PRD-043c: ADDITIVE browsable-history paging — `?limit=` (clamped) + `?cursor=` page the
 		// captured turns newest-first. With no params the legacy newest-50 panel view is returned
@@ -1052,9 +1086,11 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 		sessions.get("/sessions", async (c) => {
 			const scope = resolveScope(c);
 			if (scope === null) return c.json(NO_ORG_BODY, 400);
+			const cursorRaw = c.req.query("cursor");
 			const limit = resolveSessionsLimit(c.req.query("limit"));
-			const before = decodeSessionsCursor(c.req.query("cursor"));
-			return c.json(await fetchSessionsView(storage, scope, before !== undefined ? { limit, before } : { limit }));
+			const before = decodeSessionsCursor(cursorRaw);
+			const key = scopeCacheKey(scope, String(limit), cursorRaw);
+			return c.json(await sessionsCache(key, () => fetchSessionsView(storage, scope, before !== undefined ? { limit, before } : { limit })));
 		});
 	}
 
@@ -1093,23 +1129,27 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 
 	const rules = daemon.group(DASHBOARD_GROUPS.rules);
 	if (rules !== undefined) {
+		// Short-TTL cache (workspace-scoped, no params) so the home's Rules panel skips the read on re-nav.
+		const rulesCache = createTtlViewCache<Awaited<ReturnType<typeof fetchRulesView>>>(DIAG_TTL_MS);
 		// Served at `/rules` under the diagnostics group (full `/api/diagnostics/rules`) so the
 		// canonical `/api/rules` resource path is left to the PRD-022 product-data data-access API.
 		rules.get("/rules", async (c) => {
 			const scope = resolveScope(c);
 			if (scope === null) return c.json(NO_ORG_BODY, 400);
-			return c.json(await fetchRulesView(storage, scope));
+			return c.json(await rulesCache(scopeCacheKey(scope), () => fetchRulesView(storage, scope)));
 		});
 	}
 
 	const skills = daemon.group(DASHBOARD_GROUPS.skills);
 	if (skills !== undefined) {
+		// Short-TTL cache so the home's Skill-sync panel skips the storage read + disk inventory walk on re-nav.
+		const skillsCache = createTtlViewCache<Awaited<ReturnType<typeof fetchSkillSyncView>>>(DIAG_TTL_MS);
 		// Served at `/skills` under the diagnostics group (full `/api/diagnostics/skills`) so the
 		// canonical `/api/skills` resource path is left to the PRD-022 product-data data-access API.
 		skills.get("/skills", async (c) => {
 			const scope = resolveScope(c);
 			if (scope === null) return c.json(NO_ORG_BODY, 400);
-			return c.json(await fetchSkillSyncView(storage, scope));
+			return c.json(await skillsCache(scopeCacheKey(scope), () => fetchSkillSyncView(storage, scope)));
 		});
 	}
 
@@ -1189,34 +1229,38 @@ function createInventoryCache(): () => Promise<LocalAssetInventory> {
 	};
 }
 
-/** The TTL for the KPI band cache. Short enough that a freshly-captured turn surfaces on the next
- * load, long enough that re-navigating back to the home skips the four DeepLake aggregate scans. */
-const KPIS_TTL_MS = 10_000;
-/** A defensive cap on distinct cache keys so a long-lived daemon cannot grow the map unboundedly. */
-const KPIS_CACHE_MAX_KEYS = 64;
+/** The TTL for the short-lived diagnostics caches (KPI counts, sessions/rules/skills). Short enough that
+ * a freshly-captured turn surfaces on the next load, long enough that re-navigating the home skips the
+ * DeepLake scans. */
+const DIAG_TTL_MS = 10_000;
+/** The LONGER TTL for the estimated-savings SUM — the heaviest KPI query and a slow-moving figure, so it
+ * is recomputed far less often than the cheaper counts (PRD-049e perf). */
+const SAVINGS_TTL_MS = 60_000;
+/** A defensive cap on distinct cache keys so a long-lived daemon cannot grow a map unboundedly. */
+const CACHE_MAX_KEYS = 64;
 
-/** The KPI-band cache reader: returns a fresh-enough cached view for the `(scope, project)` key, else
- * computes + stores it. Keyed by org/workspace/project so each project view caches independently. */
-type KpisCache = (scope: QueryScope, projectId: string | undefined, compute: () => Promise<KpisView>) => Promise<KpisView>;
+/** A keyed, time-bounded view cache: returns a fresh-enough value for `key`, else computes + stores it. */
+type TtlViewCache<T> = (key: string, compute: () => Promise<T>) => Promise<T>;
+
+/** NUL-join the scope (+ optional extra segments) into a cache key no value can forge a boundary in. */
+function scopeCacheKey(scope: QueryScope, ...extra: (string | undefined)[]): string {
+	return [scope.org, scope.workspace ?? "", ...extra.map((e) => e ?? "")].join("\u0000");
+}
 
 /**
- * Build a per-(scope+project) memoizing reader for the KPI band (mirrors {@link createInventoryCache},
- * keyed). The KPI counts are four full-aggregate DeepLake reads; without this, every remount of the
- * home (the hash router re-mounts on navigation) re-runs all four. Each distinct
- * org/workspace/project view caches independently for {@link KPIS_TTL_MS}; the map is bounded by
- * {@link KPIS_CACHE_MAX_KEYS} (cleared wholesale when exceeded — a coarse but correct backstop for the
- * handful of scopes a local dashboard ever touches). Each `mountDashboardApi` call gets its own cache.
+ * Build a keyed, memoizing view cache (the generalized form of the installed-assets cache). Each distinct
+ * `key` caches independently for `ttlMs`; the map is bounded by {@link CACHE_MAX_KEYS} (cleared wholesale
+ * when exceeded — a coarse but correct backstop for the handful of scopes a local dashboard ever touches).
+ * Each `mountDashboardApi` call gets its own cache instances, so they never outlive a daemon restart.
  */
-function createKpisCache(): KpisCache {
-	const cache = new Map<string, { value: KpisView; at: number }>();
-	return async (scope, projectId, compute) => {
-		// NUL-joined so no org/workspace/project value can forge another key's boundary.
-		const key = [scope.org, scope.workspace ?? "", projectId ?? ""].join("\u0000");
+function createTtlViewCache<T>(ttlMs: number): TtlViewCache<T> {
+	const cache = new Map<string, { value: T; at: number }>();
+	return async (key, compute) => {
 		const now = Date.now();
 		const hit = cache.get(key);
-		if (hit !== undefined && now - hit.at < KPIS_TTL_MS) return hit.value;
+		if (hit !== undefined && now - hit.at < ttlMs) return hit.value;
 		const value = await compute();
-		if (cache.size >= KPIS_CACHE_MAX_KEYS && !cache.has(key)) cache.clear();
+		if (cache.size >= CACHE_MAX_KEYS && !cache.has(key)) cache.clear();
 		cache.set(key, { value, at: now });
 		return value;
 	};
