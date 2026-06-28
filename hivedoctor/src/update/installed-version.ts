@@ -10,8 +10,9 @@
  * answer "0.1.8 is installed" even with the daemon down.
  *
  * It reads `npm ls -g <pkg> --depth=0 --json` through the SAME injected command runner the
- * rungs use ({@link file://../rungs/command-runner.js}: execFile, fixed argv, no shell). On
- * Windows the runner already resolves npm/npm.cmd; there is no platform special-casing here.
+ * rungs use ({@link file://../rungs/command-runner.js}: execFile, fixed argv, no shell). The
+ * runner launches npm cross-platform (node + npm-cli.js, no shell); there is no platform
+ * special-casing here.
  *
  * Fail-soft (design principle 1): any non-zero exit, transport/spawn failure, unparseable
  * JSON, or missing `dependencies[<pkg>].version` key resolves to `null` ("installed unknown"),
