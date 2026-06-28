@@ -19,8 +19,9 @@ describe("dispatch (PRD-064f)", () => {
 
 			expect(code).toBe(EXIT_OK);
 			const text = h.out.text();
-			// The art: the bee figure carries a recognizable fragment.
-			expect(text).toContain("bzz");
+			// The attribution banner carries both wordmarks.
+			expect(text).toContain("LEGION CODE INC.");
+			expect(text).toContain("ACTIVELOOP");
 			expect(text).toContain("HiveDoctor");
 			// The menu: a sampling of commands must be listed.
 			expect(text).toContain("status");
