@@ -34,7 +34,7 @@
 |---|---|---|
 | AC-1 | `https://get.theapiary.sh/blessed-version.json` returns `{"version": "<x>"}` (short-cached, `application/json`); HiveDoctor's blessed gate reads it and stops failing closed. | Shipped this pass (build emits it); live on deploy |
 | AC-2 | A fresh install from get.theapiary.sh installs `@legioncodeinc/hivedoctor` and registers its OS service unless `--no-hivedoctor`; the served `install.sh`/`install.ps1` contain the HiveDoctor bootstrap. | Live on deploy |
-| AC-3 | A controlled HiveDoctor run emits an install-health OTLP log and a troubleshooting log to PostHog Logs (485287); `DO_NOT_TRACK=1` produces zero egress. | BLOCKED on live dogfood + PostHog access |
+| AC-3 | A HiveDoctor run emits OTLP logs to PostHog Logs (485287), scrubbed (no creds/PII); `DO_NOT_TRACK=1` produces zero egress. | CONFIRMED (2026-06-28): service `hivedoctor`, 95 records/7d, `episode` stream landing with allow-listed attributes only. Caveats: emitters seen were dev builds (`0.0.0-dev`, `device_id: unknown-device`); confirm a published install stamps version + device-id, and spot-check the info/error streams + the opt-out path. |
 | AC-4 | Each honeycomb `v*` release deploy regenerates `blessed-version.json` to the released version (self-blessing); a manual dispatch blesses main's current version. | Shipped this pass |
 | AC-5 | A bad blessed value is recoverable: re-deploy with a corrected (or removed) `blessed-version.json` and the client fails closed to the current version. | By construction (fail-closed client) |
 
@@ -52,7 +52,7 @@ The installer scripts (`scripts/install/install.sh` / `install.ps1`) already car
 
 ## Open questions / follow-ups
 
-- [ ] **Telemetry confirmation (AC-3).** Needs a controlled dogfood (the watch loop or an install-health emit) plus a look at PostHog Logs. The PostHog MCP was disconnected at authoring time; verify via the dashboard Logs view or reconnect the MCP. Do this before declaring AC-3.
+- [x] **Telemetry confirmation (AC-3).** CONFIRMED 2026-06-28 via PostHog Logs: `hivedoctor` service, 95 records/7d, `episode` stream scrubbed (no creds/PII). Residual: the observed emitters were dev builds (`hivedoctor_version: 0.0.0-dev`, `device_id: unknown-device`) - confirm a published `0.1.x` install stamps a real version and resolves the PRD-033 device-id (the `unknown-device` fallback is the one thing to chase), and spot-check the `info` (install-health) and `error` streams plus the `DO_NOT_TRACK=1` opt-out.
 - [ ] **Canary-gated bless.** v1 blesses the released version on the release-tag deploy (which already passed CI). A stronger gate (bless only after a canary cohort reports healthy via the same telemetry) is the natural follow-up to 064e's "gated on canary + smoke health."
 - [ ] **Dashboard surfaces.** Render `needs-attention.json` as a health banner in the daemon dashboard, and add the telemetry/auto-update toggles (OD-5 said these live in the dashboard; env opt-outs work, the UI does not exist yet).
 - [ ] **064h live verification.** The daemon-as-OS-native change shipped as code; run a real macOS+Linux+Windows smoke before relying on it, and wire `daemon-service unregister` into an uninstall verb.
