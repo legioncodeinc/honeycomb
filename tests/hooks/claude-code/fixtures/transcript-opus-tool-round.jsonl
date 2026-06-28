@@ -1,0 +1,5 @@
+{"type":"user","message":{"role":"user","content":"first turn, ignore me"}}
+{"type":"assistant","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":99,"output_tokens":99,"cache_read_input_tokens":99,"cache_creation_input_tokens":99}}}
+{"type":"user","message":{"role":"user","content":"refactor the rate table"}}
+{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1200,"output_tokens":40,"cache_read_input_tokens":5000,"cache_creation_input_tokens":64}}}
+{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":300,"output_tokens":110,"cache_read_input_tokens":3000,"cache_creation_input_tokens":0}}}
