@@ -22,8 +22,7 @@
  * gone from the live CLI path.
  */
 
-import { realpathSync } from "node:fs";
-import { basename } from "node:path";
+import { pathToFileURL } from "node:url";
 import { createDispatcher } from "../commands/index.js";
 import { buildRuntimeDeps } from "./runtime.js";
 import { finalizeCliExit } from "./exit.js";
@@ -41,38 +40,28 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
 }
 
 /**
- * Whether this module is being executed as the entry point (the `honeycomb` bin)
- * rather than merely imported. Pure (modulo the `realpathSync` lookup) and exported
- * so the regression test can assert it across every invocation path without a real
- * global install. PRD-001b FR-8 / b-AC-6.
+ * Whether this module is being executed directly as the `honeycomb` bin (the bundled
+ * `bundle/cli.js`), as opposed to imported by a test or another module. Mirrors the
+ * daemon's `isMainEntry` ({@link file://./../daemon/index.ts}): `import.meta.url` is the
+ * realpath'd, always-forward-slash module URL, so `endsWith("/cli.js")` matches the
+ * bundle whether it is reached directly, through the Unix npm bin SYMLINK
+ * (`honeycomb` → `…/bundle/cli.js`), or the Windows npm SHIM (`node C:\…\bundle\cli.js`).
+ * That symlink case is the one the original `process.argv[1].endsWith("cli.js")` guard
+ * missed — it tested the symlink NAME instead of the realpath'd target — so every
+ * command exited 0 in silence (the bug this fixes).
  *
- * Must fire for all three ways the published CLI is reached:
- *   1. directly as the bundle — `node bundle/cli.js`              (ends with `cli.js`)
- *   2. the npm global bin SYMLINK on Unix — `honeycomb` → realpath `…/bundle/cli.js`
- *   3. the npm bin SHIM on Windows — `node C:\…\bundle\cli.js`    (ends with `cli.js`)
- *
- * `node:path` `basename` is host-native (on Windows it splits both `/` and `\`), so the
- * realpath'd bin name resolves correctly on every platform — unlike the original
- * `split("/")`, which left Windows backslash paths unsplit and let every command exit 0
- * in silence (the bug this fixes). The `endsWith("cli.js")` clause additionally covers the
- * Windows shim, whose argv always ends in `cli.js` regardless of separator.
+ * `pathToFileURL(argv1)` (Windows-correct, unlike a `file://${path}` string concat)
+ * additionally covers `--preserve-symlinks-main`, where `import.meta.url` stays the
+ * symlink path rather than the realpath. Exported + pure so the regression test can
+ * assert every invocation path without a real global install. PRD-001b FR-8 / b-AC-6.
  */
 export function isCliEntry(importMetaUrl: string, argv1: string | undefined): boolean {
-	const raw = argv1 ?? "";
-	if (raw === "") return false; // no entry path (embedded host); never claim to be the bin.
-	let real = raw;
+	if (typeof argv1 !== "string" || argv1.length === 0) return false;
 	try {
-		real = realpathSync(raw);
+		return importMetaUrl === pathToFileURL(argv1).href || importMetaUrl.endsWith("/cli.js");
 	} catch {
-		// argv1 not on disk (test harness, deleted symlink): fall back to the raw path.
+		return false;
 	}
-	return (
-		importMetaUrl === `file://${raw}` ||
-		importMetaUrl === `file://${real}` ||
-		raw.endsWith("cli.js") ||
-		basename(real) === "cli.js" ||
-		basename(real) === "honeycomb"
-	);
 }
 
 // Run when invoked directly as the `honeycomb` binary (PRD-001b FR-8 / b-AC-6).
