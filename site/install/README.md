@@ -97,8 +97,9 @@ for the full security policy.
    - **Deployment branches**: Optionally restrict to `main` only (belt-and-suspenders; the workflow's
      branch ancestry check already enforces this, but the UI setting adds a second gate).
    
-   Without this configuration, the workflow will fail with "environment protection rules not met".
-   This is intentional — the installer must never deploy without human review. See `SECURITY.md`.
+   Without required reviewers, the workflow still references the `production` environment, but it
+   will not pause for human approval. This environment must stay protected; the installer must never
+   deploy without human review. See `SECURITY.md`.
 
 2. **Point `theapiary.sh` at Cloudflare** (the zone is currently `pending`). At the registrar,
    set the nameservers to the ones Cloudflare assigned this zone:

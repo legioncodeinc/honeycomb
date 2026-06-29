@@ -36,7 +36,7 @@ Out of scope: vulnerabilities in third-party dependencies (report those upstream
 
 The installer site at `get.theapiary.sh` serves scripts that users pipe directly into `sh` or `iex`. To prevent unauthorized deployments of malicious installer bytes, the deployment workflow (`.github/workflows/deploy-install-site.yaml`) implements defense-in-depth:
 
-1. **Protected environment**: The deploy job requires the `production` environment, which MUST be configured with required reviewers. Repository administrators must configure this at **Settings → Environments → production** with at least one trusted maintainer as a required reviewer. Without this configuration, the workflow will fail.
+1. **Protected environment**: The deploy job requires the `production` environment, which MUST be configured with required reviewers. Repository administrators must configure this at **Settings → Environments → production** with at least one trusted maintainer as a required reviewer. Without required reviewers, the workflow still references `production`, but deployments will not pause for human approval.
 
 2. **Branch ancestry verification**: The workflow verifies that any triggering `v*` tag is reachable from the protected `main` branch. This ensures the tag's commit has passed through main's required PR reviews and CI quality gates (defined in `.github/rulesets/main-protection.json`). Tags pointing to arbitrary commits not on main are rejected before any build or deploy occurs.
 
