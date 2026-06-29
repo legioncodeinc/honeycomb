@@ -5,6 +5,7 @@
 How Honeycomb keeps its DeepLake compute bill flat: the four application-layer cost drivers, the measure-first query meter, and the four env-flagged runtime cuts (adaptive poll backoff, single-lease consolidation, capture write batching + envelope trim, and fan-out/recall amplification caps). Read this if you are diagnosing a compute-cost spike, tuning the idle daemon, or wiring a new daemon work loop that touches DeepLake.
 
 **Related:**
+- [`local-queue-idle-cost-control.md`](local-queue-idle-cost-control.md)
 - [`observability-and-degradation.md`](observability-and-degradation.md)
 - [`../data/deeplake-storage.md`](../data/deeplake-storage.md)
 - [`../ai/pollinating-loop.md`](../ai/pollinating-loop.md)
