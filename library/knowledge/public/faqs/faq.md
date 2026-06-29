@@ -72,6 +72,9 @@ Yes. Sign in on each machine with the same account, and a memory captured on one
 **How do I see what it knows?**
 Open the dashboard (`honeycomb dashboard`). It shows your memories, your connected tools, your shared skills, a map of your codebase, and overall health.
 
+**What keeps Honeycomb running if it crashes?**
+A tiny built-in watchdog called **HiveDoctor**. The one-command installer sets it up alongside Honeycomb. It quietly checks that the background helper is healthy and, if something breaks, repairs it for you (restart, reinstall, and so on) so you usually never notice. If it cannot fix the problem on its own, it shows a local status page and, unless you opt out, sends home a scrubbed report so the makers can help proactively. That report never includes your credentials, tokens, or code, and you can turn it off (`DO_NOT_TRACK=1`, `HONEYCOMB_TELEMETRY=0`, or the dashboard). Don't want the watchdog at all? Add `--no-hivedoctor` when you install.
+
 **How do I remove it?**
 `honeycomb uninstall` reverses only the changes Honeycomb made to your tools, leaving everything else untouched.
 

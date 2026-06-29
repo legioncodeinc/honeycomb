@@ -110,12 +110,27 @@ export const ToolCallEventSchema = z.object({
  * it ADDITIVELY carries the optional normalized `usage` block alongside `text`.
  * The field is OPTIONAL and round-trips ABSENT when the harness produced no usage,
  * so every pre-060a assistant turn still validates unchanged (a-AC-1 / a-AC-6).
+ *
+ * PRD-060 ROI fix: it ALSO additively carries the optional per-turn `model` id (e.g.
+ * `claude-opus-4-8`), read from the Claude Code transcript so the dashboard prices the
+ * turn at its REAL model's rate instead of the Sonnet default. The field is OPTIONAL and
+ * mirrors the usage-absent discipline: an EMPTY/whitespace model is normalized to ABSENT
+ * (no empty-string persistence), so a model-less turn round-trips with the field absent.
  */
 export const AssistantMessageEventSchema = z.object({
 	kind: z.literal("assistant_message"),
 	text: z.string(),
 	/** PRD-060a: optional per-turn token + cache counts; absent when unavailable. */
 	usage: TurnUsageSchema,
+	/**
+	 * PRD-060 ROI fix: the optional per-turn model id. A blank/whitespace value is treated as
+	 * ABSENT (transformed to `undefined`) so an empty string is never persisted — the column
+	 * stays `''` = "model unknown" rather than carrying a meaningless empty model.
+	 */
+	model: z
+		.string()
+		.optional()
+		.transform((m) => (m !== undefined && m.trim() !== "" ? m.trim() : undefined)),
 });
 
 /** The normalized event: a discriminated union over `kind` (FR-2). */

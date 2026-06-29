@@ -5,6 +5,7 @@
 The unified inference control plane: how the daemon decides which model runs each workload, how it falls back, and the API and CLI surfaces that expose it.
 
 **Related:**
+- [`portkey-gateway.md`](portkey-gateway.md)
 - [`memory-pipeline.md`](memory-pipeline.md)
 - [`pollinating-loop.md`](pollinating-loop.md)
 - [`../integrations/mcp-and-sdk.md`](../integrations/mcp-and-sdk.md)
@@ -98,6 +99,10 @@ honeycomb route explain
 honeycomb route test
 honeycomb route pin    # and unpin
 ```
+
+## The Portkey alternate transport
+
+The router is not the only inference path. An operator can turn on an optional Portkey gateway (PRD-063), and when they do it SUPERSEDES this per-provider router for inference: the model-client factory builds a Portkey-backed client against a synthetic single-target config instead of resolving a per-provider key. The router is not deleted or replaced. Portkey is an alternate transport selected at the factory seam, and the per-provider path remains both the default and (opt-in) the fallback. The full supersession, precedence, fallback, health, and metering story is in [`portkey-gateway.md`](portkey-gateway.md); the privacy-tier trade-off it implies is in [`../security/portkey-privacy-tier.md`](../security/portkey-privacy-tier.md).
 
 ## Telemetry and safety
 

@@ -215,13 +215,22 @@ export interface NormalizedTurnUsage {
  * event object. ABSENT/empty usage is OMITTED entirely (never zero-filled) so a
  * turn with no usage round-trips with the field absent (a-AC-1 / a-AC-6) and the
  * downstream columns stay NULL = "token data absent" rather than a silent 0.
+ *
+ * PRD-060 ROI fix: `model` is the optional per-turn model id (e.g. `claude-opus-4-8`),
+ * read from the Claude Code transcript alongside `usage`. It rides on the SAME canonical
+ * event so the daemon persists it onto the row and the dashboard prices the turn at its
+ * real model's rate (an Opus turn at the Opus row, not the Sonnet default). ABSENT/empty
+ * `model` is OMITTED entirely — never an empty string — so a model-less turn round-trips
+ * with the field absent and the downstream column stays `''` = "model unknown".
  */
-export function assistantMessageData(text: string, usage?: NormalizedTurnUsage): unknown {
+export function assistantMessageData(text: string, usage?: NormalizedTurnUsage, model?: string): unknown {
 	const normalized = usage !== undefined ? compactUsage(usage) : undefined;
+	const trimmedModel = typeof model === "string" ? model.trim() : "";
 	return {
 		kind: "assistant_message",
 		text,
 		...(normalized !== undefined ? { usage: normalized } : {}),
+		...(trimmedModel !== "" ? { model: trimmedModel } : {}),
 	};
 }
 

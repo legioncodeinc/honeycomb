@@ -21,7 +21,7 @@
 
 import React from "react";
 
-import type { WireClient } from "./wire.js";
+import type { HealthReasonsWire, WireClient } from "./wire.js";
 
 /**
  * The props the router outlet passes every routed page (037c). A page reads the SHARED `wire`
@@ -42,6 +42,12 @@ export interface PageProps {
 	 * page reads it to drive the graph/card pollinate pulse. Defaults `false` for a page that ignores it.
 	 */
 	readonly pollinating?: boolean;
+	/**
+	 * The latest `/health` subsystem reasons, owned by the SHELL's single liveness poll and passed DOWN
+	 * (so a page never polls `/health` a second time — the home's per-subsystem strip reads THIS). `null`
+	 * before the first probe resolves or when the mode-gated public body omits reasons. Defaults `null`.
+	 */
+	readonly healthReasons?: HealthReasonsWire | null;
 }
 
 /** The maximum readable content width — preserves the old `.wrap` 1180px cap (D-8). */
@@ -104,10 +110,26 @@ export function PageFrame({ title, eyebrow, right, children }: PageFrameProps): 
  * late-resolving async `fn` from updating an unmounted tree. `fn` is held in a ref so a page can
  * pass an inline closure without re-subscribing the interval every render (only `ms` re-arms it).
  *
+ * ── Background pause (perf) ──────────────────────────────────────────────────
+ *   A dashboard left open in a BACKGROUND tab must not keep hitting the daemon/DeepLake. So a tick
+ *   NO-OPs while `document.visibilityState === "hidden"`; the interval keeps its cadence but does no
+ *   work until the tab is foregrounded again. A `visibilitychange` → visible fires an IMMEDIATE tick
+ *   so returning to the tab refreshes at once instead of waiting up to `ms`. This is the single seam
+ *   every page's poll inherits the pause from.
+ *
  * @example
  *   // A Logs page that polls /api/logs every 2.5s and stops on unmount:
  *   usePoll(async () => setLines(await wire.logs(8)), 2500);
  */
+/**
+ * Whether the tab is currently backgrounded (the single visibility predicate). A backgrounded
+ * dashboard should not keep hitting the daemon/DeepLake, so {@link usePoll} and the pages' own raw
+ * poll loops skip their fetch while this is true. SSR/non-DOM safe (returns `false` with no `document`).
+ */
+export function isTabHidden(): boolean {
+	return typeof document !== "undefined" && document.visibilityState === "hidden";
+}
+
 export function usePoll(fn: () => void | Promise<void>, ms: number): void {
 	const fnRef = React.useRef(fn);
 	// Keep the latest `fn` without re-arming the interval (only `ms` re-arms it).
@@ -118,14 +140,20 @@ export function usePoll(fn: () => void | Promise<void>, ms: number): void {
 	React.useEffect(() => {
 		let alive = true;
 		const tick = async (): Promise<void> => {
-			if (!alive) return;
+			if (!alive || isTabHidden()) return;
 			await fnRef.current();
 		};
 		void tick();
 		const id = setInterval(() => void tick(), ms);
+		// Refresh immediately on re-foreground (the skipped ticks left the view as stale as `ms` ago).
+		const onVisible = (): void => {
+			if (!isTabHidden()) void tick();
+		};
+		if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisible);
 		return () => {
 			alive = false;
 			clearInterval(id);
+			if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisible);
 		};
 	}, [ms]);
 }

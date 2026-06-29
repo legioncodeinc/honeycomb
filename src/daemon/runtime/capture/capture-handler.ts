@@ -442,6 +442,11 @@ class CaptureRouteHandler {
 			// canonical harness token the shim stamps (`claude-code` for the reference
 			// shim), so every Claude-Code-captured row carries `source_tool='claude-code'`.
 			["source_tool", val.str(meta.agent)],
+			// PRD-060 ROI fix: the per-turn model id (e.g. `claude-opus-4-8`) read from the
+			// transcript, so the dashboard prices the turn at its real model's rate. An absent
+			// model writes `''` ("model unknown" — the column default); a present model writes the
+			// id via the typed `val.str` SQL guard. Carried on the SAME append-only INSERT.
+			["model", val.str(modelFor(event))],
 			["creation_date", val.str(nowIso)],
 			["last_update_date", val.str(nowIso)],
 		];
@@ -631,6 +636,18 @@ function usageColumns(event: CaptureEvent): ReadonlyArray<readonly [string, numb
 	if (u.cacheRead !== undefined) cols.push(["cache_read_input_tokens", u.cacheRead]);
 	if (u.cacheCreation !== undefined) cols.push(["cache_creation_input_tokens", u.cacheCreation]);
 	return cols;
+}
+
+/**
+ * The per-turn `model` id an event contributes to its `sessions` row (PRD-060 ROI fix). ONLY an
+ * `assistant_message` that carried a (zod-validated, non-empty) `model` contributes the id; every
+ * other event — and an assistant turn whose model is unknown — contributes `''` (the column default
+ * = "model unknown"). The zod boundary already trimmed/omitted a blank model, so a present value
+ * here is a real model id. The dashboard's `resolveRate` reads this to price the turn at its real
+ * model's rate (an Opus turn at the Opus row, not the Sonnet default).
+ */
+function modelFor(event: CaptureEvent): string {
+	return event.kind === "assistant_message" && event.model !== undefined ? event.model : "";
 }
 
 /**

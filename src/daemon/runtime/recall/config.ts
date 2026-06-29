@@ -84,6 +84,33 @@ export const DEFAULT_RERANKER = "none" as const;
 /** Reranker timeout in ms; on timeout the original order is kept (D-4 / d-AC-2 / b-AC-2). */
 export const DEFAULT_RERANKER_TIMEOUT_MS = 300;
 /**
+ * The PROVIDER-reranker timeout in ms (PRD-063c / c-AC-3). The local `embedding-cosine` rerank is a
+ * single in-process DeepLake batch-fetch + cosine, so {@link DEFAULT_RERANKER_TIMEOUT_MS} = 300ms is
+ * a tight, correct budget. The `cohere` strategy instead makes an OUTBOUND HTTP round-trip to the
+ * Portkey gateway on EVERY recall, which needs more headroom, so it carries its OWN, larger budget.
+ * `1000ms` is the documented default (the conscious latency/cost trade-off of an external reranker —
+ * a slow gateway adds AT MOST this to a recall, then FAILS SOFT to the RRF order, never a hang); it
+ * is env-overridable (`HONEYCOMB_RECALL_RERANKER_PROVIDER_TIMEOUT_MS`) + clamped, and is tuned by the
+ * recall-quality eval (c-OQ-2) against a real Portkey+Cohere round-trip. The local-cosine path keeps
+ * the 300ms budget unchanged (c-AC-4: byte-identical when the strategy is not `cohere`).
+ */
+export const DEFAULT_RERANKER_PROVIDER_TIMEOUT_MS = 1000;
+/**
+ * The Cohere rerank `model` id sent to Portkey's `POST /v1/rerank` when the strategy is `cohere`
+ * (PRD-063c / c-D-1). The operator ULTIMATELY configures the rerank model inside Portkey (the
+ * gateway may route/override it), but Honeycomb still sends a concrete, named default so the wire
+ * shape is honest and a fake-fetch test can assert it; it is env-overridable
+ * (`HONEYCOMB_RECALL_RERANKER_COHERE_MODEL`).
+ *
+ * `rerank-v3.5` is the current stable GA Cohere rerank model id. CONFIRM vs the live Cohere/Portkey
+ * docs at build: Cohere also publishes a `rerank-v4.0` family (e.g. `rerank-v4.0-pro`); when the
+ * operator wants v4 they set the env override (or configure it in Portkey). The request/response
+ * shape (`{ model, query, documents, top_n }` → `{ results: [{ index, relevance_score }] }`) is
+ * identical across the v3.5 / v4.0 ids, so the default choice is a tuning/cost decision, not a
+ * wire-compat one.
+ */
+export const DEFAULT_RERANKER_COHERE_MODEL = "rerank-v3.5";
+/**
  * The rerank WINDOW N (PRD-047b): the count of fused top-N candidates the reranker
  * re-scores. A tuned knob — large enough to recover the magnitude RRF discarded
  * across a realistic recall window, small enough that the one guarded embedding
@@ -191,8 +218,17 @@ export const DEFAULT_REHEARSAL_WINDOW_MS = 7 * 24 * 60 * 60 * 1_000;
 /** Minimum calibrated score for injection (D-6 / e-AC-1); per-agent tunable. */
 export const DEFAULT_MIN_INJECTION_SCORE = 0.6;
 
-/** The reranker strategies the gate/shaper recognize (D-4). */
-export const RERANKER_STRATEGIES = Object.freeze(["embedding-cosine", "llm", "none"] as const);
+/**
+ * The reranker strategies the gate/shaper recognize (D-4 + PRD-063c).
+ *   - `embedding-cosine` — the LOCAL in-process cosine rerank (PRD-047b), fully wired + tested.
+ *   - `llm`              — a measured follow-up token (not built; falls through to RRF until it lands).
+ *   - `cohere`           — the FIRST provider reranker (PRD-063c): Cohere via the Portkey gateway. It
+ *                          activates ONLY when `portkey.enabled` AND the strategy is `cohere`; any
+ *                          failure (timeout, HTTP error, unreachable, malformed, missing key) FAILS
+ *                          SOFT to the RRF order (c-AC-3).
+ *   - `none`             — the RRF-only escape hatch (the {@link DEFAULT_RERANKER}).
+ */
+export const RERANKER_STRATEGIES = Object.freeze(["embedding-cosine", "llm", "cohere", "none"] as const);
 /** A reranker strategy token. */
 export type RerankerStrategy = (typeof RERANKER_STRATEGIES)[number];
 
@@ -277,12 +313,26 @@ export const TraversalConfigSchema = z.object({
 
 /** D-4 reranker config, grouped so the shaping phase reads one object. */
 export const RerankerConfigSchema = z.object({
-	/** The reranker strategy (D-4). */
+	/** The reranker strategy (D-4 + PRD-063c). */
 	strategy: z.enum(RERANKER_STRATEGIES).default(DEFAULT_RERANKER),
-	/** Reranker timeout in ms; on timeout keep the original order (d-AC-2 / b-AC-2). */
+	/** Reranker timeout in ms; on timeout keep the original order (d-AC-2 / b-AC-2). LOCAL-cosine budget. */
 	timeoutMs: ClampedInt(DEFAULT_RERANKER_TIMEOUT_MS, 1).default(DEFAULT_RERANKER_TIMEOUT_MS),
+	/**
+	 * The PROVIDER-rerank timeout in ms (PRD-063c / c-AC-3): the budget for the `cohere` outbound
+	 * Portkey round-trip, larger than the local-cosine {@link timeoutMs} because it crosses the
+	 * network. A `cohere` call that exceeds it FAILS SOFT to the RRF order. Defaults to
+	 * {@link DEFAULT_RERANKER_PROVIDER_TIMEOUT_MS} (1000ms); the local-cosine path never reads it.
+	 */
+	providerTimeoutMs: ClampedInt(DEFAULT_RERANKER_PROVIDER_TIMEOUT_MS, 1).default(DEFAULT_RERANKER_PROVIDER_TIMEOUT_MS),
 	/** Rerank window N: how many fused top-N candidates to re-score (PRD-047b). */
 	window: ClampedInt(DEFAULT_RERANKER_WINDOW, 1).default(DEFAULT_RERANKER_WINDOW),
+	/**
+	 * The Cohere rerank `model` id sent to Portkey when the strategy is `cohere` (PRD-063c / c-D-1).
+	 * Defaults to {@link DEFAULT_RERANKER_COHERE_MODEL}; the operator may override it (or configure
+	 * the model inside Portkey). A non-string env value falls back to the default. Only the `cohere`
+	 * strategy reads it.
+	 */
+	cohereModel: z.string().min(1).catch(DEFAULT_RERANKER_COHERE_MODEL).default(DEFAULT_RERANKER_COHERE_MODEL),
 });
 
 /** PRD-047c dedup config, grouped so the recall adapter reads one object. */
@@ -448,7 +498,9 @@ export interface RawRecallConfig {
 	readonly reranker?: {
 		readonly strategy?: unknown;
 		readonly timeoutMs?: unknown;
+		readonly providerTimeoutMs?: unknown;
 		readonly window?: unknown;
+		readonly cohereModel?: unknown;
 	};
 	readonly dampening?: {
 		readonly gravity?: unknown;
@@ -501,7 +553,9 @@ export function envRecallConfigProvider(env: NodeJS.ProcessEnv = process.env): R
 				reranker: {
 					strategy: env.HONEYCOMB_RECALL_RERANKER,
 					timeoutMs: env.HONEYCOMB_RECALL_RERANKER_TIMEOUT_MS,
+					providerTimeoutMs: env.HONEYCOMB_RECALL_RERANKER_PROVIDER_TIMEOUT_MS,
 					window: env.HONEYCOMB_RECALL_RERANKER_WINDOW,
+					cohereModel: env.HONEYCOMB_RECALL_RERANKER_COHERE_MODEL,
 				},
 				dampening: {
 					gravity: env.HONEYCOMB_RECALL_DAMPENING_GRAVITY,
