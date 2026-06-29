@@ -104,6 +104,7 @@ class HybridJobQueueServiceImpl implements JobQueueService {
 	async fail(id: string, reason: string): Promise<void> {
 		if (this.localIds.has(id)) {
 			await this.local.fail(id, reason);
+			this.localIds.delete(id);
 			return;
 		}
 		await this.shared.fail(id, reason);

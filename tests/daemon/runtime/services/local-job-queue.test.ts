@@ -18,9 +18,9 @@ import {
 	LOCAL_JOB_RETRYING,
 	LOCAL_QUEUE_DAEMON_DIR_NAME,
 	LOCAL_QUEUE_DB_FILE_NAME,
+	type LocalJobQueueClock,
 	NULL_LOCAL_JOB_QUEUE,
 	openLocalJobQueue,
-	type LocalJobQueueClock,
 } from "../../../../src/daemon/runtime/services/local-job-queue.js";
 
 let dir: string;
@@ -152,7 +152,9 @@ describe("PRD-066a retention and validation", () => {
 
 	it("AC-6: invalid payloads are rejected before entering the queue", async () => {
 		const queue = openLocalJobQueue({ memory: true, clock });
-		await expect(queue.enqueue({ kind: "summary", payload: [] as unknown as Record<string, unknown> })).rejects.toThrow();
+		await expect(
+			queue.enqueue({ kind: "summary", payload: [] as unknown as Record<string, unknown> }),
+		).rejects.toThrow();
 		expect((await queue.counts()).byStatus[LOCAL_JOB_QUEUED]).toBe(0);
 		queue.close();
 	});
@@ -167,6 +169,14 @@ describe("PRD-066a retention and validation", () => {
 		).rejects.toThrow(/secret-like field/i);
 		expect((await queue.counts()).byStatus[LOCAL_JOB_QUEUED]).toBe(0);
 		queue.close();
+	});
+
+	it("rejects a relative baseDir that escapes the current working directory", async () => {
+		const fires: string[] = [];
+		const queue = openLocalJobQueue({ baseDir: "..", onceFailure: (message) => fires.push(message) });
+
+		await expect(queue.enqueue({ kind: "summary", payload: {} })).rejects.toThrow(/unavailable/);
+		expect(fires.join("\n")).toMatch(/baseDir/i);
 	});
 
 	it("the NULL queue fails closed for writes and returns empty diagnostics", async () => {
@@ -184,4 +194,3 @@ describe("PRD-066a retention and validation", () => {
 		});
 	});
 });
-

@@ -1,14 +1,17 @@
 import { describe, expect, it } from "vitest";
-
 import {
-	DEFAULT_LOCAL_JOB_KINDS,
+	createStageWorker,
+	PIPELINE_JOB_KINDS,
+	type StageHandlers,
+} from "../../../../src/daemon/runtime/pipeline/stage-worker.js";
+import {
 	createHybridJobQueueService,
-	resolveHybridJobQueueConfig,
+	DEFAULT_LOCAL_JOB_KINDS,
 	type HybridJobQueueConfig,
+	resolveHybridJobQueueConfig,
 } from "../../../../src/daemon/runtime/services/hybrid-job-queue.js";
 import type { JobInput, JobQueueService, LeasedJob } from "../../../../src/daemon/runtime/services/job-queue.js";
 import { openLocalJobQueue } from "../../../../src/daemon/runtime/services/local-job-queue.js";
-import { PIPELINE_JOB_KINDS, createStageWorker, type StageHandlers } from "../../../../src/daemon/runtime/pipeline/stage-worker.js";
 
 class RecordingQueue implements JobQueueService {
 	readonly enqueued: JobInput[] = [];
@@ -107,6 +110,24 @@ describe("PRD-066b hybrid job queue routing", () => {
 
 		expect(shared.completed).toHaveLength(0);
 		expect(await queue.lease(["memory_controlled_write"])).toBeNull();
+		local.stop();
+	});
+
+	it("AC-3: a failed local job can be retried locally and then completed locally", async () => {
+		const shared = new RecordingQueue();
+		const local = openLocalJobQueue({ memory: true, config: { backoffBaseMs: 0 } });
+		const queue = createHybridJobQueueService({ local, shared, config: config() });
+		const id = await queue.enqueue({ kind: "summary", payload: { sessionId: "s1" } });
+
+		expect((await queue.lease(["summary"]))?.id).toBe(id);
+		await queue.fail(id, "transient");
+		expect(shared.failed).toHaveLength(0);
+
+		expect((await queue.lease(["summary"]))?.id).toBe(id);
+		await queue.complete(id);
+
+		expect(shared.completed).toHaveLength(0);
+		expect(await queue.lease(["summary"])).toBeNull();
 		local.stop();
 	});
 

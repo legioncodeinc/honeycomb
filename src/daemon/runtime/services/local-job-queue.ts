@@ -9,7 +9,7 @@
 
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 
 import { z } from "zod";
 
@@ -19,6 +19,23 @@ import type { DaemonService } from "./types.js";
 export const LOCAL_QUEUE_DAEMON_DIR_NAME = ".daemon" as const;
 export const LOCAL_QUEUE_DB_FILE_NAME = "local-queue.db" as const;
 export const LOCAL_JOB_TABLE = "local_job" as const;
+const LOCAL_JOB_COLUMNS = Object.freeze([
+	"id",
+	"kind",
+	"payload_json",
+	"status",
+	"priority",
+	"attempts",
+	"max_attempts",
+	"run_after",
+	"lease_owner",
+	"leased_until",
+	"created_at",
+	"updated_at",
+	"completed_at",
+	"last_error_class",
+] as const);
+const LOCAL_JOB_SELECT_COLUMNS = LOCAL_JOB_COLUMNS.map((column) => sqlIdent(column)).join(", ");
 
 export const LOCAL_JOB_QUEUED = "queued" as const;
 export const LOCAL_JOB_RETRYING = "retrying" as const;
@@ -111,7 +128,17 @@ const LocalJobInputSchema = z.object({
 	maxAttempts: z.number().int().min(1).max(100).optional(),
 });
 
-const SECRET_KEY_TERMS = new Set(["apikey", "authorization", "bearer", "cookie", "credential", "password", "secret", "session", "token"]);
+const SECRET_KEY_TERMS = new Set([
+	"apikey",
+	"authorization",
+	"bearer",
+	"cookie",
+	"credential",
+	"password",
+	"secret",
+	"session",
+	"token",
+]);
 
 interface SqliteStatement {
 	run(...params: unknown[]): { changes: number | bigint };
@@ -157,7 +184,12 @@ export function openLocalJobQueue(options: OpenLocalJobQueueOptions = {}): Local
 	try {
 		const db = createDatabase(options);
 		migrate(db);
-		return new SqliteLocalJobQueue(db, resolveConfig(options.config), options.clock ?? systemLocalJobQueueClock, onceFailure);
+		return new SqliteLocalJobQueue(
+			db,
+			resolveConfig(options.config),
+			options.clock ?? systemLocalJobQueueClock,
+			onceFailure,
+		);
 	} catch (err: unknown) {
 		const reason = err instanceof Error ? err.message : String(err);
 		onceFailure(`honeycomb: local job queue unavailable (non-fatal): ${reason}`);
@@ -188,10 +220,41 @@ function defaultOnceFailure(): (message: string) => void {
 function createDatabase(options: OpenLocalJobQueueOptions): SqliteDatabase {
 	const sqlite = loadSqlite();
 	if (options.memory === true) return new sqlite.DatabaseSync(":memory:") as SqliteDatabase;
-	const baseDir = options.baseDir ?? process.cwd();
-	const dir = join(baseDir, LOCAL_QUEUE_DAEMON_DIR_NAME);
+	const dir = localQueueDaemonDir(options.baseDir);
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
-	return new sqlite.DatabaseSync(join(dir, LOCAL_QUEUE_DB_FILE_NAME)) as SqliteDatabase;
+	return new sqlite.DatabaseSync(localQueueDatabasePath(dir)) as SqliteDatabase;
+}
+
+function localQueueDatabasePath(daemonDir: string): string {
+	const dbPath = resolve(daemonDir, LOCAL_QUEUE_DB_FILE_NAME);
+	if (relative(daemonDir, dbPath) !== LOCAL_QUEUE_DB_FILE_NAME) {
+		throw new Error("local job queue database path must stay inside the daemon directory");
+	}
+	return dbPath;
+}
+
+function localQueueDaemonDir(baseDir: string | undefined): string {
+	const resolvedBaseDir = resolveLocalQueueBaseDir(baseDir);
+	const daemonDir = resolve(resolvedBaseDir, LOCAL_QUEUE_DAEMON_DIR_NAME);
+	const relativeDaemonDir = relative(resolvedBaseDir, daemonDir);
+	if (relativeDaemonDir.startsWith("..") || relativeDaemonDir === "" || relativeDaemonDir.includes(`..${sep}`)) {
+		throw new Error("local job queue directory must stay inside the configured baseDir");
+	}
+	return daemonDir;
+}
+
+function resolveLocalQueueBaseDir(baseDir: string | undefined): string {
+	const rawBaseDir = baseDir ?? process.cwd();
+	if (rawBaseDir.includes("\0")) throw new Error("local job queue baseDir contains an invalid character");
+	if (baseDir !== undefined && !isAbsolute(baseDir)) {
+		const resolvedRelative = resolve(process.cwd(), baseDir);
+		const relativeToCwd = relative(process.cwd(), resolvedRelative);
+		if (relativeToCwd.startsWith("..") || relativeToCwd === "..") {
+			throw new Error("relative local job queue baseDir must stay inside the current working directory");
+		}
+		return resolvedRelative;
+	}
+	return resolve(rawBaseDir);
 }
 
 function loadSqlite(): SqliteModule {
@@ -409,7 +472,7 @@ class SqliteLocalJobQueue implements LocalJobQueueService {
 		if (kinds !== undefined && kinds.length === 0) return null;
 		const rows = this.db
 			.prepare(
-				`SELECT * FROM ${sqlIdent(LOCAL_JOB_TABLE)} WHERE (` +
+				`SELECT ${LOCAL_JOB_SELECT_COLUMNS} FROM ${sqlIdent(LOCAL_JOB_TABLE)} WHERE (` +
 					`(${sqlIdent("status")} IN (?, ?) AND ${sqlIdent("run_after")} <= ?) OR ` +
 					`(${sqlIdent("status")} = ? AND ${sqlIdent("leased_until")} <= ?))` +
 					kindFilter +
@@ -420,7 +483,11 @@ class SqliteLocalJobQueue implements LocalJobQueueService {
 	}
 
 	private getById(id: string): Record<string, unknown> | null {
-		const rows = this.db.prepare(`SELECT * FROM ${sqlIdent(LOCAL_JOB_TABLE)} WHERE ${sqlIdent("id")} = ? LIMIT 1`).all(id);
+		const rows = this.db
+			.prepare(
+				`SELECT ${LOCAL_JOB_SELECT_COLUMNS} FROM ${sqlIdent(LOCAL_JOB_TABLE)} WHERE ${sqlIdent("id")} = ? LIMIT 1`,
+			)
+			.all(id);
 		return rows[0] ?? null;
 	}
 
