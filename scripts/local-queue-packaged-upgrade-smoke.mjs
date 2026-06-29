@@ -17,7 +17,6 @@ import { fileURLToPath } from "node:url";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
 const packageName = String(pkg.name);
-const packageVersion = String(pkg.version);
 const root = mkdtempSync(join(tmpdir(), "hc-066e-packaged-upgrade-"));
 const packDir = join(root, "pack");
 const appDir = join(root, "app");
@@ -95,13 +94,16 @@ async function npmInit(cwd) {
 
 async function installPreviousFixture() {
 	const explicit = process.env.HONEYCOMB_PREVIOUS_PACKAGE?.trim();
-	const previousSpec = explicit !== undefined && explicit.length > 0 ? explicit : `${packageName}@${packageVersion}`;
 	try {
-		await runNpm(["install", "--no-audit", "--no-fund", "--omit=optional", "--ignore-scripts", previousSpec], {
+		const previous =
+			explicit !== undefined && explicit.length > 0
+				? { spec: explicit, label: "install explicit previous package", receipt: "explicit-package" }
+				: await resolvePublishedPreviousPackage();
+		await runNpm(["install", "--no-audit", "--no-fund", "--omit=optional", "--ignore-scripts", previous.spec], {
 			cwd: appDir,
-			label: explicit === undefined ? "install published previous package" : "install explicit previous package",
+			label: previous.label,
 		});
-		return explicit === undefined ? "published-package" : "explicit-package";
+		return previous.receipt;
 	} catch (err) {
 		const fallbackAllowed = /^(1|true|yes)$/i.test(process.env.HONEYCOMB_ALLOW_PREVIOUS_FIXTURE_FALLBACK ?? "");
 		if (!fallbackAllowed) throw err;
@@ -116,6 +118,22 @@ async function installPreviousFixture() {
 		);
 		return fallback;
 	}
+}
+
+async function resolvePublishedPreviousPackage() {
+	const output = await runNpm(["view", packageName, "version"], {
+		cwd: repoRoot,
+		label: "resolve published previous package",
+	});
+	const version = output.stdout.trim().split(/\r?\n/).at(-1)?.trim();
+	if (version === undefined || version.length === 0) {
+		throw new Error(`npm view ${packageName} version did not return a version`);
+	}
+	return {
+		spec: `${packageName}@${version}`,
+		label: "install published previous package",
+		receipt: `published-package@${version}`,
+	};
 }
 
 function installedCliEntry() {

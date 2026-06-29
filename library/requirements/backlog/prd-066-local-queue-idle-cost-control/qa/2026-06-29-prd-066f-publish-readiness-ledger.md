@@ -11,13 +11,13 @@
 This ledger records the PRD-066f publish-readiness execution pass. The local package path now proves
 zero idle DeepLake poll/reaper reads in short and default-ish installed-package windows, including a
 120-second packaged proof with background workers enabled. Full local CI, package checks, bundle
-smoke, upgrade smoke, packaged live proofs, and the npm publish dry-run are green on this machine.
-The release remains on publish hold until the release owner accepts or runs the deferred long soak and
-waives the remaining non-security Aikido code-quality suggestion.
+smoke, upgrade smoke, packaged live proofs, scratch global-install proof, and the npm publish dry-run
+are green on this machine. The release remains on publish hold until the release owner accepts or runs
+the deferred long soak and waives the remaining non-security Aikido code-quality suggestion.
 
 ## Current Go / No-Go
 
-**Publish hold as of 2026-06-29 14:36 America/New_York.**
+**Publish hold as of 2026-06-29 14:54 America/New_York.**
 
 Reasons:
 
@@ -36,10 +36,11 @@ Reasons:
 | 1 | Focused PRD-066 tests | `npx vitest run tests/daemon/runtime/assemble.test.ts tests/daemon/runtime/services/poll-loop.test.ts tests/daemon/runtime/summaries/job.test.ts tests/daemon/runtime/skillify/worker.test.ts tests/daemon/runtime/services/local-queue-diagnostics.test.ts` | Pass | Passed: 5 files, 70 tests | Validates assembly, diagnostics, poll loop idempotency, summary worker, skillify worker | Pass | Covered again by subsequent full `npm run ci` |
 | 1 | Full test suite | `npm run test` | Pass | Passed after property timeout fix | 380 files, 4194 tests, 12 skipped, about 18.44s | Pass | None observed |
 | 1 | Full CI | `npm run ci` | Pass | Passed after latest fixes | Typecheck, dup, tests, audit; `jscpd` reported 32 clones but exited 0 | Pass | `jscpd` clone groups remain existing/threshold-accepted |
-| 2 | Pack check | `npm run pack:check` | Pass | Passed on 2026-06-29 after final local package run | `pack-check OK - 62 files, no forbidden patterns, all required runtime files present`; prepack build completed at `0.1.10` | Pass | None observed |
+| 2 | Pack check | `npm run pack:check` | Pass | Passed for current `0.1.11` candidate | `pack-check OK - 62 files, no forbidden patterns, all required runtime files present`; prepack build completed at `0.1.11` | Pass | None observed |
 | 2 | Built upgrade smoke | `npm run smoke:local-queue-upgrade` | Pass | Passed | First boot `/health` 503 after 1356ms; second boot `/health` 503 after 2217ms | Pass | Setup 503 is expected no-creds behavior |
-| 2 | Packaged upgrade smoke | `npm run smoke:local-queue-packaged-upgrade` | Pass | Passed after hard-failing previous-package fallback | `@legioncodeinc/honeycomb@0.1.10 -> candidate tarball`; previous fixture boot and candidate boots returned expected 503 | Pass | Uses already-published 0.1.10 as previous fixture |
-| 2 | Packaged live proof, short | `npm run smoke:local-queue-packaged-live-proof` | Idle zero poll reads and active recall reads | Passed repeatedly | Latest default isolated proof: `idle_poll_reads=0 active_poll_reads=0 recall_reads_delta=3 total_reads=3`; diagnostics returned in 0-2ms | Pass | Short smoke only |
+| 2 | Packaged upgrade smoke | `npm run smoke:local-queue-packaged-upgrade` | Pass | Passed for current `0.1.11` candidate | Script resolved previous fixture from npm as `published-package@0.1.10`; candidate tarball was `legioncodeinc-honeycomb-0.1.11.tgz`; previous fixture boot returned `/health` 503, candidate first/second boots returned `/health` 200 | Pass | Uses latest published package as previous fixture |
+| 2 | Scratch global install proof | `npm pack`, `npm install -g --prefix <temp> <0.1.11.tgz>`, `honeycomb --version` | Installed bin runs and reports candidate version | Passed | Installed `legioncodeinc-honeycomb-0.1.11.tgz`; `honeycomb --version` returned `honeycomb v0.1.11` | Pass | Local scratch prefix only; registry install is covered by post-publish smoke after real publish |
+| 2 | Packaged live proof, short | `npm run smoke:local-queue-packaged-live-proof` | Idle zero poll reads and active recall reads | Passed for current `0.1.11` candidate | Run `pkg_live_mqzkrei6_41412`; log `C:\Users\mario\AppData\Local\Temp\hc-066-package-live-pkg_live_mqzkrei6_41412.log`; `idle_poll_reads=0 active_poll_reads=0 recall_reads_delta=3 total_reads=3`; tarball `legioncodeinc-honeycomb-0.1.11.tgz` | Pass | Short smoke only |
 | 2 | Daemon bundle smoke | `npm run smoke:daemon-bundle` | Installed bundle loads without module/runtime import error | Passed | `daemon/index.js loaded without a bundling/module error (survived 3000ms)` | Pass | Smoke verifies load/start surface, not long dogfood behavior |
 | 2 | Package proof hardening | Script instrumentation and isolation | Long runs observable and isolated | Added | Logs phase progress, request timeouts, OS-assigned loopback port, and passes `workspaceDir` into installed daemon | Pass | Long proof deferred after timer fixes |
 | 2 | Default-port installed CLI proof, credentialed | Scratch package install with real credentials and default port 3850 | Start/status/stop pass | Passed earlier | Base `C:\Users\mario\AppData\Local\Temp\hc-066f-default-port-creds-73ce4b152a684447a401679403fced3a`; `/health` 200, diagnostics 200, stop passed | Pass | Default CLI path still reported local queue disabled without explicit env flag |
@@ -94,6 +95,9 @@ Reasons:
   reran the npm publish dry-run successfully.
 - Hardened the HiveDoctor real-npm Windows smoke by pointing `npm ls -g --json` at an empty temporary
   global prefix, preserving the real npm launch proof without walking hosted-runner global state.
+- Made packaged upgrade smoke resolve the latest published npm package as the default previous fixture,
+  so a bumped but unpublished candidate like `0.1.11` tests the real `0.1.10 -> 0.1.11` upgrade path
+  without requiring `HONEYCOMB_PREVIOUS_PACKAGE`.
 
 ## Open Blockers
 
