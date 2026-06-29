@@ -61,7 +61,9 @@ describe("49b-AC-5 (b): the project_id predicate is on every memory recall query
 		const src = read("daemon/storage/vector.ts");
 		expect(src).toContain("extraClause");
 		// The conjunct is appended into the `<#>` WHERE in the same statement as the match.
-		expect(src).toMatch(/ARRAY_LENGTH\(\$\{emb\}, 1\) > 0 \$\{scopeConjuncts\}\$\{extraClause\}/);
+		expect(src).toMatch(
+			/"WHERE ARRAY_LENGTH\(",\s*emb,\s*", 1\) > 0 ",\s*scopeConjuncts,\s*extraClause/,
+		);
 	});
 
 	it("the project-segment predicate is single-sourced + exported (one factored builder, 049c reuse)", () => {

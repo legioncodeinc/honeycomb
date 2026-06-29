@@ -203,4 +203,21 @@ describe("AdaptivePollLoop: AC-2 / AC-3 — adaptive self-reschedule", () => {
 		await flush();
 		expect(timers.delays.length).toBe(before);
 	});
+
+	it("a rejected tick is contained and backs off like an empty lease", async () => {
+		const timers = manualTimers();
+		const loop = createPollLoop({
+			tick: async () => {
+				throw new Error("queue closed during shutdown");
+			},
+			backoff: ENABLED,
+			flatIntervalMs: 1_000,
+			timers,
+		});
+		loop.start();
+		timers.fireNext();
+		await flush();
+		expect(timers.delays.at(-1)).toBe(2_000);
+		loop.stop();
+	});
 });

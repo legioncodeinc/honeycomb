@@ -240,13 +240,13 @@ export function buildVectorSearchSql(args: VectorSearchArgs): string {
 	// The `<#>` operator returns negative inner product in pgvector-style
 	// engines; `(1 + (emb <#> vec)) / 2` maps the cosine range [-1,1] → [0,1].
 	const scoreSql = `((1 + (${emb} <#> ${vecLit})) / 2)`;
-	return (
-		`SELECT ${id} AS id, ${scoreSql} AS score ` +
-		`FROM "${tbl}" ` +
-		`WHERE ARRAY_LENGTH(${emb}, 1) > 0 ${scopeConjuncts}${extraClause} ` +
-		"ORDER BY score DESC " +
-		`LIMIT ${fetchLimit}`
-	);
+	return [
+		"SELECT ", id, " AS id, ", scoreSql, " AS score ",
+		"FROM \"", tbl, "\" ",
+		"WHERE ARRAY_LENGTH(", emb, ", 1) > 0 ", scopeConjuncts, extraClause, " ",
+		"ORDER BY score DESC ",
+		"LIMIT ", String(fetchLimit),
+	].join("");
 }
 
 /**
@@ -275,12 +275,12 @@ export function buildLexicalDegradeSql(args: {
 	const lexLimit = Math.max(0, Math.trunc(args.limit));
 	// ILIKE substring match; the term is escaped as a value and wrapped in `%…%`.
 	const pattern = `'%${sqlStr(args.term)}%'`;
-	return (
-		`SELECT ${id} AS id, 1.0 AS score ` +
-		`FROM "${tbl}" ` +
-		`WHERE ${textCol}::text ILIKE ${pattern} ${scopeConjuncts}${extraClause} ` +
-		`LIMIT ${lexLimit}`
-	);
+	return [
+		"SELECT ", id, " AS id, 1.0 AS score ",
+		"FROM \"", tbl, "\" ",
+		"WHERE ", textCol, "::text ILIKE ", pattern, " ", scopeConjuncts, extraClause, " ",
+		"LIMIT ", String(lexLimit),
+	].join("");
 }
 
 /** Map a result's rows into `ScoredId`s — IDs + normalized scores only (e-AC-4). */

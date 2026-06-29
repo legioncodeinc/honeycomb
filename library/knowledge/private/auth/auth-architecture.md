@@ -1,6 +1,6 @@
 # Auth Architecture
 
-> Category: Auth | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Auth | Version: 1.1 | Date: June 2026 | Status: Active
 
 How Honeycomb authenticates and authorizes: device-flow login bound to an org, the three daemon modes, role-based permissions, API keys for connectors, and rate limiting.
 
@@ -8,6 +8,7 @@ How Honeycomb authenticates and authorizes: device-flow login bound to an org, t
 - [`../multi-tenant/org-workspace-model.md`](../multi-tenant/org-workspace-model.md)
 - [`../security/credential-storage.md`](../security/credential-storage.md)
 - [`../security/scoping-and-visibility.md`](../security/scoping-and-visibility.md)
+- [`../security/request-identity-validation.md`](../security/request-identity-validation.md)
 - [`../security/secrets.md`](../security/secrets.md)
 - [`../architecture/daemon-surface.md`](../architecture/daemon-surface.md)
 - [`../operations/install-and-onboarding.md`](../operations/install-and-onboarding.md)
@@ -56,6 +57,17 @@ Because Honeycomb is team-shared by default but still supports a single-user loc
 
 `hybrid`: localhost requests are trusted based on the TCP peer address from the socket (not the spoofable `Host` header), and remote clients must present a token. If the socket info is unavailable, hybrid fails closed and requires a token.
 
+### Stub tokens are development-only
+
+The daemon mints a lightweight unsigned bearer token, the **stub token**, for single-user development. It carries the `hcmt.v1.` prefix (`STUB_TOKEN_PREFIX`) and encodes its claims (org, role, workspace, agent) with no cryptographic signature. A stub token is convenient for a developer on `local` mode loopback, but because anyone can fabricate one and stamp it with `role: admin`, it must never be trusted on a shared deployment.
+
+The token authenticator is therefore mode-aware. The deployment mode is threaded from `authForMode` through `composeAuthenticator` into `createTokenAuthenticator`, and the authenticate path is fail-closed:
+
+- In `team` and `hybrid` modes, any bearer that starts with the `hcmt.v1.` prefix is **rejected** before its claims are read, returning `null` so the middleware maps it to `401`. The rejection happens at the authenticator layer, ahead of the RBAC policy, so a forged `admin` stub identity is never constructed and never reaches a permission check.
+- Only `local` mode (single-user loopback) accepts stub tokens. When no mode is supplied (tests, development harnesses), stub tokens are accepted for backward compatibility.
+
+The prefix match is exact and case-sensitive, so `HCMT.v1.`, `Hcmt.v1.`, and `hcmt.V1.` do not bypass the gate. Non-stub bearers (real signed tokens) are unaffected and flow to the normal verifier. This closes a pentest finding where a forged unsigned `hcmt.v1` admin token could bypass RBAC on protected daemon routes in `team`/`hybrid` modes. Real production credentials are signed tokens and scrypt-verified API keys; the stub path is strictly a development affordance.
+
 ## Roles and permissions
 
 Four roles map to permission sets, checked on every protected route in `team` and `hybrid` modes.
@@ -92,6 +104,8 @@ flowchart TD
 ## Scope
 
 A token or key carries the org and workspace it is bound to, and optionally a tighter `scope` of `project`, `agent`, or `user`. A request touching a different value for a set field gets `403`. The `admin` role bypasses scope, and scope is ignored in `local` mode. This request-level scope is the outer ring; the inner ring is the storage-level org/workspace isolation plus the within-workspace `agent_id` read policy described in [`../security/scoping-and-visibility.md`](../security/scoping-and-visibility.md).
+
+This check validates the *explicit* hint a caller sets on a request. A separate defense-in-depth layer validates the scope a query will *actually resolve to*, including org/workspace headers and the cwd-derived project, against the authenticated identity, so a forged header or a manipulated cwd cannot steer a handler past the token's own binding. That guard is documented in [`../security/request-identity-validation.md`](../security/request-identity-validation.md).
 
 ## Rate limiting
 

@@ -6,6 +6,7 @@ Maps every trust boundary in the Honeycomb system: where code runs, what it can 
 
 **Related:**
 - [`scoping-and-visibility.md`](scoping-and-visibility.md)
+- [`request-identity-validation.md`](request-identity-validation.md)
 - [`secrets.md`](secrets.md)
 - [`credential-storage.md`](credential-storage.md)
 - [`../multi-tenant/org-workspace-model.md`](../multi-tenant/org-workspace-model.md)

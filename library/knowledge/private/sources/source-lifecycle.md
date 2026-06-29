@@ -1,6 +1,6 @@
 # Source Lifecycle
 
-> Category: Sources | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Sources | Version: 1.1 | Date: June 2026 | Status: Active
 
 How external knowledge bases (Obsidian, Discord, GitHub) and ad-hoc documents are connected, indexed, kept current, and purged, with provenance preserved at every step.
 
@@ -72,6 +72,13 @@ The dashboard and API route `DELETE /api/sources/:sourceId` performs the full pu
 ### Obsidian
 
 Mounts a vault: artifacts per Markdown file, native graph from vault topology, heading-split chunks. Provenance is vault-relative path plus heading and line range. Updates are watch-driven.
+
+The selected vault root is a read-only filesystem boundary, and the provider enforces path containment so a malicious vault config cannot turn an indexing pass into an arbitrary local-file read. Two checks back this:
+
+- **The vault root is canonicalized once.** On the first `connect`/`health`/snapshot/index call, the configured `vaultPath` is resolved with `realpath` (collapsing symlinks and relative segments) and confirmed to be a real directory with `stat`. An external vault outside the Honeycomb workspace is legitimate and accepted; an empty directory is a valid empty vault, but a missing, unreadable, escaping, or non-directory path is a hard validation failure. `connect` and `health` must surface that failure explicitly, and `snapshot`/`index` must return a dedicated validation-error artifact or fail the operation. They must not return an empty successful snapshot for an invalid root, because that is indistinguishable from a real empty vault and can trigger delete-all sync behavior.
+- **Every file read is contained within that canonical root.** Each candidate file path is resolved (again via `realpath`) and must still start with the canonical vault root plus a path separator. A path that escapes the root, whether through a `../` traversal segment in a narrowed scope set or through a symlink whose target lives outside the vault, is not read. It becomes a failure artifact with `readError: "path escapes vault root"` and the indexing loop continues past it.
+
+This is the source-provider instance of the daemon's general fail-closed posture: validation gates every read, and an unsafe configuration degrades to a clear health error instead of silently leaking files. See [`../security/trust-boundaries.md`](../security/trust-boundaries.md) for the broader trust-boundary map.
 
 ### Discord
 

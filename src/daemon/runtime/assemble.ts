@@ -52,6 +52,8 @@ import { type RequestLogger, createRequestLogger } from "./logger.js";
 import { createRuntimePathService } from "./middleware/runtime-path.js";
 import { createFileWatcherService, type HarnessTarget } from "./services/file-watcher.js";
 import { createJobQueueService } from "./services/job-queue.js";
+import { createHybridJobQueueService, resolveHybridJobQueueConfig } from "./services/hybrid-job-queue.js";
+import { openLocalJobQueue } from "./services/local-job-queue.js";
 import { type CreateDaemonOptions, type Daemon, type DaemonServices, createDaemon } from "./server.js";
 
 import { attachHooksHandlers } from "./capture/attach.js";
@@ -1900,9 +1902,18 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	const vault: VaultSettingsReader | undefined =
 		options.vault ?? (options.storage === undefined ? buildVaultStore() : undefined);
 
+	const sharedQueue = createJobQueueService({ storage, scope });
+	const localQueueConfig = resolveHybridJobQueueConfig();
+	const localQueue = localQueueConfig.enabled ? openLocalJobQueue({ baseDir: resolveWorkspaceBaseDir() }) : sharedQueue;
+	const queue = createHybridJobQueueService({
+		shared: sharedQueue,
+		local: localQueue,
+		config: localQueueConfig,
+	});
+
 	// ── a-AC-3: the three REAL services replace the no-op stubs.
 	const services: Partial<DaemonServices> = {
-		queue: createJobQueueService({ storage, scope }),
+		queue,
 		watcher: createFileWatcherService({
 			workspaceDir: options.workspaceDir ?? process.cwd(),
 			harnessTargets: options.harnessTargets ?? [],

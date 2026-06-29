@@ -245,7 +245,7 @@ class PollinatingJobWorkerImpl implements PollinatingJobWorker {
 		const job = parsePollinatingJobPayload(leased.payload);
 		if (job === null) {
 			this.logger?.event("pollinating.worker.bad_payload", { id: leased.id });
-			await this.queue.fail(leased.id, "malformed pollinating job payload");
+			await this.queue.fail(leased.id, "malformed pollinating job payload", leased.attempt);
 			return;
 		}
 
@@ -260,7 +260,7 @@ class PollinatingJobWorkerImpl implements PollinatingJobWorker {
 				clock: { now: () => this.clock.now() },
 			});
 			await runner.runPass(job);
-			await this.queue.complete(leased.id);
+			await this.queue.complete(leased.id, leased.attempt);
 			this.logger?.event("pollinating.worker.completed", {
 				id: leased.id,
 				mode: strategy.mode,
@@ -272,7 +272,7 @@ class PollinatingJobWorkerImpl implements PollinatingJobWorker {
 			// to the queue's fail() (backoff + dead semantics) — no swallowed error.
 			const reason = err instanceof Error ? err.message : String(err);
 			this.logger?.event("pollinating.worker.failed", { id: leased.id, attempt: leased.attempt, reason });
-			await this.queue.fail(leased.id, reason);
+			await this.queue.fail(leased.id, reason, leased.attempt);
 		}
 	}
 

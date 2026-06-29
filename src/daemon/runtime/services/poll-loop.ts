@@ -129,6 +129,9 @@ class AdaptivePollLoop implements PollLoop {
 				if (processed) backoff.onLease();
 				else backoff.onEmptyLease();
 			})
+			.catch(() => {
+				if (backoff !== null) backoff.onEmptyLease();
+			})
 			.finally(() => {
 				this.running = false;
 				// Adaptive path re-arms a fresh one-shot at the new delay; flat path

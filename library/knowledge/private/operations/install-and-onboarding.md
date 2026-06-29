@@ -1,6 +1,6 @@
 # Install and Onboarding
 
-> Category: Operations | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Operations | Version: 1.1 | Date: June 2026 | Status: Active
 
 How a brand-new user goes from a single pasted command to a working, authenticated Honeycomb dashboard, the one-command installer, the one-daemon/two-phase model, the on-page device-flow login, Hivemind migration, and operator adoption telemetry.
 
@@ -47,6 +47,18 @@ The two entrypoints (`scripts/install/install.sh`, `scripts/install/install.ps1`
 The moment a `honeycomb` bin exists, the scripts hand off to the **`honeycomb install` verb** for everything between "package installed" and "browser open on the dashboard." This keeps the daemon-ensure + health-gate + dashboard-open logic in **one** place (`src/commands/install.ts`, TypeScript, unit-tested) rather than duplicated across two shell dialects.
 
 > **The npm global-bin handoff trap:** `npm i -g` does not refresh the *current* shell's `PATH`, so calling a freshly-installed `honeycomb` by bare name in the same run can fail with "command not found." The scripts resolve the absolute bin path (`npm prefix -g`) and invoke the CLI through it.
+
+### Securing the installer-site deployment
+
+The installer endpoint serves bytes that users pipe straight into `sh` or `iex`, so the workflow that publishes it (`.github/workflows/deploy-install-site.yaml`) is itself a supply-chain attack surface. The threat is concrete: any collaborator with **tag-creation** permission could push a `v*` tag pointing at an *arbitrary* commit (not on `main`), and the deploy would ship attacker-controlled installer scripts to `get.theapiary.sh` with no review. The deploy job therefore runs three defense-in-depth controls, all of which must hold before any bytes reach Cloudflare Pages:
+
+1. **Protected `production` environment.** The deploy job declares `environment: { name: production, url: https://get.theapiary.sh }`. The environment is configured at **Settings → Environments → production** with **required reviewers** (trusted maintainers only), so even a tag that passes every other check pauses for an explicit human approval before deploying. This is a one-time operator setup step; without required reviewers the workflow still names the environment but will not pause, so the protection is only real once a reviewer is configured.
+
+2. **Branch-ancestry verification.** A guard step (`Guard — verify tag is on protected main branch`) runs *before* the build and deploy steps, gated on `github.event_name == 'push' && github.ref_type == 'tag'`. With `fetch-depth: 0` it runs `git merge-base --is-ancestor "$TAG_SHA" "$MAIN_SHA"`; if the tag's commit is **not** reachable from `origin/main` the step `exit 1`s and aborts before any installer bytes are read or built. Because a commit only lands on `main` through the required PR reviews and `ci.yaml` quality gate (`.github/rulesets/main-protection.json`), this proves the tagged tree was vetted. Legitimate releases (a tag on `main` or one of its ancestors, including commits brought in by a merge commit) pass; a tag on an unmerged feature branch, a commit ahead of `main`, or any off-`main` commit is rejected. `workflow_dispatch` deploys skip the guard (no tag to verify; manual deploys from `main` are operator-initiated).
+
+3. **Immutable tag semantics.** Tags are immutable refs, so once a `v*` tag is pushed and deployed, re-pushing the same tag name is rejected by Git. A known-good release cannot be silently swapped for malicious bytes under the same name.
+
+These controls are documented for operators in `SECURITY.md` (§ Production deployment protection) and `site/install/README.md`, and are regression-locked by `tests/security/deploy-install-site-guard.test.ts`, which parses the workflow YAML to assert the environment block, the guard step, and the guard-before-build ordering are all present, and unit-tests the `merge-base --is-ancestor` ancestry logic across the exploit and legitimate-release scenarios. Do not weaken the environment protection or the ancestry check without a documented security review. This pipeline is **distinct from** the npm publish pipeline (see [npm Publishing](../infrastructure/npm-publishing.md)), which protects the `@legioncodeinc/honeycomb` tarball with its own OIDC + pack-check + fails-closed guards.
 
 ### The `honeycomb install` verb
 

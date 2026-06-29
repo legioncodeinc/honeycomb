@@ -145,9 +145,7 @@ async function isPresentById(
 	const tbl = sqlIdent(table);
 	const idCol = sqlIdent(C_ID);
 	const agentClause = agentClauseFor(agentId);
-	const sql =
-		`SELECT ${idCol} FROM "${tbl}" ` +
-		`WHERE ${idCol} = ${sLiteral(id)} AND ${agentClause} LIMIT 1`;
+	const sql = ["SELECT ", idCol, " FROM \"", tbl, "\" WHERE ", idCol, " = ", sLiteral(id), " AND ", agentClause, " LIMIT 1"].join("");
 	for (let poll = 0; poll < PROBE_POLLS; poll++) {
 		const res = await storage.query(sql, scope);
 		if (isOk(res) && res.rows.length > 0) return true;
@@ -550,9 +548,7 @@ async function resolveExistingEntityId(
 	const idCol = sqlIdent(C_ID);
 	const nameCol = sqlIdent(C_NAME);
 	const agentClause = agentClauseFor(agentId);
-	const sql =
-		`SELECT ${idCol} FROM "${tbl}" ` +
-		`WHERE ${nameCol} = ${sLiteral(canonicalName)} AND ${agentClause} LIMIT 1`;
+	const sql = ["SELECT ", idCol, " FROM \"", tbl, "\" WHERE ", nameCol, " = ", sLiteral(canonicalName), " AND ", agentClause, " LIMIT 1"].join("");
 	for (let poll = 0; poll < PROBE_POLLS; poll++) {
 		const res = await storage.query(sql, scope);
 		if (isOk(res) && res.rows.length > 0) {

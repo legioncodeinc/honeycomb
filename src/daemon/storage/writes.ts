@@ -97,7 +97,7 @@ function buildColsVals(row: RowValues): { cols: string; vals: string } {
 export function buildInsert(table: string, row: RowValues): string {
 	const tbl = sqlIdent(table);
 	const { cols, vals } = buildColsVals(row);
-	return `INSERT INTO "${tbl}" (${cols}) VALUES (${vals})`;
+	return ["INSERT INTO \"", tbl, "\" (", cols, ") VALUES (", vals, ")"].join("");
 }
 
 /**
@@ -140,7 +140,7 @@ export function buildInsertMany(table: string, rows: readonly RowValues[]): stri
 	// `vals` is wholly routed through `renderValue` (the guarded value path), so the
 	// SQL-safety audit recognizes the binding as pre-escaped, exactly like `buildColsVals`.
 	const vals = rows.map((row) => `(${row.map(([, v]) => renderValue(v)).join(", ")})`).join(", ");
-	return `INSERT INTO "${tbl}" (${cols}) VALUES ${vals}`;
+	return ["INSERT INTO \"", tbl, "\" (", cols, ") VALUES ", vals].join("");
 }
 
 /** Throw when a batched-append row's columns diverge from the shared header (name or order). */
@@ -196,10 +196,11 @@ export async function readLatestVersion(
 	const tbl = sqlIdent(target.table);
 	const key = sqlIdent(keyColumn);
 	const cols = sqlColumnList(selectColumns);
-	const sql =
-		`SELECT ${cols} FROM "${tbl}" ` +
-		`WHERE ${key} = ${sLiteral(keyValue)} ` +
-		"ORDER BY version DESC LIMIT 1";
+	const sql = [
+		"SELECT ", cols, " FROM \"", tbl, "\" ",
+		"WHERE ", key, " = ", sLiteral(keyValue), " ",
+		"ORDER BY version DESC LIMIT 1",
+	].join("");
 	return client.query(sql, scope);
 }
 
@@ -252,10 +253,11 @@ async function readMaxVersion(
 	const tbl = sqlIdent(target.table);
 	const key = sqlIdent(keyColumn);
 	const ver = sqlIdent(versionColumn);
-	const sql =
-		`SELECT ${ver} FROM "${tbl}" ` +
-		`WHERE ${key} = ${sLiteral(keyValue)} ` +
-		`ORDER BY ${ver} DESC LIMIT 1`;
+	const sql = [
+		"SELECT ", ver, " FROM \"", tbl, "\" ",
+		"WHERE ", key, " = ", sLiteral(keyValue), " ",
+		"ORDER BY ", ver, " DESC LIMIT 1",
+	].join("");
 	const res = await withHeal(client, target, scope, () => client.query(sql, scope));
 	if (!isOk(res) || res.rows.length === 0) return 0;
 	const raw = (res.rows[0] as StorageRow)[versionColumn];
@@ -282,7 +284,7 @@ export async function updateOrInsertByKey(
 ): Promise<QueryResult> {
 	const tbl = sqlIdent(target.table);
 	const key = sqlIdent(args.keyColumn);
-	const selectSql = `SELECT ${key} FROM "${tbl}" WHERE ${key} = ${sLiteral(args.keyValue)} LIMIT 1`;
+	const selectSql = ["SELECT ", key, " FROM \"", tbl, "\" WHERE ", key, " = ", sLiteral(args.keyValue), " LIMIT 1"].join("");
 	const existing = await withHeal(client, target, scope, () => client.query(selectSql, scope));
 	if (!isOk(existing)) return existing;
 
@@ -291,7 +293,7 @@ export async function updateOrInsertByKey(
 			.filter(([name]) => name !== args.keyColumn)
 			.map(([name, v]) => `${sqlIdent(name)} = ${renderValue(v)}`)
 			.join(", ");
-		const updateSql = `UPDATE "${tbl}" SET ${setClauses} WHERE ${key} = ${sLiteral(args.keyValue)}`;
+		const updateSql = ["UPDATE \"", tbl, "\" SET ", setClauses, " WHERE ", key, " = ", sLiteral(args.keyValue)].join("");
 		return withHeal(client, target, scope, () => client.query(updateSql, scope));
 	}
 
@@ -332,7 +334,7 @@ export async function selectBeforeInsert(
 ): Promise<SelectBeforeInsertResult> {
 	const tbl = sqlIdent(target.table);
 	const key = sqlIdent(args.keyColumn);
-	const probeSql = `SELECT ${key} FROM "${tbl}" WHERE ${key} = ${sLiteral(args.keyValue)} LIMIT 1`;
+	const probeSql = ["SELECT ", key, " FROM \"", tbl, "\" WHERE ", key, " = ", sLiteral(args.keyValue), " LIMIT 1"].join("");
 
 	const probe = await withHeal(client, target, scope, () => client.query(probeSql, scope));
 	if (isOk(probe) && probe.rows.length > 0) {
@@ -345,7 +347,7 @@ export async function selectBeforeInsert(
 
 	// Re-verify: count the rows for the identity key now. >1 means a race
 	// doubled it — observable, not silent.
-	const verifySql = `SELECT ${key} FROM "${tbl}" WHERE ${key} = ${sLiteral(args.keyValue)}`;
+	const verifySql = ["SELECT ", key, " FROM \"", tbl, "\" WHERE ", key, " = ", sLiteral(args.keyValue)].join("");
 	const verify = await client.query(verifySql, scope);
 	const raceDetected = isOk(verify) && verify.rows.length > 1;
 	return { result: inserted, alreadyPresent: false, raceDetected };
@@ -365,10 +367,11 @@ export function readAppendOrdered(
 ): Promise<QueryResult> {
 	const tbl = sqlIdent(target.table);
 	const cols = sqlColumnList(selectColumns);
-	const sql =
-		`SELECT ${cols} FROM "${tbl}" ` +
-		`WHERE path = ${sLiteral(pathValue)} ` +
-		"ORDER BY creation_date ASC";
+	const sql = [
+		"SELECT ", cols, " FROM \"", tbl, "\" ",
+		"WHERE path = ", sLiteral(pathValue), " ",
+		"ORDER BY creation_date ASC",
+	].join("");
 	return client.query(sql, scope);
 }
 

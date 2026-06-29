@@ -239,7 +239,7 @@ class PipelineStageWorker implements StageWorker {
 		// in the pipeline queue is a wiring bug worth surfacing) — never swallowed.
 		if (!isPipelineJobKind(leased.kind)) {
 			this.logger?.event("stage.unknown_kind", { id: leased.id, kind: leased.kind });
-			await this.queue.fail(leased.id, `unknown pipeline job kind: ${leased.kind}`);
+			await this.queue.fail(leased.id, `unknown pipeline job kind: ${leased.kind}`, leased.attempt);
 			return;
 		}
 
@@ -247,7 +247,7 @@ class PipelineStageWorker implements StageWorker {
 		const handler = this.handlers[leased.kind];
 		try {
 			await handler(job);
-			await this.queue.complete(job.id);
+			await this.queue.complete(job.id, job.attempt);
 			this.logger?.event("stage.completed", { id: job.id, kind: job.kind, attempt: job.attempt });
 		} catch (err: unknown) {
 			// Drop-invalid-keep-partial is the HANDLER's policy for bad model output;
@@ -255,7 +255,7 @@ class PipelineStageWorker implements StageWorker {
 			// queue's fail() (backoff + dead semantics) — no swallowed error.
 			const reason = err instanceof Error ? err.message : String(err);
 			this.logger?.event("stage.failed", { id: job.id, kind: job.kind, attempt: job.attempt, reason });
-			await this.queue.fail(job.id, reason);
+			await this.queue.fail(job.id, reason, job.attempt);
 		}
 	}
 
