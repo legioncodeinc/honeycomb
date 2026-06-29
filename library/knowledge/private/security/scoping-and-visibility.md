@@ -7,6 +7,7 @@ How Honeycomb keeps memory in its lane: storage-level org and workspace isolatio
 **Related:**
 - [`../multi-tenant/org-workspace-model.md`](../multi-tenant/org-workspace-model.md)
 - [`../auth/auth-architecture.md`](../auth/auth-architecture.md)
+- [`request-identity-validation.md`](request-identity-validation.md)
 - [`secrets.md`](secrets.md)
 - [`trust-boundaries.md`](trust-boundaries.md)
 - [`../ai/retrieval.md`](../ai/retrieval.md)

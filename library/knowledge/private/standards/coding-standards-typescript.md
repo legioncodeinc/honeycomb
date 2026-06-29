@@ -48,6 +48,8 @@ Do not duplicate constants, maps, dependency types, config defaults, package lis
 
 Every bug fix needs a test that would fail before the fix. Test behavior, not implementation plumbing, and prefer integration-style tests when a contract crosses modules. Add edge cases for scoping, invalid inputs, timer lifecycle, permission checks, fallback behavior, generated manifests, and publish output. Keep prompt and model-dependent tests opt-in unless the command already defines a model-backed loop. The runner is Vitest (`tests/` mirrors `src/`); run focused suites directly rather than a bare root run, which would also pick up third-party tests under `references/`.
 
+When a test drives a real subprocess that carries its own timeout, the Vitest test-level timeout must be budgeted **above** the subprocess budget, not just the subprocess. A test that passes a 60s budget to a command runner but leaves the Vitest default at 5s will be killed by the framework before the subprocess returns, surfacing as an opaque framework timeout rather than a clean assertion failure, the failure mode behind the HiveDoctor real-npm smoke flake on busy Windows runners. Set the per-test timeout deliberately (a named constant above the subprocess budget) so a genuine subprocess timeout fails as an assertion; keep fast suites that inject a fake runner on the 5s default so they still catch hangs.
+
 ```bash
 npx vitest run tests/daemon/recall.test.ts   # one focused suite (tests/ mirrors src/)
 npm run build                                # tsc + esbuild, respects the build order

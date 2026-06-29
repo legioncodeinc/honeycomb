@@ -8,6 +8,7 @@ How Honeycomb authenticates and authorizes: device-flow login bound to an org, t
 - [`../multi-tenant/org-workspace-model.md`](../multi-tenant/org-workspace-model.md)
 - [`../security/credential-storage.md`](../security/credential-storage.md)
 - [`../security/scoping-and-visibility.md`](../security/scoping-and-visibility.md)
+- [`../security/request-identity-validation.md`](../security/request-identity-validation.md)
 - [`../security/secrets.md`](../security/secrets.md)
 - [`../architecture/daemon-surface.md`](../architecture/daemon-surface.md)
 - [`../operations/install-and-onboarding.md`](../operations/install-and-onboarding.md)
@@ -92,6 +93,8 @@ flowchart TD
 ## Scope
 
 A token or key carries the org and workspace it is bound to, and optionally a tighter `scope` of `project`, `agent`, or `user`. A request touching a different value for a set field gets `403`. The `admin` role bypasses scope, and scope is ignored in `local` mode. This request-level scope is the outer ring; the inner ring is the storage-level org/workspace isolation plus the within-workspace `agent_id` read policy described in [`../security/scoping-and-visibility.md`](../security/scoping-and-visibility.md).
+
+This check validates the *explicit* hint a caller sets on a request. A separate defense-in-depth layer validates the scope a query will *actually resolve to*, including org/workspace headers and the cwd-derived project, against the authenticated identity, so a forged header or a manipulated cwd cannot steer a handler past the token's own binding. That guard is documented in [`../security/request-identity-validation.md`](../security/request-identity-validation.md).
 
 ## Rate limiting
 
