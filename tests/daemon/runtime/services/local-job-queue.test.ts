@@ -66,7 +66,7 @@ describe("PRD-066a local queue persistence", () => {
 		expect(leased?.attempt).toBe(1);
 		expect((await queue.counts()).byStatus[LOCAL_JOB_LEASED]).toBe(1);
 
-		await queue.complete(leased?.id ?? "missing");
+		await queue.complete(leased?.id ?? "missing", leased?.attempt);
 		const counts = await queue.counts();
 		expect(counts.byStatus[LOCAL_JOB_DONE]).toBe(1);
 		expect(counts.byKind.summary).toBe(1);
@@ -93,7 +93,7 @@ describe("PRD-066a local queue leasing", () => {
 		expect(first).not.toBeNull();
 		expect(await queue.lease(["summary"])).toBeNull();
 
-		await queue.complete(first?.id ?? "missing");
+		await queue.complete(first?.id ?? "missing", first?.attempt);
 		expect(await queue.lease(["summary"])).toBeNull();
 		queue.close();
 	});
@@ -112,6 +112,27 @@ describe("PRD-066a local queue leasing", () => {
 		queue.close();
 	});
 
+	it("AC-4: stale lease attempts cannot complete a reclaimed job", async () => {
+		const queue = openLocalJobQueue({ memory: true, clock, config: { owner: "owner-a", leaseMs: 1000 } });
+		await queue.enqueue({ kind: "summary", payload: { sessionId: "s1" } });
+		const first = await queue.lease(["summary"]);
+		expect(first?.attempt).toBe(1);
+
+		advance(1001);
+		expect(await queue.reclaimExpiredLeases()).toBe(1);
+		const second = await queue.lease(["summary"]);
+		expect(second?.attempt).toBe(2);
+
+		await queue.complete(first?.id ?? "missing", first?.attempt);
+		expect((await queue.counts()).byStatus[LOCAL_JOB_LEASED]).toBe(1);
+
+		await queue.complete(second?.id ?? "missing", second?.attempt);
+		const counts = await queue.counts();
+		expect(counts.byStatus[LOCAL_JOB_LEASED]).toBe(0);
+		expect(counts.byStatus[LOCAL_JOB_DONE]).toBe(1);
+		queue.close();
+	});
+
 	it("AC-8: failed jobs retry with backoff and eventually exhaust to failed", async () => {
 		const queue = openLocalJobQueue({
 			memory: true,
@@ -121,17 +142,34 @@ describe("PRD-066a local queue leasing", () => {
 		const id = await queue.enqueue({ kind: "summary", payload: { sessionId: "s1" } });
 		const first = await queue.lease(["summary"]);
 		expect(first?.id).toBe(id);
-		await queue.fail(id, "transient");
+		await queue.fail(id, "transient", first?.attempt);
 		expect((await queue.counts()).byStatus[LOCAL_JOB_RETRYING]).toBe(1);
 		expect(await queue.lease(["summary"])).toBeNull();
 
 		advance(1000);
 		const second = await queue.lease(["summary"]);
 		expect(second?.attempt).toBe(2);
-		await queue.fail(id, "fatal");
+		await queue.fail(id, "fatal", second?.attempt);
 		const counts = await queue.counts();
 		expect(counts.byStatus[LOCAL_JOB_FAILED]).toBe(1);
 		expect(await queue.lease(["summary"])).toBeNull();
+		queue.close();
+	});
+
+	it("normalizes offset runAfter values to UTC before lexical scheduling", async () => {
+		nowMs = Date.parse("2026-06-29T10:30:00.000Z");
+		const queue = openLocalJobQueue({ memory: true, clock });
+		await queue.enqueue({
+			kind: "summary",
+			payload: { sessionId: "s1" },
+			runAfter: "2026-06-29T01:00:00-10:00",
+		});
+
+		expect(await queue.lease(["summary"])).toBeNull();
+
+		advance(30 * 60 * 1000);
+		const leased = await queue.lease(["summary"]);
+		expect(leased?.attempt).toBe(1);
 		queue.close();
 	});
 });
@@ -141,7 +179,7 @@ describe("PRD-066a retention and validation", () => {
 		const queue = openLocalJobQueue({ memory: true, clock, config: { completedRetentionMs: 1000 } });
 		const id = await queue.enqueue({ kind: "summary", payload: { sessionId: "s1" } });
 		await queue.lease(["summary"]);
-		await queue.complete(id);
+		await queue.complete(id, 1);
 		expect((await queue.counts()).byStatus[LOCAL_JOB_DONE]).toBe(1);
 
 		advance(1001);

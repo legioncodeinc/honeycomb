@@ -208,7 +208,9 @@ Enrollment tokens must be constrained:
   API use;
 - revocable before use;
 - audited when created, consumed, expired, rejected, or revoked;
-- safe to paste into a shell history only within its short TTL, but still treated as sensitive.
+- handled as sensitive material even with a short TTL. Headless flows should accept tokens through
+  stdin, a mode-restricted temporary file, or an environment-variable handoff that does not write the
+  token into shell history.
 
 Longer-lived deploy tokens may exist for Terraform, DigitalOcean user data, or CI bootstrap, but
 they should be called deploy tokens, carry a narrower scope, have explicit `max_uses`, and still not

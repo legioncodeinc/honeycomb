@@ -121,10 +121,10 @@ export interface JobQueueService extends DaemonService {
 	 * run, which would otherwise walk a legit `summary`/`skillify` job to dead.
 	 */
 	lease(kinds?: readonly string[]): Promise<LeasedJob | null>;
-	/** Mark a leased job complete (`status='done'`). */
-	complete(id: string): Promise<void>;
-	/** Mark a leased job failed; the queue applies backoff / dead semantics. */
-	fail(id: string, reason: string): Promise<void>;
+	/** Mark a leased job complete (`status='done'`). `leaseAttempt` fences local queues against stale workers. */
+	complete(id: string, leaseAttempt?: number): Promise<void>;
+	/** Mark a leased job failed; the queue applies backoff / dead semantics. `leaseAttempt` fences local queues against stale workers. */
+	fail(id: string, reason: string, leaseAttempt?: number): Promise<void>;
 }
 
 /** A minimal structured-log sink the queue can report lifecycle events to. */

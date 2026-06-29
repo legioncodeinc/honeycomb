@@ -74,8 +74,8 @@ export interface LocalJobQueueService extends DaemonService {
 	readonly persistent: boolean;
 	enqueue(job: LocalJobInput): Promise<string>;
 	lease(kinds?: readonly string[]): Promise<LocalLeasedJob | null>;
-	complete(id: string): Promise<void>;
-	fail(id: string, reason: string): Promise<void>;
+	complete(id: string, leaseAttempt?: number): Promise<void>;
+	fail(id: string, reason: string, leaseAttempt?: number): Promise<void>;
 	reclaimExpiredLeases(): Promise<number>;
 	pruneCompleted(): Promise<number>;
 	counts(): Promise<LocalQueueCounts>;
@@ -345,7 +345,7 @@ class SqliteLocalJobQueue implements LocalJobQueueService {
 				parsed.priority ?? 0,
 				0,
 				parsed.maxAttempts ?? this.config.maxAttempts,
-				parsed.runAfter ?? now,
+				parsed.runAfter === undefined ? now : new Date(parsed.runAfter).toISOString(),
 				now,
 				now,
 			);
@@ -385,21 +385,23 @@ class SqliteLocalJobQueue implements LocalJobQueueService {
 		}
 	}
 
-	async complete(id: string): Promise<void> {
+	async complete(id: string, leaseAttempt?: number): Promise<void> {
 		this.assertOpen();
 		const now = this.nowIso();
+		const leaseFilter =
+			leaseAttempt === undefined ? "" : ` AND ${sqlIdent("status")} = ? AND ${sqlIdent("attempts")} = ?`;
 		this.db
 			.prepare(
 				`UPDATE ${sqlIdent(LOCAL_JOB_TABLE)} SET ` +
 					`${sqlIdent("status")} = ?, ${sqlIdent("lease_owner")} = NULL, ${sqlIdent("leased_until")} = NULL, ` +
-					`${sqlIdent("completed_at")} = ?, ${sqlIdent("updated_at")} = ? WHERE ${sqlIdent("id")} = ?`,
+					`${sqlIdent("completed_at")} = ?, ${sqlIdent("updated_at")} = ? WHERE ${sqlIdent("id")} = ?${leaseFilter}`,
 			)
-			.run(LOCAL_JOB_DONE, now, now, id);
+			.run(LOCAL_JOB_DONE, now, now, id, ...(leaseAttempt === undefined ? [] : [LOCAL_JOB_LEASED, leaseAttempt]));
 	}
 
-	async fail(id: string, reason: string): Promise<void> {
+	async fail(id: string, reason: string, leaseAttempt?: number): Promise<void> {
 		this.assertOpen();
-		const row = this.getById(id);
+		const row = leaseAttempt === undefined ? this.getById(id) : this.getActiveLease(id, leaseAttempt);
 		if (row === null) return;
 		const attempts = numberField(row, "attempts");
 		const maxAttempts = numberField(row, "max_attempts");
@@ -413,9 +415,17 @@ class SqliteLocalJobQueue implements LocalJobQueueService {
 				`UPDATE ${sqlIdent(LOCAL_JOB_TABLE)} SET ` +
 					`${sqlIdent("status")} = ?, ${sqlIdent("run_after")} = ?, ${sqlIdent("lease_owner")} = NULL, ` +
 					`${sqlIdent("leased_until")} = NULL, ${sqlIdent("updated_at")} = ?, ${sqlIdent("last_error_class")} = ? ` +
-					`WHERE ${sqlIdent("id")} = ?`,
+					`WHERE ${sqlIdent("id")} = ?` +
+					(leaseAttempt === undefined ? "" : ` AND ${sqlIdent("status")} = ? AND ${sqlIdent("attempts")} = ?`),
 			)
-			.run(status, runAfter, now, normalizeReason(reason), id);
+			.run(
+				status,
+				runAfter,
+				now,
+				normalizeReason(reason),
+				id,
+				...(leaseAttempt === undefined ? [] : [LOCAL_JOB_LEASED, leaseAttempt]),
+			);
 	}
 
 	async reclaimExpiredLeases(): Promise<number> {
@@ -488,6 +498,17 @@ class SqliteLocalJobQueue implements LocalJobQueueService {
 				`SELECT ${LOCAL_JOB_SELECT_COLUMNS} FROM ${sqlIdent(LOCAL_JOB_TABLE)} WHERE ${sqlIdent("id")} = ? LIMIT 1`,
 			)
 			.all(id);
+		return rows[0] ?? null;
+	}
+
+	private getActiveLease(id: string, leaseAttempt: number | undefined): Record<string, unknown> | null {
+		const attemptFilter = leaseAttempt === undefined ? "" : ` AND ${sqlIdent("attempts")} = ?`;
+		const rows = this.db
+			.prepare(
+				`SELECT ${LOCAL_JOB_SELECT_COLUMNS} FROM ${sqlIdent(LOCAL_JOB_TABLE)} WHERE ${sqlIdent("id")} = ? ` +
+					`AND ${sqlIdent("status")} = ?${attemptFilter} LIMIT 1`,
+			)
+			.all(id, LOCAL_JOB_LEASED, ...(leaseAttempt === undefined ? [] : [leaseAttempt]));
 		return rows[0] ?? null;
 	}
 

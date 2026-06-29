@@ -92,18 +92,18 @@ class HybridJobQueueServiceImpl implements JobQueueService {
 		return this.shared.lease(sharedKinds);
 	}
 
-	async complete(id: string): Promise<void> {
+	async complete(id: string, leaseAttempt?: number): Promise<void> {
 		if (this.localIds.has(id)) {
-			await this.local.complete(id);
+			await this.local.complete(id, leaseAttempt);
 			this.localIds.delete(id);
 			return;
 		}
 		await this.shared.complete(id);
 	}
 
-	async fail(id: string, reason: string): Promise<void> {
+	async fail(id: string, reason: string, leaseAttempt?: number): Promise<void> {
 		if (this.localIds.has(id)) {
-			await this.local.fail(id, reason);
+			await this.local.fail(id, reason, leaseAttempt);
 			this.localIds.delete(id);
 			return;
 		}
@@ -111,6 +111,9 @@ class HybridJobQueueServiceImpl implements JobQueueService {
 	}
 
 	start(): void {
+		// Non-drain mode deliberately leaves the shared reaper stopped: callers can
+		// still lease shared work on demand, but idle local-only daemons do not resume
+		// DeepLake polling just because the adapter exists.
 		if (this.config.drainSharedLocalKinds) this.shared.start();
 		this.local.start();
 	}
@@ -147,7 +150,7 @@ class HybridJobQueueServiceImpl implements JobQueueService {
 		readonly originalKinds: readonly string[] | undefined;
 	}): readonly string[] | undefined | null {
 		if (classified.originalKinds === undefined) {
-			return this.config.drainSharedLocalKinds ? undefined : null;
+			return undefined;
 		}
 		if (this.config.drainSharedLocalKinds) return classified.originalKinds;
 		if (classified.sharedKinds.length === 0) return null;

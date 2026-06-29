@@ -123,8 +123,10 @@ only if you want Honeycomb to act as a credential custodian for convenience and 
 ```
 
 Escrow mode must be separately auditable and visible in the cloud console. Users should be able to
-turn it off, which should delete or disable the backend-readable recovery path after new
-zero-knowledge blobs are created.
+turn it off. The off-switch must not only prevent future escrow-backed blobs; it must also retire
+any existing backend-readable recovery material. Prior escrow-backed blobs must be purged, rewrapped
+into zero-knowledge custody, or otherwise rendered unreadable through the backend-read path before
+the UI can claim escrow is disabled.
 
 ## Consequences
 

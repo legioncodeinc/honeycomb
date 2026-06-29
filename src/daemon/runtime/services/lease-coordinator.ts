@@ -181,7 +181,7 @@ class CombinedLeaseCoordinator implements LeaseCoordinator {
 		const participant = this.routes.get(leased.kind);
 		if (participant === undefined) {
 			this.logger?.event("lease.coordinator.unknown_kind", { id: leased.id, kind: leased.kind });
-			await this.queue.fail(leased.id, `no participant owns leased kind: ${leased.kind}`);
+			await this.queue.fail(leased.id, `no participant owns leased kind: ${leased.kind}`, leased.attempt);
 			return true;
 		}
 

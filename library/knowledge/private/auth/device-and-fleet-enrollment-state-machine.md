@@ -50,10 +50,19 @@ These states should be reflected in API responses and user-facing surfaces.
 | `pending_approval` | New device/server asked to join; no user approval yet. | Approve or deny in cloud console. |
 | `approved_waiting_for_custodian` | User approved, but no custodian has rewrapped the credential key. | Bring a custodian online or re-link DeepLake. |
 | `memory_ready` | Device has local decrypt capability for the current credential blob. | None. |
-| `custodian` | Device can decrypt or rewrap the DeepLake credential data key. | Protect this device. |
+| `custodian` | Trusted device can decrypt or rewrap the DeepLake credential data key for other devices. | Protect this device. |
+| `fleet_custodian` | Fleet orchestrator can decrypt or rewrap the DeepLake credential data key for its managed fleet. | Protect and monitor this orchestrator. |
 | `revoked` | Device is no longer trusted by Honeycomb. | Rotate DeepLake if compromised. |
 | `lost_all_custodians` | No remaining device can rewrap credential keys. | Re-link DeepLake or use recovery material. |
+| `recovery_available` | User-controlled recovery material exists and can unwrap the credential data key. | Use recovery key/passphrase flow. |
 | `escrow_enabled` | Honeycomb-managed recovery is explicitly enabled. | Understand changed trust posture. |
+| `token_issued` | Headless enrollment token exists but has not been consumed. | Use, revoke, or let it expire. |
+| `token_consumed` | Headless enrollment token was exchanged for a device public key. | Continue device approval/access flow. |
+| `token_expired` | Headless enrollment token exceeded its TTL before use. | Generate a new token if needed. |
+| `token_revoked` | Headless enrollment token was explicitly revoked before use. | Generate a new token if needed. |
+| `rotation_recommended` | Device was revoked and may still have local DeepLake material. | Rotate DeepLake credentials. |
+| `rotated` | DeepLake credential has been rotated. | Upload/rewrap the fresh credential blob. |
+| `rewrap_required` | New credential blob exists and eligible custodians need fresh wrapped keys. | Bring custodians online or re-link. |
 
 ## First Trusted Device
 

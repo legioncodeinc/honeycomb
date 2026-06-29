@@ -379,7 +379,7 @@ class SummaryJobWorkerImpl implements SummaryJobWorker {
 		const payload = parseSummaryJobPayload(leased.payload);
 		if (payload === null) {
 			this.logger?.event("summary.worker.bad_payload", { id: leased.id });
-			await this.queue.fail(leased.id, "malformed summary job payload");
+			await this.queue.fail(leased.id, "malformed summary job payload", leased.attempt);
 			return true;
 		}
 
@@ -400,7 +400,7 @@ class SummaryJobWorkerImpl implements SummaryJobWorker {
 			// is durable; the index simply is not refreshed this run.
 			const refreshed = result.ran && result.wrote ? await this.refreshIndexSafe() : false;
 
-			await this.queue.complete(leased.id);
+			await this.queue.complete(leased.id, leased.attempt);
 			this.logger?.event("summary.worker.completed", {
 				id: leased.id,
 				ran: result.ran,
@@ -415,7 +415,7 @@ class SummaryJobWorkerImpl implements SummaryJobWorker {
 			// queue's fail() (backoff + dead semantics) — no swallowed error.
 			const reason = err instanceof Error ? err.message : String(err);
 			this.logger?.event("summary.worker.failed", { id: leased.id, attempt: leased.attempt, reason });
-			await this.queue.fail(leased.id, reason);
+			await this.queue.fail(leased.id, reason, leased.attempt);
 		}
 		return true;
 	}

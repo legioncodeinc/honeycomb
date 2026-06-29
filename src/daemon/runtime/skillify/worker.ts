@@ -332,7 +332,7 @@ class SkillifyJobWorkerImpl implements SkillifyJobWorker {
 			const payload = parseSkillifyJobPayload(job.payload);
 			if (payload === null) {
 				this.logger?.event("skillify.worker.bad_payload", { id: job.id });
-				await this.queue.fail(job.id, "malformed skillify job payload");
+				await this.queue.fail(job.id, "malformed skillify job payload", job.attempt);
 				return true;
 			}
 
@@ -366,7 +366,7 @@ class SkillifyJobWorkerImpl implements SkillifyJobWorker {
 					reason: result.reason,
 					attempt: job.attempt,
 				});
-				await this.queue.complete(job.id);
+				await this.queue.complete(job.id, job.attempt);
 				return true;
 			}
 
@@ -412,7 +412,7 @@ class SkillifyJobWorkerImpl implements SkillifyJobWorker {
 				});
 			}
 
-			await this.queue.complete(job.id);
+			await this.queue.complete(job.id, job.attempt);
 			this.logger?.event("skillify.worker.completed", {
 				id: job.id,
 				decision: outcome.decision,
@@ -430,7 +430,7 @@ class SkillifyJobWorkerImpl implements SkillifyJobWorker {
 				attempt: job.attempt,
 				reason,
 			});
-			await this.queue.fail(job.id, reason);
+			await this.queue.fail(job.id, reason, job.attempt);
 		}
 		return true;
 	}

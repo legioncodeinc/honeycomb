@@ -14,11 +14,11 @@ The local queue is a scheduler boundary only. DeepLake remains the memory, recal
 
 For single-machine users with no active work and an empty local queue, local-only workers should stop issuing DeepLake coordination reads for queue discovery. This does not remove DeepLake costs for real memory writes, recall reads, vector search, schema checks, or any shared/fleet feature that intentionally uses DeepLake.
 
-Live PRD-062 query-meter proof on 2026-06-29 measured the shared DeepLake-backed queue path at 39 poll reads and the local queue path at 0 poll reads / 0 poll writes for the same idle/job-discovery proof. The active local memory pipeline also reached DeepLake storage work with 67 total reads and 15 total writes while remaining at 0 coordination poll reads / 0 poll writes.
+Live PRD-066 query-meter proof on 2026-06-29 measured the shared DeepLake-backed queue path at 39 poll reads and the local queue path at 0 poll reads / 0 poll writes for the same idle/job-discovery proof. The active local memory pipeline also reached DeepLake storage work with 67 total reads and 15 total writes while remaining at 0 coordination poll reads / 0 poll writes.
 
 ## Remaining Verification
 
-Before release, run the remaining PRD-062 and dogfood checks against a funded, credentialed daemon to capture:
+Before release, run the remaining PRD-066 and dogfood checks against a funded, credentialed daemon to capture:
 
 - recall reads categorized separately from coordination polling;
 - daemon restart, sleep/wake, and transient DeepLake outage dogfood scenarios.

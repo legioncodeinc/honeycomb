@@ -35,11 +35,11 @@ class RecordingQueue implements JobQueueService {
 		return job ?? null;
 	}
 
-	async complete(id: string): Promise<void> {
+	async complete(id: string, _leaseAttempt?: number): Promise<void> {
 		this.completed.push(id);
 	}
 
-	async fail(id: string, reason: string): Promise<void> {
+	async fail(id: string, reason: string, _leaseAttempt?: number): Promise<void> {
 		this.failed.push({ id, reason });
 	}
 
@@ -106,7 +106,7 @@ describe("PRD-066b hybrid job queue routing", () => {
 
 		const leased = await queue.lease(["memory_controlled_write"]);
 		expect(leased?.id).toBe(id);
-		await queue.complete(id);
+		await queue.complete(id, leased?.attempt);
 
 		expect(shared.completed).toHaveLength(0);
 		expect(await queue.lease(["memory_controlled_write"])).toBeNull();
@@ -119,12 +119,14 @@ describe("PRD-066b hybrid job queue routing", () => {
 		const queue = createHybridJobQueueService({ local, shared, config: config() });
 		const id = await queue.enqueue({ kind: "summary", payload: { sessionId: "s1" } });
 
-		expect((await queue.lease(["summary"]))?.id).toBe(id);
-		await queue.fail(id, "transient");
+		const first = await queue.lease(["summary"]);
+		expect(first?.id).toBe(id);
+		await queue.fail(id, "transient", first?.attempt);
 		expect(shared.failed).toHaveLength(0);
 
-		expect((await queue.lease(["summary"]))?.id).toBe(id);
-		await queue.complete(id);
+		const second = await queue.lease(["summary"]);
+		expect(second?.id).toBe(id);
+		await queue.complete(id, second?.attempt);
 
 		expect(shared.completed).toHaveLength(0);
 		expect(await queue.lease(["summary"])).toBeNull();
@@ -219,6 +221,19 @@ describe("PRD-066b hybrid job queue routing", () => {
 		expect(id).toBe("shared-1");
 		expect(shared.enqueued.map((job) => job.kind)).toEqual(["future_shared_kind"]);
 		expect(shared.leaseCalls).toEqual([["future_shared_kind"]]);
+		local.stop();
+	});
+
+	it("lease without a kind filter falls back to shared work after local is empty", async () => {
+		const shared = new RecordingQueue();
+		shared.queued.push({ id: "shared-1", kind: "future_shared_kind", payload: {}, attempt: 1 });
+		const local = openLocalJobQueue({ memory: true });
+		const queue = createHybridJobQueueService({ local, shared, config: config({ drainSharedLocalKinds: false }) });
+
+		const leased = await queue.lease();
+
+		expect(leased?.id).toBe("shared-1");
+		expect(shared.leaseCalls).toEqual([undefined]);
 		local.stop();
 	});
 
