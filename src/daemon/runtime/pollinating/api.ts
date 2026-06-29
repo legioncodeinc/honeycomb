@@ -60,6 +60,7 @@
 import type { Context } from "hono";
 
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
+import { getRequestIdentity } from "../middleware/permission.js";
 import type { Daemon } from "../server.js";
 import { resolvePollinatingConfig } from "./config.js";
 import {
@@ -144,12 +145,31 @@ const NO_ORG_BODY = { error: "bad_request", reason: "x-honeycomb-org header is r
  * the request carries no `x-honeycomb-org` header (the PRD-022 local-mode posture: a
  * loopback dashboard button need not stamp the org). Returns `null` ONLY when neither a
  * header org NOR a default org is present (a malformed default) — fail-closed.
+ *
+ * ── Cross-tenant guard (PRD-022 security) ────────────────────────────────────
+ * When a validated Identity is present, the resolved org MUST equal `identity.org`;
+ * a mismatch falls back to the daemon's own `defaultScope`.
+ *
+ * ── Cross-workspace guard (PRD-022 security hardening) ───────────────────────
+ * When a validated Identity is present, the workspace is taken from `identity.workspace`
+ * (the token's own workspace), NOT from the header. The header is trusted ONLY in local
+ * mode (no Identity).
  */
 function resolveTriggerScope(c: Context, defaultScope: QueryScope): QueryScope | null {
 	const org = c.req.header("x-honeycomb-org");
 	if (org !== undefined && org.length > 0) {
-		const workspace = c.req.header("x-honeycomb-workspace");
-		return workspace !== undefined && workspace.length > 0 ? { org, workspace } : { org };
+		// Cross-tenant guard: never honor a header org that disagrees with the validated token org.
+		const identity = getRequestIdentity(c);
+		if (identity === undefined || org === identity.org) {
+			// When an authenticated Identity is present, use its workspace rather than trusting
+			// the header — a forged workspace header must not allow cross-workspace access.
+			if (identity !== undefined) {
+				return { org: identity.org, workspace: identity.workspace };
+			}
+			// Local mode (no Identity): trust the header, with optional workspace.
+			const workspace = c.req.header("x-honeycomb-workspace");
+			return workspace !== undefined && workspace.length > 0 ? { org, workspace } : { org };
+		}
 	}
 	// No header org → the local-mode default tenant (the single loopback tenant the dashboard
 	// host serves). Fail closed if even the default has no org (a malformed assembly).
