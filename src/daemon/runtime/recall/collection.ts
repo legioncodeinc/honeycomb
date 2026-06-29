@@ -192,13 +192,13 @@ export function buildFtsSql(args: {
 	// PRD-049b (49b-AC-2 / 49b-AC-4): the project segment is ANDed BESIDE the agent_id conjunct
 	// in the SAME statement — project is an additional predicate, not a replacement.
 	const projectClause = args.projectClause ?? "";
-	return (
-		`SELECT ${id} AS id, ${scoreSql} AS score ` +
-		`FROM "${tbl}" ` +
-		`WHERE ${contentCol}::text ILIKE ${pattern} AND ${agentCol} = ${agentVal}${projectClause} ` +
-		"ORDER BY score DESC " +
-		`LIMIT ${limit}`
-	);
+	return [
+		"SELECT ", id, " AS id, ", scoreSql, " AS score ",
+		"FROM \"", tbl, "\" ",
+		"WHERE ", contentCol, "::text ILIKE ", pattern, " AND ", agentCol, " = ", agentVal, projectClause, " ",
+		"ORDER BY score DESC ",
+		"LIMIT ", String(limit),
+	].join("");
 }
 
 /** Project a query result's rows into scored ids (IDs + clamped 0..1 scores). */

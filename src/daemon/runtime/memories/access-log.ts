@@ -230,12 +230,16 @@ async function maintainMemoryCache(
 	const reinforceClause =
 		reinforcedAt === null
 			? ""
-			: `, ${lastReinforcedCol} = CASE WHEN ${lastReinforcedCol} IS NULL OR ${lastReinforcedCol} < ${sLiteral(reinforcedAt)} ` +
-				`THEN ${sLiteral(reinforcedAt)} ELSE ${lastReinforcedCol} END`;
+			: [
+				", ", lastReinforcedCol, " = CASE WHEN ", lastReinforcedCol, " IS NULL OR ",
+				lastReinforcedCol, " < ", sLiteral(reinforcedAt), " THEN ", sLiteral(reinforcedAt),
+				" ELSE ", lastReinforcedCol, " END",
+			].join("");
 
-	const updateSql =
-		`UPDATE "${tbl}" SET ${countClause}${reinforceClause} ` +
-		`WHERE ${idCol} = ${sLiteral(memoryId)} AND ${agentScopeClause(agent)} AND ${isDeletedCol} = 0`;
+	const updateSql = [
+		"UPDATE \"", tbl, "\" SET ", countClause, reinforceClause,
+		" WHERE ", idCol, " = ", sLiteral(memoryId), " AND ", agentScopeClause(agent), " AND ", isDeletedCol, " = 0",
+	].join("");
 	await deps.storage.query(updateSql, scope); // fail-soft: a non-ok result is swallowed (cache is best-effort).
 }
 
@@ -331,9 +335,11 @@ export async function compactAccessLog(
 	// Read the full ordered event set (id + at + kind) so we can pick the fold horizon. The order is the
 	// TOTAL ORDER (at, id), NOT `at` alone, so same-timestamp siblings have a stable, deterministic rank
 	// the keep-horizon slice and the watermark cursor agree on (see the (at, id) cursor note below).
-	const readSql =
-		`SELECT ${idCol} AS id, ${atCol} AS at, ${sqlIdent("kind")} AS kind ` +
-		`FROM "${tbl}" WHERE ${memoryIdCol} = ${sLiteral(memoryId)} ORDER BY ${atCol} ASC, ${idCol} ASC`;
+	const readSql = [
+		"SELECT ", idCol, " AS id, ", atCol, " AS at, ", sqlIdent("kind"), " AS kind ",
+		"FROM \"", tbl, "\" WHERE ", memoryIdCol, " = ", sLiteral(memoryId),
+		" ORDER BY ", atCol, " ASC, ", idCol, " ASC",
+	].join("");
 	const read = await deps.storage.query(readSql, scope);
 	if (!isOk(read)) return { folded: 0 }; // fail-soft: retry next run.
 
@@ -474,9 +480,10 @@ async function readCompactionWatermark(memoryId: string, deps: AccessLogDeps, sc
 	const idCol = sqlIdent("id");
 	const watermarkCol = sqlIdent("access_compacted_at");
 	const watermarkIdCol = sqlIdent("access_compacted_id");
-	const readSql =
-		`SELECT ${watermarkCol} AS access_compacted_at, ${watermarkIdCol} AS access_compacted_id FROM "${tbl}" ` +
-		`WHERE ${idCol} = ${sLiteral(memoryId)} LIMIT 1`;
+	const readSql = [
+		"SELECT ", watermarkCol, " AS access_compacted_at, ", watermarkIdCol, " AS access_compacted_id FROM \"", tbl, "\" ",
+		"WHERE ", idCol, " = ", sLiteral(memoryId), " LIMIT 1",
+	].join("");
 	const read = await deps.storage.query(readSql, scope);
 	if (!isOk(read)) return { kind: "error" }; // read FAILED → abort (do NOT degrade to "never compacted").
 	if (read.rows.length === 0) return { kind: "missing" }; // no memories row → abort (delete-without-persist guard).

@@ -182,14 +182,13 @@ export function buildHighestVersionSql(
 	// the highest-version row that won the self-join — a promoted (later) version is judged on its
 	// own promotion columns, never a superseded prior version's.
 	const where = whereClause === "" ? "" : ` WHERE ${whereClause}`;
-	return (
-		`SELECT ${projection}, s.${version} AS version ` +
-		`FROM "${tbl}" s ` +
-		`JOIN (SELECT ${id}, MAX(${version}) AS mv FROM "${tbl}" GROUP BY ${id}) latest ` +
-		`ON s.${id} = latest.${id} AND s.${version} = latest.mv` +
-		`${where} ` +
-		`LIMIT 1000`
-	);
+	return [
+		"SELECT ", projection, ", s.", version, " AS version ",
+		"FROM \"", tbl, "\" s ",
+		"JOIN (SELECT ", id, ", MAX(", version, ") AS mv FROM \"", tbl, "\" GROUP BY ", id, ") latest ",
+		"ON s.", id, " = latest.", id, " AND s.", version, " = latest.mv",
+		where, " LIMIT 1000",
+	].join("");
 }
 
 /** Run a SELECT through the storage seam, returning rows or `[]` on any non-ok result (fail-soft). */

@@ -262,7 +262,7 @@ async function selectByIdentity(
 
 	const tbl = sqlIdent(target.table);
 	const shaCol = sqlIdent("snapshot_sha256");
-	const sql = `SELECT ${shaCol} FROM "${tbl}" WHERE ${identityWhere(identity)} LIMIT 1`;
+	const sql = ["SELECT ", shaCol, " FROM \"", tbl, "\" WHERE ", identityWhere(identity), " LIMIT 1"].join("");
 
 	const polls = ctx.verifyPolls ?? PUSH_VERIFY_POLLS;
 	for (let poll = 0; poll < polls; poll++) {
@@ -283,7 +283,7 @@ async function selectByIdentity(
 async function countIdentityRows(ctx: PushPullContext, target: HealTarget, identity: SnapshotIdentity): Promise<number> {
 	const tbl = sqlIdent(target.table);
 	const shaCol = sqlIdent("snapshot_sha256");
-	const sql = `SELECT ${shaCol} FROM "${tbl}" WHERE ${identityWhere(identity)}`;
+	const sql = ["SELECT ", shaCol, " FROM \"", tbl, "\" WHERE ", identityWhere(identity)].join("");
 
 	// This runs only AFTER a successful INSERT, so the table exists; a bare read
 	// (never healing) is correct and keeps the re-verify off the create path.
@@ -534,9 +534,10 @@ async function selectFreshestForHead(
 	const shaCol = sqlIdent("snapshot_sha256");
 	const jsonbCol = sqlIdent("snapshot_jsonb");
 	const tsCol = sqlIdent("created_at");
-	const sql =
-		`SELECT ${shaCol}, ${jsonbCol}, ${tsCol} FROM "${tbl}" ` +
-		`WHERE ${pullWhere(identity)} ORDER BY ${tsCol} DESC LIMIT 1`;
+	const sql = [
+		"SELECT ", shaCol, ", ", jsonbCol, ", ", tsCol, " FROM \"", tbl, "\" ",
+		"WHERE ", pullWhere(identity), " ORDER BY ", tsCol, " DESC LIMIT 1",
+	].join("");
 
 	const polls = ctx.verifyPolls ?? PUSH_VERIFY_POLLS;
 	let best: { snapshotJsonb: unknown; claimedSha256: string; createdAt: string } | null = null;

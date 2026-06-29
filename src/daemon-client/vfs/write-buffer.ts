@@ -452,7 +452,7 @@ export function kpiKey(goalId: string, kpiId: string): string {
 export function buildMemoryProbeSql(path: string): string {
 	const tbl = sqlIdent("memory");
 	const pathCol = sqlIdent("path");
-	return `SELECT ${pathCol} FROM "${tbl}" WHERE ${pathCol} = ${sLiteral(path)} LIMIT 1`;
+	return ["SELECT ", pathCol, " FROM \"", tbl, "\" WHERE ", pathCol, " = ", sLiteral(path), " LIMIT 1"].join("");
 }
 
 /**
@@ -463,7 +463,7 @@ export function buildMemoryProbeSql(path: string): string {
 export function buildMemoryInsertSql(path: string, body: string, vectorLiteral: string): string {
 	const tbl = sqlIdent("memory");
 	const cols = [sqlIdent("path"), sqlIdent("summary"), sqlIdent("summary_embedding")].join(", ");
-	return `INSERT INTO "${tbl}" (${cols}) VALUES (${sLiteral(path)}, ${eLiteral(body)}, ${vectorLiteral})`;
+	return ["INSERT INTO \"", tbl, "\" (", cols, ") VALUES (", sLiteral(path), ", ", eLiteral(body), ", ", vectorLiteral, ")"].join("");
 }
 
 /** Build the `memory` UPDATE-in-place (FR-5) for an existing path — rewrites summary + vector. */
@@ -472,10 +472,7 @@ export function buildMemoryUpdateSql(path: string, body: string, vectorLiteral: 
 	const summary = sqlIdent("summary");
 	const vector = sqlIdent("summary_embedding");
 	const pathCol = sqlIdent("path");
-	return (
-		`UPDATE "${tbl}" SET ${summary} = ${eLiteral(body)}, ${vector} = ${vectorLiteral} ` +
-		`WHERE ${pathCol} = ${sLiteral(path)}`
-	);
+	return ["UPDATE \"", tbl, "\" SET ", summary, " = ", eLiteral(body), ", ", vector, " = ", vectorLiteral, " WHERE ", pathCol, " = ", sLiteral(path)].join("");
 }
 
 /**
@@ -487,7 +484,10 @@ export function buildMemoryAppendSql(path: string, tail: string): string {
 	const tbl = sqlIdent("memory");
 	const summary = sqlIdent("summary");
 	const pathCol = sqlIdent("path");
-	return `UPDATE "${tbl}" SET ${summary} = ${summary} || ${eLiteral(tail)} WHERE ${pathCol} = ${sLiteral(path)}`;
+	return [
+		"UPDATE \"", tbl, "\" SET ", summary, " = ", summary, " || ", eLiteral(tail),
+		" WHERE ", pathCol, " = ", sLiteral(path),
+	].join("");
 }
 
 /** Probe the `goals` table for an existing row keyed by goal_id (the SELECT of SELECT-before-INSERT). */
@@ -495,7 +495,7 @@ export function buildGoalProbeSql(goalId: string): string {
 	const tbl = sqlIdent("goals");
 	const keyCol = sqlIdent("key");
 	const statusCol = sqlIdent("status");
-	return `SELECT ${keyCol}, ${statusCol} FROM "${tbl}" WHERE ${keyCol} = ${sLiteral(goalId)} LIMIT 1`;
+	return ["SELECT ", keyCol, ", ", statusCol, " FROM \"", tbl, "\" WHERE ", keyCol, " = ", sLiteral(goalId), " LIMIT 1"].join("");
 }
 
 /** Build the `goals` INSERT for a new goal_id (the INSERT of SELECT-before-INSERT). */
@@ -507,56 +507,55 @@ export function buildGoalInsertSql(goalId: string, owner: string, status: string
 		sqlIdent("status"),
 		sqlIdent("agent_id"),
 	].join(", ");
-	return (
-		`INSERT INTO "${tbl}" (${cols}) ` +
-		`VALUES (${sLiteral(goalId)}, ${eLiteral(body)}, ${sLiteral(status)}, ${sLiteral(owner)})`
-	);
+	return ["INSERT INTO \"", tbl, "\" (", cols, ") VALUES (", sLiteral(goalId), ", ", eLiteral(body), ", ", sLiteral(status), ", ", sLiteral(owner), ")"].join("");
 }
 
 /** Build the `goals` UPDATE for an existing goal_id (the UPDATE of SELECT-before-INSERT). */
 export function buildGoalUpdateSql(goalId: string, owner: string, status: string, body: string): string {
 	const tbl = sqlIdent("goals");
 	const keyCol = sqlIdent("key");
-	return (
-		`UPDATE "${tbl}" SET ${sqlIdent("value")} = ${eLiteral(body)}, ` +
-		`${sqlIdent("status")} = ${sLiteral(status)}, ${sqlIdent("agent_id")} = ${sLiteral(owner)} ` +
-		`WHERE ${keyCol} = ${sLiteral(goalId)}`
-	);
+	return [
+		"UPDATE \"", tbl, "\" SET ",
+		sqlIdent("value"), " = ", eLiteral(body), ", ",
+		sqlIdent("status"), " = ", sLiteral(status), ", ",
+		sqlIdent("agent_id"), " = ", sLiteral(owner),
+		" WHERE ", keyCol, " = ", sLiteral(goalId),
+	].join("");
 }
 
 /** Build the `goals` soft-close UPDATE (b-AC-2): flip status → `closed`, preserve the row. */
 export function buildGoalCloseSql(goalId: string): string {
 	const tbl = sqlIdent("goals");
 	const keyCol = sqlIdent("key");
-	return `UPDATE "${tbl}" SET ${sqlIdent("status")} = ${sLiteral("closed")} WHERE ${keyCol} = ${sLiteral(goalId)}`;
+	return ["UPDATE \"", tbl, "\" SET ", sqlIdent("status"), " = ", sLiteral("closed"), " WHERE ", keyCol, " = ", sLiteral(goalId)].join("");
 }
 
 /** Build the `goals` status-transition UPDATE (b-AC-3): set the new status for the goal_id. */
 export function buildGoalStatusTransitionSql(goalId: string, status: string): string {
 	const tbl = sqlIdent("goals");
 	const keyCol = sqlIdent("key");
-	return `UPDATE "${tbl}" SET ${sqlIdent("status")} = ${sLiteral(status)} WHERE ${keyCol} = ${sLiteral(goalId)}`;
+	return ["UPDATE \"", tbl, "\" SET ", sqlIdent("status"), " = ", sLiteral(status), " WHERE ", keyCol, " = ", sLiteral(goalId)].join("");
 }
 
 /** Probe the `kpis` table for an existing row keyed by the composite `goal_id/kpi_id`. */
 export function buildKpiProbeSql(key: string): string {
 	const tbl = sqlIdent("kpis");
 	const keyCol = sqlIdent("key");
-	return `SELECT ${keyCol} FROM "${tbl}" WHERE ${keyCol} = ${sLiteral(key)} LIMIT 1`;
+	return ["SELECT ", keyCol, " FROM \"", tbl, "\" WHERE ", keyCol, " = ", sLiteral(key), " LIMIT 1"].join("");
 }
 
 /** Build the `kpis` INSERT for a new composite key. */
 export function buildKpiInsertSql(key: string, body: string): string {
 	const tbl = sqlIdent("kpis");
 	const cols = [sqlIdent("key"), sqlIdent("value")].join(", ");
-	return `INSERT INTO "${tbl}" (${cols}) VALUES (${sLiteral(key)}, ${eLiteral(body)})`;
+	return ["INSERT INTO \"", tbl, "\" (", cols, ") VALUES (", sLiteral(key), ", ", eLiteral(body), ")"].join("");
 }
 
 /** Build the `kpis` UPDATE for an existing composite key. */
 export function buildKpiUpdateSql(key: string, body: string): string {
 	const tbl = sqlIdent("kpis");
 	const keyCol = sqlIdent("key");
-	return `UPDATE "${tbl}" SET ${sqlIdent("value")} = ${eLiteral(body)} WHERE ${keyCol} = ${sLiteral(key)}`;
+	return ["UPDATE \"", tbl, "\" SET ", sqlIdent("value"), " = ", eLiteral(body), " WHERE ", keyCol, " = ", sLiteral(key)].join("");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
