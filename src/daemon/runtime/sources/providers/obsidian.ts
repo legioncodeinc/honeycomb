@@ -36,7 +36,7 @@
 
 import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { z } from "zod";
@@ -242,6 +242,64 @@ export function isMalformed(content: string): boolean {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Path validation — prevent directory traversal attacks (security boundary).
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The selected Obsidian vault root is the filesystem boundary for reads.
+ * Vaults may live outside the Honeycomb workspace; each resolved file path must
+ * remain inside this root before it can be read.
+ */
+/**
+ * Validate and canonicalize a vault path to prevent directory traversal attacks.
+ * A vault path is allowed when it resolves to a real directory. External vaults
+ * are supported; containment is enforced for every file read inside that vault.
+ *
+ * Returns the canonicalized absolute path when valid, or `null` when the path is
+ * invalid (empty, missing, or not a directory). Never throws
+ * — a validation failure routes to `null` so the caller can reject the config with
+ * a clear error rather than crashing the provider.
+ *
+ * The validation steps (all MUST pass):
+ *   1. The candidate path is non-empty.
+ *   2. The path resolves to a real directory (via `realpath` + `stat`).
+ *
+ * Examples:
+ *   - `/Users/me/Notes/obsidian` -> valid external vault
+ *   - `./vaults/obsidian` -> valid relative vault when it exists
+ *   - `/etc/passwd` -> invalid file, not a directory
+ */
+async function validateVaultPath(candidatePath: string): Promise<string | null> {
+	if (candidatePath.length === 0) return null;
+
+	try {
+		// Canonicalize the candidate path: resolve symlinks + relative segments.
+		// `realpath` throws if the path does not exist, which we catch below.
+		const canonicalPath = await realpath(candidatePath);
+
+		// Confirm the canonicalized path is a directory (not a file).
+		const st = await stat(canonicalPath);
+		if (!st.isDirectory()) return null;
+
+		// All checks passed: the path is a valid vault directory.
+		return canonicalPath;
+	} catch {
+		// Any error (ENOENT, EACCES, ENOTDIR, etc.) → invalid path.
+		return null;
+	}
+}
+
+async function resolveVaultFilePath(vaultRoot: string, relPath: string): Promise<string | null> {
+	const candidate = path.resolve(vaultRoot, relPath.split("/").join(path.sep));
+	try {
+		const canonical = await realpath(candidate);
+		return canonical.startsWith(vaultRoot + path.sep) ? canonical : null;
+	} catch {
+		return candidate.startsWith(vaultRoot + path.sep) ? candidate : null;
+	}
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Vault walking — read-only fs. Never writes the vault.
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -294,7 +352,16 @@ async function collectMarkdownPaths(vaultRoot: string): Promise<string[]> {
 
 /** Read one vault file read-only, classifying malformed / read-error. */
 async function readVaultFile(vaultRoot: string, relPath: string): Promise<VaultFile> {
-	const abs = path.join(vaultRoot, relPath.split("/").join(path.sep));
+	const abs = await resolveVaultFilePath(vaultRoot, relPath);
+	if (abs === null) {
+		return {
+			relPath,
+			content: "",
+			fingerprint: "",
+			malformed: true,
+			readError: "path escapes vault root",
+		};
+	}
 	try {
 		const content = await readFile(abs, "utf8");
 		return { relPath, content, fingerprint: fingerprint(content), malformed: isMalformed(content) };
@@ -473,6 +540,13 @@ export interface ObsidianProvider extends SourceProvider {
  * and yields one artifact per `.md` (note + heading-split chunks + topology/wiki-link
  * graph), a failure artifact per malformed file. With NO config it is the honest
  * unconfigured stub (Wave-1 seam conformance). It NEVER writes the vault or DeepLake.
+ *
+ * SECURITY: The `config.vaultPath` is canonicalized to a readable directory, and
+ * each file read is contained within that canonical vault root. External Obsidian
+ * vaults are valid; traversal and symlink escapes from the selected vault are not.
+ * Validation is performed asynchronously in `connect()` / `health()` / read paths,
+ * so an invalid path returns a clear `unreachable` health status rather than
+ * crashing the provider at construction.
  */
 export function createObsidianProvider(config?: ObsidianConfig): ObsidianProvider {
 	// ── Unconfigured stub (Wave-1 seam conformance) ────────────────────────────
@@ -501,15 +575,29 @@ export function createObsidianProvider(config?: ObsidianConfig): ObsidianProvide
 	}
 
 	const vaultRoot = config.vaultPath;
+	let validatedVaultRoot: string | null = null;
 
-	/** Confirm the vault root is a readable directory (initial health). */
+	/** Confirm the vault root is a readable directory (initial health + security gate). */
 	async function probe(): Promise<ProviderHealth> {
-		try {
-			const st = await stat(vaultRoot);
-			if (!st.isDirectory()) {
-				return { state: "unreachable", detail: `vault path is not a directory: ${vaultRoot}` };
+		// SECURITY: Canonicalize the vault path once; every file read is contained within it.
+		// This is the ONLY place the validation runs — it gates every read operation.
+		if (validatedVaultRoot === null) {
+			validatedVaultRoot = await validateVaultPath(vaultRoot);
+			if (validatedVaultRoot === null) {
+				return {
+					state: "unreachable",
+					detail: `vault path is invalid or unreadable: ${vaultRoot}`,
+				};
 			}
-			return { state: "connected", detail: `vault: ${vaultRoot}` };
+		}
+
+		// The path is validated and canonicalized — confirm it is still a readable directory.
+		try {
+			const st = await stat(validatedVaultRoot);
+			if (!st.isDirectory()) {
+				return { state: "unreachable", detail: `vault path is not a directory: ${validatedVaultRoot}` };
+			}
+			return { state: "connected", detail: `vault: ${validatedVaultRoot}` };
 		} catch (err) {
 			const reason = err instanceof Error ? err.message : String(err);
 			return { state: "unreachable", detail: `vault unreadable: ${reason}` };
@@ -520,18 +608,38 @@ export function createObsidianProvider(config?: ObsidianConfig): ObsidianProvide
 		kind: "obsidian",
 
 		async connect(_cfg: SourceConfig): Promise<ProviderHealth> {
-			// Read-only: connecting only confirms the vault is a readable directory.
+			// Read-only: connecting validates the vault path and confirms it is a readable directory.
 			return probe();
 		},
 
 		async *index(scope: IndexScope): AsyncIterable<SourceArtifact> {
+			// SECURITY: The vault path MUST be validated before any read operation.
+			if (validatedVaultRoot === null) {
+				const health = await probe();
+				// Re-check the closure variable AFTER the awaited probe() side effect so TS
+				// control-flow narrows `validatedVaultRoot` from `string | null` to `string`.
+				if (health.state !== "connected" || validatedVaultRoot === null) {
+					// The vault path is invalid or unreadable — yield a failure artifact.
+					yield {
+						provenance: provenanceFor(config, ""),
+						kind: "note",
+						title: "vault-validation-failure",
+						content: "",
+						failure: { reason: health.detail ?? "vault path validation failed", detail: { path: vaultRoot } },
+					};
+					return;
+				}
+			}
+			// Bind the validated path to a non-null local so it stays `string` across awaits.
+			const root = validatedVaultRoot;
+
 			// Narrow to `scope.paths` when the watcher hands a change set (FR-6 single-
 			// flight re-index of just the edited files); else walk the whole vault.
-			const all = await collectMarkdownPaths(vaultRoot);
+			const all = await collectMarkdownPaths(root);
 			const narrowed = scope.paths !== undefined ? new Set(scope.paths) : null;
 			const targets = narrowed === null ? all : all.filter((p) => narrowed.has(p));
 			for (const relPath of targets) {
-				const file = await readVaultFile(vaultRoot, relPath);
+				const file = await readVaultFile(root, relPath);
 				// c-AC-6: a malformed/unreadable file becomes a failure artifact; the loop
 				// CONTINUES so every other file still indexes (one bad file never aborts).
 				yield file.malformed ? failureArtifact(config, file) : noteArtifact(config, file);
@@ -547,10 +655,23 @@ export function createObsidianProvider(config?: ObsidianConfig): ObsidianProvide
 		},
 
 		async snapshot(): Promise<VaultSnapshot> {
-			const paths = await collectMarkdownPaths(vaultRoot);
+			// SECURITY: The vault path MUST be validated before any read operation.
+			if (validatedVaultRoot === null) {
+				const health = await probe();
+				// Re-check the closure variable AFTER the awaited probe() side effect so TS
+				// control-flow narrows `validatedVaultRoot` from `string | null` to `string`.
+				if (health.state !== "connected" || validatedVaultRoot === null) {
+					// The vault path is invalid or unreadable — return an empty snapshot.
+					return {};
+				}
+			}
+			// Bind the validated path to a non-null local so it stays `string` across awaits.
+			const root = validatedVaultRoot;
+
+			const paths = await collectMarkdownPaths(root);
 			const snap: Record<string, string> = {};
 			for (const relPath of paths) {
-				const file = await readVaultFile(vaultRoot, relPath);
+				const file = await readVaultFile(root, relPath);
 				snap[relPath] = file.fingerprint;
 			}
 			return snap;
