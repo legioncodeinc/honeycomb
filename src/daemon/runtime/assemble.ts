@@ -266,6 +266,12 @@ export interface AssembleDaemonOptions {
 	 */
 	readonly seams?: SeamFns;
 	/**
+	 * Override the local `projects.json` cache directory used by capture/project
+	 * resolution. Production leaves this unset so the daemon reads `~/.deeplake`;
+	 * live tests point it at a temp dir so first-run project bindings are hermetic.
+	 */
+	readonly projectsDir?: string;
+	/**
 	 * The embed seam wired into the store + capture paths (PRD-025 AC-2). Defaults to the
 	 * REAL `createEmbedAttachment({ storage })` resolved from `resolveEmbedClientOptions`
 	 * (D-1 default-on) — so a fresh daemon stores + captures with a real 768-dim vector when
@@ -759,6 +765,7 @@ export function assembleSeams(
 	seams: SeamFns = defaultSeamFns,
 	vault?: VaultSettingsReader,
 	rerankerDeps?: RerankerMountDeps,
+	projectsDir?: string,
 ): CaptureHandler {
 	// The daemon's configured default tenancy scope (the single LOCAL tenant) is RESOLVED ONCE
 	// at the composition root (`assembleDaemon`) from the SAME credential source the storage
@@ -799,6 +806,7 @@ export function assembleSeams(
 		// reads the local `~/.deeplake/projects.json` cache (NO DeepLake call); once a project is bound
 		// it opens and the 049a inbox fallback for unbound folders resumes (a-AC-4 / a-AC-5).
 		firstRunGate: true,
+		...(projectsDir !== undefined ? { projectsDir } : {}),
 	});
 
 	// 2. The dashboard data API (020b) — the daemon-served view-models. Threads the
@@ -2095,6 +2103,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		options.seams ?? defaultSeamFns,
 		vault,
 		rerankerMountDeps,
+		options.projectsDir,
 	);
 
 	// ── PRD-032d / AC-6: FIRE the Wave-1 `/api/settings` mount ONCE so the CLI/dashboard
