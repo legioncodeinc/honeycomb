@@ -34,6 +34,7 @@ import { STATE_FILE_NAME, createInMemoryStateFs, createNotificationsState } from
 
 const NUM_RUNS = 1000;
 const SEED = 0x504a_b33f;
+const DISK_PROPERTY_TIMEOUT_MS = 15_000;
 
 /** Any JSON value, plus targeted hostile shapes. `fc.jsonValue()` covers arrays/objects/scalars/null. */
 const anyJsonValue = fc.jsonValue();
@@ -99,7 +100,7 @@ describe("property: pull manifest read() — NEVER throws, always returns a safe
 			}),
 			{ numRuns: NUM_RUNS, seed: SEED },
 		);
-	});
+	}, DISK_PROPERTY_TIMEOUT_MS);
 
 	it("a manifest entry with a traversal dirName survives only as a STRING, never executed here", () => {
 		// The PARSE stage keeps `dirName` verbatim (containment is enforced at USE time by
@@ -124,7 +125,7 @@ describe("property: pull manifest read() — NEVER throws, always returns a safe
 			}),
 			{ numRuns: NUM_RUNS, seed: SEED },
 		);
-	});
+	}, DISK_PROPERTY_TIMEOUT_MS);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

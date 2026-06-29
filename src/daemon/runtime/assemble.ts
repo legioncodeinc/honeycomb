@@ -75,7 +75,12 @@ import { mountSetupLogin } from "./dashboard/setup-login.js";
 import { mountSetupStateApi } from "./dashboard/setup-state.js";
 import { mountSetupMigrate } from "./dashboard/setup-migrate.js";
 import { mountPollinateApi } from "./pollinating/api.js";
-import { mountOnboardingApi, mountProjectsSyncApi, mountScopeEnumerationApi, mountScopeSwitchApi } from "./projects/index.js";
+import {
+	mountOnboardingApi,
+	mountProjectsSyncApi,
+	mountScopeEnumerationApi,
+	mountScopeSwitchApi,
+} from "./projects/index.js";
 import { mountCompactApi } from "./maintenance/compact-api.js";
 import { mountStaleRefApi } from "./maintenance/stale-ref-api.js";
 import { mountLogsApi } from "./logs/api.js";
@@ -136,26 +141,28 @@ import { resolvePollinatingConfig } from "./pollinating/config.js";
 import { createPollinatingTrigger } from "./pollinating/trigger.js";
 import { createPollinatingWorker, type PollinatingJobWorker } from "./pollinating/worker.js";
 import { type PollBackoffConfig, resolvePollBackoffConfig } from "./services/poll-backoff.js";
-import { createLeaseCoordinator, type LeaseCoordinator, resolvePollConsolidateConfig } from "./services/lease-coordinator.js";
+import {
+	createLeaseCoordinator,
+	type LeaseCoordinator,
+	resolvePollConsolidateConfig,
+} from "./services/lease-coordinator.js";
 
 // ── The PRD-046a summary-worker mount (the deferred-assembly seam PRD-017 left) ──
 import { createSummaryJobWorker, type SummaryJobWorker } from "./summaries/index.js";
 
 // ── The PRD-045f skillify-worker mount (the deferred-assembly seam PRD-016 left) ──
-import {
-	createSkillifyJobWorker,
-	defaultGateSpec,
-	type SkillifyJobWorker,
-} from "./skillify/worker.js";
+import { createSkillifyJobWorker, defaultGateSpec, type SkillifyJobWorker } from "./skillify/worker.js";
 
 import { createLazyStorageClient } from "../storage/index.js";
-import {
-	type CredentialProvider,
-	defaultCredentialProvider,
-} from "../storage/config.js";
+import { type CredentialProvider, defaultCredentialProvider } from "../storage/config.js";
 import type { QueryScope, StorageClient } from "../storage/client.js";
 import { isOk } from "../storage/result.js";
-import { type EmbedAttachment, type EmbedClient, createEmbedAttachment, resolveEmbedClientOptions } from "./services/embed-client.js";
+import {
+	type EmbedAttachment,
+	type EmbedClient,
+	createEmbedAttachment,
+	resolveEmbedClientOptions,
+} from "./services/embed-client.js";
 import { type EmbedSupervisor, createEmbedSupervisor } from "./services/embed-supervisor.js";
 import { type HealthDetail, type PortkeyHealth, buildHealthDetail } from "./health.js";
 import { mountDiagnosticsHealthApi } from "./diagnostics-health.js";
@@ -264,6 +271,26 @@ export interface AssembleDaemonOptions {
 	readonly installedHarnesses?: ReadonlySet<string>;
 	/** The workspace root the file watcher watches. Defaults to `process.cwd()`. */
 	readonly workspaceDir?: string;
+	/**
+	 * Override the production local-mode codebase-graph auto-build. Production leaves this
+	 * unset so the daemon preserves its current graph freshness behavior; packaged idle
+	 * proofs can set it false to isolate idle-cost regressions from a deliberate repo scan.
+	 */
+	readonly autoBuildGraph?: boolean;
+	/**
+	 * Override startup of daemon-resident background workers. Production leaves this
+	 * unset (true); idle-cost proofs can set it false to isolate core daemon idleness
+	 * from queue consumers while preserving the same packaged daemon/listener path.
+	 */
+	readonly startBackgroundWorkers?: boolean;
+	/** Test/proof override for the summary worker. Production leaves unset (true). */
+	readonly startSummaryWorker?: boolean;
+	/** Test/proof override for the memory-pipeline worker. Production leaves unset (true). */
+	readonly startPipelineWorker?: boolean;
+	/** Test/proof override for the skillify worker. Production leaves unset (true). */
+	readonly startSkillifyWorker?: boolean;
+	/** Test/proof override for the pollinating worker. Production leaves unset (true, still config-gated). */
+	readonly startPollinatingWorker?: boolean;
 	/**
 	 * The four mount/attach seam functions, injectable for testing (a-AC-2). Defaults to
 	 * the REAL seams ({@link defaultSeamFns}). A unit test injects recording fakes to assert
@@ -954,9 +981,7 @@ export function assembleSeams(
 		// The `cohere` strategy only does anything when BOTH the strategy is `cohere` (env) AND the
 		// gateway is ON (the seam's inner transport is wired in `start()`); otherwise RRF / local
 		// cosine, byte-identical to today (c-AC-4). Absent rerankerDeps (a unit mount) → engine default.
-		...(rerankerDeps !== undefined
-			? { reranker: rerankerDeps.reranker, cohereRerank: rerankerDeps.cohereRerank }
-			: {}),
+		...(rerankerDeps !== undefined ? { reranker: rerankerDeps.reranker, cohereRerank: rerankerDeps.cohereRerank } : {}),
 	});
 
 	// 7a-bis. The conflict-resolution endpoint (PRD-058b): `POST /api/memories/conflicts/:id/resolve`
@@ -1077,12 +1102,20 @@ export function assembleSeams(
 
 	if (seams.mountLocalQueueDiagnostics !== undefined) {
 		try {
+			const includePendingSharedLocalJobs =
+				localQueueConfig.drainSharedLocalKinds ||
+				parseLocalQueueDiagnosticsSharedFlag(process.env.HONEYCOMB_LOCAL_QUEUE_DIAGNOSTICS_INCLUDE_SHARED);
 			seams.mountLocalQueueDiagnostics(daemon, {
 				config: localQueueConfig,
 				localQueue,
 				topology: resolveLocalQueueTopology(),
-				pendingSharedLocalJobs: () =>
-					countPendingSharedLocalJobs({ storage, scope: defaultScope, localKinds: localQueueConfig.localKinds }),
+				...(includePendingSharedLocalJobs
+					? {
+							pendingSharedLocalJobs: () =>
+								countPendingSharedLocalJobs({ storage, scope: defaultScope, localKinds: localQueueConfig.localKinds }),
+						}
+					: {}),
+				queryMeter: () => ({ snapshot: storage.meterSnapshot(), logLine: storage.meterLogLine() }),
 			});
 		} catch (err: unknown) {
 			const reason = err instanceof Error ? err.message : String(err);
@@ -1335,6 +1368,12 @@ function isWritableDir(dir: string): boolean {
 	} catch {
 		return false;
 	}
+}
+
+function parseLocalQueueDiagnosticsSharedFlag(raw: string | undefined): boolean {
+	if (raw === undefined) return false;
+	const normalized = raw.trim().toLowerCase();
+	return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
 }
 
 /**
@@ -1724,8 +1763,9 @@ function buildSummaryWorker(
 	scope: QueryScope,
 	queue: DaemonServices["queue"],
 	embed: EmbedAttachment,
+	backoff: PollBackoffConfig,
 ): SummaryJobWorker {
-	return createSummaryJobWorker({ queue, storage, scope, embed: embed.client });
+	return createSummaryJobWorker({ queue, storage, scope, embed: embed.client, backoff });
 }
 
 /**
@@ -1835,8 +1875,22 @@ async function buildPipelineWorker(
 	// optional forward seam is wired to enqueue the next stage's job onto the same queue.
 	const handlers = createPipelineHandlers({
 		extraction: { config, model, onResult: extractionFanOut(queue) },
-		decision: { storage, scope: queryScope, model, config, embed: embed.client, hydrateCandidates: true, onDecisions: decisionFanOut(queue) },
-		controlledWrite: { storage, config, embed: embed.client, onOutcome: controlledWriteFanOut(queue), onConflict: conflictHook },
+		decision: {
+			storage,
+			scope: queryScope,
+			model,
+			config,
+			embed: embed.client,
+			hydrateCandidates: true,
+			onDecisions: decisionFanOut(queue),
+		},
+		controlledWrite: {
+			storage,
+			config,
+			embed: embed.client,
+			onOutcome: controlledWriteFanOut(queue),
+			onConflict: conflictHook,
+		},
 		graphPersist: { storage, scope: queryScope, config },
 		retention: { storage, scope: queryScope, config },
 	});
@@ -1862,12 +1916,14 @@ function buildSkillifyWorker(
 	storage: StorageClient,
 	scope: QueryScope,
 	queue: DaemonServices["queue"],
+	backoff: PollBackoffConfig,
 ): SkillifyJobWorker {
 	return createSkillifyJobWorker({
 		queue,
 		storage,
 		scope,
 		gateSpec: defaultGateSpec(),
+		backoff,
 	});
 }
 
@@ -1948,6 +2004,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 
 	const sharedQueue = createJobQueueService({ storage, scope, config: options.jobQueueConfig });
 	const localQueueConfig = resolveHybridJobQueueConfig();
+	const storageHealthProbeEnabled = !localQueueConfig.enabled || localQueueConfig.drainSharedLocalKinds;
 	const localQueue = openLocalJobQueue({
 		baseDir: resolveWorkspaceBaseDir(),
 		openExistingOnly: !localQueueConfig.enabled,
@@ -2017,7 +2074,11 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// (the hermetic suite) still reports `off`.
 	const embeddingsReason = (): boolean =>
 		options.embeddingsEnabled ??
-		(options.embed !== undefined ? false : embedSupervisor !== undefined ? !embedSupervisor.disabled : resolveEmbedClientOptions().enabled);
+		(options.embed !== undefined
+			? false
+			: embedSupervisor !== undefined
+				? !embedSupervisor.disabled
+				: resolveEmbedClientOptions().enabled);
 
 	// ── PRD-063b (b-AC-7): the Portkey gateway health reason. Mutable + live: it is SET to the
 	// assembly-time status (`off`/`ok`/`unconfigured`, derived from config below — NO probe) once the
@@ -2052,7 +2113,6 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			return inner.rerank(query, documents, topN);
 		},
 	};
-
 
 	const { authenticator, policy } = authForMode(config.mode, storage, scope);
 
@@ -2166,91 +2226,91 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		}
 	}
 
-		// PRD-044a: FIRE the `/api/auth/status` read-model mount ONCE so the Settings page can read
-		// the daemon's REDACTED DeepLake-auth identity. It attaches onto the already-mounted,
-		// protected `/api/auth` group (NO `server.ts` edit -- the group is declared there with no
-		// handlers). The handler is GATED to local mode (OQ-3) + carries NO token by construction
-		// (the body has no `token` field). It resolves credentials via the SAME `loadCredentials`
-		// path the daemon connects through (the real shared `~/.deeplake/credentials.json`), so a
-		// `honeycomb login` reflects here on the page's next poll. FAIL-SOFT: a mount error must
-		// NEVER crash the daemon -- the surface stays unmounted this run, the posture the others use.
-		try {
-			mountAuthStatusApi(daemon);
-		} catch (err: unknown) {
-			const reason = err instanceof Error ? err.message : String(err);
-			process.stderr.write(`honeycomb: auth status API mount failed (non-fatal): ${reason}\n`);
-		}
+	// PRD-044a: FIRE the `/api/auth/status` read-model mount ONCE so the Settings page can read
+	// the daemon's REDACTED DeepLake-auth identity. It attaches onto the already-mounted,
+	// protected `/api/auth` group (NO `server.ts` edit -- the group is declared there with no
+	// handlers). The handler is GATED to local mode (OQ-3) + carries NO token by construction
+	// (the body has no `token` field). It resolves credentials via the SAME `loadCredentials`
+	// path the daemon connects through (the real shared `~/.deeplake/credentials.json`), so a
+	// `honeycomb login` reflects here on the page's next poll. FAIL-SOFT: a mount error must
+	// NEVER crash the daemon -- the surface stays unmounted this run, the posture the others use.
+	try {
+		mountAuthStatusApi(daemon);
+	} catch (err: unknown) {
+		const reason = err instanceof Error ? err.message : String(err);
+		process.stderr.write(`honeycomb: auth status API mount failed (non-fatal): ${reason}\n`);
+	}
 
-		// Dashboard actions: FIRE the `/api/actions` mount ONCE so the Settings page can log out,
-		// toggle embeddings (live + persisted), restart the daemon, and surface uninstall — the named
-		// CLI actions, now performable from the UI. It attaches onto the already-mounted, protected
-		// `/api/actions` group and SELF-GATES to local mode + an origin/CSRF guard inside the handlers.
-		// The embed supervisor + vault store + default scope are threaded so the toggle actuates live
-		// and persists. FAIL-SOFT: a mount error must NEVER crash the daemon — the surface stays
-		// unmounted this run (the page's action buttons degrade), the posture the other mounts use.
-		try {
-			mountActionsApi(daemon, {
-				embed: daemon.services.embed,
-				defaultScope: scope,
-				...(vault instanceof VaultStore ? { store: vault } : {}),
-			});
-		} catch (err: unknown) {
-			const reason = err instanceof Error ? err.message : String(err);
-			process.stderr.write(`honeycomb: actions API mount failed (non-fatal): ${reason}\n`);
-		}
+	// Dashboard actions: FIRE the `/api/actions` mount ONCE so the Settings page can log out,
+	// toggle embeddings (live + persisted), restart the daemon, and surface uninstall — the named
+	// CLI actions, now performable from the UI. It attaches onto the already-mounted, protected
+	// `/api/actions` group and SELF-GATES to local mode + an origin/CSRF guard inside the handlers.
+	// The embed supervisor + vault store + default scope are threaded so the toggle actuates live
+	// and persists. FAIL-SOFT: a mount error must NEVER crash the daemon — the surface stays
+	// unmounted this run (the page's action buttons degrade), the posture the other mounts use.
+	try {
+		mountActionsApi(daemon, {
+			embed: daemon.services.embed,
+			defaultScope: scope,
+			...(vault instanceof VaultStore ? { store: vault } : {}),
+		});
+	} catch (err: unknown) {
+		const reason = err instanceof Error ? err.message : String(err);
+		process.stderr.write(`honeycomb: actions API mount failed (non-fatal): ${reason}\n`);
+	}
 
-		// PRD-049e (49e-AC-1 / 49e-AC-3): FIRE the dashboard SCOPE-SWITCHER enumeration reads ONCE so the
-		// Org→Workspace→Project switcher can hydrate its dropdowns — `GET /api/diagnostics/scope/{orgs,
-		// workspaces,projects}`. They attach onto the already-mounted, protected `/api/diagnostics` group
-		// (NO `server.ts` edit) and SELF-GATE to local mode (a non-local request 404s), mirroring the auth
-		// status read. `listOrgs`/`listWorkspaces` are privilege-scoped by the token; the Org change re-mints
-		// the org-bound token (PRD-011) BEFORE enumerating the new org. The projects read syncs + reads the
-		// 049a `projects.json` cache under the daemon's `defaultScope`. The bearer token rides ONLY in the
-		// auth client's Authorization header — NEVER in a body (D-4). FAIL-SOFT: a mount error never crashes
-		// the daemon (the switcher falls back to empty lists), and each handler returns an empty list on any
-		// auth-API failure rather than a 500.
-		try {
-			mountScopeEnumerationApi(daemon, { storage, defaultScope: scope });
-		} catch (err: unknown) {
-			const reason = err instanceof Error ? err.message : String(err);
-			process.stderr.write(`honeycomb: scope enumeration API mount failed (non-fatal): ${reason}\n`);
-		}
+	// PRD-049e (49e-AC-1 / 49e-AC-3): FIRE the dashboard SCOPE-SWITCHER enumeration reads ONCE so the
+	// Org→Workspace→Project switcher can hydrate its dropdowns — `GET /api/diagnostics/scope/{orgs,
+	// workspaces,projects}`. They attach onto the already-mounted, protected `/api/diagnostics` group
+	// (NO `server.ts` edit) and SELF-GATE to local mode (a non-local request 404s), mirroring the auth
+	// status read. `listOrgs`/`listWorkspaces` are privilege-scoped by the token; the Org change re-mints
+	// the org-bound token (PRD-011) BEFORE enumerating the new org. The projects read syncs + reads the
+	// 049a `projects.json` cache under the daemon's `defaultScope`. The bearer token rides ONLY in the
+	// auth client's Authorization header — NEVER in a body (D-4). FAIL-SOFT: a mount error never crashes
+	// the daemon (the switcher falls back to empty lists), and each handler returns an empty list on any
+	// auth-API failure rather than a 500.
+	try {
+		mountScopeEnumerationApi(daemon, { storage, defaultScope: scope });
+	} catch (err: unknown) {
+		const reason = err instanceof Error ? err.message : String(err);
+		process.stderr.write(`honeycomb: scope enumeration API mount failed (non-fatal): ${reason}\n`);
+	}
 
-			// PRD-059b/059c/059d: FIRE the dashboard ONBOARDING folder-browse + bind routes ONCE so the
-			// folder-picker (`GET /api/diagnostics/fs/browse`), the "Add a project" bind (`POST
-			// /api/diagnostics/projects/bind`), the cross-device import (`POST .../projects/bind-existing`),
-			// and the unbind (`POST .../projects/unbind`) are LIVE. They attach onto the already-mounted,
-			// protected `/api/diagnostics` group (NO `server.ts` edit) and SELF-GATE to local mode (a
-			// non-local request 404s), mirroring the scope-enumeration reads. The bind routes write the SAME
-			// thin-client `~/.deeplake/projects.json` the CLI `honeycomb project bind` writes (single-sourced
-			// store); the browse route refuses to traverse outside the home dir. NO DeepLake call, NO secret
-			// in any body. FAIL-SOFT: a mount error never crashes the daemon (the picker falls back to the
-			// CLI), and every handler returns a clean 400/200 rather than a 500.
-			try {
-				mountOnboardingApi(daemon, {
-					org: scope.org,
-					workspace: scope.workspace ?? "",
-				});
-			} catch (err: unknown) {
-				const reason = err instanceof Error ? err.message : String(err);
-				process.stderr.write(`honeycomb: onboarding API mount failed (non-fatal): ${reason}\n`);
-			}
+	// PRD-059b/059c/059d: FIRE the dashboard ONBOARDING folder-browse + bind routes ONCE so the
+	// folder-picker (`GET /api/diagnostics/fs/browse`), the "Add a project" bind (`POST
+	// /api/diagnostics/projects/bind`), the cross-device import (`POST .../projects/bind-existing`),
+	// and the unbind (`POST .../projects/unbind`) are LIVE. They attach onto the already-mounted,
+	// protected `/api/diagnostics` group (NO `server.ts` edit) and SELF-GATE to local mode (a
+	// non-local request 404s), mirroring the scope-enumeration reads. The bind routes write the SAME
+	// thin-client `~/.deeplake/projects.json` the CLI `honeycomb project bind` writes (single-sourced
+	// store); the browse route refuses to traverse outside the home dir. NO DeepLake call, NO secret
+	// in any body. FAIL-SOFT: a mount error never crashes the daemon (the picker falls back to the
+	// CLI), and every handler returns a clean 400/200 rather than a 500.
+	try {
+		mountOnboardingApi(daemon, {
+			org: scope.org,
+			workspace: scope.workspace ?? "",
+		});
+	} catch (err: unknown) {
+		const reason = err instanceof Error ? err.message : String(err);
+		process.stderr.write(`honeycomb: onboarding API mount failed (non-fatal): ${reason}\n`);
+	}
 
-			// IRD-122 (122-AC-1 / 122-AC-2 / 122-AC-4): FIRE the dashboard SCOPE-SWITCH persistence routes
-			// ONCE so an Org/Workspace switch in the dashboard PERSISTS a real scope change instead of a
-			// viewer-only no-op — `POST /api/diagnostics/scope/{org-switch,workspace-switch}`. They attach
-			// onto the already-mounted, protected `/api/diagnostics` group (NO `server.ts` edit) and SELF-GATE
-			// to local mode. The org switch RE-MINTS an org-bound token (PRD-011) + persists it via the SAME
-			// `saveDiskCredentials` writer the CLI `honeycomb org switch` uses (122-AC-2); the workspace switch
-			// persists the workspace id (no re-mint). The bearer token rides ONLY in the auth client's
-			// Authorization header + the shared credential file — NEVER in a body (D-4). FAIL-SOFT: a mount
-			// error never crashes the daemon, and every handler returns a clean ack rather than a 500.
-			try {
-				mountScopeSwitchApi(daemon, {});
-			} catch (err: unknown) {
-				const reason = err instanceof Error ? err.message : String(err);
-				process.stderr.write(`honeycomb: scope switch API mount failed (non-fatal): ${reason}\n`);
-			}
+	// IRD-122 (122-AC-1 / 122-AC-2 / 122-AC-4): FIRE the dashboard SCOPE-SWITCH persistence routes
+	// ONCE so an Org/Workspace switch in the dashboard PERSISTS a real scope change instead of a
+	// viewer-only no-op — `POST /api/diagnostics/scope/{org-switch,workspace-switch}`. They attach
+	// onto the already-mounted, protected `/api/diagnostics` group (NO `server.ts` edit) and SELF-GATE
+	// to local mode. The org switch RE-MINTS an org-bound token (PRD-011) + persists it via the SAME
+	// `saveDiskCredentials` writer the CLI `honeycomb org switch` uses (122-AC-2); the workspace switch
+	// persists the workspace id (no re-mint). The bearer token rides ONLY in the auth client's
+	// Authorization header + the shared credential file — NEVER in a body (D-4). FAIL-SOFT: a mount
+	// error never crashes the daemon, and every handler returns a clean ack rather than a 500.
+	try {
+		mountScopeSwitchApi(daemon, {});
+	} catch (err: unknown) {
+		const reason = err instanceof Error ? err.message : String(err);
+		process.stderr.write(`honeycomb: scope switch API mount failed (non-fatal): ${reason}\n`);
+	}
 
 	// ── PRD-033c / FR-1/FR-2/FR-6: FIRE the `/api/assets` mount ONCE so the asset-sync
 	// substrate (publish/pull/tombstone) is LIVE against this daemon — the ONLY DeepLake path
@@ -2298,7 +2358,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// parse / snapshot write, and team/hybrid daemons don't each re-parse the repo on a timer.
 	// Fail-soft + in-flight-guarded: a build error never crashes the daemon, and overlapping ticks
 	// never stack a second parse.
-	const autoBuildGraph = options.storage === undefined && config.mode === "local";
+	const autoBuildGraph = options.autoBuildGraph ?? (options.storage === undefined && config.mode === "local");
 	let graphBuildTimer: ReturnType<typeof setInterval> | null = null;
 	let graphBuildInFlight = false;
 	async function rebuildCodebaseGraph(): Promise<void> {
@@ -2346,6 +2406,11 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// UNCONDITIONALLY (core feature, not gated) inside `start()` AFTER the queue is up, and
 	// stopped in `shutdown()`. Null until `start()` runs.
 	let skillifyWorker: SkillifyJobWorker | null = null;
+	const startBackgroundWorkers = options.startBackgroundWorkers ?? true;
+	const startSummaryWorker = options.startSummaryWorker ?? true;
+	const startPipelineWorker = options.startPipelineWorker ?? true;
+	const startSkillifyWorker = options.startSkillifyWorker ?? true;
+	const startPollinatingWorker = options.startPollinatingWorker ?? true;
 
 	return {
 		daemon,
@@ -2360,13 +2425,17 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			locked = true;
 			started = true;
 
-			// Prime the health bit once, then refresh on the interval.
-			await refreshHealth();
-			probeTimer = setInterval(() => {
-				void refreshHealth();
-			}, probeIntervalMs);
-			if (typeof (probeTimer as NodeJS.Timeout).unref === "function") {
-				(probeTimer as NodeJS.Timeout).unref();
+			// Prime the health bit once, then refresh on the interval. In local-queue mode
+			// with shared draining off, this probe is intentionally disabled: a recurring
+			// `SELECT 1` is still idle DeepLake traffic and defeats PRD-066's cost boundary.
+			if (storageHealthProbeEnabled) {
+				await refreshHealth();
+				probeTimer = setInterval(() => {
+					void refreshHealth();
+				}, probeIntervalMs);
+				if (typeof (probeTimer as NodeJS.Timeout).unref === "function") {
+					(probeTimer as NodeJS.Timeout).unref();
+				}
 			}
 
 			// PRD-041: kick the initial codebase-graph build OFF the readiness path (fire-and-forget
@@ -2385,6 +2454,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 
 			// Start the daemon's real services (queue → watcher → runtime-path).
 			await daemon.startServices();
+			if (!startBackgroundWorkers) return;
 
 			// ── PRD-062b: resolve the adaptive-backoff + consolidation knobs ONCE, fail-soft.
 			// A malformed knob must NEVER take the daemon down — degrade to the schema's
@@ -2404,6 +2474,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			} catch {
 				consolidatePoll = false;
 			}
+			const shouldConsolidatePoll = consolidatePoll && startPollinatingWorker;
 
 			// ── PRD-063b (b-AC-7): resolve the Portkey selection + assembly-time health status ONCE,
 			// here (async, alongside the other vault reads), so `/health` `reasons.portkey` is honest
@@ -2465,80 +2536,92 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// UNCONDITIONALLY. FAIL-SOFT: a wiring failure is surfaced to stderr but must NEVER
 			// prevent the daemon from booting — the daemon is already up and serving; summaries
 			// simply stay unproduced this run rather than crashing the process.
-			try {
-				summaryWorker = buildSummaryWorker(storage, scope, daemon.services.queue, embed);
-				summaryWorker.start();
-			} catch (err: unknown) {
-				const reason = err instanceof Error ? err.message : String(err);
-				process.stderr.write(`honeycomb: summary worker start failed (non-fatal): ${reason}\n`);
-				summaryWorker = null;
+			if (startSummaryWorker) {
+				try {
+					summaryWorker = buildSummaryWorker(storage, scope, daemon.services.queue, embed, pollBackoff);
+					summaryWorker.start();
+				} catch (err: unknown) {
+					const reason = err instanceof Error ? err.message : String(err);
+					process.stderr.write(`honeycomb: summary worker start failed (non-fatal): ${reason}\n`);
+					summaryWorker = null;
+				}
 			}
 
-				// ── PRD-045a a-AC-1: build + start the MEMORY-PIPELINE worker, the live CONSUMER of
-				// the five pipeline job kinds (extraction → decision → controlled-write →
-				// graph-persist → retention). Built AFTER `startServices()` so it leases from a
-				// started queue, on the SAME durable `memory_jobs` queue capture enqueues the entry
-				// job into. FAIL-SOFT (a-AC-5): a wiring failure is surfaced to stderr but must NEVER
-				// prevent the daemon from booting — the daemon is already up and serving; the pipeline
-				// simply stays unconsumed this run rather than crashing the process. The model
-				// dependency degrades to the no-op client when no `agent.yaml`/`inference:` is present
-				// (zero-mutation passes), exactly as the pollinating worker does (constraint).
+			// ── PRD-045a a-AC-1: build + start the MEMORY-PIPELINE worker, the live CONSUMER of
+			// the five pipeline job kinds (extraction → decision → controlled-write →
+			// graph-persist → retention). Built AFTER `startServices()` so it leases from a
+			// started queue, on the SAME durable `memory_jobs` queue capture enqueues the entry
+			// job into. FAIL-SOFT (a-AC-5): a wiring failure is surfaced to stderr but must NEVER
+			// prevent the daemon from booting — the daemon is already up and serving; the pipeline
+			// simply stays unconsumed this run rather than crashing the process. The model
+			// dependency degrades to the no-op client when no `agent.yaml`/`inference:` is present
+			// (zero-mutation passes), exactly as the pollinating worker does (constraint).
+			if (startPipelineWorker) {
 				try {
-					pipelineWorker = await buildPipelineWorker(options, storage, scope, daemon.services.queue, embed, pollBackoff, portkeyWorkerDeps);
+					pipelineWorker = await buildPipelineWorker(
+						options,
+						storage,
+						scope,
+						daemon.services.queue,
+						embed,
+						pollBackoff,
+						portkeyWorkerDeps,
+					);
 					// PRD-062b (AC-4): when consolidation is ON, DEFER starting the pipeline
 					// worker's own loop — the single lease coordinator (built at the pollinating
 					// block below, once we know whether pollinating is enabled) drives it. When
 					// consolidation is OFF, start it independently now (the AC-9 two-pass path).
-					if (!consolidatePoll) pipelineWorker.start();
+					if (!shouldConsolidatePoll) pipelineWorker.start();
 				} catch (err: unknown) {
 					const reason = err instanceof Error ? err.message : String(err);
 					process.stderr.write(`honeycomb: memory-pipeline worker start failed (non-fatal): ${reason}\n`);
 					pipelineWorker = null;
 				}
+			}
 
-				// ── PRD-045f f-AC-1: build + start the SKILLIFY worker, the live CONSUMER of
-				// `skillify` jobs capture enqueues when the per-turn threshold is crossed. Built AFTER
-				// `startServices()` so it leases from a started queue, on the SAME durable `memory_jobs`
-				// queue capture enqueues into. FAIL-SOFT (f-AC-4): a wiring failure is surfaced to
-				// stderr but must NEVER prevent the daemon from booting — the daemon is already up and
-				// serving; skillify simply stays unconsumed this run rather than crashing the process.
-				// The gate shells out to the host CLI (Claude Code) — NO API key is held by the daemon.
+			// ── PRD-045f f-AC-1: build + start the SKILLIFY worker, the live CONSUMER of
+			// `skillify` jobs capture enqueues when the per-turn threshold is crossed. Built AFTER
+			// `startServices()` so it leases from a started queue, on the SAME durable `memory_jobs`
+			// queue capture enqueues into. FAIL-SOFT (f-AC-4): a wiring failure is surfaced to
+			// stderr but must NEVER prevent the daemon from booting — the daemon is already up and
+			// serving; skillify simply stays unconsumed this run rather than crashing the process.
+			// The gate shells out to the host CLI (Claude Code) — NO API key is held by the daemon.
+			if (startSkillifyWorker) {
 				try {
-					skillifyWorker = buildSkillifyWorker(storage, scope, daemon.services.queue);
+					skillifyWorker = buildSkillifyWorker(storage, scope, daemon.services.queue, pollBackoff);
 					skillifyWorker.start();
 				} catch (err: unknown) {
 					const reason = err instanceof Error ? err.message : String(err);
 					process.stderr.write(`honeycomb: skillify worker start failed (non-fatal): ${reason}\n`);
 					skillifyWorker = null;
 				}
+			}
 
-				// ── PRD-032a / AC-3: COPY the shared DeepLake login token into the vault as the
-				// `secret`-class `DEEPLAKE_TOKEN` record, ONCE per boot — the LIVE wiring of the
-				// migration. NON-DESTRUCTIVE by construction: it READS `~/.deeplake/credentials.json`
-				// (via `loadDiskCredentials`) and WRITES only the vault — ZERO writes to the plaintext
-				// file, which stays BYTE-UNCHANGED + authoritative for the shared login (D-3). It runs
-				// AFTER `startServices()` so it NEVER gates the storage connection (which keeps reading
-				// the authoritative plaintext file, env-over-file — the vault is an ADDITIVE cache, not
-				// a replacement). Idempotent: a re-boot refreshes the vault copy from the file so a token
-				// rotation is picked up. FAIL-SOFT: a `no_creds` no-op (CI / not-logged-in) or a vault
-				// write error must NEVER prevent the daemon from booting — the login still resolves from
-				// env/file. Only the REAL vault (a full `VaultStore`) migrates; an injected fake reader /
-				// the fake-storage suite skips it (the deterministic suite is untouched).
-				if (vault instanceof VaultStore) {
-					try {
-						const migrated = await migrateDeeplakeToken(vault, secretScopeFromQueryScope(scope));
-						if (!migrated.ok) {
-							// A vault write failure is surfaced (never silently swallowed) but is NOT fatal:
-							// the plaintext file is untouched and the login still resolves from env/file.
-							process.stderr.write(
-								`honeycomb: DeepLake-token vault migration failed (non-fatal): ${migrated.reason}\n`,
-							);
-						}
-					} catch (err: unknown) {
-						const reason = err instanceof Error ? err.message : String(err);
-						process.stderr.write(`honeycomb: DeepLake-token vault migration failed (non-fatal): ${reason}\n`);
+			// ── PRD-032a / AC-3: COPY the shared DeepLake login token into the vault as the
+			// `secret`-class `DEEPLAKE_TOKEN` record, ONCE per boot — the LIVE wiring of the
+			// migration. NON-DESTRUCTIVE by construction: it READS `~/.deeplake/credentials.json`
+			// (via `loadDiskCredentials`) and WRITES only the vault — ZERO writes to the plaintext
+			// file, which stays BYTE-UNCHANGED + authoritative for the shared login (D-3). It runs
+			// AFTER `startServices()` so it NEVER gates the storage connection (which keeps reading
+			// the authoritative plaintext file, env-over-file — the vault is an ADDITIVE cache, not
+			// a replacement). Idempotent: a re-boot refreshes the vault copy from the file so a token
+			// rotation is picked up. FAIL-SOFT: a `no_creds` no-op (CI / not-logged-in) or a vault
+			// write error must NEVER prevent the daemon from booting — the login still resolves from
+			// env/file. Only the REAL vault (a full `VaultStore`) migrates; an injected fake reader /
+			// the fake-storage suite skips it (the deterministic suite is untouched).
+			if (vault instanceof VaultStore) {
+				try {
+					const migrated = await migrateDeeplakeToken(vault, secretScopeFromQueryScope(scope));
+					if (!migrated.ok) {
+						// A vault write failure is surfaced (never silently swallowed) but is NOT fatal:
+						// the plaintext file is untouched and the login still resolves from env/file.
+						process.stderr.write(`honeycomb: DeepLake-token vault migration failed (non-fatal): ${migrated.reason}\n`);
 					}
+				} catch (err: unknown) {
+					const reason = err instanceof Error ? err.message : String(err);
+					process.stderr.write(`honeycomb: DeepLake-token vault migration failed (non-fatal): ${reason}\n`);
 				}
+			}
 
 			// ── PRD-026 AC-W: build + start the pollinating worker, GATED on `config.enabled`
 			// (default OFF). It is built AFTER `startServices()` so it leases from a started
@@ -2547,58 +2630,68 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// prevent the daemon from booting, so any error here is swallowed into "no worker"
 			// rather than propagated. When the gate is closed, `buildGatedPollinatingWorker`
 			// returns null and we start nothing.
-			try {
-				pollinatingWorker = await buildGatedPollinatingWorker(options, storage, scope, daemon.services.queue, vault, pollBackoff, portkeyWorkerDeps);
-				// PRD-062b (AC-4): consolidate ONLY the REAL production workers. An explicitly
-				// INJECTED test worker (`options.pollinatingWorker`) is a lifecycle-recording fake
-				// whose own `start()`/`stop()` the test asserts — it is not a real lease participant,
-				// so consolidation must respect its standalone lifecycle and never route it through
-				// the coordinator. So consolidation runs only when (a) the flag is on AND (b) the
-				// pollinating worker was the REAL build (not injected).
-				const pollinatingInjected = options.pollinatingWorker !== undefined;
-				if (consolidatePoll && !pollinatingInjected) {
-					// If consolidation is ON, do NOT start the pollinating worker's own loop —
-					// register it (with the already-built pipeline worker) as a participant of a
-					// SINGLE lease coordinator that runs ONE combined pass over the union of their
-					// kinds. Kind isolation is preserved: the union lease only leases a kind a
-					// participant owns, and each leased job is dispatched to its owner. The pipeline
-					// worker was deferred above under the same flag.
-					const participants = [pipelineWorker, pollinatingWorker].filter(
-						(p): p is StageWorker | PollinatingJobWorker => p !== null,
+			if (startPollinatingWorker) {
+				try {
+					pollinatingWorker = await buildGatedPollinatingWorker(
+						options,
+						storage,
+						scope,
+						daemon.services.queue,
+						vault,
+						pollBackoff,
+						portkeyWorkerDeps,
 					);
-					if (participants.length > 0) {
-						leaseCoordinator = createLeaseCoordinator({
-							queue: daemon.services.queue,
-							participants,
-							backoff: pollBackoff,
-							flatIntervalMs: 1_000,
-						});
-						leaseCoordinator.start();
+					// PRD-062b (AC-4): consolidate ONLY the REAL production workers. An explicitly
+					// INJECTED test worker (`options.pollinatingWorker`) is a lifecycle-recording fake
+					// whose own `start()`/`stop()` the test asserts — it is not a real lease participant,
+					// so consolidation must respect its standalone lifecycle and never route it through
+					// the coordinator. So consolidation runs only when (a) the flag is on AND (b) the
+					// pollinating worker was the REAL build (not injected).
+					const pollinatingInjected = options.pollinatingWorker !== undefined;
+					if (shouldConsolidatePoll && !pollinatingInjected) {
+						// If consolidation is ON, do NOT start the pollinating worker's own loop —
+						// register it (with the already-built pipeline worker) as a participant of a
+						// SINGLE lease coordinator that runs ONE combined pass over the union of their
+						// kinds. Kind isolation is preserved: the union lease only leases a kind a
+						// participant owns, and each leased job is dispatched to its owner. The pipeline
+						// worker was deferred above under the same flag.
+						const participants = [pipelineWorker, pollinatingWorker].filter(
+							(p): p is StageWorker | PollinatingJobWorker => p !== null,
+						);
+						if (participants.length > 0) {
+							leaseCoordinator = createLeaseCoordinator({
+								queue: daemon.services.queue,
+								participants,
+								backoff: pollBackoff,
+								flatIntervalMs: 1_000,
+							});
+							leaseCoordinator.start();
+						}
+					} else {
+						// Consolidation OFF (the two-pass AC-9 parity path) OR an injected test worker:
+						// start the pollinating worker independently. When consolidation was selected but
+						// the pollinating worker was injected, the pipeline worker's start was deferred
+						// above, so start it here too so it is never left un-pumped.
+						pollinatingWorker?.start();
+						if (shouldConsolidatePoll && pollinatingInjected && pipelineWorker !== null) {
+							pipelineWorker.start();
+						}
 					}
-				} else {
-					// Consolidation OFF (the two-pass AC-9 parity path) OR an injected test worker:
-					// start the pollinating worker independently. When consolidation was selected but
-					// the pollinating worker was injected, the pipeline worker's start was deferred
-					// above, so start it here too so it is never left un-pumped.
-					pollinatingWorker?.start();
-					if (consolidatePoll && pollinatingInjected && pipelineWorker !== null) {
+				} catch (err: unknown) {
+					// A pollinating wiring failure is surfaced to stderr (never silently swallowed) but is
+					// NOT fatal: the daemon is already up and serving; pollinating simply stays off this
+					// run. We narrow the error to a message so a thrown non-Error still reports cleanly.
+					// stderr is the documented daemon log channel (logger.ts) and carries no secret here
+					// — `buildGatedPollinatingWorker` resolves the key only inside the router's local scope.
+					const reason = err instanceof Error ? err.message : String(err);
+					process.stderr.write(`honeycomb: pollinating worker start failed (non-fatal): ${reason}\n`);
+					pollinatingWorker = null;
+					// If consolidation was selected but the coordinator never started (the pollinating
+					// build threw), fall back to starting the pipeline worker's own loop so the pipeline
+					// is never left un-pumped after its start was deferred under the consolidation flag.
+					if (shouldConsolidatePoll && leaseCoordinator === null && pipelineWorker !== null) {
 						pipelineWorker.start();
 					}
-				}
-			} catch (err: unknown) {
-				// A pollinating wiring failure is surfaced to stderr (never silently swallowed) but is
-				// NOT fatal: the daemon is already up and serving; pollinating simply stays off this
-				// run. We narrow the error to a message so a thrown non-Error still reports cleanly.
-				// stderr is the documented daemon log channel (logger.ts) and carries no secret here
-				// — `buildGatedPollinatingWorker` resolves the key only inside the router's local scope.
-				const reason = err instanceof Error ? err.message : String(err);
-				process.stderr.write(`honeycomb: pollinating worker start failed (non-fatal): ${reason}\n`);
-				pollinatingWorker = null;
-				// If consolidation was selected but the coordinator never started (the pollinating
-				// build threw), fall back to starting the pipeline worker's own loop so the pipeline
-				// is never left un-pumped after its start was deferred under the consolidation flag.
-				if (consolidatePoll && leaseCoordinator === null && pipelineWorker !== null) {
-					pipelineWorker.start();
 				}
 			}
 		},
@@ -2710,10 +2803,8 @@ function resolveDaemonTenancy(provider: CredentialProvider | undefined): DaemonT
 	const fileWorkspace = asNonEmptyString(record.workspace);
 	const orgName = asNonEmptyString(record.orgName);
 
-	const org =
-		envOrg !== undefined && envOrg.length > 0 ? envOrg : fileOrg;
-	const workspace =
-		envWorkspace !== undefined && envWorkspace.length > 0 ? envWorkspace : fileWorkspace;
+	const org = envOrg !== undefined && envOrg.length > 0 ? envOrg : fileOrg;
+	const workspace = envWorkspace !== undefined && envWorkspace.length > 0 ? envWorkspace : fileWorkspace;
 
 	if (org !== undefined) {
 		// A workspace is optional on the scope (the client defaults it to the config workspace);

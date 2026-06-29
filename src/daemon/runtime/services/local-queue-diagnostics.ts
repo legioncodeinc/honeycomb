@@ -8,10 +8,13 @@
 
 import { JOB_FAILED, JOB_LEASED, JOB_QUEUED, MEMORY_JOBS_TABLE } from "../../storage/catalog/index.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
+import type { MeterSnapshot } from "../../storage/query-meter.js";
 import { isOk, type StorageRow } from "../../storage/result.js";
 import { sLiteral, sqlIdent } from "../../storage/sql.js";
 import type { HybridJobQueueConfig } from "./hybrid-job-queue.js";
 import type { LocalJobQueueService, LocalQueueCounts } from "./local-job-queue.js";
+
+const PENDING_SHARED_LOCAL_JOBS_TIMEOUT_MS = 5_000;
 
 export type LocalQueueTopologyMode = "single_machine" | "multi_device" | "fleet" | "unknown";
 export type LocalQueueTopologySource = "env" | "explicit-opt-in" | "default";
@@ -42,6 +45,11 @@ export interface PendingSharedLocalJobs {
 	readonly message?: string;
 }
 
+export interface QueryMeterDiagnostics {
+	readonly snapshot: MeterSnapshot;
+	readonly logLine: string;
+}
+
 export interface LocalQueueUpgradeDiagnostics {
 	readonly localQueue: {
 		readonly enabled: boolean;
@@ -53,6 +61,7 @@ export interface LocalQueueUpgradeDiagnostics {
 	readonly topology: LocalQueueTopology;
 	readonly rollback: LocalQueueRollbackStatus;
 	readonly pendingSharedLocalJobs: PendingSharedLocalJobs;
+	readonly queryMeter: QueryMeterDiagnostics | null;
 }
 
 export interface BuildLocalQueueUpgradeDiagnosticsOptions {
@@ -60,6 +69,7 @@ export interface BuildLocalQueueUpgradeDiagnosticsOptions {
 	readonly localQueue: Pick<LocalJobQueueService, "persistent" | "counts">;
 	readonly topology?: LocalQueueTopology;
 	readonly pendingSharedLocalJobs?: () => Promise<PendingSharedLocalJobs>;
+	readonly queryMeter?: () => QueryMeterDiagnostics;
 }
 
 export function resolveLocalQueueTopology(env: NodeJS.ProcessEnv = process.env): LocalQueueTopology {
@@ -107,7 +117,9 @@ export async function buildLocalQueueUpgradeDiagnostics(
 	const counts = await options.localQueue.counts();
 	const topology = options.topology ?? resolveLocalQueueTopology();
 	const pending =
-		options.pendingSharedLocalJobs === undefined ? notCheckedPendingSharedLocalJobs() : await options.pendingSharedLocalJobs();
+		options.pendingSharedLocalJobs === undefined
+			? notCheckedPendingSharedLocalJobs()
+			: await withPendingSharedLocalJobsTimeout(options.pendingSharedLocalJobs, PENDING_SHARED_LOCAL_JOBS_TIMEOUT_MS);
 	const localQueuedWork =
 		statusCount(counts, "queued") + statusCount(counts, "retrying") + statusCount(counts, "leased");
 	const localWorkWillNotProcess = !options.config.enabled && localQueuedWork > 0;
@@ -133,7 +145,34 @@ export async function buildLocalQueueUpgradeDiagnostics(
 				: null,
 		},
 		pendingSharedLocalJobs: pending,
+		queryMeter: options.queryMeter === undefined ? null : options.queryMeter(),
 	};
+}
+
+async function withPendingSharedLocalJobsTimeout(
+	readPending: () => Promise<PendingSharedLocalJobs>,
+	timeoutMs: number,
+): Promise<PendingSharedLocalJobs> {
+	let timeout: NodeJS.Timeout | undefined;
+	try {
+		return await Promise.race([
+			readPending(),
+			new Promise<PendingSharedLocalJobs>((resolve) => {
+				timeout = setTimeout(() => {
+					resolve({
+						available: false,
+						total: null,
+						byStatus: {},
+						byKind: {},
+						source: "unavailable",
+						message: `shared DeepLake job count timed out after ${timeoutMs}ms`,
+					});
+				}, timeoutMs);
+			}),
+		]);
+	} finally {
+		if (timeout !== undefined) clearTimeout(timeout);
+	}
 }
 
 export function notCheckedPendingSharedLocalJobs(): PendingSharedLocalJobs {

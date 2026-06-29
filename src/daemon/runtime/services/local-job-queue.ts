@@ -186,7 +186,7 @@ export function openLocalJobQueue(options: OpenLocalJobQueueOptions = {}): Local
 	const onceFailure = options.onceFailure ?? defaultOnceFailure();
 	try {
 		const db = createDatabase(options);
-		migrate(db);
+		if (options.openExistingOnly !== true) migrate(db);
 		return new SqliteLocalJobQueue(
 			db,
 			resolveConfig(options.config),

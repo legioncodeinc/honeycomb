@@ -24,6 +24,7 @@ const workspaceDir = mkdtempSync(join(tmpdir(), "hc-066d-upgrade-"));
 const homeDir = join(workspaceDir, "home");
 const port = 38_500 + Math.floor(Math.random() * 20_000);
 const host = "127.0.0.1";
+const HEALTH_REQUEST_TIMEOUT_MS = 3_000;
 const daemonDir = join(workspaceDir, ".daemon");
 const logsDb = join(daemonDir, "logs.db");
 const localQueueDb = join(daemonDir, "local-queue.db");
@@ -117,7 +118,7 @@ async function waitForHealth(label, child) {
 			throw new Error(`${label} daemon exited before /health responded with code ${child.exitCode}`);
 		}
 		try {
-			const response = await fetch(url);
+			const response = await fetchWithTimeout(url, HEALTH_REQUEST_TIMEOUT_MS);
 			if (response.status === 200 || response.status === 503) {
 				console.log(
 					`smoke:local-queue-upgrade - ${label} /health answered ${response.status} after ${Date.now() - startedAt}ms`,
@@ -155,13 +156,22 @@ function assertDbTables(path, requiredTables) {
 
 async function stopChild(child) {
 	if (child.exitCode !== null) return;
+	const exit = new Promise((resolveExit) => child.once("exit", resolveExit));
 	child.kill("SIGTERM");
-	await Promise.race([
-		new Promise((resolveExit) => child.once("exit", resolveExit)),
-		sleep(5_000).then(() => {
-			if (child.exitCode === null) child.kill("SIGKILL");
-		}),
-	]);
+	const exited = await Promise.race([exit.then(() => true), sleep(5_000).then(() => false)]);
+	if (exited) return;
+	if (child.exitCode === null) child.kill("SIGKILL");
+	await exit;
+}
+
+async function fetchWithTimeout(url, timeoutMs) {
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), timeoutMs);
+	try {
+		return await fetch(url, { signal: controller.signal });
+	} finally {
+		clearTimeout(timeout);
+	}
 }
 
 async function sleep(ms) {

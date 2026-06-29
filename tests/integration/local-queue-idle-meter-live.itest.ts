@@ -245,9 +245,17 @@ async function startMeteredDaemon(options: {
 		embedSupervisor: noopEmbedSupervisor,
 		...(options.sharedJobTableName !== undefined ? { jobQueueConfig: { tableName: options.sharedJobTableName } } : {}),
 	});
-	await phase(options.sharedJobTableName === undefined ? "daemon start" : "daemon start bounded shared queue", () =>
-		assembled.start(),
-	);
+	try {
+		await phase(options.sharedJobTableName === undefined ? "daemon start" : "daemon start bounded shared queue", () =>
+			assembled.start(),
+		);
+	} catch (err) {
+		await assembled.shutdown().catch(() => undefined);
+		restoreEnv(originalEnv);
+		rmSync(runtimeDir, { recursive: true, force: true });
+		rmSync(workspaceDir, { recursive: true, force: true });
+		throw err;
+	}
 	const probe = {
 		assembled,
 		meter,

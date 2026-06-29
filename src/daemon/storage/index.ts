@@ -260,15 +260,17 @@ export function createLazyStorageClient(
 		provider?: CredentialProvider;
 		transport?: DeepLakeTransport;
 		sleep?: SleepFn;
+		meter?: QueryMeter;
 	} = {},
 ): StorageClient {
 	let built: StorageClient | null = null;
+	const meter = options.meter ?? new QueryMeter();
 
 	/** Try to build the real client; return it on success, or `null` when no usable credential resolves. */
 	const tryBuild = (): StorageClient | null => {
 		if (built !== null) return built;
 		try {
-			built = createStorageClient(options);
+			built = createStorageClient({ ...options, meter });
 			return built;
 		} catch {
 			// No usable credential yet (a fresh install) → stay deferred. We do NOT cache the
@@ -282,11 +284,22 @@ export function createLazyStorageClient(
 	// daemon consumers, so the deferred wrapper implements exactly that. The single cast at this
 	// factory boundary keeps every call site untouched (the same `as StorageClient` posture the
 	// fakes in tests use), while the wrapper is fully type-checked against the public members it forwards.
-	const lazy: StorageQuery & { connect(scope: QueryScope): Promise<QueryResult>; readonly endpoint: string } = {
+	const lazy: StorageQuery & {
+		connect(scope: QueryScope): Promise<QueryResult>;
+		readonly endpoint: string;
+		meterSnapshot(): ReturnType<StorageClient["meterSnapshot"]>;
+		meterLogLine(): string;
+	} = {
 		get endpoint(): string {
 			// Before the first successful build there is no resolved endpoint; report a stable
 			// placeholder (no secret, diagnostics-only) rather than reading creds eagerly here.
 			return tryBuild()?.endpoint ?? "pending-credentials";
+		},
+		meterSnapshot(): ReturnType<StorageClient["meterSnapshot"]> {
+			return tryBuild()?.meterSnapshot() ?? meter.snapshot();
+		},
+		meterLogLine(): string {
+			return tryBuild()?.meterLogLine() ?? meter.formatLogLine();
 		},
 		async connect(scope: QueryScope): Promise<QueryResult> {
 			return this.query("SELECT 1", scope);

@@ -251,7 +251,7 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 			expect(options.config.localKinds.has("summary")).toBe(true);
 			expect(typeof options.localQueue.counts).toBe("function");
 			expect(options.topology?.mode).toBeDefined();
-			expect(typeof options.pendingSharedLocalJobs).toBe("function");
+			expect(options.pendingSharedLocalJobs).toBeUndefined();
 		}) as NonNullable<SeamFns["mountLocalQueueDiagnostics"]>,
 		mountGraph: ((daemon, options) => {
 			calls.mountGraph += 1;

@@ -103,8 +103,9 @@ async function installPreviousFixture() {
 		});
 		return previousSpec;
 	} catch (err) {
-		const fallback = process.env.HONEYCOMB_ALLOW_PREVIOUS_FIXTURE_FALLBACK === "0" ? null : "candidate-as-previous-fixture";
-		if (fallback === null) throw err;
+		const fallbackAllowed = /^(1|true|yes)$/i.test(process.env.HONEYCOMB_ALLOW_PREVIOUS_FIXTURE_FALLBACK ?? "");
+		if (!fallbackAllowed) throw err;
+		const fallback = "candidate-as-previous-fixture";
 		const candidate = (await npmPackCandidate());
 		await runNpm(["install", "--no-audit", "--no-fund", "--omit=optional", "--ignore-scripts", candidate], {
 			cwd: appDir,

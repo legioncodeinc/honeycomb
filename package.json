@@ -80,7 +80,8 @@
     "prepack": "npm run build",
     "smoke:daemon-bundle": "node scripts/smoke-daemon-bundle.mjs",
     "smoke:local-queue-upgrade": "node --experimental-sqlite scripts/local-queue-upgrade-smoke.mjs",
-    "smoke:local-queue-packaged-upgrade": "node --experimental-sqlite scripts/local-queue-packaged-upgrade-smoke.mjs"
+    "smoke:local-queue-packaged-upgrade": "node --experimental-sqlite scripts/local-queue-packaged-upgrade-smoke.mjs",
+    "smoke:local-queue-packaged-live-proof": "node --experimental-sqlite scripts/local-queue-packaged-live-proof.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.0",

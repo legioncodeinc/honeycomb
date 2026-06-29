@@ -92,6 +92,12 @@ Prove the packaged user upgrade path, pending old shared job behavior, rollback 
 gating, and dogfood matrix before enabling local queue by default for production single-machine
 installs.
 
+### PRD-066f: Publish Readiness Gate
+
+Consolidate the final publish gate for PRD-066: full local CI, package-specific smokes, fresh
+no-credentials setup, upgrade/rollback proof, longer live idle-cost proof, dogfood resilience, and
+security/release-review evidence.
+
 ## Functional Requirements
 
 1. The daemon must have a local queue abstraction for enqueue, lease, complete, fail, retry,
@@ -175,6 +181,7 @@ The local queue must not introduce DeepLake schema changes.
 - PRD-043a precedent for local SQLite operational state.
 - ADR-0006 architectural decision for local queue as interim idle-cost control.
 - PRD-066e packaged upgrade proof before production default-on.
+- PRD-066f publish-readiness gate before package release.
 
 ## Open Questions
 

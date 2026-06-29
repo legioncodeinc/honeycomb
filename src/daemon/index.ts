@@ -13,11 +13,13 @@
  * `createDaemon`; see `./runtime/CONVENTIONS.md`.
  */
 
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { DAEMON_HOST, DAEMON_PORT, HONEYCOMB_VERSION } from "../shared/constants.js";
+import { type AssembleDaemonOptions, type AssembledDaemon, assembleDaemon } from "./runtime/assemble.js";
 import { resolveRuntimeConfig } from "./runtime/config.js";
 import { startDaemon as startDaemonListener } from "./runtime/listen.js";
-import { createDaemon, type CreateDaemonOptions, type Daemon } from "./runtime/server.js";
-import { type AssembleDaemonOptions, type AssembledDaemon, assembleDaemon } from "./runtime/assemble.js";
+import { type CreateDaemonOptions, createDaemon, type Daemon } from "./runtime/server.js";
 
 // DeepLake access path lives here (PRD-002). Do NOT add a DeepLake import in any
 // non-daemon package; harness/CLI/MCP bundles must stay DeepLake-free.
@@ -189,14 +191,19 @@ export async function runAssembledDaemon(options: AssembleDaemonOptions = {}): P
  * `daemon/index.js`), as opposed to imported by a test or another module. Only the
  * direct-execution path auto-listens (FR-10); importing the module never binds a socket.
  */
-function isMainEntry(): boolean {
-	const entry = process.argv[1];
+export function isDaemonMainEntry(importMetaUrl: string, argv1: string | undefined): boolean {
+	const entry = argv1;
 	if (typeof entry !== "string" || entry.length === 0) return false;
 	try {
-		return import.meta.url === new URL(`file://${entry}`).href || import.meta.url.endsWith("/daemon/index.js");
+		if (importMetaUrl === pathToFileURL(entry).href) return true;
+		return importMetaUrl === pathToFileURL(realpathSync(entry)).href;
 	} catch {
 		return false;
 	}
+}
+
+function isMainEntry(): boolean {
+	return isDaemonMainEntry(import.meta.url, process.argv[1]);
 }
 
 // Production auto-listen: ONLY when run as the main entry (the bundled daemon binary),
