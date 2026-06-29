@@ -70,10 +70,11 @@ jobs:
   release:
     name: Publish honeycomb to npm
     runs-on: ubuntu-latest
-    # Surface whether this run actually published (vs a dry-run rehearsal) so the
-    # post-publish smoke only runs against a real registry upload.
+    # Surface whether this run actually COMPLETED a publish (set after `Publish
+    # (real)` succeeds, not from publish intent) so the post-publish smoke runs
+    # against a real registry upload — even if a later step (GitHub Release) fails.
     outputs:
-      published: ${{ steps.mode.outputs.publish }}
+      published: ${{ steps.published.outputs.ok }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4.2.2
@@ -252,6 +253,17 @@ jobs:
           HONEYCOMB_POSTHOG_KEY: ${{ secrets.HONEYCOMB_POSTHOG_KEY }}
           HONEYCOMB_REF_DEFAULT: ${{ vars.HONEYCOMB_REF_DEFAULT }}
 
+      # Emit the post-publish signal HERE — after `Publish (real)` has SUCCEEDED.
+      # Steps run sequentially, so a failed publish stops the job before this runs;
+      # reaching it means the upload completed. The `release` job exports this as
+      # `outputs.published`, and the smoke gates on it (not on publish INTENT), so a
+      # later step failing (e.g. Create GitHub Release) cannot skip the smoke on an
+      # artifact that actually shipped.
+      - name: Mark publish succeeded
+        id: published
+        if: ${{ steps.mode.outputs.publish == 'true' }}
+        run: echo "ok=true" >> "$GITHUB_OUTPUT"
+
       # Rehearse: same command minus the real upload. Runs whenever we are NOT in
       # real-publish mode (any workflow_dispatch, or a non-tag ref) so the pipeline
       # is exercised end-to-end and stays green. `--dry-run` does no OIDC handshake
@@ -291,7 +303,11 @@ jobs:
   post-publish-smoke:
     name: Post-publish install smoke (${{ matrix.os }})
     needs: release
-    if: ${{ needs.release.outputs.published == 'true' }}
+    # Gate on actual publish COMPLETION, and run even if the `release` job failed
+    # AFTER publishing (e.g. Create GitHub Release errored): `!cancelled()` overrides
+    # the implicit success() so a shipped artifact is always smoke-tested. The
+    # `published` output is only 'true' when `Publish (real)` succeeded.
+    if: ${{ !cancelled() && needs.release.outputs.published == 'true' }}
     strategy:
       fail-fast: false
       matrix:
