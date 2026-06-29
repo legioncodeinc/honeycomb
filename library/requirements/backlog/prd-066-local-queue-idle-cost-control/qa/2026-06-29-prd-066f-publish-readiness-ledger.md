@@ -1,6 +1,6 @@
 # PRD-066f Publish Readiness Ledger
 
-> **Status:** Local package gates green; publish hold
+> **Status:** Local package gates and publish dry-run green; publish hold
 > **Date:** 2026-06-29
 > **Machine:** Windows development workstation at `C:\Users\mario\GitHub\honeycomb`
 > **Branch:** `legion/fix-golden-path-ci-workspace`
@@ -11,21 +11,21 @@
 This ledger records the PRD-066f publish-readiness execution pass. The local package path now proves
 zero idle DeepLake poll/reaper reads in short and default-ish installed-package windows, including a
 120-second packaged proof with background workers enabled. Full local CI, package checks, bundle
-smoke, upgrade smoke, and packaged live proofs are green on this machine. The release remains on
-publish hold until external/security gates and release-process gates are cleared.
+smoke, upgrade smoke, packaged live proofs, and the npm publish dry-run are green on this machine.
+The release remains on publish hold until the release owner accepts or runs the deferred long soak and
+waives the remaining non-security Aikido code-quality suggestion.
 
 ## Current Go / No-Go
 
-**Publish hold as of 2026-06-29 14:00 America/New_York.**
+**Publish hold as of 2026-06-29 14:36 America/New_York.**
 
 Reasons:
 
-- PR #188 exists and GitHub CI/CodeQL/CodeRabbit were green before the latest follow-up commit, but
-  Aikido remains a publish hold until the remote re-scan confirms the addressed code-quality findings.
+- PR #188 exists and GitHub CI/CodeQL/CodeRabbit are green on the latest pushed commit. Aikido is red
+  only for a release-owner-waived medium code-quality simplification in `assemble.ts`.
 - The long 10-minute idle soak was explicitly deferred by the release owner for this checkpoint; the
   latest replacement proof is a 120-second packaged run with background workers enabled.
-- `npm publish --dry-run --provenance --access public` is blocked because version `0.1.10` is already
-  published; a bumped candidate version or explicit waiver is required for final rehearsal.
+- `npm publish --dry-run --provenance --access public` passes after bumping the candidate to `0.1.11`.
 - No real npm publish or release tag was performed during this pass.
 
 ## Evidence Ledger
@@ -53,8 +53,8 @@ Reasons:
 | 6 | Restart/sleep/outage live dogfood | Manual/live dogfood scenarios | Pass | Not run to completion | Deferred because the release owner chose the package/PR gate sequence for this checkpoint | Deferred | Run before final publish if the release owner requires laptop resilience proof |
 | 7 | GitHub PR / CI | PR #188 | Open PR against `main`; remote CI attached | Passed except Aikido | CI quality gates on Node 22/24, Windows smoke, HiveDoctor, CodeQL, CLA, and Secret gate are green; live DeepLake and stress jobs skipped by workflow policy | Pass | External checks can rerun after the ledger commit |
 | 7 | CodeRabbit | Review current PR #188 | No blocking issues | Green on latest observed PR status | CodeRabbit status context is success | Pass | Re-review can attach after final ledger push |
-| 7 | Aikido | Current PR #188 branch scan | No introduced security issues and no blocking code-quality findings | SQL table-reference fix applied; remote re-scan pending | Aikido flagged `countPendingSharedLocalJobs` because the diagnostics SQL used `sqlIdent()` and then wrapped the table in another pair of quotes. The follow-up uses the validated bare table identifier directly and adds a regression assertion for `FROM memory_jobs job`. | Pending | Release hold until Aikido confirms the branch scan is green |
-| 7 | PRD-048d rehearsal | `npm publish --dry-run --provenance --access public` | Dry-run reaches publish step without publishing | Failed at version guard | Npm reported `You cannot publish over the previously published versions: 0.1.10`; `npm view @legioncodeinc/honeycomb version` returned `0.1.10` | Blocked | Need candidate version bump or explicit waiver |
+| 7 | Aikido | Current PR #188 branch scan | No introduced security issues and no blocking code-quality findings | SQL finding fixed; remaining medium waived | Scan `139399442` is red for one medium "Prefer simpler equivalent code" suggestion in `src/daemon/runtime/assemble.ts` line 857. Release owner explicitly directed to ignore it. | Waived | GitHub check remains red unless the issue is ignored in Aikido |
+| 7 | PRD-048d rehearsal | `npm publish --dry-run --provenance --access public` | Dry-run reaches publish step without publishing | Passed after version bump | Candidate bumped to `0.1.11`; npm dry-run built the package, reported `legioncodeinc-honeycomb-0.1.11.tgz`, 62 files, 3.6 MB package size, 15.2 MB unpacked size, and dry-run publish target `latest` with public access | Pass | No real npm publish or release tag was performed |
 
 ## Fixes Applied During This Pass
 
@@ -90,13 +90,14 @@ Reasons:
 - Fixed the concrete Aikido diagnostics SQL finding by changing `FROM "${table}"` and the latest-row
   subquery to use `FROM ${table}` after `sqlIdent()` validation, with test coverage proving the query
   contains `FROM memory_jobs job` and not `FROM "memory_jobs"`.
+- Bumped the release candidate from `0.1.10` to `0.1.11`, synchronized plugin/harness manifests, and
+  reran the npm publish dry-run successfully.
 
 ## Open Blockers
 
-1. Wait for the latest Aikido branch re-scan on PR #188 and resolve or waive any remaining findings.
-2. Decide whether the deferred 10-minute installed-package soak is required before final publish, or
+1. Decide whether the deferred 10-minute installed-package soak is required before final publish, or
    whether the 120-second background-worker package proof is accepted for this checkpoint.
-3. Bump the package version or explicitly waive the PRD-048d dry-run failure caused by already-published
-   `0.1.10`.
-4. Decide whether PRD-066 must ship true default-on behavior without `HONEYCOMB_LOCAL_QUEUE_ENABLED=true`.
-5. Fix or waive the setup-mode `honeycomb daemon status` wording for reachable `/health` 503.
+2. Decide whether PRD-066 must ship true default-on behavior without `HONEYCOMB_LOCAL_QUEUE_ENABLED=true`.
+3. Fix or waive the setup-mode `honeycomb daemon status` wording for reachable `/health` 503.
+4. If Aikido must be green in GitHub before merge, ignore the waived medium suggestion in Aikido or
+   apply the simplification in `assemble.ts`.
