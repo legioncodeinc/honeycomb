@@ -14,8 +14,9 @@
 
 import { describe, expect, it } from "vitest";
 
-import { createLazyStorageClient } from "../../../src/daemon/storage/index.js";
 import type { QueryScope } from "../../../src/daemon/storage/client.js";
+import { createLazyStorageClient } from "../../../src/daemon/storage/index.js";
+import { QueryMeter } from "../../../src/daemon/storage/query-meter.js";
 import { FakeDeepLakeTransport, fakeCredentialRecord } from "../../helpers/fake-deeplake.js";
 
 const SCOPE: QueryScope = { org: "fake-org", workspace: "fake-ws" };
@@ -92,5 +93,21 @@ describe("b-AC-3 the deferred client connects on the NEXT query once a credentia
 		transport.enqueueRows([{ n: 42 }]);
 		const res = await client.query("SELECT 1", SCOPE);
 		expect(res.kind).toBe("ok");
+	});
+
+	it("forwards the same query meter before and after the deferred client connects", async () => {
+		const provider = mutableProvider();
+		const transport = new FakeDeepLakeTransport();
+		const meter = new QueryMeter();
+		const client = createLazyStorageClient({ provider, transport, meter });
+
+		expect(client.meterSnapshot()).toEqual({ perSource: [], totalReads: 0, totalWrites: 0 });
+		expect(client.meterLogLine()).toBe("[query-meter] total_reads=0 total_writes=0");
+
+		provider.setRecord(fakeCredentialRecord());
+		transport.enqueueRows([{ ok: 1 }]);
+		await client.query("SELECT 1", SCOPE, { source: "recall-arm" });
+
+		expect(client.meterSnapshot().perSource).toEqual([{ source: "recall-arm", reads: 1, writes: 0 }]);
 	});
 });

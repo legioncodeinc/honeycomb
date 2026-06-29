@@ -81,6 +81,23 @@ and any remaining shared DeepLake job handling.
 Measure before/after DeepLake coordination reads, define rollout flags, and document rollback and
 operator diagnostics.
 
+### PRD-066d: Verification Hardening And Upgrade Smoke
+
+Harden the live idle-meter proof so it uses bounded throwaway DeepLake queue tables, then add a
+built-daemon smoke that proves local SQLite operational DBs are created and reopened across startup.
+
+### PRD-066e: Upgrade And Rollback Hardening
+
+Prove the packaged user upgrade path, pending old shared job behavior, rollback safety, topology
+gating, and dogfood matrix before enabling local queue by default for production single-machine
+installs.
+
+### PRD-066f: Publish Readiness Gate
+
+Consolidate the final publish gate for PRD-066: full local CI, package-specific smokes, fresh
+no-credentials setup, upgrade/rollback proof, longer live idle-cost proof, dogfood resilience, and
+security/release-review evidence.
+
 ## Functional Requirements
 
 1. The daemon must have a local queue abstraction for enqueue, lease, complete, fail, retry,
@@ -163,6 +180,8 @@ The local queue must not introduce DeepLake schema changes.
 - PRD-062b adaptive polling as the fallback safety net for remaining DeepLake queue paths.
 - PRD-043a precedent for local SQLite operational state.
 - ADR-0006 architectural decision for local queue as interim idle-cost control.
+- PRD-066e packaged upgrade proof before production default-on.
+- PRD-066f publish-readiness gate before package release.
 
 ## Open Questions
 
@@ -172,4 +191,5 @@ The local queue must not introduce DeepLake schema changes.
 - Should the first release drain old DeepLake jobs to completion or ignore them after a grace window?
 - What should the exact idle measurement window be for "zero coordination reads"?
 - Should local queue diagnostics be CLI-only, dashboard-visible, or both?
+- What exact previous package version should be used for the packaged upgrade smoke?
 

@@ -53,9 +53,11 @@ interface StartedProbe {
 	readonly assembled: AssembledDaemon;
 	readonly meter: QueryMeter;
 	readonly storage: StorageClient;
+	readonly scope: QueryScope;
 	readonly runtimeDir: string;
 	readonly workspaceDir: string;
 	readonly originalEnv: Record<string, string | undefined>;
+	readonly sharedJobTableName?: string;
 }
 
 const started: StartedProbe[] = [];
@@ -73,29 +75,40 @@ afterEach(async () => {
 
 describe.skipIf(!HAS_SHARED_CREDENTIAL_FILE)("PRD-066 live idle query-meter proof", () => {
 	it("shared queue idle discovery produces poll reads, while local queue mode produces zero DeepLake coordination reads", async () => {
-		const shared = await startMeteredDaemon({ localQueueEnabled: false });
-		shared.meter.reset();
-		await sleep(IDLE_WINDOW_MS);
-		await shared.assembled.daemon.services.queue.lease(["summary"]);
-		const sharedSnap = shared.meter.snapshot();
+		const sharedJobTableName = `ci_066d_${makeRunId()}_jobs`;
+		let shared: StartedProbe | undefined;
+		let sharedSnap: MeterSnapshot;
 
-		expect(pollReads(sharedSnap)).toBeGreaterThan(0);
+		try {
+			shared = await phase("shared start bounded table", () =>
+				startMeteredDaemon({ localQueueEnabled: false, sharedJobTableName }),
+			);
+			shared.meter.reset();
+			await phase("shared idle window", () => sleep(IDLE_WINDOW_MS));
+			await phase("shared bounded lease", () => shared.assembled.daemon.services.queue.lease(["summary"]));
+			sharedSnap = shared.meter.snapshot();
 
-		await shared.assembled.shutdown();
+			expect(pollReads(sharedSnap)).toBeGreaterThan(0);
 
-		const local = await startMeteredDaemon({ localQueueEnabled: true });
-		local.meter.reset();
-		await sleep(IDLE_WINDOW_MS);
-		await local.assembled.daemon.services.queue.lease(["summary"]);
-		const localSnap = local.meter.snapshot();
+			await shared.assembled.shutdown();
 
-		console.info(
-			`[prd-066-idle-meter] shared_poll_reads=${pollReads(sharedSnap)} shared_poll_writes=${pollWrites(sharedSnap)} ` +
-				`local_poll_reads=${pollReads(localSnap)} local_poll_writes=${pollWrites(localSnap)}`,
-		);
+			const local = await phase("local start", () => startMeteredDaemon({ localQueueEnabled: true }));
+			local.meter.reset();
+			await phase("local idle window", () => sleep(IDLE_WINDOW_MS));
+			await phase("local idle lease", () => local.assembled.daemon.services.queue.lease(["summary"]));
+			const localSnap = local.meter.snapshot();
 
-		expect(pollReads(localSnap)).toBe(0);
-		expect(pollWrites(localSnap)).toBe(0);
+			console.info(
+				`[prd-066-idle-meter] shared_table=${sharedJobTableName} shared_poll_reads=${pollReads(sharedSnap)} ` +
+					`shared_poll_writes=${pollWrites(sharedSnap)} local_poll_reads=${pollReads(localSnap)} ` +
+					`local_poll_writes=${pollWrites(localSnap)}`,
+			);
+
+			expect(pollReads(localSnap)).toBe(0);
+			expect(pollWrites(localSnap)).toBe(0);
+		} finally {
+			await dropSharedJobTable(shared, sharedJobTableName);
+		}
 	});
 
 	it("a local-queue memory pipeline job still performs real DeepLake memory/graph work", async ({ skip }) => {
@@ -209,23 +222,50 @@ describe.skipIf(!HAS_SHARED_CREDENTIAL_FILE)("PRD-066 live idle query-meter proo
 	}, 180_000);
 });
 
-async function startMeteredDaemon(options: { readonly localQueueEnabled: boolean }): Promise<StartedProbe> {
+async function startMeteredDaemon(options: {
+	readonly localQueueEnabled: boolean;
+	readonly sharedJobTableName?: string;
+}): Promise<StartedProbe> {
 	const runtimeDir = mkdtempSync(join(tmpdir(), "hc-066-runtime-"));
 	const workspaceDir = mkdtempSync(join(tmpdir(), "hc-066-workspace-"));
 	const originalEnv = setEnvForProbe(workspaceDir, options.localQueueEnabled);
 	const meter = new QueryMeter();
-	const storage = createStorageClient({ meter });
+	const provider = defaultCredentialProvider();
+	const storageConfig = resolveStorageConfig(provider);
+	const scope: QueryScope = { org: storageConfig.org, workspace: storageConfig.workspace };
+	const storage = createStorageClient({ provider, meter });
 	const assembled = assembleDaemon({
 		config: runtimeConfig,
 		storage,
+		provider,
 		logger: createRequestLogger({ silent: true }),
 		runtimeDir,
 		workspaceDir,
 		healthProbeIntervalMs: 60_000,
 		embedSupervisor: noopEmbedSupervisor,
+		...(options.sharedJobTableName !== undefined ? { jobQueueConfig: { tableName: options.sharedJobTableName } } : {}),
 	});
-	await assembled.start();
-	const probe = { assembled, meter, storage, runtimeDir, workspaceDir, originalEnv };
+	try {
+		await phase(options.sharedJobTableName === undefined ? "daemon start" : "daemon start bounded shared queue", () =>
+			assembled.start(),
+		);
+	} catch (err) {
+		await assembled.shutdown().catch(() => undefined);
+		restoreEnv(originalEnv);
+		rmSync(runtimeDir, { recursive: true, force: true });
+		rmSync(workspaceDir, { recursive: true, force: true });
+		throw err;
+	}
+	const probe = {
+		assembled,
+		meter,
+		storage,
+		scope,
+		runtimeDir,
+		workspaceDir,
+		originalEnv,
+		...(options.sharedJobTableName !== undefined ? { sharedJobTableName: options.sharedJobTableName } : {}),
+	};
 	started.push(probe);
 	return probe;
 }
@@ -280,6 +320,39 @@ async function sleep(ms: number): Promise<void> {
 
 function makeRunId(): string {
 	return `t${(process.hrtime.bigint() % 1_000_000_000n).toString()}`;
+}
+
+async function phase<T>(name: string, work: () => Promise<T>, timeoutMs = 60_000): Promise<T> {
+	const startedAt = Date.now();
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			work(),
+			new Promise<never>((_, reject) => {
+				timer = setTimeout(() => {
+					const elapsedMs = Date.now() - startedAt;
+					reject(new Error(`PRD-066 live idle-meter phase "${name}" timed out after ${elapsedMs}ms`));
+				}, timeoutMs);
+			}),
+		]);
+	} catch (err: unknown) {
+		const elapsedMs = Date.now() - startedAt;
+		const reason = err instanceof Error ? err.message : String(err);
+		throw new Error(`PRD-066 live idle-meter phase "${name}" failed after ${elapsedMs}ms: ${reason}`);
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+	}
+}
+
+async function dropSharedJobTable(probe: StartedProbe | undefined, tableName: string): Promise<void> {
+	if (probe !== undefined) {
+		await probe.storage.query(`DROP TABLE IF EXISTS "${sqlIdent(tableName)}"`, probe.scope);
+		return;
+	}
+	const provider = defaultCredentialProvider();
+	const config = resolveStorageConfig(provider);
+	const storage = createStorageClient({ provider });
+	await storage.query(`DROP TABLE IF EXISTS "${sqlIdent(tableName)}"`, { org: config.org, workspace: config.workspace });
 }
 
 function tableRewriteStorage(storage: StorageClient, tables: Record<string, string>): Pick<StorageClient, "query"> {

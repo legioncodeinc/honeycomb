@@ -65,6 +65,7 @@ import {
 	runCapture,
 	runSessionEnd,
 } from "../../src/hooks/shared/index.js";
+import { bindFolderToProject } from "../../src/hooks/shared/project-resolver.js";
 import { createFakeSummarySpawn } from "../../src/hooks/shared/session-end.js";
 
 import { createSummaryStore, type SummaryRow, summaryPath } from "../../src/daemon/runtime/summaries/index.js";
@@ -139,6 +140,7 @@ describe.skipIf(!HAS_TOKEN)("GOLDEN PATH 021f: capture → summary → cross-ses
 	let storage: StorageClient;
 	let scope: QueryScope;
 	let credDir: string;
+	let projectsDir: string;
 	let org: string;
 	let workspace: string;
 
@@ -181,12 +183,21 @@ describe.skipIf(!HAS_TOKEN)("GOLDEN PATH 021f: capture → summary → cross-ses
 				savedAt: new Date().toISOString(),
 			}),
 		);
+		projectsDir = mkdtempSync(join(tmpdir(), "honeycomb-021f-projects-"));
+		bindFolderToProject({
+			cwd: "/repo/honeycomb",
+			projectId: "ci",
+			name: "honeycomb_ci",
+			org,
+			workspace,
+			dir: projectsDir,
+		});
 
 		// Boot the REAL assembled daemon against live DeepLake on an ephemeral port (021a).
 		// `bootTestDaemon` defaults storage to the LIVE client (env creds) — the daemon path
 		// is 100% production. The HONEYCOMB_DEEPLAKE_WORKSPACE env the harness's client reads
-		// is the same `honeycomb_ci` the read-backs use, so capture + read agree on tenancy.
-		booted = await bootTestDaemon();
+		// is the same workspace the read-backs use, so capture + read agree on tenancy.
+		booted = await bootTestDaemon({ projectsDir });
 
 		// f-AC-4: the `/api/logs` reader is now served by the PRODUCTION assembly.
 		// `assembleDaemon()` fires `mountLogsApi` itself (security+quality close-out), so this
@@ -199,6 +210,7 @@ describe.skipIf(!HAS_TOKEN)("GOLDEN PATH 021f: capture → summary → cross-ses
 	afterAll(async () => {
 		if (booted) await booted.stop();
 		if (credDir) rmSync(credDir, { recursive: true, force: true });
+		if (projectsDir) rmSync(projectsDir, { recursive: true, force: true });
 	});
 
 	it(
@@ -295,6 +307,7 @@ describe.skipIf(!HAS_TOKEN)("GOLDEN PATH 021f: capture → summary → cross-ses
 			const summaryRowValue: SummaryRow = {
 				path: sPath,
 				summary: summaryBody,
+				key: `honeycomb_ci golden path ${RECALL_TERM}`,
 				description: summaryBody.slice(0, 120),
 				embedding: null,
 				author: "ci-021f-agent",

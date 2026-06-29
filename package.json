@@ -1,6 +1,6 @@
 {
   "name": "@legioncodeinc/honeycomb",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "//go-public": "Go-public switches are flipped: scoped name, public+provenance publishConfig live, `private` removed. CI auth is npm Trusted Publishing (OIDC); there is NO NPM_TOKEN. The go-live procedure is RELEASING.md 'Cut the release': the first publish is a one-time manual 2FA bootstrap that creates the package, after which every CI publish from release.yaml is tokenless OIDC.",
   "publishConfig": {
     "access": "public",
@@ -78,7 +78,10 @@
     "ci": "npm run typecheck && npm run dup && npm run test && npm run audit:sql",
     "postinstall": "node scripts/ensure-tree-sitter.mjs && node scripts/ensure-embed-deps.mjs",
     "prepack": "npm run build",
-    "smoke:daemon-bundle": "node scripts/smoke-daemon-bundle.mjs"
+    "smoke:daemon-bundle": "node scripts/smoke-daemon-bundle.mjs",
+    "smoke:local-queue-upgrade": "node --experimental-sqlite scripts/local-queue-upgrade-smoke.mjs",
+    "smoke:local-queue-packaged-upgrade": "node --experimental-sqlite scripts/local-queue-packaged-upgrade-smoke.mjs",
+    "smoke:local-queue-packaged-live-proof": "node --experimental-sqlite scripts/local-queue-packaged-live-proof.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.0",

@@ -7,7 +7,7 @@
  * module only schedules per-device work.
  */
 
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -101,6 +101,7 @@ export interface LocalJobQueueConfig {
 export interface OpenLocalJobQueueOptions {
 	readonly baseDir?: string;
 	readonly memory?: boolean;
+	readonly openExistingOnly?: boolean;
 	readonly config?: LocalJobQueueConfig;
 	readonly clock?: LocalJobQueueClock;
 	readonly onceFailure?: (message: string) => void;
@@ -120,6 +121,7 @@ const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_BACKOFF_BASE_MS = 1000;
 const DEFAULT_BACKOFF_CAP_MS = 5 * 60 * 1000;
 const DEFAULT_COMPLETED_RETENTION_MS = 24 * 60 * 60 * 1000;
+const OPEN_EXISTING_MISSING_MESSAGE = "local job queue database does not exist";
 
 const LocalJobInputSchema = z.object({
 	kind: z.string().trim().min(1),
@@ -184,7 +186,7 @@ export function openLocalJobQueue(options: OpenLocalJobQueueOptions = {}): Local
 	const onceFailure = options.onceFailure ?? defaultOnceFailure();
 	try {
 		const db = createDatabase(options);
-		migrate(db);
+		if (options.openExistingOnly !== true) migrate(db);
 		return new SqliteLocalJobQueue(
 			db,
 			resolveConfig(options.config),
@@ -193,6 +195,7 @@ export function openLocalJobQueue(options: OpenLocalJobQueueOptions = {}): Local
 		);
 	} catch (err: unknown) {
 		const reason = err instanceof Error ? err.message : String(err);
+		if (options.openExistingOnly === true && reason === OPEN_EXISTING_MISSING_MESSAGE) return NULL_LOCAL_JOB_QUEUE;
 		onceFailure(`honeycomb: local job queue unavailable (non-fatal): ${reason}`);
 		return NULL_LOCAL_JOB_QUEUE;
 	}
@@ -222,8 +225,12 @@ function createDatabase(options: OpenLocalJobQueueOptions): SqliteDatabase {
 	const sqlite = loadSqlite();
 	if (options.memory === true) return new sqlite.DatabaseSync(":memory:") as SqliteDatabase;
 	const dir = localQueueDaemonDir(options.baseDir);
+	const dbPath = localQueueDatabasePath(dir);
+	if (options.openExistingOnly === true && !existsSync(dbPath)) {
+		throw new Error(OPEN_EXISTING_MISSING_MESSAGE);
+	}
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
-	return new sqlite.DatabaseSync(localQueueDatabasePath(dir)) as SqliteDatabase;
+	return new sqlite.DatabaseSync(dbPath) as SqliteDatabase;
 }
 
 function localQueueDatabasePath(daemonDir: string): string {

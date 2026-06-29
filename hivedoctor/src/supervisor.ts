@@ -68,6 +68,8 @@ export interface SupervisorDeps {
 	readonly clock: SupervisorClock;
 	/** Probe interval in ms between healthy ticks. */
 	readonly probeIntervalMs: number;
+	/** Cold-boot / post-restart grace window in ms. Use 0 only for tests that need legacy behavior. */
+	readonly startupGraceMs: number;
 	/**
 	 * Optional error-telemetry seam (PRD-064d). When present, caught exceptions in the
 	 * tick are routed here in addition to the existing log line. Absent in Wave-0 tests
@@ -78,6 +80,8 @@ export interface SupervisorDeps {
 
 /** The supervisor surface. */
 export interface Supervisor {
+	/** Re-arm the boot grace window after an external actor starts/restarts the daemon. */
+	armStartupGrace(): void;
 	/** Arm and run the watch loop (resolves when `stop()` is called). Idempotent. */
 	start(): Promise<void>;
 	/** Disarm the watch loop. Idempotent. */
@@ -140,6 +144,19 @@ function coarseHealth(kind: HealthClassification["kind"]): HiveDoctorState["last
 export function createSupervisor(deps: SupervisorDeps): Supervisor {
 	let running = false;
 	let stopped = false;
+	const startupGraceMs =
+		Number.isFinite(deps.startupGraceMs) && deps.startupGraceMs > 0 ? deps.startupGraceMs : 0;
+	let graceUntilMs = 0;
+
+	function armStartupGrace(now = deps.clock.now()): void {
+		graceUntilMs = startupGraceMs > 0 ? now + startupGraceMs : 0;
+	}
+
+	function startupGraceRemainingMs(now = deps.clock.now()): number {
+		return graceUntilMs > now ? graceUntilMs - now : 0;
+	}
+
+	armStartupGrace();
 
 	/**
 	 * Route a caught error to the optional telemetry seam (PRD-064d AC-064d.1), fire-and-forget
@@ -226,7 +243,9 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
 			// A kicked restart: reset nothing yet (health is confirmed on the NEXT probe, per
 			// AC-064a.2). Record the restart time so the cooldown guard engages, and reset the
 			// failure count to 0 only once health is confirmed (handled in tick on the ok branch).
-			return { ...state, lastRestartAt: new Date(deps.clock.now()).toISOString() };
+			const now = deps.clock.now();
+			armStartupGrace(now);
+			return { ...state, lastRestartAt: new Date(now).toISOString() };
 		}
 
 		// A genuine failed restart: increment the consecutive-failure count + advance backoff so
@@ -275,6 +294,12 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
 				return classification;
 			}
 
+			const graceRemainingMs = startupGraceRemainingMs();
+			if (graceRemainingMs > 0) {
+				deps.logger.info("tick.booting", { kind: classification.kind, remainingMs: graceRemainingMs });
+				return classification;
+			}
+
 			// Unhealthy: open an incident episode, heal, persist, and write the episode.
 			deps.logger.warn("tick.unhealthy", { kind: classification.kind });
 			const trigger = triggerForClassification(classification.kind);
@@ -295,11 +320,13 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
 	}
 
 	return {
+		armStartupGrace,
 		async start(): Promise<void> {
 			if (running) return;
 			running = true;
 			stopped = false;
-			deps.logger.info("supervisor.start", { intervalMs: deps.probeIntervalMs });
+			armStartupGrace();
+			deps.logger.info("supervisor.start", { intervalMs: deps.probeIntervalMs, startupGraceMs });
 			while (!stopped) {
 				await tick();
 				if (stopped) break;

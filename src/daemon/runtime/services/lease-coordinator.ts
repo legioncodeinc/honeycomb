@@ -77,6 +77,10 @@ export interface LeaseCoordinatorTimers {
 	readonly setTimer: (cb: () => void, ms: number) => unknown;
 	/** Cancel a handle returned by {@link setTimer}. */
 	readonly clearTimer: (handle: unknown) => void;
+	/** Schedule a repeating callback for the legacy flat cadence. */
+	readonly setRepeatingTimer?: (cb: () => void, ms: number) => unknown;
+	/** Cancel a handle returned by {@link setRepeatingTimer}. */
+	readonly clearRepeatingTimer?: (handle: unknown) => void;
 }
 
 /** Construction deps for {@link createLeaseCoordinator}. */
@@ -152,11 +156,19 @@ class CombinedLeaseCoordinator implements LeaseCoordinator {
 			setTimer: (cb, ms) => {
 				// PRD-062b hardening: unref the combined-lease timer so it never holds the
 				// process open or burdens teardown (mirrors the capture-buffer flush timer).
-				const t = setInterval(cb, ms);
+				const t = setTimeout(cb, ms);
 				if (typeof t === "object" && t !== null && "unref" in t && typeof t.unref === "function") t.unref();
 				return t;
 			},
 			clearTimer: (handle) => {
+				if (handle !== undefined) clearTimeout(handle as ReturnType<typeof setTimeout>);
+			},
+			setRepeatingTimer: (cb, ms) => {
+				const t = setInterval(cb, ms);
+				if (typeof t === "object" && t !== null && "unref" in t && typeof t.unref === "function") t.unref();
+				return t;
+			},
+			clearRepeatingTimer: (handle) => {
 				if (handle !== undefined) clearInterval(handle as ReturnType<typeof setInterval>);
 			},
 		};

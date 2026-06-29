@@ -42,10 +42,14 @@ export type PollTick = () => Promise<boolean>;
 
 /** The injected timer seam (mirrors the workers' `setTimer`/`clearTimer`). */
 export interface PollLoopTimers {
-	/** Schedule a callback after `ms`; returns a handle for {@link clearTimer}. */
+	/** Schedule a one-shot callback after `ms`; returns a handle for {@link clearTimer}. */
 	readonly setTimer: (cb: () => void, ms: number) => unknown;
 	/** Cancel a handle returned by {@link setTimer}. */
 	readonly clearTimer: (handle: unknown) => void;
+	/** Schedule a repeating callback. Defaults to {@link setTimer} for deterministic tests. */
+	readonly setRepeatingTimer?: (cb: () => void, ms: number) => unknown;
+	/** Cancel a handle returned by {@link setRepeatingTimer}. Defaults to {@link clearTimer}. */
+	readonly clearRepeatingTimer?: (handle: unknown) => void;
 }
 
 /** Construction deps for {@link createPollLoop}. */
@@ -74,18 +78,17 @@ export interface PollLoop {
 /** The concrete loop. */
 class AdaptivePollLoop implements PollLoop {
 	private readonly tick: PollTick;
-	private readonly backoffEnabled: boolean;
 	private readonly flatIntervalMs: number;
 	private readonly timers: PollLoopTimers;
 	private readonly backoff: PollBackoff | null;
 	private handle: unknown;
+	private clearHandle: ((handle: unknown) => void) | undefined;
 	private stopped = false;
 	/** Guards against overlapping ticks on the poll loop (the workers' `running` flag). */
 	private running = false;
 
 	constructor(deps: PollLoopDeps) {
 		this.tick = deps.tick;
-		this.backoffEnabled = deps.backoff.enabled;
 		this.flatIntervalMs = deps.flatIntervalMs;
 		this.timers = deps.timers;
 		// Only build the state machine when backoff is active; the flat path never
@@ -94,10 +97,13 @@ class AdaptivePollLoop implements PollLoop {
 	}
 
 	start(): void {
+		if (!this.stopped && this.handle !== undefined) return;
 		this.stopped = false;
 		if (this.backoff === null) {
 			// ── Pre-PRD cadence (AC-9): a flat repeating interval. ──────────────────
-			this.handle = this.timers.setTimer(() => {
+			const setRepeatingTimer = this.timers.setRepeatingTimer ?? this.timers.setTimer;
+			this.clearHandle = this.timers.clearRepeatingTimer ?? this.timers.clearTimer;
+			this.handle = setRepeatingTimer(() => {
 				this.fireGuarded(null);
 			}, this.flatIntervalMs);
 			return;
@@ -109,6 +115,7 @@ class AdaptivePollLoop implements PollLoop {
 	/** Arm the next one-shot tick (adaptive path only). */
 	private scheduleNext(ms: number): void {
 		if (this.stopped) return;
+		this.clearHandle = this.timers.clearTimer;
 		this.handle = this.timers.setTimer(() => {
 			this.fireGuarded(this.backoff);
 		}, ms);
@@ -143,8 +150,9 @@ class AdaptivePollLoop implements PollLoop {
 	stop(): void {
 		this.stopped = true;
 		if (this.handle !== undefined) {
-			this.timers.clearTimer(this.handle);
+			(this.clearHandle ?? this.timers.clearTimer)(this.handle);
 			this.handle = undefined;
+			this.clearHandle = undefined;
 		}
 	}
 }
@@ -187,19 +195,33 @@ export function buildWorkerPollLoop(options: WorkerPollLoopOptions): PollLoop {
 		((cb, ms) => {
 			// PRD-062b hardening: a background poll timer must NEVER keep the process alive or
 			// burden test/shutdown teardown — unref it (mirrors the capture-buffer flush timer).
-			const t = setInterval(cb, ms);
+			const t = setTimeout(cb, ms);
 			if (typeof t === "object" && t !== null && "unref" in t && typeof t.unref === "function") t.unref();
 			return t;
 		});
 	const clearTimer =
 		options.clearTimer ??
 		((handle) => {
-			if (handle !== undefined) clearInterval(handle as ReturnType<typeof setInterval>);
+			if (handle !== undefined) clearTimeout(handle as ReturnType<typeof setTimeout>);
 		});
+	const setRepeatingTimer =
+		options.setTimer === undefined
+			? (cb: () => void, ms: number) => {
+					const t = setInterval(cb, ms);
+					if (typeof t === "object" && t !== null && "unref" in t && typeof t.unref === "function") t.unref();
+					return t;
+				}
+			: undefined;
+	const clearRepeatingTimer =
+		options.clearTimer === undefined
+			? (handle: unknown) => {
+					if (handle !== undefined) clearInterval(handle as ReturnType<typeof setInterval>);
+				}
+			: undefined;
 	return createPollLoop({
 		tick: options.tick,
 		backoff: options.backoff ?? PollBackoffConfigSchema.parse({}),
 		flatIntervalMs: options.flatIntervalMs,
-		timers: { setTimer, clearTimer },
+		timers: { setTimer, clearTimer, setRepeatingTimer, clearRepeatingTimer },
 	});
 }

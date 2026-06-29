@@ -11,10 +11,14 @@
  *   - No `.skip` / `.only`; `vitest run` is CI.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { PollBackoffConfigSchema } from "../../../../src/daemon/runtime/services/poll-backoff.js";
-import { createPollLoop, type PollLoopTimers } from "../../../../src/daemon/runtime/services/poll-loop.js";
+import {
+	buildWorkerPollLoop,
+	createPollLoop,
+	type PollLoopTimers,
+} from "../../../../src/daemon/runtime/services/poll-loop.js";
 
 /**
  * A manual one-shot timer clock. Each `setTimer` records the requested delay and the
@@ -58,6 +62,10 @@ function manualTimers(): ManualTimers {
 		},
 	};
 }
+
+afterEach(() => {
+	vi.useRealTimers();
+});
 
 /** Flush microtasks so the loop's async tick `.then()/.finally()` settle before asserting. */
 async function flush(): Promise<void> {
@@ -107,6 +115,28 @@ describe("AdaptivePollLoop: AC-9 parity — flags off ⇒ a flat repeating inter
 
 describe("AdaptivePollLoop: AC-2 / AC-3 — adaptive self-reschedule", () => {
 	const ENABLED = PollBackoffConfigSchema.parse({ enabled: true, floorMs: 1_000, ceilingMs: 30_000, jitter: 0 });
+
+	it("the default adaptive timer is one-shot, not a multiplying interval", async () => {
+		vi.useFakeTimers();
+		let ticks = 0;
+		const loop = buildWorkerPollLoop({
+			tick: async () => {
+				ticks++;
+				return false;
+			},
+			backoff: ENABLED,
+			flatIntervalMs: 1_000,
+		});
+
+		loop.start();
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(ticks).toBe(1);
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(ticks).toBe(1);
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(ticks).toBe(2);
+		loop.stop();
+	});
 
 	it("AC-2: consecutive EMPTY ticks back off geometrically toward the ceiling", async () => {
 		const timers = manualTimers();

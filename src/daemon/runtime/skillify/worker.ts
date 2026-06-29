@@ -38,6 +38,8 @@ import { join } from "node:path";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import { resolveScopeFromDisk, UNSORTED_PROJECT_ID } from "../../../hooks/shared/project-resolver.js";
 import type { JobQueueService } from "../services/job-queue.js";
+import type { PollBackoffConfig } from "../services/poll-backoff.js";
+import { buildWorkerPollLoop, type PollLoop } from "../services/poll-loop.js";
 import {
 	createFileWorkerLock,
 	createHostCliGate,
@@ -201,6 +203,8 @@ export interface SkillifyWorkerDeps {
 	readonly logger?: SkillifyWorkerLogger;
 	/** Poll interval in ms when running the continuous loop. Default 1000. */
 	readonly pollIntervalMs?: number;
+	/** Adaptive poll backoff config for idle loops. */
+	readonly backoff?: PollBackoffConfig;
 	/** Injected timer scheduler (real `setInterval` otherwise) — for tests. */
 	readonly setTimer?: (cb: () => void, ms: number) => unknown;
 	/** Injected timer canceller (real `clearInterval` otherwise) — for tests. */
@@ -265,17 +269,12 @@ class SkillifyJobWorkerImpl implements SkillifyJobWorker {
 	/** PRD-049c: optional override for the `projects.json` cache dir the resolution reads. */
 	private readonly projectsDir?: string;
 	private readonly logger?: SkillifyWorkerLogger;
-	private readonly pollIntervalMs: number;
-	private readonly setTimer: (cb: () => void, ms: number) => unknown;
-	private readonly clearTimer: (handle: unknown) => void;
+	private readonly loop: PollLoop;
 	private readonly gateOverride?: GateCli;
 	private readonly fetcherOverride?: SessionFetcher;
 	private readonly storeOverride?: SkillStore;
 	/** PRD-060e/060f — the per-session ROI writer fired once at completion (fail-soft). */
 	private readonly roiWriter: RoiSessionWriter;
-	private handle: unknown;
-	/** Guards against overlapping `runOnce` invocations on the poll loop. */
-	private running = false;
 
 	constructor(deps: SkillifyWorkerDeps) {
 		this.queue = deps.queue;
@@ -294,13 +293,13 @@ class SkillifyJobWorkerImpl implements SkillifyJobWorker {
 		this.cwd = deps.cwd ?? this.installDirs.projectDir ?? process.cwd();
 		this.projectsDir = deps.projectsDir;
 		this.logger = deps.logger;
-		this.pollIntervalMs = deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-		this.setTimer = deps.setTimer ?? ((cb, ms) => setInterval(cb, ms));
-		this.clearTimer =
-			deps.clearTimer ??
-			((handle) => {
-				if (handle !== undefined) clearInterval(handle as ReturnType<typeof setInterval>);
-			});
+		this.loop = buildWorkerPollLoop({
+			tick: () => this.runOnce(),
+			flatIntervalMs: deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+			backoff: deps.backoff,
+			setTimer: deps.setTimer,
+			clearTimer: deps.clearTimer,
+		});
 		this.gateOverride = deps.gateOverride;
 		this.fetcherOverride = deps.fetcherOverride;
 		this.storeOverride = deps.storeOverride;
@@ -458,25 +457,11 @@ class SkillifyJobWorkerImpl implements SkillifyJobWorker {
 	}
 
 	start(): void {
-		// Idempotent: a second start() while a timer is already live would overwrite `this.handle`
-		// and leak the first interval (stop() only clears the latest handle). Guard like the
-		// pollinating worker's start() so double-start is a no-op, not a timer leak.
-		if (this.handle !== undefined) return;
-		this.handle = this.setTimer(() => {
-			// Skip a tick if the previous lease+run is still in flight; never overlap.
-			if (this.running) return;
-			this.running = true;
-			void this.runOnce().finally(() => {
-				this.running = false;
-			});
-		}, this.pollIntervalMs);
+		this.loop.start();
 	}
 
 	stop(): void {
-		if (this.handle !== undefined) {
-			this.clearTimer(this.handle);
-			this.handle = undefined;
-		}
+		this.loop.stop();
 	}
 }
 

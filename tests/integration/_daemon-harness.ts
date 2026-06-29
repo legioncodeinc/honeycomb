@@ -66,6 +66,8 @@ export interface BootTestDaemonOptions {
 	readonly storage?: StorageClient;
 	/** Override the workspace dir the file watcher watches. Defaults to a temp dir. */
 	readonly workspaceDir?: string;
+	/** Override the local projects cache dir capture/project resolution reads. */
+	readonly projectsDir?: string;
 	/**
 	 * The filesystem path to the `inference:` config (`agent.yaml`) the assembled daemon
 	 * builds its real {@link ModelClient} from (PRD-026 AC-T). Forwarded verbatim to
@@ -124,6 +126,7 @@ export async function bootTestDaemon(options: BootTestDaemonOptions = {}): Promi
 		logger: createRequestLogger({ silent: true }),
 		runtimeDir,
 		...(options.workspaceDir !== undefined ? { workspaceDir: options.workspaceDir } : {}),
+		...(options.projectsDir !== undefined ? { projectsDir: options.projectsDir } : {}),
 		// PRD-045d (d-AC-2): forward the pollinating gate + inference config so an ENABLED pollinating
 		// pass can run end-to-end on the assembled daemon. Both are additive + backward-compatible
 		// (absent → the daemon's env-resolved defaults, unchanged for every other itest).

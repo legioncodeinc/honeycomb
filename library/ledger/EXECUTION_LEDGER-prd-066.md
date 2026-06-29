@@ -14,6 +14,8 @@ Source PRDs:
 - `library/requirements/backlog/prd-066-local-queue-idle-cost-control/prd-066a-local-queue-idle-cost-control-local-queue-store.md`
 - `library/requirements/backlog/prd-066-local-queue-idle-cost-control/prd-066b-local-queue-idle-cost-control-worker-routing-and-migration.md`
 - `library/requirements/backlog/prd-066-local-queue-idle-cost-control/prd-066c-local-queue-idle-cost-control-idle-cost-verification-and-rollout.md`
+- `library/requirements/backlog/prd-066-local-queue-idle-cost-control/prd-066d-local-queue-idle-cost-control-verification-hardening-and-upgrade-smoke.md`
+- `library/requirements/backlog/prd-066-local-queue-idle-cost-control/prd-066e-local-queue-idle-cost-control-upgrade-and-rollback-hardening.md`
 
 ## Wave Plan
 
@@ -50,6 +52,21 @@ Wave 4: Close-out.
 - Scope: security audit/remediate Critical/High, then QA verify PRD-066 against implementation.
 - Exit: all ACs VERIFIED or explicitly BLOCKED with evidence.
 
+Wave 5: PRD-066d verification hardening.
+
+- Owner: main orchestrator, with security and quality close-out.
+- Scope: test-only shared queue table override, bounded live idle-meter proof, built-daemon local
+  queue upgrade smoke, and regression verification.
+- Exit: 066d ACs are VERIFIED with live receipts and built-daemon smoke evidence.
+
+Wave 6: PRD-066e upgrade and rollback hardening.
+
+- Owner: main orchestrator plus non-colliding worker sub-agents.
+- Scope: packaged upgrade smoke, pending old shared job migration policy, rollback behavior,
+  topology gating, operator diagnostics, and dogfood matrix.
+- Exit: every 066e AC is VERIFIED or specifically BLOCKED with evidence; required before
+  production default-on.
+
 ## AC Ledger
 
 | ID | Source PRD | Criterion | Status | Owner | Verification Evidence |
@@ -84,6 +101,30 @@ Wave 4: Close-out.
 | 066c-AC-5 | prd-066c | Local queue diagnostics identify queued, leased, retrying, failed, and completed counts. | DONE | main orchestrator | `LocalJobQueueService.counts()` implemented and covered in local queue tests; operator surface follow-up tracked in QA warning. |
 | 066c-AC-6 | prd-066c | Dogfood rollout runs long enough to include daemon restart, sleep/wake, and transient DeepLake outage scenarios. | BLOCKED | main orchestrator | Requires real dogfood window and transient DeepLake outage simulation. |
 | 066c-AC-7 | prd-066c | Release notes describe the local queue boundary and known remaining DeepLake cost paths. | DONE | main orchestrator | Added `library/requirements/backlog/prd-066-local-queue-idle-cost-control/qa/2026-06-29-release-notes-draft.md`. |
+| 066d-AC-1 | prd-066d | The live idle-meter test no longer calls shared queue lease/discovery against the canonical `memory_jobs` table. | VERIFIED | main orchestrator | `AssembleDaemonOptions.jobQueueConfig` threads a throwaway table into `createJobQueueService`; final live receipt used `shared_table=ci_066d_t987848400_jobs`. |
+| 066d-AC-2 | prd-066d | The shared baseline emits a receipt with bounded-table poll reads greater than zero. | VERIFIED | main orchestrator | Final live idle-meter receipt: `shared_table=ci_066d_t987848400_jobs shared_poll_reads=39 shared_poll_writes=0`. |
+| 066d-AC-3 | prd-066d | The local idle path emits a receipt with `local_poll_reads=0` and `local_poll_writes=0`. | VERIFIED | main orchestrator | Final live idle-meter receipt: `local_poll_reads=0 local_poll_writes=0`. |
+| 066d-AC-4 | prd-066d | The active local memory pipeline proof emits a receipt with `poll_reads=0`, `poll_writes=0`, and non-zero total DeepLake writes. | VERIFIED | main orchestrator | Final active receipt: `poll_reads=0 poll_writes=0 total_reads=68 total_writes=15`. |
+| 066d-AC-5 | prd-066d | A timeout in any live idle-meter phase reports the phase name and elapsed time. | VERIFIED | main orchestrator | Added `phase(name, work, timeoutMs)` wrapper around shared start, shared idle window, shared lease, local start, local idle window, local lease, and daemon start. |
+| 066d-AC-6 | prd-066d | A built-daemon boot smoke proves first boot creates `.daemon/logs.db` and `.daemon/local-queue.db`. | VERIFIED | main orchestrator | `npm run smoke:local-queue-upgrade` passed; first boot answered `/health` and DB files existed before schema inspection. |
+| 066d-AC-7 | prd-066d | The built-daemon boot smoke proves `logs.db` has `event_log` and `request_log`, and `local-queue.db` has `local_job`. | VERIFIED | main orchestrator | `scripts/local-queue-upgrade-smoke.mjs` inspects `sqlite_master`; `npm run smoke:local-queue-upgrade` passed. |
+| 066d-AC-8 | prd-066d | The built-daemon boot smoke proves a second boot against the same workspace answers `/health` without schema or migration failure. | VERIFIED | main orchestrator | `npm run smoke:local-queue-upgrade` passed with first boot `/health` 503 after 1440ms and second boot `/health` 503 after 2143ms in no-creds isolated mode. |
+| 066d-AC-9 | prd-066d | `npm run smoke:golden-path` and `npm run eval:recall` remain unaffected by the test-only queue table override. | VERIFIED | main orchestrator | `npm run smoke:golden-path` passed live: recall-hit=1.00, sessions=2120, memory=2967, log events=11. `npm run eval:recall` passed live after temporary embed daemon: recall@5=0.611, MRR=0.611, semantic beats lexical. |
+| 066d-AC-10 | prd-066d | `npm run typecheck`, focused local/hybrid queue tests, the PRD-066 live idle-meter test, and the new daemon boot smoke all pass before PRD-066 is considered releasable. | VERIFIED | main orchestrator | Passed: `npm run typecheck`; `npx vitest run tests/daemon/runtime/services/local-job-queue.test.ts tests/daemon/runtime/services/hybrid-job-queue.test.ts`; final live meter; `npm run smoke:local-queue-upgrade`; `npm run audit:sql`; `npm run smoke:daemon-bundle`. |
+| 066e-AC-1 | prd-066e | A packaged upgrade smoke installs the previous version, upgrades to the candidate version, boots the daemon through the package/CLI entrypoint, and passes. | VERIFIED | main orchestrator | Added `scripts/local-queue-packaged-upgrade-smoke.mjs` and `npm run smoke:local-queue-packaged-upgrade`; final run passed: previous fixture `@legioncodeinc/honeycomb@0.1.10` -> candidate tarball, upgraded daemon started through installed CLI. |
+| 066e-AC-2 | prd-066e | First boot after packaged upgrade creates `.daemon/local-queue.db` and preserves/reopens `.daemon/logs.db`. | VERIFIED | main orchestrator | Packaged smoke verifies `logs.db`, `local-queue.db`, `event_log`, `request_log`, and `local_job` after candidate first boot. |
+| 066e-AC-3 | prd-066e | Existing DeepLake memory rows and recall behavior remain available after upgrade. | BLOCKED | main orchestrator | Branch live idle meter still proves active DeepLake memory writes after local queue (`total_reads=67`, `total_writes=15`), but a packaged-upgrade-specific live recall proof with existing rows is still required. |
+| 066e-AC-4 | prd-066e | A pending pre-upgrade DeepLake-backed `summary` or local-kind job follows the documented migration policy without duplicate successful execution. | VERIFIED | main orchestrator | Existing hybrid tests cover shared-drain leasing of old local-kind jobs and local-before-shared duplicate avoidance; PRD-066e diagnostics expose pending shared local-kind counts on demand. |
+| 066e-AC-5 | prd-066e | With local queue enabled after upgrade, new local-only jobs enqueue to the local queue and do not create new DeepLake queue rows. | VERIFIED | main orchestrator | Focused hybrid suite asserts local-only `summary` enqueue never calls shared queue; live meter still reports active local pipeline `poll_reads=0`, `poll_writes=0`. |
+| 066e-AC-6 | prd-066e | With the rollback flag off after local queue has been used, the daemon returns to the old shared queue path and reports any local queued work that will not be processed under rollback. | VERIFIED | main orchestrator | Added `buildLocalQueueUpgradeDiagnostics`; focused test reports queued local work and rollback warning when `enabled=false`. Disabled routing opens an existing local DB for diagnostics without creating one when absent. |
+| 066e-AC-7 | prd-066e | Rollback requires no DeepLake schema migration and no local DB deletion. | VERIFIED | main orchestrator | Diagnostics rollback payload hard-codes `requiresDeepLakeMigration=false` and `requiresLocalDbDeletion=false`; focused test covers both fields. |
+| 066e-AC-8 | prd-066e | Default-on is blocked unless the install is classified as single-machine/local topology. | VERIFIED | main orchestrator | Added `resolveLocalQueueTopology`; focused tests verify `single-machine` eligible and unknown blocked by default. |
+| 066e-AC-9 | prd-066e | Multi-device, fleet, or unknown topology installs stay on fallback or require explicit opt-in. | VERIFIED | main orchestrator | Focused tests verify `fleet`, `multi-device`, and unknown are blocked without `HONEYCOMB_LOCAL_QUEUE_EXPLICIT_OPT_IN=true`; explicit opt-in overrides. |
+| 066e-AC-10 | prd-066e | Upgrade diagnostics identify local queue status counts, shared drain mode, and pending old shared jobs. | VERIFIED | main orchestrator | Added protected `GET /api/diagnostics/local-queue`; focused tests cover counts, drain mode, and pending shared jobs; packaged smoke asserts the endpoint after upgraded CLI boot. |
+| 066e-AC-11 | prd-066e | The packaged upgrade smoke also verifies second boot against the upgraded workspace. | VERIFIED | main orchestrator | Final `npm run smoke:local-queue-packaged-upgrade` starts the upgraded CLI a second time against the same workspace and rechecks DB schemas. |
+| 066e-AC-12 | prd-066e | Dogfood evidence covers restart, sleep/wake, transient DeepLake outage, and rollback. | BLOCKED | main orchestrator | Restart and rollback are automated; sleep/wake and transient DeepLake outage still require a bounded physical/live dogfood window. Tracked in `qa/2026-06-29-prd-066e-dogfood-matrix.md`. |
+| 066e-AC-13 | prd-066e | Release notes and support docs describe upgrade, rollback, old shared jobs, local DB location, and remaining DeepLake cost paths. | VERIFIED | main orchestrator | Added `qa/2026-06-29-prd-066e-upgrade-support-notes.md` and dogfood matrix. |
+| 066e-AC-14 | prd-066e | The release gate fails if idle local mode produces DeepLake coordination reads after the packaged upgrade. | BLOCKED | main orchestrator | Existing live meter rerun passed with `shared_table=ci_066d_t114696700_jobs`, `shared_poll_reads=36`, `local_poll_reads=0`, `local_poll_writes=0`; package-specific live idle gate remains to automate. |
 
 ## Watchdog / Event Log
 
@@ -133,3 +174,54 @@ Wave 4: Close-out.
   rejection during shutdown is contained as an empty lease instead of surfacing as an unhandled
   rejection. Regression covered by `npx vitest run tests/daemon/runtime/services/poll-loop.test.ts`
   (7 tests).
+- 2026-06-29: PRD-066d pass started. Added test-only `AssembleDaemonOptions.jobQueueConfig` and
+  threaded it into `createJobQueueService` so live verification can use a bounded throwaway shared
+  queue table while production remains on canonical `memory_jobs`.
+- 2026-06-29: Hardened `tests/integration/local-queue-idle-meter-live.itest.ts` to generate
+  per-run `ci_066d_*_jobs` tables, wrap phases with elapsed-time timeout errors, and drop the
+  throwaway table even when the bounded shared start fails before returning a probe.
+- 2026-06-29: Added `scripts/local-queue-upgrade-smoke.mjs` and `npm run smoke:local-queue-upgrade`
+  to boot built `daemon/index.js`, verify `.daemon/logs.db` and `.daemon/local-queue.db`, inspect
+  SQLite tables, stop, restart against the same workspace, and verify `/health` answers again.
+- 2026-06-29: Verification passed: `npm run typecheck`; focused local/hybrid queue tests (27
+  passed); final live idle meter with `shared_table=ci_066d_t987848400_jobs`,
+  `shared_poll_reads=39`, `local_poll_reads=0`, active `total_writes=15`; `npm run build`;
+  `npm run smoke:local-queue-upgrade`; `npm run smoke:daemon-bundle`; `npm run audit:sql`;
+  live `npm run smoke:golden-path`; live `npm run eval:recall` after temporary embed-daemon start.
+- 2026-06-29: Security worker dispatch by named `security-worker-bee` failed before allocation due
+  model-resolution validation; generic worker `019f1312-3511-70c1-a7ab-3f9aa7813ffb` completed
+  security review and fixed one High issue by constraining inherited environment in the built-daemon
+  smoke. Main thread reran `node --check`, `npm run smoke:local-queue-upgrade`, and
+  `npm run audit:sql` successfully after the fix.
+- 2026-06-29: Quality worker dispatch by named `quality-worker-bee` failed before allocation due
+  model-resolution validation; generic worker `019f1317-1658-7f72-83e5-16dc56bb45e8` completed QA
+  review, found no blocking findings, and confirmed every PRD-066d AC covered. Added
+  `qa/2026-06-29-prd-066d-qa-report.md`.
+- 2026-06-29: Added PRD-066e to explicitly track packaged user upgrade, rollback, old shared job
+  behavior, topology gating, diagnostics, and dogfood evidence as required production default-on
+  blockers. All 066e ACs are OPEN.
+- 2026-06-29: PRD-066e smoker execution started. Main thread owns packaged smoke + ledger; worker
+  slices planned for daemon diagnostics/topology/rollback and release/support documentation.
+- 2026-06-29: PRD-066e implementation added protected `GET /api/diagnostics/local-queue`,
+  topology/default-on gating, rollback diagnostics, request-time pending shared local-job counts,
+  package CLI port overrides for isolated smoke testing, and open-existing-only local DB diagnostics
+  for rollback visibility without creating a DB on clean disabled installs.
+- 2026-06-29: Added `scripts/local-queue-packaged-upgrade-smoke.mjs` and
+  `npm run smoke:local-queue-packaged-upgrade`; final run passed using previous package fixture
+  `@legioncodeinc/honeycomb@0.1.10`, upgraded to candidate tarball, started/stopped through the
+  installed CLI, checked first and second upgraded boots, and verified local queue diagnostics.
+- 2026-06-29: Added PRD-066e support and dogfood docs. Restart/rollback/package upgrade are
+  automated; sleep/wake, transient DeepLake outage, packaged-upgrade recall, and package-specific
+  live idle gate remain explicit production default-on blockers.
+- 2026-06-29: Verification passed for PRD-066e current diff: `npm run typecheck`; focused diagnostics,
+  local queue, hybrid queue, and assemble tests; `node --check scripts/local-queue-packaged-upgrade-smoke.mjs`;
+  `npm run smoke:local-queue-packaged-upgrade`; `npm run audit:sql`; live
+  `npx vitest run --config vitest.integration.config.ts tests/integration/local-queue-idle-meter-live.itest.ts`
+  with `shared_poll_reads=36`, `local_poll_reads=0`, active `poll_reads=0`, and `total_writes=15`.
+- 2026-06-29: PRD-066e security close-out added at
+  `qa/2026-06-29-prd-066e-security-review.md`. One Medium issue was fixed before QA:
+  `HONEYCOMB_HOST` is now constrained to loopback values for CLI dialing so tenancy headers cannot
+  be sent to an arbitrary env-supplied host.
+- 2026-06-29: PRD-066e QA close-out added at `qa/2026-06-29-prd-066e-qa-report.md`.
+  Verdict: hardening implementation is mergeable, but production default-on remains blocked by
+  packaged-upgrade recall proof, package-specific idle meter gate, and sleep/wake/outage dogfood.

@@ -17,6 +17,9 @@
  * enumeration) on a busy Windows runner and flaked the HiveDoctor gate; this absorbs that.
  */
 
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { createExecFileRunner } from "../../src/rungs/command-runner.js";
@@ -47,24 +50,38 @@ describe("createExecFileRunner against real npm (multi-OS smoke)", () => {
 	it(
 		"runs `npm ls -g <pkg> --depth=0 --json` and returns parseable JSON (the installed-version path)",
 		async () => {
-			// This is the exact argv the auto-update installed-version reader issues. `npm ls` exits
-			// NON-ZERO when the queried package is absent, but STILL prints valid JSON, so we assert on the
-			// JSON body, not on ok. The point is the spawn itself succeeds cross-platform (no ENOENT).
+			// Keep the command shape the auto-update installed-version reader issues, but point npm at
+			// an empty temporary global prefix. Hosted Windows runners can spend a full minute walking
+			// their machine-global tree; the temp prefix keeps this smoke hermetic and still proves the
+			// real npm launch path succeeds cross-platform (no ENOENT).
+			const prefix = await mkdtemp(join(tmpdir(), "hivedoctor-npm-prefix-"));
 			const runner = createExecFileRunner();
-			const result = await runner.run(
-				"npm",
-				["ls", "-g", "@legioncodeinc/this-package-does-not-exist", "--depth=0", "--json"],
-				{ timeoutMs: NPM_TIMEOUT_MS },
-			);
+			try {
+				const result = await runner.run(
+					"npm",
+					[
+						"ls",
+						"-g",
+						"@legioncodeinc/this-package-does-not-exist",
+						"--depth=0",
+						"--json",
+						"--prefix",
+						prefix,
+					],
+					{ timeoutMs: NPM_TIMEOUT_MS },
+				);
 
-			// npm launched and produced output even though the package is absent (exit may be non-zero).
-			expect(result.stdout.trim().length).toBeGreaterThan(0);
-			// The body parses as JSON (npm ls --json always emits a JSON object), proving a real npm ran.
-			const parsed: unknown = JSON.parse(result.stdout);
-			expect(parsed).toBeTypeOf("object");
-			// A genuine spawn failure (the pre-fix Windows bug) would have left stdout empty with an ENOENT
-			// detail instead; assert we did NOT hit that.
-			expect(result.detail).not.toBe("ENOENT");
+				// npm launched and produced output even though the package is absent (exit may be non-zero).
+				expect(result.stdout.trim().length).toBeGreaterThan(0);
+				// The body parses as JSON (npm ls --json always emits a JSON object), proving a real npm ran.
+				const parsed: unknown = JSON.parse(result.stdout);
+				expect(parsed).toBeTypeOf("object");
+				// A genuine spawn failure (the pre-fix Windows bug) would have left stdout empty with an ENOENT
+				// detail instead; assert we did NOT hit that.
+				expect(result.detail).not.toBe("ENOENT");
+			} finally {
+				await rm(prefix, { force: true, recursive: true });
+			}
 		},
 		TEST_TIMEOUT_MS,
 	);

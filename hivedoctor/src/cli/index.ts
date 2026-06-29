@@ -216,13 +216,20 @@ async function runWatchdog(argv: readonly string[]): Promise<number> {
 	const cliNoAutoUpdate = hasFlag(parseArgs(argv), "no-auto-update");
 	const doctor = createHiveDoctor({ cliNoAutoUpdate });
 	await doctor.start();
-	// Block until a termination signal arrives; the service manager owns the lifecycle.
-	await new Promise<void>((resolve) => {
-		const stop = (): void => resolve();
-		process.once("SIGTERM", stop);
-		process.once("SIGINT", stop);
-	});
-	await doctor.stop();
+	// Keep `run` alive even when optional referenced handles (notably the status page)
+	// fail to bind and all internal loop timers are deliberately unref'ed.
+	const keepAlive = setInterval(() => undefined, 60 * 60 * 1000);
+	try {
+		// Block until a termination signal arrives; the service manager owns the lifecycle.
+		await new Promise<void>((resolve) => {
+			const stop = (): void => resolve();
+			process.once("SIGTERM", stop);
+			process.once("SIGINT", stop);
+		});
+	} finally {
+		clearInterval(keepAlive);
+		await doctor.stop();
+	}
 	return 0;
 }
 

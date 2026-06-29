@@ -48,6 +48,8 @@ import { z } from "zod";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import type { EmbedClient } from "../services/embed-client.js";
 import type { JobQueueService } from "../services/job-queue.js";
+import type { PollBackoffConfig } from "../services/poll-backoff.js";
+import { buildWorkerPollLoop, type PollLoop } from "../services/poll-loop.js";
 import {
 	createFileSessionLock,
 	createHostSummaryGenCli,
@@ -231,6 +233,8 @@ export interface SummaryJobWorkerDeps {
 	readonly logger?: SummaryJobWorkerLogger;
 	/** Poll interval in ms for the continuous loop. Default 1000. */
 	readonly pollIntervalMs?: number;
+	/** Adaptive poll backoff config for idle loops. */
+	readonly backoff?: PollBackoffConfig;
 	/** Injected timer scheduler (real `setInterval` otherwise) — for tests. */
 	readonly setTimer?: (cb: () => void, ms: number) => unknown;
 	/** Injected timer canceller (real `clearInterval` otherwise) — for tests. */
@@ -281,14 +285,9 @@ class SummaryJobWorkerImpl implements SummaryJobWorker {
 	/** The synthesis-store factory for the `/MEMORY.md` refresh; `null` SKIPS the refresh (b-AC-1). */
 	private readonly buildSynthesisStore: SynthesisStoreFactory | null;
 	private readonly logger?: SummaryJobWorkerLogger;
-	private readonly pollIntervalMs: number;
-	private readonly setTimer: (cb: () => void, ms: number) => unknown;
-	private readonly clearTimer: (handle: unknown) => void;
+	private readonly loop: PollLoop;
 	/** ONE shared per-session lock so the suppression holds across queued jobs (a-AC-3). */
 	private readonly lock = createFileSessionLock();
-	private handle: unknown;
-	/** Guards against overlapping `runOnce` invocations on the poll loop. */
-	private running = false;
 
 	constructor(deps: SummaryJobWorkerDeps) {
 		this.queue = deps.queue;
@@ -307,13 +306,13 @@ class SummaryJobWorkerImpl implements SummaryJobWorker {
 				? (): SynthesisStore => createSynthesisStore(this.storage, this.scope)
 				: deps.buildSynthesisStore;
 		this.logger = deps.logger;
-		this.pollIntervalMs = deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-		this.setTimer = deps.setTimer ?? ((cb, ms) => setInterval(cb, ms));
-		this.clearTimer =
-			deps.clearTimer ??
-			((handle) => {
-				if (handle !== undefined) clearInterval(handle as ReturnType<typeof setInterval>);
-			});
+		this.loop = buildWorkerPollLoop({
+			tick: () => this.runOnce(),
+			flatIntervalMs: deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+			backoff: deps.backoff,
+			setTimer: deps.setTimer,
+			clearTimer: deps.clearTimer,
+		});
 	}
 
 	/**
@@ -421,21 +420,11 @@ class SummaryJobWorkerImpl implements SummaryJobWorker {
 	}
 
 	start(): void {
-		this.handle = this.setTimer(() => {
-			// Skip a tick if the previous lease+run is still in flight; never overlap.
-			if (this.running) return;
-			this.running = true;
-			void this.runOnce().finally(() => {
-				this.running = false;
-			});
-		}, this.pollIntervalMs);
+		this.loop.start();
 	}
 
 	stop(): void {
-		if (this.handle !== undefined) {
-			this.clearTimer(this.handle);
-			this.handle = undefined;
-		}
+		this.loop.stop();
 	}
 }
 
