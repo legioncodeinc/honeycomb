@@ -246,56 +246,33 @@ export function isMalformed(content: string): boolean {
 // ────────────────────────────────────────────────────────────────────────────
 
 /**
- * The workspace base directory the daemon resolves filesystem state under
- * (`$HONEYCOMB_WORKSPACE`, defaulting to the daemon's cwd). This is the SINGLE
- * allowed root for Obsidian vault paths — a vault path MUST be contained within
- * this directory to prevent arbitrary filesystem reads. Memoized — resolved at
- * most once per daemon lifecycle.
+ * The selected Obsidian vault root is the filesystem boundary for reads.
+ * Vaults may live outside the Honeycomb workspace; each resolved file path must
+ * remain inside this root before it can be read.
  */
-let workspaceBaseDirMemo: string | undefined;
-function getWorkspaceBaseDir(): string {
-	if (workspaceBaseDirMemo !== undefined) return workspaceBaseDirMemo;
-	const fromEnv = process.env.HONEYCOMB_WORKSPACE;
-	workspaceBaseDirMemo = fromEnv !== undefined && fromEnv.length > 0 ? fromEnv : process.cwd();
-	return workspaceBaseDirMemo;
-}
-
 /**
  * Validate and canonicalize a vault path to prevent directory traversal attacks.
- * A vault path is ONLY allowed when it resolves to a location strictly WITHIN the
- * workspace base directory (`$HONEYCOMB_WORKSPACE` or the daemon's cwd). This is
- * the security boundary: an attacker-controlled `vaultPath` from `POST /api/sources`
- * MUST NOT escape the workspace and read arbitrary daemon-local files.
+ * A vault path is allowed when it resolves to a real directory. External vaults
+ * are supported; containment is enforced for every file read inside that vault.
  *
  * Returns the canonicalized absolute path when valid, or `null` when the path is
- * invalid (empty, not a directory, or escapes the workspace boundary). Never throws
+ * invalid (empty, missing, or not a directory). Never throws
  * — a validation failure routes to `null` so the caller can reject the config with
  * a clear error rather than crashing the provider.
  *
  * The validation steps (all MUST pass):
  *   1. The candidate path is non-empty.
  *   2. The path resolves to a real directory (via `realpath` + `stat`).
- *   3. The canonicalized path is strictly WITHIN the workspace base directory
- *      (starts with `workspaceBase + path.sep`, never equals the base itself).
  *
- * Examples (assuming `$HONEYCOMB_WORKSPACE=/home/user/workspace`):
- *   - `/home/user/workspace/vaults/obsidian` → valid (within workspace)
- *   - `./vaults/obsidian` → valid (resolves within workspace)
- *   - `/home/user/workspace/../etc/passwd` → INVALID (escapes workspace)
- *   - `/etc/passwd` → INVALID (outside workspace)
- *   - `/home/user/workspace` → INVALID (equals workspace root, not strictly within)
+ * Examples:
+ *   - `/Users/me/Notes/obsidian` -> valid external vault
+ *   - `./vaults/obsidian` -> valid relative vault when it exists
+ *   - `/etc/passwd` -> invalid file, not a directory
  */
 async function validateVaultPath(candidatePath: string): Promise<string | null> {
 	if (candidatePath.length === 0) return null;
 
 	try {
-		// Resolve the workspace base directory ONCE (memoized). Canonicalize it via
-		// `realpath` too so a containment check compares like-for-like — on Windows the
-		// base may differ from the candidate's realpath by drive-letter casing or 8.3
-		// short-name expansion, which would otherwise false-reject a valid in-workspace
-		// vault. `realpath` throws if the base does not exist, which we catch below.
-		const workspaceBase = await realpath(path.resolve(getWorkspaceBaseDir()));
-
 		// Canonicalize the candidate path: resolve symlinks + relative segments.
 		// `realpath` throws if the path does not exist, which we catch below.
 		const canonicalPath = await realpath(candidatePath);
@@ -304,22 +281,21 @@ async function validateVaultPath(candidatePath: string): Promise<string | null> 
 		const st = await stat(canonicalPath);
 		if (!st.isDirectory()) return null;
 
-		// The canonicalized path MUST be strictly WITHIN the workspace base directory.
-		// It must START with `workspaceBase + path.sep` (contained) and NOT equal the
-		// base itself (strictly within, not the root). This prevents:
-		//   - Absolute paths outside the workspace (`/etc/passwd`)
-		//   - Traversal attacks (`../../../etc/passwd`)
-		//   - Symlink escapes (a symlink pointing outside the workspace)
-		//   - The workspace root itself (a vault must be a subdirectory)
-		if (!canonicalPath.startsWith(workspaceBase + path.sep)) {
-			return null;
-		}
-
-		// All checks passed: the path is a valid, contained vault directory.
+		// All checks passed: the path is a valid vault directory.
 		return canonicalPath;
 	} catch {
 		// Any error (ENOENT, EACCES, ENOTDIR, etc.) → invalid path.
 		return null;
+	}
+}
+
+async function resolveVaultFilePath(vaultRoot: string, relPath: string): Promise<string | null> {
+	const candidate = path.resolve(vaultRoot, relPath.split("/").join(path.sep));
+	try {
+		const canonical = await realpath(candidate);
+		return canonical.startsWith(vaultRoot + path.sep) ? canonical : null;
+	} catch {
+		return candidate.startsWith(vaultRoot + path.sep) ? candidate : null;
 	}
 }
 
@@ -376,7 +352,16 @@ async function collectMarkdownPaths(vaultRoot: string): Promise<string[]> {
 
 /** Read one vault file read-only, classifying malformed / read-error. */
 async function readVaultFile(vaultRoot: string, relPath: string): Promise<VaultFile> {
-	const abs = path.join(vaultRoot, relPath.split("/").join(path.sep));
+	const abs = await resolveVaultFilePath(vaultRoot, relPath);
+	if (abs === null) {
+		return {
+			relPath,
+			content: "",
+			fingerprint: "",
+			malformed: true,
+			readError: "path escapes vault root",
+		};
+	}
 	try {
 		const content = await readFile(abs, "utf8");
 		return { relPath, content, fingerprint: fingerprint(content), malformed: isMalformed(content) };
@@ -556,12 +541,12 @@ export interface ObsidianProvider extends SourceProvider {
  * graph), a failure artifact per malformed file. With NO config it is the honest
  * unconfigured stub (Wave-1 seam conformance). It NEVER writes the vault or DeepLake.
  *
- * SECURITY: The `config.vaultPath` is VALIDATED at provider creation to ensure it is
- * strictly within the workspace base directory (`$HONEYCOMB_WORKSPACE` or the daemon's
- * cwd). An attacker-controlled path from `POST /api/sources` CANNOT escape the workspace
- * and read arbitrary daemon-local files. The validation is performed asynchronously in
- * the `connect()` method, so an invalid path is rejected with a clear `unreachable`
- * health status rather than crashing the provider at construction.
+ * SECURITY: The `config.vaultPath` is canonicalized to a readable directory, and
+ * each file read is contained within that canonical vault root. External Obsidian
+ * vaults are valid; traversal and symlink escapes from the selected vault are not.
+ * Validation is performed asynchronously in `connect()` / `health()` / read paths,
+ * so an invalid path returns a clear `unreachable` health status rather than
+ * crashing the provider at construction.
  */
 export function createObsidianProvider(config?: ObsidianConfig): ObsidianProvider {
 	// ── Unconfigured stub (Wave-1 seam conformance) ────────────────────────────
@@ -592,16 +577,16 @@ export function createObsidianProvider(config?: ObsidianConfig): ObsidianProvide
 	const vaultRoot = config.vaultPath;
 	let validatedVaultRoot: string | null = null;
 
-	/** Confirm the vault root is a readable directory within the workspace (initial health + security gate). */
+	/** Confirm the vault root is a readable directory (initial health + security gate). */
 	async function probe(): Promise<ProviderHealth> {
-		// SECURITY: Validate the vault path is strictly within the workspace base directory.
+		// SECURITY: Canonicalize the vault path once; every file read is contained within it.
 		// This is the ONLY place the validation runs — it gates every read operation.
 		if (validatedVaultRoot === null) {
 			validatedVaultRoot = await validateVaultPath(vaultRoot);
 			if (validatedVaultRoot === null) {
 				return {
 					state: "unreachable",
-					detail: `vault path is invalid or outside the workspace: ${vaultRoot}`,
+					detail: `vault path is invalid or unreadable: ${vaultRoot}`,
 				};
 			}
 		}
