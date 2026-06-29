@@ -6,7 +6,7 @@
 
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -215,6 +215,14 @@ describe("PRD-066a retention and validation", () => {
 
 		await expect(queue.enqueue({ kind: "summary", payload: {} })).rejects.toThrow(/unavailable/);
 		expect(fires.join("\n")).toMatch(/baseDir/i);
+	});
+
+	it("rejects an absolute baseDir outside trusted runtime roots", async () => {
+		const fires: string[] = [];
+		const queue = openLocalJobQueue({ baseDir: parse(dir).root, onceFailure: (message) => fires.push(message) });
+
+		await expect(queue.enqueue({ kind: "summary", payload: {} })).rejects.toThrow(/unavailable/);
+		expect(fires.join("\n")).toMatch(/trusted runtime directory/i);
 	});
 
 	it("the NULL queue fails closed for writes and returns empty diagnostics", async () => {

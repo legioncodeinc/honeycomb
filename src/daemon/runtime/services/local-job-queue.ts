@@ -9,6 +9,7 @@
 
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
+import { homedir, tmpdir } from "node:os";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
 import { z } from "zod";
@@ -252,9 +253,29 @@ function resolveLocalQueueBaseDir(baseDir: string | undefined): string {
 		if (relativeToCwd.startsWith("..") || relativeToCwd === "..") {
 			throw new Error("relative local job queue baseDir must stay inside the current working directory");
 		}
-		return resolvedRelative;
+		return assertTrustedLocalQueueBaseDir(resolvedRelative);
 	}
-	return resolve(rawBaseDir);
+	return assertTrustedLocalQueueBaseDir(resolve(rawBaseDir));
+}
+
+function assertTrustedLocalQueueBaseDir(candidate: string): string {
+	const allowedRoots = trustedLocalQueueRoots();
+	if (!allowedRoots.some((root) => isPathInside(candidate, root))) {
+		throw new Error("local job queue baseDir must be inside a trusted runtime directory");
+	}
+	return candidate;
+}
+
+function trustedLocalQueueRoots(): readonly string[] {
+	const roots = [process.cwd(), homedir(), tmpdir()];
+	const workspace = process.env.HONEYCOMB_WORKSPACE;
+	if (workspace !== undefined && workspace.length > 0) roots.push(workspace);
+	return roots.map((root) => resolve(root));
+}
+
+function isPathInside(candidate: string, root: string): boolean {
+	const rel = relative(root, candidate);
+	return rel === "" || (!rel.startsWith("..") && rel !== ".." && !isAbsolute(rel));
 }
 
 function loadSqlite(): SqliteModule {
