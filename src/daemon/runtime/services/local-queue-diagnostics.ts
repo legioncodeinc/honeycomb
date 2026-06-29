@@ -209,9 +209,9 @@ export async function countPendingSharedLocalJobs(
 	const statuses = [JOB_QUEUED, JOB_FAILED, JOB_LEASED];
 	const sql =
 		`SELECT ${sqlIdent("status")}, ${sqlIdent("type")}, COUNT(*) AS ${sqlIdent("count")} ` +
-		`FROM "${table}" ${sqlIdent("job")} ` +
+		`FROM ${table} ${sqlIdent("job")} ` +
 		`JOIN (SELECT ${sqlIdent("id")}, MAX(${sqlIdent("version")}) AS ${sqlIdent("version")} ` +
-		`FROM "${table}" GROUP BY ${sqlIdent("id")}) ${sqlIdent("latest")} ` +
+		`FROM ${table} GROUP BY ${sqlIdent("id")}) ${sqlIdent("latest")} ` +
 		`ON ${sqlIdent("job")}.${sqlIdent("id")} = ${sqlIdent("latest")}.${sqlIdent("id")} ` +
 		`AND ${sqlIdent("job")}.${sqlIdent("version")} = ${sqlIdent("latest")}.${sqlIdent("version")} ` +
 		`WHERE ${sqlIdent("job")}.${sqlIdent("type")} IN (${kinds.map((kind) => sLiteral(kind)).join(", ")}) ` +

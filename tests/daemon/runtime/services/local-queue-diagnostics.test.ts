@@ -205,6 +205,9 @@ describe("PRD-066e pending shared local-job count", () => {
 			byStatus: { queued: 2, leased: 1 },
 			byKind: { summary: 2, skillify: 1 },
 		});
+		expect(queries[0]).toContain("FROM memory_jobs job");
+		expect(queries[0]).toContain("FROM memory_jobs GROUP BY id");
+		expect(queries[0]).not.toContain('FROM "memory_jobs"');
 		expect(queries[0]).toContain("MAX(version)");
 		expect(queries[0]).toContain("'summary'");
 		expect(queries[0]).toContain("'skillify'");

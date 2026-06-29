@@ -53,7 +53,7 @@ Reasons:
 | 6 | Restart/sleep/outage live dogfood | Manual/live dogfood scenarios | Pass | Not run to completion | Deferred because the release owner chose the package/PR gate sequence for this checkpoint | Deferred | Run before final publish if the release owner requires laptop resilience proof |
 | 7 | GitHub PR / CI | PR #188 | Open PR against `main`; remote CI attached | Passed except Aikido | CI quality gates on Node 22/24, Windows smoke, HiveDoctor, CodeQL, CLA, and Secret gate are green; live DeepLake and stress jobs skipped by workflow policy | Pass | External checks can rerun after the ledger commit |
 | 7 | CodeRabbit | Review current PR #188 | No blocking issues | Green on latest observed PR status | CodeRabbit status context is success | Pass | Re-review can attach after final ledger push |
-| 7 | Aikido | Current PR #188 branch scan | No introduced security issues and no blocking code-quality findings | Second follow-up fixes applied; remote re-scan pending | Scan `139394193` still reported 1 critical and 1 medium after the first follow-up. The second patch normalized topology source handling in local queue diagnostics and simplified the local queue diagnostics mount in assembly. | Pending | Release hold until Aikido confirms the branch scan is green |
+| 7 | Aikido | Current PR #188 branch scan | No introduced security issues and no blocking code-quality findings | SQL table-reference fix applied; remote re-scan pending | Aikido flagged `countPendingSharedLocalJobs` because the diagnostics SQL used `sqlIdent()` and then wrapped the table in another pair of quotes. The follow-up uses the validated bare table identifier directly and adds a regression assertion for `FROM memory_jobs job`. | Pending | Release hold until Aikido confirms the branch scan is green |
 | 7 | PRD-048d rehearsal | `npm publish --dry-run --provenance --access public` | Dry-run reaches publish step without publishing | Failed at version guard | Npm reported `You cannot publish over the previously published versions: 0.1.10`; `npm view @legioncodeinc/honeycomb version` returned `0.1.10` | Blocked | Need candidate version bump or explicit waiver |
 
 ## Fixes Applied During This Pass
@@ -87,6 +87,9 @@ Reasons:
 - Applied a second Aikido follow-up after scan `139394193` by separating unset topology from invalid
   env topology values, adding regression coverage for invalid env topology, and replacing the local
   queue diagnostics conditional object spread with a plain optional callback.
+- Fixed the concrete Aikido diagnostics SQL finding by changing `FROM "${table}"` and the latest-row
+  subquery to use `FROM ${table}` after `sqlIdent()` validation, with test coverage proving the query
+  contains `FROM memory_jobs job` and not `FROM "memory_jobs"`.
 
 ## Open Blockers
 
