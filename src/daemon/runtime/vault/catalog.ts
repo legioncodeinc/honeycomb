@@ -26,7 +26,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** The curated provider ids (D-6). The selector offers exactly these. */
-export const PROVIDERS = ["anthropic", "openai", "openrouter"] as const;
+export const PROVIDERS = ["anthropic", "openai", "openrouter", "portkey"] as const;
 /** A curated provider id. */
 export type Provider = (typeof PROVIDERS)[number];
 
@@ -79,6 +79,15 @@ export const PROVIDER_CATALOG: readonly ProviderEntry[] = Object.freeze([
 		label: "OpenRouter",
 		// Suggestions only — OpenRouter accepts a free-form `vendor/model` id (passthrough).
 		models: Object.freeze(["anthropic/claude-sonnet-4.6", "openai/gpt-4o"]),
+		openEnded: true,
+	}),
+	Object.freeze({
+		// PRD-063a: Portkey is a GATEWAY, not a model vendor — its `portkey.config` id is
+		// free-form (a config or virtual-key id copied from the Portkey dashboard), so it is
+		// `openEnded: true` like OpenRouter and carries NO curated model list of its own.
+		id: "portkey" as Provider,
+		label: "Portkey",
+		models: Object.freeze([]),
 		openEnded: true,
 	}),
 ]);

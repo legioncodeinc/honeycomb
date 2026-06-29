@@ -95,4 +95,46 @@ describe("037c AC-4: usePoll fetches on mount, polls on the interval, and stops 
 			root.render(<div />);
 		});
 	});
+
+	it("perf: does NOT poll while the tab is hidden, and refreshes immediately on re-foreground", () => {
+		vi.useFakeTimers();
+		const fn = vi.fn();
+		const setVisibility = (state: "visible" | "hidden"): void => {
+			Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state });
+		};
+		setVisibility("hidden");
+		function Poller(): React.JSX.Element {
+			usePoll(fn, 1000);
+			return <div />;
+		}
+		act(() => {
+			root = createRoot(container);
+			root.render(<Poller />);
+		});
+		// Hidden on mount → the mount tick is skipped (no daemon/DeepLake hit).
+		expect(fn).toHaveBeenCalledTimes(0);
+		// Interval ticks are skipped too while hidden.
+		act(() => {
+			vi.advanceTimersByTime(3000);
+		});
+		expect(fn).toHaveBeenCalledTimes(0);
+		// Re-foreground → a `visibilitychange` fires ONE immediate refresh.
+		setVisibility("visible");
+		act(() => {
+			document.dispatchEvent(new Event("visibilitychange"));
+		});
+		expect(fn).toHaveBeenCalledTimes(1);
+		// And the interval resumes from there.
+		act(() => {
+			vi.advanceTimersByTime(1000);
+		});
+		expect(fn).toHaveBeenCalledTimes(2);
+		act(() => root.unmount());
+		// Restore visibility + a fresh root so afterEach's unmount is safe.
+		setVisibility("visible");
+		act(() => {
+			root = createRoot(container);
+			root.render(<div />);
+		});
+	});
 });

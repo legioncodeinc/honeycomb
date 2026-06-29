@@ -368,3 +368,62 @@ describe("CodeRabbit findings: net-all-ok gate, isolated fail-closed, ordered sa
 		expect(ledgerSql).toMatch(/m\.project_id = 'proj-X'/);
 	});
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRD-060 ROI capture fix — a row carrying `model` prices the turn at its REAL rate.
+//
+// The bug: with no `model` column, `rowToCapturedTurn` never set `CapturedTurn.model`, so
+// `resolveRate(undefined, undefined)` fell back to the Sonnet default and an Opus turn was
+// MIS-priced. These drive `fetchRoiView` end to end over the fake transport — a `sessions`
+// row with `model='claude-opus-4-8'` + cache_read tokens must price at the OPUS row, not Sonnet.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("PRD-060 ROI fix: the model column prices an Opus turn at the Opus rate (not the Sonnet default)", () => {
+	/** Build a fake transport that returns ONE captured `sessions` row with the given columns. */
+	function sessionsRow(row: Record<string, unknown>) {
+		return new FakeDeepLakeTransport((req: TransportRequest) => {
+			if (/FROM\s+"sessions"/i.test(req.sql)) return [row];
+			return []; // the roi_metrics ledger read is empty (no rollups needed here).
+		});
+	}
+
+	// A turn that read 8000 tokens from cache. Opus delta = 1500 − 150 = 1350 cents/Mtok →
+	// round(8000 × 1350 / 1e6) = 11 cents. The Sonnet default would be 270 cents/Mtok → 2 cents.
+	const CACHE_READ = 8000;
+	const OPUS_CENTS = 11;
+	const SONNET_DEFAULT_CENTS = 2;
+
+	it("the sessions SELECT requests the model column (so rowToCapturedTurn can read it)", async () => {
+		const fake = sessionsRow({});
+		await fetchRoiView(client(fake), SCOPE, { readPolicy: "shared" });
+		const sessionsSql = fake.requests.find((r) => /FROM\s+"sessions"/i.test(r.sql))?.sql ?? "";
+		expect(sessionsSql).toMatch(/"?model"?/);
+	});
+
+	it("an Opus row (model='claude-opus-4-8', source_tool='claude-code') prices measured savings at the OPUS rate", async () => {
+		const fake = sessionsRow({
+			input_tokens: null,
+			output_tokens: null,
+			cache_read_input_tokens: CACHE_READ,
+			cache_creation_input_tokens: null,
+			source_tool: "claude-code",
+			model: "claude-opus-4-8",
+		});
+		const view = await fetchRoiView(client(fake), SCOPE, { readPolicy: "shared" });
+		expect(view.savings.status).toBe("ok"); // a measured capture.
+		expect(view.savings.measuredCents).toBe(OPUS_CENTS); // priced at the Opus row, NOT the Sonnet default.
+		expect(view.savings.measuredCents).not.toBe(SONNET_DEFAULT_CENTS);
+	});
+
+	it("a row with a BLANK model ('' = unknown) falls back to the conservative Sonnet default rate", async () => {
+		const fake = sessionsRow({
+			input_tokens: null,
+			output_tokens: null,
+			cache_read_input_tokens: CACHE_READ,
+			cache_creation_input_tokens: null,
+			source_tool: "", // unknown source.
+			model: "", // model unknown → resolveRate falls back to the Sonnet default.
+		});
+		const view = await fetchRoiView(client(fake), SCOPE, { readPolicy: "shared" });
+		expect(view.savings.measuredCents).toBe(SONNET_DEFAULT_CENTS);
+	});
+});

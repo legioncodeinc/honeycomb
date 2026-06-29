@@ -49,6 +49,19 @@ export type PipelineStatus = "ok" | "degraded" | "unconfigured";
 export type SubsystemState = "ok" | "degraded";
 
 /**
+ * The Portkey gateway health reason (PRD-063b / b-AC-7). A closed enum, mode-gated like the
+ * other reasons, carrying NO secret (the values are fixed literals — no key, config id, or URL):
+ *   - `off`          — the `portkey.enabled` toggle is off; the per-provider path is in force.
+ *   - `ok`           — Portkey is on, `PORTKEY_API_KEY` is present, the Portkey path is built.
+ *   - `unconfigured` — Portkey is on but `PORTKEY_API_KEY` is absent (fail-closed, b-AC-4).
+ *   - `unreachable`  — an ACTUAL observed runtime failure: a Portkey call could not connect /
+ *                      was auth-rejected. Derived ONLY from a cached last-failure signal updated
+ *                      when a real call fails — NEVER a synchronous `/health` network probe, and
+ *                      never fabricated (b-AC-7).
+ */
+export type PortkeyHealth = "off" | "ok" | "unconfigured" | "unreachable";
+
+/**
  * The per-subsystem reasons behind a `/health` status (AC-2). Each field NAMES a
  * subsystem and its coarse state — never a bare `degraded` — so an operator sees WHY
  * the daemon is degraded (storage unreachable? embeddings off? a table missing?).
@@ -61,6 +74,8 @@ export interface HealthReasons {
 	readonly embeddings: "on" | "off";
 	/** A required table's presence (best-effort): `ok` unless a required table is known-missing. */
 	readonly schema: "ok" | "missing_table";
+	/** The Portkey gateway state (PRD-063b / b-AC-7): `off` | `ok` | `unconfigured` | `unreachable`. */
+	readonly portkey: PortkeyHealth;
 }
 
 /**
@@ -89,6 +104,14 @@ export interface HealthDetailInputs {
 	 * health seam. A caller with a real known-missing signal passes `true`.
 	 */
 	readonly schemaMissingTable?: boolean;
+	/**
+	 * The Portkey gateway state (PRD-063b / b-AC-7). `off`/`ok`/`unconfigured` are derived from
+	 * config AT ASSEMBLY (the factory's {@link PortkeyStatus}); `unreachable` is supplied by a
+	 * caller that holds a cached LAST-FAILURE signal (a real Portkey call failed to connect). The
+	 * builder reads this verbatim — it performs NO probe. Defaults to `off` (the conservative
+	 * "Portkey not in force" posture) so the pre-063b builder behavior is preserved when omitted.
+	 */
+	readonly portkey?: PortkeyHealth;
 }
 
 /**
@@ -106,6 +129,8 @@ export function buildHealthDetail(inputs: HealthDetailInputs): HealthDetail {
 		storage: inputs.status === "ok" ? "reachable" : "unreachable",
 		embeddings: inputs.embeddingsEnabled ? "on" : "off",
 		schema: inputs.schemaMissingTable === true ? "missing_table" : "ok",
+		// PRD-063b / b-AC-7: read the supplied Portkey state verbatim (no probe). Omitted → `off`.
+		portkey: inputs.portkey ?? "off",
 	};
 	return { status: inputs.status, reasons };
 }

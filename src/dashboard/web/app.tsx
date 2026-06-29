@@ -34,10 +34,10 @@ import { ConnectivityBanner } from "./panels.js";
 import { matchRoute, ROUTES, type RouteEntry } from "./registry.js";
 import { Sidebar } from "./sidebar.js";
 import { useHashRoute } from "./router.js";
-import { PAGE_MAX_WIDTH, type PageProps } from "./page-frame.js";
+import { PAGE_MAX_WIDTH, usePoll, type PageProps } from "./page-frame.js";
 import { FirstRunBindCTA } from "./needs-project.js";
 import { ScopeProvider, useScopeSwitcher } from "./scope-context.js";
-import { createWireClient, EMPTY_SETTINGS, type SettingsWire, type WireClient } from "./wire.js";
+import { createWireClient, EMPTY_SETTINGS, type HealthReasonsWire, type SettingsWire, type WireClient } from "./wire.js";
 
 /** How often the shell probes `/health` for coarse liveness (ms). */
 const HEALTH_POLL_MS = 5000;
@@ -97,6 +97,9 @@ export function Shell({ client, assetBase = "assets" }: ShellProps = {}): React.
 
 	// ── shell-owned state ──
 	const [daemonUp, setDaemonUp] = React.useState(true);
+	// The shell owns the SINGLE `/health` poll; `reasons` flow DOWN to the home's subsystem strip via
+	// PageProps so the page never polls `/health` a second time (the former double-poll, now deduped).
+	const [healthReasons, setHealthReasons] = React.useState<HealthReasonsWire | null>(null);
 	const [settings, setSettings] = React.useState<SettingsWire>(EMPTY_SETTINGS);
 	const [pollinating, setPollinating] = React.useState(false);
 	// Collapsed: a manual toggle OR an auto-collapse under the narrow breakpoint (037a AC-6). We track
@@ -120,23 +123,16 @@ export function Shell({ client, assetBase = "assets" }: ShellProps = {}): React.
 	const prevDaemonUpRef = React.useRef<boolean | null>(null);
 
 	// D-5: the shell owns the /health LIVENESS poll + the daemon-down swap. On RECOVERY (down→up) re-hydrate
-	// the identity (the active page re-hydrates itself on remount). Cleared on unmount.
-	React.useEffect(() => {
-		let alive = true;
-		const tick = async (): Promise<void> => {
-			const { up } = await wire.health();
-			if (!alive) return;
-			setDaemonUp(up);
-			if (up && prevDaemonUpRef.current === false) void hydrateIdentity();
-			prevDaemonUpRef.current = up;
-		};
-		void tick();
-		const id = setInterval(() => void tick(), HEALTH_POLL_MS);
-		return () => {
-			alive = false;
-			clearInterval(id);
-		};
-	}, [wire, hydrateIdentity]);
+	// the identity (the active page re-hydrates itself on remount). Via `usePoll` so it inherits the shared
+	// background-tab pause (a hidden dashboard stops probing) and stops on unmount. `reasons` are captured
+	// here and passed DOWN — the page's former duplicate /health poll is gone.
+	usePoll(async () => {
+		const { up, reasons } = await wire.health();
+		setDaemonUp(up);
+		setHealthReasons(reasons);
+		if (up && prevDaemonUpRef.current === false) void hydrateIdentity();
+		prevDaemonUpRef.current = up;
+	}, HEALTH_POLL_MS);
 
 	// 037a AC-6: auto-collapse under the narrow breakpoint. Tracks the viewport via matchMedia; the
 	// listener is cleaned up on unmount. A manual toggle still works (it sets `collapsed` directly).
@@ -187,7 +183,7 @@ export function Shell({ client, assetBase = "assets" }: ShellProps = {}): React.
 
 	// The PageProps every routed page receives (D-7). One shared wire, the liveness flag, the asset
 	// base, and the shell-owned pollinating pulse.
-	const pageProps: PageProps = { wire, daemonUp, assetBase, pollinating };
+	const pageProps: PageProps = { wire, daemonUp, assetBase, pollinating, healthReasons };
 
 	return (
 		// PRD-049e: the ScopeProvider owns the switchable Org→Workspace→Project selection + the

@@ -34,7 +34,7 @@ import { layout, neighborsOf, splitNeighbors, type Point } from "../graph-layout
 import { KIND_COLOR, KIND_COLOR_FALLBACK } from "../panels.js";
 import { Badge } from "../primitives.js";
 import type { PageProps } from "../page-frame.js";
-import { PageFrame } from "../page-frame.js";
+import { isTabHidden, PageFrame } from "../page-frame.js";
 import { useScope } from "../scope-context.js";
 import { NeedsProjectSelection } from "../needs-project.js";
 import { capGraphForRender, EMPTY_GRAPH, MAX_RENDER_NODES, type GraphWire } from "../wire.js";
@@ -456,6 +456,7 @@ export function GraphPage({ wire }: PageProps): React.JSX.Element {
 		}
 		let alive = true;
 		const tick = async (): Promise<void> => {
+			if (!alive || isTabHidden()) return; // background-tab pause: no graph poll while hidden
 			const next = await wire.memoryGraph(project);
 			if (alive) setGraph(next);
 		};

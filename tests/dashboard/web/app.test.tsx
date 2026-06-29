@@ -382,11 +382,18 @@ describe("PRD-029 D-2 (parity): the per-subsystem health strip still renders on 
 	}
 
 	it("a degraded subsystem renders its state in the strip on the Dashboard route", async () => {
-		await mountShell(reasonsFetch({ storage: "unreachable", embeddings: "off", schema: "ok" }));
+		await mountShell(reasonsFetch({ storage: "unreachable", embeddings: "off", schema: "ok", portkey: "off" }));
 		const strip = container.querySelector('[data-testid="health-strip"]');
 		expect(strip, "the health strip rendered on the Dashboard route").not.toBeNull();
 		const text = strip?.textContent ?? "";
 		expect(text).toContain("storage: unreachable");
 		expect(text).toContain("semantic: off");
+	});
+
+	it("PRD-063b b-AC-7: the strip renders the portkey chip with its state", async () => {
+		await mountShell(reasonsFetch({ storage: "reachable", embeddings: "on", schema: "ok", portkey: "unreachable" }));
+		const strip = container.querySelector('[data-testid="health-strip"]');
+		expect(strip, "the health strip rendered").not.toBeNull();
+		expect(strip?.textContent ?? "").toContain("portkey: unreachable");
 	});
 });

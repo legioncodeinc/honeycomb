@@ -67,6 +67,14 @@ export const SESSIONS_COLUMNS = Object.freeze([
 	{ name: "output_tokens", sql: "BIGINT" },
 	{ name: "cache_read_input_tokens", sql: "BIGINT" },
 	{ name: "cache_creation_input_tokens", sql: "BIGINT" },
+	// ── PRD-060 ROI fix: the per-turn MODEL id ────────────────────────────────────
+	// The model the turn ran on (e.g. `claude-opus-4-8`), read from the Claude Code
+	// transcript so the ROI dashboard prices the turn at its REAL model's rate instead of
+	// the Sonnet default (`rowToCapturedTurn` reads this; `resolveRate` does the rest).
+	// Additive, healed in via the SAME `ALTER TABLE ADD COLUMN … DEFAULT ''` path as the
+	// 060a columns. TEXT NOT NULL DEFAULT '' — heal-safe on a populated legacy table because
+	// the empty string backfills, and `'' = "model unknown"` (the model-absent encoding).
+	{ name: "model", sql: "TEXT NOT NULL DEFAULT ''" },
 	// The capture-source discriminant (a-AC-7): every Claude-Code row carries
 	// `source_tool = 'claude-code'`, so 060b/060e can render a "Claude Code only"
 	// partial state. NOT NULL DEFAULT '' (a discriminant always present; '' = unknown

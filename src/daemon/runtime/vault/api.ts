@@ -50,6 +50,12 @@ export const SETTINGS_GROUP = "/api/settings" as const;
  *   - `recallMode`     — the recall-mode selector (PRD-044c): the CLOSED enum
  *     `keyword | semantic | hybrid` (validated below, fail-closed). UNSET preserves the
  *     PRD-025 runtime default (behavior-neutral), so the key exists to OPT IN to an explicit mode.
+ *   - `portkey.enabled` — the Portkey gateway toggle (boolean, PRD-063a). Persisted intent only;
+ *     063b makes it take effect on the inference path.
+ *   - `portkey.config`  — the free-form Portkey config / virtual-key id (string). Validated as a
+ *     NON-EMPTY string only WHEN `portkey.enabled === true`; when disabled any/empty string passes.
+ *   - `portkey.fallbackToProvider` — the opt-in "fall back to the provider key if Portkey is
+ *     unreachable" toggle (boolean, PRD-063a D-3, default false).
  *   - `dashboard.*`    — free-form scalar dashboard prefs (validated only by the class schema).
  */
 /**
@@ -59,7 +65,16 @@ export const SETTINGS_GROUP = "/api/settings" as const;
  */
 export const EMBEDDINGS_ENABLED_KEY = "embeddings.enabled" as const;
 
-export const KNOWN_SETTING_KEYS = ["activeProvider", "activeModel", "pollinating.enabled", EMBEDDINGS_ENABLED_KEY, "recallMode"] as const;
+export const KNOWN_SETTING_KEYS = [
+	"activeProvider",
+	"activeModel",
+	"pollinating.enabled",
+	EMBEDDINGS_ENABLED_KEY,
+	"recallMode",
+	"portkey.enabled",
+	"portkey.config",
+	"portkey.fallbackToProvider",
+] as const;
 
 /**
  * The closed `recallMode` enum (PRD-044c). The recall pipeline reads this `setting` at recall
@@ -244,6 +259,31 @@ async function validateSettingSemantics(
 		// catalog-validated. Anything outside `keyword | semantic | hybrid` is rejected with a
 		// 400 — a caller cannot persist a garbage recall mode the pipeline would not understand.
 		if (!isValidRecallMode(String(value))) return "recallMode must be keyword, semantic, or hybrid";
+		return null;
+	}
+	if (key === "portkey.enabled" || key === "portkey.fallbackToProvider") {
+		// PRD-063a (D-3): both toggles MUST be a true boolean — a non-boolean (string/number) is
+		// rejected 400, the same fail-closed shape the other keys use. The class schema accepts
+		// any scalar, so this layer is what enforces the boolean type for the toggles.
+		if (typeof value !== "boolean") return `${key} must be a boolean`;
+		return null;
+	}
+	if (key === "portkey.config") {
+		// PRD-063a: a free-form id (config or virtual key). It must be a NON-EMPTY string only
+		// WHEN Portkey is enabled — an enabled gateway with an empty config is incoherent. The
+		// enabled flag is whatever is currently stored; a caller writes `portkey.enabled` first
+		// (mirrors the `activeProvider` → `activeModel` ordering above). When disabled, any/empty
+		// string passes (the user may clear or pre-fill the field with the gateway off).
+		if (typeof value !== "string") return "portkey.config must be a string";
+		// SECURITY (header-injection defense-in-depth): `portkey.config` is sent VERBATIM as the
+		// `x-portkey-config` HTTP header value by the inference transport. Reject any control
+		// character (CR/LF/NUL/etc.) at this validated boundary so a header-injection attempt is a
+		// clean 400 here rather than a confusing silent "unreachable" later (the undici fetch layer
+		// already rejects CR/LF in header values, so this is belt-and-suspenders, not the only guard).
+		if (/[\u0000-\u001F\u007F]/.test(value)) return "portkey.config must not contain control characters";
+		const enabledRes = await store.getSetting("portkey.enabled", scope);
+		const enabled = enabledRes.ok && enabledRes.value === true;
+		if (enabled && value.length === 0) return "portkey.config must be non-empty when portkey.enabled is true";
 		return null;
 	}
 	return null;
