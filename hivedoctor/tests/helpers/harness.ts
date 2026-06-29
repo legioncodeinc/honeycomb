@@ -59,6 +59,8 @@ export interface HarnessOptions {
 	readonly cooldownMs?: number;
 	readonly logger?: Logger;
 	readonly clock?: FakeClock;
+	/** Startup/post-restart grace in ms. Defaults to 0 so older supervisor tests keep legacy immediacy. */
+	readonly startupGraceMs?: number;
 	/** Extra rungs to register beyond rung 1 (default: none, so rung 2 is an unimplemented slot). */
 	readonly extraRungs?: readonly Rung[];
 	/** Replace the default restart rung 1 with a custom rung (for the targeted-classification test). */
@@ -117,6 +119,7 @@ export function buildHarness(options: HarnessOptions): Harness {
 		logger,
 		clock,
 		probeIntervalMs: 30_000,
+		startupGraceMs: options.startupGraceMs ?? 0,
 		...(options.onError !== undefined ? { onError: options.onError } : {}),
 	});
 

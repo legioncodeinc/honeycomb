@@ -81,6 +81,15 @@ function buildDoctor(over: Partial<Parameters<typeof createHiveDoctor>[0]> = {})
 	});
 }
 
+async function statusJsonUrl(doctor: ReturnType<typeof createHiveDoctor>): Promise<string> {
+	for (let i = 0; i < 50; i += 1) {
+		const port = doctor.statusPage.listeningPort;
+		if (port !== undefined) return `http://127.0.0.1:${port}/status.json`;
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+	throw new Error("status page did not bind");
+}
+
 const tmpDirs: string[] = [];
 function makeTmp(): string {
 	const d = mkdtempSync(join(tmpdir(), "hivedoctor-compose-"));
@@ -219,6 +228,82 @@ describe("createHiveDoctor (composition root)", () => {
 		const classification = await doctor.supervisor.tick();
 		expect(classification.kind).toBe("ok");
 		await doctor.stop();
+	});
+
+	it("PRD-067 AC-9: during startup grace the status page does not show terminal failure or escalation", async () => {
+		const restart = vi.fn(async () => true);
+		const doctor = buildDoctor({
+			probe: async () => ({ kind: "unreachable-refused", detail: "ECONNREFUSED" }),
+			restart,
+		});
+
+		await doctor.supervisor.tick();
+		expect(restart).not.toHaveBeenCalled();
+		doctor.statusPage.start();
+		const resp = await fetch(await statusJsonUrl(doctor));
+		const status = (await resp.json()) as { health: string; escalation: unknown };
+
+		expect(status.health).toBe("unknown");
+		expect(status.escalation).toBeNull();
+		await doctor.stop();
+	});
+
+	it("PRD-067 post-update restart: the compose restart callback re-arms supervisor grace", async () => {
+		let now = 0;
+		let health: HealthClassification = { kind: "ok" };
+		const clock: SupervisorClock = { now: () => now, sleep: async () => undefined };
+		const restart = vi.fn(async () => true);
+		const runner: CommandRunner = {
+			async run(_cmd, args): Promise<CommandResult> {
+				if (args[0] === "ls") {
+					return {
+						ok: true,
+						code: 0,
+						stdout: JSON.stringify({
+							dependencies: { "@legioncodeinc/honeycomb": { version: "0.1.0" } },
+						}),
+						stderr: "",
+					};
+				}
+				if (args[0] === "install") {
+					return { ok: true, code: 0, stdout: "", stderr: "" };
+				}
+				return { ok: false, code: 1, stdout: "", stderr: "unexpected npm command" };
+			},
+		};
+		const previousFetch = globalThis.fetch;
+		vi.stubGlobal("fetch", async () => ({
+			ok: true,
+			status: 200,
+			text: async () => JSON.stringify({ version: "0.1.1" }),
+		}));
+		try {
+			const doctor = buildDoctor({
+				clock,
+				restart,
+				runner,
+				probe: async () => health,
+				blessedChannel: {
+					fetch: async () => ({
+						ok: true,
+						status: 200,
+						text: async () => JSON.stringify({ version: "0.1.1" }),
+					}),
+				},
+			});
+			now = 60_000;
+			const update = await doctor.pollLoop.tick();
+			expect(update?.status).toBe("updated");
+			expect(restart).toHaveBeenCalledTimes(1);
+
+			health = { kind: "unreachable-refused", detail: "restarting-after-update" };
+			await doctor.supervisor.tick();
+
+			expect(restart).toHaveBeenCalledTimes(1);
+			await doctor.stop();
+		} finally {
+			vi.stubGlobal("fetch", previousFetch);
+		}
 	});
 
 	it("createRealClock produces a working sleep + now", async () => {

@@ -326,6 +326,7 @@ export function createHiveDoctor(options: CreateHiveDoctorOptions = {}): HiveDoc
 		logger,
 		clock,
 		probeIntervalMs: config.probeIntervalMs,
+		startupGraceMs: config.startupGraceMs,
 		onError,
 	});
 
@@ -352,7 +353,11 @@ export function createHiveDoctor(options: CreateHiveDoctorOptions = {}): HiveDoc
 			// supervised restart from a no-op one: `restart()` resolves false when there is no OS
 			// service / nothing to restart, and the engine must then NOT roll back a still-unhealthy
 			// /health (the update cannot make an already-down daemon worse).
-			restartDaemon: async (): Promise<boolean> => restart(),
+			restartDaemon: async (): Promise<boolean> => {
+				const restarted = await restart();
+				if (restarted) supervisor.armStartupGrace();
+				return restarted;
+			},
 			verifyHealthy: isHealthy,
 			optOut: {
 				autoUpdateDisabled: optOut.autoUpdateDisabled,
@@ -371,7 +376,7 @@ export function createHiveDoctor(options: CreateHiveDoctorOptions = {}): HiveDoc
 
 	// ── Local status page (064g) on the loopback comfort port ─────────────────────
 	const statusPage = createStatusPageServer({
-		port: options.statusPagePort ?? DEFAULT_STATUS_PAGE_PORT,
+		port: options.statusPagePort ?? config.statusPagePort,
 		state: {
 			health: () => {
 				const s = stateStore.read();

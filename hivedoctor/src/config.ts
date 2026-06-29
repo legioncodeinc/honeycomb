@@ -23,14 +23,20 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { DEFAULT_STATUS_PAGE_PORT } from "./status-page/server.js";
+
 /** The fully-resolved, validated watchdog config the supervisor consumes. */
 export interface HiveDoctorConfig {
 	/** How often the watch loop probes `/health`, in ms (default 30000). */
 	readonly probeIntervalMs: number;
 	/** Per-probe HTTP timeout, in ms (default 2000). A wedged socket must never hang the loop. */
 	readonly probeTimeoutMs: number;
+	/** Cold-boot / post-restart grace window, in ms (default 60000). */
+	readonly startupGraceMs: number;
 	/** The primary daemon health URL (default http://127.0.0.1:3850/health). */
 	readonly healthUrl: string;
+	/** The loopback status-page port (default 3852; 0 asks the OS for an ephemeral port). */
+	readonly statusPagePort: number;
 	/** Geometric-backoff floor, in ms (default 1000). */
 	readonly backoffFloorMs: number;
 	/** Geometric-backoff ceiling, in ms (default 30000). */
@@ -51,7 +57,9 @@ export interface HiveDoctorConfig {
 export interface ConfigDefaults {
 	readonly probeIntervalMs: number;
 	readonly probeTimeoutMs: number;
+	readonly startupGraceMs: number;
 	readonly healthUrl: string;
+	readonly statusPagePort: number;
 	readonly backoffFloorMs: number;
 	readonly backoffCeilingMs: number;
 	readonly restartGiveUpThreshold: number;
@@ -63,7 +71,9 @@ export interface ConfigDefaults {
 export const DEFAULTS: ConfigDefaults = {
 	probeIntervalMs: 30_000,
 	probeTimeoutMs: 2_000,
+	startupGraceMs: 60_000,
 	healthUrl: "http://127.0.0.1:3850/health",
+	statusPagePort: DEFAULT_STATUS_PAGE_PORT,
 	backoffFloorMs: 1_000,
 	backoffCeilingMs: 30_000,
 	restartGiveUpThreshold: 3,
@@ -94,6 +104,12 @@ function parseNonNegativeInt(raw: string | undefined, fallback: number): number 
 	return Number.isInteger(n) && n >= 0 ? n : fallback;
 }
 
+/** Parse a TCP port. `0` is valid and asks the OS to choose an ephemeral port. */
+function parsePort(raw: string | undefined, fallback: number): number {
+	const n = parseNonNegativeInt(raw, fallback);
+	return n <= 65_535 ? n : fallback;
+}
+
 /**
  * Validate a `/health` URL string: must parse as an http/https URL. Anything else
  * (empty, garbage, a non-http scheme) falls back to the default so a typo cannot
@@ -120,7 +136,9 @@ function parseHealthUrl(raw: string | undefined, fallback: string): string {
  * Recognized env vars (all optional, all defaulted):
  *   - HIVEDOCTOR_PROBE_INTERVAL_MS
  *   - HIVEDOCTOR_PROBE_TIMEOUT_MS
+ *   - HIVEDOCTOR_STARTUP_GRACE_MS
  *   - HIVEDOCTOR_HEALTH_URL
+ *   - HIVEDOCTOR_STATUS_PAGE_PORT
  *   - HIVEDOCTOR_BACKOFF_FLOOR_MS
  *   - HIVEDOCTOR_BACKOFF_CEILING_MS
  *   - HIVEDOCTOR_RESTART_GIVE_UP
@@ -147,7 +165,9 @@ export function resolveConfig(
 	return {
 		probeIntervalMs: parsePositiveInt(env.HIVEDOCTOR_PROBE_INTERVAL_MS, DEFAULTS.probeIntervalMs),
 		probeTimeoutMs: parsePositiveInt(env.HIVEDOCTOR_PROBE_TIMEOUT_MS, DEFAULTS.probeTimeoutMs),
+		startupGraceMs: parsePositiveInt(env.HIVEDOCTOR_STARTUP_GRACE_MS, DEFAULTS.startupGraceMs),
 		healthUrl: parseHealthUrl(env.HIVEDOCTOR_HEALTH_URL, DEFAULTS.healthUrl),
+		statusPagePort: parsePort(env.HIVEDOCTOR_STATUS_PAGE_PORT, DEFAULTS.statusPagePort),
 		backoffFloorMs: floor,
 		backoffCeilingMs: ceiling,
 		restartGiveUpThreshold: parsePositiveInt(env.HIVEDOCTOR_RESTART_GIVE_UP, DEFAULTS.restartGiveUpThreshold),

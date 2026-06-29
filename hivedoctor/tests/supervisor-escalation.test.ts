@@ -94,6 +94,7 @@ describe("supervisor escalate-on-give-up (PRD-064f wiring)", () => {
 			logger: silentLogger,
 			clock,
 			probeIntervalMs: 30_000,
+			startupGraceMs: 0,
 		});
 
 		await supervisor.tick();
@@ -158,6 +159,7 @@ describe("supervisor escalate-on-give-up (PRD-064f wiring)", () => {
 			logger: silentLogger,
 			clock,
 			probeIntervalMs: 30_000,
+			startupGraceMs: 0,
 		});
 
 		await supervisor.tick();
