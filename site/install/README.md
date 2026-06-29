@@ -66,9 +66,42 @@ Deploying with `--branch=production` (matching the project's production branch) 
 content the **production** deployment that `get.theapiary.sh` serves — so a tag's bytes go live
 immutably, even though Pages itself keys "production" off a branch name, not a tag.
 
-### Two one-time operator steps
+### Security controls (defense-in-depth)
 
-1. **Point `theapiary.sh` at Cloudflare** (the zone is currently `pending`). At the registrar,
+Because the installer is served at a public endpoint and users pipe it directly into `sh` or `iex`,
+the deployment workflow implements multiple security layers to prevent unauthorized deployments:
+
+1. **Protected environment**: The deploy job requires manual approval via the `production` GitHub
+   environment (configured at Settings → Environments → production with required reviewers). Even
+   if a `v*` tag is pushed, the workflow pauses and waits for a trusted maintainer to review and
+   approve the deployment before any bytes reach Cloudflare.
+
+2. **Branch ancestry verification**: The workflow verifies that the triggering tag is reachable from
+   the protected `main` branch. This ensures the tag's commit has passed through main's required PR
+   reviews and CI quality gates (`.github/rulesets/main-protection.json`). A tag pointing to an
+   arbitrary commit not on main is rejected before the build runs.
+
+3. **Immutable tag semantics**: Tags are immutable refs. Once a tag is pushed and deployed, re-pushing
+   the same tag name is rejected by Git, preventing silent replacement of a known-good release.
+
+These controls ensure that only vetted, reviewed installer scripts reach production. See `SECURITY.md`
+for the full security policy.
+
+### Three one-time operator steps
+
+1. **Configure the protected `production` environment** (REQUIRED for security). At the repository,
+   go to **Settings → Environments → New environment**, create an environment named `production`,
+   and configure:
+   - **Required reviewers**: Add at least one trusted maintainer (ideally 2+) who must approve
+     every deployment before it proceeds to Cloudflare.
+   - **Deployment branches**: Optionally restrict to `main` only (belt-and-suspenders; the workflow's
+     branch ancestry check already enforces this, but the UI setting adds a second gate).
+   
+   Without required reviewers, the workflow still references the `production` environment, but it
+   will not pause for human approval. This environment must stay protected; the installer must never
+   deploy without human review. See `SECURITY.md`.
+
+2. **Point `theapiary.sh` at Cloudflare** (the zone is currently `pending`). At the registrar,
    set the nameservers to the ones Cloudflare assigned this zone:
    ```
    felicity.ns.cloudflare.com
@@ -78,7 +111,7 @@ immutably, even though Pages itself keys "production" off a branch name, not a t
    `pending`. (Keeping the zone on Cloudflare DNS is also what you want for the apex website later —
    point `theapiary.sh` → wherever the site is hosted and `get` → Pages, both records in this zone.)
 
-2. **Add the deploy token to GitHub.** Repo → Settings → Secrets and variables → Actions → New
+3. **Add the deploy token to GitHub.** Repo → Settings → Secrets and variables → Actions → New
    repository secret:
    ```
    Name:  CLOUDFLARE_API_TOKEN
