@@ -289,8 +289,12 @@ async function validateVaultPath(candidatePath: string): Promise<string | null> 
 	if (candidatePath.length === 0) return null;
 
 	try {
-		// Resolve the workspace base directory ONCE (memoized).
-		const workspaceBase = path.resolve(getWorkspaceBaseDir());
+		// Resolve the workspace base directory ONCE (memoized). Canonicalize it via
+		// `realpath` too so a containment check compares like-for-like — on Windows the
+		// base may differ from the candidate's realpath by drive-letter casing or 8.3
+		// short-name expansion, which would otherwise false-reject a valid in-workspace
+		// vault. `realpath` throws if the base does not exist, which we catch below.
+		const workspaceBase = await realpath(path.resolve(getWorkspaceBaseDir()));
 
 		// Canonicalize the candidate path: resolve symlinks + relative segments.
 		// `realpath` throws if the path does not exist, which we catch below.
@@ -627,7 +631,9 @@ export function createObsidianProvider(config?: ObsidianConfig): ObsidianProvide
 			// SECURITY: The vault path MUST be validated before any read operation.
 			if (validatedVaultRoot === null) {
 				const health = await probe();
-				if (health.state !== "connected") {
+				// Re-check the closure variable AFTER the awaited probe() side effect so TS
+				// control-flow narrows `validatedVaultRoot` from `string | null` to `string`.
+				if (health.state !== "connected" || validatedVaultRoot === null) {
 					// The vault path is invalid or unreadable — yield a failure artifact.
 					yield {
 						provenance: provenanceFor(config, ""),
@@ -639,14 +645,16 @@ export function createObsidianProvider(config?: ObsidianConfig): ObsidianProvide
 					return;
 				}
 			}
+			// Bind the validated path to a non-null local so it stays `string` across awaits.
+			const root = validatedVaultRoot;
 
 			// Narrow to `scope.paths` when the watcher hands a change set (FR-6 single-
 			// flight re-index of just the edited files); else walk the whole vault.
-			const all = await collectMarkdownPaths(validatedVaultRoot);
+			const all = await collectMarkdownPaths(root);
 			const narrowed = scope.paths !== undefined ? new Set(scope.paths) : null;
 			const targets = narrowed === null ? all : all.filter((p) => narrowed.has(p));
 			for (const relPath of targets) {
-				const file = await readVaultFile(validatedVaultRoot, relPath);
+				const file = await readVaultFile(root, relPath);
 				// c-AC-6: a malformed/unreadable file becomes a failure artifact; the loop
 				// CONTINUES so every other file still indexes (one bad file never aborts).
 				yield file.malformed ? failureArtifact(config, file) : noteArtifact(config, file);
@@ -665,16 +673,20 @@ export function createObsidianProvider(config?: ObsidianConfig): ObsidianProvide
 			// SECURITY: The vault path MUST be validated before any read operation.
 			if (validatedVaultRoot === null) {
 				const health = await probe();
-				if (health.state !== "connected") {
+				// Re-check the closure variable AFTER the awaited probe() side effect so TS
+				// control-flow narrows `validatedVaultRoot` from `string | null` to `string`.
+				if (health.state !== "connected" || validatedVaultRoot === null) {
 					// The vault path is invalid or unreadable — return an empty snapshot.
 					return {};
 				}
 			}
+			// Bind the validated path to a non-null local so it stays `string` across awaits.
+			const root = validatedVaultRoot;
 
-			const paths = await collectMarkdownPaths(validatedVaultRoot);
+			const paths = await collectMarkdownPaths(root);
 			const snap: Record<string, string> = {};
 			for (const relPath of paths) {
-				const file = await readVaultFile(validatedVaultRoot, relPath);
+				const file = await readVaultFile(root, relPath);
 				snap[relPath] = file.fingerprint;
 			}
 			return snap;
