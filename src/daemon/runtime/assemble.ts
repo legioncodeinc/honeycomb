@@ -1105,16 +1105,14 @@ export function assembleSeams(
 			const includePendingSharedLocalJobs =
 				localQueueConfig.drainSharedLocalKinds ||
 				parseLocalQueueDiagnosticsSharedFlag(process.env.HONEYCOMB_LOCAL_QUEUE_DIAGNOSTICS_INCLUDE_SHARED);
+			const pendingSharedLocalJobs = includePendingSharedLocalJobs
+				? () => countPendingSharedLocalJobs({ storage, scope: defaultScope, localKinds: localQueueConfig.localKinds })
+				: undefined;
 			seams.mountLocalQueueDiagnostics(daemon, {
 				config: localQueueConfig,
 				localQueue,
 				topology: resolveLocalQueueTopology(),
-				...(includePendingSharedLocalJobs
-					? {
-							pendingSharedLocalJobs: () =>
-								countPendingSharedLocalJobs({ storage, scope: defaultScope, localKinds: localQueueConfig.localKinds }),
-						}
-					: {}),
+				pendingSharedLocalJobs,
 				queryMeter: () => ({ snapshot: storage.meterSnapshot(), logLine: storage.meterLogLine() }),
 			});
 		} catch (err: unknown) {

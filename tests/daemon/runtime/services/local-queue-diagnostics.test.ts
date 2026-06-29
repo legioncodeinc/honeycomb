@@ -65,6 +65,16 @@ describe("PRD-066e local queue diagnostics", () => {
 		}
 	});
 
+	it("labels unrecognized topology env values as env-sourced unknowns", () => {
+		const topology = resolveLocalQueueTopology({ HONEYCOMB_TOPOLOGY: "shared-workstation" });
+
+		expect(topology).toMatchObject({
+			mode: "unknown",
+			source: "env",
+			eligibleForDefaultOn: false,
+		});
+	});
+
 	it("AC-8: install topology fallback is eligible for default-on", () => {
 		const topology = resolveLocalQueueTopology({ HONEYCOMB_INSTALL_TOPOLOGY: "single-machine" });
 

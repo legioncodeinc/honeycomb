@@ -19,6 +19,11 @@ const PENDING_SHARED_LOCAL_JOBS_TIMEOUT_MS = 5_000;
 export type LocalQueueTopologyMode = "single_machine" | "multi_device" | "fleet" | "unknown";
 export type LocalQueueTopologySource = "env" | "explicit-opt-in" | "default";
 
+interface ResolvedTopologyMode {
+	readonly mode: LocalQueueTopologyMode;
+	readonly source: Exclude<LocalQueueTopologySource, "explicit-opt-in">;
+}
+
 export interface LocalQueueTopology {
 	readonly mode: LocalQueueTopologyMode;
 	readonly source: LocalQueueTopologySource;
@@ -74,29 +79,29 @@ export interface BuildLocalQueueUpgradeDiagnosticsOptions {
 
 export function resolveLocalQueueTopology(env: NodeJS.ProcessEnv = process.env): LocalQueueTopology {
 	const explicitOptIn = parseBooleanFlag(env.HONEYCOMB_LOCAL_QUEUE_EXPLICIT_OPT_IN);
-	const rawMode = normalizeMode(env.HONEYCOMB_TOPOLOGY ?? env.HONEYCOMB_INSTALL_TOPOLOGY);
+	const topologyMode = resolveTopologyMode(env);
 
 	if (explicitOptIn) {
 		return {
-			mode: rawMode ?? "unknown",
+			mode: topologyMode.mode,
 			source: "explicit-opt-in",
 			eligibleForDefaultOn: true,
 			reason: "explicit local-queue opt-in overrides topology default-on guard",
 		};
 	}
 
-	if (rawMode === "single_machine") {
+	if (topologyMode.mode === "single_machine") {
 		return {
-			mode: rawMode,
+			mode: topologyMode.mode,
 			source: "env",
 			eligibleForDefaultOn: true,
 			reason: "single-machine/local topology is eligible for local queue default-on",
 		};
 	}
 
-	if (rawMode === "multi_device" || rawMode === "fleet") {
+	if (topologyMode.mode === "multi_device" || topologyMode.mode === "fleet") {
 		return {
-			mode: rawMode,
+			mode: topologyMode.mode,
 			source: "env",
 			eligibleForDefaultOn: false,
 			reason: "multi-device and fleet topologies stay on the shared queue unless explicitly opted in",
@@ -104,8 +109,8 @@ export function resolveLocalQueueTopology(env: NodeJS.ProcessEnv = process.env):
 	}
 
 	return {
-		mode: "unknown",
-		source: rawMode === null ? "default" : "env",
+		mode: topologyMode.mode,
+		source: topologyMode.source,
 		eligibleForDefaultOn: false,
 		reason: "unknown topology is not eligible for local queue default-on without explicit opt-in",
 	};
@@ -246,15 +251,23 @@ function statusCount(counts: LocalQueueCounts, status: string): number {
 	return Number(counts.byStatus[status as keyof typeof counts.byStatus] ?? 0);
 }
 
-function normalizeMode(raw: string | undefined): LocalQueueTopologyMode | null {
-	const normalized = raw?.trim().toLowerCase().replace(/[-\s]+/g, "_");
+function resolveTopologyMode(env: NodeJS.ProcessEnv): ResolvedTopologyMode {
+	const raw = env.HONEYCOMB_TOPOLOGY ?? env.HONEYCOMB_INSTALL_TOPOLOGY;
+	if (raw === undefined || raw.trim().length === 0) {
+		return { mode: "unknown", source: "default" };
+	}
+	return { mode: normalizeMode(raw), source: "env" };
+}
+
+function normalizeMode(raw: string): LocalQueueTopologyMode {
+	const normalized = raw.trim().toLowerCase().replace(/[-\s]+/g, "_");
 	if (normalized === "single" || normalized === "single_machine" || normalized === "local") return "single_machine";
 	if (normalized === "multi" || normalized === "multi_device" || normalized === "team" || normalized === "hybrid") {
 		return "multi_device";
 	}
 	if (normalized === "fleet" || normalized === "orchestrated") return "fleet";
 	if (normalized === "unknown") return "unknown";
-	return null;
+	return "unknown";
 }
 
 function parseBooleanFlag(raw: string | undefined): boolean {
