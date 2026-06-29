@@ -170,14 +170,28 @@ class AdaptivePollLoop implements PollLoop {
 			});
 	}
 
-	/** Resume a hibernated loop and reset its cadence to the floor (PRD-062e). */
+	/**
+	 * Resume on new work (PRD-062e). Because the queue fires this on every enqueue, it
+	 * handles BOTH a fully-suspended loop AND one merely backed off toward the ceiling:
+	 * either way it snaps the cadence to the floor and re-arms so the new job is picked
+	 * up immediately, not after a stale long delay. Idempotent and safe on a never-started,
+	 * stopped, or flat loop (a no-op), and never double-arms.
+	 */
 	wake(): void {
-		// A stopped or flat (non-adaptive) loop has nothing to wake.
-		if (this.stopped || this.backoff === null) return;
+		// A never-started, stopped, or flat (non-adaptive) loop has nothing to wake.
+		if (!this.started || this.stopped || this.backoff === null) return;
 		// Snap the cadence back to fast and clear the idle accumulator so the just-woken
 		// loop polls immediately and cannot re-suspend until it goes idle again.
 		this.backoff.onWake();
-		if (!this.suspended) return; // running/armed loop: the live timer keeps the cadence; no double-arm.
+		// A tick is in flight: its finally() will re-arm exactly once at the reset floor,
+		// so arming here too would double-arm.
+		if (this.running) return;
+		// Cancel any live (suspended → none; backed-off → a long stale) timer, then re-arm
+		// at the floor. Replacing the single handle keeps exactly one timer armed.
+		if (this.handle !== undefined) {
+			this.timers.clearTimer(this.handle);
+			this.handle = undefined;
+		}
 		this.suspended = false;
 		this.scheduleNext(this.backoff.nextDelayMs());
 	}

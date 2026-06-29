@@ -298,4 +298,24 @@ describe("AdaptivePollLoop: idle hibernation, suspends when idle, wakes on deman
 		expect(timers.delays.at(-1)).toBe(30_000);
 		loop.stop();
 	});
+
+	it("AC-62e.12: wake() pulls a merely backed-off (not suspended) loop's timer back to the floor", async () => {
+		const backoffOnly = PollBackoffConfigSchema.parse({ enabled: true, floorMs: 1_000, ceilingMs: 30_000, jitter: 0 });
+		const timers = manualTimers();
+		const loop = createPollLoop({ tick: async () => false, backoff: backoffOnly, flatIntervalMs: 1_000, timers });
+		loop.start();
+		// Back off a few empty ticks so the live timer is parked at a long delay (not suspended).
+		for (let i = 0; i < 3; i++) {
+			timers.fireNext();
+			await flush();
+		}
+		expect(timers.delays.at(-1)).toBe(8_000); // parked at 8s, climbing toward the ceiling.
+		expect(timers.armedCount()).toBe(1);
+		// A new job wakes the loop: the stale 8s timer is cancelled and re-armed at the floor,
+		// so the job is picked up immediately rather than after the stale delay.
+		loop.wake();
+		expect(timers.armedCount()).toBe(1); // cancel + re-arm leaves exactly one timer, never two.
+		expect(timers.delays.at(-1)).toBe(1_000);
+		loop.stop();
+	});
 });

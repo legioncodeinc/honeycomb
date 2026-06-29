@@ -192,11 +192,13 @@ export interface JobQueueDeps {
 	/** Optional injected clock/scheduler (real timers otherwise). */
 	readonly clock?: JobQueueClock;
 	/**
-	 * Fired AFTER a successful {@link JobQueueService.enqueue} append (PRD-062e). The
-	 * daemon wires this to the wake bus so a new job resumes every hibernated poll loop
-	 * (and the reaper). Optional and side-effect-only; a throw is the caller's concern.
+	 * The fleet-wake hook (PRD-062e). Fired when the queue gains work to run: after a
+	 * successful {@link JobQueueService.enqueue} append, and when a `failed` job's retry
+	 * deadline arrives (so a hibernated daemon does not sleep through a scheduled retry).
+	 * The daemon wires this to the wake bus so it resumes every hibernated poll loop and
+	 * the reaper. Best-effort: the queue isolates a throw from the durable write/timer.
 	 */
-	readonly onEnqueue?: () => void;
+	readonly onWake?: () => void;
 	/**
 	 * Enable reaper idle hibernation (PRD-062e). When true, a clean sweep that observes
 	 * no queued or leased work suspends the reaper timer so an idle queue issues zero
@@ -421,8 +423,10 @@ class DeepLakeJobQueueService implements JobQueueService {
 	 */
 	private reaping = false;
 	private idSeq = 0;
-	/** Fired after a successful enqueue append; the daemon wires it to the wake bus (PRD-062e). */
-	private readonly onEnqueue?: () => void;
+	/** Fleet-wake hook fired on enqueue + at a retry deadline; wired to the wake bus (PRD-062e). */
+	private readonly onWake?: () => void;
+	/** Pending one-shot retry-deadline wake timers, cleared on stop (PRD-062e). */
+	private readonly retryWakes = new Set<unknown>();
 	/** Whether the reaper may hibernate when the queue goes idle (PRD-062e). */
 	private readonly reaperSuspendEnabled: boolean;
 	/** True while the reaper timer is suspended (idle hibernation). Distinct from stopped. */
@@ -437,7 +441,7 @@ class DeepLakeJobQueueService implements JobQueueService {
 		this.scope = deps.scope;
 		this.logger = deps.logger;
 		this.clock = deps.clock ?? defaultClock();
-		this.onEnqueue = deps.onEnqueue;
+		this.onWake = deps.onWake;
 		this.reaperSuspendEnabled = deps.suspendEnabled ?? false;
 		this.cfg = resolveConfig(deps.config, this.generateOwner());
 		// Heal target = the REAL catalog columns (single-sourced) under the configured
@@ -493,9 +497,46 @@ class DeepLakeJobQueueService implements JobQueueService {
 			return id;
 		}
 		// PRD-062e: a new job means there is work to do, so resume any hibernated poll
-		// loop (and the reaper) through the wake bus the daemon wired here.
-		this.onEnqueue?.();
+		// loop (and the reaper) through the wake bus. Best-effort: a throwing wake hook
+		// must NOT reject this already-durable enqueue (that would invite a duplicate retry).
+		this.fireWake({ id, kind: job.kind, trigger: "enqueue" });
 		return id;
+	}
+
+	/**
+	 * Fire the fleet-wake hook (PRD-062e), best-effort. A throw is caught and logged so it
+	 * never fails a durable write or a retry-deadline timer. The wake bus already guards
+	 * each registered callback; this is the second belt at the queue boundary.
+	 */
+	private fireWake(context: Record<string, unknown>): void {
+		if (this.onWake === undefined) return;
+		try {
+			this.onWake();
+		} catch (err: unknown) {
+			this.logger?.event("job.wake.failed", {
+				...context,
+				reason: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	/**
+	 * Schedule a ONE-SHOT fleet-wake at a `failed` job's retry deadline (PRD-062e). Without
+	 * this, once every loop hibernates no enqueue occurs at `next_run_at`, so a retryable
+	 * job could sit until unrelated activity wakes the bus. The timer fires once (it clears
+	 * itself), rings the same wake hook an enqueue does, and is cleaned up on {@link stop}.
+	 * A no-op when no wake hook is wired (a standalone/test queue).
+	 */
+	private scheduleRetryWake(delayMs: number): void {
+		if (this.onWake === undefined) return;
+		let handle: unknown;
+		handle = this.clock.setTimer(() => {
+			// One-shot over the interval-based clock seam: cancel before firing so it runs once.
+			this.clock.clearTimer(handle);
+			this.retryWakes.delete(handle);
+			this.fireWake({ trigger: "retry-deadline" });
+		}, Math.max(1, delayMs));
+		this.retryWakes.add(handle);
 	}
 
 	/**
@@ -730,9 +771,8 @@ class DeepLakeJobQueueService implements JobQueueService {
 		const nowIso = new Date(now).toISOString();
 
 		const dead = attempts >= maxAttempts;
-		const nextRunAt = dead
-			? nowIso
-			: new Date(now + backoffDelayMs(attempts, this.cfg.backoffBaseMs, this.cfg.backoffCapMs)).toISOString();
+		const retryDelayMs = dead ? 0 : backoffDelayMs(attempts, this.cfg.backoffBaseMs, this.cfg.backoffCapMs);
+		const nextRunAt = dead ? nowIso : new Date(now + retryDelayMs).toISOString();
 
 		const ok = await this.append(id, current.version + 1, [
 			["id", val.str(id)],
@@ -753,6 +793,10 @@ class DeepLakeJobQueueService implements JobQueueService {
 			return;
 		}
 		this.logger?.event(dead ? "job.dead" : "job.failed", { id, attempts, maxAttempts });
+		// PRD-062e: a retryable job is real future work. Schedule a wake at its retry deadline
+		// so a hibernated daemon resumes to lease it on time instead of waiting for unrelated
+		// activity. A dead job has no future run, so it schedules nothing.
+		if (!dead) this.scheduleRetryWake(retryDelayMs);
 	}
 
 	/**
@@ -920,13 +964,16 @@ class DeepLakeJobQueueService implements JobQueueService {
 		this.logger?.event("reaper.resumed");
 	}
 
-	/** Stop the queue: clear the reaper timer. Idempotent. */
+	/** Stop the queue: clear the reaper timer + any pending retry-deadline wakes. Idempotent. */
 	stop(): void {
 		this.reaperSuspended = false;
 		if (this.reaperHandle !== undefined) {
 			this.clock.clearTimer(this.reaperHandle);
 			this.reaperHandle = undefined;
 		}
+		// PRD-062e: cancel any scheduled retry-deadline wakes so none fire after shutdown.
+		for (const handle of this.retryWakes) this.clock.clearTimer(handle);
+		this.retryWakes.clear();
 	}
 
 	/**

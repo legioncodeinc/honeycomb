@@ -1911,8 +1911,8 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// ── PRD-062e: ONE wake bus fans a single wake() to every hibernated poll loop (the
 	// stage / pollinating / summary / skillify workers + the consolidated coordinator) and
 	// the queue reaper, so an idle daemon goes fully quiet yet any new work resumes it all.
-	// Wired to the queue as `onEnqueue` (every new job wakes the fleet) and to the recall
-	// route below. Resolve the suspend posture once here (pure, fail-soft) so the queue is
+	// Wired to the queue as `onWake` (every new job, and every retry deadline, wakes the
+	// fleet). Resolve the suspend posture once here (pure, fail-soft) so the queue is
 	// built with reaper hibernation wired; the worker poll loops resolve the SAME knobs again
 	// in `start()` (identical static env), keeping that existing resolution untouched.
 	const wakeBus = createWakeBus();
@@ -1929,8 +1929,9 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		queue: createJobQueueService({
 			storage,
 			scope,
-			// PRD-062e: a new job wakes every hibernated poll loop + the reaper through the bus.
-			onEnqueue: () => wakeBus.wake(),
+			// PRD-062e: a new job (or a retry deadline) wakes every hibernated poll loop + the
+			// reaper through the bus.
+			onWake: () => wakeBus.wake(),
 			// PRD-062e: let the reaper hibernate when the queue is idle (gated on backoff being on).
 			suspendEnabled: queueSuspendEnabled,
 		}),
@@ -2573,8 +2574,8 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			}
 
 			// ── PRD-062e: register every built poll loop + the reaper on the wake bus so a new
-			// job (any enqueue, via the queue's `onEnqueue`) or a recall resumes the whole fleet
-			// from hibernation. Registering a worker whose loop was deferred under consolidation
+			// job (any enqueue, or a retry deadline, via the queue's `onWake`) resumes the whole
+			// fleet from hibernation. Registering a worker whose loop was deferred under consolidation
 			// (its loop never started) is a harmless no-op: `wake()` only re-arms a loop that had
 			// actually suspended; the started coordinator does the real work in that mode.
 			for (const worker of [pipelineWorker, pollinatingWorker, summaryWorker, skillifyWorker, leaseCoordinator]) {

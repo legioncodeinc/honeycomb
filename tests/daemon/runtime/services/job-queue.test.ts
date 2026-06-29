@@ -635,14 +635,14 @@ describe("PRD-062e reaper idle hibernation + the enqueue wake chokepoint", () =>
 		return { storage, fake };
 	}
 
-	it("AC-62e: enqueue fires onEnqueue exactly once on a successful append (the wake chokepoint)", async () => {
+	it("AC-62e: enqueue fires onWake exactly once on a successful append (the wake chokepoint)", async () => {
 		const { storage } = buildStorage(new InMemoryJobs());
 		let wakes = 0;
 		const queue = createJobQueueService({
 			storage,
 			scope: SCOPE,
 			clock: manualClock(),
-			onEnqueue: () => {
+			onWake: () => {
 				wakes++;
 			},
 		});
@@ -650,18 +650,49 @@ describe("PRD-062e reaper idle hibernation + the enqueue wake chokepoint", () =>
 		expect(wakes).toBe(1); // every new job rings the wake bus.
 	});
 
+	it("AC-62e: a wake hook that throws does not reject a durable enqueue", async () => {
+		const { storage } = buildStorage(new InMemoryJobs());
+		const queue = createJobQueueService({
+			storage,
+			scope: SCOPE,
+			clock: manualClock(),
+			onWake: () => {
+				throw new Error("bus exploded");
+			},
+		});
+		// The append already succeeded, so the throw is isolated and logged, never surfaced.
+		const id = await queue.enqueue({ kind: "x", payload: {} });
+		expect(id).not.toBe("");
+	});
+
+	it("AC-62e: a retryable failure schedules a wake at its retry deadline", async () => {
+		const clock = manualClock();
+		const { storage } = buildStorage(new InMemoryJobs());
+		let wakes = 0;
+		const queue = createJobQueueService({ storage, scope: SCOPE, clock, onWake: () => wakes++ });
+		const id = await queue.enqueue({ kind: "x", payload: {} }); // wake #1 (the enqueue).
+		await queue.lease();
+		await queue.fail(id, "boom"); // reschedules a retry + arms a deadline wake; no immediate wake.
+		expect(wakes).toBe(1);
+		// Firing the retry-deadline timer rings the same wake hook, so a hibernated fleet
+		// resumes to lease the now-due retry instead of waiting for unrelated activity.
+		clock.tick();
+		expect(wakes).toBe(2);
+		queue.stop();
+	});
+
 	it("AC-62e: the reaper hibernates after consecutive idle sweeps and an enqueue's wake resumes it", async () => {
 		const clock = manualClock();
 		const { storage, fake } = buildStorage(new InMemoryJobs());
 		let queue: JobQueueService;
-		// Wire onEnqueue → wakeReaper exactly as the daemon's wake bus does.
+		// Wire onWake → wakeReaper exactly as the daemon's wake bus does.
 		queue = createJobQueueService({
 			storage,
 			scope: SCOPE,
 			clock,
 			config: { reaperIntervalMs: 1_000 },
 			suspendEnabled: true,
-			onEnqueue: () => queue.wakeReaper?.(),
+			onWake: () => queue.wakeReaper?.(),
 		});
 		await queue.start(); // arms the reaper + kicks one immediate idle sweep (idle run = 1).
 		await flushReaper();
@@ -674,7 +705,7 @@ describe("PRD-062e reaper idle hibernation + the enqueue wake chokepoint", () =>
 		await flushReaper();
 		expect(discoverScans(fake)).toBe(scansAtSuspend);
 
-		// A new job enqueues → onEnqueue → wakeReaper re-arms the reaper; its next sweep reads again.
+		// A new job enqueues → onWake → wakeReaper re-arms the reaper; its next sweep reads again.
 		await queue.enqueue({ kind: "x", payload: {} });
 		clock.tick();
 		await flushReaper();
