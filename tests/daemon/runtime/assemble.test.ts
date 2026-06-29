@@ -101,6 +101,7 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 		mountProjectsSync: 0,
 		mountCompact: 0,
 		mountDiagnosticsHealth: 0,
+		mountLocalQueueDiagnostics: 0,
 		mountGraph: 0,
 		mountHarness: 0,
 	} as Record<keyof SeamFns, number>;
@@ -243,6 +244,15 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 			expect(detail.reasons, "the protected surface carries the full per-subsystem reasons").toBeDefined();
 		}) as SeamFns["mountDiagnosticsHealth"],
 		// ── The PRD-014 codebase-graph build/read seam the composition root fires (deferred wiring closed). ──
+		mountLocalQueueDiagnostics: ((daemon, options) => {
+			calls.mountLocalQueueDiagnostics += 1;
+			order.push("mountLocalQueueDiagnostics");
+			expect(typeof daemon.group).toBe("function");
+			expect(options.config.localKinds.has("summary")).toBe(true);
+			expect(typeof options.localQueue.counts).toBe("function");
+			expect(options.topology?.mode).toBeDefined();
+			expect(typeof options.pendingSharedLocalJobs).toBe("function");
+		}) as NonNullable<SeamFns["mountLocalQueueDiagnostics"]>,
 		mountGraph: ((daemon, options) => {
 			calls.mountGraph += 1;
 			order.push("mountGraph");
@@ -315,6 +325,7 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 		expect(calls.mountCompact).toBe(1);
 		// PRD-029 / AC-3: the protected per-subsystem health detail fires once and only once.
 		expect(calls.mountDiagnosticsHealth).toBe(1);
+		expect(calls.mountLocalQueueDiagnostics).toBe(1);
 		// PRD-014: the production composition root fires the graph build/read seam (deferred wiring closed).
 		expect(calls.mountGraph).toBe(1);
 		// PRD-039a: the harness registry + last-seen telemetry seam fires once and only once.
@@ -337,6 +348,7 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 			"mountProjectsSync",
 			"mountCompact",
 			"mountDiagnosticsHealth",
+			"mountLocalQueueDiagnostics",
 			"mountGraph",
 			"mountHarness",
 		]);
@@ -366,6 +378,7 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 		// PRD-029 / AC-3: the protected health detail also fires unconditionally (same protected
 		// /api/diagnostics group; fires in team too — the full reasons gate behind its auth).
 		expect(calls.mountDiagnosticsHealth).toBe(1);
+		expect(calls.mountLocalQueueDiagnostics).toBe(1);
 		// PRD-039a: the harness telemetry seam also fires unconditionally (same protected
 		// /api/diagnostics group; fires in team too — the activity GROUP BY gated behind its auth).
 		expect(calls.mountHarness).toBe(1);

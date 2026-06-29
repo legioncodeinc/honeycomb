@@ -79,7 +79,8 @@
     "postinstall": "node scripts/ensure-tree-sitter.mjs && node scripts/ensure-embed-deps.mjs",
     "prepack": "npm run build",
     "smoke:daemon-bundle": "node scripts/smoke-daemon-bundle.mjs",
-    "smoke:local-queue-upgrade": "node --experimental-sqlite scripts/local-queue-upgrade-smoke.mjs"
+    "smoke:local-queue-upgrade": "node --experimental-sqlite scripts/local-queue-upgrade-smoke.mjs",
+    "smoke:local-queue-packaged-upgrade": "node --experimental-sqlite scripts/local-queue-packaged-upgrade-smoke.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.0",

@@ -81,9 +81,20 @@ export interface RuntimeDeps extends CommandDeps {
 	readonly lifecycle: DaemonLifecycle;
 }
 
-/** The daemon base URL the loopback client + health probe dial (loopback 3850). */
+/** The daemon base URL the loopback client + health probe dial. */
+function daemonHost(): string {
+	const raw = process.env.HONEYCOMB_HOST?.trim();
+	if (raw === "127.0.0.1" || raw === "localhost") return raw;
+	return DAEMON_HOST;
+}
+
+function daemonPort(): number {
+	const raw = Number.parseInt(process.env.HONEYCOMB_PORT ?? "", 10);
+	return Number.isInteger(raw) && raw > 0 && raw <= 65_535 ? raw : DAEMON_PORT;
+}
+
 function daemonBaseUrl(): string {
-	return `http://${DAEMON_HOST}:${DAEMON_PORT}`;
+	return `http://${daemonHost()}:${daemonPort()}`;
 }
 
 /**
@@ -389,12 +400,12 @@ export function buildDaemonLifecycle(client: DaemonClient, options: DaemonLifecy
 			}
 			if (running) {
 				return serviceManager !== undefined
-					? { running, pid, port: DAEMON_PORT, serviceManager }
-					: { running, pid, port: DAEMON_PORT };
+					? { running, pid, port: daemonPort(), serviceManager }
+					: { running, pid, port: daemonPort() };
 			}
 			return serviceManager !== undefined
-				? { running: false, port: DAEMON_PORT, serviceManager }
-				: { running: false, port: DAEMON_PORT };
+				? { running: false, port: daemonPort(), serviceManager }
+				: { running: false, port: daemonPort() };
 		},
 
 		async restart(): Promise<{ readonly restarted: boolean; readonly viaService: boolean }> {

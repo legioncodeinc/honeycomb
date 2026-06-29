@@ -52,8 +52,12 @@ import { type RequestLogger, createRequestLogger } from "./logger.js";
 import { createRuntimePathService } from "./middleware/runtime-path.js";
 import { createFileWatcherService, type HarnessTarget } from "./services/file-watcher.js";
 import { createJobQueueService, type JobQueueConfig } from "./services/job-queue.js";
-import { createHybridJobQueueService, resolveHybridJobQueueConfig } from "./services/hybrid-job-queue.js";
-import { openLocalJobQueue } from "./services/local-job-queue.js";
+import {
+	createHybridJobQueueService,
+	resolveHybridJobQueueConfig,
+	type HybridJobQueueConfig,
+} from "./services/hybrid-job-queue.js";
+import { openLocalJobQueue, type LocalJobQueueService } from "./services/local-job-queue.js";
 import { type CreateDaemonOptions, type Daemon, type DaemonServices, createDaemon } from "./server.js";
 
 import { attachHooksHandlers } from "./capture/attach.js";
@@ -155,6 +159,8 @@ import { type EmbedAttachment, type EmbedClient, createEmbedAttachment, resolveE
 import { type EmbedSupervisor, createEmbedSupervisor } from "./services/embed-supervisor.js";
 import { type HealthDetail, type PortkeyHealth, buildHealthDetail } from "./health.js";
 import { mountDiagnosticsHealthApi } from "./diagnostics-health.js";
+import { mountLocalQueueDiagnosticsApi } from "./local-queue-diagnostics-api.js";
+import { countPendingSharedLocalJobs, resolveLocalQueueTopology } from "./services/local-queue-diagnostics.js";
 
 /**
  * The inference-config filename the daemon reads its `inference:` block from (PRD-026
@@ -479,6 +485,11 @@ export interface SeamFns {
 	 */
 	readonly mountDiagnosticsHealth: typeof mountDiagnosticsHealthApi;
 	/**
+	 * The local queue upgrade/rollback diagnostics endpoint - `GET /api/diagnostics/local-queue`
+	 * (PRD-066e). Optional so older recording seams stay type-compatible.
+	 */
+	readonly mountLocalQueueDiagnostics?: typeof mountLocalQueueDiagnosticsApi;
+	/**
 	 * The codebase-graph build + read surface — `POST /api/graph/build` + `GET /api/graph`
 	 * (PRD-014 assembly wiring, CONVENTIONS §11). Fires UNCONDITIONALLY: its `/api/graph` group
 	 * is already `protect:true` in `server.ts`, so it inherits the dashboard JSON views' auth/RBAC
@@ -579,6 +590,7 @@ export const defaultSeamFns: SeamFns = {
 	mountCompact: mountCompactApi,
 	mountStaleRef: mountStaleRefApi,
 	mountDiagnosticsHealth: mountDiagnosticsHealthApi,
+	mountLocalQueueDiagnostics: mountLocalQueueDiagnosticsApi,
 	mountGraph: mountGraphApi,
 	mountHarness: mountHarnessApi,
 	mountSync: mountSyncApi,
@@ -766,6 +778,8 @@ export function assembleSeams(
 	orgName: string | undefined,
 	embed: EmbedAttachment,
 	healthDetail: () => HealthDetail,
+	localQueueConfig: HybridJobQueueConfig,
+	localQueue: Pick<LocalJobQueueService, "persistent" | "counts">,
 	workspaceDir: string,
 	installedHarnesses: ReadonlySet<string>,
 	logStore: LogStore,
@@ -1060,6 +1074,21 @@ export function assembleSeams(
 	//     in team/hybrid. A synchronous read of the cached health bit + assembly-known embed
 	//     state (the `healthDetail` thunk) — NO new probe (D-4).
 	seams.mountDiagnosticsHealth(daemon, { healthDetail });
+
+	if (seams.mountLocalQueueDiagnostics !== undefined) {
+		try {
+			seams.mountLocalQueueDiagnostics(daemon, {
+				config: localQueueConfig,
+				localQueue,
+				topology: resolveLocalQueueTopology(),
+				pendingSharedLocalJobs: () =>
+					countPendingSharedLocalJobs({ storage, scope: defaultScope, localKinds: localQueueConfig.localKinds }),
+			});
+		} catch (err: unknown) {
+			const reason = err instanceof Error ? err.message : String(err);
+			process.stderr.write(`honeycomb: local queue diagnostics mount failed (non-fatal): ${reason}\n`);
+		}
+	}
 
 	// 13. The codebase-graph build + read surface — `POST /api/graph/build` + `GET /api/graph`
 	//     (PRD-014 assembly wiring, CONVENTIONS §11). Attaches onto the already-mounted, protected
@@ -1919,7 +1948,10 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 
 	const sharedQueue = createJobQueueService({ storage, scope, config: options.jobQueueConfig });
 	const localQueueConfig = resolveHybridJobQueueConfig();
-	const localQueue = localQueueConfig.enabled ? openLocalJobQueue({ baseDir: resolveWorkspaceBaseDir() }) : sharedQueue;
+	const localQueue = openLocalJobQueue({
+		baseDir: resolveWorkspaceBaseDir(),
+		openExistingOnly: !localQueueConfig.enabled,
+	});
 	const queue = createHybridJobQueueService({
 		shared: sharedQueue,
 		local: localQueue,
@@ -2104,6 +2136,8 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		daemonOrgName,
 		embed,
 		healthDetail,
+		localQueueConfig,
+		localQueue,
 		options.workspaceDir ?? process.cwd(),
 		installedHarnesses,
 		logStore,
@@ -2616,6 +2650,9 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			if (started) {
 				await daemon.stopServices();
 				started = false;
+			}
+			if (!localQueueConfig.enabled) {
+				await localQueue.stop();
 			}
 			// PRD-043a: close the durable log store handle so no SQLite file handle leaks across a
 			// restart. Idempotent + never throws (the NULL no-op's close is a no-op).
