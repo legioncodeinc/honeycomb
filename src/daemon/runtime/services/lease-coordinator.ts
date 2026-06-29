@@ -115,6 +115,8 @@ export interface LeaseCoordinator {
 	start(): void;
 	/** Stop the loop. Idempotent. */
 	stop(): void;
+	/** Resume a hibernated loop and snap its cadence back to the floor (PRD-062e). */
+	wake(): void;
 }
 
 /** The concrete coordinator. */
@@ -198,6 +200,10 @@ class CombinedLeaseCoordinator implements LeaseCoordinator {
 
 	stop(): void {
 		this.loop.stop();
+	}
+
+	wake(): void {
+		this.loop.wake();
 	}
 }
 

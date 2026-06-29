@@ -17,15 +17,17 @@ import { describe, expect, it } from "vitest";
 import {
 	DEFAULT_POLL_BACKOFF_CEILING_MS,
 	DEFAULT_POLL_BACKOFF_FLOOR_MS,
+	DEFAULT_POLL_SUSPEND_AFTER_MS,
+	envPollBackoffConfigProvider,
 	PollBackoff,
 	PollBackoffConfigSchema,
 	resolvePollBackoffConfig,
 } from "../../../../src/daemon/runtime/services/poll-backoff.js";
 
 /** A no-jitter machine over a clean 1000→30000 window for exact schedule assertions. */
-function machine(floorMs = 1_000, ceilingMs = 30_000, jitter = 0.1): PollBackoff {
+function machine(floorMs = 1_000, ceilingMs = 30_000, jitter = 0.1, suspendEnabled = false, suspendAfterMs = 0): PollBackoff {
 	// Pin the jitter source to 0 so `nextDelayMs()` equals the un-jittered step.
-	return new PollBackoff({ floorMs, ceilingMs, jitter }, () => 0);
+	return new PollBackoff({ floorMs, ceilingMs, jitter, suspendEnabled, suspendAfterMs }, () => 0);
 }
 
 describe("PollBackoff state machine: grows on empty leases, resets on a lease (AC-2 / AC-3)", () => {
@@ -137,5 +139,79 @@ describe("resolvePollBackoffConfig: the zod boundary + default-ON env posture (A
 	it("normalizes a backwards window (ceiling < floor) up to the floor", () => {
 		const cfg = resolvePollBackoffConfig({ read: () => ({ enabled: "true", floorMs: "5000", ceilingMs: "1000" }) });
 		expect(cfg.ceilingMs).toBe(5_000); // lifted to the floor so the step never goes backwards.
+	});
+});
+
+describe("PollBackoff idle hibernation: suspends after the idle window, resets on lease/wake (PRD-062e)", () => {
+	// Over a 1000→30000 window the post-step idle accrual is 2000,4000,8000,16000,30000,...
+	// so the cumulative idle after N empty leases is 2000, 6000, 14000, 30000, 60000, ...
+	// A 60000ms window therefore trips on exactly the 5th empty lease.
+	it("AC-62e.1: shouldSuspend trips after the idle accumulator reaches suspendAfterMs", () => {
+		const b = machine(1_000, 30_000, 0.1, true, 60_000);
+		expect(b.shouldSuspend()).toBe(false); // fresh, never idle yet.
+		let empties = 0;
+		while (!b.shouldSuspend()) {
+			b.onEmptyLease();
+			empties++;
+			expect(empties).toBeLessThanOrEqual(10); // converges fast, never spins.
+		}
+		expect(empties).toBe(5); // 2000+4000+8000+16000+30000 = 60000.
+	});
+
+	it("AC-62e.2: a successful lease zeroes the idle accumulator (a busy loop never suspends)", () => {
+		const b = machine(1_000, 30_000, 0.1, true, 60_000);
+		for (let i = 0; i < 4; i++) b.onEmptyLease(); // idle 30000 < 60000, not yet.
+		expect(b.shouldSuspend()).toBe(false);
+		b.onLease(); // a real job resets the step AND the idle accumulator.
+		expect(b.currentStepMs()).toBe(1_000);
+		expect(b.shouldSuspend()).toBe(false);
+		// It now takes the FULL run of empties again to trip, proving the accumulator reset.
+		let empties = 0;
+		while (!b.shouldSuspend()) {
+			b.onEmptyLease();
+			empties++;
+		}
+		expect(empties).toBe(5);
+	});
+
+	it("AC-62e.3: onWake() snaps the step back to the floor and clears the idle accumulator", () => {
+		const b = machine(1_000, 30_000, 0.1, true, 60_000);
+		for (let i = 0; i < 5; i++) b.onEmptyLease();
+		expect(b.shouldSuspend()).toBe(true);
+		expect(b.currentStepMs()).toBe(30_000); // backed off to the ceiling.
+		b.onWake();
+		expect(b.currentStepMs()).toBe(1_000); // a wake polls immediately.
+		expect(b.shouldSuspend()).toBe(false); // and cannot re-suspend until idle again.
+	});
+
+	it("AC-62e.4: suspendAfterMs=0 disables suspension regardless of how long it idles", () => {
+		const b = machine(1_000, 30_000, 0.1, true, 0);
+		for (let i = 0; i < 20; i++) b.onEmptyLease();
+		expect(b.shouldSuspend()).toBe(false); // 0 window is the defensive off-switch.
+	});
+
+	it("AC-62e.5: suspendEnabled=false never suspends (the rollback / AC-9 path)", () => {
+		const b = machine(1_000, 30_000, 0.1, false, 60_000);
+		for (let i = 0; i < 20; i++) b.onEmptyLease();
+		expect(b.shouldSuspend()).toBe(false); // flag off → 062b's steady ceiling cadence forever.
+	});
+
+	it("AC-62e.6: an ABSENT suspend env flag resolves DEFAULT-ON with the 5-min window", () => {
+		const cfg = resolvePollBackoffConfig(envPollBackoffConfigProvider({} as NodeJS.ProcessEnv));
+		expect(cfg.suspendEnabled).toBe(true);
+		expect(cfg.suspendAfterMs).toBe(DEFAULT_POLL_SUSPEND_AFTER_MS);
+	});
+
+	it("AC-62e.7: an explicit suspend flag false/0 (or AFTER_MS=0) rolls suspension back", () => {
+		const env = (over: Record<string, string>): NodeJS.ProcessEnv => over as NodeJS.ProcessEnv;
+		expect(
+			resolvePollBackoffConfig(envPollBackoffConfigProvider(env({ HONEYCOMB_POLL_SUSPEND_ENABLED: "false" }))).suspendEnabled,
+		).toBe(false);
+		expect(
+			resolvePollBackoffConfig(envPollBackoffConfigProvider(env({ HONEYCOMB_POLL_SUSPEND_ENABLED: "0" }))).suspendEnabled,
+		).toBe(false);
+		expect(
+			resolvePollBackoffConfig(envPollBackoffConfigProvider(env({ HONEYCOMB_POLL_SUSPEND_AFTER_MS: "0" }))).suspendAfterMs,
+		).toBe(0);
 	});
 });

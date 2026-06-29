@@ -159,6 +159,8 @@ export interface PollinatingJobWorker extends LeaseParticipant {
 	start(): void;
 	/** Stop the poll loop. Idempotent. */
 	stop(): void;
+	/** Resume a hibernated loop and snap its cadence back to the floor (PRD-062e). */
+	wake(): void;
 }
 
 /** Default poll interval for the continuous loop (matches the stage worker). */
@@ -310,6 +312,10 @@ class PollinatingJobWorkerImpl implements PollinatingJobWorker {
 
 	stop(): void {
 		this.loop.stop();
+	}
+
+	wake(): void {
+		this.loop.wake();
 	}
 }
 

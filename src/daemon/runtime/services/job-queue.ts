@@ -125,6 +125,12 @@ export interface JobQueueService extends DaemonService {
 	complete(id: string): Promise<void>;
 	/** Mark a leased job failed; the queue applies backoff / dead semantics. */
 	fail(id: string, reason: string): Promise<void>;
+	/**
+	 * Resume the reaper if idle hibernation suspended it (PRD-062e). Optional: only the
+	 * real DeepLake queue suspends its reaper, so stubs and test doubles may omit it.
+	 * The wake bus calls this so a new job (any enqueue) or a recall re-arms the reaper.
+	 */
+	wakeReaper?(): void;
 }
 
 /** A minimal structured-log sink the queue can report lifecycle events to. */
@@ -185,6 +191,21 @@ export interface JobQueueDeps {
 	readonly config?: JobQueueConfig;
 	/** Optional injected clock/scheduler (real timers otherwise). */
 	readonly clock?: JobQueueClock;
+	/**
+	 * The fleet-wake hook (PRD-062e). Fired when the queue gains work to run: after a
+	 * successful {@link JobQueueService.enqueue} append, and when a `failed` job's retry
+	 * deadline arrives (so a hibernated daemon does not sleep through a scheduled retry).
+	 * The daemon wires this to the wake bus so it resumes every hibernated poll loop and
+	 * the reaper. Best-effort: the queue isolates a throw from the durable write/timer.
+	 */
+	readonly onWake?: () => void;
+	/**
+	 * Enable reaper idle hibernation (PRD-062e). When true, a clean sweep that observes
+	 * no queued or leased work suspends the reaper timer so an idle queue issues zero
+	 * DeepLake reads; {@link JobQueueService.wakeReaper} re-arms it. Defaults FALSE so
+	 * the reaper keeps its steady interval unless the daemon opts in (AC-9 parity).
+	 */
+	readonly suspendEnabled?: boolean;
 }
 
 /** The real, fully-resolved config the service runs against. */
@@ -245,6 +266,16 @@ const DISCOVER_POLLS = 8;
  * spin forever.
  */
 const LEASE_CANDIDATE_TRIES = 8;
+
+/**
+ * PRD-062e: how many consecutive CLEAN sweeps must observe no queued or leased work
+ * before the reaper suspends. >1 so a single stale-segment under-read (the backend
+ * can serve an older segment that misses an id) cannot suspend a reaper that still
+ * has work to watch; the union in {@link DeepLakeJobQueueService.discoverIds} already
+ * recovers a non-empty set across stale segments, and this threshold is the belt to
+ * that braces.
+ */
+const REAPER_IDLE_SWEEPS_BEFORE_SUSPEND = 2;
 
 /**
  * PRD-062b L-X (062a labeling, poll-path half): the `source` labels every physical
@@ -392,12 +423,26 @@ class DeepLakeJobQueueService implements JobQueueService {
 	 */
 	private reaping = false;
 	private idSeq = 0;
+	/** Fleet-wake hook fired on enqueue + at a retry deadline; wired to the wake bus (PRD-062e). */
+	private readonly onWake?: () => void;
+	/** Pending one-shot retry-deadline wake timers, cleared on stop (PRD-062e). */
+	private readonly retryWakes = new Set<unknown>();
+	/** Whether the reaper may hibernate when the queue goes idle (PRD-062e). */
+	private readonly reaperSuspendEnabled: boolean;
+	/** True while the reaper timer is suspended (idle hibernation). Distinct from stopped. */
+	private reaperSuspended = false;
+	/** Consecutive clean sweeps that saw no queued/leased work (drives suspension). */
+	private reaperIdleSweeps = 0;
+	/** Set by each sweep: did the last sweep observe any queued or leased (active) job? */
+	private anyActiveSeen = false;
 
 	constructor(deps: JobQueueDeps) {
 		this.storage = deps.storage;
 		this.scope = deps.scope;
 		this.logger = deps.logger;
 		this.clock = deps.clock ?? defaultClock();
+		this.onWake = deps.onWake;
+		this.reaperSuspendEnabled = deps.suspendEnabled ?? false;
 		this.cfg = resolveConfig(deps.config, this.generateOwner());
 		// Heal target = the REAL catalog columns (single-sourced) under the configured
 		// table name (defaults to the canonical `memory_jobs`). Borrowing the catalog
@@ -447,8 +492,51 @@ class DeepLakeJobQueueService implements JobQueueService {
 			["created_at", val.str(now)],
 			["updated_at", val.str(now)],
 		]);
-		if (!ok) this.logger?.event("job.enqueue.failed", { id, kind: job.kind });
+		if (!ok) {
+			this.logger?.event("job.enqueue.failed", { id, kind: job.kind });
+			return id;
+		}
+		// PRD-062e: a new job means there is work to do, so resume any hibernated poll
+		// loop (and the reaper) through the wake bus. Best-effort: a throwing wake hook
+		// must NOT reject this already-durable enqueue (that would invite a duplicate retry).
+		this.fireWake({ id, kind: job.kind, trigger: "enqueue" });
 		return id;
+	}
+
+	/**
+	 * Fire the fleet-wake hook (PRD-062e), best-effort. A throw is caught and logged so it
+	 * never fails a durable write or a retry-deadline timer. The wake bus already guards
+	 * each registered callback; this is the second belt at the queue boundary.
+	 */
+	private fireWake(context: Record<string, unknown>): void {
+		if (this.onWake === undefined) return;
+		try {
+			this.onWake();
+		} catch (err: unknown) {
+			this.logger?.event("job.wake.failed", {
+				...context,
+				reason: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	/**
+	 * Schedule a ONE-SHOT fleet-wake at a `failed` job's retry deadline (PRD-062e). Without
+	 * this, once every loop hibernates no enqueue occurs at `next_run_at`, so a retryable
+	 * job could sit until unrelated activity wakes the bus. The timer fires once (it clears
+	 * itself), rings the same wake hook an enqueue does, and is cleaned up on {@link stop}.
+	 * A no-op when no wake hook is wired (a standalone/test queue).
+	 */
+	private scheduleRetryWake(delayMs: number): void {
+		if (this.onWake === undefined) return;
+		let handle: unknown;
+		handle = this.clock.setTimer(() => {
+			// One-shot over the interval-based clock seam: cancel before firing so it runs once.
+			this.clock.clearTimer(handle);
+			this.retryWakes.delete(handle);
+			this.fireWake({ trigger: "retry-deadline" });
+		}, Math.max(1, delayMs));
+		this.retryWakes.add(handle);
 	}
 
 	/**
@@ -683,9 +771,8 @@ class DeepLakeJobQueueService implements JobQueueService {
 		const nowIso = new Date(now).toISOString();
 
 		const dead = attempts >= maxAttempts;
-		const nextRunAt = dead
-			? nowIso
-			: new Date(now + backoffDelayMs(attempts, this.cfg.backoffBaseMs, this.cfg.backoffCapMs)).toISOString();
+		const retryDelayMs = dead ? 0 : backoffDelayMs(attempts, this.cfg.backoffBaseMs, this.cfg.backoffCapMs);
+		const nextRunAt = dead ? nowIso : new Date(now + retryDelayMs).toISOString();
 
 		const ok = await this.append(id, current.version + 1, [
 			["id", val.str(id)],
@@ -706,6 +793,10 @@ class DeepLakeJobQueueService implements JobQueueService {
 			return;
 		}
 		this.logger?.event(dead ? "job.dead" : "job.failed", { id, attempts, maxAttempts });
+		// PRD-062e: a retryable job is real future work. Schedule a wake at its retry deadline
+		// so a hibernated daemon resumes to lease it on time instead of waiting for unrelated
+		// activity. A dead job has no future run, so it schedules nothing.
+		if (!dead) this.scheduleRetryWake(retryDelayMs);
 	}
 
 	/**
@@ -725,6 +816,10 @@ class DeepLakeJobQueueService implements JobQueueService {
 	async reapExpiredLeases(): Promise<number> {
 		const nowIso = this.nowIso();
 		const states = await this.discoverIds(SOURCE_REAPER);
+		// PRD-062e: note whether the queue has any ACTIVE (queued or leased) work. A
+		// queued job is counted so the reaper never suspends between an enqueue and the
+		// worker leasing it; the reaper only hibernates once nothing is in flight.
+		this.anyActiveSeen = states.some((s) => s.status === JOB_QUEUED || s.status === JOB_LEASED);
 		const expired = states.filter(
 			(s) => s.status === JOB_LEASED && s.leaseExpiresAt !== "" && s.leaseExpiresAt <= nowIso,
 		);
@@ -820,8 +915,10 @@ class DeepLakeJobQueueService implements JobQueueService {
 	private async reapSweep(): Promise<void> {
 		if (this.reaping) return;
 		this.reaping = true;
+		let swept = false;
 		try {
 			await this.reapExpiredLeases();
+			swept = true;
 		} catch (err: unknown) {
 			this.logger?.event("reaper.sweep.failed", {
 				reason: err instanceof Error ? err.message : String(err),
@@ -829,14 +926,54 @@ class DeepLakeJobQueueService implements JobQueueService {
 		} finally {
 			this.reaping = false;
 		}
+		// PRD-062e: only a CLEAN sweep is allowed to advance toward suspension; a failed
+		// sweep tells us nothing about idleness, so the next tick retries. A sweep that
+		// saw active work resets the idle run; enough consecutive idle sweeps suspend.
+		if (!swept || !this.reaperSuspendEnabled) return;
+		if (this.anyActiveSeen) {
+			this.reaperIdleSweeps = 0;
+			return;
+		}
+		this.reaperIdleSweeps += 1;
+		if (this.reaperIdleSweeps >= REAPER_IDLE_SWEEPS_BEFORE_SUSPEND) this.suspendReaper();
 	}
 
-	/** Stop the queue: clear the reaper timer. Idempotent. */
-	stop(): void {
+	/** Suspend the reaper timer so an idle queue issues zero DeepLake reads (PRD-062e). */
+	private suspendReaper(): void {
+		if (this.reaperSuspended) return;
+		this.reaperSuspended = true;
 		if (this.reaperHandle !== undefined) {
 			this.clock.clearTimer(this.reaperHandle);
 			this.reaperHandle = undefined;
 		}
+		this.logger?.event("reaper.suspended");
+	}
+
+	/**
+	 * Resume a hibernated reaper (PRD-062e). Wired to the wake bus so a new job (any
+	 * enqueue) or a recall re-arms the steady sweep. Resets the idle run so an active
+	 * loop never trips suspension; a no-op when the reaper is already running.
+	 */
+	wakeReaper(): void {
+		this.reaperIdleSweeps = 0;
+		if (!this.reaperSuspended) return;
+		this.reaperSuspended = false;
+		this.reaperHandle = this.clock.setTimer(() => {
+			void this.reapSweep();
+		}, this.cfg.reaperIntervalMs);
+		this.logger?.event("reaper.resumed");
+	}
+
+	/** Stop the queue: clear the reaper timer + any pending retry-deadline wakes. Idempotent. */
+	stop(): void {
+		this.reaperSuspended = false;
+		if (this.reaperHandle !== undefined) {
+			this.clock.clearTimer(this.reaperHandle);
+			this.reaperHandle = undefined;
+		}
+		// PRD-062e: cancel any scheduled retry-deadline wakes so none fire after shutdown.
+		for (const handle of this.retryWakes) this.clock.clearTimer(handle);
+		this.retryWakes.clear();
 	}
 
 	/**

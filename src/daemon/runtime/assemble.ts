@@ -52,6 +52,7 @@ import { type RequestLogger, createRequestLogger } from "./logger.js";
 import { createRuntimePathService } from "./middleware/runtime-path.js";
 import { createFileWatcherService, type HarnessTarget } from "./services/file-watcher.js";
 import { createJobQueueService } from "./services/job-queue.js";
+import { createWakeBus } from "./services/wake-bus.js";
 import { type CreateDaemonOptions, type Daemon, type DaemonServices, createDaemon } from "./server.js";
 
 import { attachHooksHandlers } from "./capture/attach.js";
@@ -1678,8 +1679,11 @@ function buildSummaryWorker(
 	scope: QueryScope,
 	queue: DaemonServices["queue"],
 	embed: EmbedAttachment,
+	backoff: PollBackoffConfig,
 ): SummaryJobWorker {
-	return createSummaryJobWorker({ queue, storage, scope, embed: embed.client });
+	// PRD-062b/062e: thread the resolved adaptive-backoff + idle-suspend config so the summary
+	// worker backs off and hibernates when idle instead of polling `memory_jobs` at a flat 1Hz.
+	return createSummaryJobWorker({ queue, storage, scope, embed: embed.client, backoff });
 }
 
 /**
@@ -1816,12 +1820,16 @@ function buildSkillifyWorker(
 	storage: StorageClient,
 	scope: QueryScope,
 	queue: DaemonServices["queue"],
+	backoff: PollBackoffConfig,
 ): SkillifyJobWorker {
 	return createSkillifyJobWorker({
 		queue,
 		storage,
 		scope,
 		gateSpec: defaultGateSpec(),
+		// PRD-062b/062e: thread the resolved adaptive-backoff + idle-suspend config so the skillify
+		// worker backs off and hibernates when idle instead of polling `memory_jobs` at a flat 1Hz.
+		backoff,
 	});
 }
 
@@ -1900,9 +1908,33 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	const vault: VaultSettingsReader | undefined =
 		options.vault ?? (options.storage === undefined ? buildVaultStore() : undefined);
 
+	// ── PRD-062e: ONE wake bus fans a single wake() to every hibernated poll loop (the
+	// stage / pollinating / summary / skillify workers + the consolidated coordinator) and
+	// the queue reaper, so an idle daemon goes fully quiet yet any new work resumes it all.
+	// Wired to the queue as `onWake` (every new job, and every retry deadline, wakes the
+	// fleet). Resolve the suspend posture once here (pure, fail-soft) so the queue is
+	// built with reaper hibernation wired; the worker poll loops resolve the SAME knobs again
+	// in `start()` (identical static env), keeping that existing resolution untouched.
+	const wakeBus = createWakeBus();
+	let queueSuspendEnabled = false;
+	try {
+		const suspendCfg = resolvePollBackoffConfig();
+		queueSuspendEnabled = suspendCfg.enabled && suspendCfg.suspendEnabled;
+	} catch {
+		queueSuspendEnabled = false;
+	}
+
 	// ── a-AC-3: the three REAL services replace the no-op stubs.
 	const services: Partial<DaemonServices> = {
-		queue: createJobQueueService({ storage, scope }),
+		queue: createJobQueueService({
+			storage,
+			scope,
+			// PRD-062e: a new job (or a retry deadline) wakes every hibernated poll loop + the
+			// reaper through the bus.
+			onWake: () => wakeBus.wake(),
+			// PRD-062e: let the reaper hibernate when the queue is idle (gated on backoff being on).
+			suspendEnabled: queueSuspendEnabled,
+		}),
 		watcher: createFileWatcherService({
 			workspaceDir: options.workspaceDir ?? process.cwd(),
 			harnessTargets: options.harnessTargets ?? [],
@@ -2405,7 +2437,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// prevent the daemon from booting — the daemon is already up and serving; summaries
 			// simply stay unproduced this run rather than crashing the process.
 			try {
-				summaryWorker = buildSummaryWorker(storage, scope, daemon.services.queue, embed);
+				summaryWorker = buildSummaryWorker(storage, scope, daemon.services.queue, embed, pollBackoff);
 				summaryWorker.start();
 			} catch (err: unknown) {
 				const reason = err instanceof Error ? err.message : String(err);
@@ -2443,7 +2475,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				// serving; skillify simply stays unconsumed this run rather than crashing the process.
 				// The gate shells out to the host CLI (Claude Code) — NO API key is held by the daemon.
 				try {
-					skillifyWorker = buildSkillifyWorker(storage, scope, daemon.services.queue);
+					skillifyWorker = buildSkillifyWorker(storage, scope, daemon.services.queue, pollBackoff);
 					skillifyWorker.start();
 				} catch (err: unknown) {
 					const reason = err instanceof Error ? err.message : String(err);
@@ -2540,6 +2572,18 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 					pipelineWorker.start();
 				}
 			}
+
+			// ── PRD-062e: register every built poll loop + the reaper on the wake bus so a new
+			// job (any enqueue, or a retry deadline, via the queue's `onWake`) resumes the whole
+			// fleet from hibernation. Registering a worker whose loop was deferred under consolidation
+			// (its loop never started) is a harmless no-op: `wake()` only re-arms a loop that had
+			// actually suspended; the started coordinator does the real work in that mode.
+			for (const worker of [pipelineWorker, pollinatingWorker, summaryWorker, skillifyWorker, leaseCoordinator]) {
+				if (worker !== null) wakeBus.register(() => worker.wake());
+			}
+			wakeBus.register(() => {
+				daemon.services.queue.wakeReaper?.();
+			});
 		},
 
 		async shutdown(): Promise<void> {
