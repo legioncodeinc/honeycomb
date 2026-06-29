@@ -51,7 +51,7 @@ import { type DeploymentMode, type RuntimeConfig, resolveRuntimeConfig } from ".
 import { type RequestLogger, createRequestLogger } from "./logger.js";
 import { createRuntimePathService } from "./middleware/runtime-path.js";
 import { createFileWatcherService, type HarnessTarget } from "./services/file-watcher.js";
-import { createJobQueueService } from "./services/job-queue.js";
+import { createJobQueueService, type JobQueueConfig } from "./services/job-queue.js";
 import { createHybridJobQueueService, resolveHybridJobQueueConfig } from "./services/hybrid-job-queue.js";
 import { openLocalJobQueue } from "./services/local-job-queue.js";
 import { type CreateDaemonOptions, type Daemon, type DaemonServices, createDaemon } from "./server.js";
@@ -271,6 +271,13 @@ export interface AssembleDaemonOptions {
 	 * live tests point it at a temp dir so first-run project bindings are hermetic.
 	 */
 	readonly projectsDir?: string;
+	/**
+	 * Test-only override for the DeepLake-backed shared job queue. Production leaves
+	 * this unset, preserving the canonical `memory_jobs` table. Live verification
+	 * can pass a throwaway table name to bound shared-queue polling without scanning
+	 * a user's historical queue.
+	 */
+	readonly jobQueueConfig?: JobQueueConfig;
 	/**
 	 * The embed seam wired into the store + capture paths (PRD-025 AC-2). Defaults to the
 	 * REAL `createEmbedAttachment({ storage })` resolved from `resolveEmbedClientOptions`
@@ -1910,7 +1917,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	const vault: VaultSettingsReader | undefined =
 		options.vault ?? (options.storage === undefined ? buildVaultStore() : undefined);
 
-	const sharedQueue = createJobQueueService({ storage, scope });
+	const sharedQueue = createJobQueueService({ storage, scope, config: options.jobQueueConfig });
 	const localQueueConfig = resolveHybridJobQueueConfig();
 	const localQueue = localQueueConfig.enabled ? openLocalJobQueue({ baseDir: resolveWorkspaceBaseDir() }) : sharedQueue;
 	const queue = createHybridJobQueueService({
