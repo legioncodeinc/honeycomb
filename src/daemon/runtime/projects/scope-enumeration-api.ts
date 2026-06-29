@@ -332,12 +332,24 @@ export function mountScopeEnumerationApi(daemon: Daemon, options: MountScopeEnum
  * guard is applied for consistency with `resolveSyncScope` / {@link import("../scope.js").resolveScopeFromHeaders}:
  * a header org that disagrees with a validated token org is NEVER honored — it falls back to the
  * daemon's own `defaultScope` rather than letting a forged tenancy header steer the read.
+ *
+ * ── Cross-workspace hardening (PRD-022 security) ─────────────────────────────
+ * Similarly, an authenticated caller must not be able to forge `x-honeycomb-workspace` to access
+ * projects from a different workspace within the same org. When a validated Identity is present,
+ * the workspace is taken from `identity.workspace` (the token's own workspace), NOT from the header.
+ * The header is trusted ONLY in local mode (no Identity).
  */
 function resolveProjectsScope(c: Context, defaultScope: QueryScope): QueryScope {
 	const org = c.req.header("x-honeycomb-org");
 	if (org !== undefined && org.length > 0) {
 		const identity = getRequestIdentity(c);
 		if (identity === undefined || org === identity.org) {
+			// When an authenticated Identity is present, use its workspace rather than trusting
+			// the header — a forged workspace header must not allow cross-workspace access.
+			if (identity !== undefined) {
+				return { org: identity.org, workspace: identity.workspace };
+			}
+			// Local mode (no Identity): trust the header, with optional workspace.
 			const workspace = c.req.header("x-honeycomb-workspace");
 			return workspace !== undefined && workspace.length > 0 ? { org, workspace } : { org };
 		}

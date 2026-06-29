@@ -1,8 +1,8 @@
 # npm Publishing Pipeline
 
-> Category: Infrastructure | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Infrastructure | Version: 1.1 | Date: June 2026 | Status: Active
 
-How Honeycomb ships to npm as the scoped package `@legioncodeinc/honeycomb`, the `files` allowlist, the `prepack` build, the `pack-check.mjs` secret/required-file scan, the `release.yaml` workflow, OIDC Trusted Publishing with npm provenance, and the fails-closed publishability preflight.
+How Honeycomb ships to npm as the scoped package `@legioncodeinc/honeycomb`, the `files` allowlist, the `prepack` build, the `pack-check.mjs` secret/required-file scan, the `release.yaml` workflow, OIDC Trusted Publishing with npm provenance, the fails-closed publishability preflight, and the post-publish global-install smoke that proves the shipped CLI actually runs.
 
 **Related:**
 - [`monorepo-build-release.md`](monorepo-build-release.md)
@@ -78,9 +78,12 @@ The job, in order:
 6. **Publishability preflight** (the fails-closed guard, below).
 7. **Resolve publish mode**, gated on the *trigger*, not a token.
 8. **Publish** (`npm publish --provenance --access public`) or **dry-run rehearsal** (the same command with `--dry-run`).
-9. **GitHub Release**, only on a real tag push *and* a real publish, using `generate_release_notes`.
+9. **Mark publish succeeded**, a `published=true` job output emitted from a step that runs *immediately after* a real publish step succeeds. Because steps run sequentially, a failed publish stops the job before this step is reached, so the flag tracks publish *completion*, not publish *intent*. This signal, not `steps.mode.outputs.publish`, is what gates the downstream smoke (see [Post-publish install smoke](#post-publish-install-smoke)), so a later step erroring cannot leave a shipped artifact untested.
+10. **GitHub Release**, only on a real tag push *and* a real publish, using `generate_release_notes`.
 
 `prepack` (= `npm run build`) runs *again* inside `npm publish`, so the build env (the telemetry `define`) is repeated on the publish step too, and the tarball is rebuilt from the checked-out tree.
+
+After the `release` job, a separate **`post-publish-smoke`** matrix job installs the just-published tarball from the public registry and proves the `honeycomb` bin actually runs. See the section below.
 
 ---
 
@@ -105,6 +108,25 @@ The publishability preflight is the guard that keeps a stray tag push from publi
 - `name` is the unscoped `honeycomb`, that name is already owned by a third party on the public registry, so a publish under it is impossible (403) or wrong.
 
 Going public flips these switches together in one commit (scoped name, uncommented `publishConfig` with `access: public` + `provenance: true`, and the `private` key removed), so the repo is never half-flipped. Once flipped, the preflight passes and is no longer a hard catch, at which point the operative guard against an accidental publish is the **trigger** itself: a real `npm publish` only runs when the event is a `push`, the ref is a tag, and it is not a dry run. A `workflow_dispatch` always rehearses (it is not a `push`), even if pointed at a tag with dry-run unchecked. Real publishes only ever come from a pushed `vX.Y.Z` tag, and the trusted publisher only authorizes publishes from this repo's `release.yaml`.
+
+---
+
+## Post-publish install smoke
+
+Every guard above runs *before* the upload: the CI gate, the tarball scan, the tag-vs-version guard, and the preflight all prove the *pipeline* and the *artifact-in-a-dry-run* are sound. None of them install the **published** package through the npm **global bin**. That gap shipped a real regression: v0.1.10 (PR #172) was a fix for a global install where every `honeycomb` command printed 0 bytes and exited 0, a silent CLI that sailed through the entire green gate because nothing ran the bin the way a user does. The `isCliEntry` unit test added alongside the fix guards the *logic* but can only simulate bin resolution; it never exercises a real registry install.
+
+`post-publish-smoke` closes that gap. It is a separate job (`needs: release`) that runs **only on a real publish**, gated on `!cancelled() && needs.release.outputs.published == 'true'`. The `!cancelled()` overrides the implicit `success()`, so the smoke still runs when the `release` job published successfully but *then* failed a later step (for example, Create GitHub Release erroring), a shipped artifact is always smoke-tested.
+
+The job runs as a 3-OS matrix (`ubuntu-latest`, `macos-latest`, `windows-latest`, `fail-fast: false` so one OS failing still reports the others) because the bin is resolved differently per platform: a **symlink** in `<prefix>/bin` on Unix, a **`.cmd`/`.ps1` shim** in `<prefix>` on Windows, two resolution paths the unit test cannot cover. Each leg:
+
+1. **Resolves the published version** from the pushed tag (`${GITHUB_REF_NAME#v}`).
+2. **Waits for the registry to serve it**, a 30 x 10s poll on `npm view @legioncodeinc/honeycomb@<version> version`, because the registry can lag a few seconds behind a successful publish. A timeout fails the job.
+3. **Global-installs from the public registry**: `npm install -g @legioncodeinc/honeycomb@<version>`.
+4. **Puts the global npm bin on PATH explicitly** (both `<prefix>` for Windows shims and `<prefix>/bin` for Unix symlinks), so the smoke invokes `honeycomb` **by name through PATH**, exactly as a user would, never via an absolute path that would mask the resolution bug.
+5. **Asserts `honeycomb --version`** produces non-empty output that **contains the published version** (the direct guard against the PR #172 silent-exit class).
+6. **Asserts `honeycomb --help`** prints non-empty (the entry guard fired).
+
+It cannot un-publish a bad release, npm releases are immutable, but it turns the release run **red immediately** so a fix-up patch ships fast instead of users hitting a dead CLI. A companion `hivedoctor` real-npm smoke test (`tests/`, vitest) was given a raised timeout to absorb the Windows install flake the global-install path surfaces.
 
 ---
 
