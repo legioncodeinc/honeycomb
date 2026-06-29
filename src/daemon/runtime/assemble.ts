@@ -85,7 +85,7 @@ import { mountConflictsApi } from "./memories/conflicts-api.js";
 import { mountLifecycleApi } from "./memories/lifecycle-api.js";
 import { mountVfsApi } from "./vfs/api.js";
 import { mountProductDataApi } from "./product/index.js";
-import { localDefaultScopeResolver, type ****Deps } from "./secrets/api.js";
+import { localDefaultScopeResolver, type SecretsApiDeps } from "./secrets/api.js";
 import { type SourcesApiDeps } from "./sources/api.js";
 import { buildSourcesApiDeps } from "./sources/registry.js";
 import { SecretsStore, createMachineKeyProvider } from "./secrets/store.js";
@@ -1181,7 +1181,7 @@ function resolveProductDataDeps(
 	mode: DeploymentMode,
 ): {
 	storage: StorageClient;
-	secrets?: ****Deps;
+	secrets?: SecretsApiDeps;
 	sources?: SourcesApiDeps;
 	defaultScope: QueryScope;
 } {
@@ -1191,7 +1191,7 @@ function resolveProductDataDeps(
 	// (the `C:\WINDOWS\system32` footgun) falls back to `~/.honeycomb` instead of 502ing every
 	// secret save — see {@link resolveWorkspaceBaseDir}.
 	const baseDir = resolveWorkspaceBaseDir();
-	const secrets: ****Deps = {
+	const secrets: SecretsApiDeps = {
 		store: new SecretsStore({ baseDir, machineKey: createMachineKeyProvider() }),
 		// PRD-022 local-mode default: the dashboard's `GET /api/secrets` (names-only) carries no
 		// `x-honeycomb-org` header, so resolve the daemon's single local tenant instead of 400ing.
