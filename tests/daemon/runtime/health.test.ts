@@ -147,6 +147,49 @@ describe("AC-2 /health detail NAMES the down subsystem, not a bare degraded", ()
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PRD-063b b-AC-7 — the additive `reasons.portkey` enum.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("b-AC-7 /health reasons.portkey reflects off/ok/unconfigured/unreachable", () => {
+	it("omitted → 'off' (the conservative 'Portkey not in force' default)", () => {
+		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.portkey).toBe("off");
+	});
+
+	it("each supplied state is read VERBATIM (no probe) — off | ok | unconfigured | unreachable", () => {
+		for (const state of ["off", "ok", "unconfigured", "unreachable"] as const) {
+			expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true, portkey: state }).reasons?.portkey).toBe(state);
+		}
+	});
+
+	it("the portkey reason is independent of the coarse status (storage ok, portkey unreachable)", () => {
+		const detail = buildHealthDetail({ status: "ok", embeddingsEnabled: true, portkey: "unreachable" });
+		expect(detail.status, "the coarse bit is unaffected").toBe("ok");
+		expect(detail.reasons?.storage).toBe("reachable");
+		expect(detail.reasons?.portkey).toBe("unreachable");
+	});
+
+	it("the /health BODY surfaces reasons.portkey in local mode", async () => {
+		const daemon = createDaemon({
+			config: cfg("local"),
+			storage: { async query() { return ok([]); } },
+			logger: createRequestLogger({ silent: true }),
+			healthDetail: () => buildHealthDetail({ status: "ok", embeddingsEnabled: true, portkey: "unconfigured" }),
+		});
+		const res = await daemon.app.request("/health");
+		const body = (await res.json()) as { reasons?: Record<string, string> };
+		expect(body.reasons?.portkey).toBe("unconfigured");
+	});
+
+	it("the portkey reason carries no secret (closed-enum literal only)", () => {
+		const serialized = JSON.stringify(
+			buildHealthDetail({ status: "ok", embeddingsEnabled: true, portkey: "unreachable" }),
+		);
+		expect(serialized).not.toContain(FAKE_TOKEN);
+		expect(serialized).toContain("unreachable");
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // AC-3 — mode-gated detail (no topology leak to an unauthenticated remote).
 // ─────────────────────────────────────────────────────────────────────────────
 

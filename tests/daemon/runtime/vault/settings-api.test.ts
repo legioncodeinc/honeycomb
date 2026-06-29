@@ -146,12 +146,14 @@ describe("D-6 catalog validation on activeModel writes", () => {
 });
 
 describe("D-6 catalog is single-sourced + curated", () => {
-	it("exposes Anthropic + OpenAI + OpenRouter with the curated models", () => {
+	it("exposes Anthropic + OpenAI + OpenRouter + Portkey with the curated models", () => {
 		expect(providerEntry("anthropic")?.models).toContain("claude-sonnet-4-6");
 		expect(providerEntry("anthropic")?.models).toContain("claude-opus-4-8");
 		expect(providerEntry("openai")?.models).toContain("gpt-4o");
 		expect(providerEntry("openrouter")?.openEnded).toBe(true);
-		expect(PROVIDER_CATALOG.length).toBe(3);
+		// PRD-063a added Portkey as the fourth provider (open-ended gateway, no curated models).
+		expect(providerEntry("portkey")?.openEnded).toBe(true);
+		expect(PROVIDER_CATALOG.length).toBe(4);
 	});
 
 	it("isValidProviderModel gates closed lists and passes open-ended ids", () => {
@@ -199,6 +201,110 @@ describe("PRD-044c recallMode — closed-enum, fail-closed validation", () => {
 		const body = await res.json();
 		// Nothing wrote recallMode in this case → it is not present (the page reads "" → default).
 		expect(body.settings.recallMode).toBeUndefined();
+	});
+});
+
+describe("PRD-063a Portkey settings — catalog + allow-list + semantics (a-AC-3)", () => {
+	it("portkey is a catalog provider, open-ended, with no curated models", () => {
+		expect(providerEntry("portkey")?.label).toBe("Portkey");
+		expect(providerEntry("portkey")?.openEnded).toBe(true);
+		expect(providerEntry("portkey")?.models).toEqual([]);
+	});
+
+	it("the three Portkey keys are KNOWN setting keys (the allow-list admits them)", () => {
+		expect(isKnownSettingKey("portkey.enabled")).toBe(true);
+		expect(isKnownSettingKey("portkey.config")).toBe(true);
+		expect(isKnownSettingKey("portkey.fallbackToProvider")).toBe(true);
+	});
+
+	it("accepts boolean toggles + a config string, and they round-trip through GET", async () => {
+		const enabled = await app.request("/api/settings/portkey.enabled", {
+			method: "POST",
+			headers: JSON_HEADERS,
+			body: JSON.stringify({ value: true }),
+		});
+		expect(enabled.status).toBe(201);
+		const fallback = await app.request("/api/settings/portkey.fallbackToProvider", {
+			method: "POST",
+			headers: JSON_HEADERS,
+			body: JSON.stringify({ value: false }),
+		});
+		expect(fallback.status).toBe(201);
+		const config = await app.request("/api/settings/portkey.config", {
+			method: "POST",
+			headers: JSON_HEADERS,
+			body: JSON.stringify({ value: "pk-cfg-abc123" }),
+		});
+		expect(config.status).toBe(201);
+
+		const res = await app.request("/api/settings", { headers: HEADERS });
+		const body = await res.json();
+		expect(body.settings["portkey.enabled"]).toBe(true);
+		expect(body.settings["portkey.fallbackToProvider"]).toBe(false);
+		expect(body.settings["portkey.config"]).toBe("pk-cfg-abc123");
+	});
+
+	it("rejects a non-boolean portkey.enabled (fail-closed, 400)", async () => {
+		const res = await app.request("/api/settings/portkey.enabled", {
+			method: "POST",
+			headers: JSON_HEADERS,
+			body: JSON.stringify({ value: "yes" }),
+		});
+		expect(res.status).toBe(400);
+	});
+
+	it("rejects a non-boolean portkey.fallbackToProvider (fail-closed, 400)", async () => {
+		const res = await app.request("/api/settings/portkey.fallbackToProvider", {
+			method: "POST",
+			headers: JSON_HEADERS,
+			body: JSON.stringify({ value: 1 }),
+		});
+		expect(res.status).toBe(400);
+	});
+
+	it("rejects an empty portkey.config WHEN portkey.enabled is true", async () => {
+		await app.request("/api/settings/portkey.enabled", {
+			method: "POST",
+			headers: JSON_HEADERS,
+			body: JSON.stringify({ value: true }),
+		});
+		const res = await app.request("/api/settings/portkey.config", {
+			method: "POST",
+			headers: JSON_HEADERS,
+			body: JSON.stringify({ value: "" }),
+		});
+		expect(res.status).toBe(400);
+	});
+
+	it("accepts an empty portkey.config when portkey.enabled is unset/false (gateway off)", async () => {
+		const res = await app.request("/api/settings/portkey.config", {
+			method: "POST",
+			headers: JSON_HEADERS,
+			body: JSON.stringify({ value: "" }),
+		});
+		expect(res.status).toBe(201);
+	});
+
+	// SECURITY (header-injection defense-in-depth): `portkey.config` is sent verbatim as the
+	// `x-portkey-config` HTTP header value, so a control character (CR/LF/NUL/etc.) is rejected at
+	// this validated boundary - a 400 here, not a confusing silent "unreachable" later.
+	it("rejects a portkey.config carrying a control character (CRLF header-injection guard)", async () => {
+		for (const bad of ["pk-cfg\r\nX-Injected: 1", "pk\ncfg", "pk\u0000cfg", "pk\u007Fcfg"]) {
+			const res = await app.request("/api/settings/portkey.config", {
+				method: "POST",
+				headers: JSON_HEADERS,
+				body: JSON.stringify({ value: bad }),
+			});
+			expect(res.status, `control char in ${JSON.stringify(bad)} must 400`).toBe(400);
+		}
+	});
+	it("accepts a normal portkey.config id (no control characters)", async () => {
+		const res = await app.request("/api/settings/portkey.config", {
+			method: "POST",
+			headers: JSON_HEADERS,
+			body: JSON.stringify({ value: "pk-cfg-abc123" }),
+		});
+		expect(res.status).toBe(201);
 	});
 });
 
@@ -404,4 +510,3 @@ describe("PRD-022 SECURITY: local mode behavior (no identity, no cross-check)", 
 		expect(body.ok).toBe(true);
 	});
 });
-

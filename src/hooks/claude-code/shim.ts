@@ -35,6 +35,7 @@ import {
 	toolCallData,
 	userMessageData,
 } from "../normalize.js";
+import { readTranscriptTurnUsage } from "./transcript.js";
 import type { HookSessionMeta, LogicalEvent } from "../shared/contracts.js";
 
 /** The Claude Code native → logical event name map (FR-1). The full six-event reference. */
@@ -66,8 +67,13 @@ export const CLAUDE_CODE_REFERENCES = "references/claude-code/" as const;
  * produce the SAME output as (c-AC-1). The Claude Code payload uses
  * `prompt`/`tool_name`/`tool_input`/`tool_response`/`source`/`reason` — the shared
  * `*.Data` builders return the harness-independent `{ kind, ... }` shapes.
+ *
+ * `meta` carries the resolved session metadata — in particular `meta.path`, the
+ * `transcript_path` the binary driver derived. The `assistant_message` branch reads the
+ * per-turn `usage` + `model` from THAT transcript (see {@link readTranscriptTurnUsage}),
+ * because the Claude Code `Stop` hook payload carries neither.
  */
-export function claudeCodeExtractData(raw: unknown, logical: LogicalEvent): unknown | undefined {
+export function claudeCodeExtractData(raw: unknown, logical: LogicalEvent, meta: HookSessionMeta): unknown | undefined {
 	switch (logical) {
 		case "session-start":
 			return sessionStartData(pickString(raw, "source") || "startup");
@@ -85,12 +91,18 @@ export function claudeCodeExtractData(raw: unknown, logical: LogicalEvent): unkn
 				nested(raw, "tool_input"),
 				nested(raw, "tool_response"),
 			);
-		case "assistant_message":
-			// PRD-060a (a-AC-2): carry the per-message token/cache `usage` block from the
-			// Claude Code transcript JSONL alongside the assistant text. Absent/partial
-			// usage → omitted, never zero-filled (the column stays NULL = "token data
-			// absent", a-AC-6); a measured 0 survives (zero ≠ absent).
-			return assistantMessageData(pickString(raw, "text", "message"), extractTurnUsage(raw));
+		case "assistant_message": {
+			// PRD-060 ROI fix: the per-message token/cache `usage` AND the `model` live in the
+			// Claude Code transcript JSONL at `meta.path` (the `transcript_path`), NOT in the `Stop`
+			// hook payload. Read them from the transcript; fall back to the payload-level
+			// `extractTurnUsage` for any wiring that DOES surface `usage` on the payload (and so a
+			// transcript-read miss never regresses that path). Fail-soft: a missing/unreadable
+			// transcript yields `{}` → usage + model omitted, never zero-filled (a-AC-6) and never a
+			// thrown capture. A measured 0 survives (zero ≠ absent). The assistant TEXT is unchanged.
+			const fromTranscript = readTranscriptTurnUsage(meta.path ?? "");
+			const usage = fromTranscript.usage ?? extractTurnUsage(raw);
+			return assistantMessageData(pickString(raw, "text", "message"), usage, fromTranscript.model);
+		}
 		case "session-end":
 			return sessionEndData(pickString(raw, "reason") || "Stop");
 		default:
@@ -112,9 +124,10 @@ export function createClaudeCodeShim(): HarnessShim {
 		hostCli: CLAUDE_CODE_HOST_CLI,
 		references: CLAUDE_CODE_REFERENCES,
 		eventMap: CLAUDE_CODE_EVENT_MAP,
-		extractData(raw: unknown, logical: LogicalEvent, _meta: HookSessionMeta): unknown | undefined {
-			void _meta;
-			return claudeCodeExtractData(raw, logical);
+		extractData(raw: unknown, logical: LogicalEvent, meta: HookSessionMeta): unknown | undefined {
+			// Thread `meta` through: the assistant_message branch reads the per-turn usage + model
+			// from the transcript at `meta.path` (the Stop hook payload carries neither).
+			return claudeCodeExtractData(raw, logical, meta);
 		},
 	});
 }

@@ -41,7 +41,10 @@ The API is organized into coherent groups. Permission semantics are defined in [
 | `/api/diagnostics`, `/api/pipeline/*`, `/api/repair/*` | Health report, pipeline stats, operator repair | diagnostics/operator |
 | `/api/inference/*`, `/v1/*` | Native inference routing and OpenAI-compatible gateway (gateway implemented; external HTTP mount deferred, the router is reached internally via the `ModelClient` seam) | deferred |
 | `/api/tasks/*`, `/api/logs`, `/api/update/*`, `/api/git/*` | Scheduled tasks, logs, updates, git sync | local |
+| `/api/actions/*` | Dashboard lifecycle actions (logout, embeddings on/off, restart, uninstall) | local + CSRF |
 | `/` | Dashboard static assets | none |
+
+The `/api/actions/*` group gives the dashboard CLI-parity for the sharp lifecycle actions; it runs behind a stricter guard than a settings write (local-mode only plus origin/CSRF plus the dashboard session header). The surface and its guard are documented in [`../frontend/dashboard-actions-surface.md`](../frontend/dashboard-actions-surface.md).
 
 ## The file watcher
 
@@ -69,3 +72,7 @@ Connectors send `x-honeycomb-runtime-path` set to `plugin` or `legacy`. Once a s
 ## Health and diagnostics
 
 `/health` is the cheap check (liveness, uptime, version, coarse pipeline status). `/api/status` is the full picture including resolved providers and tenancy. `/api/diagnostics` runs a live report across the daemon's subsystems (queue, storage, index, provider, mutation, connector), and `/api/repair/*` exposes the operator actions that act on what diagnostics finds. The environment-side health checks that the CLI and harness shims run (daemon reachability, login state, hooks wired) are documented in [`../operations/notifications-and-health.md`](../operations/notifications-and-health.md).
+
+## Daemon lifecycle: OS-native service, spawn fallback
+
+The daemon is brought up by a detached `spawn()` that dies with the machine and is not restarted on crash. PRD-064h makes the OS service manager the **liveness floor** without removing that path: `src/cli/daemon-service.ts` registers the daemon as a userland service (launchd LaunchAgent on macOS, `systemd --user` on Linux, a per-user Scheduled Task on Windows), and `src/cli/runtime.ts` **prefers service mode** when a manager is available, falling back to the detached spawn where registration is impossible (CI, locked-down machines, tests) or when `HONEYCOMB_DAEMON_SERVICE=spawn` forces it. The generated unit pins the working directory and `HONEYCOMB_WORKSPACE` to the caller-resolved writable workspace, so a service-started daemon never boots from an unwritable cwd (the "secrets 502" class). The intelligent healing layer above this floor (probe, restart with backoff, remediation ladder, escalation, gated auto-update) is HiveDoctor, documented in [`../operations/hivedoctor-watchdog.md`](../operations/hivedoctor-watchdog.md).
