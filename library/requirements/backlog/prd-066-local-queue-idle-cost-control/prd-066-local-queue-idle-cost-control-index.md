@@ -81,6 +81,11 @@ and any remaining shared DeepLake job handling.
 Measure before/after DeepLake coordination reads, define rollout flags, and document rollback and
 operator diagnostics.
 
+### PRD-066d: Verification Hardening And Upgrade Smoke
+
+Harden the live idle-meter proof so it uses bounded throwaway DeepLake queue tables, then add a
+built-daemon smoke that proves local SQLite operational DBs are created and reopened across startup.
+
 ## Functional Requirements
 
 1. The daemon must have a local queue abstraction for enqueue, lease, complete, fail, retry,
