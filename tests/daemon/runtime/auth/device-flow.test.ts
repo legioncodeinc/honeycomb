@@ -282,4 +282,36 @@ describe("the token authenticator resolves an Identity from verified claims, els
 		expect((await authn.authenticate({ bearer: "ok" }))?.role).toBe("admin");
 		expect(await authn.authenticate({ bearer: "no" })).toBeNull();
 	});
+
+	it("rejects stub tokens in team mode (security: unsigned tokens must not authenticate in production)", async () => {
+		const authn = createTokenAuthenticator(undefined, "team");
+		const stubToken = encodeStubToken({ org: "acme", role: "admin" });
+		// Stub token is rejected in team mode → null (401).
+		expect(await authn.authenticate({ bearer: stubToken })).toBeNull();
+	});
+
+	it("rejects stub tokens in hybrid mode (security: unsigned tokens must not authenticate in production)", async () => {
+		const authn = createTokenAuthenticator(undefined, "hybrid");
+		const stubToken = encodeStubToken({ org: "acme", role: "admin" });
+		// Stub token is rejected in hybrid mode → null (401).
+		expect(await authn.authenticate({ bearer: stubToken })).toBeNull();
+	});
+
+	it("accepts stub tokens in local mode (development: stub tokens work for single-user loopback)", async () => {
+		const authn = createTokenAuthenticator(undefined, "local");
+		const stubToken = encodeStubToken({ org: "acme", role: "admin" });
+		const identity = await authn.authenticate({ bearer: stubToken });
+		// Stub token is accepted in local mode.
+		expect(identity?.org).toBe("acme");
+		expect(identity?.role).toBe("admin");
+	});
+
+	it("accepts stub tokens when mode is undefined (backward compatibility: tests and dev)", async () => {
+		const authn = createTokenAuthenticator();
+		const stubToken = encodeStubToken({ org: "acme", role: "member" });
+		const identity = await authn.authenticate({ bearer: stubToken });
+		// Stub token is accepted when mode is not specified.
+		expect(identity?.org).toBe("acme");
+		expect(identity?.role).toBe("member");
+	});
 });

@@ -692,9 +692,13 @@ export function releaseSingleInstanceLock(runtimeDir: string): void {
  * lookup-by-keyid → scrypt-verify → Identity read against the live storage client +
  * scope (011d). The composite returns the first non-null, else `null` → the middleware
  * maps `null` to 401.
+ *
+ * SECURITY: The token authenticator receives the deployment mode so it can reject
+ * unsigned stub tokens in team/hybrid modes (production). Stub tokens are development-only
+ * and lack cryptographic signatures.
  */
-function composeAuthenticator(storage: StorageClient, scope: QueryScope): Authenticator {
-	const tokenAuth = createTokenAuthenticator();
+function composeAuthenticator(storage: StorageClient, scope: QueryScope, mode: DeploymentMode): Authenticator {
+	const tokenAuth = createTokenAuthenticator(undefined, mode);
 	// The REAL api-key half: it reads the `api_keys` table through the live client and
 	// scope, hashes + verifies the presented key, and rejects revoked/cross-project keys.
 	const apiKeyAuth = createApiKeyAuthenticator(storage, scope);
@@ -720,10 +724,10 @@ function authForMode(
 	scope: QueryScope,
 ): { authenticator: Authenticator; policy: AuthorizationPolicy } {
 	if (mode === "team" || mode === "hybrid") {
-		return { authenticator: composeAuthenticator(storage, scope), policy: createRbacPolicy() };
+		return { authenticator: composeAuthenticator(storage, scope, mode), policy: createRbacPolicy() };
 	}
 	// `local`: open middleware; the defaults are never reached but keep the shape stable.
-	return { authenticator: composeAuthenticator(storage, scope), policy: defaultDenyPolicy };
+	return { authenticator: composeAuthenticator(storage, scope, mode), policy: defaultDenyPolicy };
 }
 
 /**
