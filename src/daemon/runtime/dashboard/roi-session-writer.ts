@@ -104,18 +104,26 @@ function tokenCountOrNull(value: unknown): number | null {
 /** Map one `sessions` row to a 060b {@link CapturedTurn}, preserving NULL=absent. */
 function rowToCapturedTurn(r: StorageRow): CapturedTurn {
 	const sourceTool = typeof r.source_tool === "string" ? r.source_tool : "";
+	const model = typeof r.model === "string" ? r.model : "";
+	// Price each turn at ITS OWN model's rate (roi-savings `resolveRate`), so an Opus session is NOT
+	// written to the ledger at the Sonnet default. Claude Code captures Anthropic models, so provider
+	// is "anthropic" for a claude-code row or a `claude-`-prefixed model; an unknown/blank model leaves
+	// both undefined → the default rate (parity with `api.ts` rowToCapturedTurn).
+	const provider = sourceTool === "claude-code" || model.startsWith("claude-") ? "anthropic" : undefined;
 	return {
 		input_tokens: tokenCountOrNull(r.input_tokens),
 		output_tokens: tokenCountOrNull(r.output_tokens),
 		cache_read_input_tokens: tokenCountOrNull(r.cache_read_input_tokens),
 		cache_creation_input_tokens: tokenCountOrNull(r.cache_creation_input_tokens),
 		...(sourceTool !== "" ? { sourceTool } : {}),
+		...(model !== "" ? { model } : {}),
+		...(provider !== undefined ? { provider } : {}),
 	};
 }
 
 /**
  * Read the captured turns for ONE session by its `path` grouping key. METADATA-shaped: only the
- * four nullable token counts + `source_tool` (never a transcript/JSONB body). Identifiers via
+ * four nullable token counts + `source_tool` + `model` (never a transcript/JSONB body). Identifiers via
  * `sqlIdent`, the `path` value via `sLiteral` (the 002b guard floor). Fail-soft: `[]` on any
  * non-ok result so a flaky read degrades the savings to absent rather than throwing.
  */
@@ -127,7 +135,7 @@ async function readSessionTurns(storage: StorageQuery, scope: QueryScope, path: 
 	// the `path` value routes through `sLiteral` (the 002b guard).
 	const sql =
 		`SELECT ${sqlIdent("input_tokens")}, ${sqlIdent("output_tokens")}, ` +
-		`${sqlIdent("cache_read_input_tokens")}, ${sqlIdent("cache_creation_input_tokens")}, ${sqlIdent("source_tool")} ` +
+		`${sqlIdent("cache_read_input_tokens")}, ${sqlIdent("cache_creation_input_tokens")}, ${sqlIdent("source_tool")}, ${sqlIdent("model")} ` +
 		`FROM "${tbl}" WHERE ${pathCol} = ${sLiteral(path)} LIMIT ${SESSION_TURNS_LIMIT}`;
 	let result: QueryResult;
 	try {

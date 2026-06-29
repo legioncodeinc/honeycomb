@@ -844,6 +844,10 @@ export const HealthReasonsSchema = z.object({
 	storage: z.enum(["reachable", "unreachable"]).catch("reachable"),
 	embeddings: z.enum(["on", "off"]).catch("on"),
 	schema: z.enum(["ok", "missing_table"]).catch("ok"),
+	// PRD-063b (b-AC-7): the Portkey gateway reason. `.catch("off")` so a pre-063b daemon (no
+	// `portkey` field) or an unknown future state degrades to "off" (Portkey not in force) rather
+	// than throwing — the field is purely additive render data, like every other reason here.
+	portkey: z.enum(["off", "ok", "unconfigured", "unreachable"]).catch("off"),
 });
 export type HealthReasonsWire = z.infer<typeof HealthReasonsSchema>;
 

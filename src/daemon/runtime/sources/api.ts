@@ -73,8 +73,14 @@ export interface SourceScopeResolver {
  * handlers partition storage by the `x-honeycomb-org` HEADER, so without a cross-check an
  * authenticated caller for org A could forge `x-honeycomb-org: orgB` and list/add/delete
  * org B's sources + documents. When a validated Identity is present, the resolved org MUST
- * equal `identity.org`; a mismatch returns `null` → the handler fails closed (400). In local
- * mode no Identity is stamped, so the prior pure-header behaviour is unchanged.
+ * equal `identity.org`; a mismatch returns `null` → the handler fails closed (400).
+ *
+ * ── Cross-workspace guard (PRD-022 security hardening) ──
+ * Similarly, an authenticated caller must not be able to forge `x-honeycomb-workspace` to
+ * access sources/documents in a different workspace within the same org. When a validated
+ * Identity is present, the workspace is taken from `identity.workspace` (the token's own
+ * workspace), NOT from the header. The header is trusted ONLY in local mode (no Identity).
+ * This mirrors the pattern in `assets/api.ts` and `dashboard/sync-mount.ts`.
  */
 export const headerScopeResolver: SourceScopeResolver = {
 	resolve(c: Context): QueryScope | null {
@@ -83,6 +89,13 @@ export const headerScopeResolver: SourceScopeResolver = {
 		// A forged org header can never cross the token's own org boundary (PRD-022).
 		const identity = getRequestIdentity(c);
 		if (identity !== undefined && org !== identity.org) return null;
+		// When an authenticated Identity is present, use its workspace (the token's own
+		// workspace) rather than trusting the header — a forged workspace header must not
+		// allow cross-workspace access within the same org (PRD-022 hardening).
+		if (identity !== undefined) {
+			return { org: identity.org, workspace: identity.workspace };
+		}
+		// Local mode (no Identity): trust the header, defaulting to "default" when absent.
 		const workspace = c.req.header("x-honeycomb-workspace");
 		const ws = workspace !== undefined && workspace.length > 0 ? workspace : "default";
 		return { org, workspace: ws };

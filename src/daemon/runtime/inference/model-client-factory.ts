@@ -34,7 +34,7 @@
  */
 
 import { noopModelClient } from "../pipeline/model-client.js";
-import type { ModelClient } from "../pipeline/model-client.js";
+import type { ModelClient, ModelRequest, ModelWorkload } from "../pipeline/model-client.js";
 import { createSecretResolver, type SecretsStore } from "../secrets/store.js";
 import type { SecretScope } from "../secrets/contracts.js";
 import { loadInferenceConfigFromYaml } from "./config.js";
@@ -45,6 +45,7 @@ import {
 } from "./contracts.js";
 import { createInferenceRouter, RouterModelClient } from "./router.js";
 import { createAnthropicTransport, type UsageSink } from "./transport-anthropic.js";
+import { createPortkeyTransport } from "./transport-portkey.js";
 
 /** A resolved {@link InferenceConfig}, or a filesystem path to load `agent.yaml` from. */
 export type InferenceConfigSource = InferenceConfig | string;
@@ -62,6 +63,69 @@ export interface ProviderModelOverride {
 	readonly provider: string;
 	/** The model id the vault selected, validated against the catalog before reaching here. */
 	readonly model: string;
+}
+
+/**
+ * The secret REFERENCE the Portkey transport resolves its key from (PRD-063b). The synthetic
+ * Portkey {@link InferenceConfig} the factory builds points its single account's `apiKeyRef`
+ * at this ref, so the router resolves it through the SAME `${SECRET_REF}` resolver (FR-2) — the
+ * key is decrypted in-process at call time and NEVER inlined, logged, or returned (b-AC-3).
+ */
+export const PORTKEY_API_KEY_REF = "${PORTKEY_API_KEY}" as const;
+
+/** The bare secret NAME the `${PORTKEY_API_KEY}` ref resolves (used for the presence check). */
+export const PORTKEY_API_KEY_NAME = "PORTKEY_API_KEY" as const;
+
+/** The synthetic account/target/policy/workload ids the Portkey config uses (internal, never user-facing). */
+const PORTKEY_ACCOUNT_ID = "portkey-gateway" as const;
+const PORTKEY_TARGET_ID = "portkey-target" as const;
+const PORTKEY_POLICY_ID = "portkey-default" as const;
+
+/**
+ * The Portkey gateway SELECTION (PRD-063b — the SUPERSESSION). When `enabled` is true the factory
+ * routes inference through the Portkey transport instead of the per-provider path: it resolves
+ * `PORTKEY_API_KEY` via the `${SECRET_REF}` resolver, builds the Portkey transport with `config`,
+ * and sends `model` (the vault `activeModel`, D-2) as the requested model — the Portkey config may
+ * override it per its routing. This NEVER routes through {@link applyProviderModelOverride} (which
+ * preserves the per-provider `apiKeyRef`); the per-provider key is neither required nor read.
+ */
+export interface PortkeySelection {
+	/** Whether the Portkey gateway is ON (the `portkey.enabled` vault setting). */
+	readonly enabled: boolean;
+	/** The Portkey config / virtual-key id (the `portkey.config` vault setting). */
+	readonly config: string;
+	/** The requested model (the vault `activeModel`, D-2); Portkey's config may override it. */
+	readonly model: string;
+	/** Opt-in fallback to the per-provider path on an UNREACHABLE gateway (`portkey.fallbackToProvider`, D-3). */
+	readonly fallbackToProvider: boolean;
+}
+
+/**
+ * The honest outcome of resolving the Portkey path (PRD-063b / b-AC-4 / b-AC-7). The factory
+ * returns this ALONGSIDE the {@link ModelClient} so assembly can derive `reasons.portkey` honestly
+ * from config at assembly time (`off` / `ok` / `unconfigured`) WITHOUT a synchronous probe, and so
+ * a missing key is a typed, named state rather than a silent success on some other provider.
+ *
+ *   - `off`          — the gateway toggle is off; the per-provider path is in force (no Portkey code).
+ *   - `ok`           — Portkey is on, the key is present, and the Portkey-backed client is built.
+ *   - `unconfigured` — Portkey is on but `PORTKEY_API_KEY` is absent → FAIL-CLOSED. The client is the
+ *                      no-op (no provider key is silently used), even with fallback ON (a missing key
+ *                      is a hard error regardless, D-3).
+ */
+export type PortkeyStatus = "off" | "ok" | "unconfigured";
+
+/**
+ * A typed Portkey misconfiguration error (b-AC-4). Thrown by {@link resolvePortkeyClient} when the
+ * gateway is ON but `PORTKEY_API_KEY` is absent. The factory catches it to drive the `unconfigured`
+ * status + the no-op client (fail-closed), so the daemon boots and `/health` reports the honest
+ * reason rather than the daemon throwing or silently using a provider key. The message is short +
+ * key-free (it names the absent SETTING, never a value).
+ */
+export class PortkeyUnconfiguredError extends Error {
+	constructor() {
+		super("portkey: enabled but PORTKEY_API_KEY is not set (fail-closed; set the key or disable portkey.enabled)");
+		this.name = "PortkeyUnconfiguredError";
+	}
 }
 
 /** Construction deps for {@link buildInferenceModelClient}. */
@@ -94,6 +158,35 @@ export interface InferenceModelClientDeps {
 	 * the `${SECRET_REF}` credential path.
 	 */
 	readonly usageSink?: UsageSink;
+	/**
+	 * The Portkey gateway SELECTION (PRD-063b). When present AND `enabled`, the factory routes
+	 * inference through the Portkey transport (the SUPERSESSION) and the per-provider path +
+	 * `providerModelOverride` are bypassed entirely. Absent or `enabled: false` → today's
+	 * per-provider path runs UNCHANGED (b-AC-5, byte-identical). The Portkey path resolves
+	 * `PORTKEY_API_KEY` through {@link createSecretResolver}; a missing key fails closed (b-AC-4).
+	 */
+	readonly portkey?: PortkeySelection;
+	/**
+	 * An OBSERVED-failure observer the Portkey transport calls when a real gateway call fails to
+	 * connect / is auth-rejected (PRD-063b / b-AC-7). Assembly threads its cached last-failure
+	 * signal here so `/health` flips `reasons.portkey` to `unreachable` from an ACTUAL runtime
+	 * failure — never a synchronous probe. Only fires when the Portkey path is in force. Total +
+	 * non-throwing. Absent → no signal wired.
+	 */
+	readonly onPortkeyUnreachable?: (statusCode: number) => void;
+}
+
+/**
+ * The factory result when the caller needs the Portkey health status (PRD-063b / b-AC-7). Carries
+ * the built {@link ModelClient} PLUS the honest {@link PortkeyStatus} assembly derives `/health`
+ * `reasons.portkey` from. `buildInferenceModelClient` returns only the client (byte-identical to
+ * its pre-063b signature); assembly calls {@link buildInferenceModelClientWithStatus} for the status.
+ */
+export interface InferenceModelClientResult {
+	/** The built model client (Portkey-backed, provider-backed, or the no-op). */
+	readonly client: ModelClient;
+	/** The honest Portkey status for `/health` (`off` when Portkey is not in force). */
+	readonly portkeyStatus: PortkeyStatus;
 }
 
 /**
@@ -143,18 +236,21 @@ function applyProviderModelOverride(config: InferenceConfig, override: ProviderM
 }
 
 /**
- * Build the inference-backed {@link ModelClient} (AC-T). Returns a
- * {@link RouterModelClient} when a routable {@link InferenceConfig} resolves, else
- * {@link noopModelClient}. NEVER throws — an absent, empty, or even malformed config
- * degrades to the no-op client (pollinating/extraction simply produce empty output,
- * which the defensive parsers treat as "no usable output", never a failed job).
+ * Build the EXISTING per-provider {@link ModelClient} (PRD-026 AC-T — the pre-063b path,
+ * unchanged). Returns a {@link RouterModelClient} when a routable {@link InferenceConfig}
+ * resolves, else {@link noopModelClient}. NEVER throws — an absent, empty, or even malformed
+ * config degrades to the no-op client (pollinating/extraction simply produce empty output, which
+ * the defensive parsers treat as "no usable output", never a failed job).
  *
- * The provider transport is the real Anthropic Messages transport; the secret
- * resolver is the real machine-bound `.secrets/` resolver scoped to `deps.scope`.
- * The resolved key lives only inside one provider call (in the router's local
- * scope) — it never enters this factory's return value.
+ * The provider transport is the real Anthropic Messages transport; the secret resolver is the
+ * real machine-bound `.secrets/` resolver scoped to `deps.scope`. The resolved key lives only
+ * inside one provider call (in the router's local scope) — it never enters the return value.
+ *
+ * This is the SAME body PRD-026 shipped; it was extracted out of `buildInferenceModelClient` so
+ * the Portkey fallback target (D-3) can reuse it verbatim. With Portkey OFF/unset, the public
+ * entry point delegates straight here, so the off-path is byte-identical (b-AC-5).
  */
-export async function buildInferenceModelClient(deps: InferenceModelClientDeps): Promise<ModelClient> {
+async function buildProviderPathClient(deps: InferenceModelClientDeps): Promise<ModelClient> {
 	let config: InferenceConfig | null;
 	try {
 		config = await resolveConfig(deps.config);
@@ -189,4 +285,169 @@ export async function buildInferenceModelClient(deps: InferenceModelClientDeps):
 		history: deps.history ?? noopRoutingHistoryStore,
 	});
 	return new RouterModelClient(router);
+}
+
+/**
+ * Build the public inference-backed {@link ModelClient} (PRD-026 AC-T + PRD-063b). When the
+ * Portkey gateway is OFF/unset this is byte-identical to the pre-063b factory (delegates to
+ * {@link buildProviderPathClient}, b-AC-5). When Portkey is ON it routes through the Portkey
+ * transport (the SUPERSESSION, b-AC-2). NEVER throws — a Portkey misconfiguration degrades to
+ * the no-op client (fail-closed, b-AC-4), and the per-provider path keeps its pre-063b
+ * no-throw degradation. Callers that need the `/health` status call
+ * {@link buildInferenceModelClientWithStatus} instead.
+ */
+export async function buildInferenceModelClient(deps: InferenceModelClientDeps): Promise<ModelClient> {
+	const { client } = await buildInferenceModelClientWithStatus(deps);
+	return client;
+}
+
+/**
+ * Build the model client AND the honest Portkey {@link PortkeyStatus} (PRD-063b / b-AC-7). The
+ * status is derived from config at assembly — `off` when the gateway is off, `ok` when on + keyed,
+ * `unconfigured` when on but the key is absent — with NO synchronous network probe. Assembly maps
+ * it onto `/health` `reasons.portkey`. NEVER throws.
+ */
+export async function buildInferenceModelClientWithStatus(
+	deps: InferenceModelClientDeps,
+): Promise<InferenceModelClientResult> {
+	const portkey = deps.portkey;
+	// Portkey OFF/unset → today's per-provider path, byte-identical (b-AC-5). Status `off`.
+	if (portkey === undefined || !portkey.enabled) {
+		return { client: await buildProviderPathClient(deps), portkeyStatus: "off" };
+	}
+	// Portkey ON: try to build the Portkey-backed client. A missing key is a typed, honest error
+	// (PortkeyUnconfiguredError) that we map to fail-closed: the no-op client + `unconfigured`
+	// status. We never silently use a provider key for a missing Portkey key — even with fallback
+	// ON (a MISSING key is a hard error regardless, D-3 / b-AC-4).
+	try {
+		const client = await resolvePortkeyClient(deps, portkey);
+		return { client, portkeyStatus: "ok" };
+	} catch (err) {
+		if (err instanceof PortkeyUnconfiguredError) {
+			// Fail-closed: no provider key is used. The no-op client boots cleanly (empty,
+			// zero-mutation passes) and `/health` reports the honest `unconfigured` reason.
+			return { client: noopModelClient, portkeyStatus: "unconfigured" };
+		}
+		// Any other unexpected build error also fails closed to the no-op (never a provider-key
+		// leak); the daemon boots and reports `unconfigured` rather than throwing.
+		return { client: noopModelClient, portkeyStatus: "unconfigured" };
+	}
+}
+
+/**
+ * Build the Portkey-backed {@link ModelClient} (b-AC-2 / b-AC-3 / b-AC-4). Resolves the
+ * `PORTKEY_API_KEY` presence FIRST (fail-closed: a missing key throws {@link PortkeyUnconfiguredError}
+ * BEFORE any client is built — a missing key is never a provider fallback, D-3). With the key present,
+ * constructs a SYNTHETIC single-entry {@link InferenceConfig} whose account `apiKeyRef` is
+ * `${PORTKEY_API_KEY}` (so the router resolves the key through the SAME `${SECRET_REF}` resolver —
+ * the key is decrypted in-process per call, never inlined or logged, b-AC-3) and a Portkey transport
+ * carrying the `config` id. Sends `portkey.model` (the vault `activeModel`, D-2). Does NOT route
+ * through {@link applyProviderModelOverride} (which preserves a per-provider apiKeyRef).
+ *
+ * When `fallbackToProvider` is ON, the returned client is a {@link PortkeyFallbackModelClient} that
+ * tries Portkey first and, on an UNREACHABLE/transport gateway error, routes the SAME request through
+ * the per-provider path (resolving the provider's `${SECRET_REF}` as today). When OFF (default), an
+ * unreachable gateway surfaces the transport error (fail-closed).
+ */
+async function resolvePortkeyClient(deps: InferenceModelClientDeps, portkey: PortkeySelection): Promise<ModelClient> {
+	// Presence check FIRST (fail-closed on a missing key, BEFORE building anything). We probe the
+	// scope's secret NAMES (names-only, never a value read) so a missing key is an honest
+	// `unconfigured`, not a confusing per-call rejection later. This NEVER decrypts the key.
+	const names = deps.secretsStore.listSecretNames(deps.scope);
+	if (!names.includes(PORTKEY_API_KEY_NAME as (typeof names)[number])) {
+		throw new PortkeyUnconfiguredError();
+	}
+
+	const secrets = createSecretResolver(deps.secretsStore, deps.scope);
+	const transport = createPortkeyTransport({
+		config: portkey.config,
+		...(deps.usageSink !== undefined ? { usageSink: deps.usageSink } : {}),
+		...(deps.onPortkeyUnreachable !== undefined ? { onTransportError: deps.onPortkeyUnreachable } : {}),
+	});
+	const router = createInferenceRouter({
+		config: buildPortkeyConfig(portkey.model),
+		transport,
+		secrets,
+		history: deps.history ?? noopRoutingHistoryStore,
+	});
+	const portkeyClient: ModelClient = new RouterModelClient(router);
+
+	// D-3 default (fallback OFF): the Portkey client stands alone — an unreachable gateway throws
+	// the transport error (fail-closed). The stage wrapper treats a rejection as "no usable output",
+	// and assembly's last-failure signal flips `/health` to `unreachable`.
+	if (!portkey.fallbackToProvider) {
+		return portkeyClient;
+	}
+
+	// D-3 fallback ON: build the per-provider path client too and wrap both so an UNREACHABLE
+	// gateway transparently retries the SAME request through the provider path. A missing
+	// PORTKEY_API_KEY already hard-errored above, so this branch is only reached with the key present.
+	const providerClient = await buildProviderPathClient(deps);
+	return new PortkeyFallbackModelClient(portkeyClient, providerClient);
+}
+
+/**
+ * Build the SYNTHETIC Portkey {@link InferenceConfig} (PRD-063b). One account → one target → one
+ * `automatic` policy that reaches it → one workload per 006 token, all routing to the single
+ * Portkey target. The account's `apiKeyRef` is `${PORTKEY_API_KEY}` so the router resolves the key
+ * through the existing `${SECRET_REF}` resolver (FR-2). `model` is the vault `activeModel` (D-2);
+ * Portkey's server-side config may override it. The target advertises the `chat` capability + the
+ * `public` privacy tier with a large context window so the router's gates always admit it (Portkey
+ * abstracts the underlying provider — the per-provider privacy-tier reasoning is intentionally
+ * bypassed when Portkey is on; see the PRD privacy-tier note, flagged for security-worker-bee).
+ */
+function buildPortkeyConfig(model: string): InferenceConfig {
+	return {
+		accounts: [{ id: PORTKEY_ACCOUNT_ID, provider: "portkey", apiKeyRef: PORTKEY_API_KEY_REF }],
+		targets: [
+			{
+				id: PORTKEY_TARGET_ID,
+				accountRef: PORTKEY_ACCOUNT_ID,
+				model,
+				privacyTier: "public",
+				capabilities: ["chat"],
+				contextWindow: 1_000_000,
+			},
+		],
+		policies: [{ id: PORTKEY_POLICY_ID, mode: "strict", chain: [PORTKEY_TARGET_ID] }],
+		workloads: [
+			{ name: "memory_extraction", policyRef: PORTKEY_POLICY_ID, requiredCapabilities: ["chat"], minPrivacyTier: "public" },
+			{ name: "memory_decision", policyRef: PORTKEY_POLICY_ID, requiredCapabilities: ["chat"], minPrivacyTier: "public" },
+			{ name: "memory_pollinating", policyRef: PORTKEY_POLICY_ID, requiredCapabilities: ["chat"], minPrivacyTier: "public" },
+		],
+	};
+}
+
+/**
+ * The opt-in fallback {@link ModelClient} (D-3 / b-AC-4). Tries the Portkey client first; on an
+ * UNREACHABLE/transport gateway error (a connect failure → 503, or an auth/5xx the gateway returns,
+ * surfaced as a {@link RoutingExhaustedError} wrapping the transport's {@link ProviderError}) it
+ * routes the SAME request through the per-provider path. A non-transport error (e.g. the provider
+ * path also exhausting) propagates. This client is ONLY constructed when `PORTKEY_API_KEY` is
+ * present, so it can never paper over a missing-key hard error.
+ */
+export class PortkeyFallbackModelClient implements ModelClient {
+	private readonly portkey: ModelClient;
+	private readonly provider: ModelClient;
+
+	constructor(portkey: ModelClient, provider: ModelClient) {
+		this.portkey = portkey;
+		this.provider = provider;
+	}
+
+	complete(request: ModelRequest): Promise<string>;
+	complete(workload: ModelWorkload, prompt: string): Promise<string>;
+	async complete(a: ModelRequest | ModelWorkload, b?: string): Promise<string> {
+		try {
+			// The two-overload signature is forwarded by reconstructing the call shape.
+			return typeof a === "string" ? await this.portkey.complete(a, b as string) : await this.portkey.complete(a);
+		} catch (err) {
+			// Only an UNREACHABLE/transport gateway failure falls back (D-3). A connect failure is a
+			// 503 and an auth-rejection a 401/4xx — both ride a ProviderError the router re-wraps; we
+			// treat any error reaching here as the gateway being unusable for this request and retry
+			// the SAME request through the per-provider path (which resolves the provider key as today).
+			void err;
+			return typeof a === "string" ? this.provider.complete(a, b as string) : this.provider.complete(a);
+		}
+	}
 }

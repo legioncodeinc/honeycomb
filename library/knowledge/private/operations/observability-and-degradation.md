@@ -6,6 +6,7 @@ How Honeycomb surfaces the engine's degradation modes, embeddings off, lexical f
 
 **Related:**
 - [`notifications-and-health.md`](notifications-and-health.md)
+- [`hivedoctor-watchdog.md`](hivedoctor-watchdog.md)
 - [`deeplake-compute-cost.md`](deeplake-compute-cost.md)
 - [`../ai/retrieval.md`](../ai/retrieval.md)
 - [`../data/deeplake-storage.md`](../data/deeplake-storage.md)

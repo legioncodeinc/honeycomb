@@ -46,6 +46,7 @@ import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import { type HealTarget } from "../../storage/heal.js";
 import { isOk, type StorageRow } from "../../storage/result.js";
 import { appendOnlyInsertMany, type ColumnValue, readAppendOrdered, type RowValues, val } from "../../storage/writes.js";
+import { getRequestIdentity } from "../middleware/permission.js";
 import type { Daemon } from "../server.js";
 import type { JobQueueService } from "../services/job-queue.js";
 import { type EmbedAttachment, noopEmbedAttachment } from "../services/embed-client.js";
@@ -306,6 +307,15 @@ class CaptureRouteHandler {
 	 * org/workspace (via `readAppendOrdered`). Org/workspace come from the same
 	 * `x-honeycomb-*` headers the rest of the daemon reads, so the read-back stays
 	 * inside the requester's tenancy.
+	 *
+	 * ── Cross-tenant guard (PRD-022 security) ────────────────────────────────────
+	 * When a validated Identity is present, the resolved org MUST equal `identity.org`;
+	 * a mismatch returns 400.
+	 *
+	 * ── Cross-workspace guard (PRD-022 security hardening) ───────────────────────
+	 * When a validated Identity is present, the workspace is taken from `identity.workspace`
+	 * (the token's own workspace), NOT from the header. The header is trusted ONLY in local
+	 * mode (no Identity).
 	 */
 	async handleConversation(c: Context): Promise<Response> {
 		const path = c.req.query("path");
@@ -313,11 +323,23 @@ class CaptureRouteHandler {
 			return c.json({ error: "bad_request", reason: "path query parameter is required" }, 400);
 		}
 		const org = c.req.header("x-honeycomb-org");
-		const workspace = c.req.header("x-honeycomb-workspace");
 		if (org === undefined || org.length === 0) {
 			return c.json({ error: "bad_request", reason: "x-honeycomb-org header is required" }, 400);
 		}
-		const scope: QueryScope = workspace !== undefined && workspace.length > 0 ? { org, workspace } : { org };
+		// Cross-tenant guard: a forged org header can never cross the token's own org boundary.
+		const identity = getRequestIdentity(c);
+		if (identity !== undefined && org !== identity.org) {
+			return c.json({ error: "bad_request", reason: "org mismatch" }, 400);
+		}
+		// When an authenticated Identity is present, use its workspace rather than trusting
+		// the header — a forged workspace header must not allow cross-workspace access.
+		const scope: QueryScope = identity !== undefined
+			? { org: identity.org, workspace: identity.workspace }
+			: (() => {
+				// Local mode (no Identity): trust the header, with optional workspace.
+				const workspace = c.req.header("x-honeycomb-workspace");
+				return workspace !== undefined && workspace.length > 0 ? { org, workspace } : { org };
+			})();
 
 		const result = await readAppendOrdered(this.deps.storage, this.deps.sessionsTarget, scope, path.trim());
 		if (!isOk(result)) {
@@ -443,6 +465,11 @@ class CaptureRouteHandler {
 			// canonical harness token the shim stamps (`claude-code` for the reference
 			// shim), so every Claude-Code-captured row carries `source_tool='claude-code'`.
 			["source_tool", val.str(meta.agent)],
+			// PRD-060 ROI fix: the per-turn model id (e.g. `claude-opus-4-8`) read from the
+			// transcript, so the dashboard prices the turn at its real model's rate. An absent
+			// model writes `''` ("model unknown" — the column default); a present model writes the
+			// id via the typed `val.str` SQL guard. Carried on the SAME append-only INSERT.
+			["model", val.str(modelFor(event))],
 			["creation_date", val.str(nowIso)],
 			["last_update_date", val.str(nowIso)],
 		];
@@ -632,6 +659,18 @@ function usageColumns(event: CaptureEvent): ReadonlyArray<readonly [string, numb
 	if (u.cacheRead !== undefined) cols.push(["cache_read_input_tokens", u.cacheRead]);
 	if (u.cacheCreation !== undefined) cols.push(["cache_creation_input_tokens", u.cacheCreation]);
 	return cols;
+}
+
+/**
+ * The per-turn `model` id an event contributes to its `sessions` row (PRD-060 ROI fix). ONLY an
+ * `assistant_message` that carried a (zod-validated, non-empty) `model` contributes the id; every
+ * other event — and an assistant turn whose model is unknown — contributes `''` (the column default
+ * = "model unknown"). The zod boundary already trimmed/omitted a blank model, so a present value
+ * here is a real model id. The dashboard's `resolveRate` reads this to price the turn at its real
+ * model's rate (an Opus turn at the Opus row, not the Sonnet default).
+ */
+function modelFor(event: CaptureEvent): string {
+	return event.kind === "assistant_message" && event.model !== undefined ? event.model : "";
 }
 
 /**

@@ -36,9 +36,11 @@ import {
 	type Authenticator,
 	type Credentials,
 	type Identity,
+	type Mode,
 	type MintedToken,
 	type PresentedCredentials,
 	type Role,
+	STUB_TOKEN_PREFIX,
 	type TokenClaims,
 	type TokenIssuer,
 	asRole,
@@ -273,16 +275,37 @@ export function safeEqual(a: string, b: string): boolean {
  * verification failure (→ the middleware treats `null` as 401). It NEVER returns a
  * partially-trusted Identity and NEVER logs the token.
  *
+ * SECURITY: In `team` and `hybrid` modes, unsigned stub tokens (those with the
+ * `hcmt.v1.` prefix) are REJECTED. Stub tokens are development-only and lack
+ * cryptographic signatures; accepting them in production would allow an attacker
+ * to forge admin credentials. Only `local` mode (single-user loopback) accepts
+ * stub tokens.
+ *
  * The api-key half is 011d's {@link Authenticator}; the daemon assembly composes the
  * two (deferred, D-9).
+ *
+ * @param verify - Token verification function (default: {@link verifyTokenClaims})
+ * @param mode - Deployment mode; if `team` or `hybrid`, stub tokens are rejected
  */
-export function createTokenAuthenticator(verify: TokenVerifier = verifyTokenClaims): Authenticator {
+export function createTokenAuthenticator(
+	verify: TokenVerifier = verifyTokenClaims,
+	mode?: Mode,
+): Authenticator {
 	return {
 		authenticate(presented: PresentedCredentials): Promise<Identity | null> {
 			const bearer = presented.bearer;
 			if (typeof bearer !== "string" || bearer.length === 0) {
 				// No bearer → this half cannot authenticate (the api-key half may; else 401).
 				return Promise.resolve(null);
+			}
+			// SECURITY: Reject unsigned stub tokens in team/hybrid modes (production).
+			// Stub tokens (hcmt.v1. prefix) have no cryptographic signature and are
+			// development-only. An attacker could forge admin claims if we accepted them.
+			if (mode === "team" || mode === "hybrid") {
+				if (bearer.startsWith(STUB_TOKEN_PREFIX)) {
+					// Fail-closed: stub token in production mode → reject (null → 401).
+					return Promise.resolve(null);
+				}
 			}
 			const claims = verify(bearer);
 			if (claims === null) return Promise.resolve(null);

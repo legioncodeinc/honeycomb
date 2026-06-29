@@ -1,8 +1,8 @@
 # Retrieval
 
-> Category: Ai | Version: 2.0 | Date: June 2026 | Status: Active
+> Category: Ai | Version: 2.1 | Date: June 2026 | Status: Active
 
-How recall works: hybrid lexical + semantic candidate collection over DeepLake, RRF fusion, the reranker/dedup/recency/MMR shaping stages, the authorization boundary, GPU-backed vector search, the virtual-filesystem browse surface, and the nDCG eval harness that gates every ranking change.
+How recall works: hybrid lexical + semantic candidate collection over DeepLake, RRF fusion, the reranker/dedup/recency/MMR shaping stages (including the `cohere` provider reranker via the Portkey gateway), the authorization boundary, GPU-backed vector search, the virtual-filesystem browse surface, and the nDCG eval harness that gates every ranking change.
 
 **Related:**
 - [`memory-pipeline.md`](memory-pipeline.md)
@@ -11,6 +11,8 @@ How recall works: hybrid lexical + semantic candidate collection over DeepLake, 
 - [`knowledge-graph-ontology.md`](knowledge-graph-ontology.md)
 - [`hybrid-sql-vector-rationale.md`](hybrid-sql-vector-rationale.md)
 - [`deeplake-hybrid-record-operator-report.md`](deeplake-hybrid-record-operator-report.md)
+- [`portkey-gateway.md`](portkey-gateway.md)
+- [`../security/portkey-privacy-tier.md`](../security/portkey-privacy-tier.md)
 - [`../data/deeplake-storage.md`](../data/deeplake-storage.md)
 - [`../data/memory-virtual-filesystem.md`](../data/memory-virtual-filesystem.md)
 - [`../security/scoping-and-visibility.md`](../security/scoping-and-visibility.md)
@@ -72,12 +74,18 @@ Above the RRF floor, `recallMemories` runs four shaping stages in a fixed order,
 
 | Stage | Function | Default | What it does |
 |---|---|---|---|
-| **Reranker** | `rerankHits` | `none` (RRF order unchanged) | Re-scores the top-k by raw cosine of the query against candidate embeddings, recovering the score magnitude RRF discards. Timeout-budgeted; on timeout it keeps the prior order. Default `none` after a measured ~0 lift, the stage is real and wired, just dormant by default. |
+| **Reranker** | `rerankHits` | `none` (RRF order unchanged) | Re-scores the top-k. Strategies (`RERANKER_STRATEGIES`): `embedding-cosine` (local in-process cosine of the query against candidate embeddings, recovering the magnitude RRF discards, 300ms budget), `cohere` (Cohere via the Portkey gateway, PRD-063c, see below), and `none`. Timeout-budgeted; on timeout it keeps the prior order. Default `none` after a measured ~0 lift, the stage is real and wired, just dormant by default. |
 | **Semantic dedup** | `dedupHits` | **on** | Collapses near-duplicate hits whose embeddings exceed a similarity threshold, keeping the highest-provenance copy (memory > summary > session). The same fact stored as a kept memory, a summary, and several raw turns surfaces *once*. Fail-soft to the un-deduped list. |
 | **Recency dampening** | `applyRecencyDampening` | off-equivalent (half-life ≈ 100 years) | A multiplicative age-decay on the fused score, demotes stale rows, never a hard cutoff, never drops a row by age. Applied *last* among score adjustments so it can't disturb dedup's provenance keep-decision. Shipped with a near-infinite default half-life so it is neutral until a caller tunes it. |
 | **Token-budget + MMR** | `selectWithinTokenBudget` | opt-in (engages only on a positive `tokenBudget`) | Fills a token budget with a Maximal-Marginal-Relevance selection, trading a little pure relevance for diversity so a result set of near-paraphrases gets diversified. With no budget the unchanged fixed top-k path runs, back-compat by construction. |
 
 The reranker, dedup, and recency knobs were once orphaned scaffolding inherited from the deleted PRD-007 engine; PRD-047 wired them into `recall.ts` as real stages and re-homed the config. Every wave landed behind the eval (a change that drops recall@5/MRR below `baseline − ε` fails), so the defaults reflect *measured* behavior, not guesses.
+
+### The `cohere` provider reranker (PRD-063c)
+
+The first NON-local reranker strategy. When the operator selects `cohere` (`HONEYCOMB_RECALL_RERANKER=cohere`) **and** the optional Portkey gateway is on, `rerankWithCohere` sends the query plus the fused top-N candidate texts to Cohere through Portkey's `POST /v1/rerank` and re-orders by the returned `relevance_score`. The transport (`src/daemon/runtime/recall/rerank-portkey.ts`) reuses the inference gateway's host, headers, and `${SECRET_REF}` resolver, so recall never sees the key. The rerank model defaults to `rerank-v3.5` (`DEFAULT_RERANKER_COHERE_MODEL`), env-overridable, and ultimately governed by the operator's Portkey config.
+
+Two invariants keep it safe to ship dormant. First, the **double gate**: the `cohere` branch fires ONLY when the strategy is `cohere` AND assembly injected the `cohereRerank` seam (which it does only when the gateway is on). A `cohere` strategy with the gateway off has no seam and degrades to the RRF order; every other strategy is byte-identical to the pre-063c path. Second, **fail-soft**: the call is a bounded `Promise.race` against a distinct PROVIDER timeout (`DEFAULT_RERANKER_PROVIDER_TIMEOUT_MS = 1000`, vs the 300ms local-cosine budget), and any timeout, HTTP error, unreachable gateway, malformed response, or missing key silently keeps the local RRF order. A rerank failure also flips the shared `reasons.portkey` health signal via `recordPortkeyUnreachable`. Crucially, `cohere` egresses recall *content* to a third party, so it carries a privacy trade-off the local strategies do not, see [`../security/portkey-privacy-tier.md`](../security/portkey-privacy-tier.md) and [`portkey-gateway.md`](portkey-gateway.md). Default-ON is gated behind a live recall-quality eval.
 
 ## Authorization
 

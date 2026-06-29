@@ -30,7 +30,7 @@ import React from "react";
 import { Badge, Button, type BadgeTone } from "../primitives.js";
 import { LiveLog, Panel, SYNC_TONE } from "../panels.js";
 import type { PageProps } from "../page-frame.js";
-import { PageFrame } from "../page-frame.js";
+import { isTabHidden, PageFrame } from "../page-frame.js";
 import { useScope } from "../scope-context.js";
 import { NeedsProjectSelection } from "../needs-project.js";
 import {
@@ -396,6 +396,7 @@ export function SyncPage({ wire }: PageProps): React.JSX.Element {
 		}
 		let alive = true;
 		const tick = async (): Promise<void> => {
+			if (!alive || isTabHidden()) return; // background-tab pause: no assets-view poll while hidden
 			const v = await wire.assetsView();
 			if (alive) setView(v);
 		};
