@@ -11,7 +11,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -64,7 +64,7 @@ try {
 	await runInstalledCli(["daemon", "stop"], smokeEnv({ localQueueEnabled: true }), "candidate cli second stop");
 
 	console.log(
-		`smoke:local-queue-packaged-upgrade - OK: ${previousInstalled} -> ${candidateTarball} at ${workspaceDir}`,
+		`smoke:local-queue-packaged-upgrade - OK: previous=${previousInstalled} candidate=${basename(candidateTarball)} workspace=<temp>`,
 	);
 } finally {
 	try {
@@ -99,9 +99,9 @@ async function installPreviousFixture() {
 	try {
 		await runNpm(["install", "--no-audit", "--no-fund", "--omit=optional", "--ignore-scripts", previousSpec], {
 			cwd: appDir,
-			label: `install previous package ${previousSpec}`,
+			label: explicit === undefined ? "install published previous package" : "install explicit previous package",
 		});
-		return previousSpec;
+		return explicit === undefined ? "published-package" : "explicit-package";
 	} catch (err) {
 		const fallbackAllowed = /^(1|true|yes)$/i.test(process.env.HONEYCOMB_ALLOW_PREVIOUS_FIXTURE_FALLBACK ?? "");
 		if (!fallbackAllowed) throw err;
@@ -112,7 +112,7 @@ async function installPreviousFixture() {
 			label: "install candidate as previous fixture fallback",
 		});
 		console.warn(
-			`smoke:local-queue-packaged-upgrade - warning: could not install ${previousSpec}; using candidate with local queue disabled as previous fixture`,
+			"smoke:local-queue-packaged-upgrade - warning: could not install previous package fixture; using candidate with local queue disabled as previous fixture",
 		);
 		return fallback;
 	}
@@ -157,7 +157,8 @@ async function bootDaemonEntry(label, options) {
 	try {
 		await waitForHealth(label);
 	} catch (err) {
-		throw new Error(`${label} failed: ${err instanceof Error ? err.message : String(err)}\n${stdout}\n${stderr}`);
+		const reason = err instanceof Error ? err.message : String(err);
+		throw new Error(`${label} failed: ${reason}\n${redactLogText(stdout)}\n${redactLogText(stderr)}`);
 	} finally {
 		await stopChild(child);
 	}
@@ -277,7 +278,9 @@ async function run(command, args, options) {
 	});
 	const code = await new Promise((resolveExit) => child.once("exit", resolveExit));
 	if (code !== 0 && options.allowFailure !== true) {
-		throw new Error(`${options.label} failed with code ${code}\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}`);
+		throw new Error(
+			`${options.label} failed with code ${code}\n--- stdout ---\n${redactLogText(stdout)}\n--- stderr ---\n${redactLogText(stderr)}`,
+		);
 	}
 	return { stdout, stderr };
 }
@@ -292,4 +295,16 @@ async function runNpm(args, options) {
 
 async function sleep(ms) {
 	await new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+function redactLogText(value) {
+	let redacted = String(value);
+	for (const sensitiveValue of [process.env.HONEYCOMB_PREVIOUS_PACKAGE, root, packDir, appDir, workspaceDir, homeDir]) {
+		if (sensitiveValue !== undefined && sensitiveValue.length > 0) {
+			redacted = redacted.split(sensitiveValue).join("<redacted>");
+		}
+	}
+	return redacted
+		.replace(/(authorization|token|api[_-]?key|secret)\s*[:=]\s*[^\s"']+/gi, "$1=<redacted>")
+		.replace(/(Bearer)\s+[A-Za-z0-9._~+/-]+=*/g, "$1 <redacted>");
 }

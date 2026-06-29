@@ -29,8 +29,8 @@ export interface LocalQueueTopology {
 export interface LocalQueueRollbackStatus {
 	readonly flagEnabled: boolean;
 	readonly sharedQueuePathActive: boolean;
-	readonly requiresDeepLakeMigration: false;
-	readonly requiresLocalDbDeletion: false;
+	readonly requiresDeepLakeMigration: boolean;
+	readonly requiresLocalDbDeletion: boolean;
 	readonly localWorkWillNotProcess: boolean;
 	readonly localQueuedWork: number;
 	readonly warning: string | null;

@@ -20,7 +20,8 @@ publish hold until external/security gates and release-process gates are cleared
 
 Reasons:
 
-- PR #188 exists and GitHub CI/CodeQL/CodeRabbit are green, but Aikido remains a failing PR check.
+- PR #188 exists and GitHub CI/CodeQL/CodeRabbit were green before the latest follow-up commit, but
+  Aikido remains a publish hold until the remote re-scan confirms the addressed code-quality findings.
 - The long 10-minute idle soak was explicitly deferred by the release owner for this checkpoint; the
   latest replacement proof is a 120-second packaged run with background workers enabled.
 - `npm publish --dry-run --provenance --access public` is blocked because version `0.1.10` is already
@@ -52,7 +53,7 @@ Reasons:
 | 6 | Restart/sleep/outage live dogfood | Manual/live dogfood scenarios | Pass | Not run to completion | Deferred because the release owner chose the package/PR gate sequence for this checkpoint | Deferred | Run before final publish if the release owner requires laptop resilience proof |
 | 7 | GitHub PR / CI | PR #188 | Open PR against `main`; remote CI attached | Passed except Aikido | CI quality gates on Node 22/24, Windows smoke, HiveDoctor, CodeQL, CLA, and Secret gate are green; live DeepLake and stress jobs skipped by workflow policy | Pass | External checks can rerun after the ledger commit |
 | 7 | CodeRabbit | Review current PR #188 | No blocking issues | Green on latest observed PR status | CodeRabbit status context is success | Pass | Re-review can attach after final ledger push |
-| 7 | Aikido | Current PR #188 branch scan | No blocking criticals | Failing check on GitHub | PR #188 check `Aikido Security: check code` failed; details URL is `https://app.aikido.dev/featurebranch/scan/139388987?groupId=106837` | Fail | Release blocker unless fixed or explicitly waived |
+| 7 | Aikido | Current PR #188 branch scan | No introduced security issues and no blocking code-quality findings | Follow-up fixes applied; remote re-scan pending | Screenshot showed no newly introduced security issues and three code-quality findings: contradictory/impossible logic in local queue diagnostics, unsanitized package-smoke logging, and an assembly simplification. The follow-up patch addressed all three. | Pending | Release hold until Aikido confirms the branch scan is green |
 | 7 | PRD-048d rehearsal | `npm publish --dry-run --provenance --access public` | Dry-run reaches publish step without publishing | Failed at version guard | Npm reported `You cannot publish over the previously published versions: 0.1.10`; `npm view @legioncodeinc/honeycomb version` returned `0.1.10` | Blocked | Need candidate version bump or explicit waiver |
 
 ## Fixes Applied During This Pass
@@ -80,10 +81,13 @@ Reasons:
   properties an explicit 15-second timeout.
 - Added proof-local query timeout defaults and request-timeout scaling so packaged live proof failures
   are bounded and observable.
+- Addressed the latest Aikido code-quality findings by changing rollback diagnostic literal-false
+  fields to booleans, redacting env-controlled/package-smoke log output, and simplifying daemon
+  local-queue cleanup to an unconditional idempotent stop.
 
 ## Open Blockers
 
-1. Resolve or explicitly waive the failing Aikido branch scan on PR #188.
+1. Wait for the latest Aikido branch re-scan on PR #188 and resolve or waive any remaining findings.
 2. Decide whether the deferred 10-minute installed-package soak is required before final publish, or
    whether the 120-second background-worker package proof is accepted for this checkpoint.
 3. Bump the package version or explicitly waive the PRD-048d dry-run failure caused by already-published

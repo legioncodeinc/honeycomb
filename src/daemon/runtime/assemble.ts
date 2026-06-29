@@ -2744,9 +2744,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				await daemon.stopServices();
 				started = false;
 			}
-			if (!localQueueConfig.enabled) {
-				await localQueue.stop();
-			}
+			await localQueue.stop();
 			// PRD-043a: close the durable log store handle so no SQLite file handle leaks across a
 			// restart. Idempotent + never throws (the NULL no-op's close is a no-op).
 			logStore.close();
