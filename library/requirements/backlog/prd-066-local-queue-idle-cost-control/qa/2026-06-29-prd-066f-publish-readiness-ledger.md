@@ -92,6 +92,8 @@ Reasons:
   contains `FROM memory_jobs job` and not `FROM "memory_jobs"`.
 - Bumped the release candidate from `0.1.10` to `0.1.11`, synchronized plugin/harness manifests, and
   reran the npm publish dry-run successfully.
+- Hardened the HiveDoctor real-npm Windows smoke by pointing `npm ls -g --json` at an empty temporary
+  global prefix, preserving the real npm launch proof without walking hosted-runner global state.
 
 ## Open Blockers
 
