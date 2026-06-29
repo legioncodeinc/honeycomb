@@ -20,6 +20,13 @@
   X-Content-Type-Options: nosniff
   Cache-Control: public, max-age=300
 
+# The HiveDoctor blessed-version channel (PRD-065). Short cache so a new bless propagates
+# within HiveDoctor's 30-minute auto-update poll. JSON, never sniffed to something else.
+/blessed-version.json
+  Content-Type: application/json; charset=utf-8
+  X-Content-Type-Options: nosniff
+  Cache-Control: public, max-age=300
+
 # The inspect page itself — standard security headers, no framing.
 # CSP is defense-in-depth: the script source injected into the page is HTML-escaped at
 # build time (build.mjs escapeHtml), so it cannot break out of its <pre> container today.

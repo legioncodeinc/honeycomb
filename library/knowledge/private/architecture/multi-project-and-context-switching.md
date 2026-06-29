@@ -133,7 +133,11 @@ Every switch is session-safe: a `switch`, `use`, or `bind` does not corrupt anot
 
 ## The dashboard scope switcher
 
-The dashboard's project-specific surfaces, codebase graph, memory graph, memories, and sync, all follow a single Org → Workspace → Project switcher in the nav shell. Picking a scope re-scopes every one of those pages, and the switcher lists only the scopes the user has privileges in. This makes the same three-level model visible and navigable in the UI that the daemon enforces underneath.
+The dashboard's project-specific surfaces, the home KPI band, codebase graph, memory graph, memories, and sync, all follow a single Org → Workspace → Project switcher in the nav shell. Picking a scope re-scopes every one of those pages, and the switcher lists only the scopes the user has privileges in. This makes the same three-level model visible and navigable in the UI that the daemon enforces underneath.
+
+Each scoped surface threads the selection the same way: the web client stamps the active project onto the read as an `x-honeycomb-project` header, the daemon handler resolves it with `resolveRequestProject`, and the SQL layer narrows the query with a `WHERE project_id = '<id>'` predicate. The home KPI band (Memories / Turns / Est. savings) is the canonical example: `fetchKpisView` builds the predicate with a shared `projectWhereClause` helper and applies it to the memories count, the `sessions` (turns) count, and the est-savings `SUM`. With no project selected the predicate is omitted and the band falls back to workspace-wide totals (back-compat). Because the read also runs four DeepLake aggregate scans and the hash router remounts the home on every visit, the handler caches each result behind a short (10s) TTL keyed by `(scope, project)` so re-landing on the home does not re-run the scans, and scoping to a project additionally shrinks each scan to that project's segment.
+
+One surface is deliberately **not** narrowed: team skills. The `synced_assets` table carries no `project_id` column because a published skill is shared with the **team** (workspace), not bound to a project (see [`../collaboration/team-skills-sharing.md`](../collaboration/team-skills-sharing.md)). So the KPI band's skills count, and any other `synced_assets` read, stays workspace-wide by design even when a project is selected. This is the same asymmetry the recall path enforces: project is the soft inner-ring segment for memory and mined skills, but the team-shared published catalog lives one ring out, at the workspace.
 
 ## What stays out
 

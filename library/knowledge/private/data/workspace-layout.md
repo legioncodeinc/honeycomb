@@ -93,6 +93,19 @@ The active workspace path is resolved in order:
 
 The stored setting is written by `honeycomb workspace set <path>`. The store connection itself is configurable via `memory.store`, which resolves to the DeepLake table namespace for this org and workspace rather than to a local file path.
 
+## Daemon workspace resolution and the writability probe
+
+The resolution order above is the CLI-side rule. The daemon resolves its own filesystem root separately, and the two must agree or the daemon writes its `.secrets/`, `.daemon/`, and `agent.yaml` somewhere the CLI never looks. Inside the daemon, `assemble.ts` derives the secrets-store and log-store base directory from `HONEYCOMB_WORKSPACE ?? process.cwd()`. A detached daemon inherits the cwd of whatever spawned it, so if the CLI launches it without pinning that environment the daemon can land on an arbitrary directory.
+
+On Windows that arbitrary directory is the trap. A CLI invoked from a service or a stray shell sits in `C:\WINDOWS\system32`, which is not writable by a normal user. With `HONEYCOMB_WORKSPACE` unset the daemon then resolves its root to `system32`, every secret write throws `EACCES`, and the secrets handler returns a `502 store_failed` with no audit trail because the swallowed log writes fail silently too. `GET /api/secrets` also reads empty. This is an application 502, not a proxy failure, and it was the observed cause of secrets saves failing from the Settings page.
+
+Two layers now keep the daemon on writable ground:
+
+1. The CLI pins both `cwd` and `HONEYCOMB_WORKSPACE` when it spawns the daemon. `resolveDaemonWorkspace()` returns the first writable of an explicit `HONEYCOMB_WORKSPACE`, the CLI cwd, then `~/.honeycomb`.
+2. The daemon repeats the same fallback as defense in depth. `resolveWorkspaceBaseDir()` is memoized, probes the candidate, and on failure falls back to `~/.honeycomb` after writing a one-line stderr warning so the operator sees the substitution.
+
+Writability is tested by a real create-write-unlink round trip, not by `accessSync(W_OK)`. On Windows `accessSync` inspects the read-only attribute rather than the ACL, so `system32` falsely reports writable. The honest probe (`canWriteDir`) does `mkdirSync` then creates and removes an exclusive `mkdtemp` directory inside the candidate. The randomly suffixed temp name means the probe only ever creates and deletes a path it owns, so it can never truncate or remove a pre-existing workspace file the way a deterministic marker name could. The `~/.honeycomb` runtime directory that holds the PID and single-instance lock is always resolved from the home directory and is never affected by this fallback.
+
 ## What lives where, and why DeepLake
 
 Application state, memories, embeddings, the graph, jobs, sessions, telemetry, lives in DeepLake tables the daemon owns. Embeddings are 768-dim `nomic-embed-text-v1.5` vectors stored as DeepLake tensors. Tables are created lazily with lazy schema-healing, the query endpoint has no parameterized queries (values are escaped and interpolated), structured payloads are `jsonb`, and concurrent-edit tables use append-only version-bumped writes to work around an UPDATE-coalescing quirk. The full schema is documented in [`schema.md`](schema.md) and the storage mechanics in [`deeplake-storage.md`](deeplake-storage.md).

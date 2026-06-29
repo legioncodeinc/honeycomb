@@ -38,7 +38,7 @@ Run `honeycomb dashboard` (or just keep the tab open) to see everything in one p
 - **Graph** is the map of your codebase you can explore.
 - **Sync** shows the skills and assets being shared, mined, and pulled.
 - **Logs** is a live view of what the helper is doing.
-- **Settings** holds your preferences and sign-in status.
+- **Settings** holds your preferences and sign-in status, and lets you do the housekeeping actions right from the page: sign out, turn memory-meaning matching (embeddings) on or off, restart the helper, or remove Honeycomb, without dropping back to the terminal.
 
 If something ever looks off, the dashboard tells you plainly what is degraded and what to do, rather than showing a green light that is not telling the truth.
 

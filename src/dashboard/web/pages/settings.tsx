@@ -36,9 +36,9 @@
 import React from "react";
 
 import { Badge, Button, Input } from "../primitives.js";
-import { Panel, PROVIDER_KEY_NAME, SETTING_KEY, SettingsPanel } from "../panels.js";
+import { Panel, PortkeyGatewaySection, PROVIDER_KEY_NAME, SETTING_KEY, SettingsPanel } from "../panels.js";
 import type { PageProps } from "../page-frame.js";
-import { PageFrame } from "../page-frame.js";
+import { isTabHidden, PageFrame } from "../page-frame.js";
 import { LIFECYCLE_FLAG_REFERENCE } from "../../../shared/lifecycle-flags.js";
 import {
 	DISCONNECTED_AUTH_STATUS,
@@ -188,7 +188,7 @@ export function DeeplakeAuthSection({ wire }: { wire: PageProps["wire"] }): Reac
 	React.useEffect(() => {
 		let alive = true;
 		const tick = async (): Promise<void> => {
-			if (!alive) return;
+			if (!alive || isTabHidden()) return; // background-tab pause: no auth poll while hidden (focus still refreshes)
 			await load();
 		};
 		void tick();
@@ -439,17 +439,24 @@ function RecallModeRow({
  * MIGRATED provider/model/pollinating controls (the existing `SettingsPanel`, REUSED verbatim — D-5).
  * Everything persists through the SAME `vaultSettings()`/`setSetting()` surface with a persist-then
  * re-read contract; `recallMode` adds no new wire method.
+ *
+ * PRD-063a (D-2): when `portkeyEnabled` is true, the provider/model rows are rendered but visually
+ * de-emphasized with a "superseded by Portkey" hint. Turning Portkey off restores them without
+ * re-entry (the keys are still persisted — only the hint disappears).
  */
 export function SearchAndInferenceSection({
 	settings,
 	catalog,
 	secretNames,
 	onSave,
+	portkeyEnabled,
 }: {
 	settings: Readonly<Record<string, SettingValueWire>>;
 	catalog: VaultSettingsWire["catalog"];
 	secretNames: readonly string[];
 	onSave: (key: string, value: SettingValueWire) => Promise<boolean>;
+	/** PRD-063a D-2: when true, de-emphasize the per-provider rows + activeProvider selector. */
+	portkeyEnabled?: boolean;
 }): React.JSX.Element {
 	// The persisted recall mode (controlled). The "default" option maps to "" → the key stays UNSET
 	// (preserving the PRD-025 runtime decision). String() defends against a non-string scalar.
@@ -459,9 +466,22 @@ export function SearchAndInferenceSection({
 		<Panel title="Search & inference" eyebrow="recall mode · provider · model · pollinating">
 			<div data-testid="search-inference">
 				<RecallModeRow value={recallMode} onChange={(v) => void onSave(SETTING_KEY.recallMode, v)} />
+				{/* PRD-063a D-2: when Portkey is on, label the provider section as superseded. The controls
+				    remain visible so the user knows their persisted keys are still there; they are simply
+				    de-emphasized so it is clear they are not the active inference path. */}
+				{portkeyEnabled === true && (
+					<div
+						data-testid="portkey-supersedes-hint"
+						style={{ padding: "6px 6px 2px", fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-tertiary)" }}
+					>
+						superseded by Portkey — provider keys still stored, not the active inference path
+					</div>
+				)}
 				{/* The MIGRATED provider/model/pollinating panel — REUSED, not forked (D-5). It carries its
-				    own Panel shell, so it nests cleanly below the recall-mode row. */}
-				<div style={{ marginTop: 8 }}>
+				    own Panel shell, so it nests cleanly below the recall-mode row. When Portkey is on, we
+				    wrap it in a muted overlay to visually de-emphasize it (opacity only, controls still
+				    accessible so the user can read what is stored). */}
+				<div style={{ marginTop: 8, opacity: portkeyEnabled === true ? 0.45 : 1, transition: "opacity 0.15s" }}>
 					<SettingsPanel catalog={catalog} settings={settings} secretNames={secretNames} onSave={onSave} />
 				</div>
 			</div>
@@ -731,6 +751,23 @@ export function SettingsPage({ wire }: PageProps): React.JSX.Element {
 		[wire, hydrateSettings],
 	);
 
+	// PRD-063a (D-2): derive portkeyEnabled from persisted vault settings so the SearchAndInference
+	// section can de-emphasize per-provider rows. The raw value is a SettingValueWire (string|number|
+	// boolean|"") coming through the tolerant z.record() catch; coerce to boolean explicitly.
+	const portkeyEnabled = vault.settings[SETTING_KEY.portkeyEnabled] === true;
+
+	// PRD-063a (a-AC-4): write the PORTKEY_API_KEY secret then re-read the names-only presence so the
+	// badge updates. The value is NEVER stored in component state; it is consumed by the key input,
+	// cleared immediately on success, and the only trace of it is the names list confirming presence.
+	const onSavePortkeyKey = React.useCallback(
+		async (value: string): Promise<boolean> => {
+			const ok = await wire.setSecret(PROVIDER_KEY_NAME.portkey, value);
+			await hydrateSecretNames();
+			return ok;
+		},
+		[wire, hydrateSecretNames],
+	);
+
 	return (
 		<PageFrame title="Settings" eyebrow="deeplake · provider keys · search mode">
 			<div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -738,7 +775,20 @@ export function SettingsPage({ wire }: PageProps): React.JSX.Element {
 				<ProviderKeysSection wire={wire} secretNames={secretNames} onSaved={() => void hydrateSecretNames()} />
 				{/* Dashboard action: turn semantic embeddings on/off (live + persisted). */}
 				<EmbeddingsSection wire={wire} />
-				<SearchAndInferenceSection settings={vault.settings} catalog={vault.catalog} secretNames={secretNames} onSave={onSaveSetting} />
+				{/* PRD-063a: Portkey gateway section — toggle, config id, write-only key, fallback toggle. */}
+				<PortkeyGatewaySection
+					settings={vault.settings}
+					secretNames={secretNames}
+					onSaveSetting={onSaveSetting}
+					onSaveKey={onSavePortkeyKey}
+				/>
+				<SearchAndInferenceSection
+					settings={vault.settings}
+					catalog={vault.catalog}
+					secretNames={secretNames}
+					onSave={onSaveSetting}
+					portkeyEnabled={portkeyEnabled}
+				/>
 				{/* PRD-058d (AC-55d.1.3): the memory.lifecycle.* config reference (symbol · default · effect · env). */}
 				<LifecycleConfigSection />
 				{/* Dashboard actions: restart the daemon + uninstall (two-step confirm). */}

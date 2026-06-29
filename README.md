@@ -30,7 +30,12 @@
     </picture>
   </a>
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://activeloop.ai"><img src="assets/logos/activeloop-full-mark-logo.svg" alt="Activeloop" height="26"></a>
+  <a href="https://activeloop.ai">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/logos/activeloop-full-mark-logo-on-dark.svg">
+      <img src="assets/logos/activeloop-full-mark-logo.svg" alt="Activeloop" height="26">
+    </picture>
+  </a>
 </p>
 
 <p align="center"><sub>A <a href="https://github.com/legioncodeinc"><strong>Legion Code</strong></a> &times; <a href="https://activeloop.ai"><strong>Activeloop</strong></a> collaboration · built on <a href="https://github.com/activeloopai/hivemind">Hivemind</a> &amp; <a href="https://deeplake.ai">Deep Lake</a></sub></p>
@@ -88,7 +93,7 @@ curl -fsSL https://get.theapiary.sh | sh
 irm https://get.theapiary.sh/install.ps1 | iex
 ```
 
-That single line installs a current Node/npm if missing, installs **`@legioncodeinc/honeycomb`** globally, brings up the daemon on `127.0.0.1:3850`, and opens the dashboard. Then:
+That single line installs a current Node/npm if missing, installs **`@legioncodeinc/honeycomb`** globally, brings up the daemon on `127.0.0.1:3850`, opens the dashboard, and sets up **[HiveDoctor](#-hivedoctor-the-self-healing-watchdog)**, a tiny watchdog that keeps it all healthy (opt out with `--no-hivedoctor`). Then:
 
 1. The dashboard loads in a **pre-auth setup state**. No token ever touches your shell.
 2. Click **"First time setup."** Honeycomb runs the Deep Lake device-flow login *for* you, shows the code right on the page, and opens the verification tab.
@@ -207,6 +212,17 @@ Four ways to reach the same daemon and the same shared memory:
 - **Dashboard.** A local web UI the daemon serves at **`http://127.0.0.1:3850/dashboard`**: KPIs (memories, turns, est. savings, team skills), memory recall, the codebase graph, captured turns, skill-sync, and settings, with a live request log. It's also the guided-setup surface for first-time login.
 - **MCP server.** A [Model Context Protocol](https://modelcontextprotocol.io) server (bundled to `mcp/bundle`) exposing Honeycomb's read/resolve and search/mine tools to any MCP-capable host.
 - **TypeScript SDK.** The `@legioncodeinc/honeycomb` client with framework subpath entries (`/react`, `/vercel`, `/openai`). The core entry is fetch-only and browser-safe; `react` and `ai` are optional peers.
+
+---
+
+## 🩺 HiveDoctor: the self-healing watchdog
+
+A daemon you cannot see is a daemon you cannot trust. **[HiveDoctor](https://www.npmjs.com/package/@legioncodeinc/hivedoctor)** is a separate, deliberately tiny package (zero runtime dependencies, Node built-ins only) that keeps your Honeycomb daemon healthy and reports home when it cannot. It is supervised by your OS (launchd / systemd / Windows Scheduled Task), so it survives crashes and reboots independently of the daemon it watches.
+
+- **Watches and heals.** Probes the daemon's `/health` and runs an escalating repair ladder with exponential backoff: restart, then reinstall, then remove a conflicting Hivemind, then escalate. It goes quiet the moment the daemon is healthy, and it never touches your credentials.
+- **Tells us when it cannot.** An unhealable install surfaces a local status page and, unless you opt out, sends a scrubbed diagnosis home, so problems get fixed proactively instead of becoming a support thread.
+- **Keeps Honeycomb current.** Safely auto-updates the daemon behind a blessed-release gate, verifying health and rolling back on failure.
+- **Honest by default.** Telemetry is opt-out (`DO_NOT_TRACK=1`, `HONEYCOMB_TELEMETRY=0`, or the dashboard) and never includes credentials, tokens, or your code. The one-command installer sets it up automatically; skip it with `--no-hivedoctor`. Full details in the [HiveDoctor README](hivedoctor/README.md).
 
 ---
 

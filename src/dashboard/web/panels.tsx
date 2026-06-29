@@ -447,6 +447,11 @@ export const SETTING_KEY = Object.freeze({
 	// validated daemon-side (`vault/api.ts` `isValidRecallMode`, fail-closed); an UNSET key
 	// preserves the PRD-025 runtime default (the page's "default" option leaves it unset).
 	recallMode: "recallMode",
+	// PRD-063a: Portkey gateway setting keys. Accepted by `isKnownSettingKey` + validated by
+	// `validateSettingSemantics` daemon-side; the dashboard treats them as opaque scalar settings.
+	portkeyEnabled: "portkey.enabled",
+	portkeyConfig: "portkey.config",
+	portkeyFallbackToProvider: "portkey.fallbackToProvider",
 } as const);
 
 /**
@@ -463,6 +468,8 @@ export const PROVIDER_KEY_NAME: Record<string, string> = Object.freeze({
 	// name is NEW (grep-confirmed: `COHERE_API_KEY` exists nowhere else). Adding Cohere to the
 	// model router/catalog (PROVIDER_CATALOG) is OUT of scope here — that is PRD-010 (OQ-1).
 	cohere: "COHERE_API_KEY",
+	// PRD-063a: Portkey gateway API key presence (names-only — the write-only vault pattern).
+	portkey: "PORTKEY_API_KEY",
 });
 
 /** A styled native `<select>` matching the DS tokens (the kit has no Select primitive). */
@@ -682,6 +689,198 @@ function ProviderKeyBadge({ provider, secretNames }: { provider: string; secretN
 		<Badge tone={present ? "verified" : "neutral"} mono dot>
 			{present ? "key set ✓" : "not set"}
 		</Badge>
+	);
+}
+
+// ── Portkey gateway section (PRD-063a) ────────────────────────────────────────
+
+/** Props for the {@link PortkeyGatewaySection}. */
+export interface PortkeyGatewaySectionProps {
+	/** The current persisted settings (key→value) from the vault — same record the SettingsPanel uses. */
+	readonly settings: Readonly<Record<string, SettingValueWire>>;
+	/** The secret NAMES present (from `GET /api/secrets`) — for key presence only, never a value. */
+	readonly secretNames: readonly string[];
+	/**
+	 * Persist one setting through the daemon, then re-read. Same contract as `SettingsPanelProps.onSave`.
+	 * The section calls this for `portkey.enabled`, `portkey.config`, and `portkey.fallbackToProvider`.
+	 */
+	readonly onSaveSetting: (key: string, value: SettingValueWire) => Promise<boolean>;
+	/**
+	 * Write-only store the `PORTKEY_API_KEY` secret. Called with the raw key value; the section
+	 * CLEARS the draft on success (write-only discipline, a-AC-6). Returns true iff the daemon accepted.
+	 */
+	readonly onSaveKey: (value: string) => Promise<boolean>;
+}
+
+/**
+ * PRD-063a Portkey gateway section (a-AC-1 / a-AC-2 / a-AC-4 / a-AC-5 / a-AC-6).
+ *
+ * Renders:
+ *   - `portkey.enabled` toggle (on/off)
+ *   - `portkey.config` free-form text input (config id or virtual key)
+ *   - `PORTKEY_API_KEY` write-only password input + presence badge ("key set ✓" / "not set")
+ *   - `portkey.fallbackToProvider` opt-in toggle (default false)
+ *
+ * Built entirely from existing DS tokens/primitives (Panel, Toggle, SettingRow, etc.).
+ * Every write goes through `onSaveSetting` / `onSaveKey` — the section never opens the vault
+ * directly. The API key input is write-only and CLEARED on a successful save (a-AC-6).
+ */
+export function PortkeyGatewaySection({ settings, secretNames, onSaveSetting, onSaveKey }: PortkeyGatewaySectionProps): React.JSX.Element {
+	const enabled = settings[SETTING_KEY.portkeyEnabled] === true || settings[SETTING_KEY.portkeyEnabled] === "true";
+	const configValue = String(settings[SETTING_KEY.portkeyConfig] ?? "");
+	const fallback = settings[SETTING_KEY.portkeyFallbackToProvider] === true || settings[SETTING_KEY.portkeyFallbackToProvider] === "true";
+
+	// Local draft for the config text input (committed on blur/Enter — no POST per keystroke).
+	const [configDraft, setConfigDraft] = React.useState(configValue);
+	React.useEffect(() => setConfigDraft(configValue), [configValue]);
+
+	// Write-only API key draft — CLEARED on success, NEVER pre-filled (no value to fetch).
+	const [keyDraft, setKeyDraft] = React.useState("");
+	const [keySaving, setKeySaving] = React.useState(false);
+	const [keyRejected, setKeyRejected] = React.useState(false);
+
+	const commitConfig = (): void => {
+		const v = configDraft.trim();
+		if (v !== configValue) void onSaveSetting(SETTING_KEY.portkeyConfig, v);
+	};
+
+	const submitKey = React.useCallback(async (): Promise<void> => {
+		const value = keyDraft;
+		// Client-side empty-value guard before the POST (mirrors ProviderKeyRow discipline).
+		if (value.length === 0) {
+			setKeyRejected(true);
+			return;
+		}
+		setKeySaving(true);
+		setKeyRejected(false);
+		const ok = await onSaveKey(value);
+		setKeySaving(false);
+		if (ok) {
+			// Write-only: CLEAR the draft on a successful save (a-AC-6).
+			setKeyDraft("");
+		} else {
+			setKeyRejected(true);
+		}
+	}, [keyDraft, onSaveKey]);
+
+	const keyName = PROVIDER_KEY_NAME.portkey ?? "PORTKEY_API_KEY";
+	const keyPresent = secretNames.includes(keyName);
+
+	return (
+		<Panel title="Portkey gateway" eyebrow="portkey.enabled · config · API key · fallback">
+			<div data-testid="portkey-gateway-section" style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+				{/* portkey.enabled toggle */}
+				<SettingRow label="Use Portkey gateway" hint="routes all inference through Portkey">
+					<Toggle
+						ariaLabel="portkey enabled"
+						on={enabled}
+						onToggle={() => void onSaveSetting(SETTING_KEY.portkeyEnabled, !enabled)}
+					/>
+				</SettingRow>
+
+				{/* portkey.config free-form text input */}
+				<SettingRow label="Portkey config" hint="config id or virtual key from your Portkey dashboard">
+					<input
+						aria-label="portkey config"
+						data-testid="portkey-config-input"
+						type="text"
+						value={configDraft}
+						placeholder="pk-…"
+						onChange={(e) => setConfigDraft(e.target.value)}
+						onBlur={commitConfig}
+						onKeyDown={(e) => {
+							if (e.key === "Enter") commitConfig();
+						}}
+						style={{
+							height: 36,
+							padding: "0 10px",
+							background: "var(--bg-surface)",
+							border: "1px solid var(--border-default)",
+							borderRadius: "var(--radius-md)",
+							color: "var(--text-primary)",
+							fontFamily: "var(--font-mono)",
+							fontSize: 13,
+							minWidth: 240,
+						}}
+					/>
+				</SettingRow>
+
+				{/* PORTKEY_API_KEY write-only row */}
+				<div
+					data-testid="portkey-key-row"
+					style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 6px", borderTop: "1px solid var(--border-subtle)", flexWrap: "wrap" }}
+				>
+					<span style={{ fontSize: 14, color: "var(--text-primary)", minWidth: 150 }}>Portkey API key</span>
+					<div style={{ flex: "1 1 220px", minWidth: 180 }}>
+						<input
+							aria-label="portkey api key"
+							data-testid="portkey-key-input"
+							type="password"
+							value={keyDraft}
+							placeholder={keyPresent ? "replace key…" : "paste key…"}
+							onChange={(e) => {
+								setKeyDraft(e.target.value);
+								if (keyRejected) setKeyRejected(false);
+							}}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") void submitKey();
+							}}
+							style={{
+								height: 36,
+								padding: "0 10px",
+								width: "100%",
+								background: "var(--bg-surface)",
+								border: "1px solid var(--border-default)",
+								borderRadius: "var(--radius-md)",
+								color: "var(--text-primary)",
+								fontFamily: "var(--font-mono)",
+								fontSize: 13,
+							}}
+						/>
+					</div>
+					<button
+						type="button"
+						disabled={keySaving}
+						data-testid="portkey-key-save"
+						onClick={() => void submitKey()}
+						style={{
+							height: 36,
+							padding: "0 14px",
+							background: "var(--bg-elevated)",
+							border: "1px solid var(--border-default)",
+							borderRadius: "var(--radius-md)",
+							color: "var(--text-primary)",
+							fontFamily: "var(--font-mono)",
+							fontSize: 13,
+							cursor: keySaving ? "default" : "pointer",
+							opacity: keySaving ? 0.6 : 1,
+						}}
+					>
+						{keySaving ? "saving…" : "Save key"}
+					</button>
+					<Badge tone={keyPresent ? "verified" : "neutral"} mono dot>
+						{keyPresent ? "key set ✓" : "not set"}
+					</Badge>
+					{keyRejected && (
+						<span
+							data-testid="portkey-key-rejected"
+							style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--severity-critical)" }}
+						>
+							not accepted
+						</span>
+					)}
+				</div>
+
+				{/* portkey.fallbackToProvider opt-in toggle (D-3: default false) */}
+				<SettingRow label="Fallback to provider" hint="use per-provider key if Portkey is unreachable">
+					<Toggle
+						ariaLabel="portkey fallback to provider"
+						on={fallback}
+						onToggle={() => void onSaveSetting(SETTING_KEY.portkeyFallbackToProvider, !fallback)}
+					/>
+				</SettingRow>
+			</div>
+		</Panel>
 	);
 }
 
