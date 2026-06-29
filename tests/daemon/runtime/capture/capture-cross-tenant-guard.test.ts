@@ -193,7 +193,7 @@ describe("Cross-tenant guard for GET /api/hooks/conversation (pentest mitigation
 		expect(body.rows[0].id).toBe("row-1");
 
 		// The SELECT went out with the org from the header (no identity to cross-check).
-		const select = fake.requests.find((r) => /^\\s*SELECT/i.test(r.sql));
+		const select = fake.requests.find((r) => /^\s*SELECT/i.test(r.sql));
 		expect(select?.org).toBe(LEGITIMATE_ORG);
 	});
 
@@ -218,7 +218,7 @@ describe("Cross-tenant guard for GET /api/hooks/conversation (pentest mitigation
 		expect(body.reason).toContain("x-honeycomb-org");
 
 		// No SELECT went out — the handler failed closed before reaching storage.
-		const selects = fake.requests.filter((r) => /^\\s*SELECT/i.test(r.sql));
+		const selects = fake.requests.filter((r) => /^\s*SELECT/i.test(r.sql));
 		expect(selects.length).toBe(0);
 	});
 
@@ -246,7 +246,7 @@ describe("Cross-tenant guard for GET /api/hooks/conversation (pentest mitigation
 		expect(body.rows[0].id).toBe("row-2");
 
 		// The SELECT went out with the org from the identity (which matches the header).
-		const select = fake.requests.find((r) => /^\\s*SELECT/i.test(r.sql));
+		const select = fake.requests.find((r) => /^\s*SELECT/i.test(r.sql));
 		expect(select?.org).toBe(LEGITIMATE_ORG);
 	});
 
@@ -273,7 +273,7 @@ describe("Cross-tenant guard for GET /api/hooks/conversation (pentest mitigation
 
 		// Assert that the org in the transport request is LEGITIMATE_ORG (from the identity),
 		// not any attacker-controlled value. This proves the scope is identity-bound.
-		const select = fake.requests.find((r) => /^\\s*SELECT/i.test(r.sql));
+		const select = fake.requests.find((r) => /^\s*SELECT/i.test(r.sql));
 		expect(select?.org).toBe(LEGITIMATE_ORG);
 		expect(select?.org).not.toBe(VICTIM_ORG);
 	});
@@ -304,7 +304,7 @@ describe("Cross-tenant guard for GET /api/hooks/conversation (pentest mitigation
 		expect(body.reason).toContain("x-honeycomb-org");
 
 		// No SELECT went out.
-		const selects = fake.requests.filter((r) => /^\\s*SELECT/i.test(r.sql));
+		const selects = fake.requests.filter((r) => /^\s*SELECT/i.test(r.sql));
 		expect(selects.length).toBe(0);
 	});
 
@@ -325,7 +325,7 @@ describe("Cross-tenant guard for GET /api/hooks/conversation (pentest mitigation
 		expect(body.error).toBe("bad_request");
 
 		// No SELECT went out.
-		const selects = fake.requests.filter((r) => /^\\s*SELECT/i.test(r.sql));
+		const selects = fake.requests.filter((r) => /^\s*SELECT/i.test(r.sql));
 		expect(selects.length).toBe(0);
 	});
 
@@ -349,7 +349,7 @@ describe("Cross-tenant guard for GET /api/hooks/conversation (pentest mitigation
 		expect(res.status).toBe(200);
 
 		// The SELECT went out with both org and workspace from the headers (org validated).
-		const select = fake.requests.find((r) => /^\\s*SELECT/i.test(r.sql));
+		const select = fake.requests.find((r) => /^\s*SELECT/i.test(r.sql));
 		expect(select?.org).toBe(LEGITIMATE_ORG);
 		expect(select?.workspace).toBe(WORKSPACE);
 	});
@@ -383,7 +383,7 @@ describe("Cross-tenant guard for GET /api/hooks/conversation (pentest mitigation
 		expect(body.error).toBe("bad_request");
 
 		// No SELECT went out — the attacker cannot read victim org data.
-		const selects = fake.requests.filter((r) => /^\\s*SELECT/i.test(r.sql));
+		const selects = fake.requests.filter((r) => /^\s*SELECT/i.test(r.sql));
 		expect(selects.length).toBe(0);
 	});
 });
