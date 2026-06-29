@@ -62,6 +62,7 @@ import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import { compactVersionHistory, COMPACTABLE_VERSION_BUMPED_TABLES, resolveCompactionConfig, type CompactionRetention, type CompactionSummary } from "../../storage/compaction.js";
 import { healTargetFor } from "../../storage/catalog/index.js";
 import { tableExists, type HealTarget } from "../../storage/heal.js";
+import { getRequestIdentity } from "../middleware/permission.js";
 import type { Daemon } from "../server.js";
 
 /** The route the compaction trigger is served at (full path `/api/diagnostics/compact`). */
@@ -189,12 +190,31 @@ const NO_ORG_BODY = { error: "bad_request", reason: "x-honeycomb-org header is r
  * request carries no `x-honeycomb-org` header (the local-mode posture). Returns `null` ONLY
  * when neither a header org NOR a default org is present — fail-closed. Mirrors
  * `mountPollinateApi`'s `resolveTriggerScope`.
+ *
+ * ── Cross-tenant guard (PRD-022 security) ────────────────────────────────────
+ * When a validated Identity is present, the resolved org MUST equal `identity.org`;
+ * a mismatch falls back to the daemon's own `defaultScope`.
+ *
+ * ── Cross-workspace guard (PRD-022 security hardening) ───────────────────────
+ * When a validated Identity is present, the workspace is taken from `identity.workspace`
+ * (the token's own workspace), NOT from the header. The header is trusted ONLY in local
+ * mode (no Identity).
  */
 function resolveCompactScope(c: Context, defaultScope: QueryScope): QueryScope | null {
 	const org = c.req.header("x-honeycomb-org");
 	if (org !== undefined && org.length > 0) {
-		const workspace = c.req.header("x-honeycomb-workspace");
-		return workspace !== undefined && workspace.length > 0 ? { org, workspace } : { org };
+		// Cross-tenant guard: never honor a header org that disagrees with the validated token org.
+		const identity = getRequestIdentity(c);
+		if (identity === undefined || org === identity.org) {
+			// When an authenticated Identity is present, use its workspace rather than trusting
+			// the header — a forged workspace header must not allow cross-workspace access.
+			if (identity !== undefined) {
+				return { org: identity.org, workspace: identity.workspace };
+			}
+			// Local mode (no Identity): trust the header, with optional workspace.
+			const workspace = c.req.header("x-honeycomb-workspace");
+			return workspace !== undefined && workspace.length > 0 ? { org, workspace } : { org };
+		}
 	}
 	return defaultScope.org.length > 0 ? defaultScope : null;
 }

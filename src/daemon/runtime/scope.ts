@@ -145,8 +145,14 @@ export function resolveRequestProject(
  * the token's own org would let an authenticated caller for org A read/write org B by
  * forging `x-honeycomb-org: orgB`. When a validated Identity is present, the resolved
  * org MUST equal `identity.org`; a mismatch returns `null` → the handler fails closed
- * (its existing 400/deny). In local mode no Identity is stamped, so the prior pure-header
- * behaviour is unchanged.
+ * (its existing 400/deny).
+ *
+ * ── Cross-workspace hardening (PRD-022 security) ─────────────────────────────
+ * Similarly, an authenticated caller must not be able to forge `x-honeycomb-workspace` to
+ * access data in a different workspace within the same org. When a validated Identity is
+ * present, the workspace is taken from `identity.workspace` (the token's own workspace),
+ * NOT from the header. The header is trusted ONLY in local mode (no Identity). This mirrors
+ * the pattern in `assets/api.ts` and `dashboard/sync-mount.ts`.
  */
 export function resolveScopeFromHeaders(c: Context): QueryScope | null {
 	const org = c.req.header("x-honeycomb-org");
@@ -154,6 +160,13 @@ export function resolveScopeFromHeaders(c: Context): QueryScope | null {
 	// Cross-tenant guard: a forged org header can never cross the token's own org boundary.
 	const identity = getRequestIdentity(c);
 	if (identity !== undefined && org !== identity.org) return null;
+	// When an authenticated Identity is present, use its workspace (the token's own
+	// workspace) rather than trusting the header — a forged workspace header must not
+	// allow cross-workspace access within the same org (PRD-022 hardening).
+	if (identity !== undefined) {
+		return { org: identity.org, workspace: identity.workspace };
+	}
+	// Local mode (no Identity): trust the header, with optional workspace.
 	const workspace = c.req.header("x-honeycomb-workspace");
 	return workspace !== undefined && workspace.length > 0 ? { org, workspace } : { org };
 }
