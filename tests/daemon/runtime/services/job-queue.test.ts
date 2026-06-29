@@ -40,6 +40,7 @@ import {
 	createJobQueueService,
 	type JobQueueClock,
 	type JobQueueDeps,
+	type JobQueueService,
 } from "../../../../src/daemon/runtime/services/job-queue.js";
 
 const SCOPE: QueryScope = { org: "fake-org", workspace: "fake-ws" };
@@ -618,5 +619,83 @@ describe("b-AC-7 completed jobs purge past the window; dead jobs are retained lo
 		// The done job's rows are gone; the dead job's rows are retained.
 		expect(store.current(doneId)).toBeUndefined();
 		expect(store.current(deadId)?.status).toBe("dead");
+	});
+});
+
+describe("PRD-062e reaper idle hibernation + the enqueue wake chokepoint", () => {
+	/** Flush the void-returning async reaper sweep (mirrors the b-AC-3 pattern). */
+	const flushReaper = (): Promise<void> => new Promise((r) => setImmediate(r));
+	/** How many DeepLake discovery scans (the reaper's read) have been issued so far. */
+	const discoverScans = (fake: FakeDeepLakeTransport): number =>
+		fake.requests.filter((r) => /SELECT DISTINCT/i.test(r.sql)).length;
+
+	function buildStorage(store: InMemoryJobs): { storage: StorageClient; fake: FakeDeepLakeTransport } {
+		const fake = new FakeDeepLakeTransport(store.responder);
+		const storage = createStorageClient({ transport: fake, provider: stubProvider(fakeCredentialRecord()) });
+		return { storage, fake };
+	}
+
+	it("AC-62e: enqueue fires onEnqueue exactly once on a successful append (the wake chokepoint)", async () => {
+		const { storage } = buildStorage(new InMemoryJobs());
+		let wakes = 0;
+		const queue = createJobQueueService({
+			storage,
+			scope: SCOPE,
+			clock: manualClock(),
+			onEnqueue: () => {
+				wakes++;
+			},
+		});
+		await queue.enqueue({ kind: "x", payload: { a: 1 } });
+		expect(wakes).toBe(1); // every new job rings the wake bus.
+	});
+
+	it("AC-62e: the reaper hibernates after consecutive idle sweeps and an enqueue's wake resumes it", async () => {
+		const clock = manualClock();
+		const { storage, fake } = buildStorage(new InMemoryJobs());
+		let queue: JobQueueService;
+		// Wire onEnqueue → wakeReaper exactly as the daemon's wake bus does.
+		queue = createJobQueueService({
+			storage,
+			scope: SCOPE,
+			clock,
+			config: { reaperIntervalMs: 1_000 },
+			suspendEnabled: true,
+			onEnqueue: () => queue.wakeReaper?.(),
+		});
+		await queue.start(); // arms the reaper + kicks one immediate idle sweep (idle run = 1).
+		await flushReaper();
+		clock.tick(); // a second idle sweep reaches the suspend threshold → the reaper hibernates.
+		await flushReaper();
+
+		// Hibernated: a further tick fires a cleared (no-op) timer, so ZERO new reaper reads.
+		const scansAtSuspend = discoverScans(fake);
+		clock.tick();
+		await flushReaper();
+		expect(discoverScans(fake)).toBe(scansAtSuspend);
+
+		// A new job enqueues → onEnqueue → wakeReaper re-arms the reaper; its next sweep reads again.
+		await queue.enqueue({ kind: "x", payload: {} });
+		clock.tick();
+		await flushReaper();
+		expect(discoverScans(fake)).toBeGreaterThan(scansAtSuspend);
+		queue.stop();
+	});
+
+	it("AC-62e: with suspend disabled the reaper keeps sweeping forever (rollback / AC-9 parity)", async () => {
+		const clock = manualClock();
+		const { storage, fake } = buildStorage(new InMemoryJobs());
+		// suspendEnabled omitted → false: the reaper never hibernates (pre-PRD steady sweep).
+		const queue = createJobQueueService({ storage, scope: SCOPE, clock, config: { reaperIntervalMs: 1_000 } });
+		await queue.start();
+		await flushReaper();
+		const before = discoverScans(fake);
+		// Many idle sweeps: each one still reads (it never suspends).
+		for (let i = 0; i < 3; i++) {
+			clock.tick();
+			await flushReaper();
+		}
+		expect(discoverScans(fake)).toBeGreaterThan(before);
+		queue.stop();
 	});
 });

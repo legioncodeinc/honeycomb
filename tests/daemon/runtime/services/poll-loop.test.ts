@@ -203,4 +203,99 @@ describe("AdaptivePollLoop: AC-2 / AC-3 — adaptive self-reschedule", () => {
 		await flush();
 		expect(timers.delays.length).toBe(before);
 	});
+
+	it("start() is idempotent: a second start() never arms a second timer", () => {
+		const timers = manualTimers();
+		const loop = createPollLoop({ tick: async () => false, backoff: ENABLED, flatIntervalMs: 1_000, timers });
+		loop.start();
+		loop.start(); // a double start must be a no-op, not a leaked second timer.
+		expect(timers.armedCount()).toBe(1);
+		loop.stop();
+		expect(timers.armedCount()).toBe(0);
+	});
+});
+
+describe("AdaptivePollLoop: idle hibernation, suspends when idle, wakes on demand (PRD-062e)", () => {
+	// Over the 1000→30000 window the post-step idle accrual is 2000, 4000, 8000, ... so a
+	// 14000ms window trips suspension on exactly the THIRD empty tick (2000+4000+8000).
+	const SUSPEND = PollBackoffConfigSchema.parse({
+		enabled: true,
+		floorMs: 1_000,
+		ceilingMs: 30_000,
+		jitter: 0,
+		suspendEnabled: true,
+		suspendAfterMs: 14_000,
+	});
+
+	it("AC-62e.8: after the idle window the loop STOPS arming timers (zero further polls)", async () => {
+		const timers = manualTimers();
+		const loop = createPollLoop({ tick: async () => false, backoff: SUSPEND, flatIntervalMs: 1_000, timers });
+		loop.start();
+		expect(timers.delays).toEqual([1_000]);
+		for (let i = 0; i < 3; i++) {
+			timers.fireNext();
+			await flush();
+		}
+		// The loop hibernated: it did NOT re-arm after the third tick, so no timer is live and
+		// the daemon issues ZERO further DeepLake polls until woken (Activeloop can scale to zero).
+		expect(timers.armedCount()).toBe(0);
+		expect(timers.delays).toEqual([1_000, 2_000, 4_000]); // the suspending tick armed nothing.
+		loop.stop();
+	});
+
+	it("AC-62e.9: wake() resumes a suspended loop at the fast floor and it ticks again", async () => {
+		const timers = manualTimers();
+		const loop = createPollLoop({ tick: async () => false, backoff: SUSPEND, flatIntervalMs: 1_000, timers });
+		loop.start();
+		for (let i = 0; i < 3; i++) {
+			timers.fireNext();
+			await flush();
+		}
+		expect(timers.armedCount()).toBe(0); // suspended.
+		loop.wake();
+		// A wake re-arms exactly one timer at the floor, so the just-woken loop polls immediately.
+		expect(timers.armedCount()).toBe(1);
+		expect(timers.delays.at(-1)).toBe(1_000);
+		// And it resumes the normal adaptive cadence from the floor (backs off again).
+		timers.fireNext();
+		await flush();
+		expect(timers.delays.at(-1)).toBe(2_000);
+		loop.stop();
+	});
+
+	it("AC-62e.10: wake() never double-arms a live loop and is a no-op after stop()", async () => {
+		const timers = manualTimers();
+		const loop = createPollLoop({ tick: async () => false, backoff: SUSPEND, flatIntervalMs: 1_000, timers });
+		loop.start();
+		// A wake on a live, non-suspended loop must NOT arm a second timer (no double-poll).
+		loop.wake();
+		expect(timers.armedCount()).toBe(1);
+		loop.stop();
+		const delaysAfterStop = timers.delays.length;
+		loop.wake(); // a stopped loop stays stopped.
+		expect(timers.armedCount()).toBe(0);
+		expect(timers.delays.length).toBe(delaysAfterStop);
+	});
+
+	it("AC-62e.11: with suspend DISABLED the loop backs off to the ceiling but never hibernates", async () => {
+		const noSuspend = PollBackoffConfigSchema.parse({
+			enabled: true,
+			floorMs: 1_000,
+			ceilingMs: 30_000,
+			jitter: 0,
+			suspendEnabled: false,
+			suspendAfterMs: 14_000,
+		});
+		const timers = manualTimers();
+		const loop = createPollLoop({ tick: async () => false, backoff: noSuspend, flatIntervalMs: 1_000, timers });
+		loop.start();
+		for (let i = 0; i < 8; i++) {
+			timers.fireNext();
+			await flush();
+		}
+		// It pins at the ceiling and ALWAYS re-arms, holding 062b's steady ~30s cadence, never zero.
+		expect(timers.armedCount()).toBe(1);
+		expect(timers.delays.at(-1)).toBe(30_000);
+		loop.stop();
+	});
 });

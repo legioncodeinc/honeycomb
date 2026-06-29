@@ -43,6 +43,14 @@ export const DEFAULT_POLL_BACKOFF_CEILING_MS = 30_000;
  * daemons so they do not re-stampede DeepLake in lockstep at each ceiling wake-up.
  */
 export const DEFAULT_POLL_BACKOFF_JITTER = 0.1;
+/**
+ * Default idle window before a fully-idle loop SUSPENDS (5 min, PRD-062e). The 30s
+ * ceiling 062b reaches still resets Activeloop's compute idle-timer forever; once
+ * the accumulated idle wait passes this window the loop stops re-arming ENTIRELY
+ * (zero DeepLake polls) so compute can finally scale to zero. A new job (any
+ * `wake()`) resets the accumulator and resumes the fast floor.
+ */
+export const DEFAULT_POLL_SUSPEND_AFTER_MS = 5 * 60 * 1_000;
 
 /**
  * A boolean flag read from an env string: `true`/`1` → true, anything else →
@@ -100,6 +108,18 @@ export const PollBackoffConfigSchema = z.object({
 	ceilingMs: ClampedInt(DEFAULT_POLL_BACKOFF_CEILING_MS).default(DEFAULT_POLL_BACKOFF_CEILING_MS),
 	/** +/- jitter fraction of the current step, anti-thundering-herd. */
 	jitter: ClampedFraction(DEFAULT_POLL_BACKOFF_JITTER).default(DEFAULT_POLL_BACKOFF_JITTER),
+	/**
+	 * Idle hibernation switch (PRD-062e). When on, a loop that has been idle past
+	 * `suspendAfterMs` stops polling entirely until woken. Off → 062b's steady ~30s
+	 * ceiling cadence, never suspending. FALSE-SAFE here so a bare `{}` is the 062b
+	 * path; the env resolver ships this DEFAULT-ON (see {@link envPollBackoffConfigProvider}).
+	 */
+	suspendEnabled: BoolFlag.default(false),
+	/**
+	 * Accumulated idle wait (ms) after which an idle loop suspends. `0` disables
+	 * suspension regardless of `suspendEnabled` (a defensive second off-switch).
+	 */
+	suspendAfterMs: ClampedInt(DEFAULT_POLL_SUSPEND_AFTER_MS, 0).default(DEFAULT_POLL_SUSPEND_AFTER_MS),
 });
 
 /** The validated adaptive-backoff config every poll loop reads. */
@@ -125,6 +145,8 @@ export interface RawPollBackoffConfig {
 	readonly floorMs?: unknown;
 	readonly ceilingMs?: unknown;
 	readonly jitter?: unknown;
+	readonly suspendEnabled?: unknown;
+	readonly suspendAfterMs?: unknown;
 }
 
 /**
@@ -149,6 +171,12 @@ export interface PollBackoffConfigProvider {
  * flat 1000ms legacy cadence — the documented rollback. The parity test (AC-9)
  * drives the SCHEMA via a fixed `{}` record (enabled defaults false) to assert the
  * legacy path, independent of this env default.
+ *
+ * Idle hibernation (PRD-062e) follows the SAME posture: an ABSENT
+ * `HONEYCOMB_POLL_SUSPEND_ENABLED` yields `suspendEnabled: true`, so an idle daemon
+ * goes fully quiet by default; an explicit `false`/`0` (or `HONEYCOMB_POLL_SUSPEND_AFTER_MS=0`)
+ * rolls back to 062b's steady ~30s ceiling cadence. Suspension only ever engages when
+ * backoff itself is on (the flat legacy path never builds the state machine).
  */
 export function envPollBackoffConfigProvider(env: NodeJS.ProcessEnv = process.env): PollBackoffConfigProvider {
 	return {
@@ -156,11 +184,16 @@ export function envPollBackoffConfigProvider(env: NodeJS.ProcessEnv = process.en
 			const raw = env.HONEYCOMB_POLL_BACKOFF_ENABLED;
 			// Default-ON: an ABSENT flag means enabled. An explicit `false`/`0` rolls back.
 			const enabled = raw === undefined ? true : raw;
+			const rawSuspend = env.HONEYCOMB_POLL_SUSPEND_ENABLED;
+			// Default-ON, mirroring `enabled`: ABSENT means suspend; explicit `false`/`0` rolls back.
+			const suspendEnabled = rawSuspend === undefined ? true : rawSuspend;
 			return {
 				enabled,
 				floorMs: env.HONEYCOMB_POLL_BACKOFF_FLOOR_MS,
 				ceilingMs: env.HONEYCOMB_POLL_BACKOFF_CEILING_MS,
 				jitter: env.HONEYCOMB_POLL_BACKOFF_JITTER,
+				suspendEnabled,
+				suspendAfterMs: env.HONEYCOMB_POLL_SUSPEND_AFTER_MS,
 			};
 		},
 	};
@@ -210,48 +243,90 @@ const defaultJitterSource: JitterSource = () => Math.random() * 2 - 1;
  *
  * `currentStepMs()` exposes the un-jittered step for assertions (the geometric
  * schedule a test checks reaches the ceiling).
+ *
+ * ── Idle hibernation (PRD-062e) ──────────────────────────────────────────────
+ * The machine also accumulates the idle wait it has emitted (`idleMs`, summing the
+ * post-step delay on each empty lease) and reports `shouldSuspend()` once that
+ * passes `suspendAfterMs`. It stays PURE: `idleMs` is a sum of the machine's own
+ * un-jittered steps, not a wall-clock read, so a pinned-jitter test asserts the
+ * exact empty-lease count at which suspension trips. `onLease()` and `onWake()`
+ * reset both the step and the idle accumulator (a real job, or an external wake,
+ * snaps the loop back to a fast, non-suspended state).
  */
 export class PollBackoff {
 	private readonly floorMs: number;
 	private readonly ceilingMs: number;
 	private readonly jitter: number;
 	private readonly jitterSource: JitterSource;
+	private readonly suspendEnabled: boolean;
+	private readonly suspendAfterMs: number;
 	/** The current un-jittered step. Starts at the floor; doubles toward the ceiling. */
 	private stepMs: number;
+	/** Accumulated idle wait (sum of post-step delays on empty leases). Resets on lease/wake. */
+	private idleMs = 0;
 
 	/**
-	 * @param config the resolved bounds + jitter fraction. The state machine is only
-	 *   ever CONSTRUCTED when backoff is active; a loop with `config.enabled === false`
-	 *   does not build one (it keeps its flat legacy interval), so this class need not
-	 *   re-check the flag.
+	 * @param config the resolved bounds + jitter fraction + suspend window. The state
+	 *   machine is only ever CONSTRUCTED when backoff is active; a loop with
+	 *   `config.enabled === false` does not build one (it keeps its flat legacy
+	 *   interval), so this class need not re-check the backoff flag.
 	 * @param jitterSource injectable `[-1, 1]` source — a test pins it to 0 to assert
 	 *   the exact geometric schedule; production uses the uniform random default.
 	 */
-	constructor(config: Pick<PollBackoffConfig, "floorMs" | "ceilingMs" | "jitter">, jitterSource: JitterSource = defaultJitterSource) {
+	constructor(
+		config: Pick<PollBackoffConfig, "floorMs" | "ceilingMs" | "jitter" | "suspendEnabled" | "suspendAfterMs">,
+		jitterSource: JitterSource = defaultJitterSource,
+	) {
 		this.floorMs = config.floorMs;
 		// Guard the window here too (defense in depth) so a directly-constructed
 		// machine with a backwards window still degrades to flat, never negative.
 		this.ceilingMs = Math.max(config.floorMs, config.ceilingMs);
 		this.jitter = config.jitter;
 		this.jitterSource = jitterSource;
+		this.suspendEnabled = config.suspendEnabled;
+		this.suspendAfterMs = config.suspendAfterMs;
 		this.stepMs = this.floorMs;
 	}
 
 	/**
 	 * Step the delay toward the ceiling after an EMPTY lease (no job this tick):
 	 * double the current step, capped at the ceiling. Idempotent at the ceiling (a
-	 * fully-idle daemon stays there until a job arrives).
+	 * fully-idle daemon stays there until a job arrives). Also accrues the post-step
+	 * delay into the idle accumulator that drives {@link shouldSuspend} (PRD-062e).
 	 */
 	onEmptyLease(): void {
 		this.stepMs = Math.min(this.stepMs * 2, this.ceilingMs);
+		this.idleMs += this.stepMs;
 	}
 
 	/**
 	 * Reset the delay to the floor after a SUCCESSFUL lease (AC-3): the first real
-	 * job snaps the cadence back to fast so an active session is unchanged.
+	 * job snaps the cadence back to fast so an active session is unchanged. Also
+	 * clears the idle accumulator so a busy loop never trips suspension (PRD-062e).
 	 */
 	onLease(): void {
 		this.stepMs = this.floorMs;
+		this.idleMs = 0;
+	}
+
+	/**
+	 * Reset after an external WAKE (a new capture/recall fired the wake seam):
+	 * snap back to the fast floor and clear the idle accumulator so the just-woken
+	 * loop polls immediately and cannot re-suspend until it goes idle again (PRD-062e).
+	 */
+	onWake(): void {
+		this.stepMs = this.floorMs;
+		this.idleMs = 0;
+	}
+
+	/**
+	 * Whether the loop has been idle long enough to SUSPEND (stop polling entirely).
+	 * True once the accumulated idle wait reaches `suspendAfterMs`, and only when
+	 * suspension is enabled with a positive window. The poll loop consults this in its
+	 * re-arm step and, when true, does not schedule the next tick (PRD-062e).
+	 */
+	shouldSuspend(): boolean {
+		return this.suspendEnabled && this.suspendAfterMs > 0 && this.idleMs >= this.suspendAfterMs;
 	}
 
 	/** The current un-jittered step (for assertions on the geometric schedule). */

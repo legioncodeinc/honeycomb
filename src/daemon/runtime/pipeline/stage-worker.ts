@@ -165,6 +165,8 @@ export interface StageWorker extends LeaseParticipant {
 	start(): void;
 	/** Stop the poll loop. Idempotent. */
 	stop(): void;
+	/** Resume a hibernated loop and snap its cadence back to the floor (PRD-062e). */
+	wake(): void;
 }
 
 /** Default poll interval for the continuous loop. */
@@ -265,6 +267,10 @@ class PipelineStageWorker implements StageWorker {
 
 	stop(): void {
 		this.loop.stop();
+	}
+
+	wake(): void {
+		this.loop.wake();
 	}
 }
 

@@ -125,6 +125,12 @@ export interface JobQueueService extends DaemonService {
 	complete(id: string): Promise<void>;
 	/** Mark a leased job failed; the queue applies backoff / dead semantics. */
 	fail(id: string, reason: string): Promise<void>;
+	/**
+	 * Resume the reaper if idle hibernation suspended it (PRD-062e). Optional: only the
+	 * real DeepLake queue suspends its reaper, so stubs and test doubles may omit it.
+	 * The wake bus calls this so a new job (any enqueue) or a recall re-arms the reaper.
+	 */
+	wakeReaper?(): void;
 }
 
 /** A minimal structured-log sink the queue can report lifecycle events to. */
@@ -185,6 +191,19 @@ export interface JobQueueDeps {
 	readonly config?: JobQueueConfig;
 	/** Optional injected clock/scheduler (real timers otherwise). */
 	readonly clock?: JobQueueClock;
+	/**
+	 * Fired AFTER a successful {@link JobQueueService.enqueue} append (PRD-062e). The
+	 * daemon wires this to the wake bus so a new job resumes every hibernated poll loop
+	 * (and the reaper). Optional and side-effect-only; a throw is the caller's concern.
+	 */
+	readonly onEnqueue?: () => void;
+	/**
+	 * Enable reaper idle hibernation (PRD-062e). When true, a clean sweep that observes
+	 * no queued or leased work suspends the reaper timer so an idle queue issues zero
+	 * DeepLake reads; {@link JobQueueService.wakeReaper} re-arms it. Defaults FALSE so
+	 * the reaper keeps its steady interval unless the daemon opts in (AC-9 parity).
+	 */
+	readonly suspendEnabled?: boolean;
 }
 
 /** The real, fully-resolved config the service runs against. */
@@ -245,6 +264,16 @@ const DISCOVER_POLLS = 8;
  * spin forever.
  */
 const LEASE_CANDIDATE_TRIES = 8;
+
+/**
+ * PRD-062e: how many consecutive CLEAN sweeps must observe no queued or leased work
+ * before the reaper suspends. >1 so a single stale-segment under-read (the backend
+ * can serve an older segment that misses an id) cannot suspend a reaper that still
+ * has work to watch; the union in {@link DeepLakeJobQueueService.discoverIds} already
+ * recovers a non-empty set across stale segments, and this threshold is the belt to
+ * that braces.
+ */
+const REAPER_IDLE_SWEEPS_BEFORE_SUSPEND = 2;
 
 /**
  * PRD-062b L-X (062a labeling, poll-path half): the `source` labels every physical
@@ -392,12 +421,24 @@ class DeepLakeJobQueueService implements JobQueueService {
 	 */
 	private reaping = false;
 	private idSeq = 0;
+	/** Fired after a successful enqueue append; the daemon wires it to the wake bus (PRD-062e). */
+	private readonly onEnqueue?: () => void;
+	/** Whether the reaper may hibernate when the queue goes idle (PRD-062e). */
+	private readonly reaperSuspendEnabled: boolean;
+	/** True while the reaper timer is suspended (idle hibernation). Distinct from stopped. */
+	private reaperSuspended = false;
+	/** Consecutive clean sweeps that saw no queued/leased work (drives suspension). */
+	private reaperIdleSweeps = 0;
+	/** Set by each sweep: did the last sweep observe any queued or leased (active) job? */
+	private anyActiveSeen = false;
 
 	constructor(deps: JobQueueDeps) {
 		this.storage = deps.storage;
 		this.scope = deps.scope;
 		this.logger = deps.logger;
 		this.clock = deps.clock ?? defaultClock();
+		this.onEnqueue = deps.onEnqueue;
+		this.reaperSuspendEnabled = deps.suspendEnabled ?? false;
 		this.cfg = resolveConfig(deps.config, this.generateOwner());
 		// Heal target = the REAL catalog columns (single-sourced) under the configured
 		// table name (defaults to the canonical `memory_jobs`). Borrowing the catalog
@@ -447,7 +488,13 @@ class DeepLakeJobQueueService implements JobQueueService {
 			["created_at", val.str(now)],
 			["updated_at", val.str(now)],
 		]);
-		if (!ok) this.logger?.event("job.enqueue.failed", { id, kind: job.kind });
+		if (!ok) {
+			this.logger?.event("job.enqueue.failed", { id, kind: job.kind });
+			return id;
+		}
+		// PRD-062e: a new job means there is work to do, so resume any hibernated poll
+		// loop (and the reaper) through the wake bus the daemon wired here.
+		this.onEnqueue?.();
 		return id;
 	}
 
@@ -725,6 +772,10 @@ class DeepLakeJobQueueService implements JobQueueService {
 	async reapExpiredLeases(): Promise<number> {
 		const nowIso = this.nowIso();
 		const states = await this.discoverIds(SOURCE_REAPER);
+		// PRD-062e: note whether the queue has any ACTIVE (queued or leased) work. A
+		// queued job is counted so the reaper never suspends between an enqueue and the
+		// worker leasing it; the reaper only hibernates once nothing is in flight.
+		this.anyActiveSeen = states.some((s) => s.status === JOB_QUEUED || s.status === JOB_LEASED);
 		const expired = states.filter(
 			(s) => s.status === JOB_LEASED && s.leaseExpiresAt !== "" && s.leaseExpiresAt <= nowIso,
 		);
@@ -820,8 +871,10 @@ class DeepLakeJobQueueService implements JobQueueService {
 	private async reapSweep(): Promise<void> {
 		if (this.reaping) return;
 		this.reaping = true;
+		let swept = false;
 		try {
 			await this.reapExpiredLeases();
+			swept = true;
 		} catch (err: unknown) {
 			this.logger?.event("reaper.sweep.failed", {
 				reason: err instanceof Error ? err.message : String(err),
@@ -829,10 +882,47 @@ class DeepLakeJobQueueService implements JobQueueService {
 		} finally {
 			this.reaping = false;
 		}
+		// PRD-062e: only a CLEAN sweep is allowed to advance toward suspension; a failed
+		// sweep tells us nothing about idleness, so the next tick retries. A sweep that
+		// saw active work resets the idle run; enough consecutive idle sweeps suspend.
+		if (!swept || !this.reaperSuspendEnabled) return;
+		if (this.anyActiveSeen) {
+			this.reaperIdleSweeps = 0;
+			return;
+		}
+		this.reaperIdleSweeps += 1;
+		if (this.reaperIdleSweeps >= REAPER_IDLE_SWEEPS_BEFORE_SUSPEND) this.suspendReaper();
+	}
+
+	/** Suspend the reaper timer so an idle queue issues zero DeepLake reads (PRD-062e). */
+	private suspendReaper(): void {
+		if (this.reaperSuspended) return;
+		this.reaperSuspended = true;
+		if (this.reaperHandle !== undefined) {
+			this.clock.clearTimer(this.reaperHandle);
+			this.reaperHandle = undefined;
+		}
+		this.logger?.event("reaper.suspended");
+	}
+
+	/**
+	 * Resume a hibernated reaper (PRD-062e). Wired to the wake bus so a new job (any
+	 * enqueue) or a recall re-arms the steady sweep. Resets the idle run so an active
+	 * loop never trips suspension; a no-op when the reaper is already running.
+	 */
+	wakeReaper(): void {
+		this.reaperIdleSweeps = 0;
+		if (!this.reaperSuspended) return;
+		this.reaperSuspended = false;
+		this.reaperHandle = this.clock.setTimer(() => {
+			void this.reapSweep();
+		}, this.cfg.reaperIntervalMs);
+		this.logger?.event("reaper.resumed");
 	}
 
 	/** Stop the queue: clear the reaper timer. Idempotent. */
 	stop(): void {
+		this.reaperSuspended = false;
 		if (this.reaperHandle !== undefined) {
 			this.clock.clearTimer(this.reaperHandle);
 			this.reaperHandle = undefined;

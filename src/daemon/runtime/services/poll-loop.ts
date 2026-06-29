@@ -69,6 +69,13 @@ export interface PollLoop {
 	start(): void;
 	/** Stop the loop. Idempotent. */
 	stop(): void;
+	/**
+	 * Resume a loop that has hibernated, and snap its cadence back to the fast floor
+	 * (PRD-062e). Fired when new work arrives (an enqueue, or a recall). Idempotent and
+	 * safe to call on a running, never-suspended, or flat loop: it only re-arms a timer
+	 * when the loop had actually suspended, so it never double-arms.
+	 */
+	wake(): void;
 }
 
 /** The concrete loop. */
@@ -82,6 +89,20 @@ class AdaptivePollLoop implements PollLoop {
 	private stopped = false;
 	/** Guards against overlapping ticks on the poll loop (the workers' `running` flag). */
 	private running = false;
+	/**
+	 * Idle hibernation state (PRD-062e): true once the loop has stopped re-arming
+	 * because the backoff machine reported `shouldSuspend()`. Distinct from `stopped`
+	 * (a user/lifecycle stop): a suspended loop is still "started" and re-arms the
+	 * instant {@link wake} fires. Only ever set on the adaptive path.
+	 */
+	private suspended = false;
+	/**
+	 * Lifecycle guard (idempotent start): true between `start()` and `stop()`. A second
+	 * `start()` while already started is a no-op so it never leaks a second timer: the
+	 * idempotency the hand-rolled workers had before they moved onto this shared loop. A
+	 * suspended loop stays `started` (its resume path is {@link wake}, never a re-`start`).
+	 */
+	private started = false;
 
 	constructor(deps: PollLoopDeps) {
 		this.tick = deps.tick;
@@ -94,6 +115,8 @@ class AdaptivePollLoop implements PollLoop {
 	}
 
 	start(): void {
+		if (this.started) return; // idempotent: a second start() never arms a second timer.
+		this.started = true;
 		this.stopped = false;
 		if (this.backoff === null) {
 			// ── Pre-PRD cadence (AC-9): a flat repeating interval. ──────────────────
@@ -131,14 +154,38 @@ class AdaptivePollLoop implements PollLoop {
 			})
 			.finally(() => {
 				this.running = false;
-				// Adaptive path re-arms a fresh one-shot at the new delay; flat path
-				// relies on the repeating interval and does not reschedule here.
-				if (backoff !== null) this.scheduleNext(backoff.nextDelayMs());
+				// Flat path relies on the repeating interval and does not reschedule here.
+				if (backoff === null || this.stopped) return;
+				// Idle hibernation (PRD-062e): once the backoff machine has accrued enough
+				// idle wait, STOP re-arming: the loop goes fully quiet (zero DeepLake polls)
+				// so Activeloop compute can scale to zero, until `wake()` resumes it. A
+				// suspended loop holds no pending timer, so `wake()` cannot double-arm.
+				if (backoff.shouldSuspend()) {
+					this.suspended = true;
+					this.handle = undefined;
+					return;
+				}
+				// Otherwise re-arm a fresh one-shot at the new adaptive delay.
+				this.scheduleNext(backoff.nextDelayMs());
 			});
 	}
 
+	/** Resume a hibernated loop and reset its cadence to the floor (PRD-062e). */
+	wake(): void {
+		// A stopped or flat (non-adaptive) loop has nothing to wake.
+		if (this.stopped || this.backoff === null) return;
+		// Snap the cadence back to fast and clear the idle accumulator so the just-woken
+		// loop polls immediately and cannot re-suspend until it goes idle again.
+		this.backoff.onWake();
+		if (!this.suspended) return; // running/armed loop: the live timer keeps the cadence; no double-arm.
+		this.suspended = false;
+		this.scheduleNext(this.backoff.nextDelayMs());
+	}
+
 	stop(): void {
+		this.started = false;
 		this.stopped = true;
+		this.suspended = false;
 		if (this.handle !== undefined) {
 			this.timers.clearTimer(this.handle);
 			this.handle = undefined;
