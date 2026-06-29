@@ -40,6 +40,7 @@ import { sLiteral, sqlIdent } from "../../storage/sql.js";
 import { isOk, type StorageRow } from "../../storage/result.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import { resolveRequestProject, resolveScopeOrLocalDefault } from "../scope.js";
+import { getRequestIdentity } from "../middleware/permission.js";
 import type {
 	GraphView,
 	KpisView,
@@ -1045,6 +1046,37 @@ export async function fetchRoiTrendView(
 const NO_ORG_BODY = { error: "bad_request", reason: "x-honeycomb-org header is required" } as const;
 
 /**
+ * The 403 response for a project-scoped identity attempting to access a different project
+ * (PRD-011c c-AC-5). Returned when the resolved project (from `cwd`) does not match the
+ * authenticated Identity's project binding.
+ */
+function projectScopeForbidden(c: Context): Response {
+	return c.json(
+		{
+			error: "forbidden",
+			reason: "project scope violation: the resolved project does not match your identity's project binding",
+		},
+		403,
+	);
+}
+
+/**
+ * Validate that a project-scoped identity is authorized to access the resolved project
+ * (PRD-011c project-scope gate, c-AC-5). When an authenticated Identity has a `project`
+ * binding (project-scoped), the resolved request project MUST match that binding — a
+ * mismatch is forbidden (403). Admin identities bypass this check (c-AC-5). Unscoped
+ * identities (no `project` binding) may access any project. Returns `true` when the
+ * request is authorized, `false` when it should be denied (403).
+ */
+function isAuthorizedForResolvedProject(c: Context, resolvedProject: { projectId: string }): boolean {
+	const identity = getRequestIdentity(c);
+	if (identity === undefined) return true;
+	if (identity.role === "admin") return true;
+	if (identity.project === undefined) return true;
+	return resolvedProject.projectId === identity.project;
+}
+
+/**
  * Attach the dashboard data handlers onto the daemon's already-mounted route groups (the
  * 020b daemon-side seam). Registers one read handler per view, each reading through
  * `options.storage` with guarded SQL (via the shared view fetchers) and returning the
@@ -1078,6 +1110,12 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 			// the ROI read uses) so switching projects re-scopes the band. Only a REAL selection narrows;
 			// a degraded resolution (no selection, no cwd — the dashboard's default) stays workspace-wide.
 			const project = resolveRequestProject(c, scope);
+			// PRD-011c (c-AC-5): validate that a project-scoped identity is authorized to access
+			// the resolved project. When the project is degraded (no explicit selection), we skip
+			// the check to preserve back-compat (the view stays workspace-wide).
+			if (!project.degraded && !isAuthorizedForResolvedProject(c, project)) {
+				return projectScopeForbidden(c);
+			}
 			const projectId = project.degraded ? undefined : project.projectId;
 			const key = scopeCacheKey(scope, projectId);
 			const [counts, estimatedSavings] = await Promise.all([
@@ -1197,8 +1235,14 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 		// `resolveRequestProject`) and thread it into the ROI reads so switching projects narrows the
 		// figure. Only a REAL selection (`!degraded`) applies a filter; with no selection the read stays
 		// workspace-wide (back-compat for a non-dashboard caller). The header carries no cwd for ROI.
-		const roiOptions = (c: Context, scope: QueryScope): FetchRoiOptions => {
+		const roiOptions = (c: Context, scope: QueryScope): FetchRoiOptions | null => {
 			const project = resolveRequestProject(c, scope);
+			// PRD-011c (c-AC-5): validate that a project-scoped identity is authorized to access
+			// the resolved project. When the project is degraded (no explicit selection), we skip
+			// the check to preserve back-compat (the view stays workspace-wide).
+			if (!project.degraded && !isAuthorizedForResolvedProject(c, project)) {
+				return null; // Signal authorization failure
+			}
 			return {
 				...(options.roiInfra !== undefined ? { infra: options.roiInfra } : {}),
 				...(options.roiUsage !== undefined ? { usage: options.roiUsage } : {}),
@@ -1209,13 +1253,17 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 		roi.get("/roi", async (c) => {
 			const scope = resolveScope(c);
 			if (scope === null) return c.json(NO_ORG_BODY, 400);
-			return c.json(await fetchRoiView(storage, scope, roiOptions(c, scope)));
+			const opts = roiOptions(c, scope);
+			if (opts === null) return projectScopeForbidden(c);
+			return c.json(await fetchRoiView(storage, scope, opts));
 		});
 		roi.get("/roi/trend", async (c) => {
 			const scope = resolveScope(c);
 			if (scope === null) return c.json(NO_ORG_BODY, 400);
+			const opts = roiOptions(c, scope);
+			if (opts === null) return projectScopeForbidden(c);
 			const range = c.req.query("range") ?? "";
-			return c.json(await fetchRoiTrendView(storage, scope, range, roiOptions(c, scope)));
+			return c.json(await fetchRoiTrendView(storage, scope, range, opts));
 		});
 	}
 }
