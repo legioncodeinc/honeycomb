@@ -223,7 +223,10 @@ function Install-HiveDoctor {
     if ($LASTEXITCODE -eq 0) {
       Write-Ok 'HiveDoctor is watching (it will restart the daemon on crash and survive reboots).'
     } else {
-      Write-Host 'note: HiveDoctor installed but its service did not register (continuing).'
+      # IRD-192 AC-7: a non-zero exit now means the service manager rejected the unit (e.g. the old
+      # invalid PT5S restart interval). Do NOT claim the watchdog is watching; name the actionable
+      # command so the user can see why. Non-fatal: Honeycomb itself is already installed.
+      Write-Host 'note: HiveDoctor installed but its service did not register (continuing). Run ''hivedoctor install-service'' to see why.'
     }
   }
 }

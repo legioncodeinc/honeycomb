@@ -229,8 +229,8 @@ describe("dispatch (PRD-064f)", () => {
 		it("install-service delegates to the 064b module when wired", async () => {
 			const h = buildCliHarness({
 				serviceModule: {
-					install: async () => "service registered",
-					uninstall: async () => "service removed",
+					install: async () => ({ ok: true, message: "service registered" }),
+					uninstall: async () => ({ ok: true, message: "service removed" }),
 				},
 			});
 			await dispatch(["install-service"], h.ctx);

@@ -25,8 +25,20 @@ import { SERVICE_LABEL, WINDOWS_TASK_NAME, type ServicePlan } from "./platform.j
 /** The command HiveDoctor's unit runs to start the supervised watchdog (no shell). */
 export const HIVEDOCTOR_RUN_COMMAND = "run" as const;
 
-/** Seconds the OS waits before restarting a crashed HiveDoctor (mirrors systemd RestartSec). */
+/**
+ * Seconds the OS waits before restarting a crashed HiveDoctor on POSIX. Used by the launchd
+ * `ThrottleInterval` and the systemd `RestartSec` directives; both take seconds. AC-10: this value
+ * MUST stay 5 for macOS/Linux and is NOT reused by the Windows template (see WINDOWS_RESTART_INTERVAL).
+ */
 export const RESTART_SEC = 5 as const;
+
+/**
+ * The Windows Task Scheduler `RestartOnFailure`/`Interval` duration as an ISO-8601 time interval.
+ * Task Scheduler REJECTS sub-minute intervals (a `PT5S` makes `schtasks /Create /XML` fail with
+ * "(29,24):Interval:PT5S ... incorrectly formatted or out of range"); the minimum it accepts is
+ * `PT1M` (1 minute). IRD-192. This is Windows-only; POSIX keeps RESTART_SEC (seconds).
+ */
+export const WINDOWS_RESTART_INTERVAL = "PT1M" as const;
 
 /**
  * Quote a single token for a systemd `ExecStart` line. systemd does NOT invoke a shell, but a
@@ -122,6 +134,10 @@ WantedBy=default.target
  *
  * The author element is left to schtasks (`/RU`); this XML is consumed via
  * `schtasks /Create /XML <file>` so the per-user task needs no admin/UAC.
+ *
+ * The `RestartOnFailure`/`Interval` uses {@link WINDOWS_RESTART_INTERVAL} (`PT1M`), NOT
+ * {@link RESTART_SEC} (seconds): Task Scheduler rejects sub-minute intervals (IRD-192 root cause),
+ * so the seconds value the POSIX managers take is deliberately not reused here.
  */
 export function renderScheduledTaskXml(plan: ServicePlan): string {
 	const node = escapeXml(process.execPath);
@@ -154,7 +170,7 @@ export function renderScheduledTaskXml(plan: ServicePlan): string {
     <Enabled>true</Enabled>
     <Hidden>false</Hidden>
     <RestartOnFailure>
-      <Interval>PT${RESTART_SEC}S</Interval>
+      <Interval>${WINDOWS_RESTART_INTERVAL}</Interval>
       <Count>999</Count>
     </RestartOnFailure>
   </Settings>

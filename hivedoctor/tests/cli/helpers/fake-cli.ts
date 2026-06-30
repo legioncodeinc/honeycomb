@@ -96,8 +96,15 @@ export interface CliHarnessOptions {
 	readonly consecutiveFailures?: number;
 	/** The status-state snapshot (default: never healed, unknown health). */
 	readonly statusState?: StatusStateSnapshot;
-	/** The coarse service state (default: "unknown"). */
+	/** The coarse service state (default: "unknown"). The sync seam value. */
 	readonly serviceState?: ServiceState;
+	/**
+	 * The bounded async service-state probe (IRD-192 AC-5). When provided, `runStatus` awaits it
+	 * instead of the sync {@link serviceState} seam; default absent so tests that only set
+	 * `serviceState` still drive the sync path. A registered-task test sets this to e.g.
+	 * `async () => "running"`.
+	 */
+	readonly serviceStateAsync?: () => Promise<ServiceState>;
 	/** The resolved opt-out (default: not disabled). */
 	readonly optOut?: ResolvedOptOut;
 	/** Incident log tail lines (default: none). */
@@ -150,6 +157,7 @@ export function buildCliHarness(options: CliHarnessOptions = {}): CliHarness {
 			readConsecutiveFailures: () => options.consecutiveFailures ?? 0,
 			readStatusState: () => options.statusState ?? { lastHealAt: null, lastKnownHealth: "unknown" },
 			serviceState: () => options.serviceState ?? "unknown",
+			...(options.serviceStateAsync !== undefined ? { serviceStateAsync: options.serviceStateAsync } : {}),
 			optOut: options.optOut ?? resolveOptOut({ cliNoAutoUpdate: false, env: {} }),
 			update: { checkPrimaryUpdate, applyPrimaryUpdate, selfUpdate },
 			tailIncidents: async () => options.incidents ?? [],

@@ -9,8 +9,8 @@
 
 import { describe, expect, it } from "vitest";
 
-import { dispatch, EXIT_OK } from "../../src/cli/dispatch.js";
-import { SERVICE_NOT_AVAILABLE } from "../../src/cli/service-stub.js";
+import { dispatch, EXIT_ERROR, EXIT_OK } from "../../src/cli/dispatch.js";
+import { SERVICE_NOT_AVAILABLE, type ServiceResult } from "../../src/cli/service-stub.js";
 import { createServiceModule } from "../../src/service/index.js";
 import { buildCliHarness } from "../cli/helpers/fake-cli.js";
 import { createMemoryFs, createRecordingRunner, fixedEnv } from "./helpers.js";
@@ -58,14 +58,60 @@ describe("install-service / uninstall-service delegate to the real 064b module",
 		expect(h.out.text()).toContain("unregistered");
 	});
 
-	it("the result satisfies the ServiceModule interface (install + uninstall return strings)", async () => {
+	it("the result satisfies the ServiceModule interface (install + uninstall return ServiceResult)", async () => {
 		const serviceModule = createServiceModule({
 			execPath: "/usr/bin/hivedoctor",
 			runner: createRecordingRunner(),
 			fs: createMemoryFs(),
 			environment: fixedEnv({ platform: "darwin" }),
 		});
-		expect(typeof (await serviceModule.install())).toBe("string");
-		expect(typeof (await serviceModule.uninstall())).toBe("string");
+		const installResult: ServiceResult = await serviceModule.install();
+		const uninstallResult: ServiceResult = await serviceModule.uninstall();
+		expect(typeof installResult.ok).toBe("boolean");
+		expect(typeof installResult.message).toBe("string");
+		expect(typeof uninstallResult.ok).toBe("boolean");
+		expect(typeof uninstallResult.message).toBe("string");
+	});
+});
+
+describe("install-service exit code is honest (IRD-192 AC-6)", () => {
+	it("AC-6: a manager-command failure (ok:false) -> non-zero exit + the failure line is printed", async () => {
+		// A fake service module whose install() resolves ok:false mirrors the IRD-192 root-cause
+		// scenario (schtasks /Create rejected the XML). The CLI MUST map that to EXIT_ERROR so the
+		// one-command installers do NOT print "HiveDoctor is watching" (AC-7 depends on this exit).
+		const serviceModule = {
+			async install(): Promise<ServiceResult> {
+				return {
+					ok: false,
+					message: "Registered the HiveDoctor unit but a service-manager command failed (schtasks).",
+				};
+			},
+			async uninstall(): Promise<ServiceResult> {
+				return { ok: true, message: "unregistered" };
+			},
+		};
+		const h = buildCliHarness({ serviceModule });
+
+		const code = await dispatch(["install-service"], h.ctx);
+
+		expect(code).toBe(EXIT_ERROR);
+		expect(h.out.text()).toContain("service-manager command failed");
+	});
+
+	it("AC-6: uninstall maps ok:false -> non-zero exit too", async () => {
+		const serviceModule = {
+			async install(): Promise<ServiceResult> {
+				return { ok: true, message: "installed" };
+			},
+			async uninstall(): Promise<ServiceResult> {
+				return { ok: false, message: "a deregister command (schtasks) reported an error." };
+			},
+		};
+		const h = buildCliHarness({ serviceModule });
+
+		const code = await dispatch(["uninstall-service"], h.ctx);
+
+		expect(code).toBe(EXIT_ERROR);
+		expect(h.out.text()).toContain("deregister command");
 	});
 });

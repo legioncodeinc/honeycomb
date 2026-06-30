@@ -30,7 +30,7 @@ import {
 	createNpmHivemindDetector,
 	createExecFileRunner,
 } from "../remediation.js";
-import { createServiceModule } from "../service/index.js";
+import { createServiceModule, serviceStatus } from "../service/index.js";
 import { createStateStore } from "../state.js";
 import {
 	createInstalledPackageVersionReader,
@@ -191,10 +191,15 @@ export function buildCliContext(argv: readonly string[]): CliContext {
 				const s = stateStore.read();
 				return { lastHealAt: s.lastHealAt, lastKnownHealth: s.lastKnownHealth };
 			},
-			// serviceState is the SYNC coarse read `status` prints; the real async probe is
-			// serviceStatus() (exported from src/service), wired for 064g/064f follow-up. Kept
-			// "unknown" here so a sync `status` never blocks on a shell-out.
+			// serviceState is the SYNC coarse read the test harness injects directly; the production
+			// wiring prefers the bounded ASYNC probe below (serviceStateAsync) so `status` reports the
+			// real service-manager state. Kept "unknown" so the sync seam never claims a state it did
+			// not probe (it is only used when the async probe is absent, i.e. in tests).
 			serviceState: () => "unknown",
+			// IRD-192 AC-5: the real OS-service-manager probe (schtasks/launchctl/systemctl is-active),
+			// bounded by SERVICE_COMMAND_TIMEOUT_MS inside serviceStatus(). Never throws; resolves
+			// "unknown" on a spawn error or unsupported platform, so `status` stays fast and fail-safe.
+			serviceStateAsync: () => serviceStatus({ execPath: serviceExecPath, preferSystemScope, runner }),
 			serviceModule,
 			optOut,
 			// `update --check` previews via previewUpdate() (READ-ONLY, never mutates); `update`

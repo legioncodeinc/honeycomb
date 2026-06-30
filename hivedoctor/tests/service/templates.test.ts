@@ -10,10 +10,12 @@ import { resolveServicePlan, SERVICE_LABEL } from "../../src/service/platform.js
 import {
 	escapeXml,
 	HIVEDOCTOR_RUN_COMMAND,
+	RESTART_SEC,
 	renderLaunchdPlist,
 	renderScheduledTaskXml,
 	renderSystemdUnit,
 	renderUnit,
+	WINDOWS_RESTART_INTERVAL,
 } from "../../src/service/templates.js";
 import { fixedEnv } from "./helpers.js";
 
@@ -34,6 +36,13 @@ describe("renderLaunchdPlist (macOS)", () => {
 	it("encodes start-on-boot (RunAtLoad) and restart-on-crash (KeepAlive)", () => {
 		expect(xml).toMatch(/<key>RunAtLoad<\/key>\s*<true\/>/);
 		expect(xml).toMatch(/<key>KeepAlive<\/key>\s*<true\/>/);
+	});
+
+	// IRD-192 AC-10: launchd ThrottleInterval takes seconds; the POSIX value stays RESTART_SEC=5,
+	// unchanged by the Windows-only restart-interval fix.
+	it("AC-10: ThrottleInterval keeps the POSIX seconds value (RESTART_SEC=5)", () => {
+		expect(RESTART_SEC).toBe(5);
+		expect(xml).toContain(`<integer>${RESTART_SEC}</integer>`);
 	});
 
 	it("writes logs under the user home (no root required)", () => {
@@ -60,6 +69,13 @@ describe("renderSystemdUnit (Linux)", () => {
 	it("encodes restart-on-crash (Restart=always + RestartSec)", () => {
 		expect(unit).toContain("Restart=always");
 		expect(unit).toMatch(/RestartSec=\d+/);
+	});
+
+	// IRD-192 AC-10: the POSIX restart value stays RESTART_SEC (seconds) and is NOT changed by the
+	// Windows fix. systemd RestartSec takes seconds; 5s is correct here.
+	it("AC-10: RestartSec keeps the POSIX seconds value (RESTART_SEC=5), unchanged by the Windows fix", () => {
+		expect(RESTART_SEC).toBe(5);
+		expect(unit).toContain(`RestartSec=${RESTART_SEC}`);
 	});
 
 	it("encodes start-on-boot via WantedBy=default.target (user unit)", () => {
@@ -91,6 +107,20 @@ describe("renderScheduledTaskXml (Windows)", () => {
 
 	it("encodes restart-on-crash (RestartOnFailure)", () => {
 		expect(xml).toContain("<RestartOnFailure>");
+	});
+
+	// IRD-192 AC-2: Task Scheduler rejects sub-minute intervals. The rendered <Interval> MUST be
+	// the exact WINDOWS_RESTART_INTERVAL literal (PT1M), the minimum Task Scheduler accepts.
+	it("AC-2: the RestartOnFailure interval is exactly PT1M (Task Scheduler minimum)", () => {
+		expect(WINDOWS_RESTART_INTERVAL).toBe("PT1M");
+		expect(xml).toContain(`<Interval>${WINDOWS_RESTART_INTERVAL}</Interval>`);
+		expect(xml).toContain("<Interval>PT1M</Interval>");
+	});
+
+	// IRD-192 regression: the XML MUST NOT emit PT5S anywhere. Windows rejected PT5S with
+	// "(29,24):Interval:PT5S ... incorrectly formatted or out of range".
+	it("AC-2 regression: the rendered XML does NOT contain PT5S (the rejected value)", () => {
+		expect(xml).not.toContain("PT5S");
 	});
 
 	it("keeps a single instance (IgnoreNew)", () => {
