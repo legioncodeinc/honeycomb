@@ -170,6 +170,15 @@ describe("PRD-064h launchd controller, register/restart/status argv (injected ru
 		expect(runner.runs[0]?.args.slice(0, 3)).toEqual(["kickstart", "-k", expect.stringContaining(SERVICE_LABEL)]);
 	});
 
+	it("daemon stop bootouts the LaunchAgent so KeepAlive does not respawn it", () => {
+		const runner = recordingRunner();
+		const ctl = createDaemonServiceController("launchd", runner);
+		ctl.stop(SPEC);
+		expect(runner.runs[0]?.cmd).toBe("launchctl");
+		expect(runner.runs[0]?.args).toEqual(["bootout", expect.stringContaining(SERVICE_LABEL)]);
+		expect(runner.runs[0]?.args).not.toContain("kill");
+	});
+
 	it("isRegistered reflects the plist file presence", () => {
 		expect(createDaemonServiceController("launchd", recordingRunner({ fileExists: true })).isRegistered(SPEC)).toBe(true);
 		expect(createDaemonServiceController("launchd", recordingRunner({ fileExists: false })).isRegistered(SPEC)).toBe(false);

@@ -789,26 +789,27 @@ class DeepLakeJobQueueService implements JobQueueService {
 	}
 
 	/**
-	 * Start the queue (b-AC-5 / FR-8): ensure `memory_jobs` exists, reap any leases
-	 * dangling from a prior process, and start the reaper timer.
+	 * Start the queue (b-AC-5 / FR-8): schedule the reaper timer and warm/heal the
+	 * queue table in the background. No storage round trip is allowed to gate daemon
+	 * readiness; handlers and workers still heal on their own first write/lease path.
 	 */
 	async start(): Promise<void> {
-		await this.ensureTable();
-		// Do NOT block daemon readiness on the initial reap. `reapExpiredLeases()` resolves
-		// EVERY job's current version sequentially (`discoverIds()` walks the whole id set),
-		// so its cost scales with the TOTAL number of jobs ever recorded in the append-only
-		// table (done jobs included), not with the number of stale leases. On a large live
-		// table that is many minutes of sequential round-trips. Because the daemon binds its
-		// socket only AFTER `startServices()` resolves, awaiting the reap here wedged boot
-		// ("process holds the lock but is not answering /health"). Mirror the embed supervisor
-		// (server.ts): warm in the BACKGROUND, never block readiness. Schedule the steady-state
-		// reaper, then kick ONE immediate sweep (not awaited) so a fresh process still reclaims
-		// dangling leases promptly. Both go through `reapSweep()`, which is guarded so the
-		// per-sweep cost can never overlap/stampede the backend.
+		if (this.reaperHandle !== undefined) return;
 		this.reaperHandle = this.clock.setTimer(() => {
 			void this.reapSweep();
 		}, this.cfg.reaperIntervalMs);
-		void this.reapSweep();
+		void this.bootstrapInBackground();
+	}
+
+	private async bootstrapInBackground(): Promise<void> {
+		try {
+			await this.ensureTable();
+			await this.reapSweep();
+		} catch (err: unknown) {
+			this.logger?.event("queue.bootstrap.failed", {
+				reason: err instanceof Error ? err.message : String(err),
+			});
+		}
 	}
 
 	/**

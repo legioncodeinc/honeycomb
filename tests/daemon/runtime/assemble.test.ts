@@ -27,6 +27,7 @@ import {
 	PID_FILE_NAME,
 	acquireSingleInstanceLock,
 	assembleDaemon,
+	resolveCodebaseGraphAutoBuild,
 } from "../../../src/daemon/runtime/assemble.js";
 import { VaultStore } from "../../../src/daemon/runtime/vault/store.js";
 import { createVaultRegistry } from "../../../src/daemon/runtime/vault/registry.js";
@@ -77,6 +78,20 @@ function fakeStorage(result: QueryResult): StorageClient {
 		},
 		async query() {
 			return result;
+		},
+	} as unknown as StorageClient;
+}
+
+function hangingQueryStorage(): StorageClient {
+	return {
+		get endpoint() {
+			return "https://example.invalid";
+		},
+		async connect() {
+			return OK_RESULT;
+		},
+		query() {
+			return new Promise<QueryResult>(() => {});
 		},
 	} as unknown as StorageClient;
 }
@@ -291,6 +306,40 @@ beforeEach(() => {
 afterEach(() => {
 	rmSync(runtimeDir, { recursive: true, force: true });
 	vi.restoreAllMocks();
+});
+
+describe("codebase graph auto-build boot gate", () => {
+	it("defaults production local boot to no auto-build unless explicitly opted in", () => {
+		expect(
+			resolveCodebaseGraphAutoBuild({
+				env: {},
+				hasInjectedStorage: false,
+				mode: "local",
+			}),
+		).toBe(false);
+		expect(
+			resolveCodebaseGraphAutoBuild({
+				env: { HONEYCOMB_CODEBASE_GRAPH_AUTO_BUILD: "true" },
+				hasInjectedStorage: false,
+				mode: "local",
+			}),
+		).toBe(true);
+		expect(
+			resolveCodebaseGraphAutoBuild({
+				env: { HONEYCOMB_CODEBASE_GRAPH_AUTO_BUILD: "true" },
+				hasInjectedStorage: false,
+				mode: "team",
+			}),
+		).toBe(false);
+		expect(
+			resolveCodebaseGraphAutoBuild({
+				env: { HONEYCOMB_CODEBASE_GRAPH_AUTO_BUILD: "false" },
+				hasInjectedStorage: false,
+				mode: "local",
+				explicit: true,
+			}),
+		).toBe(true);
+	});
 });
 
 describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after construction", () => {
@@ -587,6 +636,30 @@ describe("a-AC-4 /health performs a live storage probe → 200 reachable, 503 un
 			expect(body.status).toBe("degraded");
 			expect(body.pipeline).toBe("degraded");
 			expect(assembled.pipelineStatus()).toBe("degraded");
+		} finally {
+			await assembled.shutdown();
+		}
+	});
+
+	it("can start without waiting for the first storage probe when production boot marks it non-blocking", async () => {
+		const assembled = assembleDaemon({
+			config: cfg(),
+			storage: hangingQueryStorage(),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+			embedSupervisor: noopEmbedSupervisor,
+			awaitInitialHealthProbe: false,
+			startBackgroundWorkers: false,
+		});
+		try {
+			await expect(
+				Promise.race([
+					assembled.start().then(() => "started" as const),
+					new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 100)),
+				]),
+			).resolves.toBe("started");
+			const res = await assembled.daemon.app.request("/health");
+			expect(res.status).toBe(200);
 		} finally {
 			await assembled.shutdown();
 		}

@@ -411,7 +411,9 @@ function launchdController(runner: ServiceRunner): DaemonServiceController {
 			return { ok: true, manager: "launchd" };
 		},
 		stop(_spec): ServiceOpResult {
-			runner.run("launchctl", ["kill", "SIGTERM", `${domain()}/${SERVICE_LABEL}`]);
+			// `kill SIGTERM` only terminates the child; KeepAlive=true immediately respawns it.
+			// `bootout` unloads the LaunchAgent instance, so `honeycomb daemon stop` actually stops.
+			runner.run("launchctl", ["bootout", `${domain()}/${SERVICE_LABEL}`]);
 			return { ok: true, manager: "launchd" };
 		},
 		isRegistered(spec): boolean {

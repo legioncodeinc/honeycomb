@@ -194,16 +194,32 @@ export const PID_FILE_NAME = "daemon.pid";
 const DEFAULT_HEALTH_PROBE_INTERVAL_MS = 15_000;
 
 /**
- * How often the daemon auto-rebuilds the codebase-graph snapshot (PRD-041 follow-up). The Graph
- * page is now memory-only, so the manual "Build graph" button is gone — the daemon keeps the
- * codebase snapshot fresh on this interval (plus once on start) for the stale-ref / lifecycle
- * σ(m,t) diagnostic that reads it. One hour: a full-repo tree-sitter parse is not free, and the
- * graph it feeds tolerates hour-scale staleness.
+ * Interval for the opt-in codebase-graph auto-build timer.
  */
 const DEFAULT_GRAPH_BUILD_INTERVAL_MS = 60 * 60 * 1_000;
+const CODEBASE_GRAPH_AUTO_BUILD_ENV = "HONEYCOMB_CODEBASE_GRAPH_AUTO_BUILD";
 
 /** The coarse pipeline status the cached `/health` bit reports (mirrors server.ts). */
 type PipelineStatus = "ok" | "degraded" | "unconfigured";
+
+function parseBooleanEnv(raw: unknown): boolean | undefined {
+	if (typeof raw !== "string") return undefined;
+	const value = raw.trim().toLowerCase();
+	if (value === "1" || value === "true" || value === "yes" || value === "on") return true;
+	if (value === "0" || value === "false" || value === "no" || value === "off" || value === "") return false;
+	return undefined;
+}
+
+export function resolveCodebaseGraphAutoBuild(options: {
+	readonly explicit?: boolean;
+	readonly env?: NodeJS.ProcessEnv;
+	readonly hasInjectedStorage: boolean;
+	readonly mode: DeploymentMode;
+}): boolean {
+	if (options.explicit !== undefined) return options.explicit;
+	if (options.hasInjectedStorage || options.mode !== "local") return false;
+	return parseBooleanEnv((options.env ?? process.env)[CODEBASE_GRAPH_AUTO_BUILD_ENV]) === true;
+}
 
 /**
  * The seams the composition root needs from the environment so a test drives the
@@ -254,6 +270,11 @@ export interface AssembleDaemonOptions {
 	/** Cached-health-bit refresh interval (a-AC-4). Default 15s. */
 	readonly healthProbeIntervalMs?: number;
 	/**
+	 * Test/proof override for whether start() awaits the first storage health probe. Production
+	 * defaults to false so a slow DeepLake request cannot prevent the daemon from binding.
+	 */
+	readonly awaitInitialHealthProbe?: boolean;
+	/**
 	 * The harness identity-copy targets the file watcher syncs (004c). Defaults to an
 	 * empty set (no harness copies) so a bare assembly does not require PRD-019 paths;
 	 * a fuller wiring (021c) supplies the real per-harness destinations.
@@ -272,9 +293,9 @@ export interface AssembleDaemonOptions {
 	/** The workspace root the file watcher watches. Defaults to `process.cwd()`. */
 	readonly workspaceDir?: string;
 	/**
-	 * Override the production local-mode codebase-graph auto-build. Production leaves this
-	 * unset so the daemon preserves its current graph freshness behavior; packaged idle
-	 * proofs can set it false to isolate idle-cost regressions from a deliberate repo scan.
+	 * Override the production local-mode codebase-graph auto-build. Production leaves this unset:
+	 * the boot-time parser is opt-in via HONEYCOMB_CODEBASE_GRAPH_AUTO_BUILD=true so a tree-sitter
+	 * abort cannot crash-loop the daemon before it binds.
 	 */
 	readonly autoBuildGraph?: boolean;
 	/**
@@ -2348,15 +2369,15 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		}
 	}
 
-	// ── PRD-041 (codebase graph): auto-build the snapshot so it stays fresh without the (now
-	// retired) "Build graph" UI button. The Graph page is memory-only; the codebase snapshot is
-	// still read by the stale-ref / lifecycle σ(m,t) diagnostic, so the daemon builds it once on
-	// start and then on the interval. Gated to the REAL production assembly in LOCAL mode (no
-	// injected `storage`) so the hermetic unit suite never triggers a real full-repo tree-sitter
-	// parse / snapshot write, and team/hybrid daemons don't each re-parse the repo on a timer.
-	// Fail-soft + in-flight-guarded: a build error never crashes the daemon, and overlapping ticks
-	// never stack a second parse.
-	const autoBuildGraph = options.autoBuildGraph ?? (options.storage === undefined && config.mode === "local");
+	// ── PRD-041 (codebase graph): the manual graph API remains wired, but boot-time auto-build is
+	// opt-in. A full-repo tree-sitter parse is optional work, and a native/WASM parser abort can
+	// terminate the whole process before the daemon binds; defaulting it off keeps fresh installs
+	// reachable while preserving an explicit HONEYCOMB_CODEBASE_GRAPH_AUTO_BUILD=true escape hatch.
+	const autoBuildGraph = resolveCodebaseGraphAutoBuild({
+		explicit: options.autoBuildGraph,
+		hasInjectedStorage: options.storage !== undefined,
+		mode: config.mode,
+	});
 	let graphBuildTimer: ReturnType<typeof setInterval> | null = null;
 	let graphBuildInFlight = false;
 	async function rebuildCodebaseGraph(): Promise<void> {
@@ -2404,6 +2425,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// UNCONDITIONALLY (core feature, not gated) inside `start()` AFTER the queue is up, and
 	// stopped in `shutdown()`. Null until `start()` runs.
 	let skillifyWorker: SkillifyJobWorker | null = null;
+	const awaitInitialHealthProbe = options.awaitInitialHealthProbe ?? options.storage !== undefined;
 	const startBackgroundWorkers = options.startBackgroundWorkers ?? true;
 	const startSummaryWorker = options.startSummaryWorker ?? true;
 	const startPipelineWorker = options.startPipelineWorker ?? true;
@@ -2423,11 +2445,15 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			locked = true;
 			started = true;
 
-			// Prime the health bit once, then refresh on the interval. In local-queue mode
-			// with shared draining off, this probe is intentionally disabled: a recurring
-			// `SELECT 1` is still idle DeepLake traffic and defeats PRD-066's cost boundary.
+			// Prime the health bit once, then refresh on the interval. Production does not await
+			// the first probe: daemon readiness is the listener binding, not a DeepLake round trip.
+			// Tests/proofs with injected storage keep blocking by default for deterministic health
+			// assertions. In local-queue mode with shared draining off, this probe is intentionally
+			// disabled: recurring `SELECT 1` traffic defeats PRD-066's idle-cost boundary.
 			if (storageHealthProbeEnabled) {
-				await refreshHealth();
+				const initialHealthProbe = refreshHealth();
+				if (awaitInitialHealthProbe) await initialHealthProbe;
+				else void initialHealthProbe;
 				probeTimer = setInterval(() => {
 					void refreshHealth();
 				}, probeIntervalMs);
