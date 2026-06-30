@@ -473,6 +473,25 @@ describe("b-AC-5 a fresh service over the same state resumes queued + reaps dang
 });
 
 describe("boot resilience: start() never blocks daemon readiness on the reap (wedge regression)", () => {
+	it("start() resolves promptly even when the boot ensure write never resolves", async () => {
+		const hangingTransport: DeepLakeTransport = {
+			query: () => new Promise(() => {}),
+		};
+		const storage: StorageClient = createStorageClient({
+			transport: hangingTransport,
+			provider: stubProvider(fakeCredentialRecord()),
+		});
+		const queue = createJobQueueService({ storage, scope: SCOPE, config: { owner: "owner-ensure-wedge" }, clock: manualClock() });
+
+		const TIMED_OUT = Symbol("timed-out");
+		const outcome = await Promise.race([
+			queue.start().then(() => "resolved" as const),
+			new Promise<typeof TIMED_OUT>((resolve) => setTimeout(() => resolve(TIMED_OUT), 1_000)),
+		]);
+		queue.stop();
+		expect(outcome).toBe("resolved");
+	});
+
 	it("start() resolves promptly even when the reap's discovery scan never converges", async () => {
 		// Reproduces the boot wedge: a transport where the ensureTable INSERT lands but every
 		// discovery/resolve SELECT hangs forever (a stand-in for a huge live table whose
