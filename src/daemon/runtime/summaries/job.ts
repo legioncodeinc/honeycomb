@@ -159,6 +159,8 @@ export function summaryCliSpecFor(agentId: string): SummaryCliSpec {
 	switch (agentId) {
 		case "codex":
 			return { command: "codex", args: ["exec", "-"] };
+		case "grok":
+			return { command: "grok", args: ["agent", "stdio"] };
 		case "cursor":
 		case "cursor-agent":
 			return { command: "cursor-agent", args: ["-p"] };

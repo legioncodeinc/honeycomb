@@ -26,6 +26,7 @@ import {
 	type ConnectorRegistry,
 	createClaudePluginRunner,
 	CursorConnector,
+	GrokConnector,
 	connectorMain,
 	createNodeConnectorFs,
 	type HarnessConnector,
@@ -70,6 +71,7 @@ export function createConnectorRegistry(home: string = homedir()): ConnectorRegi
 			}),
 		codex: (fs) => new CodexConnector(fs, { home, bundleSource: bundleSourceFor("codex") }),
 		cursor: (fs) => new CursorConnector(fs, { home, bundleSource: bundleSourceFor("cursor") }),
+		grok: (fs) => new GrokConnector(fs, { home, bundleSource: bundleSourceFor("grok") }),
 	};
 	return {
 		build(harness: string, fs: ConnectorFs): HarnessConnector | undefined {

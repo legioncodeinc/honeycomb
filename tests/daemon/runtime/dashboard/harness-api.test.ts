@@ -5,17 +5,17 @@
  * wire `GET /api/diagnostics/harnesses` onto the already-mounted, protected `/api/diagnostics` group
  * (mirroring `mountDashboardApi`). This suite proves the 039a acceptance criteria end-to-end through
  * `daemon.app.request(...)`:
- *   - a-AC-1: ALL SIX canonical harnesses every call, idle ones present + zeroed (never omitted).
+ *   - a-AC-1: ALL SEVEN canonical harnesses every call, idle ones present + zeroed (never omitted).
  *   - a-AC-2: `turnsCaptured`/`lastSeen` are the REAL COUNT/MAX over seeded `sessions` GROUP BY agent;
  *     a harness with rows reports the real count + timestamp, one without reports 0 / null. No fabrication.
  *   - a-AC-3: `installed` reflects the injected harness-sync wiring set, independent of activity.
  *   - a-AC-4: the `active` flag is derived (`turnsCaptured > 0`) and returned explicitly.
- *   - a-AC-5: ONE guarded GROUP BY (sqlIdent-built); a storage error fails soft to all six zeroed
+ *   - a-AC-5: ONE guarded GROUP BY (sqlIdent-built); a storage error fails soft to all seven zeroed
  *     (no 500); the response carries NO token/secret.
  *   - 039c: the folded capability descriptor carries Cursor's `agents` and Claude Code's NONE (c-AC-4).
  *
- * Plus the derive-or-assert invariant (a-OQ-3): the canonical six EQUAL the shims `src/hooks` ships,
- * so a seventh shim cannot silently skip the page.
+ * Plus the derive-or-assert invariant (a-OQ-3): the canonical seven EQUAL the shims `src/hooks` ships,
+ * so an eighth shim cannot silently skip the page.
  */
 
 import { describe, expect, it } from "vitest";
@@ -40,6 +40,7 @@ import {
 	createClaudeCodeShim,
 	createCodexShim,
 	createCursorShim,
+	createGrokShim,
 	createHermesShim,
 	createOpenClawShim,
 	createPiShim,
@@ -49,7 +50,7 @@ import { FakeDeepLakeTransport, fakeCredentialRecord, stubProvider } from "../..
 const ORG = "fake-org";
 const WORKSPACE = "fake-ws";
 
-const THE_SIX = ["claude-code", "codex", "cursor", "hermes", "pi", "openclaw"];
+const THE_SEVEN = ["claude-code", "codex", "cursor", "grok", "hermes", "pi", "openclaw"];
 
 function cfg(): RuntimeConfig {
 	return { host: "127.0.0.1", port: 3850, mode: "local", widened: false };
@@ -105,28 +106,29 @@ async function getHarnesses(seed: boolean, installed: ReadonlySet<string>): Prom
 	return json.harnesses;
 }
 
-describe("PRD-039a a-OQ-3: the canonical six are derived-from / asserted-against the shim set", () => {
-	it("CANONICAL_HARNESS_IDS equals the harness ids the shim factories ship (no drift, no 7th skip)", () => {
+describe("PRD-039a a-OQ-3: the canonical seven are derived-from / asserted-against the shim set", () => {
+	it("CANONICAL_HARNESS_IDS equals the harness ids the shim factories ship (no drift, no 8th skip)", () => {
 		// The shim set IS the source of truth (the SAME `create<Harness>Shim()` factories the capture
-		// pipeline runs). If a SEVENTH shim ships, this set diverges from THE_SIX and the test fails.
+		// pipeline runs). If an EIGHTH shim ships, this set diverges from THE_SEVEN and the test fails.
 		const fromFactories = [
 			createClaudeCodeShim(),
 			createCodexShim(),
 			createCursorShim(),
+			createGrokShim(),
 			createHermesShim(),
 			createPiShim(),
 			createOpenClawShim(),
 		].map((s) => s.harness);
-		expect([...CANONICAL_HARNESS_IDS].sort()).toEqual([...THE_SIX].sort());
+		expect([...CANONICAL_HARNESS_IDS].sort()).toEqual([...THE_SEVEN].sort());
 		expect([...CANONICAL_SHIMS].map((s) => s.harness).sort()).toEqual(fromFactories.sort());
 	});
 });
 
-describe("PRD-039a a-AC-1 / a-AC-2: all six always, with real activity from the sessions GROUP BY", () => {
-	it("returns exactly the six canonical harnesses every call (idle ones present + zeroed)", async () => {
+describe("PRD-039a a-AC-1 / a-AC-2: all seven always, with real activity from the sessions GROUP BY", () => {
+	it("returns exactly the seven canonical harnesses every call (idle ones present + zeroed)", async () => {
 		const harnesses = await getHarnesses(true, new Set());
-		expect(harnesses.map((h) => h.name).sort()).toEqual([...THE_SIX].sort());
-		expect(harnesses).toHaveLength(6);
+		expect(harnesses.map((h) => h.name).sort()).toEqual([...THE_SEVEN].sort());
+		expect(harnesses).toHaveLength(7);
 	});
 
 	it("a harness with rows reports the REAL COUNT + MAX; one without reports 0 / null (no fabrication)", async () => {
@@ -144,9 +146,9 @@ describe("PRD-039a a-AC-1 / a-AC-2: all six always, with real activity from the 
 		expect(codex?.lastSeen).toBeNull();
 	});
 
-	it("with an empty sessions table, all six come back zeroed (0 turns, null last-seen, inactive)", async () => {
+	it("with an empty sessions table, all seven come back zeroed (0 turns, null last-seen, inactive)", async () => {
 		const harnesses = await getHarnesses(false, new Set());
-		expect(harnesses).toHaveLength(6);
+		expect(harnesses).toHaveLength(7);
 		for (const h of harnesses) {
 			expect(h.turnsCaptured).toBe(0);
 			expect(h.lastSeen).toBeNull();
@@ -195,14 +197,14 @@ describe("PRD-039a a-AC-5: guarded + fail-soft + secure", () => {
 		expect(sql).not.toMatch(/;\s*\w/);
 	});
 
-	it("a non-ok storage result returns all six with zeroed activity (NO 500)", async () => {
+	it("a non-ok storage result returns all seven with zeroed activity (NO 500)", async () => {
 		const { daemon, storage } = makeFailingDaemon();
 		mountHarnessApi(daemon, { storage, installedHarnesses: new Set(["cursor"]) });
 		const res = await daemon.app.request("/api/diagnostics/harnesses", { headers: headers() });
-		// Fail-soft: still 200 with all six, activity zeroed, installed intact.
+		// Fail-soft: still 200 with all seven, activity zeroed, installed intact.
 		expect(res.status).toBe(200);
 		const json = (await res.json()) as { harnesses: HarnessStatus[] };
-		expect(json.harnesses).toHaveLength(6);
+		expect(json.harnesses).toHaveLength(7);
 		for (const h of json.harnesses) {
 			expect(h.turnsCaptured).toBe(0);
 			expect(h.lastSeen).toBeNull();
@@ -213,7 +215,7 @@ describe("PRD-039a a-AC-5: guarded + fail-soft + secure", () => {
 
 	it("the response carries NO token/secret (only ids, booleans, a count, an ISO, statics)", async () => {
 		const { daemon, storage } = makeDaemon(true);
-		mountHarnessApi(daemon, { storage, installedHarnesses: new Set(THE_SIX) });
+		mountHarnessApi(daemon, { storage, installedHarnesses: new Set(THE_SEVEN) });
 		const res = await daemon.app.request("/api/diagnostics/harnesses", { headers: headers() });
 		const raw = await res.text();
 		// No credential-shaped strings ride the body.
@@ -265,7 +267,7 @@ describe("attribution: the page-counted `agent` token EQUALS the shim's canonica
 	});
 
 	it("an empty `agent` token attributes to NO harness (the pre-fix `agent=''` reads 0 everywhere)", () => {
-		// Proves WHY the bug zeroed every harness: a row with `agent=''` matches none of the six.
+		// Proves WHY the bug zeroed every harness: a row with `agent=''` matches none of the seven.
 		const statuses = buildHarnessStatuses([{ agent: "", n: 99, last: "2026-06-23T00:00:00.000Z" }], new Set());
 		for (const s of statuses) {
 			expect(s.turnsCaptured).toBe(0);

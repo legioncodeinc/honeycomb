@@ -1,7 +1,7 @@
 /**
  * PRD-039a a-AC-3 — the install-presence detector (`detectInstalledHarnesses`).
  *
- * Proves the cheap, fail-soft, root-injectable disk probe that answers "which of the canonical six
+ * Proves the cheap, fail-soft, root-injectable disk probe that answers "which of the canonical seven
  * harnesses has Honeycomb wired on this box?" — the set the production daemon feeds into the 039a
  * telemetry endpoint so the live `installed` flag reflects REAL wiring (not the starved empty set the
  * QA flagged). Every fixture is built under a temp dir; the real home is NEVER touched.
@@ -81,6 +81,11 @@ describe("PRD-039a a-AC-3: detectInstalledHarnesses — markers present → in t
 		expect(detectInstalledHarnesses(home, home).has("pi")).toBe(true);
 	});
 
+	it("grok markers (~/.grok/hooks/honeycomb.json) → grok in the set", () => {
+		touchFile(".grok", "hooks", "honeycomb.json");
+		expect(detectInstalledHarnesses(home, home).has("grok")).toBe(true);
+	});
+
 	it("openclaw marker (~/.openclaw/extensions/hivemind) → openclaw in the set", () => {
 		touchDir(".openclaw", "extensions", "hivemind");
 		expect(detectInstalledHarnesses(home, home).has("openclaw")).toBe(true);
@@ -102,10 +107,11 @@ describe("PRD-039a a-AC-3: detectInstalledHarnesses — a present/absent MIX is 
 		expect(set.has("pi")).toBe(false);
 	});
 
-	it("ALL SIX wired → the set equals the canonical six exactly (no extras, no drift)", () => {
+	it("ALL SEVEN wired → the set equals the canonical seven exactly (no extras, no drift)", () => {
 		touchFile(".claude", "settings.json");
 		touchFile(".cursor", "hooks.json");
 		touchFile(".codex", "hooks.json");
+		touchFile(".grok", "hooks", "honeycomb.json");
 		touchFile(".hermes", "config.yaml");
 		touchFile(".pi", "agent", "AGENTS.md");
 		touchDir(".openclaw", "extensions", "hivemind");
@@ -114,7 +120,7 @@ describe("PRD-039a a-AC-3: detectInstalledHarnesses — a present/absent MIX is 
 	});
 
 	it("only ever records CANONICAL ids — a stray non-canonical marker dir never inflates the set", () => {
-		// A sibling tool's dir under home is not one of the six markers → ignored.
+		// A sibling tool's dir under home is not one of the seven markers → ignored.
 		touchDir(".some-other-agent", "settings.json");
 		expect(detectInstalledHarnesses(home, home).size).toBe(0);
 	});

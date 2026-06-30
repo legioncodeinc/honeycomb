@@ -34,6 +34,7 @@
     "harnesses/codex/bundle",
     "harnesses/codex/package.json",
     "harnesses/cursor/bundle",
+    "harnesses/grok/bundle",
     "harnesses/hermes/bundle",
     "harnesses/pi/bundle",
     "harnesses/openclaw/dist",

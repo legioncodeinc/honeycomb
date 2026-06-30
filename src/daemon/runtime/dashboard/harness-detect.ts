@@ -1,10 +1,10 @@
 /**
- * The cheap, fail-soft install-presence detector for the canonical six harnesses — PRD-039a
+ * The cheap, fail-soft install-presence detector for the canonical seven harnesses — PRD-039a
  * (a-AC-3 / OQ-1: "which harnesses are wired?").
  *
  * The 039a telemetry endpoint (`mountHarnessApi`) reports each harness's `installed` flag from an
  * injected `ReadonlySet<string>` resolved ONCE at assembly (never a per-request walk or spawn). This
- * module is that resolver for the REAL production daemon: it answers "which of the six harnesses has
+ * module is that resolver for the REAL production daemon: it answers "which of the seven harnesses has
  * Honeycomb actually wired on this box?" by checking for the on-disk MARKER each installer writes —
  * `existsSync` only, no spawn, no network, no directory walk, never a throw.
  *
@@ -79,6 +79,14 @@ const HARNESS_MARKERS: readonly HarnessMarker[] = [
 		paths: (h) => [join(h, ".codex", "hooks.json"), join(h, ".codex", "hivemind")],
 	},
 	{
+		name: "grok",
+		// src/connectors/grok.ts: configPath = ~/.grok/hooks/honeycomb.json; pluginRoot = ~/.grok/plugins/honeycomb.
+		paths: (h) => [
+			join(h, ".grok", "hooks", "honeycomb.json"),
+			join(h, ".grok", "plugins", "honeycomb"),
+		],
+	},
+	{
 		name: "hermes",
 		// hivemind-v1/src/cli/install-hermes.ts: CONFIG_PATH = ~/.hermes/config.yaml; HIVEMIND_DIR = ~/.hermes/hivemind.
 		paths: (h) => [join(h, ".hermes", "config.yaml"), join(h, ".hermes", "hivemind")],
@@ -110,7 +118,7 @@ function markerExists(path: string): boolean {
 }
 
 /**
- * Resolve which of the canonical six harnesses Honeycomb has wired on disk (a-AC-3). For each harness,
+ * Resolve which of the canonical seven harnesses Honeycomb has wired on disk (a-AC-3). For each harness,
  * the result includes its id iff at least one of its install markers exists under `homeDir`. Cheap
  * (`existsSync` only), fail-soft (a missing/unreadable marker → simply not in the set, never a throw),
  * and root-injectable (a test passes a temp `homeDir`, never the real home).
@@ -131,7 +139,7 @@ export function detectInstalledHarnesses(
 	const installed = new Set<string>();
 	for (const marker of HARNESS_MARKERS) {
 		// Defensive: only ever record a canonical id (the registry is the source of truth; a marker for
-		// a non-canonical id is ignored so the set can never diverge from the six the endpoint enumerates).
+		// a non-canonical id is ignored so the set can never diverge from the seven the endpoint enumerates).
 		if (!canonical.has(marker.name)) continue;
 		if (marker.paths(homeDir).some(markerExists)) installed.add(marker.name);
 	}
