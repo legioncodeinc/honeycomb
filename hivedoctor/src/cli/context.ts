@@ -90,15 +90,30 @@ export interface CliDeps {
 	readonly readConsecutiveFailures: () => number;
 	/** Read the status-state snapshot (last heal, last-known health). */
 	readonly readStatusState: ReadStatusStateFn;
-	/** Coarse HiveDoctor service state (064b owns the real source). */
+	/**
+	 * Coarse HiveDoctor service state - the SYNC seam, retained for the test harness. The production
+	 * wiring injects the ASYNC {@link serviceStateAsync} instead; `runStatus` only falls back to this
+	 * when the async probe is absent.
+	 */
 	readonly serviceState: () => ServiceState;
+	/**
+	 * The bounded ASYNC service-state probe `status` prefers (IRD-192 AC-5): wired to
+	 * `serviceStatus()` (the real OS-service-manager query) in the composition root, bounded by the
+	 * existing service-command timeout so `status` never blocks indefinitely. A registered task
+	 * resolves to a real state, not a hardcoded "unknown". Optional: when absent, `runStatus` uses the
+	 * sync {@link serviceState} seam (the test-harness default).
+	 */
+	readonly serviceStateAsync?: () => Promise<ServiceState>;
 	/** The resolved opt-out + pin (auto-update disabled? pinned? which layer?). */
 	readonly optOut: ResolvedOptOut;
 	/** Update actions (primary update + the sacred self-update). */
 	readonly update: UpdateActions;
 	/** Tail recent incident-log lines for `logs`. */
 	readonly tailIncidents: TailIncidentsFn;
-	/** The 064b service module, when wired in; absent today (prints "not yet available"). */
+	/**
+	 * The 064b service module, when wired in. When absent, `install-service`/`uninstall-service`
+	 * print the "not yet available" stub message. The composition root injects the real module.
+	 */
 	readonly serviceModule?: ServiceModule;
 }
 

@@ -217,7 +217,10 @@ install_hivedoctor() {
     if "$hd_bin" install-service >/dev/null 2>&1; then
       ok "HiveDoctor is watching (it will restart the daemon on crash and survive reboots)."
     else
-      printf 'note: HiveDoctor installed but its service did not register (continuing).\n'
+      # IRD-192 AC-7: a non-zero exit now means the service manager rejected the unit. Do NOT claim
+      # the watchdog is watching; name the actionable command so the user can see why. Non-fatal:
+      # Honeycomb itself is already installed (parent AC-10 spirit).
+      printf "note: HiveDoctor installed but its service did not register (continuing). Run 'hivedoctor install-service' to see why.\n"
     fi
   fi
   return 0

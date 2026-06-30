@@ -62,10 +62,15 @@ async function runStatus(ctx: CliContext): Promise<number> {
 	const classification = await deps.probe();
 	const daemonVersion = await deps.readDaemonVersion();
 	const state = deps.readStatusState();
+	// The service state prefers the bounded ASYNC probe (wired to serviceStatus in the composition
+	// root, IRD-192 AC-5) so a registered task reports its real state, never a hardcoded "unknown".
+	// The probe is bounded by SERVICE_COMMAND_TIMEOUT_MS in the wiring; it never blocks indefinitely.
+	// The sync serviceState() seam is the test-harness fallback when the async probe is not injected.
+	const serviceState = deps.serviceStateAsync !== undefined ? await deps.serviceStateAsync() : deps.serviceState();
 
 	io.out(colors.bold("HiveDoctor status"));
 	io.out(`  Daemon health:      ${colors.cyan(healthLabel(classification))}`);
-	io.out(`  HiveDoctor service: ${colors.cyan(deps.serviceState())}`);
+	io.out(`  HiveDoctor service: ${colors.cyan(serviceState)}`);
 	io.out(`  Daemon version:     ${daemonVersion ?? colors.dim("unknown (daemon unreachable)")}`);
 	io.out(`  HiveDoctor version: ${deps.hivedoctorVersion}`);
 	io.out(`  Last heal:          ${state.lastHealAt ?? colors.dim("never")}`);
@@ -182,16 +187,20 @@ async function runSelfUpdate(ctx: CliContext): Promise<number> {
 	return EXIT_OK;
 }
 
-/** `install-service` / `uninstall-service`: delegate to 064b if wired, else print stub. */
+/**
+ * `install-service` / `uninstall-service`: delegate to 064b if wired, else print stub. The module
+ * returns a structured {@link ServiceResult}; a manager-command failure (ok:false) maps to
+ * {@link EXIT_ERROR} so callers (the installers) see an honest non-zero exit (IRD-192 AC-6).
+ */
 async function runService(ctx: CliContext, kind: "install" | "uninstall"): Promise<number> {
 	const { io, deps } = ctx;
 	if (deps.serviceModule === undefined) {
 		io.out(SERVICE_NOT_AVAILABLE);
 		return EXIT_OK;
 	}
-	const line = kind === "install" ? await deps.serviceModule.install() : await deps.serviceModule.uninstall();
-	io.out(line);
-	return EXIT_OK;
+	const result = kind === "install" ? await deps.serviceModule.install() : await deps.serviceModule.uninstall();
+	io.out(result.message);
+	return result.ok ? EXIT_OK : EXIT_ERROR;
 }
 
 /** `logs`: tail the local incident log. */

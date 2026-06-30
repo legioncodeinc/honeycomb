@@ -13,8 +13,8 @@
  *
  * Crash-safe (parent AC-8 / design principle 1): every shell-out is the injected
  * {@link CommandRunner} (execFile, no shell) which never throws; every fs call is behind the
- * injected {@link ServiceFs} and wrapped, so a permission error becomes a returned message,
- * never a thrown stack. The whole module is hermetic: a test injects a recording runner +
+ * injected {@link ServiceFs} and wrapped, so a permission error becomes a returned {@link ServiceResult}
+ * (never a thrown stack). The whole module is hermetic: a test injects a recording runner +
  * an in-memory fs and asserts the EXACT argv + unit text without touching the OS.
  *
  * Built-ins only: the production fs uses node:fs, the runner uses node:child_process.execFile.
@@ -26,7 +26,7 @@ import { dirname } from "node:path";
 import { createExecFileRunner, type CommandRunner } from "../remediation.js";
 import type { Logger } from "../logger.js";
 import { silentLogger } from "../logger.js";
-import type { ServiceModule } from "../cli/service-stub.js";
+import type { ServiceModule, ServiceResult } from "../cli/service-stub.js";
 import { installCommands, statusCommand, uninstallCommands, type ServiceCommand } from "./argv.js";
 import {
 	resolveServiceContext,
@@ -140,12 +140,15 @@ export function createServiceModule(deps: ServiceModuleDeps): ServiceModule {
 	}
 
 	return {
-		async install(): Promise<string> {
+		async install(): Promise<ServiceResult> {
 			let p: ServicePlan;
 			try {
 				p = plan();
 			} catch (error) {
-				return `Could not register HiveDoctor service: ${error instanceof Error ? error.message : "unknown error"}.`;
+				return {
+					ok: false,
+					message: `Could not register HiveDoctor service: ${error instanceof Error ? error.message : "unknown error"}.`,
+				};
 			}
 
 			// 1) Write the unit file FIRST (when this manager is file-based). schtasks consumes the
@@ -161,7 +164,10 @@ export function createServiceModule(deps: ServiceModuleDeps): ServiceModule {
 					fs.mkdirp(dirname(unitTarget));
 					fs.writeFile(unitTarget, renderUnit(p));
 				} catch (error) {
-					return `Could not write the HiveDoctor unit file at ${unitTarget}: ${error instanceof Error ? error.message : "unknown error"}.`;
+					return {
+						ok: false,
+						message: `Could not write the HiveDoctor unit file at ${unitTarget}: ${error instanceof Error ? error.message : "unknown error"}.`,
+					};
 				}
 			}
 
@@ -169,20 +175,31 @@ export function createServiceModule(deps: ServiceModuleDeps): ServiceModule {
 			const planForArgv: ServicePlan = unitTarget === p.unitPath ? p : { ...p, unitPath: unitTarget };
 			const { allOk, firstFailure } = await runAll(runner, installCommands(planForArgv, uid));
 			if (!allOk) {
+				// A manager-command failure (e.g. schtasks /Create rejecting invalid XML) is NOT a
+				// successful install: surface ok:false so the CLI maps it to a non-zero exit (IRD-192 AC-6).
 				logger.warn("service.install_command_failed", { command: firstFailure?.command });
-				return `Registered the HiveDoctor unit but a service-manager command failed (${firstFailure?.command ?? "unknown"}). It will start at next login/boot; run \`hivedoctor status\` to check.`;
+				return {
+					ok: false,
+					message: `Registered the HiveDoctor unit but a service-manager command failed (${firstFailure?.command ?? "unknown"}). It will start at next login/boot; run \`hivedoctor status\` to check.`,
+				};
 			}
 
 			logger.info("service.installed", { manager: p.manager, scope: p.scope });
-			return `HiveDoctor registered as a ${p.manager} service (${scopePhrase(p)}) and started. It will restart on crash and start on boot.`;
+			return {
+				ok: true,
+				message: `HiveDoctor registered as a ${p.manager} service (${scopePhrase(p)}) and started. It will restart on crash and start on boot.`,
+			};
 		},
 
-		async uninstall(): Promise<string> {
+		async uninstall(): Promise<ServiceResult> {
 			let p: ServicePlan;
 			try {
 				p = plan();
 			} catch (error) {
-				return `Could not unregister HiveDoctor service: ${error instanceof Error ? error.message : "unknown error"}.`;
+				return {
+					ok: false,
+					message: `Could not unregister HiveDoctor service: ${error instanceof Error ? error.message : "unknown error"}.`,
+				};
 			}
 
 			// 1) Stop + deregister via the manager (idempotent - a missing unit is tolerated).
@@ -202,10 +219,16 @@ export function createServiceModule(deps: ServiceModuleDeps): ServiceModule {
 
 			if (!allOk) {
 				logger.warn("service.uninstall_command_failed", { command: firstFailure?.command });
-				return `Removed the HiveDoctor unit file; a deregister command (${firstFailure?.command ?? "unknown"}) reported an error (often because it was already gone).`;
+				return {
+					ok: false,
+					message: `Removed the HiveDoctor unit file; a deregister command (${firstFailure?.command ?? "unknown"}) reported an error (often because it was already gone).`,
+				};
 			}
 			logger.info("service.uninstalled", { manager: p.manager, scope: p.scope });
-			return `HiveDoctor service unregistered (${p.manager}, ${scopePhrase(p)}). It will not start on next boot.`;
+			return {
+				ok: true,
+				message: `HiveDoctor service unregistered (${p.manager}, ${scopePhrase(p)}). It will not start on next boot.`,
+			};
 		},
 	};
 }

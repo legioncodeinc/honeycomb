@@ -22,7 +22,7 @@ describe("install - writes the unit file then runs the manager argv", () => {
 			environment: fixedEnv({ platform: "linux", home: "/home/t" }),
 		});
 
-		const line = await module.install();
+		const result = await module.install();
 
 		// The unit file was written under ~/.config/systemd/user.
 		const unitPath = "/home/t/.config/systemd/user/hivedoctor.service";
@@ -33,7 +33,9 @@ describe("install - writes the unit file then runs the manager argv", () => {
 			command: "systemctl",
 			args: ["--user", "enable", "--now", "hivedoctor.service"],
 		});
-		expect(line).toContain("user scope");
+		// A successful install resolves ok:true (the CLI maps this to a zero exit, IRD-192 AC-6).
+		expect(result.ok).toBe(true);
+		expect(result.message).toContain("user scope");
 	});
 
 	it("macOS: writes the plist then bootstraps + kickstarts", async () => {
@@ -46,12 +48,13 @@ describe("install - writes the unit file then runs the manager argv", () => {
 			environment: fixedEnv({ platform: "darwin", home: "/Users/t" }),
 		});
 
-		await module.install();
+		const result = await module.install();
 
 		const plistPath = `/Users/t/Library/LaunchAgents/${SERVICE_LABEL}.plist`;
 		expect(fs.files.get(plistPath)).toContain("<key>KeepAlive</key>");
 		expect(runner.calls[0]?.command).toBe("launchctl");
 		expect(runner.calls[0]?.args[0]).toBe("bootstrap");
+		expect(result.ok).toBe(true);
 	});
 
 	it("Windows: stages the Scheduled Task XML beside the workspace, then schtasks /Create", async () => {
@@ -64,14 +67,17 @@ describe("install - writes the unit file then runs the manager argv", () => {
 			environment: fixedEnv({ platform: "win32", home: "C:\\Users\\t" }),
 		});
 
-		await module.install();
+		const result = await module.install();
 
 		const staged = "C:\\Users\\t/.honeycomb/hivedoctor/hivedoctor-task.xml";
+		// IRD-192 AC-2: the staged XML carries the Task-Scheduler-valid PT1M interval.
+		expect(fs.files.get(staged)).toContain("<Interval>PT1M</Interval>");
 		expect(fs.files.get(staged)).toContain("<Task ");
 		expect(runner.calls[0]).toEqual({
 			command: "schtasks",
 			args: ["/Create", "/XML", staged, "/TN", "HiveDoctor", "/F"],
 		});
+		expect(result.ok).toBe(true);
 	});
 
 	it("a unit-write failure (EACCES) returns a message, never throws", async () => {
@@ -84,8 +90,10 @@ describe("install - writes the unit file then runs the manager argv", () => {
 			environment: fixedEnv({ platform: "linux" }),
 		});
 
-		const line = await module.install();
-		expect(line).toContain("Could not write the HiveDoctor unit file");
+		const result = await module.install();
+		// A unit-write failure is ok:false (a non-successful install), still never a throw.
+		expect(result.ok).toBe(false);
+		expect(result.message).toContain("Could not write the HiveDoctor unit file");
 		// The manager argv was NOT run (we never got past the write).
 		expect(runner.calls).toHaveLength(0);
 	});
@@ -102,8 +110,37 @@ describe("install - writes the unit file then runs the manager argv", () => {
 			environment: fixedEnv({ platform: "linux" }),
 		});
 
-		const line = await module.install();
-		expect(line).toContain("service-manager command failed");
+		// IRD-192 AC-6: a manager-command failure resolves ok:false so the CLI maps it to a
+		// non-zero exit. The failure is still reported as a message, never a throw.
+		const result = await module.install();
+		expect(result.ok).toBe(false);
+		expect(result.message).toContain("service-manager command failed");
+	});
+
+	// IRD-192 AC-6 (Windows root-cause scenario): a failed `schtasks /Create` resolves ok:false so
+	// the CLI exit code is non-zero and the installer does not claim the watchdog is watching. The
+	// staged XML is still written (so `hivedoctor install-service` re-run can inspect it), but the
+	// install is honestly a failure.
+	it("AC-6: Windows schtasks /Create failure -> ok:false (the IRD-192 root-cause scenario)", async () => {
+		const runner = createRecordingRunner((command, args) =>
+			command === "schtasks" && args[0] === "/Create"
+				? { ok: false, code: 1, stdout: "", stderr: "ERROR: incorrectly formatted or out of range" }
+				: { ok: true, code: 0, stdout: "", stderr: "" },
+		);
+		const fs = createMemoryFs();
+		const module = createServiceModule({
+			execPath: "C:\\bin\\hivedoctor.cmd",
+			runner,
+			fs,
+			environment: fixedEnv({ platform: "win32", home: "C:\\Users\\t" }),
+		});
+
+		const result = await module.install();
+		expect(result.ok).toBe(false);
+		expect(result.message).toContain("service-manager command failed");
+		// The staged XML (now with PT1M) is still laid down for inspection.
+		const staged = "C:\\Users\\t/.honeycomb/hivedoctor/hivedoctor-task.xml";
+		expect(fs.files.get(staged)).toContain("<Interval>PT1M</Interval>");
 	});
 
 	it("an unsupported platform returns a clean message, never throws", async () => {
@@ -113,8 +150,9 @@ describe("install - writes the unit file then runs the manager argv", () => {
 			fs: createMemoryFs(),
 			environment: fixedEnv({ platform: "sunos" }),
 		});
-		const line = await module.install();
-		expect(line).toContain("unsupported platform");
+		const result = await module.install();
+		expect(result.ok).toBe(false);
+		expect(result.message).toContain("unsupported platform");
 	});
 });
 
@@ -131,7 +169,7 @@ describe("uninstall - deregisters then removes the unit file (AC-064b.5)", () =>
 			environment: fixedEnv({ platform: "linux", home: "/home/t" }),
 		});
 
-		const line = await module.uninstall();
+		const result = await module.uninstall();
 
 		expect(runner.calls[0]).toEqual({
 			command: "systemctl",
@@ -139,7 +177,8 @@ describe("uninstall - deregisters then removes the unit file (AC-064b.5)", () =>
 		});
 		expect(fs.removed).toContain(unitPath);
 		expect(fs.files.has(unitPath)).toBe(false);
-		expect(line).toContain("will not start on next boot");
+		expect(result.ok).toBe(true);
+		expect(result.message).toContain("will not start on next boot");
 	});
 
 	it("Windows: deletes the task and removes the staged XML", async () => {
@@ -168,8 +207,9 @@ describe("uninstall - deregisters then removes the unit file (AC-064b.5)", () =>
 			fs,
 			environment: fixedEnv({ platform: "linux" }),
 		});
-		const line = await module.uninstall();
-		expect(line).toContain("already gone");
+		const result = await module.uninstall();
+		// A deregister failure is reported (the file is still removed + the command's error surfaced).
+		expect(result.message).toContain("already gone");
 	});
 });
 
