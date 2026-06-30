@@ -1,6 +1,6 @@
 # Daemon Surface
 
-> Category: Architecture | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Architecture | Version: 1.1 | Date: June 2026 | Status: Active
 
 The daemon's externally visible surface: the HTTP server, its route groups, the file watcher, and the runtime-path contract that keeps integrations from colliding.
 
@@ -76,3 +76,27 @@ Connectors send `x-honeycomb-runtime-path` set to `plugin` or `legacy`. Once a s
 ## Daemon lifecycle: OS-native service, spawn fallback
 
 The daemon is brought up by a detached `spawn()` that dies with the machine and is not restarted on crash. PRD-064h makes the OS service manager the **liveness floor** without removing that path: `src/cli/daemon-service.ts` registers the daemon as a userland service (launchd LaunchAgent on macOS, `systemd --user` on Linux, a per-user Scheduled Task on Windows), and `src/cli/runtime.ts` **prefers service mode** when a manager is available, falling back to the detached spawn where registration is impossible (CI, locked-down machines, tests) or when `HONEYCOMB_DAEMON_SERVICE=spawn` forces it. The generated unit pins the working directory and `HONEYCOMB_WORKSPACE` to the caller-resolved writable workspace, so a service-started daemon never boots from an unwritable cwd (the "secrets 502" class). The intelligent healing layer above this floor (probe, restart with backoff, remediation ladder, escalation, gated auto-update) is HiveDoctor, documented in [`../operations/hivedoctor-watchdog.md`](../operations/hivedoctor-watchdog.md).
+
+## Boot readiness contract
+
+The v0.1.12 hotfix (PR #190, recorded as [ADR-0007](adr/0007-daemon-readiness-over-boot-time-deeplake-and-graph-work.md)) pins down what "ready" means so HiveDoctor and the CLI can tell a booting daemon from a dead one. The contract is deliberately local and cheap:
+
+```text
+Daemon ready = listener bound + /health reachable.
+```
+
+The motivating failure was a Honeycomb v0.1.11 crash-loop on macOS arm64 (Node 22.22.3): a WASM `Aborted()` in the bundled tree-sitter graph path could terminate the process before it ever bound `127.0.0.1:3850`, and because a WASM abort is not a catchable JavaScript exception, wrapping the build in `try/catch` did not save the boot. The fix moves optional and remote work off the readiness gate rather than trying to make it safe in place.
+
+Three things that used to sit in the boot-critical path are now **outside** the readiness gate, observable through health state but never owning listener availability:
+
+- **Codebase graph auto-build.** No longer default boot work. It is opt-in with `HONEYCOMB_CODEBASE_GRAPH_AUTO_BUILD=true`; manual graph APIs and explicitly requested builds (the post-commit hook, `honeycomb graph build`, the SessionEnd path documented in [`../data/codebase-graph.md`](../data/codebase-graph.md)) stay wired regardless.
+- **The first DeepLake/storage health probe.** In production local boot it runs in the background, so a slow or unreachable backend cannot delay binding. Test and injected-storage harnesses may still await it for deterministic assertions.
+- **Shared local queue warmup.** The scheduler starts promptly; table creation and the first reaper sweep run in the background. Enqueue, lease, and reaper operations must heal or fail soft if warmup has not finished, so the first queue op after process start can race warmup safely.
+
+Keeping remote storage round trips off local readiness also reinforces the idle-cost posture of [ADR-0006](adr/0006-local-queue-as-interim-idle-cost-control.md): local availability should not keep Activeloop or DeepLake compute warm.
+
+### macOS stop semantics
+
+The `ai.honeycomb.daemon` launchd agent runs with `KeepAlive=true`, which is correct for crash recovery and login startup but means a stop that only signals the child process lets launchd immediately respawn it, silently keeping backend compute warm after the user believed the daemon was stopped. On macOS, `honeycomb daemon stop` therefore unloads the agent with `launchctl bootout` rather than only signaling the process, so explicit stop matches user intent while `KeepAlive` still covers crashes and logins.
+
+One companion nuance: HiveDoctor treats roughly the first 60 seconds as booting/settling time per the health PRD work, but that grace window is a diagnostic period, not a license for the daemon to delay binding. The daemon still binds as fast as the readiness contract allows.
