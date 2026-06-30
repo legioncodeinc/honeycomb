@@ -1,6 +1,6 @@
 # HiveDoctor: the Self-Healing Watchdog
 
-> Category: Operations | Version: 1.2 | Date: June 2026 | Status: Active (published to npm; standalone install available, bootstrap-installer wiring landed)
+> Category: Operations | Version: 1.3 | Date: June 2026 | Status: Active (published to npm; standalone install available, bootstrap-installer wiring landed)
 
 How Honeycomb keeps its primary daemon alive and gives us remote eyes when it cannot auto-heal. Read this if you operate, debug, or extend the watchdog, or if you need to understand the OS-native service lifecycle the primary daemon now prefers.
 
@@ -118,6 +118,19 @@ HiveDoctor registers itself with the OS service manager so it survives its own c
 - **macOS** -> launchd LaunchAgent (`~/Library/LaunchAgents`).
 - **Linux** -> systemd `--user` unit (`~/.config/systemd/user`).
 - **Windows** -> a per-user **Scheduled Task** (no admin, no UAC) is the default; a Windows Service (`sc.exe`) is the enterprise opt-in.
+
+### Restart timing is platform-split, not one constant (IRD-192)
+
+The three unit templates (`hivedoctor/src/service/templates.ts`) encode the same two non-negotiables, restart-on-crash and start-on-boot, but the restart **interval** is not a single shared value. POSIX keeps `RESTART_SEC = 5` (seconds), consumed by the launchd `ThrottleInterval` and the systemd `RestartSec` directives, which both take seconds. Windows is different: Task Scheduler **rejects sub-minute restart intervals**, so a `PT5S` reused from the POSIX seconds value makes `schtasks /Create /XML` fail with `(29,24):Interval:PT5S ... incorrectly formatted or out of range`. The Scheduled-Task XML therefore uses a separate constant, `WINDOWS_RESTART_INTERVAL = "PT1M"` (ISO-8601, one minute, the documented Task Scheduler minimum). The two constants are deliberately distinct so the seconds value can never leak back into the Windows path. This was a confirmed live failure: the old `PT5S` blocked registration entirely, so the watchdog that was supposed to supervise HiveDoctor was never actually registered on Windows.
+
+### The install/uninstall contract is honest about failure (IRD-192)
+
+The original Windows defect was doubly dangerous because the CLI **masked the registration failure as a zero exit**: the installer printed "HiveDoctor is watching" while no task existed. The contract is now structured and exit-honest end to end:
+
+- `ServiceModule.install()` / `uninstall()` return a `ServiceResult { ok, message }` (`hivedoctor/src/cli/service-stub.ts`) instead of a bare string. Every failure branch in `service/index.ts` (an unsupported platform, an unwritable unit file, a manager command rejecting the unit) maps to `{ ok: false }` with an actionable message; success maps to `{ ok: true }`. The never-throws / crash-safe contract is preserved: a permission error becomes a returned `ok:false`, never a thrown stack.
+- `runService` in `hivedoctor/src/cli/dispatch.ts` maps `ok:false` to a non-zero exit (`EXIT_ERROR`), so a failed `hivedoctor install-service` is observable by the shell and by the bootstrap installer, not swallowed.
+- `serviceStatus()` is wired into `hivedoctor status` through a bounded async `serviceStateAsync` seam (`hivedoctor/src/cli/index.ts` + `context.ts`), so status reports the **real** registered-task state (`running` / `not-running` / `unknown`) instead of a hardcoded `"unknown"`. The synchronous seam is retained for tests.
+- The bootstrap installers (`scripts/install/install.ps1`, `scripts/install/install.sh`) name the actionable recovery command, `hivedoctor install-service`, in their failure copy; the success "watching" line was already exit-gated.
 
 PRD-064h extends the same idea to the **primary daemon itself**, and this part landed in the main package (`src/cli/daemon-service.ts`, consumed by `src/cli/runtime.ts`). The shipped daemon was brought up by a detached `spawn()` that dies with the machine and is not restarted on crash. 064h makes the OS service manager the **liveness floor**: it restarts the daemon on crash and starts it on boot, while HiveDoctor stays the intelligent healing layer above it (wedged-but-alive, stale routes, version updates, escalation). The change is strictly additive:
 
