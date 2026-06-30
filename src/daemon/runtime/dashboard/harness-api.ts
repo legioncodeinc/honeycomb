@@ -23,7 +23,7 @@
  *   A single SELECT `agent, COUNT(*) AS n, MAX(creation_date) AS last FROM "sessions" GROUP BY agent`
  *   — built only with `sqlIdent` (no interpolated value), scope-passed to `storage.query`, fail-soft
  *   to `[]` on any non-ok result (the `selectRows` pattern from `dashboard/api.ts`). The rows are
- *   mapped onto the canonical six; a harness absent from the result reports `0` / `null` / `false`.
+ *   mapped onto the canonical seven; a harness absent from the result reports `0` / `null` / `false`.
  *   So the endpoint NEVER 500s and NEVER fabricates a metric — zeroed activity, never a placeholder.
  *
  * ── No secret in the response (parent AC-8) ──────────────────────────────────────────
@@ -73,9 +73,9 @@ export interface HarnessStatus {
 	readonly capabilities: HarnessCapabilities;
 }
 
-/** The JSON envelope `GET /api/diagnostics/harnesses` returns: the six statuses. */
+/** The JSON envelope `GET /api/diagnostics/harnesses` returns: the seven statuses. */
 export interface HarnessStatusResponse {
-	/** The six canonical harness statuses (fixed length; idle harnesses present, zeroed). */
+	/** The seven canonical harness statuses (fixed length; idle harnesses present, zeroed). */
 	readonly harnesses: readonly HarnessStatus[];
 }
 
@@ -95,7 +95,7 @@ export interface MountHarnessOptions {
 	 * The set of canonical harness ids the daemon knows to be INSTALLED/wired (a-AC-3 / OQ-1) — a
 	 * CHEAP, cached presence set resolved at assembly from the harness-sync `HarnessTarget` set, NOT a
 	 * per-request file walk or spawn. ABSENT (a unit-constructed daemon / no targets) → every harness
-	 * reads `installed: false`, so the endpoint still returns all six with activity intact (the honest
+	 * reads `installed: false`, so the endpoint still returns all seven with activity intact (the honest
 	 * "wired nothing yet" picture). A test injects a fixed set to drive the installed/uninstalled mix.
 	 */
 	readonly installedHarnesses?: ReadonlySet<string>;
@@ -134,7 +134,7 @@ export function buildHarnessActivitySql(): string {
 }
 
 /**
- * Map the (possibly partial) activity rows onto the canonical six (parent AC-1). A harness present in
+ * Map the (possibly partial) activity rows onto the canonical seven (parent AC-1). A harness present in
  * the result carries its real `COUNT`/`MAX`; one absent reports `turnsCaptured: 0`, `lastSeen: null`,
  * `active: false`. `installed` comes from the injected presence set; `capabilities` is folded from the
  * shim-derived descriptor (c-OQ-2). The order is the canonical shim order (stable).
@@ -177,7 +177,7 @@ const NO_ORG_BODY = { error: "bad_request", reason: "x-honeycomb-org header is r
  * Attach the harness telemetry handler onto the daemon's already-mounted `/api/diagnostics` group
  * (a-AC-4 / parent D-7). Registers `GET /harnesses`, which reads the single guarded activity GROUP BY
  * through `options.storage` (fail-soft), folds in the injected installed set + the shim-derived
- * capability descriptors, and returns all six {@link HarnessStatus}es. Call ONCE after
+ * capability descriptors, and returns all seven {@link HarnessStatus}es. Call ONCE after
  * `createDaemon(...)`. A request with no resolvable tenancy 400s (fail-closed, mirroring
  * `mountDashboardApi`). If the group is not mounted (unknown daemon shape) the attach is a no-op.
  */
@@ -195,8 +195,8 @@ export function mountHarnessApi(daemon: Daemon, options: MountHarnessOptions): v
 	group.get(HARNESS_PATH, async (c) => {
 		const scope = resolveScope(c);
 		if (scope === null) return c.json(NO_ORG_BODY, 400);
-		// ONE guarded GROUP BY; fail-soft to [] so the endpoint still returns all six with zeroed
-		// activity (never a 500). The canonical six are enumerated from the shim set, NOT discovered
+		// ONE guarded GROUP BY; fail-soft to [] so the endpoint still returns all seven with zeroed
+		// activity (never a 500). The canonical seven are enumerated from the shim set, NOT discovered
 		// from the result, so an idle harness still appears.
 		const rows = await selectRows(storage, buildHarnessActivitySql(), scope);
 		const body: HarnessStatusResponse = { harnesses: buildHarnessStatuses(rows, installed) };

@@ -45,7 +45,7 @@ Auth passthrough is membership-based: `AUTH_SUBCOMMANDS` (`org`, `workspace`, `w
 
 ## Branded, grouped help, and the structural guard
 
-`honeycomb` with no args and `honeycomb --help` print a branded usage built by `usageText()` (`src/commands/dispatch.ts`): a plain-ASCII honeycomb banner, the version line, the usage line, then every command grouped under its section. The banner is deliberately ASCII (no ANSI color or Unicode glyphs) so it renders identically across all six harnesses, when piped, and in non-TTY logs.
+`honeycomb` with no args and `honeycomb --help` print a branded usage built by `usageText()` (`src/commands/dispatch.ts`): a plain-ASCII honeycomb banner, the version line, the usage line, then every command grouped under its section. The banner is deliberately ASCII (no ANSI color or Unicode glyphs) so it renders identically across all seven harnesses, when piped, and in non-TTY logs.
 
 The section order and labels live in `VERB_GROUPS`, the single source of truth for the help groups:
 

@@ -46,7 +46,7 @@ export function harnessNameFromRoute(route: string): string | null {
 	return name === "" ? null : name;
 }
 
-/** The colour dot for a harness id (the shared `AGENT_DOT` language, extended to six — OQ-4). */
+/** The colour dot for a harness id (the shared `AGENT_DOT` language, extended to all seven). */
 function HarnessDot({ name }: { name: string }): React.JSX.Element {
 	return <span style={{ width: 9, height: 9, borderRadius: "50%", flex: "none", background: AGENT_DOT[name] ?? AGENT_DOT_FALLBACK }} />;
 }

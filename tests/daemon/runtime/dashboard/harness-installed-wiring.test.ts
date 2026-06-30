@@ -7,7 +7,7 @@
  * when harnesses were genuinely wired. This suite closes that gap: it drives `assembleDaemon` — the SAME
  * composition root the production daemon runs — with the set the production path computes from the cheap
  * disk detector, against a FIXTURE home built under a temp dir (never the real `~`), and proves the live
- * endpoint reports `installed: true` for the wired harnesses and `false` for the rest.
+ * endpoint reports `installed: true` for the wired harnesses and `false` for the rest (all seven canonical).
  *
  * The chain proven: `detectInstalledHarnesses(fixtureHome)` → the `installedHarnesses` assembly option →
  * `assembleDaemon` → the `mountHarnessApi` seam → `GET /api/diagnostics/harnesses`. `installed` is shown
@@ -105,7 +105,7 @@ function touchDir(...segments: string[]): void {
 /**
  * Assemble the daemon EXACTLY as production does (the composition root), feeding the installed set the
  * production path computes from the disk detector over the fixture home. Returns the live endpoint's
- * six statuses. A fake storage + provider keeps it hermetic (no live DeepLake); a temp `runtimeDir`
+ * seven statuses. A fake storage + provider keeps it hermetic (no live DeepLake); a temp `runtimeDir`
  * keeps the PID/lock guard off the real machine.
  */
 async function liveHarnesses(): Promise<HarnessStatus[]> {
@@ -125,9 +125,9 @@ async function liveHarnesses(): Promise<HarnessStatus[]> {
 }
 
 describe("PRD-039a a-AC-3 (production wiring): live `installed` reflects real on-disk markers", () => {
-	it("a fixture home with NO markers → the live endpoint reports installed:false for all six", async () => {
+	it("a fixture home with NO markers → the live endpoint reports installed:false for all seven", async () => {
 		const harnesses = await liveHarnesses();
-		expect(harnesses).toHaveLength(6);
+		expect(harnesses).toHaveLength(7);
 		for (const h of harnesses) expect(h.installed).toBe(false);
 	});
 
@@ -140,7 +140,8 @@ describe("PRD-039a a-AC-3 (production wiring): live `installed` reflects real on
 		expect(by.get("claude-code")?.installed).toBe(true);
 		expect(by.get("cursor")?.installed).toBe(true);
 		expect(by.get("codex")?.installed).toBe(true);
-		// The three unwired harnesses read installed:false on the LIVE endpoint.
+		// The four unwired harnesses read installed:false on the LIVE endpoint.
+		expect(by.get("grok")?.installed).toBe(false);
 		expect(by.get("hermes")?.installed).toBe(false);
 		expect(by.get("pi")?.installed).toBe(false);
 		expect(by.get("openclaw")?.installed).toBe(false);
@@ -162,15 +163,16 @@ describe("PRD-039a a-AC-3 (production wiring): live `installed` reflects real on
 		expect(by.get("claude-code")?.turnsCaptured).toBe(7);
 	});
 
-	it("ALL SIX wired on disk → the live endpoint reports installed:true for every harness", async () => {
+	it("ALL SEVEN wired on disk → the live endpoint reports installed:true for every harness", async () => {
 		touchFile(".claude", "settings.json");
 		touchFile(".cursor", "hooks.json");
 		touchFile(".codex", "hooks.json");
+		touchFile(".grok", "hooks", "honeycomb.json");
 		touchFile(".hermes", "config.yaml");
 		touchFile(".pi", "agent", "AGENTS.md");
 		touchDir(".openclaw", "extensions", "hivemind");
 		const harnesses = await liveHarnesses();
-		expect(harnesses).toHaveLength(6);
+		expect(harnesses).toHaveLength(7);
 		for (const h of harnesses) expect(h.installed).toBe(true);
 	});
 });

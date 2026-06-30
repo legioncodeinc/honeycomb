@@ -2,7 +2,7 @@
 
 > Category: Integrations | Version: 1.0 | Date: June 2026 | Status: Active
 
-Which hook events fire on each of the six harnesses, what each hook does, and how the shared session-start seam now auto-pulls both team skills and portable assets, every hook a thin client that hands capture, recall, and pipeline work to the Honeycomb daemon.
+Which hook events fire on each of the seven harnesses, what each hook does, and how the shared session-start seam now auto-pulls both team skills and portable assets, every hook a thin client that hands capture, recall, and pipeline work to the Honeycomb daemon.
 
 **Related:**
 - [`harness-integration.md`](harness-integration.md)

@@ -12,7 +12,7 @@ This design system inherits the structural foundations of the parent **Legion Co
 
 Everything here was derived from material the team provided. You may not have access; links are recorded so you can go deeper if you do.
 
-- **GitHub — [`legioncodeinc/honeycomb`](https://github.com/legioncodeinc/honeycomb)** — the product. Daemon + thin clients (six harnesses), the memory pipeline, and the dashboard. Key reads: `README.md`, `library/knowledge/private/overview.md`, `library/knowledge/private/ai/pollinating-loop.md`, and the dashboard contract under `src/dashboard/` (`contracts.ts`, `views.ts`, `html.ts`) — the UI kit recreates that dashboard. Explore the repo to build higher-fidelity Honeycomb surfaces.
+- **GitHub — [`legioncodeinc/honeycomb`](https://github.com/legioncodeinc/honeycomb)** — the product. Daemon + thin clients (seven harnesses), the memory pipeline, and the dashboard. Key reads: `README.md`, `library/knowledge/private/overview.md`, `library/knowledge/private/ai/pollinating-loop.md`, and the dashboard contract under `src/dashboard/` (`contracts.ts`, `views.ts`, `html.ts`) — the UI kit recreates that dashboard. Explore the repo to build higher-fidelity Honeycomb surfaces.
 - **GitHub — [`legioncodeinc/brands`](https://github.com/legioncodeinc) → `legion-code-inc/`** — the parent Legion Code brand: token stylesheet (`colors_and_type.css`), the Inter + JetBrains Mono font families (imported here), and the brand guide. Honeycomb's structure is inherited from it.
 - **Activeloop Deep Lake — [activeloop.ai](https://activeloop.ai)** — the storage partner; logo in `logos/`.
 
@@ -24,7 +24,7 @@ Everything here was derived from material the team provided. You may not have ac
 
 Honeycomb is a long-lived local **daemon** (binds `127.0.0.1:3850`, loopback only) plus thin clients. The daemon is the *sole* Deep Lake client; every harness, the CLI, the MCP server, and the SDK reach it over loopback HTTP.
 
-- **Capture** every turn from any of six harnesses (Claude Code, Cursor, Codex, Hermes, pi, OpenClaw).
+- **Capture** every turn from any of seven harnesses (Claude Code, Cursor, Codex, Grok, Hermes, pi, OpenClaw).
 - **Distill** raw events into source-backed facts, entities, and skills with provenance.
 - **Recall** the right context before the next turn — hybrid lexical (BM25) + 768-dim semantic.
 - **Compound** — the **Pollinating loop** periodically merges duplicates, prunes junk, and supersedes stale claims, so memory gets sharper instead of noisier. The **skillify** miner turns recurring traces into reusable team skills.
