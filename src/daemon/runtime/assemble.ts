@@ -127,6 +127,12 @@ import type { SecretScope } from "./secrets/contracts.js";
 import { createMachineKeyProvider, createSecretResolver, SecretsStore } from "./secrets/store.js";
 import { type CreateDaemonOptions, createDaemon, type Daemon, type DaemonServices } from "./server.js";
 import {
+	createDeepLakeHibernation,
+	type DeepLakeHibernation,
+	envHibernationConfigProvider,
+	type Pausable,
+} from "./services/deeplake-hibernation.js";
+import {
 	createEmbedAttachment,
 	type EmbedAttachment,
 	type EmbedClient,
@@ -2230,6 +2236,21 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	};
 	const daemon = createDaemon(createOptions);
 
+	// ── Deep Lake idle-cost master switch (cost incident follow-up). The controller is built
+	// at the END of `start()` (once the workers + their lease topology are known) and assigned
+	// here. `onActivity` is the WAKE signal: an inbound HTTP request (a capture, a recall, a CLI
+	// call) means an agent is live and needs the shared Deep Lake pool, so it cancels/defers
+	// hibernation. It is registered as a root middleware BEFORE any route group is mounted so it
+	// fires for every request. Background worker queries are NOT inbound requests, so they never
+	// spuriously keep the daemon awake — only real agent activity does.
+	let hibernation: DeepLakeHibernation | null = null;
+	const hibernationConfig = envHibernationConfigProvider();
+	const onActivity = (): void => hibernation?.touch();
+	daemon.app.use("*", async (_c, next) => {
+		onActivity();
+		await next();
+	});
+
 	// ── PRD-025 AC-2: the embed seam wired into the store + capture paths. Default to the
 	// REAL `{ client, attacher }` pair (D-1 default-on, resolved from the env), built ONCE
 	// here and threaded into BOTH the capture handler (the full attachment) and the memories
@@ -2482,6 +2503,23 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		}
 	}
 
+	// ── Idle-cost hibernation seams: arm/disarm the two Deep Lake-touching timers so the
+	// hibernation controller can silence them while idle and revive them on the next request.
+	// Factored from the original inline `start()` blocks so the arm logic lives once.
+	function armUnrefInterval(cb: () => void, ms: number): ReturnType<typeof setInterval> {
+		const t = setInterval(cb, ms);
+		if (typeof (t as NodeJS.Timeout).unref === "function") (t as NodeJS.Timeout).unref();
+		return t;
+	}
+	function armHealthProbe(): void {
+		if (!storageHealthProbeEnabled || probeTimer !== null) return;
+		probeTimer = armUnrefInterval(() => void refreshHealth(), probeIntervalMs);
+	}
+	function armGraphBuild(): void {
+		if (!autoBuildGraph || graphBuildTimer !== null) return;
+		graphBuildTimer = armUnrefInterval(() => void rebuildCodebaseGraph(), DEFAULT_GRAPH_BUILD_INTERVAL_MS);
+	}
+
 	let started = false;
 	let locked = false;
 	// PRD-026 AC-W: the daemon-resident pollinating worker. Built + started ONLY when
@@ -2539,12 +2577,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				const initialHealthProbe = refreshHealth();
 				if (awaitInitialHealthProbe) await initialHealthProbe;
 				else void initialHealthProbe;
-				probeTimer = setInterval(() => {
-					void refreshHealth();
-				}, probeIntervalMs);
-				if (typeof (probeTimer as NodeJS.Timeout).unref === "function") {
-					(probeTimer as NodeJS.Timeout).unref();
-				}
+				armHealthProbe();
 			}
 
 			// PRD-041: kick the initial codebase-graph build OFF the readiness path (fire-and-forget
@@ -2553,12 +2586,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// `autoBuildGraph`), so the unit suite never triggers a real parse.
 			if (autoBuildGraph) {
 				void rebuildCodebaseGraph();
-				graphBuildTimer = setInterval(() => {
-					void rebuildCodebaseGraph();
-				}, DEFAULT_GRAPH_BUILD_INTERVAL_MS);
-				if (typeof (graphBuildTimer as NodeJS.Timeout).unref === "function") {
-					(graphBuildTimer as NodeJS.Timeout).unref();
-				}
+				armGraphBuild();
 			}
 
 			// Start the daemon's real services (queue → watcher → runtime-path).
@@ -2813,6 +2841,67 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 					}
 				}
 			}
+
+			// ── Wire + start the Deep Lake idle-cost master switch. Collect every background
+			// activity that touches Deep Lake on a timer as a Pausable, then let the controller
+			// silence them after `idleMs` with no inbound request so the connection drops and
+			// Activeloop scales the per-tenant pod to zero; the next request wakes them. With the
+			// flag off (the rollback) this whole block is skipped and every loop runs as before.
+			if (hibernationConfig.enabled && startBackgroundWorkers) {
+				const pausables: Pausable[] = [];
+				const addWorker = (label: string, h: { start(): void; stop(): void } | null): void => {
+					if (h !== null) pausables.push({ label, pause: () => h.stop(), resume: () => h.start() });
+				};
+				addWorker("summary", summaryWorker);
+				addWorker("skillify", skillifyWorker);
+				// Pause whatever actually drives the lease loop: the consolidated coordinator, or the
+				// two workers when running independently (never both — see the consolidation block).
+				if (leaseCoordinator !== null) addWorker("lease-coordinator", leaseCoordinator);
+				else {
+					addWorker("pipeline", pipelineWorker);
+					addWorker("pollinating", pollinatingWorker);
+				}
+				if (storageHealthProbeEnabled) {
+					pausables.push({
+						label: "health-probe",
+						pause: () => {
+							if (probeTimer !== null) {
+								clearInterval(probeTimer);
+								probeTimer = null;
+							}
+						},
+						resume: armHealthProbe,
+					});
+				}
+				if (autoBuildGraph) {
+					pausables.push({
+						label: "graph-build",
+						pause: () => {
+							if (graphBuildTimer !== null) {
+								clearInterval(graphBuildTimer);
+								graphBuildTimer = null;
+							}
+						},
+						resume: armGraphBuild,
+					});
+				}
+				if (pausables.length > 0) {
+					hibernation = createDeepLakeHibernation({
+						pausables,
+						config: hibernationConfig,
+						now: () => Date.now(),
+						timers: {
+							setTimer: (cb, ms) => {
+								const t = setTimeout(cb, ms);
+								if (typeof t.unref === "function") t.unref();
+								return t;
+							},
+							clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+						},
+					});
+					hibernation.start();
+				}
+			}
 		},
 
 		async shutdown(): Promise<void> {
@@ -2822,6 +2911,10 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// and never throws (a flush failure is logged inside the handler, not surfaced here). The
 			// `?.` tolerates a test seam whose fake capture handler does not implement `flush`.
 			await captureHandler.flush?.();
+			// Stop the idle-cost hibernation monitor first so a wake can never race the teardown
+			// below. It only cancels its own timer; the workers' own stop() does the real teardown.
+			hibernation?.stop();
+			hibernation = null;
 			// a-AC-5: graceful shutdown — stop the pollinating worker + the refresher, drain the
 			// services, and remove the lock so no stale lock survives. Idempotent + never throws
 			// on a missing lock.
