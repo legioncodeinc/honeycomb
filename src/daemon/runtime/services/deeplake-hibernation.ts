@@ -41,7 +41,7 @@
  *
  * ── Default-ON, with a parity off-switch (mirrors PRD-062b's AC-9 posture) ────
  * The cost fix ships DEFAULT-ON via {@link envHibernationConfigProvider} (an ABSENT
- * `HONEYCOMB_DEEPLAKE_HIBERNATE_ENABLED` means enabled). An explicit `false`/`0`
+ * `HONEYCOMB_DEEPLAKE_HIBERNATE_ENABLED` means enabled). ONLY an explicit `false`/`0`
  * disables it and the daemon behaves exactly as before (every loop runs forever, the
  * pre-fix cadence) — the documented rollback. With the flag off `start()` is a no-op
  * and no handle is ever paused.
@@ -118,132 +118,148 @@ export interface DeepLakeHibernation {
 
 type State = "stopped" | "active" | "hibernated";
 
+/** Clamp an idle-window config value to the floor; a non-numeric one falls back to the default. */
+function resolveIdleMs(idleMs: number): number {
+	return Number.isFinite(idleMs) ? Math.max(MIN_HIBERNATE_IDLE_MS, Math.trunc(idleMs)) : DEFAULT_HIBERNATE_IDLE_MS;
+}
+
 /**
- * Build the idle-cost master switch. The returned controller debounces on
- * `idleMs`: every {@link DeepLakeHibernation.touch} pushes the idle deadline out;
- * when the debounce fires with no intervening activity it pauses every handle, and
- * the next `touch()` resumes them. Transitions are serialized by a `transitioning`
- * guard so an async pause/resume never overlaps a wake/hibernate.
+ * Apply `pause`/`resume` to every handle in order, guarding each so a single thrower
+ * is logged and skipped rather than aborting the rest of the sweep (one wedged worker
+ * must never strand the others paused or running).
  */
+async function applyToHandles(
+	pausables: readonly Pausable[],
+	op: "pause" | "resume",
+	logger?: HibernationLogger,
+): Promise<void> {
+	const event = op === "pause" ? "hibernate.pause.error" : "wake.resume.error";
+	for (const p of pausables) {
+		try {
+			await (op === "pause" ? p.pause() : p.resume());
+		} catch (err) {
+			logger?.info(event, { handle: p.label, error: err instanceof Error ? err.message : String(err) });
+		}
+	}
+}
+
+/**
+ * The idle-cost master switch as a small-method state machine. The state machine has
+ * three states (`stopped` → `active` ⇄ `hibernated`) and debounces on `idleMs`: every
+ * {@link touch} pushes the idle deadline out; when the debounce fires with no
+ * intervening activity it pauses every handle, and the next `touch()` resumes them.
+ * Async transitions (hibernate/wake) are serialized by a `transitioning` guard so a
+ * slow pause/resume can never overlap its inverse.
+ */
+class HibernationController implements DeepLakeHibernation {
+	private readonly pausables: readonly Pausable[];
+	private readonly config: HibernationConfig;
+	private readonly now: () => number;
+	private readonly timers: HibernationTimers;
+	private readonly logger?: HibernationLogger;
+	private readonly idleMs: number;
+
+	private state: State = "stopped";
+	private lastActivityAt = 0;
+	private handle: unknown = null;
+	private transitioning = false;
+
+	constructor(deps: HibernationDeps) {
+		this.pausables = deps.pausables;
+		this.config = deps.config;
+		this.now = deps.now;
+		this.timers = deps.timers;
+		this.logger = deps.logger;
+		this.idleMs = resolveIdleMs(deps.config.idleMs);
+	}
+
+	start(): void {
+		if (!this.config.enabled || this.state !== "stopped") return;
+		this.state = "active";
+		this.lastActivityAt = this.now();
+		this.arm();
+	}
+
+	stop(): void {
+		this.clear();
+		this.state = "stopped";
+	}
+
+	touch(): void {
+		if (this.state === "stopped") return;
+		this.lastActivityAt = this.now();
+		if (this.state === "hibernated") void this.wake();
+		else this.arm();
+	}
+
+	isHibernated(): boolean {
+		return this.state === "hibernated";
+	}
+
+	private clear(): void {
+		if (this.handle !== null) {
+			this.timers.clearTimer(this.handle);
+			this.handle = null;
+		}
+	}
+
+	/** Arm the debounce to fire `delay` (default the full idle window) from now. */
+	private arm(delay: number = this.idleMs): void {
+		this.clear();
+		this.handle = this.timers.setTimer(() => this.onIdle(), delay);
+	}
+
+	private onIdle(): void {
+		this.handle = null;
+		// Only hibernate from the active state, and only if the idle window truly elapsed —
+		// a late timer that raced a fresh touch re-arms for the remaining time instead.
+		if (this.state !== "active") return;
+		const elapsed = this.now() - this.lastActivityAt;
+		if (elapsed < this.idleMs) this.arm(this.idleMs - elapsed);
+		else void this.hibernate();
+	}
+
+	private async hibernate(): Promise<void> {
+		if (this.state !== "active" || this.transitioning) return;
+		this.transitioning = true;
+		try {
+			await applyToHandles(this.pausables, "pause", this.logger);
+			this.state = "hibernated";
+			this.logger?.info("deeplake.hibernated", { idleMs: this.idleMs, handles: this.pausables.length });
+		} finally {
+			this.transitioning = false;
+		}
+	}
+
+	private async wake(): Promise<void> {
+		if (this.state !== "hibernated" || this.transitioning) return;
+		this.transitioning = true;
+		try {
+			await applyToHandles(this.pausables, "resume", this.logger);
+			this.state = "active";
+			this.logger?.info("deeplake.woke", { handles: this.pausables.length });
+			this.arm();
+		} finally {
+			this.transitioning = false;
+		}
+	}
+}
+
+/** Build the idle-cost master switch (see {@link HibernationController}). */
 export function createDeepLakeHibernation(deps: HibernationDeps): DeepLakeHibernation {
-	const { pausables, config, now, timers, logger } = deps;
-	const idleMs = Number.isFinite(config.idleMs)
-		? Math.max(MIN_HIBERNATE_IDLE_MS, Math.trunc(config.idleMs))
-		: DEFAULT_HIBERNATE_IDLE_MS;
-
-	let state: State = "stopped";
-	let lastActivityAt = 0;
-	let handle: unknown = null;
-	let transitioning = false;
-
-	function clear(): void {
-		if (handle !== null) {
-			timers.clearTimer(handle);
-			handle = null;
-		}
-	}
-
-	/** Arm the debounce to fire `idleMs` after the last recorded activity. */
-	function arm(): void {
-		clear();
-		handle = timers.setTimer(onIdle, idleMs);
-	}
-
-	function onIdle(): void {
-		handle = null;
-		// Only hibernate from the active state, and only if the idle window truly elapsed
-		// (a late timer that raced a fresh touch re-arms instead of hibernating).
-		if (state !== "active") return;
-		const elapsed = now() - lastActivityAt;
-		if (elapsed < idleMs) {
-			handle = timers.setTimer(onIdle, idleMs - elapsed);
-			return;
-		}
-		void hibernate();
-	}
-
-	async function hibernate(): Promise<void> {
-		if (state !== "active" || transitioning) return;
-		transitioning = true;
-		try {
-			for (const p of pausables) {
-				try {
-					await p.pause();
-				} catch (err) {
-					logger?.info("hibernate.pause.error", {
-						handle: p.label,
-						error: err instanceof Error ? err.message : String(err),
-					});
-				}
-			}
-			state = "hibernated";
-			logger?.info("deeplake.hibernated", { idleMs, handles: pausables.length });
-		} finally {
-			transitioning = false;
-		}
-	}
-
-	async function wake(): Promise<void> {
-		if (state !== "hibernated" || transitioning) return;
-		transitioning = true;
-		try {
-			for (const p of pausables) {
-				try {
-					await p.resume();
-				} catch (err) {
-					logger?.info("wake.resume.error", {
-						handle: p.label,
-						error: err instanceof Error ? err.message : String(err),
-					});
-				}
-			}
-			state = "active";
-			logger?.info("deeplake.woke", { handles: pausables.length });
-			arm();
-		} finally {
-			transitioning = false;
-		}
-	}
-
-	return {
-		start(): void {
-			if (!config.enabled || state !== "stopped") return;
-			state = "active";
-			lastActivityAt = now();
-			arm();
-		},
-		stop(): void {
-			clear();
-			state = "stopped";
-		},
-		touch(): void {
-			if (state === "stopped") return;
-			lastActivityAt = now();
-			if (state === "hibernated") {
-				void wake();
-			} else {
-				arm();
-			}
-		},
-		isHibernated(): boolean {
-			return state === "hibernated";
-		},
-	};
+	return new HibernationController(deps);
 }
 
 /**
  * Resolve the hibernation config from the environment. DEFAULT-ON: an ABSENT
- * `HONEYCOMB_DEEPLAKE_HIBERNATE_ENABLED` means enabled (the cost fix ships on); an
- * explicit `false`/`0` rolls it back to the pre-fix always-connected behavior.
+ * `HONEYCOMB_DEEPLAKE_HIBERNATE_ENABLED` means enabled, and ONLY an explicit
+ * `false`/`0` rolls it back to the pre-fix always-connected behavior — a typo or any
+ * other value stays enabled rather than silently disabling the cost fix.
  * `HONEYCOMB_DEEPLAKE_HIBERNATE_IDLE_MS` tunes the idle window (clamped to a floor);
  * a non-numeric value falls back to the default. Daemon-only (reads `process.env`).
  */
 export function envHibernationConfigProvider(env: NodeJS.ProcessEnv = process.env): HibernationConfig {
 	const rawEnabled = env.HONEYCOMB_DEEPLAKE_HIBERNATE_ENABLED;
-	const enabled = rawEnabled === undefined ? true : rawEnabled === "true" || rawEnabled === "1";
-	const rawMs = Number(env.HONEYCOMB_DEEPLAKE_HIBERNATE_IDLE_MS);
-	const idleMs = Number.isFinite(rawMs)
-		? Math.max(MIN_HIBERNATE_IDLE_MS, Math.trunc(rawMs))
-		: DEFAULT_HIBERNATE_IDLE_MS;
-	return { enabled, idleMs };
+	const enabled = !(rawEnabled === "false" || rawEnabled === "0");
+	return { enabled, idleMs: resolveIdleMs(Number(env.HONEYCOMB_DEEPLAKE_HIBERNATE_IDLE_MS)) };
 }

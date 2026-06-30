@@ -219,10 +219,13 @@ describe("AC-H.7 env resolver: default-ON, explicit rollback, idle clamp", () =>
 		expect(envHibernationConfigProvider({}).enabled).toBe(true);
 		expect(envHibernationConfigProvider({}).idleMs).toBe(DEFAULT_HIBERNATE_IDLE_MS);
 	});
-	it("an explicit false/0 rolls back to always-connected", () => {
+	it("ONLY an explicit false/0 rolls back; a typo or any other value stays enabled", () => {
 		expect(envHibernationConfigProvider({ HONEYCOMB_DEEPLAKE_HIBERNATE_ENABLED: "false" }).enabled).toBe(false);
 		expect(envHibernationConfigProvider({ HONEYCOMB_DEEPLAKE_HIBERNATE_ENABLED: "0" }).enabled).toBe(false);
 		expect(envHibernationConfigProvider({ HONEYCOMB_DEEPLAKE_HIBERNATE_ENABLED: "true" }).enabled).toBe(true);
+		// A malformed value must NOT silently disable the cost fix (Aikido AIK_AI_logic_bugs).
+		expect(envHibernationConfigProvider({ HONEYCOMB_DEEPLAKE_HIBERNATE_ENABLED: "maybe" }).enabled).toBe(true);
+		expect(envHibernationConfigProvider({ HONEYCOMB_DEEPLAKE_HIBERNATE_ENABLED: "" }).enabled).toBe(true);
 	});
 	it("clamps a too-small idle window up to the floor and ignores a non-numeric one", () => {
 		expect(envHibernationConfigProvider({ HONEYCOMB_DEEPLAKE_HIBERNATE_IDLE_MS: "10" }).idleMs).toBe(
