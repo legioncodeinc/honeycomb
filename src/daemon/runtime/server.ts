@@ -21,30 +21,28 @@
  * production; importing this module does NOT auto-listen.
  */
 
-import { Hono } from "hono";
 import type { MiddlewareHandler } from "hono";
+import { Hono } from "hono";
 import { HONEYCOMB_VERSION } from "../../shared/constants.js";
 import { CATALOG } from "../storage/catalog/index.js";
 import type { StorageQuery } from "../storage/client.js";
+import type { Authenticator, AuthorizationPolicy } from "./auth/contracts.js";
 import { type DeploymentMode, type RuntimeConfig, resolveRuntimeConfig } from "./config.js";
+import { type HealthDetail, publicHealthDetail } from "./health.js";
 import { createRequestLogger, type RequestLogger } from "./logger.js";
 import {
-	type PermissionCheck,
-	type PermissionMiddlewareOptions,
 	defaultDenyPermissionCheck,
 	legacyPermissionCheckAdapter,
+	type PermissionCheck,
+	type PermissionMiddlewareOptions,
 	permissionMiddleware,
 } from "./middleware/permission.js";
-import { type AuthorizationPolicy, type Authenticator } from "./auth/contracts.js";
-import {
-	type RuntimePathService,
-	noopRuntimePathService,
-	runtimePathMiddleware,
-} from "./middleware/runtime-path.js";
+import { noopRuntimePathService, type RuntimePathService, runtimePathMiddleware } from "./middleware/runtime-path.js";
+import { type EmbedSupervisor, noopEmbedSupervisor } from "./services/embed-supervisor.js";
 import { type FileWatcherService, noopFileWatcherService } from "./services/file-watcher.js";
 import { type JobQueueService, noopJobQueueService } from "./services/job-queue.js";
-import { type EmbedSupervisor, noopEmbedSupervisor } from "./services/embed-supervisor.js";
-import { type HealthDetail, publicHealthDetail } from "./health.js";
+import { noopTelemetryService, type TelemetryService } from "./telemetry/fleet-service.js";
+
 /**
  * The route-group surface (FR-2). Each entry is mounted as a scaffolded sub-app.
  * `protect: false` for the two diagnostics endpoints that require NO permission
@@ -125,6 +123,13 @@ export interface DaemonServices {
 	 * to the inert {@link noopEmbedSupervisor}; `assembleDaemon` swaps in the real one.
 	 */
 	readonly embed: EmbedSupervisor;
+	/**
+	 * The fleet check-in + metrics telemetry service (PRD-071). Writes honeycomb's runtime status
+	 * and metrics snapshot into its own local SQLite for hivedoctor to poll read-only. Defaults to
+	 * the inert {@link noopTelemetryService} so the daemon compiles and every existing test stays
+	 * on zero real SQLite; `assembleDaemon` swaps in the real one.
+	 */
+	readonly telemetry: TelemetryService;
 }
 
 /** Options for building the daemon. Everything is injectable for testability. */
@@ -230,6 +235,7 @@ export function createDaemon(options: CreateDaemonOptions = {}): Daemon {
 		watcher: options.services?.watcher ?? noopFileWatcherService,
 		runtimePath: options.services?.runtimePath ?? noopRuntimePathService,
 		embed: options.services?.embed ?? noopEmbedSupervisor,
+		telemetry: options.services?.telemetry ?? noopTelemetryService,
 	};
 	const storage = options.storage;
 	const pipelineProbe = options.pipelineProbe ?? ((): PipelineStatus => coarsePipelineStatus(storage));
@@ -408,15 +414,21 @@ export function createDaemon(options: CreateDaemonOptions = {}): Daemon {
 			await services.queue.start();
 			await services.watcher.start();
 			await services.runtimePath.start();
-			// PRD-025 D-6: the embed supervisor starts LAST. Its `start()` spawns the embed
-			// child + waits (bounded) for liveness, then warms in the BACKGROUND (D-3) — the
+			// PRD-025 D-6: the embed supervisor starts LAST (before telemetry). Its `start()` spawns
+			// the embed child + waits (bounded) for liveness, then warms in the BACKGROUND (D-3) — the
 			// warm wait is never awaited here, so daemon readiness is never blocked on a cold
 			// model. A never-starting child leaves recall on the lexical path (degraded), not hung.
 			await services.embed.start();
+			// PRD-071: the fleet telemetry service starts LAST — it only observes the daemon's own
+			// state (health, storage counters); nothing else depends on it being up.
+			await services.telemetry.start();
 		},
 		async stopServices(): Promise<void> {
 			// Stop in reverse order; each stop is awaited for a graceful drain.
-			// PRD-025 D-6: tear the embed child down FIRST so a clean daemon shutdown also
+			// PRD-071: stop telemetry FIRST so its heartbeat/metrics writes end before anything else
+			// tears down.
+			await services.telemetry.stop();
+			// PRD-025 D-6: tear the embed child down next so a clean daemon shutdown also
 			// drains the supervised embed process (no orphaned child).
 			await services.embed.stop();
 			await services.runtimePath.stop();

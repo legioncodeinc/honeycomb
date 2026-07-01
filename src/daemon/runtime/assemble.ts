@@ -34,12 +34,18 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-
-import { LEGACY_CREDENTIALS_DIR_NAME, DIR_MODE } from "./auth/credentials-store.js";
-import { mountAuthStatusApi } from "./auth/status-api.js";
+import { CATALOG } from "../storage/catalog/index.js";
+import type { QueryScope, StorageClient } from "../storage/client.js";
+import { type CredentialProvider, defaultCredentialProvider } from "../storage/config.js";
+import { createLazyStorageClient } from "../storage/index.js";
+import { isOk } from "../storage/result.js";
+// ── The asset-sync substrate `/api/assets` mount (PRD-033c / D-6) ──
+import { mountAssetsApi } from "./assets/api.js";
+import type { TrustedTableProbe } from "./assets/sync.js";
+import { DIR_MODE, LEGACY_CREDENTIALS_DIR_NAME } from "./auth/credentials-store.js";
 import {
-	type AuthorizationPolicy,
 	type Authenticator,
+	type AuthorizationPolicy,
 	createApiKeyAuthenticator,
 	createRbacPolicy,
 	createTokenAuthenticator,
@@ -47,72 +53,21 @@ import {
 	type Identity,
 	type PresentedCredentials,
 } from "./auth/index.js";
-import { type DeploymentMode, type RuntimeConfig, resolveRuntimeConfig } from "./config.js";
-import { type RequestLogger, createRequestLogger } from "./logger.js";
-import { createRuntimePathService } from "./middleware/runtime-path.js";
-import { createFileWatcherService, type HarnessTarget } from "./services/file-watcher.js";
-import { createJobQueueService, type JobQueueConfig } from "./services/job-queue.js";
-import {
-	createHybridJobQueueService,
-	resolveHybridJobQueueConfig,
-	type HybridJobQueueConfig,
-} from "./services/hybrid-job-queue.js";
-import { openLocalJobQueue, type LocalJobQueueService } from "./services/local-job-queue.js";
-import { type CreateDaemonOptions, type Daemon, type DaemonServices, createDaemon } from "./server.js";
-
+import { mountAuthStatusApi } from "./auth/status-api.js";
 import { attachHooksHandlers } from "./capture/attach.js";
 import type { CaptureHandler } from "./capture/capture-handler.js";
 import { buildCodebaseGraphSnapshot, mountGraphApi } from "./codebase/api.js";
-import { mountOntologyApi } from "./ontology/api.js";
-import { mountSkillPropagationApi } from "./skillify/propagation-api.js";
-import { mountDashboardApi } from "./dashboard/api.js";
+import { type DeploymentMode, type RuntimeConfig, resolveRuntimeConfig } from "./config.js";
 import { mountActionsApi } from "./dashboard/actions-api.js";
+import { mountDashboardApi } from "./dashboard/api.js";
 import { mountHarnessApi } from "./dashboard/harness-api.js";
-import { mountSyncApi } from "./dashboard/sync-mount.js";
 import { detectInstalledHarnesses } from "./dashboard/harness-detect.js";
 import { mountSetupLogin } from "./dashboard/setup-login.js";
-import { mountSetupStateApi } from "./dashboard/setup-state.js";
 import { mountSetupMigrate } from "./dashboard/setup-migrate.js";
-import { mountPollinateApi } from "./pollinating/api.js";
-import {
-	mountOnboardingApi,
-	mountProjectsSyncApi,
-	mountScopeEnumerationApi,
-	mountScopeSwitchApi,
-} from "./projects/index.js";
-import { mountCompactApi } from "./maintenance/compact-api.js";
-import { mountStaleRefApi } from "./maintenance/stale-ref-api.js";
-import { mountLogsApi } from "./logs/api.js";
-import { type LogStore, NULL_LOG_STORE, openLogStore } from "./logs/log-store.js";
-import { mountNotificationsApi } from "./notifications/api.js";
-import { attachSessionsPrune } from "./sessions/prune.js";
-
-// ── Data-API mount seams (PRD-022a / 022b / 022c) the composition root fires (D-2 / d-AC-1) ──
-import { mountMemoriesApi, mountMemoriesPrimeApi } from "./memories/index.js";
-import { createConflictSuppressionSource } from "./memories/conflict-resolve.js";
-import { createControlledWriteConflictHook } from "./memories/conflict-hook.js";
-import { mountConflictsApi } from "./memories/conflicts-api.js";
-import { mountLifecycleApi } from "./memories/lifecycle-api.js";
-import { mountVfsApi } from "./vfs/api.js";
-import { mountProductDataApi } from "./product/index.js";
-import { localDefaultScopeResolver, type SecretsApiDeps } from "./secrets/api.js";
-import { type SourcesApiDeps } from "./sources/api.js";
-import { buildSourcesApiDeps } from "./sources/registry.js";
-import { SecretsStore, createMachineKeyProvider } from "./secrets/store.js";
-import type { SecretScope } from "./secrets/contracts.js";
-
-// ── The vault `setting` class (PRD-032d / AC-6) — assembly READS provider/model + pollinating ──
-import { VaultStore } from "./vault/store.js";
-import { createVaultRegistry } from "./vault/registry.js";
-import { EMBEDDINGS_ENABLED_KEY, mountSettingsApi } from "./vault/api.js";
-import { isValidProviderModel, providerEntry } from "./vault/catalog.js";
-import { migrateDeeplakeToken } from "./vault/migrate.js";
-
-// ── The asset-sync substrate `/api/assets` mount (PRD-033c / D-6) ──
-import { mountAssetsApi } from "./assets/api.js";
-import { type TrustedTableProbe } from "./assets/sync.js";
-import { CATALOG } from "../storage/catalog/index.js";
-
+import { mountSetupStateApi } from "./dashboard/setup-state.js";
+import { mountSyncApi } from "./dashboard/sync-mount.js";
+import { mountDiagnosticsHealthApi } from "./diagnostics-health.js";
+import { buildHealthDetail, type HealthDetail, type PortkeyHealth } from "./health.js";
 import {
 	buildInferenceModelClient,
 	PORTKEY_API_KEY_NAME,
@@ -120,11 +75,22 @@ import {
 	type PortkeySelection,
 	type ProviderModelOverride,
 } from "./inference/model-client-factory.js";
-import { createSecretResolver } from "./secrets/store.js";
-import { RecallConfigSchema, resolveRecallConfig } from "./recall/config.js";
-import { buildCohereRerankSeam, createPortkeyRerankClient } from "./recall/rerank-portkey.js";
+import { mountLocalQueueDiagnosticsApi } from "./local-queue-diagnostics-api.js";
+import { createRequestLogger, type RequestLogger } from "./logger.js";
+import { mountLogsApi } from "./logs/api.js";
+import { type LogStore, NULL_LOG_STORE, openLogStore } from "./logs/log-store.js";
+import { mountCompactApi } from "./maintenance/compact-api.js";
+import { mountStaleRefApi } from "./maintenance/stale-ref-api.js";
+import { createControlledWriteConflictHook } from "./memories/conflict-hook.js";
+import { createConflictSuppressionSource } from "./memories/conflict-resolve.js";
+import { mountConflictsApi } from "./memories/conflicts-api.js";
+// ── Data-API mount seams (PRD-022a / 022b / 022c) the composition root fires (D-2 / d-AC-1) ──
+import { mountMemoriesApi, mountMemoriesPrimeApi } from "./memories/index.js";
+import { mountLifecycleApi } from "./memories/lifecycle-api.js";
 import type { CohereRerankSeam } from "./memories/recall.js";
-import type { ModelClient } from "./pipeline/model-client.js";
+import { createRuntimePathService } from "./middleware/runtime-path.js";
+import { mountNotificationsApi } from "./notifications/api.js";
+import { mountOntologyApi } from "./ontology/api.js";
 import {
 	controlledWriteFanOut,
 	createPipelineHandlers,
@@ -136,37 +102,69 @@ import {
 	resolvePipelineConfig,
 	type StageWorker,
 } from "./pipeline/index.js";
+import type { ModelClient } from "./pipeline/model-client.js";
+import { mountPollinateApi } from "./pollinating/api.js";
 import { resolvePollinatingConfig } from "./pollinating/config.js";
 import { createPollinatingTrigger } from "./pollinating/trigger.js";
 import { createPollinatingWorker, type PollinatingJobWorker } from "./pollinating/worker.js";
-import { type PollBackoffConfig, resolvePollBackoffConfig } from "./services/poll-backoff.js";
+import { mountProductDataApi } from "./product/index.js";
+import {
+	mountOnboardingApi,
+	mountProjectsSyncApi,
+	mountScopeEnumerationApi,
+	mountScopeSwitchApi,
+} from "./projects/index.js";
+import { RecallConfigSchema, resolveRecallConfig } from "./recall/config.js";
+import { buildCohereRerankSeam, createPortkeyRerankClient } from "./recall/rerank-portkey.js";
+import { localDefaultScopeResolver, type SecretsApiDeps } from "./secrets/api.js";
+import type { SecretScope } from "./secrets/contracts.js";
+import { createMachineKeyProvider, createSecretResolver, SecretsStore } from "./secrets/store.js";
+import { type CreateDaemonOptions, createDaemon, type Daemon, type DaemonServices } from "./server.js";
+import {
+	createEmbedAttachment,
+	type EmbedAttachment,
+	type EmbedClient,
+	resolveEmbedClientOptions,
+} from "./services/embed-client.js";
+import { createEmbedSupervisor, type EmbedSupervisor } from "./services/embed-supervisor.js";
+import { createFileWatcherService, type HarnessTarget } from "./services/file-watcher.js";
+import {
+	createHybridJobQueueService,
+	type HybridJobQueueConfig,
+	resolveHybridJobQueueConfig,
+} from "./services/hybrid-job-queue.js";
+import { createJobQueueService, type JobQueueConfig } from "./services/job-queue.js";
 import {
 	createLeaseCoordinator,
 	type LeaseCoordinator,
 	resolvePollConsolidateConfig,
 } from "./services/lease-coordinator.js";
-
-// ── The PRD-046a summary-worker mount (the deferred-assembly seam PRD-017 left) ──
-import { createSummaryJobWorker, type SummaryJobWorker } from "./summaries/index.js";
-
+import { type LocalJobQueueService, openLocalJobQueue } from "./services/local-job-queue.js";
+import { countPendingSharedLocalJobs, resolveLocalQueueTopology } from "./services/local-queue-diagnostics.js";
+import { type PollBackoffConfig, resolvePollBackoffConfig } from "./services/poll-backoff.js";
+import { attachSessionsPrune } from "./sessions/prune.js";
+import { mountSkillPropagationApi } from "./skillify/propagation-api.js";
 // ── The PRD-045f skillify-worker mount (the deferred-assembly seam PRD-016 left) ──
 import { createSkillifyJobWorker, defaultGateSpec, type SkillifyJobWorker } from "./skillify/worker.js";
-
-import { createLazyStorageClient } from "../storage/index.js";
-import { type CredentialProvider, defaultCredentialProvider } from "../storage/config.js";
-import type { QueryScope, StorageClient } from "../storage/client.js";
-import { isOk } from "../storage/result.js";
+import type { SourcesApiDeps } from "./sources/api.js";
+import { buildSourcesApiDeps } from "./sources/registry.js";
+// ── The PRD-046a summary-worker mount (the deferred-assembly seam PRD-017 left) ──
+import { createSummaryJobWorker, type SummaryJobWorker } from "./summaries/index.js";
+import { createDashboardMetricsSource } from "./telemetry/fleet-metrics-source.js";
+import { createTelemetryService, noopTelemetryService } from "./telemetry/fleet-service.js";
 import {
-	type EmbedAttachment,
-	type EmbedClient,
-	createEmbedAttachment,
-	resolveEmbedClientOptions,
-} from "./services/embed-client.js";
-import { type EmbedSupervisor, createEmbedSupervisor } from "./services/embed-supervisor.js";
-import { type HealthDetail, type PortkeyHealth, buildHealthDetail } from "./health.js";
-import { mountDiagnosticsHealthApi } from "./diagnostics-health.js";
-import { mountLocalQueueDiagnosticsApi } from "./local-queue-diagnostics-api.js";
-import { countPendingSharedLocalJobs, resolveLocalQueueTopology } from "./services/local-queue-diagnostics.js";
+	type FleetTelemetryStore,
+	NULL_FLEET_TELEMETRY_STORE,
+	openFleetTelemetryStore,
+} from "./telemetry/fleet-store.js";
+import { combineLogWriteThrough, createFleetLogTap } from "./telemetry/logs.js";
+import { EMBEDDINGS_ENABLED_KEY, mountSettingsApi } from "./vault/api.js";
+import { isValidProviderModel, providerEntry } from "./vault/catalog.js";
+import { migrateDeeplakeToken } from "./vault/migrate.js";
+import { createVaultRegistry } from "./vault/registry.js";
+// ── The vault `setting` class (PRD-032d / AC-6) — assembly READS provider/model + pollinating ──
+import { VaultStore } from "./vault/store.js";
+import { mountVfsApi } from "./vfs/api.js";
 
 /**
  * The inference-config filename the daemon reads its `inference:` block from (PRD-026
@@ -397,6 +395,22 @@ export interface AssembleDaemonOptions {
 	 * suite is unchanged — every vault read fails soft to the `agent.yaml`/env fallback).
 	 */
 	readonly vault?: VaultSettingsReader;
+	/**
+	 * PRD-071 (Contract B): the fleet telemetry SQLite store (`~/.honeycomb/telemetry/honeycomb.sqlite`)
+	 * honeycomb's check-in/metrics/log surfaces write into for hivedoctor to poll read-only. Production
+	 * leaves it UNSET → the composition root opens the REAL store at the pinned Contract-B path for the
+	 * REAL assembly only (no injected {@link storage}), so the deterministic unit suite (which injects a
+	 * fake `storage`) never touches `~/.honeycomb`. The open is fail-soft: an unavailable `node:sqlite` /
+	 * open failure degrades to {@link NULL_FLEET_TELEMETRY_STORE}. A test injects an in-memory store (or
+	 * sets {@link telemetryHomeDir}) to exercise the real wiring deterministically.
+	 */
+	readonly telemetryStore?: FleetTelemetryStore;
+	/**
+	 * Override the home dir the REAL fleet telemetry store resolves `~/.honeycomb/telemetry/…` under
+	 * (PRD-071). Ignored when {@link telemetryStore} is injected directly. A live-wiring test points
+	 * this at a temp dir so it never touches the real `~/.honeycomb`.
+	 */
+	readonly telemetryHomeDir?: string;
 }
 
 /**
@@ -1956,11 +1970,23 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	const logStore: LogStore =
 		options.logStore ??
 		(options.storage === undefined ? openLogStore({ baseDir: resolveWorkspaceBaseDir() }) : NULL_LOG_STORE);
+	// PRD-071 (Contract B): the fleet telemetry SQLite store, mirroring the SAME precedence as
+	// `logStore` above — built BEFORE the logger so its log tap can tee into the SAME `store` option
+	// `createRequestLogger` already accepts (PRD-043a), with zero changes to `logger.ts` itself. The
+	// deterministic unit suite (a fake `storage` injected, no override) gets the inert
+	// {@link NULL_FLEET_TELEMETRY_STORE} and never touches `~/.honeycomb`.
+	const fleetStore: FleetTelemetryStore =
+		options.telemetryStore ??
+		(options.storage === undefined
+			? openFleetTelemetryStore({ homeDir: options.telemetryHomeDir })
+			: NULL_FLEET_TELEMETRY_STORE);
 	// The logger writes THROUGH the store in addition to the ring buffer + stderr (FR-2). When the
 	// caller injects its own `logger`, we respect it (its own store wiring, if any, stands); only the
 	// default logger gets the assembly's store. An injected logger from a unit test has no store, so
-	// nothing changes for that suite.
-	const logger = options.logger ?? createRequestLogger({ store: logStore });
+	// nothing changes for that suite. PRD-071c: the fleet log tap is fanned in alongside the existing
+	// durable request-log store (`combineLogWriteThrough`) — one write-through call site, two sinks.
+	const logger =
+		options.logger ?? createRequestLogger({ store: combineLogWriteThrough(logStore, createFleetLogTap(fleetStore)) });
 	const runtimeDir = resolveRuntimeDir(options.runtimeDir);
 	const probeIntervalMs = options.healthProbeIntervalMs ?? DEFAULT_HEALTH_PROBE_INTERVAL_MS;
 
@@ -2022,6 +2048,18 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		config: localQueueConfig,
 	});
 
+	// ── a-AC-4: the cached health bit. A cheap background `SELECT 1` refreshes a coarse
+	// status; `/health` reads the bit (NO per-request heavy query). Initial state is
+	// `ok` (a freshly-constructed live client is assumed reachable until the first probe
+	// proves otherwise) — the server's own default would also report `ok` when storage is
+	// wired, so this never reports a false green that the server would not.
+	//
+	// Declared BEFORE the services block (moved up from its original a-AC-4 position) so the
+	// PRD-071 telemetry service constructed below can close over the SAME `healthBit` thunk
+	// `/health` reads (AC-071a.2.2: the check-in health value is never recomputed independently).
+	let healthBit: PipelineStatus = "ok";
+	const pipelineProbe = (): PipelineStatus => healthBit;
+
 	// ── a-AC-3: the three REAL services replace the no-op stubs.
 	const services: Partial<DaemonServices> = {
 		queue,
@@ -2037,6 +2075,22 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		// makes it inert (no child) and unset/on spawns with zero config (D-1). A test injects a
 		// fake supervisor so the hermetic assembly never spawns a real process.
 		embed: options.embedSupervisor ?? createEmbedSupervisor(),
+		// PRD-071: the fleet check-in + metrics telemetry service. Reuses the SAME cached
+		// `healthBit` `/health` reads and the SAME `storage` + `scope` every other daemon read
+		// goes through (AC-071b.2.1: metrics derive from EXISTING counters, never re-derived).
+		// Built whenever there is a REAL fleet store to write into — the real production assembly
+		// (no injected `storage`), OR a test that explicitly injects `telemetryStore` to drive the
+		// wiring deterministically against a fake `storage`. The plain deterministic unit suite
+		// (fake `storage`, no `telemetryStore` override) gets the inert `noopTelemetryService`.
+		telemetry:
+			options.telemetryStore !== undefined || options.storage === undefined
+				? createTelemetryService({
+						store: fleetStore,
+						health: () => healthBit,
+						deeplakeConnected: () => healthBit === "ok",
+						metricsSource: createDashboardMetricsSource(storage, scope),
+					})
+				: noopTelemetryService,
 	};
 
 	// Dashboard actions: reconcile the embed supervisor to the PERSISTED `embeddings.enabled`
@@ -2056,14 +2110,6 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				process.stderr.write(`honeycomb: embeddings boot reconciliation failed (non-fatal): ${reason}\n`);
 			});
 	}
-
-	// ── a-AC-4: the cached health bit. A cheap background `SELECT 1` refreshes a coarse
-	// status; `/health` reads the bit (NO per-request heavy query). Initial state is
-	// `ok` (a freshly-constructed live client is assumed reachable until the first probe
-	// proves otherwise) — the server's own default would also report `ok` when storage is
-	// wired, so this never reports a false green that the server would not.
-	let healthBit: PipelineStatus = "ok";
-	const pipelineProbe = (): PipelineStatus => healthBit;
 
 	// ── PRD-029 (AC-2): the structured `/health` detail. The `embeddings` reason reflects
 	// the embed-seam state KNOWN AT ASSEMBLY (D-4), NOT a probe: when a test injects a fake
