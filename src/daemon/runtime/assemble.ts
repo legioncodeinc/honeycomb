@@ -70,7 +70,6 @@ import { mountActionsApi } from "./dashboard/actions-api.js";
 import { mountHarnessApi } from "./dashboard/harness-api.js";
 import { mountSyncApi } from "./dashboard/sync-mount.js";
 import { detectInstalledHarnesses } from "./dashboard/harness-detect.js";
-import { mountDashboardHost } from "./dashboard/host.js";
 import { mountSetupLogin } from "./dashboard/setup-login.js";
 import { mountSetupStateApi } from "./dashboard/setup-state.js";
 import { mountSetupMigrate } from "./dashboard/setup-migrate.js";
@@ -413,8 +412,9 @@ export type VaultSettingsReader = Pick<VaultStore, "getSetting">;
  * The mount/attach seam functions the composition root fires once (a-AC-2). The four
  * core seams (`attachHooks`/`mountDashboard`/`mountNotifications`/`attachPrune`) fire
  * unconditionally; `mountLogs` fires unconditionally (its `/api/logs` group is already
- * `protect:true` in `server.ts`, so it carries no security gate); `mountDashboardHost`
- * fires LOCAL-MODE ONLY (security F-1 — see {@link assembleSeams}).
+ * `protect:true` in `server.ts`, so it carries no security gate); the guided-setup routes
+ * (`mountSetupLogin` / `mountSetupState` / `mountSetupMigrate`) fire LOCAL-MODE ONLY
+ * (security F-1 — see {@link assembleSeams}).
  */
 export interface SeamFns {
 	readonly attachHooks: typeof attachHooksHandlers;
@@ -423,8 +423,6 @@ export interface SeamFns {
 	readonly attachPrune: typeof attachSessionsPrune;
 	/** The `/api/logs` ring-buffer reader (021d). Fires always — its group is `protect:true`. */
 	readonly mountLogs: typeof mountLogsApi;
-	/** The viewable `/dashboard` HTML host (021d). Fires LOCAL-MODE ONLY (security F-1). */
-	readonly mountDashboardHost: typeof mountDashboardHost;
 	/**
 	 * The "First time setup" on-page login route — `POST /setup/login` (PRD-050c). Sits beside the
 	 * dashboard host on the UNPROTECTED root group, so it fires LOCAL-MODE ONLY under the SAME gate
@@ -623,7 +621,6 @@ export const defaultSeamFns: SeamFns = {
 	mountNotifications: mountNotificationsApi,
 	attachPrune: attachSessionsPrune,
 	mountLogs: mountLogsApi,
-	mountDashboardHost,
 	mountSetupLogin,
 	mountSetupState: mountSetupStateApi,
 	mountSetupMigrate,
@@ -808,12 +805,12 @@ function authForMode(
 /**
  * Fire the mount/attach seams EXACTLY ONCE, after construction, in a deterministic order
  * (a-AC-2 / FR-3): hooks → dashboard → notifications → sessions-prune → logs →
- * dashboard-host. Each reads through the live storage client + the queue/logger it needs.
+ * setup routes (local only). Each reads through the live storage client + the queue/logger it needs.
  * This is the single caller of these seams in production; calling it twice would
  * double-register routes, so the composition root calls it once (the seams hold no global
  * state — the once-ness lives here).
  *
- * The first FIVE seams fire UNCONDITIONALLY. The sixth (`mountDashboardHost`) fires
+ * The first FIVE seams fire UNCONDITIONALLY. Step 6 fires the guided-setup routes
  * LOCAL-MODE ONLY — see the security gate at step 6. Steps 7–9 fire the data-API mount
  * seams (022a/022b/022c) UNCONDITIONALLY: each resolves its OWN already-mounted +
  * protected route group (`/api/memories`, `/memory`, `/api/goals`…), so there is no
@@ -913,23 +910,14 @@ export function assembleSeams(
 	//    unavailable (fail-soft), so history degrades to an empty page, never a throw.
 	seams.mountLogs(daemon, { logger: daemon.logger, store: logStore });
 
-	// 6. The viewable /dashboard HTML host (021d / d-AC-3) — LOCAL-MODE ONLY (security F-1).
-	//    `mountDashboardHost` attaches `GET /dashboard` onto the UNPROTECTED root group
-	//    (`server.ts`: `{ path: "/", protect: false }`), so a team/hybrid daemon would
-	//    serve another tenant's KPIs/sessions/rules HTML with no auth check — the tenancy
-	//    bypass security F-1 flagged. We gate it to `local` mode, the first-class
-	//    single-user loopback dogfood target (D-3): there is exactly one tenant, the
-	//    permission middleware is open by design, and the host is unreachable in
-	//    team/hybrid. DEFERRED: wiring the host for team/hybrid waits on the separate
-	//    `x-honeycomb-org` header-trust hardening ticket (the "surface Identity to
-	//    handlers" refactor) — once that lands, the host can move to its own `protect:true`
-	//    group and this gate can widen. Until then, team/hybrid get NO `/dashboard` route
-	//    (it falls through to the root 501/404 scaffold), which is the correct closed
-	//    posture — never an open tenancy hole.
+	// 6. The guided-setup routes (PRD-050b/c/d) — LOCAL-MODE ONLY (security F-1).
+	//    They attach onto the UNPROTECTED root group (`server.ts`: `{ path: "/", protect: false }`),
+	//    so in team/hybrid they are never mounted and fall through to the root scaffold. The
+	//    viewable dashboard SPA is served by thehive (ADR-0001); honeycomb keeps these setup
+	//    API routes for the portal wire client and CLI fallbacks.
 	if (daemon.config.mode === "local") {
-		seams.mountDashboardHost(daemon, { storage });
-		// 6b. The "First time setup" on-page login route — `POST /setup/login` (PRD-050c). Sits beside
-		//     the dashboard host on the SAME unprotected root group, so it shares the SAME local-mode gate
+		// 6a. The "First time setup" on-page login route — `POST /setup/login` (PRD-050c). Sits on
+		//     the unprotected root group under the SAME local-mode gate (security F-1): in team/hybrid
 		//     (security F-1): in team/hybrid it is never mounted and falls through to the root scaffold.
 		//     Begins the device flow with the dual referral headers, returns user_code + URIs (no token),
 		//     then polls → mints → persists the shared `~/.deeplake/credentials.json` (0600). Fail-soft —

@@ -320,8 +320,8 @@ describe("PRD-050a — ref parsing + URL helpers (units)", () => {
 	});
 
 	it("the URLs are the loopback + honeycomb.local dashboard hosts on port 3850", () => {
-		expect(loopbackDashboardUrl()).toBe("http://127.0.0.1:3850/dashboard");
-		expect(localDashboardUrl()).toBe("http://honeycomb.local:3850/dashboard");
+		expect(loopbackDashboardUrl()).toBe("http://127.0.0.1:3853/");
+		expect(localDashboardUrl()).toBe("http://honeycomb.local:3853/");
 	});
 
 	it("openLocalDashboardUrl REFUSES a non-local or non-http(s) URL without launching", () => {

@@ -165,37 +165,6 @@ await build({
 stampExecutable("daemon/restart-helper.js");
 
 // ---------------------------------------------------------------------------
-// 1b. The viewable dashboard WEB APP (PRD-024 Wave 2, AC-1 production-clean).
-//
-//     The brand UI kit, recreated as a real React app, bundled for the BROWSER:
-//     React + ReactDOM are bundled IN (NO unpkg/CDN React), JSX is compiled at
-//     build time (NO @babel/standalone / type="text/babel") — exactly the three
-//     things the kit's index.html did that D-1 forbids. The daemon host
-//     (`dashboard/host.ts`) serves the produced `daemon/dashboard-app.js` as a
-//     single static <script> beside the index shell.
-//
-//     It is compiled DIRECTLY from the .tsx source (esbuild does the TS/JSX
-//     transform), not from dist/ — the web tree is browser code, not part of the
-//     node dist graph. `platform: "browser"` + `format: "esm"` (the shell loads
-//     it via <script type="module">). Nothing is external: a browser bundle must
-//     be fully self-contained. `jsx: automatic` matches the source (no explicit
-//     React import needed at every call site, though we import React anyway).
-// ---------------------------------------------------------------------------
-await build({
-  entryPoints: { "dashboard-app": "src/dashboard/web/main.tsx" },
-  bundle: true,
-  platform: "browser",
-  format: "esm",
-  outdir: "daemon",
-  jsx: "automatic",
-  define: {
-    ...VERSION_DEFINE,
-    "process.env.NODE_ENV": '"production"',
-  },
-  minify: true,
-});
-
-// ---------------------------------------------------------------------------
 // 2. The five hook-protocol harnesses (claude-code, codex, cursor, hermes, pi).
 //    Each is an independent thin-client bundle (FR-1). No DeepLake (FR-3).
 // ---------------------------------------------------------------------------
@@ -378,5 +347,5 @@ stampExecutable("embeddings/embed-daemon.js");
 // scripts/pack-check.mjs runs build via prepack) don't get log noise mixed
 // into their JSON data pipe.
 console.error(
-  `Built: 1 daemon + 1 dashboard-web + ${HOOK_HARNESSES.length} hook-harness + 1 OpenClaw + 1 MCP + ${SDK_ENTRIES.length} SDK + 1 CLI + 1 embed-daemon bundle @ ${HONEYCOMB_VERSION}`,
+  `Built: 1 daemon + ${HOOK_HARNESSES.length} hook-harness + 1 OpenClaw + 1 MCP + ${SDK_ENTRIES.length} SDK + 1 CLI + 1 embed-daemon bundle @ ${HONEYCOMB_VERSION}`,
 );

@@ -17,7 +17,7 @@
  *   spawns a UI — importing this module has no side effects.
  */
 
-import { DAEMON_HOST, DAEMON_PORT } from "../shared/constants.js";
+import { DAEMON_HOST, DAEMON_PORT, THEHIVE_HOST, THEHIVE_PORT } from "../shared/constants.js";
 import {
 	type Connectivity,
 	type DashboardData,
@@ -139,8 +139,15 @@ export async function launchDashboard(
 	return renderDashboard(source);
 }
 
-/** The URL path the daemon serves the viewable dashboard HOST page at (PRD-021d FR-3 / d-AC-3). */
-export const DASHBOARD_HOST_PATH = "/dashboard" as const;
+/** The URL path the thehive portal serves the dashboard SPA at (ADR-0001 / PRD-001). */
+export const DASHBOARD_HOST_PATH = "/" as const;
+
+/** The thehive portal base URL the operator opens in a browser. */
+export function portalBaseUrl(options: LaunchDashboardOptions = {}): string {
+	const host = options.host ?? THEHIVE_HOST;
+	const port = options.port ?? THEHIVE_PORT;
+	return `http://${host}:${port}`;
+}
 
 /** The result of opening the dashboard host: the viewable URL + a probed connectivity state. */
 export interface OpenDashboardResult {
@@ -151,17 +158,15 @@ export interface OpenDashboardResult {
 }
 
 /**
- * Resolve the viewable dashboard host URL (PRD-021d FR-3 / FR-5 / d-AC-3) the `honeycomb dashboard`
- * verb (021b) opens. The daemon serves the rendered 020b view layer at `/dashboard` (see the daemon
- * `mountDashboardHost`); this returns that URL plus a connectivity probe so the verb can surface the
- * 020b daemon-down state (d-AC-5) BEFORE handing the URL to a browser opener. The verb owns the
- * actual "open a browser" side effect (and the TUI fallback via {@link launchDashboard}); this stays
- * a pure resolver so it is testable behind the injected `fetch` seam.
+ * Resolve the viewable portal URL (PRD-001 / ADR-0001) the `honeycomb dashboard` verb opens.
+ * thehive serves the React dashboard at loopback port 3853; honeycomb keeps `/api/*` only.
+ * Returns that URL plus a connectivity probe against the honeycomb data daemon so the verb
+ * can surface the daemon-down state (d-AC-5) before handing the URL to a browser opener.
  */
 export async function openDashboard(
 	options: LaunchDashboardOptions & { readonly source?: DashboardDataSource } = {},
 ): Promise<OpenDashboardResult> {
 	const source = options.source ?? createDaemonDashboardDataSource(options);
 	const connectivity = await source.probe();
-	return { url: `${daemonBaseUrl(options)}${DASHBOARD_HOST_PATH}`, connectivity };
+	return { url: `${portalBaseUrl(options)}${DASHBOARD_HOST_PATH}`, connectivity };
 }

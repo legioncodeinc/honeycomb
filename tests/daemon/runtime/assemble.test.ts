@@ -107,7 +107,6 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 		mountNotifications: 0,
 		attachPrune: 0,
 		mountLogs: 0,
-		mountDashboardHost: 0,
 		mountMemories: 0,
 		mountMemoriesPrime: 0,
 		mountVfs: 0,
@@ -150,11 +149,6 @@ function recordingSeams(order: string[]): { seams: SeamFns; calls: Record<keyof 
 			// The logs reader is wired with the daemon's OWN ring-buffer logger.
 			expect(options.logger).toBe(daemon.logger);
 		}) as SeamFns["mountLogs"],
-		mountDashboardHost: ((daemon) => {
-			calls.mountDashboardHost += 1;
-			order.push("mountDashboardHost");
-			expect(typeof daemon.group).toBe("function");
-		}) as SeamFns["mountDashboardHost"],
 		// ── The three data-API seams (022a / 022b / 022c) the 022d composition root fires. ──
 		mountMemories: ((daemon, options) => {
 			calls.mountMemories += 1;
@@ -343,7 +337,7 @@ describe("codebase graph auto-build boot gate", () => {
 });
 
 describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after construction", () => {
-	it("in LOCAL mode fires all ten seams (logs + dashboard-host + the three data seams + the pollinate trigger) each exactly once, in order", () => {
+	it("in LOCAL mode fires all core seams (logs + setup + the three data seams + the pollinate trigger) each exactly once, in order", () => {
 		const order: string[] = [];
 		const { seams, calls } = recordingSeams(order);
 		assembleDaemon({
@@ -353,15 +347,13 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 			runtimeDir,
 			seams,
 		});
-		// The four core seams + the /api/logs reader (always) + the /dashboard host
-		// (local-mode only, fired here because the mode is `local`) + the three data-API
+		// The four core seams + the /api/logs reader (always) + the three data-API
 		// seams (memories / vfs / product-data, always) each fire EXACTLY ONCE.
 		expect(calls.attachHooks).toBe(1);
 		expect(calls.mountDashboard).toBe(1);
 		expect(calls.mountNotifications).toBe(1);
 		expect(calls.attachPrune).toBe(1);
 		expect(calls.mountLogs).toBe(1);
-		expect(calls.mountDashboardHost).toBe(1);
 		// d-AC-1: every data-API seam fires once and only once.
 		expect(calls.mountMemories).toBe(1);
 		expect(calls.mountVfs).toBe(1);
@@ -388,7 +380,6 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 			"mountNotifications",
 			"attachPrune",
 			"mountLogs",
-			"mountDashboardHost",
 			"mountMemories",
 			"mountMemoriesPrime",
 			"mountVfs",
@@ -431,8 +422,6 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 		// PRD-039a: the harness telemetry seam also fires unconditionally (same protected
 		// /api/diagnostics group; fires in team too — the activity GROUP BY gated behind its auth).
 		expect(calls.mountHarness).toBe(1);
-		// The /dashboard host stays local-only (security F-1) even though the data seams fire.
-		expect(calls.mountDashboardHost).toBe(0);
 	});
 
 	it("mountLogs fires UNCONDITIONALLY (its /api/logs group is already protect:true) — fired in team mode too", () => {
@@ -451,29 +440,17 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 	});
 });
 
-describe("security F-1: mountDashboardHost is LOCAL-MODE ONLY (the team-mode tenancy gate holds)", () => {
+describe("security F-1: guided-setup routes are LOCAL-MODE ONLY (the team-mode tenancy gate holds)", () => {
 	for (const mode of ["team", "hybrid"] as const) {
-		it(`in ${mode.toUpperCase()} mode the /dashboard host is NOT fired (the unprotected-root tenancy hole never opens)`, () => {
-			const order: string[] = [];
-			const { seams, calls } = recordingSeams(order);
-			assembleDaemon({
+		it(`in ${mode.toUpperCase()} mode setup routes are NOT on the unprotected root group`, async () => {
+			const { daemon } = assembleDaemon({
 				config: cfg({ mode }),
 				storage: fakeStorage(OK_RESULT),
 				logger: createRequestLogger({ silent: true }),
 				runtimeDir,
-				seams,
 			});
-			// The viewable HTML host attaches to the UNPROTECTED root group; in team/hybrid
-			// it would serve another tenant's data with no auth (security F-1). The gate
-			// holds: it is NEVER fired off `local`.
-			expect(calls.mountDashboardHost).toBe(0);
-			expect(order).not.toContain("mountDashboardHost");
-			// The other five seams (incl. the protect:true /api/logs reader) STILL fire once.
-			expect(calls.attachHooks).toBe(1);
-			expect(calls.mountDashboard).toBe(1);
-			expect(calls.mountNotifications).toBe(1);
-			expect(calls.attachPrune).toBe(1);
-			expect(calls.mountLogs).toBe(1);
+			const res = await daemon.app.request("/setup/state", { method: "GET" });
+			expect(res.status).not.toBe(200);
 		});
 	}
 });
@@ -765,7 +742,6 @@ describe("fix/daemon-scope-from-credentials: the daemon's default scope comes fr
 			mountNotifications: noop,
 			attachPrune: noop,
 			mountLogs: noop,
-			mountDashboardHost: noop,
 			mountMemories: ((_daemon, options) => {
 				captured.memoriesScope = options.defaultScope;
 			}) as SeamFns["mountMemories"],

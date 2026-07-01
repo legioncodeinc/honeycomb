@@ -31,7 +31,6 @@ import {
 	assembleTestDaemonApp,
 } from "../../integration/_daemon-harness.js";
 import { ok, queryError, type QueryResult } from "../../../src/daemon/storage/result.js";
-import { DASHBOARD_HOST_PATH } from "../../../src/daemon/runtime/dashboard/host.js";
 
 /**
  * A fake-storage responder that makes the `memories` LEXICAL recall arm surface ONE
@@ -133,14 +132,6 @@ describe("PRD-031 Wave A — assembled-daemon test net (plain CI, fake storage)"
 			// the `{ error: "not_implemented" }` 501 scaffold a shadow/unmounted route would hit.
 			expect(body.status, "served the health detail, not the 501 scaffold").toBeTypeOf("string");
 			expect(body.error, "did NOT fall through to the not_implemented scaffold").toBeUndefined();
-		});
-
-		it("the dashboard host itself IS mounted at /dashboard (local mode) — proving the two coexist, not collide", async () => {
-			// The complement of the no-shadow proof: the host serves its OWN path. If the
-			// data routes had shadowed the host (the inverse collision), this would not be HTML.
-			const res = await net.app.request(DASHBOARD_HOST_PATH, { method: "GET" });
-			expect(res.status).toBe(200);
-			expect(res.headers.get("content-type") ?? "", "the host serves HTML at its own path").toContain("text/html");
 		});
 	});
 

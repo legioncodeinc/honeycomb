@@ -11,6 +11,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import { createStorageClient } from "../../../../src/daemon/storage/index.js";
 import type { TransportRequest } from "../../../../src/daemon/storage/transport.js";
@@ -19,8 +20,36 @@ import { assembleRoiView, computeRollups, fetchRoiView } from "../../../../src/d
 import type { CapturedTurn } from "../../../../src/daemon/runtime/dashboard/roi-savings.js";
 import type { InfraCostReadModel } from "../../../../src/daemon/runtime/dashboard/roi-billing.js";
 import { emptyUsageSource, snapshotSource } from "../../../../src/daemon/runtime/dashboard/roi-skillify-meter.js";
-import { RoiViewSchema } from "../../../../src/dashboard/web/wire.js";
 import { FakeDeepLakeTransport, fakeCredentialRecord, stubProvider } from "../../../helpers/fake-deeplake.js";
+
+/** Wire-level integer-cents guard (mirrors the retired dashboard web wire schema). */
+const roiCentsField = z.number().int().catch(0);
+const RoiViewSchema = z.object({
+	savings: z.object({
+		status: z.string().catch("absent"),
+		measuredCents: roiCentsField,
+		modeledCents: roiCentsField,
+		assumption: z.object({ kind: z.string(), assumptionText: z.string(), signedOff: z.boolean() }).catch({ kind: "", assumptionText: "", signedOff: false }),
+		blendedCentsPerMtok: z.number().int().nullable().catch(null),
+	}),
+	infra: z.object({ status: z.string().catch("unreachable"), cents: roiCentsField, costBasis: z.string().catch("none") }),
+	pollination: z.object({
+		status: z.string().catch("unreachable"),
+		cents: roiCentsField,
+		lines: z.array(z.object({ label: z.string().catch(""), cents: roiCentsField })).catch([]),
+	}),
+	net: z.object({
+		status: z.string().catch("absent"),
+		computed: z.boolean().catch(false),
+		netCents: roiCentsField,
+		modeled: z.boolean().catch(true),
+		costBasis: z.string().catch("none"),
+	}),
+	rollups: z.array(z.unknown()).catch([]),
+	perUserAvailable: z.boolean().catch(false),
+	scopedAcrossDevices: z.boolean().catch(false),
+	ratesAsOf: z.string().catch(""),
+});
 
 const SCOPE: QueryScope = { org: "o1", workspace: "ws1" };
 

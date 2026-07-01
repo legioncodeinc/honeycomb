@@ -128,7 +128,7 @@ describe("PRD-021d openDashboard resolves the viewable host URL the dashboard ve
 				},
 			},
 		});
-		expect(result.url).toBe("http://127.0.0.1:3850/dashboard");
+		expect(result.url).toBe("http://127.0.0.1:3853/");
 		expect(result.connectivity.reachable).toBe(true);
 	});
 
@@ -144,6 +144,6 @@ describe("PRD-021d openDashboard resolves the viewable host URL the dashboard ve
 			},
 		});
 		expect(result.connectivity.reachable).toBe(false);
-		expect(result.url).toContain("/dashboard");
+		expect(result.url).toBe("http://127.0.0.1:3853/");
 	});
 });

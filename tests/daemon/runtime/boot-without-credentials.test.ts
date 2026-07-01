@@ -57,22 +57,15 @@ function assembleNoCreds(mode: "local" | "team" = "local") {
 	});
 }
 
-describe("b-AC-1 the daemon boots with NO credentials and serves the pre-auth dashboard", () => {
+describe("b-AC-1 the daemon boots with NO credentials and serves the pre-auth setup API", () => {
 	it("assembleDaemon does NOT throw when no credential resolves (the eager-read seam is fixed)", () => {
 		expect(() => assembleNoCreds()).not.toThrow();
 	});
 
-	it("GET /dashboard returns 200 + the guided-setup-driving shell (no throw, no fail-closed)", async () => {
+	it("GET /dashboard is NOT served by honeycomb after ADR-0001 (thehive owns the portal)", async () => {
 		const { daemon } = assembleNoCreds();
 		const res = await daemon.app.request("/dashboard");
-		expect(res.status).toBe(200);
-		const html = await res.text();
-		// The shell is the self-hydrating React mount point that drives the guided-setup state.
-		expect(html).toContain('<div id="root"');
-		expect(html).toContain("/dashboard/app.js");
-		// And it carries NO secret (parent AC-8 / b-AC-4).
-		expect(html.toLowerCase()).not.toContain("token");
-		expect(html.toLowerCase()).not.toContain("bearer");
+		expect(res.status).not.toBe(200);
 	});
 
 	it("GET /setup/state answers 200 with authenticated=false on a no-creds boot (drives guided-setup)", async () => {
@@ -86,9 +79,9 @@ describe("b-AC-1 the daemon boots with NO credentials and serves the pre-auth da
 		expect(body.warmup).toBeDefined();
 	});
 
-	it("serves a SINGLE daemon instance — no second process is spawned to serve the pre-auth dashboard", () => {
+	it("serves a SINGLE daemon instance — no second process is spawned for setup routes", () => {
 		// assembleDaemon returns ONE Daemon (the Hono app). There is no second-process construction here:
-		// the same app answers /dashboard AND /setup/state. (start() — which binds the socket + lock — is
+		// the same app answers /setup/state. (start() — which binds the socket + lock — is
 		// never called, so this also proves the routes are served by the constructed app alone.)
 		const assembled = assembleNoCreds();
 		expect(typeof assembled.daemon.app.request).toBe("function");

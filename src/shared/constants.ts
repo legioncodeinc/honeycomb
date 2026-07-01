@@ -16,6 +16,12 @@ export const DAEMON_PORT = 3850;
 /** Loopback host the daemon binds to. Never bind to a public interface. */
 export const DAEMON_HOST = "127.0.0.1";
 
+/** Loopback port the thehive portal daemon listens on (ADR-0001 cutover). */
+export const THEHIVE_PORT = 3853;
+
+/** Loopback host the thehive portal binds to. */
+export const THEHIVE_HOST = "127.0.0.1";
+
 /**
  * Build-time version seam. PRD-001c's sync-versions step and PRD-001b's esbuild
  * `define` replace the `__HONEYCOMB_VERSION__` token with the root

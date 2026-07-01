@@ -12,19 +12,15 @@
  * ║      assembleDaemon). The canonical `/api/kpis|rules|skills` resource paths ║
  * ║      belong to the PRD-022 product-data API, so the dashboard VIEW-MODELS   ║
  * ║      live under the diagnostics namespace.                                  ║
- * ║    - d-AC-3: the viewable host `GET /dashboard` returns an HTML page with  ║
- * ║      the six canonical view titles, pointed at the live daemon data.       ║
  * ║    - d-AC-2 / d-AC-4: `GET /api/logs` returns the request-logger ring      ║
  * ║      buffer (the dashboard GETs above are themselves logged), with NO      ║
  * ║      token/secret in the payload.                                        ║
  * ║                                                                          ║
  * ║  SEAM WIRING (now SERVED BY THE PRODUCTION ASSEMBLY):                      ║
- * ║    `mountLogsApi` + `mountDashboardHost` are wired by `assembleDaemon()`   ║
- * ║    itself (security+quality close-out): `mountLogs` always, the viewable   ║
- * ║    `/dashboard` host LOCAL-MODE ONLY (security F-1). This itest boots in    ║
- * ║    `local` mode and proves `GET /api/logs` + `GET /dashboard` are served    ║
- * ║    by the ASSEMBLED daemon with NO manual mount (it never touches the       ║
- * ║    seams — that is the whole point of the close-out).                       ║
+ * ║    `mountLogsApi` is wired by `assembleDaemon()` itself. The viewable    ║
+ * ║    dashboard SPA is served by thehive (ADR-0001); honeycomb keeps `/api/*`. ║
+ * ║    This itest boots in `local` mode and proves `GET /api/logs` is served   ║
+ * ║    by the ASSEMBLED daemon with NO manual mount.                           ║
  * ║                                                                          ║
  * ║  GATED + ISOLATED (mirrors daemon-assembly-live.itest.ts):                ║
  * ║    - `describe.skipIf(!HONEYCOMB_DEEPLAKE_TOKEN)` → no token = whole       ║
@@ -40,7 +36,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createStorageClient, type StorageClient } from "../../src/daemon/storage/index.js";
-import { mountDashboardHost } from "../../src/daemon/runtime/dashboard/host.js";
 import { mountLogsApi } from "../../src/daemon/runtime/logs/api.js";
 import { type BootedTestDaemon, bootTestDaemon } from "./_daemon-harness.js";
 import { neutralizeIfInfraDegraded } from "./_infra-skip.js";
@@ -71,11 +66,8 @@ describe.skipIf(!HAS_TOKEN)("LIVE DASHBOARD+LOGS: real view-models, viewable hos
 		// Boot the REAL assembled daemon against live DeepLake on an ephemeral port, in
 		// `local` mode. The live storage client resolves its creds from `HONEYCOMB_DEEPLAKE_*`
 		// via the storage layer. CRITICAL: this itest does NOT mount any seam itself.
-		// `assembleDaemon()` now fires `mountLogsApi` (always) and `mountDashboardHost`
-		// (local-mode only, security F-1) as part of the production composition root, so
-		// `GET /api/logs` and `GET /dashboard` are served by the ASSEMBLED daemon. The host's
-		// default `envHostScope` reads the same `HONEYCOMB_DEEPLAKE_ORG`/`WORKSPACE` env the
-		// daemon scope resolves from, so the served page draws the real partition's rows.
+		// CRITICAL: this itest does NOT mount any seam itself. `assembleDaemon()` fires
+		// `mountLogsApi` (always) as part of the production composition root.
 		booted = await bootTestDaemon({ mode: "local" });
 	}, 120_000);
 
@@ -136,37 +128,6 @@ describe.skipIf(!HAS_TOKEN)("LIVE DASHBOARD+LOGS: real view-models, viewable hos
 	);
 
 	it(
-		"PRD-024 AC-1: the ASSEMBLED daemon serves GET /dashboard as the production-clean bundled shell",
-		async () => {
-			const b = booted!;
-			// The daemon was booted in `local` mode and the test never mounted the host —
-			// the route exists ONLY because `assembleDaemon()` fired `mountDashboardHost`.
-			expect(b.assembled.config.mode, "booted in local mode (the F-1 gate fires the host)").toBe("local");
-			const res = await fetch(`${b.baseUrl}/dashboard`);
-			expect(res.status, "GET /dashboard is 200 from the assembled daemon").toBe(200);
-			expect(res.headers.get("content-type")).toContain("text/html");
-			const html = await res.text();
-			// PRD-024: the host now serves the index SHELL of the bundled React app (the brand UI
-			// kit), NOT a server-rendered view tree. The live KPIs/sessions/etc. are hydrated
-			// client-side from the JSON endpoints already proven above (d-AC-1). The shell must be
-			// production-clean (D-1) and reference only same-origin loopback assets.
-			expect(html).toContain("<!doctype html>");
-			expect(html).toContain('<div id="root"');
-			expect(html).toContain("/dashboard/app.js");
-			expect(html).toContain("/dashboard/styles.css");
-			expect(html).not.toContain("unpkg");
-			expect(html).not.toContain("@babel/standalone");
-			expect(html).not.toContain('type="text/babel"');
-			// The bundled app + the DS CSS are served on loopback.
-			const appRes = await fetch(`${b.baseUrl}/dashboard/app.js`);
-			expect([200, 404]).toContain(appRes.status); // 200 when built; 404 if the bundle is absent
-			const cssRes = await fetch(`${b.baseUrl}/dashboard/styles.css`);
-			expect([200, 404]).toContain(cssRes.status);
-		},
-		120_000,
-	);
-
-	it(
 		"d-AC-2 / d-AC-4: the ASSEMBLED daemon (no manual mount) serves GET /api/logs with no secret",
 		async () => {
 			const b = booted!;
@@ -196,6 +157,5 @@ describe.skipIf(HAS_TOKEN)("LIVE DASHBOARD+LOGS (skipped: no HONEYCOMB_DEEPLAKE_
 	it("is gated off without a live token", () => {
 		// The seam functions import cleanly without a live backend (pure module load).
 		expect(typeof mountLogsApi).toBe("function");
-		expect(typeof mountDashboardHost).toBe("function");
 	});
 });

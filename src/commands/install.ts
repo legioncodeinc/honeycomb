@@ -49,7 +49,7 @@ import {
 	saveOnboarding,
 } from "../daemon/runtime/onboarding/index.js";
 import { type EmitDeps, emitTelemetry } from "../daemon/runtime/telemetry/index.js";
-import { DAEMON_HOST, DAEMON_PORT } from "../shared/constants.js";
+import { DAEMON_HOST, DAEMON_PORT, THEHIVE_HOST, THEHIVE_PORT } from "../shared/constants.js";
 
 /**
  * The mDNS/hosts name the dashboard is attempted at FIRST (a-AC-6). It is NEVER required: if it
@@ -59,17 +59,17 @@ import { DAEMON_HOST, DAEMON_PORT } from "../shared/constants.js";
  */
 export const DASHBOARD_LOCAL_HOST = "honeycomb.local" as const;
 
-/** The dashboard route the daemon serves the viewable host page at (mirrors 021d `/dashboard`). */
-export const DASHBOARD_PATH = "/dashboard" as const;
+/** The portal route thehive serves the dashboard SPA at (ADR-0001). */
+export const DASHBOARD_PATH = "/" as const;
 
-/** The best-effort friendly dashboard URL (`http://honeycomb.local:3850/dashboard`). */
+/** The best-effort friendly portal URL (`http://honeycomb.local:3853/`). */
 export function localDashboardUrl(): string {
-	return `http://${DASHBOARD_LOCAL_HOST}:${DAEMON_PORT}${DASHBOARD_PATH}`;
+	return `http://${DASHBOARD_LOCAL_HOST}:${THEHIVE_PORT}${DASHBOARD_PATH}`;
 }
 
-/** The always-correct loopback dashboard URL (`http://127.0.0.1:3850/dashboard`) — the a-AC-6 fallback. */
+/** The always-correct loopback portal URL (`http://127.0.0.1:3853/`) — the a-AC-6 fallback. */
 export function loopbackDashboardUrl(): string {
-	return `http://${DAEMON_HOST}:${DAEMON_PORT}${DASHBOARD_PATH}`;
+	return `http://${THEHIVE_HOST}:${THEHIVE_PORT}${DASHBOARD_PATH}`;
 }
 
 /**
