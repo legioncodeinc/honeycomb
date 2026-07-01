@@ -45,6 +45,7 @@ import { type FileWatcherService, noopFileWatcherService } from "./services/file
 import { type JobQueueService, noopJobQueueService } from "./services/job-queue.js";
 import { type EmbedSupervisor, noopEmbedSupervisor } from "./services/embed-supervisor.js";
 import { type HealthDetail, publicHealthDetail } from "./health.js";
+import { dashboardCorsMiddleware } from "./middleware/dashboard-cors.js";
 
 /**
  * The route-group surface (FR-2). Each entry is mounted as a scaffolded sub-app.
@@ -260,9 +261,10 @@ export function createDaemon(options: CreateDaemonOptions = {}): Daemon {
 	const app = new Hono();
 
 	// ── FR-7: structured per-request logging, mounted first so it wraps every
-	// route (including /health). It records timing + the resolved scope; never a
-	// token or body. The scope is read from the same headers the permission
-	// resolver uses, so a logged org/workspace matches what was enforced.
+	// route (including /health and a CORS preflight below). It records timing +
+	// the resolved scope; never a token or body. The scope is read from the same
+	// headers the permission resolver uses, so a logged org/workspace matches
+	// what was enforced.
 	app.use("*", async (c, next) => {
 		const start = Date.now();
 		await next();
@@ -277,6 +279,20 @@ export function createDaemon(options: CreateDaemonOptions = {}): Daemon {
 			workspace: c.req.header("x-honeycomb-workspace"),
 		});
 	});
+
+	// ── ADR-0001 cutover: CORS for thehive's cross-origin dashboard, mounted
+	// right after the logger (so a preflight is logged too — hono/cors answers
+	// OPTIONS directly without calling `next()`, so mounting it AHEAD of the
+	// logger would make every preflight invisible to the request log) and ahead
+	// of every route group, so every route (including /health, /setup/*, and
+	// every protected /api/* group) gets Access-Control headers. This is a
+	// DELIBERATE, narrow exception to this file's "no new mounts" convention
+	// (`./CONVENTIONS.md §6`): CORS is transport middleware that must wrap the
+	// whole app, not a `DaemonService` the dependency-injection seam can take —
+	// there is no seam that avoids touching server.ts for it. See
+	// `middleware/dashboard-cors.ts` for the full rationale and the fixed,
+	// loopback-only origin allowlist (never a wildcard, never request-derived).
+	app.use("*", dashboardCorsMiddleware());
 
 	// ── FR-2 / FR-8 / a-AC-6: scaffold every route group by mounting its
 	// middleware on the ROOT app at the group prefix, and exposing a basePath
