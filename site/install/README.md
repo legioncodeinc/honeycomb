@@ -166,6 +166,28 @@ for a manual re-deploy of the default branch when needed.)
 
 ---
 
+## Product selection + install-time telemetry (the-apiary PRD-002)
+
+The scripts this site serves ([`scripts/install/install.sh`](../../scripts/install/install.sh) /
+[`install.ps1`](../../scripts/install/install.ps1)) accept `--products=`, `--profile=`,
+`--license=`, `--code=`, and `--dry-run` — see install.sh's header comment for the full grammar,
+precedence, and manifest-resolution behavior. This site adds one optional convenience on top:
+
+- **`?combo=<name>` sugar** ([`functions/index.js`](./functions/index.js)`'s `COMBO_PRESETS`
+  table): `https://get.theapiary.sh/?combo=full` streams the SAME `install.sh` bytes with an
+  `export HONEYCOMB_INSTALL_PRODUCTS=...` line prepended — the exact env var the script already
+  reads, just pre-filled. This is sugar, never the primary mechanism (ADR-0002); the response is
+  served `Cache-Control: no-store` and is deliberately NOT what `SHA256SUMS` covers (only the
+  un-prefixed `/install.sh` is checksummed).
+
+**`HONEYCOMB_INSTALL_POSTHOG_KEY`** (optional repository **variable**, not a secret — PostHog
+project keys are safe client-side by design): if set, `build.mjs` bakes it into both served scripts
+so `install_started` / `install_completed` / `install_failed` (PRD-002c) actually report; if unset,
+both scripts' telemetry calls are a documented no-op and the installer still works fully. Configure
+at Repo → Settings → Secrets and variables → Actions → **Variables** → New repository variable.
+
+---
+
 ## Local preview
 
 ```sh

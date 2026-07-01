@@ -309,6 +309,23 @@ export async function runInstallCommand(argv: readonly string[], deps: InstallVe
 	//    onboarding `dir` is threaded so the dedupe ledger lives in the same temp HOME under test. A second
 	//    install run is a no-op send (e-AC-5, dedupe). Tier-1 → opt-out default; an opt-out env / empty
 	//    key silences it.
+	//
+	//    ── the-apiary PRD-002c c-AC-5 note: this event is SCOPED, not retired ────────────────────────
+	//    ADR-0002 moves the install-LIFECYCLE phone-home into the shell scripts (`install_started` /
+	//    `install_completed` / `install_failed`, fired from `scripts/install/install.sh` /
+	//    `install.ps1`), which is now the reliable "did an install run happen, and how did it end"
+	//    signal — it survives a keyless Node build and a pre-CLI failure, neither of which
+	//    `honeycomb_installed` can ever observe (it only fires from inside a successful run of THIS
+	//    verb). `honeycomb_installed` is DELIBERATELY KEPT, scoped to a narrower, DIFFERENT meaning:
+	//    "this machine's `honeycomb` CLI verb completed successfully, ONCE, ever" (e-AC-5's dedupe
+	//    ledger enforces the "once" — repeat `honeycomb install` runs never re-fire it), correlated to
+	//    the SAME onboarding `installId`/`ref` the Node-side telemetry and login event
+	//    (`honeycomb_first_link`) already use. The two surfaces are structurally incapable of double
+	//    counting the SAME event: they are different event NAMES, sent to the same PostHog project
+	//    from two independent transports, answering two different questions (funnel/failure-rate over
+	//    every install attempt, vs. one-time CLI-verb-completion-and-onboarding-correlation per
+	//    machine). Retiring `honeycomb_installed` outright would lose that onboarding correlation for
+	//    no gain, so this pass keeps it and documents the split here rather than deleting it.
 	void emitTelemetry(
 		"honeycomb_installed",
 		{ ref, tier: "tier1" },
