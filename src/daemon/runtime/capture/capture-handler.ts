@@ -42,20 +42,31 @@
  */
 
 import type { Context } from "hono";
+import {
+	hasBoundProjectOnDisk,
+	resolveScopeFromDisk,
+	UNSORTED_PROJECT_ID,
+} from "../../../hooks/shared/project-resolver.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
-import { type HealTarget } from "../../storage/heal.js";
+import type { HealTarget } from "../../storage/heal.js";
 import { isOk, type StorageRow } from "../../storage/result.js";
-import { appendOnlyInsertMany, type ColumnValue, readAppendOrdered, type RowValues, val } from "../../storage/writes.js";
+import { MAX_SESSION_TURNS } from "../../storage/sql.js";
+import {
+	appendOnlyInsertMany,
+	type ColumnValue,
+	type RowValues,
+	readAppendOrdered,
+	val,
+} from "../../storage/writes.js";
 import { getRequestIdentity } from "../middleware/permission.js";
 import type { Daemon } from "../server.js";
-import type { JobQueueService } from "../services/job-queue.js";
 import { type EmbedAttachment, noopEmbedAttachment } from "../services/embed-client.js";
-import { type CaptureEvent, type CaptureMetadata, parseCaptureRequest } from "./event-contract.js";
-import { type MemoryCue, TurnCounters, type TurnCounterConfig, tryStopCounterTrigger } from "./turn-counters.js";
+import type { JobQueueService } from "../services/job-queue.js";
+import { budgetedStringify } from "./budgeted-stringify.js";
 import { type BufferClock, CaptureBuffer } from "./capture-buffer.js";
 import { type CaptureConfig, resolveCaptureConfig } from "./capture-config.js";
-import { budgetedStringify } from "./budgeted-stringify.js";
-import { hasBoundProjectOnDisk, resolveScopeFromDisk, UNSORTED_PROJECT_ID } from "../../../hooks/shared/project-resolver.js";
+import { type CaptureEvent, type CaptureMetadata, parseCaptureRequest } from "./event-contract.js";
+import { type MemoryCue, type TurnCounterConfig, TurnCounters, tryStopCounterTrigger } from "./turn-counters.js";
 
 /** The route group the capture handler attaches to (FR-1). */
 export const HOOKS_GROUP = "/api/hooks" as const;
@@ -96,7 +107,12 @@ export interface CaptureHandlerDeps {
 	 * throw is caught + logged and NEVER breaks the captured turn (the capture path must
 	 * never fail because the pipeline enqueue did).
 	 */
-	readonly enqueuePipelineEntry?: (text: string, scope: QueryScope, agentId: string, projectId?: string) => Promise<void>;
+	readonly enqueuePipelineEntry?: (
+		text: string,
+		scope: QueryScope,
+		agentId: string,
+		projectId?: string,
+	) => Promise<void>;
 	/**
 	 * The embed seam called non-blocking after the INSERT (D-3 / 005b). Defaults to
 	 * the no-op attachment: the column stays NULL and the continuation is inert.
@@ -333,15 +349,26 @@ class CaptureRouteHandler {
 		}
 		// When an authenticated Identity is present, use its workspace rather than trusting
 		// the header — a forged workspace header must not allow cross-workspace access.
-		const scope: QueryScope = identity !== undefined
-			? { org: identity.org, workspace: identity.workspace }
-			: (() => {
-				// Local mode (no Identity): trust the header, with optional workspace.
-				const workspace = c.req.header("x-honeycomb-workspace");
-				return workspace !== undefined && workspace.length > 0 ? { org, workspace } : { org };
-			})();
+		const scope: QueryScope =
+			identity !== undefined
+				? { org: identity.org, workspace: identity.workspace }
+				: (() => {
+						// Local mode (no Identity): trust the header, with optional workspace.
+						const workspace = c.req.header("x-honeycomb-workspace");
+						return workspace !== undefined && workspace.length > 0 ? { org, workspace } : { org };
+					})();
 
-		const result = await readAppendOrdered(this.deps.storage, this.deps.sessionsTarget, scope, path.trim());
+		// Bounded to the most-recent turns (default cap): a fan-out session that
+		// funnels many sub-agents into one `path` can hold tens of thousands of
+		// rows; an unbounded read-back materialized hundreds of MB and stalled.
+		const result = await readAppendOrdered(
+			this.deps.storage,
+			this.deps.sessionsTarget,
+			scope,
+			path.trim(),
+			"*",
+			MAX_SESSION_TURNS,
+		);
 		if (!isOk(result)) {
 			this.deps.logger?.event("capture.readback.failed", { path, kind: result.kind });
 			return c.json({ error: "read_failed", reason: "could not read the conversation" }, 502);
@@ -431,7 +458,13 @@ class CaptureRouteHandler {
 	 * NULL (its DEFAULT) here; 005b attaches it later (D-3). `visibility` defaults;
 	 * org/workspace scope the partition.
 	 */
-	private buildRow(id: string, event: CaptureEvent, meta: CaptureMetadata, nowIso: string, projectId: string): RowValues {
+	private buildRow(
+		id: string,
+		event: CaptureEvent,
+		meta: CaptureMetadata,
+		nowIso: string,
+		projectId: string,
+	): RowValues {
 		// PRD-062c (L-C2 / AC-6): the normalized envelope `{ event, metadata }`, with a
 		// `tool_call`'s oversized `input`/`response` capped to the byte budget and replaced by
 		// an explicit `…[truncated N bytes]` marker. A budget of 0 disables trimming → the FULL
@@ -576,7 +609,12 @@ class CaptureRouteHandler {
 	 * enqueue failure NEVER breaks the captured turn (the `sessions` row is already
 	 * committed). A no-op when the seam is unwired (the Wave-1 posture).
 	 */
-	private async enqueuePipelineEntry(event: CaptureEvent, scope: QueryScope, agentId: string, projectId: string): Promise<void> {
+	private async enqueuePipelineEntry(
+		event: CaptureEvent,
+		scope: QueryScope,
+		agentId: string,
+		projectId: string,
+	): Promise<void> {
 		const enqueue = this.deps.enqueuePipelineEntry;
 		if (enqueue === undefined) return;
 		const text = embedTextFor(event);

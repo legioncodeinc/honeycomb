@@ -18,25 +18,21 @@
  */
 
 import { describe, expect, it } from "vitest";
-
+import {
+	type CaptureHandlerDeps,
+	createCaptureHandler,
+} from "../../../../src/daemon/runtime/capture/capture-handler.js";
+import { TurnCounters } from "../../../../src/daemon/runtime/capture/turn-counters.js";
+import type { RuntimeConfig } from "../../../../src/daemon/runtime/config.js";
+import { createRequestLogger } from "../../../../src/daemon/runtime/logger.js";
+import { createRuntimePathService } from "../../../../src/daemon/runtime/middleware/runtime-path.js";
+import { createDaemon, type Daemon } from "../../../../src/daemon/runtime/server.js";
+import type { EmbedAttachment, EmbeddingTarget } from "../../../../src/daemon/runtime/services/embed-client.js";
+import type { JobInput, JobQueueService, LeasedJob } from "../../../../src/daemon/runtime/services/job-queue.js";
 import { healTargetFor } from "../../../../src/daemon/storage/catalog/index.js";
 import { createStorageClient } from "../../../../src/daemon/storage/index.js";
 import type { TransportRequest } from "../../../../src/daemon/storage/transport.js";
 import { TransportError } from "../../../../src/daemon/storage/transport.js";
-import { type RuntimeConfig } from "../../../../src/daemon/runtime/config.js";
-import { createRequestLogger } from "../../../../src/daemon/runtime/logger.js";
-import { createDaemon, type Daemon } from "../../../../src/daemon/runtime/server.js";
-import { createRuntimePathService } from "../../../../src/daemon/runtime/middleware/runtime-path.js";
-import type { JobInput, JobQueueService, LeasedJob } from "../../../../src/daemon/runtime/services/job-queue.js";
-import {
-	createCaptureHandler,
-	type CaptureHandlerDeps,
-} from "../../../../src/daemon/runtime/capture/capture-handler.js";
-import { TurnCounters } from "../../../../src/daemon/runtime/capture/turn-counters.js";
-import type {
-	EmbedAttachment,
-	EmbeddingTarget,
-} from "../../../../src/daemon/runtime/services/embed-client.js";
 import { FakeDeepLakeTransport, fakeCredentialRecord, stubProvider } from "../../../helpers/fake-deeplake.js";
 
 // ── Test scaffolding ─────────────────────────────────────────────────────────
@@ -109,14 +105,16 @@ function responderFor(opts: { readbackRows?: Record<string, unknown>[]; failFirs
 }
 
 /** Build a daemon + capture handler over the fake transport. Returns the pieces a test asserts on. */
-function buildDaemon(opts: {
-	responder?: (req: TransportRequest) => Record<string, unknown>[];
-	queue?: JobQueueService;
-	embed?: EmbedAttachment;
-	counters?: TurnCounters;
-	deps?: Partial<CaptureHandlerDeps>;
-	mode?: RuntimeConfig["mode"];
-} = {}): { daemon: Daemon; fake: FakeDeepLakeTransport; queue: RecordingQueue | JobQueueService } {
+function buildDaemon(
+	opts: {
+		responder?: (req: TransportRequest) => Record<string, unknown>[];
+		queue?: JobQueueService;
+		embed?: EmbedAttachment;
+		counters?: TurnCounters;
+		deps?: Partial<CaptureHandlerDeps>;
+		mode?: RuntimeConfig["mode"];
+	} = {},
+): { daemon: Daemon; fake: FakeDeepLakeTransport; queue: RecordingQueue | JobQueueService } {
 	const fake = new FakeDeepLakeTransport(opts.responder ?? responderFor());
 	const storage = createStorageClient({ transport: fake, provider: stubProvider(fakeCredentialRecord()) });
 	const queue = opts.queue ?? new RecordingQueue();
@@ -397,22 +395,23 @@ describe("a-AC-5 turn-terminating event → counters bumped + cue enqueued, NO w
 // ── a-AC-6 ───────────────────────────────────────────────────────────────────
 
 describe("a-AC-6 conversation read-back ordered by creation_date + scoped to org/workspace", () => {
-	it("reads rows for a path ordered by creation_date, scoped to the requester's tenancy", async () => {
+	it("reads the most-recent turns for a path, reversed to chronological, scoped to the requester's tenancy", async () => {
+		// The read-back is bounded (most-recent-N via `ORDER BY creation_date DESC LIMIT`),
+		// so the transport yields newest-first; the handler reverses back to chronological.
 		const rows = [
-			{ id: "a", path: "conversations/sess-1", creation_date: "2026-06-17T00:00:01.000Z" },
 			{ id: "b", path: "conversations/sess-1", creation_date: "2026-06-17T00:00:02.000Z" },
+			{ id: "a", path: "conversations/sess-1", creation_date: "2026-06-17T00:00:01.000Z" },
 		];
 		const { daemon, fake } = buildDaemon({ responder: responderFor({ readbackRows: rows }) });
-		const res = await daemon.app.request(
-			`/api/hooks/conversation?path=${encodeURIComponent("conversations/sess-1")}`,
-			{ headers: sessionHeaders() },
-		);
+		const res = await daemon.app.request(`/api/hooks/conversation?path=${encodeURIComponent("conversations/sess-1")}`, {
+			headers: sessionHeaders(),
+		});
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as { path: string; rows: Record<string, unknown>[] };
 		expect(body.rows.map((r) => r.id)).toEqual(["a", "b"]);
-		// The read-back SQL orders by creation_date and filters by the path (FR-6).
+		// The read-back SQL is bounded most-recent-first and filters by the path (FR-6 / PERF).
 		const select = fake.requests.find((r) => /^\s*SELECT/i.test(r.sql) && /FROM\s+"sessions"/i.test(r.sql));
-		expect(select?.sql).toMatch(/ORDER\s+BY\s+creation_date\s+ASC/i);
+		expect(select?.sql).toMatch(/ORDER\s+BY\s+creation_date\s+DESC\s+LIMIT\s+2000/i);
 		expect(select?.sql).toContain("conversations/sess-1");
 		// Scoped to the requesting org/workspace (the partition the query went out under).
 		expect(select?.org).toBe(ORG);

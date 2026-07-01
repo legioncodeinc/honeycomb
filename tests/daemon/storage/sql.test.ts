@@ -10,10 +10,19 @@
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { eLiteral, sLiteral, sqlColumnList, sqlIdent, sqlLike, sqlStr } from "../../../src/daemon/storage/sql.js";
+import {
+	clampSessionTurns,
+	eLiteral,
+	MAX_SESSION_TURNS,
+	sLiteral,
+	sqlColumnList,
+	sqlIdent,
+	sqlLike,
+	sqlStr,
+} from "../../../src/daemon/storage/sql.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const AUDIT_SCRIPT = join(REPO_ROOT, "scripts", "audit-sql-safety.mjs");
@@ -153,7 +162,7 @@ describe("PRD-002b SQL safety escaping", () => {
 		// false-negative class. Must exit non-zero.
 		const exitCode = runGateOn(
 			"bypass-template.ts",
-			'export const q = (v: string) => `SELECT * FROM "t" WHERE id = \'${v}\'`;\n',
+			"export const q = (v: string) => `SELECT * FROM \"t\" WHERE id = '${v}'`;\n",
 		);
 		expect(exitCode).not.toBe(0);
 	});
@@ -164,9 +173,9 @@ describe("PRD-002b SQL safety escaping", () => {
 		// SQL-fingerprinted literal with no helper. Must exit non-zero.
 		const exitCode = runGateOn(
 			"bypass-concat.ts",
-			'export function bad(client: any, userId: string) {\n' +
+			"export function bad(client: any, userId: string) {\n" +
 				'  const sql = "SELECT * FROM t WHERE id = \'" + userId + "\'";\n' +
-				"  return client.query(sql, { org: \"o\" });\n" +
+				'  return client.query(sql, { org: "o" });\n' +
 				"}\n",
 		);
 		expect(exitCode).not.toBe(0);
@@ -204,6 +213,16 @@ describe("PRD-002b SQL safety escaping", () => {
 				"}\n",
 		);
 		expect(exitCode).toBe(0);
+	});
+
+	it("PERF clampSessionTurns bounds the session-read LIMIT into [1, MAX_SESSION_TURNS]", () => {
+		expect(clampSessionTurns()).toBe(MAX_SESSION_TURNS); // missing → default cap
+		expect(clampSessionTurns(Number.NaN)).toBe(MAX_SESSION_TURNS); // non-finite → cap
+		expect(clampSessionTurns(50)).toBe(50); // in range → unchanged
+		expect(clampSessionTurns(MAX_SESSION_TURNS + 1)).toBe(MAX_SESSION_TURNS); // over → cap
+		expect(clampSessionTurns(0)).toBe(1); // under → floor
+		expect(clampSessionTurns(-100)).toBe(1); // negative → floor
+		expect(clampSessionTurns(12.9)).toBe(12); // truncated toward zero
 	});
 
 	it("b-AC-7 the audit gate does NOT flag a literal-only / helper-guarded concat", () => {
