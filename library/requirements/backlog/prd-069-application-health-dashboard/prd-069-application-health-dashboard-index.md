@@ -1,5 +1,9 @@
 # PRD-069: Application Health Dashboard
 
+> **Status:** Superseded by [hivedoctor PRD-001](../../../../../hivedoctor/library/requirements/backlog/prd-001-telemetry-source-of-truth/) and [hivedoctor PRD-002](../../../../../hivedoctor/library/requirements/backlog/prd-002-service-registry-and-poll/) (source-of-truth telemetry) plus [the-hive PRD-005 (health rail and health page)](../../../../../the-hive/library/requirements/backlog/prd-005-health-rail-and-health-page/).
+>
+> The health dashboard is no longer honeycomb-owned. hivedoctor is now the single source of truth for fleet telemetry (PRD-001 and PRD-002) and the-hive renders the health rail and health page (PRD-005). Honeycomb's contribution is to emit its own non-sensitive telemetry as a supervised service (see [PRD-071](../prd-071-service-checkin-and-sqlite-telemetry/prd-071-service-checkin-and-sqlite-telemetry-index.md)).
+
 > **Status:** Backlog
 > **Priority:** P1
 > **Effort:** L (1-3d)
