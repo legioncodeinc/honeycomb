@@ -40,14 +40,15 @@ if (hits.length) {
 }
 
 // Required runtime files: a publish that DROPS any of these from the `files`
-// allowlist ships a broken package (the daemon-served dashboard reads its CSS,
-// fonts, and logo from `assets/` at runtime — see `web-assets.ts`; an install
-// missing them renders the dashboard unstyled / 404s the fonts). This positive
-// check catches that regression, which the forbidden-only scan above cannot.
+// allowlist ships a broken package. The dashboard SPA itself moved to thehive
+// (ADR-0001 cutover, "Removed portal to migrate to the-hive") — honeycomb no
+// longer bundles or serves it, so there is no `daemon/dashboard-app.js` target
+// to require here anymore. `assets/*` (CSS tokens, logo, fonts) still ship —
+// see the entries below — this positive check still catches a regression that
+// drops any of THOSE, which the forbidden-only scan above cannot.
 const REQUIRED = [
   /(^|\/)bundle\/cli\.js$/, // the `honeycomb` bin
   /(^|\/)daemon\/index\.js$/, // the daemon entry the CLI spawns
-  /(^|\/)daemon\/dashboard-app\.js$/, // the bundled dashboard web app
   /(^|\/)assets\/styles\.css$/, // resolveAssetsDir() locator
   /(^|\/)assets\/tokens\/base\.css$/, // the DS token CSS the dashboard serves
   /(^|\/)assets\/logos\/honeycomb-memory-cluster\.svg$/, // the brand mark the header renders
