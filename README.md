@@ -17,7 +17,7 @@
   <img src="https://img.shields.io/badge/node-%E2%89%A522-339933?style=flat-square&logo=node.js&logoColor=white" alt="Node ≥ 22">
   <a href="https://deeplake.ai"><img src="https://img.shields.io/badge/powered%20by-Deep%20Lake-ff5a1f?style=flat-square" alt="Powered by Deep Lake"></a>
   <a href="#license"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="AGPL-3.0"></a>
-  <img src="https://img.shields.io/badge/harnesses-6-F7A823?style=flat-square" alt="6 harnesses">
+  <img src="https://img.shields.io/badge/harnesses-7-F7A823?style=flat-square" alt="7 harnesses">
 </p>
 
 <!-- ──────────────────────────────  PARTNERS  ────────────────────────────── -->
@@ -193,12 +193,13 @@ Most agent-memory tools bolt onto a vector-only store, which forces *every* acce
 
 ## 🔌 Supported harnesses
 
-Honeycomb ships thin clients for six coding harnesses, all wired simultaneously, all reading and writing the same shared memory:
+Honeycomb ships thin clients for seven coding harnesses, all wired simultaneously, all reading and writing the same shared memory:
 
 | | | |
 |---|---|---|
 | **Claude Code** | **Cursor** | **Codex** |
-| **Hermes** | **pi** | **OpenClaw** |
+| **Grok** | **Hermes** | **pi** |
+| **OpenClaw** | | |
 
 `honeycomb setup` detects the ones you have installed and wires each idempotently; `honeycomb uninstall` reverses only Honeycomb's changes. A skill mined while you were in Cursor is auto-pulled and ready in Claude Code on your next session.
 

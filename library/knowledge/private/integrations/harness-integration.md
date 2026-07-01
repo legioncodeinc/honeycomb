@@ -2,7 +2,7 @@
 
 > Category: Integrations | Version: 1.0 | Date: June 2026 | Status: Active
 
-How Honeycomb plugs underneath coding harnesses: the install-time connector base, the per-harness shims, MCP-server-via-install, and the capability detection plus idempotent install/uninstall contract that wires all six supported harnesses.
+How Honeycomb plugs underneath coding harnesses: the install-time connector base, the per-harness shims, MCP-server-via-install, and the capability detection plus idempotent install/uninstall contract that wires all seven supported harnesses.
 
 **Related:**
 - [`hook-lifecycle.md`](hook-lifecycle.md)
@@ -17,7 +17,7 @@ How Honeycomb plugs underneath coding harnesses: the install-time connector base
 
 Honeycomb does not try to be another agent shell. It runs underneath the harnesses people already use and gives them one shared memory layer. The challenge is that every harness exposes a different extension surface, and they share almost nothing at the integration layer. The answer is to write the memory logic once in the daemon and wrap it per harness with a thin shim. Adding a harness means writing a shim and a connector subclass, not a memory engine.
 
-Honeycomb wires six harnesses: **Claude Code, Codex, Cursor, Hermes, pi, and OpenClaw**. Each reaches the daemon through the same three surfaces, and the daemon, which is the only process that touches DeepLake, does the real work behind every one of them.
+Honeycomb wires seven harnesses: **Claude Code, Codex, Cursor, Grok, Hermes, pi, and OpenClaw**. Each reaches the daemon through the same three surfaces, and the daemon, which is the only process that touches DeepLake, does the real work behind every one of them.
 
 ## Three surfaces, one daemon
 

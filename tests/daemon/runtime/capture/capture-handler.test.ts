@@ -306,7 +306,7 @@ describe("a-AC-3 the row carries session id, cwd, permission mode, hook event, a
 	it("parameterized: each canonical harness token written upstream is recorded on the row", async () => {
 		// One capture per harness, each stamping its own canonical token (as the shims now do). Each
 		// must reach `sessions.agent` verbatim so the page's GROUP BY attributes it to that harness.
-		for (const harness of ["claude-code", "codex", "cursor", "hermes", "pi", "openclaw"]) {
+		for (const harness of ["claude-code", "codex", "cursor", "grok", "hermes", "pi", "openclaw"]) {
 			const { daemon, fake } = buildDaemon();
 			await daemon.app.request("/api/hooks/capture", {
 				method: "POST",

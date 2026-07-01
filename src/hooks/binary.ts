@@ -136,7 +136,7 @@ function pickEventName(raw: Record<string, unknown>): string | undefined {
 function deriveMeta(raw: Record<string, unknown>): HookSessionMeta {
 	const sessionId = str(raw, "session_id", "sessionId") ?? "unknown-session";
 	const transcript = str(raw, "transcript_path", "transcriptPath", "path");
-	const cwd = str(raw, "cwd", "workspace_root");
+	const cwd = str(raw, "cwd", "workspace_root", "workspaceRoot");
 	const permissionMode = str(raw, "permission_mode", "permissionMode");
 	return {
 		sessionId,

@@ -1,13 +1,13 @@
 /**
- * The canonical-six harness registry + capability descriptor — PRD-039a (the data backbone's
+ * The canonical-seven harness registry + capability descriptor — PRD-039a (the data backbone's
  * source of truth) / PRD-039c (the data-driven capability descriptor, folded server-side per c-OQ-2).
  *
  * ── DERIVED-FROM-OR-ASSERTED-AGAINST THE SHIM SET (a-OQ-3 / parent AC-1) ─────────────
- *   The six canonical harnesses are NOT a hand-typed string list that can silently drift. They are
+ *   The seven canonical harnesses are NOT a hand-typed string list that can silently drift. They are
  *   DERIVED from the real {@link HarnessShim} instances every harness exports via its
  *   `create<Harness>Shim()` factory (`src/hooks/<harness>/shim.ts`, barrelled in `src/hooks/index.ts`)
- *   — the SAME shims the capture pipeline runs. {@link CANONICAL_SHIMS} is the one place the six are
- *   listed; a test asserts that set equals the shims `src/hooks` actually ships, so a SEVENTH shim
+ *   — the SAME shims the capture pipeline runs. {@link CANONICAL_SHIMS} is the one place the seven are
+ *   listed; a test asserts that set equals the shims `src/hooks` actually ships, so an eighth shim
  *   cannot land without appearing on the Harnesses page (the "derive-or-assert" lean, a-OQ-3).
  *
  * ── CAPABILITIES ARE THE SHIM STATICS, NOT A MARKETING TEMPLATE (parent D-5 / c-AC-4) ──
@@ -21,11 +21,12 @@
  *     - OpenClaw declares `contractedTools` (tools are registered, not hooked) — `openclaw/shim.ts`.
  *     - pi declares `agentsMdContext` (the static `AGENTS.md` block) — `pi/shim.ts`.
  *     - Codex declares `userVisibleLogin` (the brief login line) — `codex/shim.ts`.
+ *     - Grok declares `userVisibleLogin` (the brief login line) — `grok/shim.ts`.
  *   An ABSENT capability omits its panel on the detail page (c-AC-3) — the descriptor's missing field
  *   drives omission, never an empty "none" card.
  *
  * This module is PURE: it imports the shim factories (thin-client constructors, no DeepLake, no SQL)
- * and exposes the frozen six + their descriptors. The endpoint (`mountHarnessApi`) reads activity from
+ * and exposes the frozen seven + their descriptors. The endpoint (`mountHarnessApi`) reads activity from
  * storage and folds these descriptors in; nothing here touches storage or the network.
  */
 
@@ -34,11 +35,13 @@ import {
 	CODEX_EVENT_MAP,
 	CURSOR_EVENT_MAP,
 	HERMES_EVENT_MAP,
+	GROK_EVENT_MAP,
 	OPENCLAW_EVENT_MAP,
 	PI_EVENT_MAP,
 	createClaudeCodeShim,
 	createCodexShim,
 	createCursorShim,
+	createGrokShim,
 	createHermesShim,
 	createOpenClawShim,
 	createPiShim,
@@ -49,22 +52,23 @@ import {
 import type { RuntimePath } from "../../../hooks/shared/contracts.js";
 
 /**
- * The canonical six shim instances, constructed ONCE from the real factories (the shim set). This is
+ * The canonical seven shim instances, constructed ONCE from the real factories (the shim set). This is
  * the single source the canonical-id list, the descriptors, and the tests all read — derive-or-assert
- * (a-OQ-3): a test compares these to the shims `src/hooks` ships so a seventh cannot silently skip the
+ * (a-OQ-3): a test compares these to the shims `src/hooks` ships so an eighth cannot silently skip the
  * page. Frozen so no consumer mutates the shared array.
  */
 export const CANONICAL_SHIMS: readonly HarnessShim[] = Object.freeze([
 	createClaudeCodeShim(),
 	createCodexShim(),
 	createCursorShim(),
+	createGrokShim(),
 	createHermesShim(),
 	createPiShim(),
 	createOpenClawShim(),
 ]);
 
 /**
- * The canonical harness ids (`claude-code` | `codex` | `cursor` | `hermes` | `pi` | `openclaw`),
+ * The canonical harness ids (`claude-code` | `codex` | `cursor` | `grok` | `hermes` | `pi` | `openclaw`),
  * DERIVED from {@link CANONICAL_SHIMS} (parent AC-1 / a-OQ-3). The endpoint enumerates THIS list (not
  * `sessions`), so a harness with zero capture activity still appears. Frozen, stable order.
  */
@@ -75,6 +79,7 @@ const EVENT_MAPS: Readonly<Record<string, Readonly<Record<string, string>>>> = O
 	"claude-code": CLAUDE_CODE_EVENT_MAP,
 	codex: CODEX_EVENT_MAP,
 	cursor: CURSOR_EVENT_MAP,
+	grok: GROK_EVENT_MAP,
 	hermes: HERMES_EVENT_MAP,
 	pi: PI_EVENT_MAP,
 	openclaw: OPENCLAW_EVENT_MAP,
@@ -141,6 +146,8 @@ const HARNESS_SPECIFICS: Readonly<Record<string, Partial<HarnessCapabilities>>> 
 	pi: { agentsMdContext: true },
 	// Codex surfaces only the brief user-visible login line (CODEX_LOGIN_LINE, codex/shim.ts).
 	codex: { userVisibleLogin: true },
+	// Grok mirrors Codex: brief user-visible login line on session start (grok/shim.ts).
+	grok: { userVisibleLogin: true },
 	// Claude Code is the REFERENCE: the full six lifecycle events, NO agents panel (the absence is the point).
 	"claude-code": {},
 });

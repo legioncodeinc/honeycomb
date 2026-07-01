@@ -2,8 +2,8 @@
  * Hook surface barrel — PRD-019b shared core + PRD-019c per-harness shims.
  *
  * Re-exports the shared core (`./shared`), the per-harness shim contract
- * (`./contracts`), the shared override-plumbing (`./normalize`), and all six
- * harness shims (Claude Code REFERENCE + Codex, Cursor, OpenClaw, Hermes, pi). Each
+ * (`./contracts`), the shared override-plumbing (`./normalize`), and all seven
+ * harness shims (Claude Code REFERENCE + Codex, Cursor, Grok, OpenClaw, Hermes, pi). Each
  * shim is a thin {@link ShimSpec} config over the shared `createShim` engine, so
  * every harness produces the SAME normalized `HookInput` as the reference (c-AC-1).
  * See `shared/CONVENTIONS.md` and `CONVENTIONS.md`.
@@ -124,6 +124,21 @@ export {
 	hermesContextOutput,
 	hermesRenderUserVisible,
 } from "./hermes/shim.js";
+
+// ── Grok shim (Grok Build CLI) ───────────────────────────────────────────────────
+export {
+	createGrokShim,
+	GROK_CONTEXT_CHANNEL,
+	GROK_EVENT_MAP,
+	GROK_HOST_CLI,
+	GROK_LOGIN_LINE,
+	GROK_REFERENCES,
+	GROK_RUNTIME_PATH,
+	grokDeriveMeta,
+	grokExtractData,
+	grokIsTerminalTool,
+	grokRenderUserVisible,
+} from "./grok/shim.js";
 
 // ── pi shim (FR-7 / c-AC-2) ─────────────────────────────────────────────────────
 export {

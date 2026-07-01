@@ -203,6 +203,7 @@ const HOOK_HARNESSES = [
   { name: "claude-code", entry: "dist/harnesses/claude-code/src/index.js", outdir: "harnesses/claude-code/bundle", aliases: ["session-start.js", "capture.js", "pre-tool-use.js", "session-end.js"] },
   { name: "codex", entry: "dist/harnesses/codex/src/index.js", outdir: "harnesses/codex/bundle", aliases: ["session-start.js", "capture.js", "pre-tool-use.js"] },
   { name: "cursor", entry: "dist/harnesses/cursor/src/index.js", outdir: "harnesses/cursor/bundle", aliases: ["session-start.js", "capture.js", "pre-tool-use.js", "session-end.js"] },
+  { name: "grok", entry: "dist/harnesses/grok/src/index.js", outdir: "harnesses/grok/bundle", aliases: ["session-start.js", "capture.js", "pre-tool-use.js"] },
   { name: "hermes", entry: "dist/harnesses/hermes/src/index.js", outdir: "harnesses/hermes/bundle" },
   { name: "pi", entry: "dist/harnesses/pi/src/index.js", outdir: "harnesses/pi/bundle" },
 ];

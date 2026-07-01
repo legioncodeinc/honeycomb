@@ -555,7 +555,7 @@ export interface SeamFns {
 	 * The harness registry + last-seen telemetry endpoint — `GET /api/diagnostics/harnesses`
 	 * (PRD-039a, the data backbone). Fires UNCONDITIONALLY: its `/api/diagnostics` group is already
 	 * `protect:true` in `server.ts`, so it inherits the dashboard JSON views' auth/RBAC (open in
-	 * `local`, gated in team/hybrid). It reports all six canonical harnesses every call (installed +
+	 * `local`, gated in team/hybrid). It reports all seven canonical harnesses every call (installed +
 	 * activity from the `sessions` GROUP BY), the single source the Harnesses page (039b/039c) and
 	 * PRD-038's home strip read (parent D-3). Fail-soft — a mount error never crashes the daemon.
 	 *
@@ -1173,7 +1173,7 @@ export function assembleSeams(
 	//     (PRD-039a, the data backbone). Attaches onto the same already-mounted, protected
 	//     `/api/diagnostics` group (NO `server.ts` edit), so it inherits the dashboard JSON views'
 	//     auth/RBAC (open in `local`, gated in team/hybrid). It is the SINGLE source the Harnesses
-	//     page (039b/039c) AND PRD-038's home strip read (parent D-3): all six canonical harnesses
+	//     page (039b/039c) AND PRD-038's home strip read (parent D-3): all seven canonical harnesses
 	//     every call, `installed` from the daemon's known harness-sync target set (the cheap cached
 	//     presence check, OQ-1 — NOT a per-request spawn), activity from ONE guarded `sessions`
 	//     GROUP BY (fail-soft, never a 500). FAIL-SOFT: a mount error must NEVER crash the daemon —

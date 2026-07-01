@@ -28,6 +28,7 @@ export {
 } from "./cli.js";
 
 export { CodexConnector, type CodexConnectorOptions } from "./codex.js";
+export { GrokConnector, type GrokConnectorOptions } from "./grok.js";
 export {
 	type ConfigHookEntry,
 	type ConfigMatcherBlock,

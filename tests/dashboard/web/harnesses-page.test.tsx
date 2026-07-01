@@ -4,7 +4,7 @@
  *
  * Mounts the REAL {@link HarnessesPage} into jsdom against a MOCKED wire client (a fixture
  * `HarnessStatus[]`) and asserts the acceptance criteria through the rendered DOM:
- *   - b-AC-1: the overview renders one KPI card per harness for all six, from the fixture payload.
+ *   - b-AC-1: the overview renders one KPI card per harness for all seven, from the fixture payload.
  *   - b-AC-2: the installed/active matrix renders a row per harness with installed/active marks.
  *   - b-AC-3: an UNINSTALLED harness renders greyed "not installed"; an installed-but-idle reads
  *     "idle"; an active one reads "active" + its real count — varying the payload changes the page
@@ -45,12 +45,13 @@ function cap(name: string, extra: Partial<HarnessCapabilitiesWire> = {}): Harnes
 	};
 }
 
-/** A fixture of the six harnesses with a representative install/activity mix. */
-function fixtureSix(): HarnessStatusWire[] {
+/** A fixture of the seven harnesses with a representative install/activity mix. */
+function fixtureSeven(): HarnessStatusWire[] {
 	return [
 		{ name: "claude-code", installed: true, active: true, lastSeen: new Date().toISOString(), turnsCaptured: 7, runtimePath: "legacy", capabilities: cap("claude-code") },
 		{ name: "codex", installed: true, active: false, lastSeen: null, turnsCaptured: 0, runtimePath: "legacy", capabilities: cap("codex", { userVisibleLogin: true }) },
 		{ name: "cursor", installed: true, active: true, lastSeen: new Date().toISOString(), turnsCaptured: 312, runtimePath: "plugin", capabilities: cap("cursor", { agents: { kind: "cursor-agent", binary: "cursor-agent", fallbackBin: "claude" }, workspaceRoots: true }) },
+		{ name: "grok", installed: false, active: false, lastSeen: null, turnsCaptured: 0, runtimePath: "legacy", capabilities: cap("grok", { userVisibleLogin: true }) },
 		{ name: "hermes", installed: false, active: false, lastSeen: null, turnsCaptured: 0, runtimePath: "legacy", capabilities: cap("hermes", { mcpRegistration: true }) },
 		{ name: "pi", installed: false, active: false, lastSeen: null, turnsCaptured: 0, runtimePath: "plugin", capabilities: cap("pi", { agentsMdContext: true }) },
 		{ name: "openclaw", installed: false, active: false, lastSeen: null, turnsCaptured: 0, runtimePath: "plugin", capabilities: cap("openclaw", { contractedTools: true }) },
@@ -144,33 +145,33 @@ describe("PRD-039 pure helpers", () => {
 	});
 
 	it("resolveHarnessSubItems maps the live list to the dynamic sub-items (037c contract)", () => {
-		const items = resolveHarnessSubItems(fixtureSix());
+		const items = resolveHarnessSubItems(fixtureSeven());
 		expect(items.map((i) => i.route)).toContain("/harnesses/cursor");
 		expect(items.map((i) => i.label)).toContain("claude-code");
-		expect(items).toHaveLength(6);
+		expect(items).toHaveLength(7);
 		// A non-array / empty live state yields no children (the parent stays a plain nav item).
 		expect(resolveHarnessSubItems(null)).toHaveLength(0);
 		expect(resolveHarnessSubItems([])).toHaveLength(0);
 	});
 });
 
-describe("PRD-039b: the overview renders six cards + the matrix from the live payload", () => {
-	it("b-AC-1 renders one KPI card per harness for all six", async () => {
-		await mountPage(mockWire(fixtureSix()));
-		for (const name of ["claude-code", "codex", "cursor", "hermes", "pi", "openclaw"]) {
+describe("PRD-039b: the overview renders seven cards + the matrix from the live payload", () => {
+	it("b-AC-1 renders one KPI card per harness for all seven", async () => {
+		await mountPage(mockWire(fixtureSeven()));
+		for (const name of ["claude-code", "codex", "cursor", "grok", "hermes", "pi", "openclaw"]) {
 			expect(container.querySelector(`[data-testid="harness-card-${name}"]`), `card for ${name}`).not.toBeNull();
 		}
 	});
 
 	it("b-AC-2 renders the installed/active matrix with a row per harness", async () => {
-		await mountPage(mockWire(fixtureSix()));
-		for (const name of ["claude-code", "codex", "cursor", "hermes", "pi", "openclaw"]) {
+		await mountPage(mockWire(fixtureSeven()));
+		for (const name of ["claude-code", "codex", "cursor", "grok", "hermes", "pi", "openclaw"]) {
 			expect(container.querySelector(`[data-testid="harness-row-${name}"]`), `matrix row for ${name}`).not.toBeNull();
 		}
 	});
 
 	it("b-AC-3 an uninstalled harness renders 'not installed', an idle one 'idle', an active one 'active'", async () => {
-		await mountPage(mockWire(fixtureSix()));
+		await mountPage(mockWire(fixtureSeven()));
 		const cursorCard = container.querySelector('[data-testid="harness-card-cursor"]');
 		const codexCard = container.querySelector('[data-testid="harness-card-codex"]');
 		const hermesCard = container.querySelector('[data-testid="harness-card-hermes"]');
@@ -184,7 +185,7 @@ describe("PRD-039b: the overview renders six cards + the matrix from the live pa
 
 	it("b-AC-3 dynamic: a DIFFERENT payload renders different states with no code change", async () => {
 		// Flip the fixture so hermes is now installed+active and cursor uninstalled.
-		const flipped = fixtureSix().map((h) =>
+		const flipped = fixtureSeven().map((h) =>
 			h.name === "hermes"
 				? { ...h, installed: true, active: true, turnsCaptured: 5 }
 				: h.name === "cursor"
@@ -197,7 +198,7 @@ describe("PRD-039b: the overview renders six cards + the matrix from the live pa
 	});
 
 	it("b-AC-4 clicking a card routes to #/harnesses/<name>", async () => {
-		await mountPage(mockWire(fixtureSix()));
+		await mountPage(mockWire(fixtureSeven()));
 		const cursorCard = container.querySelector('[data-testid="harness-card-cursor"]') as HTMLButtonElement;
 		act(() => cursorCard.click());
 		expect(window.location.hash).toBe("#/harnesses/cursor");
@@ -207,14 +208,14 @@ describe("PRD-039b: the overview renders six cards + the matrix from the live pa
 describe("PRD-039c: the per-harness detail renders capability panels (Cursor agents; Claude Code none)", () => {
 	it("c-AC-3 the Cursor detail renders the Agents panel", async () => {
 		window.location.hash = "#/harnesses/cursor";
-		await mountPage(mockWire(fixtureSix()));
+		await mountPage(mockWire(fixtureSeven()));
 		expect(container.querySelector('[data-testid="cap-agents"]'), "Cursor renders the Agents panel").not.toBeNull();
 		expect(container.textContent).toContain("cursor-agent");
 	});
 
 	it("c-AC-3 the Claude Code detail OMITS the Agents panel", async () => {
 		window.location.hash = "#/harnesses/claude-code";
-		await mountPage(mockWire(fixtureSix()));
+		await mountPage(mockWire(fixtureSeven()));
 		expect(container.querySelector('[data-testid="cap-agents"]'), "Claude Code omits the Agents panel").toBeNull();
 		// It still renders its Runtime panel (always present).
 		expect(container.textContent).toContain("legacy");
@@ -222,7 +223,7 @@ describe("PRD-039c: the per-harness detail renders capability panels (Cursor age
 
 	it("c-AC-3 the Hermes detail renders the MCP panel; OpenClaw the contracted-tools panel", async () => {
 		window.location.hash = "#/harnesses/hermes";
-		await mountPage(mockWire(fixtureSix()));
+		await mountPage(mockWire(fixtureSeven()));
 		expect(container.querySelector('[data-testid="cap-mcp"]')).not.toBeNull();
 		expect(container.querySelector('[data-testid="cap-agents"]')).toBeNull();
 	});

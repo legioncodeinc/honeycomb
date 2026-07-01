@@ -17,7 +17,7 @@ Node **>= 22.5.0**, ESM (`"type": "module"`), TypeScript strict, single npm pack
 | `src/daemon-client/` | Tier 1 — thin fetch-only client surface that harnesses/CLI/MCP import. |
 | `src/daemon/` | Tier 2 — **the daemon core. The ONLY place DeepLake is touched.** `storage/` (SQL, catalog, healing, vector), `runtime/` (Hono server, services, middleware, pipelines). |
 | `src/cli/` | Tier 4 — the `honeycomb` CLI entry. |
-| `harnesses/{claude-code,codex,cursor,hermes,pi,openclaw}/` | Tier 4 — per-harness thin adapters. Each has `src/` → bundled to `bundle/` (cursor also has `extension/`). |
+| `harnesses/{claude-code,codex,cursor,grok,hermes,pi,openclaw}/` | Tier 4 — per-harness thin adapters. Each has `src/` → bundled to `bundle/` (cursor also has `extension/`). |
 | `mcp/src/` | Tier 4 — MCP server entry. |
 | `embeddings/src/` | Tier 3 — the embed daemon (opt-in, ~600 MB runtime, optionalDependency). |
 | `sdk/` | Published `@legioncodeinc/honeycomb` subpath entries (`/react`, `/vercel`, `/openai`); core entry is fetch-only/browser-safe. |

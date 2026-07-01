@@ -76,6 +76,7 @@ export const AGENT_DOT: Record<string, string> = {
 	cursor: "var(--severity-info)",
 	"claude-code": "var(--honey)",
 	codex: "var(--pollinate)",
+	grok: "var(--severity-info)",
 	openclaw: "var(--verified)",
 	hermes: "var(--severity-warning)",
 	pi: "var(--severity-critical)",

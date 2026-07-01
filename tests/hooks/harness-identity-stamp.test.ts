@@ -33,6 +33,7 @@ import {
 	createClaudeCodeShim,
 	createCodexShim,
 	createCursorShim,
+	createGrokShim,
 	createHermesShim,
 	createOpenClawShim,
 	createPiShim,
@@ -41,8 +42,8 @@ import {
 	type OpenClawMessage,
 } from "../../src/hooks/index.js";
 
-/** The canonical six tokens the Harnesses page GROUPs BY — the contract the stamp must hit. */
-const THE_SIX = ["claude-code", "codex", "cursor", "hermes", "pi", "openclaw"] as const;
+/** The canonical seven tokens the Harnesses page GROUPs BY — the contract the stamp must hit. */
+const THE_SEVEN = ["claude-code", "codex", "cursor", "grok", "hermes", "pi", "openclaw"] as const;
 
 /** A base session metadata with NO `agent` set, so the assertion proves the SHIM stamped it. */
 function baseMeta(over: Partial<HookSessionMeta> = {}): HookSessionMeta {
@@ -57,6 +58,7 @@ function baseMeta(over: Partial<HookSessionMeta> = {}): HookSessionMeta {
 const REPRESENTATIVE_EVENT: Readonly<Record<string, NativeEvent>> = {
 	"claude-code": { name: "UserPromptSubmit", payload: { prompt: "find the bug" } },
 	codex: { name: "UserPromptSubmit", payload: { prompt: "find the bug" } },
+	grok: { name: "user_prompt_submit", payload: { prompt: "find the bug" } },
 	cursor: { name: "beforeSubmitPrompt", payload: { prompt: "find the bug" } },
 	hermes: { name: "on_user_message", payload: { prompt: "find the bug", text: "find the bug" } },
 	pi: { name: "agent_end", payload: { reason: "session_shutdown" } },
@@ -67,6 +69,7 @@ function hookShims(): Readonly<Record<string, HarnessShim>> {
 	return {
 		"claude-code": createClaudeCodeShim(),
 		codex: createCodexShim(),
+		grok: createGrokShim(),
 		cursor: createCursorShim(),
 		hermes: createHermesShim(),
 		pi: createPiShim(),
@@ -119,13 +122,13 @@ describe("harness identity → sessions.agent: every shim stamps its OWN canonic
 		expect(input?.meta.agentId).toBe("alice");
 	});
 
-	it("the stamped token matches the canonical six EXACTLY (no drift, every harness covered)", () => {
+	it("the stamped token matches the canonical seven EXACTLY (no drift, every harness covered)", () => {
 		const stamped = new Set<string>();
 		for (const harness of Object.keys(REPRESENTATIVE_EVENT)) {
 			const input = shims[harness].normalize(REPRESENTATIVE_EVENT[harness], baseMeta());
 			if (input?.meta.agent !== undefined) stamped.add(input.meta.agent);
 		}
 		stamped.add(OPENCLAW_HARNESS);
-		expect([...stamped].sort()).toEqual([...THE_SIX].sort());
+		expect([...stamped].sort()).toEqual([...THE_SEVEN].sort());
 	});
 });

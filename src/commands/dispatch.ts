@@ -81,7 +81,7 @@ export function parseInvocation(argv: readonly string[]): CommandInvocation {
 
 /**
  * The branded ASCII honeycomb mark printed atop `honeycomb` (no args) and `honeycomb --help`
- * (FR-2). Plain ASCII on purpose: it renders identically across all six harnesses, when piped,
+ * (FR-2). Plain ASCII on purpose: it renders identically across all seven harnesses, when piped,
  * and in non-TTY logs — no ANSI color or Unicode glyphs that a dumb terminal would mangle.
  * Backslashes are doubled for the JS string literal; the rendered art is a two-row honeycomb.
  */
