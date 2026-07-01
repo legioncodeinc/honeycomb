@@ -78,6 +78,13 @@ jobs:
           node-version: "22"
 
       - name: Build the install surface (copies scripts, hashes them, renders the page)
+        # PRD-002c: HONEYCOMB_INSTALL_POSTHOG_KEY is a PostHog PROJECT key, safe to expose
+        # client-side by design (ADR-0002) — it is a plain repository VARIABLE (Settings →
+        # Secrets and variables → Actions → Variables), never a secret. Absent/unset leaves
+        # install-time telemetry disabled (build.mjs's documented no-op default); nothing here
+        # gates the build or the deploy on it being configured.
+        env:
+          HONEYCOMB_INSTALL_POSTHOG_KEY: ${{ vars.HONEYCOMB_INSTALL_POSTHOG_KEY }}
         run: node site/install/build.mjs
 
       - name: Deploy to Cloudflare Pages (production)
