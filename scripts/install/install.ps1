@@ -336,16 +336,42 @@ function Get-Manifest {
 #   @{ Kind = 'ok'; Target = '<pkg>@<version>' }
 #   @{ Kind = 'unpublished'; Pkg = '<pkg>' }   -- manifest says published:false, do NOT npm-install
 #   @{ Kind = 'unresolved'; Pkg = '<pkg>' }    -- manifest unreachable/malformed, fall back to @latest
+# SECURITY (security-review finding, medium): the manifest is an external input (a compromised
+# repo, a MITM on a fetch, or a user-supplied HONEYCOMB_MANIFEST_URL override could all poison
+# it). npm on Windows is a `.cmd` shim; invoking it with an unvalidated argument value can let a
+# metacharacter WITHIN that value (`;`, `&`, `|`, backticks, `$()`, ...) be re-parsed by cmd.exe
+# and inject an additional command, even though PowerShell itself passes $target as one token.
+# These two validators enforce the SAME safe-shape allowlist as install.sh's
+# npm_package_name_is_safe / semver_is_safe (kept in sync; see that file for the shared rationale)
+# so a tampered field is rejected at the SOURCE rather than relying on downstream quoting alone.
+function Test-SafePackageName([string]$Name) {
+  if ([string]::IsNullOrEmpty($Name)) { return $false }
+  return $Name -cmatch '^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$'
+}
+
+function Test-SafeSemver([string]$Version) {
+  if ([string]::IsNullOrEmpty($Version)) { return $false }
+  return $Version -cmatch '^[0-9]+\.[0-9]+\.[0-9]+([+.-][0-9A-Za-z.+-]+)?$'
+}
+
 function Resolve-ProductTarget([string]$Slug, [string]$FallbackPkg) {
   $manifest = Get-Manifest
   $pkg = $FallbackPkg
   if ($manifest -and $manifest.products -and $manifest.products.$Slug -and $manifest.products.$Slug.packageName) {
-    $pkg = $manifest.products.$Slug.packageName
+    $candidatePkg = $manifest.products.$Slug.packageName
+    if (Test-SafePackageName $candidatePkg) { $pkg = $candidatePkg }
+    # An unsafe-shaped packageName silently falls back to $FallbackPkg rather than being honored,
+    # mirroring the resolution posture used for every other invalid/absent manifest field below.
   }
   if (-not $manifest -or -not $manifest.products -or -not $manifest.products.$Slug -or -not $manifest.products.$Slug.version) {
     return @{ Kind = 'unresolved'; Pkg = $pkg }
   }
   $entry = $manifest.products.$Slug
+  if (-not (Test-SafeSemver $entry.version)) {
+    # An unsafe-shaped (or non-semver) version is treated exactly like an unresolvable manifest
+    # entry: never interpolated into an npm invocation, always the safe `@latest` fallback path.
+    return @{ Kind = 'unresolved'; Pkg = $pkg }
+  }
   $published = $true
   if ($null -ne $entry.published) { $published = [bool]$entry.published }
   if (-not $published) {

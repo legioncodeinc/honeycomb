@@ -4,13 +4,13 @@
 # this PRD (so no real npm/global mutation, no real network install, no real telemetry send ever
 # happens while running this file).
 #
-# This is NOT wired into `npm run ci` (scripts/ is shell, outside the TypeScript graph) — run it
+# This is NOT wired into `npm run ci` (scripts/ is shell, outside the TypeScript graph); run it
 # directly:
 #   sh scripts/install/tests/install.test.sh
 #
 # Every test runs install.sh in an ISOLATED temp $HOME (so config-file / install-id / install-state
 # reads-and-writes never touch the real ~/.honeycomb) and against a LOCAL fixture manifest served
-# via a `file://` URL (so resolution is deterministic and offline — no dependency on
+# via a `file://` URL (so resolution is deterministic and offline; no dependency on
 # raw.githubusercontent.com being reachable from the test runner).
 set -u
 
@@ -21,7 +21,7 @@ FIXTURE_MANIFEST="${SCRIPT_DIR}/fixtures/manifest-mixed.json"
 PASS=0
 FAIL=0
 
-# Build a `file://` URL for the fixture manifest that curl can actually open — POSIX absolute paths
+# Build a `file://` URL for the fixture manifest that curl can actually open; POSIX absolute paths
 # work as-is; on Git-Bash/MSYS (Windows) `pwd -W` yields the Windows-drive-letter form curl expects.
 if command -v cygpath >/dev/null 2>&1; then
   FIXTURE_URL="file://$(cygpath -m "$FIXTURE_MANIFEST")"
@@ -172,6 +172,34 @@ run_install "$h11" --dry-run --products=honeycomb,thehive
 assert_contains "unpublished thehive prints a clear, friendly skip note" "is not yet published to npm"
 assert_not_contains "unpublished thehive is never handed to npm install" "would run: npm install -g @legioncodeinc/thehive"
 rm -rf "$h11"
+
+printf '\n=== security: a tampered manifest with shell/cmd-metacharacter-shaped fields never reaches npm unvalidated ===\n'
+MALICIOUS_MANIFEST="${SCRIPT_DIR}/fixtures/manifest-malicious.json"
+if command -v cygpath >/dev/null 2>&1; then
+  MALICIOUS_URL="file://$(cygpath -m "$MALICIOUS_MANIFEST")"
+elif (cd "$(dirname "$MALICIOUS_MANIFEST")" && pwd -W >/dev/null 2>&1); then
+  mal_win_dir="$(cd "$(dirname "$MALICIOUS_MANIFEST")" && pwd -W)"
+  MALICIOUS_URL="file:///${mal_win_dir}/$(basename "$MALICIOUS_MANIFEST")"
+else
+  MALICIOUS_URL="file://${MALICIOUS_MANIFEST}"
+fi
+h_mal="$(new_temp_home)"
+LAST_OUTPUT="$(HOME="$h_mal" HONEYCOMB_MANIFEST_URL="$MALICIOUS_URL" sh "$INSTALL_SH" --dry-run --products=honeycomb,hivedoctor,thehive,hivenectar 2>&1)"
+LAST_EXIT=$?
+# hivedoctor's version field carries a `;`-separated injection attempt: the unsafe shape must be
+# REJECTED (never printed as the literal npm target) and the target must fall back to @latest.
+assert_not_contains "an injection-shaped version is never handed to npm verbatim" "hivedoctor@9.9.9; touch"
+assert_contains     "an injection-shaped version falls back to @latest instead" "@legioncodeinc/hivedoctor@latest"
+# thehive's packageName field carries a `;`-separated injection attempt: must fall back to the
+# safe built-in fallback package name, never the tampered one.
+assert_not_contains "an injection-shaped packageName is never handed to npm verbatim" "thehive; touch"
+assert_contains     "an injection-shaped packageName falls back to the safe built-in name" "npm install -g @legioncodeinc/thehive@9.9.9"
+# hivenectar's version carries a `&`-separated injection attempt (the Windows/cmd.exe metacharacter
+# class the finding specifically targeted): must also fall back to @latest.
+assert_not_contains "a \`&\`-shaped version is never handed to npm verbatim" "hivenectar@9.9.9 &"
+assert_contains     "a \`&\`-shaped version falls back to @latest instead" "npm install -g @legioncodeinc/hivenectar@latest"
+assert_exit_code    "a tampered manifest is never a hard failure in dry-run" 0
+rm -rf "$h_mal"
 
 printf '\n=== manifest unreachable: falls back to @latest with a warning, never a hard failure ===\n'
 h12="$(new_temp_home)"

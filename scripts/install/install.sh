@@ -1,5 +1,5 @@
 #!/bin/sh
-# Honeycomb one-command bootstrap installer (POSIX) — PRD-050a, extended by the-apiary PRD-002
+# Honeycomb one-command bootstrap installer (POSIX); PRD-050a, extended by the-apiary PRD-002
 # (product loading + install-time telemetry, ADR-0002).
 #
 # Usage (the single line a brand-new user pastes):
@@ -9,7 +9,7 @@
 #   curl -fsSL https://get.theapiary.sh | sh -s -- --products=honeycomb,thehive,hivenectar
 #
 # Contract (PRD-050a a-AC-1..6): leave the user on a running dashboard, OR tell them in ONE plain
-# sentence why not. It assumes the operator knows nothing — no Node, no npm, no idea what a daemon
+# sentence why not. It assumes the operator knows nothing; no Node, no npm, no idea what a daemon
 # is. It is deliberately THIN and IDEMPOTENT: it detects what is already present, installs only what
 # is missing, and re-running it is safe.
 #
@@ -17,13 +17,13 @@
 # `npm i -g @legioncodeinc/honeycomb`, plus (PRD-002b) any other SELECTED product from the fleet
 # (hivedoctor / the-hive / hivenectar), each resolved to its hive-release.json-pinned version. The
 # moment a `honeycomb` bin exists it HANDS OFF to the `honeycomb install` CLI verb for the
-# daemon-ensure + health-gate + dashboard-open — so that logic lives ONCE in TypeScript
+# daemon-ensure + health-gate + dashboard-open; so that logic lives ONCE in TypeScript
 # (src/commands/install.ts), not duplicated across two shell dialects.
 #
 # POSIX sh ONLY (no bashisms): this runs under `sh`, which may be dash/ash, not bash.
 #
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
-# PRD-002a — Product loading grammar (documented once, implemented identically in install.ps1)
+# PRD-002a; Product loading grammar (documented once, implemented identically in install.ps1)
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 #
 # Flags (all optional):
@@ -42,7 +42,7 @@
 #                                 resolve_code_products/resolve_code_profile below) to a
 #                                 products+profile PRESET, standing in for a longer flag
 #                                 combination. Example: --code=HONEY-FULL. Unknown/expired code:
-#                                 a warning is printed and the code is IGNORED (soft-fail — a
+#                                 a warning is printed and the code is IGNORED (soft-fail; a
 #                                 bad code must never brick the one-line install).
 #   --dry-run                     Resolve everything (flags/env/config/code/profile, the pinned
 #                                 manifest versions) and PRINT what would happen; performs NO
@@ -56,9 +56,9 @@
 #   HONEYCOMB_INSTALL_CODE, HONEYCOMB_NO_HIVEDOCTOR (pre-existing).
 #
 # Config file (read when neither the flag nor the env var is set):
-#   ~/.honeycomb/install.conf — one `KEY=value` pair per line (no spaces around `=`), `#` comments
-#   and blank lines allowed. Keys: PRODUCTS, PROFILE, LICENSE, CODE. Never sourced/executed — only
-#   parsed as plain text — so a config file can never inject shell code. This is the seam a repo
+#   ~/.honeycomb/install.conf; one `KEY=value` pair per line (no spaces around `=`), `#` comments
+#   and blank lines allowed. Keys: PRODUCTS, PROFILE, LICENSE, CODE. Never sourced/executed; only
+#   parsed as plain text; so a config file can never inject shell code. This is the seam a repo
 #   administrator uses to pin a fleet-wide deploy shape without editing the pasted command.
 #
 # PRECEDENCE (documented once, applies per-field): explicit flag > environment variable > config
@@ -66,36 +66,36 @@
 # built-in default (`honeycomb,hivedoctor`, i.e. today's behavior, unchanged for anyone who pipes
 # this script with no flags at all). `honeycomb` itself is ALWAYS part of the effective product set
 # regardless of --products=, because this script IS honeycomb's own bootstrap entry point (it hands
-# off to `honeycomb install` for the daemon/dashboard) — there is no meaningful "install without
+# off to `honeycomb install` for the daemon/dashboard); there is no meaningful "install without
 # honeycomb" outcome through this entry point.
 #
 # Combo/alias URLs (PRD-002a a-AC-4) are OPTIONAL SUGAR handled at the install SITE
 # (honeycomb/site/install/functions/index.js), which maps a `?combo=<name>` query parameter to the
-# SAME environment-variable inputs this script already reads (HONEYCOMB_INSTALL_PRODUCTS/_PROFILE) —
+# SAME environment-variable inputs this script already reads (HONEYCOMB_INSTALL_PRODUCTS/_PROFILE) ,
 # never a separate/parallel resolution mechanism. See that file for the preset table.
 #
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
-# PRD-002c — Install-time telemetry (fired from THIS script, independent of the Node build key)
+# PRD-002c; Install-time telemetry (fired from THIS script, independent of the Node build key)
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
-# `install_started` fires first (before any flag/env/config resolution — c-AC-1), and exactly one
+# `install_started` fires first (before any flag/env/config resolution; c-AC-1), and exactly one
 # of `install_completed` / `install_failed` fires at the terminal state (c-AC-2), via `finish()`.
-# Both use a PUBLIC PostHog project key baked into the install SITE (not the Node build key) — see
+# Both use a PUBLIC PostHog project key baked into the install SITE (not the Node build key); see
 # `phone_home()` below. A stable anonymous install id correlates the two (c-AC-4).
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 # `set -e` would abort on the FIRST non-zero command, surfacing a raw error. We instead handle every
-# failure explicitly and print a plain-language line (parent AC-7) — so `set -e` is intentionally OFF.
+# failure explicitly and print a plain-language line (parent AC-7); so `set -e` is intentionally OFF.
 set -u
 
 # ─────────────────────────────────────────────────────────────────────────────
 # THE ONE PLACE TO BUMP NODE. The single pinned Node LTS the installer provisions
 # via fnm. To upgrade the provisioned Node for every new user, change THIS line
-# only. (Existing users with a working Node are left untouched — see step 1.)
+# only. (Existing users with a working Node are left untouched; see step 1.)
 # ─────────────────────────────────────────────────────────────────────────────
 HONEYCOMB_NODE_VERSION="22"
 
 # The published npm package the global install pulls (PRD-048 publishes it; this consumes it).
-# PRD-002b: this is the FALLBACK package name only — `install_honeycomb` resolves the ACTUAL
+# PRD-002b: this is the FALLBACK package name only; `install_honeycomb` resolves the ACTUAL
 # installed version from the hive-release.json manifest (`resolve_product_target`) when it is
 # reachable, falling back to `@latest` only when the manifest itself cannot be resolved.
 HONEYCOMB_NPM_PACKAGE="@legioncodeinc/honeycomb"
@@ -119,12 +119,12 @@ HONEYCOMB_INSTALL_BASE_URL="https://get.theapiary.sh"
 # purely for local testing against a fork/branch copy of the manifest.
 HONEYCOMB_MANIFEST_URL="${HONEYCOMB_MANIFEST_URL:-https://raw.githubusercontent.com/legioncodeinc/the-apiary/main/hive-release.json}"
 
-# ── PRD-002c: telemetry destination. The key is EMPTY in source control by design — this exact
+# ── PRD-002c: telemetry destination. The key is EMPTY in source control by design; this exact
 # `HONEYCOMB_INSTALL_POSTHOG_KEY=""` line is the one `site/install/build.mjs` patches (via an
 # anchored regex on this literal line, never a blind find/replace over the whole file) at deploy
 # time, injecting the real PostHog project key (mirrors ADR-0002: "a public PostHog project key
 # baked into the install site"). An empty value (any un-built/local/dev copy of this script) makes
-# `phone_home` a silent no-op — never a hard failure. See site/install/build.mjs for the build-time
+# `phone_home` a silent no-op; never a hard failure. See site/install/build.mjs for the build-time
 # substitution and site/install/README.md for why a full-file text substitution was rejected (it
 # would also corrupt this script's OWN "is telemetry configured" check).
 HONEYCOMB_INSTALL_POSTHOG_KEY=""
@@ -134,7 +134,7 @@ HONEYCOMB_INSTALL_ID_FILE="${HOME}/.honeycomb/install-id"
 
 # ── PRD-002a: admin config file + PRD-002b: this installer's own bookkeeping of the last-selected
 # product set (used ONLY to detect a --products= narrowing between runs, so a removed product's
-# hivedoctor registry entry can be cleaned up — see reconcile_removed_products). ──
+# hivedoctor registry entry can be cleaned up; see reconcile_removed_products). ──
 HONEYCOMB_INSTALL_CONFIG_FILE="${HOME}/.honeycomb/install.conf"
 HONEYCOMB_INSTALL_STATE_FILE="${HOME}/.honeycomb/install-state.json"
 HONEYCOMB_HIVEDOCTOR_REGISTRY_FILE="${HOME}/.honeycomb/hivedoctor.daemons.json"
@@ -164,7 +164,7 @@ fail()  { printf 'Honeycomb install could not continue: %s\n' "$1" >&2; }
 have()  { command -v "$1" >/dev/null 2>&1; }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
-# PRD-002c — anonymous install id + phone-home
+# PRD-002c; anonymous install id + phone-home
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 # Best-effort UUID-shaped id, in decreasing order of "how real a UUID this actually is". This is an
@@ -186,7 +186,7 @@ generate_uuid() {
 		fi
 	fi
 	# Last-resort fallback (no uuidgen/od/procfs available): not a spec-compliant UUID, but still
-	# unique-enough and carries no machine/user identity — better than losing correlation entirely.
+	# unique-enough and carries no machine/user identity; better than losing correlation entirely.
 	printf 'nohd-%s-%s\n' "$(date +%s 2>/dev/null || echo 0)" "$$"
 }
 
@@ -212,7 +212,7 @@ resolve_install_id() {
 # unreachable ingest endpoint never hangs or breaks the install (ADR-0002 "never delays or breaks
 # the install"). Uses the SAME capture endpoint + body shape as the Node-side chokepoint
 # (`src/daemon/runtime/telemetry/emit.ts`: `{ api_key, event, distinct_id, properties }` posted to
-# `${host}/i/v0/e/`) for consistency, but is otherwise fully INDEPENDENT of it — this only needs
+# `${host}/i/v0/e/`) for consistency, but is otherwise fully INDEPENDENT of it; this only needs
 # `curl`, so it fires even before Node/npm exist (the entire point of ADR-0002: the transport
 # survives a keyless Node build AND an install that fails before the Node CLI ever runs).
 #
@@ -222,7 +222,7 @@ resolve_install_id() {
 phone_home() {
 	event="$1"
 	# --dry-run ALWAYS previews what would be sent, even against an un-substituted placeholder key
-	# (a local/dev checkout) — this is the one seam PRD-002's verification story depends on, so the
+	# (a local/dev checkout); this is the one seam PRD-002's verification story depends on, so the
 	# key-guard below only gates the REAL network send, never the dry-run preview.
 	if [ "$DRY_RUN" -eq 1 ]; then
 		printf '[dry-run] would phone home: %s (install_id=%s, repeat=%s, products=%s, profile=%s)\n' \
@@ -240,11 +240,11 @@ phone_home() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
-# PRD-002a — flag / env / config-file / code / profile resolution
+# PRD-002a; flag / env / config-file / code / profile resolution
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 # `--code=<code>` → a products PRESET (a-AC-2). Unrecognized code: caller treats a non-zero return
-# as "ignore the code, warn, keep going" (soft-fail — never brick the one-line install over a typo).
+# as "ignore the code, warn, keep going" (soft-fail; never brick the one-line install over a typo).
 resolve_code_products() {
 	case "$1" in
 		HONEY-FULL) printf '%s' "honeycomb,hivedoctor,thehive,hivenectar" ;;
@@ -270,7 +270,7 @@ resolve_profile_products() {
 	esac
 }
 
-# Read one `KEY=value` from the admin config file (a-AC-3). Plain-text parse ONLY — this file is
+# Read one `KEY=value` from the admin config file (a-AC-3). Plain-text parse ONLY; this file is
 # NEVER sourced/executed, so it cannot inject shell code. Comments (`#`) and blank lines are
 # ignored; the LAST matching `KEY=` line wins (a later line overrides an earlier one, ini-style).
 read_config_value() {
@@ -285,7 +285,7 @@ read_config_value() {
 
 # Scan argv for the installer-only flags this script consumes itself (a-AC-1/a-AC-5). Does NOT
 # mutate or shift the caller's positional params (function-local $@); `--no-hivedoctor` is
-# deliberately left alone here — `hivedoctor_opted_out` re-scans the ORIGINAL "$@" directly, as it
+# deliberately left alone here; `hivedoctor_opted_out` re-scans the ORIGINAL "$@" directly, as it
 # already did before PRD-002.
 parse_args() {
 	for a in "$@"; do
@@ -356,7 +356,7 @@ resolve_selection() {
 	# installer with no flags at all.
 	[ -z "$SEL_PRODUCTS" ] && SEL_PRODUCTS="honeycomb,hivedoctor"
 
-	# honeycomb is ALWAYS part of the effective set — see the header comment for why.
+	# honeycomb is ALWAYS part of the effective set; see the header comment for why.
 	case ",$SEL_PRODUCTS," in
 		*,honeycomb,*) : ;;
 		*) SEL_PRODUCTS="honeycomb,${SEL_PRODUCTS}" ;;
@@ -364,7 +364,7 @@ resolve_selection() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
-# PRD-002b — resolve a product's pinned version from hive-release.json
+# PRD-002b; resolve a product's pinned version from hive-release.json
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 _MANIFEST_JSON=""
@@ -381,8 +381,8 @@ fetch_manifest() {
 	return 0
 }
 
-# manifest_field <slug> <field> — prints the field's value, or nothing (+ returns 1) if unresolved.
-# Uses `node` (guaranteed available by the time any real, non-dry-run caller reaches this — Node is
+# manifest_field <slug> <field>; prints the field's value, or nothing (+ returns 1) if unresolved.
+# Uses `node` (guaranteed available by the time any real, non-dry-run caller reaches this; Node is
 # ensured before any product is installed) to parse JSON reliably rather than hand-rolling a
 # sed/grep JSON parser for a document this script does not control the shape of byte-for-byte.
 manifest_field() {
@@ -403,19 +403,61 @@ manifest_field() {
 	' "$slug" "$field" 2>/dev/null
 }
 
+# SECURITY (security-review finding, medium): the manifest is an external input (a
+# compromised repo, a MITM on a fetch, or a user-supplied HONEYCOMB_MANIFEST_URL override
+# could all poison it). Even though this script already double-quotes every "$target"
+# expansion (never vulnerable to the injection class the finding targeted on the
+# PowerShell dialect, whose npm.cmd shim re-parses argument metacharacters via cmd.exe),
+# validating the SHAPE of packageName/version here closes the vector at its source for
+# BOTH dialects rather than relying solely on downstream quoting discipline.
+#
+# npm_package_name_is_safe: a conservative safe-character allowlist matching real npm
+# package-name rules (lowercase, digits, `.`/`_`/`-`, optionally `@scope/name`); this
+# alone makes it structurally impossible to smuggle a shell/cmd metacharacter through.
+npm_package_name_is_safe() {
+	case "$1" in
+		@[a-z0-9]*/[a-z0-9]*)
+			scope="${1%%/*}"; name="${1#*/}"
+			case "$scope" in @*[!a-z0-9._-]*|@) return 1 ;; esac
+			case "$name" in *[!a-z0-9._-]*|"") return 1 ;; esac
+			return 0
+			;;
+		[a-z0-9]*)
+			case "$1" in *[!a-z0-9._-]*) return 1 ;; esac
+			return 0
+			;;
+		*) return 1 ;;
+	esac
+}
+
+# semver_is_safe: digits.digits.digits with an optional -prerelease / +build suffix drawn
+# from the same safe character set (never a metacharacter).
+semver_is_safe() {
+	case "$1" in
+		[0-9]*.[0-9]*.[0-9]*)
+			case "$1" in *[!0-9A-Za-z.+-]*) return 1 ;; esac
+			return 0
+			;;
+		*) return 1 ;;
+	esac
+}
+
 # Resolve the npm install target for a product slug (b-AC-2). Prints exactly one of:
 #   "ok <pkg>@<version>"   -- install this manifest-pinned target
 #   "unpublished <pkg>"    -- manifest declares published:false; do NOT attempt an npm install,
 #                             this is the expected shape until a maintainer completes the one-time
-#                             npm Trusted-Publisher bootstrap (PRD-001c) — never a cryptic npm error
-#   "unresolved <pkg>"     -- the manifest itself is unreachable/malformed; fall back to
-#                             <pkg>@latest with a printed warning (a manifest hiccup must never
-#                             brick installing a product the user explicitly asked for)
+#                             npm Trusted-Publisher bootstrap (PRD-001c); never a cryptic npm error
+#   "unresolved <pkg>"     -- the manifest itself is unreachable/malformed, OR its packageName/
+#                             version fields fail the safe-shape check above; fall back to
+#                             <pkg>@latest with a printed warning (a manifest hiccup, or a
+#                             tampered field, must never brick installing a product the user
+#                             explicitly asked for, and must never reach npm/the shell unvalidated)
 resolve_product_target() {
 	slug="$1"; fallback_pkg="$2"
-	pkg="$(manifest_field "$slug" packageName)"; [ -n "$pkg" ] || pkg="$fallback_pkg"
+	pkg="$(manifest_field "$slug" packageName)"
+	if [ -z "$pkg" ] || ! npm_package_name_is_safe "$pkg"; then pkg="$fallback_pkg"; fi
 	version="$(manifest_field "$slug" version)"
-	if [ -z "$version" ]; then
+	if [ -z "$version" ] || ! semver_is_safe "$version"; then
 		printf 'unresolved %s\n' "$pkg"
 		return 0
 	fi
@@ -428,7 +470,7 @@ resolve_product_target() {
 }
 
 # Thin wrapper over resolve_product_target for the two ALWAYS-core products (honeycomb,
-# hivedoctor), which — unlike the-hive/hivenectar — are always expected to already be published
+# hivedoctor), which; unlike the-hive/hivenectar; are always expected to already be published
 # (b-AC-2 applies to every installed product, not only the new ones). Collapses the 3-way
 # ok/unpublished/unresolved result down to a single npm install target string: the manifest-pinned
 # version when resolvable, else `<pkg>@latest` (never a hard failure over a manifest hiccup).
@@ -444,7 +486,7 @@ resolve_core_product_target() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 1 — Node + npm. If both are present, use them. Else install fnm (NO elevation)
+# Step 1; Node + npm. If both are present, use them. Else install fnm (NO elevation)
 #          + the pinned Node LTS. fnm installs entirely under $HOME, so it never needs
 #          sudo; that is exactly why it is the primary path over the official installer.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -454,9 +496,9 @@ ensure_node() {
     return 0
   fi
 
-  step "Node/npm not found — installing a private copy via fnm (no admin rights needed)…"
+  step "Node/npm not found; installing a private copy via fnm (no admin rights needed)…"
 
-  # fnm install is a curl|sh that writes ONLY under ~/.local/share/fnm + ~/.fnm — no elevation.
+  # fnm install is a curl|sh that writes ONLY under ~/.local/share/fnm + ~/.fnm; no elevation.
   if ! have fnm; then
     if ! have curl; then
       # We cannot fetch fnm without curl, and installing curl itself needs the OS package manager
@@ -466,7 +508,7 @@ ensure_node() {
     fi
     if ! curl -fsSL https://fnm.vercel.app/install | sh >/dev/null 2>&1; then
       # fnm's own installer failed (e.g. a locked-down $HOME it cannot write). Fall back to the
-      # documented manual command + clean non-zero exit (a-AC-3) — never a raw error dump.
+      # documented manual command + clean non-zero exit (a-AC-3); never a raw error dump.
       elevation_required_node
       return 1
     fi
@@ -496,12 +538,12 @@ ensure_node() {
     return 0
   fi
 
-  # fnm landed but node/npm still are not resolvable — surface the manual path, clean exit (a-AC-3).
+  # fnm landed but node/npm still are not resolvable; surface the manual path, clean exit (a-AC-3).
   elevation_required_node
   return 1
 }
 
-# a-AC-3 — print the EXACT copy-paste install command + a one-line WHY, then signal a clean
+# a-AC-3; print the EXACT copy-paste install command + a one-line WHY, then signal a clean
 # non-zero exit. NEVER a raw error dump. The caller exits with this function's surfaced intent.
 elevation_required_node() {
   fail "Honeycomb needs Node ${HONEYCOMB_NODE_VERSION} and could not install it automatically (your machine blocked the no-admin install)."
@@ -515,16 +557,16 @@ elevation_required_node() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 2 — install @legioncodeinc/honeycomb globally. The embedding runtime
+# Step 2; install @legioncodeinc/honeycomb globally. The embedding runtime
 #          (@huggingface/transformers) is an OPTIONAL dependency of the package and
 #          is pulled by npm during this install; its MODEL WEIGHTS are NOT fetched
-#          here (that is the embed daemon's lazy warmup — 050b), so this stays fast.
+#          here (that is the embed daemon's lazy warmup; 050b), so this stays fast.
 # ─────────────────────────────────────────────────────────────────────────────
 install_honeycomb() {
-  # Idempotent: a re-run on a machine that already has `honeycomb` is a NO-OP — no npm mutation, no
+  # Idempotent: a re-run on a machine that already has `honeycomb` is a NO-OP; no npm mutation, no
   # network. This keeps the documented "safe to re-run" contract and lets a rerun succeed OFFLINE. Only
   # an absent install triggers the global npm install. (`resolve_honeycomb_bin` is defined below; POSIX sh
-  # resolves functions at call time, so the forward reference is fine — both exist before `main` runs.)
+  # resolves functions at call time, so the forward reference is fine; both exist before `main` runs.)
   if existing_bin="$(resolve_honeycomb_bin 2>/dev/null)"; then
     ok "${HONEYCOMB_NPM_PACKAGE} already installed (${existing_bin})."
     return 0
@@ -621,14 +663,14 @@ install_hivedoctor() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
-# PRD-002b — install + register the-hive / hivenectar when selected (the coverage-gap close)
+# PRD-002b; install + register the-hive / hivenectar when selected (the coverage-gap close)
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 #
 # Generic across both products (small, deliberate duplication vs. one dense function): resolve the
 # manifest-pinned target, npm-install it globally (idempotent, fail-soft), then run the product's
 # OWN post-install verb. Both the-hive (`thehive install-service`) and hivenectar (`hivenectar
 # install`) ALREADY implement a hivedoctor-registry writer internally (`thehive/src/install/
-# registry.ts` / `hivenectar/src/hivedoctor-registry.ts`) — this installer reuses THEIR verb rather
+# registry.ts` / `hivenectar/src/hivedoctor-registry.ts`); this installer reuses THEIR verb rather
 # than hand-rolling a second registry writer, so there is exactly one writer per product (b-AC-3).
 install_extra_product() {
 	display_name="$1"; slug="$2"; fallback_pkg="$3"; bin_name="$4"; post_install_verb="$5"
@@ -639,11 +681,11 @@ install_extra_product() {
 
 	case "$kind" in
 		unpublished)
-			printf 'note: %s (%s) is not yet published to npm — skipping (a maintainer still needs to complete the one-time npm Trusted-Publisher bootstrap, PRD-001c). Re-run this installer after that lands.\n' "$display_name" "$pkg"
+			printf 'note: %s (%s) is not yet published to npm; skipping (a maintainer still needs to complete the one-time npm Trusted-Publisher bootstrap, PRD-001c). Re-run this installer after that lands.\n' "$display_name" "$pkg"
 			return 0
 			;;
 		unresolved)
-			printf 'note: could not resolve the pinned version for %s from the release manifest — falling back to %s@latest.\n' "$display_name" "$pkg"
+			printf 'note: could not resolve the pinned version for %s from the release manifest; falling back to %s@latest.\n' "$display_name" "$pkg"
 			target="${pkg}@latest"
 			;;
 		*)
@@ -662,7 +704,7 @@ install_extra_product() {
 	else
 		step "installing ${display_name} (${target}) globally…"
 		if ! npm install -g "$target" >/dev/null 2>&1; then
-			printf 'note: could not install %s (continuing — the rest of the install still succeeded). Try: npm install -g %s\n' "$display_name" "$target"
+			printf 'note: could not install %s (continuing; the rest of the install still succeeded). Try: npm install -g %s\n' "$display_name" "$target"
 			EXTRA_PRODUCT_FAILED=1
 			return 0
 		fi
@@ -692,14 +734,14 @@ install_extra_product() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
-# PRD-002b — registration create/update/DELETE across lifecycle transitions
+# PRD-002b; registration create/update/DELETE across lifecycle transitions
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 # CREATE/UPDATE are handled above (install_extra_product's post-install verb, plus honeycomb's own
 # `writeHivedoctorRegistryEntry` inside `honeycomb install`). DELETE is the remaining transition:
 # when a re-run's --products= NARROWS the set (a product previously installed is no longer
 # selected), that product's hivedoctor registry entry is removed so the registry stays an honest
 # picture of the fleet (parent AC-6). This is the ONLY delete path this installer implements today
-# — see the header note in reconcile_removed_products for the honest scope of what is NOT covered.
+#; see the header note in reconcile_removed_products for the honest scope of what is NOT covered.
 
 # Read the previous run's selected products (comma list), or empty if none/unreadable/first-run.
 read_previous_products() {
@@ -715,7 +757,7 @@ read_previous_products() {
 }
 
 # Persist this run's selection as "the last thing this installer selected" (installer-owned
-# bookkeeping — NOT the hivedoctor registry contract itself, just this script's own diff baseline).
+# bookkeeping; NOT the hivedoctor registry contract itself, just this script's own diff baseline).
 write_install_state() {
 	have node || return 0
 	node -e '
@@ -731,7 +773,7 @@ write_install_state() {
 # Deregister one product's entry from hivedoctor's static registry by name (the "delete"
 # transition). Mirrors the SAME idempotent replace-by-name shape the TS writers use
 # (`registerHoneycombWithHivedoctor` / `registerThehiveWithHivedoctor`), just filtering the entry
-# OUT instead of upserting it. Fail-soft: any read/parse/write hiccup is swallowed — a registry
+# OUT instead of upserting it. Fail-soft: any read/parse/write hiccup is swallowed; a registry
 # cleanup step must never fail the run that triggered it.
 deregister_from_hivedoctor() {
 	name="$1"
@@ -752,12 +794,12 @@ deregister_from_hivedoctor() {
 	' "$HONEYCOMB_HIVEDOCTOR_REGISTRY_FILE" "$name" 2>/dev/null || true
 }
 
-# NOTE ON SCOPE (documented honestly, see the ledger too): this does NOT run `npm uninstall -g` —
+# NOTE ON SCOPE (documented honestly, see the ledger too): this does NOT run `npm uninstall -g` ,
 # removing a global package the user may still want for other reasons is a separate, more
 # destructive decision this installer does not make on the user's behalf. It ONLY keeps
 # hivedoctor's registry honest. Also: neither honeycomb, the-hive, nor hivenectar ships a full
 # "product uninstall" verb today (checked: the-hive's `uninstall-service` / hivenectar's
-# `uninstall` only remove the OS service unit, they do NOT touch the hivedoctor registry) — so a
+# `uninstall` only remove the OS service unit, they do NOT touch the hivedoctor registry); so a
 # --products= narrowing between two runs of THIS installer is the only delete trigger implemented.
 # A real `honeycomb uninstall` (or per-product uninstall) command remains a documented gap.
 reconcile_removed_products() {
@@ -768,7 +810,7 @@ reconcile_removed_products() {
 	for p in $previous; do
 		IFS="$old_ifs"
 		case ",$SEL_PRODUCTS," in
-			*",$p,"*) : ;; # still selected — nothing to do
+			*",$p,"*) : ;; # still selected; nothing to do
 			*)
 				case "$p" in
 					thehive|hivenectar)
@@ -804,7 +846,7 @@ finish() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 3 — hand off to the CLI verb for the daemon-ensure + health-gate + dashboard
+# Step 3; hand off to the CLI verb for the daemon-ensure + health-gate + dashboard
 #          open. The open logic lives ONCE in the CLI (src/commands/install.ts), not
 #          here. The verb is idempotent + health-gated (a-AC-2 / a-AC-4) and opens
 #          honeycomb.local → loopback (a-AC-6), writing onboarding "installed" (a-AC-5).
@@ -832,7 +874,7 @@ main() {
     if have node && have npm; then
       ok "Node $(node --version) and npm $(npm --version) found (dry-run: no bootstrap attempted)."
     else
-      printf 'note: node/npm not found (dry-run — a real run would attempt to install them via fnm).\n'
+      printf 'note: node/npm not found (dry-run; a real run would attempt to install them via fnm).\n'
     fi
   else
     ensure_node || finish 1
@@ -893,7 +935,7 @@ main() {
 
   # The verb prints its own friendly step log (daemon up / onboarding marked / opening dashboard) and
   # returns a clean exit code; we forward it verbatim. A handled failure inside the verb is already a
-  # plain-language line + non-zero exit — no raw stack reaches the user here. Forward the caller's args
+  # plain-language line + non-zero exit; no raw stack reaches the user here. Forward the caller's args
   # MINUS every installer-only flag this script itself consumed (--no-hivedoctor, and now the PRD-002a
   # flags), so a bootstrap `--ref <code>` (and any future verb flag) still reaches the CLI's install
   # verb. The positional rebuild preserves args that contain spaces (string concatenation would not):

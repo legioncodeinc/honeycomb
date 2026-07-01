@@ -1,0 +1,25 @@
+{
+  "manifestVersion": "0.1.0",
+  "products": {
+    "honeycomb": {
+      "version": "9.9.9",
+      "packageName": "@legioncodeinc/honeycomb",
+      "published": true
+    },
+    "hivedoctor": {
+      "version": "9.9.9; touch /tmp/pwned",
+      "packageName": "@legioncodeinc/hivedoctor",
+      "published": true
+    },
+    "thehive": {
+      "version": "9.9.9",
+      "packageName": "@legioncodeinc/thehive; touch /tmp/pwned",
+      "published": true
+    },
+    "hivenectar": {
+      "version": "9.9.9 & calc.exe",
+      "packageName": "@legioncodeinc/hivenectar",
+      "published": true
+    }
+  }
+}
