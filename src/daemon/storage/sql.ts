@@ -40,12 +40,14 @@
  * are stripped.
  */
 export function sqlStr(value: string): string {
-	return value
-		.replace(/\\/g, "\\\\")
-		.replace(/'/g, "''")
-		.replace(/\0/g, "")
-		// Drop C0 controls except \t (0x09) \n (0x0A) \r (0x0D), plus DEL (0x7f).
-		.replace(/[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+	return (
+		value
+			.replace(/\\/g, "\\\\")
+			.replace(/'/g, "''")
+			.replace(/\0/g, "")
+			// Drop C0 controls except \t (0x09) \n (0x0A) \r (0x0D), plus DEL (0x7f).
+			.replace(/[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
+	);
 }
 
 /**
@@ -73,12 +75,14 @@ export function sqlStr(value: string): string {
  * character classes.
  */
 export function sqlLike(value: string): string {
-	return value
-		.replace(/[\\%_]/g, "\\$&")
-		.replace(/'/g, "''")
-		.replace(/\0/g, "")
-		// Drop C0 controls except \t (0x09) \n (0x0A) \r (0x0D), plus DEL (0x7f).
-		.replace(/[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+	return (
+		value
+			.replace(/[\\%_]/g, "\\$&")
+			.replace(/'/g, "''")
+			.replace(/\0/g, "")
+			// Drop C0 controls except \t (0x09) \n (0x0A) \r (0x0D), plus DEL (0x7f).
+			.replace(/[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
+	);
 }
 
 /**
@@ -150,4 +154,31 @@ export function sqlColumnList(list: string): string {
 		.split(",")
 		.map((part) => sqlIdent(part.trim()))
 		.join(", ");
+}
+
+/**
+ * The cap on how many `sessions` turns a single per-`path` read materializes
+ * (PERF: bound the recall/read-back scans).
+ *
+ * The session readers filter by `path` alone (the conversation grouping key).
+ * Concurrent sub-agents that share one transcript all append under the SAME
+ * `path`, so a fan-out run can drive a single session to tens of thousands of
+ * rows — each with a large JSONB `message`. An unbounded `SELECT ... ORDER BY
+ * creation_date` on such a path materializes hundreds of MB and pins the read at
+ * tens of seconds. Every ordinary single-agent session stays far below this cap,
+ * so bounding to the most-recent N turns leaves real sessions untouched and only
+ * truncates the pathological runaway ones.
+ */
+export const MAX_SESSION_TURNS = 2000;
+
+/**
+ * Clamp a caller-supplied session-turn limit into `[1, {@link MAX_SESSION_TURNS}]`,
+ * defaulting a missing/non-finite value to the cap. Mirrors the recall/resolve
+ * clamps so no reader can emit an unbounded — or absurd — `LIMIT`.
+ */
+export function clampSessionTurns(limit?: number): number {
+	if (typeof limit !== "number" || !Number.isFinite(limit)) return MAX_SESSION_TURNS;
+	const truncated = Math.trunc(limit);
+	if (truncated < 1) return 1;
+	return Math.min(truncated, MAX_SESSION_TURNS);
 }

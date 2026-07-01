@@ -67,7 +67,10 @@ describe("a-AC-1 read precedence: graph > index > cache > pending > sessions > S
 
 	it("a-AC-1 tier 4 — a pending write wins over SQL (cat-after-write), no dispatch", async () => {
 		const pending = new Map([
-			["notes/y.md", { path: "notes/y.md", body: "PENDING BODY", verb: "write" as const, pathClass: "memory" as const }],
+			[
+				"notes/y.md",
+				{ path: "notes/y.md", body: "PENDING BODY", verb: "write" as const, pathClass: "memory" as const },
+			],
 		]);
 		const { fs, dispatch } = makeFs({ pending });
 		const body = await fs.readFile("notes/y.md");
@@ -84,16 +87,19 @@ describe("a-AC-1 read precedence: graph > index > cache > pending > sessions > S
 		expect(await fs.readFile("dup.md")).toBe("FROM CACHE");
 	});
 
-	it("a-AC-1 tier 5 — a sessions path concatenates message rows ORDER BY creation_date ASC", async () => {
+	it("a-AC-1 tier 5 — a sessions path concatenates message rows in chronological order", async () => {
+		// The bounded reader selects newest-first (`ORDER BY creation_date DESC LIMIT N`);
+		// concatSessions reverses the rows so the turn stream still reads oldest→newest.
 		const { fs, dispatch } = makeFs({
-			respond: (sql) => (sql.includes('FROM "sessions"') ? [sessionRow("turn 1"), sessionRow("turn 2")] : []),
+			respond: (sql) => (sql.includes('FROM "sessions"') ? [sessionRow("turn 2"), sessionRow("turn 1")] : []),
 		});
 		const body = await fs.readFile("sessions/2026/abc.md");
 		expect(body).toBe("turn 1\nturn 2");
-		// reached storage through the seam, with the sessions concat SQL, ordered ASC
+		// reached storage through the seam, with the bounded most-recent-N concat SQL
 		expect(dispatch.calls).toHaveLength(1);
 		expect(dispatch.calls[0].sql).toContain('FROM "sessions"');
-		expect(dispatch.calls[0].sql).toContain("ORDER BY creation_date ASC");
+		expect(dispatch.calls[0].sql).toContain("ORDER BY creation_date DESC");
+		expect(dispatch.calls[0].sql).toContain("LIMIT 2000");
 	});
 
 	it("a-AC-1 tier 6 — a memory path falls through to a direct summary SELECT", async () => {

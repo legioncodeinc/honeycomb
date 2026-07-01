@@ -7,7 +7,16 @@
  */
 
 import { describe, expect, it } from "vitest";
+import {
+	FIXTURE_CODEBASE_COLUMNS,
+	FIXTURE_MEMORY_COLUMNS,
+	FIXTURE_SESSIONS_COLUMNS,
+	FIXTURE_SKILLS_COLUMNS,
+} from "../../../src/daemon/storage/examples/fixture-tables.js";
+import type { HealTarget } from "../../../src/daemon/storage/heal.js";
 import { createStorageClient } from "../../../src/daemon/storage/index.js";
+import type { TransportRequest } from "../../../src/daemon/storage/transport.js";
+import { TransportError } from "../../../src/daemon/storage/transport.js";
 import {
 	appendOnlyInsert,
 	appendVersionBumped,
@@ -17,16 +26,7 @@ import {
 	updateOrInsertByKey,
 	val,
 } from "../../../src/daemon/storage/writes.js";
-import type { HealTarget } from "../../../src/daemon/storage/heal.js";
-import {
-	FIXTURE_CODEBASE_COLUMNS,
-	FIXTURE_MEMORY_COLUMNS,
-	FIXTURE_SESSIONS_COLUMNS,
-	FIXTURE_SKILLS_COLUMNS,
-} from "../../../src/daemon/storage/examples/fixture-tables.js";
 import { FakeDeepLakeTransport, fakeCredentialRecord, stubProvider } from "../../helpers/fake-deeplake.js";
-import type { TransportRequest } from "../../../src/daemon/storage/transport.js";
-import { TransportError } from "../../../src/daemon/storage/transport.js";
 
 const SCOPE = { org: "o1", workspace: "ws1" } as const;
 
@@ -113,12 +113,20 @@ describe("PRD-002d write patterns", () => {
 		const first = await appendVersionBumped(client, SKILLS, SCOPE, {
 			keyColumn: "skill_id",
 			keyValue: "s1",
-			row: [["id", val.str("r1")], ["skill_id", val.str("s1")], ["body", val.text("a")]],
+			row: [
+				["id", val.str("r1")],
+				["skill_id", val.str("s1")],
+				["body", val.text("a")],
+			],
 		});
 		const second = await appendVersionBumped(client, SKILLS, SCOPE, {
 			keyColumn: "skill_id",
 			keyValue: "s1",
-			row: [["id", val.str("r2")], ["skill_id", val.str("s1")], ["body", val.text("b")]],
+			row: [
+				["id", val.str("r2")],
+				["skill_id", val.str("s1")],
+				["body", val.text("b")],
+			],
 		});
 		expect(first.version).toBe(2);
 		expect(second.version).toBe(3); // both persisted; highest is current
@@ -142,6 +150,35 @@ describe("PRD-002d write patterns", () => {
 		await readAppendOrdered(client, SESSIONS, SCOPE, "p/1");
 		const read = fake.requests.find((r) => /SELECT \* FROM "sessions"/.test(r.sql));
 		expect(read?.sql).toMatch(/ORDER BY creation_date ASC/);
+	});
+
+	it("PERF a bounded read caps to most-recent-N (DESC LIMIT) and reverses back to chronological", async () => {
+		// The transport returns newest-first (as the DESC query would); the reader
+		// must reverse the rows so the caller still sees oldest→newest.
+		const { client, fake } = clientWith((req) =>
+			/SELECT \* FROM "sessions"/.test(req.sql)
+				? [{ message: "newest" }, { message: "middle" }, { message: "oldest" }]
+				: [],
+		);
+		const result = await readAppendOrdered(client, SESSIONS, SCOPE, "p/1", "*", 2000);
+		// Emitted a bounded, newest-first scan — never the unbounded ASC read.
+		const read = fake.requests.find((r) => /SELECT \* FROM "sessions"/.test(r.sql));
+		expect(read?.sql).toMatch(/ORDER BY creation_date DESC LIMIT 2000/);
+		expect(read?.sql).not.toMatch(/ORDER BY creation_date ASC/);
+		// Returned rows are reversed to chronological order.
+		expect(result.kind).toBe("ok");
+		if (result.kind === "ok") {
+			expect(result.rows.map((r) => r.message)).toEqual(["oldest", "middle", "newest"]);
+		}
+	});
+
+	it("PERF an out-of-range bounded limit clamps into [1, MAX_SESSION_TURNS]", async () => {
+		const { client, fake } = clientWith(() => []);
+		await readAppendOrdered(client, SESSIONS, SCOPE, "p/1", "*", 10_000_000); // over the cap
+		await readAppendOrdered(client, SESSIONS, SCOPE, "p/2", "*", 0); // under the floor
+		const reads = fake.requests.filter((r) => /SELECT \* FROM "sessions"/.test(r.sql));
+		expect(reads[0]?.sql).toMatch(/LIMIT 2000/); // clamped down to the cap
+		expect(reads[1]?.sql).toMatch(/LIMIT 1/); // clamped up to the floor
 	});
 
 	it("d-AC-5 supersede appends a new version + marks prior superseded, no in-place mutate", async () => {

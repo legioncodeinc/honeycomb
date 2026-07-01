@@ -16,20 +16,13 @@
  * reaches the LOCAL disk through the injected {@link SnapshotLoader} and NEVER the network.
  */
 
-import { handleGraphVfs } from "../../daemon/runtime/codebase/query.js";
 import type { Snapshot } from "../../daemon/runtime/codebase/contracts.js";
-import { sqlIdent, sLiteral } from "../../daemon/storage/sql.js";
+import { handleGraphVfs } from "../../daemon/runtime/codebase/query.js";
+import { clampSessionTurns, sLiteral, sqlIdent } from "../../daemon/storage/sql.js";
 
 import { classifyPath, toMountRelative } from "./classify.js";
+import type { ContentCache, DaemonDispatch, PendingBuffer, Row, SnapshotLoader, VfsScope } from "./contracts.js";
 import { generateVirtualIndex } from "./index-gen.js";
-import type {
-	ContentCache,
-	DaemonDispatch,
-	PendingBuffer,
-	Row,
-	SnapshotLoader,
-	VfsScope,
-} from "./contracts.js";
 
 /** The `graph/` subtree prefix the bridge strips before delegating (FR-9). */
 const GRAPH_PREFIX = "graph/";
@@ -136,9 +129,16 @@ function resolveGraph(rel: string, snapshots: SnapshotLoader): string {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Build the sessions-concat SELECT (FR-7): every `message` for this `path` ordered by
- * `creation_date ASC`, so the rows reconstruct the turn stream in order. Value (the path)
- * goes through `sLiteral`; identifiers through `sqlIdent`.
+ * Build the sessions-concat SELECT (FR-7): the most-recent {@link MAX_SESSION_TURNS}
+ * `message` rows for this `path`. Value (the path) goes through `sLiteral`; identifiers
+ * through `sqlIdent`.
+ *
+ * PERF: bounded to the most-recent N turns via a flat `ORDER BY creation_date DESC LIMIT N`
+ * (the proven pattern in this codebase — no derived-table subquery). The caller
+ * ({@link concatSessions}) reverses the rows back into chronological order, so the turn
+ * stream still reads oldest→newest. An unbounded read on a fan-out session (tens of
+ * thousands of shared-`path` rows) materialized hundreds of MB and stalled for tens of
+ * seconds; every ordinary session is far under the cap and is returned in full.
  */
 export function buildSessionsConcatSql(path: string): string {
 	const tbl = sqlIdent("sessions");
@@ -148,18 +148,24 @@ export function buildSessionsConcatSql(path: string): string {
 	return (
 		`SELECT ${message} FROM "${tbl}" ` +
 		`WHERE ${pathCol} = ${sLiteral(path)} ` +
-		`ORDER BY ${created} ASC`
+		`ORDER BY ${created} DESC ` +
+		`LIMIT ${clampSessionTurns()}`
 	);
 }
 
 /**
- * Concatenate the session rows for a path (FR-7). Dispatches the ordered SELECT and joins
- * each row's normalized `message` with a newline. A path with no rows resolves to "" (an
- * empty session file).
+ * Concatenate the session rows for a path (FR-7). Dispatches the bounded most-recent-N
+ * SELECT (newest-first), reverses into chronological order, and joins each row's normalized
+ * `message` with a newline. A path with no rows resolves to "" (an empty session file).
  */
 async function concatSessions(rel: string, deps: ReadDeps): Promise<string> {
 	const rows = await deps.dispatch.query(buildSessionsConcatSql(rel), deps.scope);
-	return rows.map((row) => normalizeMessage(row.message)).filter((s) => s !== "").join("\n");
+	return rows
+		.slice()
+		.reverse()
+		.map((row) => normalizeMessage(row.message))
+		.filter((s) => s !== "")
+		.join("\n");
 }
 
 /** Normalize a `sessions.message` (JSONB) cell to a string line. */
