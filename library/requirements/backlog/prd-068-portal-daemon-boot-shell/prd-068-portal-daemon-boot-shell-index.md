@@ -1,5 +1,9 @@
 # PRD-068: Portal Daemon Boot Shell
 
+> **Status:** Superseded by [the-hive PRD-003 (portal gate and routing)](../../../../../the-hive/library/requirements/backlog/prd-003-portal-gate-and-routing/) and [the-hive PRD-004 (/buzzing)](../../../../../the-hive/library/requirements/backlog/prd-004-buzzing/).
+>
+> The portal is no longer a honeycomb-owned boot shell. Under the fleet realignment the-hive owns the human-facing portal: PRD-003 handles the landing gate and routing and PRD-004 handles the /buzzing boot experience. Honeycomb's role is now that of a supervised service (see [PRD-071](../prd-071-service-checkin-and-sqlite-telemetry/prd-071-service-checkin-and-sqlite-telemetry-index.md)).
+
 > **Status:** Backlog
 > **Priority:** P1
 > **Effort:** L (1-3d)
