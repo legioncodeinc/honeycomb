@@ -168,7 +168,7 @@ export interface SourceArtifact {
 	/** The provenanced chunks this unit splits into (may be empty). */
 	readonly chunks?: readonly SourceChunk[];
 	/** Native graph rows mounted from source topology (optional, 013c). */
-	readonly graphTriples?: readonly SourceGraphTriple[];
+	readonly graphTriples?: readonly HiveGraphTriple[];
 	/** Genuinely-schemaless per-provider detail (→ JSONB). */
 	readonly metadata?: Record<string, unknown>;
 	/** A partial-failure marker → FAILURE ARTIFACT, no row deleted (D-4 / a-AC-7). */
@@ -200,7 +200,7 @@ export interface SourceChunk {
  * rows; the lifecycle carries the provenance through so the graph row is purgeable
  * by `source_id` (a-AC-2 — the additive provenance quartet on the graph tables).
  */
-export interface SourceGraphTriple {
+export interface HiveGraphTriple {
 	/** The subject entity (canonical name). */
 	readonly subject: string;
 	/** The relationship/edge type. */

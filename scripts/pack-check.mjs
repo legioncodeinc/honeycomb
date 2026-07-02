@@ -40,8 +40,8 @@ if (hits.length) {
 }
 
 // Required runtime files: a publish that DROPS any of these from the `files`
-// allowlist ships a broken package. The dashboard SPA itself moved to thehive
-// (ADR-0001 cutover, "Removed portal to migrate to the-hive") — honeycomb no
+// allowlist ships a broken package. The dashboard SPA itself moved to hive
+// (ADR-0001 cutover, "Removed portal to migrate to hive") — honeycomb no
 // longer bundles or serves it, so there is no `daemon/dashboard-app.js` target
 // to require here anymore. `assets/*` (CSS tokens, logo, fonts) still ship —
 // see the entries below — this positive check still catches a regression that

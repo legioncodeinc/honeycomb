@@ -127,8 +127,8 @@ rm -rf "$h3"
 
 printf '\n=== slug-rename aliases: pre-rename tokens normalize to the canonical slugs ===\n'
 h3b="$(new_temp_home)"
-run_install "$h3b" --dry-run --products=honeycomb,hivedoctor,thehive,hivenectar
-assert_contains "pre-rename tokens (hivedoctor,thehive,hivenectar) normalize to doctor,hive,nectar" "products = honeycomb,doctor,hive,nectar"
+run_install "$h3b" --dry-run --products=honeycomb,doctor,hive,nectar
+assert_contains "pre-rename tokens (doctor,hive,nectar) normalize to doctor,hive,nectar" "products = honeycomb,doctor,hive,nectar"
 rm -rf "$h3b"
 
 printf '\n=== a-AC-2: --code= resolves to a products+profile preset ===\n'
@@ -153,7 +153,7 @@ rm -rf "$h6"
 printf '\n=== a-AC-3: precedence -- flag beats env beats config file ===\n'
 h7="$(new_temp_home)"
 mkdir -p "$h7/.honeycomb"
-printf 'PRODUCTS=honeycomb,hivenectar\n' > "$h7/.honeycomb/install.conf"
+printf 'PRODUCTS=honeycomb,nectar\n' > "$h7/.honeycomb/install.conf"
 run_install "$h7" --dry-run
 assert_contains "config file alone supplies the product set (pre-rename token normalized)" "products = honeycomb,nectar"
 rm -rf "$h7"
@@ -258,27 +258,27 @@ assert_contains    "a fresh HOME reports repeat=false" "repeat=false"
 assert_file_absent "dry-run still never persists the freshly-generated id" "$h15b/.honeycomb/install-id"
 rm -rf "$h15b"
 
-printf '\n=== --no-doctor opts out of HiveDoctor (pre-rename --no-hivedoctor accepted as alias) ===\n'
+printf '\n=== --no-doctor opts out of Doctor (pre-rename --no-doctor accepted as alias) ===\n'
 h16a="$(new_temp_home)"
 run_install "$h16a" --dry-run --no-doctor
-assert_contains "--no-doctor skips the HiveDoctor bootstrap" "skipping HiveDoctor (--no-doctor)."
+assert_contains "--no-doctor skips the Doctor bootstrap" "skipping Doctor (--no-doctor)."
 rm -rf "$h16a"
 
 h16b="$(new_temp_home)"
-run_install "$h16b" --dry-run --no-hivedoctor
-assert_contains "the pre-rename --no-hivedoctor alias still opts out" "skipping HiveDoctor (--no-doctor)."
+run_install "$h16b" --dry-run --no-doctor
+assert_contains "the pre-rename --no-doctor alias still opts out" "skipping Doctor (--no-doctor)."
 rm -rf "$h16b"
 
 h16c="$(new_temp_home)"
 LAST_OUTPUT="$(HOME="$h16c" HONEYCOMB_MANIFEST_URL="$FIXTURE_URL" HONEYCOMB_NO_DOCTOR=1 sh "$INSTALL_SH" --dry-run 2>&1)"
 LAST_EXIT=$?
-assert_contains "HONEYCOMB_NO_DOCTOR=1 opts out via env" "skipping HiveDoctor (--no-doctor)."
+assert_contains "HONEYCOMB_NO_DOCTOR=1 opts out via env" "skipping Doctor (--no-doctor)."
 rm -rf "$h16c"
 
 h16d="$(new_temp_home)"
-LAST_OUTPUT="$(HOME="$h16d" HONEYCOMB_MANIFEST_URL="$FIXTURE_URL" HONEYCOMB_NO_HIVEDOCTOR=1 sh "$INSTALL_SH" --dry-run 2>&1)"
+LAST_OUTPUT="$(HOME="$h16d" HONEYCOMB_MANIFEST_URL="$FIXTURE_URL" HONEYCOMB_NO_DOCTOR=1 sh "$INSTALL_SH" --dry-run 2>&1)"
 LAST_EXIT=$?
-assert_contains "the pre-rename HONEYCOMB_NO_HIVEDOCTOR env alias still opts out" "skipping HiveDoctor (--no-doctor)."
+assert_contains "the pre-rename HONEYCOMB_NO_DOCTOR env alias still opts out" "skipping Doctor (--no-doctor)."
 rm -rf "$h16d"
 
 printf '\n=== --help prints usage and exits 0 without side effects ===\n'
@@ -310,7 +310,7 @@ STUB
     chmod +x "$stub_dir/npm" "$stub_dir/honeycomb"
   }
 
-  # Failure path: the selected hivenectar's npm install fails -> the run must exit non-zero and
+  # Failure path: the selected nectar's npm install fails -> the run must exit non-zero and
   # must NOT persist install-state.json (which would record the failed selection as installed).
   h17="$(new_temp_home)"
   stub17="$h17/stub-bin"
@@ -323,15 +323,15 @@ STUB
   assert_file_absent "a failed selected product is never recorded in install-state.json" "$h17/.honeycomb/install-state.json"
   rm -rf "$h17"
 
-  # Success path: the selected hivenectar installs + registers cleanly -> exit 0 and the state IS
+  # Success path: the selected nectar installs + registers cleanly -> exit 0 and the state IS
   # written (proves the new gate does not break the happy path).
   h18="$(new_temp_home)"
   stub18="$h18/stub-bin"
   prefix18="$h18/npm-prefix"
   make_stub_bin "$stub18" 0 "$prefix18"
   mkdir -p "$prefix18/bin"
-  printf '#!/bin/sh\nexit 0\n' > "$prefix18/bin/hivenectar"
-  chmod +x "$prefix18/bin/hivenectar"
+  printf '#!/bin/sh\nexit 0\n' > "$prefix18/bin/nectar"
+  chmod +x "$prefix18/bin/nectar"
   LAST_OUTPUT="$(HOME="$h18" HONEYCOMB_MANIFEST_URL="$FIXTURE_URL" PATH="$stub18:$PATH" \
     sh "$INSTALL_SH" --products=honeycomb,nectar 2>&1)"
   LAST_EXIT=$?
@@ -361,7 +361,7 @@ if command -v node >/dev/null 2>&1; then
   mkdir -p "$h20/.honeycomb"
   # Seeded with PRE-RENAME tokens on purpose: proves a state file written before the slug rename
   # normalizes and diffs cleanly against a post-rename selection.
-  printf '{"products":"honeycomb,hivedoctor,hivenectar"}\n' > "$h20/.honeycomb/install-state.json"
+  printf '{"products":"honeycomb,doctor,nectar"}\n' > "$h20/.honeycomb/install-state.json"
   run_install "$h20" --dry-run --products=honeycomb,doctor
   assert_contains     "a narrowing re-run fires product_removed for the dropped product" "would phone home: product_removed (product=nectar,"
   assert_contains     "a narrowing re-run fires product_updated for a retained product" "would phone home: product_updated (product=honeycomb,"

@@ -10,20 +10,20 @@
 
 ## Goals
 
-Make honeycomb a registered, self-announcing member of the fleet so hivedoctor can locate it, know it should exist, and read a live liveness and health signal without honeycomb pushing anything. This implements the honeycomb side of `ADR-0002-service-registration-static-registry-plus-runtime-sqlite.md`: a static installer registry entry (who should exist, plus the SQLite DB path) and a runtime status record (check-in, binding time, last-seen, health).
+Make honeycomb a registered, self-announcing member of the fleet so doctor can locate it, know it should exist, and read a live liveness and health signal without honeycomb pushing anything. This implements the honeycomb side of `ADR-0002-service-registration-static-registry-plus-runtime-sqlite.md`: a static installer registry entry (who should exist, plus the SQLite DB path) and a runtime status record (check-in, binding time, last-seen, health).
 
 ## Scope
 
-- Write or refresh honeycomb's entry in hivedoctor's static installer registry during install, declaring honeycomb's identity and the absolute path to its runtime telemetry SQLite database.
+- Write or refresh honeycomb's entry in doctor's static installer registry during install, declaring honeycomb's identity and the absolute path to its runtime telemetry SQLite database.
 - Write a runtime status record on check-in: binding time (when honeycomb bound its port), current health, and an initial last-seen.
 - Advance last-seen on a fixed heartbeat interval so liveness is derivable as an age of last-seen, independent of whether metrics changed.
-- Source the health value from the same signal honeycomb's `/health` reports, so hivedoctor's `/health` probe and the polled status agree.
+- Source the health value from the same signal honeycomb's `/health` reports, so doctor's `/health` probe and the polled status agree.
 - Keep every write fail-soft: a registry or status write error never blocks daemon boot or memory work.
 
 ## Out of scope
 
 - Metrics emission (PRD-071b) and log emission (PRD-071c).
-- hivedoctor's merge of static registry plus runtime status, its poll loop, and the SSE to the-hive (hivedoctor PRD-001 and PRD-002).
+- doctor's merge of static registry plus runtime status, its poll loop, and the SSE to hive (doctor PRD-001 and PRD-002).
 - Per-agent cryptographic identity, enrollment, or command channels (PRD-055).
 
 ---
@@ -32,21 +32,21 @@ Make honeycomb a registered, self-announcing member of the fleet so hivedoctor c
 
 ### US-071a.1 - Honeycomb is discoverable in the registry
 
-**As** hivedoctor, **I want** a static registry entry for honeycomb with its SQLite DB path, **so that** I know honeycomb should exist and where to poll its telemetry.
+**As** doctor, **I want** a static registry entry for honeycomb with its SQLite DB path, **so that** I know honeycomb should exist and where to poll its telemetry.
 
 - AC-071a.1.1 Given a completed install, when the static registry is read, then honeycomb has an entry declaring its identity and the absolute path to its runtime telemetry SQLite database, per `ADR-0002-service-registration-static-registry-plus-runtime-sqlite.md`.
 - AC-071a.1.2 Given honeycomb is reinstalled or upgraded, when install runs again, then the entry is refreshed idempotently rather than duplicated, and the DB path remains stable across restarts.
 
 ### US-071a.2 - Honeycomb checks in with binding time and health
 
-**As** hivedoctor, **I want** a runtime status record on check-in, **so that** I can merge live binding time and health with the static entry.
+**As** doctor, **I want** a runtime status record on check-in, **so that** I can merge live binding time and health with the static entry.
 
 - AC-071a.2.1 Given honeycomb binds its port, when it checks in, then it writes a runtime status record with a binding time and a current health value readable read-only.
 - AC-071a.2.2 Given honeycomb's health source changes, when the status is next written, then the health field reflects the same value `/health` reports.
 
 ### US-071a.3 - Liveness is derivable from last-seen
 
-**As** hivedoctor, **I want** last-seen to advance on a heartbeat, **so that** a quiet-but-healthy honeycomb is not mistaken for a dead one.
+**As** doctor, **I want** last-seen to advance on a heartbeat, **so that** a quiet-but-healthy honeycomb is not mistaken for a dead one.
 
 - AC-071a.3.1 Given honeycomb is running and idle, when the heartbeat interval fires, then last-seen advances even though no metric changed.
 - AC-071a.3.2 Given a honeycomb restart, when it checks in again, then binding time reflects the new process while the registry entry and DB path are unchanged.
@@ -76,14 +76,14 @@ Make honeycomb a registered, self-announcing member of the fleet so hivedoctor c
 ## Open questions
 
 - [ ] Does the runtime status record live in the same local SQLite database as metrics and logs (single DB path in the registry), or a dedicated status file the merge reads first?
-- [ ] Heartbeat cadence relative to hivedoctor's roughly one-second poll: match it, or run slower since the poll drives freshness?
+- [ ] Heartbeat cadence relative to doctor's roughly one-second poll: match it, or run slower since the poll drives freshness?
 
 ---
 
 ## Related
 
 - Parent: [PRD-071](./prd-071-service-checkin-and-sqlite-telemetry-index.md)
-- `../../../../../hivedoctor/library/knowledge/private/architecture/ADR-0002-service-registration-static-registry-plus-runtime-sqlite.md` - static installer registry plus runtime SQLite status.
-- `../../../../../hivedoctor/library/knowledge/private/architecture/ADR-0001-hive-telemetry-transport-and-single-source-of-truth.md` - hivedoctor is the single source of truth and reads service SQLite read-only.
+- `../../../../../doctor/library/knowledge/private/architecture/ADR-0002-service-registration-static-registry-plus-runtime-sqlite.md` - static installer registry plus runtime SQLite status.
+- `../../../../../doctor/library/knowledge/private/architecture/ADR-0001-hive-telemetry-transport-and-single-source-of-truth.md` - doctor is the single source of truth and reads service SQLite read-only.
 - Sibling: [PRD-071b](./prd-071b-service-checkin-and-sqlite-telemetry-metrics-emission.md), [PRD-071c](./prd-071c-service-checkin-and-sqlite-telemetry-log-emission.md).
 - `src/commands/install.ts`, `src/daemon/runtime/server.ts`.

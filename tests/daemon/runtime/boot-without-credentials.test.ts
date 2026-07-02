@@ -62,7 +62,7 @@ describe("b-AC-1 the daemon boots with NO credentials and serves the pre-auth se
 		expect(() => assembleNoCreds()).not.toThrow();
 	});
 
-	it("GET /dashboard is NOT served by honeycomb after ADR-0001 (thehive owns the portal)", async () => {
+	it("GET /dashboard is NOT served by honeycomb after ADR-0001 (hive owns the portal)", async () => {
 		const { daemon } = assembleNoCreds();
 		const res = await daemon.app.request("/dashboard");
 		expect(res.status).not.toBe(200);

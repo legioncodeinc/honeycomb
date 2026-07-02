@@ -1,7 +1,7 @@
 /**
  * Redaction for fleet log lines — PRD-071c (AC-071c.3.2 / AC-10).
  *
- * `service_logs` rows are polled read-only by hivedoctor and eventually rendered on the-hive's
+ * `service_logs` rows are polled read-only by doctor and eventually rendered on hive's
  * health rail, so a line must never carry a token, credential value, raw `Authorization` header,
  * org secret, memory body, or PII. Log lines are free-form TEXT (unlike the structured
  * `service_status`/`service_metrics` rows, which are numeric/enum/timestamp columns that cannot

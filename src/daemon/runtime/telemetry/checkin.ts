@@ -2,10 +2,10 @@
  * The fleet check-in / heartbeat service — PRD-071a (AC-2 / AC-3 / AC-6 / AC-071a.2 / AC-071a.3).
  *
  * Writes and refreshes honeycomb's `service_status` row in the fleet telemetry SQLite (Contract B)
- * so hivedoctor can merge a live binding-time / last-seen / health view without honeycomb pushing
+ * so doctor can merge a live binding-time / last-seen / health view without honeycomb pushing
  * anything (ADR-0001). `start()` stamps the binding time for THIS process and writes the initial
  * row; a fixed-interval heartbeat then advances `last_seen` (and re-reads health) even when
- * nothing else changed, so hivedoctor can tell "quiet" apart from "dead" (AC-3 / AC-071a.3.1). A
+ * nothing else changed, so doctor can tell "quiet" apart from "dead" (AC-3 / AC-071a.3.1). A
  * restart re-stamps `binding_time` while the registry entry and DB path stay unchanged (AC-6 /
  * AC-071a.3.2) — that stability is `fleet-registry.ts` + `fleet-store.ts`'s job, not this module's.
  *
@@ -27,7 +27,7 @@ export interface CheckinClock {
 }
 export const systemCheckinClock: CheckinClock = { now: () => new Date() };
 
-/** The heartbeat cadence (PRD-071 suggests every 5-10s; hivedoctor polls roughly every ~1s). */
+/** The heartbeat cadence (PRD-071 suggests every 5-10s; doctor polls roughly every ~1s). */
 export const DEFAULT_HEARTBEAT_INTERVAL_MS = 7_500;
 
 export interface CheckinDeps {

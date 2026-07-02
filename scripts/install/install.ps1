@@ -38,11 +38,11 @@ $HoneycombNodeVersion = '22'
 # to @latest only when the manifest itself cannot be resolved.
 $HoneycombNpmPackage = '@legioncodeinc/honeycomb'
 
-# HiveDoctor (PRD-064b): a SECOND global package -- the self-healing watchdog that keeps the
+# Doctor (PRD-064b): a SECOND global package -- the self-healing watchdog that keeps the
 # primary daemon alive and registers itself with the OS (a per-user Scheduled Task on Windows,
 # no admin / no UAC) so it survives crashes + reboots. Independent lifecycle (OD-6: a second
 # global), installed after the primary unless the user opts out with -NoDoctor.
-$HiveDoctorNpmPackage = '@legioncodeinc/doctor'
+$DoctorNpmPackage = '@legioncodeinc/doctor'
 
 # Distribution base URL: the vanity domain that serves this installer surface (PRD-050a follow-up,
 # now RESOLVED). get.theapiary.sh is a Cloudflare Pages site (site/install/) that content-negotiates:
@@ -72,7 +72,7 @@ $HoneycombInstallIdFile = Join-Path $HOME '.honeycomb\install-id'
 # product set (used only to detect a --products= narrowing between runs).
 $HoneycombInstallConfigFile = Join-Path $HOME '.honeycomb\install.conf'
 $HoneycombInstallStateFile = Join-Path $HOME '.honeycomb\install-state.json'
-$HoneycombHivedoctorRegistryFile = Join-Path $HOME '.honeycomb\hivedoctor.daemons.json'
+$HoneycombDoctorRegistryFile = Join-Path $HOME '.honeycomb\doctor.daemons.json'
 
 # Friendly progress log: step lines to the host, the single failure summary to the error stream.
 function Write-Step([string]$m) { Write-Host "-> $m" }
@@ -107,8 +107,8 @@ function Show-Usage {
   Write-Host '  --license=<key>                           thread a license key through (seam only)'
   Write-Host '  --code=HONEY-FULL                         resolve a product code to a preset'
   Write-Host '  --dry-run                                 resolve + print, mutate nothing'
-  Write-Host '  --no-doctor / -NoDoctor                   skip the HiveDoctor watchdog'
-  Write-Host '                                            (aliases: --no-hivedoctor / -NoHiveDoctor)'
+  Write-Host '  --no-doctor / -NoDoctor                   skip the Doctor watchdog'
+  Write-Host '                                            (aliases: --no-doctor / -NoDoctor)'
   Write-Host ''
   Write-Host 'Env equivalents: HONEYCOMB_INSTALL_PRODUCTS / _PROFILE / _LICENSE / _CODE, HONEYCOMB_NO_DOCTOR.'
   Write-Host 'Config file: ~\.honeycomb\install.conf (KEY=value per line: PRODUCTS, PROFILE, LICENSE, CODE).'
@@ -198,7 +198,7 @@ function Send-PhoneHome {
 }
 
 # Comma-free running list of SELECTED products that did NOT actually land this run (unpublished
-# skip, npm install failure, registration failure, or the hivedoctor opt-out). Consumed by
+# skip, npm install failure, registration failure, or the doctor opt-out). Consumed by
 # Send-ProductTransitions so product_installed/product_updated never over-claims. Mirrors
 # install.sh's PRODUCTS_NOT_INSTALLED (keep in parity).
 $script:ProductsNotInstalled = @()
@@ -238,7 +238,7 @@ function Resolve-ProfileProducts([string]$ProfileName) {
 }
 
 # Normalize a comma list of product tokens to the canonical slugs. The July 2026 repository
-# renames (hivedoctor -> doctor, the-hive -> hive, hivenectar -> nectar) renamed the slugs with
+# renames (doctor -> doctor, hive -> hive, nectar -> nectar) renamed the slugs with
 # the repos; the pre-rename tokens stay accepted as aliases so every documented invocation,
 # config file, and previously-written install-state.json keeps working across the rename.
 # Mirrors install.sh's normalize_products_list (keep in parity).
@@ -246,10 +246,10 @@ function ConvertTo-CanonicalProducts([string]$Products) {
   if ([string]::IsNullOrEmpty($Products)) { return $Products }
   $normalized = foreach ($tok in ($Products.Split(',') | Where-Object { $_ -ne '' })) {
     switch ($tok) {
-      'hivedoctor' { 'doctor' }
-      'thehive' { 'hive' }
-      'the-hive' { 'hive' }
-      'hivenectar' { 'nectar' }
+      'doctor' { 'doctor' }
+      'hive' { 'hive' }
+      'hive' { 'hive' }
+      'nectar' { 'nectar' }
       default { $tok }
     }
   }
@@ -340,7 +340,7 @@ function Resolve-Selection([string[]]$InvocationArgs) {
 
   if ([string]::IsNullOrEmpty($selProducts)) { $selProducts = 'honeycomb,doctor' }
 
-  # Pre-rename tokens (hivedoctor/thehive/the-hive/hivenectar) normalize to the canonical slugs.
+  # Pre-rename tokens (doctor/hive/hive/nectar) normalize to the canonical slugs.
   $selProducts = ConvertTo-CanonicalProducts $selProducts
 
   # honeycomb is ALWAYS part of the effective set (see install.sh's header comment for why).
@@ -537,28 +537,28 @@ function Resolve-HoneycombBin {
 }
 
 # -----------------------------------------------------------------------------
-# Step 3b -- HiveDoctor bootstrap (PRD-064b). After the primary is installed, install the
-#            HiveDoctor watchdog (a second global) and register its per-user Scheduled Task,
+# Step 3b -- Doctor bootstrap (PRD-064b). After the primary is installed, install the
+#            Doctor watchdog (a second global) and register its per-user Scheduled Task,
 #            UNLESS the user opted out. The opt-out is `-NoDoctor` / a bare `--no-doctor` in
 #            $args (pre-rename aliases still accepted), or the env equivalent
 #            $env:HONEYCOMB_NO_DOCTOR=1 (the ONLY install-time switch, OD-5). Idempotent +
-#            FAIL-SOFT: a HiveDoctor hiccup never fails the Honeycomb install -- the user still
+#            FAIL-SOFT: a Doctor hiccup never fails the Honeycomb install -- the user still
 #            lands on a working dashboard.
 # -----------------------------------------------------------------------------
 
-# True when the user opted OUT of HiveDoctor (canonical --no-doctor / -NoDoctor /
+# True when the user opted OUT of Doctor (canonical --no-doctor / -NoDoctor /
 # HONEYCOMB_NO_DOCTOR, or the pre-rename alias spellings). Mirrors
-# doctor/src/service/install-guard.ts (shouldBootstrapHiveDoctor) -- keep in sync. Reads the
+# doctor/src/service/install-guard.ts (shouldBootstrapDoctor) -- keep in sync. Reads the
 # passed invocation args (the bare flag) + the env equivalent. Args are passed in explicitly
 # because inside `irm | iex` there is no script-level $args to read.
-function Test-HiveDoctorOptedOut([string[]]$InvocationArgs) {
-  $optOutFlags = @('--no-doctor', '-NoDoctor', '--no-hivedoctor', '-NoHiveDoctor')
+function Test-DoctorOptedOut([string[]]$InvocationArgs) {
+  $optOutFlags = @('--no-doctor', '-NoDoctor', '--no-doctor', '-NoDoctor')
   if ($InvocationArgs) {
     foreach ($flag in $optOutFlags) {
       if ($InvocationArgs -contains $flag) { return $true }
     }
   }
-  foreach ($envVal in @($env:HONEYCOMB_NO_DOCTOR, $env:HONEYCOMB_NO_HIVEDOCTOR)) {
+  foreach ($envVal in @($env:HONEYCOMB_NO_DOCTOR, $env:HONEYCOMB_NO_DOCTOR)) {
     if ($envVal) {
       $v = $envVal.Trim().ToLowerInvariant()
       if ($v -eq '1' -or $v -eq 'true') { return $true }
@@ -567,28 +567,28 @@ function Test-HiveDoctorOptedOut([string[]]$InvocationArgs) {
   return $false
 }
 
-# Resolve the absolute hivedoctor bin shim (npm i -g does not refresh THIS session's PATH).
-function Resolve-HiveDoctorBin {
-  $cmd = Get-Command 'hivedoctor' -ErrorAction SilentlyContinue
+# Resolve the absolute doctor bin shim (npm i -g does not refresh THIS session's PATH).
+function Resolve-DoctorBin {
+  $cmd = Get-Command 'doctor' -ErrorAction SilentlyContinue
   if ($cmd) { return $cmd.Source }
   $prefix = (npm prefix -g 2>$null)
   if ($prefix) {
-    $candidate = Join-Path $prefix 'hivedoctor.cmd'
+    $candidate = Join-Path $prefix 'doctor.cmd'
     if (Test-Path $candidate) { return $candidate }
   }
-  $appdataCmd = Join-Path $env:AppData 'npm\hivedoctor.cmd'
+  $appdataCmd = Join-Path $env:AppData 'npm\doctor.cmd'
   if (Test-Path $appdataCmd) { return $appdataCmd }
   return $null
 }
 
-# Install the HiveDoctor global (idempotent) + register its per-user Scheduled Task. Every failure
+# Install the Doctor global (idempotent) + register its per-user Scheduled Task. Every failure
 # is a soft note, never a hard return -- the primary install already succeeded.
-function Install-HiveDoctor {
-  if (Test-Have 'hivedoctor') {
-    Write-Ok "$HiveDoctorNpmPackage already installed."
+function Install-Doctor {
+  if (Test-Have 'doctor') {
+    Write-Ok "$DoctorNpmPackage already installed."
   } else {
-    $hdTarget = Resolve-CoreProductTarget 'doctor' $HiveDoctorNpmPackage
-    Write-Step "installing the HiveDoctor watchdog ($hdTarget)..."
+    $hdTarget = Resolve-CoreProductTarget 'doctor' $DoctorNpmPackage
+    Write-Step "installing the Doctor watchdog ($hdTarget)..."
     npm install -g $hdTarget 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) {
       Write-Host "note: could not install $hdTarget (continuing -- Honeycomb itself is installed)."
@@ -598,17 +598,17 @@ function Install-HiveDoctor {
     Write-Ok "installed $hdTarget."
   }
 
-  $hd = Resolve-HiveDoctorBin
+  $hd = Resolve-DoctorBin
   if ($hd) {
-    Write-Step 'registering the HiveDoctor service (per-user Scheduled Task, no admin)...'
+    Write-Step 'registering the Doctor service (per-user Scheduled Task, no admin)...'
     & $hd install-service 2>$null | Out-Null
     if ($LASTEXITCODE -eq 0) {
-      Write-Ok 'HiveDoctor is watching (it will restart the daemon on crash and survive reboots).'
+      Write-Ok 'Doctor is watching (it will restart the daemon on crash and survive reboots).'
     } else {
       # IRD-192 AC-7: a non-zero exit now means the service manager rejected the unit (e.g. the old
       # invalid PT5S restart interval). Do NOT claim the watchdog is watching; name the actionable
       # command so the user can see why. Non-fatal: Honeycomb itself is already installed.
-      Write-Host 'note: HiveDoctor installed but its service did not register (continuing). Run ''hivedoctor install-service'' to see why.'
+      Write-Host 'note: Doctor installed but its service did not register (continuing). Run ''doctor install-service'' to see why.'
     }
   }
 }
@@ -616,8 +616,8 @@ function Install-HiveDoctor {
 # -----------------------------------------------------------------------------
 # PRD-002b -- install + register hive / nectar when selected (the coverage-gap close).
 # Generic across both products, mirroring install.sh's Install-ExtraProduct 1:1. Both hive
-# (`thehive install-service`) and nectar (`hivenectar install`) ALREADY implement a
-# hivedoctor-registry writer internally -- this installer reuses THEIR verb (exactly one writer
+# (`hive install-service`) and nectar (`nectar install`) ALREADY implement a
+# doctor-registry writer internally -- this installer reuses THEIR verb (exactly one writer
 # per product, b-AC-3) rather than hand-rolling a second one here.
 # -----------------------------------------------------------------------------
 function Install-ExtraProduct {
@@ -679,7 +679,7 @@ function Install-ExtraProduct {
   }
 
   if ($prodBin) {
-    Write-Step "registering $DisplayName with hivedoctor..."
+    Write-Step "registering $DisplayName with doctor..."
     & $prodBin $PostInstallVerb 2>$null | Out-Null
     if ($LASTEXITCODE -eq 0) {
       Write-Ok "$DisplayName registered."
@@ -724,19 +724,19 @@ function Set-InstallState([string]$Products) {
   }
 }
 
-# Deregister one product's entry from hivedoctor's static registry by name (the "delete"
+# Deregister one product's entry from doctor's static registry by name (the "delete"
 # transition). Fail-soft: any read/parse/write hiccup is swallowed.
-function Remove-HivedoctorRegistryEntry([string]$Name) {
-  if (-not (Test-Path $HoneycombHivedoctorRegistryFile)) { return }
+function Remove-DoctorRegistryEntry([string]$Name) {
+  if (-not (Test-Path $HoneycombDoctorRegistryFile)) { return }
   try {
-    $doc = Get-Content $HoneycombHivedoctorRegistryFile -Raw | ConvertFrom-Json
+    $doc = Get-Content $HoneycombDoctorRegistryFile -Raw | ConvertFrom-Json
     if (-not $doc.daemons) { return }
     $kept = @($doc.daemons | Where-Object { $_.name -ne $Name })
     if ($kept.Count -eq $doc.daemons.Count) { return }
     $doc.daemons = $kept
-    $tmp = "$HoneycombHivedoctorRegistryFile.tmp-$PID-$(Get-Date -UFormat %s)"
+    $tmp = "$HoneycombDoctorRegistryFile.tmp-$PID-$(Get-Date -UFormat %s)"
     ($doc | ConvertTo-Json -Depth 10) | Set-Content -Path $tmp
-    Move-Item -Force -Path $tmp -Destination $HoneycombHivedoctorRegistryFile
+    Move-Item -Force -Path $tmp -Destination $HoneycombDoctorRegistryFile
   } catch {
     # Fail-soft: a registry cleanup step must never fail the run that triggered it.
   }
@@ -754,15 +754,15 @@ function Resolve-RemovedProducts([string]$CurrentProducts, [string]$SelProfile, 
     # EVERY dropped product, whether or not it has a deregistration branch below.
     Send-PhoneHome 'product_removed' $CurrentProducts $SelProfile $InstallId $Repeat $DryRun $p
     if ($p -eq 'hive' -or $p -eq 'nectar') {
-      # The registry entry name is the product's own daemon name (hive registers as "thehive",
-      # nectar as "hivenectar"; those runtime names deliberately did not change with the slug
+      # The registry entry name is the product's own daemon name (hive registers as "hive",
+      # nectar as "nectar"; those runtime names deliberately did not change with the slug
       # rename), so map slug -> registry name here. Mirrors install.sh (keep in parity).
-      $registryName = if ($p -eq 'hive') { 'thehive' } else { 'hivenectar' }
+      $registryName = if ($p -eq 'hive') { 'hive' } else { 'nectar' }
       if ($DryRun) {
-        Write-Host "[dry-run] would deregister $p from hivedoctor (no longer in --products=)."
+        Write-Host "[dry-run] would deregister $p from doctor (no longer in --products=)."
       } else {
-        Write-Step "deregistering $p from hivedoctor (no longer in --products=)..."
-        Remove-HivedoctorRegistryEntry $registryName
+        Write-Step "deregistering $p from doctor (no longer in --products=)..."
+        Remove-DoctorRegistryEntry $registryName
       }
     }
   }
@@ -868,34 +868,34 @@ function Invoke-Main([string[]]$InvocationArgs) {
     }
   }
 
-  # HiveDoctor bootstrap (PRD-064b), now ALSO gated on doctor being in the resolved selection.
+  # Doctor bootstrap (PRD-064b), now ALSO gated on doctor being in the resolved selection.
   if ($productList -contains 'doctor') {
-    if (Test-HiveDoctorOptedOut $InvocationArgs) {
-      Write-Step 'skipping HiveDoctor (--no-doctor).'
+    if (Test-DoctorOptedOut $InvocationArgs) {
+      Write-Step 'skipping Doctor (--no-doctor).'
       # Opted out: doctor stays selected but does not land, so it earns no transition event.
       Add-ProductNotInstalled 'doctor'
     } elseif ($dryRun) {
-      Write-Host "[dry-run] would install + register HiveDoctor ($(Resolve-CoreProductTarget 'doctor' $HiveDoctorNpmPackage))."
+      Write-Host "[dry-run] would install + register Doctor ($(Resolve-CoreProductTarget 'doctor' $DoctorNpmPackage))."
     } else {
-      Install-HiveDoctor
+      Install-Doctor
     }
   } else {
-    Write-Step 'skipping HiveDoctor (not in --products=).'
+    Write-Step 'skipping Doctor (not in --products=).'
   }
 
   # PRD-002b: actually install hive / nectar when selected (the coverage-gap close). The bin
-  # names (`thehive` / `hivenectar`) are the products' own CLI bins and deliberately did not
+  # names (`hive` / `nectar`) are the products' own CLI bins and deliberately did not
   # change with the slug rename. Mirrors install.sh's EXTRA_PRODUCT_FAILED: a failed SELECTED
   # product must not be recorded as installed (Set-InstallState below) nor reported as
   # install_completed (the final exit path).
   $extraProductFailed = $false
   if ($productList -contains 'hive') {
-    if (-not (Install-ExtraProduct 'The Hive' 'hive' '@legioncodeinc/hive' 'thehive' 'install-service' $dryRun)) {
+    if (-not (Install-ExtraProduct 'Hive' 'hive' '@legioncodeinc/hive' 'hive' 'install-service' $dryRun)) {
       $extraProductFailed = $true
     }
   }
   if ($productList -contains 'nectar') {
-    if (-not (Install-ExtraProduct 'Nectar' 'nectar' '@legioncodeinc/nectar' 'hivenectar' 'install' $dryRun)) {
+    if (-not (Install-ExtraProduct 'Nectar' 'nectar' '@legioncodeinc/nectar' 'nectar' 'install' $dryRun)) {
       $extraProductFailed = $true
     }
   }
@@ -920,7 +920,7 @@ function Invoke-Main([string[]]$InvocationArgs) {
   $forwardArgs = @()
   if ($InvocationArgs) {
     foreach ($a in $InvocationArgs) {
-      if ($a -eq '--no-doctor' -or $a -eq '-NoDoctor' -or $a -eq '--no-hivedoctor' -or $a -eq '-NoHiveDoctor' -or $a -eq '--dry-run') { continue }
+      if ($a -eq '--no-doctor' -or $a -eq '-NoDoctor' -or $a -eq '--no-doctor' -or $a -eq '-NoDoctor' -or $a -eq '--dry-run') { continue }
       if ($a -like '--products=*' -or $a -like '--profile=*' -or $a -like '--license=*' -or $a -like '--code=*') { continue }
       $forwardArgs += $a
     }

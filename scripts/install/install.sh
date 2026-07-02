@@ -30,7 +30,7 @@
 #   --products=<slug,slug,...>   e.g. --products=honeycomb,hive,nectar
 #                                 Slugs match hive-release.json's product keys exactly:
 #                                 honeycomb | doctor | hive | nectar. The pre-rename tokens
-#                                 (hivedoctor / thehive / the-hive / hivenectar) are accepted
+#                                 (doctor / hive / hive / nectar) are accepted
 #                                 as aliases and normalized, so older invocations keep working.
 #   --profile=<name>              A named preset that expands to a --products= list when
 #                                 --products= itself was not given. Built-in profiles:
@@ -51,12 +51,12 @@
 #                                 mutation (no npm install, no Node bootstrap, no registry write,
 #                                 no state write, no real telemetry POST). Added by PRD-002 to make
 #                                 this script's resolution logic verifiable without a real install.
-#   --no-doctor                   Opt out of the HiveDoctor watchdog (PRD-064b). The pre-rename
-#                                 spelling `--no-hivedoctor` stays accepted as an alias.
+#   --no-doctor                   Opt out of the Doctor watchdog (PRD-064b). The pre-rename
+#                                 spelling `--no-doctor` stays accepted as an alias.
 #
 # Environment variable equivalents (read when the matching flag is absent):
 #   HONEYCOMB_INSTALL_PRODUCTS, HONEYCOMB_INSTALL_PROFILE, HONEYCOMB_INSTALL_LICENSE,
-#   HONEYCOMB_INSTALL_CODE, HONEYCOMB_NO_DOCTOR (pre-rename alias: HONEYCOMB_NO_HIVEDOCTOR).
+#   HONEYCOMB_INSTALL_CODE, HONEYCOMB_NO_DOCTOR (pre-rename alias: HONEYCOMB_NO_DOCTOR).
 #
 # Config file (read when neither the flag nor the env var is set):
 #   ~/.honeycomb/install.conf; one `KEY=value` pair per line (no spaces around `=`), `#` comments
@@ -103,11 +103,11 @@ HONEYCOMB_NODE_VERSION="22"
 # reachable, falling back to `@latest` only when the manifest itself cannot be resolved.
 HONEYCOMB_NPM_PACKAGE="@legioncodeinc/honeycomb"
 
-# HiveDoctor (PRD-064b): a SECOND global package, the self-healing watchdog that keeps the
+# Doctor (PRD-064b): a SECOND global package, the self-healing watchdog that keeps the
 # primary daemon alive and registers itself with the OS so it survives crashes + reboots. Its
 # lifecycle is deliberately INDEPENDENT of the Honeycomb tarball (OD-6: a second global), so it
 # is installed here as its own `npm i -g` after the primary, then registers its OS service.
-HIVEDOCTOR_NPM_PACKAGE="@legioncodeinc/doctor"
+DOCTOR_NPM_PACKAGE="@legioncodeinc/doctor"
 
 # Distribution base URL: the vanity domain that serves this installer surface (PRD-050a follow-up,
 # now RESOLVED). get.theapiary.sh is a Cloudflare Pages site (site/install/) that content-negotiates:
@@ -137,10 +137,10 @@ HONEYCOMB_INSTALL_ID_FILE="${HOME}/.honeycomb/install-id"
 
 # ── PRD-002a: admin config file + PRD-002b: this installer's own bookkeeping of the last-selected
 # product set (used ONLY to detect a --products= narrowing between runs, so a removed product's
-# hivedoctor registry entry can be cleaned up; see reconcile_removed_products). ──
+# doctor registry entry can be cleaned up; see reconcile_removed_products). ──
 HONEYCOMB_INSTALL_CONFIG_FILE="${HOME}/.honeycomb/install.conf"
 HONEYCOMB_INSTALL_STATE_FILE="${HOME}/.honeycomb/install-state.json"
-HONEYCOMB_HIVEDOCTOR_REGISTRY_FILE="${HOME}/.honeycomb/hivedoctor.daemons.json"
+HONEYCOMB_DOCTOR_REGISTRY_FILE="${HOME}/.honeycomb/doctor.daemons.json"
 
 # ── Globals populated during argv parsing / selection resolution. Declared up-front (all `set -u`
 # safe) so every later `${VAR:-...}` reference is well-defined regardless of code path taken. ──
@@ -158,7 +158,7 @@ INSTALL_ID=""
 IS_REPEAT_INSTALL="false"
 EXTRA_PRODUCT_FAILED=0
 # Comma list of SELECTED products that did NOT actually land this run (unpublished skip, npm
-# install failure, registration failure, or the hivedoctor opt-out). Consumed by
+# install failure, registration failure, or the doctor opt-out). Consumed by
 # phone_home_product_transitions so product_installed/product_updated never over-claims.
 PRODUCTS_NOT_INSTALLED=""
 
@@ -295,14 +295,14 @@ resolve_profile_products() {
 }
 
 # Normalize a single product token to its canonical slug. The July 2026 repository renames
-# (hivedoctor -> doctor, the-hive -> hive, hivenectar -> nectar) renamed the slugs with the repos;
+# (doctor -> doctor, hive -> hive, nectar -> nectar) renamed the slugs with the repos;
 # the pre-rename tokens stay accepted as aliases so every documented invocation, config file, and
 # previously-written install-state.json keeps working across the rename.
 normalize_product_token() {
 	case "$1" in
-		hivedoctor) printf '%s' "doctor" ;;
-		thehive|the-hive) printf '%s' "hive" ;;
-		hivenectar) printf '%s' "nectar" ;;
+		doctor) printf '%s' "doctor" ;;
+		hive|hive) printf '%s' "hive" ;;
+		nectar) printf '%s' "nectar" ;;
 		*) printf '%s' "$1" ;;
 	esac
 }
@@ -339,7 +339,7 @@ read_config_value() {
 
 # Scan argv for the installer-only flags this script consumes itself (a-AC-1/a-AC-5). Does NOT
 # mutate or shift the caller's positional params (function-local $@); `--no-doctor` (and its
-# pre-rename alias) is deliberately left alone here; `hivedoctor_opted_out` re-scans the
+# pre-rename alias) is deliberately left alone here; `doctor_opted_out` re-scans the
 # ORIGINAL "$@" directly, as it already did before PRD-002.
 parse_args() {
 	for a in "$@"; do
@@ -364,7 +364,7 @@ Usage: install.sh [--products=<slug,slug,...>] [--profile=<name>] [--license=<ke
   --license=<key>                           thread a license key through (seam only, PRD-002a)
   --code=HONEY-FULL                         resolve a product code to a products+profile preset
   --dry-run                                 resolve + print, mutate nothing
-  --no-doctor                               skip the HiveDoctor watchdog (alias: --no-hivedoctor)
+  --no-doctor                               skip the Doctor watchdog (alias: --no-doctor)
 
 Env equivalents: HONEYCOMB_INSTALL_PRODUCTS / _PROFILE / _LICENSE / _CODE, HONEYCOMB_NO_DOCTOR.
 Config file: ~/.honeycomb/install.conf (KEY=value per line: PRODUCTS, PROFILE, LICENSE, CODE).
@@ -410,7 +410,7 @@ resolve_selection() {
 	# installer with no flags at all.
 	[ -z "$SEL_PRODUCTS" ] && SEL_PRODUCTS="honeycomb,doctor"
 
-	# Pre-rename tokens (hivedoctor/thehive/the-hive/hivenectar) normalize to the canonical slugs.
+	# Pre-rename tokens (doctor/hive/hive/nectar) normalize to the canonical slugs.
 	SEL_PRODUCTS="$(normalize_products_list "$SEL_PRODUCTS")"
 
 	# honeycomb is ALWAYS part of the effective set; see the header comment for why.
@@ -656,41 +656,41 @@ resolve_honeycomb_bin() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 3b: HiveDoctor bootstrap (PRD-064b). After the primary is installed, install the
-#           HiveDoctor watchdog (a second global) and register its OS service, UNLESS the
+# Step 3b: Doctor bootstrap (PRD-064b). After the primary is installed, install the
+#           Doctor watchdog (a second global) and register its OS service, UNLESS the
 #           user opted out with `--no-doctor` (the ONLY install-time switch, OD-5; pre-rename
-#           alias `--no-hivedoctor` still accepted) or the env equivalent HONEYCOMB_NO_DOCTOR=1
-#           (alias HONEYCOMB_NO_HIVEDOCTOR=1). Idempotent: an existing hivedoctor bin
-#           is not reinstalled, and `hivedoctor install-service` converges (it overwrites its
-#           unit). FAIL-SOFT: a HiveDoctor hiccup never fails the Honeycomb install, the user
+#           alias `--no-doctor` still accepted) or the env equivalent HONEYCOMB_NO_DOCTOR=1
+#           (alias HONEYCOMB_NO_DOCTOR=1). Idempotent: an existing doctor bin
+#           is not reinstalled, and `doctor install-service` converges (it overwrites its
+#           unit). FAIL-SOFT: a Doctor hiccup never fails the Honeycomb install, the user
 #           still lands on a working dashboard (parent AC-10 spirit: opt-out is honest, and a
 #           watchdog failure is not a primary-install failure).
 # ─────────────────────────────────────────────────────────────────────────────
 
-# True (returns 0) when the user opted OUT of HiveDoctor via the flag or the env equivalent
+# True (returns 0) when the user opted OUT of Doctor via the flag or the env equivalent
 # (canonical `--no-doctor` / HONEYCOMB_NO_DOCTOR, or the pre-rename alias spellings).
-# Mirrors doctor/src/service/install-guard.ts (shouldBootstrapHiveDoctor), keep in sync.
-hivedoctor_opted_out() {
+# Mirrors doctor/src/service/install-guard.ts (shouldBootstrapDoctor), keep in sync.
+doctor_opted_out() {
   case " $* " in
-    *" --no-doctor "*|*" --no-hivedoctor "*) return 0 ;;
+    *" --no-doctor "*|*" --no-doctor "*) return 0 ;;
   esac
   case "${HONEYCOMB_NO_DOCTOR:-}" in
     1|true|TRUE|True) return 0 ;;
   esac
-  case "${HONEYCOMB_NO_HIVEDOCTOR:-}" in
+  case "${HONEYCOMB_NO_DOCTOR:-}" in
     1|true|TRUE|True) return 0 ;;
   esac
   return 1
 }
 
-# Install the HiveDoctor global (idempotent) + register its OS service. All output is friendly;
+# Install the Doctor global (idempotent) + register its OS service. All output is friendly;
 # every failure is a soft note, never a hard exit (the primary install already succeeded).
-install_hivedoctor() {
-  if have hivedoctor; then
-    ok "${HIVEDOCTOR_NPM_PACKAGE} already installed."
+install_doctor() {
+  if have doctor; then
+    ok "${DOCTOR_NPM_PACKAGE} already installed."
   else
-    hd_target="$(resolve_core_product_target "doctor" "$HIVEDOCTOR_NPM_PACKAGE")"
-    step "installing the HiveDoctor watchdog (${hd_target})…"
+    hd_target="$(resolve_core_product_target "doctor" "$DOCTOR_NPM_PACKAGE")"
+    step "installing the Doctor watchdog (${hd_target})…"
     if ! npm install -g "$hd_target" >/dev/null 2>&1; then
       printf 'note: could not install %s (continuing, Honeycomb itself is installed).\n' "$hd_target"
       mark_product_not_installed doctor
@@ -699,27 +699,27 @@ install_hivedoctor() {
     ok "installed ${hd_target}."
   fi
 
-  # Resolve + run `hivedoctor install-service` to register the OS service (userland scope by
+  # Resolve + run `doctor install-service` to register the OS service (userland scope by
   # default; survives crash + reboot). `npm i -g` does not refresh THIS shell's PATH, so resolve
   # the absolute bin the same way we do for honeycomb.
   hd_bin=""
-  if have hivedoctor; then
-    hd_bin="$(command -v hivedoctor)"
+  if have doctor; then
+    hd_bin="$(command -v doctor)"
   else
     hd_prefix="$(npm prefix -g 2>/dev/null)"
-    if [ -n "$hd_prefix" ] && [ -x "${hd_prefix}/bin/hivedoctor" ]; then
-      hd_bin="${hd_prefix}/bin/hivedoctor"
+    if [ -n "$hd_prefix" ] && [ -x "${hd_prefix}/bin/doctor" ]; then
+      hd_bin="${hd_prefix}/bin/doctor"
     fi
   fi
   if [ -n "$hd_bin" ]; then
-    step "registering the HiveDoctor OS service…"
+    step "registering the Doctor OS service…"
     if "$hd_bin" install-service >/dev/null 2>&1; then
-      ok "HiveDoctor is watching (it will restart the daemon on crash and survive reboots)."
+      ok "Doctor is watching (it will restart the daemon on crash and survive reboots)."
     else
       # IRD-192 AC-7: a non-zero exit now means the service manager rejected the unit. Do NOT claim
       # the watchdog is watching; name the actionable command so the user can see why. Non-fatal:
       # Honeycomb itself is already installed (parent AC-10 spirit).
-      printf "note: HiveDoctor installed but its service did not register (continuing). Run 'hivedoctor install-service' to see why.\n"
+      printf "note: Doctor installed but its service did not register (continuing). Run 'doctor install-service' to see why.\n"
     fi
   fi
   return 0
@@ -731,9 +731,9 @@ install_hivedoctor() {
 #
 # Generic across both products (small, deliberate duplication vs. one dense function): resolve the
 # manifest-pinned target, npm-install it globally (idempotent, fail-soft), then run the product's
-# OWN post-install verb. Both hive (`thehive install-service`) and nectar (`hivenectar
-# install`) ALREADY implement a hivedoctor-registry writer internally (`hive/src/install/
-# registry.ts` / `nectar/src/hivedoctor-registry.ts`); this installer reuses THEIR verb rather
+# OWN post-install verb. Both hive (`hive install-service`) and nectar (`nectar
+# install`) ALREADY implement a doctor-registry writer internally (`hive/src/install/
+# registry.ts` / `nectar/src/doctor-registry.ts`); this installer reuses THEIR verb rather
 # than hand-rolling a second registry writer, so there is exactly one writer per product (b-AC-3).
 install_extra_product() {
 	display_name="$1"; slug="$2"; fallback_pkg="$3"; bin_name="$4"; post_install_verb="$5"
@@ -787,7 +787,7 @@ install_extra_product() {
 	fi
 
 	if [ -n "$prod_bin" ]; then
-		step "registering ${display_name} with hivedoctor…"
+		step "registering ${display_name} with doctor…"
 		if "$prod_bin" $post_install_verb >/dev/null 2>&1; then
 			ok "${display_name} registered."
 		else
@@ -805,9 +805,9 @@ install_extra_product() {
 # PRD-002b; registration create/update/DELETE across lifecycle transitions
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 # CREATE/UPDATE are handled above (install_extra_product's post-install verb, plus honeycomb's own
-# `writeHivedoctorRegistryEntry` inside `honeycomb install`). DELETE is the remaining transition:
+# `writeDoctorRegistryEntry` inside `honeycomb install`). DELETE is the remaining transition:
 # when a re-run's --products= NARROWS the set (a product previously installed is no longer
-# selected), that product's hivedoctor registry entry is removed so the registry stays an honest
+# selected), that product's doctor registry entry is removed so the registry stays an honest
 # picture of the fleet (parent AC-6). This is the ONLY delete path this installer implements today
 #; see the header note in reconcile_removed_products for the honest scope of what is NOT covered.
 
@@ -828,7 +828,7 @@ read_previous_products() {
 }
 
 # Persist this run's selection as "the last thing this installer selected" (installer-owned
-# bookkeeping; NOT the hivedoctor registry contract itself, just this script's own diff baseline).
+# bookkeeping; NOT the doctor registry contract itself, just this script's own diff baseline).
 write_install_state() {
 	have node || return 0
 	node -e '
@@ -841,14 +841,14 @@ write_install_state() {
 	' "$HONEYCOMB_INSTALL_STATE_FILE" "$SEL_PRODUCTS" 2>/dev/null || true
 }
 
-# Deregister one product's entry from hivedoctor's static registry by name (the "delete"
+# Deregister one product's entry from doctor's static registry by name (the "delete"
 # transition). Mirrors the SAME idempotent replace-by-name shape the TS writers use
-# (`registerHoneycombWithHivedoctor` / `registerThehiveWithHivedoctor`), just filtering the entry
+# (`registerHoneycombWithDoctor` / `registerHiveWithDoctor`), just filtering the entry
 # OUT instead of upserting it. Fail-soft: any read/parse/write hiccup is swallowed; a registry
 # cleanup step must never fail the run that triggered it.
-deregister_from_hivedoctor() {
+deregister_from_doctor() {
 	name="$1"
-	[ -f "$HONEYCOMB_HIVEDOCTOR_REGISTRY_FILE" ] || return 0
+	[ -f "$HONEYCOMB_DOCTOR_REGISTRY_FILE" ] || return 0
 	have node || return 0
 	node -e '
 		const fs = require("node:fs");
@@ -862,15 +862,15 @@ deregister_from_hivedoctor() {
 		const tmp = file + ".tmp-" + process.pid + "-" + Date.now();
 		fs.writeFileSync(tmp, JSON.stringify(Object.assign({}, doc, { daemons: next }), null, 2) + "\n", "utf8");
 		fs.renameSync(tmp, file);
-	' "$HONEYCOMB_HIVEDOCTOR_REGISTRY_FILE" "$name" 2>/dev/null || true
+	' "$HONEYCOMB_DOCTOR_REGISTRY_FILE" "$name" 2>/dev/null || true
 }
 
 # NOTE ON SCOPE (documented honestly, see the ledger too): this does NOT run `npm uninstall -g` ,
 # removing a global package the user may still want for other reasons is a separate, more
 # destructive decision this installer does not make on the user's behalf. It ONLY keeps
-# hivedoctor's registry honest. Also: neither honeycomb, hive, nor nectar ships a full
+# doctor's registry honest. Also: neither honeycomb, hive, nor nectar ships a full
 # "product uninstall" verb today (checked: hive's `uninstall-service` / nectar's
-# `uninstall` only remove the OS service unit, they do NOT touch the hivedoctor registry); so a
+# `uninstall` only remove the OS service unit, they do NOT touch the doctor registry); so a
 # --products= narrowing between two runs of THIS installer is the only delete trigger implemented.
 # A real `honeycomb uninstall` (or per-product uninstall) command remains a documented gap.
 reconcile_removed_products() {
@@ -890,19 +890,19 @@ reconcile_removed_products() {
 				case "$p" in
 					hive|nectar)
 						# The registry entry name is the product's own daemon name (what its TS
-						# writer registered: hive/src/install/registry.ts THEHIVE_REGISTRY_NAME
-						# = "thehive", nectar/src/hivedoctor-registry.ts HIVENECTAR_DAEMON_NAME
-						# = "hivenectar"); those runtime names deliberately did not change with
+						# writer registered: hive/src/install/registry.ts HIVE_REGISTRY_NAME
+						# = "hive", nectar/src/doctor-registry.ts NECTAR_DAEMON_NAME
+						# = "nectar"); those runtime names deliberately did not change with
 						# the slug rename, so map slug -> registry name here.
 						case "$p" in
-							hive)   registry_name="thehive" ;;
-							nectar) registry_name="hivenectar" ;;
+							hive)   registry_name="hive" ;;
+							nectar) registry_name="nectar" ;;
 						esac
 						if [ "$DRY_RUN" -eq 1 ]; then
-							printf '[dry-run] would deregister %s from hivedoctor (no longer in --products=).\n' "$p"
+							printf '[dry-run] would deregister %s from doctor (no longer in --products=).\n' "$p"
 						else
-							step "deregistering ${p} from hivedoctor (no longer in --products=)…"
-							deregister_from_hivedoctor "$registry_name"
+							step "deregistering ${p} from doctor (no longer in --products=)…"
+							deregister_from_doctor "$registry_name"
 						fi
 						;;
 					*) : ;; # honeycomb/doctor: no self-deregistration through this path
@@ -1011,31 +1011,31 @@ main() {
     fi
   fi
 
-  # HiveDoctor bootstrap (PRD-064b), now ALSO gated on doctor being in the resolved selection
+  # Doctor bootstrap (PRD-064b), now ALSO gated on doctor being in the resolved selection
   # (b-AC-5: an unselected product is never installed), in addition to the pre-existing opt-out.
   case ",$SEL_PRODUCTS," in
     *,doctor,*)
-      if hivedoctor_opted_out "$@"; then
-        step "skipping HiveDoctor (--no-doctor)."
+      if doctor_opted_out "$@"; then
+        step "skipping Doctor (--no-doctor)."
         # Opted out: doctor stays selected but does not land, so it earns no transition event.
         mark_product_not_installed doctor
       elif [ "$DRY_RUN" -eq 1 ]; then
-        printf '[dry-run] would install + register HiveDoctor (%s).\n' "$(resolve_core_product_target "doctor" "$HIVEDOCTOR_NPM_PACKAGE")"
+        printf '[dry-run] would install + register Doctor (%s).\n' "$(resolve_core_product_target "doctor" "$DOCTOR_NPM_PACKAGE")"
       else
-        install_hivedoctor
+        install_doctor
       fi
       ;;
-    *) step "skipping HiveDoctor (not in --products=)." ;;
+    *) step "skipping Doctor (not in --products=)." ;;
   esac
 
   # PRD-002b: actually install hive / nectar when selected (the coverage-gap close). The bin
-  # names (`thehive` / `hivenectar`) are the products' own CLI bins and deliberately did not
+  # names (`hive` / `nectar`) are the products' own CLI bins and deliberately did not
   # change with the slug rename.
   case ",$SEL_PRODUCTS," in
-    *,hive,*) install_extra_product "The Hive" hive "@legioncodeinc/hive" thehive install-service ;;
+    *,hive,*) install_extra_product "Hive" hive "@legioncodeinc/hive" hive install-service ;;
   esac
   case ",$SEL_PRODUCTS," in
-    *,nectar,*) install_extra_product "Nectar" nectar "@legioncodeinc/nectar" hivenectar install ;;
+    *,nectar,*) install_extra_product "Nectar" nectar "@legioncodeinc/nectar" nectar install ;;
   esac
 
   # PRD-002b DELETE transition: a --products= narrowing vs. the last run (fires product_removed).
@@ -1065,7 +1065,7 @@ main() {
   _orig_count=$#
   for a in "$@"; do
     case "$a" in
-      --no-doctor|--no-hivedoctor|--products=*|--profile=*|--license=*|--code=*|--dry-run) continue ;;
+      --no-doctor|--no-doctor|--products=*|--profile=*|--license=*|--code=*|--dry-run) continue ;;
     esac
     set -- "$@" "$a"
   done

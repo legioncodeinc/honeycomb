@@ -1,11 +1,11 @@
 /**
  * The fleet telemetry SQLite store — PRD-071 (Contract B: `~/.honeycomb/telemetry/honeycomb.sqlite`).
  *
- * hivedoctor's static registry (`fleet-registry.ts`) points at this file; hivedoctor polls it
+ * doctor's static registry (`fleet-registry.ts`) points at this file; doctor polls it
  * READ-ONLY per `ADR-0001-hive-telemetry-transport-and-single-source-of-truth.md`. This module is
  * the ONE writer. It reuses the same built-in `node:sqlite` mechanism honeycomb's local job queue
  * already runs on (`services/local-job-queue.ts`) — no new dependency — and opens WAL mode (AC-9)
- * so hivedoctor's read-only open never contends with honeycomb's own writes.
+ * so doctor's read-only open never contends with honeycomb's own writes.
  *
  * ── Schema (pinned, AC-1..AC-10) ───────────────────────────────────────────────
  *   `service_status` / `service_metrics` — single-row (`id = 1`), latest-wins UPSERT, never
@@ -35,7 +35,7 @@ import { sqlIdent } from "../../storage/sql.js";
 export const FLEET_TELEMETRY_DIR_NAME = "telemetry" as const;
 /** The SQLite database filename (Contract B: `~/.honeycomb/telemetry/honeycomb.sqlite`). */
 export const FLEET_TELEMETRY_DB_FILE_NAME = "honeycomb.sqlite" as const;
-/** honeycomb's identity in the `service_status` row and the hivedoctor registry entry. */
+/** honeycomb's identity in the `service_status` row and the doctor registry entry. */
 export const FLEET_SERVICE_NAME = "honeycomb" as const;
 /** The `service_logs` row cap (AC-8): oldest rows beyond this are rotated out on write. */
 export const FLEET_LOG_MAX_ROWS = 5_000;
@@ -227,7 +227,7 @@ function loadSqlite(): SqliteModule {
 
 /** Create the three Contract-B tables + index if absent, and enable WAL mode (AC-9). */
 function migrate(db: SqliteDatabase): void {
-	// WAL mode: hivedoctor's read-only poll must never block on (or block) honeycomb's own writes.
+	// WAL mode: doctor's read-only poll must never block on (or block) honeycomb's own writes.
 	db.exec("PRAGMA journal_mode = WAL");
 	db.exec("PRAGMA busy_timeout = 2000");
 

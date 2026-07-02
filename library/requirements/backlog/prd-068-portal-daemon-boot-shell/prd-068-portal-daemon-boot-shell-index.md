@@ -1,8 +1,8 @@
 # PRD-068: Portal Daemon Boot Shell
 
-> **Status:** Superseded by [the-hive PRD-003 (portal gate and routing)](../../../../../the-hive/library/requirements/backlog/prd-003-portal-gate-and-routing/) and [the-hive PRD-004 (/buzzing)](../../../../../the-hive/library/requirements/backlog/prd-004-buzzing/).
+> **Status:** Superseded by [hive PRD-003 (portal gate and routing)](../../../../../hive/library/requirements/backlog/prd-003-portal-gate-and-routing/) and [hive PRD-004 (/buzzing)](../../../../../hive/library/requirements/backlog/prd-004-buzzing/).
 >
-> The portal is no longer a honeycomb-owned boot shell. Under the fleet realignment the-hive owns the human-facing portal: PRD-003 handles the landing gate and routing and PRD-004 handles the /buzzing boot experience. Honeycomb's role is now that of a supervised service (see [PRD-071](../prd-071-service-checkin-and-sqlite-telemetry/prd-071-service-checkin-and-sqlite-telemetry-index.md)).
+> The portal is no longer a honeycomb-owned boot shell. Under the fleet realignment hive owns the human-facing portal: PRD-003 handles the landing gate and routing and PRD-004 handles the /buzzing boot experience. Honeycomb's role is now that of a supervised service (see [PRD-071](../prd-071-service-checkin-and-sqlite-telemetry/prd-071-service-checkin-and-sqlite-telemetry-index.md)).
 
 > **Status:** Backlog
 > **Priority:** P1
@@ -23,7 +23,7 @@ This PRD defines the second step in the boot-experience sequence: a portal daemo
 
 - Give fresh installs and machine boots an immediately available browser surface, even when the primary daemon is still warming.
 - Keep the portal separate from the primary daemon so it can still render when `3850` is down.
-- Reuse HiveDoctor's existing loopback status-page foundation where possible, especially `hivedoctor/src/status-page/server.ts`.
+- Reuse Doctor's existing loopback status-page foundation where possible, especially `doctor/src/status-page/server.ts`.
 - Show a clear `booting` state for the first 60 seconds, then transition to `healthy`, `still starting`, `degraded`, or `needs attention` based on real health signals.
 - Open the portal first from install and boot flows, then deep-link or redirect to the primary dashboard only after primary readiness.
 - Keep the portal read-only for v1: no credential mutations, no repair buttons that execute side effects, no DeepLake reads.
@@ -44,8 +44,8 @@ This PRD defines the second step in the boot-experience sequence: a portal daemo
 |---|---|---|
 | Install opens primary dashboard | `src/commands/install.ts` calls `ensureDaemonRunning(...)`, then opens `http://honeycomb.local:3850/dashboard` or `http://127.0.0.1:3850/dashboard`. | The browser cannot show progress until the primary daemon is healthy enough to answer. |
 | Primary dashboard host | `src/daemon/runtime/dashboard/host.ts` serves the React shell and assets from the primary daemon in local mode. | The normal dashboard remains the destination after boot, but cannot be the first guaranteed surface. |
-| HiveDoctor status page | `hivedoctor/src/status-page/server.ts` already serves read-only HTML and `/status.json` on loopback port `3852`. | This is the best seed for the portal because it already lives outside the primary daemon and is designed to swallow bind errors. |
-| HiveDoctor composition | `hivedoctor/src/compose/index.ts` starts the status page before the supervisor loop. | The portal can be available before the first primary health decision. |
+| Doctor status page | `doctor/src/status-page/server.ts` already serves read-only HTML and `/status.json` on loopback port `3852`. | This is the best seed for the portal because it already lives outside the primary daemon and is designed to swallow bind errors. |
+| Doctor composition | `doctor/src/compose/index.ts` starts the status page before the supervisor loop. | The portal can be available before the first primary health decision. |
 | Dashboard data source | `src/dashboard/launch.ts` and `src/dashboard/contracts.ts` treat daemon reachability as an explicit connectivity state. | The portal can reuse the same mental model: reachable vs unreachable, not blank page or hang. |
 | Setup state | `src/daemon/runtime/dashboard/setup-state.ts` exposes `authenticated` and embeddings `warmup` once the primary is up. | The portal can consume this after primary readiness, but cannot depend on it during pre-bind boot. |
 | Diagnostics health | `src/daemon/runtime/diagnostics-health.ts` exposes protected subsystem health through the primary daemon. | The portal can show coarse unauthenticated health while primary is down, then richer details after the primary is reachable and local mode permits it. |
@@ -60,9 +60,9 @@ When the portal starts, it displays `booting` for 60 seconds by default:
 
 - The visual state is optimistic but honest: "Honeycomb is starting."
 - It shows the primary daemon status as `waiting for 127.0.0.1:3850`.
-- It shows HiveDoctor status as `watching`.
+- It shows Doctor status as `watching`.
 - It shows a countdown or elapsed boot timer.
-- It does not show a terminal failure during this window unless HiveDoctor has an existing unresolved escalation from a prior run.
+- It does not show a terminal failure during this window unless Doctor has an existing unresolved escalation from a prior run.
 
 ### After 60 seconds
 
@@ -72,7 +72,7 @@ After the grace window:
 - If primary `/health` is `degraded`, show degraded with subsystem details where available.
 - If primary is still unreachable but a primary daemon PID/lock is held, show `still starting`.
 - If primary is unreachable and no process/service is known to be running, show `needs attention`.
-- If HiveDoctor has an unresolved needs-attention record, surface it above all other copy.
+- If Doctor has an unresolved needs-attention record, surface it above all other copy.
 
 ### Transition
 
@@ -86,27 +86,27 @@ The portal must not hard-redirect before the primary is actually ready. Acceptab
 
 ## Architecture options
 
-### Recommended v1: portal served by HiveDoctor
+### Recommended v1: portal served by Doctor
 
-Use the existing HiveDoctor process as the portal daemon for v1:
+Use the existing Doctor process as the portal daemon for v1:
 
-- Extend `hivedoctor/src/status-page/server.ts` from minimal status page to portal shell.
+- Extend `doctor/src/status-page/server.ts` from minimal status page to portal shell.
 - Keep `DEFAULT_STATUS_PAGE_PORT = 3852`.
 - Add a richer `/portal/status.json` or extend `/status.json` with boot metadata.
 - Serve static inline CSS/JS or bundled static assets with no runtime dependencies.
-- Keep the process under HiveDoctor's existing OS service supervision.
+- Keep the process under Doctor's existing OS service supervision.
 
 This meets the user's "separate daemon" intent because it is separate from the primary daemon and can render when primary is down. It avoids a third OS service while preserving the can-not-crash property.
 
 ### Later option: dedicated `honeycomb-portal` process
 
-If HiveDoctor becomes too constrained, split the portal into a dedicated lightweight process:
+If Doctor becomes too constrained, split the portal into a dedicated lightweight process:
 
 - Separate package or binary.
-- OS-supervised like HiveDoctor.
+- OS-supervised like Doctor.
 - Still loopback only.
 - Still read-only.
-- Consumes HiveDoctor status and primary health over loopback.
+- Consumes Doctor status and primary health over loopback.
 
 This is explicitly not the v1 recommendation unless product or reliability pressure requires it.
 
@@ -116,12 +116,12 @@ This is explicitly not the v1 recommendation unless product or reliability press
 
 | ID | Criterion |
 |---|---|
-| AC-1 | Given HiveDoctor is installed and started, when the portal port is requested, then a browser-visible portal page responds before the primary daemon is required to answer `/health`. |
+| AC-1 | Given Doctor is installed and started, when the portal port is requested, then a browser-visible portal page responds before the primary daemon is required to answer `/health`. |
 | AC-2 | Given the primary daemon has not answered `/health` and the portal boot timer is under 60 seconds, when the portal renders, then it shows `booting` rather than `dead`, `failed`, or `needs attention`. |
 | AC-3 | Given the primary daemon becomes healthy during the first 60 seconds, when the portal polls status, then it transitions to ready and offers the regular dashboard URL. |
 | AC-4 | Given the primary daemon remains unreachable after 60 seconds and no PID/service signal says it is still starting, when the portal polls status, then it shows a clear action-oriented needs-attention state. |
-| AC-5 | Given HiveDoctor has an unresolved needs-attention record from a prior episode, when the portal opens during a new boot, then the prior escalation is shown without being overwritten by the booting state. |
-| AC-6 | Given port `3852` is occupied, when the portal attempts to bind, then HiveDoctor logs the bind failure and continues running; the primary daemon is not affected. |
+| AC-5 | Given Doctor has an unresolved needs-attention record from a prior episode, when the portal opens during a new boot, then the prior escalation is shown without being overwritten by the booting state. |
+| AC-6 | Given port `3852` is occupied, when the portal attempts to bind, then Doctor logs the bind failure and continues running; the primary daemon is not affected. |
 | AC-7 | Given `DO_NOT_TRACK=1` or telemetry opt-out is configured, when the portal renders and polls local status, then no extra telemetry egress is introduced. |
 | AC-8 | Given the user is on a headless machine, when install cannot open a browser, then the CLI prints the portal URL, not only the primary dashboard URL. |
 | AC-9 | Given the primary daemon is healthy, when the user opens the portal, then the portal links to `http://127.0.0.1:3850/dashboard` and does not proxy or duplicate the full dashboard. |
@@ -133,16 +133,16 @@ This is explicitly not the v1 recommendation unless product or reliability press
 
 Recommended implementation path:
 
-1. Extend HiveDoctor's status page into a small portal host.
+1. Extend Doctor's status page into a small portal host.
 2. Add boot timer metadata to the status provider:
    - `portalStartedAt`
    - `startupGraceMs`
    - `primaryHealth`
-   - `hivedoctorHealth`
+   - `doctorHealth`
    - `needsAttention`
    - `regularDashboardUrl`
 3. Add a read-only primary health probe from the portal status provider with a very short timeout, separate from the supervisor remediation loop.
-4. Change `honeycomb install` so it starts/ensures HiveDoctor/portal before waiting for the primary daemon, then opens `http://127.0.0.1:3852/`.
+4. Change `honeycomb install` so it starts/ensures Doctor/portal before waiting for the primary daemon, then opens `http://127.0.0.1:3852/`.
 5. Keep the existing primary health-gate for command success semantics, but do not block the first browser open on it.
 6. Keep the regular dashboard unchanged; the portal only routes to it after readiness.
 
@@ -159,12 +159,12 @@ Do not:
 
 | File | Expected change |
 |---|---|
-| `hivedoctor/src/status-page/server.ts` | Evolve the minimal status page into a portal shell with boot state and richer JSON. |
-| `hivedoctor/src/compose/index.ts` | Provide portal boot timing, primary probe, and needs-attention state. |
-| `hivedoctor/tests/status-page/server.test.ts` | Cover booting, ready, degraded, needs-attention, bind failure. |
-| `hivedoctor/tests/compose/create-hivedoctor.test.ts` | Cover portal status provider wiring. |
+| `doctor/src/status-page/server.ts` | Evolve the minimal status page into a portal shell with boot state and richer JSON. |
+| `doctor/src/compose/index.ts` | Provide portal boot timing, primary probe, and needs-attention state. |
+| `doctor/tests/status-page/server.test.ts` | Cover booting, ready, degraded, needs-attention, bind failure. |
+| `doctor/tests/compose/create-doctor.test.ts` | Cover portal status provider wiring. |
 | `src/commands/install.ts` | Open the portal URL early and continue to report primary dashboard fallback. |
-| `scripts/install/install.sh` and `scripts/install/install.ps1` | Ensure HiveDoctor/portal bootstrap happens before CLI handoff where needed. |
+| `scripts/install/install.sh` and `scripts/install/install.ps1` | Ensure Doctor/portal bootstrap happens before CLI handoff where needed. |
 
 ---
 
@@ -184,18 +184,18 @@ Do not:
 
 - [ ] Should the portal keep using port `3852`, or should we reserve a more user-facing port name/constant before shipping the feature?
 - [ ] Should install open the portal immediately and leave it open, or open the portal immediately and then soft-redirect once primary dashboard is ready?
-- [ ] Should the portal be branded as "Honeycomb Portal", "Honeycomb Health", or "HiveDoctor"? Recommendation: "Honeycomb" first, HiveDoctor as the reliability layer.
-- [ ] Should a future dedicated portal process be a separate package, or remain a mode/route of `@legioncodeinc/hivedoctor`?
+- [ ] Should the portal be branded as "Honeycomb Portal", "Honeycomb Health", or "HiveDoctor"? Recommendation: "Honeycomb" first, Doctor as the reliability layer.
+- [ ] Should a future dedicated portal process be a separate package, or remain a mode/route of `@legioncodeinc/doctor`?
 
 ---
 
 ## Related
 
-- [PRD-067: HiveDoctor Boot Grace Release Blocker](../prd-067-hivedoctor-boot-grace-release-blocker/prd-067-hivedoctor-boot-grace-release-blocker-index.md)
+- [PRD-067: Doctor Boot Grace Release Blocker](../prd-067-doctor-boot-grace-release-blocker/prd-067-doctor-boot-grace-release-blocker-index.md)
 - [PRD-069: Application Health Dashboard](../prd-069-application-health-dashboard/prd-069-application-health-dashboard-index.md)
 - [PRD-070: First Browser Load Experience](../prd-070-first-browser-load-experience/prd-070-first-browser-load-experience-index.md)
-- `hivedoctor/src/status-page/server.ts`
-- `hivedoctor/src/compose/index.ts`
+- `doctor/src/status-page/server.ts`
+- `doctor/src/compose/index.ts`
 - `src/commands/install.ts`
 - `src/daemon/runtime/dashboard/host.ts`
 - `src/dashboard/launch.ts`

@@ -1,8 +1,8 @@
 # PRD-054: Fleet Observation, Control Plane and Read-Only Dashboard (v1)
 
-> **Status:** Partially superseded. The READ-ONLY DASHBOARD portion only is superseded by [the-hive PRD-005 (health rail and health page)](../../../../../the-hive/library/requirements/backlog/prd-005-health-rail-and-health-page/) and [hivedoctor PRD-002 (service registry and poll)](../../../../../hivedoctor/library/requirements/backlog/prd-002-service-registry-and-poll/).
+> **Status:** Partially superseded. The READ-ONLY DASHBOARD portion only is superseded by [hive PRD-005 (health rail and health page)](../../../../../hive/library/requirements/backlog/prd-005-health-rail-and-health-page/) and [doctor PRD-002 (service registry and poll)](../../../../../doctor/library/requirements/backlog/prd-002-service-registry-and-poll/).
 >
-> Only the read-only-dashboard portion (sub-PRD 054c) is superseded: fleet observation is now rendered by the-hive from hivedoctor's single source of truth. The control-plane and enrollment portions of this PRD (and of PRD-055) remain in scope. Honeycomb's own telemetry emission as a supervised service is defined in [PRD-071](../prd-071-service-checkin-and-sqlite-telemetry/prd-071-service-checkin-and-sqlite-telemetry-index.md).
+> Only the read-only-dashboard portion (sub-PRD 054c) is superseded: fleet observation is now rendered by hive from doctor's single source of truth. The control-plane and enrollment portions of this PRD (and of PRD-055) remain in scope. Honeycomb's own telemetry emission as a supervised service is defined in [PRD-071](../prd-071-service-checkin-and-sqlite-telemetry/prd-071-service-checkin-and-sqlite-telemetry-index.md).
 
 > **Status:** Backlog
 > **Priority:** P2

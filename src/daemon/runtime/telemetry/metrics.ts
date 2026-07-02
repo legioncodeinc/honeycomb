@@ -3,7 +3,7 @@
  *
  * Writes a latest-wins `service_metrics` snapshot (actions taken, files processed, memories
  * created, all SINCE THE CURRENT PROCESS STARTED) to the fleet telemetry SQLite (Contract B), on a
- * short interval, so hivedoctor observes live counters without honeycomb pushing anything.
+ * short interval, so doctor observes live counters without honeycomb pushing anything.
  *
  * ── Reuse, never recompute (AC-071b.2.1) ────────────────────────────────────────
  *   - `memoriesCreated` <- the DELTA of `fetchKpiCounts(...).memoryCount` (the dashboard's existing
@@ -57,7 +57,7 @@ export interface MetricsClock {
 }
 export const systemMetricsClock: MetricsClock = { now: () => new Date() };
 
-/** The snapshot cadence. Short enough to look "live" under hivedoctor's roughly-1s poll. */
+/** The snapshot cadence. Short enough to look "live" under doctor's roughly-1s poll. */
 export const DEFAULT_METRICS_FLUSH_INTERVAL_MS = 10_000;
 
 export interface MetricsDeps {

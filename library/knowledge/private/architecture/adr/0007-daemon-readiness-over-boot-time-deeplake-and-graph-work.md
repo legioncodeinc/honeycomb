@@ -15,7 +15,7 @@ to other boot-time work.
 
 This matters for both user experience and cost:
 
-- Hivedoctor and the CLI need the daemon to bind and answer `/health` quickly enough to distinguish
+- Doctor and the CLI need the daemon to bind and answer `/health` quickly enough to distinguish
   "booting" from "dead".
 - Optional codebase graph work should not be allowed to crash or block the core daemon listener.
 - DeepLake health probes and queue warmup can involve remote I/O. They should not own local process
@@ -31,7 +31,7 @@ optional graph parsing or remote storage work.
 
 ## Decision drivers
 
-- **The daemon must bind quickly enough for Hivedoctor and the CLI to observe it.**
+- **The daemon must bind quickly enough for Doctor and the CLI to observe it.**
 - **Core daemon readiness must not depend on optional codebase graph generation.**
 - **Core daemon readiness must not depend on first DeepLake health or queue warmup round trips.**
 - **A user-issued macOS stop must stop the launchd service, not trigger an immediate respawn.**
@@ -117,14 +117,14 @@ This ADR does not redesign:
 - the long-term hosted control plane;
 - multi-device memory synchronization;
 - graph feature semantics after explicit user or API invocation;
-- the full Hivedoctor portal/dashboard roadmap.
+- the full Doctor portal/dashboard roadmap.
 
 ## Consequences
 
 **Positive**
 
 - The daemon can bind and answer `/health` without waiting for optional graph or remote storage work.
-- Hivedoctor can observe a live daemon instead of treating a slow or blocked boot as a dead service.
+- Doctor can observe a live daemon instead of treating a slow or blocked boot as a dead service.
 - A parser/WASM failure in automatic graph construction no longer prevents core daemon startup by
   default.
 - macOS `daemon stop` actually stops the launchd-managed service instead of letting `KeepAlive`
@@ -146,7 +146,7 @@ This ADR does not redesign:
 
 - Manual graph APIs remain wired.
 - Storage schemas and DeepLake memory/vector behavior are unchanged.
-- Hivedoctor should treat the first 60 seconds as booting/settling time per the companion health
+- Doctor should treat the first 60 seconds as booting/settling time per the companion health
   PRD work, but that timeout is a diagnostic grace period, not a reason for the daemon to delay
   binding.
 
@@ -166,7 +166,7 @@ Re-open this decision if any of these become true:
 1. The graph path is proven safe across supported platforms and can run out-of-process or behind a
    crash boundary that cannot kill the daemon.
 2. Users report that opt-in graph auto-build creates unacceptable discoverability or freshness gaps.
-3. Hivedoctor gains a separate always-on portal process that can supervise daemon boot without
+3. Doctor gains a separate always-on portal process that can supervise daemon boot without
    depending on the main daemon listener.
 4. DeepLake or the hosted control plane provides a cheap, non-blocking health/readiness primitive
    that does not keep remote compute warm.

@@ -22,7 +22,7 @@ The governing constraint is **progressive disclosure**. The internal version of 
 
 Two principles:
 
-> **Principle 1 (non-destructive, visibly):** every write is opt-in per artifact, namespaced under `library/` or the harness's own asset folder, shown in a dry-run before it lands, idempotent (re-running never clobbers user edits), and removable by a clean uninstall. Joining the Hive must never feel like the tool took over the repo.
+> **Principle 1 (non-destructive, visibly):** every write is opt-in per artifact, namespaced under `library/` or the harness's own asset folder, shown in a dry-run before it lands, idempotent (re-running never clobbers user edits), and removable by a clean uninstall. Joining hive must never feel like the tool took over the repo.
 > **Principle 2 (value before methodology):** the join flow is offered *after* PRD-051 has already shown the user a real signal. We never ask for the workflow change before the user has seen the payoff.
 
 The three sub-PRDs cover the non-destructive `library/` scaffold, the harness-appropriate asset provisioning with dry-run and uninstall, and the onboarding explainer plus the copy-paste `/knowledge-stinger` prompt.

@@ -48,7 +48,7 @@ import type {
 	SourceArtifact,
 	SourceChunk,
 	SourceConfig,
-	SourceGraphTriple,
+	HiveGraphTriple,
 	SourceProvider,
 } from "../contracts.js";
 
@@ -414,8 +414,8 @@ function chunksFor(config: ObsidianConfig, file: VaultFile): SourceChunk[] {
 }
 
 /** Build the topology + wiki-link graph triples for a note (c-AC-1 / c-AC-4). */
-function graphTriplesFor(config: ObsidianConfig, file: VaultFile): SourceGraphTriple[] {
-	const triples: SourceGraphTriple[] = [];
+function graphTriplesFor(config: ObsidianConfig, file: VaultFile): HiveGraphTriple[] {
+	const triples: HiveGraphTriple[] = [];
 	const note = noteName(file.relPath);
 
 	// Topology: vault root is_a vault; the containing folder (or root) contains the note.

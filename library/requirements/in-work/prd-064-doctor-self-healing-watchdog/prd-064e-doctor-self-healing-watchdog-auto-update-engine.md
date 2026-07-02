@@ -1,6 +1,6 @@
-# PRD-064e: HiveDoctor - Auto-Update Engine
+# PRD-064e: Doctor - Auto-Update Engine
 
-> **Parent:** [PRD-064](./prd-064-hivedoctor-self-healing-watchdog-index.md)
+> **Parent:** [PRD-064](./prd-064-doctor-self-healing-watchdog-index.md)
 > **Status:** Draft
 > **Priority:** P1
 > **Effort:** M (3-8h)
@@ -14,7 +14,7 @@ Keep the primary daemon current automatically and safely, so users stop running 
 - Poll the npm registry for `@legioncodeinc/honeycomb@latest` on a **30-minute TTL**.
 - Auto-update the primary daemon when a new version is available **and blessed** (opt-out via `--no-auto-update` / env).
 - Verify `/health` after the update; **roll back** to the prior version on a failed verify.
-- Never touch HiveDoctor's own package here - that is explicit-only ([064f](./prd-064f-hivedoctor-self-healing-watchdog-cli-and-ux.md)).
+- Never touch Doctor's own package here - that is explicit-only ([064f](./prd-064f-doctor-self-healing-watchdog-cli-and-ux.md)).
 
 ## Scope
 
@@ -26,14 +26,14 @@ Keep the primary daemon current automatically and safely, so users stop running 
 
 ## Out of scope
 
-- Reinstall-as-repair (same npm primitive, different intent) - [064c](./prd-064c-hivedoctor-self-healing-watchdog-remediation-ladder.md) rung 2.
-- HiveDoctor self-update - [064f](./prd-064f-hivedoctor-self-healing-watchdog-cli-and-ux.md).
+- Reinstall-as-repair (same npm primitive, different intent) - [064c](./prd-064c-doctor-self-healing-watchdog-remediation-ladder.md) rung 2.
+- Doctor self-update - [064f](./prd-064f-doctor-self-healing-watchdog-cli-and-ux.md).
 
 ## Acceptance criteria
 
 - AC-064e.1 Given a blessed version newer than installed, when the poll fires and auto-update is on, then the daemon is updated to the blessed version within ~30 min.
-- AC-064e.2 Given npm `@latest` is newer but NOT blessed, when the poll fires, then HiveDoctor does NOT update (gate holds).
-- AC-064e.3 Given an update whose post-update `/health` fails, when verify fails, then HiveDoctor rolls back to the prior version and the daemon returns to healthy on the old version.
+- AC-064e.2 Given npm `@latest` is newer but NOT blessed, when the poll fires, then Doctor does NOT update (gate holds).
+- AC-064e.3 Given an update whose post-update `/health` fails, when verify fails, then Doctor rolls back to the prior version and the daemon returns to healthy on the old version.
 - AC-064e.4 Given `--no-auto-update` or a pinned version, when a newer blessed version exists, then no update occurs.
 - AC-064e.5 Given any update or rollback, when it completes, then a telemetry event records from-version, to-version, and outcome.
 - AC-064e.6 Given an update is in progress, when the watch loop also wants to act, then they are serialized (no concurrent npm installs / restarts).
@@ -42,7 +42,7 @@ Keep the primary daemon current automatically and safely, so users stop running 
 
 - **The gate is the safety, not the TTL.** A 30-min poll against raw `@latest` would propagate a bad publish fleet-wide in 30 min; the blessed channel (`blessed-version.json` on the install CDN) is what makes auto-update safe. Mandatory, and fail-closed.
 - **Atomicity:** global npm installs are not transactional; the prior version + a verify+rollback loop is how we approximate atomicity.
-- **Coordination with rung 2:** auto-update and reinstall-as-repair must not run concurrently; share a single "install lock" in HiveDoctor.
+- **Coordination with rung 2:** auto-update and reinstall-as-repair must not run concurrently; share a single "install lock" in Doctor.
 - **Our release process gains a "bless" step:** publishing to npm and blessing for auto-rollout become two actions (could be gated on canary/smoke health).
 
 ## Open questions

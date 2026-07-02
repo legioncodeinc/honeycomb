@@ -102,7 +102,7 @@ describe("PRD-071 Contract B: fleet telemetry store", () => {
 	it("AC-9: opens in WAL journal mode so a concurrent read-only reader never contends with writes", () => {
 		const store = openFleetTelemetryStore({ homeDir });
 		store.upsertStatus({ name: FLEET_SERVICE_NAME, bindingTime: "t0", lastSeen: "t0", health: "ok" });
-		// Opening a second read-only handle at the SAME path (hivedoctor's poller) must see the row
+		// Opening a second read-only handle at the SAME path (doctor's poller) must see the row
 		// without honeycomb's own writer closing first — proves WAL, not a locked/rolled-back file.
 		const reader = openFleetTelemetryStore({ homeDir });
 		expect(reader.readStatus()?.health).toBe("ok");

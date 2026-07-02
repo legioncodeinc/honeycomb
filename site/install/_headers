@@ -20,8 +20,8 @@
   X-Content-Type-Options: nosniff
   Cache-Control: public, max-age=300
 
-# The HiveDoctor blessed-version channel (PRD-065). Short cache so a new bless propagates
-# within HiveDoctor's 30-minute auto-update poll. JSON, never sniffed to something else.
+# The Doctor blessed-version channel (PRD-065). Short cache so a new bless propagates
+# within Doctor's 30-minute auto-update poll. JSON, never sniffed to something else.
 /blessed-version.json
   Content-Type: application/json; charset=utf-8
   X-Content-Type-Options: nosniff

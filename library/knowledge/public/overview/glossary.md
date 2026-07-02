@@ -17,7 +17,7 @@ Plain-language definitions of the words you will see around Honeycomb. Each entr
 
 **Daemon**: The small helper program that runs quietly in the background on your machine. It is the only part of Honeycomb that touches your memory store, which keeps everything in one safe, consistent place. You rarely interact with it directly; it starts itself when needed.
 
-**HiveDoctor**: A tiny separate watchdog that keeps the daemon healthy. It quietly checks that the background helper is running and, if something goes wrong, tries to fix it (restart, reinstall, and so on) before you ever notice. If it cannot fix the problem on its own, it shows you a local status page and (unless you opt out) sends home a scrubbed report so the makers can help. The one-command installer sets it up automatically; skip it with `--no-hivedoctor`. Its reports never include your credentials, tokens, or code.
+**Doctor**: A tiny separate watchdog that keeps the daemon healthy. It quietly checks that the background helper is running and, if something goes wrong, tries to fix it (restart, reinstall, and so on) before you ever notice. If it cannot fix the problem on its own, it shows you a local status page and (unless you opt out) sends home a scrubbed report so the makers can help. The one-command installer sets it up automatically; skip it with `--no-doctor`. Its reports never include your credentials, tokens, or code.
 
 **Capture**: The act of quietly recording what happened as you work (your prompts, the tool's actions, the results). Capture is the raw material Honeycomb later distills into clean notes.
 

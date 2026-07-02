@@ -1,15 +1,15 @@
 /**
- * hivedoctor static registry writer — PRD-071 (Contract A: registry entry extension, ADR-0002
+ * doctor static registry writer — PRD-071 (Contract A: registry entry extension, ADR-0002
  * `service-registration-static-registry-plus-runtime-sqlite`).
  *
- * hivedoctor reads `~/.honeycomb/hivedoctor.daemons.json` (`{ "daemons": [...] }`) as the static
+ * doctor reads `~/.honeycomb/doctor.daemons.json` (`{ "daemons": [...] }`) as the static
  * declaration of "who should exist" plus where each service's runtime telemetry SQLite lives.
  * Honeycomb writes NOTHING to this file today; this module is the honeycomb-side writer, called
  * from `src/commands/install.ts`'s install flow (AC-1 / AC-071a.1).
  *
- * ── Mirrors the-hive's reference writer exactly (read-tolerant, replace-by-name, atomic) ──────
- * The idempotent-upsert + atomic-write shape mirrors `the-hive/src/install/registry.ts`'s
- * `registerThehiveWithHivedoctor`: the file is read tolerantly (a missing file, or one that fails
+ * ── Mirrors hive's reference writer exactly (read-tolerant, replace-by-name, atomic) ──────
+ * The idempotent-upsert + atomic-write shape mirrors `hive/src/install/registry.ts`'s
+ * `registerHiveWithDoctor`: the file is read tolerantly (a missing file, or one that fails
  * to parse as `{ daemons: [...] }`, degrades to an empty daemon list rather than throwing), the
  * honeycomb entry is replaced by name (`findIndex`) rather than duplicated on a re-install
  * (AC-071a.1.2), and the write is atomic (temp file + rename) so a crash mid-write never leaves a
@@ -17,8 +17,8 @@
  *
  * ── `pidPath` / `telemetryDbPath` stay literal `~`-prefixed strings ────────────────────────────
  * Per the pinned Contract-A shape, both `pidPath` and `telemetryDbPath` are written as literal
- * `~/...`-prefixed strings (never pre-expanded here) — the same convention the-hive's own
- * `pidPath` uses. hivedoctor expands `~` on its own read side; the REAL absolute path this
+ * `~/...`-prefixed strings (never pre-expanded here) — the same convention hive's own
+ * `pidPath` uses. doctor expands `~` on its own read side; the REAL absolute path this
  * honeycomb process actually opens is resolved independently by `fleet-store.ts`
  * ({@link import("./fleet-store.js").fleetTelemetryDbPath}), which must always resolve to the same
  * on-disk file this string names.
@@ -31,9 +31,9 @@ import { dirname, join } from "node:path";
 import { DAEMON_HOST, DAEMON_PORT } from "../../../shared/constants.js";
 import { FLEET_SERVICE_NAME } from "./fleet-store.js";
 
-/** The static registry file hivedoctor reads (`~/.honeycomb/hivedoctor.daemons.json`). */
-export function hivedoctorRegistryPath(homeDir: string = homedir()): string {
-	return join(homeDir, ".honeycomb", "hivedoctor.daemons.json");
+/** The static registry file doctor reads (`~/.honeycomb/doctor.daemons.json`). */
+export function doctorRegistryPath(homeDir: string = homedir()): string {
+	return join(homeDir, ".honeycomb", "doctor.daemons.json");
 }
 
 /** honeycomb's registry identity — reused from the fleet store so the two never drift. */
@@ -65,7 +65,7 @@ export const HONEYCOMB_REGISTRY_RESTART_COOLDOWN_MS = 5_000 as const;
 /** The literal (un-expanded) telemetry DB path convention (Contract B's file, Contract A's pointer). */
 export const HONEYCOMB_REGISTRY_TELEMETRY_DB_PATH = "~/.honeycomb/telemetry/honeycomb.sqlite" as const;
 
-/** The injectable filesystem seam (mirrors the-hive's `RegistryFs`) — a test injects an in-memory fake. */
+/** The injectable filesystem seam (mirrors hive's `RegistryFs`) — a test injects an in-memory fake. */
 export interface RegistryFs {
 	readFile(path: string): string;
 	mkdirp(path: string): void;
@@ -92,7 +92,7 @@ export interface RegistryUpsertResult {
 	readonly updatedExistingEntry: boolean;
 }
 
-/** One entry in the hivedoctor static registry (ADR-0002). Additional fields are tolerated (`Record`). */
+/** One entry in the doctor static registry (ADR-0002). Additional fields are tolerated (`Record`). */
 export type RegistryDaemonEntry = Record<string, unknown> & {
 	readonly name: string;
 	readonly healthUrl: string;
@@ -186,7 +186,7 @@ function nextTempPath(registryPath: string): string {
 
 /**
  * How many read-merge-write-verify rounds the upsert attempts before accepting the last atomic
- * write as-is (see the concurrency note on {@link registerHoneycombWithHivedoctor}).
+ * write as-is (see the concurrency note on {@link registerHoneycombWithDoctor}).
  */
 const REGISTRY_UPSERT_MAX_ATTEMPTS = 5;
 
@@ -229,7 +229,7 @@ function writeMergedRegistry(
 }
 
 /**
- * Upsert honeycomb's entry into hivedoctor's static registry (AC-1 / AC-071a.1). Idempotent: a
+ * Upsert honeycomb's entry into doctor's static registry (AC-1 / AC-071a.1). Idempotent: a
  * re-install REPLACES the existing `name === "honeycomb"` entry in place (never duplicates it,
  * AC-071a.1.2) while every other daemon's entry is preserved untouched. The write is atomic
  * (temp file + rename), and a missing / malformed pre-existing file degrades to an empty daemon
@@ -248,8 +248,8 @@ function writeMergedRegistry(
  * last-writer-wins under pathological contention is preferable to failing the install (071a
  * technical considerations: fail-soft).
  */
-export function registerHoneycombWithHivedoctor(options: RegistryUpsertOptions = {}): RegistryUpsertResult {
-	const registryPath = options.registryPath ?? hivedoctorRegistryPath(options.homeDir ?? homedir());
+export function registerHoneycombWithDoctor(options: RegistryUpsertOptions = {}): RegistryUpsertResult {
+	const registryPath = options.registryPath ?? doctorRegistryPath(options.homeDir ?? homedir());
 	const fs = options.fs ?? createNodeRegistryFs();
 	const honeycombEntry = buildHoneycombRegistryEntry(options.bind);
 

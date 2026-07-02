@@ -1,9 +1,9 @@
-# QA Findings Report: HiveDoctor Auto-Update Fix (PRD-065)
+# QA Findings Report: Doctor Auto-Update Fix (PRD-065)
 
 - **Date:** 2026-06-28
 - **Auditor:** quality-worker-bee
 - **Branch:** main (uncommitted working-tree diff)
-- **Scope:** the just-made HiveDoctor auto-update fix (two issues): (1) `update --check` must be a read-only dry-run preview; (2) post-update verify must not destructively roll back when the daemon was not healthy before / there is no supervised service, but must still roll back a healthy->regressed daemon.
+- **Scope:** the just-made Doctor auto-update fix (two issues): (1) `update --check` must be a read-only dry-run preview; (2) post-update verify must not destructively roll back when the daemon was not healthy before / there is no supervised service, but must still roll back a healthy->regressed daemon.
 - **Source intent:** the invoking brief + `prd-065-autoupdate-fix-security.md` (security-worker-bee, same day). There is no standalone PRD-064e/064f text in this folder; the acceptance criteria referenced (AC-064e.1/.2/.3/.5/.6) are cited from the code/test docstrings and the security report.
 - **Ordering:** security-worker-bee ran first and produced `prd-065-autoupdate-fix-security.md` (No Critical/High). No prior `*-qa-report.md` existed for this branch. **Ordering intact.**
 
@@ -65,7 +65,7 @@ None.
 
 ### Suggestion (consider improving)
 
-- **S1 — `updated_unverified` is not asserted at the CLI-context / dispatch layer end-to-end.** `info`. The `updated_unverified` path is proven at the engine layer and at the `createUpdateActions` mapping layer (`update-actions.test.ts:71-78`), and security confirmed the telemetry chokepoint. There is no single test that drives a real `buildCliContext`/`createHiveDoctor` composition through a forced pre-unhealthy update to assert the wired daemon emits `updated_unverified` end-to-end. The unit coverage is strong enough that this is genuinely optional, but a composition-level test would close the last seam between "the engine does the right thing" and "the wired product does the right thing." No coordinates to fix; this is a coverage suggestion, not a defect.
+- **S1 — `updated_unverified` is not asserted at the CLI-context / dispatch layer end-to-end.** `info`. The `updated_unverified` path is proven at the engine layer and at the `createUpdateActions` mapping layer (`update-actions.test.ts:71-78`), and security confirmed the telemetry chokepoint. There is no single test that drives a real `buildCliContext`/`createDoctor` composition through a forced pre-unhealthy update to assert the wired daemon emits `updated_unverified` end-to-end. The unit coverage is strong enough that this is genuinely optional, but a composition-level test would close the last seam between "the engine does the right thing" and "the wired product does the right thing." No coordinates to fix; this is a coverage suggestion, not a defect.
 
 - **S2 — Brief references AC-064e.* but no PRD-064e text is co-located.** `info`. The acceptance criteria (`AC-064e.1/.3/.5/.6`) are cited only from code docstrings and the security report; there is no `library/requirements/.../prd-064e*.md` in this folder to trace against as ground truth. Verification here was done against the stated two-issue intent (which the code matches exactly). If 064e is a real prior PRD, linking it under PRD-065's folder would make future audits trace cleanly. Defer to `library-worker-bee`.
 
@@ -73,14 +73,14 @@ None.
 
 | Gate | Command | Result |
 | --- | --- | --- |
-| Typecheck | `cd hivedoctor && npm run typecheck` (`tsc --noEmit`) | **PASS** — clean, no output |
-| Tests | `cd hivedoctor && npm run test` (`vitest run`) | **PASS** — **47 test files passed, 456 tests passed, 0 failed**, duration ~1.7s |
+| Typecheck | `cd doctor && npm run typecheck` (`tsc --noEmit`) | **PASS** — clean, no output |
+| Tests | `cd doctor && npm run test` (`vitest run`) | **PASS** — **47 test files passed, 456 tests passed, 0 failed**, duration ~1.7s |
 
 Relevant suites within the run:
 - `tests/update/update-engine.test.ts` — 26 tests pass (includes the 6 `previewUpdate` dry-run cases + the 4 FIX-2 baseline cases + the updated AC-064e.3 rollback cases).
 - `tests/cli/update-actions.test.ts` — 5 tests pass (the `--check`-routes-to-preview spy proof).
 - `tests/update/poll-loop.test.ts` — 8 tests pass (poll loop still ticks `runUpdateTransaction`).
-- `tests/compose/create-hivedoctor.test.ts` — 14 tests pass.
+- `tests/compose/create-doctor.test.ts` — 14 tests pass.
 
 No failures, no flakiness, no skips observed. Counts match the security report's `47 files / 456 tests` exactly, confirming the audited tree is the same green tree.
 
@@ -88,17 +88,17 @@ No failures, no flakiness, no skips observed. Counts match the security report's
 
 | File | Change |
 | --- | --- |
-| `hivedoctor/src/cli/update-actions.ts` (NEW) | `createUpdateActions`: `checkPrimaryUpdate`->`previewUpdate` (read-only), `applyPrimaryUpdate`->`runUpdateTransaction`, `selfUpdate` passthrough. |
-| `hivedoctor/src/update/update-engine.ts` | Adds `previewUpdate()` + shared `gatherDecision()` (read+decide, no mutation); pre-update `wasHealthyBefore` baseline; FIX-2 rollback-vs-keep rule; `updated_unverified` status; `RestartDaemonFn` widened to `Promise<void\|boolean>`. |
-| `hivedoctor/src/update/update-telemetry.ts` | Adds `updated_unverified` to the `UpdateOutcome` union. |
-| `hivedoctor/src/update/index.ts` | Re-exports `UpdatePreview` type. |
-| `hivedoctor/src/cli/index.ts` | Deletes the old mutating inline `--check`; wires `createUpdateActions`; CLI `restartDaemon` now returns `false` (no OS service). |
-| `hivedoctor/src/compose/index.ts` | `restartDaemon` forwards `restart()`'s boolean instead of swallowing it. |
-| `hivedoctor/tests/cli/update-actions.test.ts` (NEW) | Proves `--check`->preview-only, `update`->transaction-only, `updated_unverified` reported honestly. |
-| `hivedoctor/tests/update/update-engine.test.ts` | Adds the 6 pure-dry-run preview tests + 4 FIX-2 baseline tests; updates happy-path/rollback health-probe counts (+1 baseline probe). |
-| `hivedoctor/tests/update/poll-loop.test.ts` | Adds `previewUpdate` to fake engines (interface only); loop still asserts `runUpdateTransaction`. |
-| `hivedoctor/tests/compose/create-hivedoctor.test.ts` | Adds `previewUpdate` to the fake engine to satisfy the interface. |
-| `library/requirements/backlog/prd-065-hivedoctor-go-live/qa/prd-065-autoupdate-fix-security.md` (NEW) | The preceding security audit (No Critical/High). |
+| `doctor/src/cli/update-actions.ts` (NEW) | `createUpdateActions`: `checkPrimaryUpdate`->`previewUpdate` (read-only), `applyPrimaryUpdate`->`runUpdateTransaction`, `selfUpdate` passthrough. |
+| `doctor/src/update/update-engine.ts` | Adds `previewUpdate()` + shared `gatherDecision()` (read+decide, no mutation); pre-update `wasHealthyBefore` baseline; FIX-2 rollback-vs-keep rule; `updated_unverified` status; `RestartDaemonFn` widened to `Promise<void\|boolean>`. |
+| `doctor/src/update/update-telemetry.ts` | Adds `updated_unverified` to the `UpdateOutcome` union. |
+| `doctor/src/update/index.ts` | Re-exports `UpdatePreview` type. |
+| `doctor/src/cli/index.ts` | Deletes the old mutating inline `--check`; wires `createUpdateActions`; CLI `restartDaemon` now returns `false` (no OS service). |
+| `doctor/src/compose/index.ts` | `restartDaemon` forwards `restart()`'s boolean instead of swallowing it. |
+| `doctor/tests/cli/update-actions.test.ts` (NEW) | Proves `--check`->preview-only, `update`->transaction-only, `updated_unverified` reported honestly. |
+| `doctor/tests/update/update-engine.test.ts` | Adds the 6 pure-dry-run preview tests + 4 FIX-2 baseline tests; updates happy-path/rollback health-probe counts (+1 baseline probe). |
+| `doctor/tests/update/poll-loop.test.ts` | Adds `previewUpdate` to fake engines (interface only); loop still asserts `runUpdateTransaction`. |
+| `doctor/tests/compose/create-doctor.test.ts` | Adds `previewUpdate` to the fake engine to satisfy the interface. |
+| `library/requirements/backlog/prd-065-doctor-go-live/qa/prd-065-autoupdate-fix-security.md` (NEW) | The preceding security audit (No Critical/High). |
 
 ## Verdict
 
