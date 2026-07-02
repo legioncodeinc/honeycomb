@@ -52,7 +52,7 @@ Reasons:
 | 5 | Active memory proof after idle | Recall after packaged idle proof | Legitimate reads only | Passed in 120-second background-worker proof | Recall returned 200 after idle; `recall_reads_delta=3`; `active_poll_reads=0` | Pass | Long-idle active phase still deferred |
 | 6 | Deterministic restart/lease/retry tests | `npx vitest run tests/daemon/runtime/services/local-job-queue.test.ts tests/daemon/runtime/services/poll-loop.test.ts tests/daemon/runtime/services/job-queue-source-labels.test.ts tests/daemon/runtime/services/poll-backoff.test.ts` | Pass | Passed: 4 files, 35 tests | Covers persistence, expired lease reclaim, stale lease completion rejection, retry backoff/exhaustion, poll-loop containment | Pass | Does not replace live restart/sleep/outage dogfood |
 | 6 | Restart/sleep/outage live dogfood | Manual/live dogfood scenarios | Pass | Not run to completion | Deferred because the release owner chose the package/PR gate sequence for this checkpoint | Deferred | Run before final publish if the release owner requires laptop resilience proof |
-| 7 | GitHub PR / CI | PR #188 | Open PR against `main`; remote CI attached | Passed except Aikido | CI quality gates on Node 22/24, Windows smoke, HiveDoctor, CodeQL, CLA, and Secret gate are green; live DeepLake and stress jobs skipped by workflow policy | Pass | External checks can rerun after the ledger commit |
+| 7 | GitHub PR / CI | PR #188 | Open PR against `main`; remote CI attached | Passed except Aikido | CI quality gates on Node 22/24, Windows smoke, Doctor, CodeQL, CLA, and Secret gate are green; live DeepLake and stress jobs skipped by workflow policy | Pass | External checks can rerun after the ledger commit |
 | 7 | CodeRabbit | Review current PR #188 | No blocking issues | Green on latest observed PR status | CodeRabbit status context is success | Pass | Re-review can attach after final ledger push |
 | 7 | Aikido | Current PR #188 branch scan | No introduced security issues and no blocking code-quality findings | SQL finding fixed; remaining medium waived | Scan `139399442` is red for one medium "Prefer simpler equivalent code" suggestion in `src/daemon/runtime/assemble.ts` line 857. Release owner explicitly directed to ignore it. | Waived | GitHub check remains red unless the issue is ignored in Aikido |
 | 7 | PRD-048d rehearsal | `npm publish --dry-run --provenance --access public` | Dry-run reaches publish step without publishing | Passed after version bump | Candidate bumped to `0.1.11`; npm dry-run built the package, reported `legioncodeinc-honeycomb-0.1.11.tgz`, 62 files, 3.6 MB package size, 15.2 MB unpacked size, and dry-run publish target `latest` with public access | Pass | No real npm publish or release tag was performed |
@@ -93,7 +93,7 @@ Reasons:
   contains `FROM memory_jobs job` and not `FROM "memory_jobs"`.
 - Bumped the release candidate from `0.1.10` to `0.1.11`, synchronized plugin/harness manifests, and
   reran the npm publish dry-run successfully.
-- Hardened the HiveDoctor real-npm Windows smoke by pointing `npm ls -g --json` at an empty temporary
+- Hardened the Doctor real-npm Windows smoke by pointing `npm ls -g --json` at an empty temporary
   global prefix, preserving the real npm launch proof without walking hosted-runner global state.
 - Made packaged upgrade smoke resolve the latest published npm package as the default previous fixture,
   so a bumped but unpublished candidate like `0.1.11` tests the real `0.1.10 -> 0.1.11` upgrade path

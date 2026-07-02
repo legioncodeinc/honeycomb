@@ -322,7 +322,7 @@ export interface DaemonLifecycleOptions {
  *
  * `stop`/`status` reflect+control the SAME path: in service mode they go through the manager (and
  * status reports the supervising manager); in fallback mode they use the 021a PID/lock + SIGTERM.
- * `restart` (AC-064h.5) prefers the service manager (`kickstart`/`restart`/task re-run) so HiveDoctor's
+ * `restart` (AC-064h.5) prefers the service manager (`kickstart`/`restart`/task re-run) so Doctor's
  * rung-1 never double-spawns; the 021a single-instance guard prevents any double-bind. Never imports
  * the composition root (D-2).
  */
@@ -410,7 +410,7 @@ export function buildDaemonLifecycle(client: DaemonClient, options: DaemonLifecy
 
 		async restart(): Promise<{ readonly restarted: boolean; readonly viaService: boolean }> {
 			// AC-064h.5: prefer the service manager (kickstart / systemctl restart / schtasks stop+run)
-			// so HiveDoctor's rung-1 restart goes THROUGH the service, never a second spawn that would
+			// so Doctor's rung-1 restart goes THROUGH the service, never a second spawn that would
 			// fight the service for the 3850 bind. The 021a PID/lock guard prevents any double-bind.
 			const svc = serviceController();
 			if (svc !== null && svc.isRegistered(buildServiceSpec())) {

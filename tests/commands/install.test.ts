@@ -31,7 +31,7 @@ import {
 	runInstallCommand,
 } from "../../src/commands/index.js";
 import { DEFAULT_REF, loadOnboarding } from "../../src/daemon/runtime/onboarding/index.js";
-import { hivedoctorRegistryPath } from "../../src/daemon/runtime/telemetry/fleet-registry.js";
+import { doctorRegistryPath } from "../../src/daemon/runtime/telemetry/fleet-registry.js";
 
 /** A recording fake DaemonLifecycle: scripts start/status results + records every call. */
 function fakeLifecycle(script: {
@@ -306,7 +306,7 @@ describe("PRD-050a — honeycomb install (a-AC-5 onboarding 'installed' + ref)",
 	});
 });
 
-describe("PRD-071 Contract A — install registers honeycomb with hivedoctor's static registry", () => {
+describe("PRD-071 Contract A — install registers honeycomb with doctor's static registry", () => {
 	it("AC-1 / AC-071a.1.1 writes a registry entry under the injected temp HOME (never the real ~/.honeycomb)", async () => {
 		const res = await runInstallCommand([], {
 			daemon: createFakeDaemonClient({ alive: true }),
@@ -316,7 +316,7 @@ describe("PRD-071 Contract A — install registers honeycomb with hivedoctor's s
 			out: () => {},
 		});
 		expect(res.exitCode).toBe(0);
-		const registryPath = hivedoctorRegistryPath(tmpDir);
+		const registryPath = doctorRegistryPath(tmpDir);
 		const doc = JSON.parse(readFileSync(registryPath, "utf8")) as { daemons: Array<Record<string, unknown>> };
 		const entry = doc.daemons.find((d) => d.name === "honeycomb");
 		expect(entry).toMatchObject({
@@ -336,7 +336,7 @@ describe("PRD-071 Contract A — install registers honeycomb with hivedoctor's s
 		};
 		await runInstallCommand([], deps);
 		await runInstallCommand([], deps);
-		const registryPath = hivedoctorRegistryPath(tmpDir);
+		const registryPath = doctorRegistryPath(tmpDir);
 		const doc = JSON.parse(readFileSync(registryPath, "utf8")) as { daemons: Array<Record<string, unknown>> };
 		expect(doc.daemons.filter((d) => d.name === "honeycomb")).toHaveLength(1);
 	});

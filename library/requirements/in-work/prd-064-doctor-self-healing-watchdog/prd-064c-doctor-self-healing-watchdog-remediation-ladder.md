@@ -1,6 +1,6 @@
-# PRD-064c: HiveDoctor - Remediation Ladder
+# PRD-064c: Doctor - Remediation Ladder
 
-> **Parent:** [PRD-064](./prd-064-hivedoctor-self-healing-watchdog-index.md)
+> **Parent:** [PRD-064](./prd-064-doctor-self-healing-watchdog-index.md)
 > **Status:** Draft
 > **Priority:** P1
 > **Effort:** L (1-3d)
@@ -23,20 +23,20 @@ Encode the escalating repair actions a careful human operator would take, each i
 
 - **Rung 2 reinstall:** a clean global reinstall of `@legioncodeinc/honeycomb`, fixing the "stale global daemon serves old routes" failure mode; verify version via `/health` after; fires only after 3 consecutive failed restarts (064a).
 - **Rung 3 uninstall Hivemind:** detect a conflicting `@deeplake/hivemind` global and remove it automatically per the coexistence rules in [`prd-050d`](../../completed/prd-050-quick-install-and-guided-setup/prd-050d-quick-install-and-guided-setup-hivemind-coexistence-and-migration.md). Uninstall removes the **package only** - it must NOT delete the shared `~/.deeplake/` state Honeycomb still depends on.
-- **Rung 4 escalate:** hand off to [064g](./prd-064g-hivedoctor-self-healing-watchdog-dashboard-escalation-reporting.md) when the ladder cannot restore health, including when a deferred action (credential purge) is what HiveDoctor believes is needed.
+- **Rung 4 escalate:** hand off to [064g](./prd-064g-doctor-self-healing-watchdog-dashboard-escalation-reporting.md) when the ladder cannot restore health, including when a deferred action (credential purge) is what Doctor believes is needed.
 - Idempotency + before/after state capture for every rung (feeds 064d/064g), including a timestamped backup before rung 3's uninstall.
 
 ## Out of scope
 
-- The watch loop and backoff - [064a](./prd-064a-hivedoctor-self-healing-watchdog-supervisor-core-and-lifecycle.md).
-- Forward auto-update of the primary (distinct from reinstall-as-repair) - [064e](./prd-064e-hivedoctor-self-healing-watchdog-auto-update-engine.md).
+- The watch loop and backoff - [064a](./prd-064a-doctor-self-healing-watchdog-supervisor-core-and-lifecycle.md).
+- Forward auto-update of the primary (distinct from reinstall-as-repair) - [064e](./prd-064e-doctor-self-healing-watchdog-auto-update-engine.md).
 - **Credential purge - deferred.** Designed for, not built in v1.
 
 ## Acceptance criteria
 
-- AC-064c.1 Given 3 failed restarts, when rung 2 fires, then HiveDoctor reinstalls the primary and a stale-route symptom is gone (version reported by `/health` matches the blessed version).
+- AC-064c.1 Given 3 failed restarts, when rung 2 fires, then Doctor reinstalls the primary and a stale-route symptom is gone (version reported by `/health` matches the blessed version).
 - AC-064c.2 Given a conflicting `@deeplake/hivemind` global is detected, when rung 3 fires, then it is removed automatically and Honeycomb's shared `~/.deeplake/` state is left intact.
-- AC-064c.3 Given a suspected credential fault, when HiveDoctor reaches that condition, then it does NOT delete credentials and instead escalates (rung 4) noting the action it would have taken.
+- AC-064c.3 Given a suspected credential fault, when Doctor reaches that condition, then it does NOT delete credentials and instead escalates (rung 4) noting the action it would have taken.
 - AC-064c.4 Given any rung runs twice, when re-run, then the second run is a safe no-op (idempotent).
 - AC-064c.5 Given rung 3 removes a package, when it does, then a timestamped record of what was removed is written before deletion.
 - AC-064c.6 Given any rung, when it completes, then before/after state is recorded in `incidents.ndjson`.

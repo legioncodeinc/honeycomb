@@ -1,17 +1,17 @@
-# QA Findings Report: PRD-064 HiveDoctor Self-Healing Watchdog
+# QA Findings Report: PRD-064 Doctor Self-Healing Watchdog
 
 **Audit date:** 2026-06-27
 **Auditor:** quality-worker-bee
 **Branch:** `legion/competent-nightingale-900e0c`
 **Worktree:** `C:\Users\mario\GitHub\honeycomb\.claude\worktrees\competent-nightingale-900e0c`
-**Source plan:** `library/requirements/in-work/prd-064-hivedoctor-self-healing-watchdog/` (index AC-1..AC-10 + sub-PRDs 064a..064h)
+**Source plan:** `library/requirements/in-work/prd-064-doctor-self-healing-watchdog/` (index AC-1..AC-10 + sub-PRDs 064a..064h)
 **Predecessor:** `security-worker-bee` ran first (2 High remediated, 0 Critical). Ordering correct: this is the first QA report for the branch, so security did not run after QA. No ordering violation.
 
 ---
 
 ## Summary
 
-HiveDoctor is an unusually disciplined, well-tested implementation that conforms tightly to the resolved decisions. Of the 56 acceptance criteria (10 index + 46 sub-PRD), **41 are VERIFIED** by real tests that assert behavior (not name-only), **15 are BLOCKED** on legitimately external prerequisites (live OS service survival, live npm publish, live PostHog ingest, live CDN bless object) that map cleanly to the ledger's B-1..B-5 asks and are HONEST, not cover for missing work. **0 MISSING, 0 PARTIAL among the index ACs.** All gates pass: hivedoctor `typecheck` + `test` (378/378), root `typecheck` (exit 0), root `dup` (0.35%, under threshold 7), root `test` (3963 passed, 1 pre-existing flaky timeout in an unrelated property test, 10 skipped). The shipped-daemon edits did not break existing daemon/install/runtime tests; the spawn fallback is intact (43/43). **Verdict: ship-ready as a code-complete v1, conditioned on the B-1..B-5 external prerequisites before the live behaviors flip on.** The ledger's status claims are accurate and, if anything, conservative.
+Doctor is an unusually disciplined, well-tested implementation that conforms tightly to the resolved decisions. Of the 56 acceptance criteria (10 index + 46 sub-PRD), **41 are VERIFIED** by real tests that assert behavior (not name-only), **15 are BLOCKED** on legitimately external prerequisites (live OS service survival, live npm publish, live PostHog ingest, live CDN bless object) that map cleanly to the ledger's B-1..B-5 asks and are HONEST, not cover for missing work. **0 MISSING, 0 PARTIAL among the index ACs.** All gates pass: doctor `typecheck` + `test` (378/378), root `typecheck` (exit 0), root `dup` (0.35%, under threshold 7), root `test` (3963 passed, 1 pre-existing flaky timeout in an unrelated property test, 10 skipped). The shipped-daemon edits did not break existing daemon/install/runtime tests; the spawn fallback is intact (43/43). **Verdict: ship-ready as a code-complete v1, conditioned on the B-1..B-5 external prerequisites before the live behaviors flip on.** The ledger's status claims are accurate and, if anything, conservative.
 
 ---
 
@@ -47,20 +47,20 @@ HiveDoctor is an unusually disciplined, well-tested implementation that conforms
 ## Warnings (should fix)
 
 - **W-1 (functional, inherited Low from security): compose `blessedVersion: ""` makes rung-2 post-install verify a no-op.**
-  `hivedoctor/src/compose/index.ts:184` wires `blessedVersion: options.blessedVersion ?? ""`. The reinstall rung (`createReinstallRung`) verifies the post-install daemon version against `deps.blessedVersion`; with an empty string the `after === blessedVersion` check can never match a real version, so rung 2 always reports `unverified`. The reinstall still happens (functionality is not lost), but AC-064c.1's "version reported by `/health` matches the blessed version" is not actually asserted at runtime in the production composition - only in the rung's own unit test where a real blessed version is injected. **Recommendation:** resolve a real blessed version into the composition root (read it from the blessed-channel / `blessed-version.json`, the same source the auto-update engine consults). Tracked in the ledger close-out and the security report's Low follow-up #3.
+  `doctor/src/compose/index.ts:184` wires `blessedVersion: options.blessedVersion ?? ""`. The reinstall rung (`createReinstallRung`) verifies the post-install daemon version against `deps.blessedVersion`; with an empty string the `after === blessedVersion` check can never match a real version, so rung 2 always reports `unverified`. The reinstall still happens (functionality is not lost), but AC-064c.1's "version reported by `/health` matches the blessed version" is not actually asserted at runtime in the production composition - only in the rung's own unit test where a real blessed version is injected. **Recommendation:** resolve a real blessed version into the composition root (read it from the blessed-channel / `blessed-version.json`, the same source the auto-update engine consults). Tracked in the ledger close-out and the security report's Low follow-up #3.
 
-- **W-2 (robustness, inherited Medium from security): hivedoctor systemd `ExecStart` token is unquoted.**
-  `hivedoctor/src/service/templates.ts:86` builds `ExecStart=${plan.execPath} ${HIVEDOCTOR_RUN_COMMAND}` with no quoting around the exec path. systemd `ExecStart` does not invoke a shell (no injection vector), but a space-bearing exec path would mis-split. The daemon-service sibling template already quotes its tokens; this is a parity/robustness gap. **Recommendation:** quote the token (`ExecStart="${plan.execPath}" ...`). Affects AC-064b.1/.6 robustness on installs with spaces in the path (e.g. some Windows-via-WSL or non-default prefixes). Tracked.
+- **W-2 (robustness, inherited Medium from security): doctor systemd `ExecStart` token is unquoted.**
+  `doctor/src/service/templates.ts:86` builds `ExecStart=${plan.execPath} ${DOCTOR_RUN_COMMAND}` with no quoting around the exec path. systemd `ExecStart` does not invoke a shell (no injection vector), but a space-bearing exec path would mis-split. The daemon-service sibling template already quotes its tokens; this is a parity/robustness gap. **Recommendation:** quote the token (`ExecStart="${plan.execPath}" ...`). Affects AC-064b.1/.6 robustness on installs with spaces in the path (e.g. some Windows-via-WSL or non-default prefixes). Tracked.
 
 ---
 
 ## Suggestions (consider improving)
 
 - **S-1 (defense-in-depth, inherited Medium from security): `escapeHtml` omits the single-quote.**
-  `hivedoctor/src/status-page/server.ts:187` escapes `& < > "` but not `'`. No current XSS path (loopback-only, read-only, all dynamic values in text or double-quoted attributes), but add `.replace(/'/g, "&#39;")` so a future single-quoted attribute cannot regress. Affects AC-064g.4 hardening only.
+  `doctor/src/status-page/server.ts:187` escapes `& < > "` but not `'`. No current XSS path (loopback-only, read-only, all dynamic values in text or double-quoted attributes), but add `.replace(/'/g, "&#39;")` so a future single-quoted attribute cannot regress. Affects AC-064g.4 hardening only.
 
 - **S-2 (prose hygiene, Mario's no-em-dash rule): em/en + box-drawing dashes appear in new shipped files.**
-  The new `src/cli/daemon-service.ts` (13 occurrences), the new added lines in `scripts/install/install.sh` (em dash in comments), and the hivedoctor `src/**` use box-drawing rules (`──`) and arrows (`→`) in JSDoc/comment banners. These are all in **comments**, not user-facing prose, and they match the pervasive existing house style in the daemon code (`src/daemon/runtime/assemble.ts` alone has 287). The hivedoctor TypeScript source itself contains **zero** em/en dashes (verified by grep). This is a consistency observation, not a functional issue; flag for Mario's call on whether the no-dash rule extends to code-comment banners. (No em dashes were introduced into any prose document.)
+  The new `src/cli/daemon-service.ts` (13 occurrences), the new added lines in `scripts/install/install.sh` (em dash in comments), and the doctor `src/**` use box-drawing rules (`──`) and arrows (`→`) in JSDoc/comment banners. These are all in **comments**, not user-facing prose, and they match the pervasive existing house style in the daemon code (`src/daemon/runtime/assemble.ts` alone has 287). The doctor TypeScript source itself contains **zero** em/en dashes (verified by grep). This is a consistency observation, not a functional issue; flag for Mario's call on whether the no-dash rule extends to code-comment banners. (No em dashes were introduced into any prose document.)
 
 - **S-3 (functional follow-up already noted in ledger): `daemon-service.ts` `unregister` is built + tested but not wired into an uninstall verb.**
   The 064h ledger entry calls this out explicitly. Not an AC (no index/sub AC requires a daemon uninstall verb in v1; AC-064h scopes "a clean uninstall path" as a goal/scope line, not a numbered AC). Tracked as a follow-up.
@@ -71,17 +71,17 @@ HiveDoctor is an unusually disciplined, well-tested implementation that conforms
 
 | Decision | Ruling | Conformance | Evidence |
 |---|---|---|---|
-| OD-1 self-supervision | OS-native (launchd/systemd-user/schtasks); daemon also OS-native (064h) | CONFORMS | `hivedoctor/src/service/{platform,templates}.ts`; `src/cli/daemon-service.ts`; service-preferred + spawn fallback proven in `tests/cli/daemon-lifecycle-service.test.ts`. |
-| OD-2 telemetry sink | PostHog only, OTLP Logs (`/i/v1/logs`), no Sentry, no OTel SDK | CONFORMS | `hivedoctor/src/telemetry/emit.ts` hand-rolls OTLP/JSON over `fetch`; zero runtime deps (package.json). No Sentry/OTel import anywhere. AC-064d.7 test asserts dependency-free. |
+| OD-1 self-supervision | OS-native (launchd/systemd-user/schtasks); daemon also OS-native (064h) | CONFORMS | `doctor/src/service/{platform,templates}.ts`; `src/cli/daemon-service.ts`; service-preferred + spawn fallback proven in `tests/cli/daemon-lifecycle-service.test.ts`. |
+| OD-2 telemetry sink | PostHog only, OTLP Logs (`/i/v1/logs`), no Sentry, no OTel SDK | CONFORMS | `doctor/src/telemetry/emit.ts` hand-rolls OTLP/JSON over `fetch`; zero runtime deps (package.json). No Sentry/OTel import anywhere. AC-064d.7 test asserts dependency-free. |
 | OD-3 auto-update safety | on-by-default + blessed gate + verify + rollback, fail-closed | CONFORMS | `update-policy.ts` (fail-closed, latest===blessed, strictly-newer); `update-engine.ts` (verify `/health` + rollback). |
 | OD-4 remediation authority | restart auto / reinstall after 3 / uninstall-hivemind always / NO credential purge | CONFORMS | `compose/index.ts` registers rungs 1/2/3 only; `restartGiveUpThreshold` drives reinstall-after-3; rung 3 always-on-detection; **no credential-purge code path exists** (grep: every `~/.deeplake/` mention is a comment/recommendation). |
-| OD-5 opt-out granularity | `--no-hivedoctor` master switch + dashboard toggles; env opt-outs honored | CONFORMS | `install.sh`/`install.ps1` `--no-hivedoctor` + `HONEYCOMB_NO_HIVEDOCTOR=1`; `install-guard.ts`; telemetry honors `DO_NOT_TRACK`/`HONEYCOMB_TELEMETRY=0`/state toggle. |
-| OD-6 package boundary | new top-level `hivedoctor/`, dependency-light, own release job | CONFORMS | `hivedoctor/` dir, own tsconfig/vitest/esbuild; `.github/workflows/release-hivedoctor.yaml`. |
+| OD-5 opt-out granularity | `--no-doctor` master switch + dashboard toggles; env opt-outs honored | CONFORMS | `install.sh`/`install.ps1` `--no-doctor` + `HONEYCOMB_NO_DOCTOR=1`; `install-guard.ts`; telemetry honors `DO_NOT_TRACK`/`HONEYCOMB_TELEMETRY=0`/state toggle. |
+| OD-6 package boundary | new top-level `doctor/`, dependency-light, own release job | CONFORMS | `doctor/` dir, own tsconfig/vitest/esbuild; `.github/workflows/release-doctor.yaml`. |
 | OD-7 dashboard reachability | all three paths (status page + hosted sink + incident file) | CONFORMS | `status-page/server.ts` (loopback 3852), `escalation/hosted-sink.ts`, `escalation/needs-attention-store.ts` + incidents append. |
-| OD-8 embeddings scope | indirect (heal via primary restart) | CONFORMS | No `3851` supervisor in hivedoctor; restart goes through the primary only. |
+| OD-8 embeddings scope | indirect (heal via primary restart) | CONFORMS | No `3851` supervisor in doctor; restart goes through the primary only. |
 | Sub: OTLP transport | PostHog Logs, hand-rolled OTLP/JSON, zero deps | CONFORMS | `telemetry/otlp-serializer.ts` + `emit.ts`; no SDK. |
 | Sub: blessed channel | static `blessed-version.json`, fail-closed | CONFORMS (logic) | `update/blessed-channel.ts`; live CDN object is B-3. |
-| Sub: master switch only at install | yes | CONFORMS | only `--no-hivedoctor` is an install-time switch. |
+| Sub: master switch only at install | yes | CONFORMS | only `--no-doctor` is an install-time switch. |
 | Daemon service-preferred + spawn fallback | yes | CONFORMS | `runtime.ts buildDaemonLifecycle` service-aware; fallback + fail-open proven by test. |
 | Zero runtime deps | yes | CONFORMS | `npm audit` 0 vulns; package has no `dependencies`; built-ins only. |
 
@@ -93,8 +93,8 @@ HiveDoctor is an unusually disciplined, well-tested implementation that conforms
 
 | Gate | Command | Result |
 |---|---|---|
-| hivedoctor typecheck | `cd hivedoctor && npm run typecheck` | PASS (tsc --noEmit, exit 0) |
-| hivedoctor test | `cd hivedoctor && npm run test` | PASS - 40 files, **378/378** tests |
+| doctor typecheck | `cd doctor && npm run typecheck` | PASS (tsc --noEmit, exit 0) |
+| doctor test | `cd doctor && npm run test` | PASS - 40 files, **378/378** tests |
 | root typecheck | `npm run typecheck` | PASS (tsc --noEmit, exit 0) |
 | root dup | `npm run dup` | PASS - 25 clones, **0.35%** dup lines (threshold 7) |
 | root test | `npm run test` | **3963 passed, 1 failed (flaky), 10 skipped** - see below |
@@ -102,7 +102,7 @@ HiveDoctor is an unusually disciplined, well-tested implementation that conforms
 
 ### The 1 root-test failure is a pre-existing flake, NOT a PRD-064 regression
 
-- Failing test: `tests/property/json-parsers.property.test.ts > property: pull manifest read() ... > a manifest entry with a traversal dirName survives only as a STRING` - a fast-check property test for **pull-manifest JSON parsing**, which has **zero** relation to any PRD-064 file (no hivedoctor, daemon-service, runtime, or install code is exercised).
+- Failing test: `tests/property/json-parsers.property.test.ts > property: pull manifest read() ... > a manifest entry with a traversal dirName survives only as a STRING` - a fast-check property test for **pull-manifest JSON parsing**, which has **zero** relation to any PRD-064 file (no doctor, daemon-service, runtime, or install code is exercised).
 - Failure mode: `testTimeout` exceeded under full-suite parallel load during a fast-check shrink. The documented project flake (`hook-runtime` timeouts) actually **passed** this run (23/23, 20.2s), so this is the same *class* (parallel-load timeout) on a different file.
 - Classified by isolation: re-running the file alone passes **7/7 in ~2.2s**. This is the honest "pre-existing flaky timeout class," not a regression and not attributable to this PRD.
 
@@ -121,11 +121,11 @@ Legend: V = VERIFIED (code + a real asserting test), B = BLOCKED (external prere
 | AC-3 | ladder exhausts -> structured escalation | V | `tests/supervisor-escalation.test.ts` (escalate-on-give-up, incident records both steps). |
 | AC-4 | telemetry default-on; honest opt-out | V | `tests/telemetry/emit.test.ts` (3 gates, single chokepoint). |
 | AC-5 | auto-update blessed + verify + rollback | V (logic) / B (B-2,B-3 live) | `tests/update/update-engine.test.ts`, `update-policy.test.ts`. Live npm/CDN blocked. |
-| AC-6 | never auto-updates itself; self-update explicit | V | `HIVEDOCTOR_PACKAGE` referenced ONLY in `cli/self-update.ts`; engine hard-wires `PRIMARY_PACKAGE`. `tests/cli/self-update.test.ts`. |
+| AC-6 | never auto-updates itself; self-update explicit | V | `DOCTOR_PACKAGE` referenced ONLY in `cli/self-update.ts`; engine hard-wires `PRIMARY_PACKAGE`. `tests/cli/self-update.test.ts`. |
 | AC-7 | bare invoke prints ASCII art + menu | V | `tests/cli/banner.test.ts`, `command-table.test.ts`, `dispatch.test.ts`. |
 | AC-8 | remediation failure never crashes watchdog | V | crash-net + per-step try/catch; `tests/supervisor.test.ts` (rung throws, loop continues). |
 | AC-9 | authority model + idempotent + before/after logged | V | `tests/rungs.test.ts`, `remediation-064c.test.ts`. |
-| AC-10 | install opt-out (`--no-hivedoctor`) | V (logic) / B (B-1 live OS) | `tests/service/install-guard.test.ts`; `install.sh`/`install.ps1` guards. Live install path BLOCKED. |
+| AC-10 | install opt-out (`--no-doctor`) | V (logic) / B (B-1 live OS) | `tests/service/install-guard.test.ts`; `install.sh`/`install.ps1` guards. Live install path BLOCKED. |
 
 ### 064a Supervisor core
 
@@ -145,7 +145,7 @@ Legend: V = VERIFIED (code + a real asserting test), B = BLOCKED (external prere
 | 064b.1 clean install -> service registered + running | B (B-1) | templates + `service-module.test.ts`; live OS blocked. |
 | 064b.2 SIGKILL -> manager restarts | B (B-1) | unit templates assert `KeepAlive`/`Restart=always`; live blocked. |
 | 064b.3 reboot -> auto-start | B (B-1) | unit (RunAtLoad/WantedBy); live blocked. |
-| 064b.4 `--no-hivedoctor` -> no service, no process | V | `install-guard.test.ts`, `cli-delegation.test.ts`. |
+| 064b.4 `--no-doctor` -> no service, no process | V | `install-guard.test.ts`, `cli-delegation.test.ts`. |
 | 064b.5 `uninstall-service` removes unit | V (unit) / B (B-1 live) | `service/argv.test.ts`, `service-module.test.ts`. |
 | 064b.6 unprivileged -> userland fallback | V (logic) / B (B-1 live) | `platform.test.ts`, `install-guard.test.ts`. |
 
@@ -230,7 +230,7 @@ The ledger's status claims are **accurate and not inflated**. Cross-checks:
 
 ## Files Changed (one-line summaries)
 
-### New package `hivedoctor/`
+### New package `doctor/`
 - `src/supervisor.ts` - watch loop, classify -> heal -> incident, crash-net (064a).
 - `src/backoff.ts` - geometric jittered backoff, persisted rung (064a).
 - `src/health-probe.ts` - node:http `/health` probe + classification (064a).
@@ -241,7 +241,7 @@ The ledger's status claims are **accurate and not inflated**. Cross-checks:
 - `src/telemetry/{emit,otlp-serializer}.ts` - single OTLP/JSON egress chokepoint, allow-list, opt-out (064d).
 - `src/escalation/{needs-attention-store,hosted-sink}.ts` - local + hosted escalation (064g).
 - `src/status-page/server.ts` - loopback read-only status page on 3852 (064g).
-- `src/service/{platform,templates,argv,index,install-guard}.ts` - HiveDoctor OS-service registration (064b).
+- `src/service/{platform,templates,argv,index,install-guard}.ts` - Doctor OS-service registration (064b).
 - `src/cli/{banner,dispatch,arg-parse,self-update,opt-out,status,diagnose,...}.ts` - branded CLI + sacred self-update (064f).
 - `src/compose/index.ts` - composition root: rungs 1/2/3 + escalate-on-give-up + poll loop + status page (064f).
 - `esbuild.config.mjs`, `scripts/pack-check.mjs`, `package.json` - zero-dep bundle + publish hygiene (INT).
@@ -253,9 +253,9 @@ The ledger's status claims are **accurate and not inflated**. Cross-checks:
 - `src/commands/daemon.ts` - service-aware start/stop/status (064h).
 
 ### Installer + workflows
-- `scripts/install/install.sh`, `install.ps1` - additive HiveDoctor bootstrap, `--no-hivedoctor` guarded, fail-soft (064b).
-- `.github/workflows/ci.yaml` - multi-OS hivedoctor matrix (INT-1).
-- `.github/workflows/release-hivedoctor.yaml` (NEW) - OIDC trusted publish, provenance, fail-closed, does NOT auto-publish (INT-2, B-2).
+- `scripts/install/install.sh`, `install.ps1` - additive Doctor bootstrap, `--no-doctor` guarded, fail-soft (064b).
+- `.github/workflows/ci.yaml` - multi-OS doctor matrix (INT-1).
+- `.github/workflows/release-doctor.yaml` (NEW) - OIDC trusted publish, provenance, fail-closed, does NOT auto-publish (INT-2, B-2).
 
 ### Tests added (root)
 - `tests/cli/daemon-service.test.ts`, `tests/cli/daemon-lifecycle-service.test.ts`, `tests/commands/install.test.ts` (edited) - spawn-fallback regression coverage, all green.
@@ -266,8 +266,8 @@ The ledger's status claims are **accurate and not inflated**. Cross-checks:
 
 **SHIP-READY (code-complete v1), conditioned on external prerequisites B-1..B-5.**
 
-The implementation is faithful to the plan, exceptionally well-tested (378 hivedoctor + the new daemon-service suites), conforms to every resolved decision with no drift, introduces zero runtime dependencies, and carries both security High fixes verified in place. There are **no Critical issues and no MISSING acceptance criteria.** The 15 BLOCKED ACs are honest external prerequisites, not hidden gaps, and align exactly with the ledger's B-1..B-5 asks.
+The implementation is faithful to the plan, exceptionally well-tested (378 doctor + the new daemon-service suites), conforms to every resolved decision with no drift, introduces zero runtime dependencies, and carries both security High fixes verified in place. There are **no Critical issues and no MISSING acceptance criteria.** The 15 BLOCKED ACs are honest external prerequisites, not hidden gaps, and align exactly with the ledger's B-1..B-5 asks.
 
-Before the live behaviors flip on, the team must clear: **B-1** (macOS+Linux+Windows CI matrix for OS-service survival - gates 064b.1-.3, 064h.1-.3, AC-1, live 064b.5/.6), **B-2** (npm publish of `@legioncodeinc/hivedoctor` - 064e live, AC-5 live), **B-3** (the `blessed-version.json` CDN object - also unblocks W-1 by giving compose a real blessed version), **B-4** (PostHog `phc_` token + Logs-alpha acceptance - 064d/064g live ingest), and **B-5** (human review + live multi-OS smoke before 064h auto-merges to the shipped daemon, given it is the highest-blast-radius edit).
+Before the live behaviors flip on, the team must clear: **B-1** (macOS+Linux+Windows CI matrix for OS-service survival - gates 064b.1-.3, 064h.1-.3, AC-1, live 064b.5/.6), **B-2** (npm publish of `@legioncodeinc/doctor` - 064e live, AC-5 live), **B-3** (the `blessed-version.json` CDN object - also unblocks W-1 by giving compose a real blessed version), **B-4** (PostHog `phc_` token + Logs-alpha acceptance - 064d/064g live ingest), and **B-5** (human review + live multi-OS smoke before 064h auto-merges to the shipped daemon, given it is the highest-blast-radius edit).
 
 The two Warnings (W-1 compose blessed-version no-op verify; W-2 systemd ExecStart quoting) should be fixed but do not block the v1 code landing. W-1 in particular should be closed alongside B-3 since they share a root (a real blessed version source).

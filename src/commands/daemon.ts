@@ -63,10 +63,10 @@ export interface DaemonLifecycle {
 	/**
 	 * Restart the daemon (PRD-064h AC-064h.5). OPTIONAL on the seam (additive): when the daemon runs
 	 * as an OS service the real impl restarts it THROUGH the service manager (`launchctl kickstart` /
-	 * `systemctl --user restart` / schtasks stop+run) so HiveDoctor's rung-1 never spawns a second
+	 * `systemctl --user restart` / schtasks stop+run) so Doctor's rung-1 never spawns a second
 	 * process that would fight the service for the 3850 bind; in the detached-spawn fallback it
 	 * stop+starts via the PID/lock path. The 021a single-instance guard prevents any double-bind.
-	 * Resolves `{ restarted, viaService }` so the caller / HiveDoctor knows which path ran. A seam
+	 * Resolves `{ restarted, viaService }` so the caller / Doctor knows which path ran. A seam
 	 * that does not implement it (an older recording fake) simply omits it; callers guard with `?.`.
 	 */
 	restart?(): Promise<{ readonly restarted: boolean; readonly viaService: boolean }>;

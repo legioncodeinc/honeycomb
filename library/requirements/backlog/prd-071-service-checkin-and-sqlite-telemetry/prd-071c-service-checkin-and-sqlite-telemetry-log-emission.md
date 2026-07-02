@@ -10,7 +10,7 @@
 
 ## Goals
 
-Expose honeycomb's non-sensitive logs in its own local SQLite, each line carrying a verbosity level, so hivedoctor can poll recent log activity per `ADR-0001-hive-telemetry-transport-and-single-source-of-truth.md`. Keep the store bounded and rotated so it stays small enough for a one-second read cycle and never grows without limit.
+Expose honeycomb's non-sensitive logs in its own local SQLite, each line carrying a verbosity level, so doctor can poll recent log activity per `ADR-0001-hive-telemetry-transport-and-single-source-of-truth.md`. Keep the store bounded and rotated so it stays small enough for a one-second read cycle and never grows without limit.
 
 ## Scope
 
@@ -24,17 +24,17 @@ Expose honeycomb's non-sensitive logs in its own local SQLite, each line carryin
 
 - Check-in, registration, and heartbeat (PRD-071a).
 - Metrics emission (PRD-071b).
-- hivedoctor's poll, merge, and relay to the-hive (hivedoctor PRD-001 and PRD-002; the-hive PRD-005 renders the log rail).
+- doctor's poll, merge, and relay to hive (doctor PRD-001 and PRD-002; hive PRD-005 renders the log rail).
 
 ---
 
 ## User stories and acceptance criteria
 
-### US-071c.1 - hivedoctor can poll recent logs
+### US-071c.1 - doctor can poll recent logs
 
-**As** hivedoctor, **I want** honeycomb's recent logs in local SQLite, **so that** I can surface them on the health rail without honeycomb pushing.
+**As** doctor, **I want** honeycomb's recent logs in local SQLite, **so that** I can surface them on the health rail without honeycomb pushing.
 
-- AC-071c.1.1 Given honeycomb emits log activity, when hivedoctor reads `honeycomb_logs`, then it sees recent lines, each with a timestamp and a verbosity level.
+- AC-071c.1.1 Given honeycomb emits log activity, when doctor reads `honeycomb_logs`, then it sees recent lines, each with a timestamp and a verbosity level.
 
 ### US-071c.2 - The log store stays bounded
 
@@ -54,7 +54,7 @@ Expose honeycomb's non-sensitive logs in its own local SQLite, each line carryin
 
 - Logs are mirrored from honeycomb's existing daemon logger, not produced by a parallel logging path, so there is one definition of a log line.
 - Retention is enforced on write (cap by row count, byte size, or age) so no separate reaper process is required, mirroring the bounded discipline the local queue already follows.
-- The write uses the same built-in `node:sqlite` connection style in WAL mode so hivedoctor's read-only open does not contend with honeycomb's writes (per `ADR-0001-hive-telemetry-transport-and-single-source-of-truth.md`).
+- The write uses the same built-in `node:sqlite` connection style in WAL mode so doctor's read-only open does not contend with honeycomb's writes (per `ADR-0001-hive-telemetry-transport-and-single-source-of-truth.md`).
 - Redaction runs before insert; if a line cannot be safely redacted it is dropped rather than written.
 - Fail-soft: a log write error is caught and dropped and never surfaces into memory work.
 
@@ -75,13 +75,13 @@ Expose honeycomb's non-sensitive logs in its own local SQLite, each line carryin
 ## Open questions
 
 - [ ] Retention bound: cap by row count, byte size, or age, and what default keeps reads cheap on a one-second cycle?
-- [ ] Verbosity mapping: reuse the daemon logger's levels verbatim, or collapse to a small fixed set for hivedoctor's rail?
+- [ ] Verbosity mapping: reuse the daemon logger's levels verbatim, or collapse to a small fixed set for doctor's rail?
 
 ---
 
 ## Related
 
 - Parent: [PRD-071](./prd-071-service-checkin-and-sqlite-telemetry-index.md)
-- `../../../../../hivedoctor/library/knowledge/private/architecture/ADR-0001-hive-telemetry-transport-and-single-source-of-truth.md` - logs live in the service's local SQLite; hivedoctor polls read-only.
-- Expected the-hive PRD-005 (health rail and health page) at `../../../../../the-hive/library/requirements/backlog/prd-005-health-rail-and-health-page/` - the eventual reader of these logs.
+- `../../../../../doctor/library/knowledge/private/architecture/ADR-0001-hive-telemetry-transport-and-single-source-of-truth.md` - logs live in the service's local SQLite; doctor polls read-only.
+- Expected hive PRD-005 (health rail and health page) at `../../../../../hive/library/requirements/backlog/prd-005-health-rail-and-health-page/` - the eventual reader of these logs.
 - Sibling: [PRD-071a](./prd-071a-service-checkin-and-sqlite-telemetry-checkin-and-registration.md), [PRD-071b](./prd-071b-service-checkin-and-sqlite-telemetry-metrics-emission.md).

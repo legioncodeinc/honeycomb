@@ -46,9 +46,9 @@ import {
 	type OnboardingState,
 	saveOnboarding,
 } from "../daemon/runtime/onboarding/index.js";
-import { type RegistryBind, registerHoneycombWithHivedoctor } from "../daemon/runtime/telemetry/fleet-registry.js";
+import { type RegistryBind, registerHoneycombWithDoctor } from "../daemon/runtime/telemetry/fleet-registry.js";
 import { type EmitDeps, emitTelemetry, recordVersionAndEmitUpdated } from "../daemon/runtime/telemetry/index.js";
-import { DAEMON_HOST, DAEMON_PORT, THEHIVE_HOST, THEHIVE_PORT } from "../shared/constants.js";
+import { DAEMON_HOST, DAEMON_PORT, HIVE_HOST, HIVE_PORT } from "../shared/constants.js";
 import type { CommandResult, OutputSink } from "./contracts.js";
 import { type DaemonVerbDeps, ensureDaemonRunning } from "./daemon.js";
 
@@ -60,17 +60,17 @@ import { type DaemonVerbDeps, ensureDaemonRunning } from "./daemon.js";
  */
 export const DASHBOARD_LOCAL_HOST = "honeycomb.local" as const;
 
-/** The portal route thehive serves the dashboard SPA at (ADR-0001). */
+/** The portal route hive serves the dashboard SPA at (ADR-0001). */
 export const DASHBOARD_PATH = "/" as const;
 
 /** The best-effort friendly portal URL (`http://honeycomb.local:3853/`). */
 export function localDashboardUrl(): string {
-	return `http://${DASHBOARD_LOCAL_HOST}:${THEHIVE_PORT}${DASHBOARD_PATH}`;
+	return `http://${DASHBOARD_LOCAL_HOST}:${HIVE_PORT}${DASHBOARD_PATH}`;
 }
 
 /** The always-correct loopback portal URL (`http://127.0.0.1:3853/`) — the a-AC-6 fallback. */
 export function loopbackDashboardUrl(): string {
-	return `http://${THEHIVE_HOST}:${THEHIVE_PORT}${DASHBOARD_PATH}`;
+	return `http://${HIVE_HOST}:${HIVE_PORT}${DASHBOARD_PATH}`;
 }
 
 /**
@@ -187,9 +187,9 @@ function writeInstalledMarker(ref: string, dir: string | undefined, out: OutputS
 }
 
 /**
- * Register (or refresh) honeycomb's entry in hivedoctor's static registry (PRD-071 Contract A /
+ * Register (or refresh) honeycomb's entry in doctor's static registry (PRD-071 Contract A /
  * AC-1 / AC-071a.1), declaring honeycomb's identity, `/health` URL, and its fleet telemetry SQLite
- * path so hivedoctor knows honeycomb should exist and where to poll it. FAIL-SOFT (071a technical
+ * path so doctor knows honeycomb should exist and where to poll it. FAIL-SOFT (071a technical
  * considerations): a registry write error (a locked file, a missing/unwritable `~/.honeycomb`)
  * logs a note and returns `false` — it NEVER aborts the install. Idempotent: re-running REPLACES
  * the existing `honeycomb` entry in place rather than duplicating it (AC-071a.1.2).
@@ -198,7 +198,7 @@ function writeInstalledMarker(ref: string, dir: string | undefined, out: OutputS
  * Resolve the daemon bind (host/port) the registry entry's `healthUrl` should advertise, from the
  * SAME runtime-config resolution the daemon itself binds with (`HONEYCOMB_PORT` / `HONEYCOMB_HOST`
  * / `HONEYCOMB_BIND`), so a non-default bind advertises the right probe URL. A wildcard listen
- * address (0.0.0.0 / ::) maps to the loopback host: that is the address hivedoctor (same machine)
+ * address (0.0.0.0 / ::) maps to the loopback host: that is the address doctor (same machine)
  * can actually reach a wildcard-bound daemon on. FAIL-SOFT: an invalid env value falls back to the
  * shared default constants rather than failing the install.
  */
@@ -212,16 +212,16 @@ function resolveRegistryBind(): RegistryBind | undefined {
 	}
 }
 
-function writeHivedoctorRegistryEntry(dir: string | undefined, out: OutputSink): boolean {
+function writeDoctorRegistryEntry(dir: string | undefined, out: OutputSink): boolean {
 	try {
 		const bind = resolveRegistryBind();
-		registerHoneycombWithHivedoctor({
+		registerHoneycombWithDoctor({
 			...(dir !== undefined ? { homeDir: dir } : {}),
 			...(bind !== undefined ? { bind } : {}),
 		});
 		return true;
 	} catch {
-		out("note: could not register with hivedoctor (continuing — the install still succeeded).");
+		out("note: could not register with doctor (continuing — the install still succeeded).");
 		return false;
 	}
 }
@@ -316,9 +316,9 @@ export async function runInstallCommand(argv: readonly string[], deps: InstallVe
 	const wrote = writeInstalledMarker(ref, deps.dir, out);
 	if (wrote) out(`✓ onboarding marked installed (ref: ${ref}).`);
 
-	// 2b) Register (or refresh) honeycomb's hivedoctor static-registry entry (PRD-071 Contract A).
-	// Fail-soft — see `writeHivedoctorRegistryEntry`.
-	writeHivedoctorRegistryEntry(deps.dir, out);
+	// 2b) Register (or refresh) honeycomb's doctor static-registry entry (PRD-071 Contract A).
+	// Fail-soft — see `writeDoctorRegistryEntry`.
+	writeDoctorRegistryEntry(deps.dir, out);
 
 	// 3) Open the dashboard, honeycomb.local best-effort → loopback fallback (a-AC-6).
 	openDashboardWithFallback(opener, out);

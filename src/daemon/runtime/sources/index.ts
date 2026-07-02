@@ -35,7 +35,7 @@ export {
 	type SourceChunk,
 	type SourceConfig,
 	SourceConfigSchema,
-	type SourceGraphTriple,
+	type HiveGraphTriple,
 	type SourceKind,
 	SOURCE_KINDS,
 	SourceKindSchema,

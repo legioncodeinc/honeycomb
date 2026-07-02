@@ -17,7 +17,7 @@
  *   spawns a UI — importing this module has no side effects.
  */
 
-import { DAEMON_HOST, DAEMON_PORT, THEHIVE_HOST, THEHIVE_PORT } from "../shared/constants.js";
+import { DAEMON_HOST, DAEMON_PORT, HIVE_HOST, HIVE_PORT } from "../shared/constants.js";
 import {
 	type Connectivity,
 	type DashboardData,
@@ -139,13 +139,13 @@ export async function launchDashboard(
 	return renderDashboard(source);
 }
 
-/** The URL path the thehive portal serves the dashboard SPA at (ADR-0001 / PRD-001). */
+/** The URL path the hive portal serves the dashboard SPA at (ADR-0001 / PRD-001). */
 export const DASHBOARD_HOST_PATH = "/" as const;
 
-/** The thehive portal base URL the operator opens in a browser. */
+/** The hive portal base URL the operator opens in a browser. */
 export function portalBaseUrl(options: LaunchDashboardOptions = {}): string {
-	const host = options.host ?? THEHIVE_HOST;
-	const port = options.port ?? THEHIVE_PORT;
+	const host = options.host ?? HIVE_HOST;
+	const port = options.port ?? HIVE_PORT;
 	return `http://${host}:${port}`;
 }
 
@@ -159,7 +159,7 @@ export interface OpenDashboardResult {
 
 /**
  * Resolve the viewable portal URL (PRD-001 / ADR-0001) the `honeycomb dashboard` verb opens.
- * thehive serves the React dashboard at loopback port 3853; honeycomb keeps `/api/*` only.
+ * hive serves the React dashboard at loopback port 3853; honeycomb keeps `/api/*` only.
  * Returns that URL plus a connectivity probe against the honeycomb data daemon so the verb
  * can surface the daemon-down state (d-AC-5) before handing the URL to a browser opener.
  */

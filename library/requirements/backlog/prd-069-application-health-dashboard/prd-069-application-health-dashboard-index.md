@@ -1,8 +1,8 @@
 # PRD-069: Application Health Dashboard
 
-> **Status:** Superseded by [hivedoctor PRD-001](../../../../../hivedoctor/library/requirements/backlog/prd-001-telemetry-source-of-truth/) and [hivedoctor PRD-002](../../../../../hivedoctor/library/requirements/backlog/prd-002-service-registry-and-poll/) (source-of-truth telemetry) plus [the-hive PRD-005 (health rail and health page)](../../../../../the-hive/library/requirements/backlog/prd-005-health-rail-and-health-page/).
+> **Status:** Superseded by [doctor PRD-001](../../../../../doctor/library/requirements/backlog/prd-001-telemetry-source-of-truth/) and [doctor PRD-002](../../../../../doctor/library/requirements/backlog/prd-002-service-registry-and-poll/) (source-of-truth telemetry) plus [hive PRD-005 (health rail and health page)](../../../../../hive/library/requirements/backlog/prd-005-health-rail-and-health-page/).
 >
-> The health dashboard is no longer honeycomb-owned. hivedoctor is now the single source of truth for fleet telemetry (PRD-001 and PRD-002) and the-hive renders the health rail and health page (PRD-005). Honeycomb's contribution is to emit its own non-sensitive telemetry as a supervised service (see [PRD-071](../prd-071-service-checkin-and-sqlite-telemetry/prd-071-service-checkin-and-sqlite-telemetry-index.md)).
+> The health dashboard is no longer honeycomb-owned. doctor is now the single source of truth for fleet telemetry (PRD-001 and PRD-002) and hive renders the health rail and health page (PRD-005). Honeycomb's contribution is to emit its own non-sensitive telemetry as a supervised service (see [PRD-071](../prd-071-service-checkin-and-sqlite-telemetry/prd-071-service-checkin-and-sqlite-telemetry-index.md)).
 
 > **Status:** Backlog
 > **Priority:** P1
@@ -13,7 +13,7 @@
 
 ## Overview
 
-Honeycomb already has multiple health signals: primary `/health`, protected diagnostics health, setup warmup, HiveDoctor state, needs-attention files, update status, service-manager state, and CLI daemon status. Today those signals are split across CLI output, the primary dashboard, the minimal HiveDoctor status page, and telemetry. This PRD creates a browser-accessible application health dashboard that is available from Chrome even when the primary daemon is down, while also surfacing the same health information inside the regular dashboard when the primary is up.
+Honeycomb already has multiple health signals: primary `/health`, protected diagnostics health, setup warmup, Doctor state, needs-attention files, update status, service-manager state, and CLI daemon status. Today those signals are split across CLI output, the primary dashboard, the minimal Doctor status page, and telemetry. This PRD creates a browser-accessible application health dashboard that is available from Chrome even when the primary daemon is down, while also surfacing the same health information inside the regular dashboard when the primary is up.
 
 This is the third PRD in the boot-experience sequence. PRD-067 prevents false remediation during boot. PRD-068 provides the always-fast portal shell. This PRD turns the portal into an operational health surface.
 
@@ -23,7 +23,7 @@ This is the third PRD in the boot-experience sequence. PRD-067 prevents false re
 
 - Provide one local browser page that answers "Is Honeycomb healthy? If not, which layer is failing?"
 - Keep the page available from a service that is much harder to crash than the primary daemon.
-- Aggregate health from HiveDoctor, primary daemon, embeddings, storage, service supervision, update state, setup/auth state, and known escalation records.
+- Aggregate health from Doctor, primary daemon, embeddings, storage, service supervision, update state, setup/auth state, and known escalation records.
 - Mirror the health dashboard inside the regular primary dashboard when `3850` is healthy.
 - Keep the health dashboard read-only in v1.
 - Preserve privacy: no tokens, no credential values, no raw org secrets, no DeepLake data payloads.
@@ -48,9 +48,9 @@ This is the third PRD in the boot-experience sequence. PRD-067 prevents false re
 | Embeddings warmup | `src/daemon/runtime/dashboard/setup-state.ts` exposes `warmup: { enabled, live, warm }`. | Useful for boot UX but currently tied to primary daemon availability. |
 | Dashboard connectivity | `src/dashboard/contracts.ts` has explicit `reachable` vs `unreachable` connectivity state. | The regular dashboard can show down state, but only after its host exists. |
 | Regular dashboard host | `src/daemon/runtime/dashboard/host.ts` serves `/dashboard` from the primary daemon. | The host is unavailable when primary is down. |
-| HiveDoctor health | `hivedoctor/src/state.ts` stores `lastKnownHealth`, backoff, failures, and last heal. | The minimal status page does not present an operator-grade timeline or layered health view. |
-| HiveDoctor status page | `hivedoctor/src/status-page/server.ts` serves `/` and `/status.json` with health, escalation, suggested commands. | Too minimal for product launch; does not aggregate primary, service, update, and warmup signals. |
-| HiveDoctor compose | `hivedoctor/src/compose/index.ts` wires status page, supervisor, update poll loop, install-health telemetry, needs-attention store. | All the raw ingredients exist in separate seams, but no single health model is exported. |
+| Doctor health | `doctor/src/state.ts` stores `lastKnownHealth`, backoff, failures, and last heal. | The minimal status page does not present an operator-grade timeline or layered health view. |
+| Doctor status page | `doctor/src/status-page/server.ts` serves `/` and `/status.json` with health, escalation, suggested commands. | Too minimal for product launch; does not aggregate primary, service, update, and warmup signals. |
+| Doctor compose | `doctor/src/compose/index.ts` wires status page, supervisor, update poll loop, install-health telemetry, needs-attention store. | All the raw ingredients exist in separate seams, but no single health model is exported. |
 | Daemon service state | `src/cli/runtime.ts` and `src/commands/daemon.ts` expose service manager and PID/lock status through the lifecycle seam. | CLI-only today; browser health needs equivalent read-only state. |
 
 ---
@@ -61,14 +61,14 @@ The dashboard should present a layered model, not one ambiguous red/green dot:
 
 | Layer | Status values | Source |
 |---|---|---|
-| Portal | `ok`, `degraded` | Portal/HiveDoctor process self state. |
-| HiveDoctor | `watching`, `booting`, `healing`, `needs_attention`, `disabled`, `unknown` | Supervisor state, state file, needs-attention store. |
+| Portal | `ok`, `degraded` | Portal/Doctor process self state. |
+| Doctor | `watching`, `booting`, `healing`, `needs_attention`, `disabled`, `unknown` | Supervisor state, state file, needs-attention store. |
 | Primary daemon | `booting`, `ok`, `degraded`, `unreachable`, `still_starting`, `unknown` | `/health`, PID/lock, service manager state. |
 | Service manager | `registered`, `running`, `not_registered`, `unavailable`, `unknown` | Existing lifecycle/service-manager seams. |
 | Storage | `reachable`, `unreachable`, `not_checked`, `unknown` | Primary health reasons and cached health bit. |
 | Embeddings | `disabled`, `starting`, `live`, `warm`, `unavailable`, `unknown` | Setup warmup and health reasons. |
 | Schema | `ok`, `missing_table`, `unknown` | Primary health reasons. |
-| Updates | `current`, `update_available`, `updating`, `failed`, `pinned`, `disabled`, `unknown` | HiveDoctor update state/poll loop, state file. |
+| Updates | `current`, `update_available`, `updating`, `failed`, `pinned`, `disabled`, `unknown` | Doctor update state/poll loop, state file. |
 | Telemetry | `enabled`, `disabled`, `unknown` | Opt-out resolution; do not test egress live from the dashboard. |
 
 The visual hierarchy must answer:
@@ -88,7 +88,7 @@ Primary URL: `http://127.0.0.1:3852/health`
 
 Requirements:
 
-- Served by the portal/HiveDoctor process, not by the primary daemon.
+- Served by the portal/Doctor process, not by the primary daemon.
 - Read-only.
 - Loopback only.
 - Polls a same-origin JSON endpoint, for example `/health/status.json`.
@@ -113,11 +113,11 @@ Requirements:
 
 | ID | Criterion |
 |---|---|
-| AC-1 | Given the primary daemon is down but HiveDoctor/portal is running, when the user opens the health dashboard in Chrome, then the page renders and clearly marks primary as unavailable or booting. |
+| AC-1 | Given the primary daemon is down but Doctor/portal is running, when the user opens the health dashboard in Chrome, then the page renders and clearly marks primary as unavailable or booting. |
 | AC-2 | Given the primary daemon is healthy, when the user opens the portal health dashboard, then it shows primary `ok`, storage status, embeddings status, service manager state, and a link to the regular dashboard. |
 | AC-3 | Given embeddings are enabled but not warm, when the health dashboard renders, then embeddings show `starting` or `live, warming`, not `failed`. |
 | AC-4 | Given storage health is degraded after boot grace, when the health dashboard renders, then storage is marked degraded and the primary daemon status is not collapsed into a generic `dead`. |
-| AC-5 | Given HiveDoctor has an unresolved needs-attention record, when the health dashboard renders, then the recommended action and attempted remediation steps are visible without exposing secrets. |
+| AC-5 | Given Doctor has an unresolved needs-attention record, when the health dashboard renders, then the recommended action and attempted remediation steps are visible without exposing secrets. |
 | AC-6 | Given telemetry opt-out is enabled, when the health dashboard renders, then it shows telemetry disabled and performs no network egress beyond loopback. |
 | AC-7 | Given the portal cannot read a health signal because an endpoint is unavailable, when the page renders, then that tile shows `unknown` with a short reason and the page remains usable. |
 | AC-8 | Given the regular dashboard is available, when the health panel renders there, then the labels and statuses match the portal health model. |
@@ -130,9 +130,9 @@ Requirements:
 
 Recommended implementation path:
 
-1. Define a shared health-view contract in a file importable by HiveDoctor and dashboard web code without importing daemon storage.
-2. In HiveDoctor/portal, implement a read-only health aggregator:
-   - Read HiveDoctor state and needs-attention store.
+1. Define a shared health-view contract in a file importable by Doctor and dashboard web code without importing daemon storage.
+2. In Doctor/portal, implement a read-only health aggregator:
+   - Read Doctor state and needs-attention store.
    - Probe primary `/health` with a short timeout.
    - Read daemon PID/service state if a safe CLI/runtime seam is exposed, or initially mark service state `unknown`.
    - When primary is reachable and local-mode-safe, optionally call `/setup/state` and `/api/diagnostics/health`.
@@ -141,9 +141,9 @@ Recommended implementation path:
 5. Add a copy-safe recommended action map:
    - `booting`: wait, auto-refresh.
    - `still_starting`: wait or run `honeycomb daemon status`.
-   - `unreachable`: run `hivedoctor status` or view logs.
+   - `unreachable`: run `doctor status` or view logs.
    - `degraded storage`: check credentials/network.
-   - `needs_attention`: follow HiveDoctor recommendation.
+   - `needs_attention`: follow Doctor recommendation.
 
 The health dashboard must not be a repair console in v1. It can show commands, but it must not execute them.
 
@@ -153,13 +153,13 @@ The health dashboard must not be a repair console in v1. It can show commands, b
 
 | File | Expected change |
 |---|---|
-| `hivedoctor/src/status-page/server.ts` or new `hivedoctor/src/portal/*` | Serve health dashboard HTML and status JSON. |
-| `hivedoctor/src/compose/index.ts` | Wire aggregator dependencies: state, needs-attention, primary probe, update state. |
-| `hivedoctor/src/state.ts` | Expose or preserve fields needed by the health model. |
+| `doctor/src/status-page/server.ts` or new `doctor/src/portal/*` | Serve health dashboard HTML and status JSON. |
+| `doctor/src/compose/index.ts` | Wire aggregator dependencies: state, needs-attention, primary probe, update state. |
+| `doctor/src/state.ts` | Expose or preserve fields needed by the health model. |
 | `src/dashboard/web/*` | Add regular-dashboard health panel/page using the shared model. |
 | `src/daemon/runtime/diagnostics-health.ts` | No required behavior change, but consumed as a source when primary is healthy. |
 | `src/daemon/runtime/dashboard/setup-state.ts` | No required behavior change, but consumed for warmup/auth/setup signals. |
-| `src/cli/runtime.ts` | Potentially expose a safe read-only service status helper without pulling daemon storage into HiveDoctor. |
+| `src/cli/runtime.ts` | Potentially expose a safe read-only service status helper without pulling daemon storage into Doctor. |
 
 ---
 
@@ -172,13 +172,13 @@ The health dashboard must not be a repair console in v1. It can show commands, b
 - Browser test: portal health page renders on `3852` while primary `3850` is down.
 - Browser test: regular dashboard health panel renders on `3850` while primary is up.
 - Browser test: text fits at mobile and desktop widths.
-- Live proof: start HiveDoctor with primary delayed, open Chrome to portal health, watch transition from booting to ready.
+- Live proof: start Doctor with primary delayed, open Chrome to portal health, watch transition from booting to ready.
 
 ---
 
 ## Open questions
 
-- [ ] Should service-manager status be read by HiveDoctor directly, or should the primary daemon publish it once healthy?
+- [ ] Should service-manager status be read by Doctor directly, or should the primary daemon publish it once healthy?
 - [ ] Should the health dashboard timeline use the existing `incidents.ndjson`, the needs-attention file, or a new summarized local file?
 - [ ] Should the regular dashboard health panel be top-level navigation or a settings subpage? Recommendation: top-level "Health" because it is support-critical.
 - [ ] Should update state expose exact versions in local mode? Recommendation: yes for package versions, never for tokens or org secrets.
@@ -187,13 +187,13 @@ The health dashboard must not be a repair console in v1. It can show commands, b
 
 ## Related
 
-- [PRD-067: HiveDoctor Boot Grace Release Blocker](../prd-067-hivedoctor-boot-grace-release-blocker/prd-067-hivedoctor-boot-grace-release-blocker-index.md)
+- [PRD-067: Doctor Boot Grace Release Blocker](../prd-067-doctor-boot-grace-release-blocker/prd-067-doctor-boot-grace-release-blocker-index.md)
 - [PRD-068: Portal Daemon Boot Shell](../prd-068-portal-daemon-boot-shell/prd-068-portal-daemon-boot-shell-index.md)
 - [PRD-070: First Browser Load Experience](../prd-070-first-browser-load-experience/prd-070-first-browser-load-experience-index.md)
 - [PRD-029: Degradation Observability](../../completed/prd-029-degradation-observability/prd-029-degradation-observability-index.md)
-- [PRD-064: HiveDoctor Self-Healing Watchdog](../../in-work/prd-064-hivedoctor-self-healing-watchdog/prd-064-hivedoctor-self-healing-watchdog-index.md)
-- `hivedoctor/src/status-page/server.ts`
-- `hivedoctor/src/compose/index.ts`
+- [PRD-064: Doctor Self-Healing Watchdog](../../in-work/prd-064-doctor-self-healing-watchdog/prd-064-doctor-self-healing-watchdog-index.md)
+- `doctor/src/status-page/server.ts`
+- `doctor/src/compose/index.ts`
 - `src/daemon/runtime/server.ts`
 - `src/daemon/runtime/diagnostics-health.ts`
 - `src/daemon/runtime/dashboard/setup-state.ts`

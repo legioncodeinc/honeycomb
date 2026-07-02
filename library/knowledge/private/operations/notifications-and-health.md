@@ -6,7 +6,7 @@ Architecture of the Honeycomb notifications framework and the proactive prerequi
 
 **Related:**
 - [`cli-command-architecture.md`](cli-command-architecture.md)
-- [`hivedoctor-watchdog.md`](hivedoctor-watchdog.md)
+- [`doctor-watchdog.md`](doctor-watchdog.md)
 - [`../auth/auth-architecture.md`](../auth/auth-architecture.md)
 - [`../architecture/daemon-surface.md`](../architecture/daemon-surface.md)
 - [`../overview.md`](../overview.md)

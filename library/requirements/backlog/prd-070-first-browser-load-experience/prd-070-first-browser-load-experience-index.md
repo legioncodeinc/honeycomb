@@ -1,8 +1,8 @@
 # PRD-070: First Browser Load Experience
 
-> **Status:** Superseded by [the-hive PRD-003 (landing gate)](../../../../../the-hive/library/requirements/backlog/prd-003-portal-gate-and-routing/) and [the-hive PRD-004 (/buzzing)](../../../../../the-hive/library/requirements/backlog/prd-004-buzzing/).
+> **Status:** Superseded by [hive PRD-003 (landing gate)](../../../../../hive/library/requirements/backlog/prd-003-portal-gate-and-routing/) and [hive PRD-004 (/buzzing)](../../../../../hive/library/requirements/backlog/prd-004-buzzing/).
 >
-> The first browser load is now owned by the-hive portal: PRD-003 defines the landing gate and PRD-004 defines the /buzzing boot experience. Honeycomb no longer serves this surface; its fleet role is defined in [PRD-071](../prd-071-service-checkin-and-sqlite-telemetry/prd-071-service-checkin-and-sqlite-telemetry-index.md).
+> The first browser load is now owned by hive portal: PRD-003 defines the landing gate and PRD-004 defines the /buzzing boot experience. Honeycomb no longer serves this surface; its fleet role is defined in [PRD-071](../prd-071-service-checkin-and-sqlite-telemetry/prd-071-service-checkin-and-sqlite-telemetry-index.md).
 
 > **Status:** Backlog
 > **Priority:** P2
@@ -25,7 +25,7 @@ This is not a marketing landing page. It is the first operational surface of the
 - Show a graphical boot experience for the first 60 seconds that matches the real boot grace.
 - Communicate progress through truthful health signals rather than fake percentages.
 - Transition gracefully to the regular dashboard when the primary daemon is ready.
-- Keep the experience lightweight enough to be served by the portal/HiveDoctor process.
+- Keep the experience lightweight enough to be served by the portal/Doctor process.
 - Work on Chrome desktop without layout shifts, blank screens, or text overlap.
 - Respect reduced motion and avoid motion-heavy effects for users who opt out.
 
@@ -45,7 +45,7 @@ This is not a marketing landing page. It is the first operational surface of the
 | Area | Current code fact | UX implication |
 |---|---|---|
 | Regular dashboard assets | `src/daemon/runtime/dashboard/host.ts` serves `/dashboard`, `/dashboard/app.js`, `/dashboard/styles.css`, `/dashboard/honeycomb-memory-cluster.svg`, and fonts from the primary daemon. | The boot experience can reuse brand assets and visual language, but cannot depend on the primary daemon being up. |
-| Portal seed | `hivedoctor/src/status-page/server.ts` currently serves minimal inline HTML/CSS with no external resources. | The boot shell should preserve the no-network, loopback-only reliability posture. |
+| Portal seed | `doctor/src/status-page/server.ts` currently serves minimal inline HTML/CSS with no external resources. | The boot shell should preserve the no-network, loopback-only reliability posture. |
 | Install opener | `src/commands/install.ts` opens the dashboard URL after daemon readiness. | PRD-068 will change the first-open target to the portal; this PRD defines what users see there. |
 | Connectivity model | `src/dashboard/contracts.ts` defines reachable/unreachable states. | The visual scene should render from real connectivity states. |
 | Setup warmup | `src/daemon/runtime/dashboard/setup-state.ts` exposes embeddings `warmup` once primary is reachable. | The graphical boot can show embeddings as warming without treating it as failure. |
@@ -62,7 +62,7 @@ The boot screen should be a full-browser operational scene:
 - A subtle animated memory/health graph or honeycomb-cell field driven by CSS/canvas, not heavy libraries.
 - Real status chips:
   - Portal
-  - HiveDoctor
+  - Doctor
   - Primary daemon
   - Storage
   - Embeddings
@@ -149,11 +149,11 @@ Avoid:
 
 | File | Expected change |
 |---|---|
-| `hivedoctor/src/status-page/server.ts` or new `hivedoctor/src/portal/*` | Serve boot shell and local assets. |
-| `hivedoctor/tests/status-page/server.test.ts` | Cover HTML contains boot UI states and no remote resources. |
+| `doctor/src/status-page/server.ts` or new `doctor/src/portal/*` | Serve boot shell and local assets. |
+| `doctor/tests/status-page/server.test.ts` | Cover HTML contains boot UI states and no remote resources. |
 | New portal browser tests | Verify desktop/mobile/reduced-motion render and ready transition. |
 | `src/commands/install.ts` | Open portal first after PRD-068, not directly relevant to visual implementation beyond route target. |
-| Asset folder under `hivedoctor/` or shared dashboard assets | Add/copy any required brand images or generated visual assets. |
+| Asset folder under `doctor/` or shared dashboard assets | Add/copy any required brand images or generated visual assets. |
 
 ---
 
@@ -180,11 +180,11 @@ Avoid:
 
 ## Related
 
-- [PRD-067: HiveDoctor Boot Grace Release Blocker](../prd-067-hivedoctor-boot-grace-release-blocker/prd-067-hivedoctor-boot-grace-release-blocker-index.md)
+- [PRD-067: Doctor Boot Grace Release Blocker](../prd-067-doctor-boot-grace-release-blocker/prd-067-doctor-boot-grace-release-blocker-index.md)
 - [PRD-068: Portal Daemon Boot Shell](../prd-068-portal-daemon-boot-shell/prd-068-portal-daemon-boot-shell-index.md)
 - [PRD-069: Application Health Dashboard](../prd-069-application-health-dashboard/prd-069-application-health-dashboard-index.md)
 - [PRD-024: Dashboard UI Parity](../../completed/prd-024-dashboard-ui-parity/prd-024-dashboard-ui-parity-index.md)
-- `hivedoctor/src/status-page/server.ts`
+- `doctor/src/status-page/server.ts`
 - `src/daemon/runtime/dashboard/host.ts`
 - `src/dashboard/contracts.ts`
 - `src/commands/install.ts`

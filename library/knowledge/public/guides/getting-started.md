@@ -31,7 +31,7 @@ The terminal shows a short progress log, and when it finishes it **opens a dashb
 
 > Prefer to read the script before running it? Visit [get.theapiary.sh](https://get.theapiary.sh) in a browser, where you can inspect it and check the published checksums first.
 
-> The installer also sets up **HiveDoctor**, a tiny watchdog that keeps the background helper healthy and quietly repairs it if anything breaks. You do not need to do anything with it. Don't want it? Add `--no-hivedoctor` to the install command. See the [Glossary](../overview/glossary.md) for more.
+> The installer also sets up **Doctor**, a tiny watchdog that keeps the background helper healthy and quietly repairs it if anything breaks. You do not need to do anything with it. Don't want it? Add `--no-doctor` to the install command. See the [Glossary](../overview/glossary.md) for more.
 
 ## 2. Click "First time setup"
 

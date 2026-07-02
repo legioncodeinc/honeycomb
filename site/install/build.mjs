@@ -132,13 +132,13 @@ async function main() {
   //     real honeycomb-mark.svg inlined in the template.
   await copyFile(join(REPO_ROOT, 'assets', 'logos', 'favicon.svg'), join(DIST_DIR, 'favicon.svg'));
 
-  // 2d) Emit the blessed-version channel for HiveDoctor auto-update (PRD-065). HiveDoctor fetches
+  // 2d) Emit the blessed-version channel for Doctor auto-update (PRD-065). Doctor fetches
   //     https://get.theapiary.sh/blessed-version.json and forward-updates the daemon ONLY to the
   //     `version` named here (verify + rollback on the client, fail-closed if this is unreachable).
   //     On a `v*` release deploy this self-blesses the released version; on a manual dispatch it
   //     blesses main's current version. Schema is minimal: { version } (+ optional minVersion);
   //     extra fields are ignored by the client. Served short-cache so a new bless propagates within
-  //     HiveDoctor's 30-minute poll.
+  //     Doctor's 30-minute poll.
   const honeycombVersion = JSON.parse(await readFile(join(REPO_ROOT, 'package.json'), 'utf8')).version;
   const blessed = { version: honeycombVersion, generatedAt: new Date().toISOString() };
   await writeFile(join(DIST_DIR, 'blessed-version.json'), JSON.stringify(blessed, null, 2) + '\n', 'utf8');

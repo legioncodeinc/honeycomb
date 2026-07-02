@@ -18,7 +18,7 @@
  * ║                                                                          ║
  * ║  SEAM WIRING (now SERVED BY THE PRODUCTION ASSEMBLY):                      ║
  * ║    `mountLogsApi` is wired by `assembleDaemon()` itself. The viewable    ║
- * ║    dashboard SPA is served by thehive (ADR-0001); honeycomb keeps `/api/*`. ║
+ * ║    dashboard SPA is served by hive (ADR-0001); honeycomb keeps `/api/*`. ║
  * ║    This itest boots in `local` mode and proves `GET /api/logs` is served   ║
  * ║    by the ASSEMBLED daemon with NO manual mount.                           ║
  * ║                                                                          ║

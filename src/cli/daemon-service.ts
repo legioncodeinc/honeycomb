@@ -5,7 +5,7 @@
  * The shipped daemon lifecycle (`src/cli/runtime.ts`) brings the daemon up by a DETACHED
  * `spawn()`, which dies with the machine and is not restarted on crash. 064h makes the OS
  * service manager the LIVENESS FLOOR: it restarts the daemon on crash and starts it on boot,
- * while HiveDoctor stays the intelligent healing layer above it. This module is the small,
+ * while Doctor stays the intelligent healing layer above it. This module is the small,
  * pure, per-OS surface that registers / unregisters / starts / stops / restarts / reports the
  * daemon as a userland service:
  *   - macOS  → launchd LaunchAgent (`~/Library/LaunchAgents/<label>.plist`, `launchctl`)
@@ -32,9 +32,9 @@
  *    shell string, always fixed-argv.
  *
  * ── Scope boundary ───────────────────────────────────────────────────────────
- * This is the PRIMARY daemon's service. HiveDoctor's OWN service is 064b (a sibling, separate
+ * This is the PRIMARY daemon's service. Doctor's OWN service is 064b (a sibling, separate
  * unit). The two share the same approach and acceptably-duplicated templates; this module lives
- * in the MAIN package (`src/`) and does not import from `hivedoctor/`.
+ * in the MAIN package (`src/`) and does not import from `doctor/`.
  */
 
 import { createRequire } from "node:module";
@@ -200,7 +200,7 @@ export interface ServiceSpec {
  * through this validator before the path ever reaches a file syscall (`writeFileSync` /
  * `rmSync` / `existsSync` in {@link defaultServiceRunner}). The fixed sub-segments are
  * literals we control, so the ONLY way the result escapes `home` is a hostile `home`,
- * which we reject. Built-ins only (node:path). Mirrors hivedoctor/src/safe-path.ts.
+ * which we reject. Built-ins only (node:path). Mirrors doctor/src/safe-path.ts.
  */
 function containedUnitPath(home: string, segments: readonly string[]): string {
 	const resolvedHome = normalize(resolve(home));
@@ -377,7 +377,7 @@ export interface DaemonServiceController {
 	register(spec: ServiceSpec): ServiceOpResult;
 	/** Deregister the service (unload/disable + remove the unit). Idempotent + never throws. */
 	unregister(spec: ServiceSpec): ServiceOpResult;
-	/** Ask the manager to (re)start the daemon, the rung-1 path HiveDoctor calls (AC-064h.5). */
+	/** Ask the manager to (re)start the daemon, the rung-1 path Doctor calls (AC-064h.5). */
 	restart(spec: ServiceSpec): ServiceOpResult;
 	/** Ask the manager to stop the daemon. */
 	stop(spec: ServiceSpec): ServiceOpResult;

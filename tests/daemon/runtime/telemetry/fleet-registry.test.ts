@@ -1,5 +1,5 @@
 /**
- * PRD-071 Contract A — the hivedoctor static registry writer (`fleet-registry.ts`).
+ * PRD-071 Contract A — the doctor static registry writer (`fleet-registry.ts`).
  *
  * Runs against a temp HOME dir — never the real `~/.honeycomb`. Covers AC-1, AC-071a.1.1,
  * AC-071a.1.2 (idempotent upsert, preserves other entries), and the pinned Contract-A shape.
@@ -18,10 +18,10 @@ import {
 	HONEYCOMB_REGISTRY_NAME,
 	HONEYCOMB_REGISTRY_PID_PATH,
 	HONEYCOMB_REGISTRY_TELEMETRY_DB_PATH,
-	hivedoctorRegistryPath,
+	doctorRegistryPath,
 	honeycombRegistryHealthUrl,
 	type RegistryFs,
-	registerHoneycombWithHivedoctor,
+	registerHoneycombWithDoctor,
 } from "../../../../src/daemon/runtime/telemetry/fleet-registry.js";
 
 let homeDir: string;
@@ -65,11 +65,11 @@ describe("PRD-071 Contract A: buildHoneycombRegistryEntry", () => {
 	});
 });
 
-describe("PRD-071 Contract A: registerHoneycombWithHivedoctor", () => {
+describe("PRD-071 Contract A: registerHoneycombWithDoctor", () => {
 	it("AC-1 / AC-071a.1.1 creates the registry file with honeycomb's entry when none existed (ENOENT-tolerant)", () => {
-		const result = registerHoneycombWithHivedoctor({ homeDir });
+		const result = registerHoneycombWithDoctor({ homeDir });
 		expect(existsSync(result.registryPath)).toBe(true);
-		expect(result.registryPath).toBe(hivedoctorRegistryPath(homeDir));
+		expect(result.registryPath).toBe(doctorRegistryPath(homeDir));
 		expect(result.updatedExistingEntry).toBe(false);
 		const doc = readRegistry(result.registryPath);
 		expect(doc.daemons).toHaveLength(1);
@@ -77,33 +77,33 @@ describe("PRD-071 Contract A: registerHoneycombWithHivedoctor", () => {
 	});
 
 	it("AC-071a.1.2 a re-install REPLACES the existing entry in place rather than duplicating it", () => {
-		const first = registerHoneycombWithHivedoctor({ homeDir });
+		const first = registerHoneycombWithDoctor({ homeDir });
 		expect(first.updatedExistingEntry).toBe(false);
-		const second = registerHoneycombWithHivedoctor({ homeDir });
+		const second = registerHoneycombWithDoctor({ homeDir });
 		expect(second.updatedExistingEntry).toBe(true);
 		const doc = readRegistry(second.registryPath);
 		expect(doc.daemons.filter((d) => d.name === "honeycomb")).toHaveLength(1);
 	});
 
-	it("preserves every OTHER daemon's entry untouched (e.g. hivedoctor's own or the-hive's)", () => {
-		const path = hivedoctorRegistryPath(homeDir);
+	it("preserves every OTHER daemon's entry untouched (e.g. doctor's own or hive's)", () => {
+		const path = doctorRegistryPath(homeDir);
 		mkdirSync(dirname(path), { recursive: true });
 		writeFileSync(
 			path,
 			JSON.stringify({
 				daemons: [
-					{ name: "thehive", healthUrl: "http://127.0.0.1:3853/health", pidPath: "~/.honeycomb/thehive.pid" },
-					{ name: "hivedoctor", healthUrl: "http://127.0.0.1:3851/health", pidPath: "~/.honeycomb/hivedoctor.pid" },
+					{ name: "hive", healthUrl: "http://127.0.0.1:3853/health", pidPath: "~/.honeycomb/hive.pid" },
+					{ name: "doctor", healthUrl: "http://127.0.0.1:3851/health", pidPath: "~/.honeycomb/doctor.pid" },
 				],
 			}),
 			"utf8",
 		);
 
-		registerHoneycombWithHivedoctor({ homeDir });
+		registerHoneycombWithDoctor({ homeDir });
 		const doc = readRegistry(path);
 		expect(doc.daemons).toHaveLength(3);
-		expect(doc.daemons.find((d) => d.name === "thehive")).toMatchObject({ healthUrl: "http://127.0.0.1:3853/health" });
-		expect(doc.daemons.find((d) => d.name === "hivedoctor")).toMatchObject({
+		expect(doc.daemons.find((d) => d.name === "hive")).toMatchObject({ healthUrl: "http://127.0.0.1:3853/health" });
+		expect(doc.daemons.find((d) => d.name === "doctor")).toMatchObject({
 			healthUrl: "http://127.0.0.1:3851/health",
 		});
 		expect(doc.daemons.find((d) => d.name === "honeycomb")).toMatchObject({
@@ -112,30 +112,30 @@ describe("PRD-071 Contract A: registerHoneycombWithHivedoctor", () => {
 	});
 
 	it("degrades a malformed pre-existing file to an empty daemon list rather than throwing", () => {
-		const path = hivedoctorRegistryPath(homeDir);
+		const path = doctorRegistryPath(homeDir);
 		mkdirSync(dirname(path), { recursive: true });
 		writeFileSync(path, "{ not valid json", "utf8");
-		expect(() => registerHoneycombWithHivedoctor({ homeDir })).not.toThrow();
+		expect(() => registerHoneycombWithDoctor({ homeDir })).not.toThrow();
 		const doc = readRegistry(path);
 		expect(doc.daemons).toHaveLength(1);
 		expect(doc.daemons[0]?.name).toBe("honeycomb");
 	});
 
 	it("the DB path convention stays stable across a re-install", () => {
-		registerHoneycombWithHivedoctor({ homeDir });
-		registerHoneycombWithHivedoctor({ homeDir });
-		const doc = readRegistry(hivedoctorRegistryPath(homeDir));
+		registerHoneycombWithDoctor({ homeDir });
+		registerHoneycombWithDoctor({ homeDir });
+		const doc = readRegistry(doctorRegistryPath(homeDir));
 		expect(doc.daemons[0]?.telemetryDbPath).toBe("~/.honeycomb/telemetry/honeycomb.sqlite");
 	});
 
 	it("a resolved bind threads through to the persisted entry's healthUrl", () => {
-		registerHoneycombWithHivedoctor({ homeDir, bind: { host: "127.0.0.1", port: 4850 } });
-		const doc = readRegistry(hivedoctorRegistryPath(homeDir));
+		registerHoneycombWithDoctor({ homeDir, bind: { host: "127.0.0.1", port: 4850 } });
+		const doc = readRegistry(doctorRegistryPath(homeDir));
 		expect(doc.daemons[0]).toMatchObject({ name: "honeycomb", healthUrl: "http://127.0.0.1:4850/health" });
 	});
 
 	it("re-merges when a concurrent writer's rename lands between our write and our verify read", () => {
-		const path = hivedoctorRegistryPath(homeDir);
+		const path = doctorRegistryPath(homeDir);
 		const real = createNodeRegistryFs();
 		// Simulate a lost update: right AFTER our first atomic rename commits, a competitor's
 		// document (read BEFORE our write, so missing our entry) lands and clobbers the file.
@@ -148,18 +148,18 @@ describe("PRD-071 Contract A: registerHoneycombWithHivedoctor", () => {
 					competitorWrites += 1;
 					real.writeFile(
 						path,
-						`${JSON.stringify({ daemons: [{ name: "thehive", healthUrl: "http://127.0.0.1:3853/health" }] }, null, 2)}\n`,
+						`${JSON.stringify({ daemons: [{ name: "hive", healthUrl: "http://127.0.0.1:3853/health" }] }, null, 2)}\n`,
 					);
 				}
 			},
 		};
 
-		registerHoneycombWithHivedoctor({ homeDir, fs: racingFs });
+		registerHoneycombWithDoctor({ homeDir, fs: racingFs });
 		const doc = readRegistry(path);
 		expect(doc.daemons.find((d) => d.name === "honeycomb")).toMatchObject({
 			healthUrl: "http://127.0.0.1:3850/health",
 		});
-		expect(doc.daemons.find((d) => d.name === "thehive")).toMatchObject({
+		expect(doc.daemons.find((d) => d.name === "hive")).toMatchObject({
 			healthUrl: "http://127.0.0.1:3853/health",
 		});
 	});

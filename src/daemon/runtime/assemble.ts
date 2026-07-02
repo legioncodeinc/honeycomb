@@ -397,7 +397,7 @@ export interface AssembleDaemonOptions {
 	readonly vault?: VaultSettingsReader;
 	/**
 	 * PRD-071 (Contract B): the fleet telemetry SQLite store (`~/.honeycomb/telemetry/honeycomb.sqlite`)
-	 * honeycomb's check-in/metrics/log surfaces write into for hivedoctor to poll read-only. Production
+	 * honeycomb's check-in/metrics/log surfaces write into for doctor to poll read-only. Production
 	 * leaves it UNSET → the composition root opens the REAL store at the pinned Contract-B path for the
 	 * REAL assembly only (no injected {@link storage}), so the deterministic unit suite (which injects a
 	 * fake `storage`) never touches `~/.honeycomb`. The open is fail-soft: an unavailable `node:sqlite` /
@@ -927,7 +927,7 @@ export function assembleSeams(
 	// 6. The guided-setup routes (PRD-050b/c/d) — LOCAL-MODE ONLY (security F-1).
 	//    They attach onto the UNPROTECTED root group (`server.ts`: `{ path: "/", protect: false }`),
 	//    so in team/hybrid they are never mounted and fall through to the root scaffold. The
-	//    viewable dashboard SPA is served by thehive (ADR-0001); honeycomb keeps these setup
+	//    viewable dashboard SPA is served by hive (ADR-0001); honeycomb keeps these setup
 	//    API routes for the portal wire client and CLI fallbacks.
 	if (daemon.config.mode === "local") {
 		// 6a. The "First time setup" on-page login route — `POST /setup/login` (PRD-050c). Sits on

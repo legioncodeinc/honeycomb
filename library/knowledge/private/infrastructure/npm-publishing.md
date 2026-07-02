@@ -126,7 +126,7 @@ The job runs as a 3-OS matrix (`ubuntu-latest`, `macos-latest`, `windows-latest`
 5. **Asserts `honeycomb --version`** produces non-empty output that **contains the published version** (the direct guard against the PR #172 silent-exit class).
 6. **Asserts `honeycomb --help`** prints non-empty (the entry guard fired).
 
-It cannot un-publish a bad release, npm releases are immutable, but it turns the release run **red immediately** so a fix-up patch ships fast instead of users hitting a dead CLI. A companion `hivedoctor` real-npm smoke test (`tests/`, vitest) was given a raised timeout to absorb the Windows install flake the global-install path surfaces.
+It cannot un-publish a bad release, npm releases are immutable, but it turns the release run **red immediately** so a fix-up patch ships fast instead of users hitting a dead CLI. A companion `doctor` real-npm smoke test (`tests/`, vitest) was given a raised timeout to absorb the Windows install flake the global-install path surfaces.
 
 ---
 

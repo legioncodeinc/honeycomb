@@ -125,7 +125,7 @@ export interface DaemonServices {
 	readonly embed: EmbedSupervisor;
 	/**
 	 * The fleet check-in + metrics telemetry service (PRD-071). Writes honeycomb's runtime status
-	 * and metrics snapshot into its own local SQLite for hivedoctor to poll read-only. Defaults to
+	 * and metrics snapshot into its own local SQLite for doctor to poll read-only. Defaults to
 	 * the inert {@link noopTelemetryService} so the daemon compiles and every existing test stays
 	 * on zero real SQLite; `assembleDaemon` swaps in the real one.
 	 */
@@ -283,9 +283,9 @@ export function createDaemon(options: CreateDaemonOptions = {}): Daemon {
 		});
 	});
 
-	// ── No CORS middleware: the dashboard reaches honeycomb ONLY through thehive's
-	// server-side proxy (the-hive ADR-0002). The browser talks same-origin to thehive
-	// (`:3853`), and thehive fetches honeycomb over loopback SERVER-SIDE — so no browser
+	// ── No CORS middleware: the dashboard reaches honeycomb ONLY through hive's
+	// server-side proxy (hive ADR-0002). The browser talks same-origin to hive
+	// (`:3853`), and hive fetches honeycomb over loopback SERVER-SIDE — so no browser
 	// cross-origin request (and no preflight) ever hits honeycomb, and no `Access-Control-*`
 	// allowance is needed. This supersedes the ADR-0001 cutover's client-side federated wire,
 	// which fetched honeycomb's origin directly from the browser and required a CORS allowlist.

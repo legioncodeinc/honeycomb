@@ -1,16 +1,16 @@
-# Security Audit: HiveDoctor Auto-Update Fix (PRD-065)
+# Security Audit: Doctor Auto-Update Fix (PRD-065)
 
 - **Date:** 2026-06-28
 - **Auditor:** security-worker-bee
 - **Branch:** main (uncommitted diff)
-- **Scope:** ONLY the uncommitted HiveDoctor auto-update fix (dry-run preview + verify/rollback semantics). The npm/auto-update surface was audited in prior passes; this is a focused delta audit.
+- **Scope:** ONLY the uncommitted Doctor auto-update fix (dry-run preview + verify/rollback semantics). The npm/auto-update surface was audited in prior passes; this is a focused delta audit.
 - **Files reviewed (the diff + new files):**
-  - `hivedoctor/src/cli/update-actions.ts` (NEW) - `createUpdateActions`: `checkPrimaryUpdate` -> `previewUpdate`, `applyPrimaryUpdate` -> `runUpdateTransaction`.
-  - `hivedoctor/src/update/update-engine.ts` - new `previewUpdate()`, `gatherDecision()`, `updated_unverified` status, pre-update health baseline.
-  - `hivedoctor/src/update/update-telemetry.ts` - new `updated_unverified` outcome.
-  - `hivedoctor/src/update/index.ts` - exports `UpdatePreview`.
-  - `hivedoctor/src/cli/index.ts`, `hivedoctor/src/compose/index.ts` - wiring; `restartDaemon` seam returns boolean.
-  - `hivedoctor/tests/cli/update-actions.test.ts` (NEW), `hivedoctor/tests/update/update-engine.test.ts`, `poll-loop.test.ts`, `compose/create-hivedoctor.test.ts`.
+  - `doctor/src/cli/update-actions.ts` (NEW) - `createUpdateActions`: `checkPrimaryUpdate` -> `previewUpdate`, `applyPrimaryUpdate` -> `runUpdateTransaction`.
+  - `doctor/src/update/update-engine.ts` - new `previewUpdate()`, `gatherDecision()`, `updated_unverified` status, pre-update health baseline.
+  - `doctor/src/update/update-telemetry.ts` - new `updated_unverified` outcome.
+  - `doctor/src/update/index.ts` - exports `UpdatePreview`.
+  - `doctor/src/cli/index.ts`, `doctor/src/compose/index.ts` - wiring; `restartDaemon` seam returns boolean.
+  - `doctor/tests/cli/update-actions.test.ts` (NEW), `doctor/tests/update/update-engine.test.ts`, `poll-loop.test.ts`, `compose/create-doctor.test.ts`.
 - **Supporting (read for context, not in diff):** `src/update/update-policy.ts` (gate), `src/telemetry/emit.ts` (egress chokepoint).
 
 ## Executive Summary
@@ -32,7 +32,7 @@ None detected.
 
 ### Low
 - **L1 (informational, no fix) - `updated_unverified` is a deliberately weaker terminal state, by design.**
-  `hivedoctor/src/update/update-engine.ts:340-365`. When the daemon was already unhealthy before the update, OR there was no supervised service to restart through, a post-update unhealthy `/health` does NOT roll back; the new version is KEPT and labeled `updated_unverified`. This is the correct and intended behavior (rolling back here would only discard a version that may be the fix, for no safety gain - the update cannot make an already-down daemon worse). It is recorded as informational only so a downstream reader knows the state is intentional, observable (distinct telemetry outcome + `autoupdate.verify_skipped` log), and not an un-verified-version regression on a healthy box. No action recommended.
+  `doctor/src/update/update-engine.ts:340-365`. When the daemon was already unhealthy before the update, OR there was no supervised service to restart through, a post-update unhealthy `/health` does NOT roll back; the new version is KEPT and labeled `updated_unverified`. This is the correct and intended behavior (rolling back here would only discard a version that may be the fix, for no safety gain - the update cannot make an already-down daemon worse). It is recorded as informational only so a downstream reader knows the state is intentional, observable (distinct telemetry outcome + `autoupdate.verify_skipped` log), and not an un-verified-version regression on a healthy box. No action recommended.
 
 ## Focus-Area Confirmations
 
@@ -67,7 +67,7 @@ The new structured log `autoupdate.verify_skipped` (`update-engine.ts:353-358`) 
 
 ## Post-Audit Test Result
 
-`cd hivedoctor && npm run test` -> **47 files passed, 456 tests passed** (0 failed). No code was modified during this audit (no Critical/High to remediate), so this confirms the audited tree is green as-shipped.
+`cd doctor && npm run test` -> **47 files passed, 456 tests passed** (0 failed). No code was modified during this audit (no Critical/High to remediate), so this confirms the audited tree is green as-shipped.
 
 ## Ordering Note
 

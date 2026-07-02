@@ -1,17 +1,17 @@
-# QA Report — PRD-065 HiveDoctor one-shot CLI exit fix (`UV_HANDLE_CLOSING`)
+# QA Report — PRD-065 Doctor one-shot CLI exit fix (`UV_HANDLE_CLOSING`)
 
 - **Auditor:** quality-worker-bee
 - **Date:** 2026-06-28
-- **Plan / source:** PRD-065 HiveDoctor go-live (`library/requirements/backlog/prd-065-hivedoctor-go-live/`)
+- **Plan / source:** PRD-065 Doctor go-live (`library/requirements/backlog/prd-065-doctor-go-live/`)
 - **Scope:** the just-made fix for the Windows libuv exit assertion
   (`Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\win\async.c, line 76`)
-  on HiveDoctor's one-shot CLI commands.
+  on Doctor's one-shot CLI commands.
 - **Base:** `main` @ `fb714db` (working-tree change, uncommitted)
 - **Verified in:** `C:\Users\mario\GitHub\honeycomb` (main checkout)
 - **Files under review:**
-  - `hivedoctor/src/cli/bin.ts` (modified)
-  - `hivedoctor/src/cli/shutdown.ts` (new)
-  - `hivedoctor/tests/cli/shutdown.test.ts` (new)
+  - `doctor/src/cli/bin.ts` (modified)
+  - `doctor/src/cli/shutdown.ts` (new)
+  - `doctor/tests/cli/shutdown.test.ts` (new)
 
 ---
 
@@ -30,7 +30,7 @@ clean and `vitest run` reporting **48 files / 474 tests passed** (the new suite 
 > unit-asserted** because it aborts the process before any assertion can run. The testable
 > surface is therefore the exit-path *logic* (close-before-exit, unref-not-destroy, no synchronous
 > force-exit on the happy path, bounded close, unref'd backstop). The behavioral proof that the
-> abort is gone is the implementer's live Windows repro of `hivedoctor update --check`. This QA
+> abort is gone is the implementer's live Windows repro of `doctor update --check`. This QA
 > verifies the logic exhaustively; it does not and cannot re-run the native abort.
 
 **Verdict: SHIP-READY.**
@@ -73,7 +73,7 @@ None.
 ### Suggestions (consider improving)
 
 - **[Suggestion] No automated regression guard that `bin.ts` actually routes through `isOneShot` / `finalizeOneShot`.**
-  `bin.ts` (`hivedoctor/src/cli/bin.ts:30-41`) is top-level module code executed on import, so it is
+  `bin.ts` (`doctor/src/cli/bin.ts:30-41`) is top-level module code executed on import, so it is
   not unit-tested directly; the gate logic (`isOneShot`, `finalizeOneShot`) is fully covered in
   isolation but the *wiring* in `bin.ts` (one-shot → `finalizeOneShot`, `run` → plain `process.exit`)
   is verified only by reading. This matches the existing repo pattern (other bin/entry code is also
@@ -98,7 +98,7 @@ None.
 | Test suite | `npm run test` (`vitest run`) | PASS — **48 files / 474 tests** |
 | New suite (isolated) | `npx vitest run tests/cli/shutdown.test.ts` | PASS — **18 tests** |
 
-Environment: Node `v25.2.1`, run in `hivedoctor/` under the main checkout on branch `main`.
+Environment: Node `v25.2.1`, run in `doctor/` under the main checkout on branch `main`.
 
 ---
 
@@ -110,7 +110,7 @@ Environment: Node `v25.2.1`, run in `hivedoctor/` under the main checkout on bra
 - **Bounded so it can never hang.** The pool-close step races a `settleTimeoutMs` bound (`:211-218`),
   tested with a never-resolving close (`shutdown.test.ts:244-266`).
 - **No new runtime dependency.** undici is reached via `Symbol.for("undici.globalDispatcher.1")`
-  (`shutdown.ts:48,82-86`) rather than importing undici — built-ins only, consistent with the rest of HiveDoctor.
+  (`shutdown.ts:48,82-86`) rather than importing undici — built-ins only, consistent with the rest of Doctor.
 - **`run` watchdog lifecycle is genuinely untouched.** No edit to `runWatchdog`/`doctor.stop()`; the
   only `run`-adjacent change is the `bin.ts` guard that keeps `run` on its plain-exit path.
 
@@ -120,9 +120,9 @@ Environment: Node `v25.2.1`, run in `hivedoctor/` under the main checkout on bra
 
 | File | Change | One-line summary |
 |------|--------|------------------|
-| `hivedoctor/src/cli/bin.ts` | modified | Awaits `runCli`, then branches: `run` → `process.exit(code)`; one-shot → `await finalizeOneShot(code)`. |
-| `hivedoctor/src/cli/shutdown.ts` | new (+243) | One-shot teardown: `isOneShot`, `closeGlobalDispatcher`, `unrefActiveHandles`, `finalizeOneShot` (close pool → unref → set exitCode → unref'd backstop). All seams injectable. |
-| `hivedoctor/tests/cli/shutdown.test.ts` | new (+267) | 18 tests: gate truth table, close fail-soft + destroy fallback, unref-not-destroy, graceful no-force-exit order, bounded close, unref'd backstop. |
+| `doctor/src/cli/bin.ts` | modified | Awaits `runCli`, then branches: `run` → `process.exit(code)`; one-shot → `await finalizeOneShot(code)`. |
+| `doctor/src/cli/shutdown.ts` | new (+243) | One-shot teardown: `isOneShot`, `closeGlobalDispatcher`, `unrefActiveHandles`, `finalizeOneShot` (close pool → unref → set exitCode → unref'd backstop). All seams injectable. |
+| `doctor/tests/cli/shutdown.test.ts` | new (+267) | 18 tests: gate truth table, close fail-soft + destroy fallback, unref-not-destroy, graceful no-force-exit order, bounded close, unref'd backstop. |
 
 ---
 
