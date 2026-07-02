@@ -88,6 +88,7 @@ import type { EmbedClient } from "../services/embed-client.js";
 import type { RecallMode } from "../vault/api.js";
 import { Semaphore } from "./bounded-pool.js";
 import { amplificationConfig } from "./amplification-config.js";
+import { clampNectarRrfMultiplier, DEFAULT_NECTAR_RRF_MULTIPLIER } from "./nectar-recall-config.js";
 import type { QuerySource } from "../../storage/query-meter.js";
 import { actrActivation, type AccessEvent, type ActrParams, DEFAULT_ACTR_PARAMS } from "./activation.js";
 import { applyCalibration, type CalibrationModel } from "./calibration.js";
@@ -166,7 +167,7 @@ export function kindOfSource(source: RecallSource): RecallKind {
 }
 
 /** Which table/arm surfaced a recall hit. */
-export type RecallSource = "memories" | "memory" | "sessions";
+export type RecallSource = "memories" | "memory" | "sessions" | "hive_graph_versions";
 
 /**
  * The provenance CLASS of a hit (PRD-027 D-3 / AC-2). `memory` = a DISTILLED hit
@@ -382,10 +383,68 @@ export function buildSessionsArmSql(term: string, perArmLimit: number, projectCl
 	);
 }
 
+/**
+ * Build the `hive_graph_versions` arm (PRD-013a): Nectar's LLM-minted file descriptions,
+ * matched with a guarded `ILIKE` over `title` / `description` / `concepts`. Same guard
+ * discipline as {@link buildMemoriesArmSql} — the term routes through `sqlLike`, every
+ * identifier through `sqlIdent`, the per-arm `LIMIT` through the bare-numeric interpolation.
+ *
+ * Three load-bearing predicates carry the corpus's "added guarded arm" spec
+ * (`data/recall-integration.md`):
+ *  1. LATEST-PER-NECTAR — an `INNER JOIN` on a `MAX(seq)` subquery grouped by `nectar`
+ *     collapses a file's append-only version chain to its ONE current row (without it a
+ *     file edited 50 times dominates recall with 50 near-duplicate rows).
+ *  2. `describe_status = 'described'` — excludes `pending`/`failed`/`skipped-*` rows; a file
+ *     never described does not surface in semantic recall.
+ *  3. `project_id` scoping — the shared {@link buildProjectScopeConjunct} segment (`projectClause`)
+ *     ANDed into the SAME statement (BOTH the subquery and, transitively via the seq join, the
+ *     outer row) so a cross-project file is filtered server-side and never enters the fusion.
+ *
+ * Projects the four columns `rowsToRankedArm` reads: `source` (the `'hive_graph_versions'`
+ * literal), `id` (`nectar`, the stable file identity so the lexical + semantic arms fuse on
+ * `source+nectar`), `text` (`title || description`), and `created_at` (`described_at`, aliased
+ * to the uniform timestamp the recency dampener reads).
+ */
+export function buildHiveGraphVersionsArmSql(term: string, perArmLimit: number, projectClause = ""): string {
+	const pattern = `'%${sqlLike(term)}%'`;
+	const versionsTbl = sqlIdent("hive_graph_versions");
+	const nectarCol = sqlIdent("nectar");
+	const seqCol = sqlIdent("seq");
+	const titleCol = sqlIdent("title");
+	const descriptionCol = sqlIdent("description");
+	const conceptsCol = sqlIdent("concepts");
+	const describeStatusCol = sqlIdent("describe_status");
+	// PRD-047d: `hive_graph_versions` stamps `described_at` (the enricher-run time); alias it to
+	// the uniform `created_at` projection the recency dampener reads (no new column).
+	const describedAtCol = sqlIdent("described_at");
+	const perArm = Math.max(1, Math.trunc(perArmLimit));
+	// PRD-013a: the latest DESCRIBED version per nectar. The MAX(seq) subquery (grouped by nectar)
+	// collapses the append-only version chain to the one current row; the describe_status filter
+	// excludes pending/failed/skipped rows; the projectClause is the buildProjectScopeConjunct
+	// project_id segment ANDed in so a cross-project file never enters the fusion (49b-AC-2).
+	return (
+		`SELECT 'hive_graph_versions' AS source, v.${nectarCol} AS id, (v.${titleCol} || v.${descriptionCol})::text AS text, v.${describedAtCol}::text AS created_at ` +
+		`FROM "${versionsTbl}" v ` +
+		`INNER JOIN (SELECT ${nectarCol}, MAX(${seqCol}) AS max_seq FROM "${versionsTbl}" WHERE ${describeStatusCol} = 'described'${projectClause} GROUP BY ${nectarCol}) latest ` +
+		`ON v.${nectarCol} = latest.${nectarCol} AND v.${seqCol} = latest.max_seq ` +
+		`WHERE (v.${titleCol}::text ILIKE ${pattern} OR v.${descriptionCol}::text ILIKE ${pattern} OR v.${conceptsCol}::text ILIKE ${pattern}) ` +
+		`LIMIT ${perArm}`
+	);
+}
+
 /** Coerce a recall row's `source` cell into a {@link RecallSource} (defaults to `sessions`). */
 function readSource(value: unknown): RecallSource {
 	const s = String(value ?? "");
-	return s === "memories" ? "memories" : s === "memory" ? "memory" : "sessions";
+	// PRD-013a: the `hive_graph_versions` arm's rows carry the `'hive_graph_versions'` source
+	// literal — recognized here so they are NOT mis-defaulted to `sessions` (which would corrupt
+	// the hit's provenance, its `source+id` dedup key, and its arm-class weight).
+	return s === "memories"
+		? "memories"
+		: s === "memory"
+			? "memory"
+			: s === "hive_graph_versions"
+				? "hive_graph_versions"
+				: "sessions";
 }
 
 /** Coerce a row cell to a string (never undefined). */
@@ -400,13 +459,20 @@ function cell(value: unknown): string {
  * arm appears ONCE (the first — i.e. semantic — occurrence wins). This is plain
  * arm-COMBINATION, not ranking/fusion (PRD-027 owns ranking). Capped at `limit`.
  */
-function fuseHits(arms: readonly RankedArm[], limit: number): { hits: MemoryRecallHit[]; sources: RecallSource[] } {
+function fuseHits(
+	arms: readonly RankedArm[],
+	limit: number,
+	nectarRrfMultiplier: number = DEFAULT_NECTAR_RRF_MULTIPLIER,
+): { hits: MemoryRecallHit[]; sources: RecallSource[] } {
 	const docs = new Map<string, FusedDoc>();
 	for (const arm of arms) {
 		arm.entries.forEach((entry, index) => {
 			const rank = index + 1; // 1-based rank: the arm's own order IS the rank signal.
 			const kind = kindOfSource(entry.source);
-			const contribution = ARM_CLASS_WEIGHT[kind] / (RRF_K + rank);
+			// PRD-013a (decision #17): the per-SOURCE Nectar multiplier scales ONLY the
+			// `hive_graph_versions` contribution; every other source keeps a fixed `1` multiplier.
+			const sourceMultiplier = entry.source === "hive_graph_versions" ? nectarRrfMultiplier : 1;
+			const contribution = (ARM_CLASS_WEIGHT[kind] * sourceMultiplier) / (RRF_K + rank);
 			const docKey = fusionKey(entry.source, entry.id);
 			const existing = docs.get(docKey);
 			if (existing === undefined) {
@@ -686,6 +752,16 @@ export interface MemoryRecallDeps {
 	 */
 	readonly dedup?: DedupConfig;
 	/**
+	 * PRD-013a (decision #17 as amended): the operator-tunable `nectar_rrf_multiplier`. Scales ONLY
+	 * the `hive_graph_versions` arm's RRF fusion contribution (every other source keeps its
+	 * contribution unchanged), so an operator can dial Nectar file-description hits down/up relative
+	 * to session/memory hits. The composition root resolves it ONCE at boot from
+	 * `~/.honeycomb/nectar.json` (fail-soft to `1.0`, clamped `[0, 10]`) and threads it here; ABSENT
+	 * (a unit-constructed mount) → {@link DEFAULT_NECTAR_RRF_MULTIPLIER} (`1.0`), byte-identical to
+	 * today for the other arms. The engine re-clamps defensively.
+	 */
+	readonly nectarRrfMultiplier?: number;
+	/**
 	 * The recency config (PRD-047d + PRD-058a). The LIVE recency stage is the PRD-058a class-aware
 	 * ACTIVATION ({@link applyRecencyActivation}): when ABSENT, every class falls back to its DOCUMENTED
 	 * per-class default ({@link DEFAULT_RECENCY_HALF_LIFE_DAYS_BY_CLASS}: `memories` 180d / `memory` 45d /
@@ -849,7 +925,7 @@ async function runArm(sql: string, request: MemoryRecallRequest, deps: MemoryRec
  */
 interface SemanticArmSpec {
 	/** The {@link RecallSource} tag the hydrated hits carry. */
-	readonly source: Extract<RecallSource, "memories" | "sessions">;
+	readonly source: Extract<RecallSource, "memories" | "sessions" | "hive_graph_versions">;
 	/** The bare table identifier (`memories` / `sessions`). */
 	readonly table: string;
 	/** The id/grouping column the lexical counterpart keys on (`id` / `path`). */
@@ -884,6 +960,19 @@ const SEMANTIC_ARMS: readonly SemanticArmSpec[] = [
 		textColumn: "message",
 		timestampColumn: "creation_date", // PRD-047d: `sessions` stamps `creation_date`.
 		hydrateFilter: "",
+	},
+	{
+		// PRD-013b: the hive-graph semantic arm — `<#>` cosine over the 768-dim `embedding`
+		// column, paired with the lexical arm (PRD-013a) on the same `nectar` id space so a
+		// file hit by both fuses on `source+nectar`. The `describe_status = 'described'`
+		// hydrate filter mirrors the lexical arm's filter (excludes pending/failed/skipped rows).
+		source: "hive_graph_versions",
+		table: "hive_graph_versions",
+		idColumn: "nectar",
+		embeddingColumn: "embedding",
+		textColumn: "description",
+		timestampColumn: "described_at", // PRD-047d: `hive_graph_versions` stamps `described_at`.
+		hydrateFilter: `AND ${sqlIdent("describe_status")} = 'described'`,
 	},
 ];
 
@@ -1041,6 +1130,7 @@ async function runSemanticArms(
 function embeddingColumnFor(source: RecallSource): string | null {
 	if (source === "memories") return "content_embedding";
 	if (source === "sessions") return "message_embedding";
+	if (source === "hive_graph_versions") return "embedding"; // PRD-013b: the 768-dim file-description vector.
 	return null; // `memory` (summaries) — no embedding column.
 }
 
@@ -1069,9 +1159,11 @@ export function buildRerankEmbeddingSql(
 	);
 }
 
-/** The per-table id column the lexical/semantic arms key on (`memories`→id, `sessions`→path). */
+/** The per-table id column the lexical/semantic arms key on (`memories`→id, `sessions`→path, `hive_graph_versions`→nectar). */
 function idColumnFor(source: RecallSource): string {
-	return source === "sessions" || source === "memory" ? "path" : "id";
+	if (source === "sessions" || source === "memory") return "path";
+	if (source === "hive_graph_versions") return "nectar"; // PRD-013b: the stable file identity the rerank fetch keys on.
+	return "id";
 }
 
 /** Coerce a stored `FLOAT4[]` cell into a `number[]`, or `null` when it is not a usable vector. */
@@ -1098,12 +1190,13 @@ async function fetchCandidateEmbeddings(
 	request: MemoryRecallRequest,
 	deps: MemoryRecallDeps,
 ): Promise<Map<string, number[]>> {
-	// Group candidate ids by their embedding-bearing table.
-	const idsBySource = new Map<Extract<RecallSource, "memories" | "sessions">, string[]>();
+	// Group candidate ids by their embedding-bearing table. PRD-013b: `hive_graph_versions`
+	// joins `memories`/`sessions` as an embedding-bearing source, so the rerank fetch keys on it too.
+	const idsBySource = new Map<Extract<RecallSource, "memories" | "sessions" | "hive_graph_versions">, string[]>();
 	for (const hit of candidates) {
 		const col = embeddingColumnFor(hit.source);
 		if (col === null || hit.id === "") continue; // no embedding column / empty id → skip.
-		const source = hit.source as Extract<RecallSource, "memories" | "sessions">;
+		const source = hit.source as Extract<RecallSource, "memories" | "sessions" | "hive_graph_versions">;
 		const bucket = idsBySource.get(source);
 		if (bucket === undefined) idsBySource.set(source, [hit.id]);
 		else bucket.push(hit.id);
@@ -1669,9 +1762,24 @@ function refTimestampMs(createdAt: string, lastReinforcedAt: string | null | und
  * returned value is floored ≥ {@link MIN_RECENCY_HALF_LIFE_FLOOR} so the `λ = ln2/h` math is finite.
  */
 export function halfLifeForSource(source: RecallSource, byClass: RecencyHalfLifeByClass | undefined): number {
-	const configured = byClass?.[source];
-	const resolved = typeof configured === "number" && configured > 0 ? configured : DEFAULT_RECENCY_HALF_LIFE_DAYS_BY_CLASS[source];
+	const cls = recencyClassOf(source);
+	const configured = byClass?.[cls];
+	const resolved = typeof configured === "number" && configured > 0 ? configured : DEFAULT_RECENCY_HALF_LIFE_DAYS_BY_CLASS[cls];
 	return Math.max(MIN_RECENCY_HALF_LIFE_FLOOR, resolved);
+}
+
+/**
+ * Map a {@link RecallSource} to the recency half-life CLASS it decays under (PRD-058a). The
+ * half-life config is keyed by the three original arms (`memories` 180d / `memory` 45d /
+ * `sessions` 10d); `hive_graph_versions` — a clean, LLM-minted, durable file description — decays
+ * under the distilled `memories` class (its slow, long-lived rate), consistent with decision #17's
+ * "peer with distilled memory" framing. The three original sources map to their own class 1:1, so
+ * this is byte-for-byte the prior behavior for them.
+ */
+function recencyClassOf(source: RecallSource): keyof typeof DEFAULT_RECENCY_HALF_LIFE_DAYS_BY_CLASS {
+	if (source === "sessions") return "sessions";
+	if (source === "memory") return "memory";
+	return "memories"; // `memories` AND `hive_graph_versions` (durable distilled descriptions).
 }
 
 /**
@@ -2093,11 +2201,15 @@ export async function recallMemories(
 	// lexical arms always run (the resilient floor). Each lexical arm is bounded by the
 	// overall limit so a single arm cannot starve the fusion. In `keyword` mode the
 	// semantic arm is never invoked — it short-circuits to `null` before the await.
-	const [semanticRun, memoriesRows, memoryRows, sessionsRows] = await Promise.all([
+	const [semanticRun, memoriesRows, memoryRows, sessionsRows, hiveGraphRows] = await Promise.all([
 		keywordOnly ? Promise.resolve(null) : runSemanticArms(request, deps, limit),
 		runArm(buildMemoriesArmSql(term, limit, projectClause), request, deps),
 		runArm(buildMemoryArmSql(term, limit, projectClause), request, deps),
 		runArm(buildSessionsArmSql(term, limit, projectClause), request, deps),
+		// PRD-013a: the 4th (hive-graph) lexical arm — its OWN guarded statement, so a missing
+		// `hive_graph_versions` table (fresh workspace, brooding not run) degrades to [] for THIS
+		// arm only (`runArm`), never wiping the other three.
+		runArm(buildHiveGraphVersionsArmSql(term, limit, projectClause), request, deps),
 	]);
 
 	// `degraded` is HONEST (PRD-025 AC-3): false iff the semantic arm actually ran — EXCEPT in
@@ -2115,8 +2227,15 @@ export async function recallMemories(
 		rowsToRankedArm(memoriesRows),
 		rowsToRankedArm(memoryRows),
 		rowsToRankedArm(sessionsRows),
+		// PRD-013a: the hive-graph lexical arm joins the fusion in its storage order; a null
+		// semantic path leaves it as the lexical floor (BM25-only), an empty arm contributes nothing.
+		rowsToRankedArm(hiveGraphRows),
 	];
-	const { hits, sources } = fuseHits(arms, limit);
+	// PRD-013a (decision #17): resolve the per-SOURCE Nectar multiplier (already boot-clamped when
+	// threaded; re-clamped here defensively, fail-soft to 1.0). It scales ONLY the hive-graph
+	// contribution inside fuseHits — every other arm is unchanged.
+	const nectarRrfMultiplier = clampNectarRrfMultiplier(deps.nectarRrfMultiplier);
+	const { hits, sources } = fuseHits(arms, limit, nectarRrfMultiplier);
 
 	// PRD-047b + PRD-063c: rerank the fused top-N. The `embedding-cosine` path re-scores by
 	// cosine(query vector, candidate embedding) and runs ONLY when a real query vector exists (the

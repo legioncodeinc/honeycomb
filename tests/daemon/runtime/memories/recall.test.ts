@@ -316,8 +316,11 @@ function semanticStorage(opts: {
 			sqls.push(sql);
 			const kind = kindOf(sql);
 			const table = tableOf(sql);
-			if (kind === "vector") return ok((opts.vector?.[table === "other" ? "memories" : table]) ?? [], 0);
-			if (kind === "hydrate") return ok((opts.hydrate?.[table === "other" ? "memories" : table]) ?? [], 0);
+			// PRD-013: a table with no configured bucket (e.g. the `hive_graph_versions` arm this
+			// test does not populate) resolves to EMPTY — modeling a real absent/empty table, not
+			// the memories rows (which the prior `other → memories` fallback would have fabricated).
+			if (kind === "vector") return ok(table === "other" ? [] : (opts.vector?.[table] ?? []), 0);
+			if (kind === "hydrate") return ok(table === "other" ? [] : (opts.hydrate?.[table] ?? []), 0);
 			if (kind === "memories") return opts.lexical?.memories ?? ok([], 0);
 			if (kind === "memory") return opts.lexical?.memory ?? ok([], 0);
 			if (kind === "sessions") return opts.lexical?.sessions ?? ok([], 0);
