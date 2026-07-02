@@ -183,11 +183,18 @@ interface SqliteModule {
  */
 export function openFleetTelemetryStore(options: OpenFleetTelemetryStoreOptions = {}): FleetTelemetryStore {
 	const onceFailure = options.onceFailure ?? defaultOnceFailure();
-	let db: SqliteDatabase;
+	let db: SqliteDatabase | undefined;
 	try {
 		db = createDatabase(options);
 		migrate(db);
 	} catch (err: unknown) {
+		// If createDatabase succeeded but migrate threw, close the handle so the fail-soft
+		// fallback never leaks it (or leaves the file locked for a later retry/cleanup).
+		try {
+			db?.close();
+		} catch {
+			// The fail-soft fallback must stay non-throwing.
+		}
 		const reason = err instanceof Error ? err.message : String(err);
 		onceFailure(`honeycomb: fleet telemetry store unavailable (non-fatal): ${reason}`);
 		return NULL_FLEET_TELEMETRY_STORE;

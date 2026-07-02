@@ -926,7 +926,11 @@ main() {
 
   # PRD-002b DELETE transition: a --products= narrowing vs. the last run.
   reconcile_removed_products
-  [ "$DRY_RUN" -eq 1 ] || write_install_state
+  # Persist the selected set ONLY when every selected extra product actually installed/registered:
+  # a failed selection must not be recorded as "installed" (nor emit install_completed below).
+  if [ "$DRY_RUN" -ne 1 ] && [ "$EXTRA_PRODUCT_FAILED" -eq 0 ]; then
+    write_install_state
+  fi
 
   if [ "$DRY_RUN" -eq 1 ]; then
     printf '[dry-run] would hand off to: honeycomb install (daemon-ensure + dashboard-open)\n'
@@ -954,7 +958,18 @@ main() {
     _i=$((_i + 1))
   done
   "$bin" install "$@"
-  finish $?
+  cli_status=$?
+  # Propagate a selected extra-product failure into the terminal state: the run must not report
+  # install_completed / exit 0 when a product the user explicitly selected failed to install or
+  # register (its note was already printed by install_extra_product).
+  if [ "$cli_status" -ne 0 ]; then
+    finish "$cli_status"
+  fi
+  if [ "$EXTRA_PRODUCT_FAILED" -ne 0 ]; then
+    fail "one of the selected products did not install/register (see the notes above); Honeycomb itself is installed."
+    finish 1
+  fi
+  finish 0
 }
 
 main "$@"

@@ -453,6 +453,14 @@ function Ensure-Node {
 #           (lazy warmup -- 050b), so this stays fast.
 # -----------------------------------------------------------------------------
 function Install-Honeycomb {
+  # Idempotent (mirrors install.sh's install_honeycomb): a re-run on a machine that already has
+  # `honeycomb` is a NO-OP -- no npm mutation, no network -- so a rerun stays safe and succeeds
+  # OFFLINE. Only an absent install triggers the global npm install.
+  $existing = Resolve-HoneycombBin
+  if ($existing) {
+    Write-Ok "$HoneycombNpmPackage already installed ($existing)."
+    return $true
+  }
   $target = Resolve-CoreProductTarget 'honeycomb' $HoneycombNpmPackage
   Write-Step "installing $target globally..."
   npm install -g $target 2>$null | Out-Null
@@ -787,16 +795,23 @@ function Invoke-Main([string[]]$InvocationArgs) {
   }
 
   # PRD-002b: actually install the-hive / hivenectar when selected (the coverage-gap close).
+  # Mirrors install.sh's EXTRA_PRODUCT_FAILED: a failed SELECTED product must not be recorded as
+  # installed (Set-InstallState below) nor reported as install_completed (the final exit path).
+  $extraProductFailed = $false
   if ($productList -contains 'thehive') {
-    Install-ExtraProduct 'the-hive' 'thehive' '@legioncodeinc/thehive' 'thehive' 'install-service' $dryRun | Out-Null
+    if (-not (Install-ExtraProduct 'the-hive' 'thehive' '@legioncodeinc/thehive' 'thehive' 'install-service' $dryRun)) {
+      $extraProductFailed = $true
+    }
   }
   if ($productList -contains 'hivenectar') {
-    Install-ExtraProduct 'Hivenectar' 'hivenectar' '@legioncodeinc/hivenectar' 'hivenectar' 'install' $dryRun | Out-Null
+    if (-not (Install-ExtraProduct 'Hivenectar' 'hivenectar' '@legioncodeinc/hivenectar' 'hivenectar' 'install' $dryRun)) {
+      $extraProductFailed = $true
+    }
   }
 
   # PRD-002b DELETE transition: a --products= narrowing vs. the last run.
   Resolve-RemovedProducts $selection.Products $dryRun
-  if (-not $dryRun) { Set-InstallState $selection.Products }
+  if (-not $dryRun -and -not $extraProductFailed) { Set-InstallState $selection.Products }
 
   if ($dryRun) {
     Write-Host '[dry-run] would hand off to: honeycomb install (daemon-ensure + dashboard-open)'
@@ -805,8 +820,27 @@ function Invoke-Main([string[]]$InvocationArgs) {
 
   # The verb prints its own friendly step log and returns a clean exit code; forward it verbatim. A
   # handled failure inside the verb is already a plain-language line + non-zero exit -- no raw trace.
-  & $bin install
-  return (& $finish $LASTEXITCODE)
+  # Forward the caller's args MINUS every installer-only flag this script itself consumed (mirrors
+  # install.sh's filtering), so a bootstrap `--ref <code>` (and any future verb flag) still reaches
+  # the CLI's install verb.
+  $forwardArgs = @()
+  if ($InvocationArgs) {
+    foreach ($a in $InvocationArgs) {
+      if ($a -eq '--no-hivedoctor' -or $a -eq '-NoHiveDoctor' -or $a -eq '--dry-run') { continue }
+      if ($a -like '--products=*' -or $a -like '--profile=*' -or $a -like '--license=*' -or $a -like '--code=*') { continue }
+      $forwardArgs += $a
+    }
+  }
+  & $bin install @forwardArgs
+  $cliStatus = $LASTEXITCODE
+  # Propagate a selected extra-product failure into the terminal state (mirrors install.sh): never
+  # report install_completed / exit 0 when a product the user explicitly selected failed.
+  if ($cliStatus -ne 0) { return (& $finish $cliStatus) }
+  if ($extraProductFailed) {
+    Write-Fail 'one of the selected products did not install/register (see the notes above); Honeycomb itself is installed.'
+    return (& $finish 1)
+  }
+  return (& $finish 0)
 }
 
 # Entrypoint: run main, then set the exit code ONCE without tearing down the host (so `irm | iex`

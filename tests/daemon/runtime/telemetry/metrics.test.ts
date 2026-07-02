@@ -114,6 +114,49 @@ describe("PRD-071b: metrics snapshot service", () => {
 		store.close();
 	});
 
+	it("AC-071b.3.1 an in-flight flush from a previous run never corrupts a restart's fresh baseline", async () => {
+		const store = openFleetTelemetryStore({ memory: true });
+		// A manually-resolved source so one fetch can be held IN FLIGHT across a restart.
+		const pending: Array<(totals: MetricsTotals) => void> = [];
+		const source = {
+			async fetchTotals(): Promise<MetricsTotals> {
+				return new Promise((resolve) => {
+					pending.push(resolve);
+				});
+			},
+		};
+		const service = createMetricsService({ store, source, flushIntervalMs: 1_000 });
+
+		const firstStart = service.start();
+		pending.shift()?.({ memoryCount: 10, actionsTakenTotal: 2 }); // run 1 baseline {10, 2}
+		await firstStart;
+
+		// A timer tick fires and its fetch STALLS in flight...
+		await vi.advanceTimersByTimeAsync(1_000);
+		const staleResolve = pending.shift();
+
+		// ...then a restart re-baselines from fresh totals and writes the zero snapshot.
+		const secondStart = service.start();
+		pending.shift()?.({ memoryCount: 100, actionsTakenTotal: 50 }); // run 2 baseline {100, 50}
+		await secondStart;
+		expect(store.readMetrics()).toMatchObject({ memoriesCreated: 0, actionsTaken: 0 });
+
+		// The STALE run-1 flush finally resolves: it must be discarded, never repopulate the
+		// baseline or overwrite the restart's zero snapshot with run-1 deltas.
+		staleResolve?.({ memoryCount: 60, actionsTakenTotal: 30 });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(store.readMetrics()).toMatchObject({ memoriesCreated: 0, actionsTaken: 0 });
+
+		// The next run-2 flush still computes deltas against run 2's own baseline {100, 50}.
+		const nextFlush = service._flushForTest?.();
+		pending.shift()?.({ memoryCount: 105, actionsTakenTotal: 51 });
+		await nextFlush;
+		expect(store.readMetrics()).toMatchObject({ memoriesCreated: 5, actionsTaken: 1 });
+
+		await service.stop();
+		store.close();
+	});
+
 	it("recordFilesProcessed() accumulates in-memory and resets to zero on start()", async () => {
 		const store = openFleetTelemetryStore({ memory: true });
 		const source = fixtureSource([{ memoryCount: 0, actionsTakenTotal: 0 }]);

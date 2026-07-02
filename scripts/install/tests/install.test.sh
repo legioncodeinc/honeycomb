@@ -96,6 +96,17 @@ assert_file_absent() {
   fi
 }
 
+assert_file_present() {
+  desc="$1"; path="$2"
+  if [ -e "$path" ]; then
+    PASS=$((PASS + 1))
+    printf 'ok   - %s\n' "$desc"
+  else
+    FAIL=$((FAIL + 1))
+    printf 'FAIL - %s (expected to exist: %s)\n' "$desc" "$path"
+  fi
+}
+
 printf '=== a-AC-1/a-AC-3: default selection (no flags) preserves today'"'"'s behavior ===\n'
 h1="$(new_temp_home)"
 run_install "$h1" --dry-run
@@ -248,6 +259,60 @@ assert_contains  "help text documents --products=" "--products="
 assert_exit_code "help exits 0" 0
 assert_file_absent "help never writes install-id" "$h16/.honeycomb/install-id"
 rm -rf "$h16"
+
+printf '\n=== EXTRA_PRODUCT_FAILED gating: a failed selected product fails the run and skips the state write ===\n'
+# These two tests exercise a REAL (non-dry-run) pass through main() against stubbed npm/product
+# bins on PATH, so no actual npm mutation or network install ever happens. They need a real `node`
+# (install.sh's own manifest/state helpers use it); skip gracefully when absent.
+if command -v node >/dev/null 2>&1; then
+  make_stub_bin() {
+    stub_dir="$1"; stub_npm_install_exit="$2"; stub_prefix="$3"
+    mkdir -p "$stub_dir"
+    cat > "$stub_dir/npm" <<STUB
+#!/bin/sh
+case "\$1" in
+  --version) echo "9.9.9" ;;
+  prefix) printf '%s\n' "$stub_prefix" ;;
+  install) exit $stub_npm_install_exit ;;
+esac
+exit 0
+STUB
+    printf '#!/bin/sh\nexit 0\n' > "$stub_dir/honeycomb"
+    chmod +x "$stub_dir/npm" "$stub_dir/honeycomb"
+  }
+
+  # Failure path: the selected hivenectar's npm install fails -> the run must exit non-zero and
+  # must NOT persist install-state.json (which would record the failed selection as installed).
+  h17="$(new_temp_home)"
+  stub17="$h17/stub-bin"
+  make_stub_bin "$stub17" 1 "$h17/npm-prefix"
+  LAST_OUTPUT="$(HOME="$h17" HONEYCOMB_MANIFEST_URL="$FIXTURE_URL" PATH="$stub17:$PATH" \
+    sh "$INSTALL_SH" --products=honeycomb,hivenectar 2>&1)"
+  LAST_EXIT=$?
+  assert_contains    "a failed selected product prints its friendly note" "could not install Hivenectar"
+  assert_exit_code   "a failed selected product makes the run exit non-zero" 1
+  assert_file_absent "a failed selected product is never recorded in install-state.json" "$h17/.honeycomb/install-state.json"
+  rm -rf "$h17"
+
+  # Success path: the selected hivenectar installs + registers cleanly -> exit 0 and the state IS
+  # written (proves the new gate does not break the happy path).
+  h18="$(new_temp_home)"
+  stub18="$h18/stub-bin"
+  prefix18="$h18/npm-prefix"
+  make_stub_bin "$stub18" 0 "$prefix18"
+  mkdir -p "$prefix18/bin"
+  printf '#!/bin/sh\nexit 0\n' > "$prefix18/bin/hivenectar"
+  chmod +x "$prefix18/bin/hivenectar"
+  LAST_OUTPUT="$(HOME="$h18" HONEYCOMB_MANIFEST_URL="$FIXTURE_URL" PATH="$stub18:$PATH" \
+    sh "$INSTALL_SH" --products=honeycomb,hivenectar 2>&1)"
+  LAST_EXIT=$?
+  assert_contains     "a clean selected-product run registers the product" "Hivenectar registered"
+  assert_exit_code    "a clean selected-product run exits 0" 0
+  assert_file_present "a clean selected-product run persists install-state.json" "$h18/.honeycomb/install-state.json"
+  rm -rf "$h18"
+else
+  printf 'skip - EXTRA_PRODUCT_FAILED gating tests need node on PATH\n'
+fi
 
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then

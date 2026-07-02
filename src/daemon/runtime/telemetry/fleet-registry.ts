@@ -38,7 +38,23 @@ export function hivedoctorRegistryPath(homeDir: string = homedir()): string {
 
 /** honeycomb's registry identity — reused from the fleet store so the two never drift. */
 export const HONEYCOMB_REGISTRY_NAME = FLEET_SERVICE_NAME;
-/** honeycomb's `/health` endpoint, built from the SAME shared constants the daemon binds (no drift). */
+
+/**
+ * The resolved daemon bind a caller can thread in (host/port from the daemon's resolved runtime
+ * config) so the advertised `/health` URL matches where the daemon ACTUALLY listens, not just the
+ * shared defaults. When absent, the default `DAEMON_HOST:DAEMON_PORT` constants apply.
+ */
+export interface RegistryBind {
+	readonly host: string;
+	readonly port: number;
+}
+
+/** Build honeycomb's `/health` URL from a resolved bind, defaulting to the shared constants. */
+export function honeycombRegistryHealthUrl(bind?: RegistryBind): string {
+	return `http://${bind?.host ?? DAEMON_HOST}:${bind?.port ?? DAEMON_PORT}/health`;
+}
+
+/** honeycomb's DEFAULT `/health` endpoint, built from the SAME shared constants the daemon binds (no drift). */
 export const HONEYCOMB_REGISTRY_HEALTH_URL = `http://${DAEMON_HOST}:${DAEMON_PORT}/health` as const;
 /** The literal (un-expanded) pid-file path convention, matching `src/cli/runtime.ts`'s `daemon.pid`. */
 export const HONEYCOMB_REGISTRY_PID_PATH = "~/.honeycomb/daemon.pid" as const;
@@ -64,6 +80,11 @@ export interface RegistryUpsertOptions {
 	/** Override the home dir the registry lives under (tests point this at a temp HOME). */
 	readonly homeDir?: string;
 	readonly fs?: RegistryFs;
+	/**
+	 * The resolved daemon bind (host/port) the entry's `healthUrl` should advertise. Callers that
+	 * know the resolved runtime config thread it here; omitted, the shared defaults apply.
+	 */
+	readonly bind?: RegistryBind;
 }
 
 export interface RegistryUpsertResult {
@@ -132,11 +153,14 @@ function parseRegistryDocument(raw: string): ParsedRegistryDocument {
 	return { root, daemons };
 }
 
-/** Build honeycomb's registry entry from the pinned Contract-A constants (AC-1). */
-export function buildHoneycombRegistryEntry(): RegistryDaemonEntry {
+/**
+ * Build honeycomb's registry entry from the pinned Contract-A constants (AC-1). A resolved `bind`
+ * makes the advertised `healthUrl` follow a non-default daemon bind; absent, the defaults apply.
+ */
+export function buildHoneycombRegistryEntry(bind?: RegistryBind): RegistryDaemonEntry {
 	return {
 		name: HONEYCOMB_REGISTRY_NAME,
-		healthUrl: HONEYCOMB_REGISTRY_HEALTH_URL,
+		healthUrl: honeycombRegistryHealthUrl(bind),
 		pidPath: HONEYCOMB_REGISTRY_PID_PATH,
 		probeIntervalMs: HONEYCOMB_REGISTRY_PROBE_INTERVAL_MS,
 		startupGraceMs: HONEYCOMB_REGISTRY_STARTUP_GRACE_MS,
@@ -161,20 +185,27 @@ function nextTempPath(registryPath: string): string {
 }
 
 /**
- * Upsert honeycomb's entry into hivedoctor's static registry (AC-1 / AC-071a.1). Idempotent: a
- * re-install REPLACES the existing `name === "honeycomb"` entry in place (never duplicates it,
- * AC-071a.1.2) while every other daemon's entry is preserved untouched. The write is atomic
- * (temp file + rename), and a missing / malformed pre-existing file degrades to an empty daemon
- * list rather than throwing (fail-tolerant read). Callers (install.ts) wrap this fail-soft — a
- * registry write failure must never abort the install (071a technical considerations).
+ * How many read-merge-write-verify rounds the upsert attempts before accepting the last atomic
+ * write as-is (see the concurrency note on {@link registerHoneycombWithHivedoctor}).
  */
-export function registerHoneycombWithHivedoctor(options: RegistryUpsertOptions = {}): RegistryUpsertResult {
-	const registryPath = options.registryPath ?? hivedoctorRegistryPath(options.homeDir ?? homedir());
-	const fs = options.fs ?? createNodeRegistryFs();
+const REGISTRY_UPSERT_MAX_ATTEMPTS = 5;
+
+/** True when `entry` still carries every field/value of honeycomb's own entry (survived a race). */
+function entryMatches(entry: Record<string, unknown>, wanted: RegistryDaemonEntry): boolean {
+	for (const [key, value] of Object.entries(wanted)) {
+		if (entry[key] !== value) return false;
+	}
+	return true;
+}
+
+/** One atomic read-merge-write round. Returns whether an existing honeycomb entry was replaced. */
+function writeMergedRegistry(
+	registryPath: string,
+	fs: RegistryFs,
+	honeycombEntry: RegistryDaemonEntry,
+): { updatedExistingEntry: boolean } {
 	const parsed = readRegistryDocument(registryPath, fs);
 	const nextDaemons = [...parsed.daemons];
-	const honeycombEntry = buildHoneycombRegistryEntry();
-
 	const index = nextDaemons.findIndex((entry) => entry.name === HONEYCOMB_REGISTRY_NAME);
 	if (index >= 0) {
 		nextDaemons[index] = { ...nextDaemons[index], ...honeycombEntry };
@@ -194,9 +225,48 @@ export function registerHoneycombWithHivedoctor(options: RegistryUpsertOptions =
 		fs.removeFile(tempPath);
 		throw error;
 	}
+	return { updatedExistingEntry: index >= 0 };
+}
+
+/**
+ * Upsert honeycomb's entry into hivedoctor's static registry (AC-1 / AC-071a.1). Idempotent: a
+ * re-install REPLACES the existing `name === "honeycomb"` entry in place (never duplicates it,
+ * AC-071a.1.2) while every other daemon's entry is preserved untouched. The write is atomic
+ * (temp file + rename), and a missing / malformed pre-existing file degrades to an empty daemon
+ * list rather than throwing (fail-tolerant read). Callers (install.ts) wrap this fail-soft — a
+ * registry write failure must never abort the install (071a technical considerations).
+ *
+ * ── Concurrency: an optimistic re-read-and-verify loop, not a lock ────────────────────────────
+ * The temp-file rename makes each WRITE atomic, but two installers running at once can both read
+ * the same old document and the later rename would silently drop the other daemon's entry
+ * (last-writer-wins). Each round therefore RE-READS the file after its own rename and verifies
+ * honeycomb's entry survived; when a concurrent writer's rename landed in between and dropped it,
+ * the loop re-merges into THAT writer's document and writes again (dependency-free, no lockfile).
+ * Because every product's writer only replaces its OWN entry by name and preserves the rest, the
+ * loop converges. After {@link REGISTRY_UPSERT_MAX_ATTEMPTS} rounds the last atomic write is
+ * accepted as-is rather than failing: this runs on the install path, where a residual
+ * last-writer-wins under pathological contention is preferable to failing the install (071a
+ * technical considerations: fail-soft).
+ */
+export function registerHoneycombWithHivedoctor(options: RegistryUpsertOptions = {}): RegistryUpsertResult {
+	const registryPath = options.registryPath ?? hivedoctorRegistryPath(options.homeDir ?? homedir());
+	const fs = options.fs ?? createNodeRegistryFs();
+	const honeycombEntry = buildHoneycombRegistryEntry(options.bind);
+
+	let updatedExistingEntry = false;
+	for (let attempt = 0; attempt < REGISTRY_UPSERT_MAX_ATTEMPTS; attempt++) {
+		const round = writeMergedRegistry(registryPath, fs, honeycombEntry);
+		// The FIRST round's read reflects the pre-upsert state; that is the honest answer to
+		// "did an entry already exist" regardless of how many verify rounds follow.
+		if (attempt === 0) updatedExistingEntry = round.updatedExistingEntry;
+
+		const after = readRegistryDocument(registryPath, fs);
+		const mine = after.daemons.find((entry) => entry.name === HONEYCOMB_REGISTRY_NAME);
+		if (mine !== undefined && entryMatches(mine, honeycombEntry)) break;
+	}
 
 	return {
 		registryPath,
-		updatedExistingEntry: index >= 0,
+		updatedExistingEntry,
 	};
 }

@@ -39,13 +39,14 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { resolveRuntimeConfig } from "../daemon/runtime/config.js";
 import {
 	DEFAULT_REF,
 	loadOnboarding,
 	type OnboardingState,
 	saveOnboarding,
 } from "../daemon/runtime/onboarding/index.js";
-import { registerHoneycombWithHivedoctor } from "../daemon/runtime/telemetry/fleet-registry.js";
+import { type RegistryBind, registerHoneycombWithHivedoctor } from "../daemon/runtime/telemetry/fleet-registry.js";
 import { type EmitDeps, emitTelemetry } from "../daemon/runtime/telemetry/index.js";
 import { DAEMON_HOST, DAEMON_PORT, THEHIVE_HOST, THEHIVE_PORT } from "../shared/constants.js";
 import type { CommandResult, OutputSink } from "./contracts.js";
@@ -193,9 +194,31 @@ function writeInstalledMarker(ref: string, dir: string | undefined, out: OutputS
  * logs a note and returns `false` — it NEVER aborts the install. Idempotent: re-running REPLACES
  * the existing `honeycomb` entry in place rather than duplicating it (AC-071a.1.2).
  */
+/**
+ * Resolve the daemon bind (host/port) the registry entry's `healthUrl` should advertise, from the
+ * SAME runtime-config resolution the daemon itself binds with (`HONEYCOMB_PORT` / `HONEYCOMB_HOST`
+ * / `HONEYCOMB_BIND`), so a non-default bind advertises the right probe URL. A wildcard listen
+ * address (0.0.0.0 / ::) maps to the loopback host: that is the address hivedoctor (same machine)
+ * can actually reach a wildcard-bound daemon on. FAIL-SOFT: an invalid env value falls back to the
+ * shared default constants rather than failing the install.
+ */
+function resolveRegistryBind(): RegistryBind | undefined {
+	try {
+		const config = resolveRuntimeConfig();
+		const host = config.host === "0.0.0.0" || config.host === "::" ? DAEMON_HOST : config.host;
+		return { host, port: config.port };
+	} catch {
+		return undefined;
+	}
+}
+
 function writeHivedoctorRegistryEntry(dir: string | undefined, out: OutputSink): boolean {
 	try {
-		registerHoneycombWithHivedoctor(dir !== undefined ? { homeDir: dir } : {});
+		const bind = resolveRegistryBind();
+		registerHoneycombWithHivedoctor({
+			...(dir !== undefined ? { homeDir: dir } : {}),
+			...(bind !== undefined ? { bind } : {}),
+		});
 		return true;
 	} catch {
 		out("note: could not register with hivedoctor (continuing — the install still succeeded).");

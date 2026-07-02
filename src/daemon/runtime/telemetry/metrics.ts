@@ -97,10 +97,16 @@ export function createMetricsService(deps: MetricsDeps): MetricsService {
 	const intervalMs = deps.flushIntervalMs ?? DEFAULT_METRICS_FLUSH_INTERVAL_MS;
 	const onceFailure = deps.onceFailure ?? defaultOnceFailure();
 	let timer: ReturnType<typeof setInterval> | null = null;
+	// A generation counter guarding against OVERLAPPING flushes: the timer fires `void flush(...)`,
+	// so an in-flight tick from a previous run could otherwise win the race against a restart and
+	// repopulate the fresh baseline / overwrite the restart's zero snapshot (AC-071b.3.1). Each
+	// start()/stop() bumps the generation; a flush re-checks its own generation after every await
+	// and bails out silently when it has been superseded.
+	let runId = 0;
 	let baseline: MetricsTotals | undefined;
 	let filesProcessed = 0;
 
-	async function flush(): Promise<void> {
+	async function flush(currentRunId: number): Promise<void> {
 		let totals: MetricsTotals;
 		try {
 			totals = await deps.source.fetchTotals();
@@ -109,11 +115,13 @@ export function createMetricsService(deps: MetricsDeps): MetricsService {
 			onceFailure(`honeycomb: fleet metrics snapshot failed (non-fatal): ${reason}`);
 			return;
 		}
+		if (currentRunId !== runId) return;
 		// The FIRST successful fetch (per process lifetime, i.e. since the last start()) becomes the
 		// baseline — every later delta is "since this process started" by construction (AC-071b.3.1).
 		if (baseline === undefined) baseline = totals;
 		const memoriesCreated = Math.max(0, totals.memoryCount - baseline.memoryCount);
 		const actionsTaken = Math.max(0, totals.actionsTakenTotal - baseline.actionsTakenTotal);
+		if (currentRunId !== runId) return;
 		deps.store.upsertMetrics({
 			actionsTaken,
 			filesProcessed,
@@ -127,23 +135,29 @@ export function createMetricsService(deps: MetricsDeps): MetricsService {
 			filesProcessed += count;
 		},
 		async start(): Promise<void> {
+			runId += 1;
+			const currentRunId = runId;
+			if (timer !== null) {
+				clearInterval(timer);
+				timer = null;
+			}
 			filesProcessed = 0;
 			baseline = undefined;
-			await flush();
-			if (timer !== null) clearInterval(timer);
+			await flush(currentRunId);
 			timer = setInterval(() => {
-				void flush();
+				void flush(currentRunId);
 			}, intervalMs);
 			unrefTimer(timer);
 		},
 		async stop(): Promise<void> {
+			runId += 1;
 			if (timer !== null) {
 				clearInterval(timer);
 				timer = null;
 			}
 		},
 		async _flushForTest(): Promise<void> {
-			await flush();
+			await flush(runId);
 		},
 	};
 }

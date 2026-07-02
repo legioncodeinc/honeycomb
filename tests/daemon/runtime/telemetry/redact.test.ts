@@ -33,6 +33,31 @@ describe("PRD-071c: redactLogMessage", () => {
 		}
 	});
 
+	it("AC-10 redacts JSON-form secrets (the shape formatEventLogMessage actually serializes)", () => {
+		const cases: Array<{ line: string; leaked: string }> = [
+			{ line: 'event fields: {"token":"sekrit-json-value"}', leaked: "sekrit-json-value" },
+			{ line: 'event fields: {"password":"hunter2json"}', leaked: "hunter2json" },
+			{ line: 'event fields: {"api_key":"deadbeefjson"}', leaked: "deadbeefjson" },
+			{ line: 'event fields: {"secret":"json-app-secret","other":1}', leaked: "json-app-secret" },
+			{ line: 'event fields: {"cookie":"json-session-id"}', leaked: "json-session-id" },
+		];
+		for (const { line, leaked } of cases) {
+			const out = redactLogMessage(line);
+			expect(out).not.toBeNull();
+			expect(out).toContain("[REDACTED]");
+			expect(out).not.toContain(leaked);
+		}
+	});
+
+	it("AC-10 the Authorization pattern consumes the credential after a Basic/Bearer scheme", () => {
+		const basic = redactLogMessage("request rejected: Authorization: Basic dXNlcjpwYXNz");
+		expect(basic).not.toBeNull();
+		expect(basic).not.toContain("dXNlcjpwYXNz");
+		const jsonAuth = redactLogMessage('event fields: {"Authorization":"Bearer abc.def.ghi"}');
+		expect(jsonAuth).not.toBeNull();
+		expect(jsonAuth).not.toContain("abc.def.ghi");
+	});
+
 	it("AC-071c.3.2 drops (returns null) a line carrying an unredactable private-key block", () => {
 		const out = redactLogMessage("dumped config: -----BEGIN RSA PRIVATE KEY-----\nMIIBogI...");
 		expect(out).toBeNull();

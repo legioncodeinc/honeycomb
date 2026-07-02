@@ -173,7 +173,7 @@ The scripts this site serves ([`scripts/install/install.sh`](../../scripts/insta
 `--license=`, `--code=`, and `--dry-run` — see install.sh's header comment for the full grammar,
 precedence, and manifest-resolution behavior. This site adds one optional convenience on top:
 
-- **`?combo=<name>` sugar** ([`functions/index.js`](./functions/index.js)`'s `COMBO_PRESETS`
+- **`?combo=<name>` sugar** ([`functions/index.js`](./functions/index.js)'s `COMBO_PRESETS`
   table): `https://get.theapiary.sh/?combo=full` streams the SAME `install.sh` bytes with an
   `export HONEYCOMB_INSTALL_PRODUCTS=...` line prepended — the exact env var the script already
   reads, just pre-filled. This is sugar, never the primary mechanism (ADR-0002); the response is

@@ -8,7 +8,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createCheckinService, noopCheckinService } from "../../../../src/daemon/runtime/telemetry/checkin.js";
-import { openFleetTelemetryStore } from "../../../../src/daemon/runtime/telemetry/fleet-store.js";
+import {
+	NULL_FLEET_TELEMETRY_STORE,
+	openFleetTelemetryStore,
+} from "../../../../src/daemon/runtime/telemetry/fleet-store.js";
 
 beforeEach(() => {
 	vi.useFakeTimers();
@@ -84,6 +87,42 @@ describe("PRD-071a: check-in service", () => {
 		await vi.advanceTimersByTimeAsync(10_000);
 		expect(store.readStatus()?.lastSeen).toBe(afterStop);
 		store.close();
+	});
+
+	it("AC-7 a throwing store/health is fail-soft: start() resolves and the heartbeat never throws", async () => {
+		const throwingStore = {
+			...NULL_FLEET_TELEMETRY_STORE,
+			upsertStatus(): void {
+				throw new Error("disk full");
+			},
+		};
+		const failures: string[] = [];
+		const service = createCheckinService({
+			store: throwingStore,
+			health: () => "ok",
+			heartbeatIntervalMs: 1_000,
+			onceFailure: (message) => failures.push(message),
+		});
+		await expect(service.start()).resolves.toBeUndefined();
+		// The heartbeat keeps ticking without an escaping throw, and the failure surfaces ONCE.
+		await vi.advanceTimersByTimeAsync(3_000);
+		expect(failures).toHaveLength(1);
+		expect(failures[0]).toContain("disk full");
+		await service.stop();
+
+		// A throwing health thunk is equally contained.
+		const store2 = openFleetTelemetryStore({ memory: true });
+		const service2 = createCheckinService({
+			store: store2,
+			health: () => {
+				throw new Error("health unavailable");
+			},
+			onceFailure: () => {},
+		});
+		await expect(service2.start()).resolves.toBeUndefined();
+		expect(() => service2._tickForTest?.()).not.toThrow();
+		await service2.stop();
+		store2.close();
 	});
 
 	it("AC-7 noopCheckinService is inert (fail-soft default) and never throws", async () => {

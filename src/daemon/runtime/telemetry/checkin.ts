@@ -40,6 +40,8 @@ export interface CheckinDeps {
 	readonly heartbeatIntervalMs?: number;
 	readonly clock?: CheckinClock;
 	readonly serviceName?: string;
+	/** A one-time failure sink (surfaced ONCE, never per tick). Defaults to a single stderr write. */
+	readonly onceFailure?: (message: string) => void;
 }
 
 export interface CheckinService extends DaemonService {
@@ -61,19 +63,35 @@ export function createCheckinService(deps: CheckinDeps): CheckinService {
 	const intervalMs = deps.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
 	let timer: ReturnType<typeof setInterval> | null = null;
 	let bindingTimeIso: string | undefined;
+	let failureReported = false;
+
+	// Fail-soft (AC-7, mirrors metrics.ts): a throw from deps.health(), deps.deeplakeConnected?.(),
+	// or the store upsert must never reject start() or escape the heartbeat interval callback. The
+	// failure is surfaced ONCE (never per tick) through the injectable sink.
+	function reportWriteFailure(err: unknown): void {
+		if (failureReported) return;
+		failureReported = true;
+		const reason = err instanceof Error ? err.message : String(err);
+		const sink = deps.onceFailure ?? ((message: string): void => void process.stderr.write(`${message}\n`));
+		sink(`honeycomb: fleet check-in write failed (non-fatal): ${reason}`);
+	}
 
 	function writeStatus(): void {
-		const nowIso = clock.now().toISOString();
-		const connected = deps.deeplakeConnected?.();
-		deps.store.upsertStatus({
-			name: serviceName,
-			bindingTime: bindingTimeIso ?? nowIso,
-			lastSeen: nowIso,
-			health: deps.health(),
-			...(connected !== undefined
-				? { deeplakeConnected: connected, ...(connected ? { deeplakeLastComm: nowIso } : {}) }
-				: {}),
-		});
+		try {
+			const nowIso = clock.now().toISOString();
+			const connected = deps.deeplakeConnected?.();
+			deps.store.upsertStatus({
+				name: serviceName,
+				bindingTime: bindingTimeIso ?? nowIso,
+				lastSeen: nowIso,
+				health: deps.health(),
+				...(connected !== undefined
+					? { deeplakeConnected: connected, ...(connected ? { deeplakeLastComm: nowIso } : {}) }
+					: {}),
+			});
+		} catch (err: unknown) {
+			reportWriteFailure(err);
+		}
 	}
 
 	return {

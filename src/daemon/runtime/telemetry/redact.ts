@@ -23,15 +23,23 @@
  * a future caller accidentally formatting a secret-shaped value into an event's `fields` bag.
  */
 
+/**
+ * A secret VALUE in either shape a log line actually carries: a JSON quoted string (`"..."`, the
+ * form `formatEventLogMessage()` serializes event fields into) or a bare key=value token.
+ */
+const JSON_OR_KV_VALUE = String.raw`(?:"[^"]*"|[^\s,}]+)`;
+
 /** Patterns for known secret-shaped key=value / header spans. Replaced with `[REDACTED]`. */
 function secretSpanPatterns(): RegExp[] {
 	return [
 		/\bBearer\s+[A-Za-z0-9\-._~+/]+=*/gi,
-		/\bAuthorization\s*[:=]\s*"?[^\s"]+"?/gi,
-		/\b(api[_-]?key|apikey)\s*[:=]\s*"?[^\s"]+"?/gi,
-		/\b(password|passwd|pwd)\s*[:=]\s*"?[^\s"]+"?/gi,
-		/\b(secret|token|credential)s?\s*[:=]\s*"?[^\s"]+"?/gi,
-		/\bcookie\s*[:=]\s*"?[^\s"]+"?/gi,
+		// Consume the FULL credential after `Authorization:`, including a `Basic <blob>` /
+		// `Bearer <blob>` scheme+value pair (the old pattern stopped at the scheme word).
+		/"?Authorization"?\s*[:=]\s*(?:"[^"]*"|(?:[^\s"]+\s+)?[^\s"]+)/gi,
+		new RegExp(String.raw`"?\b(api[_-]?key|apikey)\b"?\s*[:=]\s*${JSON_OR_KV_VALUE}`, "gi"),
+		new RegExp(String.raw`"?\b(password|passwd|pwd)\b"?\s*[:=]\s*${JSON_OR_KV_VALUE}`, "gi"),
+		new RegExp(String.raw`"?\b(secret|token|credential)s?\b"?\s*[:=]\s*${JSON_OR_KV_VALUE}`, "gi"),
+		new RegExp(String.raw`"?\bcookie\b"?\s*[:=]\s*${JSON_OR_KV_VALUE}`, "gi"),
 		/\bsk-[A-Za-z0-9]{16,}/gi,
 	];
 }
