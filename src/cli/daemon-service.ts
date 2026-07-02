@@ -44,10 +44,24 @@ import { join, normalize, resolve, sep } from "node:path";
 /** The three OS service managers this module can target (the resolved per-OS default). */
 export type ServiceManager = "launchd" | "systemd-user" | "schtasks";
 
-/** The label / unit / task name the daemon's service is registered under (one per host family). */
-export const SERVICE_LABEL = "ai.honeycomb.daemon" as const;
-/** The Windows Scheduled Task name (schtasks uses a friendlier name than the reverse-DNS label). */
-export const SERVICE_TASK_NAME = "HoneycombDaemon" as const;
+/**
+ * The label / unit / task name the daemon's service is registered under (one per host family).
+ * Decision #32 (2026-07-02, nectar `library/requirements/PRD-DECISIONS-AND-DEFAULTS.md`): the
+ * fleet-wide scheme is reverse-DNS `com.legioncode.<shortname>` with the product short name
+ * `honeycomb`, superseding the shipped `ai.honeycomb.daemon` / `HoneycombDaemon` names.
+ */
+export const SERVICE_LABEL = "com.legioncode.honeycomb" as const;
+/** The systemd --user unit name (decision #32: `<shortname>.service`). */
+export const SERVICE_SYSTEMD_UNIT = "honeycomb.service" as const;
+/** The Windows Scheduled Task name (decision #32: the bare short name). */
+export const SERVICE_TASK_NAME = "honeycomb" as const;
+
+/** The pre-decision-#32 launchd label, deregistered on register (migration path). */
+export const LEGACY_SERVICE_LABEL = "ai.honeycomb.daemon" as const;
+/** The pre-decision-#32 systemd unit name (the old label + `.service`), deregistered on register. */
+export const LEGACY_SERVICE_SYSTEMD_UNIT = "ai.honeycomb.daemon.service" as const;
+/** The pre-decision-#32 Windows task name, deregistered on register. */
+export const LEGACY_SERVICE_TASK_NAME = "HoneycombDaemon" as const;
 
 /**
  * The opt-out env var that forces the detached-spawn fallback regardless of the host. Set
@@ -205,9 +219,19 @@ export function launchdPlistPath(home: string): string {
 	return containedUnitPath(home, ["Library", "LaunchAgents", `${SERVICE_LABEL}.plist`]);
 }
 
-/** Resolve the systemd --user unit path (`~/.config/systemd/user/<label>.service`). */
+/** Resolve the systemd --user unit path (`~/.config/systemd/user/honeycomb.service`). */
 export function systemdUnitPath(home: string): string {
-	return containedUnitPath(home, [".config", "systemd", "user", `${SERVICE_LABEL}.service`]);
+	return containedUnitPath(home, [".config", "systemd", "user", SERVICE_SYSTEMD_UNIT]);
+}
+
+/** The PRE-decision-#32 LaunchAgent plist path, removed on register (migration path). */
+export function legacyLaunchdPlistPath(home: string): string {
+	return containedUnitPath(home, ["Library", "LaunchAgents", `${LEGACY_SERVICE_LABEL}.plist`]);
+}
+
+/** The PRE-decision-#32 systemd unit path, removed on register (migration path). */
+export function legacySystemdUnitPath(home: string): string {
+	return containedUnitPath(home, [".config", "systemd", "user", LEGACY_SERVICE_SYSTEMD_UNIT]);
 }
 
 /** XML-escape a value bound into a plist `<string>` (the entry/workspace can contain `&`/`<`). */
@@ -389,6 +413,19 @@ function launchdController(runner: ServiceRunner): DaemonServiceController {
 	return {
 		manager: "launchd",
 		register(spec): ServiceOpResult {
+			// Decision #32 migration: best-effort boot out + remove the legacy `ai.honeycomb.daemon`
+			// agent so a re-run never leaves two agents racing over one daemon. Expected to fail
+			// harmlessly when no legacy agent exists.
+			try {
+				runner.run("launchctl", ["bootout", `${domain()}/${LEGACY_SERVICE_LABEL}`]);
+			} catch {
+				// No legacy agent loaded, fine.
+			}
+			try {
+				runner.removeFile(legacyLaunchdPlistPath(specHome(spec)));
+			} catch {
+				// Best-effort cleanup only.
+			}
 			const path = launchdPlistPath(specHome(spec));
 			runner.writeFile(path, renderLaunchdPlist(spec));
 			// bootstrap loads + (RunAtLoad) starts the agent; the `||` re-bootstrap is handled by callers.
@@ -424,10 +461,22 @@ function launchdController(runner: ServiceRunner): DaemonServiceController {
 
 /** systemd --user controller (`systemctl --user enable --now`/`disable`/`restart`). */
 function systemdController(runner: ServiceRunner): DaemonServiceController {
-	const unit = `${SERVICE_LABEL}.service`;
+	const unit = SERVICE_SYSTEMD_UNIT;
 	return {
 		manager: "systemd-user",
 		register(spec): ServiceOpResult {
+			// Decision #32 migration: best-effort disable + remove the legacy unit so a re-run
+			// never leaves two units racing over one daemon. Fails harmlessly when absent.
+			try {
+				runner.run("systemctl", ["--user", "disable", "--now", LEGACY_SERVICE_SYSTEMD_UNIT]);
+			} catch {
+				// No legacy unit enabled, fine.
+			}
+			try {
+				runner.removeFile(legacySystemdUnitPath(specHome(spec)));
+			} catch {
+				// Best-effort cleanup only.
+			}
 			const path = systemdUnitPath(specHome(spec));
 			runner.writeFile(path, renderSystemdUnit(spec));
 			runner.run("systemctl", ["--user", "daemon-reload"]);
@@ -469,6 +518,18 @@ function schtasksController(runner: ServiceRunner): DaemonServiceController {
 	return {
 		manager: "schtasks",
 		register(spec): ServiceOpResult {
+			// Decision #32 migration: best-effort end + delete the legacy `HoneycombDaemon` task so a
+			// re-run never leaves two tasks racing over one daemon. Fails harmlessly when absent.
+			try {
+				runner.run("schtasks", ["/End", "/TN", LEGACY_SERVICE_TASK_NAME]);
+			} catch {
+				// No legacy task running, fine.
+			}
+			try {
+				runner.run("schtasks", ["/Delete", "/TN", LEGACY_SERVICE_TASK_NAME, "/F"]);
+			} catch {
+				// No legacy task registered, fine.
+			}
 			// /Create /F is idempotent (overwrites). /SC ONLOGON starts the daemon on login (boot floor).
 			runner.run("schtasks", buildSchtasksCreateArgs(spec));
 			// Start it immediately so register == running (the install path expects an up daemon).

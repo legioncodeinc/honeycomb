@@ -17,12 +17,17 @@ import { describe, expect, it } from "vitest";
 import {
 	type ServiceRunner,
 	type ServiceSpec,
+	LEGACY_SERVICE_LABEL,
+	LEGACY_SERVICE_SYSTEMD_UNIT,
+	LEGACY_SERVICE_TASK_NAME,
 	SERVICE_LABEL,
+	SERVICE_SYSTEMD_UNIT,
 	SERVICE_TASK_NAME,
 	buildSchtasksCreateArgs,
 	createDaemonServiceController,
 	detectServiceManager,
 	launchdPlistPath,
+	legacyLaunchdPlistPath,
 	renderLaunchdPlist,
 	renderSystemdUnit,
 	systemdUnitPath,
@@ -152,14 +157,18 @@ describe("PRD-064h AC-064h.4, schtasks /Create pins the writable workspace", () 
 });
 
 describe("PRD-064h launchd controller, register/restart/status argv (injected runner)", () => {
-	it("register writes the plist then bootstraps it (no execution)", () => {
+	it("register deregisters the legacy agent (decision #32), writes the plist, then bootstraps it", () => {
 		const runner = recordingRunner();
 		const ctl = createDaemonServiceController("launchd", runner);
 		const res = ctl.register(SPEC);
 		expect(res.ok).toBe(true);
-		expect(runner.writes[0]?.path).toBe(launchdPlistPath("/home/ada"));
+		// Decision #32 migration: the legacy label is booted out and its plist removed first.
 		expect(runner.runs[0]?.cmd).toBe("launchctl");
-		expect(runner.runs[0]?.args[0]).toBe("bootstrap");
+		expect(runner.runs[0]?.args).toEqual(["bootout", expect.stringContaining(LEGACY_SERVICE_LABEL)]);
+		expect(runner.removes).toContain(legacyLaunchdPlistPath("/home/ada"));
+		expect(runner.writes[0]?.path).toBe(launchdPlistPath("/home/ada"));
+		expect(runner.runs[1]?.cmd).toBe("launchctl");
+		expect(runner.runs[1]?.args[0]).toBe("bootstrap");
 	});
 
 	it("AC-064h.5 restart goes THROUGH launchctl kickstart -k (no second spawn)", () => {
@@ -186,14 +195,15 @@ describe("PRD-064h launchd controller, register/restart/status argv (injected ru
 });
 
 describe("PRD-064h systemd controller, register/restart argv (injected runner)", () => {
-	it("register writes the unit, daemon-reloads, then enable --now (start-on-login + start now)", () => {
+	it("register deregisters the legacy unit (decision #32), writes the unit, daemon-reloads, then enable --now", () => {
 		const runner = recordingRunner();
 		const ctl = createDaemonServiceController("systemd-user", runner);
 		ctl.register(SPEC);
 		expect(runner.writes[0]?.path).toBe(systemdUnitPath("/home/ada"));
 		expect(runner.runs.map((r) => r.args.join(" "))).toEqual([
+			`--user disable --now ${LEGACY_SERVICE_SYSTEMD_UNIT}`,
 			"--user daemon-reload",
-			`--user enable --now ${SERVICE_LABEL}.service`,
+			`--user enable --now ${SERVICE_SYSTEMD_UNIT}`,
 		]);
 	});
 
@@ -201,17 +211,19 @@ describe("PRD-064h systemd controller, register/restart argv (injected runner)",
 		const runner = recordingRunner();
 		createDaemonServiceController("systemd-user", runner).restart(SPEC);
 		expect(runner.runs[0]?.cmd).toBe("systemctl");
-		expect(runner.runs[0]?.args).toEqual(["--user", "restart", `${SERVICE_LABEL}.service`]);
+		expect(runner.runs[0]?.args).toEqual(["--user", "restart", SERVICE_SYSTEMD_UNIT]);
 	});
 });
 
 describe("PRD-064h schtasks controller, register/restart/status argv (injected runner)", () => {
-	it("register creates the task then runs it", () => {
+	it("register deletes the legacy task (decision #32), creates the task, then runs it", () => {
 		const runner = recordingRunner();
 		const ctl = createDaemonServiceController("schtasks", runner);
 		ctl.register(WIN_SPEC);
-		expect(runner.runs[0]?.args[0]).toBe("/Create");
-		expect(runner.runs[1]?.args).toEqual(["/Run", "/TN", SERVICE_TASK_NAME]);
+		expect(runner.runs[0]?.args).toEqual(["/End", "/TN", LEGACY_SERVICE_TASK_NAME]);
+		expect(runner.runs[1]?.args).toEqual(["/Delete", "/TN", LEGACY_SERVICE_TASK_NAME, "/F"]);
+		expect(runner.runs[2]?.args[0]).toBe("/Create");
+		expect(runner.runs[3]?.args).toEqual(["/Run", "/TN", SERVICE_TASK_NAME]);
 	});
 
 	it("AC-064h.5 restart is stop-then-run on the SAME task (no second spawn, no double-bind)", () => {
