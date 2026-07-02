@@ -29,7 +29,7 @@ const COMBO_PRESETS = {
   // Keep this table's PRODUCT VALUES in sync with the `--code=`/`--profile=` tables in
   // scripts/install/install.sh (resolve_code_products / resolve_profile_products) — this is a
   // separate, install-SITE-side convenience table (env-var injection), not the same code path.
-  full: { products: 'honeycomb,hivedoctor,thehive,hivenectar', profile: 'full' },
+  full: { products: 'honeycomb,doctor,hive,nectar', profile: 'full' },
 };
 
 // The inspect-page CSP (kept in sync with the `/` + `/index.html` rules in _headers). The page uses

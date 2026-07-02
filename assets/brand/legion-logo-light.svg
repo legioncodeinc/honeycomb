@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 260 64" role="img" aria-label="Legion">
+  <title>Legion logo — for light backgrounds</title>
+  <desc>Legion primary lockup. Symbol left, wordmark right. Optimized for placement on light surfaces and printed reports.</desc>
+  <!-- Symbol -->
+  <g>
+    <path d="M12 8 L24 8 L24 44 L48 44 L48 56 L12 56 Z" fill="#0A0B0D"/>
+    <rect x="12" y="8" width="12" height="8" fill="#18A968"/>
+  </g>
+  <!-- Wordmark -->
+  <text x="72" y="46"
+        font-family="'Inter', 'Inter Display', 'Helvetica Neue', Arial, sans-serif"
+        font-weight="700"
+        font-size="40"
+        letter-spacing="-1.2"
+        fill="#0A0B0D">LEGION</text>
+</svg>

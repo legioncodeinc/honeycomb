@@ -3,5 +3,5 @@
   "version": "0.1.13",
   "description": "Honeycomb — persistent shared memory for OpenAI Codex CLI via the local Honeycomb daemon",
   "type": "module",
-  "license": "MIT"
+  "license": "AGPL-3.0-or-later"
 }

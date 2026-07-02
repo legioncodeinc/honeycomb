@@ -6,19 +6,19 @@
       "packageName": "@legioncodeinc/honeycomb",
       "published": true
     },
-    "hivedoctor": {
+    "doctor": {
       "version": "9.9.2",
-      "packageName": "@legioncodeinc/hivedoctor",
+      "packageName": "@legioncodeinc/doctor",
       "published": true
     },
-    "thehive": {
+    "hive": {
       "version": "0.1.0",
-      "packageName": "@legioncodeinc/thehive",
+      "packageName": "@legioncodeinc/hive",
       "published": false
     },
-    "hivenectar": {
+    "nectar": {
       "version": "9.9.4",
-      "packageName": "@legioncodeinc/hivenectar",
+      "packageName": "@legioncodeinc/nectar",
       "published": true
     }
   }

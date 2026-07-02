@@ -6,19 +6,19 @@
       "packageName": "@legioncodeinc/honeycomb",
       "published": true
     },
-    "hivedoctor": {
+    "doctor": {
       "version": "9.9.9; touch /tmp/pwned",
-      "packageName": "@legioncodeinc/hivedoctor",
+      "packageName": "@legioncodeinc/doctor",
       "published": true
     },
-    "thehive": {
+    "hive": {
       "version": "9.9.9",
-      "packageName": "@legioncodeinc/thehive; touch /tmp/pwned",
+      "packageName": "@legioncodeinc/hive; touch /tmp/pwned",
       "published": true
     },
-    "hivenectar": {
+    "nectar": {
       "version": "9.9.9 & calc.exe",
-      "packageName": "@legioncodeinc/hivenectar",
+      "packageName": "@legioncodeinc/nectar",
       "published": true
     }
   }

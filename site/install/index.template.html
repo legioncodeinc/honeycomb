@@ -166,10 +166,10 @@ sh install.sh">Copy</button></div>
     <summary>Advanced: choosing which products to install</summary>
     <p style="padding: 0 16px 16px; color: var(--muted); font-size: 0.9rem; line-height: 1.6;">
       By default this installs Honeycomb + the HiveDoctor watchdog. Pass <code class="inline">--products=</code>
-      to install more of the fleet, e.g. <code class="inline">curl -fsSL {{VANITY}} | sh -s -- --products=honeycomb,thehive,hivenectar</code>.
+      to install more of the fleet, e.g. <code class="inline">curl -fsSL {{VANITY}} | sh -s -- --products=honeycomb,hive,nectar</code>.
       Other flags: <code class="inline">--profile=full</code> (a named preset), <code class="inline">--code=&lt;code&gt;</code>
       (a product code resolving to a preset), <code class="inline">--dry-run</code> (preview only, changes nothing),
-      and <code class="inline">--no-hivedoctor</code>. Environment variables
+      and <code class="inline">--no-doctor</code>. Environment variables
       (<code class="inline">HONEYCOMB_INSTALL_PRODUCTS</code>, <code class="inline">HONEYCOMB_INSTALL_PROFILE</code>,
       <code class="inline">HONEYCOMB_INSTALL_LICENSE</code>, <code class="inline">HONEYCOMB_INSTALL_CODE</code>) and a
       <code class="inline">~/.honeycomb/install.conf</code> file work the same way, for administrators
