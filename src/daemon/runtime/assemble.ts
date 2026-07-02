@@ -86,6 +86,7 @@ import { createConflictSuppressionSource } from "./memories/conflict-resolve.js"
 import { mountConflictsApi } from "./memories/conflicts-api.js";
 // ── Data-API mount seams (PRD-022a / 022b / 022c) the composition root fires (D-2 / d-AC-1) ──
 import { mountMemoriesApi, mountMemoriesPrimeApi } from "./memories/index.js";
+import { resolveNectarRrfMultiplierAtBoot } from "./memories/nectar-recall-config.js";
 import { mountLifecycleApi } from "./memories/lifecycle-api.js";
 import type { CohereRerankSeam } from "./memories/recall.js";
 import { createRuntimePathService } from "./middleware/runtime-path.js";
@@ -993,12 +994,18 @@ export function assembleSeams(
 	// FAIL-SOFT by construction: a missing/unreadable `memory_conflicts` table → no suppression (both sides
 	// returned), never a 500. Threaded into the recall handler's engine deps.
 	const conflictSuppression = createConflictSuppressionSource(storage);
+	// PRD-013a (decision #17 as amended): resolve the operator-tunable `nectar_rrf_multiplier` ONCE
+	// at boot from `~/.honeycomb/nectar.json` (fail-soft to 1.0, clamped [0, 10]); a non-default value
+	// is logged ONCE here via the daemon logger, so a surprising recall mix is diagnosable from the
+	// boot log alone. Threaded into the recall mount so the fusion scales ONLY the hive-graph arm.
+	const nectarRrfMultiplier = resolveNectarRrfMultiplierAtBoot(daemon.logger);
 	seams.mountMemories(daemon, {
 		storage,
 		defaultScope,
 		embed: embed.client,
 		logger: daemon.logger,
 		conflictSuppression,
+		nectarRrfMultiplier,
 		...(vault !== undefined ? { vault } : {}),
 		// PRD-063c: the operator-selected reranker config + the late-bound Cohere-via-Portkey seam.
 		// The `cohere` strategy only does anything when BOTH the strategy is `cohere` (env) AND the

@@ -167,6 +167,14 @@ export interface MountMemoriesOptions {
 	 * (structurally satisfies the engine's `CohereRerankSeam`).
 	 */
 	readonly cohereRerank?: import("./recall.js").CohereRerankSeam;
+	/**
+	 * PRD-013a (decision #17 as amended): the operator-tunable `nectar_rrf_multiplier`, resolved ONCE
+	 * at boot from `~/.honeycomb/nectar.json` (fail-soft to `1.0`, clamped `[0, 10]`) and threaded
+	 * into {@link recallMemories} so the fusion scales ONLY the `hive_graph_versions` contribution by
+	 * it. ABSENT (a unit-constructed mount) → the engine default `1.0` — byte-identical to today for
+	 * the other arms. The composition root resolves it via `resolveNectarRrfMultiplierAtBoot`.
+	 */
+	readonly nectarRrfMultiplier?: number;
 }
 
 /**
@@ -560,6 +568,9 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 				// cosine path — byte-identical to today (c-AC-4).
 				...(options.reranker !== undefined ? { reranker: options.reranker } : {}),
 				...(options.cohereRerank !== undefined ? { cohereRerank: options.cohereRerank } : {}),
+				// PRD-013a (decision #17): the boot-resolved Nectar multiplier scaling ONLY the
+				// hive-graph fusion contribution. Absent (unit mount) → the engine default 1.0.
+				...(options.nectarRrfMultiplier !== undefined ? { nectarRrfMultiplier: options.nectarRrfMultiplier } : {}),
 			},
 		);
 		// PRD-029 (AC-4): when this recall ran DEGRADED (lexical fallback), emit one

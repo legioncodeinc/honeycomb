@@ -93,12 +93,16 @@ function dedupStorage(opts: {
 			sqls.push(sql);
 			const kind = kindOf(sql);
 			const table = tableOf(sql);
-			const tbl = table === "other" ? "memories" : table;
-			if (kind === "vector") return ok(opts.vector?.[tbl] ?? [], 0);
-			if (kind === "hydrate") return ok(opts.hydrate?.[tbl] ?? [], 0);
+			// PRD-013: a table with no configured bucket (e.g. the `hive_graph_versions` arm this
+			// test does not populate) resolves to EMPTY — modeling a real absent/empty table, not
+			// the memories rows (which the prior `other → memories` fallback would have fabricated).
+			const bucket = (m?: { memories?: StorageRow[]; sessions?: StorageRow[] }): StorageRow[] =>
+				table === "memories" ? (m?.memories ?? []) : table === "sessions" ? (m?.sessions ?? []) : [];
+			if (kind === "vector") return ok(bucket(opts.vector), 0);
+			if (kind === "hydrate") return ok(bucket(opts.hydrate), 0);
 			if (kind === "dedup") {
-				if (opts.failEmbeddingFetch) return queryError(`relation "${tbl}" missing column`);
-				return ok(opts.embeddings?.[tbl] ?? [], 0);
+				if (opts.failEmbeddingFetch) return queryError(`relation "${table}" missing column`);
+				return ok(bucket(opts.embeddings), 0);
 			}
 			if (kind === "memories") return opts.lexical?.memories ?? ok([], 0);
 			if (kind === "memory") return opts.lexical?.memory ?? ok([], 0);
