@@ -13,9 +13,11 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+	type ConnectorRunner,
 	type DaemonLifecycle,
 	type DaemonStatus,
 	createFakeDaemonClient,
+	runConnectorVerb,
 	runInstallCommand,
 	runTelemetryCommand,
 } from "../../src/commands/index.js";
@@ -119,6 +121,103 @@ describe("e-AC-4 install telemetry is fire-and-forget: a throwing fetch leaves t
 			rmSync(dirA, { recursive: true, force: true });
 			rmSync(dirB, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("honeycomb_updated fires from the install verb when the build version changed since the last run", () => {
+	it("first run records the baseline silently; a re-run at a NEW version emits honeycomb_updated once", async () => {
+		const rec = recordingFetch();
+		const depsAt = (version: string) => ({
+			daemon: createFakeDaemonClient({ alive: true }),
+			lifecycle: fakeLifecycle(),
+			openDashboard: () => true,
+			dir,
+			out: () => {},
+			telemetry: { fetch: rec.fetch, posthogKey: KEY, version },
+		});
+		// First run at 1.0.0: honeycomb_installed fires; the version checkpoint records the baseline
+		// WITHOUT an update emit (a fresh install is not an update).
+		await runInstallCommand(["--ref", "mario"], depsAt("1.0.0"));
+		// The whole chain is fire-and-forget; the baseline persist is its LAST step, so wait for it.
+		await waitFor(() => loadOnboarding(dir).lastVersion !== undefined);
+		expect(rec.calls.map((c) => JSON.parse(c.init.body).event)).toEqual(["honeycomb_installed"]);
+		expect(loadOnboarding(dir).lastVersion).toBe("1.0.0");
+		// Re-run at 1.0.1: honeycomb_installed is deduped (once per machine); honeycomb_updated fires
+		// with the new version in the allow-listed honeycomb_version property.
+		await runInstallCommand(["--ref", "mario"], depsAt("1.0.1"));
+		await waitFor(() => loadOnboarding(dir).lastVersion === "1.0.1");
+		const events = rec.calls.map((c) => JSON.parse(c.init.body).event);
+		expect(events).toEqual(["honeycomb_installed", "honeycomb_updated"]);
+		expect(JSON.parse(rec.calls[1]!.init.body).properties.honeycomb_version).toBe("1.0.1");
+		expect(loadOnboarding(dir).lastVersion).toBe("1.0.1");
+		// A THIRD run at the same version emits nothing new (baseline matches + both events deduped).
+		await runInstallCommand(["--ref", "mario"], depsAt("1.0.1"));
+		await waitFor(() => false, 5);
+		expect(rec.calls).toHaveLength(2);
+	});
+});
+
+describe("honeycomb_uninstalled fires from the FULL uninstall verb, fire-and-forget", () => {
+	const recordingConnector = (): ConnectorRunner & { runs: string[] } => {
+		const runs: string[] = [];
+		return {
+			runs,
+			async run(args) {
+				runs.push(args.verb);
+				return { exitCode: 0, harnesses: ["cursor"] };
+			},
+		};
+	};
+
+	it("a full `uninstall` (no harness arg) emits honeycomb_uninstalled once", async () => {
+		const rec = recordingFetch();
+		const connector = recordingConnector();
+		const res = await runConnectorVerb("uninstall", [], {
+			daemon: createFakeDaemonClient({ alive: true }),
+			connector,
+			dir,
+			out: () => {},
+			telemetry: { fetch: rec.fetch, posthogKey: KEY },
+		});
+		expect(res.exitCode).toBe(0);
+		await waitFor(() => rec.calls.length > 0);
+		expect(rec.calls).toHaveLength(1);
+		expect(JSON.parse(rec.calls[0]!.init.body).event).toBe("honeycomb_uninstalled");
+		// A second full uninstall dedupes (once per machine) - still exactly one network call.
+		await runConnectorVerb("uninstall", [], {
+			daemon: createFakeDaemonClient({ alive: true }),
+			connector,
+			dir,
+			out: () => {},
+			telemetry: { fetch: rec.fetch, posthogKey: KEY },
+		});
+		await waitFor(() => false, 5);
+		expect(rec.calls).toHaveLength(1);
+	});
+
+	it("a single-harness `uninstall <harness>` (a partial re-wire) emits nothing", async () => {
+		const rec = recordingFetch();
+		await runConnectorVerb("uninstall", ["cursor"], {
+			daemon: createFakeDaemonClient({ alive: true }),
+			connector: recordingConnector(),
+			dir,
+			out: () => {},
+			telemetry: { fetch: rec.fetch, posthogKey: KEY },
+		});
+		await waitFor(() => false, 5);
+		expect(rec.calls).toHaveLength(0);
+	});
+
+	it("a throwing telemetry fetch leaves the uninstall byte-identical (same exit code, no throw)", async () => {
+		const rec = recordingFetch({ throws: true });
+		const res = await runConnectorVerb("uninstall", [], {
+			daemon: createFakeDaemonClient({ alive: true }),
+			connector: recordingConnector(),
+			dir,
+			out: () => {},
+			telemetry: { fetch: rec.fetch, posthogKey: KEY },
+		});
+		expect(res.exitCode).toBe(0);
 	});
 });
 

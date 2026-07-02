@@ -157,6 +157,39 @@ describe("markReported / isReported round-trip", () => {
 		expect(isReported(marked, "honeycomb_installed")).toBe(false);
 		expect(isReported(marked, "honeycomb_hivemind_upgrade")).toBe(false);
 	});
+
+	it("a version-qualified ledger key (honeycomb_updated@<version>) round-trips independently of the plain name", () => {
+		const marked = markReported(freshOnboardingState(), "honeycomb_updated@1.2.3", "2026-06-25T00:00:00.000Z");
+		expect(isReported(marked, "honeycomb_updated@1.2.3")).toBe(true);
+		expect(isReported(marked, "honeycomb_updated")).toBe(false);
+		expect(isReported(marked, "honeycomb_updated@1.2.4")).toBe(false);
+	});
+});
+
+describe("lastVersion baseline field (honeycomb_updated detection)", () => {
+	it("is absent on a fresh state and round-trips through save→load once set", () => {
+		expect(freshOnboardingState().lastVersion).toBeUndefined();
+		saveOnboarding({ ...freshOnboardingState(), lastVersion: "1.2.3" }, dir);
+		expect(loadOnboarding(dir).lastVersion).toBe("1.2.3");
+	});
+
+	it("a pre-lastVersion file (no field, qualified ledger keys allowed) still validates", () => {
+		// Simulates a state file written before lastVersion existed, plus a qualified dedupe key.
+		const legacy = {
+			...freshOnboardingState(),
+			telemetry: {
+				optInTier2: false,
+				reported: { honeycomb_installed: "2026-01-01T00:00:00.000Z", "honeycomb_updated@1.0.0": "2026-01-02T00:00:00.000Z" },
+				sent: [],
+			},
+		};
+		writeFileSync(onboardingPath(dir), JSON.stringify(legacy));
+		const loaded = loadOnboarding(dir);
+		// NOT the fail-soft fresh default: the installId survived, so the file validated.
+		expect(loaded.installId).toBe(legacy.installId);
+		expect(loaded.lastVersion).toBeUndefined();
+		expect(isReported(loaded, "honeycomb_updated@1.0.0")).toBe(true);
+	});
 });
 
 describe("appendSent ordering", () => {
