@@ -34,12 +34,18 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-
-import { LEGACY_CREDENTIALS_DIR_NAME, DIR_MODE } from "./auth/credentials-store.js";
-import { mountAuthStatusApi } from "./auth/status-api.js";
+import { CATALOG } from "../storage/catalog/index.js";
+import type { QueryScope, StorageClient } from "../storage/client.js";
+import { type CredentialProvider, defaultCredentialProvider } from "../storage/config.js";
+import { createLazyStorageClient } from "../storage/index.js";
+import { isOk } from "../storage/result.js";
+// ── The asset-sync substrate `/api/assets` mount (PRD-033c / D-6) ──
+import { mountAssetsApi } from "./assets/api.js";
+import type { TrustedTableProbe } from "./assets/sync.js";
+import { DIR_MODE, LEGACY_CREDENTIALS_DIR_NAME } from "./auth/credentials-store.js";
 import {
-	type AuthorizationPolicy,
 	type Authenticator,
+	type AuthorizationPolicy,
 	createApiKeyAuthenticator,
 	createRbacPolicy,
 	createTokenAuthenticator,
@@ -47,72 +53,21 @@ import {
 	type Identity,
 	type PresentedCredentials,
 } from "./auth/index.js";
-import { type DeploymentMode, type RuntimeConfig, resolveRuntimeConfig } from "./config.js";
-import { type RequestLogger, createRequestLogger } from "./logger.js";
-import { createRuntimePathService } from "./middleware/runtime-path.js";
-import { createFileWatcherService, type HarnessTarget } from "./services/file-watcher.js";
-import { createJobQueueService, type JobQueueConfig } from "./services/job-queue.js";
-import {
-	createHybridJobQueueService,
-	resolveHybridJobQueueConfig,
-	type HybridJobQueueConfig,
-} from "./services/hybrid-job-queue.js";
-import { openLocalJobQueue, type LocalJobQueueService } from "./services/local-job-queue.js";
-import { type CreateDaemonOptions, type Daemon, type DaemonServices, createDaemon } from "./server.js";
-
+import { mountAuthStatusApi } from "./auth/status-api.js";
 import { attachHooksHandlers } from "./capture/attach.js";
 import type { CaptureHandler } from "./capture/capture-handler.js";
 import { buildCodebaseGraphSnapshot, mountGraphApi } from "./codebase/api.js";
-import { mountOntologyApi } from "./ontology/api.js";
-import { mountSkillPropagationApi } from "./skillify/propagation-api.js";
-import { mountDashboardApi } from "./dashboard/api.js";
+import { type DeploymentMode, type RuntimeConfig, resolveRuntimeConfig } from "./config.js";
 import { mountActionsApi } from "./dashboard/actions-api.js";
+import { mountDashboardApi } from "./dashboard/api.js";
 import { mountHarnessApi } from "./dashboard/harness-api.js";
-import { mountSyncApi } from "./dashboard/sync-mount.js";
 import { detectInstalledHarnesses } from "./dashboard/harness-detect.js";
 import { mountSetupLogin } from "./dashboard/setup-login.js";
-import { mountSetupStateApi } from "./dashboard/setup-state.js";
 import { mountSetupMigrate } from "./dashboard/setup-migrate.js";
-import { mountPollinateApi } from "./pollinating/api.js";
-import {
-	mountOnboardingApi,
-	mountProjectsSyncApi,
-	mountScopeEnumerationApi,
-	mountScopeSwitchApi,
-} from "./projects/index.js";
-import { mountCompactApi } from "./maintenance/compact-api.js";
-import { mountStaleRefApi } from "./maintenance/stale-ref-api.js";
-import { mountLogsApi } from "./logs/api.js";
-import { type LogStore, NULL_LOG_STORE, openLogStore } from "./logs/log-store.js";
-import { mountNotificationsApi } from "./notifications/api.js";
-import { attachSessionsPrune } from "./sessions/prune.js";
-
-// ── Data-API mount seams (PRD-022a / 022b / 022c) the composition root fires (D-2 / d-AC-1) ──
-import { mountMemoriesApi, mountMemoriesPrimeApi } from "./memories/index.js";
-import { createConflictSuppressionSource } from "./memories/conflict-resolve.js";
-import { createControlledWriteConflictHook } from "./memories/conflict-hook.js";
-import { mountConflictsApi } from "./memories/conflicts-api.js";
-import { mountLifecycleApi } from "./memories/lifecycle-api.js";
-import { mountVfsApi } from "./vfs/api.js";
-import { mountProductDataApi } from "./product/index.js";
-import { localDefaultScopeResolver, type SecretsApiDeps } from "./secrets/api.js";
-import { type SourcesApiDeps } from "./sources/api.js";
-import { buildSourcesApiDeps } from "./sources/registry.js";
-import { SecretsStore, createMachineKeyProvider } from "./secrets/store.js";
-import type { SecretScope } from "./secrets/contracts.js";
-
-// ── The vault `setting` class (PRD-032d / AC-6) — assembly READS provider/model + pollinating ──
-import { VaultStore } from "./vault/store.js";
-import { createVaultRegistry } from "./vault/registry.js";
-import { EMBEDDINGS_ENABLED_KEY, mountSettingsApi } from "./vault/api.js";
-import { isValidProviderModel, providerEntry } from "./vault/catalog.js";
-import { migrateDeeplakeToken } from "./vault/migrate.js";
-
-// ── The asset-sync substrate `/api/assets` mount (PRD-033c / D-6) ──
-import { mountAssetsApi } from "./assets/api.js";
-import { type TrustedTableProbe } from "./assets/sync.js";
-import { CATALOG } from "../storage/catalog/index.js";
-
+import { mountSetupStateApi } from "./dashboard/setup-state.js";
+import { mountSyncApi } from "./dashboard/sync-mount.js";
+import { mountDiagnosticsHealthApi } from "./diagnostics-health.js";
+import { buildHealthDetail, type HealthDetail, type PortkeyHealth } from "./health.js";
 import {
 	buildInferenceModelClient,
 	PORTKEY_API_KEY_NAME,
@@ -120,11 +75,22 @@ import {
 	type PortkeySelection,
 	type ProviderModelOverride,
 } from "./inference/model-client-factory.js";
-import { createSecretResolver } from "./secrets/store.js";
-import { RecallConfigSchema, resolveRecallConfig } from "./recall/config.js";
-import { buildCohereRerankSeam, createPortkeyRerankClient } from "./recall/rerank-portkey.js";
+import { mountLocalQueueDiagnosticsApi } from "./local-queue-diagnostics-api.js";
+import { createRequestLogger, type RequestLogger } from "./logger.js";
+import { mountLogsApi } from "./logs/api.js";
+import { type LogStore, NULL_LOG_STORE, openLogStore } from "./logs/log-store.js";
+import { mountCompactApi } from "./maintenance/compact-api.js";
+import { mountStaleRefApi } from "./maintenance/stale-ref-api.js";
+import { createControlledWriteConflictHook } from "./memories/conflict-hook.js";
+import { createConflictSuppressionSource } from "./memories/conflict-resolve.js";
+import { mountConflictsApi } from "./memories/conflicts-api.js";
+// ── Data-API mount seams (PRD-022a / 022b / 022c) the composition root fires (D-2 / d-AC-1) ──
+import { mountMemoriesApi, mountMemoriesPrimeApi } from "./memories/index.js";
+import { mountLifecycleApi } from "./memories/lifecycle-api.js";
 import type { CohereRerankSeam } from "./memories/recall.js";
-import type { ModelClient } from "./pipeline/model-client.js";
+import { createRuntimePathService } from "./middleware/runtime-path.js";
+import { mountNotificationsApi } from "./notifications/api.js";
+import { mountOntologyApi } from "./ontology/api.js";
 import {
 	controlledWriteFanOut,
 	createPipelineHandlers,
@@ -136,37 +102,67 @@ import {
 	resolvePipelineConfig,
 	type StageWorker,
 } from "./pipeline/index.js";
+import type { ModelClient } from "./pipeline/model-client.js";
+import { mountPollinateApi } from "./pollinating/api.js";
 import { resolvePollinatingConfig } from "./pollinating/config.js";
 import { createPollinatingTrigger } from "./pollinating/trigger.js";
 import { createPollinatingWorker, type PollinatingJobWorker } from "./pollinating/worker.js";
-import { type PollBackoffConfig, resolvePollBackoffConfig } from "./services/poll-backoff.js";
+import { mountProductDataApi } from "./product/index.js";
+import {
+	mountOnboardingApi,
+	mountProjectsSyncApi,
+	mountScopeEnumerationApi,
+	mountScopeSwitchApi,
+} from "./projects/index.js";
+import { RecallConfigSchema, resolveRecallConfig } from "./recall/config.js";
+import { buildCohereRerankSeam, createPortkeyRerankClient } from "./recall/rerank-portkey.js";
+import { localDefaultScopeResolver, type SecretsApiDeps } from "./secrets/api.js";
+import type { SecretScope } from "./secrets/contracts.js";
+import { createMachineKeyProvider, createSecretResolver, SecretsStore } from "./secrets/store.js";
+import { type CreateDaemonOptions, createDaemon, type Daemon, type DaemonServices } from "./server.js";
+import {
+	createDeepLakeHibernation,
+	type DeepLakeHibernation,
+	envHibernationConfigProvider,
+	type Pausable,
+} from "./services/deeplake-hibernation.js";
+import {
+	createEmbedAttachment,
+	type EmbedAttachment,
+	type EmbedClient,
+	resolveEmbedClientOptions,
+} from "./services/embed-client.js";
+import { createEmbedSupervisor, type EmbedSupervisor } from "./services/embed-supervisor.js";
+import { createFileWatcherService, type HarnessTarget } from "./services/file-watcher.js";
+import {
+	createHybridJobQueueService,
+	type HybridJobQueueConfig,
+	resolveHybridJobQueueConfig,
+} from "./services/hybrid-job-queue.js";
+import { createJobQueueService, type JobQueueConfig } from "./services/job-queue.js";
 import {
 	createLeaseCoordinator,
 	type LeaseCoordinator,
 	resolvePollConsolidateConfig,
 } from "./services/lease-coordinator.js";
-
-// ── The PRD-046a summary-worker mount (the deferred-assembly seam PRD-017 left) ──
-import { createSummaryJobWorker, type SummaryJobWorker } from "./summaries/index.js";
-
+import { type LocalJobQueueService, openLocalJobQueue } from "./services/local-job-queue.js";
+import { countPendingSharedLocalJobs, resolveLocalQueueTopology } from "./services/local-queue-diagnostics.js";
+import { type PollBackoffConfig, resolvePollBackoffConfig } from "./services/poll-backoff.js";
+import { attachSessionsPrune } from "./sessions/prune.js";
+import { mountSkillPropagationApi } from "./skillify/propagation-api.js";
 // ── The PRD-045f skillify-worker mount (the deferred-assembly seam PRD-016 left) ──
 import { createSkillifyJobWorker, defaultGateSpec, type SkillifyJobWorker } from "./skillify/worker.js";
-
-import { createLazyStorageClient } from "../storage/index.js";
-import { type CredentialProvider, defaultCredentialProvider } from "../storage/config.js";
-import type { QueryScope, StorageClient } from "../storage/client.js";
-import { isOk } from "../storage/result.js";
-import {
-	type EmbedAttachment,
-	type EmbedClient,
-	createEmbedAttachment,
-	resolveEmbedClientOptions,
-} from "./services/embed-client.js";
-import { type EmbedSupervisor, createEmbedSupervisor } from "./services/embed-supervisor.js";
-import { type HealthDetail, type PortkeyHealth, buildHealthDetail } from "./health.js";
-import { mountDiagnosticsHealthApi } from "./diagnostics-health.js";
-import { mountLocalQueueDiagnosticsApi } from "./local-queue-diagnostics-api.js";
-import { countPendingSharedLocalJobs, resolveLocalQueueTopology } from "./services/local-queue-diagnostics.js";
+import type { SourcesApiDeps } from "./sources/api.js";
+import { buildSourcesApiDeps } from "./sources/registry.js";
+// ── The PRD-046a summary-worker mount (the deferred-assembly seam PRD-017 left) ──
+import { createSummaryJobWorker, type SummaryJobWorker } from "./summaries/index.js";
+import { EMBEDDINGS_ENABLED_KEY, mountSettingsApi } from "./vault/api.js";
+import { isValidProviderModel, providerEntry } from "./vault/catalog.js";
+import { migrateDeeplakeToken } from "./vault/migrate.js";
+import { createVaultRegistry } from "./vault/registry.js";
+// ── The vault `setting` class (PRD-032d / AC-6) — assembly READS provider/model + pollinating ──
+import { VaultStore } from "./vault/store.js";
+import { mountVfsApi } from "./vfs/api.js";
 
 /**
  * The inference-config filename the daemon reads its `inference:` block from (PRD-026
@@ -2135,6 +2131,21 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	};
 	const daemon = createDaemon(createOptions);
 
+	// ── Deep Lake idle-cost master switch (cost incident follow-up). The controller is built
+	// at the END of `start()` (once the workers + their lease topology are known) and assigned
+	// here. `onActivity` is the WAKE signal: an inbound HTTP request (a capture, a recall, a CLI
+	// call) means an agent is live and needs the shared Deep Lake pool, so it cancels/defers
+	// hibernation. It is registered as a root middleware BEFORE any route group is mounted so it
+	// fires for every request. Background worker queries are NOT inbound requests, so they never
+	// spuriously keep the daemon awake — only real agent activity does.
+	let hibernation: DeepLakeHibernation | null = null;
+	const hibernationConfig = envHibernationConfigProvider();
+	const onActivity = (): void => hibernation?.touch();
+	daemon.app.use("*", async (_c, next) => {
+		onActivity();
+		await next();
+	});
+
 	// ── PRD-025 AC-2: the embed seam wired into the store + capture paths. Default to the
 	// REAL `{ client, attacher }` pair (D-1 default-on, resolved from the env), built ONCE
 	// here and threaded into BOTH the capture handler (the full attachment) and the memories
@@ -2385,6 +2396,23 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		}
 	}
 
+	// ── Idle-cost hibernation seams: arm/disarm the two Deep Lake-touching timers so the
+	// hibernation controller can silence them while idle and revive them on the next request.
+	// Factored from the original inline `start()` blocks so the arm logic lives once.
+	function armUnrefInterval(cb: () => void, ms: number): ReturnType<typeof setInterval> {
+		const t = setInterval(cb, ms);
+		if (typeof (t as NodeJS.Timeout).unref === "function") (t as NodeJS.Timeout).unref();
+		return t;
+	}
+	function armHealthProbe(): void {
+		if (!storageHealthProbeEnabled || probeTimer !== null) return;
+		probeTimer = armUnrefInterval(() => void refreshHealth(), probeIntervalMs);
+	}
+	function armGraphBuild(): void {
+		if (!autoBuildGraph || graphBuildTimer !== null) return;
+		graphBuildTimer = armUnrefInterval(() => void rebuildCodebaseGraph(), DEFAULT_GRAPH_BUILD_INTERVAL_MS);
+	}
+
 	let started = false;
 	let locked = false;
 	// PRD-026 AC-W: the daemon-resident pollinating worker. Built + started ONLY when
@@ -2442,12 +2470,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				const initialHealthProbe = refreshHealth();
 				if (awaitInitialHealthProbe) await initialHealthProbe;
 				else void initialHealthProbe;
-				probeTimer = setInterval(() => {
-					void refreshHealth();
-				}, probeIntervalMs);
-				if (typeof (probeTimer as NodeJS.Timeout).unref === "function") {
-					(probeTimer as NodeJS.Timeout).unref();
-				}
+				armHealthProbe();
 			}
 
 			// PRD-041: kick the initial codebase-graph build OFF the readiness path (fire-and-forget
@@ -2456,12 +2479,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// `autoBuildGraph`), so the unit suite never triggers a real parse.
 			if (autoBuildGraph) {
 				void rebuildCodebaseGraph();
-				graphBuildTimer = setInterval(() => {
-					void rebuildCodebaseGraph();
-				}, DEFAULT_GRAPH_BUILD_INTERVAL_MS);
-				if (typeof (graphBuildTimer as NodeJS.Timeout).unref === "function") {
-					(graphBuildTimer as NodeJS.Timeout).unref();
-				}
+				armGraphBuild();
 			}
 
 			// Start the daemon's real services (queue → watcher → runtime-path).
@@ -2706,6 +2724,67 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 					}
 				}
 			}
+
+			// ── Wire + start the Deep Lake idle-cost master switch. Collect every background
+			// activity that touches Deep Lake on a timer as a Pausable, then let the controller
+			// silence them after `idleMs` with no inbound request so the connection drops and
+			// Activeloop scales the per-tenant pod to zero; the next request wakes them. With the
+			// flag off (the rollback) this whole block is skipped and every loop runs as before.
+			if (hibernationConfig.enabled && startBackgroundWorkers) {
+				const pausables: Pausable[] = [];
+				const addWorker = (label: string, h: { start(): void; stop(): void } | null): void => {
+					if (h !== null) pausables.push({ label, pause: () => h.stop(), resume: () => h.start() });
+				};
+				addWorker("summary", summaryWorker);
+				addWorker("skillify", skillifyWorker);
+				// Pause whatever actually drives the lease loop: the consolidated coordinator, or the
+				// two workers when running independently (never both — see the consolidation block).
+				if (leaseCoordinator !== null) addWorker("lease-coordinator", leaseCoordinator);
+				else {
+					addWorker("pipeline", pipelineWorker);
+					addWorker("pollinating", pollinatingWorker);
+				}
+				if (storageHealthProbeEnabled) {
+					pausables.push({
+						label: "health-probe",
+						pause: () => {
+							if (probeTimer !== null) {
+								clearInterval(probeTimer);
+								probeTimer = null;
+							}
+						},
+						resume: armHealthProbe,
+					});
+				}
+				if (autoBuildGraph) {
+					pausables.push({
+						label: "graph-build",
+						pause: () => {
+							if (graphBuildTimer !== null) {
+								clearInterval(graphBuildTimer);
+								graphBuildTimer = null;
+							}
+						},
+						resume: armGraphBuild,
+					});
+				}
+				if (pausables.length > 0) {
+					hibernation = createDeepLakeHibernation({
+						pausables,
+						config: hibernationConfig,
+						now: () => Date.now(),
+						timers: {
+							setTimer: (cb, ms) => {
+								const t = setTimeout(cb, ms);
+								if (typeof t.unref === "function") t.unref();
+								return t;
+							},
+							clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+						},
+					});
+					hibernation.start();
+				}
+			}
 		},
 
 		async shutdown(): Promise<void> {
@@ -2715,6 +2794,10 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// and never throws (a flush failure is logged inside the handler, not surfaced here). The
 			// `?.` tolerates a test seam whose fake capture handler does not implement `flush`.
 			await captureHandler.flush?.();
+			// Stop the idle-cost hibernation monitor first so a wake can never race the teardown
+			// below. It only cancels its own timer; the workers' own stop() does the real teardown.
+			hibernation?.stop();
+			hibernation = null;
 			// a-AC-5: graceful shutdown — stop the pollinating worker + the refresher, drain the
 			// services, and remove the lock so no stale lock survives. Idempotent + never throws
 			// on a missing lock.
