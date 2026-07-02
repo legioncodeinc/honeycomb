@@ -10,11 +10,11 @@
  * MERGE path over a recording store, asserting the appended row's `contributors`.
  */
 
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { createStorageClient } from "../../../../src/daemon/storage/index.js";
 import {
@@ -36,8 +36,18 @@ function client(transport: FakeDeepLakeTransport) {
 	return createStorageClient({ transport, provider: stubProvider(fakeCredentialRecord()) });
 }
 
+// Every mkdtemp'd dir minted by a test is tracked here and reclaimed in `afterEach` — see
+// `tests/setup/isolate-home.ts` for the incident (100k+ stray dirs under `%TEMP%`) that made
+// this discipline mandatory across every skillify test helper.
+const tempDirs: string[] = [];
+afterEach(() => {
+	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
 function tempDir(): string {
-	return mkdtempSync(join(tmpdir(), "skillify-pub-"));
+	const dir = mkdtempSync(join(tmpdir(), "skillify-pub-"));
+	tempDirs.push(dir);
+	return dir;
 }
 
 function skillAt(name: string, author: string, version: number, body: string): Skill {

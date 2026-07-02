@@ -14,11 +14,11 @@
  *   - 49c-AC-5 (identity-less → __unsorted__): the worker's project resolution falls to the inbox.
  */
 
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { buildProjectScopeClause } from "../../../../src/daemon/runtime/recall/scope-clause.js";
 import { UNSORTED_PROJECT_ID } from "../../../../src/hooks/shared/project-resolver.js";
@@ -36,9 +36,19 @@ import {
 
 const AUTHOR = "alice";
 
+// Every mkdtemp'd dir minted by a test is tracked here and reclaimed in `afterEach` — see
+// `tests/setup/isolate-home.ts` for the incident (100k+ stray dirs under `%TEMP%`) that made
+// this discipline mandatory across every skillify test helper.
+const tempDirs: string[] = [];
+afterEach(() => {
+	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
 /** A temp dir unique per call — the install seam roots here (no real cwd/home writes). */
 function tempDir(): string {
-	return mkdtempSync(join(tmpdir(), "skillify-049c-"));
+	const dir = mkdtempSync(join(tmpdir(), "skillify-049c-"));
+	tempDirs.push(dir);
+	return dir;
 }
 
 /** A FAKE recording SkillStore — records every appended row + serves the active (highest) per id. */

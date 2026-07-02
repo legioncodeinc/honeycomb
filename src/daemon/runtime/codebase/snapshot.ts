@@ -23,7 +23,7 @@
  * itself touch DeepLake — the 014c push (in `push-pull.ts`) does.
  */
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -294,5 +294,37 @@ export function writeSnapshotAtomic(snapshot: Snapshot, baseDir: string, sha256?
 	const bytes = canonicalJSON(snapshot);
 	writeFileSync(tmpPath, bytes, { encoding: "utf8" });
 	renameSync(tmpPath, finalPath);
+	pruneStaleSnapshots(dir, fileName);
 	return finalPath;
+}
+
+/**
+ * Delete every OTHER `.json` snapshot in `dir` once `keepFileName` has landed — the
+ * unbounded-growth fix. {@link loadFreshestLocalSnapshot} (`api.ts`) only EVER reads the
+ * most-recently-modified snapshot file, so every prior commit's file is dead weight the
+ * instant a newer one is written; nothing else in the codebase ever lists or reads an
+ * older one (confirmed: no caller globs `snapshots/*.json`). Without this,
+ * `<baseDir>/snapshots/` grows one file per commit FOREVER on an hourly rebuild timer
+ * (`DEFAULT_GRAPH_BUILD_INTERVAL_MS`) — this is the real cause behind reports of
+ * `~/.honeycomb/graphs/<repo>/` (adjacent to the `~/.deeplake` credentials dir) growing
+ * unbounded on an actively-developed repo. Best-effort: a delete failure (a concurrent
+ * reader mid-copy, an already-gone file) never fails the build that just succeeded — this
+ * runs strictly AFTER the atomic rename, so a crash here can never corrupt the just-written
+ * snapshot.
+ */
+function pruneStaleSnapshots(dir: string, keepFileName: string): void {
+	let entries: string[];
+	try {
+		entries = readdirSync(dir);
+	} catch {
+		return;
+	}
+	for (const name of entries) {
+		if (name === keepFileName || !name.endsWith(".json")) continue;
+		try {
+			unlinkSync(join(dir, name));
+		} catch {
+			// Best-effort — a concurrent reader or an already-removed file is fine.
+		}
+	}
 }

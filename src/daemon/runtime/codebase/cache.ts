@@ -32,7 +32,7 @@
  * file I/O — no DeepLake, no parsing.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { type FileExtraction, type GraphEdge, type GraphNode, isExternalTarget } from "./contracts.js";
@@ -48,6 +48,20 @@ import { type FileExtraction, type GraphEdge, type GraphNode, isExternalTarget }
  *       ts cross-file inputs; `external:` placeholder targets).
  */
 export const CACHE_SCHEMA_VERSION = 1 as const;
+
+/**
+ * Age ceiling for a content-addressed entry (the unbounded-growth guard). Entries are
+ * legitimately reused far into the future (a revert, a long-lived branch), so — unlike
+ * `snapshots/` — this cache cannot simply keep "only the latest". But with zero eviction
+ * at all, `.cache/` grows one file per UNIQUE file content EVER SEEN across the repo's
+ * entire history, forever, on an hourly rebuild timer — confirmed accumulating unboundedly
+ * on an actively-developed repo (the real cause behind reports of `~/.honeycomb/graphs/`
+ * growing massive). 90 days is long enough that a genuine revert still gets a cache hit in
+ * the overwhelming common case, while bounding steady-state size; a swept entry is not
+ * data loss — a miss just re-extracts the file (FR-11 territory: this cache is always a
+ * pure performance optimization, never a source of truth).
+ */
+const MAX_ENTRY_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 
 /** The on-disk cache entry envelope. The `extraction` is the cached {@link FileExtraction}. */
 interface CacheEntry {
@@ -69,6 +83,34 @@ export class ExtractionCache {
 
 	constructor(baseDir: string) {
 		this.cacheDir = join(baseDir, ".cache");
+		// Best-effort, once per build (the hourly rebuild timer bounds frequency) — see
+		// MAX_ENTRY_AGE_MS for why this exists at all.
+		this.sweepStaleEntries();
+	}
+
+	/**
+	 * Evict entries untouched (by mtime) for longer than {@link MAX_ENTRY_AGE_MS} — the
+	 * unbounded-growth guard. A no-op when the cache dir does not exist yet (a fresh repo).
+	 * Never throws: a permissions hiccup or a concurrent writer just means this sweep skips
+	 * that entry, tried again on the next build.
+	 */
+	private sweepStaleEntries(): void {
+		let entries: string[];
+		try {
+			entries = readdirSync(this.cacheDir);
+		} catch {
+			return; // Cache dir does not exist yet — nothing to sweep.
+		}
+		const cutoff = Date.now() - MAX_ENTRY_AGE_MS;
+		for (const name of entries) {
+			if (!name.endsWith(".json")) continue;
+			const full = join(this.cacheDir, name);
+			try {
+				if (statSync(full).mtimeMs < cutoff) unlinkSync(full);
+			} catch {
+				// Best-effort — a concurrent writer or an already-gone file is fine.
+			}
+		}
 	}
 
 	/** The on-disk path for a content sha (`<cacheDir>/<sha>.json`). */
@@ -102,6 +144,16 @@ export class ExtractionCache {
 		// Integrity: the entry's sha must match the key it was stored under (FR-11).
 		if (entry.contentSha256 !== contentSha256) return null;
 		if (!isWellFormed(entry.extraction)) return null;
+
+		// A live hit resets the age clock (best-effort) — an entry still in active rotation
+		// (e.g. a file that toggles between two known contents across branches) must never
+		// be swept out from under a build just because it was FIRST written 90+ days ago.
+		try {
+			const now = new Date();
+			utimesSync(path, now, now);
+		} catch {
+			// Best-effort — a read-only filesystem or a race with a sweep is fine either way.
+		}
 
 		return rewritePath(entry.extraction, currentPath);
 	}

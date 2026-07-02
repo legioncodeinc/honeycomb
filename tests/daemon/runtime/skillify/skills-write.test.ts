@@ -11,11 +11,11 @@
  * NEVER an UPDATE — exactly like the sources / ontology append-only tests.
  */
 
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { createStorageClient } from "../../../../src/daemon/storage/index.js";
 import { healTargetFor } from "../../../../src/daemon/storage/catalog/index.js";
@@ -40,9 +40,19 @@ function client(transport: FakeDeepLakeTransport) {
 	return createStorageClient({ transport, provider: stubProvider(fakeCredentialRecord()) });
 }
 
+// Every mkdtemp'd dir minted by a test is tracked here and reclaimed in `afterEach` — see
+// `tests/setup/isolate-home.ts` for the incident (100k+ stray dirs under `%TEMP%`) that made
+// this discipline mandatory across every skillify test helper.
+const tempDirs: string[] = [];
+afterEach(() => {
+	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
 /** A temp dir unique per call — the install seam roots here (no real cwd/home writes). */
 function tempDir(): string {
-	return mkdtempSync(join(tmpdir(), "skillify-"));
+	const dir = mkdtempSync(join(tmpdir(), "skillify-"));
+	tempDirs.push(dir);
+	return dir;
 }
 
 // ════════════════════════════════════════════════════════════════════════════

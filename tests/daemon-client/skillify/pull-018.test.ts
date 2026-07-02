@@ -20,13 +20,14 @@ import {
 	mkdtempSync,
 	readFileSync,
 	readlinkSync,
+	rmSync,
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
 	type AgentRootDetector,
@@ -44,9 +45,20 @@ import {
 	unpullSkill,
 } from "../../../src/daemon-client/skillify/index.js";
 
+// Every mkdtemp'd dir minted by a test is tracked here and reclaimed in `afterEach` — see
+// `tests/setup/isolate-home.ts` for the incident (100k+ stray dirs under `%TEMP%`) that made
+// this discipline mandatory across every skillify test helper.
+const tempDirs: string[] = [];
+
 function tempDir(): string {
-	return mkdtempSync(join(tmpdir(), "skillify-018-"));
+	const dir = mkdtempSync(join(tmpdir(), "skillify-018-"));
+	tempDirs.push(dir);
+	return dir;
 }
+
+afterEach(() => {
+	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
 
 const CAN_SYMLINK = (() => {
 	try {

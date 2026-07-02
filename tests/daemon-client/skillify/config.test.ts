@@ -4,11 +4,11 @@
  * dir (no real `~`), plus the pure `coerceScope` / `normalizeConfig` / `parseUsersList`.
  */
 
-import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
 	coerceScope,
@@ -18,8 +18,18 @@ import {
 	parseUsersList,
 } from "../../../src/daemon-client/skillify/index.js";
 
+// Every mkdtemp'd dir minted by a test is tracked here and reclaimed in `afterEach` — see
+// `tests/setup/isolate-home.ts` for the incident (100k+ stray dirs under `%TEMP%`) that made
+// this discipline mandatory across every skillify test helper.
+const tempDirs: string[] = [];
+afterEach(() => {
+	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
 function tempDir(): string {
-	return mkdtempSync(join(tmpdir(), "skillify-config-"));
+	const dir = mkdtempSync(join(tmpdir(), "skillify-config-"));
+	tempDirs.push(dir);
+	return dir;
 }
 
 /** Seed a raw config.json at the store's base dir. */
