@@ -119,14 +119,19 @@ export function isOptedOut(env: NodeJS.ProcessEnv = process.env): boolean {
 export type TelemetryTier = "tier1" | "tier2";
 
 /**
- * The Tier-1 event set — the three named lifecycle events (e-AC-1). All are operational "a moment
+ * The Tier-1 event set: the named lifecycle events (e-AC-1). All are operational "a moment
  * happened" facts with no content, so they ride the opt-out default. `honeycomb_hivemind_upgrade`'s
  * call site is PRD-050d's; this module builds + tests its emit so 050d only has to call the chokepoint.
+ * `honeycomb_updated` (a version change observed at a lifecycle checkpoint, deduped per event+version
+ * via {@link EmitOptions.dedupeKey}) and `honeycomb_uninstalled` (the `honeycomb uninstall` verb ran)
+ * are lifecycle facts of the same shape, so they ride Tier-1 too.
  */
 export const TIER1_EVENTS: ReadonlySet<TelemetryEventName> = new Set<TelemetryEventName>([
 	"honeycomb_installed",
 	"honeycomb_first_link",
 	"honeycomb_hivemind_upgrade",
+	"honeycomb_updated",
+	"honeycomb_uninstalled",
 ]);
 
 /**
@@ -351,6 +356,12 @@ export interface EmitOptions {
 	readonly countBucket?: CountBucket;
 	/** Extra allow-listed properties (filtered through {@link ALLOWED_KEY_SET}). */
 	readonly properties?: Readonly<Record<string, unknown>>;
+	/**
+	 * Override the dedupe-ledger KEY (defaults to the event name, i.e. once-per-machine, e-AC-5).
+	 * A version-qualified caller passes e.g. `honeycomb_updated@1.2.3` so dedupe is per
+	 * event+version while the event NAME sent over the wire stays the plain `honeycomb_updated`.
+	 */
+	readonly dedupeKey?: string;
 }
 
 /** The default bounded POST timeout — a telemetry POST never hangs an install longer than this (e-AC-4). */
@@ -450,8 +461,11 @@ export async function emitTelemetry(
 			return { sent: false, skipped: "not_consented", properties };
 		}
 
-		// Gate 4: dedupe — each event sends AT MOST ONCE per machine (e-AC-5).
-		if (isReported(state, event)) return { sent: false, skipped: "already_reported", properties };
+		// Gate 4: dedupe. Each ledger key sends AT MOST ONCE per machine (e-AC-5). The key defaults
+		// to the event name; a caller-supplied `dedupeKey` (e.g. `honeycomb_updated@<version>`)
+		// scopes the dedupe to event+version instead.
+		const ledgerKey = opts.dedupeKey ?? event;
+		if (isReported(state, ledgerKey)) return { sent: false, skipped: "already_reported", properties };
 
 		// distinct_id is ALWAYS the anonymized random installId (e-AC-6) — never email/account id.
 		const distinctId = state.installId;
@@ -466,7 +480,7 @@ export async function emitTelemetry(
 		const clock = deps.clock ?? systemTelemetryClock;
 		const at = clock();
 		const sentRecord: TelemetrySentRecord = { event, at, properties };
-		const next = appendSent(markReported(state, event, at), sentRecord);
+		const next = appendSent(markReported(state, ledgerKey, at), sentRecord);
 		try {
 			save(next, deps.dir);
 		} catch {

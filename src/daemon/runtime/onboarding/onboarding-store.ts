@@ -70,10 +70,18 @@ export const DEFAULT_REF: string =
 // ────────────────────────────────────────────────────────────────────────────
 
 /**
- * The closed set of Tier-2 telemetry events. Each is reported AT MOST ONCE per
- * machine (the {@link OnboardingState.telemetry} `reported` ledger dedupes them).
+ * The closed set of named lifecycle telemetry events. Each is reported AT MOST ONCE per
+ * machine (the {@link OnboardingState.telemetry} `reported` ledger dedupes them) - except
+ * `honeycomb_updated`, whose dedupe is per event+version: the emitter records the qualified
+ * key `honeycomb_updated@<version>` in the ledger while sending the plain event name, so a
+ * NEW version re-fires but the SAME version never double-sends.
  */
-export type TelemetryEventName = "honeycomb_installed" | "honeycomb_first_link" | "honeycomb_hivemind_upgrade";
+export type TelemetryEventName =
+	| "honeycomb_installed"
+	| "honeycomb_first_link"
+	| "honeycomb_hivemind_upgrade"
+	| "honeycomb_updated"
+	| "honeycomb_uninstalled";
 
 /**
  * One glass-box record of a telemetry event that was ACTUALLY sent — the
@@ -104,14 +112,25 @@ export interface OnboardingState {
 	firstTimeSetupComplete: boolean;
 	/** The effective referral code (defaults to the build-time {@link DEFAULT_REF}). */
 	ref: string;
+	/**
+	 * The last Honeycomb build version this machine observed at a lifecycle checkpoint
+	 * (the `honeycomb_updated` detection baseline). ABSENT on a fresh install and on any
+	 * state file written before this field existed - the first observation records the
+	 * baseline WITHOUT emitting (a first sighting is not an update).
+	 */
+	lastVersion?: string;
 	/** Detection of a prior Hivemind install (drives the migration path). */
 	priorTool: { hivemind: "absent" | "present" | "migrated" };
 	/** Telemetry consent + the dedupe ledger + the glass-box sent log. */
 	telemetry: {
 		/** Tiered consent: Tier-2 usage events are sent ONLY when this is true. */
 		optInTier2: boolean;
-		/** Dedupe ledger: event name → ISO timestamp it was reported (sent at most once). */
-		reported: Partial<Record<TelemetryEventName, string>>;
+		/**
+		 * Dedupe ledger: ledger key → ISO timestamp it was reported (sent at most once per key).
+		 * The key is USUALLY the plain event name; a version-qualified event records a qualified
+		 * key instead (e.g. `honeycomb_updated@1.2.3`), so dedupe is per event+version there.
+		 */
+		reported: Partial<Record<string, string>>;
 		/** Append-only glass-box log of what was actually sent. */
 		sent: TelemetrySentRecord[];
 	};
@@ -131,7 +150,13 @@ export interface OnboardingState {
 // ────────────────────────────────────────────────────────────────────────────
 
 /** The closed telemetry-event enum, mirrored as a zod enum for boundary validation. */
-const TelemetryEventNameSchema = z.enum(["honeycomb_installed", "honeycomb_first_link", "honeycomb_hivemind_upgrade"]);
+const TelemetryEventNameSchema = z.enum([
+	"honeycomb_installed",
+	"honeycomb_first_link",
+	"honeycomb_hivemind_upgrade",
+	"honeycomb_updated",
+	"honeycomb_uninstalled",
+]);
 
 /** One {@link TelemetrySentRecord}, validated. */
 const TelemetrySentRecordSchema = z.object({
@@ -154,16 +179,18 @@ export const OnboardingStateSchema = z.object({
 	phase: z.enum(["fresh", "installed", "linking", "linked", "migrating", "migrated"]),
 	firstTimeSetupComplete: z.boolean(),
 	ref: z.string(),
+	// Optional: absent on a fresh install and on pre-existing files (fail-soft compatibility).
+	lastVersion: z.string().optional(),
 	priorTool: z.object({
 		hivemind: z.enum(["absent", "present", "migrated"]),
 	}),
 	telemetry: z.object({
 		optInTier2: z.boolean(),
-		// `reported` is a PARTIAL ledger — only events that have fired are present.
-		// zod v4's `z.record(enum, …)` is EXHAUSTIVE (it demands every enum key), which
-		// would reject the common empty/partial ledger; `z.partialRecord` is the precise
-		// match for the `Partial<Record<TelemetryEventName, string>>` contract field.
-		reported: z.partialRecord(TelemetryEventNameSchema, z.string()),
+		// `reported` is a PARTIAL ledger keyed by LEDGER KEY (usually the event name, but a
+		// version-qualified key like `honeycomb_updated@1.2.3` is valid too), so the schema is a
+		// plain string→string record rather than an enum-keyed one. Only keys that have fired
+		// are present; an empty ledger is the common fresh-install shape.
+		reported: z.record(z.string(), z.string()),
 		sent: z.array(TelemetrySentRecordSchema),
 	}),
 	migration: z
@@ -311,26 +338,29 @@ export function getOrCreateInstallId(state: OnboardingState): [string, Onboardin
 }
 
 /**
- * Return a COPY of `state` with `event` recorded in the telemetry dedupe ledger at
- * `isoTimestamp`. PURE — `state` is not mutated. Downstream uses this to mark a
- * Tier-2 event reported so {@link isReported} suppresses a re-send.
+ * Return a COPY of `state` with the ledger key recorded in the telemetry dedupe ledger at
+ * `isoTimestamp`. PURE: `state` is not mutated. The key is usually the plain
+ * {@link TelemetryEventName}; a version-qualified key (e.g. `honeycomb_updated@1.2.3`)
+ * dedupes per event+version instead. Downstream uses this to mark an event reported so
+ * {@link isReported} suppresses a re-send.
  */
-export function markReported(state: OnboardingState, event: TelemetryEventName, isoTimestamp: string): OnboardingState {
+export function markReported(state: OnboardingState, ledgerKey: string, isoTimestamp: string): OnboardingState {
 	return {
 		...state,
 		telemetry: {
 			...state.telemetry,
-			reported: { ...state.telemetry.reported, [event]: isoTimestamp },
+			reported: { ...state.telemetry.reported, [ledgerKey]: isoTimestamp },
 		},
 	};
 }
 
 /**
- * True when `event` has already been recorded in the telemetry dedupe ledger — the
- * guard a sender checks to send each Tier-2 event AT MOST ONCE per machine. PURE.
+ * True when the ledger key has already been recorded in the telemetry dedupe ledger: the
+ * guard a sender checks to send each event AT MOST ONCE per key (per machine for a plain
+ * event-name key; per machine+version for a qualified key). PURE.
  */
-export function isReported(state: OnboardingState, event: TelemetryEventName): boolean {
-	return state.telemetry.reported[event] !== undefined;
+export function isReported(state: OnboardingState, ledgerKey: string): boolean {
+	return state.telemetry.reported[ledgerKey] !== undefined;
 }
 
 /**

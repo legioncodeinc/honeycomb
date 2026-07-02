@@ -177,6 +177,55 @@ describe("e-AC-5 dedupe: a second run does NOT re-emit an already-reported event
 	});
 });
 
+describe("honeycomb_updated dedupes per event+version via dedupeKey (the version-qualified ledger key)", () => {
+	it("the SAME version never double-sends; a NEW version's key sends again under the same event name", async () => {
+		const rec = recordingFetch();
+		const deps = { dir, fetch: rec.fetch, posthogKey: KEY };
+		const first = await emitTelemetry(
+			"honeycomb_updated",
+			{ ref: "mario", tier: "tier1", dedupeKey: "honeycomb_updated@1.0.1" },
+			deps,
+		);
+		expect(first.sent).toBe(true);
+		// The wire event NAME is the plain honeycomb_updated; the qualified key lives only in the ledger.
+		expect(bodyOf(rec).event).toBe("honeycomb_updated");
+		expect(loadOnboarding(dir).telemetry.reported["honeycomb_updated@1.0.1"]).toBeDefined();
+		expect(loadOnboarding(dir).telemetry.reported.honeycomb_updated).toBeUndefined();
+
+		const dup = await emitTelemetry(
+			"honeycomb_updated",
+			{ ref: "mario", tier: "tier1", dedupeKey: "honeycomb_updated@1.0.1" },
+			deps,
+		);
+		expect(dup.sent).toBe(false);
+		expect(dup.skipped).toBe("already_reported");
+		expect(rec.calls).toHaveLength(1);
+
+		const next = await emitTelemetry(
+			"honeycomb_updated",
+			{ ref: "mario", tier: "tier1", dedupeKey: "honeycomb_updated@1.0.2" },
+			deps,
+		);
+		expect(next.sent).toBe(true);
+		expect(rec.calls).toHaveLength(2);
+		expect(JSON.parse(rec.calls[1]!.init.body).event).toBe("honeycomb_updated");
+	});
+});
+
+describe("honeycomb_uninstalled rides Tier-1 (opt-out default), deduped once per machine", () => {
+	it("sends without Tier-2 opt-in and dedupes a second emit", async () => {
+		const rec = recordingFetch();
+		const deps = { dir, fetch: rec.fetch, posthogKey: KEY };
+		const first = await emitTelemetry("honeycomb_uninstalled", { ref: "mario", tier: "tier1" }, deps);
+		expect(first.sent).toBe(true);
+		expect(bodyOf(rec).event).toBe("honeycomb_uninstalled");
+		const second = await emitTelemetry("honeycomb_uninstalled", { ref: "mario", tier: "tier1" }, deps);
+		expect(second.sent).toBe(false);
+		expect(second.skipped).toBe("already_reported");
+		expect(rec.calls).toHaveLength(1);
+	});
+});
+
 describe("e-AC-6 distinct_id is the anonymized random installId, stable across runs, a UUID not an email", () => {
 	it("distinct_id is the onboarding installId (UUID v4) and stable across two emits", async () => {
 		const rec = recordingFetch();

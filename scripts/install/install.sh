@@ -154,6 +154,10 @@ SEL_CODE=""
 INSTALL_ID=""
 IS_REPEAT_INSTALL="false"
 EXTRA_PRODUCT_FAILED=0
+# Comma list of SELECTED products that did NOT actually land this run (unpublished skip, npm
+# install failure, registration failure, or the hivedoctor opt-out). Consumed by
+# phone_home_product_transitions so product_installed/product_updated never over-claims.
+PRODUCTS_NOT_INSTALLED=""
 
 # ── Friendly progress log: step lines to stdout, the single failure summary to stderr. ──
 step()  { printf '→ %s\n' "$1"; }
@@ -219,24 +223,41 @@ resolve_install_id() {
 # The payload is deliberately minimal and allow-list-shaped (no PII, and `--license=`/`--code=`
 # values are NEVER included): products, profile, coarse OS family, repeat-vs-first, and the event
 # name itself (doubling as a coarse terminal-status label).
+# phone_home <event> [product]
+# The optional second arg is the per-product transition payload field (product_installed /
+# product_updated / product_removed each name the ONE product they describe); when present it is
+# appended to the properties as `"product":"<slug>"` alongside the existing run-level fields.
 phone_home() {
 	event="$1"
+	product="${2:-}"
 	# --dry-run ALWAYS previews what would be sent, even against an un-substituted placeholder key
 	# (a local/dev checkout); this is the one seam PRD-002's verification story depends on, so the
 	# key-guard below only gates the REAL network send, never the dry-run preview.
 	if [ "$DRY_RUN" -eq 1 ]; then
-		printf '[dry-run] would phone home: %s (install_id=%s, repeat=%s, products=%s, profile=%s)\n' \
-			"$event" "${INSTALL_ID:-unknown}" "$IS_REPEAT_INSTALL" "${SEL_PRODUCTS:-<unresolved>}" "${SEL_PROFILE:-<none>}"
+		if [ -n "$product" ]; then
+			printf '[dry-run] would phone home: %s (product=%s, install_id=%s, repeat=%s, products=%s, profile=%s)\n' \
+				"$event" "$product" "${INSTALL_ID:-unknown}" "$IS_REPEAT_INSTALL" "${SEL_PRODUCTS:-<unresolved>}" "${SEL_PROFILE:-<none>}"
+		else
+			printf '[dry-run] would phone home: %s (install_id=%s, repeat=%s, products=%s, profile=%s)\n' \
+				"$event" "${INSTALL_ID:-unknown}" "$IS_REPEAT_INSTALL" "${SEL_PRODUCTS:-<unresolved>}" "${SEL_PROFILE:-<none>}"
+		fi
 		return 0
 	fi
 	[ -z "$HONEYCOMB_INSTALL_POSTHOG_KEY" ] && return 0
 	have curl || return 0
-	body=$(printf '{"api_key":"%s","event":"%s","distinct_id":"%s","properties":{"products":"%s","profile":"%s","os":"%s","repeat_install":"%s"}}' \
+	product_prop=""
+	[ -n "$product" ] && product_prop="$(printf ',"product":"%s"' "$product")"
+	body=$(printf '{"api_key":"%s","event":"%s","distinct_id":"%s","properties":{"products":"%s","profile":"%s","os":"%s","repeat_install":"%s"%s}}' \
 		"$HONEYCOMB_INSTALL_POSTHOG_KEY" "$event" "${INSTALL_ID:-unknown}" "${SEL_PRODUCTS:-}" "${SEL_PROFILE:-}" \
-		"$(uname -s 2>/dev/null || echo unknown)" "$IS_REPEAT_INSTALL")
+		"$(uname -s 2>/dev/null || echo unknown)" "$IS_REPEAT_INSTALL" "$product_prop")
 	curl -fsS --max-time 3 -H 'Content-Type: application/json' -d "$body" \
 		"${HONEYCOMB_INSTALL_POSTHOG_HOST}${HONEYCOMB_INSTALL_POSTHOG_PATH}" >/dev/null 2>&1 || true
 	return 0
+}
+
+# Record that a SELECTED product did not actually land this run (see PRODUCTS_NOT_INSTALLED).
+mark_product_not_installed() {
+	PRODUCTS_NOT_INSTALLED="${PRODUCTS_NOT_INSTALLED}${PRODUCTS_NOT_INSTALLED:+,}$1"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -631,6 +652,7 @@ install_hivedoctor() {
     step "installing the HiveDoctor watchdog (${hd_target})…"
     if ! npm install -g "$hd_target" >/dev/null 2>&1; then
       printf 'note: could not install %s (continuing, Honeycomb itself is installed).\n' "$hd_target"
+      mark_product_not_installed hivedoctor
       return 0
     fi
     ok "installed ${hd_target}."
@@ -682,6 +704,7 @@ install_extra_product() {
 	case "$kind" in
 		unpublished)
 			printf 'note: %s (%s) is not yet published to npm; skipping (a maintainer still needs to complete the one-time npm Trusted-Publisher bootstrap, PRD-001c). Re-run this installer after that lands.\n' "$display_name" "$pkg"
+			mark_product_not_installed "$slug"
 			return 0
 			;;
 		unresolved)
@@ -706,6 +729,7 @@ install_extra_product() {
 		if ! npm install -g "$target" >/dev/null 2>&1; then
 			printf 'note: could not install %s (continuing; the rest of the install still succeeded). Try: npm install -g %s\n' "$display_name" "$target"
 			EXTRA_PRODUCT_FAILED=1
+			mark_product_not_installed "$slug"
 			return 0
 		fi
 		ok "installed ${display_name}."
@@ -728,6 +752,9 @@ install_extra_product() {
 		else
 			printf 'note: %s installed but its %s step did not complete (continuing). Run `%s %s` to see why.\n' "$display_name" "$post_install_verb" "$bin_name" "$post_install_verb"
 			EXTRA_PRODUCT_FAILED=1
+			# A registration failure keeps the product OUT of the transition events, matching the
+			# install-state gate below (a failed selection is not recorded as installed).
+			mark_product_not_installed "$slug"
 		fi
 	fi
 	return 0
@@ -812,6 +839,10 @@ reconcile_removed_products() {
 		case ",$SEL_PRODUCTS," in
 			*",$p,"*) : ;; # still selected; nothing to do
 			*)
+				# Per-product transition telemetry: this product WAS in the last run's selection and
+				# is gone now (the DELETE transition). Fire-and-forget like every phone_home call;
+				# fires for EVERY dropped product, whether or not it has a deregistration branch below.
+				phone_home product_removed "$p"
 				case "$p" in
 					thehive|hivenectar)
 						if [ "$DRY_RUN" -eq 1 ]; then
@@ -824,6 +855,32 @@ reconcile_removed_products() {
 					*) : ;; # honeycomb/hivedoctor: no self-deregistration through this path
 				esac
 				;;
+		esac
+		IFS=','
+	done
+	IFS="$old_ifs"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-product transition telemetry: product_installed / product_updated (product_removed fires
+# from reconcile_removed_products above). Diffs the PREVIOUS run's selection (install-state) vs
+# this run's resolved selection, skipping any product that did not actually land
+# (PRODUCTS_NOT_INSTALLED). Same posture as every phone_home call: fire-and-forget, silent no-op
+# without a key, dry-run previews only, never affects the exit code. `repeat_install` covers the
+# RUN; these events cover the PER-PRODUCT fact.
+# ─────────────────────────────────────────────────────────────────────────────
+phone_home_product_transitions() {
+	previous="$(read_previous_products)"
+	old_ifs="$IFS"
+	IFS=','
+	for p in $SEL_PRODUCTS; do
+		IFS="$old_ifs"
+		case ",$PRODUCTS_NOT_INSTALLED," in
+			*",$p,"*) IFS=','; continue ;; # selected but did not land: no transition claim
+		esac
+		case ",$previous," in
+			*",$p,"*) phone_home product_updated "$p" ;;   # already present last run: refreshed
+			*)        phone_home product_installed "$p" ;; # newly added this run
 		esac
 		IFS=','
 	done
@@ -907,6 +964,8 @@ main() {
     *,hivedoctor,*)
       if hivedoctor_opted_out "$@"; then
         step "skipping HiveDoctor (--no-hivedoctor)."
+        # Opted out: hivedoctor stays selected but does not land, so it earns no transition event.
+        mark_product_not_installed hivedoctor
       elif [ "$DRY_RUN" -eq 1 ]; then
         printf '[dry-run] would install + register HiveDoctor (%s).\n' "$(resolve_core_product_target "hivedoctor" "$HIVEDOCTOR_NPM_PACKAGE")"
       else
@@ -924,8 +983,11 @@ main() {
     *,hivenectar,*) install_extra_product "Hivenectar" hivenectar "@legioncodeinc/hivenectar" hivenectar install ;;
   esac
 
-  # PRD-002b DELETE transition: a --products= narrowing vs. the last run.
+  # PRD-002b DELETE transition: a --products= narrowing vs. the last run (fires product_removed).
   reconcile_removed_products
+  # Per-product CREATE/UPDATE transitions: product_installed / product_updated. Must run BEFORE
+  # write_install_state below (the diff baseline is the PREVIOUS run's recorded selection).
+  phone_home_product_transitions
   # Persist the selected set ONLY when every selected extra product actually installed/registered:
   # a failed selection must not be recorded as "installed" (nor emit install_completed below).
   if [ "$DRY_RUN" -ne 1 ] && [ "$EXTRA_PRODUCT_FAILED" -eq 0 ]; then

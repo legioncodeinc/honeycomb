@@ -47,7 +47,7 @@ import {
 	saveOnboarding,
 } from "../daemon/runtime/onboarding/index.js";
 import { type RegistryBind, registerHoneycombWithHivedoctor } from "../daemon/runtime/telemetry/fleet-registry.js";
-import { type EmitDeps, emitTelemetry } from "../daemon/runtime/telemetry/index.js";
+import { type EmitDeps, emitTelemetry, recordVersionAndEmitUpdated } from "../daemon/runtime/telemetry/index.js";
 import { DAEMON_HOST, DAEMON_PORT, THEHIVE_HOST, THEHIVE_PORT } from "../shared/constants.js";
 import type { CommandResult, OutputSink } from "./contracts.js";
 import { type DaemonVerbDeps, ensureDaemonRunning } from "./daemon.js";
@@ -349,11 +349,21 @@ export async function runInstallCommand(argv: readonly string[], deps: InstallVe
 	//    every install attempt, vs. one-time CLI-verb-completion-and-onboarding-correlation per
 	//    machine). Retiring `honeycomb_installed` outright would lose that onboarding correlation for
 	//    no gain, so this pass keeps it and documents the split here rather than deleting it.
-	void emitTelemetry(
-		"honeycomb_installed",
-		{ ref, tier: "tier1" },
-		{ ...(deps.telemetry ?? {}), ...(deps.dir !== undefined ? { dir: deps.dir } : {}) },
-	);
+	//
+	//    The `honeycomb_updated` version checkpoint (the-apiary lifecycle telemetry) runs in the SAME
+	//    fire-and-forget chain, SEQUENCED after the installed emit: both mutate the one onboarding
+	//    state file (ledger / lastVersion), so running them concurrently would race a load/save and
+	//    lose one write. `recordVersionAndEmitUpdated` is a one-string-compare no-op when the version
+	//    is unchanged, records the baseline silently on first sighting, and emits `honeycomb_updated`
+	//    (deduped per event+version) on a real change. Fail-soft always - see version-check.ts.
+	const telemetryDeps: EmitDeps = {
+		...(deps.telemetry ?? {}),
+		...(deps.dir !== undefined ? { dir: deps.dir } : {}),
+	};
+	void (async () => {
+		await emitTelemetry("honeycomb_installed", { ref, tier: "tier1" }, telemetryDeps);
+		await recordVersionAndEmitUpdated(ref, telemetryDeps);
+	})();
 
 	return { exitCode: 0 };
 }

@@ -17,6 +17,8 @@
  *   claude-code connectors); a test injects a fake.
  */
 
+import { DEFAULT_REF, loadOnboarding } from "../daemon/runtime/onboarding/index.js";
+import { type EmitDeps, emitTelemetry } from "../daemon/runtime/telemetry/index.js";
 import {
 	type CommandDeps,
 	type CommandResult,
@@ -60,6 +62,13 @@ export interface LocalDeps extends CommandDeps {
 	readonly connector?: ConnectorRunner;
 	/** The 020b dashboard launcher (`dashboard`). Bound at assembly. */
 	readonly dashboard?: DashboardLauncher;
+	/**
+	 * Telemetry chokepoint seam (PRD-050e posture). The `honeycomb_uninstalled` lifecycle event
+	 * emits through here when the full `uninstall` verb runs - fire-and-forget, never gating the
+	 * verb. Tests inject a `fetch` recorder + temp `dir`; omit in production (the chokepoint's
+	 * defaults apply, and an empty build key makes it a no-op).
+	 */
+	readonly telemetry?: EmitDeps;
 }
 
 /** Parse the harness slug (first non-flag word) off a connector verb's argv tail. */
@@ -81,6 +90,28 @@ export async function runConnectorVerb(verb: string, argv: readonly string[], de
 		return { exitCode: 1 };
 	}
 	const harness = harnessArg(argv);
+	// The `honeycomb_uninstalled` lifecycle event (the-apiary fleet telemetry). Fires on the FULL
+	// `uninstall` (no harness arg - the "reverse everything Honeycomb wired" invocation), not a
+	// single-harness `uninstall <harness>` (that is a partial re-wire, not an uninstall). It fires
+	// BEFORE the connector engine reverses anything, fire-and-forget (`void`, never awaited), so a
+	// slow/broken telemetry hop can never delay or fail the uninstall - and every chokepoint gate
+	// (empty key / opt-out / once-per-machine dedupe) applies unchanged. The ref comes from the
+	// onboarding state, fail-soft to the build default. NOTE: no honeycomb verb removes the npm
+	// package or the state dir today; PACKAGE-removal coverage is the installer's `product_removed`
+	// event (see version-check.ts's module docstring for the full split).
+	if (verb === "uninstall" && harness === undefined) {
+		let ref = DEFAULT_REF;
+		try {
+			ref = loadOnboarding(deps.dir).ref;
+		} catch {
+			// Fail-soft: an unreadable onboarding state never blocks the uninstall (or the emit).
+		}
+		void emitTelemetry(
+			"honeycomb_uninstalled",
+			{ ref, tier: "tier1" },
+			{ ...(deps.telemetry ?? {}), ...(deps.dir !== undefined ? { dir: deps.dir } : {}) },
+		);
+	}
 	const result = await deps.connector.run({ verb, ...(harness !== undefined ? { harness } : {}) });
 	if (result.harnesses.length > 0) {
 		out(`${verb}: ${verb === "uninstall" ? "reversed" : "wired"} ${result.harnesses.join(", ")}.`);

@@ -43,3 +43,5 @@ export {
 	buildGlassBoxView,
 	renderGlassBoxText,
 } from "./glass-box.js";
+
+export { type VersionCheckOutcome, recordVersionAndEmitUpdated } from "./version-check.js";

@@ -149,6 +149,9 @@ function Resolve-InstallId([bool]$DryRun) {
 # body shape as the Node-side chokepoint (src/daemon/runtime/telemetry/emit.ts) for consistency,
 # but is otherwise fully independent of it. Payload is minimal + allow-list-shaped: products,
 # profile, coarse OS family, repeat-vs-first -- NEVER --license=/--code= values (no PII).
+# The optional -Product arg is the per-product transition payload field (product_installed /
+# product_updated / product_removed each name the ONE product they describe); when present it is
+# appended to the properties as `product = <slug>` alongside the existing run-level fields.
 function Send-PhoneHome {
   param(
     [string]$EventName,
@@ -156,26 +159,33 @@ function Send-PhoneHome {
     [string]$Profile,
     [string]$InstallId,
     [bool]$Repeat,
-    [bool]$DryRun
+    [bool]$DryRun,
+    [string]$Product = ''
   )
   if ($DryRun) {
-    Write-Host "[dry-run] would phone home: $EventName (install_id=$InstallId, repeat=$Repeat, products=$Products, profile=$Profile)"
+    if ($Product) {
+      Write-Host "[dry-run] would phone home: $EventName (product=$Product, install_id=$InstallId, repeat=$Repeat, products=$Products, profile=$Profile)"
+    } else {
+      Write-Host "[dry-run] would phone home: $EventName (install_id=$InstallId, repeat=$Repeat, products=$Products, profile=$Profile)"
+    }
     return
   }
 
   if ([string]::IsNullOrEmpty($HoneycombInstallPosthogKey)) { return }
 
   $osFamily = 'windows'
+  $props = @{
+    products = $Products
+    profile = $Profile
+    os = $osFamily
+    repeat_install = "$Repeat".ToLowerInvariant()
+  }
+  if ($Product) { $props.product = $Product }
   $body = @{
     api_key = $HoneycombInstallPosthogKey
     event = $EventName
     distinct_id = $InstallId
-    properties = @{
-      products = $Products
-      profile = $Profile
-      os = $osFamily
-      repeat_install = "$Repeat".ToLowerInvariant()
-    }
+    properties = $props
   } | ConvertTo-Json -Compress
 
   try {
@@ -184,6 +194,16 @@ function Send-PhoneHome {
   } catch {
     # Fail-soft: a dropped telemetry POST is acceptable; a hung/broken install is not.
   }
+}
+
+# Comma-free running list of SELECTED products that did NOT actually land this run (unpublished
+# skip, npm install failure, registration failure, or the hivedoctor opt-out). Consumed by
+# Send-ProductTransitions so product_installed/product_updated never over-claims. Mirrors
+# install.sh's PRODUCTS_NOT_INSTALLED (keep in parity).
+$script:ProductsNotInstalled = @()
+
+function Add-ProductNotInstalled([string]$Slug) {
+  $script:ProductsNotInstalled += $Slug
 }
 
 # -----------------------------------------------------------------------------
@@ -543,6 +563,7 @@ function Install-HiveDoctor {
     npm install -g $hdTarget 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) {
       Write-Host "note: could not install $hdTarget (continuing -- Honeycomb itself is installed)."
+      Add-ProductNotInstalled 'hivedoctor'
       return
     }
     Write-Ok "installed $hdTarget."
@@ -584,6 +605,7 @@ function Install-ExtraProduct {
 
   if ($resolved.Kind -eq 'unpublished') {
     Write-Host "note: $DisplayName ($($resolved.Pkg)) is not yet published to npm -- skipping (a maintainer still needs to complete the one-time npm Trusted-Publisher bootstrap, PRD-001c). Re-run this installer after that lands."
+    Add-ProductNotInstalled $Slug
     return $true
   }
 
@@ -609,6 +631,7 @@ function Install-ExtraProduct {
     npm install -g $target 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) {
       Write-Host "note: could not install $DisplayName (continuing -- the rest of the install still succeeded). Try: npm install -g $target"
+      Add-ProductNotInstalled $Slug
       return $false
     }
     Write-Ok "installed $DisplayName."
@@ -633,6 +656,9 @@ function Install-ExtraProduct {
       Write-Ok "$DisplayName registered."
     } else {
       Write-Host "note: $DisplayName installed but its $PostInstallVerb step did not complete (continuing). Run '$BinName $PostInstallVerb' to see why."
+      # A registration failure keeps the product OUT of the transition events, matching the
+      # Set-InstallState gate (a failed selection is not recorded as installed).
+      Add-ProductNotInstalled $Slug
       $ok = $false
     }
   }
@@ -685,13 +711,17 @@ function Remove-HivedoctorRegistryEntry([string]$Name) {
   }
 }
 
-function Resolve-RemovedProducts([string]$CurrentProducts, [bool]$DryRun) {
+function Resolve-RemovedProducts([string]$CurrentProducts, [string]$SelProfile, [string]$InstallId, [bool]$Repeat, [bool]$DryRun) {
   $previous = Get-PreviousProducts
   if (-not $previous) { return }
   $previousList = $previous.Split(',') | Where-Object { $_ -ne '' }
   $currentList = $CurrentProducts.Split(',') | Where-Object { $_ -ne '' }
   foreach ($p in $previousList) {
     if ($currentList -contains $p) { continue }
+    # Per-product transition telemetry: this product WAS in the last run's selection and is gone
+    # now (the DELETE transition). Fire-and-forget like every Send-PhoneHome call; fires for
+    # EVERY dropped product, whether or not it has a deregistration branch below.
+    Send-PhoneHome 'product_removed' $CurrentProducts $SelProfile $InstallId $Repeat $DryRun $p
     if ($p -eq 'thehive' -or $p -eq 'hivenectar') {
       if ($DryRun) {
         Write-Host "[dry-run] would deregister $p from hivedoctor (no longer in --products=)."
@@ -699,6 +729,28 @@ function Resolve-RemovedProducts([string]$CurrentProducts, [bool]$DryRun) {
         Write-Step "deregistering $p from hivedoctor (no longer in --products=)..."
         Remove-HivedoctorRegistryEntry $p
       }
+    }
+  }
+}
+
+# Per-product transition telemetry: product_installed / product_updated (product_removed fires
+# from Resolve-RemovedProducts above). Diffs the PREVIOUS run's selection (install-state) vs this
+# run's resolved selection, skipping any product that did not actually land
+# ($script:ProductsNotInstalled). Same posture as every Send-PhoneHome call: fire-and-forget,
+# silent no-op without a key, dry-run previews only, never affects the exit code. `repeat_install`
+# covers the RUN; these events cover the PER-PRODUCT fact. Mirrors install.sh's
+# phone_home_product_transitions (keep in parity).
+function Send-ProductTransitions([string]$CurrentProducts, [string]$SelProfile, [string]$InstallId, [bool]$Repeat, [bool]$DryRun) {
+  $previous = Get-PreviousProducts
+  $previousList = @()
+  if ($previous) { $previousList = $previous.Split(',') | Where-Object { $_ -ne '' } }
+  $currentList = $CurrentProducts.Split(',') | Where-Object { $_ -ne '' }
+  foreach ($p in $currentList) {
+    if ($script:ProductsNotInstalled -contains $p) { continue } # selected but did not land: no claim
+    if ($previousList -contains $p) {
+      Send-PhoneHome 'product_updated' $CurrentProducts $SelProfile $InstallId $Repeat $DryRun $p
+    } else {
+      Send-PhoneHome 'product_installed' $CurrentProducts $SelProfile $InstallId $Repeat $DryRun $p
     }
   }
 }
@@ -785,6 +837,8 @@ function Invoke-Main([string[]]$InvocationArgs) {
   if ($productList -contains 'hivedoctor') {
     if (Test-HiveDoctorOptedOut $InvocationArgs) {
       Write-Step 'skipping HiveDoctor (--no-hivedoctor).'
+      # Opted out: hivedoctor stays selected but does not land, so it earns no transition event.
+      Add-ProductNotInstalled 'hivedoctor'
     } elseif ($dryRun) {
       Write-Host "[dry-run] would install + register HiveDoctor ($(Resolve-CoreProductTarget 'hivedoctor' $HiveDoctorNpmPackage))."
     } else {
@@ -809,8 +863,11 @@ function Invoke-Main([string[]]$InvocationArgs) {
     }
   }
 
-  # PRD-002b DELETE transition: a --products= narrowing vs. the last run.
-  Resolve-RemovedProducts $selection.Products $dryRun
+  # PRD-002b DELETE transition: a --products= narrowing vs. the last run (fires product_removed).
+  Resolve-RemovedProducts $selection.Products $selection.Profile $installIdInfo.Id $installIdInfo.Repeat $dryRun
+  # Per-product CREATE/UPDATE transitions: product_installed / product_updated. Must run BEFORE
+  # Set-InstallState below (the diff baseline is the PREVIOUS run's recorded selection).
+  Send-ProductTransitions $selection.Products $selection.Profile $installIdInfo.Id $installIdInfo.Repeat $dryRun
   if (-not $dryRun -and -not $extraProductFailed) { Set-InstallState $selection.Products }
 
   if ($dryRun) {

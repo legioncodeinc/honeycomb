@@ -314,6 +314,53 @@ else
   printf 'skip - EXTRA_PRODUCT_FAILED gating tests need node on PATH\n'
 fi
 
+printf '\n=== per-product transition telemetry: a FRESH install fires product_installed per selected product ===\n'
+h19="$(new_temp_home)"
+run_install "$h19" --dry-run --products=honeycomb,hivedoctor
+assert_contains     "a fresh install fires product_installed for honeycomb" "would phone home: product_installed (product=honeycomb,"
+assert_contains     "a fresh install fires product_installed for hivedoctor" "would phone home: product_installed (product=hivedoctor,"
+assert_not_contains "a fresh install fires no product_updated" "would phone home: product_updated"
+assert_not_contains "a fresh install fires no product_removed" "would phone home: product_removed"
+rm -rf "$h19"
+
+# The seeded-state transition tests below read the previous selection out of install-state.json,
+# which install.sh parses via node; skip gracefully when absent (same posture as the
+# EXTRA_PRODUCT_FAILED block above).
+if command -v node >/dev/null 2>&1; then
+  printf '\n=== per-product transition telemetry: a NARROWING re-run fires product_removed for the dropped product ===\n'
+  h20="$(new_temp_home)"
+  mkdir -p "$h20/.honeycomb"
+  printf '{"products":"honeycomb,hivedoctor,hivenectar"}\n' > "$h20/.honeycomb/install-state.json"
+  run_install "$h20" --dry-run --products=honeycomb,hivedoctor
+  assert_contains     "a narrowing re-run fires product_removed for the dropped product" "would phone home: product_removed (product=hivenectar,"
+  assert_contains     "a narrowing re-run fires product_updated for a retained product" "would phone home: product_updated (product=honeycomb,"
+  assert_not_contains "a narrowing re-run fires no product_installed" "would phone home: product_installed"
+  rm -rf "$h20"
+
+  printf '\n=== per-product transition telemetry: a REPEAT run (same set) fires product_updated per product ===\n'
+  h21="$(new_temp_home)"
+  mkdir -p "$h21/.honeycomb"
+  printf '{"products":"honeycomb,hivedoctor"}\n' > "$h21/.honeycomb/install-state.json"
+  run_install "$h21" --dry-run
+  assert_contains     "a repeat run fires product_updated for honeycomb" "would phone home: product_updated (product=honeycomb,"
+  assert_contains     "a repeat run fires product_updated for hivedoctor" "would phone home: product_updated (product=hivedoctor,"
+  assert_not_contains "a repeat run fires no product_installed" "would phone home: product_installed"
+  assert_not_contains "a repeat run fires no product_removed" "would phone home: product_removed"
+  rm -rf "$h21"
+
+  printf '\n=== per-product transition telemetry: a WIDENING re-run fires product_installed ONLY for the new product ===\n'
+  h22="$(new_temp_home)"
+  mkdir -p "$h22/.honeycomb"
+  printf '{"products":"honeycomb,hivedoctor"}\n' > "$h22/.honeycomb/install-state.json"
+  run_install "$h22" --dry-run --products=honeycomb,hivedoctor,hivenectar
+  assert_contains     "a widening re-run fires product_installed for the newly-added product" "would phone home: product_installed (product=hivenectar,"
+  assert_contains     "a widening re-run still fires product_updated for a retained product" "would phone home: product_updated (product=honeycomb,"
+  assert_not_contains "a widening re-run never claims product_installed for a retained product" "would phone home: product_installed (product=honeycomb,"
+  rm -rf "$h22"
+else
+  printf 'skip - per-product transition seeded-state tests need node on PATH\n'
+fi
+
 printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then
   exit 1
