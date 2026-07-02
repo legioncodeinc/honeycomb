@@ -39,17 +39,18 @@
  */
 
 import { execFileSync } from "node:child_process";
-
-import { type CommandResult, type OutputSink } from "./contracts.js";
-import { type DaemonVerbDeps, ensureDaemonRunning } from "./daemon.js";
+import { resolveRuntimeConfig } from "../daemon/runtime/config.js";
 import {
 	DEFAULT_REF,
 	loadOnboarding,
 	type OnboardingState,
 	saveOnboarding,
 } from "../daemon/runtime/onboarding/index.js";
+import { type RegistryBind, registerHoneycombWithHivedoctor } from "../daemon/runtime/telemetry/fleet-registry.js";
 import { type EmitDeps, emitTelemetry } from "../daemon/runtime/telemetry/index.js";
 import { DAEMON_HOST, DAEMON_PORT, THEHIVE_HOST, THEHIVE_PORT } from "../shared/constants.js";
+import type { CommandResult, OutputSink } from "./contracts.js";
+import { type DaemonVerbDeps, ensureDaemonRunning } from "./daemon.js";
 
 /**
  * The mDNS/hosts name the dashboard is attempted at FIRST (a-AC-6). It is NEVER required: if it
@@ -99,8 +100,7 @@ export function openLocalDashboardUrl(url: string): boolean {
 		const parsed = new URL(url);
 		if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
 		const host = parsed.hostname;
-		const isLocal =
-			host === DAEMON_HOST || host === "localhost" || host === "::1" || host === DASHBOARD_LOCAL_HOST;
+		const isLocal = host === DAEMON_HOST || host === "localhost" || host === "::1" || host === DASHBOARD_LOCAL_HOST;
 		if (!isLocal) return false;
 		safeUrl = parsed.href;
 	} catch {
@@ -187,6 +187,46 @@ function writeInstalledMarker(ref: string, dir: string | undefined, out: OutputS
 }
 
 /**
+ * Register (or refresh) honeycomb's entry in hivedoctor's static registry (PRD-071 Contract A /
+ * AC-1 / AC-071a.1), declaring honeycomb's identity, `/health` URL, and its fleet telemetry SQLite
+ * path so hivedoctor knows honeycomb should exist and where to poll it. FAIL-SOFT (071a technical
+ * considerations): a registry write error (a locked file, a missing/unwritable `~/.honeycomb`)
+ * logs a note and returns `false` — it NEVER aborts the install. Idempotent: re-running REPLACES
+ * the existing `honeycomb` entry in place rather than duplicating it (AC-071a.1.2).
+ */
+/**
+ * Resolve the daemon bind (host/port) the registry entry's `healthUrl` should advertise, from the
+ * SAME runtime-config resolution the daemon itself binds with (`HONEYCOMB_PORT` / `HONEYCOMB_HOST`
+ * / `HONEYCOMB_BIND`), so a non-default bind advertises the right probe URL. A wildcard listen
+ * address (0.0.0.0 / ::) maps to the loopback host: that is the address hivedoctor (same machine)
+ * can actually reach a wildcard-bound daemon on. FAIL-SOFT: an invalid env value falls back to the
+ * shared default constants rather than failing the install.
+ */
+function resolveRegistryBind(): RegistryBind | undefined {
+	try {
+		const config = resolveRuntimeConfig();
+		const host = config.host === "0.0.0.0" || config.host === "::" ? DAEMON_HOST : config.host;
+		return { host, port: config.port };
+	} catch {
+		return undefined;
+	}
+}
+
+function writeHivedoctorRegistryEntry(dir: string | undefined, out: OutputSink): boolean {
+	try {
+		const bind = resolveRegistryBind();
+		registerHoneycombWithHivedoctor({
+			...(dir !== undefined ? { homeDir: dir } : {}),
+			...(bind !== undefined ? { bind } : {}),
+		});
+		return true;
+	} catch {
+		out("note: could not register with hivedoctor (continuing — the install still succeeded).");
+		return false;
+	}
+}
+
+/**
  * Open the dashboard with the `honeycomb.local`→loopback fallback (a-AC-6). Tries the friendly
  * `honeycomb.local` URL first; if that opener returns false (it could not launch, e.g. the name does
  * not resolve to a reachable opener target), falls back to the loopback URL. ALWAYS prints the URL
@@ -208,9 +248,7 @@ function openDashboardWithFallback(opener: DashboardOpener, out: OutputSink): vo
 	// Fall back to the always-correct loopback URL; the run succeeds regardless of the launch result.
 	const opened = opener(loopback);
 	out(
-		opened
-			? `→ opening dashboard at ${loopback}…`
-			: `→ dashboard is ready at ${loopback} (open it in your browser).`,
+		opened ? `→ opening dashboard at ${loopback}…` : `→ dashboard is ready at ${loopback} (open it in your browser).`,
 	);
 }
 
@@ -278,6 +316,10 @@ export async function runInstallCommand(argv: readonly string[], deps: InstallVe
 	const wrote = writeInstalledMarker(ref, deps.dir, out);
 	if (wrote) out(`✓ onboarding marked installed (ref: ${ref}).`);
 
+	// 2b) Register (or refresh) honeycomb's hivedoctor static-registry entry (PRD-071 Contract A).
+	// Fail-soft — see `writeHivedoctorRegistryEntry`.
+	writeHivedoctorRegistryEntry(deps.dir, out);
+
 	// 3) Open the dashboard, honeycomb.local best-effort → loopback fallback (a-AC-6).
 	openDashboardWithFallback(opener, out);
 
@@ -290,6 +332,23 @@ export async function runInstallCommand(argv: readonly string[], deps: InstallVe
 	//    onboarding `dir` is threaded so the dedupe ledger lives in the same temp HOME under test. A second
 	//    install run is a no-op send (e-AC-5, dedupe). Tier-1 → opt-out default; an opt-out env / empty
 	//    key silences it.
+	//
+	//    ── the-apiary PRD-002c c-AC-5 note: this event is SCOPED, not retired ────────────────────────
+	//    ADR-0002 moves the install-LIFECYCLE phone-home into the shell scripts (`install_started` /
+	//    `install_completed` / `install_failed`, fired from `scripts/install/install.sh` /
+	//    `install.ps1`), which is now the reliable "did an install run happen, and how did it end"
+	//    signal — it survives a keyless Node build and a pre-CLI failure, neither of which
+	//    `honeycomb_installed` can ever observe (it only fires from inside a successful run of THIS
+	//    verb). `honeycomb_installed` is DELIBERATELY KEPT, scoped to a narrower, DIFFERENT meaning:
+	//    "this machine's `honeycomb` CLI verb completed successfully, ONCE, ever" (e-AC-5's dedupe
+	//    ledger enforces the "once" — repeat `honeycomb install` runs never re-fire it), correlated to
+	//    the SAME onboarding `installId`/`ref` the Node-side telemetry and login event
+	//    (`honeycomb_first_link`) already use. The two surfaces are structurally incapable of double
+	//    counting the SAME event: they are different event NAMES, sent to the same PostHog project
+	//    from two independent transports, answering two different questions (funnel/failure-rate over
+	//    every install attempt, vs. one-time CLI-verb-completion-and-onboarding-correlation per
+	//    machine). Retiring `honeycomb_installed` outright would lose that onboarding correlation for
+	//    no gain, so this pass keeps it and documents the split here rather than deleting it.
 	void emitTelemetry(
 		"honeycomb_installed",
 		{ ref, tier: "tier1" },

@@ -21,7 +21,7 @@
  * Seeded + anchored with the hostile JSON shapes.
  */
 
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -75,31 +75,35 @@ describe("property: pull manifest read() — NEVER throws, always returns a safe
 		const baseDir = mkdtempSync(join(tmpdir(), "hc-prop-manifest-"));
 		const filePath = join(baseDir, "pull-manifest.json");
 		const store = createPullManifestStore(baseDir);
-		fc.assert(
-			fc.property(anyFileText, (text) => {
-				writeFileSync(filePath, text, "utf-8");
-				const entries = store.read(); // MUST NOT throw, for ANY file content.
-				expect(Array.isArray(entries)).toBe(true);
-				for (const e of entries) {
-					// Every surviving entry is fully coerced to the safe typed shape — no undefined,
-					// no wrong types, no NaN version, install constrained to the closed set.
-					expect(typeof e.dirName).toBe("string");
-					expect(e.dirName.length).toBeGreaterThan(0); // dirName==="" entries are dropped.
-					expect(typeof e.name).toBe("string");
-					expect(typeof e.author).toBe("string");
-					expect(typeof e.projectKey).toBe("string");
-					expect(typeof e.remoteVersion).toBe("number");
-					expect(Number.isFinite(e.remoteVersion)).toBe(true);
-					expect(e.install === "global" || e.install === "project").toBe(true);
-					expect(typeof e.installRoot).toBe("string");
-					expect(typeof e.pulledAt).toBe("string");
-					expect(Array.isArray(e.symlinks)).toBe(true);
-					expect(e.symlinks.every((s) => typeof s === "string")).toBe(true);
-				}
-				assertProtoClean();
-			}),
-			{ numRuns: NUM_RUNS, seed: SEED },
-		);
+		try {
+			fc.assert(
+				fc.property(anyFileText, (text) => {
+					writeFileSync(filePath, text, "utf-8");
+					const entries = store.read(); // MUST NOT throw, for ANY file content.
+					expect(Array.isArray(entries)).toBe(true);
+					for (const e of entries) {
+						// Every surviving entry is fully coerced to the safe typed shape — no undefined,
+						// no wrong types, no NaN version, install constrained to the closed set.
+						expect(typeof e.dirName).toBe("string");
+						expect(e.dirName.length).toBeGreaterThan(0); // dirName==="" entries are dropped.
+						expect(typeof e.name).toBe("string");
+						expect(typeof e.author).toBe("string");
+						expect(typeof e.projectKey).toBe("string");
+						expect(typeof e.remoteVersion).toBe("number");
+						expect(Number.isFinite(e.remoteVersion)).toBe(true);
+						expect(e.install === "global" || e.install === "project").toBe(true);
+						expect(typeof e.installRoot).toBe("string");
+						expect(typeof e.pulledAt).toBe("string");
+						expect(Array.isArray(e.symlinks)).toBe(true);
+						expect(e.symlinks.every((s) => typeof s === "string")).toBe(true);
+					}
+					assertProtoClean();
+				}),
+				{ numRuns: NUM_RUNS, seed: SEED },
+			);
+		} finally {
+			rmSync(baseDir, { recursive: true, force: true });
+		}
 	}, DISK_PROPERTY_TIMEOUT_MS);
 
 	it("a manifest entry with a traversal dirName survives only as a STRING, never executed here", () => {
@@ -110,21 +114,25 @@ describe("property: pull manifest read() — NEVER throws, always returns a safe
 		const filePath = join(baseDir, "pull-manifest.json");
 		const store = createPullManifestStore(baseDir);
 		const traversalDir = fc.constantFrom("../../../etc", "..", ".", "a/../b", "..\\..\\win", "/abs/path");
-		fc.assert(
-			fc.property(traversalDir, (dirName) => {
-				writeFileSync(
-					filePath,
-					JSON.stringify([{ dirName, install: "global", installRoot: "/", symlinks: [] }]),
-					"utf-8",
-				);
-				const entries = store.read();
-				expect(Array.isArray(entries)).toBe(true);
-				// It is kept as an inert string (or dropped if empty) — never crashes the read.
-				for (const e of entries) expect(typeof e.dirName).toBe("string");
-				assertProtoClean();
-			}),
-			{ numRuns: NUM_RUNS, seed: SEED },
-		);
+		try {
+			fc.assert(
+				fc.property(traversalDir, (dirName) => {
+					writeFileSync(
+						filePath,
+						JSON.stringify([{ dirName, install: "global", installRoot: "/", symlinks: [] }]),
+						"utf-8",
+					);
+					const entries = store.read();
+					expect(Array.isArray(entries)).toBe(true);
+					// It is kept as an inert string (or dropped if empty) — never crashes the read.
+					for (const e of entries) expect(typeof e.dirName).toBe("string");
+					assertProtoClean();
+				}),
+				{ numRuns: NUM_RUNS, seed: SEED },
+			);
+		} finally {
+			rmSync(baseDir, { recursive: true, force: true });
+		}
 	}, DISK_PROPERTY_TIMEOUT_MS);
 });
 

@@ -34,6 +34,57 @@ const GITHUB_SRC = 'https://github.com/legioncodeinc/honeycomb/tree/main/scripts
 // The two installer scripts, in the order they appear in SHA256SUMS + the page.
 const SCRIPTS = ['install.sh', 'install.ps1'];
 
+// PRD-002c: both installer scripts declare their PostHog key as an EMPTY string in source control
+// (`HONEYCOMB_INSTALL_POSTHOG_KEY=""` / `$HoneycombInstallPosthogKey = ''`). This is a PostHog
+// project API key — safe to expose client-side by design (ADR-0002) — so it is injected here at
+// deploy-build time, the same "bake a public key into the install site" mechanism the ADR calls
+// for, rather than a runtime secret lookup on the user's machine. Sourced from an env var so
+// `deploy-install-site.yaml` can supply it as a plain (non-secret) repository variable.
+//
+// IMPORTANT: this is an ANCHORED, per-language regex substitution of the exact declaration line —
+// deliberately NOT a blind find/replace of a placeholder token over the whole file. An earlier
+// version of this build step used a shared placeholder token, which also appeared (by construction)
+// in the scripts' own "is telemetry configured" empty-string guard once naively substituted,
+// silently disabling telemetry forever after the very first real key was baked in. Anchoring the
+// substitution to the ONE declaration line closes that class of bug structurally: nothing else in
+// either script can accidentally match the pattern.
+//
+// An UNSET/empty env var leaves each script's declaration at its committed empty-string default,
+// which both scripts' `phone_home`/`Send-PhoneHome` treat as "telemetry disabled" (never a hard
+// failure) — so a keyless build (e.g. a PR preview, or local `node build.mjs`) still produces a
+// fully working, just silently non-reporting, installer.
+const POSTHOG_KEY = process.env.HONEYCOMB_INSTALL_POSTHOG_KEY ?? '';
+// Defense-in-depth: only ever inject a key shaped like a PostHog project key. Anything else
+// (accidental whitespace, an unrelated secret pasted into the wrong env var, …) is treated as
+// "not set" rather than silently baked into a public, world-readable script.
+const POSTHOG_KEY_SAFE = /^[A-Za-z0-9_-]{0,200}$/.test(POSTHOG_KEY) ? POSTHOG_KEY : '';
+
+const POSTHOG_KEY_PATTERNS = {
+  'install.sh': {
+    pattern: /^HONEYCOMB_INSTALL_POSTHOG_KEY=""$/m,
+    replace: (key) => `HONEYCOMB_INSTALL_POSTHOG_KEY="${key}"`,
+  },
+  'install.ps1': {
+    pattern: /^\$HoneycombInstallPosthogKey = ''$/m,
+    replace: (key) => `$HoneycombInstallPosthogKey = '${key}'`,
+  },
+};
+
+// Inject the key into one script's source text via its anchored pattern above. Throws (failing the
+// build loudly) if the expected declaration line is missing — a silent no-op here would mean a
+// refactor of install.sh/install.ps1 quietly broke telemetry injection without anyone noticing.
+function injectPosthogKey(name, text, key) {
+  const spec = POSTHOG_KEY_PATTERNS[name];
+  if (spec === undefined) return text;
+  if (!spec.pattern.test(text)) {
+    throw new Error(
+      `site/install build: expected declaration line for ${name} (pattern ${spec.pattern}) not found — ` +
+        'the PostHog key injection point may have moved; update POSTHOG_KEY_PATTERNS in build.mjs.',
+    );
+  }
+  return text.replace(spec.pattern, spec.replace(key));
+}
+
 function sha256(buf) {
   return createHash('sha256').update(buf).digest('hex');
 }
@@ -51,14 +102,18 @@ async function main() {
   await rm(DIST_DIR, { recursive: true, force: true });
   await mkdir(DIST_DIR, { recursive: true });
 
-  // 1) Copy canonical scripts + capture their bytes for hashing/rendering.
+  // 1) Copy canonical scripts + capture their bytes for hashing/rendering. The PostHog key is
+  //    injected HERE (before hashing/writing) so SHA256SUMS always reflects exactly the bytes
+  //    actually served — no separate "hash then patch" step that could ever drift.
   const sources = {};
   const sums = {};
   for (const name of SCRIPTS) {
     const srcPath = join(SRC_DIR, name);
-    const bytes = await readFile(srcPath);
-    await copyFile(srcPath, join(DIST_DIR, name));
-    sources[name] = bytes.toString('utf8');
+    const rawText = await readFile(srcPath, 'utf8');
+    const text = injectPosthogKey(name, rawText, POSTHOG_KEY_SAFE);
+    const bytes = Buffer.from(text, 'utf8');
+    await writeFile(join(DIST_DIR, name), bytes);
+    sources[name] = text;
     sums[name] = sha256(bytes);
   }
 
@@ -109,6 +164,12 @@ async function main() {
   console.log('  _headers     copied');
   console.log('  favicon.svg  copied');
   console.log('  index.html   rendered');
+  console.log(
+    '  posthog key  ',
+    POSTHOG_KEY_SAFE.length > 0
+      ? 'baked (install-time telemetry ENABLED)'
+      : 'NOT set (HONEYCOMB_INSTALL_POSTHOG_KEY env var absent/invalid — install-time telemetry stays disabled, matches the no-op default)',
+  );
 }
 
 main().catch((err) => {

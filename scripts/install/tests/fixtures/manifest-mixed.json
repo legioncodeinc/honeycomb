@@ -1,0 +1,25 @@
+{
+  "manifestVersion": "0.1.0",
+  "products": {
+    "honeycomb": {
+      "version": "9.9.1",
+      "packageName": "@legioncodeinc/honeycomb",
+      "published": true
+    },
+    "hivedoctor": {
+      "version": "9.9.2",
+      "packageName": "@legioncodeinc/hivedoctor",
+      "published": true
+    },
+    "thehive": {
+      "version": "0.1.0",
+      "packageName": "@legioncodeinc/thehive",
+      "published": false
+    },
+    "hivenectar": {
+      "version": "9.9.4",
+      "packageName": "@legioncodeinc/hivenectar",
+      "published": true
+    }
+  }
+}

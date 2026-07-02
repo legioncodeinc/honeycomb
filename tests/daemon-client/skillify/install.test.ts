@@ -17,12 +17,12 @@
  * assertions (`auth.test.ts` / `secrets/store.test.ts`).
  */
 
-import { existsSync, lstatSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
 	createFakeDaemonDispatch,
@@ -41,9 +41,19 @@ import {
 	pull,
 } from "../../../src/daemon-client/skillify/index.js";
 
+// Every mkdtemp'd dir minted by a test is tracked here and reclaimed in `afterEach` — see
+// `tests/setup/isolate-home.ts` for the incident (100k+ stray dirs under `%TEMP%`) that made
+// this discipline mandatory across every skillify test helper.
+const tempDirs: string[] = [];
+afterEach(() => {
+	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
 /** A temp dir unique per call — agent roots root here (no real home writes). */
 function tempDir(): string {
-	return mkdtempSync(join(tmpdir(), "skillify-c-"));
+	const dir = mkdtempSync(join(tmpdir(), "skillify-c-"));
+	tempDirs.push(dir);
+	return dir;
 }
 
 /** Probe once whether this platform can create a symlink (win32 may lack the privilege). */

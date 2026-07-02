@@ -27,9 +27,24 @@
  * `legacyCredentialsPath()` → `<tmp>/.honeycomb/credentials.json` for the entire run —
  * so even a test that performs a real `logout` only ever unlinks throwaway temp space.
  *
- * Cleanup is intentionally NOT performed: the dir lives under the OS temp root, it is
- * per-process and tiny, and a `finally` rm could race parallel workers / a still-open
- * handle. The OS reclaims `tmpdir()` content; leaving it is the safe, simple choice.
+ * Cleanup is a SELF-HEALING SWEEP, not an exit hook: a `process.on("exit", …)` handler was
+ * tried first, but vitest's worker pool (`forks` by default) tears workers down by killing
+ * the child process rather than letting it run to a natural exit, so the handler never fires
+ * in practice — proven by measurement, not assumption (a full `vitest run` left every one of
+ * its `hc-test-home-*` dirs behind even with the exit hook wired). This used to skip cleanup
+ * entirely on top of that same optimistic assumption ("the OS reclaims tmpdir() content"),
+ * which does not hold on Windows (this repo's primary dev + CI platform) either: nothing
+ * purges `%TEMP%` automatically. Together this accumulated 100k+ stray directories under
+ * `%TEMP%` over time — a real incident.
+ *
+ * The fix: EVERY worker, on startup, sweeps `tmpdir()` for `hc-test-home-*` entries OLDER
+ * than `STALE_AFTER_MS` and removes them, before minting its own fresh one. Age-gating is
+ * what makes this race-free against sibling workers running the SAME `vitest` invocation —
+ * they mint their dirs within milliseconds of each other, all far younger than the staleness
+ * floor, so a live sibling's home is never touched. Only genuinely abandoned dirs from a
+ * PAST run (whose worker is long gone) are old enough to qualify. Cleanup is therefore
+ * incremental — each run mops up the debris of previous runs — rather than requiring every
+ * worker to reliably self-clean on its own way out, which the pool does not guarantee.
  *
  * Defense in depth — this is the SYSTEMIC guard. The specific destructive test is ALSO
  * made self-isolating, and a regression test
@@ -37,11 +52,41 @@
  * `credentialsPath()` resolves UNDER this temp home. Belt and suspenders.
  */
 
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const isolatedHome = mkdtempSync(join(tmpdir(), "hc-test-home-"));
+const HOME_PREFIX = "hc-test-home-";
+/** Only sweep dirs older than this — far beyond how long any single `vitest run` takes, so a
+ *  live sibling worker's own dir (minted moments ago) is never in the blast radius. Short
+ *  enough that back-to-back `npm run ci` loops (e.g. a QA/fix loop re-running the suite every
+ *  few minutes) still get swept promptly instead of piling up across the whole loop. */
+const STALE_AFTER_MS = 10 * 60 * 1000;
+
+/** Best-effort removal of `hc-test-home-*` dirs left behind by long-finished past runs. */
+function sweepStaleIsolatedHomes(): void {
+	const root = tmpdir();
+	let entries: string[];
+	try {
+		entries = readdirSync(root);
+	} catch {
+		return; // Never let the sweep block the real test run.
+	}
+	const cutoff = Date.now() - STALE_AFTER_MS;
+	for (const name of entries) {
+		if (!name.startsWith(HOME_PREFIX)) continue;
+		const full = join(root, name);
+		try {
+			if (statSync(full).mtimeMs < cutoff) rmSync(full, { recursive: true, force: true });
+		} catch {
+			// Another worker may be mid-sweep of the same stale dir, or it's already gone — fine.
+		}
+	}
+}
+
+sweepStaleIsolatedHomes();
+
+const isolatedHome = mkdtempSync(join(tmpdir(), HOME_PREFIX));
 
 // win32: os.homedir() reads USERPROFILE. POSIX: os.homedir() reads HOME. Set BOTH so the
 // redirect holds on every platform the suite runs on, before any test resolves a home path.

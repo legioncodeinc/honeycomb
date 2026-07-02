@@ -13,24 +13,25 @@
  *   - `--ref` override vs the build-time DEFAULT_REF default.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+	createFakeDaemonClient,
 	type DaemonLifecycle,
 	type DaemonStatus,
-	createFakeDaemonClient,
-	loopbackDashboardUrl,
 	localDashboardUrl,
+	loopbackDashboardUrl,
 	openLocalDashboardUrl,
 	parseRefArg,
 	resolveEffectiveRef,
 	runInstallCommand,
 } from "../../src/commands/index.js";
 import { DEFAULT_REF, loadOnboarding } from "../../src/daemon/runtime/onboarding/index.js";
+import { hivedoctorRegistryPath } from "../../src/daemon/runtime/telemetry/fleet-registry.js";
 
 /** A recording fake DaemonLifecycle: scripts start/status results + records every call. */
 function fakeLifecycle(script: {
@@ -302,6 +303,59 @@ describe("PRD-050a — honeycomb install (a-AC-5 onboarding 'installed' + ref)",
 		const after = loadOnboarding(tmpDir);
 		expect(after.installId).toBe(first);
 		expect(after.ref).toBe("bob");
+	});
+});
+
+describe("PRD-071 Contract A — install registers honeycomb with hivedoctor's static registry", () => {
+	it("AC-1 / AC-071a.1.1 writes a registry entry under the injected temp HOME (never the real ~/.honeycomb)", async () => {
+		const res = await runInstallCommand([], {
+			daemon: createFakeDaemonClient({ alive: true }),
+			lifecycle: fakeLifecycle({}),
+			openDashboard: () => true,
+			dir: tmpDir,
+			out: () => {},
+		});
+		expect(res.exitCode).toBe(0);
+		const registryPath = hivedoctorRegistryPath(tmpDir);
+		const doc = JSON.parse(readFileSync(registryPath, "utf8")) as { daemons: Array<Record<string, unknown>> };
+		const entry = doc.daemons.find((d) => d.name === "honeycomb");
+		expect(entry).toMatchObject({
+			name: "honeycomb",
+			healthUrl: "http://127.0.0.1:3850/health",
+			telemetryDbPath: "~/.honeycomb/telemetry/honeycomb.sqlite",
+		});
+	});
+
+	it("AC-071a.1.2 a second install run refreshes the entry idempotently rather than duplicating it", async () => {
+		const deps = {
+			daemon: createFakeDaemonClient({ alive: true }),
+			lifecycle: fakeLifecycle({}),
+			openDashboard: () => true,
+			dir: tmpDir,
+			out: () => {},
+		};
+		await runInstallCommand([], deps);
+		await runInstallCommand([], deps);
+		const registryPath = hivedoctorRegistryPath(tmpDir);
+		const doc = JSON.parse(readFileSync(registryPath, "utf8")) as { daemons: Array<Record<string, unknown>> };
+		expect(doc.daemons.filter((d) => d.name === "honeycomb")).toHaveLength(1);
+	});
+
+	it("a registry write failure is fail-soft: the install still succeeds", async () => {
+		// An invalid `dir` (a file, not a directory) makes `mkdirp` fail inside the registry writer.
+		const notADir = join(tmpDir, "not-a-directory-marker");
+		const { writeFileSync } = await import("node:fs");
+		writeFileSync(notADir, "x");
+		const lines: string[] = [];
+		const res = await runInstallCommand([], {
+			daemon: createFakeDaemonClient({ alive: true }),
+			lifecycle: fakeLifecycle({}),
+			openDashboard: () => true,
+			dir: notADir,
+			out: (l) => lines.push(l),
+		});
+		expect(res.exitCode).toBe(0);
+		expect(lines.join("\n")).toMatch(/Honeycomb is ready/);
 	});
 });
 

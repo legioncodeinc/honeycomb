@@ -14,12 +14,12 @@
  *   - `pull` + `unpull` + `backfill` round-trip THROUGH the unified registry, behavior identical.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
 	canonicalDirName,
@@ -32,8 +32,18 @@ import {
 	unpullSkill,
 } from "../../../src/daemon-client/skillify/index.js";
 
+// Every mkdtemp'd dir minted by a test is tracked here and reclaimed in `afterEach` — see
+// `tests/setup/isolate-home.ts` for the incident (100k+ stray dirs under `%TEMP%`) that made
+// this discipline mandatory across every skillify test helper.
+const tempDirs: string[] = [];
+afterEach(() => {
+	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
 function tempDir(): string {
-	return mkdtempSync(join(tmpdir(), "skillify-migrate-"));
+	const dir = mkdtempSync(join(tmpdir(), "skillify-migrate-"));
+	tempDirs.push(dir);
+	return dir;
 }
 
 /** The unified registry file inside a base dir. */

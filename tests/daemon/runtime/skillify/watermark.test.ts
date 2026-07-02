@@ -6,17 +6,28 @@
  * at an INJECTED temp dir (no real home writes).
  */
 
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { createWatermarkStore } from "../../../../src/daemon/runtime/skillify/index.js";
 
+// Every mkdtemp'd dir minted by a test is tracked here and reclaimed in `afterEach` — see
+// `tests/setup/isolate-home.ts` for the incident (100k+ stray dirs under `%TEMP%`) that made
+// this discipline mandatory across every skillify test helper.
+const tempDirs: string[] = [];
+
 function tempBase(): string {
-	return mkdtempSync(join(tmpdir(), "skillify-wm-"));
+	const dir = mkdtempSync(join(tmpdir(), "skillify-wm-"));
+	tempDirs.push(dir);
+	return dir;
 }
+
+afterEach(() => {
+	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
 
 describe("PRD-016b watermark", () => {
 	// ── b-AC-2 ──────────────────────────────────────────────────────────────────

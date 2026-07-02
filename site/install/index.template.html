@@ -162,6 +162,21 @@ sh install.sh">Copy</button></div>
     Everything runs <strong>locally on your machine</strong> — the daemon and dashboard bind to loopback. The installer is idempotent: re-running it is safe and skips anything already in place.
   </div>
 
+  <details>
+    <summary>Advanced: choosing which products to install</summary>
+    <p style="padding: 0 16px 16px; color: var(--muted); font-size: 0.9rem; line-height: 1.6;">
+      By default this installs Honeycomb + the HiveDoctor watchdog. Pass <code class="inline">--products=</code>
+      to install more of the fleet, e.g. <code class="inline">curl -fsSL {{VANITY}} | sh -s -- --products=honeycomb,thehive,hivenectar</code>.
+      Other flags: <code class="inline">--profile=full</code> (a named preset), <code class="inline">--code=&lt;code&gt;</code>
+      (a product code resolving to a preset), <code class="inline">--dry-run</code> (preview only, changes nothing),
+      and <code class="inline">--no-hivedoctor</code>. Environment variables
+      (<code class="inline">HONEYCOMB_INSTALL_PRODUCTS</code>, <code class="inline">HONEYCOMB_INSTALL_PROFILE</code>,
+      <code class="inline">HONEYCOMB_INSTALL_LICENSE</code>, <code class="inline">HONEYCOMB_INSTALL_CODE</code>) and a
+      <code class="inline">~/.honeycomb/install.conf</code> file work the same way, for administrators
+      pinning a fleet-wide deploy shape. See the source below for the full, documented precedence.
+    </p>
+  </details>
+
   <h2><span class="num">5</span>Read the source</h2>
   <p class="muted">The full scripts, inline. This is byte-for-byte what the checksums above cover.</p>
   <details>

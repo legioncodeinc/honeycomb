@@ -15,11 +15,11 @@
  *     asserting NO verdict is produced AND the lock is free afterwards (a-AC-6).
  */
 
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { createStorageClient } from "../../../../src/daemon/storage/index.js";
 import {
@@ -50,6 +50,14 @@ import { TurnCounters } from "../../../../src/daemon/runtime/capture/turn-counte
 import { FakeDeepLakeTransport, fakeCredentialRecord, stubProvider } from "../../../helpers/fake-deeplake.js";
 
 const SCOPE = { org: "o1", workspace: "ws1" } as const;
+
+// Every mkdtemp'd dir minted by a test is tracked here and reclaimed in `afterEach` — see
+// `tests/setup/isolate-home.ts` for the incident (100k+ stray dirs under `%TEMP%`) that made
+// this discipline mandatory across every skillify test helper.
+const tempDirs: string[] = [];
+afterEach(() => {
+	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
 
 // ── Builders for fake `sessions` rows (the verbatim `{ event, metadata }` envelope) ──
 
@@ -308,6 +316,7 @@ describe("PRD-016a trace miner", () => {
 	// ── a-AC-5 (the real O_EXCL file lock suppresses a concurrent acquire) ───────────
 	it("a-AC-5 the file worker lock atomically suppresses a second acquire and releases idempotently", () => {
 		const baseDir = mkdtempSync(join(tmpdir(), "skillify-lock-"));
+		tempDirs.push(baseDir);
 		const lock = createFileWorkerLock(baseDir);
 
 		const h1 = lock.acquire("proj-1");
@@ -330,7 +339,9 @@ describe("PRD-016a trace miner", () => {
 
 	// ── a-AC-6 ────────────────────────────────────────────────────────────────────
 	it("a-AC-6 a gate exceeding the timeout aborts with no verdict and the lock is released in finally", async () => {
-		const lock = createFileWorkerLock(mkdtempSync(join(tmpdir(), "skillify-timeout-")));
+		const timeoutBaseDir = mkdtempSync(join(tmpdir(), "skillify-timeout-"));
+		tempDirs.push(timeoutBaseDir);
+		const lock = createFileWorkerLock(timeoutBaseDir);
 		const fetcher = fakeFetcher(threeExchangeRows());
 		// A gate that NEVER resolves → the injectable fast timeout must abort it.
 		const hangingGate = { run: (): Promise<GateVerdict> => new Promise<GateVerdict>(() => undefined) };
