@@ -112,7 +112,7 @@ curl -fsSL https://get.theapiary.sh | sh
 irm https://get.theapiary.sh/install.ps1 | iex
 ```
 
-That single line installs a current Node/npm if missing, installs **`@legioncodeinc/honeycomb`** globally, brings up the daemon on `127.0.0.1:3850`, opens the dashboard, and sets up **[Doctor](https://github.com/legioncodeinc/doctor#readme)**, a tiny watchdog that keeps it all healthy (opt out with `--no-doctor`). Then:
+That single line installs a current Node/npm if missing, installs **`@legioncodeinc/honeycomb`** globally, brings up the daemon on `127.0.0.1:3850`, opens the dashboard (The Hive portal at `127.0.0.1:3853`), and sets up **[Doctor](https://github.com/legioncodeinc/doctor#readme)**, a tiny watchdog that keeps it all healthy (opt out with `--no-doctor`). Then:
 
 1. The dashboard loads in a **pre-auth setup state**. No token ever touches your shell.
 2. Click **"First time setup."** Honeycomb runs the Deeplake device-flow login *for* you, shows the code right on the page, and opens the verification tab.
@@ -141,7 +141,7 @@ node bundle/cli.js status    # check the daemon and your environment
 
 ## 🖥️ Using the dashboard
 
-The daemon serves a local web UI at **`http://127.0.0.1:3850/dashboard`**. It is the first thing the installer opens and the fastest way to see what Honeycomb knows: KPIs up top (memories, turns, estimated savings, team skills), memory recall you can query by hand, the codebase graph, every captured turn, skill-sync status, and settings, all backed by a live request log so you can watch your harnesses hit the daemon in real time. It doubles as the guided-setup surface for first-time login.
+The dashboard is **The Hive portal at `http://127.0.0.1:3853`**, the one UI for the whole Apiary stack and the first thing the installer opens. Honeycomb's old in-daemon dashboard is retired; the daemon on `:3850` serves data, the portal serves the picture. Everything Honeycomb knows shows up there: KPIs up top (memories, turns, estimated savings, team skills), memory recall you can query by hand, the codebase graph, every captured turn, skill-sync status, and settings, hydrated server-side from the daemon's API. It doubles as the guided-setup surface for first-time login.
 
 <!-- screenshot pending: drop honeycomb dashboard capture into assets/screenshots/dashboard.png -->
 <img src="assets/screenshots/dashboard.png" alt="Honeycomb dashboard" width="100%">
@@ -164,7 +164,7 @@ honeycomb skill                      # list, inspect, and sync mined skills
 honeycomb goal                       # track goals across sessions
 honeycomb sources                    # manage capture sources
 honeycomb graph                      # query the codebase and knowledge graphs
-honeycomb dashboard                  # open the local dashboard
+honeycomb dashboard                  # open the dashboard (The Hive portal, :3853)
 ```
 
 <img src="assets/brand/divider-minor.svg" width="100%" height="3">
@@ -250,7 +250,7 @@ Honeycomb ships thin clients for six coding harnesses, all wired simultaneously,
 
 Beyond the CLI, three more ways to reach the same daemon and the same shared memory:
 
-- **Dashboard.** The local web UI at `http://127.0.0.1:3850/dashboard`, covered [above](#%EF%B8%8F-using-the-dashboard). Same daemon, zero extra setup.
+- **Dashboard.** The Hive portal at `http://127.0.0.1:3853`, covered [above](#%EF%B8%8F-using-the-dashboard). One front door for the whole stack; Honeycomb's data hydrates through it.
 - **MCP server.** A [Model Context Protocol](https://modelcontextprotocol.io) server (bundled to `mcp/bundle`) exposing Honeycomb's read/resolve and search/mine tools to any MCP-capable host.
 - **TypeScript SDK.** The `@legioncodeinc/honeycomb` client with framework subpath entries (`/react`, `/vercel`, `/openai`). The core entry is fetch-only and browser-safe; `react` and `ai` are optional peers.
 
