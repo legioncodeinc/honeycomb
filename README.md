@@ -23,7 +23,7 @@
 <p align="center">
   <a href="https://linktr.ee/marioaldayuz"><img src="https://img.shields.io/badge/designed%20by-Mario%20Aldayuz-8B7CF0?style=flat-square" alt="Designed by Mario Aldayuz"></a>
   <a href="https://www.legioncodeinc.com"><img src="https://img.shields.io/badge/built%20by-Legion%20Code%20Inc.-111111?style=flat-square" alt="Built by Legion Code Inc."></a>
-  <a href="https://deeplake.ai"><img src="https://img.shields.io/badge/powered%20by-Deep%20Lake-ff5a1f?style=flat-square" alt="Powered by Deep Lake"></a>
+  <a href="https://deeplake.ai"><img src="https://img.shields.io/badge/powered%20by-Deeplake-ff5a1f?style=flat-square" alt="Powered by Deeplake"></a>
 </p>
 
 <p align="center">
@@ -84,7 +84,7 @@ One shared brain across every developer, device, and coding tool. A skill discov
 
 ## ✨ What makes Honeycomb different
 
-A vector database can store text and hand it back by similarity. Honeycomb does that, and then keeps going. On top of [Activeloop Deep Lake](https://deeplake.ai), **[Legion Code](https://github.com/legioncodeinc)** builds the memory system that turns raw recall into a brain your agents actually trust.
+A vector database can store text and hand it back by similarity. Honeycomb does that, and then keeps going. On top of [Activeloop Deeplake](https://deeplake.ai), **[Legion Code](https://github.com/legioncodeinc)** builds the memory system that turns raw recall into a brain your agents actually trust.
 
 <img src="assets/brand/divider-minor.svg" width="100%" height="3">
 
@@ -93,7 +93,7 @@ A vector database can store text and hand it back by similarity. Honeycomb does 
 - **🍯 Skillify & propagation.** The daemon mines reusable skills out of real sessions, gates them for quality, and auto-pulls the team's latest skills into every agent at session start. Author a skill once; everyone gets it. *(Legion Code)*
 - **🌼 The pollinating loop.** A periodic maintenance pass reasons over accumulated memory and the entity graph to merge duplicates, prune junk, and supersede stale facts, so memory gets *sharper* over time, not noisier. *(Legion Code)*
 - **🕸️ Knowledge graph.** An entity-centric, versioned, provenance-tracked index over your memories. Newer facts supersede stale ones; every claim traces back to the session that produced it. *(Legion Code)*
-- **🔀 Hybrid recall.** Lexical (BM25) and semantic (768-dim vectors) search fused by Reciprocal Rank Fusion, with a measured **recall@5 ≈ 0.72-0.78**. *(built on Deep Lake)*
+- **🔀 Hybrid recall.** Lexical (BM25) and semantic (768-dim vectors) search fused by Reciprocal Rank Fusion, with a measured **recall@5 ≈ 0.72-0.78**. *(built on Deeplake)*
 - **🗺️ Codebase graph.** A multi-language AST graph (TypeScript, JS, Python, Go, Rust, Java, Ruby, C/C++) of files, functions, and their call/import/extends edges, queryable for impact and neighborhood. *(Legion Code)*
 
 <img src="assets/brand/divider-minor.svg" width="100%" height="3">
@@ -115,8 +115,8 @@ irm https://get.theapiary.sh/install.ps1 | iex
 That single line installs a current Node/npm if missing, installs **`@legioncodeinc/honeycomb`** globally, brings up the daemon on `127.0.0.1:3850`, opens the dashboard, and sets up **[Doctor](https://github.com/legioncodeinc/doctor#readme)**, a tiny watchdog that keeps it all healthy (opt out with `--no-doctor`). Then:
 
 1. The dashboard loads in a **pre-auth setup state**. No token ever touches your shell.
-2. Click **"First time setup."** Honeycomb runs the Deep Lake device-flow login *for* you, shows the code right on the page, and opens the verification tab.
-3. Done. The same running daemon lights up its Deep Lake-backed surfaces, and capture and recall go live.
+2. Click **"First time setup."** Honeycomb runs the Deeplake device-flow login *for* you, shows the code right on the page, and opens the verification tab.
+3. Done. The same running daemon lights up its Deeplake-backed surfaces, and capture and recall go live.
 
 > Already running **Hivemind**? The dashboard detects it, explains that running both is unsupported, and **"Proceed with Honeycomb"** migrates you cleanly. Prefer to inspect before you pipe? The script and a published `SHA256SUMS` are served from [get.theapiary.sh](https://get.theapiary.sh).
 
@@ -133,7 +133,7 @@ node bundle/cli.js setup     # detect your assistants, wire hooks, start the dae
 node bundle/cli.js status    # check the daemon and your environment
 ```
 
-`setup` wires every coding assistant it detects and starts the loopback daemon; any storage command auto-starts the daemon if it is down. You'll need Activeloop Deep Lake credentials; the device flow above writes them to the shared `~/.deeplake/credentials.json`.
+`setup` wires every coding assistant it detects and starts the loopback daemon; any storage command auto-starts the daemon if it is down. You'll need Activeloop Deeplake credentials; the device flow above writes them to the shared `~/.deeplake/credentials.json`.
 
 </details>
 
@@ -175,7 +175,7 @@ honeycomb dashboard                  # open the local dashboard
 # Capture a decision once…
 honeycomb remember "we deploy from the prd-022 branch, never from main"
 
-# …recall it anywhere: same daemon, same Deep Lake, any harness
+# …recall it anywhere: same daemon, same Deeplake, any harness
 honeycomb recall "how do we deploy"
 ```
 
@@ -185,7 +185,7 @@ Write it from Claude Code; recall it from Cursor tomorrow on a different laptop.
 
 ## 🏗️ How it works
 
-Honeycomb is a long-lived local **daemon** plus thin clients. The daemon is the *only* process that talks to storage. Every harness, the CLI, the MCP server, and the SDK reach it over loopback HTTP. One shared memory behind one boundary; your Deep Lake credentials in exactly one place.
+Honeycomb is a long-lived local **daemon** plus thin clients. The daemon is the *only* process that talks to storage. Every harness, the CLI, the MCP server, and the SDK reach it over loopback HTTP. One shared memory behind one boundary; your Deeplake credentials in exactly one place.
 
 ```mermaid
 flowchart TB
@@ -197,7 +197,7 @@ flowchart TB
     OC["OpenClaw"] --> TC
     TC["thin clients<br/>hooks · CLI · MCP · SDK"] --> HTTP["loopback HTTP<br/>127.0.0.1:3850"]
     HTTP --> D["honeycomb daemon<br/>capture · recall · skillify · pollinate · session priming<br/>sole storage client, owns your credentials"]
-    D --> DL["Activeloop Deep Lake<br/>Tier 1 · Tier 2 · Tier 3<br/>BM25 + semantic vectors"]
+    D --> DL["Activeloop Deeplake<br/>Tier 1 · Tier 2 · Tier 3<br/>BM25 + semantic vectors"]
 ```
 
 - **Capture on every turn.** Per-harness hooks stream each turn to the daemon, which distills and persists it: always-on, cheap, and soft-failing so a capture error never breaks your agent's turn.
@@ -208,7 +208,7 @@ flowchart TB
 
 ## 🧠 The three-tier memory system
 
-This is the heart of what **Legion Code** adds on top of Deep Lake. The same memory lives at three levels of detail at once, and the agent chooses how far to zoom:
+This is the heart of what **Legion Code** adds on top of Deeplake. The same memory lives at three levels of detail at once, and the agent chooses how far to zoom:
 
 | Tier | What it is | When it's used |
 |---|---|---|
@@ -216,20 +216,20 @@ This is the heart of what **Legion Code** adds on top of Deep Lake. The same mem
 | **Tier 2 · Summary** | A distilled recap: goals, decisions, blockers, outcomes. Carries the semantic embedding. | Pulled when a key looks relevant. |
 | **Tier 3 · Raw** | The full session dialogue: exact turns and tool calls, never rewritten. | Resolved when the agent needs ground truth. |
 
-Resolution is a **deterministic SQL join, not a fuzzy search**. `key → summary → raw` is a pointer walk down three Deep Lake tables. Mining ("find the thing I didn't know to name") is where the hybrid vector + lexical search kicks in. Cheap when you're skimming, precise when you're zooming.
+Resolution is a **deterministic SQL join, not a fuzzy search**. `key → summary → raw` is a pointer walk down three Deeplake tables. Mining ("find the thing I didn't know to name") is where the hybrid vector + lexical search kicks in. Cheap when you're skimming, precise when you're zooming.
 
 <img src="assets/brand/divider-minor.svg" width="100%" height="3">
 
-## 💎 Why Deep Lake makes the difference
+## 💎 Why Deeplake makes the difference
 
-Most agent-memory tools bolt onto a vector-only store, which forces *every* access pattern through a similarity engine. Honeycomb's zoom model needs both exact joins **and** semantic search, and [**Deep Lake**](https://deeplake.ai), the database for AI, gives it both natively:
+Most agent-memory tools bolt onto a vector-only store, which forces *every* access pattern through a similarity engine. Honeycomb's zoom model needs both exact joins **and** semantic search, and [**Deeplake**](https://deeplake.ai), the database for AI, gives it both natively:
 
 - **SQL + vector in one engine.** The cheap skim and the deterministic zoom run as SQL; semantic mining runs as vector search; a single store serves both. No second database, no sync problem.
 - **Versioned & append-only.** Writes bump a version instead of mutating in place, so memory's full history stays on disk. Supersession marks old facts stale without losing them, which is what makes the pollinating loop safe and auditable.
 - **Hybrid lexical + semantic search.** BM25 and 768-dim `nomic-embed-text-v1.5` cosine arms, fused by Reciprocal Rank Fusion. Turn embeddings off and recall silently falls back to lexical, never an error, no quality cliff.
 - **Built to scale & BYOC.** The same substrate that serves one developer's laptop serves an organization's entire history, in your own cloud bucket if you want it.
 
-> Honeycomb stands on two shoulders: **[Deep Lake](https://deeplake.ai)** gives the memories somewhere durable and queryable to live, and **[Hivemind](https://github.com/activeloopai/hivemind)**, Activeloop's open-source agent-memory project, is the foundation Legion Code extended into Honeycomb's multi-tier system.
+> Honeycomb stands on two shoulders: **[Deeplake](https://deeplake.ai)** gives the memories somewhere durable and queryable to live, and **[Hivemind](https://github.com/activeloopai/hivemind)**, Activeloop's open-source agent-memory project, is the foundation Legion Code extended into Honeycomb's multi-tier system.
 
 <img src="assets/brand/divider-minor.svg" width="100%" height="3">
 
@@ -261,14 +261,14 @@ Beyond the CLI, three more ways to reach the same daemon and the same shared mem
 Honeycomb is **pre-release (v0.1.x)**. We document what's real and flag what's opt-in.
 
 **Working today**
-- Capture-to-recall, proven end-to-end against live Deep Lake (`npm run smoke:golden-path` with credentials).
+- Capture-to-recall, proven end-to-end against live Deeplake (`npm run smoke:golden-path` with credentials).
 - One-command install → guided dashboard setup, the loopback daemon, the unified CLI, per-harness hooks, the MCP server, and the SDK.
 - Three-tier memory, session priming, skillify + propagation, the pollinating loop, the knowledge graph, and the codebase graph.
 
 **Opt-in / by design**
 - **Embeddings are opt-in.** Recall runs the lexical BM25 path by default; turning on the local embedding runtime (≈600 MB, model fetched on first warmup) adds 768-dim semantic recall. The fallback is silent and intentional; recall never errors when embeddings are unavailable.
 - **The distillation pipeline is off by default** to avoid surprise model spend; enable it when you want background summarization and graph extraction.
-- The daemon binds **loopback only** (single machine). Cross-device and cross-user sharing happen through Deep Lake's org/workspace scope, not a remote daemon bind.
+- The daemon binds **loopback only** (single machine). Cross-device and cross-user sharing happen through Deeplake's org/workspace scope, not a remote daemon bind.
 
 Full documentation and guides live at **[theapiary.sh](https://theapiary.sh)**; vote on what ships next at **[ideas.theapiary.sh](https://ideas.theapiary.sh)**.
 
@@ -290,8 +290,8 @@ npm run ci           # the gate: typecheck + duplication (jscpd) + tests (vitest
 
 Honeycomb exists because two halves fit together:
 
-- **[Activeloop](https://activeloop.ai/)** brings **[Deep Lake](https://deeplake.ai/)** (the versioned, multi-modal database for AI with native vector + columnar indexing and hybrid search) and **[Hivemind](https://github.com/activeloopai/hivemind)**, the open-source agent-memory project Honeycomb is built upon.
-- **[Legion Code Inc](https://github.com/legioncodeinc)** brings the multi-tier memory system (Tier 1 / 2 / 3 keys, summaries, raw), code base atlas memory architecture, auto healing service, session priming, automatic skill development & propagation, the pollinating loop, the knowledge graph, cross device cross repository cross team skill sharing, and the daemon architecture that turns Deep Lake into a shared brain your coding agents read and write on every turn.
+- **[Activeloop](https://activeloop.ai/)** brings **[Deeplake](https://deeplake.ai/)** (the versioned, multi-modal database for AI with native vector + columnar indexing and hybrid search) and **[Hivemind](https://github.com/activeloopai/hivemind)**, the open-source agent-memory project Honeycomb is built upon.
+- **[Legion Code Inc](https://github.com/legioncodeinc)** brings the multi-tier memory system (Tier 1 / 2 / 3 keys, summaries, raw), code base atlas memory architecture, auto healing service, session priming, automatic skill development & propagation, the pollinating loop, the knowledge graph, cross device cross repository cross team skill sharing, and the daemon architecture that turns Deeplake into a shared brain your coding agents read and write on every turn.
 
 <img src="assets/brand/divider-minor.svg" width="100%" height="3">
 
