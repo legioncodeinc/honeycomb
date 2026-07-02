@@ -98,6 +98,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Setup Node ${{ matrix.node-version }}
         uses: actions/setup-node@v6.4.0
@@ -144,6 +146,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@v6.4.0
@@ -211,6 +215,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
       - name: Run live integration (shared body)
         uses: ./.github/actions/live-integration
         with:
@@ -243,6 +249,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
       - name: Run live integration (shared body)
         uses: ./.github/actions/live-integration
         with:
@@ -270,6 +278,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@v6.4.0
