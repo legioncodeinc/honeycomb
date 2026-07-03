@@ -149,15 +149,20 @@ function resolveIdleMs(idleMs: number): number {
 /**
  * Apply `pause`/`resume` to every handle in order, guarding each so a single thrower
  * is logged and skipped rather than aborting the rest of the sweep (one wedged worker
- * must never strand the others paused or running).
+ * must never strand the others paused or running). The optional `isStopped` predicate
+ * makes the sweep stop-aware: `stop()` is authoritative, so a teardown that lands
+ * mid-sweep aborts the remaining handles instead of pausing/resuming workers the
+ * shutdown path is about to tear down anyway.
  */
 async function applyToHandles(
 	pausables: readonly Pausable[],
 	op: "pause" | "resume",
 	logger?: HibernationLogger,
+	isStopped?: () => boolean,
 ): Promise<void> {
 	const event = op === "pause" ? "hibernate.pause.error" : "wake.resume.error";
 	for (const p of pausables) {
+		if (isStopped?.()) return;
 		try {
 			await (op === "pause" ? p.pause() : p.resume());
 		} catch (err) {
@@ -173,6 +178,21 @@ async function applyToHandles(
  * intervening activity it pauses every handle, and the next `touch()` resumes them.
  * Async transitions (hibernate/wake) are serialized by a `transitioning` guard so a
  * slow pause/resume can never overlap its inverse.
+ *
+ * Two race rules on top of the serialization (PR 225 review findings):
+ *
+ * - `stop()` is AUTHORITATIVE. A hibernate or wake whose pause/resume sweep is in
+ *   flight when `stop()` runs must not finish afterward and silently reinstate
+ *   "active"/"hibernated", log a transition, or re-arm the debounce during teardown.
+ *   So both transitions re-check `state === "stopped"` after their await before any
+ *   state write, log, or arm, and `arm()` itself short-circuits when stopped.
+ *
+ * - A `touch()` that lands while a transition is IN FLIGHT is never lost. Mid-pause
+ *   the state still reads "active", so the plain wake path would see nothing to do
+ *   and the daemon would end hibernated despite fresh work. Instead the touch sets a
+ *   `pendingWake` dirty flag; a completing hibernate checks it and immediately wakes
+ *   (still respecting the stopped guard), and a completing wake clears it because
+ *   that wake already satisfied the queued activity.
  */
 class HibernationController implements DeepLakeHibernation {
 	private readonly pausables: readonly Pausable[];
@@ -186,6 +206,8 @@ class HibernationController implements DeepLakeHibernation {
 	private lastActivityAt = 0;
 	private handle: unknown = null;
 	private transitioning = false;
+	/** Set when a touch lands mid-transition; consumed by the transition that settles. */
+	private pendingWake = false;
 
 	constructor(deps: HibernationDeps) {
 		this.pausables = deps.pausables;
@@ -204,19 +226,42 @@ class HibernationController implements DeepLakeHibernation {
 	}
 
 	stop(): void {
+		// Authoritative: cancel any armed debounce AND drop any queued wake, then latch
+		// "stopped". An in-flight hibernate/wake re-checks this latch after its await and
+		// bails, so a transition that raced the teardown can never reinstate a live state,
+		// re-arm a timer, or resume a worker afterward.
 		this.clear();
+		this.pendingWake = false;
 		this.state = "stopped";
 	}
 
 	touch(): void {
 		if (this.state === "stopped") return;
 		this.lastActivityAt = this.now();
+		if (this.transitioning) {
+			// A transition is in flight, so `state` is stale (mid-pause it still reads
+			// "active"). Queue the wake instead of dropping it: a completing hibernate
+			// consumes the flag and immediately wakes, so fresh work is never lost. (A
+			// direct `wake()` call here would no-op on its own state/transitioning guard,
+			// which is exactly the missed-wake bug.)
+			this.pendingWake = true;
+			return;
+		}
 		if (this.state === "hibernated") void this.wake();
 		else this.arm();
 	}
 
 	isHibernated(): boolean {
 		return this.state === "hibernated";
+	}
+
+	/**
+	 * The stop latch, as a method so the post-await re-checks inside the transitions
+	 * survive TypeScript's control-flow narrowing (a mutation across an await is
+	 * invisible to the narrower on a direct `this.state` comparison).
+	 */
+	private isStopped(): boolean {
+		return this.state === "stopped";
 	}
 
 	private clear(): void {
@@ -228,6 +273,8 @@ class HibernationController implements DeepLakeHibernation {
 
 	/** Arm the debounce to fire `delay` (default the full idle window) from now. */
 	private arm(delay: number = this.idleMs): void {
+		// Stopped is terminal until the next start(): never arm a timer past teardown.
+		if (this.state === "stopped") return;
 		this.clear();
 		this.handle = this.timers.setTimer(() => this.onIdle(), delay);
 	}
@@ -246,11 +293,23 @@ class HibernationController implements DeepLakeHibernation {
 		if (this.state !== "active" || this.transitioning) return;
 		this.transitioning = true;
 		try {
-			await applyToHandles(this.pausables, "pause", this.logger);
+			await applyToHandles(this.pausables, "pause", this.logger, () => this.isStopped());
+			// stop() raced the pause sweep: it is authoritative, so do NOT reinstate a
+			// live state, log a transition, or wake past teardown.
+			if (this.isStopped()) return;
 			this.state = "hibernated";
 			this.logger?.info("deeplake.hibernated", { idleMs: this.idleMs, handles: this.pausables.length });
 		} finally {
 			this.transitioning = false;
+		}
+		// A touch landed while the pause sweep was in flight (it saw `transitioning` and
+		// queued instead of waking a state that still read "active"). Honor it now: the
+		// daemon has fresh work and must end awake, not hibernated. `transitioning` is
+		// already false, so this wake is not self-blocked; the stopped case returned above.
+		if (this.pendingWake) {
+			this.pendingWake = false;
+			this.lastActivityAt = this.now();
+			await this.wake();
 		}
 	}
 
@@ -258,12 +317,18 @@ class HibernationController implements DeepLakeHibernation {
 		if (this.state !== "hibernated" || this.transitioning) return;
 		this.transitioning = true;
 		try {
-			await applyToHandles(this.pausables, "resume", this.logger);
+			await applyToHandles(this.pausables, "resume", this.logger, () => this.isStopped());
+			// stop() raced the resume sweep: it is authoritative, so do NOT reinstate a
+			// live state, log a transition, or re-arm the debounce past teardown.
+			if (this.isStopped()) return;
 			this.state = "active";
 			this.logger?.info("deeplake.woke", { handles: this.pausables.length });
 			this.arm();
 		} finally {
 			this.transitioning = false;
+			// This wake already satisfies any touch that landed mid-resume; dropping the
+			// flag here prevents a stale queued wake from firing after a later hibernate.
+			this.pendingWake = false;
 		}
 	}
 }
