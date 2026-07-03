@@ -34,11 +34,11 @@ The front door is a single line:
 - **macOS / Linux:** `curl -fsSL https://get.theapiary.sh | sh`
 - **Windows PowerShell:** `irm https://get.theapiary.sh/install.ps1 | iex`
 
-`get.theapiary.sh` is a Cloudflare Pages site (`site/install/`) that content-negotiates, a shell pipe receives `install.sh`/`install.ps1` as `text/plain`, a browser gets an "inspect before piping" page, and publishes a `SHA256SUMS` checksum file. It is deployed by `.github/workflows/deploy-install-site.yaml` on `v*` tags.
+`get.theapiary.sh` is a Cloudflare Pages site in the-apiary (`https://github.com/legioncodeinc/the-apiary/tree/main/site/install`) that content-negotiates, a shell pipe receives `install.sh`/`install.ps1` as `text/plain`, a browser gets an "inspect before piping" page, and publishes a `SHA256SUMS` checksum file. It is deployed by the-apiary's `.github/workflows/deploy-install-site.yaml` on `v*` tags.
 
 ### What the shell scripts own (and what they hand off)
 
-The two entrypoints (`scripts/install/install.sh`, `scripts/install/install.ps1`) are deliberately thin and idempotent. They own only the **host-bootstrap half**:
+The two entrypoints (`https://github.com/legioncodeinc/the-apiary/tree/main/scripts/install`) are deliberately thin and idempotent. They own only the **host-bootstrap half**:
 
 1. **Detect-then-install Node/npm** if absent (via `fnm` + a pinned LTS). A junior user will not have npm; if installation needs elevation it cannot obtain, the script prints the exact copy-paste command and exits cleanly (non-zero, no stack trace).
 2. **Install the embedding runtime dependencies** the daemon needs, notably `@huggingface/transformers`, whose model weights are *not* pulled synchronously (that download is the embed daemon's lazy warmup, so the installer finishes fast).
@@ -58,7 +58,7 @@ The installer endpoint serves bytes that users pipe straight into `sh` or `iex`,
 
 3. **Immutable tag semantics.** Tags are immutable refs, so once a `v*` tag is pushed and deployed, re-pushing the same tag name is rejected by Git. A known-good release cannot be silently swapped for malicious bytes under the same name.
 
-These controls are documented for operators in `SECURITY.md` (§ Production deployment protection) and `site/install/README.md`, and are regression-locked by `tests/security/deploy-install-site-guard.test.ts`, which parses the workflow YAML to assert the environment block, the guard step, and the guard-before-build ordering are all present, and unit-tests the `merge-base --is-ancestor` ancestry logic across the exploit and legitimate-release scenarios. Do not weaken the environment protection or the ancestry check without a documented security review. This pipeline is **distinct from** the npm publish pipeline (see [npm Publishing](../infrastructure/npm-publishing.md)), which protects the `@legioncodeinc/honeycomb` tarball with its own OIDC + pack-check + fails-closed guards.
+These controls are documented for operators in `SECURITY.md` (§ Production deployment protection) and [the-apiary `site/install/README.md`](https://github.com/legioncodeinc/the-apiary/tree/main/site/install/README.md), and are regression-locked by `tests/security/deploy-install-site-guard.test.ts`, which parses the workflow YAML to assert the environment block, the guard step, and the guard-before-build ordering are all present, and unit-tests the `merge-base --is-ancestor` ancestry logic across the exploit and legitimate-release scenarios. Do not weaken the environment protection or the ancestry check without a documented security review. This pipeline is **distinct from** the npm publish pipeline (see [npm Publishing](../infrastructure/npm-publishing.md)), which protects the `@legioncodeinc/honeycomb` tarball with its own OIDC + pack-check + fails-closed guards.
 
 ### The `honeycomb install` verb
 

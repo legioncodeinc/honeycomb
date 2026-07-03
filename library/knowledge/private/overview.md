@@ -1,6 +1,6 @@
 # Honeycomb Knowledge Base
 
-> Category: Overview | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Overview | Version: 1.1 | Date: July 2026 | Status: Active
 
 The entry point for everyone working on Honeycomb: what it is, how the pieces fit, and where to read next.
 
@@ -21,6 +21,8 @@ Honeycomb is the ultimate harness memory system: one shared, self-improving memo
 Honeycomb is the merger of two systems. Hivemind contributed the broad product: capture across six-plus harnesses, a trace-to-skill mining pipeline, team skill sharing, a live codebase graph, a Cursor extension, multi-tenant org and workspace boundaries, and GPU-backed DeepLake storage. Our memory engine contributed the memory layer, which is the better one: a durable extraction-to-recall pipeline, hybrid retrieval, a knowledge-graph ontology, a pollinating maintenance loop, a model and provider router, fine-grained agent scoping, and source-backed recall with provenance. Where the two overlapped on how memory works, our memory engine won.
 
 The result is one daemon that captures everything a harness does, distills it into structured, source-backed memory, and serves it back, all on a DeepLake substrate that a team can share.
+
+Honeycomb is production ready and live-tested end to end: the capture-to-recall path runs green against live Deeplake (`npm run smoke:golden-path` with credentials), and three harnesses (Claude Code, Cursor, Codex) ship in production today, with Hermes, pi, and OpenClaw in progress. Embeddings, the distillation pipeline, and cross-device sharing are deliberate opt-in and by-design choices (covered below and in the linked operations docs), not gaps.
 
 ## The shape
 

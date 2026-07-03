@@ -43,20 +43,7 @@ at `GET /api/diagnostics/memory-graph` (a distinct path — no collision) and re
 (`tests/daemon/runtime/dashboard/api.test.ts` drives `app.request(...)`); importing the daemon does
 not auto-invoke it.
 
-## The viewable dashboard HOST — `host.ts` (PRD-021d, d-AC-3)
+## Dashboard host note
 
-`mountDashboardHost(daemon, { storage, scope? })` attaches `GET /dashboard` onto the root group (the
-viewable HTML page, served from inside the daemon). It builds a DAEMON-SIDE `DashboardDataSource`
-that reads the live storage through the SHARED view fetchers `api.ts` now exports
-(`fetchKpisView`/`fetchSessionsView`/`buildSettingsView`/`fetchRulesView`/`fetchSkillSyncView`)
-— so the served page and the JSON endpoints read EXACTLY the same rows (single-sourced SQL, jscpd-clean).
-It then runs the 020b `renderDashboard` and serializes via `src/dashboard/html.ts`'s
-`renderDashboardPage` (a STANDALONE page, distinct from the cursor webview FRAGMENT serializer).
-
-- **Connectivity + empty states are free (d-AC-5/6):** the host calls the SAME `renderDashboard`, so a
-  not-built graph / empty sessions render the 020b empty-state and a daemon-down probe renders the 020b
-  banner — no reinvention. (The host's own `probe()` is reachable-by-construction since the page is
-  served from the running daemon; the daemon-DOWN banner is the thin-client path's concern.)
-- **Seam, not auto-wired:** mirrors `mountDashboardApi` — 021d owns the seam; the production assembly
-  (021a/021f) fires `mountDashboardHost(daemon, { storage })` once. 021d does NOT edit `assemble.ts`.
-- **`/api/logs`** is the sibling seam (`src/daemon/runtime/logs/`); see its CONVENTIONS.
+`mountDashboardHost` no longer lives in this repo. The dashboard host and onboarding portal now live
+in the hive repository, and honeycomb no longer mounts `GET /dashboard` locally.

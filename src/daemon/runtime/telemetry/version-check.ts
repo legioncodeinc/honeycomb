@@ -36,7 +36,8 @@
  * no verb removes the npm package or the `~/.deeplake` state dir. The `honeycomb_uninstalled`
  * event therefore fires from that verb (see `src/commands/local-handlers.ts`); PACKAGE-removal
  * coverage comes from the installer's `product_removed` phone-home event
- * (`scripts/install/install.sh` / `install.ps1`), which observes a `--products=` narrowing
+ * ([the-apiary installer scripts](https://github.com/legioncodeinc/the-apiary/tree/main/scripts/install)),
+ * which observe a `--products=` narrowing
  * between installer runs.
  */
 
