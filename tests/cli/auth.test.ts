@@ -326,6 +326,21 @@ describe("self-hosted login (--endpoint): writes the credential directly WITHOUT
 		expect(text).toContain("https://deeplake.internal");
 	});
 
+	it("redacts embedded endpoint credentials in the success line but persists the raw URL", async () => {
+		const endpoint = "postgres://postgres:deeplake@localhost:5432/postgres";
+		const cap = captured();
+		const res = await runAuthCommand(
+			{ command: "login", endpoint },
+			{ dir, clock: clock(), env: {}, out: cap.out, fetch: throwingFetch },
+		);
+		expect(res.exitCode).toBe(0);
+		const onDisk = JSON.parse(readFileSync(credentialsPath(dir), "utf8")) as DiskCredentials;
+		expect(onDisk.apiUrl).toBe(endpoint);
+		const text = cap.lines.join("\n");
+		expect(text).not.toContain("deeplake@localhost");
+		expect(text).toContain("postgres://postgres:****@localhost:5432/postgres");
+	});
+
 	it("rejects a value-less --endpoint instead of falling back to hosted login", async () => {
 		// A bare `--endpoint` parses to an empty string; it must error, NOT silently run the
 		// hosted flow (which could dial api.deeplake.ai via throwingFetch).

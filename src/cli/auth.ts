@@ -47,6 +47,7 @@ import {
 	saveCredentials,
 	systemClock,
 } from "../daemon/runtime/auth/index.js";
+import { redactEndpointCredentials } from "../shared/redact-endpoint.js";
 
 /** A line-sink so command output is capturable in tests (no direct stdout). */
 export type OutputSink = (line: string) => void;
@@ -301,7 +302,7 @@ function loginSelfHosted(inv: AuthInvocation, endpoint: string, deps: ReturnType
 		out(`error: login failed: ${reason}`);
 		return { exitCode: 1, wrote: false };
 	}
-	out(`Logged in to self-hosted backend ${endpoint}. Org ${org}, workspace ${workspace}.`);
+	out(`Logged in to self-hosted backend ${redactEndpointCredentials(endpoint)}. Org ${org}, workspace ${workspace}.`);
 	return { exitCode: 0, wrote: true };
 }
 
