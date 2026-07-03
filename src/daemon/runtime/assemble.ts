@@ -2921,6 +2921,12 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 							},
 							clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
 						},
+						// Adapt the daemon's structured logger onto the controller's HibernationLogger
+						// seam (same posture as the capture logger wiring): hibernate/wake transitions
+						// (`deeplake.hibernated` / `deeplake.woke`) and swallowed handle errors
+						// (`hibernate.pause.error` / `wake.resume.error`) land in the event ring buffer
+						// instead of vanishing, so the cost fix is observable in production.
+						logger: { info: (event, fields) => daemon.logger.event(event, fields) },
 					});
 					hibernation.start();
 				}
