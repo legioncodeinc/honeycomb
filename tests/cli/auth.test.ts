@@ -19,20 +19,20 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-
+import { type AuthResult, parseAuthArgs, runAuthCommand } from "../../src/cli/auth.js";
 import {
 	type AuthFetch,
 	type AuthFetchResponse,
 	type BrowserOpener,
 	type Clock,
-	type DiskCredentials,
-	type Sleeper,
-	FILE_MODE,
 	credentialsPath,
+	type DiskCredentials,
+	FILE_MODE,
 	legacyCredentialsPath,
+	type Sleeper,
 	saveDiskCredentials,
+	verifyTokenClaims,
 } from "../../src/daemon/runtime/auth/index.js";
-import { type AuthResult, parseAuthArgs, runAuthCommand } from "../../src/cli/auth.js";
 
 const IS_POSIX = process.platform !== "win32";
 const FIXED = "2026-06-20T12:00:00.000Z";
@@ -76,7 +76,8 @@ function fakeFetch(opts: { meStatus?: number } = {}): AuthFetch {
 		}
 		if (path === "/auth/device/token") return Promise.resolve(jsonResponse(200, { access_token: AUTH0_TOKEN }));
 		if (path === "/me") {
-			if (opts.meStatus !== undefined && opts.meStatus !== 200) return Promise.resolve(jsonResponse(opts.meStatus, "unauth"));
+			if (opts.meStatus !== undefined && opts.meStatus !== 200)
+				return Promise.resolve(jsonResponse(opts.meStatus, "unauth"));
 			return Promise.resolve(jsonResponse(200, { id: "u-1", name: "Ada Lovelace", email: "ada@deeplake.ai" }));
 		}
 		if (path === "/organizations") return Promise.resolve(jsonResponse(200, [{ id: "org-acme", name: "Acme Inc" }]));
@@ -242,5 +243,128 @@ describe("AC-6 logout: removes the shared + legacy file; exit 0 when absent; nev
 		expect(res.exitCode).toBe(0);
 		expect(res.wrote).toBe(false);
 		expect(cap.lines.join("\n")).toContain("Not logged in.");
+	});
+});
+
+describe("self-hosted login (--endpoint): writes the credential directly WITHOUT dialing api.deeplake.ai", () => {
+	// Proves the path never touches the auth backend: any fetch is a hard failure.
+	const throwingFetch: AuthFetch = () => {
+		throw new Error("self-hosted login must not call api.deeplake.ai");
+	};
+
+	it("parseAuthArgs captures --endpoint / --org / --workspace (and --token=)", () => {
+		const inv = parseAuthArgs([
+			"login",
+			"--endpoint",
+			"postgres://db/dl",
+			"--org",
+			"team",
+			"--workspace",
+			"ws",
+			"--token=tok-1",
+		]);
+		expect(inv).toEqual({
+			command: "login",
+			endpoint: "postgres://db/dl",
+			org: "team",
+			workspace: "ws",
+			token: "tok-1",
+		});
+	});
+
+	it("mints a LOCAL stub token and writes apiUrl=endpoint, org=local, workspace=default with only --endpoint", async () => {
+		const cap = captured();
+		const res = await runAuthCommand(
+			{ command: "login", endpoint: "https://deeplake.internal:8443" },
+			{ dir, clock: clock(), env: {}, out: cap.out, fetch: throwingFetch },
+		);
+		expect(res.exitCode).toBe(0);
+		expect(res.wrote).toBe(true);
+
+		const onDisk = JSON.parse(readFileSync(credentialsPath(dir), "utf8")) as DiskCredentials;
+		expect(onDisk.apiUrl).toBe("https://deeplake.internal:8443");
+		expect(onDisk.orgId).toBe("local");
+		expect(onDisk.workspaceId).toBe("default");
+		expect(onDisk.savedAt).toBe(FIXED);
+		expect(typeof onDisk.token).toBe("string");
+		expect(onDisk.token.length).toBeGreaterThan(0);
+		// The minted token is REAL: it round-trips the verifier to the same org.
+		expect(verifyTokenClaims(onDisk.token)?.org).toBe("local");
+	});
+
+	it("supports a postgres:// endpoint with an explicit --token / --org / --workspace (verbatim token)", async () => {
+		const cap = captured();
+		const res = await runAuthCommand(
+			{
+				command: "login",
+				endpoint: "postgres://u@db:5432/deeplake",
+				token: "byo-token-xyz",
+				org: "team-blue",
+				workspace: "backend",
+			},
+			{ dir, clock: clock(), env: {}, out: cap.out, fetch: throwingFetch },
+		);
+		expect(res.exitCode).toBe(0);
+		const onDisk = JSON.parse(readFileSync(credentialsPath(dir), "utf8")) as DiskCredentials;
+		expect(onDisk.apiUrl).toBe("postgres://u@db:5432/deeplake");
+		expect(onDisk.token).toBe("byo-token-xyz");
+		expect(onDisk.orgId).toBe("team-blue");
+		expect(onDisk.workspaceId).toBe("backend");
+	});
+
+	it("writes the file at 0600 and NEVER prints the token (D-4)", async () => {
+		const cap = captured();
+		await runAuthCommand(
+			{ command: "login", endpoint: "https://deeplake.internal", token: "secret-token-zzz" },
+			{ dir, clock: clock(), env: {}, out: cap.out, fetch: throwingFetch },
+		);
+		if (IS_POSIX) {
+			expect(statSync(credentialsPath(dir)).mode & 0o777).toBe(FILE_MODE);
+		}
+		const text = cap.lines.join("\n");
+		expect(text).not.toContain("secret-token-zzz");
+		expect(text).toContain("https://deeplake.internal");
+	});
+
+	it("redacts embedded endpoint credentials in the success line but persists the raw URL", async () => {
+		const endpoint = "postgres://postgres:deeplake@localhost:5432/postgres";
+		const cap = captured();
+		const res = await runAuthCommand(
+			{ command: "login", endpoint },
+			{ dir, clock: clock(), env: {}, out: cap.out, fetch: throwingFetch },
+		);
+		expect(res.exitCode).toBe(0);
+		const onDisk = JSON.parse(readFileSync(credentialsPath(dir), "utf8")) as DiskCredentials;
+		expect(onDisk.apiUrl).toBe(endpoint);
+		const text = cap.lines.join("\n");
+		expect(text).not.toContain("deeplake@localhost");
+		expect(text).toContain("postgres://postgres:****@localhost:5432/postgres");
+	});
+
+	it("rejects a value-less --endpoint instead of falling back to hosted login", async () => {
+		// A bare `--endpoint` parses to an empty string; it must error, NOT silently run the
+		// hosted flow (which could dial api.deeplake.ai via throwingFetch).
+		expect(parseAuthArgs(["login", "--endpoint"])).toEqual({ command: "login", endpoint: "" });
+		const cap = captured();
+		const res = await runAuthCommand(
+			{ command: "login", endpoint: "" },
+			{ dir, clock: clock(), env: {}, out: cap.out, fetch: throwingFetch },
+		);
+		expect(res.exitCode).toBe(1);
+		expect(res.wrote).toBe(false);
+		expect(existsSync(credentialsPath(dir))).toBe(false);
+		expect(cap.lines.join("\n")).toContain("--endpoint requires a URL");
+	});
+
+	it("treats an empty --token / HONEYCOMB_TOKEN as absent and mints a stub (no empty bearer)", async () => {
+		const cap = captured();
+		const res = await runAuthCommand(
+			{ command: "login", endpoint: "https://deeplake.internal", token: "" },
+			{ dir, clock: clock(), env: { HONEYCOMB_TOKEN: "" }, out: cap.out, fetch: throwingFetch },
+		);
+		expect(res.exitCode).toBe(0);
+		const onDisk = JSON.parse(readFileSync(credentialsPath(dir), "utf8")) as DiskCredentials;
+		expect(onDisk.token.length).toBeGreaterThan(0);
+		expect(verifyTokenClaims(onDisk.token)?.org).toBe("local");
 	});
 });

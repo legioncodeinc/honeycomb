@@ -135,6 +135,8 @@ node bundle/cli.js status    # check the daemon and your environment
 
 `setup` wires every coding assistant it detects and starts the loopback daemon; any storage command auto-starts the daemon if it is down. You'll need Activeloop Deeplake credentials; the device flow above writes them to the shared `~/.deeplake/credentials.json`.
 
+> **Self-hosting the storage backend?** You can run Honeycomb against Activeloop's open-source [`pg_deeplake`](https://quay.io/activeloopai/pg-deeplake) Postgres extension instead of hosted Deep Lake, and point Honeycomb at it with `honeycomb login --endpoint postgres://...` (direct) or `--endpoint https://...` (HTTP gateway), no Activeloop account required. See the [self-hosting guide](library/knowledge/public/guides/self-hosting.md) for the setup and the backend contract.
+
 </details>
 
 <img src="assets/brand/divider-minor.svg" width="100%" height="3">
