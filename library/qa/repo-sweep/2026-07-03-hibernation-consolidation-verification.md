@@ -3,7 +3,7 @@
 **Plan document:** Consolidation directive supplied by the invoker (no single PRD file authored the merge decision; the shipped design doc is `library/requirements/completed/prd-062-deeplake-compute-cost-reduction/prd-062e-deeplake-compute-cost-reduction-idle-hibernation.md`)
 **Audit date:** 2026-07-03 (initial), 2026-07-03 (re-audit after remediation commits `bf9c348`, `00647e8`, `661fcbf`)
 **Base branch:** `origin/main`
-**Head:** `feat/deeplake-hibernation-consolidated`, worktree `C:\Users\mario\GitHub\honeycomb-hibernation` (initial audit at 4 commits ahead; re-audit at 8 commits ahead: 4 implementation + this report + 3 remediation)
+**Head:** `feat/deeplake-hibernation-consolidated` (initial audit at 4 commits ahead; re-audit at 8 commits ahead: 4 implementation + this report + 3 remediation)
 **Auditor:** quality-worker-bee
 
 ## Ordering check
