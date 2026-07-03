@@ -259,12 +259,13 @@ Beyond the CLI, three more ways to reach the same daemon and the same shared mem
 
 <h2 align="center"><a href="https://ideas.theapiary.sh">📍 Status & Roadmap</a></h2>
 
-Honeycomb is **pre-release (v0.1.x)**. We document what's real and flag what's opt-in.
+Honeycomb is **pre-release (v0.2.x)**. We document what's real and flag what's opt-in.
 
 **Working today**
 - Capture-to-recall, proven end-to-end against live Deeplake (`npm run smoke:golden-path` with credentials).
 - One-command install → guided dashboard setup, the loopback daemon, the unified CLI, per-harness hooks, the MCP server, and the SDK.
 - Three-tier memory, session priming, skillify + propagation, the pollinating loop, the knowledge graph, and the codebase graph.
+- Self-hosted backends: point the CLI at your own Postgres-backed Deeplake endpoint with `honeycomb login --endpoint`, with idle connection hibernation for scale-to-zero.
 
 **Opt-in / by design**
 - **Embeddings are opt-in.** Recall runs the lexical BM25 path by default; turning on the local embedding runtime (≈600 MB, model fetched on first warmup) adds 768-dim semantic recall. The fallback is silent and intentional; recall never errors when embeddings are unavailable.
