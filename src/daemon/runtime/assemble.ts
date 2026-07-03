@@ -2519,6 +2519,15 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		if (!autoBuildGraph || graphBuildTimer !== null) return;
 		graphBuildTimer = armUnrefInterval(() => void rebuildCodebaseGraph(), DEFAULT_GRAPH_BUILD_INTERVAL_MS);
 	}
+	// The PRD-223 pollinating maintenance tick calls checkAndEnqueuePollinating, which queries
+	// Deeplake, so it must hibernate with the workers or it keeps the Activeloop pod warm forever.
+	// Its handle self-schedules and cannot be restarted after stop(), so — exactly like the health
+	// probe and graph build above — resume RE-ARMS it by building a fresh tick rather than reviving
+	// the stopped one. Idempotent: a second arm with a live tick is a no-op.
+	function armPollinatingMaintenanceTick(): void {
+		if (pollinatingMaintenanceTick !== null) return;
+		pollinatingMaintenanceTick = startPollinatingMaintenanceTick(pollinatingTrigger, { agentId: "default" });
+	}
 
 	let started = false;
 	let locked = false;
@@ -2593,7 +2602,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			await daemon.startServices();
 			if (!startBackgroundWorkers) return;
 
-			pollinatingMaintenanceTick = startPollinatingMaintenanceTick(pollinatingTrigger, { agentId: "default" });
+			armPollinatingMaintenanceTick();
 
 			// ── PRD-062b: resolve the adaptive-backoff + consolidation knobs ONCE, fail-soft.
 			// A malformed knob must NEVER take the daemon down — degrade to the schema's
@@ -2861,6 +2870,20 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 					addWorker("pipeline", pipelineWorker);
 					addWorker("pollinating", pollinatingWorker);
 				}
+				// PRD-223's pollinating maintenance tick queries Deeplake (checkAndEnqueuePollinating),
+				// so it must go quiet while hibernated or it keeps the Activeloop pod warm forever and
+				// silently defeats the master switch. Pause stops + drops the handle; resume re-arms a
+				// fresh tick (the handle is not restartable), exactly like health-probe / graph-build.
+				pausables.push({
+					label: "pollinating-maintenance-tick",
+					pause: () => {
+						if (pollinatingMaintenanceTick !== null) {
+							pollinatingMaintenanceTick.stop();
+							pollinatingMaintenanceTick = null;
+						}
+					},
+					resume: armPollinatingMaintenanceTick,
+				});
 				if (storageHealthProbeEnabled) {
 					pausables.push({
 						label: "health-probe",
