@@ -53,8 +53,9 @@ The contract is now extended, **additively**. The coarse bit and its existing co
 | `storage` | `reachable` / `unreachable` | The cached pipeline bit the `SELECT 1` probe maintains. `ok` → reachable. |
 | `embeddings` | `on` / `off` | The embed-seam state known at assembly, `on` when the real embedder is wired, `off` for the no-op or an explicit `HONEYCOMB_EMBEDDINGS=false`. |
 | `schema` | `ok` / `missing_table` | Best-effort: `ok` unless a required table is known-missing. With no cheap always-on signal, it stays conservatively `ok` rather than risk a false alarm; a caller that holds a known-missing signal passes `missing_table` explicitly. |
+| `capture` | `droppedEvents` count (integer, `≥ 0`) | The acked-but-dropped events counter (C-4). The capture seam increments it fail-soft when a captured event is dropped *after* the daemon already acked it, so an event the harness believes landed is surfaced rather than lost silently. The same count also feeds the dashboard KPIs. |
 
-No new probe is introduced, the `reasons` read the three facts the runtime already knows. The structured detail is built by a pure contract module (`src/daemon/runtime/health.ts`); each reason is a closed enum of string literals.
+No new probe is introduced, the `reasons` read facts the runtime already knows. The structured detail is built by a pure contract module (`src/daemon/runtime/health.ts`); the `storage` / `embeddings` / `schema` reasons are each a closed enum of string literals, and `capture.droppedEvents` is a monotonic integer count rather than a literal.
 
 ### Partial storage degradation
 
@@ -71,7 +72,7 @@ The gating lives at the caller (`server.ts`), not in the contract module. A `pub
 
 ## The no-secret invariant
 
-Every new field and log line is scrubbed. The health detail and degraded logs carry subsystem **names and states only**, never a token, endpoint credential, full org GUID, header value, or URL. Because each reason is a fixed string literal from a closed set, a value *cannot* carry a free-form secret-bearing string. This reuses the same redaction posture the request log records and the SQL tracer already enforce, and a grep/test proves no token, credential, org GUID, or header appears in any new field, the degraded badge payload, or the degraded log line. The discipline is the same thread that runs through [`../security/scoping-and-visibility.md`](../security/scoping-and-visibility.md): the system refuses rather than over-shares.
+Every new field and log line is scrubbed. The health detail and degraded logs carry subsystem **names and states only**, never a token, endpoint credential, full org GUID, header value, or URL. Because each reason is either a fixed string literal from a closed set or a bare integer count (`capture.droppedEvents`), a value *cannot* carry a free-form secret-bearing string. This reuses the same redaction posture the request log records and the SQL tracer already enforce, and a grep/test proves no token, credential, org GUID, or header appears in any new field, the degraded badge payload, or the degraded log line. The discipline is the same thread that runs through [`../security/scoping-and-visibility.md`](../security/scoping-and-visibility.md): the system refuses rather than over-shares.
 
 ## How an operator reads it
 
