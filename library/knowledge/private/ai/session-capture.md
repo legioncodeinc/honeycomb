@@ -1,6 +1,6 @@
 # Session Capture
 
-> Category: Ai | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Ai | Version: 1.1 | Date: July 2026 | Status: Active
 
 The input layer: how every prompt, tool call, and response becomes a durable raw event that feeds the distillation pipeline, and the guards that keep capture cheap and safe.
 
@@ -36,6 +36,12 @@ flowchart TD
 ```
 
 The `message` column is `JSONB` because each event is a structured payload (prompt text, tool input, tool response), and storing it as structured JSON keeps the original shape intact for later extraction. The capture call goes to the daemon, which owns the write to DeepLake; the shim never touches storage directly. The table shape is documented in [`../data/schema.md`](../data/schema.md).
+
+## Bounded read-back
+
+The two hot read paths that reconstruct a conversation, the VFS `cat sessions/...` concat (`buildSessionsConcatSql` in `src/daemon-client/vfs/read.ts`) and the `GET /api/hooks/conversation` read-back (`readAppendOrdered` in `src/daemon/storage/writes.ts`, called from `capture-handler.ts`), both bound the result to the most-recent `MAX_SESSION_TURNS` rows, currently `2000`. They do this with a flat `ORDER BY creation_date DESC LIMIT N` and then reverse the rows in application code back to chronological order, so the turn stream still reads oldest to newest. The bound exists because `path` is the conversation grouping key: concurrent sub-agents that share one transcript all append under the same `path`, so a fan-out swarm can drive a single session to tens of thousands of rows, each carrying a large `JSONB` `message`. Before the cap, one such session materialized hundreds of MB per read and stalled for tens of seconds. Every ordinary single-agent session is far under the cap and is returned in full, unchanged; only a pathological fan-out session is truncated to its most-recent 2000 turns.
+
+The bound is opt-in on the read side. `readAppendOrdered` keeps its unbounded ascending path when no limit is passed, so the other append-only tables that stream every row (`memory_history`, `dependencies`, and the like) are unaffected: only the sessions read-back passes the cap.
 
 ## Optional embeddings
 

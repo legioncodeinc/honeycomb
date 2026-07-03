@@ -1,6 +1,6 @@
 # Retrieval
 
-> Category: Ai | Version: 2.1 | Date: June 2026 | Status: Active
+> Category: Ai | Version: 2.2 | Date: July 2026 | Status: Active
 
 How recall works: hybrid lexical + semantic candidate collection over DeepLake, RRF fusion, the reranker/dedup/recency/MMR shaping stages (including the `cohere` provider reranker via the Portkey gateway), the authorization boundary, GPU-backed vector search, the virtual-filesystem browse surface, and the nDCG eval harness that gates every ranking change.
 
@@ -29,9 +29,9 @@ Recall has to be cheap, scoped, current, and *shaped*. Cheap means it cannot run
 flowchart TD
     query["Incoming recall query"] --> lexical
     query --> semantic
-    lexical["Lexical arms: UNION-ALL over memories + memory + sessions (BM25/ILIKE)"] --> fuse
-    semantic["Semantic arms: &lt;#&gt; cosine per table (optional)"] --> fuse
-    fuse["fuseHits: RRF blend + arm-class weights → real score, ranked order"] --> rerank
+    lexical["Lexical arms: per-arm guarded query over memories + memory + sessions + hive_graph_versions (BM25/ILIKE)"] --> fuse
+    semantic["Semantic arms: &lt;#&gt; cosine over memories + sessions + hive_graph_versions (optional)"] --> fuse
+    fuse["fuseHits: RRF blend + arm-class weights + nectar_rrf_multiplier → real score, ranked order"] --> rerank
     rerank["rerankHits: re-score top-k (default none)"] --> dedup
     dedup["dedupHits: collapse near-duplicates by embedding (default on)"] --> recency
     recency["applyRecencyDampening: age-decay multiplier (default off-equivalent)"] --> assemble
@@ -49,11 +49,20 @@ A fresh `honeycomb login` user gets hybrid lexical + 768-dim semantic recall out
 
 ## Lexical arms
 
-`recallMemories` runs a `UNION ALL` over three tables, `memories` (durable distilled facts), `memory` (per-session summaries), and `sessions` (raw dialogue rows), using BM25-style full-text search when the DeepLake index is present and falling back to `ILIKE` when it is not. Each arm is a separately-guarded query (`buildMemoriesArmSql` / `buildMemoryArmSql` / `buildSessionsArmSql`) precisely so a missing sibling table degrades *that arm* to empty rather than 500-ing the whole recall. Every value interpolated into the query passes through the `sqlStr`/`sqlLike`/`sqlIdent` helpers because the DeepLake query endpoint has no parameterized queries.
+`recallMemories` runs **four** lexical arms, one per table a memory can live in, using BM25-style full-text search when the DeepLake index is present and falling back to `ILIKE` when it is not:
+
+- `memories` (durable distilled facts), via `buildMemoriesArmSql`.
+- `memory` (per-session summaries), via `buildMemoryArmSql`.
+- `sessions` (raw dialogue rows), via `buildSessionsArmSql`.
+- `hive_graph_versions` (Nectar's LLM-minted file descriptions, PRD-013a), via `buildHiveGraphVersionsArmSql`.
+
+Each arm is its **own** separately-guarded `storage.query` rather than one `UNION ALL`, precisely so a missing sibling table degrades *that arm* to empty rather than 500-ing the whole recall. On a fresh workspace the store's heal-on-insert creates `memories`, but `memory`, `sessions`, and `hive_graph_versions` may not exist yet; a single `UNION ALL` would fail as a whole and silently wipe the real `memories` hit (the live dogfood bug), so per-arm isolation is load-bearing. Recall still fails-soft overall: every arm failing yields an empty result, never a 500. Every value interpolated into a query passes through the `sqlStr`/`sqlLike`/`sqlIdent` helpers because the DeepLake query endpoint has no parameterized queries.
+
+The `hive_graph_versions` arm (`buildHiveGraphVersionsArmSql`) mirrors `buildMemoriesArmSql` but carries three load-bearing predicates that fit the corpus's append-only version-chain shape. First, a **latest-per-nectar** `INNER JOIN` on a `MAX(seq)` subquery grouped by `nectar` collapses a file's version chain to its one current row, so a file edited fifty times does not flood recall with fifty near-duplicates. Second, a `describe_status = 'described'` filter excludes `pending`, `failed`, and `skipped` rows, so a file never described does not surface. Third, the shared `buildProjectScopeConjunct` project-scope segment is ANDed into both the subquery and the outer row so a cross-project file is filtered server-side and never enters the fusion. The arm keys on `nectar` (the stable file identity), matches over `title`, `description`, and `concepts`, and projects `described_at` as the uniform `created_at` the recency dampener reads.
 
 ## Semantic arms and embeddings
 
-When embeddings are enabled, the query is embedded with the nomic embed daemon and a `<#>` cosine arm runs per table, scored as a normalized cosine `((1 + (emb <#> vec)) / 2)` in `[0,1]`. Vectors are stored as DeepLake tensor columns and searched on the GPU-backed engine, so the semantic filter and the scope filter run in one query rather than against a separate vector index. An embedding tracker heals missing or stale vectors in the background, outside any write path.
+When embeddings are enabled, the query is embedded with the nomic embed daemon and a `<#>` cosine arm runs over the tables in the `SEMANTIC_ARMS` set, scored as a normalized cosine `((1 + (emb <#> vec)) / 2)` in `[0,1]`. Three tables carry a 768-dim `embedding`-class vector column and therefore a semantic arm: `memories` (`content_embedding`), `sessions` (`message_embedding`), and `hive_graph_versions` (`embedding`, PRD-013b). The `memory` summaries table has no embedding column, so it is a lexical-only arm. Each semantic arm runs through the same 768-dim dim guard as the store path, pairs with its lexical counterpart on a shared id space (`hive_graph_versions` fuses lexical and semantic hits on `source+nectar`), and stays **per-arm fail-soft**: a missing or empty table yields `[]` for that arm rather than a 500. Vectors are stored as DeepLake tensor columns and searched on the GPU-backed engine, so the semantic filter and the scope filter run in one query rather than against a separate vector index. An embedding tracker heals missing or stale vectors in the background, outside any write path.
 
 ## RRF fusion and provenance-forward ranking (PRD-027)
 
@@ -63,6 +72,12 @@ Recall hits carry a **real, comparable score**, and results are ordered by relev
 - **Identity dedup** collapses the same `source+id` across arms, and every hit keeps its `source` + scope provenance.
 
 This ranking was not adopted on faith. PRD-027 shipped the golden-set eval harness (`npm run eval:recall`) that *measures* the lift, and PRD-025's semantic-on claim is defended against it, not asserted.
+
+### The `nectar_rrf_multiplier` tuning knob (PRD-013a, decision #17)
+
+The arm-class weight is a per-`RecallKind` constant with no per-`RecallSource` seam, so it cannot on its own dial `hive_graph_versions` file-description hits down relative to session and memory hits. The operator-tunable `nectar_rrf_multiplier` fills that gap: it is a single scalar folded into `fuseHits` that multiplies **only** the `hive_graph_versions` arm's RRF contribution (`ARM_CLASS_WEIGHT[kind] * multiplier / (RRF_K + rank)`); every other source keeps a fixed `1`, so a mount that leaves it at the default is byte-identical to the pre-013a fusion for the other arms. An operator who finds Nectar descriptions crowding out session memory can dial them down, or up, without retuning the shared class weight.
+
+It is threaded through `assemble` like the reranker seam, and read **once at boot** (never per request) from `~/.honeycomb/nectar.json` (key `recall.nectar_rrf_multiplier`). The read is fail-soft: a missing file, malformed JSON, an absent key, or a non-numeric value all resolve to the `1.0` default and never throw on the recall hot path. A finite value is clamped to `[0, 10]`, so a negative or absurd value clamps rather than inverting or exploding the fusion, and the resolved value is logged once at boot when it differs from `1.0` so a surprising recall mix is diagnosable from the boot log alone. A change takes effect on the next daemon restart, mirroring the registry hot-add posture: no file watch. The engine re-clamps defensively at fusion time.
 
 ## Why not the native hybrid operator (PRD-047a)
 

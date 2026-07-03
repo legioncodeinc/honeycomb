@@ -1,6 +1,6 @@
 # README and Brand Assets
 
-> Category: Standards | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Standards | Version: 1.1 | Date: July 2026 | Status: Active
 
 How brand, hero, and partner logos are stored under `assets/logos/` and rendered in `README.md` so they stay legible on both GitHub's light and dark themes. Read this before adding or editing any logo in the README.
 
@@ -60,3 +60,4 @@ Prefer the `-on-dark` suffix on new work so the unsuffixed file remains the cano
 3. Store both files in `assets/logos/` using the `-on-dark` naming convention.
 4. Wrap the README markup in a `<picture>` with a `prefers-color-scheme: dark` source and a light-default `<img>` that has `alt` and `height`.
 5. Verify both themes by toggling GitHub's appearance setting, not just the one you author in.
+6. Check that the SVG `viewBox` is trimmed to the artwork's real content bounds. GitHub centers a logo by centering its whole canvas, so transparent padding baked asymmetrically into the `viewBox` (a wide right-side margin, for example) makes the visible mark sit off-center even though the markup looks centered. Trim each `viewBox` to the measured content bounds plus symmetric padding, with only a small right-side allowance on text for font-fallback variance (PR #221 fixed exactly this on the wordmark and Legion lockup SVGs).

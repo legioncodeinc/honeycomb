@@ -1,8 +1,8 @@
 # Dashboard Architecture
 
-> Category: Frontend | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Frontend | Version: 1.1 | Date: July 2026 | Status: Active
 
-How Honeycomb's daemon-served web dashboard is built and shipped: the loopback-only HTTP host, the token-free self-hydrating React shell at `127.0.0.1:3850/dashboard`, the hash-routed page registry, and the eight surfaces (nav shell plus seven pages) that present memory, harnesses, graph, sync, logs, and settings.
+How Honeycomb's web dashboard is built and shipped: the token-free self-hydrating React shell, the hash-routed page registry, and the eight surfaces (nav shell plus seven pages) that present memory, harnesses, graph, sync, logs, and settings. In the current fleet arrangement the Hive portal fronts the dashboard SPA on its own loopback origin and federates to Honeycomb server-side; Honeycomb itself is the `/api/*` data plane and serves no cross-origin browser traffic.
 
 **Related:**
 - [`dashboard-actions-surface.md`](dashboard-actions-surface.md)
@@ -19,42 +19,27 @@ How Honeycomb's daemon-served web dashboard is built and shipped: the loopback-o
 
 ## What the dashboard is
 
-The dashboard is a local operator console for Honeycomb. It is a single-page React app the daemon serves over loopback, giving a developer a visual view of their memory, harness wiring, codebase graph, sync state, and logs without leaving their machine. It is not a hosted product surface and carries no multi-tenant UI: it shows the one daemon running on this box, talking to the one workspace that daemon is scoped to.
+The dashboard is a local operator console for Honeycomb. It is a single-page React app that gives a developer a visual view of their memory, harness wiring, codebase graph, sync state, and logs without leaving their machine. It is not a hosted product surface and carries no multi-tenant UI: it shows the one Honeycomb daemon running on this box, talking to the one workspace that daemon is scoped to.
 
-That scoping is the whole security model. The dashboard is **local-mode only**, the daemon mounts its routes solely when `daemon.config.mode === "local"` (`src/daemon/runtime/dashboard/host.ts`). In team or hybrid daemon modes the dashboard host seam never fires, so there is no exposed web surface to protect. Because the only listener is on the loopback interface, the OS network stack is the access gate; the shell needs no auth token, embeds no secret, and makes plain unauthenticated calls to same-origin daemon endpoints.
+**Who serves the SPA and who serves the data are two different processes.** In the current fleet arrangement the Hive portal owns the dashboard SPA and serves it on its own loopback origin (`127.0.0.1:3853/`, `HIVE_HOST` / `HIVE_PORT` in `src/shared/constants.ts`); Honeycomb keeps the `/api/*` data plane on its own loopback port (`127.0.0.1:3850`). The browser talks only to the Hive origin same-origin, and Hive federates dashboard data from Honeycomb **server-side** over loopback (the Hive-side BFF proxy, Hive ADR-0002). Honeycomb therefore never receives a cross-origin browser request and ships no CORS allowance at all (`src/daemon/runtime/server.ts`, see [The cross-origin story](#the-cross-origin-story) below). `honeycomb install` and `honeycomb dashboard` open the Hive portal URL, not a Honeycomb path (`src/commands/install.ts`, `src/dashboard/launch.ts`).
+
+That split does not change the trust model. Both listeners bind the loopback interface only, so the OS network stack is the access gate; the shell needs no auth token and embeds no secret. Honeycomb's own authorization boundary is the permission middleware mounted on every protected `/api/*` group (`src/daemon/runtime/server.ts`), unchanged by the hosting arrangement. The dashboard surface is still **local-mode only**: Honeycomb's setup and console-adjacent seams (for example `mountSetupLogin`) fire solely when `daemon.config.mode === "local"`, so team or hybrid daemons expose no operator surface to protect.
 
 ---
 
 ## The served URL and the shell
 
-The dashboard lives at:
+The operator opens the dashboard at the Hive portal:
 
 ```
-http://127.0.0.1:3850/dashboard
+http://127.0.0.1:3853/
 ```
 
-`127.0.0.1` and `3850` are the daemon's loopback host and port (`src/shared/constants.ts`); `/dashboard` is the host path (`DASHBOARD_HOST_PATH` in `src/dashboard/launch.ts`). `honeycomb dashboard` launches it and opens the browser.
+`127.0.0.1` and `3853` are the Hive portal's loopback host and port (`HIVE_HOST` / `HIVE_PORT` in `src/shared/constants.ts`); `/` is the portal path (`DASHBOARD_HOST_PATH` in `src/dashboard/launch.ts`, `DASHBOARD_PATH` in `src/commands/install.ts`). `honeycomb dashboard` resolves this URL (`openDashboard` in `src/dashboard/launch.ts`) and opens the browser; `honeycomb install` opens it too, `honeycomb.local:3853` best-effort with the loopback URL as the always-correct fallback.
 
-`GET /dashboard` returns a complete HTML document with no inline token, secret, or credential. The body is essentially a mount point and a module script:
+The Hive portal serves a complete HTML document with no inline token, secret, or credential: a mount point plus a module script that pulls the bundled SPA (React, ReactDOM, the router, every page). The shell **self-hydrates**: it boots from static HTML, then fills itself by fetching data same-origin from the Hive portal, which federates each read from Honeycomb server-side over loopback (Hive ADR-0002). There is no server-rendered state and no token round-trip, so a refresh re-hydrates from scratch with zero auth ceremony.
 
-```html
-<div id="root" data-asset-base="/dashboard"></div>
-<script type="module" src="/dashboard/app.js"></script>
-```
-
-`data-asset-base` carries only a safe relative path (regex-validated in `src/dashboard/web/main.tsx` before use). Everything else, React, ReactDOM, the router, every page, is in the bundle the script pulls. The shell **self-hydrates**: it boots from the static HTML, then fills itself by polling same-origin loopback endpoints. There is no server-rendered state and no token round-trip, so a refresh re-hydrates from scratch with zero auth ceremony.
-
-The host registers a small fixed set of `GET` routes (`src/daemon/runtime/dashboard/host.ts`):
-
-| Route | Serves |
-|---|---|
-| `GET /dashboard` | The index shell HTML (`renderShell`) |
-| `GET /dashboard/app.js` | The esbuild web bundle |
-| `GET /dashboard/styles.css` | The concatenated design-system CSS |
-| `GET /dashboard/honeycomb-memory-cluster.svg` | The brand mark |
-| `GET /dashboard/fonts/:name` | Brand fonts, served from an allow-list |
-
-The data the pages read comes from the daemon's dashboard API (`src/daemon/runtime/dashboard/api.ts`) plus the harness, sync, and setup endpoints, all loopback, all metadata-only by construction. The auth-status read model, for example, returns org / workspace / agent / source / saved-at / expires-at and **never a token**.
+Honeycomb serves no shell HTML, bundle, or static asset of its own: the dashboard host that once lived under `src/daemon/runtime/dashboard/` was removed once Hive took over the SPA origin, so Honeycomb has no `GET /dashboard` route. What Honeycomb serves is the data plane, its dashboard API (`src/daemon/runtime/dashboard/api.ts`) plus the harness, sync, diagnostics, and setup endpoints under `/api/*` (and `/setup/*` in local mode), all loopback, all metadata-only by construction. The auth-status read model, for example, returns org / workspace / agent / source / saved-at / expires-at and **never a token**. Those are the endpoints Hive's BFF proxy reads on the browser's behalf.
 
 ---
 
@@ -93,21 +78,21 @@ The seven pages, each a component under `src/dashboard/web/pages/`:
 
 ## Hash routing
 
-The dashboard routes entirely client-side with **hash routing**, the active route lives in the URL fragment (`/dashboard#/graph`), never in the path (`src/dashboard/web/router.tsx`). This is a deliberate choice that keeps the daemon host simple: the host registers exactly the handful of `GET` routes above and no catch-all. History-API routing would put real paths like `/dashboard/graph` in the URL, which the browser *does* send to the server, forcing a daemon catch-all to serve the shell for every unknown sub-path. A fragment is never sent to the server, so deep links and refreshes are correct with zero extra host routes.
+The dashboard routes entirely client-side with **hash routing**, the active route lives in the URL fragment (`#/graph`), never in the path (`src/dashboard/web/router.tsx`). This is a deliberate choice that keeps the portal host simple: it serves the shell and the bundle and needs no catch-all. History-API routing would put real paths like `/graph` in the URL, which the browser *does* send to the server, forcing a host catch-all to serve the shell for every unknown sub-path. A fragment is never sent to the server, so deep links and refreshes are correct with zero extra host routes.
 
 The router is a small hook. `routeFromHash` parses `location.hash`, strips the leading `#`, and normalizes the empty case to `/`. `useHashRoute` reads the current fragment, subscribes to the `hashchange` event, and exposes `{ route, navigate }`. `navigate(r)` is the single place that mutates `location.hash`; the sidebar passes through it rather than touching the hash directly.
 
 Deep links work as written:
 
 ```
-http://127.0.0.1:3850/dashboard#/            → Dashboard
-http://127.0.0.1:3850/dashboard#/harnesses   → Harnesses
-http://127.0.0.1:3850/dashboard#/harnesses/claude-code → Harnesses ▸ Claude Code
-http://127.0.0.1:3850/dashboard#/memories    → Memories
-http://127.0.0.1:3850/dashboard#/graph       → Graph
-http://127.0.0.1:3850/dashboard#/sync        → Sync
-http://127.0.0.1:3850/dashboard#/logs        → Logs
-http://127.0.0.1:3850/dashboard#/settings    → Settings
+http://127.0.0.1:3853/#/            → Dashboard
+http://127.0.0.1:3853/#/harnesses   → Harnesses
+http://127.0.0.1:3853/#/harnesses/claude-code → Harnesses ▸ Claude Code
+http://127.0.0.1:3853/#/memories    → Memories
+http://127.0.0.1:3853/#/graph       → Graph
+http://127.0.0.1:3853/#/sync        → Sync
+http://127.0.0.1:3853/#/logs        → Logs
+http://127.0.0.1:3853/#/settings    → Settings
 ```
 
 An unknown route resolves to the Dashboard entry rather than a blank screen.
@@ -152,29 +137,47 @@ build({
 });
 ```
 
-The single entry is `src/dashboard/web/main.tsx`; the output is `daemon/dashboard-app.js`, emitted beside the daemon bundle. React and ReactDOM are bundled *in*, there is no CDN or `unpkg` dependency, and the `.tsx` source is compiled directly by esbuild (no separate TypeScript step in the web path). At runtime, `src/daemon/runtime/dashboard/web-assets.ts` resolves the produced bundle, the design-system CSS (token + base layers concatenated, no `@import` chain), the brand mark, and the allow-listed fonts, and the host serves each over its fixed loopback route. The bundle ships in the daemon, so the dashboard is available wherever the daemon runs, with no separate install step.
+The single entry is `src/dashboard/web/main.tsx`; the output is `daemon/dashboard-app.js`. React and ReactDOM are bundled *in*, there is no CDN or `unpkg` dependency, and the `.tsx` source is compiled directly by esbuild (no separate TypeScript step in the web path). This bundle is the single source of truth for the view tree: the Hive portal serves it to the browser as the dashboard SPA, and the Cursor extension embeds the same rendered tree in its webview (see [`cursor-extension-architecture.md`](cursor-extension-architecture.md)). Honeycomb no longer serves this bundle or any shell asset itself.
+
+The flow is a three-participant one: the browser talks same-origin to the Hive portal, and the Hive portal reaches Honeycomb's data plane server-side over loopback.
 
 ```mermaid
 sequenceDiagram
     participant browser as Browser
-    participant host as Daemon dashboard host (loopback)
-    participant api as Daemon dashboard API
+    participant hive as Hive portal (same-origin, loopback)
+    participant api as Honeycomb data plane (loopback)
 
-    browser->>host: GET /dashboard
-    host-->>browser: shell HTML (no token)
-    browser->>host: GET /dashboard/app.js
-    host-->>browser: esbuild bundle (React in)
+    browser->>hive: GET / (portal origin)
+    hive-->>browser: shell HTML (no token)
+    browser->>hive: GET the SPA bundle (React in)
+    hive-->>browser: esbuild bundle
     browser->>browser: mount Shell, read #hash route
     loop self-hydrate
-        browser->>api: GET metadata endpoints (loopback, unauthenticated)
-        api-->>browser: workspace / harness / sync / log / auth-status (no token)
+        browser->>hive: GET dashboard data (same-origin)
+        hive->>api: proxy to Honeycomb /api/* (server-side loopback)
+        api-->>hive: workspace / harness / sync / log / auth-status (no token)
+        hive-->>browser: federated metadata (no token)
     end
-    browser->>host: GET /health (liveness poll)
-    host-->>browser: ok
+    browser->>hive: liveness poll (same-origin)
+    hive->>api: proxy GET /health
+    api-->>hive: ok
+    hive-->>browser: ok
 ```
+
+---
+
+## The cross-origin story
+
+The dashboard SPA and Honeycomb's data plane run on two different loopback origins: the Hive portal on `127.0.0.1:3853` and Honeycomb on `127.0.0.1:3850`. The question that shape raises is how the browser reaches Honeycomb's data across that origin gap. The answer, in the current arrangement, is that it does not: **the browser never touches Honeycomb directly.** It talks same-origin to the Hive portal, and the Hive portal proxies each dashboard read to Honeycomb server-side over loopback (the Hive-side BFF proxy, Hive ADR-0002). Because the request that reaches Honeycomb originates from Hive's server rather than the browser, it is not a cross-origin browser request, there is no CORS preflight, and Honeycomb needs no `Access-Control-*` allowance.
+
+So Honeycomb ships **zero CORS middleware**, by design. `src/daemon/runtime/server.ts` carries an explicit note where a CORS mount would otherwise sit, recording that the server-side federation makes any allowance unnecessary. This was briefly not the case: an earlier cutover had the SPA fetch Honeycomb's origin directly from the browser and a CORS middleware was added to permit it, but that middleware was removed once Hive moved federation server-side, leaving the net state at no CORS at all.
+
+CORS was never Honeycomb's authorization boundary in either arrangement. Authorization lives in the permission middleware mounted on every protected `/api/*` route group (`src/daemon/runtime/server.ts`), which is unchanged throughout. CORS is purely browser plumbing that decides whether a browser is *allowed to read a response*; the permission layer decides whether a *caller is allowed to act*. Removing the CORS allowance narrows the browser-reachable surface without touching the authorization gate: a request that arrives at Honeycomb still passes the same permission check it always did.
+
+Honeycomb, for its part, is a Hive-agnostic loopback data plane. It only requires that a same-host client (here, the Hive portal's server) can reach its `/api/*`, `/health`, and `/setup/*` endpoints over loopback; it does not know or care that Hive is the one calling. Hive's own internals are a separate repo and out of scope for this doc.
 
 ---
 
 ## Why this shape
 
-Three constraints drive the architecture. First, **loopback is the trust boundary**, local-only mounting plus same-origin unauthenticated calls means no token plumbing and no secret in the page, and the daemon simply does not expose the surface in non-local modes. Second, **hash routing keeps the host trivial**, no catch-all, refresh-safe deep links, zero new server routes per page. Third, **one registry, one contract**, a single ordered `ROUTES` array feeds both the sidebar and the router, and every page obeys the same `PageProps` + `PageFrame` + shared-`wire` contract, so the eight surfaces stay consistent and a ninth is a small, mechanical addition. The same rendered view tree the dashboard produces is also what the Cursor extension embeds in its webview (see [`cursor-extension-architecture.md`](cursor-extension-architecture.md)), so the operator console is authored once and surfaced in two hosts.
+Three constraints drive the architecture. First, **loopback is the trust boundary**, both origins bind loopback only and Honeycomb's permission middleware gates every protected `/api/*` group, so there is no token plumbing or secret in the page, and Honeycomb never exposes an operator surface in non-local modes. Second, **hash routing keeps the host trivial**, no catch-all, refresh-safe deep links, zero new server routes per page. Third, **one registry, one contract**, a single ordered `ROUTES` array feeds both the sidebar and the router, and every page obeys the same `PageProps` + `PageFrame` + shared-`wire` contract, so the eight surfaces stay consistent and a ninth is a small, mechanical addition. The same rendered view tree the dashboard produces is also what the Cursor extension embeds in its webview (see [`cursor-extension-architecture.md`](cursor-extension-architecture.md)), so the operator console is authored once and surfaced in two hosts.

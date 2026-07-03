@@ -1,6 +1,6 @@
 # Dashboard Actions Surface
 
-> Category: Frontend | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Frontend | Version: 1.1 | Date: July 2026 | Status: Active
 
 How the daemon-served dashboard performs CLI lifecycle actions, logout, embeddings on/off, daemon restart, and uninstall, through the guarded `/api/actions` group, and why these four are held to a stricter trust gate than the rest of the dashboard.
 
@@ -50,7 +50,7 @@ Every handler calls `actionGuard(c, mode)` first, which returns a `Response` to 
 
 1. **Local mode only.** A `team`/`hybrid` daemon returns `403`, the same posture as the dashboard host and `/setup/*` routes (`assemble.ts` security F-1). A self-destruct / credential surface is never exposed to a remote.
 2. **Origin / CSRF.** The daemon binds loopback, but a malicious site open in the user's browser could `POST` to `127.0.0.1:3850`. The guard rejects a browser cross-origin request (`Sec-Fetch-Site: cross-site|same-site`) and requires any present `Origin` to resolve to a loopback host (`127.0.0.1`, `localhost`, `::1`).
-3. **Dashboard session header.** It requires the dashboard's custom `x-honeycomb-session` header. A cross-origin `fetch` cannot set a custom header without a CORS preflight the daemon never approves, so this is a third, independent CSRF barrier.
+3. **Dashboard session header.** It requires the dashboard's custom `x-honeycomb-session` header. A cross-origin `fetch` cannot set a custom header without a CORS preflight, and Honeycomb ships zero CORS allowance by design (`src/daemon/runtime/server.ts` mounts no CORS middleware, see [`dashboard-architecture.md`](dashboard-architecture.md)), so a preflight is never approved. That makes this a third, independent CSRF barrier, one that is only stronger now that no `Access-Control-*` header is emitted at all.
 
 A non-browser client (the CLI, a unit test) sends no `Sec-Fetch-Site`, so it passes barrier 2 cleanly while still needing local mode and the session header.
 

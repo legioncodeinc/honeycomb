@@ -1,6 +1,6 @@
 # npm Publishing Pipeline
 
-> Category: Infrastructure | Version: 1.1 | Date: June 2026 | Status: Active
+> Category: Infrastructure | Version: 1.2 | Date: July 2026 | Status: Active
 
 How Honeycomb ships to npm as the scoped package `@legioncodeinc/honeycomb`, the `files` allowlist, the `prepack` build, the `pack-check.mjs` secret/required-file scan, the `release.yaml` workflow, OIDC Trusted Publishing with npm provenance, the fails-closed publishability preflight, and the post-publish global-install smoke that proves the shipped CLI actually runs.
 
@@ -70,7 +70,7 @@ The embedding runtime (`@huggingface/transformers` + its ONNX native runtime, ~6
 
 The job, in order:
 
-1. **Setup Node 22 + upgrade npm to ≥ 11.5.1.** Node 22 bundles npm 10.x, but OIDC Trusted Publishing requires npm ≥ 11.5.1; the upgrade runs before any `npm` invocation so the OIDC handshake can engage. Dependency caching is off on this high-privilege job (cache-poisoning hardening); `npm ci` installs from the committed lockfile.
+1. **Setup Node 22 + upgrade npm to ≥ 11.5.1.** Node 22 bundles npm 10.x, but OIDC Trusted Publishing requires npm ≥ 11.5.1; the upgrade runs before any `npm` invocation so the OIDC handshake can engage. Dependency caching is off on this high-privilege job (cache-poisoning hardening); `npm ci` installs from the committed lockfile. Every `actions/checkout` in both `release.yaml` and `ci.yaml` sets `persist-credentials: false` (PR #211) so the `GITHUB_TOKEN` is never written into `.git/config` where a later step or a third-party dependency could read it; this matters most here because the release job holds `contents: write` + `id-token: write` (the zizmor `artipacked` finding).
 2. **Quality gate**, `npm run ci` (typecheck + jscpd duplication + vitest + `audit:sql`).
 3. **Build**, `npm run build`, with the telemetry `define` env (`HONEYCOMB_POSTHOG_KEY` secret + `HONEYCOMB_REF_DEFAULT` var) scoped to *just* this step.
 4. **`audit:openclaw`** (ClawHub bundle rules) and **`pack:check`** (the tarball scan above).
@@ -126,7 +126,7 @@ The job runs as a 3-OS matrix (`ubuntu-latest`, `macos-latest`, `windows-latest`
 5. **Asserts `honeycomb --version`** produces non-empty output that **contains the published version** (the direct guard against the PR #172 silent-exit class).
 6. **Asserts `honeycomb --help`** prints non-empty (the entry guard fired).
 
-It cannot un-publish a bad release, npm releases are immutable, but it turns the release run **red immediately** so a fix-up patch ships fast instead of users hitting a dead CLI. A companion `doctor` real-npm smoke test (`tests/`, vitest) was given a raised timeout to absorb the Windows install flake the global-install path surfaces.
+It cannot un-publish a bad release, npm releases are immutable, but it turns the release run **red immediately** so a fix-up patch ships fast instead of users hitting a dead CLI. The companion `doctor` real-npm smoke test that once lived alongside this in honeycomb's `tests/` moved out with the Doctor extraction (PR #199) and now runs in the `github.com/legioncodeinc/doctor` repo's own CI; honeycomb's `post-publish-smoke` covers only the `@legioncodeinc/honeycomb` global install.
 
 ---
 
