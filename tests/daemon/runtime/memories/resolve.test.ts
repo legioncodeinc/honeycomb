@@ -136,17 +136,48 @@ const C5_SESSION_ROWS: Record<string, unknown>[] = [
 	},
 ];
 
+/** Escape one character for embedding inside a RegExp body. */
+function reEscape(ch: string): string {
+	return ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /**
- * Emulate a `sessions` WHERE clause against a fixture row. Understands BOTH the pre-fix
- * `WHERE path = '<value>'` predicate (which, faithfully, matches nothing here) and the fixed
- * `WHERE id LIKE 'sess-<sessionId>-%'` predicate, so the SAME fixture proves the old join
- * misses and the new join hits.
+ * Translate a SQL LIKE pattern into an anchored RegExp: `%` → `.*`, `_` → `.`, a
+ * backslash-escaped char (the `sqlLike` escape convention) → that literal char.
+ */
+function likeToRegExp(pattern: string): RegExp {
+	let body = "";
+	for (let i = 0; i < pattern.length; i++) {
+		const ch = pattern[i];
+		if (ch === "\\" && i + 1 < pattern.length) {
+			body += reEscape(pattern[i + 1]);
+			i++;
+		} else if (ch === "%") {
+			body += ".*";
+		} else if (ch === "_") {
+			body += ".";
+		} else {
+			body += reEscape(ch);
+		}
+	}
+	return new RegExp(`^${body}$`);
+}
+
+/**
+ * Emulate a `sessions` WHERE clause against a fixture row. Understands the pre-fix
+ * `WHERE path = '<value>'` predicate (which, faithfully, matches nothing here), a
+ * multi-wildcard `WHERE id LIKE '<pattern>'`, and the dash-count exclusion
+ * `AND id NOT LIKE '<pattern>'` — so the SAME fixture proves the old join misses, the coarse
+ * LIKE leaks, and the exclusion-carrying SQL selects exactly the target session's rows.
  */
 function sessionsWhereSelects(sql: string, row: Record<string, unknown>): boolean {
 	const like = /"?id"?\s+LIKE\s+'([^']*)'/i.exec(sql);
 	if (like) {
-		const prefix = like[1].replace(/%$/, "").replace(/\\([\\%_])/g, "$1");
-		return String(row.id).startsWith(prefix);
+		const id = String(row.id);
+		if (!likeToRegExp(like[1]).test(id)) return false;
+		const notLike = /"?id"?\s+NOT\s+LIKE\s+'([^']*)'/i.exec(sql);
+		if (notLike !== null && likeToRegExp(notLike[1]).test(id)) return false;
+		return true;
 	}
 	const pathEq = /"?path"?\s*=\s*'([^']*)'/i.exec(sql);
 	if (pathEq) return String(row.path) === pathEq[1];
@@ -192,18 +223,22 @@ describe("e-AC-4 — SQL builders are guarded SELECTs (no ILIKE, no search, no I
 		expect(sql).toContain("LIMIT 1");
 	});
 
-	it("buildSessionDepth2Sql joins by the sess-<sessionId>- id prefix, bounded + ordered", () => {
+	it("buildSessionDepth2Sql joins by the sess-<sessionId>- id shape, bounded + ordered", () => {
 		const sql = buildSessionDepth2Sql("s1");
 		expect(sql.toUpperCase()).toContain("SELECT");
 		expect(sql.toUpperCase()).not.toContain("ILIKE");
 		expect(sql.toUpperCase()).not.toContain("<#>");
-		// Matches the capture id prefix via a guarded LIKE — NOT the summary path (the C-5 bug).
-		expect(sql).toMatch(/WHERE\s+id\s+LIKE\s+'sess-s1-%'/i);
+		// Matches the capture id shape via guarded LIKE algebra — NOT the summary path (C-5):
+		// remainder after `sess-s1-` has at least one dash (the `<ts>-<rand>` tail)...
+		expect(sql).toMatch(/WHERE\s+id\s+LIKE\s+'sess-s1-%-%'/i);
+		// ...and NOT two or more (a dash-extended foreign session id — the collision exclusion).
+		expect(sql).toMatch(/AND\s+id\s+NOT\s+LIKE\s+'sess-s1-%-%-%'/i);
 		expect(sql).not.toContain("/summaries/");
 		expect(sql).toContain("ORDER BY");
 		expect(sql).toContain("creation_date");
-		// The SQL bound is the COARSE candidate-scan cap; the caller trims to the turn cap AFTER
-		// the exact id post-filter, so foreign prefix-collision rows never consume the cap.
+		// The SQL bound is the candidate-scan cap; with foreign ids excluded IN the SQL, the
+		// window is spent only on the target session's rows (no starvation), and the caller
+		// trims to the turn cap after the exact-id post-filter.
 		expect(sql).toContain(`LIMIT ${MAX_SESSION_TURNS}`);
 	});
 
@@ -213,9 +248,24 @@ describe("e-AC-4 — SQL builders are guarded SELECTs (no ILIKE, no search, no I
 	});
 
 	it("buildSessionDepth2Sql LIKE-escapes wildcard metacharacters in the session id", () => {
-		// A crafted session id can never inject a LIKE wildcard: `%`/`_` are backslash-escaped.
+		// A crafted session id can never inject a LIKE wildcard: `%`/`_` are backslash-escaped
+		// in BOTH the include and the exclude pattern.
 		const sql = buildSessionDepth2Sql("a%b_c");
-		expect(sql).toContain("sess-a\\%b\\_c-%");
+		expect(sql).toContain("LIKE 'sess-a\\%b\\_c-%-%'");
+		expect(sql).toContain("NOT LIKE 'sess-a\\%b\\_c-%-%-%'");
+	});
+
+	it("the LIKE dash algebra selects exactly the valid id shape", () => {
+		// Emulated LIKE semantics (multi-wildcard + NOT LIKE, both exercised by the dialect in
+		// production: recall/collection.ts '%…%', skillify/miner.ts NOT LIKE).
+		const sql = buildSessionDepth2Sql("abc");
+		const selects = (id: string): boolean => sessionsWhereSelects(sql, { id });
+		// Valid: remainder `<ts>-<rand>` has exactly one dash.
+		expect(selects("sess-abc-1730000000000-12345")).toBe(true);
+		// Dash-extended foreign session id: remainder has two or more dashes → excluded.
+		expect(selects("sess-abc-def-1730000000000-12345")).toBe(false);
+		// Truncated tail (no dash in remainder) → not included.
+		expect(selects("sess-abc-1730000000000")).toBe(false);
 	});
 
 	it("buildSessionRowIdMatcher accepts only the exact sess-<sessionId>-<ts>-<rand> shape", () => {
@@ -702,11 +752,21 @@ describe("prefix-collision guard — depth-2 resolve of session `abc` returns ON
 		return [];
 	}
 
-	it("the coarse LIKE alone would leak the long session's turns (documents the guarded hazard)", () => {
-		const sql = buildSessionDepth2Sql(SHORT_ID);
-		const coarse = collidingSessionRows.filter((r) => sessionsWhereSelects(sql, r));
-		// All three rows survive the LIKE — including the foreign `abc-def` turn.
+	it("a bare prefix LIKE would leak the long session's turns; the emitted SQL excludes them", () => {
+		// The hazard: a prefix-only LIKE matches all three rows, including the foreign turn.
+		const bareLikeSql = `SELECT id, path, message FROM "sessions" WHERE id LIKE 'sess-${SHORT_ID}-%' LIMIT 50`;
+		const coarse = collidingSessionRows.filter((r) => sessionsWhereSelects(bareLikeSql, r));
 		expect(coarse.length).toBe(3);
+
+		// The guard: the REAL emitted SQL carries the dash-count NOT LIKE exclusion, so the
+		// foreign `abc-def` row is rejected inside the SQL — only the target's two rows survive.
+		const sql = buildSessionDepth2Sql(SHORT_ID);
+		expect(sql).toMatch(/NOT\s+LIKE\s+'sess-abc-%-%-%'/i);
+		const exact = collidingSessionRows.filter((r) => sessionsWhereSelects(sql, r));
+		expect(exact.length).toBe(2);
+		for (const row of exact) {
+			expect(String(row.id)).toMatch(/^sess-abc-\d+-\d+$/);
+		}
 	});
 
 	it("depth-2 resolve of the short id returns ONLY its own turns (exact post-filter)", async () => {
@@ -741,6 +801,57 @@ describe("prefix-collision guard — depth-2 resolve of session `abc` returns ON
 		if (result.depth === 2 && result.source === "episodic") {
 			expect(result.turns.length).toBe(2);
 			expect(result.turns[1].message).toContain("short-session reply");
+		}
+	});
+
+	it("a colliding neighbor larger than the scan window cannot starve valid rows (SQL-side exclusion)", async () => {
+		// The CodeRabbit truncation finding: under LIKE-only SQL, MAX_SESSION_TURNS chronologically
+		// EARLIER foreign rows would fill the entire scan window before any target row is fetched,
+		// so the target's turns silently vanish. The dash-count NOT LIKE exclusion runs INSIDE the
+		// SQL, so the window is spent only on target rows. This responder emulates the full scan
+		// window honestly: WHERE filter → ORDER BY creation_date ASC → LIMIT parsed from the SQL.
+		const foreignFlood: Record<string, unknown>[] = Array.from({ length: MAX_SESSION_TURNS }, (_, i) => ({
+			id: `${SESSION_ROW_ID_PREFIX}${LONG_ID}-${1720000000000 + i}-${i}`,
+			path: LONG_TRANSCRIPT,
+			// Chronologically BEFORE every target row, so a LIKE-only scan window fills with these.
+			message: `{"role":"user","content":"foreign flood turn ${i}"}`,
+			creation_date: `2025-06-19T00:00:00.${String(i).padStart(3, "0")}Z`,
+		}));
+		const allRows = [...foreignFlood, ...collidingSessionRows];
+		const emittedSessionSql: string[] = [];
+		const fake = new FakeDeepLakeTransport((req) => {
+			const sql = req.sql;
+			if (/FROM\s+"memory"/i.test(sql)) {
+				const pathEq = /"?path"?\s*=\s*'([^']*)'/i.exec(sql);
+				return pathEq !== null && pathEq[1] === SHORT_REF ? [shortSummaryRow] : [];
+			}
+			if (/FROM\s+"sessions"/i.test(sql)) {
+				emittedSessionSql.push(sql);
+				const filtered = allRows
+					.filter((r) => sessionsWhereSelects(sql, r))
+					.sort((a, b) => String(a.creation_date).localeCompare(String(b.creation_date)));
+				const limitMatch = /LIMIT\s+(\d+)/i.exec(sql);
+				const limit = limitMatch ? parseInt(limitMatch[1], 10) : filtered.length;
+				return filtered.slice(0, limit);
+			}
+			return [];
+		});
+		const storage = createStorageClient({ transport: fake, provider: stubProvider(fakeCredentialRecord()) });
+
+		const result = await resolveRef(SHORT_REF, 2, "episodic", SCOPE, { storage });
+
+		// The emitted SQL carries the exclusion (this is what prevents the starvation)...
+		expect(emittedSessionSql.length).toBe(1);
+		expect(emittedSessionSql[0]).toMatch(/NOT\s+LIKE\s+'sess-abc-%-%-%'/i);
+		// ...and both target turns come back despite MAX_SESSION_TURNS earlier foreign rows.
+		expect(result.found).toBe(true);
+		if (!result.found) throw new Error("should be found");
+		if (result.depth === 2 && result.source === "episodic") {
+			expect(result.turns.length).toBe(2);
+			for (const turn of result.turns) {
+				expect(turn.path).toBe(SHORT_TRANSCRIPT);
+				expect(turn.message).not.toContain("foreign flood");
+			}
 		}
 	});
 });

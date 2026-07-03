@@ -18,13 +18,16 @@
  *             (`makeRowId`), so the raw turns do NOT live at the summary path. depth-2 therefore
  *             extracts the `<sessionId>` from the summary ref and matches the raw rows by that
  *             `id` prefix (`WHERE id LIKE 'sess-<sessionId>-%'`), NOT by `path` — that is the
- *             deterministic Tier-2 → Tier-3 join. The LIKE is only the COARSE, index-friendly
- *             selection: because `makeRowId` embeds the sessionId verbatim, session `abc`'s
- *             prefix also LIKE-matches session `abc-def`'s rows, so every fetched row is
+ *             deterministic Tier-2 → Tier-3 join. Because `makeRowId` embeds the sessionId
+ *             verbatim, session `abc`'s prefix also LIKE-matches session `abc-def`'s rows, so
+ *             the SQL carries a dash-count exclusion (`AND id NOT LIKE 'sess-<sid>-%-%-%'`,
+ *             see {@link buildSessionDepth2Sql}) that rejects dash-extended foreign ids INSIDE
+ *             the scan window — a colliding neighbor can neither leak turns nor starve valid
+ *             rows out of the {@link MAX_SESSION_TURNS} scan bound. Every fetched row is then
  *             post-filtered in TypeScript against the EXACT id shape
- *             `^sess-<sessionId>-<ts>-<rand>$` (both tail segments are digit runs) before the
- *             {@link MAX_RESOLVE_TURNS} trim is applied — foreign rows can neither leak into
- *             the result nor consume the cap. For a durable ref at depth 2 the summary
+ *             `^sess-<sessionId>-<ts>-<rand>$` (both tail segments are digit runs; stronger
+ *             than the dash algebra) before the {@link MAX_RESOLVE_TURNS} trim is applied.
+ *             For a durable ref at depth 2 the summary
  *             content is returned (durable facts have no direct session ancestry the prime
  *             exposes). Bounded by {@link MAX_RESOLVE_TURNS} so a zoom never dumps an unbounded
  *             transcript into context.
@@ -193,20 +196,33 @@ export function extractSessionId(episodicRef: string): string {
 }
 
 /**
- * Build the depth-2 sessions lookup SQL: the COARSE, index-friendly candidate selection for a
- * session's raw turns, ordered by `creation_date` ascending so the caller sees turns in
- * chronological order (mirroring the summary worker's own `createSessionEventFetcher`).
- * Capture stamps every raw row's `id` with the `sess-<sessionId>-<ts>-<rand>` shape, so this
- * matches the session's rows by that id PREFIX (a guarded `LIKE`, escaped via `sqlLike`; the
- * trailing `%` is the wildcard), NOT by the summary path.
+ * Build the depth-2 sessions lookup SQL: the candidate selection for a session's raw turns,
+ * ordered by `creation_date` ascending so the caller sees turns in chronological order
+ * (mirroring the summary worker's own `createSessionEventFetcher`). Capture stamps every raw
+ * row's `id` with the `sess-<sessionId>-<ts>-<rand>` shape, so this matches the session's rows
+ * by that id (guarded `LIKE` patterns, escaped via `sqlLike`), NOT by the summary path.
  *
- * COARSE ONLY (the prefix-collision guard): a prefix LIKE for session `abc` also matches a
- * session named `abc-def`, so the caller MUST post-filter each fetched row's `id` through
- * {@link buildSessionRowIdMatcher} and trim to the turn cap AFTER that filter — which is why
- * `id` is in the SELECT list and why the SQL bound is {@link MAX_SESSION_TURNS} (the standard
- * per-session scan cap, sql.ts) rather than the caller's turn limit: a foreign session's rows
- * must not consume the {@link MAX_RESOLVE_TURNS} cap before the exact filter runs.
- * Single guarded SELECT by id prefix — NOT a search (no ILIKE, no `<#>`, no UNION).
+ * THE PREFIX-COLLISION EXCLUSION IS IN THE SQL. `makeRowId`
+ * (`src/daemon/runtime/capture/capture-handler.ts:597-600`) embeds the sessionId verbatim and
+ * both tail segments (`<ts>` = epoch millis, `<rand>` = an integer) are pure digit runs with no
+ * dashes. So for the fixed literal prefix `sess-<sessionId>-`, a VALID row's remainder contains
+ * exactly ONE dash (`<ts>-<rand>`), while any dash-extended foreign session id
+ * (`<sessionId>-X…`) yields a remainder with TWO or more. That makes the exact set expressible
+ * in plain LIKE algebra:
+ *
+ *   `id LIKE 'sess-<sid>-%-%' AND id NOT LIKE 'sess-<sid>-%-%-%'`
+ *
+ * (remainder has at least one dash, and not two or more). Multi-wildcard LIKE and NOT LIKE are
+ * both already exercised by this dialect in production (`'%…%'` in recall/collection.ts:186 and
+ * memories/recall.ts:335; `NOT LIKE` in skillify/miner.ts:184 and pollinating/incremental.ts:236).
+ * Excluding foreign rows IN the SQL means the {@link MAX_SESSION_TURNS} scan window is spent
+ * only on the target session's rows — a prefix-colliding neighbor with many rows can no longer
+ * starve valid rows out of the window (the CodeRabbit truncation finding). The caller still
+ * post-filters each row's `id` through {@link buildSessionRowIdMatcher} as defense in depth
+ * (its digit-run check is stronger than the dash-count algebra) and trims to the turn cap after
+ * that — which is why `id` is in the SELECT list and the SQL bound is the scan cap rather than
+ * the caller's turn limit.
+ * Guarded SELECT by id shape — NOT a search (no ILIKE, no `<#>`, no UNION).
  */
 export function buildSessionDepth2Sql(sessionId: string): string {
 	const tbl = sqlIdent("sessions");
@@ -214,13 +230,17 @@ export function buildSessionDepth2Sql(sessionId: string): string {
 	const pathCol = sqlIdent("path");
 	const messageCol = sqlIdent("message");
 	const dateCol = sqlIdent("creation_date");
-	// The literal id prefix `sess-<sessionId>-`, LIKE-escaped; the trailing `%` is the wildcard.
+	// The literal id prefix `sess-<sessionId>-`, LIKE-escaped; the `%`s are the wildcards and the
+	// dashes are literal (dash is not a LIKE metacharacter).
 	const idPrefix = `${SESSION_ROW_ID_PREFIX}${sessionId}-`;
-	const pattern = `'${sqlLike(idPrefix)}%'`;
+	// Remainder after the prefix must contain AT LEAST one dash (the `<ts>-<rand>` tail)...
+	const includePattern = `'${sqlLike(idPrefix)}%-%'`;
+	// ...and NOT two or more (a dash-extended foreign session id like `<sessionId>-X`).
+	const excludePattern = `'${sqlLike(idPrefix)}%-%-%'`;
 	return (
 		`SELECT ${idCol}, ${pathCol}, ${messageCol}::text AS message ` +
 		`FROM "${tbl}" ` +
-		`WHERE ${idCol} LIKE ${pattern} ` +
+		`WHERE ${idCol} LIKE ${includePattern} AND ${idCol} NOT LIKE ${excludePattern} ` +
 		`ORDER BY ${dateCol} ASC ` +
 		`LIMIT ${MAX_SESSION_TURNS}`
 	);
@@ -279,10 +299,11 @@ export async function resolveRef(
 		// ── depth 2: read the raw `sessions` turns for this session ──────────
 		// Capture stamps `sessions.path` with the harness transcript path and the session id
 		// appears only in the `sessions.id` prefix (`sess-<sessionId>-…`), so the join back from a
-		// `/summaries/<user>/<sessionId>.md` summary is by session id, NOT by path. The SQL LIKE
-		// is coarse (session `abc` prefix-matches session `abc-def`), so every fetched row is
-		// post-filtered against the exact `sess-<sessionId>-<ts>-<rand>` shape, and the turn cap
-		// is applied AFTER that filter so foreign rows never consume it.
+		// `/summaries/<user>/<sessionId>.md` summary is by session id, NOT by path. The SQL
+		// excludes dash-extended prefix-colliding ids (LIKE + NOT LIKE dash algebra) so foreign
+		// rows never occupy the scan window; each fetched row is ALSO post-filtered against the
+		// exact `sess-<sessionId>-<ts>-<rand>` shape (defense in depth), and the turn cap is
+		// applied AFTER that filter.
 		const sessionId = extractSessionId(ref);
 		const safeTurns = Math.max(1, Math.min(Math.trunc(turnLimit), MAX_RESOLVE_TURNS));
 		const exactId = buildSessionRowIdMatcher(sessionId);
