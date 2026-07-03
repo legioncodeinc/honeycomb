@@ -20,7 +20,7 @@ A shared, lasting memory for your AI coding assistants, so what one of them lear
 No. You install with one command, click a button, and use plain commands like `remember` and `recall`. The technical machinery is hidden behind a friendly dashboard.
 
 **Which AI coding assistants work with it?**
-Six are supported at once: Claude Code, Cursor, Codex, Hermes, pi, and OpenClaw. Honeycomb plugs underneath whichever ones you have installed, and a memory written from one is recalled by the others.
+Three are supported today: Claude Code, Cursor, and Codex. Three more, Hermes, pi, and OpenClaw, are in progress. Honeycomb plugs underneath whichever supported ones you have installed, and a memory written from one is recalled by the others.
 
 **Who makes Honeycomb?**
 It is a collaboration between Legion Code and Activeloop. Activeloop provides [Deep Lake](https://deeplake.ai) (the database for AI it stores memory in) and [Hivemind](https://github.com/activeloopai/hivemind) (the open-source project it builds on). Legion Code adds the multi-tier memory, skill sharing, the self-tidying loop, and the local helper that ties it together.
