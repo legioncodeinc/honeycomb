@@ -1,6 +1,6 @@
 {
   "name": "honeycomb-openclaw",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "Honeycomb — persistent shared memory for AI agents, OpenClaw harness",
   "license": "AGPL-3.0-or-later",
