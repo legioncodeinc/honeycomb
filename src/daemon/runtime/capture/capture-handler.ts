@@ -398,7 +398,9 @@ class CaptureRouteHandler {
 	private bufferRow(id: string, row: RowValues, scope: QueryScope): void {
 		const buffer = this.ensureBuffer();
 		void buffer.add({ row, scope }).catch((err: unknown) => {
-			this.recordDropped(1);
+			// Dropped-row counting is owned by flushBatch (per row of the failed batch);
+			// counting here too would double-count the row that triggered a size-flush,
+			// whose add() promise IS the flush promise. This catch only logs.
 			this.deps.logger?.event("capture.flush.failed", {
 				id,
 				reason: err instanceof Error ? err.message : String(err),

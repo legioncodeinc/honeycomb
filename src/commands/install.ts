@@ -75,9 +75,24 @@ export function loopbackDashboardUrl(): string {
 /** The short timeout budget for the local portal reachability probe. */
 const DASHBOARD_PROBE_TIMEOUT_MS = 750;
 
-/** One plain sentence for the "portal not installed/running" branch (C-6 claim-honesty fix). */
-export const DASHBOARD_PORTAL_NOT_RUNNING_MESSAGE =
-	"Dashboard portal is not running; install it with curl -fsSL https://get.theapiary.sh | sh -s -- --products=honeycomb,doctor,hive.";
+/**
+ * One plain sentence for the "portal not installed/running" branch (C-6 claim-honesty fix),
+ * branched by platform so the named command is actually runnable on the user's shell. The two
+ * one-liners are the CANONICAL forms the bootstrap installers document: the POSIX pipe from
+ * `scripts/install/install.sh`, and the PowerShell flag-passing invocation from the
+ * `scripts/install/install.ps1` header (a bare `irm | iex` pipe cannot see flags, so the
+ * documented `& { ... } --products=` form is the one that works).
+ */
+export function dashboardPortalNotRunningMessage(platform: NodeJS.Platform = process.platform): string {
+	const command =
+		platform === "win32"
+			? 'powershell -c "& { $(irm https://get.theapiary.sh/install.ps1) } --products=honeycomb,doctor,hive"'
+			: "curl -fsSL https://get.theapiary.sh | sh -s -- --products=honeycomb,doctor,hive";
+	return `Dashboard portal is not running; install it with ${command}.`;
+}
+
+/** The C-6 fallback sentence for THIS platform (what `runInstallCommand` actually prints). */
+export const DASHBOARD_PORTAL_NOT_RUNNING_MESSAGE = dashboardPortalNotRunningMessage();
 
 /**
  * The browser-opener seam (a-AC-6). Returns `true` iff it launched the URL. The production default
@@ -240,11 +255,12 @@ function writeDoctorRegistryEntry(dir: string | undefined, out: OutputSink): boo
 /**
  * Probe the loopback dashboard portal (`127.0.0.1:3853`) with a short timeout. Returns `true` when
  * the portal responds at all; status code does not matter because any HTTP response proves the
- * portal process is running and reachable.
+ * portal process is running and reachable. `timeoutMs` is injectable so a unit test can prove the
+ * abort path in milliseconds instead of waiting out the production budget.
  */
-export async function probeLoopbackDashboard(): Promise<boolean> {
+export async function probeLoopbackDashboard(timeoutMs: number = DASHBOARD_PROBE_TIMEOUT_MS): Promise<boolean> {
 	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), DASHBOARD_PROBE_TIMEOUT_MS);
+	const timer = setTimeout(() => controller.abort(), timeoutMs);
 	if (typeof timer.unref === "function") timer.unref();
 	try {
 		await fetch(loopbackDashboardUrl(), { method: "GET", signal: controller.signal });
@@ -352,8 +368,15 @@ export async function runInstallCommand(argv: readonly string[], deps: InstallVe
 	writeDoctorRegistryEntry(deps.dir, out);
 
 	// 3) Probe the dashboard portal first. Reachable: open friendly->loopback. Not reachable:
-	// print one plain sentence and do not open a browser tab (C-6).
-	if (await probeDashboard()) {
+	// print one plain sentence and do not open a browser tab (C-6). FAIL-SOFT: a throwing probe
+	// (an injected seam misbehaving) degrades to the not-running branch, never a failed install.
+	let portalReachable = false;
+	try {
+		portalReachable = await probeDashboard();
+	} catch {
+		portalReachable = false;
+	}
+	if (portalReachable) {
 		openDashboardWithFallback(opener, out);
 	} else {
 		out(DASHBOARD_PORTAL_NOT_RUNNING_MESSAGE);

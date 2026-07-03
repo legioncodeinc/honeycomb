@@ -22,7 +22,7 @@ export const DEFAULT_POLLINATING_MAINTENANCE_INTERVAL_MS = 60_000;
 
 /** Handle returned by {@link startPollinatingMaintenanceTick} for shutdown cleanup. */
 export interface PollinatingMaintenanceTickHandle {
-	/** Clear the interval. Idempotent. */
+	/** Cancel the pending tick and stop rescheduling. Idempotent. */
 	stop(): void;
 }
 
@@ -30,15 +30,18 @@ export interface PollinatingMaintenanceTickHandle {
 export interface PollinatingMaintenanceTickOptions {
 	/** Tick cadence in ms. Defaults to {@link DEFAULT_POLLINATING_MAINTENANCE_INTERVAL_MS}. */
 	readonly intervalMs?: number;
-	/** Timer scheduler (real `setInterval` when omitted). */
-	readonly setTimer?: (cb: () => void, ms: number) => ReturnType<typeof setInterval>;
-	/** Timer canceller (real `clearInterval` when omitted). */
-	readonly clearTimer?: (handle: ReturnType<typeof setInterval>) => void;
+	/** Timer scheduler (real `setTimeout` when omitted). */
+	readonly setTimer?: (cb: () => void, ms: number) => ReturnType<typeof setTimeout>;
+	/** Timer canceller (real `clearTimeout` when omitted). */
+	readonly clearTimer?: (handle: ReturnType<typeof setTimeout>) => void;
 }
 
 /**
- * Start the pollinating maintenance tick for one agent scope. Unrefs the timer so it
- * never keeps the process alive alone. Returns a handle whose `stop()` clears the timer.
+ * Start the pollinating maintenance tick for one agent scope. Uses a self-rescheduling
+ * `setTimeout` rather than `setInterval` so a check that hangs can never overlap the
+ * next one — the next tick is scheduled only after the current check settles. Unrefs
+ * each timer so it never keeps the process alive alone. Returns a handle whose
+ * `stop()` cancels the pending tick.
  */
 export function startPollinatingMaintenanceTick(
 	trigger: PollinatingTrigger,
@@ -46,20 +49,38 @@ export function startPollinatingMaintenanceTick(
 	options: PollinatingMaintenanceTickOptions = {},
 ): PollinatingMaintenanceTickHandle {
 	const intervalMs = options.intervalMs ?? DEFAULT_POLLINATING_MAINTENANCE_INTERVAL_MS;
-	const setTimer = options.setTimer ?? setInterval;
-	const clearTimer = options.clearTimer ?? clearInterval;
-	const tick = (): void => {
-		void trigger.checkAndEnqueuePollinating(scope).catch(() => {
-			/* fail-soft: a storage blip on the tick must not crash the daemon */
-		});
+	const setTimer = options.setTimer ?? setTimeout;
+	const clearTimer = options.clearTimer ?? clearTimeout;
+
+	let stopped = false;
+	let handle: ReturnType<typeof setTimeout> | null = null;
+
+	const schedule = (): void => {
+		if (stopped) return;
+		handle = setTimer(tick, intervalMs);
+		if (typeof (handle as NodeJS.Timeout).unref === "function") {
+			(handle as NodeJS.Timeout).unref();
+		}
 	};
-	const handle = setTimer(tick, intervalMs);
-	if (typeof (handle as NodeJS.Timeout).unref === "function") {
-		(handle as NodeJS.Timeout).unref();
-	}
+
+	const tick = (): void => {
+		handle = null;
+		void trigger
+			.checkAndEnqueuePollinating(scope)
+			.catch(() => {
+				/* fail-soft: a storage blip on the tick must not crash the daemon */
+			})
+			.finally(schedule);
+	};
+
+	schedule();
 	return {
 		stop(): void {
-			clearTimer(handle);
+			stopped = true;
+			if (handle !== null) {
+				clearTimer(handle);
+				handle = null;
+			}
 		},
 	};
 }

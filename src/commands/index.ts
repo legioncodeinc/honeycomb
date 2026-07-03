@@ -137,6 +137,7 @@ export {
 	DASHBOARD_PORTAL_NOT_RUNNING_MESSAGE,
 	DASHBOARD_LOCAL_HOST,
 	DASHBOARD_PATH,
+	dashboardPortalNotRunningMessage,
 	type DashboardOpener,
 	type DashboardProbe,
 	type InstallVerbDeps,

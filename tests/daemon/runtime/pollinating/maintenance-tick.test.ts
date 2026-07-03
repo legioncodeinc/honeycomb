@@ -53,4 +53,34 @@ describe("C-3 pollinating maintenance tick", () => {
 		await vi.advanceTimersByTimeAsync(DEFAULT_POLLINATING_MAINTENANCE_INTERVAL_MS);
 		expect(trigger.checkAndEnqueuePollinating).toHaveBeenCalledTimes(2);
 	});
+
+	it("never overlaps ticks: a hanging check delays the next tick until it settles", async () => {
+		vi.useFakeTimers();
+		let release: (() => void) | undefined;
+		const trigger = {
+			checkAndEnqueuePollinating: vi.fn(
+				() =>
+					new Promise<PollinatingTickResult>((resolve) => {
+						release = () => resolve({ decision: "below_threshold", reason: "below-threshold", tokens: 0 });
+					}),
+			),
+		} as unknown as PollinatingTrigger;
+
+		const handle = startPollinatingMaintenanceTick(trigger, { agentId: "default" }, {});
+
+		await vi.advanceTimersByTimeAsync(DEFAULT_POLLINATING_MAINTENANCE_INTERVAL_MS);
+		expect(trigger.checkAndEnqueuePollinating).toHaveBeenCalledTimes(1);
+
+		// The first check is still in flight: advancing further fires NOTHING —
+		// the next tick is only scheduled after the current check settles.
+		await vi.advanceTimersByTimeAsync(DEFAULT_POLLINATING_MAINTENANCE_INTERVAL_MS * 3);
+		expect(trigger.checkAndEnqueuePollinating).toHaveBeenCalledTimes(1);
+
+		// Settle the hung check → the next tick is scheduled one interval out.
+		release?.();
+		await vi.advanceTimersByTimeAsync(DEFAULT_POLLINATING_MAINTENANCE_INTERVAL_MS);
+		expect(trigger.checkAndEnqueuePollinating).toHaveBeenCalledTimes(2);
+
+		handle.stop();
+	});
 });

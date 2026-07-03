@@ -29,12 +29,14 @@ import {
 	buildDurableDepth1Sql,
 	buildEpisodicDepth1Sql,
 	buildSessionDepth2Sql,
+	buildSessionRowIdMatcher,
 	extractSessionId,
 	resolveRef,
 	MAX_RESOLVE_TURNS,
 	DEFAULT_RESOLVE_TURNS,
 	SESSION_ROW_ID_PREFIX,
 } from "../../../../src/daemon/runtime/memories/resolve.js";
+import { MAX_SESSION_TURNS } from "../../../../src/daemon/storage/sql.js";
 import { FakeDeepLakeTransport, fakeCredentialRecord, stubProvider } from "../../../helpers/fake-deeplake.js";
 
 const ORG = "fake-org";
@@ -191,7 +193,7 @@ describe("e-AC-4 — SQL builders are guarded SELECTs (no ILIKE, no search, no I
 	});
 
 	it("buildSessionDepth2Sql joins by the sess-<sessionId>- id prefix, bounded + ordered", () => {
-		const sql = buildSessionDepth2Sql("s1", 50);
+		const sql = buildSessionDepth2Sql("s1");
 		expect(sql.toUpperCase()).toContain("SELECT");
 		expect(sql.toUpperCase()).not.toContain("ILIKE");
 		expect(sql.toUpperCase()).not.toContain("<#>");
@@ -200,18 +202,37 @@ describe("e-AC-4 — SQL builders are guarded SELECTs (no ILIKE, no search, no I
 		expect(sql).not.toContain("/summaries/");
 		expect(sql).toContain("ORDER BY");
 		expect(sql).toContain("creation_date");
-		expect(sql).toContain("LIMIT 50");
+		// The SQL bound is the COARSE candidate-scan cap; the caller trims to the turn cap AFTER
+		// the exact id post-filter, so foreign prefix-collision rows never consume the cap.
+		expect(sql).toContain(`LIMIT ${MAX_SESSION_TURNS}`);
 	});
 
-	it("buildSessionDepth2Sql clamps turns to MAX_RESOLVE_TURNS", () => {
-		const sql = buildSessionDepth2Sql("s1", MAX_RESOLVE_TURNS + 999);
-		expect(sql).toContain(`LIMIT ${MAX_RESOLVE_TURNS}`);
+	it("buildSessionDepth2Sql selects the id column so the exact post-filter can run", () => {
+		const sql = buildSessionDepth2Sql("s1");
+		expect(sql).toMatch(/SELECT\s+id\s*,/i);
 	});
 
 	it("buildSessionDepth2Sql LIKE-escapes wildcard metacharacters in the session id", () => {
 		// A crafted session id can never inject a LIKE wildcard: `%`/`_` are backslash-escaped.
-		const sql = buildSessionDepth2Sql("a%b_c", 10);
+		const sql = buildSessionDepth2Sql("a%b_c");
 		expect(sql).toContain("sess-a\\%b\\_c-%");
+	});
+
+	it("buildSessionRowIdMatcher accepts only the exact sess-<sessionId>-<ts>-<rand> shape", () => {
+		const re = buildSessionRowIdMatcher("abc");
+		expect(re.test("sess-abc-1730000000000-12345")).toBe(true);
+		// A dash-extended session id (`abc-def`) shares the coarse LIKE prefix but MUST be rejected.
+		expect(re.test("sess-abc-def-1730000000000-12345")).toBe(false);
+		// Missing tail segments are rejected too.
+		expect(re.test("sess-abc-1730000000000")).toBe(false);
+		expect(re.test("sess-abc-")).toBe(false);
+	});
+
+	it("buildSessionRowIdMatcher regex-escapes metacharacters in the session id", () => {
+		const re = buildSessionRowIdMatcher("a.b+c");
+		expect(re.test("sess-a.b+c-1730000000000-1")).toBe(true);
+		// The `.` must be literal, not a wildcard.
+		expect(re.test("sess-aXb+c-1730000000000-1")).toBe(false);
 	});
 
 	it("extractSessionId parses <sessionId> out of a /summaries/<user>/<sessionId>.md ref", () => {
@@ -531,27 +552,33 @@ describe("PRD-046e HTTP handler — GET /api/memories/resolve", () => {
 	});
 
 	it("turns param caps the depth-2 result to MAX_RESOLVE_TURNS", async () => {
-		const recorded: string[] = [];
+		// The trim now runs in TypeScript AFTER the exact-id post-filter (so foreign prefix-collision
+		// rows cannot consume the cap), so the cap is asserted on the RESPONSE, not the SQL LIMIT.
+		const manyTurns = Array.from({ length: MAX_RESOLVE_TURNS + 50 }, (_, i) => ({
+			id: `${SESSION_ROW_ID_PREFIX}${C5_SESSION_ID}-${1730000000000 + i}-${i}`,
+			path: C5_TRANSCRIPT_PATH,
+			message: `{"role":"user","content":"turn ${i}"}`,
+			creation_date: `2025-06-20T10:00:${String(i % 60).padStart(2, "0")}Z`,
+		}));
 		const { daemon, storage } = makeDaemon((req) => {
-			recorded.push(req.sql);
 			if (/FROM\s+"memory"/i.test(req.sql)) {
-				return [{ path: "/s/1", summary: "x", key: "x", last_update_date: "2025-06-01" }];
+				return [C5_SUMMARY_ROW];
+			}
+			if (/FROM\s+"sessions"/i.test(req.sql)) {
+				return manyTurns;
 			}
 			return [];
 		});
 		mountMemoriesApi(daemon, { storage });
 
-		await daemon.app.request(
-			`/api/memories/resolve?ref=%2Fs%2F1&source=episodic&depth=2&turns=${MAX_RESOLVE_TURNS + 999}`,
+		const res = await daemon.app.request(
+			`/api/memories/resolve?ref=${encodeURIComponent(C5_SUMMARY_REF)}&source=episodic&depth=2&turns=${MAX_RESOLVE_TURNS + 999}`,
 			{ method: "GET", headers: headers() },
 		);
-		// The sessions query must have LIMIT <= MAX_RESOLVE_TURNS.
-		const sessionsQuery = recorded.find((s) => /FROM\s+"sessions"/i.test(s));
-		if (sessionsQuery !== undefined) {
-			const match = /LIMIT\s+(\d+)/i.exec(sessionsQuery);
-			const limit = match ? parseInt(match[1], 10) : 0;
-			expect(limit).toBeLessThanOrEqual(MAX_RESOLVE_TURNS);
-		}
+		expect(res.status).toBe(200);
+		const json = (await res.json()) as Record<string, unknown>;
+		expect(Array.isArray(json.turns)).toBe(true);
+		expect((json.turns as unknown[]).length).toBeLessThanOrEqual(MAX_RESOLVE_TURNS);
 	});
 
 	it("e-AC-4: all SQL issued by the handler is SELECT-by-id/path (no ILIKE, no search)", async () => {
@@ -614,9 +641,107 @@ describe("C-5 — depth-2 resolve joins a production-written summary back to its
 		expect(matched.length).toBe(0);
 
 		// ...while the fixed id-prefix query selects both raw turns.
-		const newStyleSql = buildSessionDepth2Sql(extractSessionId(C5_SUMMARY_REF), 50);
+		const newStyleSql = buildSessionDepth2Sql(extractSessionId(C5_SUMMARY_REF));
 		const hit = C5_SESSION_ROWS.filter((r) => sessionsWhereSelects(newStyleSql, r));
 		expect(hit.length).toBe(2);
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CodeRabbit prefix-collision guard: a session id that is a strict dash-extended
+// prefix of another session's id must never pull the other session's turns
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("prefix-collision guard — depth-2 resolve of session `abc` returns ONLY `abc` turns, never `abc-def`", () => {
+	// Two writer-faithful sessions whose ids collide on the coarse LIKE prefix:
+	// `sess-abc-…` is a strict prefix of `sess-abc-def-…` (makeRowId embeds the sessionId
+	// verbatim, validated only as non-empty — capture-handler.ts:597-600).
+	const SHORT_ID = "abc";
+	const LONG_ID = "abc-def";
+	const SHORT_REF = `/summaries/${C5_USER}/${SHORT_ID}.md`;
+	const SHORT_TRANSCRIPT = "/Users/alice/.claude/projects/demo/abc.jsonl";
+	const LONG_TRANSCRIPT = "/Users/alice/.claude/projects/demo/abc-def.jsonl";
+
+	const shortSummaryRow: Record<string, unknown> = {
+		path: SHORT_REF,
+		summary: "the short session's summary",
+		key: "short session",
+		last_update_date: "2025-06-20T10:00:10Z",
+	};
+
+	const collidingSessionRows: Record<string, unknown>[] = [
+		{
+			id: `${SESSION_ROW_ID_PREFIX}${SHORT_ID}-1730000000000-11`,
+			path: SHORT_TRANSCRIPT,
+			message: '{"role":"user","content":"short-session turn"}',
+			creation_date: "2025-06-20T10:00:00Z",
+		},
+		{
+			id: `${SESSION_ROW_ID_PREFIX}${LONG_ID}-1730000000001-22`,
+			path: LONG_TRANSCRIPT,
+			message: '{"role":"user","content":"long-session turn that must NOT leak"}',
+			creation_date: "2025-06-20T10:00:01Z",
+		},
+		{
+			id: `${SESSION_ROW_ID_PREFIX}${SHORT_ID}-1730000000002-33`,
+			path: SHORT_TRANSCRIPT,
+			message: '{"role":"assistant","content":"short-session reply"}',
+			creation_date: "2025-06-20T10:00:02Z",
+		},
+	];
+
+	function collisionResponder(req: TransportRequest): Record<string, unknown>[] {
+		const sql = req.sql;
+		if (/FROM\s+"memory"/i.test(sql)) {
+			const pathEq = /"?path"?\s*=\s*'([^']*)'/i.exec(sql);
+			return pathEq !== null && pathEq[1] === SHORT_REF ? [shortSummaryRow] : [];
+		}
+		if (/FROM\s+"sessions"/i.test(sql)) {
+			return collidingSessionRows.filter((r) => sessionsWhereSelects(sql, r));
+		}
+		return [];
+	}
+
+	it("the coarse LIKE alone would leak the long session's turns (documents the guarded hazard)", () => {
+		const sql = buildSessionDepth2Sql(SHORT_ID);
+		const coarse = collidingSessionRows.filter((r) => sessionsWhereSelects(sql, r));
+		// All three rows survive the LIKE — including the foreign `abc-def` turn.
+		expect(coarse.length).toBe(3);
+	});
+
+	it("depth-2 resolve of the short id returns ONLY its own turns (exact post-filter)", async () => {
+		const fake = new FakeDeepLakeTransport(collisionResponder);
+		const storage = createStorageClient({ transport: fake, provider: stubProvider(fakeCredentialRecord()) });
+
+		const result = await resolveRef(SHORT_REF, 2, "episodic", SCOPE, { storage });
+
+		expect(result.found).toBe(true);
+		if (!result.found) throw new Error("should be found");
+		expect(result.depth).toBe(2);
+		if (result.depth === 2 && result.source === "episodic") {
+			expect(result.turns.length).toBe(2);
+			for (const turn of result.turns) {
+				expect(turn.path).toBe(SHORT_TRANSCRIPT);
+				expect(turn.message).not.toContain("must NOT leak");
+			}
+		}
+	});
+
+	it("foreign prefix-collision rows do not consume the turn cap", async () => {
+		// turnLimit 2: the foreign `abc-def` row sits BETWEEN the two `abc` rows chronologically.
+		// If the cap were applied before the exact filter, the foreign row would consume a slot and
+		// the second `abc` turn would be dropped. Post-filter trimming returns both.
+		const fake = new FakeDeepLakeTransport(collisionResponder);
+		const storage = createStorageClient({ transport: fake, provider: stubProvider(fakeCredentialRecord()) });
+
+		const result = await resolveRef(SHORT_REF, 2, "episodic", SCOPE, { storage }, 2);
+
+		expect(result.found).toBe(true);
+		if (!result.found) throw new Error("should be found");
+		if (result.depth === 2 && result.source === "episodic") {
+			expect(result.turns.length).toBe(2);
+			expect(result.turns[1].message).toContain("short-session reply");
+		}
 	});
 });
 
@@ -633,28 +758,47 @@ describe("e-AC-1 turn limit — depth-2 zoom is bounded", () => {
 		expect(MAX_RESOLVE_TURNS).toBe(100);
 	});
 
-	it("depth-2 SQL uses the supplied turnLimit, not an unbounded query", async () => {
+	/** Writer-faithful rows for one session, `count` chronological turns. */
+	function turnsFor(sessionId: string, count: number): Record<string, unknown>[] {
+		return Array.from({ length: count }, (_, i) => ({
+			id: `${SESSION_ROW_ID_PREFIX}${sessionId}-${1730000000000 + i}-${i}`,
+			path: C5_TRANSCRIPT_PATH,
+			message: `{"role":"user","content":"turn ${i}"}`,
+			creation_date: `2025-06-20T10:${String(Math.trunc(i / 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}Z`,
+		}));
+	}
+
+	it("depth-2 returns at most the supplied turnLimit (trimmed after the exact-id filter)", async () => {
 		const fake = new FakeDeepLakeTransport();
 		const storage = createStorageClient({ transport: fake, provider: stubProvider(fakeCredentialRecord()) });
-		fake.enqueueRows([{ path: "/s/1", summary: "x", key: "x", last_update_date: "2025-06-01" }]);
-		fake.enqueueRows([]);
+		fake.enqueueRows([{ path: C5_SUMMARY_REF, summary: "x", key: "x", last_update_date: "2025-06-01" }]);
+		fake.enqueueRows(turnsFor(C5_SESSION_ID, 30));
 
-		await resolveRef("/s/1", 2, "episodic", SCOPE, { storage }, 25);
+		const result = await resolveRef(C5_SUMMARY_REF, 2, "episodic", SCOPE, { storage }, 25);
 
+		expect(result.found).toBe(true);
+		if (!result.found) throw new Error("should be found");
+		if (result.depth === 2 && result.source === "episodic") {
+			expect(result.turns.length).toBe(25);
+		}
+		// The SQL bound is the coarse candidate-scan cap (the trim happens post-filter in TS).
 		const sessionsQuery = fake.requests.find((r) => /FROM\s+"sessions"/i.test(r.sql));
 		expect(sessionsQuery).toBeDefined();
-		expect(sessionsQuery?.sql).toContain("LIMIT 25");
+		expect(sessionsQuery?.sql).toContain(`LIMIT ${MAX_SESSION_TURNS}`);
 	});
 
-	it("depth-2 SQL caps at MAX_RESOLVE_TURNS when turnLimit exceeds it", async () => {
+	it("depth-2 caps at MAX_RESOLVE_TURNS when turnLimit exceeds it", async () => {
 		const fake = new FakeDeepLakeTransport();
 		const storage = createStorageClient({ transport: fake, provider: stubProvider(fakeCredentialRecord()) });
-		fake.enqueueRows([{ path: "/s/1", summary: "x", key: "x", last_update_date: "2025-06-01" }]);
-		fake.enqueueRows([]);
+		fake.enqueueRows([{ path: C5_SUMMARY_REF, summary: "x", key: "x", last_update_date: "2025-06-01" }]);
+		fake.enqueueRows(turnsFor(C5_SESSION_ID, MAX_RESOLVE_TURNS + 50));
 
-		await resolveRef("/s/1", 2, "episodic", SCOPE, { storage }, MAX_RESOLVE_TURNS + 500);
+		const result = await resolveRef(C5_SUMMARY_REF, 2, "episodic", SCOPE, { storage }, MAX_RESOLVE_TURNS + 500);
 
-		const sessionsQuery = fake.requests.find((r) => /FROM\s+"sessions"/i.test(r.sql));
-		expect(sessionsQuery?.sql).toContain(`LIMIT ${MAX_RESOLVE_TURNS}`);
+		expect(result.found).toBe(true);
+		if (!result.found) throw new Error("should be found");
+		if (result.depth === 2 && result.source === "episodic") {
+			expect(result.turns.length).toBe(MAX_RESOLVE_TURNS);
+		}
 	});
 });

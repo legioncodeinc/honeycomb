@@ -94,7 +94,8 @@ export async function runCapture(
 	if (transportFailed) {
 		return { ok: false, reason: "transport-failure" };
 	}
-	// Gate said capture but the action threw before a response (fail-soft, turn proceeds).
+	// Capture succeeded (a normal daemon response), OR the action threw before a
+	// response and the gate swallowed it (fail-soft, turn proceeds) — both land here.
 	return { ok: true };
 }
 

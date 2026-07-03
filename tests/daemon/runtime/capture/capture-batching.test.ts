@@ -355,4 +355,41 @@ describe("C-4: dropped-events counter on acked-but-lost capture writes", () => {
 		expect(dropped.read()).toBe(1);
 		expect(logged.some((name) => name === "capture.flush.failed" || name === "capture.batch_insert.failed")).toBe(true);
 	});
+
+	it("counts each row of a failed SIZE-triggered flush exactly once (no off-by-one on the trigger row)", async () => {
+		// The row that trips the size cap gets the flush promise back from `add()`, so its
+		// rejection is observed by bufferRow's catch AND by flushBatch — the count must be
+		// owned by exactly one of them (flushBatch), never both.
+		const dropped = createCaptureDroppedEventsCounter();
+		const clock = new FakeClock();
+		const failInsert = (req: TransportRequest): Record<string, unknown>[] => {
+			if (/information_schema\.columns/i.test(req.sql)) {
+				return healTargetFor("sessions").columns.map((c) => ({ column_name: c.name }));
+			}
+			if (/^\s*INSERT/i.test(req.sql)) {
+				throw new TransportError("query", "insert failed", 500);
+			}
+			return [];
+		};
+		const { daemon } = buildDaemon({ ...BATCH_ON, maxEvents: 3 }, clock, {
+			responder: failInsert,
+			droppedEvents: dropped,
+		});
+
+		for (let i = 0; i < 3; i++) {
+			const res = await daemon.app.request("/api/hooks/capture", {
+				method: "POST",
+				headers: sessionHeaders(),
+				body: JSON.stringify(userBody(`turn ${i}`)),
+			});
+			expect(res.status).toBe(201);
+		}
+		// The 3rd event tripped the size cap → the flush fired and failed. Let the
+		// rejection propagate through the buffer's promise chain and both observers.
+		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(dropped.read(), "3 rows lost → exactly 3 counted, not 4").toBe(3);
+	});
 });

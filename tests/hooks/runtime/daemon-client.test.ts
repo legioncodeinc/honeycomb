@@ -299,7 +299,11 @@ describe("C-4 transport observability", () => {
 				runtimePath: "legacy",
 			});
 			expect(res.status).toBe(0);
-			expect(writes.some((line) => line.includes("hook capture transport failed"))).toBe(true);
+			// The diagnostic carries the underlying cause so an operator can tell
+			// ECONNREFUSED from a timeout.
+			expect(
+				writes.some((line) => line.includes("hook capture transport failed") && line.includes("ECONNREFUSED")),
+			).toBe(true);
 		} finally {
 			process.stderr.write = origWrite;
 		}

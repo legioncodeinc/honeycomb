@@ -117,10 +117,12 @@ export function createDaemonHookClient(options: DaemonHookClientOptions): Daemon
 					body: JSON.stringify(body),
 				});
 				return { status: res.status, body: await parseJson(res) };
-			} catch {
+			} catch (err: unknown) {
 				// A transport failure (daemon down / refused) is NOT a hook crash — surface a
-				// `0` status with no body so the fail-soft core absorbs it (FR-10).
-				process.stderr.write("honeycomb: hook capture transport failed (daemon unreachable)\n");
+				// `0` status with no body so the fail-soft core absorbs it (FR-10). The cause
+				// rides on the stderr line so an operator can tell ECONNREFUSED from a timeout.
+				const reason = err instanceof Error ? err.message : String(err);
+				process.stderr.write(`honeycomb: hook capture transport failed (daemon unreachable): ${reason}\n`);
 				return { status: 0 };
 			}
 		},
