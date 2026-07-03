@@ -5,6 +5,7 @@
 How Honeycomb keeps its DeepLake compute bill flat: the four application-layer cost drivers, the measure-first query meter, and the four env-flagged runtime cuts (adaptive poll backoff, single-lease consolidation, capture write batching + envelope trim, and fan-out/recall amplification caps). Read this if you are diagnosing a compute-cost spike, tuning the idle daemon, or wiring a new daemon work loop that touches DeepLake.
 
 **Related:**
+- [`deeplake-idle-hibernation.md`](deeplake-idle-hibernation.md)
 - [`local-queue-idle-cost-control.md`](local-queue-idle-cost-control.md)
 - [`observability-and-degradation.md`](observability-and-degradation.md)
 - [`../data/deeplake-storage.md`](../data/deeplake-storage.md)
@@ -129,3 +130,4 @@ The invariants any future cost change must hold:
 | Capture batching + envelope trim | [`capture-config.ts`](../../../../src/daemon/runtime/capture/capture-config.ts) · [`capture-buffer.ts`](../../../../src/daemon/runtime/capture/capture-buffer.ts) · [`budgeted-stringify.ts`](../../../../src/daemon/runtime/capture/budgeted-stringify.ts) |
 | Amplification caps | [`amplification-config.ts`](../../../../src/daemon/runtime/memories/amplification-config.ts) · [`bounded-pool.ts`](../../../../src/daemon/runtime/memories/bounded-pool.ts) |
 | Source spec | [`PRD-062`](../../../requirements/completed/prd-062-deeplake-compute-cost-reduction/prd-062-deeplake-compute-cost-reduction-index.md) (062a/b/c/d), shipped v0.1.7 |
+| Idle capstone (scale-to-zero) | [`deeplake-idle-hibernation.md`](deeplake-idle-hibernation.md): PRD-062e connection hibernation pauses every DeepLake-touching timer at idle so the pod scales to zero, closing the residual ~30s-poll floor this backoff work could not reach |

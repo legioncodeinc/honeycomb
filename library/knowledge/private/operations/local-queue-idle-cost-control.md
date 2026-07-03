@@ -6,6 +6,7 @@ How the daemon stops paying DeepLake compute to ask "is there local work?" by sc
 
 **Related:**
 - [`deeplake-compute-cost.md`](deeplake-compute-cost.md)
+- [`deeplake-idle-hibernation.md`](deeplake-idle-hibernation.md)
 - [`observability-and-degradation.md`](observability-and-degradation.md)
 - [`../architecture/adr/0006-local-queue-as-interim-idle-cost-control.md`](../architecture/adr/0006-local-queue-as-interim-idle-cost-control.md)
 - [`../architecture/adr/0004-honeycomb-control-plane-and-postgres-boundary.md`](../architecture/adr/0004-honeycomb-control-plane-and-postgres-boundary.md)

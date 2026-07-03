@@ -50,6 +50,9 @@ No. Recording is cheap and happens out of the way, and if anything ever hiccups,
 **Does it cost money in AI model usage?**
 The everyday memory features (capturing, recalling, the briefing) do not require their own AI model or API key. Two optional extras can use a model: turning sessions into summaries and skills, and the periodic self-tidying loop. Both are opt-in, so you decide when to spend.
 
+**What happens when I stop working for a while?**
+Honeycomb notices when nothing is happening and quietly goes to sleep: after a couple of idle minutes it stops all its background chatter with your storage, which lets the hosted storage wind down so an idle setup costs next to nothing. It still captures anything new the moment you start again. The only thing you might notice is that the very first action after a long idle stretch can take a few extra seconds while storage wakes back up; after that it is full speed. This is on by default and nothing is ever lost while it sleeps.
+
 **Do I need an internet connection?**
 You need to be signed in to reach your store. The optional "search by meaning" feature uses a small language model that runs locally on your own machine (downloaded once), not a cloud service.
 
