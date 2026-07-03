@@ -135,7 +135,7 @@ node bundle/cli.js status    # check the daemon and your environment
 
 `setup` wires every coding assistant it detects and starts the loopback daemon; any storage command auto-starts the daemon if it is down. You'll need Activeloop Deeplake credentials; the device flow above writes them to the shared `~/.deeplake/credentials.json`.
 
-> **Self-hosting the storage backend?** You can run Honeycomb against Activeloop's open-source [`pg_deeplake`](https://quay.io/activeloopai/pg-deeplake) Postgres extension instead of hosted Deep Lake, and point Honeycomb at it with `honeycomb login --endpoint postgres://...` (direct) or `--endpoint https://...` (HTTP gateway), no Activeloop account required. See the [self-hosting guide](library/knowledge/public/guides/self-hosting.md) for the setup and the backend contract.
+> **Self-hosting the storage backend?** You can run Honeycomb against Activeloop's open-source [`pg_deeplake`](https://quay.io/activeloopai/pg-deeplake) Postgres extension instead of hosted Deeplake, and point Honeycomb at it with `honeycomb login --endpoint postgres://...` (direct) or `--endpoint https://...` (HTTP gateway), no Activeloop account required. See the [self-hosting guide](library/knowledge/public/guides/self-hosting.md) for the setup and the backend contract.
 
 </details>
 
@@ -237,7 +237,7 @@ Most agent-memory tools bolt onto a vector-only store, which forces *every* acce
 
 ## 🔌 Supported harnesses
 
-Honeycomb currently supports 3 harnesses in production (Claude Code, Codex, Cursor). Hermes, pi, and OpenClaw are in progress.
+Honeycomb supports 3 harnesses in production (Claude Code, Codex, Cursor). Hermes, pi, and OpenClaw are in progress.
 
 | Supported today | In progress |
 |---|---|
@@ -259,10 +259,10 @@ Beyond the CLI, three more ways to reach the same daemon and the same shared mem
 
 <h2 align="center"><a href="https://ideas.theapiary.sh">📍 Status & Roadmap</a></h2>
 
-Honeycomb is **pre-release (v0.2.x)**. We document what's real and flag what's opt-in.
+Honeycomb is **production ready (v0.2.x)** and fully tested in live scenarios. We document what's real and flag what's opt-in.
 
-**Working today**
-- Capture-to-recall, proven end-to-end against live Deeplake (`npm run smoke:golden-path` with credentials).
+**Production today**
+- Capture-to-recall, proven end-to-end and live-tested against Deeplake (`npm run smoke:golden-path` with credentials).
 - One-command install → guided dashboard setup, the loopback daemon, the unified CLI, per-harness hooks, the MCP server, and the SDK.
 - Three-tier memory, session priming, skillify + propagation, the pollinating loop, the knowledge graph, and the codebase graph.
 - Self-hosted backends: point the CLI at your own Postgres-backed Deeplake endpoint with `honeycomb login --endpoint`, with idle connection hibernation for scale-to-zero.
