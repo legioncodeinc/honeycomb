@@ -1,6 +1,6 @@
 # Execution Ledger: PRD-067 Doctor Boot Grace Release Blocker
 
-> **PRD:** `library/requirements/backlog/prd-067-doctor-boot-grace-release-blocker/prd-067-doctor-boot-grace-release-blocker-index.md`
+> **PRD:** `library/requirements/archive/prd-067-doctor-boot-grace-release-blocker/prd-067-doctor-boot-grace-release-blocker-index.md` (archived 2026-07-03; canonical record is doctor PRD-003 at `doctor/library/requirements/completed/prd-003-doctor-boot-grace-release-blocker/`)
 > **Smoker run started:** 2026-06-29
 > **Mode:** Ship implementation with full local verification.
 
@@ -38,7 +38,7 @@
 
 ## Out-of-Scope Discoveries
 
-1. `OOS-1` from `library/requirements/backlog/prd-067-doctor-boot-grace-release-blocker/qa/out-of-scope-discoveries.md` was accepted into PRD-067 as AC-11 on 2026-06-29.
+1. `OOS-1` from `library/requirements/archive/prd-067-doctor-boot-grace-release-blocker/qa/out-of-scope-discoveries.md` was accepted into PRD-067 as AC-11 on 2026-06-29.
 
 ---
 

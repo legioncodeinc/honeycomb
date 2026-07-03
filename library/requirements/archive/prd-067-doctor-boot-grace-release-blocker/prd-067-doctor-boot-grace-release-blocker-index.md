@@ -1,6 +1,8 @@
 # PRD-067: Doctor Boot Grace Release Blocker
 
-> **Status:** Backlog
+> **Status:** Completed and moved (archived 2026-07-03). This work belongs to the standalone doctor repository and was implemented there on 2026-06-29: all 11 ACs verified (see [`EXECUTION_LEDGER-prd-067.md`](../../../ledger/EXECUTION_LEDGER-prd-067.md)), with `startupGraceMs` in `doctor/src/config.ts`, the grace window and `armStartupGrace()` in `doctor/src/supervisor.ts`, compose wiring plus the post-update re-arm in `doctor/src/compose/index.ts`, and regression tests in `doctor/tests/config.test.ts`, `doctor/tests/supervisor.test.ts`, `doctor/tests/compose/create-doctor.test.ts`, and `doctor/tests/cli/run-watchdog.test.ts`. The canonical record now lives in the doctor repo as **doctor PRD-003** (`doctor/library/requirements/completed/prd-003-doctor-boot-grace-release-blocker/`).
+
+> **Original status:** Backlog
 > **Priority:** P0
 > **Effort:** S (1-3h)
 > **Schema changes:** None. Local Doctor state may gain non-breaking in-memory or file-backed boot metadata, but no DeepLake schema changes.
@@ -192,7 +194,7 @@ This PRD blocks release. A release candidate must not be tagged until:
 ## Related
 
 - [PRD-064: Doctor Self-Healing Watchdog](../../in-work/prd-064-doctor-self-healing-watchdog/prd-064-doctor-self-healing-watchdog-index.md)
-- [PRD-065: Doctor Go-Live and Activation](../prd-065-doctor-go-live/prd-065-doctor-go-live-index.md)
+- [PRD-065: Doctor Go-Live and Activation](../../completed/prd-065-doctor-go-live/prd-065-doctor-go-live-index.md)
 - [PRD-068: Portal Daemon Boot Shell](../prd-068-portal-daemon-boot-shell/prd-068-portal-daemon-boot-shell-index.md)
 - [PRD-069: Application Health Dashboard](../prd-069-application-health-dashboard/prd-069-application-health-dashboard-index.md)
 - [PRD-070: First Browser Load Experience](../prd-070-first-browser-load-experience/prd-070-first-browser-load-experience-index.md)

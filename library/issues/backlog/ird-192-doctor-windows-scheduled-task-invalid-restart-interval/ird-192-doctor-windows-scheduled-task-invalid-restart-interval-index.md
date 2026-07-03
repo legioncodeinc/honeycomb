@@ -349,4 +349,4 @@ Expected implementation surface:
 - GitHub issue: [#192](https://github.com/legioncodeinc/honeycomb/issues/192)
 - [PRD-064b: Doctor Self-Supervision and Install Integration](../../../requirements/in-work/prd-064-doctor-self-healing-watchdog/prd-064b-doctor-self-healing-watchdog-self-supervision-and-install-integration.md)
 - [PRD-064f: Doctor CLI and UX](../../../requirements/in-work/prd-064-doctor-self-healing-watchdog/prd-064f-doctor-self-healing-watchdog-cli-and-ux.md)
-- [PRD-067: Doctor Boot Grace Release Blocker](../../../requirements/backlog/prd-067-doctor-boot-grace-release-blocker/prd-067-doctor-boot-grace-release-blocker-index.md)
+- [PRD-067: Doctor Boot Grace Release Blocker](../../../requirements/archive/prd-067-doctor-boot-grace-release-blocker/prd-067-doctor-boot-grace-release-blocker-index.md) (completed; canonical record is doctor PRD-003)

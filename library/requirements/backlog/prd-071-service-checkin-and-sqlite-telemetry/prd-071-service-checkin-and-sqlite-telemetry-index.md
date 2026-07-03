@@ -127,10 +127,10 @@ The static installer registry records honeycomb's identity and the absolute path
 
 - `../../../../../doctor/library/knowledge/private/architecture/ADR-0001-hive-telemetry-transport-and-single-source-of-truth.md` - telemetry transport and single source of truth (services write local SQLite, doctor polls).
 - `../../../../../doctor/library/knowledge/private/architecture/ADR-0002-service-registration-static-registry-plus-runtime-sqlite.md` - static installer registry plus runtime SQLite status.
-- Expected doctor PRD-001 (source-of-truth telemetry) at `../../../../../doctor/library/requirements/backlog/prd-001-telemetry-source-of-truth/`.
-- Expected doctor PRD-002 (registry merge and poll) at `../../../../../doctor/library/requirements/backlog/prd-002-service-registry-and-poll/`.
-- Expected hive PRD-005 (health rail and health page) at `../../../../../hive/library/requirements/backlog/prd-005-health-rail-and-health-page/`.
+- doctor PRD-001 (source-of-truth telemetry) at [`../../../../../doctor/library/requirements/backlog/prd-001-service-registration-and-telemetry-ingestion/`](../../../../../doctor/library/requirements/backlog/prd-001-service-registration-and-telemetry-ingestion/prd-001-service-registration-and-telemetry-ingestion-index.md).
+- doctor PRD-002 (telemetry SoT, SSE, and schema) at [`../../../../../doctor/library/requirements/backlog/prd-002-telemetry-sot-sse-and-schema/`](../../../../../doctor/library/requirements/backlog/prd-002-telemetry-sot-sse-and-schema/prd-002-telemetry-sot-sse-and-schema-index.md).
+- hive PRD-005 (health rail and page) at [`../../../../../hive/library/requirements/backlog/prd-005-health-rail-and-page/`](../../../../../hive/library/requirements/backlog/prd-005-health-rail-and-page/prd-005-health-rail-and-page-index.md).
 - [PRD-054: Fleet Observation, Control Plane and Read-Only Dashboard](../prd-054-fleet-observation-control-plane/prd-054-fleet-observation-control-plane-index.md) - the read-only-dashboard portion is superseded by the realignment; presence-store precedent for local SQLite telemetry.
-- [PRD-069: Application Health Dashboard](../prd-069-application-health-dashboard/prd-069-application-health-dashboard-index.md) - superseded health surface; its health model informs the check-in health field.
+- [PRD-069: Application Health Dashboard](../../archive/prd-069-application-health-dashboard/prd-069-application-health-dashboard-index.md) (archived; canonical reference copy is hive PRD-007) - superseded health surface; its health model informs the check-in health field.
 - `src/daemon/runtime/dashboard/` - existing counters reused as metric sources.
 - `src/daemon/runtime/server.ts` - `/health` source for the check-in health value.

@@ -1,8 +1,8 @@
 # PRD-069: Application Health Dashboard
 
-> **Status:** Superseded by [doctor PRD-001](../../../../../doctor/library/requirements/backlog/prd-001-telemetry-source-of-truth/) and [doctor PRD-002](../../../../../doctor/library/requirements/backlog/prd-002-service-registry-and-poll/) (source-of-truth telemetry) plus [hive PRD-005 (health rail and health page)](../../../../../hive/library/requirements/backlog/prd-005-health-rail-and-health-page/).
+> **Status:** Superseded by [doctor PRD-001](../../../../../doctor/library/requirements/backlog/prd-001-service-registration-and-telemetry-ingestion/prd-001-service-registration-and-telemetry-ingestion-index.md) and [doctor PRD-002](../../../../../doctor/library/requirements/backlog/prd-002-telemetry-sot-sse-and-schema/prd-002-telemetry-sot-sse-and-schema-index.md) (source-of-truth telemetry) plus [hive PRD-005 (health rail and page)](../../../../../hive/library/requirements/backlog/prd-005-health-rail-and-page/prd-005-health-rail-and-page-index.md). Archived 2026-07-03; a reference copy lives in the hive repo as hive PRD-007 (`hive/library/requirements/archive/prd-007-application-health-dashboard/`).
 >
-> The health dashboard is no longer honeycomb-owned. doctor is now the single source of truth for fleet telemetry (PRD-001 and PRD-002) and hive renders the health rail and health page (PRD-005). Honeycomb's contribution is to emit its own non-sensitive telemetry as a supervised service (see [PRD-071](../prd-071-service-checkin-and-sqlite-telemetry/prd-071-service-checkin-and-sqlite-telemetry-index.md)).
+> The health dashboard is no longer honeycomb-owned. doctor is now the single source of truth for fleet telemetry (PRD-001 and PRD-002) and hive renders the health rail and health page (PRD-005). Honeycomb's contribution is to emit its own non-sensitive telemetry as a supervised service (see [PRD-071](../../backlog/prd-071-service-checkin-and-sqlite-telemetry/prd-071-service-checkin-and-sqlite-telemetry-index.md)).
 
 > **Status:** Backlog
 > **Priority:** P1

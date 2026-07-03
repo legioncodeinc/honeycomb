@@ -1,8 +1,8 @@
 # PRD-070: First Browser Load Experience
 
-> **Status:** Superseded by [hive PRD-003 (landing gate)](../../../../../hive/library/requirements/backlog/prd-003-portal-gate-and-routing/) and [hive PRD-004 (/buzzing)](../../../../../hive/library/requirements/backlog/prd-004-buzzing/).
+> **Status:** Superseded by [hive PRD-003 (portal landing gate and routing)](../../../../../hive/library/requirements/backlog/prd-003-portal-landing-gate-and-routing/prd-003-portal-landing-gate-and-routing-index.md) and [hive PRD-004 (/buzzing service loaders)](../../../../../hive/library/requirements/backlog/prd-004-buzzing-service-loaders/prd-004-buzzing-service-loaders-index.md). Archived 2026-07-03; a reference copy lives in the hive repo as hive PRD-008 (`hive/library/requirements/archive/prd-008-first-browser-load-experience/`).
 >
-> The first browser load is now owned by hive portal: PRD-003 defines the landing gate and PRD-004 defines the /buzzing boot experience. Honeycomb no longer serves this surface; its fleet role is defined in [PRD-071](../prd-071-service-checkin-and-sqlite-telemetry/prd-071-service-checkin-and-sqlite-telemetry-index.md).
+> The first browser load is now owned by hive portal: PRD-003 defines the landing gate and PRD-004 defines the /buzzing boot experience. Honeycomb no longer serves this surface; its fleet role is defined in [PRD-071](../../backlog/prd-071-service-checkin-and-sqlite-telemetry/prd-071-service-checkin-and-sqlite-telemetry-index.md).
 
 > **Status:** Backlog
 > **Priority:** P2
