@@ -142,3 +142,5 @@ stryker.log
 # Security-worker-bee close-out scratch dir (grep findings, npm-audit json, scan
 # summaries). A local audit artifact written during the security pass — never committed.
 .scan-output/
+
+**/.DS_Store
