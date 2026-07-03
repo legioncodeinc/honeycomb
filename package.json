@@ -88,6 +88,7 @@
     "@stryker-mutator/core": "^8.7.1",
     "@stryker-mutator/vitest-runner": "^8.7.1",
     "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.10",
     "@types/react": "^18.3.31",
     "@types/react-dom": "^18.3.7",
     "@vitest/coverage-v8": "^3.2.6",
@@ -127,8 +128,10 @@
     "zod": "^4.4.3"
   },
   "//optionalDependencies": "PRD-025 D-2: the embedding RUNTIME (@huggingface/transformers + its ONNX native runtime, ~600 MB with the nomic-embed-text-v1.5 model acquired at first-run) ships as an OPTIONAL dependency, NOT in the `files` allowlist. This keeps the published @legioncodeinc/honeycomb tarball LEAN (the model is downloaded + cached on the daemon's first warmup, not packed — AC-7) and keeps `npm i` fast for everyone; a `--no-optional` / slimmed / offline install simply runs recall on the BM25/ILIKE lexical fallback (no quality cliff — D-4). The embed daemon dynamic-imports this only at warmup, so the bundle + CI never require it.",
+  "//optionalDependencies-pg": "Self-hosted backend (PgDeepLakeTransport, src/daemon/storage/pg-transport.ts): `pg` is used ONLY when the storage endpoint is a postgres:// URL (a self-hosted Activeloop pg_deeplake backend). It is OPTIONAL and dynamic-imported at the first query, so the default HTTP path, the lean cloud bundles, and a `--no-optional` install never need it; esbuild externalizes it so it is never bundled.",
   "optionalDependencies": {
-    "@huggingface/transformers": "^3.8.1"
+    "@huggingface/transformers": "^3.8.1",
+    "pg": "^8.13.1"
   },
   "//overrides": "Dependabot transitive-devDependency remediation. All are DEV-only and never ship (the `files` allowlist packs built bundles, not node_modules), so consumer risk is nil — these clear the dev/CI tree. tmp ^0.2.6 fixes GHSA-ph9p-34f9-6g65 (HIGH path traversal) + GHSA-52f5-9888-hmc6 (symlink write), reached only via @stryker-mutator/core -> @inquirer/prompts -> external-editor -> tmp (which calls only tmpNameSync, stable across the 0.0.33->0.2.x major). esbuild ^0.28.1 fixes GHSA-g7r4-m6w7-qqqr (Windows dev-server file read) in vitest's nested copy; the direct dep is already 0.28.1. @babel/core ^7.29.6 fixes GHSA-4x5r-pxfx-6jf8 (sourceMappingURL file read) under @stryker-mutator/instrumenter. ajv ^8.20.0 fixes GHSA-2g4f-4pwh-qvx6 ($data ReDoS) under @stryker-mutator/core's schema validator — a same-major bump (8.17.1 -> 8.20.x), preferred over npm audit's suggested breaking @stryker-mutator/core 9.x major. Validated by npm run mutation (exercises tmp+babel+ajv schema load) + npm run ci/build (exercises esbuild).",
   "overrides": {
