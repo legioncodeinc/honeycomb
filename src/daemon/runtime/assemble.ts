@@ -2238,11 +2238,22 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 
 	// ── Deep Lake idle-cost master switch (cost incident follow-up). The controller is built
 	// at the END of `start()` (once the workers + their lease topology are known) and assigned
-	// here. `onActivity` is the WAKE signal: an inbound HTTP request (a capture, a recall, a CLI
-	// call) means an agent is live and needs the shared Deep Lake pool, so it cancels/defers
-	// hibernation. It is registered as a root middleware BEFORE any route group is mounted so it
-	// fires for every request. Background worker queries are NOT inbound requests, so they never
-	// spuriously keep the daemon awake — only real agent activity does.
+	// here. `onActivity` is the WAKE signal: a work-carrying inbound HTTP request (a capture, a
+	// recall, a hooks/mcp/dashboard call) means an agent is live and needs the shared Deep Lake
+	// pool, so it cancels/defers hibernation. Background worker queries are NOT inbound requests,
+	// so they never spuriously keep the daemon awake — only real agent activity does.
+	//
+	// INTENDED DESIGN, enforced by REGISTRATION ORDER (do not reorder): this wildcard middleware
+	// is registered AFTER `createDaemon(createOptions)` above has already mounted the terminal
+	// `/health` and `/api/status` handlers (server.ts, a no-touch file). Hono composes matched
+	// handlers in registration order, so those two liveness routes resolve and return WITHOUT
+	// ever running this middleware: a monitoring poller hitting `/health` on a short interval
+	// must NOT count as activity, or the idle window would never elapse, the Activeloop pod
+	// would stay warm forever, and hibernation would never fire. Every work-carrying surface
+	// (capture, recall, hooks, mcp, dashboard) is mounted AFTER this middleware by
+	// `assembleSeams()` below, so real work always wakes. Moving this registration above
+	// `createDaemon()`, or mounting a work route before it, silently flips that split; the
+	// non-waking/waking behavior is pinned by tests/daemon/runtime/assemble-hibernation.test.ts.
 	let hibernation: DeepLakeHibernation | null = null;
 	const hibernationConfig = envHibernationConfigProvider();
 	const onActivity = (): void => hibernation?.touch();

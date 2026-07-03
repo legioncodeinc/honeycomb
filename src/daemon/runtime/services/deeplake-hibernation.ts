@@ -42,6 +42,19 @@
  * cold-start (a few seconds to re-provision the pod); responses are simply slower at
  * spin-up, which is the accepted trade for an idle cost of ~zero.
  *
+ * ── INTENDED DESIGN: liveness/status endpoints are deliberately NON-WAKING ───
+ * Only real work wakes the daemon. The wake signal (`touch()`) is wired to the
+ * work-carrying HTTP surfaces (capture, recall, hooks, mcp, dashboard); the two
+ * read-only liveness routes, `/health` and `/api/status`, intentionally do NOT
+ * touch the controller. Monitoring pollers hit `/health` on a short interval, and
+ * if a liveness probe counted as activity the idle window would never elapse: the
+ * Activeloop pod would stay warm forever and hibernation would never fire, which
+ * is exactly the cost bug this controller exists to fix. A hibernated daemon still
+ * answers `/health` (the cached health bit needs no Deeplake round trip). The
+ * mechanism enforcing the split is Hono registration order at the composition root
+ * (see the touch-middleware wiring comment in assemble.ts), and the behavior is
+ * pinned by tests/daemon/runtime/assemble-hibernation.test.ts.
+ *
  * ── No I/O, no clock-of-record ───────────────────────────────────────────────
  * The controller owns no Deep Lake access and no wall clock. It calls the injected
  * `pause()`/`resume()` on its handles and the injected `now`/`setTimer`/`clearTimer`
