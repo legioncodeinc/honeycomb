@@ -1,31 +1,33 @@
 {
-	"id": "honeycomb",
-	"name": "Honeycomb",
-	"description": "Honeycomb — persistent shared memory for AI agents via the local Honeycomb daemon",
-	"skills": ["./skills"],
-	"uiHints": {
-		"autoCapture": {
-			"label": "Auto-Capture"
-		},
-		"autoRecall": {
-			"label": "Auto-Recall"
-		}
-	},
-	"configSchema": {
-		"type": "object",
-		"additionalProperties": false,
-		"properties": {
-			"autoCapture": {
-				"type": "boolean"
-			},
-			"autoRecall": {
-				"type": "boolean"
-			},
-			"tuning": {
-				"type": "object",
-				"additionalProperties": true
-			}
-		}
-	},
-	"version": "0.1.14"
+  "id": "honeycomb",
+  "name": "Honeycomb",
+  "description": "Honeycomb — persistent shared memory for AI agents via the local Honeycomb daemon",
+  "skills": [
+    "./skills"
+  ],
+  "uiHints": {
+    "autoCapture": {
+      "label": "Auto-Capture"
+    },
+    "autoRecall": {
+      "label": "Auto-Recall"
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "autoCapture": {
+        "type": "boolean"
+      },
+      "autoRecall": {
+        "type": "boolean"
+      },
+      "tuning": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  },
+  "version": "0.2.0"
 }
