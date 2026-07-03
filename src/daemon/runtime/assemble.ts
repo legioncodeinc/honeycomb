@@ -127,6 +127,12 @@ import type { SecretScope } from "./secrets/contracts.js";
 import { createMachineKeyProvider, createSecretResolver, SecretsStore } from "./secrets/store.js";
 import { type CreateDaemonOptions, createDaemon, type Daemon, type DaemonServices } from "./server.js";
 import {
+	createDeepLakeHibernation,
+	type DeepLakeHibernation,
+	envHibernationConfigProvider,
+	type Pausable,
+} from "./services/deeplake-hibernation.js";
+import {
 	createEmbedAttachment,
 	type EmbedAttachment,
 	type EmbedClient,
@@ -2230,6 +2236,32 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	};
 	const daemon = createDaemon(createOptions);
 
+	// ── Deep Lake idle-cost master switch (cost incident follow-up). The controller is built
+	// at the END of `start()` (once the workers + their lease topology are known) and assigned
+	// here. `onActivity` is the WAKE signal: a work-carrying inbound HTTP request (a capture, a
+	// recall, a hooks/mcp/dashboard call) means an agent is live and needs the shared Deep Lake
+	// pool, so it cancels/defers hibernation. Background worker queries are NOT inbound requests,
+	// so they never spuriously keep the daemon awake — only real agent activity does.
+	//
+	// INTENDED DESIGN, enforced by REGISTRATION ORDER (do not reorder): this wildcard middleware
+	// is registered AFTER `createDaemon(createOptions)` above has already mounted the terminal
+	// `/health` and `/api/status` handlers (server.ts, a no-touch file). Hono composes matched
+	// handlers in registration order, so those two liveness routes resolve and return WITHOUT
+	// ever running this middleware: a monitoring poller hitting `/health` on a short interval
+	// must NOT count as activity, or the idle window would never elapse, the Activeloop pod
+	// would stay warm forever, and hibernation would never fire. Every work-carrying surface
+	// (capture, recall, hooks, mcp, dashboard) is mounted AFTER this middleware by
+	// `assembleSeams()` below, so real work always wakes. Moving this registration above
+	// `createDaemon()`, or mounting a work route before it, silently flips that split; the
+	// non-waking/waking behavior is pinned by tests/daemon/runtime/assemble-hibernation.test.ts.
+	let hibernation: DeepLakeHibernation | null = null;
+	const hibernationConfig = envHibernationConfigProvider();
+	const onActivity = (): void => hibernation?.touch();
+	daemon.app.use("*", async (_c, next) => {
+		onActivity();
+		await next();
+	});
+
 	// ── PRD-025 AC-2: the embed seam wired into the store + capture paths. Default to the
 	// REAL `{ client, attacher }` pair (D-1 default-on, resolved from the env), built ONCE
 	// here and threaded into BOTH the capture handler (the full attachment) and the memories
@@ -2482,6 +2514,32 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		}
 	}
 
+	// ── Idle-cost hibernation seams: arm/disarm the two Deep Lake-touching timers so the
+	// hibernation controller can silence them while idle and revive them on the next request.
+	// Factored from the original inline `start()` blocks so the arm logic lives once.
+	function armUnrefInterval(cb: () => void, ms: number): ReturnType<typeof setInterval> {
+		const t = setInterval(cb, ms);
+		if (typeof (t as NodeJS.Timeout).unref === "function") (t as NodeJS.Timeout).unref();
+		return t;
+	}
+	function armHealthProbe(): void {
+		if (!storageHealthProbeEnabled || probeTimer !== null) return;
+		probeTimer = armUnrefInterval(() => void refreshHealth(), probeIntervalMs);
+	}
+	function armGraphBuild(): void {
+		if (!autoBuildGraph || graphBuildTimer !== null) return;
+		graphBuildTimer = armUnrefInterval(() => void rebuildCodebaseGraph(), DEFAULT_GRAPH_BUILD_INTERVAL_MS);
+	}
+	// The PRD-223 pollinating maintenance tick calls checkAndEnqueuePollinating, which queries
+	// Deeplake, so it must hibernate with the workers or it keeps the Activeloop pod warm forever.
+	// Its handle self-schedules and cannot be restarted after stop(), so — exactly like the health
+	// probe and graph build above — resume RE-ARMS it by building a fresh tick rather than reviving
+	// the stopped one. Idempotent: a second arm with a live tick is a no-op.
+	function armPollinatingMaintenanceTick(): void {
+		if (pollinatingMaintenanceTick !== null) return;
+		pollinatingMaintenanceTick = startPollinatingMaintenanceTick(pollinatingTrigger, { agentId: "default" });
+	}
+
 	let started = false;
 	let locked = false;
 	// PRD-026 AC-W: the daemon-resident pollinating worker. Built + started ONLY when
@@ -2539,12 +2597,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				const initialHealthProbe = refreshHealth();
 				if (awaitInitialHealthProbe) await initialHealthProbe;
 				else void initialHealthProbe;
-				probeTimer = setInterval(() => {
-					void refreshHealth();
-				}, probeIntervalMs);
-				if (typeof (probeTimer as NodeJS.Timeout).unref === "function") {
-					(probeTimer as NodeJS.Timeout).unref();
-				}
+				armHealthProbe();
 			}
 
 			// PRD-041: kick the initial codebase-graph build OFF the readiness path (fire-and-forget
@@ -2553,19 +2606,14 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// `autoBuildGraph`), so the unit suite never triggers a real parse.
 			if (autoBuildGraph) {
 				void rebuildCodebaseGraph();
-				graphBuildTimer = setInterval(() => {
-					void rebuildCodebaseGraph();
-				}, DEFAULT_GRAPH_BUILD_INTERVAL_MS);
-				if (typeof (graphBuildTimer as NodeJS.Timeout).unref === "function") {
-					(graphBuildTimer as NodeJS.Timeout).unref();
-				}
+				armGraphBuild();
 			}
 
 			// Start the daemon's real services (queue → watcher → runtime-path).
 			await daemon.startServices();
 			if (!startBackgroundWorkers) return;
 
-			pollinatingMaintenanceTick = startPollinatingMaintenanceTick(pollinatingTrigger, { agentId: "default" });
+			armPollinatingMaintenanceTick();
 
 			// ── PRD-062b: resolve the adaptive-backoff + consolidation knobs ONCE, fail-soft.
 			// A malformed knob must NEVER take the daemon down — degrade to the schema's
@@ -2813,6 +2861,87 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 					}
 				}
 			}
+
+			// ── Wire + start the Deep Lake idle-cost master switch. Collect every background
+			// activity that touches Deep Lake on a timer as a Pausable, then let the controller
+			// silence them after `idleMs` with no inbound request so the connection drops and
+			// Activeloop scales the per-tenant pod to zero; the next request wakes them. With the
+			// flag off (the rollback) this whole block is skipped and every loop runs as before.
+			if (hibernationConfig.enabled && startBackgroundWorkers) {
+				const pausables: Pausable[] = [];
+				const addWorker = (label: string, h: { start(): void; stop(): void } | null): void => {
+					if (h !== null) pausables.push({ label, pause: () => h.stop(), resume: () => h.start() });
+				};
+				addWorker("summary", summaryWorker);
+				addWorker("skillify", skillifyWorker);
+				// Pause whatever actually drives the lease loop: the consolidated coordinator, or the
+				// two workers when running independently (never both — see the consolidation block).
+				if (leaseCoordinator !== null) addWorker("lease-coordinator", leaseCoordinator);
+				else {
+					addWorker("pipeline", pipelineWorker);
+					addWorker("pollinating", pollinatingWorker);
+				}
+				// PRD-223's pollinating maintenance tick queries Deeplake (checkAndEnqueuePollinating),
+				// so it must go quiet while hibernated or it keeps the Activeloop pod warm forever and
+				// silently defeats the master switch. Pause stops + drops the handle; resume re-arms a
+				// fresh tick (the handle is not restartable), exactly like health-probe / graph-build.
+				pausables.push({
+					label: "pollinating-maintenance-tick",
+					pause: () => {
+						if (pollinatingMaintenanceTick !== null) {
+							pollinatingMaintenanceTick.stop();
+							pollinatingMaintenanceTick = null;
+						}
+					},
+					resume: armPollinatingMaintenanceTick,
+				});
+				if (storageHealthProbeEnabled) {
+					pausables.push({
+						label: "health-probe",
+						pause: () => {
+							if (probeTimer !== null) {
+								clearInterval(probeTimer);
+								probeTimer = null;
+							}
+						},
+						resume: armHealthProbe,
+					});
+				}
+				if (autoBuildGraph) {
+					pausables.push({
+						label: "graph-build",
+						pause: () => {
+							if (graphBuildTimer !== null) {
+								clearInterval(graphBuildTimer);
+								graphBuildTimer = null;
+							}
+						},
+						resume: armGraphBuild,
+					});
+				}
+				if (pausables.length > 0) {
+					hibernation = createDeepLakeHibernation({
+						pausables,
+						config: hibernationConfig,
+						now: () => Date.now(),
+						timers: {
+							setTimer: (cb, ms) => {
+								const t = setTimeout(cb, ms);
+								if (typeof t.unref === "function") t.unref();
+								return t;
+							},
+							clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+						},
+						// Adapt the daemon's structured logger onto the controller's HibernationLogger
+						// seam (same posture as the capture logger wiring): hibernate/wake transitions
+						// (`deeplake.hibernated` / `deeplake.woke`) and swallowed handle errors
+						// (`hibernate.pause.error` / `wake.resume.error`) land in the event ring buffer
+						// instead of vanishing, so the cost fix is observable in production.
+						logger: { info: (event, fields) => daemon.logger.event(event, fields) },
+					});
+					hibernation.start();
+				}
+			}
 		},
 
 		async shutdown(): Promise<void> {
@@ -2822,6 +2951,10 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// and never throws (a flush failure is logged inside the handler, not surfaced here). The
 			// `?.` tolerates a test seam whose fake capture handler does not implement `flush`.
 			await captureHandler.flush?.();
+			// Stop the idle-cost hibernation monitor first so a wake can never race the teardown
+			// below. It only cancels its own timer; the workers' own stop() does the real teardown.
+			hibernation?.stop();
+			hibernation = null;
 			// a-AC-5: graceful shutdown — stop the pollinating worker + the refresher, drain the
 			// services, and remove the lock so no stale lock survives. Idempotent + never throws
 			// on a missing lock.
