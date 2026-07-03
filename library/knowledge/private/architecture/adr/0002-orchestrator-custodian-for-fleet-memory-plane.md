@@ -1,7 +1,9 @@
 # ADR-0002, Orchestrator-custodian for fleet memory-plane enrollment
 
+> **SUPERSEDED (2026-07-03):** Relocated to Queen, the fleet orchestrator. Canonical copy: `queen/library/knowledge/private/architecture/ADR-0002-orchestrator-custodian-for-fleet-memory-plane.md`. Retained here for history only; do not update.
+
 > **Status:** Proposed (exploratory) | **Date:** 2026-06-29
-> **Supersedes:** none | **Superseded by:** none
+> **Supersedes:** none | **Superseded by:** queen ADR-0002 (relocated)
 > **Owners:** fleet, security, integrations | **Related:** PRD-054, PRD-055, PRD-062
 
 ## Context

@@ -1,5 +1,7 @@
 # PRD-054b: Daemon Presence Reporter
 
+> **SUPERSEDED (2026-07-03):** Cloud fleet/team management now belongs to Queen, the fleet orchestrator. The canonical copy of this document lives at `queen/library/requirements/backlog/prd-054-fleet-observation-control-plane/prd-054b-fleet-observation-control-plane-daemon-presence-reporter.md`. This copy is retained for history only; do not update it here.
+
 > **Parent:** [PRD-054](./prd-054-fleet-observation-control-plane-index.md)
 > **Status:** Draft
 > **Priority:** P2

@@ -1,5 +1,7 @@
 # Device And Fleet Enrollment State Machine
 
+> **SUPERSEDED (2026-07-03):** Relocated to Queen, the fleet orchestrator. Canonical copy: `queen/library/knowledge/private/auth/device-and-fleet-enrollment-state-machine.md`. Retained here for history only; do not update.
+
 > Category: Auth | Version: 1.0 | Date: June 2026 | Status: Proposed
 
 How Honeycomb devices, headless servers, and fleet orchestrators move from first sign-in to memory-ready, including the states users see when approval, rewrap, recovery, or revocation is incomplete.

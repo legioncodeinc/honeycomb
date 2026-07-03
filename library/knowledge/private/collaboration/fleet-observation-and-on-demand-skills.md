@@ -1,5 +1,7 @@
 # Harness Fleet Observation and On-Demand Skill Sharing
 
+> **SUPERSEDED (2026-07-03):** Relocated to Queen, the fleet orchestrator. Canonical copy: `queen/library/knowledge/private/collaboration/fleet-observation-and-on-demand-skills.md`. Retained here for history only; do not update.
+
 > Category: Collaboration | Version: 0.1 | Date: June 2026 | Status: Proposed (Design)
 
 A forward-looking design for observing and steering a fleet of Honeycomb-equipped agents (across Claude Code, Codex, Cursor, OpenClaw, Hermes, and pi), and for serving the team skill library on demand instead of eagerly syncing all of it to every agent. This doc is a design proposal, not shipped behavior: it grounds the proposal in the code that exists today and in external prior art, and calls out the decisions still open.

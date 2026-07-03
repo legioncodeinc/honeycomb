@@ -1,5 +1,7 @@
 # PRD-061d: Per-User Gating on the Verified Backend User-Claim
 
+> **SUPERSEDED (2026-07-03):** Cloud fleet/team management now belongs to Queen, the fleet orchestrator. The canonical copy of this document lives at `queen/library/requirements/backlog/prd-061-hosted-roi-admin-surface/prd-061d-hosted-roi-admin-surface-per-user-claim-gating.md`. This copy is retained for history only; do not update it here.
+
 > **Parent:** [PRD-061](./prd-061-hosted-roi-admin-surface-index.md)
 > **Status:** Backlog, draft (2026-06-26), **blocked on an external backend dependency**
 > **Priority:** P2 (the gate that keeps per-user leaderboards honest; inert until the dependency lands)

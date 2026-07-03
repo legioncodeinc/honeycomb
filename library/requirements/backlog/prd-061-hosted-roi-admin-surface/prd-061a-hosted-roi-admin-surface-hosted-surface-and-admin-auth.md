@@ -1,5 +1,7 @@
 # PRD-061a: Hosted Surface + Admin Auth / Access-Control Model
 
+> **SUPERSEDED (2026-07-03):** Cloud fleet/team management now belongs to Queen, the fleet orchestrator. The canonical copy of this document lives at `queen/library/requirements/backlog/prd-061-hosted-roi-admin-surface/prd-061a-hosted-roi-admin-surface-hosted-surface-and-admin-auth.md`. This copy is retained for history only; do not update it here.
+
 > **Parent:** [PRD-061](./prd-061-hosted-roi-admin-surface-index.md)
 > **Status:** Backlog, draft (2026-06-26)
 > **Priority:** P2, **security-critical** (the authorization spine; the partition-crossing seam is the highest-risk decision in the ROI set)

@@ -1,5 +1,7 @@
 # PRD-061b: Aggregation Read API over `roi_metrics` / `teams`
 
+> **SUPERSEDED (2026-07-03):** Cloud fleet/team management now belongs to Queen, the fleet orchestrator. The canonical copy of this document lives at `queen/library/requirements/backlog/prd-061-hosted-roi-admin-surface/prd-061b-hosted-roi-admin-surface-aggregation-read-api.md`. This copy is retained for history only; do not update it here.
+
 > **Parent:** [PRD-061](./prd-061-hosted-roi-admin-surface-index.md)
 > **Status:** Backlog, draft (2026-06-26)
 > **Priority:** P2 (the read layer the hosted frontend consumes)

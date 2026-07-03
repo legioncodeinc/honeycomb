@@ -1,7 +1,9 @@
 # ADR-0005, Recovery, revocation, and escrow policy
 
+> **SUPERSEDED (2026-07-03):** Relocated to Queen, the fleet orchestrator. Canonical copy: `queen/library/knowledge/private/architecture/ADR-0005-recovery-revocation-and-escrow-policy.md`. Retained here for history only; do not update.
+
 > **Status:** Proposed (exploratory) | **Date:** 2026-06-29
-> **Supersedes:** none | **Superseded by:** none
+> **Supersedes:** none | **Superseded by:** queen ADR-0005 (relocated)
 > **Owners:** security, auth, support, cloud-control-plane | **Related:** ADR-0002, ADR-0003, ADR-0004
 
 ## Context
