@@ -40,6 +40,10 @@ function fakeLifecycle(): DaemonLifecycle {
 	};
 }
 
+async function reachablePortalProbe(): Promise<boolean> {
+	return true;
+}
+
 function recordingFetch(opts: { throws?: boolean } = {}) {
 	const calls: { url: string; init: TelemetryFetchRequestInit }[] = [];
 	return {
@@ -78,6 +82,7 @@ describe("e-AC-1/e-AC-5 honeycomb install emits honeycomb_installed once, dedupe
 			daemon: createFakeDaemonClient({ alive: true }),
 			lifecycle: fakeLifecycle(),
 			openDashboard: () => true,
+			probeDashboard: reachablePortalProbe,
 			dir,
 			out: () => {},
 			telemetry: { fetch: rec.fetch, posthogKey: KEY },
@@ -105,6 +110,7 @@ describe("e-AC-4 install telemetry is fire-and-forget: a throwing fetch leaves t
 			daemon: createFakeDaemonClient({ alive: true }),
 			lifecycle: fakeLifecycle(),
 			openDashboard: () => true,
+			probeDashboard: reachablePortalProbe,
 			dir: d,
 			out: () => {},
 			telemetry: { fetch: telemetryFetch, posthogKey: KEY },
@@ -131,6 +137,7 @@ describe("honeycomb_updated fires from the install verb when the build version c
 			daemon: createFakeDaemonClient({ alive: true }),
 			lifecycle: fakeLifecycle(),
 			openDashboard: () => true,
+			probeDashboard: reachablePortalProbe,
 			dir,
 			out: () => {},
 			telemetry: { fetch: rec.fetch, posthogKey: KEY, version },
@@ -238,6 +245,7 @@ describe("e-AC-8 honeycomb telemetry --show renders the glass box", () => {
 			daemon: createFakeDaemonClient({ alive: true }),
 			lifecycle: fakeLifecycle(),
 			openDashboard: () => true,
+			probeDashboard: reachablePortalProbe,
 			dir,
 			out: () => {},
 			telemetry: { fetch: rec.fetch, posthogKey: KEY },

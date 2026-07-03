@@ -36,13 +36,14 @@ import { runSettingsVerb } from "./settings.js";
 import { runAssetVerb } from "./asset.js";
 import { runStorageVerb } from "./storage-handlers.js";
 import { runStatusCommand, type StatusDeps } from "./status.js";
-import { type LocalDeps, runConnectorVerb, runDashboardCommand, runHookCommand, runUpdateCommand } from "./local-handlers.js";
 import {
-	type DaemonLifecycle,
-	type DaemonVerbDeps,
-	ensureDaemonRunning,
-	runDaemonCommand,
-} from "./daemon.js";
+	type LocalDeps,
+	runConnectorVerb,
+	runDashboardCommand,
+	runHookCommand,
+	runUpdateCommand,
+} from "./local-handlers.js";
+import { type DaemonLifecycle, type DaemonVerbDeps, ensureDaemonRunning, runDaemonCommand } from "./daemon.js";
 import { type InstallVerbDeps, runInstallCommand } from "./install.js";
 import { type TelemetryVerbDeps, runTelemetryCommand } from "./telemetry.js";
 import { HONEYCOMB_VERSION, PRODUCT_SLUG } from "../shared/constants.js";
@@ -101,7 +102,14 @@ const HONEYCOMB_BANNER = [
  * column is padded to the widest verb so summaries align.
  */
 export function usageText(): string {
-	const lines: string[] = [HONEYCOMB_BANNER, "", `${PRODUCT_SLUG} v${HONEYCOMB_VERSION}`, "", "usage: honeycomb <command> [options]", ""];
+	const lines: string[] = [
+		HONEYCOMB_BANNER,
+		"",
+		`${PRODUCT_SLUG} v${HONEYCOMB_VERSION}`,
+		"",
+		"usage: honeycomb <command> [options]",
+		"",
+	];
 	const pad = VERB_TABLE.reduce((w, s) => Math.max(w, s.verb.length), 0) + 2;
 	for (const { key, label } of VERB_GROUPS) {
 		const rows = VERB_TABLE.filter((s) => s.group === key);
@@ -133,14 +141,17 @@ function daemonVerbDeps(deps: CommandDeps): DaemonVerbDeps {
  * The deps the `install` verb (PRD-050a) runs against: the daemon HTTP+lifecycle seams (for the
  * health-gated ensure-running) plus the onboarding-state `dir` override. The browser opener is left
  * unbound — `runInstallCommand` defaults to the production fixed-argv opener; only a test injects a
- * recorder. `deps.openDashboard` is forwarded when present so a bin/test can override it.
+ * recorder. `deps.openDashboard` and `deps.probeDashboard` (the C-6 portal reachability probe) are
+ * forwarded when present so a bin/test can override them.
  */
 function installVerbDeps(deps: CommandDeps): InstallVerbDeps {
 	const opener = (deps as { openDashboard?: InstallVerbDeps["openDashboard"] }).openDashboard;
+	const probe = (deps as { probeDashboard?: InstallVerbDeps["probeDashboard"] }).probeDashboard;
 	return {
 		...daemonVerbDeps(deps),
 		...(deps.dir !== undefined ? { dir: deps.dir } : {}),
 		...(opener !== undefined ? { openDashboard: opener } : {}),
+		...(probe !== undefined ? { probeDashboard: probe } : {}),
 	};
 }
 

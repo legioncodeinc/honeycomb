@@ -792,8 +792,9 @@ function Send-ProductTransitions([string]$CurrentProducts, [string]$SelProfile, 
 
 # -----------------------------------------------------------------------------
 # Step 3 -- hand off to the CLI verb for the daemon-ensure + health-gate + dashboard
-#           open. The verb is idempotent + health-gated (a-AC-2 / a-AC-4) and opens
-#           honeycomb.local -> loopback (a-AC-6), writing onboarding "installed" (a-AC-5).
+#           handling. The verb is idempotent + health-gated (a-AC-2 / a-AC-4), writes
+#           onboarding "installed" (a-AC-5), and either opens the portal when reachable or
+#           prints one plain sentence with the install command for Hive when it is not.
 # -----------------------------------------------------------------------------
 # Returns a status CODE (never calls `exit`): in the documented `irm ... | iex` bootstrap, `exit`
 # terminates the CALLER's PowerShell host and can close the user's terminal. The single process-exit
@@ -908,7 +909,7 @@ function Invoke-Main([string[]]$InvocationArgs) {
   if (-not $dryRun -and -not $extraProductFailed) { Set-InstallState $selection.Products }
 
   if ($dryRun) {
-    Write-Host '[dry-run] would hand off to: honeycomb install (daemon-ensure + dashboard-open)'
+    Write-Host '[dry-run] would hand off to: honeycomb install (daemon-ensure + honest dashboard handling)'
     return (& $finish 0)
   }
 

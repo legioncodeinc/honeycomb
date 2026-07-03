@@ -957,9 +957,10 @@ finish() {
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Step 3; hand off to the CLI verb for the daemon-ensure + health-gate + dashboard
-#          open. The open logic lives ONCE in the CLI (src/commands/install.ts), not
-#          here. The verb is idempotent + health-gated (a-AC-2 / a-AC-4) and opens
-#          honeycomb.local → loopback (a-AC-6), writing onboarding "installed" (a-AC-5).
+#          handling. The open logic lives ONCE in the CLI (src/commands/install.ts), not
+#          here. The verb is idempotent + health-gated (a-AC-2 / a-AC-4), writes onboarding
+#          "installed" (a-AC-5), and either opens the portal when reachable or prints one
+#          plain sentence with the install command for Hive when it is not.
 # ─────────────────────────────────────────────────────────────────────────────
 main() {
   parse_args "$@"
@@ -1050,7 +1051,7 @@ main() {
   fi
 
   if [ "$DRY_RUN" -eq 1 ]; then
-    printf '[dry-run] would hand off to: honeycomb install (daemon-ensure + dashboard-open)\n'
+    printf '[dry-run] would hand off to: honeycomb install (daemon-ensure + honest dashboard handling)\n'
     finish 0
   fi
 

@@ -60,10 +60,7 @@ import type {
 } from "../../../dashboard/contracts.js";
 import { EMPTY_ROI_TREND, EMPTY_ROI_VIEW } from "../../../dashboard/contracts.js";
 import { scanInstalledAssets } from "./installed-assets.js";
-import {
-	SYNCED_ASSETS_TABLE,
-	TOMBSTONE_FALSE,
-} from "../../storage/catalog/synced-assets.js";
+import { SYNCED_ASSETS_TABLE, TOMBSTONE_FALSE } from "../../storage/catalog/synced-assets.js";
 import {
 	blendedCentsPerMtok,
 	type CapturedTurn,
@@ -111,6 +108,8 @@ export interface MountDashboardOptions {
 	 * contribution, never a fabricated `$0`). Threaded from the composition root which owns the singleton.
 	 */
 	readonly roiUsage?: SkillifyUsageSource;
+	/** Capture events acked but not durably written since boot (process-local counter). */
+	readonly captureDroppedEvents?: () => number;
 }
 
 /**
@@ -292,7 +291,11 @@ export async function fetchKpiCounts(storage: StorageQuery, scope: QueryScope, p
  * across the corpus) AND it moves slowly, so the route caches it on a LONGER TTL than the counts. Scoped
  * to the selected project (same predicate as the Memories count). `0` on an empty corpus or a storage error.
  */
-export async function fetchEstimatedSavings(storage: StorageQuery, scope: QueryScope, projectId?: string): Promise<number> {
+export async function fetchEstimatedSavings(
+	storage: StorageQuery,
+	scope: QueryScope,
+	projectId?: string,
+): Promise<number> {
 	const savingsRows = await selectRows(storage, buildEstimatedSavingsSql(projectId), scope);
 	// 035b: chars → tokens via the documented divisor. SUM is NULL on an empty corpus → toNum → 0.
 	return Math.floor(toNum(savingsRows[0]?.chars) / CHARS_PER_TOKEN);
@@ -424,7 +427,8 @@ export async function fetchSessionsView(
 	const projCol = sqlIdent("project");
 	const dateCol = sqlIdent("creation_date");
 	const pathCol = sqlIdent("path");
-	const limit = options?.limit !== undefined ? Math.min(Math.max(1, options.limit), MAX_SESSIONS_LIMIT) : DEFAULT_SESSIONS_LIMIT;
+	const limit =
+		options?.limit !== undefined ? Math.min(Math.max(1, options.limit), MAX_SESSIONS_LIMIT) : DEFAULT_SESSIONS_LIMIT;
 	// Fetch one extra row to know whether an older page exists (the cursor sentinel).
 	const fetchLimit = limit + 1;
 
@@ -472,11 +476,7 @@ export async function fetchSessionsView(
  * unit-constructed daemon / no creds) so the field is never empty. `orgId` is always the scope
  * org. Display-only — neither value loosens tenancy.
  */
-export function buildSettingsView(
-	scope: QueryScope,
-	config: DashboardSettingsConfig,
-	orgName?: string,
-): SettingsView {
+export function buildSettingsView(scope: QueryScope, config: DashboardSettingsConfig, orgName?: string): SettingsView {
 	return {
 		orgId: scope.org,
 		orgName: orgName !== undefined && orgName.length > 0 ? orgName : scope.org,
@@ -726,7 +726,9 @@ export interface FetchRoiOptions {
 const DEFAULT_ROI_READ_POLICY = "shared" as const;
 
 /** Map 060c's billing status / 060d's pollination status onto the contract's section status (one vocabulary). */
-function roiSectionStatusFor(status: PollinationStatus | "ok" | "partial" | "unreachable" | "unauthenticated"): RoiView["infra"]["status"] {
+function roiSectionStatusFor(
+	status: PollinationStatus | "ok" | "partial" | "unreachable" | "unauthenticated",
+): RoiView["infra"]["status"] {
 	// 060d's `measured` (Haiku-ok) maps to `ok` at the section level; everything else is 1:1.
 	if (status === "measured") return "ok";
 	return status;
@@ -778,7 +780,11 @@ const ROI_SESSIONS_LIMIT = 5000;
  * never a transcript/JSONB body. Fail-soft via `selectRows` (`[]` on any non-ok result). Identifiers
  * via `sqlIdent`; no interpolated value.
  */
-async function readCapturedTurns(storage: StorageQuery, scope: QueryScope, projectId?: string): Promise<CapturedTurn[]> {
+async function readCapturedTurns(
+	storage: StorageQuery,
+	scope: QueryScope,
+	projectId?: string,
+): Promise<CapturedTurn[]> {
 	const tbl = sqlIdent("sessions");
 	const dateCol = sqlIdent("creation_date");
 	const idCol = sqlIdent("id");
@@ -887,7 +893,8 @@ export async function fetchRoiView(
 	const readPolicy = options.readPolicy ?? DEFAULT_ROI_READ_POLICY;
 	const infraModel = options.infra ?? createInfraCostReadModel();
 	const usage = options.usage ?? emptyUsageSource;
-	const projectId = options.projectId !== undefined && options.projectId.trim() !== "" ? options.projectId.trim() : undefined;
+	const projectId =
+		options.projectId !== undefined && options.projectId.trim() !== "" ? options.projectId.trim() : undefined;
 
 	// Fail-soft fan-out (parity with fetchKpisView): each read is independently guarded so one
 	// failure degrades its section rather than nuking the whole view. `infraModel.read()` is itself
@@ -981,7 +988,8 @@ export function assembleRoiView(input: RoiAssemblyInputs): RoiView {
 	const netComputable = savingsPresent && infraConfident && pollinationConfident;
 	let netSection: RoiView["net"];
 	if (netComputable) {
-		const netCents = measured.value.savingsCents + modeled.value.estimatedCents - (infraCents + pollination.pollinationCents);
+		const netCents =
+			measured.value.savingsCents + modeled.value.estimatedCents - (infraCents + pollination.pollinationCents);
 		netSection = {
 			status: "ok",
 			computed: true,
@@ -1122,7 +1130,12 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 				countsCache(key, () => fetchKpiCounts(storage, scope, projectId)),
 				savingsCache(key, () => fetchEstimatedSavings(storage, scope, projectId)),
 			]);
-			return c.json({ ...counts, estimatedSavings });
+			const droppedEvents = options.captureDroppedEvents?.() ?? 0;
+			return c.json({
+				...counts,
+				estimatedSavings,
+				...(options.captureDroppedEvents !== undefined ? { extra: { captureDroppedEvents: droppedEvents } } : {}),
+			});
 		});
 	}
 
@@ -1144,7 +1157,11 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 			const limit = resolveSessionsLimit(c.req.query("limit"));
 			const before = decodeSessionsCursor(cursorRaw);
 			const key = scopeCacheKey(scope, String(limit), cursorRaw);
-			return c.json(await sessionsCache(key, () => fetchSessionsView(storage, scope, before !== undefined ? { limit, before } : { limit })));
+			return c.json(
+				await sessionsCache(key, () =>
+					fetchSessionsView(storage, scope, before !== undefined ? { limit, before } : { limit }),
+				),
+			);
 		});
 	}
 
@@ -1155,9 +1172,7 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 		settings.get("/settings", (c) => {
 			const scope = resolveScope(c);
 			if (scope === null) return c.json(NO_ORG_BODY, 400);
-			return c.json(
-				buildSettingsView(scope, { mode: daemon.config.mode, port: daemon.config.port }, options.orgName),
-			);
+			return c.json(buildSettingsView(scope, { mode: daemon.config.mode, port: daemon.config.port }, options.orgName));
 		});
 	}
 

@@ -61,6 +61,7 @@ import { buildInsert, selectBeforeInsert, val, type RowValues } from "../../stor
 // REUSE skillify's redaction at the mine boundary so a transcript secret never lands
 // in a summary (SECURITY — security-worker-bee, PRD-017 Wave 3). Imported, not forked.
 import { redactSecrets } from "../skillify/miner.js";
+import { estimateTokens } from "../pollinating/incremental.js";
 import { buildStructuredSummaryPrompt, parseSummaryGate } from "./key.js";
 import type { EmbedClient } from "../services/embed-client.js";
 import {
@@ -136,9 +137,7 @@ export function summaryPath(session: SummarySession): string {
 /** A short single-line excerpt of the markdown for the `description` column (FR-10). */
 export function excerptOf(markdown: string): string {
 	const oneLine = markdown.replace(/\s+/g, " ").trim();
-	return oneLine.length <= DESCRIPTION_EXCERPT_CHARS
-		? oneLine
-		: `${oneLine.slice(0, DESCRIPTION_EXCERPT_CHARS)}…`;
+	return oneLine.length <= DESCRIPTION_EXCERPT_CHARS ? oneLine : `${oneLine.slice(0, DESCRIPTION_EXCERPT_CHARS)}…`;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -169,9 +168,7 @@ export function createSessionEventFetcher(storage: StorageQuery, scope: QuerySco
 			const pathCol = sqlIdent("path");
 			const dateCol = sqlIdent("creation_date");
 			const sql =
-				`SELECT * FROM "${tbl}" ` +
-				`WHERE ${pathCol} = ${sLiteral(session.path)} ` +
-				`ORDER BY ${dateCol} ASC`;
+				`SELECT * FROM "${tbl}" ` + `WHERE ${pathCol} = ${sLiteral(session.path)} ` + `ORDER BY ${dateCol} ASC`;
 			const res = await storage.query(sql, scope);
 			if (!isOk(res)) return [];
 			return (res.rows as StorageRow[]).map(rowToSessionEvent);
@@ -227,9 +224,7 @@ export function createSummaryStore(
 		// fragment from serializeFloat4Array) or a raw NULL — both are `val.raw`, never
 		// hand-quoted. A non-768 vector is rejected to NULL so the write still succeeds.
 		const embeddingLit =
-			args.embedding !== null && args.embedding.length === 768
-				? serializeFloat4Array(args.embedding)
-				: "NULL";
+			args.embedding !== null && args.embedding.length === 768 ? serializeFloat4Array(args.embedding) : "NULL";
 		return [
 			["path", val.str(args.path)],
 			["filename", val.str(filenameOf(args.path))],
@@ -561,6 +556,12 @@ export const systemSleeper: Sleeper = {
 	},
 };
 
+/** Fail-soft seam: increment the pollinating token counter after a summary lands. */
+export interface PollinatingCounterIncrement {
+	/** Increment by `tokens` for the given agent scope (FR-2). Must never throw. */
+	increment(scope: { readonly agentId: string }, tokens: number): Promise<void>;
+}
+
 /** Construction deps for {@link runSummaryWorker} (everything IO-touching injected). */
 export interface SummaryWorkerDeps {
 	/** The per-session lock (a-AC-4). Default: the filesystem `O_EXCL` lock. */
@@ -577,6 +578,11 @@ export interface SummaryWorkerDeps {
 	readonly config?: WorkerConfig;
 	/** The backoff sleeper (a-AC-3). Injectable so a test drives the retry loop fast. */
 	readonly sleeper?: Sleeper;
+	/**
+	 * Optional pollinating counter increment (FR-2). Called fail-soft after a fresh summary write;
+	 * a counter failure must never fail the summary write.
+	 */
+	readonly pollinatingCounter?: PollinatingCounterIncrement;
 }
 
 /** Why a summary run did not write a row (the lock was held, or it gave up on no events). */
@@ -677,6 +683,14 @@ export async function runSummaryWorker(
 			author,
 		};
 		const outcome = await deps.store.writeSummary(row);
+		if (outcome.written && deps.pollinatingCounter !== undefined) {
+			try {
+				const tokens = estimateTokens(markdown);
+				await deps.pollinatingCounter.increment({ agentId: session.agentId ?? "default" }, tokens);
+			} catch {
+				/* fail-soft: counter failure must never fail the summary write (FR-2) */
+			}
+		}
 		return { ran: true, path, wrote: outcome.written, embedded: embedding !== null };
 	} finally {
 		// ALWAYS release — on success, on a no-events give-up, on a gate failure, on a throw.

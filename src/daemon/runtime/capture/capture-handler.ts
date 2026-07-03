@@ -66,6 +66,7 @@ import { budgetedStringify } from "./budgeted-stringify.js";
 import { type BufferClock, CaptureBuffer } from "./capture-buffer.js";
 import { type CaptureConfig, resolveCaptureConfig } from "./capture-config.js";
 import { type CaptureEvent, type CaptureMetadata, parseCaptureRequest } from "./event-contract.js";
+import type { CaptureDroppedEventsCounter } from "./dropped-events.js";
 import { type MemoryCue, type TurnCounterConfig, TurnCounters, tryStopCounterTrigger } from "./turn-counters.js";
 
 /** The route group the capture handler attaches to (FR-1). */
@@ -124,6 +125,11 @@ export interface CaptureHandlerDeps {
 	readonly counters?: TurnCounters;
 	/** Optional structured-log sink. */
 	readonly logger?: CaptureLogger;
+	/**
+	 * Monotonic counter for events acked to the hook but lost on flush/batch-insert (fail-soft
+	 * observability). When present, flush failures increment by the number of rows lost.
+	 */
+	readonly droppedEvents?: CaptureDroppedEventsCounter;
 	/** Injected clock (ISO timestamps) so tests are deterministic. Default `Date.now`. */
 	readonly now?: () => number;
 	/**
@@ -385,9 +391,16 @@ class CaptureRouteHandler {
 	 * shutdown). This is the documented trade: worst-case loss is one window on a hard
 	 * crash (see {@link CaptureBuffer}); a graceful stop drains the buffer.
 	 */
+	private recordDropped(count: number): void {
+		this.deps.droppedEvents?.increment(count);
+	}
+
 	private bufferRow(id: string, row: RowValues, scope: QueryScope): void {
 		const buffer = this.ensureBuffer();
 		void buffer.add({ row, scope }).catch((err: unknown) => {
+			// Dropped-row counting is owned by flushBatch (per row of the failed batch);
+			// counting here too would double-count the row that triggered a size-flush,
+			// whose add() promise IS the flush promise. This catch only logs.
 			this.deps.logger?.event("capture.flush.failed", {
 				id,
 				reason: err instanceof Error ? err.message : String(err),
@@ -417,12 +430,25 @@ class CaptureRouteHandler {
 	 */
 	private async flushBatch(batch: readonly BufferedRow[]): Promise<void> {
 		for (const [scope, rows] of groupRowsByScope(batch)) {
-			const result = await appendOnlyInsertMany(this.deps.storage, this.deps.sessionsTarget, scope, rows, {
-				source: CAPTURE_WRITE_SOURCE,
-			});
-			if (!isOk(result)) {
-				this.deps.logger?.event("capture.batch_insert.failed", { count: rows.length, kind: result.kind });
-				throw new Error(`capture batch append failed: ${result.kind}`);
+			try {
+				const result = await appendOnlyInsertMany(this.deps.storage, this.deps.sessionsTarget, scope, rows, {
+					source: CAPTURE_WRITE_SOURCE,
+				});
+				if (!isOk(result)) {
+					this.recordDropped(rows.length);
+					this.deps.logger?.event("capture.batch_insert.failed", { count: rows.length, kind: result.kind });
+					throw new Error(`capture batch append failed: ${result.kind}`);
+				}
+			} catch (err: unknown) {
+				const alreadyCounted = err instanceof Error && err.message.startsWith("capture batch append failed:");
+				if (!alreadyCounted) {
+					this.recordDropped(rows.length);
+					this.deps.logger?.event("capture.batch_insert.failed", {
+						count: rows.length,
+						kind: err instanceof Error ? err.message : String(err),
+					});
+				}
+				throw err;
 			}
 		}
 	}
@@ -440,6 +466,7 @@ class CaptureRouteHandler {
 			this.deps.logger?.event("capture.flush.failed", {
 				reason: err instanceof Error ? err.message : String(err),
 			});
+			// Per-row losses are counted in flushBatch; avoid double-counting on shutdown drain.
 		}
 	}
 

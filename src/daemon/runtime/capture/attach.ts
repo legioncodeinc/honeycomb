@@ -44,12 +44,8 @@ import type { Daemon } from "../server.js";
 import type { JobQueueService } from "../services/job-queue.js";
 import type { EmbedAttachment } from "../services/embed-client.js";
 import { SUMMARY_JOB_KIND } from "../summaries/index.js";
-import {
-	type CaptureHandler,
-	type CaptureLogger,
-	createCaptureHandler,
-	HOOKS_GROUP,
-} from "./capture-handler.js";
+import { type CaptureHandler, type CaptureLogger, createCaptureHandler, HOOKS_GROUP } from "./capture-handler.js";
+import type { CaptureDroppedEventsCounter } from "./dropped-events.js";
 import type { BufferClock } from "./capture-buffer.js";
 import type { CaptureConfig } from "./capture-config.js";
 
@@ -83,7 +79,12 @@ export interface AttachHooksOptions {
 	 * absent capture does not enter the pipeline (the Wave-1 posture); the daemon
 	 * assembly wires it to the pipeline fan-out.
 	 */
-	readonly enqueuePipelineEntry?: (text: string, scope: QueryScope, agentId: string, projectId?: string) => Promise<void>;
+	readonly enqueuePipelineEntry?: (
+		text: string,
+		scope: QueryScope,
+		agentId: string,
+		projectId?: string,
+	) => Promise<void>;
 	/**
 	 * PRD-059a / IRD-123: enable the first-run capture gate (default ON in production via
 	 * {@link attachHooksHandlers}). When enabled, a capture whose active workspace has zero
@@ -100,6 +101,8 @@ export interface AttachHooksOptions {
 	readonly projectsDir?: string;
 	/** Optional structured-log sink. */
 	readonly logger?: CaptureLogger;
+	/** Acks-but-lost capture counter surfaced on `/health` + dashboard KPIs. */
+	readonly droppedEvents?: CaptureDroppedEventsCounter;
 	/**
 	 * PRD-062c (L-C1 / L-C2 / L-X1): the capture write-batching + envelope-trim config.
 	 * Defaults (in the capture handler) to {@link resolveCaptureConfig} — the `HONEYCOMB_CAPTURE_*`
@@ -149,6 +152,7 @@ export function attachHooksHandlers(daemon: Daemon, options: AttachHooksOptions)
 		...(options.firstRunGate !== undefined ? { firstRunGate: options.firstRunGate } : {}),
 		...(options.projectsDir !== undefined ? { projectsDir: options.projectsDir } : {}),
 		...(options.logger !== undefined ? { logger: options.logger } : {}),
+		...(options.droppedEvents !== undefined ? { droppedEvents: options.droppedEvents } : {}),
 		...(options.captureConfig !== undefined ? { captureConfig: options.captureConfig } : {}),
 		...(options.bufferClock !== undefined ? { bufferClock: options.bufferClock } : {}),
 	});

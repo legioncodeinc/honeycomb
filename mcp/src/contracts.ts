@@ -19,7 +19,7 @@
  *
  * ── WAVE 1 vs WAVE 2 ────────────────────────────────────────────────────────
  * Wave 1 (this scaffold) defines the {@link ToolRegistry} contract, the
- * {@link DaemonApiSeam}, the cluster grouping, and the ~25-tool NAME list with
+ * {@link DaemonApiSeam}, the cluster grouping, and the 19-tool NAME list (15 unconditional + 4 conditional codebase) with
  * arg-schema placeholders — WITHOUT importing the absent MCP SDK (no new dependency,
  * D-5-adjacent). Wave 2 (019d) backs {@link ToolRegistry} with `McpServer.registerTool`,
  * wires the HTTP + stdio transports behind the seam, and fills each handler.
@@ -44,16 +44,14 @@ export function notImplemented(what: string): never {
  * The clusters the unified `honeycomb_` surface unions both source systems' tools
  * into (FR-3..FR-8). `codebase` is registered ONLY when the codebase graph is built
  * for the workspace (FR-7 / d-AC-4); `secrets` is value-safe (FR-8 / d-AC-2).
+ *
+ * `sessions` and `agent` were removed (pre-release C-2 fix): their backing daemon
+ * routes (`/api/sessions/*`, `/api/agents/*`) were never mounted in
+ * `src/daemon/runtime/server.ts`'s `ROUTE_GROUPS`, so every tool in those clusters
+ * 404'd on every call. They are UNREGISTERED, not built — re-add the cluster value
+ * here only alongside a real daemon route group.
  */
-export const TOOL_CLUSTERS = [
-	"memory",
-	"browse",
-	"sessions",
-	"goals-kpis",
-	"agent",
-	"codebase",
-	"secrets",
-] as const;
+export const TOOL_CLUSTERS = ["memory", "browse", "goals-kpis", "codebase", "secrets"] as const;
 
 /** One tool cluster. */
 export type ToolCluster = (typeof TOOL_CLUSTERS)[number];

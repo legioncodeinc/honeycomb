@@ -61,7 +61,11 @@ describe("c-AC-1 production DaemonHookClient: native event → shim → core →
 		const deps: HookCoreDeps = {
 			daemon,
 			credentials,
-			context: { async render() { return ""; } },
+			context: {
+				async render() {
+					return "";
+				},
+			},
 		};
 
 		// REAL claude-code shim + normalize engine: native UserPromptSubmit → HookInput.
@@ -86,7 +90,15 @@ describe("c-AC-1 production DaemonHookClient: native event → shim → core →
 		const { fn, calls } = recordingFetch();
 		const credentials = createFakeCredentialReader({ token: "tok", org: "acme", actor: "agent-7" });
 		const daemon = createDaemonHookClient({ credentials, fetch: fn });
-		const deps: HookCoreDeps = { daemon, credentials, context: { async render() { return ""; } } };
+		const deps: HookCoreDeps = {
+			daemon,
+			credentials,
+			context: {
+				async render() {
+					return "";
+				},
+			},
+		};
 
 		const shim = createClaudeCodeShim();
 		const input = shim.normalize({ name: "UserPromptSubmit", payload: { prompt: "scoped" } }, META);
@@ -261,5 +273,39 @@ describe("c-AC-2 production CredentialReader: reads ~/.honeycomb/credentials.jso
 		// The org the file claimed is the org stamped on the daemon call (same identity).
 		expect(calls[0].headers["x-honeycomb-org"]).toBe("globex");
 		expect(calls[0].headers["x-honeycomb-actor"]).toBe("agent-9");
+	});
+});
+
+describe("C-4 transport observability", () => {
+	it("writes a stderr diagnostic when fetch rejects (fail-soft status 0)", async () => {
+		const writes: string[] = [];
+		const origWrite = process.stderr.write.bind(process.stderr);
+		process.stderr.write = ((chunk: string | Uint8Array, ...args: unknown[]) => {
+			writes.push(String(chunk));
+			return origWrite(chunk, ...(args as Parameters<typeof process.stderr.write>));
+		}) as typeof process.stderr.write;
+		try {
+			const fetchFails = (async () => {
+				throw new Error("ECONNREFUSED");
+			}) as typeof fetch;
+			const daemon = createDaemonHookClient({
+				credentials: createFakeCredentialReader({ token: "t", org: "o" }),
+				fetch: fetchFails,
+			});
+			const res = await daemon.send({
+				endpoint: "capture",
+				body: { event: {}, metadata: {} },
+				meta: META,
+				runtimePath: "legacy",
+			});
+			expect(res.status).toBe(0);
+			// The diagnostic carries the underlying cause so an operator can tell
+			// ECONNREFUSED from a timeout.
+			expect(
+				writes.some((line) => line.includes("hook capture transport failed") && line.includes("ECONNREFUSED")),
+			).toBe(true);
+		} finally {
+			process.stderr.write = origWrite;
+		}
 	});
 });

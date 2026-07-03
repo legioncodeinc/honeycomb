@@ -24,17 +24,14 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import {
-	createFakeDaemonDispatch,
-	type Row,
-	type VfsScope,
-} from "../../../src/daemon-client/vfs/index.js";
+import { createFakeDaemonDispatch, type Row, type VfsScope } from "../../../src/daemon-client/vfs/index.js";
 import {
 	type AgentRootDetector,
 	type AuthCheck,
 	AUTOPULL_DISABLED_ENV,
 	autoPull,
 	canonicalDirName,
+	createDefaultAgentRoots,
 	createDaemonPullClient,
 	createFakeSkillPullClient,
 	type PulledSkill,
@@ -112,22 +109,19 @@ describe("PRD-016c skill install", () => {
 		expect(outcome.symlinksCreated).toBe(2);
 	});
 
-	it.skipIf(!CAN_SYMLINK)(
-		"c-AC-1 the fanned-out entry is a real symlink pointing at the canonical dir",
-		async () => {
-			const canonical = tempDir();
-			const other = tempDir();
-			const client = createFakeSkillPullClient({ skills: [skill()] });
+	it.skipIf(!CAN_SYMLINK)("c-AC-1 the fanned-out entry is a real symlink pointing at the canonical dir", async () => {
+		const canonical = tempDir();
+		const other = tempDir();
+		const client = createFakeSkillPullClient({ skills: [skill()] });
 
-			await pull({ client, roots: roots(canonical, [other]) });
+		await pull({ client, roots: roots(canonical, [other]) });
 
-			const dirName = canonicalDirName("tidy-imports", "alice");
-			const linkPath = join(other, dirName);
-			expect(lstatSync(linkPath).isSymbolicLink()).toBe(true);
-			// Reading through the link resolves to the canonical SKILL.md (the target is the canonical dir).
-			expect(readFileSync(join(linkPath, "SKILL.md"), "utf-8")).toContain("## Tidy imports");
-		},
-	);
+		const dirName = canonicalDirName("tidy-imports", "alice");
+		const linkPath = join(other, dirName);
+		expect(lstatSync(linkPath).isSymbolicLink()).toBe(true);
+		// Reading through the link resolves to the canonical SKILL.md (the target is the canonical dir).
+		expect(readFileSync(join(linkPath, "SKILL.md"), "utf-8")).toContain("## Tidy imports");
+	});
 
 	// ── c-AC-5 ──────────────────────────────────────────────────────────────────
 	it("c-AC-5 a global-install pull fans a symlink into EACH detected agent root → the canonical dir", async () => {
@@ -325,5 +319,12 @@ describe("PRD-016c skill install", () => {
 	it("path safety: a pure-dots name segment is neutralized (cannot become a `..` traversal)", () => {
 		expect(canonicalDirName("..", "x")).not.toContain("..");
 		expect(canonicalDirName(".", "x").startsWith(".--")).toBe(false);
+	});
+
+	it("H-6 default fan-out roots include ~/.cursor/skills when a Cursor install root exists", () => {
+		const home = tempDir();
+		mkdirSync(join(home, ".cursor"), { recursive: true });
+		const detected = createDefaultAgentRoots(home).otherRoots();
+		expect(detected).toContain(join(home, ".cursor", "skills"));
 	});
 });

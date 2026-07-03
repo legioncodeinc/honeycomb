@@ -17,9 +17,8 @@
  *     - Cursor declares `agents` (`cursor-agent` + the `claude` fallback) + `workspaceRoots`
  *       (`cursorDeriveMeta` reads `workspace_roots[0]`) — `src/hooks/cursor/shim.ts`.
  *     - Claude Code declares the full six `lifecycleEvents` and NO `agents` — `claude-code/shim.ts`.
- *     - Hermes declares `mcpRegistration` (`HERMES_MCP_MENTION` advertises `honeycomb_*`) — `hermes/shim.ts`.
- *     - OpenClaw declares `contractedTools` (tools are registered, not hooked) — `openclaw/shim.ts`.
- *     - pi declares `agentsMdContext` (the static `AGENTS.md` block) — `pi/shim.ts`.
+ *     - Hermes, pi, and OpenClaw are explicitly marked `in-progress` until their runtime paths are
+ *       fully wired in production (C-1 claim-reduction path).
  *     - Codex declares `userVisibleLogin` (the brief login line) — `codex/shim.ts`.
  *   An ABSENT capability omits its panel on the detail page (c-AC-3) — the descriptor's missing field
  *   drives omission, never an empty "none" card.
@@ -103,6 +102,8 @@ export interface HarnessAgents {
 export interface HarnessCapabilities {
 	/** Canonical harness id (mirrors {@link HarnessShim.harness}). */
 	readonly name: string;
+	/** Honest support state for this harness in the current production wiring. */
+	readonly supportStatus: "supported" | "in-progress";
 	/** The runtime path the shim stamps: `plugin` (extension) | `legacy` (hook scripts). */
 	readonly runtimePath: RuntimePath;
 	/** The context-injection channel: `model-only` | `user-visible`. */
@@ -133,17 +134,17 @@ const HARNESS_SPECIFICS: Readonly<Record<string, Partial<HarnessCapabilities>>> 
 		agents: { kind: "cursor-agent", binary: "cursor-agent", fallbackBin: "claude" },
 		workspaceRoots: true,
 	},
-	// Hermes appends `HERMES_MCP_MENTION` advertising `honeycomb_search/read/index` (hermes/shim.ts).
-	hermes: { mcpRegistration: true },
-	// OpenClaw registers tools (NO PreToolUse hook) — the contracted-tools divergence (openclaw/shim.ts).
-	openclaw: { contractedTools: true },
-	// pi injects context via the static `AGENTS.md` block (pi/shim.ts).
-	pi: { agentsMdContext: true },
+	// Hermes, pi, and OpenClaw remain in-progress in production (C-1 claim-reduction).
+	hermes: {},
+	openclaw: {},
+	pi: {},
 	// Codex surfaces only the brief user-visible login line (CODEX_LOGIN_LINE, codex/shim.ts).
 	codex: { userVisibleLogin: true },
 	// Claude Code is the REFERENCE: the full six lifecycle events, NO agents panel (the absence is the point).
 	"claude-code": {},
 });
+
+const SUPPORTED_HARNESSES = new Set(["claude-code", "codex", "cursor"]);
 
 /** Build one harness's capability descriptor from its shim statics + the grounded specifics. */
 function buildCapabilities(shim: HarnessShim): HarnessCapabilities {
@@ -152,6 +153,7 @@ function buildCapabilities(shim: HarnessShim): HarnessCapabilities {
 	const specifics = HARNESS_SPECIFICS[shim.harness] ?? {};
 	return {
 		name: shim.harness,
+		supportStatus: SUPPORTED_HARNESSES.has(shim.harness) ? "supported" : "in-progress",
 		runtimePath: shim.runtimePath,
 		contextChannel: shim.contextChannel,
 		hostCli: shim.hostCli,

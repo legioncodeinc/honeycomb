@@ -25,7 +25,10 @@ import {
 import { buildCaptureBody, runCapture, runCaptureBatch } from "../../../src/hooks/shared/capture.js";
 
 /** Build a core-deps bundle wired to a recording daemon fake. */
-function deps(daemon = createFakeDaemonHookClient()): { deps: HookCoreDeps; daemon: ReturnType<typeof createFakeDaemonHookClient> } {
+function deps(daemon = createFakeDaemonHookClient()): {
+	deps: HookCoreDeps;
+	daemon: ReturnType<typeof createFakeDaemonHookClient>;
+} {
 	const fake = daemon;
 	return {
 		daemon: fake,
@@ -100,8 +103,16 @@ describe("PRD-019b capture core", () => {
 		// Incremental: three separate captures.
 		const inc = deps();
 		await runCapture(userMessage("one"), inc.deps, {});
-		await runCapture({ ...userMessage("two"), event: "tool_call", data: { kind: "tool_call", tool: "Read" } }, inc.deps, {});
-		await runCapture({ ...userMessage("three"), event: "assistant_message", data: { kind: "assistant_message", text: "three" } }, inc.deps, {});
+		await runCapture(
+			{ ...userMessage("two"), event: "tool_call", data: { kind: "tool_call", tool: "Read" } },
+			inc.deps,
+			{},
+		);
+		await runCapture(
+			{ ...userMessage("three"), event: "assistant_message", data: { kind: "assistant_message", text: "three" } },
+			inc.deps,
+			{},
+		);
 
 		// Batched: one flush of the same three events at session end.
 		const batch = deps();
@@ -151,5 +162,22 @@ describe("PRD-019b capture core", () => {
 		// The gate wrapper swallows the throw; capture resolves (never rejects).
 		const result = await runCapture(userMessage("hi"), d, {});
 		expect(result.ok).toBe(true);
+	});
+
+	it("C-4: transport failure is observable (ok: false) but never throws out of capture", async () => {
+		const transportDown = {
+			calls: [] as unknown[],
+			async send() {
+				return { status: 0 as const };
+			},
+		};
+		const d: HookCoreDeps = {
+			daemon: transportDown as unknown as HookCoreDeps["daemon"],
+			credentials: createFakeCredentialReader(),
+			context: createFakeContextRenderer(),
+		};
+		const result = await runCapture(userMessage("hi"), d, {});
+		expect(result.ok).toBe(false);
+		expect(result.reason).toBe("transport-failure");
 	});
 });

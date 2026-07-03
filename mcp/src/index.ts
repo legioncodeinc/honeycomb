@@ -22,11 +22,7 @@ import { createDaemonClient, type DaemonClient } from "../../src/daemon-client/i
 import { HONEYCOMB_VERSION } from "../../src/shared/constants.js";
 import { type Actor, type DaemonApiSeam } from "./contracts.js";
 import { createHttpDaemonApiSeam } from "./daemon-seam.js";
-import {
-	createMcpToolRegistry,
-	type McpToolRegistry,
-	registerHoneycombSurface,
-} from "./registry.js";
+import { createMcpToolRegistry, type McpToolRegistry, registerHoneycombSurface } from "./registry.js";
 import {
 	type BoundTransport,
 	bindAllTransports,
@@ -79,9 +75,7 @@ export interface McpServerHandle {
  * (the Wave-1 signature), or an options object for the full Wave-2 surface.
  */
 export function createMcpServer(daemonOrOpts?: DaemonApiSeam | CreateMcpServerOptions): McpServerHandle {
-	const opts: CreateMcpServerOptions = isDaemonSeam(daemonOrOpts)
-		? { daemon: daemonOrOpts }
-		: daemonOrOpts ?? {};
+	const opts: CreateMcpServerOptions = isDaemonSeam(daemonOrOpts) ? { daemon: daemonOrOpts } : (daemonOrOpts ?? {});
 
 	const daemon: DaemonApiSeam = opts.daemon ?? createHttpDaemonApiSeam();
 	const actor: Actor = opts.actor ?? DEFAULT_ACTOR;
@@ -277,4 +271,4 @@ export {
 	toSecretListResult,
 } from "./handlers.js";
 
-export { inferParentSessionKey, sessionSearch } from "./sessions.js";
+export { inferParentSessionKey } from "./sessions.js";

@@ -59,13 +59,8 @@ import {
 	type SummaryCliSpec,
 	type SummarySpawner,
 } from "./worker.js";
-import { runSummaryWorker, type SummaryWorkerDeps } from "./worker.js";
-import {
-	createSynthesisStore,
-	refreshMemoryIndex,
-	synthesizeThreadHeads,
-	type SynthesisStore,
-} from "./synthesis.js";
+import { runSummaryWorker, type PollinatingCounterIncrement, type SummaryWorkerDeps } from "./worker.js";
+import { createSynthesisStore, refreshMemoryIndex, synthesizeThreadHeads, type SynthesisStore } from "./synthesis.js";
 import { DEFAULT_WORKER_CONFIG, type SummarySession, type SummaryTrigger, type WorkerConfig } from "./contracts.js";
 
 /** The job kind capture (periodic) + session-end (final) enqueue, routed to THIS worker. */
@@ -231,6 +226,11 @@ export interface SummaryJobWorkerDeps {
 	readonly buildSynthesisStore?: SynthesisStoreFactory | null;
 	/** Optional structured-log sink. */
 	readonly logger?: SummaryJobWorkerLogger;
+	/**
+	 * Optional pollinating counter increment (FR-2), threaded into each {@link SummaryWorkerDeps}
+	 * build so a landed summary accrues tokens toward the maintenance threshold.
+	 */
+	readonly pollinatingCounter?: PollinatingCounterIncrement;
 	/** Poll interval in ms for the continuous loop. Default 1000. */
 	readonly pollIntervalMs?: number;
 	/** Adaptive poll backoff config for idle loops. */
@@ -285,6 +285,7 @@ class SummaryJobWorkerImpl implements SummaryJobWorker {
 	/** The synthesis-store factory for the `/MEMORY.md` refresh; `null` SKIPS the refresh (b-AC-1). */
 	private readonly buildSynthesisStore: SynthesisStoreFactory | null;
 	private readonly logger?: SummaryJobWorkerLogger;
+	private readonly pollinatingCounter?: PollinatingCounterIncrement;
 	private readonly loop: PollLoop;
 	/** ONE shared per-session lock so the suppression holds across queued jobs (a-AC-3). */
 	private readonly lock = createFileSessionLock();
@@ -306,6 +307,7 @@ class SummaryJobWorkerImpl implements SummaryJobWorker {
 				? (): SynthesisStore => createSynthesisStore(this.storage, this.scope)
 				: deps.buildSynthesisStore;
 		this.logger = deps.logger;
+		this.pollinatingCounter = deps.pollinatingCounter;
 		this.loop = buildWorkerPollLoop({
 			tick: () => this.runOnce(),
 			flatIntervalMs: deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
@@ -329,6 +331,7 @@ class SummaryJobWorkerImpl implements SummaryJobWorker {
 			embed: this.embed,
 			store: createSummaryStore(this.storage, this.scope),
 			config: this.config,
+			...(this.pollinatingCounter !== undefined ? { pollinatingCounter: this.pollinatingCounter } : {}),
 		};
 	}
 

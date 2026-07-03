@@ -56,6 +56,47 @@ describe("d-AC-2: secrets are value-safe (list names, exec redacted)", () => {
 		expect(res.output).toBe(REDACTED);
 	});
 
+	it("M-10 secret_exec preserves the jobId from a 202 submit ack instead of dropping it", async () => {
+		// The REAL daemon shape (`secrets/api.ts` POST /exec): a 202 job-submission ack, not a
+		// finished result — `status` is a lifecycle string, there is no `output` field yet.
+		const daemon = createFakeDaemonApiSeam({ status: 202, body: { ok: true, jobId: "exec-1-1-42", status: "queued" } });
+		const res = (await HANDLERS.secret_exec({ command: "deploy" }, ACTOR, daemon)) as {
+			jobId?: string;
+			status?: string;
+			output: string;
+		};
+		expect(res.jobId, "the jobId must survive so the submitted job is not orphaned").toBe("exec-1-1-42");
+		expect(res.status).toBe("queued");
+		// Nothing has run yet — no stdout/stderr/output field — falls to the safe placeholder.
+		expect(res.output).toBe(REDACTED);
+	});
+
+	it("M-10 secret_exec surfaces the already-redacted stdout/stderr from a job-status poll", async () => {
+		// The REAL daemon shape (`secrets/api.ts` GET /exec/:jobId): an `ExecJobView` — already
+		// redacted by the daemon's RollingRedactor before it ever left the daemon.
+		const daemon = createFakeDaemonApiSeam({
+			status: 200,
+			body: {
+				jobId: "exec-1-1-42",
+				status: "succeeded",
+				stdout: `connected with ${REDACTED}`,
+				stderr: "",
+				exitCode: 0,
+				signal: null,
+				timedOut: false,
+			},
+		});
+		const res = (await HANDLERS.secret_exec({ command: "deploy" }, ACTOR, daemon)) as {
+			jobId?: string;
+			status?: string;
+			output: string;
+		};
+		expect(res.jobId).toBe("exec-1-1-42");
+		expect(res.status).toBe("succeeded");
+		expect(res.output).toContain(REDACTED);
+		expect(JSON.stringify(res)).not.toContain(SECRET_VALUE);
+	});
+
 	it("d-AC-2 both secrets handlers still route through the daemon (plugin + actor stamp)", async () => {
 		const listDaemon = createFakeDaemonApiSeam({ status: 200, body: { names: [] } });
 		await HANDLERS.secret_list({}, ACTOR, listDaemon);

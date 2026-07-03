@@ -11,15 +11,30 @@
  *   depth 1 — Tier-2 row: the stored summary (`memory.summary` for an episodic ref,
  *             `memories.content` for a durable ref). Single guarded SELECT by path/id.
  *   depth 2 — Tier-3 rows: the raw `sessions` turns for the session that produced the
- *             episodic ref (`WHERE path = '<session>'`). The session path is derived from
- *             the episodic ref (a `/summaries/<org>/<session>/…` path → strip to the
- *             session segment). For a durable ref at depth 2 the summary content is
- *             returned (durable facts have no direct session ancestry the prime exposes).
- *             Bounded by {@link MAX_RESOLVE_TURNS} so a zoom never dumps an unbounded
+ *             episodic ref. The episodic ref is the summary path the summary worker writes,
+ *             `/summaries/<userName>/<sessionId>.md` (summaries/worker.ts `summaryPath`).
+ *             Capture (capture/capture-handler.ts) stores each raw event at `sessions.path` =
+ *             the harness TRANSCRIPT path and stamps `sessions.id` = `sess-<sessionId>-<ts>-<rand>`
+ *             (`makeRowId`), so the raw turns do NOT live at the summary path. depth-2 therefore
+ *             extracts the `<sessionId>` from the summary ref and matches the raw rows by that
+ *             `id` prefix (`WHERE id LIKE 'sess-<sessionId>-%'`), NOT by `path` — that is the
+ *             deterministic Tier-2 → Tier-3 join. Because `makeRowId` embeds the sessionId
+ *             verbatim, session `abc`'s prefix also LIKE-matches session `abc-def`'s rows, so
+ *             the SQL carries a dash-count exclusion (`AND id NOT LIKE 'sess-<sid>-%-%-%'`,
+ *             see {@link buildSessionDepth2Sql}) that rejects dash-extended foreign ids INSIDE
+ *             the scan window — a colliding neighbor can neither leak turns nor starve valid
+ *             rows out of the {@link MAX_SESSION_TURNS} scan bound. Every fetched row is then
+ *             post-filtered in TypeScript against the EXACT id shape
+ *             `^sess-<sessionId>-<ts>-<rand>$` (both tail segments are digit runs; stronger
+ *             than the dash algebra) before the {@link MAX_RESOLVE_TURNS} trim is applied.
+ *             For a durable ref at depth 2 the summary
+ *             content is returned (durable facts have no direct session ancestry the prime
+ *             exposes). Bounded by {@link MAX_RESOLVE_TURNS} so a zoom never dumps an unbounded
  *             transcript into context.
  *
  * ── SQL safety ───────────────────────────────────────────────────────────────
- * Every identifier routes through `sqlIdent`; every value through `sLiteral`.
+ * Every identifier routes through `sqlIdent`; every value through `sLiteral` (and every
+ * LIKE pattern through `sqlLike`).
  * No value is hand-quoted (`audit:sql` scans `src/daemon`). The org/workspace
  * partition rides the per-request {@link QueryScope}; this module opens NO
  * DeepLake connection — it reads only through the injected {@link StorageQuery}.
@@ -37,7 +52,7 @@
  */
 
 import { isOk } from "../../storage/result.js";
-import { sLiteral, sqlIdent } from "../../storage/sql.js";
+import { MAX_SESSION_TURNS, sLiteral, sqlIdent, sqlLike } from "../../storage/sql.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import type { KeySource } from "../summaries/prime-keys.js";
 
@@ -45,6 +60,39 @@ import type { KeySource } from "../summaries/prime-keys.js";
 export const MAX_RESOLVE_TURNS = 100;
 /** The default number of raw session turns returned when the caller supplies no limit. */
 export const DEFAULT_RESOLVE_TURNS = 50;
+
+/**
+ * The `id`-column prefix capture stamps on every raw `sessions` row. Capture writes one row
+ * per event with `id = \`sess-<sessionId>-<ts>-<rand>\`` (see
+ * `src/daemon/runtime/capture/capture-handler.ts` `makeRowId`). The harness session id is the
+ * ONLY column value that carries the session identity — there is no dedicated `session_id`
+ * column (capture-handler.ts stores the raw session id only inside the JSONB envelope and this
+ * `id` prefix) — so a depth-2 resolve joins a summary back to its raw turns by this id prefix.
+ */
+export const SESSION_ROW_ID_PREFIX = "sess-";
+
+/** Escape a literal string for embedding inside a RegExp body. */
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Build the EXACT-shape matcher for a session's capture row ids (the prefix-collision guard).
+ *
+ * `makeRowId` (`src/daemon/runtime/capture/capture-handler.ts:597-600`) generates
+ * `sess-<sessionId>-<ts>-<rand>` where `<ts>` is `this.now()` — a numeric epoch-millis value
+ * (`Date.now()` by default, capture-handler.ts:207) — and `<rand>` is
+ * `Math.floor(Math.random() * 1_000_000)`. Both tail segments are therefore pure digit runs.
+ * Because the sessionId is embedded VERBATIM (validated only as non-empty), a coarse
+ * `LIKE 'sess-abc-%'` also matches session `abc-def`'s rows (`sess-abc-def-<ts>-<rand>`): the
+ * segment after `abc-` there starts with `def`, not a digit run followed by end-of-string. This
+ * anchored regex — `^sess-<sessionId>-\d+-\d+$` with the sessionId regex-escaped — accepts only
+ * ids whose ENTIRE tail after the sessionId is the `<ts>-<rand>` digit pair, so a session whose
+ * id is a strict dash-extended prefix of another can never pull the other's turns.
+ */
+export function buildSessionRowIdMatcher(sessionId: string): RegExp {
+	return new RegExp(`^${escapeRegExp(SESSION_ROW_ID_PREFIX)}${escapeRegExp(sessionId)}-\\d+-\\d+$`);
+}
 
 /** Construction deps for the resolve adapter. */
 export interface ResolveRefDeps {
@@ -129,35 +177,72 @@ export function buildDurableDepth1Sql(ref: string): string {
 }
 
 /**
- * Derive the session path from an episodic ref (a `/summaries/…` path). The `sessions`
- * table uses the same path as the base session that produced the summary. The summary
- * path is `/summaries/<agent>/<session-id>/…` and the session rows use just the
- * `/<session-id>` segment. Deriving this is table-schema knowledge, NOT a search.
+ * Extract the harness session id from an episodic ref. The summary worker writes the Tier-2
+ * summary row at `/summaries/<userName>/<sessionId>.md` (see
+ * `src/daemon/runtime/summaries/worker.ts` `summaryPath`), so the session id is the final path
+ * segment with the `.md` suffix stripped. Both path segments are single, slash-free segments
+ * (the writer sanitizes them), so the trailing segment is exactly `<sessionId>.md`.
  *
- * Strategy: the session path is the episodic ref itself — summary rows carry the same
- * `path` key as the session that owns them (the summary worker writes
- * `path: sessionPath`). So a depth-2 resolve queries `sessions WHERE path = ref`.
+ * The raw `sessions` turns are NOT stored at this summary path: capture stamps `sessions.path`
+ * with the harness transcript path and only the `sessions.id` prefix (`sess-<sessionId>-…`)
+ * carries the session id. So depth-2 resolve derives the session id here and matches the raw
+ * rows by that id prefix, NOT by the summary path. Deriving this is table-schema knowledge,
+ * NOT a search.
  */
-export function deriveSessionPath(episodicRef: string): string {
-	// The episodic ref IS the path in `sessions` (same key space). No transformation needed.
-	return episodicRef;
+export function extractSessionId(episodicRef: string): string {
+	const lastSlash = episodicRef.lastIndexOf("/");
+	const tail = lastSlash === -1 ? episodicRef : episodicRef.slice(lastSlash + 1);
+	return tail.endsWith(".md") ? tail.slice(0, -".md".length) : tail;
 }
 
 /**
- * Build the depth-2 sessions lookup SQL: SELECT the raw turns for a session path, bounded
- * by `turnLimit`. Ordered by rowid/insertion order so the caller sees turns in chronological
- * order. Single guarded SELECT by path — NOT a search.
+ * Build the depth-2 sessions lookup SQL: the candidate selection for a session's raw turns,
+ * ordered by `creation_date` ascending so the caller sees turns in chronological order
+ * (mirroring the summary worker's own `createSessionEventFetcher`). Capture stamps every raw
+ * row's `id` with the `sess-<sessionId>-<ts>-<rand>` shape, so this matches the session's rows
+ * by that id (guarded `LIKE` patterns, escaped via `sqlLike`), NOT by the summary path.
+ *
+ * THE PREFIX-COLLISION EXCLUSION IS IN THE SQL. `makeRowId`
+ * (`src/daemon/runtime/capture/capture-handler.ts:597-600`) embeds the sessionId verbatim and
+ * both tail segments (`<ts>` = epoch millis, `<rand>` = an integer) are pure digit runs with no
+ * dashes. So for the fixed literal prefix `sess-<sessionId>-`, a VALID row's remainder contains
+ * exactly ONE dash (`<ts>-<rand>`), while any dash-extended foreign session id
+ * (`<sessionId>-X…`) yields a remainder with TWO or more. That makes the exact set expressible
+ * in plain LIKE algebra:
+ *
+ *   `id LIKE 'sess-<sid>-%-%' AND id NOT LIKE 'sess-<sid>-%-%-%'`
+ *
+ * (remainder has at least one dash, and not two or more). Multi-wildcard LIKE and NOT LIKE are
+ * both already exercised by this dialect in production (`'%…%'` in recall/collection.ts:186 and
+ * memories/recall.ts:335; `NOT LIKE` in skillify/miner.ts:184 and pollinating/incremental.ts:236).
+ * Excluding foreign rows IN the SQL means the {@link MAX_SESSION_TURNS} scan window is spent
+ * only on the target session's rows — a prefix-colliding neighbor with many rows can no longer
+ * starve valid rows out of the window (the CodeRabbit truncation finding). The caller still
+ * post-filters each row's `id` through {@link buildSessionRowIdMatcher} as defense in depth
+ * (its digit-run check is stronger than the dash-count algebra) and trims to the turn cap after
+ * that — which is why `id` is in the SELECT list and the SQL bound is the scan cap rather than
+ * the caller's turn limit.
+ * Guarded SELECT by id shape — NOT a search (no ILIKE, no `<#>`, no UNION).
  */
-export function buildSessionDepth2Sql(sessionPath: string, turnLimit: number): string {
+export function buildSessionDepth2Sql(sessionId: string): string {
 	const tbl = sqlIdent("sessions");
+	const idCol = sqlIdent("id");
 	const pathCol = sqlIdent("path");
 	const messageCol = sqlIdent("message");
-	const safeTurnLimit = Math.max(1, Math.min(Math.trunc(turnLimit), MAX_RESOLVE_TURNS));
+	const dateCol = sqlIdent("creation_date");
+	// The literal id prefix `sess-<sessionId>-`, LIKE-escaped; the `%`s are the wildcards and the
+	// dashes are literal (dash is not a LIKE metacharacter).
+	const idPrefix = `${SESSION_ROW_ID_PREFIX}${sessionId}-`;
+	// Remainder after the prefix must contain AT LEAST one dash (the `<ts>-<rand>` tail)...
+	const includePattern = `'${sqlLike(idPrefix)}%-%'`;
+	// ...and NOT two or more (a dash-extended foreign session id like `<sessionId>-X`).
+	const excludePattern = `'${sqlLike(idPrefix)}%-%-%'`;
 	return (
-		`SELECT ${pathCol}, ${messageCol}::text AS message ` +
+		`SELECT ${idCol}, ${pathCol}, ${messageCol}::text AS message ` +
 		`FROM "${tbl}" ` +
-		`WHERE ${pathCol} = ${sLiteral(sessionPath)} ` +
-		`LIMIT ${safeTurnLimit}`
+		`WHERE ${idCol} LIKE ${includePattern} AND ${idCol} NOT LIKE ${excludePattern} ` +
+		`ORDER BY ${dateCol} ASC ` +
+		`LIMIT ${MAX_SESSION_TURNS}`
 	);
 }
 
@@ -212,13 +297,22 @@ export async function resolveRef(
 		}
 
 		// ── depth 2: read the raw `sessions` turns for this session ──────────
-		// The episodic ref IS the session path (same key space; `sessions WHERE path = ref`).
-		const sessionPath = deriveSessionPath(ref);
+		// Capture stamps `sessions.path` with the harness transcript path and the session id
+		// appears only in the `sessions.id` prefix (`sess-<sessionId>-…`), so the join back from a
+		// `/summaries/<user>/<sessionId>.md` summary is by session id, NOT by path. The SQL
+		// excludes dash-extended prefix-colliding ids (LIKE + NOT LIKE dash algebra) so foreign
+		// rows never occupy the scan window; each fetched row is ALSO post-filtered against the
+		// exact `sess-<sessionId>-<ts>-<rand>` shape (defense in depth), and the turn cap is
+		// applied AFTER that filter.
+		const sessionId = extractSessionId(ref);
 		const safeTurns = Math.max(1, Math.min(Math.trunc(turnLimit), MAX_RESOLVE_TURNS));
-		const r2 = await deps.storage.query(buildSessionDepth2Sql(sessionPath, safeTurns), scope);
+		const exactId = buildSessionRowIdMatcher(sessionId);
+		const r2 = await deps.storage.query(buildSessionDepth2Sql(sessionId), scope);
 		const turns: SessionTurnRow[] = [];
 		if (isOk(r2)) {
 			for (const row of r2.rows) {
+				if (turns.length >= safeTurns) break; // rows are already chronological (ORDER BY in SQL)
+				if (!exactId.test(str(row.id))) continue; // prefix-collision guard: exact ids only
 				const msg = str(row.message);
 				if (msg !== "") turns.push({ path: str(row.path), message: msg });
 			}

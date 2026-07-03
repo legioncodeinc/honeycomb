@@ -257,6 +257,7 @@ export {
 	buildDurableDepth1Sql,
 	buildEpisodicDepth1Sql,
 	buildSessionDepth2Sql,
-	deriveSessionPath,
+	buildSessionRowIdMatcher,
+	extractSessionId,
 	resolveRef,
 } from "./resolve.js";

@@ -24,14 +24,16 @@ import { createRequestLogger } from "../../../../src/daemon/runtime/logger.js";
 import { createDaemon, type Daemon } from "../../../../src/daemon/runtime/server.js";
 import { createRuntimePathService } from "../../../../src/daemon/runtime/middleware/runtime-path.js";
 import type { JobInput, JobQueueService, LeasedJob } from "../../../../src/daemon/runtime/services/job-queue.js";
-import {
-	type CaptureHandler,
-	createCaptureHandler,
-} from "../../../../src/daemon/runtime/capture/capture-handler.js";
+import { type CaptureHandler, createCaptureHandler } from "../../../../src/daemon/runtime/capture/capture-handler.js";
 import type { CaptureConfig } from "../../../../src/daemon/runtime/capture/capture-config.js";
 import { type BufferClock, type TimerHandle } from "../../../../src/daemon/runtime/capture/capture-buffer.js";
 import { truncationMarker } from "../../../../src/daemon/runtime/capture/budgeted-stringify.js";
+import {
+	createCaptureDroppedEventsCounter,
+	type CaptureDroppedEventsCounter,
+} from "../../../../src/daemon/runtime/capture/dropped-events.js";
 import { FakeDeepLakeTransport, fakeCredentialRecord, stubProvider } from "../../../helpers/fake-deeplake.js";
+import { TransportError } from "../../../../src/daemon/storage/transport.js";
 
 const ORG = "fake-org";
 const WORKSPACE = "fake-ws";
@@ -99,13 +101,22 @@ function responder() {
 	};
 }
 
-function buildDaemon(config: CaptureConfig, clock?: BufferClock): { daemon: Daemon; fake: FakeDeepLakeTransport; handler: CaptureHandler } {
-	const fake = new FakeDeepLakeTransport(responder());
+function buildDaemon(
+	config: CaptureConfig,
+	clock?: BufferClock,
+	overrides?: {
+		responder?: (req: TransportRequest) => Record<string, unknown>[];
+		droppedEvents?: CaptureDroppedEventsCounter;
+		logger?: ReturnType<typeof createRequestLogger>;
+	},
+): { daemon: Daemon; fake: FakeDeepLakeTransport; handler: CaptureHandler } {
+	const fake = new FakeDeepLakeTransport(overrides?.responder ?? responder());
 	const storage = createStorageClient({ transport: fake, provider: stubProvider(fakeCredentialRecord()) });
+	const logger = overrides?.logger ?? createRequestLogger({ silent: true });
 	const daemon = createDaemon({
 		config: cfg(),
 		storage,
-		logger: createRequestLogger({ silent: true }),
+		logger,
 		services: { runtimePath: createRuntimePathService() },
 	});
 	const handler = createCaptureHandler({
@@ -113,6 +124,8 @@ function buildDaemon(config: CaptureConfig, clock?: BufferClock): { daemon: Daem
 		sessionsTarget: healTargetFor("sessions"),
 		queue: new NoopQueue(),
 		captureConfig: config,
+		logger,
+		...(overrides?.droppedEvents !== undefined ? { droppedEvents: overrides.droppedEvents } : {}),
 		...(clock !== undefined ? { bufferClock: clock } : {}),
 	});
 	handler.register(daemon);
@@ -304,5 +317,79 @@ describe("AC-9: flags OFF reproduces pre-PRD behavior", () => {
 		const toolInsert = inserts[2];
 		expect(toolInsert.includes(huge), "the full untrimmed response is persisted").toBe(true);
 		expect(toolInsert.includes("[truncated"), "no truncation marker when budget is 0").toBe(false);
+	});
+});
+
+describe("C-4: dropped-events counter on acked-but-lost capture writes", () => {
+	it("increments the dropped counter and logs when a batched flush fails to persist", async () => {
+		const dropped = createCaptureDroppedEventsCounter();
+		const logged: string[] = [];
+		const logger = createRequestLogger({ silent: true });
+		const origEvent = logger.event.bind(logger);
+		logger.event = (name, fields) => {
+			logged.push(name);
+			origEvent(name, fields);
+		};
+		const clock = new FakeClock();
+		const failInsert = (req: TransportRequest): Record<string, unknown>[] => {
+			if (/information_schema\.columns/i.test(req.sql)) {
+				return healTargetFor("sessions").columns.map((c) => ({ column_name: c.name }));
+			}
+			if (/^\s*INSERT/i.test(req.sql)) {
+				throw new TransportError("query", "insert failed", 500);
+			}
+			return [];
+		};
+		const { daemon, handler } = buildDaemon(BATCH_ON, clock, { responder: failInsert, droppedEvents: dropped, logger });
+
+		const res = await daemon.app.request("/api/hooks/capture", {
+			method: "POST",
+			headers: sessionHeaders(),
+			body: JSON.stringify(userBody("turn that will not persist")),
+		});
+		expect(res.status).toBe(201);
+
+		await handler.flush();
+		await Promise.resolve();
+
+		expect(dropped.read()).toBe(1);
+		expect(logged.some((name) => name === "capture.flush.failed" || name === "capture.batch_insert.failed")).toBe(true);
+	});
+
+	it("counts each row of a failed SIZE-triggered flush exactly once (no off-by-one on the trigger row)", async () => {
+		// The row that trips the size cap gets the flush promise back from `add()`, so its
+		// rejection is observed by bufferRow's catch AND by flushBatch — the count must be
+		// owned by exactly one of them (flushBatch), never both.
+		const dropped = createCaptureDroppedEventsCounter();
+		const clock = new FakeClock();
+		const failInsert = (req: TransportRequest): Record<string, unknown>[] => {
+			if (/information_schema\.columns/i.test(req.sql)) {
+				return healTargetFor("sessions").columns.map((c) => ({ column_name: c.name }));
+			}
+			if (/^\s*INSERT/i.test(req.sql)) {
+				throw new TransportError("query", "insert failed", 500);
+			}
+			return [];
+		};
+		const { daemon } = buildDaemon({ ...BATCH_ON, maxEvents: 3 }, clock, {
+			responder: failInsert,
+			droppedEvents: dropped,
+		});
+
+		for (let i = 0; i < 3; i++) {
+			const res = await daemon.app.request("/api/hooks/capture", {
+				method: "POST",
+				headers: sessionHeaders(),
+				body: JSON.stringify(userBody(`turn ${i}`)),
+			});
+			expect(res.status).toBe(201);
+		}
+		// The 3rd event tripped the size cap → the flush fired and failed. Let the
+		// rejection propagate through the buffer's promise chain and both observers.
+		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(dropped.read(), "3 rows lost → exactly 3 counted, not 4").toBe(3);
 	});
 });
