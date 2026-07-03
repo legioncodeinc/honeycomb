@@ -76,6 +76,10 @@ export interface HealthReasons {
 	readonly schema: "ok" | "missing_table";
 	/** The Portkey gateway state (PRD-063b / b-AC-7): `off` | `ok` | `unconfigured` | `unreachable`. */
 	readonly portkey: PortkeyHealth;
+	/** Capture persistence observability: events acked but not durably written since boot. */
+	readonly capture?: {
+		readonly droppedEvents: number;
+	};
 }
 
 /**
@@ -112,6 +116,11 @@ export interface HealthDetailInputs {
 	 * "Portkey not in force" posture) so the pre-063b builder behavior is preserved when omitted.
 	 */
 	readonly portkey?: PortkeyHealth;
+	/**
+	 * Capture events acked to the hook but lost on flush/batch-insert since boot. Omitted when the
+	 * composition root does not wire the counter (bare `createDaemon` / pre-C-4 posture).
+	 */
+	readonly captureDroppedEvents?: number;
 }
 
 /**
@@ -131,6 +140,9 @@ export function buildHealthDetail(inputs: HealthDetailInputs): HealthDetail {
 		schema: inputs.schemaMissingTable === true ? "missing_table" : "ok",
 		// PRD-063b / b-AC-7: read the supplied Portkey state verbatim (no probe). Omitted → `off`.
 		portkey: inputs.portkey ?? "off",
+		...(inputs.captureDroppedEvents !== undefined
+			? { capture: { droppedEvents: Math.max(0, Math.trunc(inputs.captureDroppedEvents)) } }
+			: {}),
 	};
 	return { status: inputs.status, reasons };
 }

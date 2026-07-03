@@ -11,15 +11,21 @@
  *   depth 1 — Tier-2 row: the stored summary (`memory.summary` for an episodic ref,
  *             `memories.content` for a durable ref). Single guarded SELECT by path/id.
  *   depth 2 — Tier-3 rows: the raw `sessions` turns for the session that produced the
- *             episodic ref (`WHERE path = '<session>'`). The session path is derived from
- *             the episodic ref (a `/summaries/<org>/<session>/…` path → strip to the
- *             session segment). For a durable ref at depth 2 the summary content is
- *             returned (durable facts have no direct session ancestry the prime exposes).
- *             Bounded by {@link MAX_RESOLVE_TURNS} so a zoom never dumps an unbounded
+ *             episodic ref. The episodic ref is the summary path the summary worker writes,
+ *             `/summaries/<userName>/<sessionId>.md` (summaries/worker.ts `summaryPath`).
+ *             Capture (capture/capture-handler.ts) stores each raw event at `sessions.path` =
+ *             the harness TRANSCRIPT path and stamps `sessions.id` = `sess-<sessionId>-<ts>-<rand>`
+ *             (`makeRowId`), so the raw turns do NOT live at the summary path. depth-2 therefore
+ *             extracts the `<sessionId>` from the summary ref and matches the raw rows by that
+ *             `id` prefix (`WHERE id LIKE 'sess-<sessionId>-%'`), NOT by `path` — that is the
+ *             deterministic Tier-2 → Tier-3 join. For a durable ref at depth 2 the summary
+ *             content is returned (durable facts have no direct session ancestry the prime
+ *             exposes). Bounded by {@link MAX_RESOLVE_TURNS} so a zoom never dumps an unbounded
  *             transcript into context.
  *
  * ── SQL safety ───────────────────────────────────────────────────────────────
- * Every identifier routes through `sqlIdent`; every value through `sLiteral`.
+ * Every identifier routes through `sqlIdent`; every value through `sLiteral` (and every
+ * LIKE pattern through `sqlLike`).
  * No value is hand-quoted (`audit:sql` scans `src/daemon`). The org/workspace
  * partition rides the per-request {@link QueryScope}; this module opens NO
  * DeepLake connection — it reads only through the injected {@link StorageQuery}.
@@ -37,7 +43,7 @@
  */
 
 import { isOk } from "../../storage/result.js";
-import { sLiteral, sqlIdent } from "../../storage/sql.js";
+import { sLiteral, sqlIdent, sqlLike } from "../../storage/sql.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import type { KeySource } from "../summaries/prime-keys.js";
 
@@ -45,6 +51,16 @@ import type { KeySource } from "../summaries/prime-keys.js";
 export const MAX_RESOLVE_TURNS = 100;
 /** The default number of raw session turns returned when the caller supplies no limit. */
 export const DEFAULT_RESOLVE_TURNS = 50;
+
+/**
+ * The `id`-column prefix capture stamps on every raw `sessions` row. Capture writes one row
+ * per event with `id = \`sess-<sessionId>-<ts>-<rand>\`` (see
+ * `src/daemon/runtime/capture/capture-handler.ts` `makeRowId`). The harness session id is the
+ * ONLY column value that carries the session identity — there is no dedicated `session_id`
+ * column (capture-handler.ts stores the raw session id only inside the JSONB envelope and this
+ * `id` prefix) — so a depth-2 resolve joins a summary back to its raw turns by this id prefix.
+ */
+export const SESSION_ROW_ID_PREFIX = "sess-";
 
 /** Construction deps for the resolve adapter. */
 export interface ResolveRefDeps {
@@ -129,34 +145,48 @@ export function buildDurableDepth1Sql(ref: string): string {
 }
 
 /**
- * Derive the session path from an episodic ref (a `/summaries/…` path). The `sessions`
- * table uses the same path as the base session that produced the summary. The summary
- * path is `/summaries/<agent>/<session-id>/…` and the session rows use just the
- * `/<session-id>` segment. Deriving this is table-schema knowledge, NOT a search.
+ * Extract the harness session id from an episodic ref. The summary worker writes the Tier-2
+ * summary row at `/summaries/<userName>/<sessionId>.md` (see
+ * `src/daemon/runtime/summaries/worker.ts` `summaryPath`), so the session id is the final path
+ * segment with the `.md` suffix stripped. Both path segments are single, slash-free segments
+ * (the writer sanitizes them), so the trailing segment is exactly `<sessionId>.md`.
  *
- * Strategy: the session path is the episodic ref itself — summary rows carry the same
- * `path` key as the session that owns them (the summary worker writes
- * `path: sessionPath`). So a depth-2 resolve queries `sessions WHERE path = ref`.
+ * The raw `sessions` turns are NOT stored at this summary path: capture stamps `sessions.path`
+ * with the harness transcript path and only the `sessions.id` prefix (`sess-<sessionId>-…`)
+ * carries the session id. So depth-2 resolve derives the session id here and matches the raw
+ * rows by that id prefix, NOT by the summary path. Deriving this is table-schema knowledge,
+ * NOT a search.
  */
-export function deriveSessionPath(episodicRef: string): string {
-	// The episodic ref IS the path in `sessions` (same key space). No transformation needed.
-	return episodicRef;
+export function extractSessionId(episodicRef: string): string {
+	const lastSlash = episodicRef.lastIndexOf("/");
+	const tail = lastSlash === -1 ? episodicRef : episodicRef.slice(lastSlash + 1);
+	return tail.endsWith(".md") ? tail.slice(0, -".md".length) : tail;
 }
 
 /**
- * Build the depth-2 sessions lookup SQL: SELECT the raw turns for a session path, bounded
- * by `turnLimit`. Ordered by rowid/insertion order so the caller sees turns in chronological
- * order. Single guarded SELECT by path — NOT a search.
+ * Build the depth-2 sessions lookup SQL: SELECT the raw turns for a session id, bounded by
+ * `turnLimit` and ordered by `creation_date` ascending so the caller sees turns in
+ * chronological order (mirroring the summary worker's own `createSessionEventFetcher`).
+ * Capture stamps every raw row's `id` with the `sess-<sessionId>-<ts>-<rand>` shape, so this
+ * matches the session's rows by that id PREFIX (a guarded `LIKE`, escaped via `sqlLike`; the
+ * trailing `%` is the wildcard), NOT by the summary path. Single guarded SELECT by id prefix —
+ * NOT a search (no ILIKE, no `<#>`, no UNION).
  */
-export function buildSessionDepth2Sql(sessionPath: string, turnLimit: number): string {
+export function buildSessionDepth2Sql(sessionId: string, turnLimit: number): string {
 	const tbl = sqlIdent("sessions");
+	const idCol = sqlIdent("id");
 	const pathCol = sqlIdent("path");
 	const messageCol = sqlIdent("message");
+	const dateCol = sqlIdent("creation_date");
 	const safeTurnLimit = Math.max(1, Math.min(Math.trunc(turnLimit), MAX_RESOLVE_TURNS));
+	// The literal id prefix `sess-<sessionId>-`, LIKE-escaped; the trailing `%` is the wildcard.
+	const idPrefix = `${SESSION_ROW_ID_PREFIX}${sessionId}-`;
+	const pattern = `'${sqlLike(idPrefix)}%'`;
 	return (
 		`SELECT ${pathCol}, ${messageCol}::text AS message ` +
 		`FROM "${tbl}" ` +
-		`WHERE ${pathCol} = ${sLiteral(sessionPath)} ` +
+		`WHERE ${idCol} LIKE ${pattern} ` +
+		`ORDER BY ${dateCol} ASC ` +
 		`LIMIT ${safeTurnLimit}`
 	);
 }
@@ -212,10 +242,12 @@ export async function resolveRef(
 		}
 
 		// ── depth 2: read the raw `sessions` turns for this session ──────────
-		// The episodic ref IS the session path (same key space; `sessions WHERE path = ref`).
-		const sessionPath = deriveSessionPath(ref);
+		// Capture stamps `sessions.path` with the harness transcript path and the session id
+		// appears only in the `sessions.id` prefix (`sess-<sessionId>-…`), so the join back from a
+		// `/summaries/<user>/<sessionId>.md` summary is by session id, NOT by path.
+		const sessionId = extractSessionId(ref);
 		const safeTurns = Math.max(1, Math.min(Math.trunc(turnLimit), MAX_RESOLVE_TURNS));
-		const r2 = await deps.storage.query(buildSessionDepth2Sql(sessionPath, safeTurns), scope);
+		const r2 = await deps.storage.query(buildSessionDepth2Sql(sessionId, safeTurns), scope);
 		const turns: SessionTurnRow[] = [];
 		if (isOk(r2)) {
 			for (const row of r2.rows) {

@@ -20,18 +20,11 @@
 
 import { describe, expect, it } from "vitest";
 
-import {
-	buildHealthDetail,
-	publicHealthDetail,
-	type HealthDetail,
-} from "../../../src/daemon/runtime/health.js";
+import { buildHealthDetail, publicHealthDetail, type HealthDetail } from "../../../src/daemon/runtime/health.js";
 import { createDaemon } from "../../../src/daemon/runtime/server.js";
 import { createRequestLogger } from "../../../src/daemon/runtime/logger.js";
 import { type RuntimeConfig } from "../../../src/daemon/runtime/config.js";
-import {
-	mountMemoriesApi,
-	RECALL_DEGRADED_EVENT,
-} from "../../../src/daemon/runtime/memories/index.js";
+import { mountMemoriesApi, RECALL_DEGRADED_EVENT } from "../../../src/daemon/runtime/memories/index.js";
 import { mountDiagnosticsHealthApi } from "../../../src/daemon/runtime/diagnostics-health.js";
 import type { QueryScope, StorageQuery, QueryOptions } from "../../../src/daemon/storage/client.js";
 import { ok as okResult, type QueryResult, type StorageRow } from "../../../src/daemon/storage/result.js";
@@ -59,7 +52,7 @@ function headers(extra: Record<string, string> = {}): Record<string, string> {
 		"x-honeycomb-workspace": "ws-029",
 		"x-honeycomb-runtime-path": "legacy",
 		"x-honeycomb-session": SESSION,
-		"authorization": `Bearer ${FAKE_TOKEN}`,
+		authorization: `Bearer ${FAKE_TOKEN}`,
 		"content-type": "application/json",
 		...extra,
 	};
@@ -120,15 +113,24 @@ describe("AC-2 /health detail NAMES the down subsystem, not a bare degraded", ()
 
 	it("schema is best-effort 'ok' by default; 'missing_table' only when a required table is known-missing", () => {
 		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.schema).toBe("ok");
-		expect(
-			buildHealthDetail({ status: "ok", embeddingsEnabled: true, schemaMissingTable: true }).reasons?.schema,
-		).toBe("missing_table");
+		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true, schemaMissingTable: true }).reasons?.schema).toBe(
+			"missing_table",
+		);
+	});
+
+	it("C-4: captureDroppedEvents surfaces under reasons.capture on /health (local)", () => {
+		const detail = buildHealthDetail({ status: "ok", embeddingsEnabled: true, captureDroppedEvents: 3 });
+		expect(detail.reasons?.capture).toEqual({ droppedEvents: 3 });
 	});
 
 	it("the /health BODY surfaces the named storage reason in local mode (not a bare degraded)", async () => {
 		const daemon = createDaemon({
 			config: cfg("local"),
-			storage: { async query() { return ok([]); } },
+			storage: {
+				async query() {
+					return ok([]);
+				},
+			},
 			logger: createRequestLogger({ silent: true }),
 			pipelineProbe: () => "degraded",
 			healthDetail: () => buildHealthDetail({ status: "degraded", embeddingsEnabled: false }),
@@ -171,7 +173,11 @@ describe("b-AC-7 /health reasons.portkey reflects off/ok/unconfigured/unreachabl
 	it("the /health BODY surfaces reasons.portkey in local mode", async () => {
 		const daemon = createDaemon({
 			config: cfg("local"),
-			storage: { async query() { return ok([]); } },
+			storage: {
+				async query() {
+					return ok([]);
+				},
+			},
 			logger: createRequestLogger({ silent: true }),
 			healthDetail: () => buildHealthDetail({ status: "ok", embeddingsEnabled: true, portkey: "unconfigured" }),
 		});
@@ -207,7 +213,11 @@ describe("AC-3 /health detail is mode-gated; full detail on the protected diagno
 	it("local PUBLIC /health body INCLUDES reasons", async () => {
 		const daemon = createDaemon({
 			config: cfg("local"),
-			storage: { async query() { return ok([]); } },
+			storage: {
+				async query() {
+					return ok([]);
+				},
+			},
 			logger: createRequestLogger({ silent: true }),
 			healthDetail: () => detail,
 		});
@@ -219,7 +229,11 @@ describe("AC-3 /health detail is mode-gated; full detail on the protected diagno
 	it("team PUBLIC /health body has NO reasons (status-only — no topology to an unauthenticated remote)", async () => {
 		const daemon = createDaemon({
 			config: cfg("team"),
-			storage: { async query() { return ok([]); } },
+			storage: {
+				async query() {
+					return ok([]);
+				},
+			},
 			logger: createRequestLogger({ silent: true }),
 			healthDetail: () => detail,
 		});
@@ -232,7 +246,11 @@ describe("AC-3 /health detail is mode-gated; full detail on the protected diagno
 	it("hybrid PUBLIC /health body has NO reasons either", async () => {
 		const daemon = createDaemon({
 			config: cfg("hybrid"),
-			storage: { async query() { return ok([]); } },
+			storage: {
+				async query() {
+					return ok([]);
+				},
+			},
 			logger: createRequestLogger({ silent: true }),
 			healthDetail: () => detail,
 		});
@@ -247,7 +265,11 @@ describe("AC-3 /health detail is mode-gated; full detail on the protected diagno
 		// is the reachable in-process posture; the auth gating is server.ts's existing contract.)
 		const daemon = createDaemon({
 			config: cfg("local"),
-			storage: { async query() { return ok([]); } },
+			storage: {
+				async query() {
+					return ok([]);
+				},
+			},
 			logger: createRequestLogger({ silent: true }),
 			healthDetail: () => detail,
 		});
@@ -336,7 +358,11 @@ describe("AC-5 no token / org GUID / header value in the health detail or the de
 		const detail = buildHealthDetail({ status: "ok", embeddingsEnabled: true });
 		const daemon = createDaemon({
 			config: cfg("local"),
-			storage: { async query() { return ok([]); } },
+			storage: {
+				async query() {
+					return ok([]);
+				},
+			},
 			logger: createRequestLogger({ silent: true }),
 			healthDetail: () => detail,
 		});

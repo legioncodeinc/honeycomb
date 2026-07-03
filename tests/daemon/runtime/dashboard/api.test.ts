@@ -30,7 +30,15 @@ import type { TransportRequest } from "../../../../src/daemon/storage/transport.
 import { type RuntimeConfig } from "../../../../src/daemon/runtime/config.js";
 import { createRequestLogger } from "../../../../src/daemon/runtime/logger.js";
 import { createDaemon } from "../../../../src/daemon/runtime/server.js";
-import { buildSettingsView, fetchEstimatedSavings, fetchKpiCounts, fetchKpisView, fetchMemoryGraphView, fetchSkillSyncView, mountDashboardApi } from "../../../../src/daemon/runtime/dashboard/api.js";
+import {
+	buildSettingsView,
+	fetchEstimatedSavings,
+	fetchKpiCounts,
+	fetchKpisView,
+	fetchMemoryGraphView,
+	fetchSkillSyncView,
+	mountDashboardApi,
+} from "../../../../src/daemon/runtime/dashboard/api.js";
 import type { QueryScope, StorageQuery } from "../../../../src/daemon/storage/client.js";
 import type { QueryResult, StorageRow } from "../../../../src/daemon/storage/result.js";
 import type { LocalAssetInventory } from "../../../../src/dashboard/contracts.js";
@@ -127,6 +135,20 @@ describe("PRD-020b mountDashboardApi wires the six dashboard read handlers", () 
 		expect(json.estimatedSavings).toBe(1000);
 		// PRD-036c: the team-shared skill count from the synced_assets substrate.
 		expect(json.teamSkillCount).toBe(3);
+	});
+
+	it("C-4: /api/diagnostics/kpis exposes captureDroppedEvents when the seam is wired", async () => {
+		const { daemon, storage } = makeDaemon(true);
+		let dropped = 2;
+		mountDashboardApi(daemon, { storage, captureDroppedEvents: () => dropped });
+		const res = await daemon.app.request("/api/diagnostics/kpis", { headers: headers() });
+		expect(res.status).toBe(200);
+		const json = (await res.json()) as { extra?: { captureDroppedEvents: number } };
+		expect(json.extra?.captureDroppedEvents).toBe(2);
+		dropped = 5;
+		const again = await daemon.app.request("/api/diagnostics/kpis", { headers: headers() });
+		const body = (await again.json()) as { extra?: { captureDroppedEvents: number } };
+		expect(body.extra?.captureDroppedEvents).toBe(5);
 	});
 
 	it("PRD-022 collision: the dashboard does NOT claim /api/kpis (left to product-data)", async () => {

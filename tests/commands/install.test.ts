@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+	DASHBOARD_PORTAL_NOT_RUNNING_MESSAGE,
 	createFakeDaemonClient,
 	type DaemonLifecycle,
 	type DaemonStatus,
@@ -69,6 +70,10 @@ function recordingOpener(result: (url: string) => boolean): { open: (url: string
 	};
 }
 
+async function reachablePortalProbe(): Promise<boolean> {
+	return true;
+}
+
 let tmpDir: string;
 
 beforeEach(() => {
@@ -88,6 +93,7 @@ describe("PRD-050a — honeycomb install (a-AC-4 health-gated open)", () => {
 			daemon: createFakeDaemonClient({ alive: true }),
 			lifecycle,
 			openDashboard: opener.open,
+			probeDashboard: reachablePortalProbe,
 			dir: tmpDir,
 			out: (l) => lines.push(l),
 		});
@@ -107,6 +113,7 @@ describe("PRD-050a — honeycomb install (a-AC-4 health-gated open)", () => {
 			daemon: createFakeDaemonClient({ alive: false }),
 			lifecycle,
 			openDashboard: opener.open,
+			probeDashboard: reachablePortalProbe,
 			dir: tmpDir,
 			out: (l) => lines.push(l),
 		});
@@ -140,6 +147,7 @@ describe("PRD-064h: install reports daemon supervision (fail-soft, additive)", (
 			daemon: createFakeDaemonClient({ alive: true }),
 			lifecycle,
 			openDashboard: () => true,
+			probeDashboard: reachablePortalProbe,
 			dir: tmpDir,
 			out: (l) => lines.push(l),
 		});
@@ -157,6 +165,7 @@ describe("PRD-064h: install reports daemon supervision (fail-soft, additive)", (
 			// The default fakeLifecycle().status() returns no serviceManager → fallback note.
 			lifecycle: fakeLifecycle({}),
 			openDashboard: () => true,
+			probeDashboard: reachablePortalProbe,
 			dir: tmpDir,
 			out: (l) => lines.push(l),
 		});
@@ -181,6 +190,7 @@ describe("PRD-064h: install reports daemon supervision (fail-soft, additive)", (
 			daemon: createFakeDaemonClient({ alive: true }),
 			lifecycle,
 			openDashboard: () => true,
+			probeDashboard: reachablePortalProbe,
 			dir: tmpDir,
 			out: (l) => lines.push(l),
 		});
@@ -197,6 +207,7 @@ describe("PRD-050a — honeycomb install (a-AC-2 idempotency)", () => {
 			daemon: createFakeDaemonClient({ alive: true }),
 			lifecycle,
 			openDashboard: opener.open,
+			probeDashboard: reachablePortalProbe,
 			dir: tmpDir,
 			out: () => {},
 		});
@@ -213,6 +224,7 @@ describe("PRD-050a — honeycomb install (a-AC-2 idempotency)", () => {
 			daemon: createFakeDaemonClient({ alive: true }),
 			lifecycle,
 			openDashboard: opener.open,
+			probeDashboard: reachablePortalProbe,
 			dir: tmpDir,
 			out: () => {},
 		};
@@ -233,6 +245,7 @@ describe("PRD-050a — honeycomb install (a-AC-6 honeycomb.local → loopback fa
 			daemon: createFakeDaemonClient({ alive: true }),
 			lifecycle: fakeLifecycle({}),
 			openDashboard: opener.open,
+			probeDashboard: reachablePortalProbe,
 			dir: tmpDir,
 			out: () => {},
 		});
@@ -249,6 +262,7 @@ describe("PRD-050a — honeycomb install (a-AC-6 honeycomb.local → loopback fa
 			daemon: createFakeDaemonClient({ alive: true }),
 			lifecycle: fakeLifecycle({}),
 			openDashboard: opener.open,
+			probeDashboard: reachablePortalProbe,
 			dir: tmpDir,
 			out: (l) => lines.push(l),
 		});
@@ -256,6 +270,22 @@ describe("PRD-050a — honeycomb install (a-AC-6 honeycomb.local → loopback fa
 		// The loopback URL is printed so a headless host learns where the dashboard lives.
 		expect(lines.join("\n")).toContain(loopbackDashboardUrl());
 		expect(lines.join("\n")).toMatch(/Honeycomb is ready/);
+	});
+
+	it("C-6 does not open a browser tab when the portal is unreachable; it prints one honest sentence", async () => {
+		const lines: string[] = [];
+		const opener = recordingOpener(() => true);
+		const res = await runInstallCommand([], {
+			daemon: createFakeDaemonClient({ alive: true }),
+			lifecycle: fakeLifecycle({}),
+			openDashboard: opener.open,
+			probeDashboard: async () => false,
+			dir: tmpDir,
+			out: (l) => lines.push(l),
+		});
+		expect(res.exitCode).toBe(0);
+		expect(opener.urls).toHaveLength(0);
+		expect(lines).toContain(DASHBOARD_PORTAL_NOT_RUNNING_MESSAGE);
 	});
 });
 
@@ -265,6 +295,7 @@ describe("PRD-050a — honeycomb install (a-AC-5 onboarding 'installed' + ref)",
 			daemon: createFakeDaemonClient({ alive: true }),
 			lifecycle: fakeLifecycle({}),
 			openDashboard: () => true,
+			probeDashboard: reachablePortalProbe,
 			dir: tmpDir,
 			out: () => {},
 		});
@@ -279,6 +310,7 @@ describe("PRD-050a — honeycomb install (a-AC-5 onboarding 'installed' + ref)",
 			daemon: createFakeDaemonClient({ alive: true }),
 			lifecycle: fakeLifecycle({}),
 			openDashboard: () => true,
+			probeDashboard: reachablePortalProbe,
 			dir: tmpDir,
 			out: () => {},
 		});
@@ -294,6 +326,7 @@ describe("PRD-050a — honeycomb install (a-AC-5 onboarding 'installed' + ref)",
 			daemon: createFakeDaemonClient({ alive: true }),
 			lifecycle: fakeLifecycle({}),
 			openDashboard: () => true,
+			probeDashboard: reachablePortalProbe,
 			dir: tmpDir,
 			out: () => {},
 		};
@@ -312,6 +345,7 @@ describe("PRD-071 Contract A — install registers honeycomb with doctor's stati
 			daemon: createFakeDaemonClient({ alive: true }),
 			lifecycle: fakeLifecycle({}),
 			openDashboard: () => true,
+			probeDashboard: reachablePortalProbe,
 			dir: tmpDir,
 			out: () => {},
 		});
@@ -331,6 +365,7 @@ describe("PRD-071 Contract A — install registers honeycomb with doctor's stati
 			daemon: createFakeDaemonClient({ alive: true }),
 			lifecycle: fakeLifecycle({}),
 			openDashboard: () => true,
+			probeDashboard: reachablePortalProbe,
 			dir: tmpDir,
 			out: () => {},
 		};
@@ -351,6 +386,7 @@ describe("PRD-071 Contract A — install registers honeycomb with doctor's stati
 			daemon: createFakeDaemonClient({ alive: true }),
 			lifecycle: fakeLifecycle({}),
 			openDashboard: () => true,
+			probeDashboard: reachablePortalProbe,
 			dir: notADir,
 			out: (l) => lines.push(l),
 		});

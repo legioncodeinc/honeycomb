@@ -120,6 +120,7 @@ export function createDaemonHookClient(options: DaemonHookClientOptions): Daemon
 			} catch {
 				// A transport failure (daemon down / refused) is NOT a hook crash — surface a
 				// `0` status with no body so the fail-soft core absorbs it (FR-10).
+				process.stderr.write("honeycomb: hook capture transport failed (daemon unreachable)\n");
 				return { status: 0 };
 			}
 		},
@@ -161,9 +162,7 @@ function withTenancy(body: unknown, tenancy: ResolvedTenancy): unknown {
 	if (tenancy.org === undefined && tenancy.workspace === undefined) return body;
 	const record = body as Record<string, unknown>;
 	const metadata =
-		record.metadata !== null && typeof record.metadata === "object"
-			? (record.metadata as Record<string, unknown>)
-			: {};
+		record.metadata !== null && typeof record.metadata === "object" ? (record.metadata as Record<string, unknown>) : {};
 	return {
 		...record,
 		metadata: {

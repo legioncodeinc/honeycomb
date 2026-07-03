@@ -19,6 +19,7 @@ import {
 	type CommandDeps,
 	createDispatcher,
 	createFakeDaemonClient,
+	DASHBOARD_PORTAL_NOT_RUNNING_MESSAGE,
 	parseInvocation,
 	usageText,
 	VERB_GROUPS,
@@ -107,7 +108,7 @@ describe("PRD-020a a-AC-1 — the unified dispatcher parses + routes", () => {
 		expect(daemon.calls[0]?.req.path).toBe("/api/skills/pull");
 	});
 
-	it("PRD-050a routes `install` as a LOCAL verb through the daemon ensure-running + opener seams", async () => {
+	it("PRD-050a routes `install` as a LOCAL verb through the daemon ensure-running + opener seams (reachable portal opens)", async () => {
 		const lines: string[] = [];
 		const urls: string[] = [];
 		// Bind a TEMP onboarding dir so this dispatcher test never persists to the developer/CI machine's
@@ -117,13 +118,15 @@ describe("PRD-020a a-AC-1 — the unified dispatcher parses + routes", () => {
 		// telemetry stays a no-op under the empty build-time PostHog key.
 		const dir = mkdtempSync(join(tmpdir(), "hc-dispatch-install-"));
 		try {
-			// A live daemon so ensure-running short-circuits (no lifecycle needed here); a recording opener.
+			// A live daemon so ensure-running short-circuits (no lifecycle needed here); a recording opener;
+			// a reachable portal probe so the C-6 honest-dashboard branch takes the open path.
 			const deps = {
 				daemon: createFakeDaemonClient({ alive: true }),
 				openDashboard: (url: string): boolean => {
 					urls.push(url);
 					return true;
 				},
+				probeDashboard: async () => true,
 				out: (l: string) => lines.push(l),
 				dir,
 			} as unknown as CommandDeps;
@@ -132,6 +135,33 @@ describe("PRD-020a a-AC-1 — the unified dispatcher parses + routes", () => {
 			expect(res.exitCode).toBe(0);
 			// The verb reached the install handler: a dashboard URL was opened and the ready line printed.
 			expect(urls.length).toBeGreaterThan(0);
+			expect(lines.join("\n")).toMatch(/Honeycomb is ready/);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("PRD-050a (C-6) an unreachable portal through the dispatcher prints one honest sentence and opens nothing", async () => {
+		const lines: string[] = [];
+		const urls: string[] = [];
+		const dir = mkdtempSync(join(tmpdir(), "hc-dispatch-install-"));
+		try {
+			const deps = {
+				daemon: createFakeDaemonClient({ alive: true }),
+				openDashboard: (url: string): boolean => {
+					urls.push(url);
+					return true;
+				},
+				probeDashboard: async () => false,
+				out: (l: string) => lines.push(l),
+				dir,
+			} as unknown as CommandDeps;
+			const d = createDispatcher();
+			const res = await d.dispatch(d.parse(["install", "--ref", "alice"]), deps);
+			expect(res.exitCode).toBe(0);
+			// No browser tab on the unreachable-portal path — just the one-sentence fallback + ready line.
+			expect(urls).toHaveLength(0);
+			expect(lines).toContain(DASHBOARD_PORTAL_NOT_RUNNING_MESSAGE);
 			expect(lines.join("\n")).toMatch(/Honeycomb is ready/);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });

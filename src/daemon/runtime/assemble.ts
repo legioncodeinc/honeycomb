@@ -56,6 +56,7 @@ import {
 import { mountAuthStatusApi } from "./auth/status-api.js";
 import { attachHooksHandlers } from "./capture/attach.js";
 import type { CaptureHandler } from "./capture/capture-handler.js";
+import { createCaptureDroppedEventsCounter, type CaptureDroppedEventsCounter } from "./capture/dropped-events.js";
 import { buildCodebaseGraphSnapshot, mountGraphApi } from "./codebase/api.js";
 import { type DeploymentMode, type RuntimeConfig, resolveRuntimeConfig } from "./config.js";
 import { mountActionsApi } from "./dashboard/actions-api.js";
@@ -106,7 +107,11 @@ import {
 import type { ModelClient } from "./pipeline/model-client.js";
 import { mountPollinateApi } from "./pollinating/api.js";
 import { resolvePollinatingConfig } from "./pollinating/config.js";
-import { createPollinatingTrigger } from "./pollinating/trigger.js";
+import {
+	startPollinatingMaintenanceTick,
+	type PollinatingMaintenanceTickHandle,
+} from "./pollinating/maintenance-tick.js";
+import { createPollinatingTrigger, type PollinatingTrigger } from "./pollinating/trigger.js";
 import { createPollinatingWorker, type PollinatingJobWorker } from "./pollinating/worker.js";
 import { mountProductDataApi } from "./product/index.js";
 import {
@@ -847,6 +852,7 @@ export function assembleSeams(
 	vault?: VaultSettingsReader,
 	rerankerDeps?: RerankerMountDeps,
 	projectsDir?: string,
+	captureDroppedEvents?: CaptureDroppedEventsCounter,
 ): CaptureHandler {
 	// The daemon's configured default tenancy scope (the single LOCAL tenant) is RESOLVED ONCE
 	// at the composition root (`assembleDaemon`) from the SAME credential source the storage
@@ -887,6 +893,8 @@ export function assembleSeams(
 		// reads the local `~/.deeplake/projects.json` cache (NO DeepLake call); once a project is bound
 		// it opens and the 049a inbox fallback for unbound folders resumes (a-AC-4 / a-AC-5).
 		firstRunGate: true,
+		logger: daemon.logger,
+		...(captureDroppedEvents !== undefined ? { droppedEvents: captureDroppedEvents } : {}),
 		...(projectsDir !== undefined ? { projectsDir } : {}),
 	});
 
@@ -897,7 +905,12 @@ export function assembleSeams(
 	//    codebase-graph view is owned solely by step 13's `mountGraph` (the freshest-LOCAL-snapshot
 	//    read), so the "Build graph" re-read is immediate + consistent. The MEMORY-graph view this
 	//    seam DOES serve lives at `/api/diagnostics/memory-graph` (a distinct path, no collision).
-	seams.mountDashboard(daemon, { storage, defaultScope, orgName });
+	seams.mountDashboard(daemon, {
+		storage,
+		defaultScope,
+		orgName,
+		...(captureDroppedEvents !== undefined ? { captureDroppedEvents: () => captureDroppedEvents.read() } : {}),
+	});
 
 	// 3. The backend notifications API (020d) — the org's pending notifications.
 	seams.mountNotifications(daemon, { storage });
@@ -1696,6 +1709,7 @@ async function buildGatedPollinatingWorker(
 	queue: DaemonServices["queue"],
 	vault: VaultSettingsReader | undefined,
 	backoff: PollBackoffConfig,
+	pollinatingTrigger: PollinatingTrigger,
 	portkeyDeps?: PortkeyWorkerDeps,
 ): Promise<PollinatingJobWorker | null> {
 	// Resolve the env gate fail-soft FIRST: a malformed pollinating-config knob must NEVER take the
@@ -1758,12 +1772,8 @@ async function buildGatedPollinatingWorker(
 		...(portkeyDeps !== undefined ? { onPortkeyUnreachable: portkeyDeps.onUnreachable } : {}),
 	});
 
-	// The REAL PRD-009a trigger: its `readState` feeds the worker's first-run backfill rule
-	// and its additive `recordPassComplete` is the runner's append-only state-update seam. It
-	// reuses the daemon's OWN durable queue as the enqueuer — no second pollinating subsystem.
-	// No `pendingTerminal` probe is passed (see the JSDoc above): the queue exposes no public
-	// status-by-id read, so the trigger applies its conservative never-terminal default.
-	const trigger = createPollinatingTrigger({ storage, scope, config, enqueuer: queue });
+	// The REAL PRD-009a trigger (shared with the summary increment + maintenance tick).
+	const trigger = pollinatingTrigger;
 
 	// The consumer: leases ONLY `["pollinating"]`, runs the runner with the real model + the 008c
 	// apply (inside the runner) + the append-only state update, completes/fails the job.
@@ -1792,8 +1802,20 @@ function buildSummaryWorker(
 	queue: DaemonServices["queue"],
 	embed: EmbedAttachment,
 	backoff: PollBackoffConfig,
+	pollinatingTrigger: PollinatingTrigger,
 ): SummaryJobWorker {
-	return createSummaryJobWorker({ queue, storage, scope, embed: embed.client, backoff });
+	return createSummaryJobWorker({
+		queue,
+		storage,
+		scope,
+		embed: embed.client,
+		backoff,
+		pollinatingCounter: {
+			increment: async (agentScope, tokens) => {
+				await pollinatingTrigger.incrementPollinatingCounter(agentScope, tokens);
+			},
+		},
+	});
 }
 
 /**
@@ -2055,6 +2077,21 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		config: localQueueConfig,
 	});
 
+	const captureDroppedEvents = createCaptureDroppedEventsCounter();
+
+	let pollinatingConfig: ReturnType<typeof resolvePollinatingConfig>;
+	try {
+		pollinatingConfig = resolvePollinatingConfig(options.pollinatingConfigProvider);
+	} catch {
+		pollinatingConfig = resolvePollinatingConfig({ read: () => ({}) });
+	}
+	const pollinatingTrigger = createPollinatingTrigger({
+		storage,
+		scope,
+		config: pollinatingConfig,
+		enqueuer: queue,
+	});
+
 	// ── a-AC-4: the cached health bit. A cheap background `SELECT 1` refreshes a coarse
 	// status; `/health` reads the bit (NO per-request heavy query). Initial state is
 	// `ok` (a freshly-constructed live client is assumed reachable until the first probe
@@ -2153,7 +2190,12 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	};
 
 	const healthDetail = (): HealthDetail =>
-		buildHealthDetail({ status: healthBit, embeddingsEnabled: embeddingsReason(), portkey: portkeyHealth });
+		buildHealthDetail({
+			status: healthBit,
+			embeddingsEnabled: embeddingsReason(),
+			portkey: portkeyHealth,
+			captureDroppedEvents: captureDroppedEvents.read(),
+		});
 
 	// ── PRD-063c (c-D-2 / c-AC-1 / c-AC-3): the Cohere-via-Portkey rerank seam, late-bound.
 	// The seam handed to the `/api/memories/recall` mount is a STABLE delegating object whose `rerank`
@@ -2265,6 +2307,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		vault,
 		rerankerMountDeps,
 		options.projectsDir,
+		captureDroppedEvents,
 	);
 
 	// ── PRD-032d / AC-6: FIRE the Wave-1 `/api/settings` mount ONCE so the CLI/dashboard
@@ -2420,6 +2463,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		mode: config.mode,
 	});
 	let graphBuildTimer: ReturnType<typeof setInterval> | null = null;
+	let pollinatingMaintenanceTick: PollinatingMaintenanceTickHandle | null = null;
 	let graphBuildInFlight = false;
 	async function rebuildCodebaseGraph(): Promise<void> {
 		if (graphBuildInFlight) return;
@@ -2521,6 +2565,8 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			await daemon.startServices();
 			if (!startBackgroundWorkers) return;
 
+			pollinatingMaintenanceTick = startPollinatingMaintenanceTick(pollinatingTrigger, { agentId: "default" });
+
 			// ── PRD-062b: resolve the adaptive-backoff + consolidation knobs ONCE, fail-soft.
 			// A malformed knob must NEVER take the daemon down — degrade to the schema's
 			// safe defaults (backoff still default-ON per the env provider; consolidation
@@ -2603,7 +2649,14 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// simply stay unproduced this run rather than crashing the process.
 			if (startSummaryWorker) {
 				try {
-					summaryWorker = buildSummaryWorker(storage, scope, daemon.services.queue, embed, pollBackoff);
+					summaryWorker = buildSummaryWorker(
+						storage,
+						scope,
+						daemon.services.queue,
+						embed,
+						pollBackoff,
+						pollinatingTrigger,
+					);
 					summaryWorker.start();
 				} catch (err: unknown) {
 					const reason = err instanceof Error ? err.message : String(err);
@@ -2704,6 +2757,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 						daemon.services.queue,
 						vault,
 						pollBackoff,
+						pollinatingTrigger,
 						portkeyWorkerDeps,
 					);
 					// PRD-062b (AC-4): consolidate ONLY the REAL production workers. An explicitly
@@ -2804,6 +2858,10 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			if (graphBuildTimer !== null) {
 				clearInterval(graphBuildTimer);
 				graphBuildTimer = null;
+			}
+			if (pollinatingMaintenanceTick !== null) {
+				pollinatingMaintenanceTick.stop();
+				pollinatingMaintenanceTick = null;
 			}
 			if (started) {
 				await daemon.stopServices();

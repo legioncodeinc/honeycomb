@@ -217,7 +217,16 @@ describe("PRD-039a a-AC-5: guarded + fail-soft + secure", () => {
 		const res = await daemon.app.request("/api/diagnostics/harnesses", { headers: headers() });
 		const raw = await res.text();
 		// No credential-shaped strings ride the body.
-		for (const needle of ["token", "Bearer", "authorization", "secret", "api_key", "apikey", "password", "credential"]) {
+		for (const needle of [
+			"token",
+			"Bearer",
+			"authorization",
+			"secret",
+			"api_key",
+			"apikey",
+			"password",
+			"credential",
+		]) {
 			expect(raw.toLowerCase()).not.toContain(needle.toLowerCase());
 		}
 	});
@@ -302,10 +311,18 @@ describe("PRD-039c c-AC-4 (server-folded descriptor): Cursor carries `agents`, C
 			"SessionEnd",
 		]);
 		// Claude Code has strictly MORE lifecycle events than Cursor (the reference is the richest).
-		expect(claude?.capabilities.lifecycleEvents.length).toBeGreaterThan(cursor?.capabilities.lifecycleEvents.length ?? 0);
-		// Hermes: MCP registration; OpenClaw: contracted tools — the other real divergences.
-		expect(hermes?.capabilities.mcpRegistration).toBe(true);
-		expect(openclaw?.capabilities.contractedTools).toBe(true);
+		expect(claude?.capabilities.lifecycleEvents.length).toBeGreaterThan(
+			cursor?.capabilities.lifecycleEvents.length ?? 0,
+		);
+		// C-1 claim-reduction: only three harnesses are supported today.
+		expect(cursor?.capabilities.supportStatus).toBe("supported");
+		expect(claude?.capabilities.supportStatus).toBe("supported");
+		expect(harnesses.find((h) => h.name === "codex")?.capabilities.supportStatus).toBe("supported");
+		expect(hermes?.capabilities.supportStatus).toBe("in-progress");
+		expect(openclaw?.capabilities.supportStatus).toBe("in-progress");
+		expect(harnesses.find((h) => h.name === "pi")?.capabilities.supportStatus).toBe("in-progress");
+		expect(hermes?.capabilities.mcpRegistration).toBeUndefined();
+		expect(openclaw?.capabilities.contractedTools).toBeUndefined();
 	});
 
 	it("the registry descriptors agree with the folded response (single source, c-OQ-2)", () => {

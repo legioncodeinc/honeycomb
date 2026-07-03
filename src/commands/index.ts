@@ -134,14 +134,17 @@ export {
 } from "./daemon.js";
 
 export {
+	DASHBOARD_PORTAL_NOT_RUNNING_MESSAGE,
 	DASHBOARD_LOCAL_HOST,
 	DASHBOARD_PATH,
 	type DashboardOpener,
+	type DashboardProbe,
 	type InstallVerbDeps,
 	localDashboardUrl,
 	loopbackDashboardUrl,
 	openLocalDashboardUrl,
 	parseRefArg,
+	probeLoopbackDashboard,
 	resolveEffectiveRef,
 	runInstallCommand,
 } from "./install.js";

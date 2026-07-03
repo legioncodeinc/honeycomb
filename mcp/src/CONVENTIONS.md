@@ -35,21 +35,32 @@ bundle itself; only the SDK dep + the transport wiring.
 
 ## The unified surface (FR-3..FR-8) — `tools.ts`
 
-~25 tools across seven clusters. Each `ToolSpec` carries its `honeycomb_`-prefixed name, cluster,
-and a STRICT `zod/v3` arg-schema placeholder (`.strict()` rejects unknown args, FR-10 / d-AC-1).
+19 tools across five clusters (15 unconditional + the 4-tool conditional `codebase` cluster).
+Each `ToolSpec` carries its `honeycomb_`-prefixed name, cluster, and a STRICT `zod/v3` arg-schema
+placeholder (`.strict()` rejects unknown args, FR-10 / d-AC-1).
 
 | Cluster      | Tools |
 |--------------|-------|
-| memory       | memory_search, memory_store, memory_get, memory_list, memory_modify*, memory_forget*, memory_feedback |
+| memory       | memory_search, memory_store, memory_get, memory_list, memory_modify*, memory_forget*, hivemind_read, hivemind_search |
 | browse       | honeycomb_search, honeycomb_read, honeycomb_index |
-| sessions     | session_search (infers parent lineage from a child key, d-AC-5), session_bypass |
 | goals-kpis   | honeycomb_goal_add, honeycomb_kpi_add |
-| agent        | agent_peers, agent_message_send, agent_message_inbox |
 | codebase†    | honeycomb_code_search, honeycomb_code_context, honeycomb_code_blast, honeycomb_code_impact |
 | secrets‡     | secret_list, secret_exec |
 
 \* `memory_modify` / `memory_forget` REQUIRE a `reason` arg — the handler rejects a call without
-one (FR-9 / d-AC-3). The arg schema already makes `reason` required; the Wave-2 handler enforces it.
+one (FR-9 / d-AC-3). `memory_modify` also REQUIRES `content` (the real `POST /api/memories/:id/
+modify` route is a version-bumped UPDATE). The arg schema already makes both required; the
+Wave-2 handler enforces the `reason` gate.
+
+**2026-07-03 pre-release C-2 fix:** the `sessions` (session_search, session_bypass), `agent`
+(agent_peers, agent_message_send, agent_message_inbox), and `memory_feedback` tools were
+UNREGISTERED — they dialed `/api/sessions/*`, `/api/agents/*`, and `POST /api/memories/feedback`,
+none of which `src/daemon/runtime/server.ts`'s `ROUTE_GROUPS` mounts, so every call 404'd. The
+browse trio was RE-POINTED at the real VFS routes (`honeycomb_search`→`/memory/grep`,
+`honeycomb_read`→`/memory/cat`, `honeycomb_index`→`/memory/ls`), and `memory_modify`/
+`memory_forget` were fixed to the real `POST /api/memories/:id/modify|forget` shape (previously
+`PATCH`/`DELETE /api/memories`). See `tests/mcp/route-conformance.test.ts` for the regression
+test — it drives every registered tool against a real assembled daemon.
 
 † the `codebase` cluster is registered CONDITIONALLY — only after `honeycomb graph build` enables
 the workspace graph (FR-7 / d-AC-4). `CONDITIONAL_TOOL_NAMES` is the exact set to gate.
@@ -81,8 +92,8 @@ fully registered + routed:
 
 | Module | Owns |
 |--------|------|
-| `handlers.ts` | The `HANDLERS` table — one daemon-routed handler per tool. Reason-required gate (`memory_modify`/`memory_forget` reject a missing/blank `reason` BEFORE any daemon call). Value-safe secrets (`toSecretListResult` reconstructs from names only; `toSecretExecResult` always redacts). |
-| `sessions.ts` | `inferParentSessionKey` (pure lineage derivation from a child key) + `sessionSearch` (stamps `parentSessionKey` onto the daemon request — how OpenClaw resolves a parent slice). |
+| `handlers.ts` | The `HANDLERS` table — one daemon-routed handler per tool. Reason-required gate (`memory_modify`/`memory_forget` reject a missing/blank `reason` BEFORE any daemon call). Value-safe secrets (`toSecretListResult` reconstructs from names only; `toSecretExecResult` always redacts, and preserves `jobId`/`status`). |
+| `sessions.ts` | `inferParentSessionKey` — pure lineage derivation from a child key. Kept as a tested utility after the `session_search` tool that used it was unregistered (C-2, no backing route). |
 | `registry.ts` | `createMcpToolRegistry` backs `ToolRegistry` over `McpServer.registerTool`. The wrapped handler STRICT-parses args (unknown/extra → rejected, FR-10), routes through the daemon seam (FR-2), shapes the MCP envelope. `registerHoneycombSurface` registers every cluster, GATING the codebase cluster on `graphBuilt` (d-AC-4). `invoke(name,args)` drives the exact wrapped handler both transports run (used by the d-AC-6 test). |
 | `daemon-seam.ts` | `createHttpDaemonApiSeam` — the production seam. Stamps `x-honeycomb-runtime-path: plugin` + `x-honeycomb-actor` + `x-honeycomb-actor-type` on EVERY call (FR-2 / d-AC-1 / D-6). Behind an injected `fetch` so a test asserts the stamps with no socket. |
 | `transports.ts` | `bindAllTransports` binds streamable-HTTP (`StreamableHTTPServerTransport`) AND stdio (`StdioServerTransport`) to the SAME `McpServer` (d-AC-6). Behind the `TransportBinder` seam so a test asserts equivalence without binding a port. |
@@ -92,9 +103,10 @@ fully registered + routed:
 
 No tool ever returns a raw secret value. `secret_list` reconstructs `{ names }` from the daemon
 body's `names` array ALONE — even a daemon that attaches `value`/`values` fields cannot leak them.
-`secret_exec` coerces to `{ status, output }` with `output` ALWAYS the redacted string (defaults to
-`[REDACTED]`). `tests/mcp/secrets.test.ts` proves a planted secret never appears in the serialized
-result.
+`secret_exec` coerces to `{ jobId?, status?, output }` with `output` ALWAYS the redacted string
+(defaults to `[REDACTED]`); `jobId`/`status` are opaque/non-secret and preserved so a submitted
+job is not orphaned (M-10). `tests/mcp/secrets.test.ts` proves a planted secret never appears in
+the serialized result.
 
 ### Honest deferral (assembly step — NOT claimed live)
 

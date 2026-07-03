@@ -16,7 +16,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@legioncodeinc/honeycomb"><img src="https://img.shields.io/npm/v/@legioncodeinc/honeycomb?style=flat-square&color=F7A823&label=version" alt="npm version"></a>
-  <img src="https://img.shields.io/badge/harnesses-6-F7A823?style=flat-square" alt="6 harnesses">
+  <img src="https://img.shields.io/badge/harnesses-3%20supported%20%7C%203%20in%20progress-F7A823?style=flat-square" alt="3 supported, 3 in progress">
   <img src="https://img.shields.io/badge/OS-windows%20%7C%20macos%20%7C%20linux-6E6A62?style=flat-square" alt="Windows, macOS, Linux">
 </p>
 
@@ -235,12 +235,11 @@ Most agent-memory tools bolt onto a vector-only store, which forces *every* acce
 
 ## 🔌 Supported harnesses
 
-Honeycomb ships thin clients for six coding harnesses, all wired simultaneously, all reading and writing the same shared memory:
+Honeycomb currently supports 3 harnesses in production (Claude Code, Codex, Cursor). Hermes, pi, and OpenClaw are in progress.
 
-| | | |
-|---|---|---|
-| **Claude Code** | **Cursor** | **Codex** |
-| **Hermes** | **pi** | **OpenClaw** |
+| Supported today | In progress |
+|---|---|
+| **Claude Code**, **Cursor**, **Codex** | **Hermes**, **pi**, **OpenClaw** |
 
 `honeycomb setup` detects the ones you have installed and wires each idempotently; `honeycomb uninstall` reverses only Honeycomb's changes. A skill mined while you were in Cursor is auto-pulled and ready in Claude Code on your next session.
 

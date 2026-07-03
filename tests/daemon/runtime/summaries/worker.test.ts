@@ -72,7 +72,10 @@ function fakeFetcher(events: readonly SessionEvent[]): SessionEventFetcher {
 }
 
 /** A fetcher that returns empty for the first `emptyTimes` attempts, then the events. */
-function emptyThenPresentFetcher(emptyTimes: number, events: readonly SessionEvent[]): { fetcher: SessionEventFetcher; attempts: () => number } {
+function emptyThenPresentFetcher(
+	emptyTimes: number,
+	events: readonly SessionEvent[],
+): { fetcher: SessionEventFetcher; attempts: () => number } {
 	let n = 0;
 	const fetcher: SessionEventFetcher = {
 		async fetch(): Promise<readonly SessionEvent[]> {
@@ -86,7 +89,14 @@ function emptyThenPresentFetcher(emptyTimes: number, events: readonly SessionEve
 /** A no-op fake clock so the retry backoff runs instantly. */
 function fakeSleeper(): { sleeper: Sleeper; sleeps: number[] } {
 	const sleeps: number[] = [];
-	return { sleeper: { async sleep(ms: number): Promise<void> { sleeps.push(ms); } }, sleeps };
+	return {
+		sleeper: {
+			async sleep(ms: number): Promise<void> {
+				sleeps.push(ms);
+			},
+		},
+		sleeps,
+	};
 }
 
 /** An in-memory per-session lock (one holder per session; second acquire → null). */
@@ -114,7 +124,11 @@ function fixedEmbed(): EmbedClient {
 
 /** An embed client that THROWS (a-AC-5 — non-fatal). */
 function throwingEmbed(): EmbedClient {
-	return { embed: async (): Promise<readonly number[] | null> => { throw new Error("embed daemon down"); } };
+	return {
+		embed: async (): Promise<readonly number[] | null> => {
+			throw new Error("embed daemon down");
+		},
+	};
 }
 
 /** A recording fake `SummaryStore` (NO `update` by construction). */
@@ -212,7 +226,10 @@ describe("PRD-017a summary worker", () => {
 		const { systemSummarySpawner } = await import("../../../../src/daemon/runtime/summaries/index.js");
 		const spec: SummaryCliSpec = {
 			command: process.execPath,
-			args: ["-e", "process.stdout.write(JSON.stringify({w:process.env.HONEYCOMB_WIKI_WORKER,c:process.env.HONEYCOMB_CAPTURE,m:process.env.HONEYCOMB_WORKER}))"],
+			args: [
+				"-e",
+				"process.stdout.write(JSON.stringify({w:process.env.HONEYCOMB_WIKI_WORKER,c:process.env.HONEYCOMB_CAPTURE,m:process.env.HONEYCOMB_WORKER}))",
+			],
 		};
 		const out = await systemSummarySpawner.run(spec, "ignored stdin", 10_000);
 		const parsed = JSON.parse(out.trim()) as { w?: string; c?: string; m?: string };
@@ -349,7 +366,10 @@ describe("PRD-017a summary worker", () => {
 		expect(statements.some((s) => /INSERT\s+INTO\s+"memory"/i.test(s))).toBe(true);
 		expect(statements.some((s) => s.includes(path))).toBe(true);
 		// THE invariant: no in-place UPDATE of the memory table anywhere.
-		expect(statements.some((s) => /UPDATE\s+"memory"\s+SET/i.test(s)), "no in-place UPDATE on memory").toBe(false);
+		expect(
+			statements.some((s) => /UPDATE\s+"memory"\s+SET/i.test(s)),
+			"no in-place UPDATE on memory",
+		).toBe(false);
 		// The placeholder removal is a guarded DELETE on the in-progress marker, not an UPDATE.
 		expect(statements.some((s) => /DELETE\s+FROM\s+"memory"/i.test(s) && /in progress/i.test(s))).toBe(true);
 	});
@@ -423,8 +443,47 @@ describe("PRD-017a summary worker", () => {
 
 	it("fetchWithRetry: retryLimit 0 → a single attempt, no backoff", async () => {
 		const { sleeper, sleeps } = fakeSleeper();
-		const events = await fetchWithRetry(fakeFetcher([]), SESSION, { retryLimit: 0, backoffMs: 99, gateTimeoutMs: 1 }, sleeper);
+		const events = await fetchWithRetry(
+			fakeFetcher([]),
+			SESSION,
+			{ retryLimit: 0, backoffMs: 99, gateTimeoutMs: 1 },
+			sleeper,
+		);
 		expect(events).toHaveLength(0);
 		expect(sleeps).toEqual([]); // no retry → no sleep
+	});
+
+	it("C-3: a fresh summary write increments the pollinating counter by the summary token estimate", async () => {
+		const markdown = "## Deploy\nRotated credentials safely.";
+		const increments: { agentId: string; tokens: number }[] = [];
+		const gate: SummaryGenCli = {
+			async run(): Promise<string> {
+				return JSON.stringify({
+					extraction: { changes: ["rotated credentials"] },
+					summary: markdown,
+					key: "deploy: rotated",
+				});
+			},
+		};
+		const { store } = recordingStore();
+		const { sleeper } = fakeSleeper();
+		const session: SummarySession = { ...SESSION, agentId: "claude-code" };
+		const result = await runSummaryWorker(FINAL_TRIGGER, session, {
+			lock: memoryLock(),
+			fetcher: fakeFetcher(CANNED_EVENTS),
+			gate,
+			embed: fixedEmbed(),
+			store,
+			config: FAST_CONFIG,
+			sleeper,
+			pollinatingCounter: {
+				increment: async (scope, tokens) => {
+					increments.push({ agentId: scope.agentId, tokens });
+				},
+			},
+		});
+		expect(result.ran).toBe(true);
+		expect(result).toMatchObject({ wrote: true });
+		expect(increments).toEqual([{ agentId: "claude-code", tokens: Math.ceil(markdown.length / 4) }]);
 	});
 });

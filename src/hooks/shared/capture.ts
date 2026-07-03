@@ -22,17 +22,8 @@
  * (OpenClaw) produces the SAME daemon-written rows as one that captures incrementally.
  */
 
-import {
-	type CaptureGateContext,
-	type CaptureGateEnv,
-	runCaptureGuarded,
-} from "../../shared/capture-gate.js";
-import {
-	type DaemonHookResponse,
-	type HookCoreDeps,
-	type HookInput,
-	type HookResult,
-} from "./contracts.js";
+import { type CaptureGateContext, type CaptureGateEnv, runCaptureGuarded } from "../../shared/capture-gate.js";
+import { type DaemonHookResponse, type HookCoreDeps, type HookInput, type HookResult } from "./contracts.js";
 
 // Re-export the shared gate so a shim wires capture through one import surface.
 export { runCaptureGuarded, type CaptureGateContext, type CaptureGateEnv };
@@ -84,12 +75,12 @@ export async function runCapture(
 	ctx: CaptureGateContext = {},
 ): Promise<HookResult> {
 	let conflict = false;
-	let dispatched = false;
+	let transportFailed = false;
 
 	const decision = await runCaptureGuarded(env, withEntrypoint(input, ctx), async () => {
-		dispatched = true;
 		const response = await dispatchCapture(input, deps);
-		if (response.status === RUNTIME_PATH_CONFLICT) conflict = true;
+		if (response.status === 0) transportFailed = true;
+		else if (response.status === RUNTIME_PATH_CONFLICT) conflict = true;
 	});
 
 	// Gate skipped → no daemon call was made (c-AC-6); report the skip reason.
@@ -100,9 +91,11 @@ export async function runCapture(
 	if (conflict) {
 		return { ok: false, reason: "runtime-path-conflict" };
 	}
-	// `dispatched` stays false only if the gate-wrapper swallowed an error before the
-	// send; either way the turn proceeded. Report ok when the dispatch completed.
-	return { ok: dispatched };
+	if (transportFailed) {
+		return { ok: false, reason: "transport-failure" };
+	}
+	// Gate said capture but the action threw before a response (fail-soft, turn proceeds).
+	return { ok: true };
 }
 
 /**

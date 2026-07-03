@@ -184,8 +184,9 @@ function emitResponse(io: BinaryIo, shim: HarnessShim, outcome: HookEventOutcome
  */
 export function maybeRunHookBinaryMain(shim: HarnessShim, importMetaUrl: string): void {
 	if (!isMainEntry(importMetaUrl)) return;
-	void runHookBinary({ shim }).catch(() => {
-		// Fail-soft: a hook crash must never break the turn — exit 0 with no output.
+	void runHookBinary({ shim }).catch((err: unknown) => {
+		const reason = err instanceof Error ? err.message : String(err);
+		process.stderr.write(`honeycomb: hook binary failed (fail-soft): ${reason}\n`);
 	});
 }
 

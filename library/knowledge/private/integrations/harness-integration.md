@@ -2,7 +2,7 @@
 
 > Category: Integrations | Version: 1.0 | Date: June 2026 | Status: Active
 
-How Honeycomb plugs underneath coding harnesses: the install-time connector base, the per-harness shims, MCP-server-via-install, and the capability detection plus idempotent install/uninstall contract that wires all six supported harnesses.
+How Honeycomb plugs underneath coding harnesses: the install-time connector base, the per-harness shims, MCP-server-via-install, and the capability detection plus idempotent install/uninstall contract that wires 3 supported harnesses today (Claude Code, Codex, Cursor) while tracking Hermes, pi, and OpenClaw as in progress.
 
 **Related:**
 - [`hook-lifecycle.md`](hook-lifecycle.md)
@@ -17,7 +17,7 @@ How Honeycomb plugs underneath coding harnesses: the install-time connector base
 
 Honeycomb does not try to be another agent shell. It runs underneath the harnesses people already use and gives them one shared memory layer. The challenge is that every harness exposes a different extension surface, and they share almost nothing at the integration layer. The answer is to write the memory logic once in the daemon and wrap it per harness with a thin shim. Adding a harness means writing a shim and a connector subclass, not a memory engine.
 
-Honeycomb wires six harnesses: **Claude Code, Codex, Cursor, Hermes, pi, and OpenClaw**. Each reaches the daemon through the same three surfaces, and the daemon, which is the only process that touches DeepLake, does the real work behind every one of them.
+Honeycomb currently supports 3 harnesses in production: **Claude Code, Codex, and Cursor**. Hermes, pi, and OpenClaw remain in progress. The daemon remains the only process that touches DeepLake, and supported harnesses reach it through the same three surfaces.
 
 ## Three surfaces, one daemon
 
@@ -65,7 +65,7 @@ Two invariants make the connector safe to run repeatedly:
 
 ## Capability detection and `honeycomb setup`
 
-Each connector reports whether its harness is installed via `detectPlatforms()`, which checks that the harness's config root exists on disk (e.g. Cursor is "installed" when `~/.cursor` exists). The CLI verbs (`src/connectors/cli.ts`) drive the registry off that probe:
+Each connector reports whether its harness is installed via `detectPlatforms()`, which checks that the harness's config root exists on disk (e.g. Cursor is "installed" when `~/.cursor` exists). The CLI verbs (`src/connectors/cli.ts`) drive the supported-harness registry off that probe:
 
 - **`honeycomb setup`**, ask every connector whether it is detected and wire all the detected ones. On a box with three harnesses present, all three are wired; each `install()` is foreign-preserving and idempotent, so re-running `setup` writes nothing where nothing changed.
 - **`honeycomb connect <harness>`**, wire exactly one named harness.
@@ -77,14 +77,14 @@ The connector registry (`src/cli/connector-runner.ts`, `createConnectorRegistry`
 
 Each harness wires the same logical lifecycle events through its own mechanism; the shim normalizes the harness's native event names and payloads into the daemon's shared shape. The per-event detail is in [`hook-lifecycle.md`](hook-lifecycle.md); the integration surfaces by harness:
 
-| Harness | Surfaces | Notes |
-|---|---|---|
-| Claude Code | Marketplace plugin + hooks + MCP | Reference connector and reference hook set; model-only context, `legacy` runtime path |
-| Codex | `~/.codex/hooks.json` + hooks + MCP | Nested matcher-block config shape; user-visible context; Bash-only VFS intercept |
-| Cursor | `~/.cursor/hooks.json` + extension + MCP | Flat per-event config shape; first-party editor extension; `Shell`-tool VFS intercept; see [`../frontend/cursor-extension-architecture.md`](../frontend/cursor-extension-architecture.md) |
-| Hermes | Skill + shell hooks + MCP | Terminal-only tool capture; user-visible `{ context }` output with an MCP-tools mention; `legacy` runtime path |
-| pi | Managed extension + `AGENTS.md` block | On-demand recall; context from the static `AGENTS.md` block; summary worker shells `pi --print` |
-| OpenClaw | Native extension (flagship) + connector + MCP | Batches capture at `agent_end`; auto-routes the agent from the session key; `plugin` runtime path |
+| Harness | Status | Surfaces | Notes |
+|---|---|---|---|
+| Claude Code | Supported | Marketplace plugin + hooks + MCP | Reference connector and reference hook set; model-only context, `legacy` runtime path |
+| Codex | Supported | `~/.codex/hooks.json` + hooks + MCP | Nested matcher-block config shape; user-visible context; Bash-only VFS intercept |
+| Cursor | Supported | `~/.cursor/hooks.json` + extension + MCP | Flat per-event config shape; first-party editor extension; `Shell`-tool VFS intercept; see [`../frontend/cursor-extension-architecture.md`](../frontend/cursor-extension-architecture.md) |
+| Hermes | In progress | Planned hook + MCP path | Not wired as a production connector path yet |
+| pi | In progress | Planned extension + `AGENTS.md` path | Not wired as a production connector path yet |
+| OpenClaw | In progress | Planned native-extension path | Not wired as a production connector path yet |
 
 The differences are real but shallow: native event names and payload fields vary, and the context channel is model-only on some harnesses (Claude Code, Cursor, OpenClaw) and user-visible on others (Codex, Hermes, pi), so each shim normalizes before handing off and renders the context block through its harness's channel.
 

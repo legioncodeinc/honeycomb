@@ -21,11 +21,10 @@
  *      (`__HONEYCOMB_REF_DEFAULT__`, default "mario"). 050c's login reads this ref; this verb only
  *      PERSISTS it (the device-flow/referral header is 050c's job, not here). The write is fail-soft
  *      — an onboarding-write hiccup never fails the install, it only logs a warning.
- *   3. Open the dashboard (a-AC-6): try `http://honeycomb.local:3850/dashboard` first (best-effort),
- *      and ALWAYS fall back to the `http://127.0.0.1:3850/dashboard` loopback URL — the run succeeds
- *      on the loopback whether or not `honeycomb.local` resolves. The open uses the reused safe
- *      fixed-argv opener ({@link openLocalDashboardUrl}); a failed browser launch is non-fatal (the
- *      URL is printed for the user to open manually).
+ *   3. Open the dashboard honestly (a-AC-6): first probe the loopback portal URL
+ *      (`http://127.0.0.1:3853/`). If reachable, open `http://honeycomb.local:3853/` first
+ *      (best-effort) and fall back to `http://127.0.0.1:3853/`. If not reachable, do not open a
+ *      browser and print one plain sentence that names the one command to install Hive.
  *
  * ── Idempotency (a-AC-2) ─────────────────────────────────────────────────────────────────────
  *   Re-running is safe: ensure-running short-circuits on an already-healthy daemon (no start, no
@@ -73,12 +72,22 @@ export function loopbackDashboardUrl(): string {
 	return `http://${HIVE_HOST}:${HIVE_PORT}${DASHBOARD_PATH}`;
 }
 
+/** The short timeout budget for the local portal reachability probe. */
+const DASHBOARD_PROBE_TIMEOUT_MS = 750;
+
+/** One plain sentence for the "portal not installed/running" branch (C-6 claim-honesty fix). */
+export const DASHBOARD_PORTAL_NOT_RUNNING_MESSAGE =
+	"Dashboard portal is not running; install it with curl -fsSL https://get.theapiary.sh | sh -s -- --products=honeycomb,doctor,hive.";
+
 /**
  * The browser-opener seam (a-AC-6). Returns `true` iff it launched the URL. The production default
  * is {@link openLocalDashboardUrl}; a test injects a recorder so no real browser launches and the
  * `honeycomb.local`→loopback fallback is asserted by the URLs it was handed.
  */
 export type DashboardOpener = (url: string) => boolean;
+
+/** The local portal reachability probe seam used before opening a browser tab (C-6). */
+export type DashboardProbe = () => Promise<boolean>;
 
 /**
  * Open a LOCAL dashboard URL in the OS browser via a fixed-argv `execFileSync` (never a shell) —
@@ -128,6 +137,8 @@ export function openLocalDashboardUrl(url: string): boolean {
 export interface InstallVerbDeps extends DaemonVerbDeps {
 	/** The browser opener (a-AC-6). Defaults to {@link openLocalDashboardUrl}; tests inject a recorder. */
 	readonly openDashboard?: DashboardOpener;
+	/** The loopback portal probe used before any browser open (C-6). */
+	readonly probeDashboard?: DashboardProbe;
 	/**
 	 * Override the onboarding-state directory (tests point this at a temp HOME so the real
 	 * `~/.deeplake/onboarding.json` is never touched). Defaults to the real shared dir.
@@ -227,6 +238,25 @@ function writeDoctorRegistryEntry(dir: string | undefined, out: OutputSink): boo
 }
 
 /**
+ * Probe the loopback dashboard portal (`127.0.0.1:3853`) with a short timeout. Returns `true` when
+ * the portal responds at all; status code does not matter because any HTTP response proves the
+ * portal process is running and reachable.
+ */
+export async function probeLoopbackDashboard(): Promise<boolean> {
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), DASHBOARD_PROBE_TIMEOUT_MS);
+	if (typeof timer.unref === "function") timer.unref();
+	try {
+		await fetch(loopbackDashboardUrl(), { method: "GET", signal: controller.signal });
+		return true;
+	} catch {
+		return false;
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/**
  * Open the dashboard with the `honeycomb.local`→loopback fallback (a-AC-6). Tries the friendly
  * `honeycomb.local` URL first; if that opener returns false (it could not launch, e.g. the name does
  * not resolve to a reachable opener target), falls back to the loopback URL. ALWAYS prints the URL
@@ -283,6 +313,7 @@ async function reportDaemonSupervision(deps: InstallVerbDeps, out: OutputSink): 
 export async function runInstallCommand(argv: readonly string[], deps: InstallVerbDeps): Promise<CommandResult> {
 	const out: OutputSink = deps.out ?? ((line: string): void => console.log(line));
 	const opener = deps.openDashboard ?? openLocalDashboardUrl;
+	const probeDashboard = deps.probeDashboard ?? probeLoopbackDashboard;
 	const ref = resolveEffectiveRef(argv);
 
 	// 1) Health-gate the daemon (a-AC-4). ensureDaemonRunning is idempotent (a-AC-2): an already-up
@@ -320,8 +351,13 @@ export async function runInstallCommand(argv: readonly string[], deps: InstallVe
 	// Fail-soft — see `writeDoctorRegistryEntry`.
 	writeDoctorRegistryEntry(deps.dir, out);
 
-	// 3) Open the dashboard, honeycomb.local best-effort → loopback fallback (a-AC-6).
-	openDashboardWithFallback(opener, out);
+	// 3) Probe the dashboard portal first. Reachable: open friendly->loopback. Not reachable:
+	// print one plain sentence and do not open a browser tab (C-6).
+	if (await probeDashboard()) {
+		openDashboardWithFallback(opener, out);
+	} else {
+		out(DASHBOARD_PORTAL_NOT_RUNNING_MESSAGE);
+	}
 
 	out("✓ Honeycomb is ready.");
 

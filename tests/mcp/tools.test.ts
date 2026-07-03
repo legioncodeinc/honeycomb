@@ -34,10 +34,16 @@ describe("d-AC-1: unified surface lists + stamps plugin + actor", () => {
 		// Spot-check each cluster is represented.
 		expect(handle.toolNames).toContain("memory_search");
 		expect(handle.toolNames).toContain("honeycomb_read");
-		expect(handle.toolNames).toContain("session_search");
 		expect(handle.toolNames).toContain("honeycomb_goal_add");
-		expect(handle.toolNames).toContain("agent_peers");
 		expect(handle.toolNames).toContain("secret_list");
+		// C-2: the sessions/agent clusters + memory_feedback were UNREGISTERED (no backing
+		// daemon route) — they must never appear in the registered surface again.
+		expect(handle.toolNames).not.toContain("session_search");
+		expect(handle.toolNames).not.toContain("session_bypass");
+		expect(handle.toolNames).not.toContain("agent_peers");
+		expect(handle.toolNames).not.toContain("agent_message_send");
+		expect(handle.toolNames).not.toContain("agent_message_inbox");
+		expect(handle.toolNames).not.toContain("memory_feedback");
 	});
 
 	it("d-AC-1 every handler routes through the daemon seam, stamping plugin + actor", async () => {
@@ -58,17 +64,22 @@ describe("d-AC-1: unified surface lists + stamps plugin + actor", () => {
 	it("d-AC-1 the production seam stamps x-honeycomb-runtime-path: plugin + actor headers", async () => {
 		// The real HTTP seam stamps the plugin runtime-path + actor headers on the wire
 		// (D-6). Inject a fake fetch so no socket is bound; assert the headers.
-		const { createHttpDaemonApiSeam, RUNTIME_PATH_HEADER, ACTOR_HEADER, ACTOR_TYPE_HEADER } =
-			await import("../../mcp/src/daemon-seam.js");
+		const { createHttpDaemonApiSeam, RUNTIME_PATH_HEADER, ACTOR_HEADER, ACTOR_TYPE_HEADER } = await import(
+			"../../mcp/src/daemon-seam.js"
+		);
 		let seen: Record<string, string> = {};
 		const seam = createHttpDaemonApiSeam({
 			fetch: async (_url, init) => {
 				seen = init.headers;
-				return { status: 200, async json() {
-					return {};
-				}, async text() {
-					return "";
-				} };
+				return {
+					status: 200,
+					async json() {
+						return {};
+					},
+					async text() {
+						return "";
+					},
+				};
 			},
 		});
 		await seam.call({ method: "POST", path: "/api/memories/recall", body: { query: "x" }, actor: ACTOR });
@@ -85,7 +96,15 @@ describe("d-AC-1: unified surface lists + stamps plugin + actor", () => {
 		const seam = createHttpDaemonApiSeam({
 			fetch: async (_url, init) => {
 				seen = init.headers;
-				return { status: 200, async json() { return {}; }, async text() { return ""; } };
+				return {
+					status: 200,
+					async json() {
+						return {};
+					},
+					async text() {
+						return "";
+					},
+				};
 			},
 		});
 		await seam.call({ method: "GET", path: "/api/goals", actor: ACTOR });
@@ -139,10 +158,93 @@ describe("d-AC-3: modify/forget without a reason are rejected", () => {
 
 	it("d-AC-3 memory_modify WITH a reason routes through to the daemon", async () => {
 		const daemon = createFakeDaemonApiSeam({ status: 200, body: { ok: true } });
-		await HANDLERS.memory_modify({ path: "/m/x", reason: "stale" }, ACTOR, daemon);
+		await HANDLERS.memory_modify({ path: "/m/x", content: "new content", reason: "stale" }, ACTOR, daemon);
 		expect(daemon.calls.length).toBe(1);
-		expect(daemon.calls[0].method).toBe("PATCH");
+		// C-2 fix: the real route is POST /api/memories/:id/modify, not PATCH /api/memories.
+		expect(daemon.calls[0].method).toBe("POST");
+		expect(daemon.calls[0].path).toBe("/api/memories/%2Fm%2Fx/modify");
+		expect(daemon.calls[0].body).toEqual({ content: "new content", reason: "stale" });
 		expect(daemon.calls[0].actor).toEqual(ACTOR);
+	});
+});
+
+describe("C-2: memory_modify / memory_forget dial the real POST /api/memories/:id/modify|forget shape", () => {
+	it("memory_modify requires `content` and rides the id on the URL path (URL-encoded)", async () => {
+		const daemon = createFakeDaemonApiSeam({ status: 200, body: { id: "m1", action: "updated" } });
+		await HANDLERS.memory_modify({ path: "m/1 a", content: "updated body", reason: "fix typo" }, ACTOR, daemon);
+		expect(daemon.calls.length).toBe(1);
+		expect(daemon.calls[0].method).toBe("POST");
+		expect(daemon.calls[0].path).toBe("/api/memories/m%2F1%20a/modify");
+		expect(daemon.calls[0].path).not.toContain("PATCH");
+		expect(daemon.calls[0].body).toEqual({ content: "updated body", reason: "fix typo" });
+	});
+
+	it("memory_forget rides the id on the URL path and sends only `reason`", async () => {
+		const daemon = createFakeDaemonApiSeam({ status: 200, body: { id: "m1", action: "forgotten" } });
+		await HANDLERS.memory_forget({ path: "m/1 a", reason: "stale" }, ACTOR, daemon);
+		expect(daemon.calls.length).toBe(1);
+		expect(daemon.calls[0].method).toBe("POST");
+		expect(daemon.calls[0].path).toBe("/api/memories/m%2F1%20a/forget");
+		expect(daemon.calls[0].body).toEqual({ reason: "stale" });
+	});
+});
+
+describe("C-2: honeycomb_search / honeycomb_read / honeycomb_index dial the real VFS routes", () => {
+	it("honeycomb_search issues GET /memory/grep?q=<query> (not POST /memory/search)", async () => {
+		const daemon = createFakeDaemonApiSeam({ status: 200, body: { query: "x", degraded: false, hits: [] } });
+		await HANDLERS.honeycomb_search({ query: "eventual consistency" }, ACTOR, daemon);
+		expect(daemon.calls.length).toBe(1);
+		expect(daemon.calls[0].method).toBe("GET");
+		expect(daemon.calls[0].path).toBe("/memory/grep?q=eventual%20consistency");
+	});
+
+	it("honeycomb_read issues GET /memory/cat?path=<path> (not GET /memory/read)", async () => {
+		const daemon = createFakeDaemonApiSeam({ status: 200, body: { path: "/p", found: true, content: "hi" } });
+		await HANDLERS.honeycomb_read({ path: "/summaries/alice/s1" }, ACTOR, daemon);
+		expect(daemon.calls.length).toBe(1);
+		expect(daemon.calls[0].method).toBe("GET");
+		expect(daemon.calls[0].path).toBe("/memory/cat?path=%2Fsummaries%2Falice%2Fs1");
+	});
+
+	it("honeycomb_index issues GET /memory/ls?prefix=<prefix> (not GET /memory/index)", async () => {
+		const daemon = createFakeDaemonApiSeam({ status: 200, body: { prefix: "", entries: [] } });
+		await HANDLERS.honeycomb_index({ prefix: "/summaries" }, ACTOR, daemon);
+		expect(daemon.calls.length).toBe(1);
+		expect(daemon.calls[0].method).toBe("GET");
+		expect(daemon.calls[0].path).toBe("/memory/ls?prefix=%2Fsummaries");
+	});
+});
+
+describe("C-2 follow-up: honeycomb_goal_add / honeycomb_kpi_add send the daemon's strict keyed body", () => {
+	it("honeycomb_goal_add maps the goal text onto the strict { key, value } keyed body", async () => {
+		const daemon = createFakeDaemonApiSeam({ status: 201, body: { ok: true } });
+		await HANDLERS.honeycomb_goal_add({ goal: "ship v1" }, ACTOR, daemon);
+		expect(daemon.calls.length).toBe(1);
+		expect(daemon.calls[0].method).toBe("POST");
+		expect(daemon.calls[0].path).toBe("/api/goals");
+		// The keyed engine's `.strict()` schema requires { key, value } — the raw
+		// { goal } body 400'd on every call before this fix.
+		expect(daemon.calls[0].body).toEqual({ key: "ship v1", value: "ship v1" });
+	});
+
+	it("honeycomb_kpi_add maps the kpi text onto the strict { key, value } keyed body", async () => {
+		const daemon = createFakeDaemonApiSeam({ status: 201, body: { ok: true } });
+		await HANDLERS.honeycomb_kpi_add({ kpi: "weekly active users" }, ACTOR, daemon);
+		expect(daemon.calls.length).toBe(1);
+		expect(daemon.calls[0].method).toBe("POST");
+		expect(daemon.calls[0].path).toBe("/api/kpis");
+		expect(daemon.calls[0].body).toEqual({ key: "weekly active users", value: "weekly active users" });
+	});
+
+	it("honeycomb_kpi_add no longer publishes the dead `goalId` arg (no daemon-side field)", async () => {
+		const daemon = createFakeDaemonApiSeam({ status: 201, body: { ok: true } });
+		const registry = createMcpToolRegistry({ daemon, actor: ACTOR });
+		registerHoneycombSurface(registry);
+		// The keyed body has no goal-linkage field, so `goalId` is now rejected by the
+		// strict schema (unknown arg) rather than published-and-dropped (the M-10 pattern).
+		const out = await registry.invoke("honeycomb_kpi_add", { kpi: "k", goalId: "g-1" });
+		expect(out.isError).toBe(true);
+		expect(daemon.calls.length).toBe(0);
 	});
 });
 
@@ -192,7 +294,7 @@ describe("S-1: memory_get / memory_list hit the WIRED PRD-022a read routes", () 
 
 	it("S-1 memory_list issues GET /api/memories (no ?prefix=) and returns {memories:[...]}", async () => {
 		const daemon = createFakeDaemonApiSeam({ status: 200, body: { memories: [{ id: "a" }, { id: "b" }] } });
-		const out = (await HANDLERS.memory_list({ prefix: "anything" }, ACTOR, daemon)) as { memories?: unknown[] };
+		const out = (await HANDLERS.memory_list({}, ACTOR, daemon)) as { memories?: unknown[] };
 		expect(daemon.calls.length).toBe(1);
 		expect(daemon.calls[0].method).toBe("GET");
 		// The WIRED list route is `/api/memories` (+ optional `?limit=`); it has NO prefix filter.
@@ -200,6 +302,17 @@ describe("S-1: memory_get / memory_list hit the WIRED PRD-022a read routes", () 
 		expect(daemon.calls[0].path).not.toContain("/list");
 		expect(daemon.calls[0].path).not.toContain("prefix=");
 		expect(out.memories).toEqual([{ id: "a" }, { id: "b" }]);
+	});
+
+	it("M-10 memory_list no longer publishes a `prefix` arg (the route has no prefix filter)", async () => {
+		const daemon = createFakeDaemonApiSeam({ status: 200, body: {} });
+		const registry = createMcpToolRegistry({ daemon, actor: ACTOR });
+		registerHoneycombSurface(registry);
+		// A caller passing `prefix` is now REJECTED by the strict schema (unknown arg) instead
+		// of silently accepted-and-ignored.
+		const out = await registry.invoke("memory_list", { prefix: "anything" });
+		expect(out.isError).toBe(true);
+		expect(daemon.calls.length).toBe(0);
 	});
 
 	it("S-1 memory_list with a numeric limit issues GET /api/memories?limit=<n>", async () => {
@@ -219,7 +332,15 @@ describe("S-1: memory_get / memory_list hit the WIRED PRD-022a read routes", () 
 			fetch: async (url, init) => {
 				seenUrl = url;
 				seen = init.headers;
-				return { status: 200, async json() { return { memory: {} }; }, async text() { return ""; } };
+				return {
+					status: 200,
+					async json() {
+						return { memory: {} };
+					},
+					async text() {
+						return "";
+					},
+				};
 			},
 		});
 		await seam.call({ method: "GET", path: "/api/memories/m%2F1", actor: ACTOR });
@@ -237,7 +358,15 @@ describe("S-1: memory_get / memory_list hit the WIRED PRD-022a read routes", () 
 		const seam = createHttpDaemonApiSeam({
 			fetch: async (_url, init) => {
 				seen = init.headers;
-				return { status: 200, async json() { return { memories: [] }; }, async text() { return ""; } };
+				return {
+					status: 200,
+					async json() {
+						return { memories: [] };
+					},
+					async text() {
+						return "";
+					},
+				};
 			},
 		});
 		await seam.call({ method: "GET", path: "/api/memories?limit=5", actor: ACTOR });
@@ -252,7 +381,6 @@ function minimalArgs(name: string): Record<string, unknown> {
 		case "memory_search":
 		case "honeycomb_search":
 		case "honeycomb_code_search":
-		case "session_search":
 			return { query: "q" };
 		case "memory_store":
 			return { text: "t" };
@@ -260,19 +388,11 @@ function minimalArgs(name: string): Record<string, unknown> {
 		case "memory_list":
 		case "honeycomb_read":
 		case "honeycomb_index":
-		case "memory_feedback":
 			return { path: "/p" };
-		case "session_bypass":
-			return { sessionId: "s" };
 		case "honeycomb_goal_add":
 			return { goal: "g" };
 		case "honeycomb_kpi_add":
 			return { kpi: "k" };
-		case "agent_peers":
-		case "agent_message_inbox":
-			return {};
-		case "agent_message_send":
-			return { to: "a", message: "m" };
 		case "honeycomb_code_context":
 		case "honeycomb_code_blast":
 		case "honeycomb_code_impact":

@@ -664,6 +664,7 @@ export function createDefaultAgentRoots(home: string = homedir()): AgentRootDete
 	const others = [
 		join(home, ".codex", "skills"),
 		join(home, ".agents", "skills"),
+		join(home, ".cursor", "skills"),
 		join(home, ".hermes", "skills"),
 		join(home, ".pi", "agent", "skills"),
 	];
