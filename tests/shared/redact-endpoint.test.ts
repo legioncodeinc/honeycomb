@@ -19,4 +19,30 @@ describe("redactEndpointCredentials", () => {
 		expect(redactEndpointCredentials("not-a-url")).toBe("not-a-url");
 		expect(redactEndpointCredentials("")).toBe("");
 	});
+
+	it("masks a password carried in the query string (libpq-style URI)", () => {
+		expect(redactEndpointCredentials("postgres://user@host:5432/db?password=secret")).toBe(
+			"postgres://user@host:5432/db?password=****",
+		);
+		expect(redactEndpointCredentials("postgres://host:5432/db?sslpassword=secret&sslmode=require")).toBe(
+			"postgres://host:5432/db?sslpassword=****&sslmode=require",
+		);
+	});
+
+	it("masks both userinfo and query-string secrets together", () => {
+		expect(redactEndpointCredentials("https://user:pw@gw.internal/api?token=abc123")).toBe(
+			"https://user:****@gw.internal/api?token=****",
+		);
+	});
+
+	it("masks the password across multiple @ signs and IPv6 hosts", () => {
+		expect(redactEndpointCredentials("postgres://a:b@c:d@host/db")).toBe("postgres://a:****@host/db");
+		expect(redactEndpointCredentials("postgres://user:pass@[::1]:5432/db")).toBe("postgres://user:****@[::1]:5432/db");
+	});
+
+	it("leaves a non-secret query string byte-for-byte unchanged", () => {
+		expect(redactEndpointCredentials("https://gw.internal/api?region=us-east-1")).toBe(
+			"https://gw.internal/api?region=us-east-1",
+		);
+	});
 });
