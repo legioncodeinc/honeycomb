@@ -1,6 +1,6 @@
 # PRD-061c: Hosted Frontend (Dashboards + Leaderboards)
 
-> **SUPERSEDED (2026-07-03):** Cloud fleet/team management now belongs to Queen, the fleet orchestrator. The canonical copy of this document lives at `queen/library/requirements/backlog/prd-061-hosted-roi-admin-surface/prd-061c-hosted-roi-admin-surface-hosted-frontend.md`. This copy is retained for history only; do not update it here.
+> **SUPERSEDED (2026-07-03):** Cloud fleet/team management now belongs to Queen, the fleet orchestrator. The canonical copy of this document lives at `queen/library/requirements/backlog/prd-009-hosted-roi-admin-surface/prd-009c-hosted-roi-admin-surface-hosted-frontend.md`. This copy is retained for history only; do not update it here.
 
 > **Parent:** [PRD-061](./prd-061-hosted-roi-admin-surface-index.md)
 > **Status:** Backlog, draft (2026-06-26)

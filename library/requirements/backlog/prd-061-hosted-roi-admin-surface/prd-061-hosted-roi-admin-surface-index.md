@@ -1,6 +1,6 @@
 # PRD-061: Hosted ROI Admin Surface
 
-> **SUPERSEDED (2026-07-03):** Cloud fleet/team management now belongs to Queen, the fleet orchestrator. The canonical copy of this document lives at `queen/library/requirements/backlog/prd-061-hosted-roi-admin-surface/prd-061-hosted-roi-admin-surface-index.md`. This copy is retained for history only; do not update it here.
+> **SUPERSEDED (2026-07-03):** Cloud fleet/team management now belongs to Queen, the fleet orchestrator. The canonical copy of this document lives at `queen/library/requirements/backlog/prd-009-hosted-roi-admin-surface/prd-009-hosted-roi-admin-surface-index.md`. This copy is retained for history only; do not update it here.
 
 > **Status:** Backlog, draft (2026-06-26). 5 sub-PRDs, not started.
 > **Priority:** P2 (the multi-tenant reporting/leaderboard surface that monetizes the shared ROI ledger; gated behind the 060f data foundation and the highest-risk security surface in the set)

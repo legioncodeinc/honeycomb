@@ -1,6 +1,6 @@
 # PRD-054: Fleet Observation, Control Plane and Read-Only Dashboard (v1)
 
-> **SUPERSEDED (2026-07-03):** Cloud fleet/team management now belongs to Queen, the fleet orchestrator. The canonical copy of this document lives at `queen/library/requirements/backlog/prd-054-fleet-observation-control-plane/prd-054-fleet-observation-control-plane-index.md`. This copy is retained for history only; do not update it here.
+> **SUPERSEDED (2026-07-03):** Cloud fleet/team management now belongs to Queen, the fleet orchestrator. The canonical copy of this document lives at `queen/library/requirements/backlog/prd-007-fleet-observation-control-plane/prd-007-fleet-observation-control-plane-index.md`. This copy is retained for history only; do not update it here.
 
 > **Status:** Partially superseded. The READ-ONLY DASHBOARD portion only is superseded by [hive PRD-005 (health rail and page)](../../../../../hive/library/requirements/backlog/prd-005-health-rail-and-page/prd-005-health-rail-and-page-index.md) and [doctor PRD-002 (telemetry SoT, SSE, and schema)](../../../../../doctor/library/requirements/backlog/prd-002-telemetry-sot-sse-and-schema/prd-002-telemetry-sot-sse-and-schema-index.md).
 >
@@ -44,9 +44,9 @@ Source of truth: [`fleet-observation-and-on-demand-skills.md`](../../../knowledg
 
 | Sub-PRD | Scope | Status |
 |---|---|---|
-| [`prd-054a-presence-store-and-heartbeat-protocol`](./prd-054a-fleet-observation-control-plane-presence-store-and-heartbeat-protocol.md) | The presence store schema + the heartbeat-vs-status-diff write protocol and TTL reaping | Draft |
-| [`prd-054b-daemon-presence-reporter`](./prd-054b-fleet-observation-control-plane-daemon-presence-reporter.md) | The daemon-side reporter that emits heartbeats on interval and status on change, fail-soft | Draft |
-| [`prd-054c-read-only-fleet-dashboard`](./prd-054c-fleet-observation-control-plane-read-only-fleet-dashboard.md) | The dashboard surface that reads presence and renders the org's fleet, read-only | Draft |
+| [`prd-054a-presence-store-and-heartbeat-protocol`](./prd-007a-fleet-observation-control-plane-presence-store-and-heartbeat-protocol.md) | The presence store schema + the heartbeat-vs-status-diff write protocol and TTL reaping | Draft |
+| [`prd-054b-daemon-presence-reporter`](./prd-007b-fleet-observation-control-plane-daemon-presence-reporter.md) | The daemon-side reporter that emits heartbeats on interval and status on change, fail-soft | Draft |
+| [`prd-054c-read-only-fleet-dashboard`](./prd-007c-fleet-observation-control-plane-read-only-fleet-dashboard.md) | The dashboard surface that reads presence and renders the org's fleet, read-only | Draft |
 
 ---
 

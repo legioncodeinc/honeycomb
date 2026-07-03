@@ -1,6 +1,6 @@
 # PRD-055: Fleet Control, Enrollment, Identity and Mint/Sign Authority
 
-> **SUPERSEDED (2026-07-03):** Cloud fleet/team management now belongs to Queen, the fleet orchestrator. The canonical copy of this document lives at `queen/library/requirements/backlog/prd-055-fleet-control-enrollment-and-mint-authority/prd-055-fleet-control-enrollment-and-mint-authority-index.md`. This copy is retained for history only; do not update it here.
+> **SUPERSEDED (2026-07-03):** Cloud fleet/team management now belongs to Queen, the fleet orchestrator. The canonical copy of this document lives at `queen/library/requirements/backlog/prd-008-fleet-control-enrollment-and-mint-authority/prd-008-fleet-control-enrollment-and-mint-authority-index.md`. This copy is retained for history only; do not update it here.
 
 > **Status:** Backlog
 > **Priority:** P2
