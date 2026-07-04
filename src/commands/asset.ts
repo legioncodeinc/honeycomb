@@ -42,6 +42,7 @@ import {
 	type AssetSyncApi,
 	createAssetRegistryStore,
 	defaultRegistryBaseDir,
+	legacyRegistryBaseDir,
 	type DeviceRecord,
 	type FileEntry,
 	hashArtifact,
@@ -132,7 +133,10 @@ export function parseAssetCliArgs(argv: readonly string[]): AssetCliInvocation {
 }
 
 /** Match one of the register flags (`--key value` or `--key=value`); `null` for a non-flag/unknown. */
-function matchFlag(token: string, next: string | undefined): { key: string; value: string; consumedNext: boolean } | null {
+function matchFlag(
+	token: string,
+	next: string | undefined,
+): { key: string; value: string; consumedNext: boolean } | null {
 	for (const key of ["type", "harness", "style"] as const) {
 		if (token === `--${key}`) {
 			if (next !== undefined && !next.startsWith("--")) return { key, value: next, consumedNext: true };
@@ -149,7 +153,13 @@ function matchFlag(token: string, next: string | undefined): { key: string; valu
 
 /** Resolve the local registry store (injected, or the default `~/.honeycomb/registry.json`). */
 function resolveRegistry(deps: AssetCliDeps): AssetRegistryStore {
-	return deps.registry ?? createAssetRegistryStore(defaultRegistryBaseDir(deps.dir ?? homedir()));
+	return (
+		deps.registry ??
+		createAssetRegistryStore(
+			defaultRegistryBaseDir(deps.dir ?? homedir()),
+			legacyRegistryBaseDir(deps.dir ?? homedir()),
+		)
+	);
 }
 
 /** Resolve the loopback asset-sync API (injected, or one built from the daemon seam). */
@@ -300,7 +310,11 @@ async function runRegister(deps: AssetCliDeps, inv: AssetCliInvocation, out: Out
 	});
 
 	out(`asset: registered ${assetType} '${honeycombId}' at ${entry.tier}/${entry.style} (harness ${harness}).`);
-	out(resolved.minted ? `  honeycomb_id minted + ready to stamp (registry is authoritative).` : `  honeycomb_id resolved (rename-stable).`);
+	out(
+		resolved.minted
+			? `  honeycomb_id minted + ready to stamp (registry is authoritative).`
+			: `  honeycomb_id resolved (rename-stable).`,
+	);
 	// `stamped` is computed so a caller can persist the frontmatter; v1 reports the id, not the rewrite.
 	void stamped;
 	return { exitCode: 0 };
@@ -313,7 +327,12 @@ async function runRegister(deps: AssetCliDeps, inv: AssetCliInvocation, out: Out
  * the CLI re-reads the artifact's native blob + hash (a publish carries the bytes); a demotion
  * needs neither. An illegal transition is rejected with a clear message (b-AC-6).
  */
-async function runTransition(deps: AssetCliDeps, verb: "promote" | "demote", inv: AssetCliInvocation, out: OutputSink): Promise<CommandResult> {
+async function runTransition(
+	deps: AssetCliDeps,
+	verb: "promote" | "demote",
+	inv: AssetCliInvocation,
+	out: OutputSink,
+): Promise<CommandResult> {
 	const honeycombId = inv.args[0] ?? "";
 	const tierArg = inv.args[1] ?? "";
 	if (honeycombId === "" || tierArg === "") {
@@ -489,9 +508,18 @@ async function runDevice(deps: AssetCliDeps, inv: AssetCliInvocation, out: Outpu
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Render a {@link transitionAsset} result (publish/tombstone summary + the resulting cell). */
-function renderTransition(verb: "promote" | "demote", result: { to: LatticeCell; from: LatticeCell; published: boolean; tombstonedTiers: readonly Tier[] }, out: OutputSink): CommandResult {
+function renderTransition(
+	verb: "promote" | "demote",
+	result: { to: LatticeCell; from: LatticeCell; published: boolean; tombstonedTiers: readonly Tier[] },
+	out: OutputSink,
+): CommandResult {
 	if (verb === "promote") {
-		const where = result.to.tier === "Team" ? "workspace radius" : result.to.tier === "Device" ? "device radius" : "Local (unmanaged)";
+		const where =
+			result.to.tier === "Team"
+				? "workspace radius"
+				: result.to.tier === "Device"
+					? "device radius"
+					: "Local (unmanaged)";
 		out(`asset: promoted ${result.from.tier} → ${result.to.tier} (${where})${result.published ? ", published" : ""}.`);
 	} else {
 		const left = result.tombstonedTiers.length > 0 ? ` — tombstoned ${result.tombstonedTiers.join(", ")}` : "";

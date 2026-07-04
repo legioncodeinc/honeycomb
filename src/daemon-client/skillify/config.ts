@@ -25,14 +25,19 @@
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { honeycombStateDir, legacyHoneycombDir, preferExistingPath } from "../../shared/fleet-root.js";
 import { type SkillInstall, type SkillScope } from "./contracts.js";
 
-/** The default `~/.honeycomb/state/skillify` state root (mirrors `watermark.ts`). */
+/** The default `~/.apiary/honeycomb/state/skillify` state root (mirrors `watermark.ts`, PRD-072b). */
 export function defaultConfigBaseDir(): string {
-	return join(homedir(), ".honeycomb", "state", "skillify");
+	return join(honeycombStateDir(), "state", "skillify");
+}
+
+/** The legacy `~/.honeycomb/state/skillify` state root read as a fallback during the window. */
+export function legacyConfigBaseDir(): string {
+	return join(legacyHoneycombDir(), "state", "skillify");
 }
 
 /** The config file name under the state root. */
@@ -85,14 +90,21 @@ interface RawConfigFile {
 /**
  * Build a filesystem {@link SkillifyConfigStore} rooted at `baseDir` (default
  * {@link defaultConfigBaseDir}). A test injects a temp dir so no real `~` is touched.
+ *
+ * PRD-072b window fallback: with the PRODUCTION default base dir (no injected `baseDir`), reads
+ * resolve new-path-first then the legacy `~/.honeycomb/state/skillify/config.json`, so an
+ * unmigrated legacy config never silently reverts to defaults. Writes always target the new path.
  */
-export function createSkillifyConfigStore(baseDir: string = defaultConfigBaseDir()): SkillifyConfigStore {
-	const filePath = join(baseDir, CONFIG_FILE);
+export function createSkillifyConfigStore(baseDir?: string, legacyBaseDir?: string): SkillifyConfigStore {
+	const filePath = join(baseDir ?? defaultConfigBaseDir(), CONFIG_FILE);
+	const legacyBase = legacyBaseDir ?? (baseDir === undefined ? legacyConfigBaseDir() : undefined);
+	const readPath = (): string =>
+		legacyBase !== undefined ? preferExistingPath(filePath, join(legacyBase, CONFIG_FILE)) : filePath;
 
 	return {
 		read(): SkillifyConfig {
 			try {
-				const raw = JSON.parse(readFileSync(filePath, "utf-8")) as RawConfigFile;
+				const raw = JSON.parse(readFileSync(readPath(), "utf-8")) as RawConfigFile;
 				return normalizeConfig(raw);
 			} catch {
 				// Missing or malformed → the canonical default (never throws on read).

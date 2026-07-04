@@ -15,25 +15,68 @@
  * (AC-071a.1.2), and the write is atomic (temp file + rename) so a crash mid-write never leaves a
  * truncated registry that the next read would treat as empty.
  *
- * ── `pidPath` / `telemetryDbPath` stay literal `~`-prefixed strings ────────────────────────────
- * Per the pinned Contract-A shape, both `pidPath` and `telemetryDbPath` are written as literal
- * `~/...`-prefixed strings (never pre-expanded here) — the same convention hive's own
- * `pidPath` uses. doctor expands `~` on its own read side; the REAL absolute path this
- * honeycomb process actually opens is resolved independently by `fleet-store.ts`
- * ({@link import("./fleet-store.js").fleetTelemetryDbPath}), which must always resolve to the same
- * on-disk file this string names.
+ * ── `pidPath` / `telemetryDbPath` are RESOLVED ABSOLUTE paths (ADR-0003 Resolved decision 4) ────
+ * Per the fleet ADR's Resolved decision 4 (2026-07-04), the entry carries the writer's own resolved
+ * absolute `pidPath` / `telemetryDbPath` (from {@link honeycombRegistryPidPath} /
+ * {@link honeycombRegistryTelemetryDbPath}), NEVER a `~`-literal: a `~`-literal is expanded by the
+ * READER under the reader's home, which diverges from the writer's resolved root the moment
+ * `APIARY_HOME` / XDG overrides apply. The advertised strings are the SAME paths `fleet-store.ts`
+ * ({@link import("./fleet-store.js").fleetTelemetryDbPath}) and the runtime dir actually open/write,
+ * so the advertised string and the on-disk file never disagree (AC-072c.2.1 coherence). Doctor still
+ * expands legacy `~`-literals from old writers on its own read side during the window.
+ *
+ * ── Registry file location (ADR-0003 window contract) ──────────────────────────────────────────
+ * The entry is written to `~/.apiary/registry.json` when the fleet ROOT directory exists, else to
+ * the legacy `~/.honeycomb/doctor.daemons.json` ({@link resolveRegistryWritePath}); never both.
  */
 
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { DAEMON_HOST, DAEMON_PORT } from "../../../shared/constants.js";
-import { FLEET_SERVICE_NAME } from "./fleet-store.js";
+import {
+	type FleetRootOptions,
+	fleetRootFile,
+	honeycombStateDir,
+	legacyHoneycombDir,
+	resolveFleetRoot,
+} from "../../../shared/fleet-root.js";
+import { FLEET_SERVICE_NAME, fleetTelemetryDbPath } from "./fleet-store.js";
 
-/** The static registry file doctor reads (`~/.honeycomb/doctor.daemons.json`). */
+/** The fleet-root registry file name doctor owns/reads (`~/.apiary/registry.json`). */
+export const FLEET_REGISTRY_FILE_NAME = "registry.json" as const;
+/** The legacy registry file name (`~/.honeycomb/doctor.daemons.json`) during the compatibility window. */
+export const LEGACY_REGISTRY_FILE_NAME = "doctor.daemons.json" as const;
+/** The daemon pid filename honeycomb advertises (matches the runtime dir's `daemon.pid`). */
+const DAEMON_PID_FILE_NAME = "daemon.pid" as const;
+
+/**
+ * Resolve the registry path per the fleet ADR-0003 compatibility window contract (RESOLVED
+ * 2026-07-04): write to `~/.apiary/registry.json` when the fleet ROOT directory exists, otherwise
+ * to the legacy `~/.honeycomb/doctor.daemons.json`. Deterministic, no cross-product coordination,
+ * NEVER both (doctor's reader merges new-wins-per-name; legacy-only entries merge additively).
+ */
 export function doctorRegistryPath(homeDir: string = homedir()): string {
-	return join(homeDir, ".honeycomb", "doctor.daemons.json");
+	return resolveRegistryWritePath({ home: homeDir });
+}
+
+/** The fleet-root registry path (`~/.apiary/registry.json`). */
+export function fleetRegistryPath(options: FleetRootOptions = {}): string {
+	return fleetRootFile(FLEET_REGISTRY_FILE_NAME, options);
+}
+
+/** The legacy registry path (`~/.honeycomb/doctor.daemons.json`). */
+export function legacyRegistryPath(home: string = homedir()): string {
+	return join(legacyHoneycombDir(home), LEGACY_REGISTRY_FILE_NAME);
+}
+
+/**
+ * The registry write target for THIS moment in the window: the fleet-root `registry.json` when the
+ * fleet root directory exists, else the legacy file. Never dual-writes.
+ */
+export function resolveRegistryWritePath(options: FleetRootOptions = {}): string {
+	return existsSync(resolveFleetRoot(options)) ? fleetRegistryPath(options) : legacyRegistryPath(options.home);
 }
 
 /** honeycomb's registry identity — reused from the fleet store so the two never drift. */
@@ -56,14 +99,26 @@ export function honeycombRegistryHealthUrl(bind?: RegistryBind): string {
 
 /** honeycomb's DEFAULT `/health` endpoint, built from the SAME shared constants the daemon binds (no drift). */
 export const HONEYCOMB_REGISTRY_HEALTH_URL = `http://${DAEMON_HOST}:${DAEMON_PORT}/health` as const;
-/** The literal (un-expanded) pid-file path convention, matching `src/cli/runtime.ts`'s `daemon.pid`. */
-export const HONEYCOMB_REGISTRY_PID_PATH = "~/.honeycomb/daemon.pid" as const;
 export const HONEYCOMB_REGISTRY_PROBE_INTERVAL_MS = 30_000 as const;
 export const HONEYCOMB_REGISTRY_STARTUP_GRACE_MS = 60_000 as const;
 export const HONEYCOMB_REGISTRY_RESTART_GIVE_UP_THRESHOLD = 3 as const;
 export const HONEYCOMB_REGISTRY_RESTART_COOLDOWN_MS = 5_000 as const;
-/** The literal (un-expanded) telemetry DB path convention (Contract B's file, Contract A's pointer). */
-export const HONEYCOMB_REGISTRY_TELEMETRY_DB_PATH = "~/.honeycomb/telemetry/honeycomb.sqlite" as const;
+
+/**
+ * The RESOLVED ABSOLUTE pid path honeycomb advertises (fleet ADR Resolved decision 4, 2026-07-04):
+ * `<resolveFleetRoot>/honeycomb/daemon.pid`, NEVER a `~`-literal. A `~`-literal is expanded by the
+ * READER under the reader's home, which diverges from the writer's resolved root the moment
+ * `APIARY_HOME` / XDG overrides apply; an absolute path derived from the writer's own resolver stays
+ * true. It is the SAME path the runtime dir writes (AC-072c.2.1 coherence).
+ */
+export function honeycombRegistryPidPath(options: FleetRootOptions = {}): string {
+	return join(honeycombStateDir(options), DAEMON_PID_FILE_NAME);
+}
+
+/** The RESOLVED ABSOLUTE telemetry DB path honeycomb advertises (SAME file `fleet-store.ts` opens). */
+export function honeycombRegistryTelemetryDbPath(options: FleetRootOptions = {}): string {
+	return fleetTelemetryDbPath(options);
+}
 
 /** The injectable filesystem seam (mirrors hive's `RegistryFs`) — a test injects an in-memory fake. */
 export interface RegistryFs {
@@ -77,8 +132,12 @@ export interface RegistryFs {
 export interface RegistryUpsertOptions {
 	/** Override the full registry file path. Wins over `homeDir` when both are given. */
 	readonly registryPath?: string;
-	/** Override the home dir the registry lives under (tests point this at a temp HOME). */
+	/** Override the home dir the registry + advertised paths resolve under (tests point at a temp HOME). */
 	readonly homeDir?: string;
+	/** Override the env the fleet root resolves from (tests, for hermetic path resolution). */
+	readonly env?: NodeJS.ProcessEnv;
+	/** Override the platform the fleet root resolves from (tests). */
+	readonly platform?: NodeJS.Platform;
 	readonly fs?: RegistryFs;
 	/**
 	 * The resolved daemon bind (host/port) the entry's `healthUrl` should advertise. Callers that
@@ -157,16 +216,19 @@ function parseRegistryDocument(raw: string): ParsedRegistryDocument {
  * Build honeycomb's registry entry from the pinned Contract-A constants (AC-1). A resolved `bind`
  * makes the advertised `healthUrl` follow a non-default daemon bind; absent, the defaults apply.
  */
-export function buildHoneycombRegistryEntry(bind?: RegistryBind): RegistryDaemonEntry {
+export function buildHoneycombRegistryEntry(
+	bind?: RegistryBind,
+	pathOptions: FleetRootOptions = {},
+): RegistryDaemonEntry {
 	return {
 		name: HONEYCOMB_REGISTRY_NAME,
 		healthUrl: honeycombRegistryHealthUrl(bind),
-		pidPath: HONEYCOMB_REGISTRY_PID_PATH,
+		pidPath: honeycombRegistryPidPath(pathOptions),
 		probeIntervalMs: HONEYCOMB_REGISTRY_PROBE_INTERVAL_MS,
 		startupGraceMs: HONEYCOMB_REGISTRY_STARTUP_GRACE_MS,
 		restartGiveUpThreshold: HONEYCOMB_REGISTRY_RESTART_GIVE_UP_THRESHOLD,
 		restartCooldownMs: HONEYCOMB_REGISTRY_RESTART_COOLDOWN_MS,
-		telemetryDbPath: HONEYCOMB_REGISTRY_TELEMETRY_DB_PATH,
+		telemetryDbPath: honeycombRegistryTelemetryDbPath(pathOptions),
 	};
 }
 
@@ -249,9 +311,18 @@ function writeMergedRegistry(
  * technical considerations: fail-soft).
  */
 export function registerHoneycombWithDoctor(options: RegistryUpsertOptions = {}): RegistryUpsertResult {
-	const registryPath = options.registryPath ?? doctorRegistryPath(options.homeDir ?? homedir());
+	const pathOptions: FleetRootOptions = {
+		...(options.homeDir !== undefined ? { home: options.homeDir } : {}),
+		...(options.env !== undefined ? { env: options.env } : {}),
+		...(options.platform !== undefined ? { platform: options.platform } : {}),
+	};
+	// Window contract: write to `~/.apiary/registry.json` when the fleet root exists, else the legacy
+	// file (never both). The advertised pid/telemetry paths are the RESOLVED ABSOLUTE paths from the
+	// SAME resolvers the daemon writes through (ADR Resolved decision 4), so what doctor reads and
+	// what honeycomb writes never disagree.
+	const registryPath = options.registryPath ?? resolveRegistryWritePath(pathOptions);
 	const fs = options.fs ?? createNodeRegistryFs();
-	const honeycombEntry = buildHoneycombRegistryEntry(options.bind);
+	const honeycombEntry = buildHoneycombRegistryEntry(options.bind, pathOptions);
 
 	let updatedExistingEntry = false;
 	for (let attempt = 0; attempt < REGISTRY_UPSERT_MAX_ATTEMPTS; attempt++) {

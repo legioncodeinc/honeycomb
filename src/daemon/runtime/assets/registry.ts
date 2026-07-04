@@ -49,6 +49,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 
+import { honeycombStateDir, legacyHoneycombDir, preferExistingPath } from "../../../shared/fleet-root.js";
 import { STYLES, TIERS } from "./contracts.js";
 import { SYNCED_ASSET_TYPES } from "../../storage/catalog/synced-assets.js";
 
@@ -147,9 +148,14 @@ export interface AssetRegistryStore {
 	remove(honeycombId: string): RegistryEntry | null;
 }
 
-/** The default `.honeycomb` base dir under the user's home (mirrors the device store). */
+/** The default honeycomb state base dir under the fleet root (`~/.apiary/honeycomb/`, PRD-072b). */
 export function defaultRegistryBaseDir(homeDir: string = homedir()): string {
-	return join(homeDir, ".honeycomb");
+	return honeycombStateDir({ home: homeDir });
+}
+
+/** The legacy `~/.honeycomb` base dir the registry read-falls back to during the window. */
+export function legacyRegistryBaseDir(homeDir: string = homedir()): string {
+	return legacyHoneycombDir(homeDir);
 }
 
 /** The registry file name under the base dir. */
@@ -162,12 +168,19 @@ const REGISTRY_FILE = "registry.json";
  * Mirrors `createPullManifestStore`, with an ATOMIC write (temp + rename) so a
  * crash mid-write can never truncate the registry.
  */
-export function createAssetRegistryStore(baseDir: string = defaultRegistryBaseDir()): AssetRegistryStore {
+export function createAssetRegistryStore(
+	baseDir: string = defaultRegistryBaseDir(),
+	legacyBaseDir?: string,
+): AssetRegistryStore {
 	const filePath = join(baseDir, REGISTRY_FILE);
+	// Writes always target the new path; reads prefer the new path, falling back to the legacy file
+	// (PRD-072b) only when a `legacyBaseDir` is supplied (production passes it; hermetic tests do not).
+	const readPath = (): string =>
+		legacyBaseDir !== undefined ? preferExistingPath(filePath, join(legacyBaseDir, REGISTRY_FILE)) : filePath;
 
 	const readAll = (): RegistryEntry[] => {
 		try {
-			const parsed = JSON.parse(readFileSync(filePath, "utf-8")) as unknown;
+			const parsed = JSON.parse(readFileSync(readPath(), "utf-8")) as unknown;
 			if (!Array.isArray(parsed)) return [];
 			return parsed.map(normalizeEntry).filter((e): e is RegistryEntry => e !== null);
 		} catch {

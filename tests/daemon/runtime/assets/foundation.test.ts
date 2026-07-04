@@ -187,8 +187,8 @@ describe("PRD-033a a-AC-4 device_id present in 'my devices'", () => {
 		expect(first.label).toBe("my-machine");
 		expect(first.createdAt).toBe("2026-06-21T12:00:00.000Z");
 
-		// Persisted beside .machine-key, stable on the second load (no re-mint).
-		const file = deviceFilePath(tmp);
+		// Persisted at the fleet root `~/.apiary/device.json` (PRD-072c), stable on the second load.
+		const file = deviceFilePath({ home: tmp });
 		expect(JSON.parse(readFileSync(file, "utf-8")).device_id).toBe("dev-fixed");
 		const second = loadOrCreateDevice({ homeDir: tmp, mintId: () => "SHOULD-NOT-BE-USED" });
 		expect(second.device_id).toBe("dev-fixed");
@@ -284,7 +284,9 @@ describe("PRD-033a audience predicate (FR-7, tombstone-honoring)", () => {
 
 	it("Team matches same workspace; not another workspace", () => {
 		expect(audienceMatches(asset({ cell: { tier: "Team", style: "Repository" } }), ctx)).toBe(true);
-		expect(audienceMatches(asset({ cell: { tier: "Team", style: "Repository" }, workspace: "other" }), ctx)).toBe(false);
+		expect(audienceMatches(asset({ cell: { tier: "Team", style: "Repository" }, workspace: "other" }), ctx)).toBe(
+			false,
+		);
 	});
 
 	it("Device matches same author + device in set; not another user", () => {

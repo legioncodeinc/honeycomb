@@ -23,6 +23,14 @@
 import { sqlIdent } from "../../daemon/storage/sql.js";
 import type { DaemonDispatch, Row, VfsScope } from "./contracts.js";
 
+/**
+ * The agent-facing memory mount display path emitted in generated text (PRD-072b.3 / AC-072b.3.2).
+ * The mount relocated to `~/.apiary/honeycomb/memory/` (ADR-0003); the pre-tool-use classifier still
+ * recognizes the legacy `~/.honeycomb/memory/` shape (dual recognition), but generated overviews
+ * point agents at the new path.
+ */
+export const MEMORY_MOUNT_DISPLAY_PATH = "~/.apiary/honeycomb/memory/" as const;
+
 /** The per-section row cap (a-AC-5 / FR-8). */
 export const INDEX_SECTION_LIMIT = 50;
 /** The fetch size — one over the cap, so a 51st row signals "more available". */
@@ -38,10 +46,7 @@ export function buildRecentMemoriesSql(): string {
 	const path = sqlIdent("path");
 	const summary = sqlIdent("summary");
 	const updated = sqlIdent("last_update_date");
-	return (
-		`SELECT ${path}, ${summary} FROM "${tbl}" ` +
-		`ORDER BY ${updated} DESC LIMIT ${INDEX_FETCH_SIZE}`
-	);
+	return `SELECT ${path}, ${summary} FROM "${tbl}" ` + `ORDER BY ${updated} DESC LIMIT ${INDEX_FETCH_SIZE}`;
 }
 
 /**
@@ -117,6 +122,8 @@ export async function generateVirtualIndex(dispatch: DaemonDispatch, scope: VfsS
 
 	const lines: string[] = [
 		"# Honeycomb memory",
+		"",
+		`Mounted at \`${MEMORY_MOUNT_DISPLAY_PATH}\`.`,
 		"",
 		"A virtual index of team memory. These are not real files — each `cat` resolves through",
 		"the daemon. Use Grep to search beyond the most-recent rows shown here.",

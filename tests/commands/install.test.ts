@@ -435,7 +435,9 @@ describe("PRD-071 Contract A — install registers honeycomb with doctor's stati
 		expect(entry).toMatchObject({
 			name: "honeycomb",
 			healthUrl: "http://127.0.0.1:3850/health",
-			telemetryDbPath: "~/.honeycomb/telemetry/honeycomb.sqlite",
+			// PRD-072c / ADR Resolved decision 4: the advertised telemetry path is resolved absolute
+			// under the new `~/.apiary/honeycomb/` root, not a `~`-literal.
+			telemetryDbPath: join(tmpDir, ".apiary", "honeycomb", "telemetry", "honeycomb.sqlite"),
 		});
 	});
 

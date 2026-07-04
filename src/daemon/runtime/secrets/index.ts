@@ -20,7 +20,6 @@ export {
 	type SecretScope,
 	type SecretsAuditEvent,
 	type VaultProvider,
-	MACHINE_KEY_DIR_NAME,
 	MACHINE_KEY_FILE_NAME,
 	MAX_SECRET_NAME_LENGTH,
 	SECRET_OPS,

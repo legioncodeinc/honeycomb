@@ -112,8 +112,10 @@ describe("PRD-071 Contract B: fleet telemetry store", () => {
 		reader.close();
 	});
 
-	it("fleetTelemetryDbPath resolves the pinned Contract-B path under the given home dir", () => {
-		expect(fleetTelemetryDbPath(homeDir)).toBe(join(homeDir, ".honeycomb", "telemetry", "honeycomb.sqlite"));
+	it("fleetTelemetryDbPath resolves the pinned Contract-B path under the new apiary root (PRD-072b)", () => {
+		expect(fleetTelemetryDbPath({ home: homeDir })).toBe(
+			join(homeDir, ".apiary", "honeycomb", "telemetry", "honeycomb.sqlite"),
+		);
 	});
 
 	it("AC-7: writes and reads are fail-soft no-ops after close()", () => {

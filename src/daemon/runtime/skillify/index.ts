@@ -83,6 +83,7 @@ export {
 	type GateSpawner,
 	type HostCliSpec,
 	KEEP_MIN_EXCHANGES,
+	legacyLockBaseDir,
 	type LockHandle,
 	MAX_BATCH_CHARS,
 	MAX_PAIR_CHARS,

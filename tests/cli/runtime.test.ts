@@ -17,11 +17,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import {
-	CLI_RUNTIME_PATH,
-	createLoopbackDaemonClient,
-	isSessionGroupPath,
-} from "../../src/commands/index.js";
+import { CLI_RUNTIME_PATH, createLoopbackDaemonClient, isSessionGroupPath } from "../../src/commands/index.js";
 import {
 	buildAuthPassthrough,
 	buildDaemonLifecycle,
@@ -58,7 +54,10 @@ afterEach(() => {
 describe("PRD-021b b-AC-1 — real loopback DaemonClient", () => {
 	it("b-AC-1 POSTs to 127.0.0.1:3850 with the credential tenancy headers and returns real data", async () => {
 		const seen: { url?: string; method?: string; headers?: Record<string, string>; body?: string } = {};
-		const fakeFetch = (async (url: string, init: { method: string; headers: Record<string, string>; body?: string }) => {
+		const fakeFetch = (async (
+			url: string,
+			init: { method: string; headers: Record<string, string>; body?: string },
+		) => {
 			seen.url = url;
 			seen.method = init.method;
 			seen.headers = init.headers;
@@ -92,7 +91,13 @@ describe("PRD-021b b-AC-1 — real loopback DaemonClient", () => {
 		const headerKeys: string[] = [];
 		const fakeFetch = (async (_url: string, init: { headers: Record<string, string> }) => {
 			headerKeys.push(...Object.keys(init.headers));
-			return { ok: true, status: 200, async json() { return {}; } };
+			return {
+				ok: true,
+				status: 200,
+				async json() {
+					return {};
+				},
+			};
 		}) as unknown as typeof fetch;
 		const client = createLoopbackDaemonClient({
 			headers: { "x-honeycomb-org": "acme", "x-honeycomb-workspace": "default", "x-honeycomb-actor": "a" },
@@ -110,7 +115,13 @@ describe("PRD-022d d-AC-2 / d-AC-3 — the loopback client stamps the session-gr
 		let seen: Record<string, string> = {};
 		const fakeFetch = (async (_url: string, init: { headers: Record<string, string> }) => {
 			seen = init.headers;
-			return { ok: true, status: 200, async json() { return {}; } };
+			return {
+				ok: true,
+				status: 200,
+				async json() {
+					return {};
+				},
+			};
 		}) as unknown as typeof fetch;
 		const client = createLoopbackDaemonClient({
 			baseUrl: "http://127.0.0.1:3850",
@@ -167,7 +178,13 @@ describe("PRD-022d d-AC-2 / d-AC-3 — the loopback client stamps the session-gr
 		let seen: Record<string, string> = {};
 		const fakeFetch = (async (_url: string, init: { headers: Record<string, string> }) => {
 			seen = init.headers;
-			return { ok: true, status: 200, async json() { return {}; } };
+			return {
+				ok: true,
+				status: 200,
+				async json() {
+					return {};
+				},
+			};
 		}) as unknown as typeof fetch;
 		const client = createLoopbackDaemonClient({
 			headers: { "x-honeycomb-org": "acme", "x-honeycomb-runtime-path": "plugin", "x-honeycomb-session": "fixed-1" },
@@ -472,11 +489,11 @@ describe("daemon workspace resolution (system32 footgun guard)", () => {
 		const asFile = join(tmp, "bad-workspace-file");
 		writeFileSync(asFile, "");
 		// An env path that cannot be a directory must be rejected, not blindly trusted; the resolver
-		// then lands on the (writable) cwd or `~/.honeycomb` — never the unwritable candidate.
+		// then lands on the (writable) cwd or `~/.apiary/honeycomb` — never the unwritable candidate.
 		process.env.HONEYCOMB_WORKSPACE = join(asFile, "sub");
 		const resolved = resolveDaemonWorkspace();
 		expect(resolved).not.toBe(join(asFile, "sub"));
-		expect([process.cwd(), join(homedir(), ".honeycomb")]).toContain(resolved);
+		expect([process.cwd(), join(homedir(), ".apiary", "honeycomb")]).toContain(resolved);
 		expect(canWriteDir(resolved)).toBe(true);
 	});
 });

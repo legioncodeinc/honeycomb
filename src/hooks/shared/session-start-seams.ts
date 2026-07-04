@@ -40,7 +40,8 @@
  * artifacts to disk. The same discipline holds — kill-switch (`HONEYCOMB_ASSET_AUTOPULL_DISABLED`),
  * fully fail-soft (ANY error swallowed → resolves void), and time-budgeted (the thin client's own
  * 5s budget; we add NO second timeout). The tenancy scope is built from the credential
- * (org/workspace/author) + this machine's stable device id (`~/.honeycomb/device.json`).
+ * (org/workspace/author) + this machine's stable device id (`~/.apiary/device.json`, with a legacy
+ * `~/.honeycomb/device.json` read fallback during the ADR-0003 window).
  */
 
 import {
@@ -51,10 +52,7 @@ import {
 	createDefaultHarnessRoots,
 	createLoopbackAssetSyncApi,
 } from "../../daemon-client/assets/index.js";
-import {
-	AUTOPULL_DISABLED_ENV,
-	AUTOPULL_TIMEOUT_MS,
-} from "../../daemon-client/skillify/index.js";
+import { AUTOPULL_DISABLED_ENV, AUTOPULL_TIMEOUT_MS } from "../../daemon-client/skillify/index.js";
 import { createLoopbackDaemonClient } from "../../commands/contracts.js";
 // `loadOrCreateDevice` is imported from the PURE device module (NOT the assets barrel
 // `daemon/runtime/assets/index.js`, which re-exports the storage-laden `sync.js`/`api.js`).
@@ -63,11 +61,7 @@ import { createLoopbackDaemonClient } from "../../commands/contracts.js";
 // at bundle time (esbuild never pulls the storage client in through this leaf). See D-6.
 import { type DeviceRecord, loadOrCreateDevice } from "../../daemon/runtime/assets/device.js";
 import { DAEMON_HOST, DAEMON_PORT } from "../../shared/constants.js";
-import {
-	type CredentialReader,
-	type HookCredential,
-	type SessionStartSeams,
-} from "./contracts.js";
+import { type CredentialReader, type HookCredential, type SessionStartSeams } from "./contracts.js";
 
 /** The loopback route the auto-pull POSTs (PRD-045g `mountSkillPropagationApi`). */
 const SKILLS_PULL_ENDPOINT = "/api/skills/pull" as const;
@@ -99,8 +93,9 @@ export interface SessionStartSeamsOptions {
 	readonly timeoutMs?: number;
 	/**
 	 * Resolve this machine's stable device record for the asset-pull scope (default
-	 * {@link loadOrCreateDevice}, which reads/mints `~/.honeycomb/device.json`). Injected so the
-	 * asset auto-pull test drives the device id deterministically WITHOUT touching the real home.
+	 * {@link loadOrCreateDevice}, which reads/mints the fleet-root `~/.apiary/device.json` with a
+	 * legacy `~/.honeycomb/device.json` fallback). Injected so the asset auto-pull test drives the
+	 * device id deterministically WITHOUT touching the real home.
 	 */
 	readonly loadDevice?: () => DeviceRecord;
 }
@@ -194,7 +189,8 @@ function buildAssetAutoPullDeps(wiring: AssetAutoPullWiring): AssetAutoPullDeps 
  * Build the {@link AssetScope} the asset pull is scoped by — org/workspace bound the Team radius,
  * author + the stable device id bound the Device radius. Prefer the credential's resolved tenancy;
  * fall back to the same `local`/`default` sentinels the CLI's `resolveScope` uses for a loopback,
- * single-tenant local pull. The device id is read from (or minted into) `~/.honeycomb/device.json`.
+ * single-tenant local pull. The device id is read from (or minted into) the fleet-root
+ * `~/.apiary/device.json` (legacy `~/.honeycomb/device.json` fallback during the window).
  */
 function buildAssetScope(cred: HookCredential | undefined, loadDevice: () => DeviceRecord): AssetScope {
 	const device = loadDevice();
@@ -247,7 +243,8 @@ function tenancyHeaders(cred: HookCredential | undefined): Record<string, string
 	const headers: Record<string, string> = { "content-type": "application/json" };
 	if (cred?.org !== undefined && cred.org.length > 0) {
 		headers[ORG_HEADER] = cred.org;
-		headers[WORKSPACE_HEADER] = cred.workspace !== undefined && cred.workspace.length > 0 ? cred.workspace : DEFAULT_WORKSPACE;
+		headers[WORKSPACE_HEADER] =
+			cred.workspace !== undefined && cred.workspace.length > 0 ? cred.workspace : DEFAULT_WORKSPACE;
 	}
 	if (cred?.actor !== undefined && cred.actor.length > 0) headers[ACTOR_HEADER] = cred.actor;
 	return headers;

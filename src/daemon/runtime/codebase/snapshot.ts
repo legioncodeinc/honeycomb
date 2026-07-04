@@ -24,8 +24,10 @@
  */
 
 import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { honeycombStateDir } from "../../../shared/fleet-root.js";
 import {
 	type FileExtraction,
 	type GraphEdge,
@@ -192,11 +194,12 @@ function assembleSnapshot(
 	};
 }
 
-/** Default local cache dir for an identity — `~/.honeycomb/graphs/<repo>/`. Repo is the key. */
+/** Default local cache dir for an identity — `~/.apiary/honeycomb/graphs/<repo>/`. Repo is the key. */
 function defaultCacheDir(identity: SnapshotIdentity): string {
-	const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+	const home = process.env.HOME ?? process.env.USERPROFILE ?? homedir();
 	const repoKey = identity.repo === "" ? "default" : identity.repo.replace(/[^A-Za-z0-9._-]/g, "_");
-	return join(home, ".honeycomb", "graphs", repoKey);
+	// Regenerable cache under the new fleet root (`~/.apiary/honeycomb/graphs/`, ADR-0003 / PRD-072b).
+	return join(honeycombStateDir({ home }), "graphs", repoKey);
 }
 
 // ════════════════════════════════════════════════════════════════════════════

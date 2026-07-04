@@ -219,14 +219,14 @@ export function createFakeMachineKeyProvider(id: string): MachineKeyProvider {
 }
 
 /**
- * The cross-platform fallback machine-key directory + file. A generate-once 32-byte
- * random key lives at `~/.honeycomb/.machine-key` (mode 0600) — OUTSIDE `.secrets/`,
- * so copying `.secrets/` ALONE yields nothing (the key file is not in it). This is the
- * fallback when no OS machine identifier is readable; the real provider's wiring lives
- * in {@link "./store.js"} (it needs `node:fs`), so this module only NAMES the location.
+ * The cross-platform fallback machine-key FILE NAME. A generate-once 32-byte random key
+ * lives at `~/.apiary/honeycomb/.machine-key` (mode 0600; legacy read fallback at
+ * `~/.honeycomb/.machine-key` during the ADR-0003 window) — OUTSIDE `.secrets/`, so copying
+ * `.secrets/` ALONE yields nothing (the key file is not in it). This is the fallback when no
+ * OS machine identifier is readable; the real provider's wiring (and the directory
+ * resolution, via the shared fleet-root helper) lives in {@link "./store.js"} — this module
+ * only NAMES the file.
  */
-export const MACHINE_KEY_DIR_NAME = ".honeycomb" as const;
-/** The fallback machine-key file name within {@link MACHINE_KEY_DIR_NAME}. */
 export const MACHINE_KEY_FILE_NAME = ".machine-key" as const;
 
 /**

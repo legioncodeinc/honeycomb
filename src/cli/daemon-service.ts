@@ -41,6 +41,8 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join, normalize, resolve, sep } from "node:path";
 
+import { APIARY_HOME_ENV } from "../shared/fleet-root.js";
+
 /** The three OS service managers this module can target (the resolved per-OS default). */
 export type ServiceManager = "launchd" | "systemd-user" | "schtasks";
 
@@ -191,6 +193,15 @@ export interface ServiceSpec {
 	readonly workspace: string;
 	/** The home dir the file-based unit paths resolve under. Defaults to `os.homedir()`. */
 	readonly home?: string;
+	/**
+	 * The RESOLVED fleet root (ADR-0003 / PRD-072d) pinned into the unit's environment as
+	 * `APIARY_HOME`, beside `HONEYCOMB_WORKSPACE`. The caller (`src/cli/runtime.ts`) resolves it once
+	 * at registration time (`resolveFleetRoot`), so a service-launched daemon resolves the SAME root
+	 * the installing CLI resolved, including the Windows LocalSystem opt-in (which resolves
+	 * `os.homedir()` to `System32\config\systemprofile` without the pin). Pin-always: the caller sets
+	 * it unconditionally for determinism; when absent the renderers simply omit the env line.
+	 */
+	readonly fleetRoot?: string;
 }
 
 /**
@@ -236,16 +247,12 @@ export function legacySystemdUnitPath(home: string): string {
 
 /** XML-escape a value bound into a plist `<string>` (the entry/workspace can contain `&`/`<`). */
 function xmlEscape(value: string): string {
-	return value
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;");
+	return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 /**
  * Render the launchd LaunchAgent plist (AC-064h.4: pins `WorkingDirectory` + the `HONEYCOMB_WORKSPACE`
- * env to the writable workspace; `KeepAlive`+`RunAtLoad` make launchd the liveness floor , 
+ * env to the writable workspace; `KeepAlive`+`RunAtLoad` make launchd the liveness floor ,
  * restart-on-crash + start-on-login).
  */
 export function renderLaunchdPlist(spec: ServiceSpec): string {
@@ -266,7 +273,11 @@ ${argvXml}
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>HONEYCOMB_WORKSPACE</key>
-		<string>${xmlEscape(spec.workspace)}</string>
+		<string>${xmlEscape(spec.workspace)}</string>${
+			spec.fleetRoot !== undefined
+				? `\n\t\t<key>${APIARY_HOME_ENV}</key>\n\t\t<string>${xmlEscape(spec.fleetRoot)}</string>`
+				: ""
+		}
 	</dict>
 	<key>RunAtLoad</key>
 	<true/>
@@ -288,6 +299,9 @@ export function renderSystemdUnit(spec: ServiceSpec): string {
 	// systemd ExecStart wants a single command line; quote each argv token so a space in a path is
 	// preserved. The tokens are absolute paths we control (no user-supplied shell metacharacters).
 	const execStart = [spec.nodePath, ...spec.nodeFlags, spec.entry].map((a) => `"${a}"`).join(" ");
+	// PRD-072d: pin APIARY_HOME beside HONEYCOMB_WORKSPACE. systemd `Environment=` values with spaces
+	// need quoting; follow the same treatment the ExecStart tokens use.
+	const apiaryHomeLine = spec.fleetRoot !== undefined ? `\nEnvironment=${APIARY_HOME_ENV}="${spec.fleetRoot}"` : "";
 	return `[Unit]
 Description=Honeycomb primary daemon (127.0.0.1:3850)
 After=network.target
@@ -296,7 +310,7 @@ After=network.target
 Type=simple
 ExecStart=${execStart}
 WorkingDirectory=${spec.workspace}
-Environment=HONEYCOMB_WORKSPACE=${spec.workspace}
+Environment=HONEYCOMB_WORKSPACE=${spec.workspace}${apiaryHomeLine}
 Restart=always
 RestartSec=5
 
@@ -343,23 +357,16 @@ export function buildSchtasksCreateArgs(spec: ServiceSpec): readonly string[] {
 	assertCmdSafe(spec.workspace);
 	assertCmdSafe(spec.nodePath);
 	assertCmdSafe(spec.entry);
+	// PRD-072d: the pinned fleet root passes the SAME cmd-metacharacter guard before it is embedded in
+	// the auto-running task command (a poisoned APIARY_HOME must never inject a command).
+	if (spec.fleetRoot !== undefined) assertCmdSafe(spec.fleetRoot);
 	const nodeFlags = spec.nodeFlags.length > 0 ? `${spec.nodeFlags.join(" ")} ` : "";
-	// The /TR command: set HONEYCOMB_WORKSPACE for the child, then launch node on the entry. `cd /d`
-	// pins the working directory to the writable workspace (the system32 footgun close). Quote the
-	// paths so spaces survive. schtasks runs this exact string under cmd.exe at task time.
-	const tr = `cmd /c "cd /d "${spec.workspace}" && set HONEYCOMB_WORKSPACE=${spec.workspace} && "${spec.nodePath}" ${nodeFlags}"${spec.entry}""`;
-	return [
-		"/Create",
-		"/TN",
-		SERVICE_TASK_NAME,
-		"/TR",
-		tr,
-		"/SC",
-		"ONLOGON",
-		"/RL",
-		"LIMITED",
-		"/F",
-	];
+	// The /TR command: set HONEYCOMB_WORKSPACE (and APIARY_HOME when pinned) for the child, then launch
+	// node on the entry. `cd /d` pins the working directory to the writable workspace (the system32
+	// footgun close). Quote the paths so spaces survive. schtasks runs this exact string under cmd.exe.
+	const apiaryHomeSet = spec.fleetRoot !== undefined ? `set ${APIARY_HOME_ENV}=${spec.fleetRoot} && ` : "";
+	const tr = `cmd /c "cd /d "${spec.workspace}" && set HONEYCOMB_WORKSPACE=${spec.workspace} && ${apiaryHomeSet}"${spec.nodePath}" ${nodeFlags}"${spec.entry}""`;
+	return ["/Create", "/TN", SERVICE_TASK_NAME, "/TR", tr, "/SC", "ONLOGON", "/RL", "LIMITED", "/F"];
 }
 
 /** The outcome of a service operation, what happened, for the CLI to report honestly. */

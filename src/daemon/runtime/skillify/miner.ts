@@ -40,20 +40,14 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdirSync, openSync, closeSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
+import { closeSync, existsSync, mkdirSync, openSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+import { honeycombStateDir, legacyHoneycombDir } from "../../../shared/fleet-root.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import { isOk, type StorageRow } from "../../storage/result.js";
 import { sqlIdent, sLiteral } from "../../storage/sql.js";
-import {
-	type GateCli,
-	type GateDecision,
-	type GateVerdict,
-	GATE_VERDICTS,
-	type MinedPair,
-} from "./contracts.js";
+import { type GateCli, type GateDecision, type GateVerdict, GATE_VERDICTS, type MinedPair } from "./contracts.js";
 import { DEFAULT_SKILLIFY_EVERY_TURNS, type TurnCounters, tryStopCounterTrigger } from "../capture/turn-counters.js";
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -156,11 +150,7 @@ export interface SessionFetcher {
  *     fetch rows (a session is many rows) then group to {@link FETCH_SESSION_LIMIT}
  *     distinct sessions in {@link extractPairs}.
  */
-export function createSessionFetcher(
-	storage: StorageQuery,
-	scope: QueryScope,
-	rowFanout = 200,
-): SessionFetcher {
+export function createSessionFetcher(storage: StorageQuery, scope: QueryScope, rowFanout = 200): SessionFetcher {
 	return {
 		async fetch(mine: MineScope, watermark: string | null): Promise<readonly SessionRow[]> {
 			const tbl = sqlIdent(SESSIONS_TABLE);
@@ -194,11 +184,7 @@ export function createSessionFetcher(
 			const whereClauses = conjuncts.join(" AND ");
 			const whereSql = conjuncts.length > 0 ? `WHERE ${whereClauses} ` : "";
 			const limit = Math.max(1, Math.trunc(rowFanout));
-			const sql =
-				`SELECT * FROM "${tbl}" ` +
-				whereSql +
-				`ORDER BY ${dateCol} DESC ` +
-				`LIMIT ${limit}`;
+			const sql = `SELECT * FROM "${tbl}" ` + whereSql + `ORDER BY ${dateCol} DESC ` + `LIMIT ${limit}`;
 
 			const res = await storage.query(sql, scope);
 			if (!isOk(res)) return [];
@@ -265,7 +251,10 @@ function parseSessionId(message: unknown): string | null {
  * skill material. Remove every such block (case-insensitive, across newlines).
  */
 function stripThinking(text: string): string {
-	return text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, "").replace(/\n{3,}/g, "\n\n").trim();
+	return text
+		.replace(/<thinking>[\s\S]*?<\/thinking>/gi, "")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
 }
 
 /** The token a redacted secret is replaced with (mirrors `secrets/exec.ts`'s `REDACTED`). */
@@ -315,9 +304,7 @@ const SECRET_PATTERNS: readonly RegExp[] = [
 export function redactSecrets(text: string): string {
 	let out = text;
 	for (const re of SECRET_PATTERNS) {
-		out = out.replace(re, (_match, label?: string) =>
-			typeof label === "string" ? `${label}${REDACTED}` : REDACTED,
-		);
+		out = out.replace(re, (_match, label?: string) => (typeof label === "string" ? `${label}${REDACTED}` : REDACTED));
 	}
 	return out;
 }
@@ -376,10 +363,10 @@ export function extractPairsFromRows(rows: readonly SessionRow[]): readonly Mine
 
 			if (kind === "user_message") {
 				// A new prompt starts a fresh pending pair (a prompt with no answer is dropped).
-					// sanitizeBody strips thinking AND scrubs secrets at the mine boundary so a pasted
-					// credential never reaches the gate / SKILL.md / team (SECURITY, PRD-016).
-					pendingPrompt = sanitizeBody(text);
-					promptSessionId = row.sessionId;
+				// sanitizeBody strips thinking AND scrubs secrets at the mine boundary so a pasted
+				// credential never reaches the gate / SKILL.md / team (SECURITY, PRD-016).
+				pendingPrompt = sanitizeBody(text);
+				promptSessionId = row.sessionId;
 				promptDate = row.creationDate;
 				continue;
 			}
@@ -652,9 +639,14 @@ export interface WorkerLock {
 	acquire(projectKey: string): LockHandle | null;
 }
 
-/** The default per-project lock root in production (`~/.honeycomb/state/skillify`). */
+/** The default per-project lock root in production (`~/.apiary/honeycomb/state/skillify`, PRD-072b). */
 export function defaultLockBaseDir(): string {
-	return join(homedir(), ".honeycomb", "state", "skillify");
+	return join(honeycombStateDir(), "state", "skillify");
+}
+
+/** The legacy lock root (`~/.honeycomb/state/skillify`) checked as a fallback during the window. */
+export function legacyLockBaseDir(): string {
+	return join(legacyHoneycombDir(), "state", "skillify");
 }
 
 /**
@@ -664,12 +656,22 @@ export function defaultLockBaseDir(): string {
  * SUPPRESSED. `release` removes the lock file (idempotent — a double release is a no-op,
  * which is exactly what the `finally` needs even after a gate timeout). `projectKey` is
  * sanitized into a single path segment so it can never traverse out of the base dir.
+ *
+ * PRD-072b window fallback: when `legacyBaseDir` is given (production passes the legacy
+ * `~/.honeycomb/state/skillify`), a PRE-EXISTING lock file at the legacy path also suppresses the
+ * run, so a run left in flight by a not-yet-upgraded daemon is still respected mid-window. New
+ * locks are only ever created at `baseDir`; the legacy path is read-only here.
  */
-export function createFileWorkerLock(baseDir: string = defaultLockBaseDir()): WorkerLock {
+export function createFileWorkerLock(baseDir: string = defaultLockBaseDir(), legacyBaseDir?: string): WorkerLock {
 	const fileFor = (projectKey: string): string => join(baseDir, sanitizeSegment(projectKey), "worker.lock");
 	return {
 		acquire(projectKey: string): LockHandle | null {
 			const path = fileFor(projectKey);
+			// Legacy-fallback read (PRD-072b): a lock held at the legacy path means a run is in flight
+			// under an old daemon — suppress, never double-run. Read-only probe; never created here.
+			if (legacyBaseDir !== undefined && existsSync(join(legacyBaseDir, sanitizeSegment(projectKey), "worker.lock"))) {
+				return null;
+			}
 			try {
 				mkdirSync(dirname(path), { recursive: true });
 				// `wx` = O_CREAT | O_EXCL: fails if the file exists → a run is in flight.

@@ -28,9 +28,9 @@ import {
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { honeycombStateDir, legacyHoneycombDir } from "../shared/fleet-root.js";
 import {
 	type ClaimLock,
 	type NotificationsState,
@@ -130,9 +130,9 @@ export const nodeStateFs: StateFs = {
 	},
 };
 
-/** Resolve the state directory (the override, or `~/.honeycomb`). */
+/** Resolve the state directory (the override, or `~/.apiary/honeycomb`, ADR-0003 / PRD-072b). */
 function stateDir(loc: StateLocation): string {
-	return loc.dir ?? join(homedir(), ".honeycomb");
+	return loc.dir ?? honeycombStateDir();
 }
 
 /** Resolve the FS seam (the override, or the real `node:fs`). */
@@ -198,8 +198,16 @@ export function createNotificationsState(loc: StateLocation = {}): Notifications
 	const fs = stateFs(loc);
 	const dir = stateDir(loc);
 	const file = join(dir, STATE_FILE_NAME);
+	// PRD-072b window: with no injected dir (production), read new-first then the legacy
+	// `~/.honeycomb/notifications-state.json`. An injected dir (tests) reads only that dir. The
+	// existence probe goes through the SAME injected StateFs seam as the reads/writes, so a caller
+	// that injects `fs` (but not `dir`) gets one consistent filesystem for probe + read.
+	const legacyFile = loc.dir === undefined ? join(legacyHoneycombDir(), STATE_FILE_NAME) : undefined;
 
-	const read = (): NotificationsStateData => (fs.exists(file) ? parseStateData(fs.readText(file)) : { seen: {} });
+	const read = (): NotificationsStateData => {
+		const src = legacyFile !== undefined && !fs.exists(file) && fs.exists(legacyFile) ? legacyFile : file;
+		return fs.exists(src) ? parseStateData(fs.readText(src)) : { seen: {} };
+	};
 
 	return {
 		load(): NotificationsStateData {
