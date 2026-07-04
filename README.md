@@ -259,7 +259,7 @@ Beyond the CLI, three more ways to reach the same daemon and the same shared mem
 
 <h2 align="center"><a href="https://ideas.theapiary.sh">📍 Status & Roadmap</a></h2>
 
-Honeycomb is **production ready (v0.2.x)** and fully tested in live scenarios. We document what's real and flag what's opt-in.
+Honeycomb is **production ready (v0.3.x)** and fully tested in live scenarios. We document what's real and flag what's opt-in.
 
 **Production today**
 - Capture-to-recall, proven end-to-end and live-tested against Deeplake (`npm run smoke:golden-path` with credentials).
