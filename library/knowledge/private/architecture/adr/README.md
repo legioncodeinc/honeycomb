@@ -24,3 +24,4 @@ captured once so it doesn't have to be re-litigated from memory.
 | [0005](0005-recovery-revocation-and-escrow-policy.md) | Recovery, revocation, and escrow policy | Proposed | 2026-06-29 |
 | [0006](0006-local-queue-as-interim-idle-cost-control.md) | Local queue as interim idle-cost control | Proposed | 2026-06-29 |
 | [0007](0007-daemon-readiness-over-boot-time-deeplake-and-graph-work.md) | Daemon readiness over boot-time DeepLake and graph work | Accepted | 2026-06-30 |
+| [0008](0008-fleet-directory-ownership-and-neutral-state-root.md) | Fleet directory ownership and neutral state root (mirror of superproject ADR-0003) | Proposed | 2026-07-04 |
