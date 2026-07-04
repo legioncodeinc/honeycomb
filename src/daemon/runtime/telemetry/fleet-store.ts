@@ -85,7 +85,14 @@ export function resolveTelemetryDbPathForOpen(options: FleetRootOptions = {}): s
 	if (existsSync(newPath)) return newPath;
 	const legacyPath = legacyFleetTelemetryDbPath(options.home);
 	if (!existsSync(legacyPath)) return newPath;
-	return moveSqliteWithSiblings(legacyPath, newPath) === "migrated" ? newPath : legacyPath;
+	// The move primitive reports an outcome and never throws; the guard is defense in depth so even
+	// an unexpected filesystem error resolves to the documented legacy fallback, never a throw that
+	// would degrade the whole store to the inert null fallback.
+	try {
+		return moveSqliteWithSiblings(legacyPath, newPath) === "migrated" ? newPath : legacyPath;
+	} catch {
+		return legacyPath;
+	}
 }
 
 /** The `service_status` upsert input (AC-071a.2, AC-071a.3). */

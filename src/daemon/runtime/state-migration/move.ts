@@ -49,6 +49,21 @@ function filesByteIdentical(a: string, b: string): boolean {
 }
 
 /**
+ * Best-effort removal that NEVER throws. `rmSync(..., { force: true })` only suppresses ENOENT; on
+ * POSIX a path whose PARENT component is a regular file fails the lstat with ENOTDIR instead
+ * (Windows reports the same probe as not-found), so a cleanup inside a catch block would throw the
+ * error the caller promised to swallow. Every cleanup in this module routes through here so the
+ * move primitives keep their contract: they return an outcome, they never throw.
+ */
+function bestEffortRm(path: string, recursive = false): void {
+	try {
+		rmSync(path, { recursive, force: true });
+	} catch {
+		// Cleanup is advisory: a temp file that could not even be created needs no removal.
+	}
+}
+
+/**
  * Copy `legacyFile` to `newFile` (temp + atomic rename), then remove the legacy copy. Returns
  * `skipped` when there is nothing to do (no legacy file, or the destination exists with no legacy
  * remainder); `migrated` on a successful move OR when both exist byte-identical (the legacy copy is
@@ -62,11 +77,8 @@ export function moveFile(legacyFile: string, newFile: string, options: MoveFileO
 		// clear the legacy remainder. Differing bytes → a store minted the destination fresh while the
 		// legacy data sits unmigrated: NEVER self-mark complete (QA Critical 2b).
 		if (!filesByteIdentical(newFile, legacyFile)) return "failed";
-		try {
-			rmSync(legacyFile, { force: true });
-		} catch {
-			// non-fatal: the next boot retries the (idempotent) verified-equivalent removal.
-		}
+		// Best-effort: the next boot retries the (idempotent) verified-equivalent removal.
+		bestEffortRm(legacyFile);
 		return "migrated";
 	}
 	const tmp = tempBeside(newFile);
@@ -76,21 +88,20 @@ export function moveFile(legacyFile: string, newFile: string, options: MoveFileO
 		if (options.fileMode !== undefined && process.platform !== "win32") chmodSync(tmp, options.fileMode);
 		if (options.verifyBytes === true && !readFileSync(tmp).equals(readFileSync(legacyFile))) {
 			// The copy did not reproduce the legacy bytes exactly: abort, keep the legacy authoritative.
-			rmSync(tmp, { force: true });
+			bestEffortRm(tmp);
 			return "failed";
 		}
 		renameSync(tmp, newFile);
 	} catch {
-		rmSync(tmp, { force: true });
+		// POSIX note: when the destination's parent component is a FILE (a blocked dir), rmSync here
+		// would itself throw ENOTDIR (`force` only covers ENOENT); the guarded helper keeps the
+		// promised never-throw contract on every platform.
+		bestEffortRm(tmp);
 		return "failed";
 	}
 	// Best-effort remove of the legacy copy: the new file is now authoritative. A failed unlink leaves
 	// a harmless legacy artifact (the window keeps reading new-first anyway), never a lost byte.
-	try {
-		rmSync(legacyFile, { force: true });
-	} catch {
-		// non-fatal
-	}
+	bestEffortRm(legacyFile);
 	return "migrated";
 }
 
@@ -111,14 +122,10 @@ export function moveDir(legacyDir: string, newDir: string): FamilyOutcome {
 		mkdirSync(dirname(newDir), { recursive: true, mode: STATE_DIR_MODE });
 		renameSync(tmp, newDir);
 	} catch {
-		rmSync(tmp, { recursive: true, force: true });
+		bestEffortRm(tmp, true);
 		return "failed";
 	}
-	try {
-		rmSync(legacyDir, { recursive: true, force: true });
-	} catch {
-		// non-fatal
-	}
+	bestEffortRm(legacyDir, true);
 	return "migrated";
 }
 

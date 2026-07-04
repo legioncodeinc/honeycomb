@@ -144,8 +144,10 @@ describe("PRD-072 AC-7 / PRD-072b AC-072b.1.3 — machine key byte-preserved; se
 		const keyHex = "a".repeat(64); // 32 bytes as hex
 		write(legacy(".machine-key"), keyHex);
 		const scope = { org: "o", workspace: "w" };
-		// Encrypt BEFORE migration, using the key the way the store derives it (`file:<hex>`).
-		const record = encrypt("sk-live-123", deriveKey(`file:${keyHex}`, scope));
+		// Encrypt BEFORE migration, using the key the way the store derives it (`file:<hex>`). The
+		// plaintext deliberately does NOT resemble a provider key prefix so secret scanners never
+		// flag this fixture as a leaked credential.
+		const record = encrypt("not-a-real-secret-123", deriveKey(`file:${keyHex}`, scope));
 
 		runHoneycombStateMigration({ home, env: ENV, platform: PLATFORM });
 
@@ -156,6 +158,6 @@ describe("PRD-072 AC-7 / PRD-072b AC-072b.1.3 — machine key byte-preserved; se
 		// The secret encrypted pre-migration decrypts with the migrated key bytes.
 		const migratedHex = readFileSync(newHc(".machine-key"), "utf8").trim();
 		const result = decrypt(record, deriveKey(`file:${migratedHex}`, scope));
-		expect(result).toEqual({ ok: true, value: "sk-live-123" });
+		expect(result).toEqual({ ok: true, value: "not-a-real-secret-123" });
 	});
 });
