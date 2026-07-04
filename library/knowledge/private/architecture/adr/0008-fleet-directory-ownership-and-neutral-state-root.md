@@ -2,10 +2,36 @@
 
 > **MIRROR - not the authoritative copy.** This is a synced copy of the superproject (the-apiary) fleet-wide ADR, placed in honeycomb so the decision is visible when working inside this submodule. Authoritative source: `library/knowledge/private/architecture/ADR-0003-fleet-directory-ownership-and-neutral-state-root.md` in the superproject. Edit the authoritative copy, then re-sync this mirror; do not edit this copy in isolation. (Numbered `0008` here to fit honeycomb's local ADR sequence; it is superproject `ADR-0003`.)
 
-**Status:** Proposed (superproject ADR-0003) · **Date:** 2026-07-04
+**Status:** Accepted (superproject ADR-0003) · **Date:** 2026-07-04
 **Owners:** platform, doctor, honeycomb, nectar, hive
 
-> **DECISION TO CONFIRM (before implementation):** the concrete name of the shared root. This ADR recommends the brand-neutral `~/.apiary/`. The considered alternative is the supervisor-branded `~/.doctor/` (see Alternatives). Everything else in this ADR is independent of which name wins; a rename is a single find/replace across the four repos.
+## Resolved decisions (confirmed 2026-07-04)
+
+The three decisions this ADR left open are now resolved. These resolutions are **normative**: the four per-repo migration PRDs (doctor PRD-004, honeycomb PRD-072, nectar PRD-020, hive PRD-010) cite this section rather than restating it, so there is exactly one source of truth.
+
+**1. Root name: `~/.apiary/`.** Confirmed over the supervisor-branded `~/.doctor/` alternative.
+
+**2. XDG precedence: honor `$XDG_STATE_HOME` only when it is explicitly set; the default is `<homedir>/.apiary` on every OS, including Linux.** There is no `~/.local/state/apiary` default. Rationale: the fleet's support story depends on "inspect one directory" being true everywhere, and both existing precedents (`~/.deeplake`, the legacy `~/.honeycomb`) are dotfiles in home; honoring XDG when explicitly set still respects users who deliberately configured it. The chain is purely environmental and deterministic: no product ever scans the disk for existing roots to decide precedence, and a user who changes `$XDG_STATE_HOME` after install is handled by the same legacy-fallback read as any other move.
+
+The canonical resolution chain every product implements (mirrored, never imported):
+
+```
+resolveFleetRoot(env, platform, home = os.homedir()):
+  1. env.APIARY_HOME set and non-blank            -> APIARY_HOME
+     (the installer's --home= pin is delivered as APIARY_HOME in the service environment)
+  2. platform is linux AND env.XDG_STATE_HOME set and non-blank
+                                                  -> join(XDG_STATE_HOME, "apiary")
+  3. otherwise                                    -> join(home, ".apiary")
+```
+
+Per-product state is `resolveFleetRoot() + "/<product>"`; the shared surface (registry.json, device.json, install-id) sits at the root itself.
+
+**3. The registry compatibility window contract.** One contract, stated once, binding all four repos during the migration window:
+
+- **Ownership:** doctor creates `~/.apiary/` and migrates `~/.honeycomb/doctor.daemons.json` -> `~/.apiary/registry.json` during its own migration boot. doctor is the only product that migrates the shared file.
+- **Write side (every product's installer):** write your registry entry to `~/.apiary/registry.json` when the fleet root directory exists; otherwise write to the legacy `~/.honeycomb/doctor.daemons.json`. Deterministic, no cross-product coordination required at write time.
+- **Read side (doctor):** read new-first. When both files exist, the new file wins per daemon `name`; legacy-only entries merge additively. doctor never writes merged results back to the legacy file.
+- **Window close:** the legacy fallback (read side and write side) is removed only when every supported install path ships its migration. That removal is the close-out gate tracked in the superproject execution ledger (`library/ledger/EXECUTION_LEDGER-apiary-state-root.md`).
 
 ## Context
 
@@ -51,7 +77,7 @@ Separately, `~/.deeplake/` already sets the precedent for a **brand-neutral shar
 ### The root is home-anchored, selectable, and never cwd
 
 - The default root is `<os.homedir()>/.apiary`. It is resolved from `os.homedir()`, **never** `process.cwd()`, so it does not inherit the service manager's working directory and cannot land in `System32` / `/` by that path.
-- A single override selects a non-default location, resolved with one precedence chain across the fleet: **`APIARY_HOME` env var > installer `--home=` flag / config > XDG base dirs on Linux (`$XDG_STATE_HOME`, falling back to `~/.local/state/apiary`) > `<home>/.apiary`.** Every product resolves the root through one shared helper so the chain is identical everywhere.
+- A single override selects a non-default location, resolved with one precedence chain across the fleet: **`APIARY_HOME` env var (the installer's `--home=` pin is delivered as `APIARY_HOME` in the service environment) > `$XDG_STATE_HOME/apiary` on Linux only when `$XDG_STATE_HOME` is explicitly set > `<home>/.apiary`.** There is no `~/.local/state` default. Every product resolves the root through one mirrored helper so the chain is identical everywhere (see Resolved decisions for the canonical chain).
 - **Windows LocalSystem edge (enterprise opt-in only):** on the default Windows install, `os.homedir()` returns the real user profile (`C:\Users\<name>`), because nectar's default is a per-user Scheduled Task running as the logged-in user (`InteractiveToken`, `LeastPrivilege`; `nectar/src/service/platform.ts:15`, `templates.ts:152,178`). The `System32\config\systemprofile` result occurs ONLY under the LocalSystem account, i.e. the `sc.exe` Windows Service backend, which is an enterprise opt-in requiring `preferSystemScope` plus a privileged process, "never the userland default" (`platform.ts:16,178-204`). For that opt-in path only, the installer captures the *installing user's* home at install time and pins the resolved root into the service environment so state never lands under `System32`. The default per-user path already resolves correctly at runtime.
 
 ### Migration and back-compat
@@ -79,7 +105,7 @@ Separately, `~/.deeplake/` already sets the precedent for a **brand-neutral shar
 
 ## Revisit triggers
 
-- The shared-root name is confirmed or changed from the recommended `~/.apiary/` (see DECISION TO CONFIRM); if it changes, re-sync all mirrors and update every reference.
+- The shared-root name was confirmed as `~/.apiary/` on 2026-07-04 (see Resolved decisions); if it ever changes, re-sync all mirrors and update every reference.
 - The legacy-fallback read is removed once all supported install paths ship the migration; record that removal as the trigger to close the migration window.
 - A new product joins the fleet (or the supervisor changes), which would add a subdirectory and revalidate the "who owns the shared root" reasoning.
 
