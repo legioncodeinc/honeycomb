@@ -16,10 +16,10 @@ import {
 	createNodeRegistryFs,
 	HONEYCOMB_REGISTRY_HEALTH_URL,
 	HONEYCOMB_REGISTRY_NAME,
-	HONEYCOMB_REGISTRY_PID_PATH,
-	HONEYCOMB_REGISTRY_TELEMETRY_DB_PATH,
 	doctorRegistryPath,
 	honeycombRegistryHealthUrl,
+	honeycombRegistryPidPath,
+	honeycombRegistryTelemetryDbPath,
 	type RegistryFs,
 	registerHoneycombWithDoctor,
 } from "../../../../src/daemon/runtime/telemetry/fleet-registry.js";
@@ -39,21 +39,26 @@ function readRegistry(path: string): { daemons: Array<Record<string, unknown>> }
 }
 
 describe("PRD-071 Contract A: buildHoneycombRegistryEntry", () => {
-	it("matches the pinned Contract-A shape exactly", () => {
-		expect(buildHoneycombRegistryEntry()).toEqual({
+	it("AC-072c matches the pinned Contract-A shape with RESOLVED ABSOLUTE pid/telemetry paths", () => {
+		// ADR-0003 Resolved decision 4: the entry carries the writer's own resolved absolute
+		// pidPath / telemetryDbPath (never a `~`-literal). A fixed home makes the resolution deterministic.
+		expect(buildHoneycombRegistryEntry(undefined, { home: homeDir })).toEqual({
 			name: "honeycomb",
 			healthUrl: "http://127.0.0.1:3850/health",
-			pidPath: "~/.honeycomb/daemon.pid",
+			pidPath: honeycombRegistryPidPath({ home: homeDir }),
 			probeIntervalMs: 30000,
 			startupGraceMs: 60000,
 			restartGiveUpThreshold: 3,
 			restartCooldownMs: 5000,
-			telemetryDbPath: "~/.honeycomb/telemetry/honeycomb.sqlite",
+			telemetryDbPath: honeycombRegistryTelemetryDbPath({ home: homeDir }),
 		});
+		// The resolved paths are absolute and land under the new `~/.apiary/honeycomb/` root.
+		expect(honeycombRegistryPidPath({ home: homeDir })).toBe(join(homeDir, ".apiary", "honeycomb", "daemon.pid"));
+		expect(honeycombRegistryTelemetryDbPath({ home: homeDir })).toBe(
+			join(homeDir, ".apiary", "honeycomb", "telemetry", "honeycomb.sqlite"),
+		);
 		expect(HONEYCOMB_REGISTRY_NAME).toBe("honeycomb");
 		expect(HONEYCOMB_REGISTRY_HEALTH_URL).toBe("http://127.0.0.1:3850/health");
-		expect(HONEYCOMB_REGISTRY_PID_PATH).toBe("~/.honeycomb/daemon.pid");
-		expect(HONEYCOMB_REGISTRY_TELEMETRY_DB_PATH).toBe("~/.honeycomb/telemetry/honeycomb.sqlite");
 	});
 
 	it("a resolved non-default bind is advertised in healthUrl (defaults apply when absent)", () => {
@@ -121,11 +126,14 @@ describe("PRD-071 Contract A: registerHoneycombWithDoctor", () => {
 		expect(doc.daemons[0]?.name).toBe("honeycomb");
 	});
 
-	it("the DB path convention stays stable across a re-install", () => {
+	it("the DB path convention stays stable across a re-install (resolved absolute, AC-072c.2.1)", () => {
 		registerHoneycombWithDoctor({ homeDir });
 		registerHoneycombWithDoctor({ homeDir });
 		const doc = readRegistry(doctorRegistryPath(homeDir));
-		expect(doc.daemons[0]?.telemetryDbPath).toBe("~/.honeycomb/telemetry/honeycomb.sqlite");
+		expect(doc.daemons[0]?.telemetryDbPath).toBe(honeycombRegistryTelemetryDbPath({ home: homeDir }));
+		expect(doc.daemons[0]?.telemetryDbPath).toBe(
+			join(homeDir, ".apiary", "honeycomb", "telemetry", "honeycomb.sqlite"),
+		);
 	});
 
 	it("a resolved bind threads through to the persisted entry's healthUrl", () => {

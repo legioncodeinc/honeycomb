@@ -24,7 +24,6 @@
 
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -53,6 +52,8 @@ import {
 	verifyTokenClaims,
 } from "../daemon/runtime/auth/index.js";
 import { DAEMON_HOST, DAEMON_PORT } from "../shared/constants.js";
+import { honeycombStateDir, legacyHoneycombDir, preferExistingPath, resolveFleetRoot } from "../shared/fleet-root.js";
+import { runHoneycombStateMigration } from "../daemon/runtime/state-migration/index.js";
 
 import { authMain } from "./auth.js";
 import { orgMain } from "./org.js";
@@ -155,9 +156,9 @@ const DEFAULT_START_TIMEOUT_MS = 45_000;
 /** The `/health` poll cadence while waiting for a freshly-spawned daemon to bind. */
 const START_POLL_INTERVAL_MS = 150;
 
-/** Resolve the `~/.honeycomb` runtime dir the 021a PID/lock guard writes to. */
+/** Resolve the `~/.apiary/honeycomb/` runtime dir the PID/lock guard writes to (ADR-0003 / PRD-072a). */
 function runtimeDir(): string {
-	return join(homedir(), ".honeycomb");
+	return honeycombStateDir();
 }
 
 /**
@@ -200,7 +201,10 @@ export function canWriteDir(dir: string): boolean {
 async function readDaemonPid(): Promise<number | null> {
 	const { readFile } = await import("node:fs/promises");
 	try {
-		const raw = (await readFile(join(runtimeDir(), "daemon.pid"), "utf8")).trim();
+		// PRD-072a window: resolve the pid file new-first (`~/.apiary/honeycomb/daemon.pid`), then the
+		// legacy `~/.honeycomb/daemon.pid` so a not-yet-migrated / old-daemon pid still resolves.
+		const pidFile = preferExistingPath(join(runtimeDir(), "daemon.pid"), join(legacyHoneycombDir(), "daemon.pid"));
+		const raw = (await readFile(pidFile, "utf8")).trim();
 		const pid = Number.parseInt(raw, 10);
 		return Number.isInteger(pid) && pid > 0 ? pid : null;
 	} catch {
@@ -230,6 +234,10 @@ function buildServiceSpec(): ServiceSpec {
 		entry: resolveDaemonEntry(),
 		nodeFlags: DAEMON_NODE_FLAGS,
 		workspace: resolveDaemonWorkspace(),
+		// PRD-072d (pin-always): pin the RESOLVED fleet root into every rendered unit so a
+		// service-launched daemon resolves the same root the installing CLI resolved (env drift and the
+		// Windows LocalSystem `System32` resolution are both closed by the pin).
+		fleetRoot: resolveFleetRoot(),
 	};
 }
 
@@ -327,8 +335,10 @@ export interface DaemonLifecycleOptions {
  * the composition root (D-2).
  */
 export function buildDaemonLifecycle(client: DaemonClient, options: DaemonLifecycleOptions = {}): DaemonLifecycle {
-	const manager: ServiceManager | null = options.serviceManager !== undefined ? options.serviceManager : detectServiceManager();
-	const controllerFor = options.controllerFor ?? ((m: ServiceManager): DaemonServiceController => createDaemonServiceController(m));
+	const manager: ServiceManager | null =
+		options.serviceManager !== undefined ? options.serviceManager : detectServiceManager();
+	const controllerFor =
+		options.controllerFor ?? ((m: ServiceManager): DaemonServiceController => createDaemonServiceController(m));
 	// Lazily build the controller once (only when a manager is present). A controller construction
 	// that throws (e.g. a missing runner dep) degrades to spawn, never crashes `start`.
 	let controller: DaemonServiceController | null = null;
@@ -557,6 +567,13 @@ export function buildDashboardLauncher(headers: Record<string, string>): Dashboa
  * real — no deferred-assembly stub path remains.
  */
 export function buildRuntimeDeps(): RuntimeDeps {
+	// PRD-072 migration mechanics step 1: the trigger is "daemon assembly OR CLI verb that touches
+	// state". This composition root is the single chokepoint every dispatched verb passes through, so
+	// running the one-time migration here means a CLI verb that reads/writes state (asset register,
+	// skill pull, daemon pid reads) never operates on a half-legacy layout before any daemon boot.
+	// Idempotent + cheap: after the one-time run the marker short-circuits every family with zero
+	// writes, and the whole call is fail-soft (it never throws into a CLI verb).
+	runHoneycombStateMigration();
 	const creds = loadCredentials();
 	const headers = tenancyHeaders(creds);
 	const daemon = createLoopbackDaemonClient({ baseUrl: daemonBaseUrl(), headers });

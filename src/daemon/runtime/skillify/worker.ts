@@ -32,9 +32,6 @@
  * scans `src/daemon`.
  */
 
-import { homedir } from "node:os";
-import { join } from "node:path";
-
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import { resolveScopeFromDisk, UNSORTED_PROJECT_ID } from "../../../hooks/shared/project-resolver.js";
 import type { JobQueueService } from "../services/job-queue.js";
@@ -44,6 +41,8 @@ import {
 	createFileWorkerLock,
 	createHostCliGate,
 	createSessionFetcher,
+	defaultLockBaseDir,
+	legacyLockBaseDir,
 	mine,
 	systemGateSpawner,
 	type GateSpawner,
@@ -52,23 +51,11 @@ import {
 	type WorkerLock,
 } from "./miner.js";
 import type { GateCli } from "./contracts.js";
-import {
-	createFsInstallTarget,
-	type FsInstallDirs,
-} from "./install-target.js";
-import {
-	createSkillStore,
-	writeSkill,
-} from "./skills-write.js";
+import { createFsInstallTarget, type FsInstallDirs } from "./install-target.js";
+import { createSkillStore, writeSkill } from "./skills-write.js";
 import type { SkillStore } from "./contracts.js";
-import {
-	createWatermarkStore,
-	type WatermarkStore,
-} from "./watermark.js";
-import {
-	createRoiSessionWriter,
-	type RoiSessionWriter,
-} from "../dashboard/roi-session-writer.js";
+import { createWatermarkStore, type WatermarkStore } from "./watermark.js";
+import { createRoiSessionWriter, type RoiSessionWriter } from "../dashboard/roi-session-writer.js";
 
 /** The job kind capture enqueues; this worker leases ONLY this — NEVER a foreign job. */
 export const SKILLIFY_JOB_KIND = "skillify" as const;
@@ -169,7 +156,7 @@ export interface SkillifyWorkerDeps {
 	readonly lock?: WorkerLock;
 	/**
 	 * The per-project watermark store (default: the filesystem watermark under
-	 * `~/.honeycomb/state/skillify`). Injected so a test uses a temp dir.
+	 * `~/.apiary/honeycomb/state/skillify`). Injected so a test uses a temp dir.
 	 */
 	readonly watermark?: WatermarkStore;
 	/**
@@ -248,11 +235,6 @@ export function defaultGateSpec(): HostCliSpec {
 	return { command: "claude", args: ["--print"] };
 }
 
-/** Default lock base dir (mirrors miner.ts `defaultLockBaseDir`). */
-function defaultLockBaseDir(): string {
-	return join(homedir(), ".honeycomb", "state", "skillify");
-}
-
 /** The concrete skillify job worker implementation. */
 class SkillifyJobWorkerImpl implements SkillifyJobWorker {
 	private readonly queue: JobQueueService;
@@ -282,7 +264,9 @@ class SkillifyJobWorkerImpl implements SkillifyJobWorker {
 		this.scope = deps.scope;
 		this.gateSpec = deps.gateSpec;
 		this.gateSpawner = deps.gateSpawner ?? systemGateSpawner;
-		this.lock = deps.lock ?? createFileWorkerLock(defaultLockBaseDir());
+		// PRD-072b: the production default lock lives under the fleet root
+		// (`~/.apiary/honeycomb/state/skillify`), with the legacy dir as a read-only in-flight probe.
+		this.lock = deps.lock ?? createFileWorkerLock(defaultLockBaseDir(), legacyLockBaseDir());
 		this.watermarkStore = deps.watermark ?? createWatermarkStore();
 		this.installDirs = deps.installDirs ?? {};
 		// The author defaults to `scope.org` (the tenant identifier). When the scope is

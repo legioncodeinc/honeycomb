@@ -106,13 +106,19 @@ export async function runPreToolUse(
 
 	// Write/Edit on the mount is denied with guidance — never buffered, never sent.
 	if (verb === "write") {
-		return { result: { ok: false, reason: "memory-write-denied" }, decision: { kind: "deny", guidance: WRITE_DENY_GUIDANCE } };
+		return {
+			result: { ok: false, reason: "memory-write-denied" },
+			decision: { kind: "deny", guidance: WRITE_DENY_GUIDANCE },
+		};
 	}
 
 	// An unmodelable Bash command on the mount is rewritten to a harmless echo so it
 	// runs but mutates nothing (and never reaches the real FS).
 	if (verb === undefined) {
-		return { result: { ok: true, reason: "rewritten-unmodelable" }, decision: { kind: "rewrite", command: HARMLESS_ECHO } };
+		return {
+			result: { ok: true, reason: "rewritten-unmodelable" },
+			decision: { kind: "rewrite", command: HARMLESS_ECHO },
+		};
 	}
 
 	// read / search / list / find → resolve through the daemon VFS seam (the ONLY
@@ -157,18 +163,33 @@ function onMemoryMount(path: string): boolean {
 	return true;
 }
 
-/** True when a path references the honeycomb memory mount in any accepted shape. */
+/**
+ * True when a path references the honeycomb memory mount in any accepted shape.
+ *
+ * SECURITY: this predicate is the gate. A shape that slips past it reaches the REAL filesystem
+ * (the read is not intercepted, and the Write/Edit deny never fires). Windows separators are
+ * normalized to `/` before matching so `C:\Users\ada\.apiary\honeycomb\memory\x` cannot bypass, and
+ * the two honeycomb-owned host-absolute shapes are matched case-insensitively because Windows paths
+ * are case-insensitive (`.APIARY\HONEYCOMB\MEMORY` names the same real directory).
+ */
 function mentionsMount(path: string): boolean {
+	const p = path.replace(/\\/g, "/");
+	const lower = p.toLowerCase();
 	return (
-		path.includes("/memory/") ||
-		path.startsWith("memory/") ||
-		path === "memory" ||
-		path.includes(".honeycomb/memory") ||
-		path.startsWith("goal/") ||
-		path.startsWith("kpi/") ||
-		path.startsWith("sessions/") ||
-		path.startsWith("graph/") ||
-		path === "index.md"
+		p.includes("/memory/") ||
+		p.startsWith("memory/") ||
+		p === "memory" ||
+		// PRD-072b.3 dual recognition: BOTH the new `.apiary/honeycomb/memory` and the legacy
+		// `.honeycomb/memory` host-absolute shapes resolve to the mount (agents holding either keep
+		// working). The `.apiary/...` shape already contains `/memory/` when it has a trailing segment;
+		// these bare-prefix checks catch the no-trailing-slash mount root too.
+		lower.includes(".apiary/honeycomb/memory") ||
+		lower.includes(".honeycomb/memory") ||
+		p.startsWith("goal/") ||
+		p.startsWith("kpi/") ||
+		p.startsWith("sessions/") ||
+		p.startsWith("graph/") ||
+		p === "index.md"
 	);
 }
 

@@ -31,8 +31,7 @@
  * NOT fake it (see {@link assembleSeams}).
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CATALOG } from "../storage/catalog/index.js";
 import type { QueryScope, StorageClient } from "../storage/client.js";
@@ -42,7 +41,9 @@ import { isOk } from "../storage/result.js";
 // ── The asset-sync substrate `/api/assets` mount (PRD-033c / D-6) ──
 import { mountAssetsApi } from "./assets/api.js";
 import type { TrustedTableProbe } from "./assets/sync.js";
-import { DIR_MODE, LEGACY_CREDENTIALS_DIR_NAME } from "./auth/credentials-store.js";
+import { DIR_MODE } from "./auth/credentials-store.js";
+import { honeycombStateDir, legacyHoneycombDir } from "../../shared/fleet-root.js";
+import { runHoneycombStateMigration } from "./state-migration/index.js";
 import {
 	type Authenticator,
 	type AuthorizationPolicy,
@@ -707,9 +708,13 @@ export class DaemonAlreadyRunningError extends Error {
 	}
 }
 
-/** Resolve the `~/.honeycomb` runtime dir (honoring a test override). */
+/**
+ * Resolve the daemon runtime dir (pid + lock) — `~/.apiary/honeycomb/` per ADR-0003 / PRD-072a,
+ * honoring the injectable test override. The legacy `~/.honeycomb` dir is only reached through the
+ * migration mover + the legacy-lock liveness check ({@link acquireSingleInstanceLock}).
+ */
 function resolveRuntimeDir(dir: string | undefined): string {
-	return dir ?? join(homedir(), LEGACY_CREDENTIALS_DIR_NAME);
+	return dir ?? honeycombStateDir();
 }
 
 /** True when a process with `pid` is currently alive (signal 0 probes liveness). */
@@ -727,15 +732,34 @@ function isPidAlive(pid: number): boolean {
 	}
 }
 
+/** Options for the single-instance lock: the legacy dir enables the upgrade-boot continuity (072a). */
+export interface SingleInstanceLockOptions {
+	/**
+	 * The LEGACY runtime dir (`~/.honeycomb`). During the migration window the guard also refuses on
+	 * a live LEGACY lock (an in-place upgrade never double-binds while the old daemon still runs,
+	 * AC-072a.2.2 / AC-4) and, WINDOW-ONLY, dual-stamps the legacy `daemon.pid` with this pid so an
+	 * old doctor or an operator's `cat ~/.honeycomb/daemon.pid` still resolves the live process
+	 * (AC-072a.2.3). "Window-only" (the QA-resolved reconciliation of AC-1 with mechanics step 5.5):
+	 * the legacy pid is stamped ONLY when the legacy dir ALREADY EXISTS (an upgrade mid-window); a
+	 * fresh install with no `~/.honeycomb` never creates it, keeping index AC-1 literally true.
+	 * Absent, the guard behaves exactly as before (single-path, new-dir only).
+	 */
+	readonly legacyDir?: string;
+}
+
 /**
- * Acquire the single-instance PID/lock guard (FR-8 / a-AC-6). Writes `daemon.pid` +
- * `daemon.lock` under the runtime dir. If a lock already exists AND its recorded PID
- * is still alive, throws {@link DaemonAlreadyRunningError} so the second start does NOT
- * double-bind port 3850. A STALE lock (the recorded process is gone) is reclaimed — a
- * crashed daemon never wedges the next start. Returns the resolved paths so shutdown
- * removes exactly what it wrote.
+ * Acquire the single-instance PID/lock guard (FR-8 / a-AC-6 + PRD-072a US-072a.2). Writes
+ * `daemon.pid` + `daemon.lock` under the (new) runtime dir. If a lock already exists AND its
+ * recorded PID is still alive, throws {@link DaemonAlreadyRunningError} so the second start does NOT
+ * double-bind port 3850. When {@link SingleInstanceLockOptions.legacyDir} is given, the guard ALSO
+ * refuses on a live legacy lock (upgrade-boot continuity) and, once it acquires the new lock,
+ * dual-stamps the legacy pid file. A STALE lock at either path is reclaimed. Returns the resolved
+ * new-dir paths so shutdown removes exactly what it wrote (release removes the legacy files too).
  */
-export function acquireSingleInstanceLock(runtimeDir: string): { lockPath: string; pidPath: string } {
+export function acquireSingleInstanceLock(
+	runtimeDir: string,
+	options: SingleInstanceLockOptions = {},
+): { lockPath: string; pidPath: string } {
 	mkdirSync(runtimeDir, { recursive: true, mode: DIR_MODE });
 	const lockPath = join(runtimeDir, LOCK_FILE_NAME);
 	const pidPath = join(runtimeDir, PID_FILE_NAME);
@@ -745,12 +769,36 @@ export function acquireSingleInstanceLock(runtimeDir: string): { lockPath: strin
 		throw new DaemonAlreadyRunningError(existingPid);
 	}
 
+	// Upgrade-boot continuity (AC-072a.2.2): a live daemon still holding the LEGACY lock must block
+	// the new start so an in-place upgrade never double-binds 3850. A stale legacy lock is ignored
+	// (it is reclaimed implicitly — we simply do not throw, and never read it again).
+	if (options.legacyDir !== undefined) {
+		const legacyLockPath = join(options.legacyDir, LOCK_FILE_NAME);
+		const legacyPid = readPidFile(legacyLockPath);
+		if (legacyPid !== null && isPidAlive(legacyPid)) {
+			throw new DaemonAlreadyRunningError(legacyPid);
+		}
+	}
+
 	// Fresh or stale-reclaimed: stamp this process's pid into both files. The lock and
 	// pid files carry the same value; the lock is what the guard checks, the pid file is
-	// the operator-facing convenience (`cat ~/.honeycomb/daemon.pid`).
+	// the operator-facing convenience (`cat ~/.apiary/honeycomb/daemon.pid`).
 	const pid = String(process.pid);
 	writeFileSync(lockPath, pid, { encoding: "utf8" });
 	writeFileSync(pidPath, pid, { encoding: "utf8" });
+
+	// WINDOW-ONLY dual-stamp of the legacy pid file (AC-072a.2.3, reconciled with index AC-1): an old
+	// doctor or an operator's muscle memory (`cat ~/.honeycomb/daemon.pid`) still resolves the live
+	// process on an UPGRADE install, where the legacy dir already exists. A FRESH install (no legacy
+	// `~/.honeycomb`) never creates the dir, so nothing honeycomb-owned appears under it (AC-1).
+	// Best-effort — a failed legacy write never blocks the (already-acquired) new lock.
+	if (options.legacyDir !== undefined && existsSync(options.legacyDir)) {
+		try {
+			writeFileSync(join(options.legacyDir, PID_FILE_NAME), pid, { encoding: "utf8" });
+		} catch {
+			// non-fatal: the legacy pid file is an operator convenience, not the lock of record.
+		}
+	}
 	return { lockPath, pidPath };
 }
 
@@ -767,13 +815,19 @@ function readPidFile(path: string): number | null {
 	}
 }
 
-/** Remove the PID/lock files (graceful shutdown / stale reclaim). Never throws. */
-export function releaseSingleInstanceLock(runtimeDir: string): void {
-	for (const name of [LOCK_FILE_NAME, PID_FILE_NAME]) {
-		try {
-			rmSync(join(runtimeDir, name), { force: true });
-		} catch {
-			// A missing lock on shutdown is fine — the goal (no stale lock) already holds.
+/**
+ * Remove the PID/lock files (graceful shutdown / stale reclaim). Never throws. When a legacy dir is
+ * given, removes the dual-stamped legacy files too (AC-072a.2.4: release clears BOTH paths).
+ */
+export function releaseSingleInstanceLock(runtimeDir: string, options: SingleInstanceLockOptions = {}): void {
+	const dirs = options.legacyDir !== undefined ? [runtimeDir, options.legacyDir] : [runtimeDir];
+	for (const dir of dirs) {
+		for (const name of [LOCK_FILE_NAME, PID_FILE_NAME]) {
+			try {
+				rmSync(join(dir, name), { force: true });
+			} catch {
+				// A missing lock on shutdown is fine — the goal (no stale lock) already holds.
+			}
 		}
 	}
 }
@@ -1014,9 +1068,10 @@ export function assembleSeams(
 	// returned), never a 500. Threaded into the recall handler's engine deps.
 	const conflictSuppression = createConflictSuppressionSource(storage);
 	// PRD-013a (decision #17 as amended): resolve the operator-tunable `nectar_rrf_multiplier` ONCE
-	// at boot from `~/.honeycomb/nectar.json` (fail-soft to 1.0, clamped [0, 10]); a non-default value
-	// is logged ONCE here via the daemon logger, so a surprising recall mix is diagnosable from the
-	// boot log alone. Threaded into the recall mount so the fusion scales ONLY the hive-graph arm.
+	// at boot from `~/.apiary/nectar/nectar.json` (legacy `~/.honeycomb/nectar.json` fallback,
+	// PRD-072b; fail-soft to 1.0, clamped [0, 10]); a non-default value is logged ONCE here via the
+	// daemon logger, so a surprising recall mix is diagnosable from the boot log alone. Threaded into
+	// the recall mount so the fusion scales ONLY the hive-graph arm.
 	const nectarRrfMultiplier = resolveNectarRrfMultiplierAtBoot(daemon.logger);
 	seams.mountMemories(daemon, {
 		storage,
@@ -1381,7 +1436,7 @@ function resolveWorkspaceBaseDir(): string {
 		workspaceBaseDirMemo = candidate;
 		return candidate;
 	}
-	const fallback = join(homedir(), ".honeycomb");
+	const fallback = honeycombStateDir();
 	process.stderr.write(
 		`honeycomb: workspace "${candidate}" is not writable; using "${fallback}" for filesystem state (secrets, logs, agent.yaml)\n`,
 	);
@@ -1993,6 +2048,14 @@ function buildSkillifyWorker(
  */
 export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDaemon {
 	const config = options.config ?? resolveRuntimeConfig();
+	// PRD-072a: run the one-time, idempotent, additive state migration BEFORE any state-family store
+	// initializes, so a store never mints fresh state at the new `~/.apiary/honeycomb/` root and
+	// orphans the legacy `~/.honeycomb` data. Gated to the REAL assembly (no injected storage),
+	// exactly like the fleet/log stores below, so the deterministic unit suite never touches the real
+	// home. Fail-soft: `runHoneycombStateMigration` always returns and never throws into boot.
+	if (options.storage === undefined && options.runtimeDir === undefined) {
+		runHoneycombStateMigration();
+	}
 	// ── PRD-043a (FR-1/FR-2): the durable SQLite log store. Built BEFORE the logger so it can be
 	// injected as the logger's write-through seam. Precedence:
 	//   1. an explicit `options.logStore` (a test injects a temp-dir / in-memory store);
@@ -2023,6 +2086,11 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	const logger =
 		options.logger ?? createRequestLogger({ store: combineLogWriteThrough(logStore, createFleetLogTap(fleetStore)) });
 	const runtimeDir = resolveRuntimeDir(options.runtimeDir);
+	// The legacy runtime dir participates in the single-instance guard ONLY for the real assembly
+	// (PRD-072a upgrade-boot continuity). A test that injects `runtimeDir` gets a single-path guard so
+	// it never touches the real `~/.honeycomb`.
+	const legacyRuntimeDir = options.runtimeDir === undefined ? legacyHoneycombDir() : undefined;
+	const lockOptions: SingleInstanceLockOptions = legacyRuntimeDir !== undefined ? { legacyDir: legacyRuntimeDir } : {};
 	const probeIntervalMs = options.healthProbeIntervalMs ?? DEFAULT_HEALTH_PROBE_INTERVAL_MS;
 
 	// ── a-AC-1: construct the LIVE storage client. This is the ONLY production code
@@ -2584,7 +2652,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			if (started) return;
 			// a-AC-6: acquire the single-instance guard BEFORE starting services so a
 			// second start fails fast (DaemonAlreadyRunningError) without warming anything.
-			acquireSingleInstanceLock(runtimeDir);
+			acquireSingleInstanceLock(runtimeDir, lockOptions);
 			locked = true;
 			started = true;
 
@@ -3005,7 +3073,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// restart. Idempotent + never throws (the NULL no-op's close is a no-op).
 			logStore.close();
 			if (locked) {
-				releaseSingleInstanceLock(runtimeDir);
+				releaseSingleInstanceLock(runtimeDir, lockOptions);
 				locked = false;
 			}
 		},

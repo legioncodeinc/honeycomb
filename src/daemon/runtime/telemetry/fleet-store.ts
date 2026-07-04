@@ -26,14 +26,15 @@
 
 import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { type FleetRootOptions, honeycombStateDir, legacyHoneycombDir } from "../../../shared/fleet-root.js";
+import { moveSqliteWithSiblings } from "../state-migration/move.js";
 import { sqlIdent } from "../../storage/sql.js";
 
-/** The `~/.honeycomb` subdirectory the telemetry database lives under. */
+/** The telemetry subdirectory the database lives under (`~/.apiary/honeycomb/telemetry/`). */
 export const FLEET_TELEMETRY_DIR_NAME = "telemetry" as const;
-/** The SQLite database filename (Contract B: `~/.honeycomb/telemetry/honeycomb.sqlite`). */
+/** The SQLite database filename (Contract B: `~/.apiary/honeycomb/telemetry/honeycomb.sqlite`). */
 export const FLEET_TELEMETRY_DB_FILE_NAME = "honeycomb.sqlite" as const;
 /** honeycomb's identity in the `service_status` row and the doctor registry entry. */
 export const FLEET_SERVICE_NAME = "honeycomb" as const;
@@ -53,9 +54,45 @@ export function isFleetLogLevel(value: string): value is FleetLogLevel {
 	return (FLEET_LOG_LEVELS as readonly string[]).includes(value);
 }
 
-/** The absolute path to the pinned Contract-B database, under an (injectable, for tests) home dir. */
-export function fleetTelemetryDbPath(homeDir: string = homedir()): string {
-	return join(homeDir, ".honeycomb", FLEET_TELEMETRY_DIR_NAME, FLEET_TELEMETRY_DB_FILE_NAME);
+/**
+ * The absolute path to the pinned Contract-B database under the resolved honeycomb state dir
+ * (`~/.apiary/honeycomb/telemetry/honeycomb.sqlite`, PRD-072b). The fleet-root seams (home/env/
+ * platform) are injectable so a test resolves a deterministic temp path.
+ */
+export function fleetTelemetryDbPath(options: FleetRootOptions = {}): string {
+	return join(honeycombStateDir(options), FLEET_TELEMETRY_DIR_NAME, FLEET_TELEMETRY_DB_FILE_NAME);
+}
+
+/** The legacy Contract-B database path (`~/.honeycomb/telemetry/honeycomb.sqlite`) for the window. */
+export function legacyFleetTelemetryDbPath(home?: string): string {
+	return join(legacyHoneycombDir(home), FLEET_TELEMETRY_DIR_NAME, FLEET_TELEMETRY_DB_FILE_NAME);
+}
+
+/**
+ * Resolve the database path the store should actually OPEN (PRD-072b legacy fallback, QA Critical
+ * 2a). The trap this closes: if the migration mover failed (for example the legacy `.sqlite` was
+ * still locked by a lingering old daemon), a naive open would mint a FRESH EMPTY database at the new
+ * path, permanently defeating the retry (the destination then "exists") and stranding the install's
+ * telemetry history. So before any open:
+ *   1. the new path exists           → open it (the normal steady state);
+ *   2. no legacy database remains    → open the new path (a genuinely fresh install mints here);
+ *   3. an unmigrated legacy database exists → RETRY the move right now (no handle is held yet);
+ *      on success open the new path, on failure open the LEGACY path (fallback read/write — never
+ *      mint fresh over unmigrated history). The next boot's mover retries the move again.
+ */
+export function resolveTelemetryDbPathForOpen(options: FleetRootOptions = {}): string {
+	const newPath = fleetTelemetryDbPath(options);
+	if (existsSync(newPath)) return newPath;
+	const legacyPath = legacyFleetTelemetryDbPath(options.home);
+	if (!existsSync(legacyPath)) return newPath;
+	// The move primitive reports an outcome and never throws; the guard is defense in depth so even
+	// an unexpected filesystem error resolves to the documented legacy fallback, never a throw that
+	// would degrade the whole store to the inert null fallback.
+	try {
+		return moveSqliteWithSiblings(legacyPath, newPath) === "migrated" ? newPath : legacyPath;
+	} catch {
+		return legacyPath;
+	}
 }
 
 /** The `service_status` upsert input (AC-071a.2, AC-071a.3). */
@@ -150,8 +187,12 @@ export const NULL_FLEET_TELEMETRY_STORE: FleetTelemetryStore = Object.freeze({
 
 /** Construction options for {@link openFleetTelemetryStore}. */
 export interface OpenFleetTelemetryStoreOptions {
-	/** Override the home dir the `.honeycomb/telemetry/honeycomb.sqlite` file lives under (tests). */
+	/** Override the home dir the telemetry db resolves under (tests). Maps to the fleet-root `home`. */
 	readonly homeDir?: string;
+	/** Override the env the fleet root resolves from (tests, for hermetic path resolution). */
+	readonly env?: NodeJS.ProcessEnv;
+	/** Override the platform the fleet root resolves from (tests). */
+	readonly platform?: NodeJS.Platform;
 	/** Open a fully in-memory database (`:memory:`) — used by unit tests that never touch disk. */
 	readonly memory?: boolean;
 	/** The `service_logs` row cap. Defaults to {@link FLEET_LOG_MAX_ROWS}. */
@@ -214,7 +255,13 @@ function defaultOnceFailure(): (message: string) => void {
 function createDatabase(options: OpenFleetTelemetryStoreOptions): SqliteDatabase {
 	const sqlite = loadSqlite();
 	if (options.memory === true) return new sqlite.DatabaseSync(":memory:") as SqliteDatabase;
-	const dbPath = fleetTelemetryDbPath(options.homeDir ?? homedir());
+	// PRD-072b: never mint a fresh database while an unmigrated legacy one remains (see
+	// resolveTelemetryDbPathForOpen) — retry the move here, else fall back to the legacy file.
+	const dbPath = resolveTelemetryDbPathForOpen({
+		...(options.homeDir !== undefined ? { home: options.homeDir } : {}),
+		...(options.env !== undefined ? { env: options.env } : {}),
+		...(options.platform !== undefined ? { platform: options.platform } : {}),
+	});
 	const dir = join(dbPath, "..");
 	if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
 	return new sqlite.DatabaseSync(dbPath) as SqliteDatabase;

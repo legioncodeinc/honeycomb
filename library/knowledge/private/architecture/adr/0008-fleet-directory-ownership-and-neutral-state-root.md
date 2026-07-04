@@ -17,12 +17,15 @@ The canonical resolution chain every product implements (mirrored, never importe
 
 ```
 resolveFleetRoot(env, platform, home = os.homedir()):
-  1. env.APIARY_HOME set and non-blank            -> APIARY_HOME
-     (the installer's --home= pin is delivered as APIARY_HOME in the service environment)
-  2. platform is linux AND env.XDG_STATE_HOME set and non-blank
+  1. env.APIARY_HOME set, non-blank, and ABSOLUTE -> APIARY_HOME
+     (the installer's --home= pin is delivered as APIARY_HOME in the service environment;
+      the installer resolves a relative --home= against ITS cwd at capture time)
+  2. platform is linux AND env.XDG_STATE_HOME set, non-blank, and ABSOLUTE
                                                   -> join(XDG_STATE_HOME, "apiary")
   3. otherwise                                    -> join(home, ".apiary")
 ```
+
+Security amendment (2026-07-04, from the W3 security audits): env roots are honored ONLY when absolute; a relative value is ignored and the chain falls through. Honoring a relative value would anchor the fleet root, and everything derived from it (machine keys, trust roots, registry pidPaths), on `process.cwd()`, the exact footgun this ADR exists to prevent; the XDG Base Directory spec likewise requires ignoring relative values. Absoluteness is checked with `path.win32.isAbsolute` (a strict superset of the posix check) so a relative value is never mistaken for absolute on any host.
 
 Per-product state is `resolveFleetRoot() + "/<product>"`; the shared surface (registry.json, device.json, install-id) sits at the root itself.
 

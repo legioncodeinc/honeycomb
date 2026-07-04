@@ -42,6 +42,7 @@ export {
 	type AssetRegistryStore,
 	createAssetRegistryStore,
 	defaultRegistryBaseDir,
+	legacyRegistryBaseDir,
 	type PulledManifest,
 	PulledManifestSchema,
 	type RegistryEntry,

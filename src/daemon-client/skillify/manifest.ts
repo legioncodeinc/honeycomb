@@ -36,20 +36,20 @@
  */
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { honeycombStateDir, legacyHoneycombDir, preferExistingPath } from "../../shared/fleet-root.js";
 import { type PullManifestEntry, type PullManifestStore, type SkillInstall } from "./contracts.js";
 import { migrateLegacyManifest } from "./migrate-manifest.js";
 
 /**
- * The default base dir for the unified registry — `~/.honeycomb` (where `registry.json` lives,
- * mirroring `defaultRegistryBaseDir` on the daemon side). R-2 moves the manifest's SoT here from
- * the old `~/.honeycomb/state/skillify` state root; the legacy file at that old path is migrated
- * in on first access (see {@link legacyManifestPath}).
+ * The default base dir for the unified registry — `~/.apiary/honeycomb` (where `registry.json`
+ * lives, mirroring `defaultRegistryBaseDir` on the daemon side, ADR-0003 / PRD-072b). R-2 folds the
+ * old `state/skillify/pull-manifest.json` into `registry.json` on first access; PRD-072b relocates
+ * that registry to the fleet root's honeycomb subdir (moved by the daemon's asset-registry mover).
  */
 export function defaultManifestBaseDir(): string {
-	return join(homedir(), ".honeycomb");
+	return honeycombStateDir();
 }
 
 /** The unified registry file name under the base dir (the R-2 SoT — shared with the daemon side). */
@@ -70,21 +70,32 @@ export function legacyManifestPaths(baseDir: string): readonly string[] {
 
 /**
  * Build a filesystem {@link PullManifestStore} rooted at `baseDir` (default
- * {@link defaultManifestBaseDir}, i.e. `~/.honeycomb`). A test injects a temp dir so no real `~`
- * is touched. Entries are keyed by `dirName` (`<name>--<author>`); a re-pull replaces the record.
+ * {@link defaultManifestBaseDir}, i.e. `~/.apiary/honeycomb`). A test injects a temp dir so no real
+ * `~` is touched. Entries are keyed by `dirName` (`<name>--<author>`); a re-pull replaces the record.
  *
  * R-2: this is a THIN ADAPTER over the unified `registry.json`. Every access first runs the
  * one-time, idempotent legacy-manifest migration ({@link migrateLegacyManifest}), then reads /
  * writes the registry file. The surface (`read`/`record`/`remove`) is IDENTICAL to the pre-R-2
  * store, so `pull` / `unpullSkill` / `backfillSymlinks` are unchanged.
+ *
+ * PRD-072b window fallback: with the PRODUCTION default base dir (no injected `baseDir`), reads
+ * resolve the new `~/.apiary/honeycomb/registry.json` first, then the legacy
+ * `~/.honeycomb/registry.json`, and the legacy-manifest fold ALSO probes the legacy state root, so
+ * an unmigrated install keeps its pulled-skill records visible. Writes always target the new path.
  */
-export function createPullManifestStore(baseDir: string = defaultManifestBaseDir()): PullManifestStore {
-	const registryPath = join(baseDir, REGISTRY_FILE);
+export function createPullManifestStore(baseDir?: string): PullManifestStore {
+	const base = baseDir ?? defaultManifestBaseDir();
+	// The legacy `~/.honeycomb` dir participates only for the production default (a test that
+	// injects its own baseDir stays hermetic to that dir).
+	const legacyBase = baseDir === undefined ? legacyHoneycombDir() : undefined;
+	const registryPath = join(base, REGISTRY_FILE);
+	const readRegistryPath = (): string =>
+		legacyBase !== undefined ? preferExistingPath(registryPath, join(legacyBase, REGISTRY_FILE)) : registryPath;
 
 	/** Read every registry row (every kind), EMPTY on a missing/garbled file — never throws. */
 	const readAllRows = (): RegistryRow[] => {
 		try {
-			const parsed = JSON.parse(readFileSync(registryPath, "utf-8")) as unknown;
+			const parsed = JSON.parse(readFileSync(readRegistryPath(), "utf-8")) as unknown;
 			if (!Array.isArray(parsed)) return [];
 			return parsed.filter((r): r is RegistryRow => typeof r === "object" && r !== null);
 		} catch {
@@ -102,7 +113,13 @@ export function createPullManifestStore(baseDir: string = defaultManifestBaseDir
 
 	/** Fold any legacy `pull-manifest.json` into the registry once (idempotent, breadcrumb-leaving). */
 	const ensureMigrated = (): void => {
-		migrateLegacyManifest({ legacyPaths: legacyManifestPaths(baseDir), readAllRows, writeAllRows, legacyRecordToRow });
+		// PRD-072b: in production the pre-R-2 manifest may still sit under the LEGACY state root
+		// (`~/.honeycomb/...`), so those candidate paths are probed after the base dir's own.
+		const legacyPaths =
+			legacyBase !== undefined
+				? [...legacyManifestPaths(base), ...legacyManifestPaths(legacyBase)]
+				: legacyManifestPaths(base);
+		migrateLegacyManifest({ legacyPaths, readAllRows, writeAllRows, legacyRecordToRow });
 	};
 
 	return {

@@ -93,5 +93,12 @@ const isolatedHome = mkdtempSync(join(tmpdir(), HOME_PREFIX));
 process.env.USERPROFILE = isolatedHome;
 process.env.HOME = isolatedHome;
 
+// ADR-0003 / PRD-072 fleet-root isolation: `resolveFleetRoot()` honors `APIARY_HOME` (any platform)
+// and `XDG_STATE_HOME` (Linux) over the home default. Clear both so a developer's / CI runner's real
+// env can never redirect the resolved `~/.apiary` root outside the isolated home during the run. A
+// test that exercises those precedence legs sets them explicitly via the injectable helper seams.
+delete process.env.APIARY_HOME;
+delete process.env.XDG_STATE_HOME;
+
 /** The isolated home dir the run was redirected to (exported for assertions/debugging). */
 export const ISOLATED_TEST_HOME = isolatedHome;

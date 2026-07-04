@@ -26,8 +26,9 @@
  */
 
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+
+import { legacyHoneycombDir, preferExistingPath, resolveFleetRoot } from "../../../shared/fleet-root.js";
 
 /** The equal-weighting default (decision #17): a file-description hit is as actionable as a session-trace hit. */
 export const DEFAULT_NECTAR_RRF_MULTIPLIER = 1.0;
@@ -36,8 +37,10 @@ export const MIN_NECTAR_RRF_MULTIPLIER = 0;
 /** The upper clamp bound: an absurd value clamps to `10` (never explodes the fusion). */
 export const MAX_NECTAR_RRF_MULTIPLIER = 10;
 
-/** The config directory the multiplier is read from (`~/.honeycomb`). */
+/** The legacy config directory the multiplier was read from (`~/.honeycomb`). */
 export const NECTAR_CONFIG_DIR_NAME = ".honeycomb";
+/** The fleet-root product subdirectory nectar owns its config under (`~/.apiary/nectar`). */
+export const NECTAR_PRODUCT_DIR_NAME = "nectar";
 /** The config file the multiplier is read from (`nectar.json`). */
 export const NECTAR_CONFIG_FILE_NAME = "nectar.json";
 
@@ -57,10 +60,19 @@ export function clampNectarRrfMultiplier(value: unknown): number {
 	return Math.min(MAX_NECTAR_RRF_MULTIPLIER, Math.max(MIN_NECTAR_RRF_MULTIPLIER, value));
 }
 
-/** Where to read the config from. A test overrides `dir` with a temp directory; undefined → `~/.honeycomb`. */
+/**
+ * Where to read the config from. A test either pins a single `dir` (read only there), or drives the
+ * new-first/legacy-second precedence via the injectable fleet-root seams (`home`/`env`/`platform`).
+ */
 export interface NectarConfigLocation {
-	/** Override the config directory (tests). Undefined → the real `~/.honeycomb`. */
+	/** Pin a single config directory (tests). When set, ONLY this dir is read (no precedence). */
 	readonly dir?: string;
+	/** The home the fleet root + legacy dir anchor on (precedence path). Defaults to `os.homedir()`. */
+	readonly home?: string;
+	/** The env the fleet root resolves from (precedence path). Defaults to `process.env`. */
+	readonly env?: NodeJS.ProcessEnv;
+	/** The platform the fleet root resolves from (precedence path). Defaults to `process.platform`. */
+	readonly platform?: NodeJS.Platform;
 }
 
 /**
@@ -71,8 +83,21 @@ export interface NectarConfigLocation {
  * be able to crash the daemon boot).
  */
 export function readNectarRrfMultiplier(loc: NectarConfigLocation = {}): number {
-	const dir = loc.dir ?? join(homedir(), NECTAR_CONFIG_DIR_NAME);
-	const path = join(dir, NECTAR_CONFIG_FILE_NAME);
+	// PRD-072b.4: nectar owns this file under the fleet root (`~/.apiary/nectar/nectar.json`) after its
+	// parallel migration; read new-first, then the legacy `~/.honeycomb/nectar.json`. An injected dir
+	// (tests) reads only that dir. Honeycomb does NOT move this file (nectar owns it).
+	const rootOptions = {
+		...(loc.env !== undefined ? { env: loc.env } : {}),
+		...(loc.platform !== undefined ? { platform: loc.platform } : {}),
+		...(loc.home !== undefined ? { home: loc.home } : {}),
+	};
+	const path =
+		loc.dir !== undefined
+			? join(loc.dir, NECTAR_CONFIG_FILE_NAME)
+			: preferExistingPath(
+					join(resolveFleetRoot(rootOptions), NECTAR_PRODUCT_DIR_NAME, NECTAR_CONFIG_FILE_NAME),
+					join(legacyHoneycombDir(loc.home), NECTAR_CONFIG_FILE_NAME),
+				);
 	let raw: string;
 	try {
 		raw = readFileSync(path, "utf8");
@@ -103,10 +128,7 @@ export interface NectarBootLogger {
  * emits one {@link NECTAR_RRF_MULTIPLIER_BOOT_EVENT}. Returns the resolved (clamped) value the
  * composition root threads into the recall mount. Never throws.
  */
-export function resolveNectarRrfMultiplierAtBoot(
-	logger?: NectarBootLogger,
-	loc: NectarConfigLocation = {},
-): number {
+export function resolveNectarRrfMultiplierAtBoot(logger?: NectarBootLogger, loc: NectarConfigLocation = {}): number {
 	const multiplier = readNectarRrfMultiplier(loc);
 	if (multiplier !== DEFAULT_NECTAR_RRF_MULTIPLIER && logger !== undefined) {
 		logger.event(NECTAR_RRF_MULTIPLIER_BOOT_EVENT, { multiplier });

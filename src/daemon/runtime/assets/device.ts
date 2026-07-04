@@ -4,10 +4,12 @@
  * A `Device`-tier artifact syncs to the SAME user's OTHER devices and nobody
  * else's. That needs a stable per-machine identity:
  *
- *   - `device_id`: a generated UUIDv4 persisted at `~/.honeycomb/device.json`
- *     (`{device_id, label, createdAt}`), stable per machine, sitting BESIDE the
- *     existing `~/.honeycomb/.machine-key` (D-1). It is DELIBERATELY a generated
- *     UUID, NOT the raw OS machine-id — for privacy (the OS machine-id is a
+ *   - `device_id`: a generated UUIDv4 persisted at the FLEET ROOT `~/.apiary/device.json`
+ *     (`{device_id, label, createdAt}`, ADR-0003 / PRD-072c; read new-first with a legacy
+ *     `~/.honeycomb/device.json` fallback), stable per machine. After the ADR-0003 move it no longer
+ *     sits beside `.machine-key` (which is now the per-product `~/.apiary/honeycomb/.machine-key`);
+ *     the device id is a fleet-SHARED identity doctor manages long-term. It is DELIBERATELY a
+ *     generated UUID, NOT the raw OS machine-id — for privacy (the OS machine-id is a
  *     cross-application fingerprint) and stability (the OS id can change under a
  *     reimage / VM clone while our file persists).
  *
@@ -16,7 +18,8 @@
  *     author's devices lands on every one of them and on no other user's machine
  *     (a-AC-4).
  *
- * Pure + local (D-6): this module reads/writes ONLY `~/.honeycomb/device.json`
+ * Pure + local (D-6): this module reads/writes ONLY the device record file (new-first at
+ * `~/.apiary/device.json`, legacy fallback `~/.honeycomb/device.json`)
  * under an INJECTABLE home dir (so a test points it at a temp dir). It opens no
  * DeepLake and no network. The daemon later threads the resolved `device_id`
  * into the `AssetScope` that crosses to storage.
@@ -26,6 +29,13 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
+
+import {
+	type FleetRootOptions,
+	fleetRootFile,
+	legacyHoneycombDir,
+	preferExistingPath,
+} from "../../../shared/fleet-root.js";
 
 /** The on-disk device record (D-1). `{device_id, label, createdAt}`. */
 export interface DeviceRecord {
@@ -37,14 +47,27 @@ export interface DeviceRecord {
 	readonly createdAt: string;
 }
 
-/** The `~/.honeycomb` root (mirrors `machineKeyFilePath`'s parent). Home is injectable. */
+/** The device record file name at the fleet root. */
+const DEVICE_FILE_NAME = "device.json" as const;
+
+/** The legacy `~/.honeycomb` root the device record read-falls back to during the window. */
 export function honeycombHomeDir(homeDir: string = homedir()): string {
-	return join(homeDir, ".honeycomb");
+	return legacyHoneycombDir(homeDir);
 }
 
-/** Where the device record lives — `~/.honeycomb/device.json`, BESIDE `.machine-key` (D-1). */
-export function deviceFilePath(homeDir: string = homedir()): string {
-	return join(honeycombHomeDir(homeDir), "device.json");
+/**
+ * Where the device record lives — the FLEET ROOT `~/.apiary/device.json` (ADR-0003 / PRD-072c). The
+ * device id is a fleet-shared identity (doctor manages it long-term); honeycomb reads/mints it here
+ * with a legacy fallback. NOTE (072c): after this move `device.json` no longer sits beside
+ * `.machine-key` (which is now the per-product `~/.apiary/honeycomb/.machine-key`).
+ */
+export function deviceFilePath(options: FleetRootOptions = {}): string {
+	return fleetRootFile(DEVICE_FILE_NAME, options);
+}
+
+/** The legacy device record path (`~/.honeycomb/device.json`) read as a fallback during the window. */
+export function legacyDeviceFilePath(homeDir: string = homedir()): string {
+	return join(legacyHoneycombDir(homeDir), DEVICE_FILE_NAME);
 }
 
 /** A clock seam so a test pins `createdAt` deterministically. */
@@ -54,6 +77,10 @@ export type DeviceClock = () => Date;
 export interface DeviceStoreOptions {
 	/** The home dir the record is rooted under (default real `~`). */
 	readonly homeDir?: string;
+	/** Override the env the fleet root resolves from (tests, for hermetic path resolution). */
+	readonly env?: NodeJS.ProcessEnv;
+	/** Override the platform the fleet root resolves from (tests). */
+	readonly platform?: NodeJS.Platform;
 	/** The clock for `createdAt` (default real `Date`). */
 	readonly clock?: DeviceClock;
 	/** The label generator (default the OS hostname). */
@@ -76,18 +103,28 @@ export function loadOrCreateDevice(options: DeviceStoreOptions = {}): DeviceReco
 	const clock = options.clock ?? (() => new Date());
 	const label = options.label ?? (() => hostname());
 	const mintId = options.mintId ?? (() => randomUUID());
-	const filePath = deviceFilePath(homeDir);
+	const rootOptions: FleetRootOptions = {
+		home: homeDir,
+		...(options.env !== undefined ? { env: options.env } : {}),
+		...(options.platform !== undefined ? { platform: options.platform } : {}),
+	};
+	const newPath = deviceFilePath(rootOptions);
+	const legacyPath = legacyDeviceFilePath(homeDir);
 
-	const existing = readDeviceRecord(filePath);
+	// New-first, legacy-second read (PRD-072c AC-072c.3.1): an existing legacy id is honored (never
+	// re-minted) so the per-device asset-pull identity is stable across the migration; the migration
+	// mover relocates the file, and a not-yet-migrated legacy record is still read here.
+	const existing = readDeviceRecord(preferExistingPath(newPath, legacyPath));
 	if (existing !== null) return existing;
 
+	// Neither path had a record: mint at the FLEET ROOT only (AC-072c.3.2).
 	const record: DeviceRecord = {
 		device_id: mintId(),
 		label: label(),
 		createdAt: clock().toISOString(),
 	};
-	mkdirSync(dirname(filePath), { recursive: true });
-	writeFileSync(filePath, `${JSON.stringify(record, null, 2)}\n`, "utf-8");
+	mkdirSync(dirname(newPath), { recursive: true });
+	writeFileSync(newPath, `${JSON.stringify(record, null, 2)}\n`, "utf-8");
 	return record;
 }
 

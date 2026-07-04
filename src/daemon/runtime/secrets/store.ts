@@ -21,7 +21,8 @@
  * {@link MachineKeyProvider} seam. The REAL provider ({@link createMachineKeyProvider})
  * reads an OS machine id (Linux `/etc/machine-id` || `/var/lib/dbus/machine-id`; macOS
  * `IOPlatformUUID` via `ioreg`; win `MachineGuid` from the registry), and FALLS BACK to
- * a generate-once 32-byte random key file at `~/.honeycomb/.machine-key` (mode 0600,
+ * a generate-once 32-byte random key file at `~/.apiary/honeycomb/.machine-key` (mode 0600,
+ * read new-first with a legacy `~/.honeycomb/.machine-key` fallback, ADR-0003 / PRD-072b,
  * OUTSIDE `.secrets/` — so copying `.secrets/` alone yields nothing). The "different
  * host" AC is a DIFFERENT provider → a different derived key → decrypt fails (a-AC-3).
  *
@@ -45,14 +46,14 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
+import { honeycombStateDir, legacyHoneycombDir, preferExistingPath } from "../../../shared/fleet-root.js";
 import type { SecretResolver } from "../inference/contracts.js";
 import {
 	asSecretName,
 	hostnameUserFallbackId,
 	isSecretRecord,
-	MACHINE_KEY_DIR_NAME,
 	MACHINE_KEY_FILE_NAME,
 	type MachineKeyProvider,
 	type SecretName,
@@ -106,9 +107,17 @@ export interface SecretsStoreDeps {
 // The real MachineKeyProvider (OS id readers + generate-once fallback key file)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Where the generate-once fallback key lives — `~/.honeycomb/.machine-key` (OUTSIDE `.secrets/`). */
+/**
+ * Where the generate-once fallback key lives — `~/.apiary/honeycomb/.machine-key` (ADR-0003 /
+ * PRD-072b, OUTSIDE `.secrets/`). Home is injectable for tests.
+ */
 export function machineKeyFilePath(homeDir: string = homedir()): string {
-	return join(homeDir, MACHINE_KEY_DIR_NAME, MACHINE_KEY_FILE_NAME);
+	return join(honeycombStateDir({ home: homeDir }), MACHINE_KEY_FILE_NAME);
+}
+
+/** The legacy machine-key path (`~/.honeycomb/.machine-key`) read as a fallback during the window. */
+export function legacyMachineKeyFilePath(homeDir: string = homedir()): string {
+	return join(legacyHoneycombDir(homeDir), MACHINE_KEY_FILE_NAME);
 }
 
 /**
@@ -164,12 +173,16 @@ function readOsMachineId(): string | null {
  * the key binds to when no OS machine id is available.
  */
 function readOrCreateFallbackKey(homeDir: string): string {
-	const dir = join(homeDir, MACHINE_KEY_DIR_NAME);
 	const file = machineKeyFilePath(homeDir);
-	if (existsSync(file)) {
-		const hex = readFileSync(file, "utf8").trim();
+	// PRD-072b window: read new-first, then the legacy `~/.honeycomb/.machine-key`. A legacy key MUST
+	// be honored, never re-minted — a fresh key would silently orphan every existing `.secrets/` blob
+	// (AC-7). The migration mover byte-relocates it; this fallback covers the not-yet-migrated case.
+	const source = preferExistingPath(file, legacyMachineKeyFilePath(homeDir));
+	if (existsSync(source)) {
+		const hex = readFileSync(source, "utf8").trim();
 		if (hex.length > 0) return hex;
 	}
+	const dir = dirname(file);
 	if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: SECRET_DIR_MODE });
 	const hex = randomBytes(32).toString("hex");
 	writeFileSync(file, hex, { mode: SECRET_FILE_MODE });

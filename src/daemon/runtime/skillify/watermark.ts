@@ -30,12 +30,18 @@
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-/** The default per-project state root in production (`~/.honeycomb/state/skillify`). */
+import { honeycombStateDir, legacyHoneycombDir, preferExistingPath } from "../../../shared/fleet-root.js";
+
+/** The default per-project state root in production (`~/.apiary/honeycomb/state/skillify`, PRD-072b). */
 export function defaultWatermarkBaseDir(): string {
-	return join(homedir(), ".honeycomb", "state", "skillify");
+	return join(honeycombStateDir(), "state", "skillify");
+}
+
+/** The legacy `~/.honeycomb/state/skillify` state root read as a fallback during the window. */
+export function legacyWatermarkBaseDir(): string {
+	return join(legacyHoneycombDir(), "state", "skillify");
 }
 
 /** A per-project watermark store — read + advance-to-oldest. Filesystem-only. */
@@ -63,13 +69,23 @@ interface WatermarkFile {
  * {@link defaultWatermarkBaseDir}). A test injects a temp dir. Each project gets its
  * own subdir + `watermark.json`; `projectKey` is sanitized into a single path
  * segment so it can never traverse out of the base dir.
+ *
+ * PRD-072b window fallback: with the PRODUCTION default base dir (no injected `baseDir`), reads
+ * resolve new-path-first then the legacy `~/.honeycomb/state/skillify/<project>/watermark.json`,
+ * so an unmigrated legacy watermark never forces a full re-mine. Writes always target the new path.
  */
-export function createWatermarkStore(baseDir: string = defaultWatermarkBaseDir()): WatermarkStore {
-	const fileFor = (projectKey: string): string => join(baseDir, sanitizeSegment(projectKey), "watermark.json");
+export function createWatermarkStore(baseDir?: string, legacyBaseDir?: string): WatermarkStore {
+	const base = baseDir ?? defaultWatermarkBaseDir();
+	const legacyBase = legacyBaseDir ?? (baseDir === undefined ? legacyWatermarkBaseDir() : undefined);
+	const fileFor = (projectKey: string): string => join(base, sanitizeSegment(projectKey), "watermark.json");
+	const readFileFor = (projectKey: string): string =>
+		legacyBase !== undefined
+			? preferExistingPath(fileFor(projectKey), join(legacyBase, sanitizeSegment(projectKey), "watermark.json"))
+			: fileFor(projectKey);
 
 	const read = (projectKey: string): string | null => {
 		try {
-			const raw = readFileSync(fileFor(projectKey), "utf-8");
+			const raw = readFileSync(readFileFor(projectKey), "utf-8");
 			const parsed = JSON.parse(raw) as Partial<WatermarkFile>;
 			return typeof parsed.watermark === "string" && parsed.watermark !== "" ? parsed.watermark : null;
 		} catch {

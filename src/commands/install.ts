@@ -38,6 +38,8 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { isAbsolute, resolve } from "node:path";
+
 import { resolveRuntimeConfig } from "../daemon/runtime/config.js";
 import {
 	DEFAULT_REF,
@@ -194,6 +196,43 @@ export function resolveEffectiveRef(argv: readonly string[]): string {
 }
 
 /**
+ * Parse the installer's `--home <path>` / `--home=<path>` pin (PRD-072d / ADR-0003), the chosen
+ * fleet-root location. Returns the value, else `undefined` when the flag is absent/empty.
+ */
+export function parseHomeArg(argv: readonly string[]): string | undefined {
+	const i = argv.indexOf("--home");
+	if (i !== -1) {
+		const next = argv[i + 1];
+		if (next !== undefined && !next.startsWith("--") && next.length > 0) return next;
+	}
+	const eq = argv.find((a) => a.startsWith("--home="));
+	if (eq !== undefined) {
+		const value = eq.slice("--home=".length);
+		if (value.length > 0) return value;
+	}
+	return undefined;
+}
+
+/**
+ * Record the installer's `--home=` choice by delivering it as `APIARY_HOME` in the process
+ * environment (fleet ADR Resolved decision: the `--home=` pin is delivered as `APIARY_HOME`; there is
+ * NO config.json recording step). Setting it here means every downstream fleet-root resolution in
+ * THIS install run agrees: the doctor registry entry advertises the overridden root, the service
+ * registration pins `APIARY_HOME` into the unit (PRD-072d), and the spawned daemon inherits it.
+ * A subsequent re-register with a changed root re-pins the unit. On the Windows LocalSystem enterprise
+ * opt-in this is where the installer captures the installing user's home so state never lands under
+ * `System32` (the pinned env wins regardless of the service account).
+ */
+export function applyHomeOverride(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): void {
+	const home = parseHomeArg(argv);
+	if (home === undefined) return;
+	// The resolver honors ABSOLUTE roots only (a relative value would re-anchor state on the service
+	// manager's cwd). A relative `--home=` is resolved against the INSTALLER's cwd here, at capture
+	// time, so the user's intent survives and the pinned value is deterministic everywhere downstream.
+	env.APIARY_HOME = isAbsolute(home) ? home : resolve(home);
+}
+
+/**
  * Persist onboarding `phase: "installed"` + the effective `ref` through the SHARED onboarding store
  * (a-AC-5). FAIL-SOFT: an IO error here logs a warning and returns `false` (the install still
  * succeeds — the marker is best-effort bookkeeping, never a hard dependency). Idempotent: re-running
@@ -331,6 +370,9 @@ export async function runInstallCommand(argv: readonly string[], deps: InstallVe
 	const opener = deps.openDashboard ?? openLocalDashboardUrl;
 	const probeDashboard = deps.probeDashboard ?? probeLoopbackDashboard;
 	const ref = resolveEffectiveRef(argv);
+	// PRD-072d: record the `--home=` pin as APIARY_HOME BEFORE the daemon is ensured/registered, so the
+	// registry write, the service-unit pin, and the spawned daemon all resolve the chosen fleet root.
+	applyHomeOverride(argv);
 
 	// 1) Health-gate the daemon (a-AC-4). ensureDaemonRunning is idempotent (a-AC-2): an already-up
 	//    daemon returns at once with NO second start/bind; a down daemon is started + waited on the

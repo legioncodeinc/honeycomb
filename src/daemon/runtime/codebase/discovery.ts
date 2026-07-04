@@ -18,7 +18,7 @@
  *   - `.d.ts` declaration files are EXCLUDED (a-AC-3 / FR-6) — no implementation to
  *     extract.
  *   - only files whose extension a {@link languageForFile} recognizes are kept.
- *   - a user-editable ignore set at `~/.honeycomb/graph-ignore.json` (or an injected
+ *   - a user-editable ignore set at `~/.apiary/honeycomb/graph-ignore.json` (or an injected
  *     path) is applied as a SAFETY NET over tracked directories (FR-5) — so a vendored
  *     dir that git tracks can still be excluded from the graph.
  *   - the result is BOUNDED (a hard file cap) so a pathological repo cannot blow up
@@ -30,8 +30,10 @@
 
 import { execFileSync } from "node:child_process";
 import { type Dirent, existsSync, readdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join, relative, sep } from "node:path";
 
+import { honeycombStateDir, legacyHoneycombDir, preferExistingPath } from "../../../shared/fleet-root.js";
 import { languageForFile } from "./extract.js";
 
 /**
@@ -193,10 +195,18 @@ interface UserIgnore {
 	readonly exact: ReadonlySet<string>;
 }
 
-/** Default user ignore-set path: `~/.honeycomb/graph-ignore.json` (FR-5). */
+/**
+ * Default user ignore-set path: `~/.apiary/honeycomb/graph-ignore.json` (FR-5, ADR-0003 / PRD-072b),
+ * read new-first with a legacy `~/.honeycomb/graph-ignore.json` fallback. The file is user-edited
+ * (not regenerable), so the migration mover relocates it; this fallback covers the not-yet-migrated
+ * case.
+ */
 function defaultGraphIgnorePath(): string {
-	const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
-	return join(home, ".honeycomb", "graph-ignore.json");
+	const home = process.env.HOME ?? process.env.USERPROFILE ?? homedir();
+	return preferExistingPath(
+		join(honeycombStateDir({ home }), "graph-ignore.json"),
+		join(legacyHoneycombDir(home), "graph-ignore.json"),
+	);
 }
 
 /**

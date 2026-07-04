@@ -42,6 +42,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { honeycombStateDir } from "../../../shared/fleet-root.js";
 import type { Context } from "hono";
 
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
@@ -52,12 +53,7 @@ import type { GraphView } from "../../../dashboard/contracts.js";
 import type { Snapshot, SnapshotIdentity } from "./contracts.js";
 import { resolveSnapshotIdentity } from "./identity.js";
 import { parseSnapshotJsonb, pushSnapshot, type PushOutcome } from "./push-pull.js";
-import {
-	buildAggregateSnapshot,
-	type BuildDeps,
-	finalizeSnapshot,
-	writeSnapshotAtomic,
-} from "./snapshot.js";
+import { buildAggregateSnapshot, type BuildDeps, finalizeSnapshot, writeSnapshotAtomic } from "./snapshot.js";
 
 /** The route group the graph API attaches to (already mounted in `server.ts`). */
 export const GRAPH_GROUP = "/api/graph" as const;
@@ -99,14 +95,16 @@ export interface MountGraphOptions {
 const NO_ORG_BODY = { error: "bad_request", reason: "x-honeycomb-org header is required" } as const;
 
 /**
- * The local base dir for a repo's snapshots — `~/.honeycomb/graphs/<repo-key>/`. The
+ * The local base dir for a repo's snapshots — `~/.apiary/honeycomb/graphs/<repo-key>/`. The
  * repo slug is sanitized to a single safe path segment so it can never traverse. Mirrors
  * `snapshot.ts`'s `defaultCacheDir` so the build write + the GET read agree on ONE dir.
  */
 export function defaultGraphBaseDir(identity: SnapshotIdentity): string {
 	const home = process.env.HOME ?? process.env.USERPROFILE ?? homedir();
 	const repoKey = identity.repo === "" ? "default" : identity.repo.replace(/[^A-Za-z0-9._-]/g, "_");
-	return join(home, ".honeycomb", "graphs", repoKey);
+	// The graph CACHE is regenerable: fresh builds land under `~/.apiary/honeycomb/graphs/` (ADR-0003
+	// / PRD-072b) and the legacy `~/.honeycomb/graphs/` is NOT migrated (it rebuilds lazily here).
+	return join(honeycombStateDir({ home }), "graphs", repoKey);
 }
 
 /**
@@ -198,7 +196,9 @@ export function snapshotToGraphView(snapshot: Snapshot, limit: number = MAX_VIEW
 		const importance = (n: Snapshot["nodes"][number]): number =>
 			(degree.get(n.id) ?? 0) * 4 + (n.kind === "file" ? 2 : 0) + (n.observation.isEntrypoint === true ? 1 : 0);
 		// Tie-break by id so the selection is deterministic (two builds → the same shown set).
-		selected = [...snapshot.nodes].sort((a, b) => importance(b) - importance(a) || a.id.localeCompare(b.id)).slice(0, limit);
+		selected = [...snapshot.nodes]
+			.sort((a, b) => importance(b) - importance(a) || a.id.localeCompare(b.id))
+			.slice(0, limit);
 	}
 
 	const kept = new Set(selected.map((n) => n.id));
@@ -287,7 +287,10 @@ async function runGraphBuild(
  * building on start + on a timer instead. Throws on a build error exactly like the endpoint — the
  * caller (the daemon lifecycle) wraps it fail-soft so a build failure never crashes the daemon.
  */
-export async function buildCodebaseGraphSnapshot(scope: QueryScope, options: MountGraphOptions): Promise<BuildResultBody> {
+export async function buildCodebaseGraphSnapshot(
+	scope: QueryScope,
+	options: MountGraphOptions,
+): Promise<BuildResultBody> {
 	const workspaceDir = options.workspaceDir ?? process.cwd();
 	const identity = options.identity ?? resolveSnapshotIdentity(workspaceDir, scope);
 	return runGraphBuild(identity, scope, options);
@@ -340,8 +343,7 @@ export function mountGraphApi(daemon: Daemon, options: MountGraphOptions): void 
 		if (scope === null) return c.json(NO_ORG_BODY, 400);
 		const baseDir = options.graphBaseDir ?? defaultGraphBaseDir(resolveIdentity(scope));
 		const snapshot = loadFreshestLocalSnapshot(baseDir);
-		const view: GraphView =
-			snapshot === null ? { built: false, nodes: [], edges: [] } : snapshotToGraphView(snapshot);
+		const view: GraphView = snapshot === null ? { built: false, nodes: [], edges: [] } : snapshotToGraphView(snapshot);
 		return c.json(view);
 	});
 }
