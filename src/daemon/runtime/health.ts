@@ -137,8 +137,13 @@ export const TENANCY_UNCONFIRMED_GUIDANCE =
 export interface HealthReasons {
 	/** Storage reachability, from the `SELECT 1` probe bit: `reachable` when the bit is `ok`. */
 	readonly storage: "reachable" | "unreachable";
-	/** The embed seam at assembly: `on` when the real embedder is wired, `off` for the no-op. */
-	readonly embeddings: "on" | "off";
+	/**
+	 * The embed seam state: `off` when embeddings are disabled/no-op, `warming` when ENABLED but the
+	 * child embedder has not warmed yet (or crash-looped) — a state in which recall silently falls back
+	 * to BM25 — and `on` only when the embedder is enabled AND warm. Reported LIVE per `/health` call so
+	 * a stuck/failed embed daemon shows `warming` instead of a misleading `on`.
+	 */
+	readonly embeddings: "on" | "off" | "warming";
 	/** A required table's presence (best-effort): `ok` unless a required table is known-missing. */
 	readonly schema: "ok" | "missing_table";
 	/** The Portkey gateway state (PRD-063b / b-AC-7): `off` | `ok` | `unconfigured` | `unreachable`. */
@@ -196,6 +201,12 @@ export interface HealthDetailInputs {
 	readonly status: PipelineStatus;
 	/** Whether the REAL embedder is wired at assembly (the embed-seam state, ledger D-4). */
 	readonly embeddingsEnabled: boolean;
+	/**
+	 * Whether the wired embedder has WARMED (the child answered + loaded its model). Optional +
+	 * backward-compatible: when omitted (an injected-embed test / no supervisor), an enabled embedder
+	 * reports `on` as before; when explicitly `false`, an enabled-but-unwarmed embedder reports `warming`.
+	 */
+	readonly embeddingsWarm?: boolean;
 	/**
 	 * Whether a REQUIRED table is known-missing (best-effort). Defaults to `false`
 	 * (→ `schema: "ok"`) — the conservative posture when there is no cheap signal at the
@@ -266,7 +277,7 @@ export function buildHealthDetail(inputs: HealthDetailInputs): HealthDetail {
 			: undefined;
 	const reasons: HealthReasons = {
 		storage: inputs.status === "ok" ? "reachable" : "unreachable",
-		embeddings: inputs.embeddingsEnabled ? "on" : "off",
+		embeddings: !inputs.embeddingsEnabled ? "off" : inputs.embeddingsWarm === false ? "warming" : "on",
 		schema: inputs.schemaMissingTable === true ? "missing_table" : "ok",
 		// PRD-063b / b-AC-7: read the supplied Portkey state verbatim (no probe). Omitted → `off`.
 		portkey: inputs.portkey ?? "off",

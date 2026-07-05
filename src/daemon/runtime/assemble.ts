@@ -31,7 +31,17 @@
  * NOT fake it (see {@link assembleSeams}).
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	copyFileSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { hasBoundProjectOnDisk } from "../../hooks/shared/project-resolver.js";
 import { honeycombStateDir, legacyHoneycombDir } from "../../shared/fleet-root.js";
@@ -1431,12 +1441,11 @@ function resolveProductDataDeps(
 	sources?: SourcesApiDeps;
 	defaultScope: QueryScope;
 } {
-	// The secrets store base dir is the workspace root ($HONEYCOMB_WORKSPACE), defaulting to
-	// the daemon's cwd when unset (the same default the secrets CONVENTIONS document). Routed
-	// through the HARDENED resolver so a detached daemon that inherited a non-writable cwd
-	// (the `C:\WINDOWS\system32` footgun) falls back to `~/.honeycomb` instead of 502ing every
-	// secret save — see {@link resolveWorkspaceBaseDir}.
-	const baseDir = resolveWorkspaceBaseDir();
+	// The VAULT (secrets + settings) base dir is the FIXED fleet state root ({@link resolveVaultBaseDir}
+	// → `~/.apiary/honeycomb`), NOT the workspace/cwd: this store holds daemon-GLOBAL config (Portkey key,
+	// provider/model, pollinating/embeddings toggles), so pinning it cwd-independent is what stops
+	// secrets/settings from scattering across whatever directory the daemon was launched from.
+	const baseDir = resolveVaultBaseDir();
 	const secrets: SecretsApiDeps = {
 		store: new SecretsStore({ baseDir, machineKey: createMachineKeyProvider() }),
 		// PRD-022 local-mode default: the dashboard's `GET /api/secrets` (names-only) carries no
@@ -1527,6 +1536,58 @@ function resolveWorkspaceBaseDir(): string {
 	}
 	workspaceBaseDirMemo = fallback;
 	return fallback;
+}
+
+/**
+ * The base dir for the daemon's VAULT — `secret`-class records (`.secrets/`) AND `setting`-class
+ * records (`.vault/setting/`). Unlike logs (`.daemon/`), the local job queue, and `agent.yaml` — all
+ * legitimately PER-WORKSPACE — the vault holds DAEMON-GLOBAL config: the Portkey/inference key, the
+ * provider/model selection, and the pollinating/embeddings toggles. It MUST be a FIXED, cwd-independent
+ * location so a daemon launched from ANY directory reads and writes the SAME secrets/settings.
+ * {@link resolveWorkspaceBaseDir} falls back to `process.cwd()` when `HONEYCOMB_WORKSPACE` is unset,
+ * which scatters config across whatever folder the daemon happened to start in (observed: the same key
+ * / toggle landing in `~/.apiary/honeycomb/.vault`, `~/GitHub/<repo>/honeycomb/.vault`, … so a boot read
+ * sees an inconsistent subset and Portkey/pollinating silently never engage). Anchoring the vault to the
+ * fleet state root {@link honeycombStateDir} (`~/.apiary/honeycomb`) removes that entire class.
+ */
+function resolveVaultBaseDir(): string {
+	return honeycombStateDir();
+}
+
+/**
+ * One-time, best-effort consolidation of a vault written under an OLD workspace-scoped root into the
+ * FIXED vault root. Before {@link resolveVaultBaseDir}, secrets/settings were stored under
+ * {@link resolveWorkspaceBaseDir} (which falls back to `process.cwd()`), so an upgrade — or a daemon
+ * previously launched from a project dir — can leave records the fixed reader now misses. Copies each
+ * `.secrets/<scope>/<name>` and `.vault/setting/<scope>/<name>` record from the workspace root into the
+ * fixed root ONLY when the fixed root lacks it (the fixed root ALWAYS wins — never overwritten). The
+ * ciphertext is portable: it is keyed by the GLOBAL machine id + the scope encoded in the dir NAME, both
+ * unchanged by the move. Fully fail-soft: any error is swallowed so the daemon never fails to boot on a
+ * migration hiccup (a partial copy simply completes on the next boot).
+ */
+function consolidateWorkspaceVaultIntoFixedRoot(): void {
+	const from = resolveWorkspaceBaseDir();
+	const to = resolveVaultBaseDir();
+	if (from === to) return;
+	for (const sub of [".secrets", join(".vault", "setting")]) {
+		try {
+			const srcRoot = join(from, sub);
+			if (!existsSync(srcRoot)) continue;
+			for (const scopeDir of readdirSync(srcRoot)) {
+				const srcScope = join(srcRoot, scopeDir);
+				if (!statSync(srcScope).isDirectory()) continue;
+				const dstScope = join(to, sub, scopeDir);
+				for (const name of readdirSync(srcScope)) {
+					const dstFile = join(dstScope, name);
+					if (existsSync(dstFile)) continue; // the fixed root wins — never overwrite.
+					mkdirSync(dstScope, { recursive: true, mode: DIR_MODE });
+					copyFileSync(join(srcScope, name), dstFile);
+				}
+			}
+		} catch {
+			// best-effort; a partial migration simply completes on the next boot.
+		}
+	}
 }
 
 /**
@@ -1627,7 +1688,7 @@ function catalogTrustedTableProbe(): TrustedTableProbe {
 
 function buildVaultStore(): VaultStore {
 	return new VaultStore({
-		baseDir: resolveWorkspaceBaseDir(),
+		baseDir: resolveVaultBaseDir(),
 		machineKey: createMachineKeyProvider(),
 		registry: createVaultRegistry(),
 	});
@@ -1720,7 +1781,7 @@ async function resolvePortkeyAssemblyStatus(
 	if (selection === undefined || !selection.enabled) return "off";
 	try {
 		const secretsStore = new SecretsStore({
-			baseDir: resolveWorkspaceBaseDir(),
+			baseDir: resolveVaultBaseDir(),
 			machineKey: createMachineKeyProvider(),
 		});
 		const names = secretsStore.listSecretNames(secretScopeFromQueryScope(scope));
@@ -1894,7 +1955,7 @@ async function buildGatedPollinatingWorker(
 	// override (when set) wins over the `agent.yaml` selection; the `${SECRET_REF}` credential
 	// still resolves through the `secret` class unchanged (FR-2 — the key is never inlined).
 	const secretsStore = new SecretsStore({
-		baseDir: resolveWorkspaceBaseDir(),
+		baseDir: resolveVaultBaseDir(),
 		machineKey: createMachineKeyProvider(),
 	});
 	// PRD-063b: when the Portkey gateway is ON (selection present), the factory routes inference
@@ -2033,7 +2094,7 @@ async function buildPipelineWorker(
 	let model: ModelClient;
 	try {
 		const secretsStore = new SecretsStore({
-			baseDir: resolveWorkspaceBaseDir(),
+			baseDir: resolveVaultBaseDir(),
 			machineKey: createMachineKeyProvider(),
 		});
 		// PRD-063b: route the pipeline's extraction/decision inference through Portkey too when the
@@ -2133,6 +2194,9 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// home. Fail-soft: `runHoneycombStateMigration` always returns and never throws into boot.
 	if (options.storage === undefined && options.runtimeDir === undefined) {
 		runHoneycombStateMigration();
+		// Consolidate any vault records left under an old workspace-scoped root (pre-fixed-root) into the
+		// fixed vault root, so secrets/settings the daemon wrote from a project dir converge (fail-soft).
+		consolidateWorkspaceVaultIntoFixedRoot();
 	}
 	// ── PRD-043a (FR-1/FR-2): the durable SQLite log store. Built BEFORE the logger so it can be
 	// injected as the logger's write-through seam. Precedence:
@@ -2371,6 +2435,9 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		buildHealthDetail({
 			status: healthBit,
 			embeddingsEnabled: embeddingsReason(),
+			// PRD-029 honesty: report `warming` (not a misleading `on`) while the wired embedder has not
+			// warmed — read LIVE per health call from the supervisor, so recall's BM25 fallback is visible.
+			embeddingsWarm: embedSupervisor !== undefined ? embedSupervisor.warm : undefined,
 			portkey: portkeyHealth,
 			captureDroppedEvents: captureDroppedEvents.read(),
 			// PRD-073b: the per-reason gated-captures totals + the two dormancy reasons, read LIVE per
@@ -2856,7 +2923,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				// order (c-AC-4). Fail-soft: a build error leaves the inner seam absent (RRF order).
 				if (portkeySelection !== undefined) {
 					const rerankSecrets = createSecretResolver(
-						new SecretsStore({ baseDir: resolveWorkspaceBaseDir(), machineKey: createMachineKeyProvider() }),
+						new SecretsStore({ baseDir: resolveVaultBaseDir(), machineKey: createMachineKeyProvider() }),
 						secretScopeFromQueryScope(scope),
 					);
 					const rerankClient = createPortkeyRerankClient({

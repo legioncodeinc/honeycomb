@@ -118,6 +118,30 @@ function buildSkillRequest(argv: readonly string[]): DaemonRequest {
 }
 
 /**
+ * Build the `secret` verb's daemon request. The secrets API keys the secret NAME in the URL PATH and
+ * carries the value in the body (`{ value }`) — NOT the generic `POST /base/<sub> {args}` shape, which
+ * would mis-route `secret set FOO bar` as a secret literally NAMED "set" (the observed bug: the value
+ * never lands and the daemon 400s / stores garbage). Values are write-only: `list` returns NAMES only,
+ * `get` is intentionally unsupported (the daemon never returns a secret value).
+ *   - `secret set <name> <value>` → POST   /api/secrets/<name>  { value }
+ *   - `secret rm  <name>`         → DELETE /api/secrets/<name>
+ *   - `secret list` (or bare)     → GET    /api/secrets          (names only)
+ */
+function buildSecretRequest(argv: readonly string[]): DaemonRequest {
+	const sub = subcommandOf(argv);
+	const rest = argv.filter((a) => !a.startsWith("--"));
+	const name = rest[1] ?? "";
+	if (sub === "rm" || sub === "remove" || sub === "delete" || sub === "unset") {
+		return { method: "DELETE", path: `/api/secrets/${encodeURIComponent(name)}` };
+	}
+	if (sub === "set") {
+		return { method: "POST", path: `/api/secrets/${encodeURIComponent(name)}`, body: { value: rest[2] ?? "" } };
+	}
+	// `list` / bare / anything else → the names-only listing (a secret VALUE is never returned).
+	return { method: "GET", path: "/api/secrets" };
+}
+
+/**
  * Drop a `--flag value` PAIR from an argv tail (both the flag and the word after it),
  * so the value does not leak into a downstream positional join. Returns a new array.
  */
@@ -189,6 +213,7 @@ export function buildStorageRequest(verb: string, argv: readonly string[]): Daem
 	// 045g owns merging the duplicate `skill`/`skillify` CLI surfaces into one; here we only make
 	// the registered `skillify` verb route correctly onto the live skills group.
 	if (verb === "skill" || verb === "skillify") return buildSkillRequest(argv);
+	if (verb === "secret") return buildSecretRequest(argv);
 	if (verb === "remember") return buildRememberRequest(argv);
 	if (verb === "recall") return buildRecallRequest(argv);
 
