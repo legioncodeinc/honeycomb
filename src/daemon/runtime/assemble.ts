@@ -1492,11 +1492,24 @@ function resolveProductDataDeps(
  * pid/lock + machine-key). The CLI spawn (`src/cli/runtime.ts`) ALSO pins a writable workspace,
  * so this is defense-in-depth for a daemon brought up by any other launcher.
  */
+/**
+ * The workspace base-dir candidate from the environment: `HONEYCOMB_WORKSPACE` (TRIMMED) when set and
+ * non-blank, else `process.cwd()`. Trimming matters because a service manager can pin a polluted value
+ * (e.g. a Windows scheduled task whose `set HONEYCOMB_WORKSPACE=<dir> && ...` captured the space before
+ * `&&`); an untrimmed trailing space diverts logs (`.daemon/logs.db`) and secrets (`.secrets/`) into a
+ * divergent `<dir> ` directory the rest of the tooling never looks in — the same class of bug the
+ * APIARY_HOME trim in fleet-root.ts closes for the state root. Pure + total so a test drives it
+ * without the module-level memo or the writability probe.
+ */
+export function workspaceBaseDirCandidate(env: NodeJS.ProcessEnv = process.env): string {
+	const fromEnv = env.HONEYCOMB_WORKSPACE?.trim();
+	return fromEnv !== undefined && fromEnv.length > 0 ? fromEnv : process.cwd();
+}
+
 let workspaceBaseDirMemo: string | undefined;
 function resolveWorkspaceBaseDir(): string {
 	if (workspaceBaseDirMemo !== undefined) return workspaceBaseDirMemo;
-	const fromEnv = process.env.HONEYCOMB_WORKSPACE;
-	const candidate = fromEnv !== undefined && fromEnv.length > 0 ? fromEnv : process.cwd();
+	const candidate = workspaceBaseDirCandidate();
 	if (isWritableDir(candidate)) {
 		workspaceBaseDirMemo = candidate;
 		return candidate;
