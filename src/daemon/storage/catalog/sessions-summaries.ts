@@ -80,6 +80,12 @@ export const SESSIONS_COLUMNS = Object.freeze([
 	// partial state. NOT NULL DEFAULT '' (a discriminant always present; '' = unknown
 	// source) — heal-safe on a populated table because the empty string backfills.
 	{ name: "source_tool", sql: "TEXT NOT NULL DEFAULT ''" },
+	// PRD-074: the derived prose form of the event — the compact, harness-ready text recall
+	// matches + returns. Populated at capture time from the typed CaptureEvent by
+	// `proseForEvent` (event-contract.ts). NOT NULL DEFAULT '' so legacy rows heal cleanly
+	// (recall falls back to `message::text` for empty `prose` via a COALESCE). The structured
+	// `message` JSONB stays verbatim for downstream parsers (summaries/skillify/ROI).
+	{ name: "prose", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "creation_date", sql: "TEXT NOT NULL DEFAULT ''" },
 	{ name: "last_update_date", sql: "TEXT NOT NULL DEFAULT ''" },
 ]);
