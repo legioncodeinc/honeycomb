@@ -2370,6 +2370,13 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				? !embedSupervisor.disabled
 				: resolveEmbedClientOptions().enabled);
 
+	// PRD-025 honesty: the LIVE embed supervisor drives the fine-grained `warming`/`on`/`failed` signal,
+	// but only on the REAL path — an explicit `embeddingsEnabled` option (deterministic test) or an
+	// injected hermetic `embed` attachment must keep the coarse-mirrored state, so leave the signals
+	// undefined there. The thunks read live state per `/health` call (a warm/failure flip shows next read).
+	const liveEmbed = (): EmbedSupervisor | undefined =>
+		options.embeddingsEnabled === undefined && options.embed === undefined ? embedSupervisor : undefined;
+
 	// ── PRD-063b (b-AC-7): the Portkey gateway health reason. Mutable + live: it is SET to the
 	// assembly-time status (`off`/`ok`/`unconfigured`, derived from config below — NO probe) once the
 	// vault is constructed, and FLIPPED to `unreachable` by `recordPortkeyUnreachable` when a REAL
@@ -2386,6 +2393,10 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		buildHealthDetail({
 			status: healthBit,
 			embeddingsEnabled: embeddingsReason(),
+			// PRD-025 honesty: live warm/failed signals so `/health` reports `warming`/`on`/`failed`
+			// (via `reasons.embeddingsState`) instead of a coarse `on` that only means "enabled".
+			embeddingsWarm: liveEmbed()?.warm,
+			embeddingsFailed: liveEmbed()?.failed,
 			portkey: portkeyHealth,
 			captureDroppedEvents: captureDroppedEvents.read(),
 			// PRD-073b: the per-reason gated-captures totals + the two dormancy reasons, read LIVE per

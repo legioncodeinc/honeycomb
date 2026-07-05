@@ -11,12 +11,15 @@
  *   - the deliberate restart (AC-5 toggle) tears down + respawns and resets the bound.
  */
 
+import { resolve } from "node:path";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
 	type EmbedChild,
 	type EmbedSupervisorClock,
 	createEmbedSupervisor,
+	pickEmbedEntry,
 	scrubChildEnv,
 } from "../../../../src/daemon/runtime/services/embed-supervisor.js";
 
@@ -333,5 +336,142 @@ describe("scrubChildEnv (security: DeepLake credentials never enter the embed ch
 		expect(env.HONEYCOMB_DEEPLAKE_TOKEN).toBe("eyJ-secret-jwt");
 		expect(scrubbed.HONEYCOMB_DEEPLAKE_TOKEN).toBeUndefined();
 		expect(scrubbed).not.toBe(env);
+	});
+});
+
+describe("resolveEmbedEntry layout bug (pickEmbedEntry) — the ship-blocking regression", () => {
+	// Compute the two candidates the SAME way `pickEmbedEntry` does, so the assertions are OS-agnostic
+	// (`resolve` adds a drive letter + backslashes on Windows — comparing against these avoids that).
+	const bundledFrom = (moduleDir: string): string => resolve(moduleDir, "..", "embeddings", "embed-daemon.js");
+	const devFrom = (moduleDir: string): string => resolve(moduleDir, "..", "..", "..", "..", "..", "embeddings", "embed-daemon.js");
+
+	it("BUNDLED: from `<root>/daemon`, resolves the sibling embeddings/embed-daemon.js (one level up)", () => {
+		// The shipped layout: the supervisor is inlined into `<root>/daemon/index.js`. Only the
+		// one-level-up sibling candidate exists here — the five-up ghost does NOT.
+		const moduleDir = resolve("/pkg/honeycomb/daemon");
+		const bundled = bundledFrom(moduleDir);
+		const exists = (p: string): boolean => p === bundled;
+		expect(pickEmbedEntry(moduleDir, exists)).toBe(bundled);
+	});
+
+	it("does NOT resolve to the five-up ghost (the pre-existing bug) when the sibling exists", () => {
+		// Before the fix, the hard-coded five-up walk from `<root>/daemon` pointed OUTSIDE the package.
+		const moduleDir = resolve("/pkg/honeycomb/daemon");
+		const exists = (p: string): boolean => p === bundledFrom(moduleDir);
+		expect(pickEmbedEntry(moduleDir, exists)).not.toBe(devFrom(moduleDir));
+		expect(pickEmbedEntry(moduleDir, exists)).toBe(bundledFrom(moduleDir));
+	});
+
+	it("DEV tsc: from `<root>/dist/src/daemon/runtime/services`, resolves the five-up embeddings/…", () => {
+		const moduleDir = resolve("/pkg/honeycomb/dist/src/daemon/runtime/services");
+		const dev = devFrom(moduleDir);
+		const exists = (p: string): boolean => p === dev;
+		expect(pickEmbedEntry(moduleDir, exists)).toBe(dev);
+	});
+
+	it("HONEYCOMB_EMBED_ENTRY override wins over any candidate", () => {
+		const chosen = pickEmbedEntry(resolve("/pkg/honeycomb/daemon"), () => true, "/custom/entry.js");
+		expect(chosen).toBe("/custom/entry.js");
+	});
+
+	it("falls back to the bundled sibling when nothing exists (a sensible, in-package path to log)", () => {
+		const moduleDir = resolve("/pkg/honeycomb/daemon");
+		expect(pickEmbedEntry(moduleDir, () => false)).toBe(bundledFrom(moduleDir));
+	});
+});
+
+describe("PRD-025 honesty — the supervisor surfaces warming/on/failed truthfully", () => {
+	it("reports `failed` when the child is live but its warmup THREW (warmFailed)", async () => {
+		const child = fakeChild();
+		// Live immediately; never ready; warmup reported as failed by the embed daemon.
+		const probeHealth = vi.fn(async () => ({ ok: true, ready: false, warmFailed: true }));
+		const sup = createEmbedSupervisor({
+			spawnChild: () => child,
+			probeHealth,
+			clock: instantClock,
+			env: {},
+			config: { warmTimeoutMs: 500 },
+		});
+		await sup.start();
+		// Let the background warm wait observe the failure.
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(sup.live).toBe(true);
+		expect(sup.warm).toBe(false);
+		expect(sup.failed).toBe(true);
+		await sup.stop();
+	});
+
+	it("reports `failed` when the bounded crash-restart budget is exhausted (child never live)", async () => {
+		const spawnChild = vi.fn(() => fakeChild());
+		// Never live: every probe says the listener is down → each spawn is treated as a crash.
+		const probeHealth = vi.fn(async () => ({ ok: false, ready: false }));
+		const sup = createEmbedSupervisor({
+			spawnChild,
+			probeHealth,
+			clock: instantClock,
+			env: {},
+			config: { maxRestarts: 1, restartBackoffMs: 0, liveTimeoutMs: 50 },
+		});
+		await sup.start();
+		// Drain the restart microtasks.
+		for (let i = 0; i < 8; i++) await Promise.resolve();
+		expect(sup.live).toBe(false);
+		expect(sup.failed).toBe(true);
+	});
+
+	it("is NOT `failed` while merely warming (live, not-yet-ready, no failure)", async () => {
+		const child = fakeChild();
+		const probeHealth = vi.fn(async () => ({ ok: true, ready: false }));
+		const sup = createEmbedSupervisor({
+			spawnChild: () => child,
+			probeHealth,
+			clock: instantClock,
+			env: {},
+			config: { warmTimeoutMs: 200 },
+		});
+		await sup.start();
+		expect(sup.live).toBe(true);
+		expect(sup.warm).toBe(false);
+		expect(sup.failed).toBe(false);
+		await sup.stop();
+	});
+
+	it("is NOT `failed` when disabled (opted out) — that is `off`, not a failure", async () => {
+		const sup = createEmbedSupervisor({
+			spawnChild: () => fakeChild(),
+			probeHealth: async () => ({ ok: true, ready: true }),
+			clock: instantClock,
+			env: { HONEYCOMB_EMBEDDINGS: "false" },
+		});
+		await sup.start();
+		expect(sup.disabled).toBe(true);
+		expect(sup.failed).toBe(false);
+	});
+
+	it("a deliberate restart clears a prior `failed` and re-attempts warmup", async () => {
+		let ready = false;
+		let warmFailed = true;
+		const probeHealth = vi.fn(async () => ({ ok: true, ready, warmFailed }));
+		const sup = createEmbedSupervisor({
+			spawnChild: () => fakeChild(),
+			probeHealth,
+			clock: instantClock,
+			env: {},
+			config: { warmTimeoutMs: 500 },
+		});
+		await sup.start();
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(sup.failed).toBe(true);
+		// Flip the world to healthy, then restart: the supervisor re-arms and warms.
+		ready = true;
+		warmFailed = false;
+		await sup.restart();
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(sup.failed).toBe(false);
+		expect(sup.warm).toBe(true);
+		await sup.stop();
 	});
 });

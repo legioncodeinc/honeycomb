@@ -118,6 +118,22 @@ export type SubsystemState = "ok" | "degraded";
  */
 export type PortkeyHealth = "off" | "ok" | "unconfigured" | "unreachable";
 
+/**
+ * The fine-grained embeddings health (PRD-025 honesty). A closed enum, carrying NO secret:
+ *   - `off`     — embeddings are disabled (opted out / never enabled); recall is lexical by design.
+ *   - `warming` — enabled and the embed child is coming up / downloading + loading the model; recall
+ *                 is lexical MEANWHILE (degraded), and this flips to `on` once the model is warm.
+ *   - `on`      — enabled AND the model is warm: semantic recall is actually working.
+ *   - `failed`  — enabled but the embed child cannot serve (warmup threw, or the crash-restart budget
+ *                 was exhausted). Actionable, and honestly distinct from an indefinite `warming`.
+ *
+ * This is the HONEST successor to the coarse two-state `embeddings` reason (which reports only
+ * enabled-vs-disabled, so it reads `on` even while the model is still downloading or has failed to
+ * load). It is exposed ADDITIVELY as `HealthReasons.embeddingsState` so the coarse field's contract is
+ * unchanged; the Hive dashboard prefers `embeddingsState` when present.
+ */
+export type EmbeddingsHealth = "off" | "warming" | "on" | "failed";
+
 /** PRD-073b: the machine-readable dormancy reason codes surfaced on the health detail. */
 export const CAPTURE_DORMANT_NO_PROJECT = "capture_dormant_no_project" as const;
 /** PRD-073b: the machine-readable capture-blocked-on-tenancy reason code. */
@@ -139,6 +155,14 @@ export interface HealthReasons {
 	readonly storage: "reachable" | "unreachable";
 	/** The embed seam at assembly: `on` when the real embedder is wired, `off` for the no-op. */
 	readonly embeddings: "on" | "off";
+	/**
+	 * The HONEST fine-grained embeddings state (PRD-025 honesty). ADDITIVE alongside the coarse
+	 * `embeddings` field — present when the builder is given the live warm/failed signals (the daemon
+	 * composition root), so an operator sees `warming`/`failed` rather than a `on` that merely means
+	 * "enabled". Absent only in the degenerate case where a caller passes neither signal AND the coarse
+	 * field is enough. Carries NO secret (a fixed literal). See {@link EmbeddingsHealth}.
+	 */
+	readonly embeddingsState?: EmbeddingsHealth;
 	/** A required table's presence (best-effort): `ok` unless a required table is known-missing. */
 	readonly schema: "ok" | "missing_table";
 	/** The Portkey gateway state (PRD-063b / b-AC-7): `off` | `ok` | `unconfigured` | `unreachable`. */
@@ -196,6 +220,19 @@ export interface HealthDetailInputs {
 	readonly status: PipelineStatus;
 	/** Whether the REAL embedder is wired at assembly (the embed-seam state, ledger D-4). */
 	readonly embeddingsEnabled: boolean;
+	/**
+	 * PRD-025 honesty: whether the embed model has finished WARMING (semantic actually working). When
+	 * supplied (a real boolean), the builder computes `embeddingsState`: `true` → `on`, `false` →
+	 * `warming` (unless `embeddingsFailed`). Omitted (legacy callers) → `embeddingsState` mirrors the
+	 * coarse `embeddings` field, preserving pre-honesty behavior.
+	 */
+	readonly embeddingsWarm?: boolean;
+	/**
+	 * PRD-025 honesty: whether the embed child cannot serve (warmup threw, or the crash-restart budget
+	 * was exhausted). When `true` and embeddings are enabled → `embeddingsState: "failed"`. Omitted →
+	 * not failed.
+	 */
+	readonly embeddingsFailed?: boolean;
 	/**
 	 * Whether a REQUIRED table is known-missing (best-effort). Defaults to `false`
 	 * (→ `schema: "ok"`) — the conservative posture when there is no cheap signal at the
@@ -264,9 +301,22 @@ export function buildHealthDetail(inputs: HealthDetailInputs): HealthDetail {
 						: {}),
 				}
 			: undefined;
+	// PRD-025 honesty: the fine-grained embeddings state, from the live warm/failed signals when the
+	// composition root supplies them. Legacy callers (no warm signal) → mirror the coarse enabled/disabled
+	// field, so the pre-honesty behavior is preserved verbatim.
+	const embeddingsState: EmbeddingsHealth = !inputs.embeddingsEnabled
+		? "off"
+		: inputs.embeddingsFailed === true
+			? "failed"
+			: inputs.embeddingsWarm === true
+				? "on"
+				: inputs.embeddingsWarm === false
+					? "warming"
+					: "on";
 	const reasons: HealthReasons = {
 		storage: inputs.status === "ok" ? "reachable" : "unreachable",
 		embeddings: inputs.embeddingsEnabled ? "on" : "off",
+		embeddingsState,
 		schema: inputs.schemaMissingTable === true ? "missing_table" : "ok",
 		// PRD-063b / b-AC-7: read the supplied Portkey state verbatim (no probe). Omitted → `off`.
 		portkey: inputs.portkey ?? "off",

@@ -118,6 +118,29 @@ describe("AC-2 /health detail NAMES the down subsystem, not a bare degraded", ()
 		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.embeddings).toBe("on");
 	});
 
+	it("PRD-025 honesty: embeddingsState reports off/warming/on/failed from the live warm+failed signals", () => {
+		// Disabled → off (coarse + fine agree).
+		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: false }).reasons?.embeddingsState).toBe("off");
+		// Enabled but not-yet-warm → warming (the coarse field still says "on" — this is the dishonesty the
+		// fine state corrects; recall is lexical MEANWHILE).
+		const warming = buildHealthDetail({ status: "ok", embeddingsEnabled: true, embeddingsWarm: false });
+		expect(warming.reasons?.embeddings).toBe("on");
+		expect(warming.reasons?.embeddingsState).toBe("warming");
+		// Enabled AND warm → on.
+		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true, embeddingsWarm: true }).reasons?.embeddingsState).toBe("on");
+		// Enabled but the child cannot serve → failed (actionable, distinct from an indefinite warming).
+		expect(
+			buildHealthDetail({ status: "ok", embeddingsEnabled: true, embeddingsWarm: false, embeddingsFailed: true }).reasons
+				?.embeddingsState,
+		).toBe("failed");
+	});
+
+	it("legacy callers (no warm signal) → embeddingsState mirrors the coarse enabled/disabled field", () => {
+		// Preserves pre-honesty behavior: an enabled caller that supplies neither warm nor failed reads "on".
+		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.embeddingsState).toBe("on");
+		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: false }).reasons?.embeddingsState).toBe("off");
+	});
+
 
 	it("schema is best-effort 'ok' by default; 'missing_table' only when a required table is known-missing", () => {
 		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.schema).toBe("ok");
