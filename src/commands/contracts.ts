@@ -267,7 +267,12 @@ export interface DaemonResponse {
 export interface DaemonClient {
 	/** Dispatch a request to the daemon. */
 	send(req: DaemonRequest): Promise<DaemonResponse>;
-	/** Cheap liveness probe (for `status`/`dashboard` connectivity). */
+	/**
+	 * Cheap REACHABILITY probe (for `status`/`dashboard` connectivity and ensure-running). True
+	 * when the daemon answered `/health` with ANY HTTP status — a 503-degraded daemon (storage
+	 * unreachable before the first workspace bind) is still UP. Only an explicit no-response
+	 * (connection refused/reset/timeout) is false.
+	 */
 	ping(): Promise<boolean>;
 }
 
@@ -403,8 +408,14 @@ export function createLoopbackDaemonClient(options: {
 		},
 		async ping(): Promise<boolean> {
 			try {
-				const res = await doFetch(`${baseUrl}/health`, { method: "GET" });
-				return res.ok;
+				// Reachability, not pipeline health: ANY completed HTTP response proves the daemon
+				// process is up and answering. `/health` deliberately serves 503 while DEGRADED
+				// (e.g. storage unreachable before the first login/workspace bind), and gating on
+				// `res.ok` here deadlocked fresh-machine installs: `honeycomb install` waits on this
+				// probe, but the daemon cannot be non-degraded until the user logs in AFTER install.
+				// Only an explicit no-response (refused / reset / timeout) reads as down.
+				await doFetch(`${baseUrl}/health`, { method: "GET" });
+				return true;
 			} catch {
 				return false;
 			}

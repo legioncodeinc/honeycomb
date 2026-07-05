@@ -88,12 +88,19 @@ export function createDaemonDashboardDataSource(options: LaunchDashboardOptions 
 	const timeoutMs = options.timeoutMs ?? 1500;
 	return {
 		async probe(): Promise<Connectivity> {
+			// Reachability, not pipeline health: ANY completed HTTP response (including the 503 a
+			// DEGRADED daemon serves pre-workspace-bind) proves the daemon is up. Only an explicit
+			// no-response (refused/reset/timeout) reads as unreachable.
+			const controller = new AbortController();
+			const timer = setTimeout(() => controller.abort(), timeoutMs);
 			try {
-				await getJson<unknown>(fetchImpl, `${base}/health`, headers, timeoutMs);
+				await fetchImpl(`${base}/health`, { method: "GET", headers, signal: controller.signal });
 				return reachable(base);
 			} catch (err) {
 				const detail = err instanceof Error ? err.message : "daemon not reachable";
 				return unreachable(base, detail);
+			} finally {
+				clearTimeout(timer);
 			}
 		},
 		async fetchAll(): Promise<DashboardData> {

@@ -47,8 +47,11 @@ async function stillUp(): Promise<boolean> {
 	const ac = new AbortController();
 	const timer = setTimeout(() => ac.abort(), POLL_TIMEOUT_MS);
 	try {
-		const res = await fetch(healthUrl, { method: "GET", signal: ac.signal });
-		return res.ok;
+		// ANY completed HTTP response means the old daemon still holds the port/lock — a
+		// 503-degraded daemon (storage unreachable pre-login) is still UP. Gating on `res.ok`
+		// here would respawn while the old process still holds the single-instance lock.
+		await fetch(healthUrl, { method: "GET", signal: ac.signal });
+		return true;
 	} catch (error) {
 		// An aborted (timed-out) probe → still wedged → keep waiting. Refused/reset → down.
 		return error instanceof Error && error.name === "AbortError";
