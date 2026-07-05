@@ -15,6 +15,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 
 import { sqlIdent } from "../../storage/sql.js";
+import type { JobQueueStats } from "./job-queue.js";
 import type { DaemonService } from "./types.js";
 
 export const LOCAL_QUEUE_DAEMON_DIR_NAME = ".daemon" as const;
@@ -71,6 +72,17 @@ export interface LocalQueueCounts {
 	readonly byKind: Readonly<Record<string, number>>;
 }
 
+/** A mutable per-kind accumulator used while building the {@link JobQueueStats} snapshot. */
+interface MutableJobKindStats {
+	kind: string;
+	queued: number;
+	leased: number;
+	done: number;
+	failed: number;
+	dead: number;
+	total: number;
+}
+
 export interface LocalJobQueueService extends DaemonService {
 	readonly persistent: boolean;
 	enqueue(job: LocalJobInput): Promise<string>;
@@ -80,6 +92,16 @@ export interface LocalJobQueueService extends DaemonService {
 	reclaimExpiredLeases(): Promise<number>;
 	pruneCompleted(): Promise<number>;
 	counts(): Promise<LocalQueueCounts>;
+	/**
+	 * The CURRENT-status snapshot in the SHARED {@link JobQueueStats} shape (job-observability), so the
+	 * hybrid router can merge this local queue with the DeepLake shared queue behind one endpoint. Unlike
+	 * {@link counts} (which reports `byStatus` and `byKind` SEPARATELY, never cross-partitioned), this
+	 * runs a real `GROUP BY kind, status` so each kind carries its own per-status breakdown — the faithful
+	 * mapping, never fabricated. Local statuses map onto the shared buckets: `queued`→queued,
+	 * `retrying`→failed (awaiting backoff retry), `leased`→leased, `done`→done, `failed`→dead (terminal,
+	 * retries exhausted).
+	 */
+	stats(): Promise<JobQueueStats>;
 	close(): void;
 }
 
@@ -176,6 +198,9 @@ export const NULL_LOCAL_JOB_QUEUE: LocalJobQueueService = Object.freeze({
 	},
 	async counts(): Promise<LocalQueueCounts> {
 		return emptyCounts();
+	},
+	async stats(): Promise<JobQueueStats> {
+		return { byKind: [], total: 0 };
 	},
 	async start(): Promise<void> {},
 	async stop(): Promise<void> {},
@@ -503,6 +528,41 @@ class SqliteLocalJobQueue implements LocalJobQueueService {
 			.all();
 		for (const row of kindRows) byKind[stringField(row, "kind")] = numberField(row, "count");
 		return { byStatus, byKind };
+	}
+
+	async stats(): Promise<JobQueueStats> {
+		this.assertOpen();
+		const rows = this.db
+			.prepare(
+				`SELECT ${sqlIdent("kind")} AS ${sqlIdent("kind")}, ${sqlIdent("status")} AS ${sqlIdent("status")}, ` +
+					`COUNT(*) AS ${sqlIdent("count")} FROM ${sqlIdent(LOCAL_JOB_TABLE)} ` +
+					`GROUP BY ${sqlIdent("kind")}, ${sqlIdent("status")}`,
+			)
+			.all();
+		const byKind = new Map<string, MutableJobKindStats>();
+		let total = 0;
+		for (const row of rows) {
+			const kind = stringField(row, "kind");
+			const status = stringField(row, "status");
+			const count = numberField(row, "count");
+			let entry = byKind.get(kind);
+			if (entry === undefined) {
+				entry = { kind, queued: 0, leased: 0, done: 0, failed: 0, dead: 0, total: 0 };
+				byKind.set(kind, entry);
+			}
+			entry.total += count;
+			total += count;
+			// Map local statuses onto the shared JobQueueStats buckets (faithful, never fabricated):
+			//   queued→queued, retrying→failed (awaiting backoff), leased→leased, done→done,
+			//   failed→dead (terminal, retries exhausted).
+			if (status === LOCAL_JOB_QUEUED) entry.queued += count;
+			else if (status === LOCAL_JOB_RETRYING) entry.failed += count;
+			else if (status === LOCAL_JOB_LEASED) entry.leased += count;
+			else if (status === LOCAL_JOB_DONE) entry.done += count;
+			else if (status === LOCAL_JOB_FAILED) entry.dead += count;
+		}
+		const list = [...byKind.values()].sort((a, b) => b.total - a.total || a.kind.localeCompare(b.kind));
+		return { byKind: list, total };
 	}
 
 	private nextRunnable(now: string, kinds?: readonly string[]): Record<string, unknown> | null {

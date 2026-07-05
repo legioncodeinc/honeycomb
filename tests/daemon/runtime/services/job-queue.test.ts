@@ -40,6 +40,7 @@ import {
 	createJobQueueService,
 	type JobQueueClock,
 	type JobQueueDeps,
+	noopJobQueueService,
 } from "../../../../src/daemon/runtime/services/job-queue.js";
 
 const SCOPE: QueryScope = { org: "fake-org", workspace: "fake-ws" };
@@ -639,3 +640,63 @@ describe("b-AC-7 completed jobs purge past the window; dead jobs are retained lo
 		expect(store.current(deadId)?.status).toBe("dead");
 	});
 });
+
+describe("job-observability stats() reports the CURRENT-status breakdown by kind", () => {
+	it("aggregates by kind + status over the highest-version row (a queued→leased→done job counts once as done)", async () => {
+		const { queue } = makeQueue();
+
+		// Two `summary` jobs: one is walked all the way to `done`, one stays queued.
+		const summaryDone = await queue.enqueue({ kind: "summary", payload: {} });
+		await queue.enqueue({ kind: "summary", payload: {} });
+		// One `distill` job left queued.
+		await queue.enqueue({ kind: "distill", payload: {} });
+
+		// Drive summaryDone: queued → leased → done. Its CURRENT state must count ONCE as `done`,
+		// never as one-per-transition over the append-only history.
+		const leased = await queue.lease(["summary"]);
+		expect(leased?.id).toBe(summaryDone);
+		await queue.complete(summaryDone);
+
+		const stats = await queue.stats();
+
+		// Total is CURRENT jobs (3 distinct ids), not the raw append-only row count.
+		expect(stats.total).toBe(3);
+
+		const summary = stats.byKind.find((k) => k.kind === "summary");
+		expect(summary).toEqual({ kind: "summary", queued: 1, leased: 0, done: 1, failed: 0, dead: 0, total: 2 });
+		const distill = stats.byKind.find((k) => k.kind === "distill");
+		expect(distill).toEqual({ kind: "distill", queued: 1, leased: 0, done: 0, failed: 0, dead: 0, total: 1 });
+	});
+
+	it("counts a leased job as leased and a dead job as dead (current status, not history)", async () => {
+		const clock = manualClock();
+		const { queue } = makeQueue({ clock, config: { maxAttempts: 1, backoffBaseMs: 1_000 } });
+
+		// A job left leased (in flight).
+		await queue.enqueue({ kind: "work", payload: {} });
+		await queue.lease(["work"]);
+
+		// A separate job walked to dead (maxAttempts 1 → first fail is fatal).
+		const deadId = await queue.enqueue({ kind: "work", payload: {} });
+		const leasedDead = await queue.lease(["work"]);
+		expect(leasedDead?.id).toBe(deadId);
+		await queue.fail(deadId, "fatal");
+
+		const stats = await queue.stats();
+		const work = stats.byKind.find((k) => k.kind === "work");
+		expect(work).toEqual({ kind: "work", queued: 0, leased: 1, done: 0, failed: 0, dead: 1, total: 2 });
+		expect(stats.total).toBe(2);
+	});
+
+	it("returns an empty snapshot for an empty queue", async () => {
+		const { queue } = makeQueue();
+		expect(await queue.stats()).toEqual({ byKind: [], total: 0 });
+	});
+});
+
+describe("noopJobQueueService.stats() returns an empty snapshot", () => {
+	it("byKind is empty and total is 0", async () => {
+		expect(await noopJobQueueService.stats()).toEqual({ byKind: [], total: 0 });
+	});
+});
+

@@ -6,7 +6,7 @@
  * leaving shared/unknown kinds on the existing DeepLake-backed queue.
  */
 
-import type { JobInput, JobQueueService, LeasedJob } from "./job-queue.js";
+import type { JobInput, JobKindStats, JobQueueService, JobQueueStats, LeasedJob } from "./job-queue.js";
 
 export const HONEYCOMB_LOCAL_QUEUE_ENABLED = "HONEYCOMB_LOCAL_QUEUE_ENABLED" as const;
 export const HONEYCOMB_LOCAL_QUEUE_DRAIN_SHARED = "HONEYCOMB_LOCAL_QUEUE_DRAIN_SHARED" as const;
@@ -92,6 +92,20 @@ class HybridJobQueueServiceImpl implements JobQueueService {
 		return this.shared.lease(sharedKinds);
 	}
 
+	async stats(): Promise<JobQueueStats> {
+		// Merge the CURRENT-status snapshot from BOTH queues. A kind lives in exactly one of them in
+		// practice (a kind is either local-classified or shared), but we merge per-kind defensively so a
+		// migration overlap — the same kind draining on both — sums correctly instead of dropping one side.
+		const [local, shared] = await Promise.all([this.local.stats(), this.shared.stats()]);
+		const byKind = new Map<string, JobKindStats>();
+		for (const entry of [...local.byKind, ...shared.byKind]) {
+			const existing = byKind.get(entry.kind);
+			byKind.set(entry.kind, existing === undefined ? entry : mergeKindStats(existing, entry));
+		}
+		const list = [...byKind.values()].sort((a, b) => b.total - a.total || a.kind.localeCompare(b.kind));
+		return { byKind: list, total: local.total + shared.total };
+	}
+
 	async complete(id: string, leaseAttempt?: number): Promise<void> {
 		if (this.localIds.has(id)) {
 			await this.local.complete(id, leaseAttempt);
@@ -156,6 +170,19 @@ class HybridJobQueueServiceImpl implements JobQueueService {
 		if (classified.sharedKinds.length === 0) return null;
 		return classified.sharedKinds;
 	}
+}
+
+/** Sum two same-kind {@link JobKindStats} entries field-by-field (defensive cross-queue merge). */
+function mergeKindStats(a: JobKindStats, b: JobKindStats): JobKindStats {
+	return {
+		kind: a.kind,
+		queued: a.queued + b.queued,
+		leased: a.leased + b.leased,
+		done: a.done + b.done,
+		failed: a.failed + b.failed,
+		dead: a.dead + b.dead,
+		total: a.total + b.total,
+	};
 }
 
 function parseBooleanFlag(raw: string | undefined): boolean {
