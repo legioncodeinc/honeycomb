@@ -203,6 +203,20 @@ class InMemoryJobs {
 			const row = id !== undefined ? this.current(id) : undefined;
 			return row ? [{ ...row }] : [];
 		}
+		// Paginated stats scan: SELECT id,type,status,version FROM ... ORDER BY id,version LIMIT N OFFSET M
+		// (no WHERE). Returns EVERY appended row (all versions), ordered by (id, version), sliced by the
+		// page — the service reduces to the highest-version-per-id in memory across pages.
+		if (!/WHERE/i.test(sql) && /LIMIT\s+\d+\s+OFFSET\s+\d+/i.test(sql)) {
+			const limit = Number(sql.match(/LIMIT\s+(\d+)/i)?.[1] ?? "0");
+			const offset = Number(sql.match(/OFFSET\s+(\d+)/i)?.[1] ?? "0");
+			const sorted = [...this.all].sort((a, b) => {
+				const ai = String(a.id);
+				const bi = String(b.id);
+				if (ai !== bi) return ai < bi ? -1 : 1;
+				return Number(a.version) - Number(b.version);
+			});
+			return sorted.slice(offset, offset + limit).map((r) => ({ id: r.id, type: r.type, status: r.status, version: r.version }));
+		}
 		return [];
 	}
 
@@ -666,6 +680,35 @@ describe("job-observability stats() reports the CURRENT-status breakdown by kind
 		expect(summary).toEqual({ kind: "summary", queued: 1, leased: 0, done: 1, failed: 0, dead: 0, total: 2 });
 		const distill = stats.byKind.find((k) => k.kind === "distill");
 		expect(distill).toEqual({ kind: "distill", queued: 1, leased: 0, done: 0, failed: 0, dead: 0, total: 1 });
+	});
+
+	it("PAGINATES: accumulates the highest-version-per-id across pages, not just page 0 (statsPageSize=2)", async () => {
+		// A tiny page size forces the scan to span multiple pages. A queued→leased→done job's three
+		// append-only rows land across page boundaries, so this proves the reduction accumulates over
+		// ALL pages (page 0 alone would miss the `done` row and mis-count the job as still queued).
+		const { queue } = makeQueue({ config: { statsPageSize: 2 } });
+
+		const a = await queue.enqueue({ kind: "summary", payload: {} }); // → done (3 rows)
+		await queue.enqueue({ kind: "summary", payload: {} }); // queued (1 row)
+		await queue.enqueue({ kind: "distill", payload: {} }); // queued (1 row)
+
+		const leased = await queue.lease(["summary"]);
+		expect(leased?.id).toBe(a);
+		await queue.complete(a); // a now: queued→leased→done, 3 rows spread across pages
+
+		const stats = await queue.stats();
+
+		// 3 distinct jobs, correctly reduced despite 5 total rows over 3 pages.
+		expect(stats.total).toBe(3);
+		expect(stats.byKind.find((k) => k.kind === "summary")).toEqual({
+			kind: "summary",
+			queued: 1,
+			leased: 0,
+			done: 1,
+			failed: 0,
+			dead: 0,
+			total: 2,
+		});
 	});
 
 	it("counts a leased job as leased and a dead job as dead (current status, not history)", async () => {
