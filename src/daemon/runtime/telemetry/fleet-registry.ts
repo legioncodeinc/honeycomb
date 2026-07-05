@@ -341,3 +341,57 @@ export function registerHoneycombWithDoctor(options: RegistryUpsertOptions = {})
 		updatedExistingEntry,
 	};
 }
+
+/** The outcome of {@link unregisterHoneycombFromDoctor} — whether an entry was removed + where. */
+export interface RegistryDeleteResult {
+	/** True iff a `name === "honeycomb"` entry existed and was removed from at least one file. */
+	readonly removed: boolean;
+	/** The registry file(s) actually rewritten to drop the entry. */
+	readonly registryPaths: readonly string[];
+}
+
+/**
+ * Delete honeycomb's entry from doctor's static registry (PRD-003b b-AC-3) — the delete counterpart
+ * to {@link registerHoneycombWithDoctor}. Removes the `name === "honeycomb"` entry by name from
+ * WHICHEVER registry file(s) carry it: both the fleet-root `~/.apiary/registry.json` AND the legacy
+ * `~/.honeycomb/doctor.daemons.json` are checked, since the compat window can leave the entry in
+ * either. Every OTHER daemon's entry and every unknown top-level key is preserved verbatim; the write
+ * is atomic (temp file + rename). A missing / malformed / entry-less file is a friendly no-op (never a
+ * throw, never a created file). Callers (the uninstall verb) run this best-effort.
+ */
+export function unregisterHoneycombFromDoctor(options: RegistryUpsertOptions = {}): RegistryDeleteResult {
+	const pathOptions: FleetRootOptions = {
+		...(options.homeDir !== undefined ? { home: options.homeDir } : {}),
+		...(options.env !== undefined ? { env: options.env } : {}),
+		...(options.platform !== undefined ? { platform: options.platform } : {}),
+	};
+	const fs = options.fs ?? createNodeRegistryFs();
+	// An explicit `registryPath` targets exactly that file; otherwise check BOTH window locations.
+	const candidatePaths =
+		options.registryPath !== undefined
+			? [options.registryPath]
+			: [fleetRegistryPath(pathOptions), legacyRegistryPath(pathOptions.home)];
+
+	let removed = false;
+	const registryPaths: string[] = [];
+	for (const path of candidatePaths) {
+		const parsed = readRegistryDocument(path, fs);
+		const index = parsed.daemons.findIndex((entry) => entry.name === HONEYCOMB_REGISTRY_NAME);
+		if (index < 0) continue;
+		const nextDaemons = parsed.daemons.filter((entry) => entry.name !== HONEYCOMB_REGISTRY_NAME);
+		const nextRoot: Record<string, unknown> = { ...parsed.root, daemons: nextDaemons };
+		const serialized = `${JSON.stringify(nextRoot, null, 2)}\n`;
+		const tempPath = nextTempPath(path);
+		fs.mkdirp(dirname(path));
+		fs.writeFile(tempPath, serialized);
+		try {
+			fs.rename(tempPath, path);
+		} catch (error) {
+			fs.removeFile(tempPath);
+			throw error;
+		}
+		removed = true;
+		registryPaths.push(path);
+	}
+	return { removed, registryPaths };
+}

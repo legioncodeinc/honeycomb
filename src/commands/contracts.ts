@@ -103,17 +103,52 @@ export interface VerbSpec {
  */
 export const VERB_TABLE: readonly VerbSpec[] = Object.freeze([
 	// Memory & recall — the product's core write/read/lifecycle surface.
-	{ verb: "remember", cls: "storage", group: "memory", summary: "write a memory through the daemon (--type fact|convention|preference|decision|gotcha|reference)" },
+	{
+		verb: "remember",
+		cls: "storage",
+		group: "memory",
+		summary: "write a memory through the daemon (--type fact|convention|preference|decision|gotcha|reference)",
+	},
 	{ verb: "recall", cls: "storage", group: "memory", summary: "recall memories through the daemon" },
-	{ verb: "memory", cls: "storage", group: "memory", summary: "lifecycle: conflicts (list/resolve), stale-refs (list), inspect <id> --lifecycle (058d)" },
+	{
+		verb: "memory",
+		cls: "storage",
+		group: "memory",
+		summary: "lifecycle: conflicts (list/resolve), stale-refs (list), inspect <id> --lifecycle (058d)",
+	},
 	{ verb: "sessions", cls: "storage", group: "memory", summary: "list/prune captured sessions through the daemon" },
-	{ verb: "pollinate", cls: "storage", group: "memory", summary: "trigger a pollinating consolidation pass on the daemon (009/026)" },
-	{ verb: "maintenance", cls: "storage", group: "memory", summary: "run version-history compaction over version-bumped tables (030)" },
+	{
+		verb: "pollinate",
+		cls: "storage",
+		group: "memory",
+		summary: "trigger a pollinating consolidation pass on the daemon (009/026)",
+	},
+	{
+		verb: "maintenance",
+		cls: "storage",
+		group: "memory",
+		summary: "run version-history compaction over version-bumped tables (030)",
+	},
 	// Knowledge & skills — skills, assets, ontology, the codebase graph, and goals.
-	{ verb: "skill", cls: "storage", group: "knowledge", summary: "skillify scope/pull/unpull/force/promote through the daemon (promote = cross-project, 049c)" },
+	{
+		verb: "skill",
+		cls: "storage",
+		group: "knowledge",
+		summary: "skillify scope/pull/unpull/force/promote through the daemon (promote = cross-project, 049c)",
+	},
 	{ verb: "skillify", cls: "storage", group: "knowledge", summary: "pull team skills from the daemon (016c)" },
-	{ verb: "asset", cls: "storage", group: "knowledge", summary: "register/promote/demote/style skills+agents through the tier×style lattice (033)" },
-	{ verb: "ontology", cls: "storage", group: "knowledge", summary: "inspect/propose ontology changes through the daemon" },
+	{
+		verb: "asset",
+		cls: "storage",
+		group: "knowledge",
+		summary: "register/promote/demote/style skills+agents through the tier×style lattice (033)",
+	},
+	{
+		verb: "ontology",
+		cls: "storage",
+		group: "knowledge",
+		summary: "inspect/propose ontology changes through the daemon",
+	},
 	{ verb: "graph", cls: "storage", group: "knowledge", summary: "build/query the codebase graph through the daemon" },
 	{ verb: "sources", cls: "storage", group: "knowledge", summary: "connect/index/purge sources through the daemon" },
 	{ verb: "goal", cls: "storage", group: "knowledge", summary: "manage goals/KPIs through the daemon" },
@@ -121,23 +156,65 @@ export const VERB_TABLE: readonly VerbSpec[] = Object.freeze([
 	{ verb: "agent", cls: "storage", group: "agents", summary: "run an agent turn through the daemon" },
 	{ verb: "route", cls: "storage", group: "agents", summary: "manage inference routes through the daemon" },
 	{ verb: "secret", cls: "storage", group: "agents", summary: "manage named secrets through the daemon" },
-	{ verb: "settings", cls: "storage", group: "agents", summary: "get/set/list vault settings + provider→model selector through the daemon" },
+	{
+		verb: "settings",
+		cls: "storage",
+		group: "agents",
+		summary: "get/set/list vault settings + provider→model selector through the daemon",
+	},
 	// Account & workspaces — auth, identity, and the org/workspace/project scope surface.
-	{ verb: "login", cls: "auth", group: "account", summary: "authenticate via device flow, or --token <key> for headless (023)" },
+	{
+		verb: "login",
+		cls: "auth",
+		group: "account",
+		summary: "authenticate via device flow, or --token <key> for headless (023)",
+	},
 	{ verb: "logout", cls: "auth", group: "account", summary: "remove the shared credentials and sign out (023)" },
-	{ verb: "whoami", cls: "auth", group: "account", summary: "show the authenticated user, org, and workspace (GET /me)" },
+	{
+		verb: "whoami",
+		cls: "auth",
+		group: "account",
+		summary: "show the authenticated user, org, and workspace (GET /me)",
+	},
 	{ verb: "org", cls: "auth", group: "account", summary: "list/switch org (passthrough to the auth dispatcher)" },
-	{ verb: "workspace", cls: "auth", group: "account", summary: "list/switch/use workspace (passthrough to the auth dispatcher)" },
-	{ verb: "workspaces", cls: "auth", group: "account", summary: "list workspaces in the active org (alias of `workspace list`)" },
-	{ verb: "project", cls: "auth", group: "account", summary: "list/bind/use projects + show the resolved per-folder scope (049d)" },
+	{
+		verb: "workspace",
+		cls: "auth",
+		group: "account",
+		summary: "list/switch/use workspace (passthrough to the auth dispatcher)",
+	},
+	{
+		verb: "workspaces",
+		cls: "auth",
+		group: "account",
+		summary: "list workspaces in the active org (alias of `workspace list`)",
+	},
+	{
+		verb: "project",
+		cls: "auth",
+		group: "account",
+		summary: "list/bind/use projects + show the resolved per-folder scope (049d)",
+	},
 	// Setup & system — install/onboard, daemon lifecycle, dashboard, hooks, telemetry, update.
 	{ verb: "setup", cls: "local", group: "system", summary: "detect assistants, wire hooks, bring up the daemon" },
-	{ verb: "install", cls: "local", group: "system", summary: "bring up the daemon (health-gated) + open the dashboard (PRD-050a)" },
+	{
+		verb: "install",
+		cls: "local",
+		group: "system",
+		summary: "bring up the daemon (health-gated) + open the dashboard (PRD-050a)",
+	},
 	{ verb: "status", cls: "local", group: "system", summary: "daemon connectivity + login + D1–D5 environment health" },
+	{ verb: "start", cls: "local", group: "system", summary: "start the daemon (bare alias of `daemon start`)" },
+	{ verb: "stop", cls: "local", group: "system", summary: "stop the daemon (bare alias of `daemon stop`)" },
 	{ verb: "daemon", cls: "local", group: "system", summary: "start | stop | status the loopback daemon (3850)" },
 	{ verb: "dashboard", cls: "local", group: "system", summary: "launch the daemon-served dashboard (020b)" },
 	{ verb: "hook", cls: "local", group: "system", summary: "inspect/wire harness hooks" },
-	{ verb: "telemetry", cls: "local", group: "system", summary: "show exactly what adoption telemetry has been / would be sent (--show, PRD-050e)" },
+	{
+		verb: "telemetry",
+		cls: "local",
+		group: "system",
+		summary: "show exactly what adoption telemetry has been / would be sent (--show, PRD-050e)",
+	},
 	{ verb: "update", cls: "local", group: "system", summary: "self-update the CLI, daemon, and bundles" },
 	{ verb: "uninstall", cls: "local", group: "system", summary: "reverse only Honeycomb's changes" },
 ]);
@@ -371,13 +448,15 @@ export function mintCliSessionId(): string {
  * The injected `headers` win on conflict, so a caller can override the runtime-path/session
  * (e.g. a test, or a future plugin-path caller).
  */
-export function createLoopbackDaemonClient(options: {
-	readonly baseUrl?: string;
-	readonly headers?: Readonly<Record<string, string>>;
-	readonly fetchImpl?: typeof fetch;
-	/** Override the synthetic-session minter (tests). Defaults to {@link mintCliSessionId}. */
-	readonly sessionId?: () => string;
-} = {}): DaemonClient {
+export function createLoopbackDaemonClient(
+	options: {
+		readonly baseUrl?: string;
+		readonly headers?: Readonly<Record<string, string>>;
+		readonly fetchImpl?: typeof fetch;
+		/** Override the synthetic-session minter (tests). Defaults to {@link mintCliSessionId}. */
+		readonly sessionId?: () => string;
+	} = {},
+): DaemonClient {
 	const baseUrl = options.baseUrl ?? "http://127.0.0.1:3850";
 	const headers = options.headers ?? {};
 	const doFetch = options.fetchImpl ?? fetch;
@@ -428,9 +507,7 @@ export function createLoopbackDaemonClient(options: {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** A line-sink so dispatcher/handler output is capturable in tests (no direct stdout). */
-export interface OutputSink {
-	(line: string): void;
-}
+export type OutputSink = (line: string) => void;
 
 /** The outcome of a dispatched command: the process exit code. */
 export interface CommandResult {

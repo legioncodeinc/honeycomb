@@ -23,7 +23,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -38,38 +38,39 @@ import {
 	type DashboardLauncher,
 	type OrgDriftHealer,
 	type StatusHealthSource,
+	type UninstallLifecycleSteps,
 } from "../commands/index.js";
 import { healthSourceFromCheck } from "../commands/status.js";
 
 import {
 	type Credentials,
-	DEFAULT_DEEPLAKE_API_URL,
 	credentialsPath,
+	DEFAULT_DEEPLAKE_API_URL,
 	healOrgDrift,
 	loadCredentials,
 	loadDiskCredentials,
 	systemClock,
 	verifyTokenClaims,
 } from "../daemon/runtime/auth/index.js";
+import { runHoneycombStateMigration } from "../daemon/runtime/state-migration/index.js";
+import { unregisterHoneycombFromDoctor } from "../daemon/runtime/telemetry/fleet-registry.js";
+import { launchDashboard } from "../dashboard/launch.js";
 import { DAEMON_HOST, DAEMON_PORT } from "../shared/constants.js";
 import { honeycombStateDir, legacyHoneycombDir, preferExistingPath, resolveFleetRoot } from "../shared/fleet-root.js";
-import { runHoneycombStateMigration } from "../daemon/runtime/state-migration/index.js";
-
 import { authMain } from "./auth.js";
-import { orgMain } from "./org.js";
-import { projectMain } from "./project.js";
-import { whoamiMain } from "./whoami.js";
-import { buildRealTokenIssuer } from "./token-issuer.js";
 import { buildConnectorRunner } from "./connector-runner.js";
-import { buildStatusHealthSource } from "./health-probes.js";
-import { launchDashboard } from "../dashboard/launch.js";
 import {
+	createDaemonServiceController,
 	type DaemonServiceController,
+	detectServiceManager,
 	type ServiceManager,
 	type ServiceSpec,
-	createDaemonServiceController,
-	detectServiceManager,
 } from "./daemon-service.js";
+import { buildStatusHealthSource } from "./health-probes.js";
+import { orgMain } from "./org.js";
+import { projectMain } from "./project.js";
+import { buildRealTokenIssuer } from "./token-issuer.js";
+import { whoamiMain } from "./whoami.js";
 
 /** The full dep bundle the bin hands `dispatch` — `CommandDeps` plus the local/status/daemon seams. */
 export interface RuntimeDeps extends CommandDeps {
@@ -80,6 +81,7 @@ export interface RuntimeDeps extends CommandDeps {
 	readonly drift: OrgDriftHealer;
 	readonly loggedIn: boolean;
 	readonly lifecycle: DaemonLifecycle;
+	readonly uninstallSteps: UninstallLifecycleSteps;
 }
 
 /** The daemon base URL the loopback client + health probe dial. */
@@ -549,6 +551,82 @@ function isRealBackendCredential(apiUrl: string | undefined): boolean {
 	return apiUrl.replace(/\/+$/, "") === DEFAULT_DEEPLAKE_API_URL;
 }
 
+/**
+ * Build the PRD-003b fleet-lifecycle uninstall steps (b-AC-2/3/4) the FULL `uninstall` verb runs
+ * alongside the harness-hook reversal. Every step is best-effort and self-contained:
+ *   - `stopDaemon` fronts the {@link DaemonLifecycle} stop path (service-aware where registered).
+ *   - `unregisterService` removes the OS service unit (current label + best-effort legacy labels)
+ *     through the same {@link createDaemonServiceController} the lifecycle uses; it reports `removed`
+ *     only when the unit was actually registered before the call. A host with no service manager is
+ *     a friendly no-op.
+ *   - `deleteRegistryEntry` deletes honeycomb's entry from doctor's registry (both the fleet-root and
+ *     legacy files), leaving every other entry intact ({@link unregisterHoneycombFromDoctor}).
+ *   - `removeStateDir` removes honeycomb's resolved absolute state dir ({@link honeycombStateDir}),
+ *     never following a symlink out of the fleet root (a symlinked dir has only the link removed) and
+ *     never glob-expanding. It touches NOTHING shared (`~/.deeplake`) and no other product's dir.
+ */
+export function buildUninstallLifecycleSteps(lifecycle: DaemonLifecycle): UninstallLifecycleSteps {
+	return {
+		async stopDaemon(): Promise<{ readonly stopped: boolean }> {
+			return lifecycle.stop();
+		},
+		unregisterService(): { readonly removed: boolean; readonly manager?: string } {
+			const manager = detectServiceManager();
+			if (manager === null) return { removed: false };
+			const spec = buildServiceSpec();
+			let controller: DaemonServiceController;
+			try {
+				controller = createDaemonServiceController(manager);
+			} catch {
+				return { removed: false, manager };
+			}
+			let wasRegistered = false;
+			try {
+				wasRegistered = controller.isRegistered(spec);
+			} catch {
+				wasRegistered = false;
+			}
+			try {
+				controller.unregister(spec);
+			} catch {
+				// Best-effort: a manager stop/remove failure never aborts the uninstall.
+			}
+			try {
+				controller.unregisterLegacy?.(spec);
+			} catch {
+				// Best-effort legacy cleanup.
+			}
+			return wasRegistered ? { removed: true, manager } : { removed: false, manager };
+		},
+		deleteRegistryEntry(): { readonly removed: boolean } {
+			try {
+				return { removed: unregisterHoneycombFromDoctor().removed };
+			} catch {
+				return { removed: false };
+			}
+		},
+		removeStateDir(): { readonly removed: boolean; readonly dir: string } {
+			// The RESOLVED absolute honeycomb state dir under the fleet root (ADR-0003). Never a glob.
+			const dir = honeycombStateDir();
+			let isSymlink: boolean;
+			try {
+				isSymlink = lstatSync(dir).isSymbolicLink();
+			} catch {
+				// Absent (or unreadable): nothing to remove.
+				return { removed: false, dir };
+			}
+			try {
+				// A symlinked state dir: remove ONLY the link, never follow it out of the root.
+				if (isSymlink) rmSync(dir, { force: true });
+				else rmSync(dir, { recursive: true, force: true });
+				return { removed: true, dir };
+			} catch {
+				return { removed: false, dir };
+			}
+		},
+	};
+}
+
 /** The dashboard launcher seam (FR-4) — binds 020b's {@link launchDashboard} over the loopback daemon. */
 export function buildDashboardLauncher(headers: Record<string, string>): DashboardLauncher {
 	return {
@@ -588,6 +666,8 @@ export function buildRuntimeDeps(): RuntimeDeps {
 		health: buildStatusHealthSource(daemon),
 		drift: buildOrgDriftHealer(creds),
 		loggedIn: creds !== null,
+		// PRD-003b: the FULL `uninstall` verb runs these alongside the harness-hook reversal.
+		uninstallSteps: buildUninstallLifecycleSteps(lifecycle),
 	};
 }
 

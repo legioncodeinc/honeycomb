@@ -15,6 +15,8 @@
  * never `daemon/storage`. `src/commands` is a NON_DAEMON_ROOT (D-2).
  */
 
+import { HONEYCOMB_VERSION, PRODUCT_SLUG } from "../shared/constants.js";
+import { runAssetVerb } from "./asset.js";
 import {
 	type CommandDeps,
 	type CommandDispatcher,
@@ -28,14 +30,8 @@ import {
 	VERB_GROUPS,
 	VERB_TABLE,
 } from "./contracts.js";
-import { parseSessionsArgs, runSessionsCommand } from "./sessions.js";
-import { runPollinateVerb } from "./pollinate.js";
-import { runMaintenanceVerb } from "./maintenance.js";
-import { runMemoryVerb } from "./memory.js";
-import { runSettingsVerb } from "./settings.js";
-import { runAssetVerb } from "./asset.js";
-import { runStorageVerb } from "./storage-handlers.js";
-import { runStatusCommand, type StatusDeps } from "./status.js";
+import { type DaemonLifecycle, type DaemonVerbDeps, ensureDaemonRunning, runDaemonCommand } from "./daemon.js";
+import { type InstallVerbDeps, runInstallCommand } from "./install.js";
 import {
 	type LocalDeps,
 	runConnectorVerb,
@@ -43,10 +39,14 @@ import {
 	runHookCommand,
 	runUpdateCommand,
 } from "./local-handlers.js";
-import { type DaemonLifecycle, type DaemonVerbDeps, ensureDaemonRunning, runDaemonCommand } from "./daemon.js";
-import { type InstallVerbDeps, runInstallCommand } from "./install.js";
-import { type TelemetryVerbDeps, runTelemetryCommand } from "./telemetry.js";
-import { HONEYCOMB_VERSION, PRODUCT_SLUG } from "../shared/constants.js";
+import { runMaintenanceVerb } from "./maintenance.js";
+import { runMemoryVerb } from "./memory.js";
+import { runPollinateVerb } from "./pollinate.js";
+import { parseSessionsArgs, runSessionsCommand } from "./sessions.js";
+import { runSettingsVerb } from "./settings.js";
+import { runStatusCommand, type StatusDeps } from "./status.js";
+import { runStorageVerb } from "./storage-handlers.js";
+import { runTelemetryCommand, type TelemetryVerbDeps } from "./telemetry.js";
 
 /** The recognized global-flag tokens (FR-1). A per-command flag is left for the handler. */
 const GLOBAL_FLAG_TOKENS: Readonly<Record<string, keyof GlobalFlags>> = {
@@ -147,11 +147,20 @@ function daemonVerbDeps(deps: CommandDeps): DaemonVerbDeps {
 function installVerbDeps(deps: CommandDeps): InstallVerbDeps {
 	const opener = (deps as { openDashboard?: InstallVerbDeps["openDashboard"] }).openDashboard;
 	const probe = (deps as { probeDashboard?: InstallVerbDeps["probeDashboard"] }).probeDashboard;
+	// PRD-003a: forward the solo-vs-fleet + auto-login seams so a bin/test can override them; production
+	// leaves them unset (the real classifier + device-flow login defaults apply).
+	const detectFleet = (deps as { detectFleet?: InstallVerbDeps["detectFleet"] }).detectFleet;
+	const loadInstallCredentials = (deps as { loadInstallCredentials?: InstallVerbDeps["loadInstallCredentials"] })
+		.loadInstallCredentials;
+	const runDeviceLogin = (deps as { runDeviceLogin?: InstallVerbDeps["runDeviceLogin"] }).runDeviceLogin;
 	return {
 		...daemonVerbDeps(deps),
 		...(deps.dir !== undefined ? { dir: deps.dir } : {}),
 		...(opener !== undefined ? { openDashboard: opener } : {}),
 		...(probe !== undefined ? { probeDashboard: probe } : {}),
+		...(detectFleet !== undefined ? { detectFleet } : {}),
+		...(loadInstallCredentials !== undefined ? { loadInstallCredentials } : {}),
+		...(runDeviceLogin !== undefined ? { runDeviceLogin } : {}),
 	};
 }
 
@@ -235,6 +244,13 @@ function dispatchLocal(inv: CommandInvocation, deps: LocalDeps & StatusDeps): Pr
 			return runDashboardCommand(deps);
 		case "status":
 			return runStatusCommand(deps);
+		// PRD-003b b-AC-1 / b-AC-5: bare `start` / `stop` front the SAME DaemonLifecycle paths as
+		// `daemon start` / `daemon stop` (which stay working as aliases). The daemon subcommand is
+		// forced to the bare verb; any extra flags on the tail are preserved.
+		case "start":
+			return runDaemonCommand(["start", ...inv.argv], daemonVerbDeps(deps));
+		case "stop":
+			return runDaemonCommand(["stop", ...inv.argv], daemonVerbDeps(deps));
 		case "daemon":
 			return runDaemonCommand(inv.argv, daemonVerbDeps(deps));
 		case "hook":
