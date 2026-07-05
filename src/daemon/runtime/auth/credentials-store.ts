@@ -97,6 +97,15 @@ export interface DiskCredentials {
 	apiUrl?: string;
 	/** Additive Honeycomb-only field: the within-workspace actor id (Hivemind ignores it). */
 	agentId?: string;
+	/**
+	 * PRD-073c: the confirmed-tenancy marker. Set to an ISO-8601 timestamp ONLY by an EXPLICIT
+	 * link-time selection (the dashboard `POST /setup/tenancy/select` or the CLI login prompt/flags/
+	 * auto-select) — never by the legacy silent `orgs[0]` guess. Additive + Hivemind-ignored. A
+	 * pre-073 credential omits it and is grandfathered as confirmed via its non-empty `orgId`
+	 * ({@link import("./tenancy-confirmation.js").resolveTenancyConfirmation}); a pending link writes
+	 * NO credential at all, so the absence of a credential file is the "unconfirmed" state.
+	 */
+	tenancyConfirmedAt?: string;
 	/** ISO timestamp stamped server-side on save (b-AC-4). */
 	savedAt: string;
 }

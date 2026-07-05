@@ -76,14 +76,16 @@ export async function runCapture(
 ): Promise<HookResult> {
 	let conflict = false;
 	let transportFailed = false;
+	let gatedReason: string | undefined;
 
 	const decision = await runCaptureGuarded(env, withEntrypoint(input, ctx), async () => {
 		const response = await dispatchCapture(input, deps);
 		if (response.status === 0) transportFailed = true;
 		else if (response.status === RUNTIME_PATH_CONFLICT) conflict = true;
+		else gatedReason = gatedReasonOf(response.body);
 	});
 
-	// Gate skipped → no daemon call was made (c-AC-6); report the skip reason.
+	// Gate skipped locally → no daemon call was made (c-AC-6); report the skip reason.
 	if (!decision.capture) {
 		return { ok: true, reason: decision.reason };
 	}
@@ -94,9 +96,29 @@ export async function runCapture(
 	if (transportFailed) {
 		return { ok: false, reason: "transport-failure" };
 	}
+	// PRD-073b (AC-073b.2.1): the daemon GATED the capture (dormant-by-default). Surface the reason
+	// so no shim path reports a plain success for a gated event — exactly the skip-reason shape the
+	// local gate already uses. An old-shape gated ack (no `reason`) degrades to a plain `ok` (073b).
+	if (gatedReason !== undefined) {
+		return { ok: true, reason: gatedReason };
+	}
 	// Capture succeeded (a normal daemon response), OR the action threw before a
 	// response and the gate swallowed it (fail-soft, turn proceeds) — both land here.
 	return { ok: true };
+}
+
+/**
+ * Extract the PRD-073 gated reason from a daemon capture ack, or `undefined` for a normal write / an
+ * old-shape ack. The daemon returns `{ ok: true, gated: true, reason: "no_bound_project" |
+ * "tenancy_unconfirmed", ... }` (status 200) when a capture is gated by the dormancy ladder; this
+ * reads the `reason` ONLY when `gated` is true and `reason` is a non-empty string, so a pre-073 daemon
+ * (gated ack without a `reason`, or a plain success) never fabricates one.
+ */
+function gatedReasonOf(body: unknown): string | undefined {
+	if (typeof body !== "object" || body === null) return undefined;
+	const record = body as Record<string, unknown>;
+	if (record.gated !== true) return undefined;
+	return typeof record.reason === "string" && record.reason.length > 0 ? record.reason : undefined;
 }
 
 /**

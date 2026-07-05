@@ -47,6 +47,8 @@ import {
 	type Clock,
 	type DiskCredentials,
 	DEFAULT_DEEPLAKE_API_URL,
+	DEFAULT_WORKSPACE,
+	ENV_WORKSPACE_ID,
 	saveDiskCredentials,
 	systemClock,
 } from "./credentials-store.js";
@@ -91,8 +93,7 @@ export interface DeviceFlowReporter {
 }
 
 /** The real wall-clock sleeper. */
-export const realSleeper: Sleeper = (ms: number): Promise<void> =>
-	new Promise((resolve) => setTimeout(resolve, ms));
+export const realSleeper: Sleeper = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ────────────────────────────────────────────────────────────────────────────
 // VERBATIM Hivemind wire shapes (ported from hivemind/src/commands/auth.ts).
@@ -258,6 +259,13 @@ export interface DeeplakeAuthClient {
 	listOrgs(token: string): Promise<OrgRow[]>;
 	/** `GET /workspaces` — the org's workspaces (AC-5 `workspaces` consumes this). */
 	listWorkspaces(token: string, orgId?: string): Promise<WorkspaceRow[]>;
+	/**
+	 * `POST /workspaces` — create a workspace in `orgId` (PRD-073c). Body `{ id, name }` (the Deeplake
+	 * contract: `id` is the Postgres-schema slug matching `^[a-z0-9]+(?:[-_][a-z0-9]+)*$`, `name` the
+	 * display label), scoped by the `X-Activeloop-Org-Id` header. Returns the created {@link WorkspaceRow}.
+	 * The token rides ONLY in the `Authorization` header (D-4).
+	 */
+	createWorkspace(token: string, orgId: string, id: string, name: string): Promise<WorkspaceRow>;
 	/** `POST /users/me/tokens` — mint a fresh long-lived token bound to `orgId` (AC-4 `org switch`). */
 	reMint(token: string, orgId: string): Promise<string>;
 	/**
@@ -337,6 +345,23 @@ export function createDeeplakeAuthClient(options: DeeplakeAuthClientOptions = {}
 			// Hivemind tolerates BOTH `{ data: [...] }` and a bare array — port that tolerance verbatim.
 			const data = (body as { data?: WorkspaceRow[] } | null)?.data ?? body;
 			return Array.isArray(data) ? (data as WorkspaceRow[]) : [];
+		},
+		async createWorkspace(token: string, orgId: string, id: string, name: string): Promise<WorkspaceRow> {
+			// PRD-073c: create a workspace in the chosen org. The Deeplake contract requires `id`
+			// (Postgres-schema slug) + `name`; the org is scoped by the X-Activeloop-Org-Id header.
+			const body = await request(
+				"/workspaces",
+				{
+					method: "POST",
+					headers: authHeaders(token, orgId),
+					body: JSON.stringify({ id, name }),
+				},
+				true,
+			);
+			const created = body as { id?: unknown; name?: unknown } | null;
+			const newId = typeof created?.id === "string" && created.id.length > 0 ? created.id : id;
+			const newName = typeof created?.name === "string" && created.name.length > 0 ? created.name : name;
+			return { id: newId, name: newName };
 		},
 		async reMint(token: string, orgId: string): Promise<string> {
 			// Per-mint unique name. DeepLake rejects a duplicate (user_id, name) with a misleading 500,
@@ -422,7 +447,11 @@ export function defaultBrowserOpener(url: string): boolean {
 			execFileSync("open", [safeUrl], { stdio: "ignore", timeout: 5000, windowsHide: true });
 		} else if (process.platform === "win32") {
 			// `windowsHide` suppresses the transient rundll32 console flash; the browser still opens.
-			execFileSync("rundll32", ["url.dll,FileProtocolHandler", safeUrl], { stdio: "ignore", timeout: 5000, windowsHide: true });
+			execFileSync("rundll32", ["url.dll,FileProtocolHandler", safeUrl], {
+				stdio: "ignore",
+				timeout: 5000,
+				windowsHide: true,
+			});
 		} else {
 			execFileSync("xdg-open", [safeUrl], { stdio: "ignore", timeout: 5000, windowsHide: true });
 		}
@@ -463,6 +492,13 @@ export interface LoginDeps {
 	readonly fetch?: AuthFetch;
 	/** The injectable poll sleeper (defaults to the real wall clock). */
 	readonly sleep?: Sleeper;
+	/**
+	 * PRD-073c/073d: the explicit tenancy selector (prompt/flags). When the account is multi-tenancy
+	 * and no env pins resolve it, {@link resolveTenancyChoice} calls this to obtain the chosen
+	 * `{ orgId, workspaceId }`. Absent, a single-tenancy account auto-selects and a multi-tenancy one
+	 * throws {@link TenancySelectionRequiredError} (the no-guess contract — parent AC-6).
+	 */
+	readonly selectTenancy?: TenancySelector;
 }
 
 /** Extra deps for the device flow: the reporter + the browser opener (both injectable). */
@@ -502,38 +538,223 @@ export interface DeviceFlowLoginDeps extends LoginDeps {
 /** The default device-flow poll cap — bounded so a stuck flow surfaces rather than hangs. */
 export const DEFAULT_MAX_POLLS = 900;
 
+// ────────────────────────────────────────────────────────────────────────────
+// PRD-073c/073d — explicit tenancy selection (no silent orgs[0] guess).
+// ────────────────────────────────────────────────────────────────────────────
+
+/** The enumerated candidates a {@link TenancySelector} chooses from (org list + a per-org ws lister). */
+export interface TenancyCandidates {
+	/** The orgs the authenticated account can see (`GET /organizations`, privilege-scoped). */
+	readonly orgs: readonly OrgRow[];
+	/** List a specific org's workspaces (the pending-window lister — no persist). */
+	listWorkspaces(orgId: string): Promise<WorkspaceRow[]>;
+}
+
 /**
- * Assemble the full Hivemind disk record from a long-lived token + the `/me` identity, then persist
- * it to the shared `~/.deeplake/credentials.json` (0600) via {@link saveDiskCredentials}. The org is
- * pinned by `HONEYCOMB_ORG_ID` when set, else the first org the account belongs to (Hivemind's
- * priority order, ported). The token NEVER reaches a log here (D-4).
+ * The interactive/flag-driven tenancy selector (PRD-073d). Given the enumerated candidates, returns
+ * the chosen `{ orgId, workspaceId }` (already resolved to ids). The CLI passes a selector that
+ * prompts on a TTY or resolves `--org`/`--workspace` flags, and throws a hard actionable error on a
+ * non-TTY multi-tenancy account with no flags. Absent, {@link resolveTenancyChoice} auto-selects a
+ * single-tenancy account and otherwise throws {@link TenancySelectionRequiredError}.
  */
-async function persistFromToken(
+export type TenancySelector = (candidates: TenancyCandidates) => Promise<{ orgId: string; workspaceId: string }>;
+
+/** A resolved, explicit tenancy choice (never a silent guess), with how it was chosen (for surfacing). */
+export interface ResolvedTenancyChoice {
+	readonly orgId: string;
+	readonly orgName: string;
+	readonly workspaceId: string;
+	readonly workspaceName: string;
+	/** `pins` (env), `auto` (single-tenancy), or `selector` (prompt/flags). */
+	readonly via: "pins" | "auto" | "selector";
+}
+
+/**
+ * Thrown when a link needs an explicit org/workspace choice but none was available (multi-tenancy
+ * account, no env pins, no selector — the non-TTY / no-flags refusal path, parent AC-6 / 073d-AC-2.1).
+ * Carries the enumerated orgs so the CLI can print an actionable list. NEVER carries a token (D-4).
+ */
+export class TenancySelectionRequiredError extends Error {
+	readonly orgs: readonly OrgRow[];
+	constructor(orgs: readonly OrgRow[]) {
+		super("tenancy selection required: this account has multiple orgs/workspaces — choose one explicitly");
+		this.name = "TenancySelectionRequiredError";
+		this.orgs = orgs;
+	}
+}
+
+/** Read the env tenancy pins (`HONEYCOMB_ORG_ID` / `HONEYCOMB_WORKSPACE_ID`) — trimmed, non-empty only. */
+export function resolvePinnedTenancy(env: NodeJS.ProcessEnv): { orgId?: string; workspaceId?: string } {
+	const out: { orgId?: string; workspaceId?: string } = {};
+	const org = env[ENV_ORG_ID];
+	if (typeof org === "string" && org.trim().length > 0) out.orgId = org.trim();
+	const ws = env[ENV_WORKSPACE_ID];
+	if (typeof ws === "string" && ws.trim().length > 0) out.workspaceId = ws.trim();
+	return out;
+}
+
+/**
+ * The auto-select rule (parent AC-8): a single org AND a single (or zero, the `default` sentinel)
+ * workspace resolve to an unambiguous pair; anything else needs an explicit choice. Returns the pair
+ * or `null` (needs selection). Zero concrete workspaces auto-selects the `default` sentinel (a
+ * single-tenancy account with no named workspaces).
+ */
+export function computeAutoSelection(
+	orgs: readonly OrgRow[],
+	workspaces: readonly WorkspaceRow[],
+): ResolvedTenancyChoice | null {
+	if (orgs.length !== 1) return null;
+	const org = orgs[0];
+	if (workspaces.length === 1) {
+		return {
+			orgId: org.id,
+			orgName: org.name,
+			workspaceId: workspaces[0].id,
+			workspaceName: workspaces[0].name,
+			via: "auto",
+		};
+	}
+	if (workspaces.length === 0) {
+		return {
+			orgId: org.id,
+			orgName: org.name,
+			workspaceId: DEFAULT_WORKSPACE,
+			workspaceName: DEFAULT_WORKSPACE,
+			via: "auto",
+		};
+	}
+	return null;
+}
+
+/**
+ * List an org's workspaces for the AUTO-SELECT path, tolerating a failure by degrading to an EMPTY
+ * list (→ the `default` sentinel). A single-tenancy account must not be hard-blocked at link time
+ * because the workspace enumeration hiccupped; the `default` sentinel is the correct fallback (and the
+ * pre-073 behavior). The interactive selector path lists directly (a failure there surfaces).
+ */
+async function listWorkspacesSoft(
+	wsFor: (orgId: string) => Promise<WorkspaceRow[]>,
+	orgId: string,
+): Promise<WorkspaceRow[]> {
+	try {
+		return await wsFor(orgId);
+	} catch {
+		return [];
+	}
+}
+
+/** Resolve a selector's `{ orgId, workspaceId }` ids to display names (for surfacing) — fail-soft. */
+async function finalizeChoice(
+	sel: { orgId: string; workspaceId: string },
+	orgs: readonly OrgRow[],
+	wsFor: (orgId: string) => Promise<WorkspaceRow[]>,
+): Promise<ResolvedTenancyChoice> {
+	const org = orgs.find((o) => o.id === sel.orgId) ?? { id: sel.orgId, name: sel.orgId };
+	let workspaceName = sel.workspaceId;
+	try {
+		const ws = await wsFor(org.id);
+		workspaceName = ws.find((w) => w.id === sel.workspaceId)?.name ?? sel.workspaceId;
+	} catch {
+		// Name resolution is cosmetic; fall back to the id when the lister flaps.
+	}
+	return { orgId: org.id, orgName: org.name, workspaceId: sel.workspaceId, workspaceName, via: "selector" };
+}
+
+/**
+ * Resolve the EXPLICIT tenancy choice for a link (PRD-073c/073d) — NEVER a silent `orgs[0]` guess.
+ * Precedence: (1) full env pins; (2) org pin + workspace resolved (auto/selector); (3) single-org
+ * auto-select (single/zero workspace, with a workspace pin honored); (4) the {@link TenancySelector}
+ * (prompt/flags) when provided; else throws {@link TenancySelectionRequiredError}. `authToken` is the
+ * short-lived (device-flow) or pre-issued (headless) token; workspace enumeration rides it with the
+ * `X-Activeloop-Org-Id` header (no reMint needed for a read).
+ */
+export async function resolveTenancyChoice(
+	authToken: string,
 	client: DeeplakeAuthClient,
-	token: string,
+	env: NodeJS.ProcessEnv,
+	selector: TenancySelector | undefined,
+): Promise<ResolvedTenancyChoice> {
+	const orgs = await client.listOrgs(authToken);
+	if (orgs.length === 0) throw new AuthHttpError(0, "no organizations found for this account");
+	const wsFor = (orgId: string): Promise<WorkspaceRow[]> => client.listWorkspaces(authToken, orgId);
+	const pins = resolvePinnedTenancy(env);
+
+	// 1. Fully pinned → explicit selection (parent AC-10, CI/scripted parity).
+	if (pins.orgId !== undefined && pins.workspaceId !== undefined) {
+		const org = orgs.find((o) => o.id === pins.orgId) ?? { id: pins.orgId, name: pins.orgId };
+		return {
+			orgId: org.id,
+			orgName: org.name,
+			workspaceId: pins.workspaceId,
+			workspaceName: pins.workspaceId,
+			via: "pins",
+		};
+	}
+	// 2. Org pinned, workspace not → auto-resolve the workspace, else selector, else refuse.
+	if (pins.orgId !== undefined) {
+		const org = orgs.find((o) => o.id === pins.orgId) ?? { id: pins.orgId, name: pins.orgId };
+		const ws = await listWorkspacesSoft(wsFor, org.id);
+		if (ws.length <= 1) {
+			const w = ws[0];
+			return {
+				orgId: org.id,
+				orgName: org.name,
+				workspaceId: w?.id ?? DEFAULT_WORKSPACE,
+				workspaceName: w?.name ?? DEFAULT_WORKSPACE,
+				via: "pins",
+			};
+		}
+		if (selector !== undefined) return finalizeChoice(await selector({ orgs, listWorkspaces: wsFor }), orgs, wsFor);
+		throw new TenancySelectionRequiredError(orgs);
+	}
+	// 3. No org pin → try the single-tenancy auto-select (honoring a workspace pin on the single org).
+	if (orgs.length === 1) {
+		const ws = await listWorkspacesSoft(wsFor, orgs[0].id);
+		const auto = computeAutoSelection(orgs, ws);
+		if (auto !== null) {
+			if (pins.workspaceId !== undefined) {
+				return { ...auto, workspaceId: pins.workspaceId, workspaceName: pins.workspaceId, via: "pins" };
+			}
+			return auto;
+		}
+		// Single org but multiple workspaces → an explicit workspace choice is required.
+		if (selector !== undefined) return finalizeChoice(await selector({ orgs, listWorkspaces: wsFor }), orgs, wsFor);
+		throw new TenancySelectionRequiredError(orgs);
+	}
+	// 4. Multiple orgs → an explicit choice is required (parent AC-6).
+	if (selector !== undefined) return finalizeChoice(await selector({ orgs, listWorkspaces: wsFor }), orgs, wsFor);
+	throw new TenancySelectionRequiredError(orgs);
+}
+
+/**
+ * Phase 2 of the link (PRD-073c): mint the long-lived token bound to the CHOSEN org, validate + hydrate
+ * identity via `GET /me`, and persist the shared `~/.deeplake/credentials.json` (0600) with the chosen
+ * `{ orgId, workspaceId }` PLUS the confirmed-tenancy marker (`tenancyConfirmedAt`). The token NEVER
+ * reaches a log (D-4). `savedAt` + the marker are stamped server-side from the injected clock.
+ */
+export async function persistSelectedTenancy(
+	client: DeeplakeAuthClient,
+	authToken: string,
+	choice: { orgId: string; orgName: string; workspaceId: string },
 	deps: LoginDeps,
 ): Promise<DiskCredentials> {
-	const env = deps.env ?? process.env;
 	const clock = deps.clock ?? systemClock;
-
-	// `GET /me` validates the token AND supplies the user display name (AC-2 / AC-3).
-	const me = await client.getMe(token);
+	// Mint the long-lived token bound to the CHOSEN org (never a guessed org).
+	const longLived = await client.reMint(authToken, choice.orgId);
+	// `GET /me` validates the minted token AND supplies the user display name (AC-2 / AC-3).
+	const me = await client.getMe(longLived, choice.orgId);
 	const userName = me.name.length > 0 ? me.name : me.email ? me.email.split("@")[0] : "unknown";
-
-	// Resolve the org the token is bound to: the env pin wins, else the account's first org.
-	const orgs = await client.listOrgs(token);
-	if (orgs.length === 0) throw new AuthHttpError(0, "no organizations found for this account");
-	const pinned = env[ENV_ORG_ID];
-	const chosen = (pinned !== undefined && pinned.length > 0 ? orgs.find((o) => o.id === pinned) : undefined) ?? orgs[0];
-
 	const disk: DiskCredentials = {
-		token,
-		orgId: chosen.id,
-		orgName: chosen.name,
+		token: longLived,
+		orgId: choice.orgId,
+		orgName: choice.orgName,
 		userName,
-		workspaceId: "default",
+		workspaceId: choice.workspaceId,
 		apiUrl: client.apiUrl,
-		savedAt: "", // stamped server-side by saveDiskCredentials (b-AC-4).
+		// PRD-073c: the explicit-selection marker. `savedAt` is stamped server-side by saveDiskCredentials;
+		// the marker is stamped here from the same injected clock so both are deterministic under test.
+		tenancyConfirmedAt: clock.now(),
+		savedAt: "",
 	};
 	return saveDiskCredentials(disk, deps.dir, clock);
 }
@@ -550,7 +771,23 @@ async function persistFromToken(
  * The bearer token is NEVER printed (only the user code + URI reach the reporter). Throws on a grant
  * that expires or a poll cap exhausted without approval; the CLI maps a throw to a redacted non-zero exit.
  */
-export async function loginWithDeviceFlow(deps: DeviceFlowLoginDeps = {}): Promise<DiskCredentials> {
+/** The result of {@link authenticateDeviceFlow}: the short-lived token + the client/apiUrl to select against. */
+export interface DeviceFlowAuthResult {
+	/** The short-lived Auth0 token — held in memory only; NEVER persisted before the tenancy choice. */
+	readonly authToken: string;
+	/** The resolved API base URL. */
+	readonly apiUrl: string;
+	/** The auth client bound to `apiUrl` (reused for enumeration + the phase-2 mint). */
+	readonly client: DeeplakeAuthClient;
+}
+
+/**
+ * Phase 1 of the link (PRD-073c): run the device flow to the short-lived Auth0 token and return it
+ * WITHOUT persisting anything. The caller (the CLI's {@link loginWithDeviceFlow}, or the dashboard
+ * pending-link runner) then resolves the explicit tenancy and persists via {@link persistSelectedTenancy}.
+ * Fires `onGrant` + the reporter with the user code (NO token — D-4) and opens the validated https URL.
+ */
+export async function authenticateDeviceFlow(deps: DeviceFlowLoginDeps = {}): Promise<DeviceFlowAuthResult> {
 	const env = deps.env ?? process.env;
 	const apiUrl = resolveApiUrl(env);
 	const sleep = deps.sleep ?? realSleeper;
@@ -596,17 +833,29 @@ export async function loginWithDeviceFlow(deps: DeviceFlowLoginDeps = {}): Promi
 		}
 	}
 	if (authToken === undefined) throw new AuthHttpError(0, "device-flow login timed out before the grant was approved");
+	return { authToken, apiUrl, client };
+}
 
-	// Mint a long-lived org-bound token from the short-lived Auth0 token (Hivemind's mint step).
-	const orgs = await client.listOrgs(authToken);
-	if (orgs.length === 0) throw new AuthHttpError(0, "no organizations found for this account");
-	const pinned = env[ENV_ORG_ID];
-	const chosen = (pinned !== undefined && pinned.length > 0 ? orgs.find((o) => o.id === pinned) : undefined) ?? orgs[0];
-	const longLived = await client.reMint(authToken, chosen.id);
+export async function loginWithDeviceFlow(deps: DeviceFlowLoginDeps = {}): Promise<DiskCredentials> {
+	const env = deps.env ?? process.env;
+	const reporter = deps.reporter ?? { prompt: (line: string): void => console.log(line) };
 
-	// Persist the long-lived token (validated + identity-hydrated via /me) — the auth token is discarded.
-	const persisted = await persistFromToken(client, longLived, deps);
+	// Phase 1: authenticate to the short-lived token (no persist).
+	const { authToken, client } = await authenticateDeviceFlow(deps);
 
+	// PRD-073c/073d: resolve the EXPLICIT tenancy (env pins > single-tenancy auto-select > selector).
+	// No silent `orgs[0]` guess is ever persisted — a multi-tenancy account with no pins/selector
+	// throws TenancySelectionRequiredError before any write.
+	const choice = await resolveTenancyChoice(authToken, client, env, deps.selectTenancy);
+
+	// Phase 2: mint for the CHOSEN org, validate via /me, persist with the confirmed-tenancy marker.
+	const persisted = await persistSelectedTenancy(client, authToken, choice, deps);
+
+	// Surface the resolved selection so an auto-selected / pinned choice is always PRINTED (parent
+	// AC-8 / AC-10) before capture can start. Names + ids only — never a token (D-4).
+	reporter.prompt(`Using org ${choice.orgName} (${choice.orgId}), workspace ${choice.workspaceName}.`);
+
+	const effectiveRef = resolveEffectiveRef(deps.ref, deps.dir);
 	// Emit `honeycomb_first_link` (PRD-050e e-AC-1) AFTER the credential is persisted — the first
 	// successful link. FIRE-AND-FORGET through the single chokepoint: the promise is intentionally NOT
 	// awaited (`void`), so a slow/timing-out PostHog hop never delays CLI completion or the `/setup/login`
@@ -639,5 +888,9 @@ export async function loginWithToken(token: string, deps: LoginDeps = {}): Promi
 		...(deps.fetch !== undefined ? { fetch: deps.fetch } : {}),
 		...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
 	});
-	return persistFromToken(client, token, deps);
+	// PRD-073d: the headless token authenticates, but the TENANCY still requires an explicit choice
+	// (env pins / flags-via-selector / single-tenancy auto-select) — never a silent guess. Then persist
+	// the chosen pair + the confirmed-tenancy marker through the SAME phase-2 internals as the device flow.
+	const choice = await resolveTenancyChoice(token, client, env, deps.selectTenancy);
+	return persistSelectedTenancy(client, token, choice, deps);
 }

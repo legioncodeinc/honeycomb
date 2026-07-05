@@ -575,6 +575,15 @@ export interface SessionStartDeps extends HookCoreDeps {
 export interface OnboardingNoticeGate {
 	/** True when the workspace has ≥1 bound project (notice suppressed); false in the zero-state. */
 	hasBoundProject(meta: HookSessionMeta, credential: HookCredential | undefined): boolean;
+	/**
+	 * PRD-073b (AC-073b.2.2): the PER-SESSION notice text, or `null` to show nothing. When present it
+	 * SUPERSEDES the boolean {@link hasBoundProject} path in session-start, so the notice can carry a
+	 * cwd-specific variant ("this folder is not bound to a project") when the session's own cwd is
+	 * unbound while the workspace has other bound projects, and the workspace-level variant on a
+	 * genuinely fresh install. Optional + additive: a gate that implements only {@link hasBoundProject}
+	 * (the 059a gate, or a test fake) keeps the workspace-level behavior unchanged.
+	 */
+	noticeText?(meta: HookSessionMeta, credential: HookCredential | undefined): string | null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

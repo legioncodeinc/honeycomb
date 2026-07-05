@@ -43,7 +43,9 @@
 
 import type { Context } from "hono";
 import {
+	ENV_PROJECT_ID,
 	hasBoundProjectOnDisk,
+	type ResolvedScope,
 	resolveScopeFromDisk,
 	UNSORTED_PROJECT_ID,
 } from "../../../hooks/shared/project-resolver.js";
@@ -67,6 +69,7 @@ import { type BufferClock, CaptureBuffer } from "./capture-buffer.js";
 import { type CaptureConfig, resolveCaptureConfig } from "./capture-config.js";
 import { type CaptureEvent, type CaptureMetadata, parseCaptureRequest } from "./event-contract.js";
 import type { CaptureDroppedEventsCounter } from "./dropped-events.js";
+import type { GatedCaptureReason, GatedCapturesCounter } from "./gated-captures.js";
 import { type MemoryCue, type TurnCounterConfig, TurnCounters, tryStopCounterTrigger } from "./turn-counters.js";
 
 /** The route group the capture handler attaches to (FR-1). */
@@ -171,6 +174,40 @@ export interface CaptureHandlerDeps {
 	 * store (the unambiguous zero-state) suppresses when the gate is on.
 	 */
 	readonly firstRunGate?: boolean;
+	/**
+	 * PRD-073a: the PER-SESSION bound-project capture gate. When `true` (the production posture),
+	 * a capture whose cwd resolves to NO bound project (resolver `bound: false`) NO-OPs — it writes
+	 * no row and enqueues no job — and returns a reasoned gated ack (`reason: "no_bound_project"`),
+	 * UNLESS the inbox opt-in ({@link inboxCapture}) is on. Unlike the one-shot {@link firstRunGate},
+	 * this gates per session FOREVER: an unbound folder stays silent even after other projects are
+	 * bound (073a-AC-1.2). OPT-IN (default off) so a direct-construction unit test keeps capturing.
+	 */
+	readonly boundProjectGate?: boolean;
+	/**
+	 * PRD-073a: the `__unsorted__` inbox opt-in (default off). When `true`, an unbound-cwd capture is
+	 * NOT gated by {@link boundProjectGate} — it falls to the workspace inbox and pipelines run (the
+	 * PRD-049a behavior, restored verbatim). Resolved from `HONEYCOMB_INBOX_CAPTURE` via
+	 * {@link import("./capture-config.js").resolveInboxCaptureEnabled} at the composition root.
+	 */
+	readonly inboxCapture?: boolean;
+	/**
+	 * PRD-073c: the confirmed-tenancy boolean seam (parent AC-9). When wired and it returns `false`,
+	 * every capture gates with `reason: "tenancy_unconfirmed"` REGARDLESS of folder bindings (checked
+	 * BEFORE the bound-project gate). Unset ⇒ treated as confirmed (a direct-construction test keeps
+	 * capturing). FAIL-OPEN: a throw is treated as confirmed so a set-up user is never hard-blocked.
+	 * Production wires {@link import("../auth/tenancy-confirmation.js").isTenancyConfirmed}.
+	 */
+	readonly tenancyConfirmed?: () => boolean;
+	/**
+	 * PRD-073b: the per-reason gated-captures counter (b-AC-3.1). Incremented once per gated event by
+	 * its reason so the `/health` detail can report "N captures were gated". Omitted ⇒ no counting.
+	 */
+	readonly gatedCaptures?: GatedCapturesCounter;
+	/**
+	 * The env the `HONEYCOMB_PROJECT_ID` project override is read from during scope resolution
+	 * (073a-AC-2.2). Defaults to `process.env`; a test injects a record to drive the override.
+	 */
+	readonly env?: NodeJS.ProcessEnv;
 	/**
 	 * Wait for the fire-and-forget embed continuation. ONLY for tests — production
 	 * NEVER awaits it (b-AC-4). The handler returns the HTTP response before this
@@ -280,12 +317,24 @@ class CaptureRouteHandler {
 			return c.json({ ok: true, gated: true, path: metadata.path, enqueued: [] }, 200);
 		}
 
+		// PRD-073a/073c — the per-session dormancy gate ladder. Resolve the session's scope ONCE
+		// (a pure local read, no DeepLake call), then gate: (1) tenancy-confirmed (073c), then
+		// (2) bound-project (073a). A gated capture writes nothing, enqueues nothing, and returns a
+		// REASONED ack (`no_bound_project` / `tenancy_unconfirmed`) so the shim surfaces the skip
+		// honestly (073b) — never a silent success-shaped drop. The resolved scope is reused for the
+		// row's `project_id` (PRD-049b) so resolution happens exactly once.
+		const resolved = this.resolveCaptureScope(metadata);
+		const gateReason = this.evaluateDormancyGate(resolved);
+		if (gateReason !== null) {
+			this.deps.gatedCaptures?.increment(gateReason);
+			return c.json({ ok: true, gated: true, reason: gateReason, path: metadata.path, enqueued: [] }, 200);
+		}
+
 		const id = this.makeRowId(metadata);
 		const nowIso = new Date(this.now()).toISOString();
-		// PRD-049b (49b-AC-1): resolve the session's project ONCE, then carry it onto BOTH the
-		// `sessions` row AND the pipeline-entry job so the distilled fact the pipeline writes is
-		// segmented by the SAME project. Capture never drops: a no-cwd session falls to the inbox.
-		const projectId = this.resolveCaptureProjectId(metadata);
+		// PRD-049b (49b-AC-1): the resolved project is carried onto BOTH the `sessions` row AND the
+		// pipeline-entry job so the distilled fact the pipeline writes is segmented by the SAME project.
+		const projectId = resolved.projectId;
 		const row = this.buildRow(id, event, metadata, nowIso, projectId);
 
 		// PRD-062c (L-C1 / AC-5): the write path. With batching ON the row is BUFFERED and
@@ -546,12 +595,65 @@ class CaptureRouteHandler {
 	}
 
 	/**
-	 * Resolve the capture row's `project_id` from the session cwd (PRD-049b 49b-AC-1 / 49b-AC-3).
-	 * Uses the thin-client {@link resolveScopeFromDisk} (049a) scoped to the capture's resolved
-	 * org/workspace so a stale cross-workspace cache can never bind the wrong project. Capture is
-	 * NEVER dropped: a blank cwd, a missing/malformed cache, or any throw falls to the workspace
-	 * {@link UNSORTED_PROJECT_ID} inbox (the write-side asymmetry — never fail-closed on capture).
+	 * Resolve the capture row's scope from the session cwd (PRD-049b + PRD-073a). Honors the
+	 * `HONEYCOMB_PROJECT_ID` override first (a scripted/CI pin resolves `bound: true` and is never
+	 * gated — 073a-AC-2.2), else resolves the cwd against the thin-client {@link resolveScopeFromDisk}
+	 * (049a) scoped to the capture's org/workspace so a stale cross-workspace cache can never bind the
+	 * wrong project. Returns the FULL {@link ResolvedScope} (the `bound` flag drives the 073a gate; the
+	 * `projectId` scopes the row). NEVER throws: a blank cwd (no override) or any resolver throw yields
+	 * the `bound: false` inbox scope so the gate/inbox decision downstream is deterministic.
 	 */
+	private resolveCaptureScope(meta: CaptureMetadata): ResolvedScope {
+		const env = this.deps.env ?? process.env;
+		const override = (env[ENV_PROJECT_ID] ?? "").trim();
+		const inboxScope: ResolvedScope = {
+			projectId: UNSORTED_PROJECT_ID,
+			bound: false,
+			source: "inbox",
+			org: meta.org,
+			workspace: meta.workspace,
+		};
+		// No override + no cwd → the inbox scope (no spurious cwd resolution against process.cwd()).
+		if (override === "" && meta.cwd.trim() === "") return inboxScope;
+		try {
+			return resolveScopeFromDisk({
+				cwd: meta.cwd,
+				org: meta.org,
+				workspace: meta.workspace,
+				projectIdOverride: override,
+				...(this.deps.projectsDir !== undefined ? { dir: this.deps.projectsDir } : {}),
+			});
+		} catch {
+			// The resolver is fail-soft; guard belt-and-suspenders so resolution never throws.
+			return inboxScope;
+		}
+	}
+
+	/**
+	 * The PRD-073 per-session dormancy gate ladder. Returns the machine-readable reason a capture is
+	 * gated, or `null` to proceed. Order (parent overview): (1) tenancy confirmed (073c) — an
+	 * unconfirmed link gates with `tenancy_unconfirmed` REGARDLESS of folder bindings (AC-9); then
+	 * (2) bound-project (073a) — when the gate is enabled AND the inbox opt-in is OFF, a `bound: false`
+	 * scope gates with `no_bound_project`. Both checks are OPT-IN: an unset seam/flag never gates, so a
+	 * direct-construction unit test keeps the pre-073 capture behavior. FAIL-OPEN on a tenancy-seam
+	 * throw (never hard-block a set-up user because the seam hiccuped).
+	 */
+	private evaluateDormancyGate(resolved: ResolvedScope): GatedCaptureReason | null {
+		if (this.deps.tenancyConfirmed !== undefined) {
+			let confirmed: boolean;
+			try {
+				confirmed = this.deps.tenancyConfirmed();
+			} catch {
+				confirmed = true;
+			}
+			if (!confirmed) return "tenancy_unconfirmed";
+		}
+		if (this.deps.boundProjectGate === true && this.deps.inboxCapture !== true && !resolved.bound) {
+			return "no_bound_project";
+		}
+		return null;
+	}
+
 	/**
 	 * Is the first-run capture gate CLOSED for this event's workspace? (PRD-059a a-AC-1 / a-AC-3 /
 	 * IRD-123.) The gate is closed when it is ENABLED (`firstRunGate` defaults ON) AND the active
@@ -577,21 +679,6 @@ class CaptureRouteHandler {
 		} catch {
 			// Fail-open: never hard-block a set-up user because the local store read hiccuped.
 			return false;
-		}
-	}
-
-	private resolveCaptureProjectId(meta: CaptureMetadata): string {
-		if (meta.cwd.trim() === "") return UNSORTED_PROJECT_ID; // no cwd → inbox (never dropped).
-		try {
-			return resolveScopeFromDisk({
-				cwd: meta.cwd,
-				org: meta.org,
-				workspace: meta.workspace,
-				...(this.deps.projectsDir !== undefined ? { dir: this.deps.projectsDir } : {}),
-			}).projectId;
-		} catch {
-			// The resolver is fail-soft; guard belt-and-suspenders so capture never fails on resolution.
-			return UNSORTED_PROJECT_ID;
 		}
 	}
 
