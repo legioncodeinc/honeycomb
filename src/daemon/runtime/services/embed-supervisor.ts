@@ -41,6 +41,7 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -83,11 +84,13 @@ export interface EmbedSupervisorDeps {
 	 */
 	readonly spawnChild?: () => EmbedChild;
 	/**
-	 * Probe the embed daemon's `/health` once. Returns `{ ok, ready }`: `ok` = the
-	 * listener answered (liveness), `ready` = the model finished warming (D-3).
-	 * Defaults to a loopback `fetch` of `<url>/health`. A test scripts the sequence.
+	 * Probe the embed daemon's `/health` once. Returns `{ ok, ready, warmFailed }`: `ok` = the
+	 * listener answered (liveness), `ready` = the model finished warming (D-3), `warmFailed` = the
+	 * child's background warmup THREW (deps/model/download failure — the embed daemon stays live but
+	 * can never serve, so this must not read as "still warming" forever). Defaults to a loopback
+	 * `fetch` of `<url>/health`. A test scripts the sequence.
 	 */
-	readonly probeHealth?: () => Promise<{ ok: boolean; ready: boolean }>;
+	readonly probeHealth?: () => Promise<{ ok: boolean; ready: boolean; warmFailed?: boolean }>;
 	/** Optional structured-log sink. */
 	readonly logger?: EmbedSupervisorLogger;
 	/** Optional injected clock (real timers otherwise). */
@@ -146,18 +149,43 @@ const defaultClock: EmbedSupervisorClock = {
 };
 
 /**
- * Resolve the bundled `embeddings/embed-daemon.js` the supervisor spawns. From this
- * module's location, walk up to the package root then into `embeddings/`. An env
- * override (`HONEYCOMB_EMBED_ENTRY`) covers the dev/tsc layout + tests.
+ * Resolve the bundled `embeddings/embed-daemon.js` the supervisor spawns. The embed daemon lives at
+ * `<package-root>/embeddings/embed-daemon.js`, but this module's DEPTH under the root differs by build
+ * layout, so a fixed `..`-walk cannot be correct in both:
+ *   - BUNDLED (production npm install): the supervisor is inlined into `<root>/daemon/index.js`, so the
+ *     entry is ONE level up (`<root>/daemon` → `<root>/embeddings/embed-daemon.js`).
+ *   - DEV (tsc): `<root>/dist/src/daemon/runtime/services/embed-supervisor.js`, so the entry is FIVE
+ *     levels up (`services` → `runtime` → `daemon` → `src` → `dist` → `<root>`).
+ *
+ * The pre-existing code hard-coded the FIVE-level walk — correct for dev but WRONG for the bundled
+ * install, where it resolved to `<root>/../../../embeddings/…` (outside the package). `spawn` then got a
+ * non-existent path, the child exited 1 on start, the bounded-restart policy exhausted, and embeddings
+ * were silently dead while `/health` still reported them enabled. We now probe candidate paths and pick
+ * the first that EXISTS, so both layouts resolve correctly. `HONEYCOMB_EMBED_ENTRY` still wins (tests/itests).
  */
 function resolveEmbedEntry(env: NodeJS.ProcessEnv): string {
-	const override = env.HONEYCOMB_EMBED_ENTRY;
-	if (override !== undefined && override.length > 0) return override;
 	const here = dirname(fileURLToPath(import.meta.url));
-	// Bundled: `<root>/daemon/index.js` imports this transitively; the embed daemon is
-	// `<root>/embeddings/embed-daemon.js`. The dev tsc layout is `<root>/dist/src/daemon/runtime/services`.
-	// Prefer the bundled sibling; the env override handles the dev path in tests/itests.
-	return resolve(here, "..", "..", "..", "..", "..", "embeddings", "embed-daemon.js");
+	return pickEmbedEntry(here, existsSync, env.HONEYCOMB_EMBED_ENTRY);
+}
+
+/**
+ * The pure entry-resolution core (extracted so the layout bug is deterministically testable without
+ * spawning). Given the supervisor MODULE's directory, an `exists` predicate, and the optional
+ * `HONEYCOMB_EMBED_ENTRY` override, return the embed-daemon path. The override wins; otherwise the
+ * first candidate that EXISTS is chosen; otherwise the bundled sibling (the production shape) is the
+ * sensible fallback. This is what fixes the ship bug: the pre-existing single hard-coded FIVE-up walk
+ * was correct for the dev layout but resolved OUTSIDE the package in the bundled install.
+ */
+export function pickEmbedEntry(moduleDir: string, exists: (p: string) => boolean, override?: string): string {
+	if (override !== undefined && override.length > 0) return override;
+	const candidates = [
+		// Bundled: `<root>/daemon/index.js` → sibling `<root>/embeddings/embed-daemon.js` (ONE level up).
+		resolve(moduleDir, "..", "embeddings", "embed-daemon.js"),
+		// Dev tsc: `<root>/dist/src/daemon/runtime/services/…` → `<root>/embeddings/…` (FIVE levels up).
+		resolve(moduleDir, "..", "..", "..", "..", "..", "embeddings", "embed-daemon.js"),
+	];
+	const found = candidates.find((c) => exists(c));
+	return found ?? candidates[0]!;
 }
 
 /**
@@ -221,18 +249,22 @@ function defaultSpawnChild(env: NodeJS.ProcessEnv): () => EmbedChild {
 }
 
 /** The default real `/health` probe over the loopback URL the client dials. */
-function defaultProbeHealth(env: NodeJS.ProcessEnv): () => Promise<{ ok: boolean; ready: boolean }> {
+function defaultProbeHealth(env: NodeJS.ProcessEnv): () => Promise<{ ok: boolean; ready: boolean; warmFailed: boolean }> {
 	const { url } = resolveEmbedClientOptions(env);
-	return async (): Promise<{ ok: boolean; ready: boolean }> => {
+	// The default probe always returns a concrete `warmFailed` (the injected test seam may omit it).
+	return async (): Promise<{ ok: boolean; ready: boolean; warmFailed: boolean }> => {
 		const controller = new AbortController();
 		const timer = setTimeout(() => controller.abort(), 2_000);
 		try {
 			const res = await fetch(`${url}/health`, { signal: controller.signal });
-			if (!res.ok) return { ok: false, ready: false };
-			const body = (await res.json()) as { ready?: unknown };
-			return { ok: true, ready: body.ready === true };
+			if (!res.ok) return { ok: false, ready: false, warmFailed: false };
+			// The embed daemon reports `warmFailed:true` when its background model warmup threw (missing
+			// optional deps, an offline model fetch, a dim mismatch). It stays live but can never serve, so
+			// the supervisor must surface this as `failed`, not an indefinite "warming".
+			const body = (await res.json()) as { ready?: unknown; warmFailed?: unknown };
+			return { ok: true, ready: body.ready === true, warmFailed: body.warmFailed === true };
 		} catch {
-			return { ok: false, ready: false };
+			return { ok: false, ready: false, warmFailed: false };
 		} finally {
 			clearTimeout(timer);
 		}
@@ -251,6 +283,13 @@ export interface EmbedSupervisor extends DaemonService {
 	readonly warm: boolean;
 	/** True when the supervisor is inert (embeddings explicitly opted out — D-1). */
 	readonly disabled: boolean;
+	/**
+	 * True when embeddings are ENABLED but the child cannot serve — either its background warmup threw
+	 * (the embed daemon's `/health.warmFailed`) or the bounded crash-restart budget was exhausted (the
+	 * child never came live). Distinct from `warm:false` alone, which just means "still warming". Lets
+	 * `/health` report `failed` (actionable) instead of an indefinite `warming` (misleading).
+	 */
+	readonly failed: boolean;
 	/** Current bounded restart count (for diagnostics). */
 	readonly restarts: number;
 	/**
@@ -295,6 +334,12 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 	let live = false;
 	let warm = false;
 	let restarts = 0;
+	// True when the child's background warmup THREW (observed via `/health.warmFailed`): the daemon is
+	// live but can never serve. Sticky until a deliberate re-enable/restart re-arms a fresh warmup.
+	let warmFailed = false;
+	// True once the bounded crash-restart budget is exhausted (the child never came live). Sticky until a
+	// deliberate re-enable/restart resets the restart count. Together with `warmFailed` → the `failed` state.
+	let restartExhausted = false;
 	// The in-flight background warmup wait, so stop() can let it settle.
 	let warmWatch: Promise<void> | null = null;
 
@@ -317,10 +362,19 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 	async function waitForWarm(): Promise<void> {
 		const deadline = clock.now() + cfg.warmTimeoutMs;
 		while (clock.now() < deadline && !stopping) {
-			const { ok, ready } = await probeHealth();
+			const { ok, ready, warmFailed: probeWarmFailed } = await probeHealth();
 			if (ok && ready) {
 				warm = true;
+				warmFailed = false;
 				logger.event("embed.warm", { pid: child?.pid });
+				return;
+			}
+			// The child's warmup threw (deps/model/download). It is live but can never serve — stop polling
+			// (it will not recover on its own) and mark `failed` so `/health` reports it honestly, not an
+			// indefinite `warming`. Recall stays lexical (D-4). A deliberate restart re-arms a fresh warmup.
+			if (ok && probeWarmFailed) {
+				warmFailed = true;
+				logger.event("embed.warm_failed", { pid: child?.pid });
 				return;
 			}
 			await clock.sleep(cfg.pollIntervalMs);
@@ -331,6 +385,8 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 
 	/** Spawn one child, wire its crash handler, and wait for liveness; warm in the background. */
 	async function spawnAndWatch(): Promise<void> {
+		// A fresh child re-attempts warmup, so clear any prior warm-failure before it comes up.
+		warmFailed = false;
 		// Hold a LOCAL reference: a concurrent stop()/restart() may null the shared `child`
 		// field while we await liveness, so every read below uses `current`, never `child`.
 		const current = spawnChild();
@@ -371,7 +427,9 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 		if (stopping) return;
 		if (restarts >= cfg.maxRestarts) {
 			// Crash loop bound hit: stop retrying. Recall stays lexical (degraded) — the host
-			// daemon is never wedged and no turn is ever blocked (D-4).
+			// daemon is never wedged and no turn is ever blocked (D-4). Mark `restartExhausted` so
+			// `/health` reports embeddings `failed` (the child never came live) instead of `warming`.
+			restartExhausted = true;
 			logger.event("embed.restart_exhausted", { restarts });
 			child = null;
 			return;
@@ -393,6 +451,12 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 		get disabled(): boolean {
 			return !enabled;
 		},
+		get failed(): boolean {
+			// Enabled but unusable: warmup threw, or the crash-restart budget was exhausted. Never
+			// `failed` while disabled (that is `off`) or while a live child is still warming (that is
+			// `warming`). Once warm, `warmFailed` is cleared, so a warmed child is never `failed`.
+			return enabled && !stopping && (warmFailed || restartExhausted);
+		},
 		get restarts(): number {
 			return restarts;
 		},
@@ -406,6 +470,8 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 				logger.event("embed.disabled");
 				return;
 			}
+			// A deliberate start re-arms the failure signals (a prior run may have exhausted restarts).
+			restartExhausted = false;
 			stopping = false;
 			await spawnAndWatch();
 		},
@@ -451,6 +517,9 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 			live = false;
 			warm = false;
 			restarts = 0;
+			// Reset the failure signals: a deliberate restart re-attempts warmup and re-arms the budget.
+			restartExhausted = false;
+			warmFailed = false;
 			if (!enabled || stopping) return;
 			logger.event("embed.manual_restart");
 			await spawnAndWatch();
@@ -491,6 +560,7 @@ export const noopEmbedSupervisor: EmbedSupervisor = {
 	live: false,
 	warm: false,
 	disabled: true,
+	failed: false,
 	restarts: 0,
 	start(): void {
 		/* no-op stub */
