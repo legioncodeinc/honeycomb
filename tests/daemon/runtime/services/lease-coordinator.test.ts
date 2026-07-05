@@ -219,3 +219,46 @@ describe("resolvePollConsolidateConfig: the HONEYCOMB_POLL_CONSOLIDATE boundary 
 		expect(resolvePollConsolidateConfig({ read: () => ({ enabled: "1" }) }).enabled).toBe(true);
 	});
 });
+
+describe("LeaseCoordinator: observability — lifecycle + dispatch events (job-observability)", () => {
+	it("start() emits lease.coordinator.started with the UNION kinds + participant count", () => {
+		const queue = new FakeQueue([]);
+		const pipeline = fakeParticipant(PIPELINE_KINDS, queue);
+		const pollinating = fakeParticipant([POLLINATING_KIND], queue);
+		const events: { name: string; fields?: Record<string, unknown> }[] = [];
+		const coordinator = createLeaseCoordinator({
+			queue,
+			participants: [pipeline, pollinating],
+			backoff: PollBackoffConfigSchema.parse({}),
+			flatIntervalMs: 1_000,
+			logger: { event: (name, fields) => events.push({ name, fields }) },
+		});
+
+		coordinator.start();
+		coordinator.stop();
+
+		const started = events.find((e) => e.name === "lease.coordinator.started");
+		expect(started).toBeDefined();
+		expect([...((started?.fields?.unionKinds as string[]) ?? [])].sort()).toEqual([...PIPELINE_KINDS, POLLINATING_KIND].sort());
+		expect(started?.fields?.participants).toBe(2);
+	});
+
+	it("runOnce() emits lease.coordinator.dispatched per leased job (proof the loop is DRAINING, not idle)", async () => {
+		const queue = new FakeQueue([job("p1", "memory_extraction")]);
+		const pipeline = fakeParticipant(PIPELINE_KINDS, queue);
+		const events: { name: string; fields?: Record<string, unknown> }[] = [];
+		const coordinator = createLeaseCoordinator({
+			queue,
+			participants: [pipeline],
+			backoff: PollBackoffConfigSchema.parse({}),
+			flatIntervalMs: 1_000,
+			logger: { event: (name, fields) => events.push({ name, fields }) },
+		});
+
+		await coordinator.runOnce();
+
+		const dispatched = events.filter((e) => e.name === "lease.coordinator.dispatched");
+		expect(dispatched).toHaveLength(1);
+		expect(dispatched[0]?.fields).toMatchObject({ id: "p1", kind: "memory_extraction" });
+	});
+});

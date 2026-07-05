@@ -291,3 +291,27 @@ describe("a-AC-6 worker crash mid-job → the queue reclaims and the job is retr
 		expect(released?.id).toBe(leased?.id);
 	});
 });
+
+describe("stage-worker observability: start emits stage.worker.started (job-observability)", () => {
+	it("start() emits stage.worker.started with the leaseKinds the loop leases", () => {
+		const clock = manualClock();
+		const store = new InMemoryJobs();
+		const queue = makeQueue(clock, store);
+		const { handlers } = makeHandlers();
+		const events: { name: string; fields?: Record<string, unknown> }[] = [];
+		const worker = createStageWorker({
+			queue,
+			handlers,
+			logger: { event: (name, fields) => events.push({ name, fields }) },
+		});
+
+		worker.start();
+		worker.stop();
+
+		const started = events.find((e) => e.name === "stage.worker.started");
+		expect(started).toBeDefined();
+		// Default leaseKinds are the five pipeline kinds — the backlogged `memory_extraction` must be one,
+		// so its ABSENCE from a live daemon's logs would mean the loop never started (the real bug signal).
+		expect(started?.fields?.leaseKinds).toContain("memory_extraction");
+	});
+});
