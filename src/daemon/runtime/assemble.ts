@@ -31,18 +31,8 @@
  * NOT fake it (see {@link assembleSeams}).
  */
 
-import {
-	copyFileSync,
-	existsSync,
-	mkdirSync,
-	mkdtempSync,
-	readdirSync,
-	readFileSync,
-	rmSync,
-	statSync,
-	writeFileSync,
-} from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { hasBoundProjectOnDisk } from "../../hooks/shared/project-resolver.js";
 import { honeycombStateDir, legacyHoneycombDir } from "../../shared/fleet-root.js";
 import { CATALOG } from "../storage/catalog/index.js";
@@ -1555,54 +1545,6 @@ function resolveVaultBaseDir(): string {
 }
 
 /**
- * One-time, best-effort consolidation of a vault written under an OLD workspace-scoped root into the
- * FIXED vault root. Before {@link resolveVaultBaseDir}, secrets/settings were stored under
- * {@link resolveWorkspaceBaseDir} (which falls back to `process.cwd()`), so an upgrade — or a daemon
- * previously launched from a project dir — can leave records the fixed reader now misses. Copies each
- * `.secrets/<scope>/<name>` and `.vault/setting/<scope>/<name>` record from the workspace root into the
- * fixed root ONLY when the fixed root lacks it (the fixed root ALWAYS wins — never overwritten). The
- * ciphertext is portable: it is keyed by the GLOBAL machine id + the scope encoded in the dir NAME, both
- * unchanged by the move. Fully fail-soft: any error is swallowed so the daemon never fails to boot on a
- * migration hiccup (a partial copy simply completes on the next boot).
- */
-function consolidateWorkspaceVaultIntoFixedRoot(): void {
-	const from = resolveWorkspaceBaseDir();
-	const to = resolveVaultBaseDir();
-	if (from === to) return;
-	// Path-containment guard: every entry comes from `readdirSync` of a dir WE own (single components,
-	// never `..`), but validate before EVERY fs read/copy so a joined path can never escape its scope
-	// dir — mirrors the {@link stagedTaskXmlPath} / service-unit containment checks.
-	const contains = (base: string, child: string): boolean => {
-		const b = resolve(base);
-		const c = resolve(child);
-		return c === b || c.startsWith(b + sep);
-	};
-	for (const sub of [".secrets", join(".vault", "setting")]) {
-		try {
-			const srcRoot = join(from, sub);
-			const dstRoot = join(to, sub);
-			if (!existsSync(srcRoot)) continue;
-			for (const scopeDir of readdirSync(srcRoot)) {
-				const srcScope = join(srcRoot, scopeDir);
-				const dstScope = join(dstRoot, scopeDir);
-				if (!contains(srcRoot, srcScope) || !contains(dstRoot, dstScope)) continue;
-				if (!statSync(srcScope).isDirectory()) continue;
-				for (const name of readdirSync(srcScope)) {
-					const srcFile = join(srcScope, name);
-					const dstFile = join(dstScope, name);
-					if (!contains(srcScope, srcFile) || !contains(dstScope, dstFile)) continue;
-					if (existsSync(dstFile)) continue; // the fixed root wins — never overwrite.
-					mkdirSync(dstScope, { recursive: true, mode: DIR_MODE });
-					copyFileSync(srcFile, dstFile);
-				}
-			}
-		} catch {
-			// best-effort; a partial migration simply completes on the next boot.
-		}
-	}
-}
-
-/**
  * Probe a directory for REAL writability via a create-write-unlink round-trip. `accessSync(W_OK)`
  * is unreliable on Windows (it inspects the read-only ATTRIBUTE, not the ACL — `system32` reads as
  * "writable" and then EACCESes on the actual write), so an actual probe is the only cross-platform
@@ -2206,9 +2148,6 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// home. Fail-soft: `runHoneycombStateMigration` always returns and never throws into boot.
 	if (options.storage === undefined && options.runtimeDir === undefined) {
 		runHoneycombStateMigration();
-		// Consolidate any vault records left under an old workspace-scoped root (pre-fixed-root) into the
-		// fixed vault root, so secrets/settings the daemon wrote from a project dir converge (fail-soft).
-		consolidateWorkspaceVaultIntoFixedRoot();
 	}
 	// ── PRD-043a (FR-1/FR-2): the durable SQLite log store. Built BEFORE the logger so it can be
 	// injected as the logger's write-through seam. Precedence:
