@@ -40,7 +40,6 @@ import {
 	type MintedToken,
 	type PresentedCredentials,
 	type Role,
-	STUB_TOKEN_PREFIX,
 	type TokenClaims,
 	type TokenIssuer,
 	asRole,
@@ -298,14 +297,16 @@ export function createTokenAuthenticator(
 				// No bearer → this half cannot authenticate (the api-key half may; else 401).
 				return Promise.resolve(null);
 			}
-			// SECURITY: Reject unsigned stub tokens in team/hybrid modes (production).
-			// Stub tokens (hcmt.v1. prefix) have no cryptographic signature and are
-			// development-only. An attacker could forge admin claims if we accepted them.
-			if (mode === "team" || mode === "hybrid") {
-				if (bearer.startsWith(STUB_TOKEN_PREFIX)) {
-					// Fail-closed: stub token in production mode → reject (null → 401).
-					return Promise.resolve(null);
-				}
+			// SECURITY: Reject UNSIGNED tokens in team/hybrid modes (production) when the
+			// default (signature-blind) verifier is in use. Stub tokens (hcmt.v1. prefix)
+			// have no signature; and as of FIX #3 the default `verifyTokenClaims` also
+			// decodes a real JWT's payload WITHOUT verifying its signature (it is a
+			// tenancy-resolution decoder, not a production authenticator). Accepting either
+			// in production would let an attacker forge claims. A production deployment
+			// injects a real signature-verifying `verify`, which opts out of this guard.
+			if ((mode === "team" || mode === "hybrid") && verify === verifyTokenClaims) {
+				// Fail-closed: no signature-checking verifier in production → reject (null → 401).
+				return Promise.resolve(null);
 			}
 			const claims = verify(bearer);
 			if (claims === null) return Promise.resolve(null);

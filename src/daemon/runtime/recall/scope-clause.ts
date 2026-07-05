@@ -334,8 +334,13 @@ export interface ProjectScopeInput {
  * hit (49b-AC-2): this fragment is ANDed into the SAME statement as the match, so an
  * authorized-id channel can surface an id but the content is filtered past this predicate.
  *
- *   - BOUND session in project P → `(project_id = 'P' OR project_id = '')`
- *   - UNBOUND session            → `(project_id = '__unsorted__' OR project_id = '')`
+ *   - BOUND session in project P → `(project_id = 'P' OR project_id = '' OR project_id IS NULL)`
+ *   - UNBOUND session            → `(project_id = '__unsorted__' OR project_id = '' OR project_id IS NULL)`
+ *
+ * The `project_id IS NULL` arm (FIX #6) admits legacy rows a backend healed to SQL NULL
+ * rather than the '' DEFAULT — `project_id = ''` never matches NULL, so without this arm
+ * those pre-heal rows disappear from scoped recall. NULL and '' are treated identically as
+ * "unset/legacy".
  *
  * ── PRD-049c — the cross-project promotion arm (49c-AC-2) ────────────────────
  * When `promotionColumn` is supplied (the `skills` table's `cross_project_scope`), the
@@ -368,6 +373,15 @@ export function buildProjectScopeClause(input: ProjectScopeInput): ProjectScopeC
 	const admitted = primaryId === PROJECT_ID_UNSET ? [PROJECT_ID_UNSET] : [primaryId, PROJECT_ID_UNSET];
 	const disjuncts = admitted.map((id) => `${col} = ${sLiteral(id)}`);
 	const values = [...admitted];
+	// FIX #6: the column DEFAULT is '' (PROJECT_ID_UNSET), but a backend that healed pre-049b
+	// rows can land SQL NULL instead of '' — and `project_id = ''` does NOT match NULL (SQL
+	// three-valued logic), so those legacy rows silently vanished from scoped recall. Treat
+	// NULL identically to the '' sentinel: wherever '' is admitted as "unset/legacy", ALSO
+	// admit `<col> IS NULL`. `IS NULL` is a fixed SQL keyword against the `sqlIdent`-guarded
+	// column — no interpolated value, so this stays injection-safe (no `values` entry).
+	if (admitted.includes(PROJECT_ID_UNSET)) {
+		disjuncts.push(`${col} IS NULL`);
+	}
 
 	// PRD-049c (49c-AC-2): admit explicitly-promoted skills in ANY of the user's projects. This
 	// arm is ADDED ONLY when the caller passes a `promotionColumn` (the skills surfacing path); the

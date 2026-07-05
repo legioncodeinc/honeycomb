@@ -15,6 +15,13 @@ import {
 	resolveStorageConfig,
 	type StorageConfig,
 } from "./config.js";
+import { credentialsPath } from "../runtime/auth/credentials-store.js";
+import {
+	createMtimeGatedResolver,
+	fileMtimeReader,
+	type MtimeReader,
+	type NowFn,
+} from "./live-reload.js";
 import { QueryMeter } from "./query-meter.js";
 import { PgDeepLakeTransport } from "./pg-transport.js";
 import { connectionError, type QueryResult } from "./result.js";
@@ -273,6 +280,19 @@ export function createStorageClient(
  * The default provider ({@link defaultCredentialProvider}, env-over-file) is read fresh on each
  * build attempt, so a credential written after boot is picked up. A `transport` override is honored
  * for tests (a fake transport that needs no live endpoint).
+ *
+ * ── Live config re-resolution (no restart on `login`/re-point) ────────────────
+ * The daemon historically CACHED the first-built client forever, so a credential CHANGE written
+ * after boot (a re-`login` to a different org/workspace/token, or a re-point to a different
+ * endpoint) was invisible — the daemon kept connecting under the boot-time partition until an
+ * operator restarted it. The cached client is now INVALIDATED when the resolved config's
+ * identity-bearing fields (`endpoint`/`token`/`org`/`workspace`) change, so the NEXT query
+ * rebuilds against the new tenancy — on the SAME running daemon. The change detection is
+ * mtime-gated on `~/.deeplake/credentials.json` and DEBOUNCED (re-stat at most once per
+ * {@link DEFAULT_RESTAT_TTL_MS}), so a hot request path pays one stat per window, not per query,
+ * and the client is rebuilt ONLY when the config actually changed (never thrashed). This live
+ * path runs ONLY for the REAL production assembly (a default file-backed provider); a test that
+ * injects a `transport` (the fake, no live endpoint) or a `mtimeReader` drives it deterministically.
  */
 export function createLazyStorageClient(
 	options: {
@@ -280,16 +300,81 @@ export function createLazyStorageClient(
 		transport?: DeepLakeTransport;
 		sleep?: SleepFn;
 		meter?: QueryMeter;
+		/**
+		 * Override the mtime source for the live config re-resolve (tests). Defaults to a
+		 * `statSync` of `~/.deeplake/credentials.json`. A test injects a controllable reader so
+		 * the debounce + rebuild-on-change are proven with NO disk and NO real sleep. When a
+		 * `transport` is injected WITHOUT this, live re-resolution is DISABLED (the deterministic
+		 * fake-transport suites keep exactly one build — unchanged behaviour).
+		 */
+		mtimeReader?: MtimeReader;
+		/** Override the mtime-gate debounce window (tests). */
+		ttlMs?: number;
+		/** Injectable clock for the debounce (tests). Defaults to `Date.now`. */
+		now?: NowFn;
 	} = {},
 ): StorageClient {
 	let built: StorageClient | null = null;
+	// The identity-bearing config the cached `built` client was constructed under. When a live
+	// re-resolve yields a config whose identity fields differ, `built` is invalidated + rebuilt.
+	let builtIdentity: string | null = null;
 	const meter = options.meter ?? new QueryMeter();
+
+	// Live config re-resolution is enabled for the REAL production assembly (no injected transport)
+	// OR when a test explicitly injects a `mtimeReader` to drive it. When a fake `transport` is
+	// injected WITHOUT a `mtimeReader`, the resolver is disabled so the deterministic suites keep
+	// exactly one build (their fake transport carries no live endpoint to reconnect to).
+	const liveResolveEnabled = options.mtimeReader !== undefined || options.transport === undefined;
+	const provider = options.provider ?? defaultCredentialProvider();
+	const mtimeReader: MtimeReader = options.mtimeReader ?? fileMtimeReader(credentialsPath());
+	// The mtime-gated resolver returns the CURRENT identity fingerprint of the resolved config, or
+	// `null` when config is unusable (no creds yet). Debounced so a burst pays one stat, not one per
+	// query. `derive` re-reads the provider (which reads disk fresh) and fingerprints the identity.
+	const resolveIdentity = createMtimeGatedResolver<string | null>(
+		mtimeReader,
+		(): string | null => {
+			try {
+				return configIdentity(resolveStorageConfig(provider));
+			} catch {
+				// No usable credential yet (fresh install / mid-write) → no identity to compare against.
+				return null;
+			}
+		},
+		{ ...(options.ttlMs !== undefined ? { ttlMs: options.ttlMs } : {}), ...(options.now !== undefined ? { now: options.now } : {}) },
+	);
 
 	/** Try to build the real client; return it on success, or `null` when no usable credential resolves. */
 	const tryBuild = (): StorageClient | null => {
+		// Live re-resolution: if the on-disk config's identity changed since the cached client was
+		// built (a re-login / re-point), drop the cached client so it rebuilds under the new tenancy.
+		if (liveResolveEnabled && built !== null) {
+			const identity = resolveIdentity();
+			// Only invalidate on a CONCRETE, DIFFERENT identity — a transient no-creds read (`null`)
+			// keeps the working client (fail-soft; never tear down a good client on a read hiccup).
+			if (identity !== null && identity !== builtIdentity) {
+				built = null;
+				builtIdentity = null;
+			}
+		}
 		if (built !== null) return built;
 		try {
-			built = createStorageClient({ ...options, meter });
+			built = createStorageClient({
+				provider,
+				...(options.transport !== undefined ? { transport: options.transport } : {}),
+				...(options.sleep !== undefined ? { sleep: options.sleep } : {}),
+				meter,
+			});
+			// Record the identity the freshly-built client connects under so a later change is detected.
+			try {
+				builtIdentity = configIdentity(resolveStorageConfig(provider));
+			} catch {
+				builtIdentity = null;
+			}
+			// PRIME the debounced resolver's baseline to the identity we just built under, so its
+			// first observed value aligns with `builtIdentity` and the debounce window starts NOW. If
+			// we did not prime, the resolver's first-ever derive (on a later query) would read the CURRENT
+			// on-disk config unconditionally — picking up a mid-window change early and defeating the debounce.
+			if (liveResolveEnabled) resolveIdentity();
 			return built;
 		} catch {
 			// No usable credential yet (a fresh install) → stay deferred. We do NOT cache the
@@ -335,6 +420,19 @@ export function createLazyStorageClient(
 		},
 	};
 	return lazy as unknown as StorageClient;
+}
+
+/**
+ * The identity-bearing fingerprint of a resolved {@link StorageConfig} — the fields that decide
+ * WHICH tenancy + endpoint + credential the storage client connects under. A change in any of
+ * these means the cached client is talking to the wrong place and must rebuild; a change in a
+ * pure tuning knob (`queryTimeoutMs`, `traceSql`) does NOT force a reconnect. JSON-encoded so a
+ * separator char in a value can never alias two different configs to the same fingerprint. The
+ * token is part of the identity (a rotated token must reconnect) but this string is compared
+ * in-memory and NEVER logged.
+ */
+function configIdentity(config: StorageConfig): string {
+	return JSON.stringify([config.endpoint, config.token, config.org, config.workspace]);
 }
 
 /** Re-export the structural query contract Wave 2 codes against. */

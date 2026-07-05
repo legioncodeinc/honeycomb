@@ -34,6 +34,14 @@ describe("PRD-072a AC-072a.1.1 — APIARY_HOME wins over XDG and the home defaul
 		expect(resolveFleetRoot({ env, platform: "win32", home: HOME })).toBe("/mnt/state/apiary");
 	});
 
+	it("trims a trailing-space APIARY_HOME so a polluted service-manager env cannot diverge the state dir", () => {
+		// A Windows scheduled task whose `set APIARY_HOME=<root> && ...` captured the space before `&&`
+		// pins a trailing space; the resolver must trim it, not carry it into a `<root> /honeycomb` dir.
+		const env = { [APIARY_HOME_ENV]: "/mnt/state/apiary " };
+		expect(resolveFleetRoot({ env, platform: "linux", home: HOME })).toBe("/mnt/state/apiary");
+		expect(resolveFleetRoot({ env, platform: "win32", home: HOME })).toBe("/mnt/state/apiary");
+	});
+
 	it("AC-072a.1.1 a blank / whitespace-only APIARY_HOME does NOT win (falls through the chain)", () => {
 		expect(resolveFleetRoot({ env: { [APIARY_HOME_ENV]: "" }, platform: "darwin", home: HOME })).toBe(
 			join(HOME, APIARY_ROOT_DIR_NAME),

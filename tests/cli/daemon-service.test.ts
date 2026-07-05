@@ -199,13 +199,14 @@ describe("PRD-064h AC-064h.4, renderScheduledTaskXml is SID-scoped + conhost-hea
 	});
 	it("pins cd /d <workspace> + HONEYCOMB_WORKSPACE + APIARY_HOME + node entry (system32 close)", () => {
 		expect(xml).toContain("cd /d &quot;C:\\Users\\ada\\hc&quot;");
-		expect(xml).toContain("set HONEYCOMB_WORKSPACE=C:\\Users\\ada\\hc");
-		expect(xml).toContain("set APIARY_HOME=C:\\Users\\ada\\.apiary");
+		// Quoted `set "VAR=value"` so cmd does not fold the space before `&&` into the value.
+		expect(xml).toContain(`set &quot;HONEYCOMB_WORKSPACE=C:\\Users\\ada\\hc&quot;`);
+		expect(xml).toContain(`set &quot;APIARY_HOME=C:\\Users\\ada\\.apiary&quot;`);
 		expect(xml).toContain("daemon\\index.js");
 	});
 	it("omits the APIARY_HOME set when no fleet root is pinned", () => {
 		const plain = renderScheduledTaskXml(WIN_SPEC, FAKE_SID, "C:\\Windows\\System32\\conhost.exe");
-		expect(plain).not.toContain("set APIARY_HOME=");
+		expect(plain).not.toContain("APIARY_HOME");
 	});
 	it("XML-escapes embedded values, including an apostrophe that passes the cmd-safety guard", () => {
 		const spec: ServiceSpec = { ...WIN_SPEC, workspace: "C:\\Users\\O'Brien\\hc" };
