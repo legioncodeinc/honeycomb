@@ -59,6 +59,7 @@ import { DAEMON_HOST, DAEMON_PORT, HIVE_HOST, HIVE_PORT } from "../shared/consta
 import { classifyFleet, type FleetClassification, fleetSignalLine } from "../shared/fleet-detection.js";
 import type { CommandResult, OutputSink } from "./contracts.js";
 import { type DaemonVerbDeps, ensureDaemonRunning } from "./daemon.js";
+import type { ConnectorRunner } from "./local-handlers.js";
 
 /** The portal route hive serves the dashboard SPA at (ADR-0001). */
 export const DASHBOARD_PATH = "/" as const;
@@ -187,6 +188,16 @@ export interface InstallVerbDeps extends DaemonVerbDeps {
 	 * injects a recorder so no real browser launches and no real device flow runs.
 	 */
 	readonly runDeviceLogin?: (out: OutputSink) => Promise<boolean>;
+	/**
+	 * The connector engine `honeycomb setup` uses (the 019a `connectorMain` behind the
+	 * {@link ConnectorRunner} seam). At the END of a successful install this is run BEST-EFFORT to wire
+	 * the harness hooks so the one-line installer no longer leaves them unwired until a manual
+	 * `honeycomb setup` (the observed D5-FAIL-until-manual-run gap). Fires in BOTH solo and fleet modes.
+	 * FAIL-SOFT: a setup failure prints one actionable line and NEVER fails the install. Production binds
+	 * the real runner (`src/cli/connector-runner.ts`); a test injects a fake. When absent (older
+	 * install-only tests) the step is a silent no-op.
+	 */
+	readonly connector?: ConnectorRunner;
 }
 
 /** Parse the effective referral code off the argv tail (`--ref <code>`), else `undefined`. */
@@ -407,7 +418,11 @@ async function runInstallLoginStep(deps: InstallVerbDeps, out: OutputSink): Prom
 		// dashboard window. Actionable line, and the returned fleet classification gates the dashboard
 		// step to "open nothing" too.
 		out("note: could not determine solo vs fleet mode; deferring login (run `honeycomb login` to sign in).");
-		return { mode: "fleet", signals: { registryHiveEntry: false, hivePortAnswering: false, hiveNpmGlobal: false }, firedSignals: [] };
+		return {
+			mode: "fleet",
+			signals: { registryHiveEntry: false, hivePortAnswering: false, hiveNpmGlobal: false },
+			firedSignals: [],
+		};
 	}
 	// a-AC-6: the classification's inputs (which signals fired) are visible in the install output.
 	out(fleetSignalLine(classification));
@@ -435,6 +450,31 @@ async function runInstallLoginStep(deps: InstallVerbDeps, out: OutputSink): Prom
 		out(`note: automatic sign-in could not complete (${reason}); run \`honeycomb login\` to sign in.`);
 	}
 	return classification;
+}
+
+/**
+ * Wire the harness hooks BEST-EFFORT at the end of a successful install (the D5-until-manual-setup
+ * fix). Runs the SAME connector engine `honeycomb setup` uses (019a `connectorMain` via the
+ * {@link ConnectorRunner} seam), in BOTH solo and fleet modes. FAIL-SOFT: a missing seam is a silent
+ * no-op; a setup THROW prints one actionable line and NEVER changes the install exit code. Prints what
+ * got wired (or that nothing supported was detected) so the user sees the outcome.
+ */
+async function runInstallSetupStep(deps: InstallVerbDeps, out: OutputSink): Promise<void> {
+	if (deps.connector === undefined) return;
+	try {
+		const result = await deps.connector.run({ verb: "setup" });
+		if (result.harnesses.length > 0) {
+			out(`✓ wired harness hooks: ${result.harnesses.join(", ")}.`);
+		} else {
+			out(
+				"note: no harness hooks were wired (no supported harness detected); run `honeycomb setup` after installing one.",
+			);
+		}
+	} catch (err) {
+		// Fail-soft: wiring is best-effort. One actionable line, never a raw stack, never a failed install.
+		const reason = err instanceof Error ? err.message : "setup failed";
+		out(`note: could not wire harness hooks (${reason}); run \`honeycomb setup\` to wire them.`);
+	}
 }
 
 /**
@@ -493,6 +533,12 @@ export async function runInstallCommand(argv: readonly string[], deps: InstallVe
 	//     solo + creds → already signed in. Fail-soft: it never changes the install exit code. The
 	//     returned classification also gates the dashboard-open step below (solo-only).
 	const classification = await runInstallLoginStep(deps, out);
+
+	// 2d) PRD-003a follow-through: wire the harness hooks best-effort so the one-line installer no longer
+	//     leaves them unwired until a manual `honeycomb setup` (the observed D5-FAIL). Runs the SAME
+	//     connector engine `honeycomb setup` uses, in BOTH solo and fleet modes, fail-soft — a setup
+	//     failure prints one line and never fails the install.
+	await runInstallSetupStep(deps, out);
 
 	// 3) Open the dashboard — SOLO mode ONLY. When Hive is present (FLEET) the dashboard IS the Hive
 	//    portal and Hive's own onboarding already opened it; opening a SECOND competing window here is

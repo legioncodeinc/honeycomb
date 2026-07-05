@@ -153,6 +153,10 @@ function installVerbDeps(deps: CommandDeps): InstallVerbDeps {
 	const loadInstallCredentials = (deps as { loadInstallCredentials?: InstallVerbDeps["loadInstallCredentials"] })
 		.loadInstallCredentials;
 	const runDeviceLogin = (deps as { runDeviceLogin?: InstallVerbDeps["runDeviceLogin"] }).runDeviceLogin;
+	// PRD-003a: forward the connector engine so `install` wires harness hooks best-effort at the end
+	// (the same engine `honeycomb setup` uses). Production binds the real runner in `src/cli/runtime.ts`;
+	// a test injects a fake. When absent the install-time setup step is a silent no-op.
+	const connector = (deps as { connector?: InstallVerbDeps["connector"] }).connector;
 	return {
 		...daemonVerbDeps(deps),
 		...(deps.dir !== undefined ? { dir: deps.dir } : {}),
@@ -161,6 +165,7 @@ function installVerbDeps(deps: CommandDeps): InstallVerbDeps {
 		...(detectFleet !== undefined ? { detectFleet } : {}),
 		...(loadInstallCredentials !== undefined ? { loadInstallCredentials } : {}),
 		...(runDeviceLogin !== undefined ? { runDeviceLogin } : {}),
+		...(connector !== undefined ? { connector } : {}),
 	};
 }
 

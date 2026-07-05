@@ -33,6 +33,8 @@
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { hasBoundProjectOnDisk } from "../../hooks/shared/project-resolver.js";
+import { honeycombStateDir, legacyHoneycombDir } from "../../shared/fleet-root.js";
 import { CATALOG } from "../storage/catalog/index.js";
 import type { QueryScope, StorageClient } from "../storage/client.js";
 import { type CredentialProvider, defaultCredentialProvider } from "../storage/config.js";
@@ -42,8 +44,6 @@ import { isOk } from "../storage/result.js";
 import { mountAssetsApi } from "./assets/api.js";
 import type { TrustedTableProbe } from "./assets/sync.js";
 import { DIR_MODE } from "./auth/credentials-store.js";
-import { honeycombStateDir, legacyHoneycombDir } from "../../shared/fleet-root.js";
-import { runHoneycombStateMigration } from "./state-migration/index.js";
 import {
 	type Authenticator,
 	type AuthorizationPolicy,
@@ -55,19 +55,12 @@ import {
 	type PresentedCredentials,
 } from "./auth/index.js";
 import { mountAuthStatusApi } from "./auth/status-api.js";
-import { attachHooksHandlers } from "./capture/attach.js";
-import type { CaptureHandler } from "./capture/capture-handler.js";
-import { createCaptureDroppedEventsCounter, type CaptureDroppedEventsCounter } from "./capture/dropped-events.js";
-import { createGatedCapturesCounter, type GatedCapturesCounter } from "./capture/gated-captures.js";
-import { resolveInboxCaptureEnabled } from "./capture/capture-config.js";
 import { isTenancyConfirmed } from "./auth/tenancy-confirmation.js";
-import {
-	createPendingLinkStore,
-	makePendingLinkRunner,
-	mountSetupTenancyApi,
-	type PendingLinkStore,
-} from "./dashboard/setup-tenancy.js";
-import { hasBoundProjectOnDisk } from "../../hooks/shared/project-resolver.js";
+import { attachHooksHandlers } from "./capture/attach.js";
+import { resolveInboxCaptureEnabled } from "./capture/capture-config.js";
+import type { CaptureHandler } from "./capture/capture-handler.js";
+import { type CaptureDroppedEventsCounter, createCaptureDroppedEventsCounter } from "./capture/dropped-events.js";
+import { createGatedCapturesCounter, type GatedCapturesCounter } from "./capture/gated-captures.js";
 import { buildCodebaseGraphSnapshot, mountGraphApi } from "./codebase/api.js";
 import { type DeploymentMode, type RuntimeConfig, resolveRuntimeConfig } from "./config.js";
 import { mountActionsApi } from "./dashboard/actions-api.js";
@@ -77,6 +70,12 @@ import { detectInstalledHarnesses } from "./dashboard/harness-detect.js";
 import { mountSetupLogin } from "./dashboard/setup-login.js";
 import { mountSetupMigrate } from "./dashboard/setup-migrate.js";
 import { mountSetupStateApi } from "./dashboard/setup-state.js";
+import {
+	createPendingLinkStore,
+	makePendingLinkRunner,
+	mountSetupTenancyApi,
+	type PendingLinkStore,
+} from "./dashboard/setup-tenancy.js";
 import { mountSyncApi } from "./dashboard/sync-mount.js";
 import { mountDiagnosticsHealthApi } from "./diagnostics-health.js";
 import {
@@ -105,8 +104,8 @@ import { createConflictSuppressionSource } from "./memories/conflict-resolve.js"
 import { mountConflictsApi } from "./memories/conflicts-api.js";
 // ── Data-API mount seams (PRD-022a / 022b / 022c) the composition root fires (D-2 / d-AC-1) ──
 import { mountMemoriesApi, mountMemoriesPrimeApi } from "./memories/index.js";
-import { resolveNectarRrfMultiplierAtBoot } from "./memories/nectar-recall-config.js";
 import { mountLifecycleApi } from "./memories/lifecycle-api.js";
+import { resolveNectarRrfMultiplierAtBoot } from "./memories/nectar-recall-config.js";
 import type { CohereRerankSeam } from "./memories/recall.js";
 import { createRuntimePathService } from "./middleware/runtime-path.js";
 import { mountNotificationsApi } from "./notifications/api.js";
@@ -126,8 +125,8 @@ import type { ModelClient } from "./pipeline/model-client.js";
 import { mountPollinateApi } from "./pollinating/api.js";
 import { resolvePollinatingConfig } from "./pollinating/config.js";
 import {
-	startPollinatingMaintenanceTick,
 	type PollinatingMaintenanceTickHandle,
+	startPollinatingMaintenanceTick,
 } from "./pollinating/maintenance-tick.js";
 import { createPollinatingTrigger, type PollinatingTrigger } from "./pollinating/trigger.js";
 import { createPollinatingWorker, type PollinatingJobWorker } from "./pollinating/worker.js";
@@ -137,7 +136,10 @@ import {
 	mountProjectsSyncApi,
 	mountScopeEnumerationApi,
 	mountScopeSwitchApi,
+	PROJECTS_VIEW_TTL_MS,
+	ProjectsViewCache,
 } from "./projects/index.js";
+import type { ProjectCountsMap } from "./projects/project-counts.js";
 import { RecallConfigSchema, resolveRecallConfig } from "./recall/config.js";
 import { buildCohereRerankSeam, createPortkeyRerankClient } from "./recall/rerank-portkey.js";
 import { localDefaultScopeResolver, type SecretsApiDeps } from "./secrets/api.js";
@@ -178,6 +180,7 @@ import { mountSkillPropagationApi } from "./skillify/propagation-api.js";
 import { createSkillifyJobWorker, defaultGateSpec, type SkillifyJobWorker } from "./skillify/worker.js";
 import type { SourcesApiDeps } from "./sources/api.js";
 import { buildSourcesApiDeps } from "./sources/registry.js";
+import { runHoneycombStateMigration } from "./state-migration/index.js";
 // ── The PRD-046a summary-worker mount (the deferred-assembly seam PRD-017 left) ──
 import { createSummaryJobWorker, type SummaryJobWorker } from "./summaries/index.js";
 import { createDashboardMetricsSource } from "./telemetry/fleet-metrics-source.js";
@@ -930,7 +933,7 @@ export function assembleSeams(
 	localQueueConfig: HybridJobQueueConfig,
 	localQueue: Pick<LocalJobQueueService, "persistent" | "counts">,
 	workspaceDir: string,
-	installedHarnesses: ReadonlySet<string>,
+	resolveInstalledHarnesses: () => ReadonlySet<string>,
 	logStore: LogStore,
 	seams: SeamFns = defaultSeamFns,
 	vault?: VaultSettingsReader,
@@ -1316,7 +1319,15 @@ export function assembleSeams(
 	//     the surface stays unmounted this run (falls through to the 501 scaffold).
 	if (seams.mountHarness !== undefined) {
 		try {
-			seams.mountHarness(daemon, { storage, defaultScope, installedHarnesses });
+			// PRD-039a re-probe: pass the LIVE resolver so `installed` reflects a harness wired AFTER
+			// boot (cheap existsSync per request). The static `installedHarnesses` snapshot is passed too
+			// for back-compat with consumers that read it directly.
+			seams.mountHarness(daemon, {
+				storage,
+				defaultScope,
+				installedHarnesses: resolveInstalledHarnesses(),
+				resolveInstalled: resolveInstalledHarnesses,
+			});
 		} catch (err: unknown) {
 			const reason = err instanceof Error ? err.message : String(err);
 			process.stderr.write(`honeycomb: harness API mount failed (non-fatal): ${reason}\n`);
@@ -2408,26 +2419,29 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// client (clean lexical-only). The attacher writes through the same live storage client.
 	const embed = options.embed ?? createEmbedAttachment({ storage });
 
-	// ── PRD-039a (a-AC-3 / OQ-1): the daemon's known INSTALLED/wired harness set — the cheap
-	// cached presence check resolved ONCE here (NOT a per-request file walk or spawn). A harness
-	// reads `installed: true` on the telemetry endpoint independent of whether it has ever captured
-	// a turn. Precedence (highest first):
-	//   1. an explicit `options.installedHarnesses` (a test injects a fixed mix);
+	// ── PRD-039a (a-AC-3 / OQ-1): the daemon's INSTALLED/wired harness RESOLVER — a cheap presence
+	// check the telemetry endpoint runs PER REQUEST so a harness wired AFTER boot (e.g. cursor wired
+	// post-boot) is reflected without a daemon restart, instead of a frozen boot-time snapshot. A
+	// harness reads `installed: true` independent of whether it has ever captured a turn. Precedence
+	// (highest first):
+	//   1. an explicit `options.installedHarnesses` (a test injects a fixed mix) → a fixed resolver;
 	//   2. else the harness-sync `HarnessTarget` names the file watcher holds, WHEN any are supplied;
 	//   3. else — for the REAL production assembly only (no injected `storage`) — the cheap on-disk
-	//      `detectInstalledHarnesses()` probe (existsSync over each installer's marker), so the LIVE
-	//      endpoint reflects what is actually wired instead of the empty "wired nothing yet" set
-	//      (a-AC-3 was plumbed but starved in production — this feeds it).
-	// A unit assembly (injected `storage`, no targets, no explicit set) stays on the empty set, so the
-	// deterministic suite never touches the real home. The probe is fail-soft (a missing/unreadable
-	// marker → simply absent), so it can never crash the boot.
-	const installedHarnesses: ReadonlySet<string> =
-		options.installedHarnesses ??
-		(options.harnessTargets !== undefined && options.harnessTargets.length > 0
-			? new Set(options.harnessTargets.map((t) => t.name))
-			: options.storage === undefined
-				? detectInstalledHarnesses()
-				: new Set<string>());
+	//      `detectInstalledHarnesses()` probe (existsSync over each honeycomb marker), RE-RUN on every
+	//      request so the LIVE endpoint reflects what is actually wired right now.
+	// A unit assembly (injected `storage`, no targets, no explicit set) resolves to the empty set, so
+	// the deterministic suite never touches the real home. The probe is fail-soft (a missing/unreadable
+	// marker → simply absent), so it can never crash a request.
+	const explicitInstalled = options.installedHarnesses;
+	const harnessTargets = options.harnessTargets;
+	const resolveInstalledHarnesses: () => ReadonlySet<string> =
+		explicitInstalled !== undefined
+			? (): ReadonlySet<string> => explicitInstalled
+			: harnessTargets !== undefined && harnessTargets.length > 0
+				? (): ReadonlySet<string> => new Set(harnessTargets.map((t) => t.name))
+				: options.storage === undefined
+					? (): ReadonlySet<string> => detectInstalledHarnesses()
+					: (): ReadonlySet<string> => new Set<string>();
 
 	// (The vault `setting`-class READER is constructed earlier, before the services block, so it can
 	// also seed the embed supervisor's boot enabled state. It threads into `assembleSeams` below — the
@@ -2470,7 +2484,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		localQueueConfig,
 		localQueue,
 		options.workspaceDir ?? process.cwd(),
-		installedHarnesses,
+		resolveInstalledHarnesses,
 		logStore,
 		options.seams ?? defaultSeamFns,
 		vault,
@@ -2543,8 +2557,12 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// auth client's Authorization header — NEVER in a body (D-4). FAIL-SOFT: a mount error never crashes
 	// the daemon (the switcher falls back to empty lists), and each handler returns an empty list on any
 	// auth-API failure rather than a 500.
+	// PRD-062 FIX 3: ONE shared projects view cache, held by BOTH the scope/projects read (which
+	// memoizes the sync + counts behind it) AND the onboarding bind/unbind handlers (which invalidate
+	// it), so a fresh bind shows on the very next read instead of after the TTL lapses.
+	const projectsViewCache = new ProjectsViewCache<ProjectCountsMap>(PROJECTS_VIEW_TTL_MS);
 	try {
-		mountScopeEnumerationApi(daemon, { storage, defaultScope: scope });
+		mountScopeEnumerationApi(daemon, { storage, defaultScope: scope, projectsViewCache });
 	} catch (err: unknown) {
 		const reason = err instanceof Error ? err.message : String(err);
 		process.stderr.write(`honeycomb: scope enumeration API mount failed (non-fatal): ${reason}\n`);
@@ -2564,6 +2582,10 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		mountOnboardingApi(daemon, {
 			org: scope.org,
 			workspace: scope.workspace ?? "",
+			// PRD-062 FIX 1: persist a bound project into the Deeplake `projects` registry (best-effort).
+			storage,
+			// PRD-062 FIX 3: invalidate the shared projects view cache so a fresh bind shows immediately.
+			projectsViewCache,
 		});
 	} catch (err: unknown) {
 		const reason = err instanceof Error ? err.message : String(err);

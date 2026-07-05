@@ -8,22 +8,23 @@
  * Honeycomb actually wired on this box?" by checking for the on-disk MARKER each installer writes —
  * `existsSync` only, no spawn, no network, no directory walk, never a throw.
  *
- * ── The markers are the install pipeline's own authoritative signals ─────────────────
- *   Each harness is "wired" when at least one of its install markers is present. The markers are
- *   grounded in the install code, NOT guessed:
+ * ── The markers are HONEYCOMB's own artifacts, never dead hivemind-v1 leftovers ───────
+ *   Each harness is "wired" when at least one of its install markers is present. Every marker points
+ *   at what the CURRENT honeycomb product writes — NOT the legacy hivemind-v1 install paths (an old
+ *   `~/.hermes` / `~/.codex/hivemind` must never masquerade as a honeycomb install):
  *     - `claude-code` → `~/.claude/settings.json` — the hook-config file the connector patches
  *       (`src/connectors/claude-code.ts` `configPath()`); OR the plugin root `~/.claude/plugins/honeycomb`
  *       (that connector's `pluginRoot`, where the compiled handlers land).
  *     - `cursor` → `~/.cursor/hooks.json` — the connector's `configPath()` (`src/connectors/cursor.ts`);
  *       OR the plugin root `~/.cursor/honeycomb`.
- *     - `codex` → `~/.codex/hooks.json` + the plugin dir `~/.codex/hivemind` the installer writes
- *       (`hivemind-v1/src/cli/install-codex.ts` `HOOKS_PATH` / `PLUGIN_DIR`).
- *     - `hermes` → `~/.hermes/config.yaml` + the bundle dir `~/.hermes/hivemind`
- *       (`hivemind-v1/src/cli/install-hermes.ts` `CONFIG_PATH` / `HIVEMIND_DIR`).
- *     - `pi` → `~/.pi/agent/AGENTS.md` (the BEGIN/END Honeycomb block upsert) + the extension
- *       `~/.pi/agent/extensions/hivemind.ts` (`hivemind-v1/src/cli/install-pi.ts` `AGENTS_MD` / `EXTENSION_PATH`).
- *     - `openclaw` → the plugin dir `~/.openclaw/extensions/hivemind`
- *       (`hivemind-v1/src/cli/install-openclaw.ts` `PLUGIN_DIR`).
+ *     - `codex` → `~/.codex/hooks.json` (the connector's `configPath()`) OR the plugin root
+ *       `~/.codex/plugins/honeycomb` (`src/connectors/codex.ts`). Repointed off the dead
+ *       `~/.codex/hivemind` leftover.
+ *     - `hermes` / `pi` / `openclaw` → NO honeycomb connector wires these yet (only claude-code,
+ *       codex, and cursor have connectors). Their marker is the honeycomb-namespaced dir honeycomb
+ *       WOULD write once wired (`~/.hermes/honeycomb`, `~/.pi/honeycomb`, `~/.openclaw/honeycomb`) —
+ *       so they read absent today (the honest "not wired yet" picture) rather than reporting installed
+ *       off a stale hivemind-v1 artifact (`~/.hermes/config.yaml`, `~/.pi/agent/…`, `~/.openclaw/extensions/hivemind`).
  *
  *   A harness reads INSTALLED iff one of its markers exists. The check is intentionally OR-over-markers
  *   and tolerant: a partially-wired harness (e.g. the config written but the plugin dir pruned) still
@@ -59,8 +60,9 @@ interface HarnessMarker {
 
 /**
  * The per-harness markers, keyed by canonical id. Each path is the AUTHORITATIVE on-disk signal the
- * harness's installer writes (the connector `configPath()`/`pluginRoot`, or the legacy installer's
- * `HOOKS_PATH`/`PLUGIN_DIR`/`AGENTS_MD`/`EXTENSION_PATH`). OR-over-paths: any one present → wired.
+ * CURRENT honeycomb install writes (the connector `configPath()`/`pluginRoot`, or — for a harness with
+ * no connector yet — the honeycomb-namespaced dir honeycomb would write). Never a legacy hivemind-v1
+ * path. OR-over-paths: any one present → wired.
  */
 const HARNESS_MARKERS: readonly HarnessMarker[] = [
 	{
@@ -75,26 +77,29 @@ const HARNESS_MARKERS: readonly HarnessMarker[] = [
 	},
 	{
 		name: "codex",
-		// hivemind-v1/src/cli/install-codex.ts: HOOKS_PATH = ~/.codex/hooks.json; PLUGIN_DIR = ~/.codex/hivemind.
-		paths: (h) => [join(h, ".codex", "hooks.json"), join(h, ".codex", "hivemind")],
+		// src/connectors/codex.ts: configPath() = ~/.codex/hooks.json; pluginRoot = ~/.codex/plugins/honeycomb.
+		// (Repointed off the dead hivemind-v1 `~/.codex/hivemind` path to the CURRENT honeycomb connector's artifacts.)
+		paths: (h) => [join(h, ".codex", "hooks.json"), join(h, ".codex", "plugins", "honeycomb")],
 	},
 	{
 		name: "hermes",
-		// hivemind-v1/src/cli/install-hermes.ts: CONFIG_PATH = ~/.hermes/config.yaml; HIVEMIND_DIR = ~/.hermes/hivemind.
-		paths: (h) => [join(h, ".hermes", "config.yaml"), join(h, ".hermes", "hivemind")],
+		// No honeycomb connector wires hermes yet (only claude-code/codex/cursor have connectors). The
+		// marker is the honeycomb-NAMESPACED dir honeycomb would write, NEVER the dead hivemind-v1
+		// `~/.hermes/config.yaml` / `~/.hermes/hivemind` leftovers — so an old ~/.hermes no longer
+		// masquerades as installed. It reads absent until honeycomb actually wires hermes.
+		paths: (h) => [join(h, ".hermes", "honeycomb")],
 	},
 	{
 		name: "pi",
-		// hivemind-v1/src/cli/install-pi.ts: AGENTS_MD = ~/.pi/agent/AGENTS.md; EXTENSION_PATH = ~/.pi/agent/extensions/hivemind.ts.
-		paths: (h) => [
-			join(h, ".pi", "agent", "extensions", "hivemind.ts"),
-			join(h, ".pi", "agent", "AGENTS.md"),
-		],
+		// No honeycomb connector wires pi yet. Detect ONLY the honeycomb-namespaced dir, not the dead
+		// hivemind-v1 `~/.pi/agent/AGENTS.md` / `~/.pi/agent/extensions/hivemind.ts` leftovers.
+		paths: (h) => [join(h, ".pi", "honeycomb")],
 	},
 	{
 		name: "openclaw",
-		// hivemind-v1/src/cli/install-openclaw.ts: PLUGIN_DIR = ~/.openclaw/extensions/hivemind.
-		paths: (h) => [join(h, ".openclaw", "extensions", "hivemind")],
+		// No honeycomb connector wires openclaw yet. Detect ONLY the honeycomb-namespaced dir, not the
+		// dead hivemind-v1 `~/.openclaw/extensions/hivemind` leftover.
+		paths: (h) => [join(h, ".openclaw", "honeycomb")],
 	},
 ];
 
@@ -123,10 +128,7 @@ function markerExists(path: string): boolean {
  * @param _cwd     The workspace root — accepted for symmetry with the assembly seam (a future
  *                 project-local marker could key off it); UNUSED today (no current marker is cwd-local).
  */
-export function detectInstalledHarnesses(
-	homeDir: string = homedir(),
-	_cwd: string = process.cwd(),
-): Set<string> {
+export function detectInstalledHarnesses(homeDir: string = homedir(), _cwd: string = process.cwd()): Set<string> {
 	const canonical = new Set<string>(CANONICAL_HARNESS_IDS);
 	const installed = new Set<string>();
 	for (const marker of HARNESS_MARKERS) {

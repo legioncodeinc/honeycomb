@@ -6,8 +6,10 @@
  * telemetry endpoint so the live `installed` flag reflects REAL wiring (not the starved empty set the
  * QA flagged). Every fixture is built under a temp dir; the real home is NEVER touched.
  *
- * The markers are the install pipeline's own authoritative signals (grounded in `src/connectors/*` and
- * `hivemind-v1/src/cli/install-*.ts`): a harness reads INSTALLED iff at least one of its markers exists.
+ * The markers are HONEYCOMB's own install artifacts (grounded in `src/connectors/*`, or — for a harness
+ * with no connector yet — the honeycomb-namespaced dir honeycomb would write). A harness reads INSTALLED
+ * iff at least one of its markers exists. Dead hivemind-v1 leftovers (`~/.hermes/config.yaml`,
+ * `~/.codex/hivemind`, `~/.pi/agent/…`, `~/.openclaw/extensions/hivemind`) must NEVER read installed.
  */
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -65,33 +67,59 @@ describe("PRD-039a a-AC-3: detectInstalledHarnesses — markers present → in t
 		expect(detectInstalledHarnesses(home, home).has("cursor")).toBe(true);
 	});
 
-	it("codex markers (~/.codex/hooks.json, ~/.codex/hivemind) → codex in the set", () => {
+	it("codex marker (~/.codex/hooks.json) → codex in the set", () => {
 		touchFile(".codex", "hooks.json");
-		touchDir(".codex", "hivemind");
 		expect(detectInstalledHarnesses(home, home).has("codex")).toBe(true);
 	});
 
-	it("hermes markers (~/.hermes/config.yaml) → hermes in the set", () => {
-		touchFile(".hermes", "config.yaml");
+	it("the codex honeycomb plugin dir alone (~/.codex/plugins/honeycomb) also reads installed", () => {
+		touchDir(".codex", "plugins", "honeycomb");
+		expect(detectInstalledHarnesses(home, home).has("codex")).toBe(true);
+	});
+
+	it("hermes honeycomb marker (~/.hermes/honeycomb) → hermes in the set", () => {
+		touchDir(".hermes", "honeycomb");
 		expect(detectInstalledHarnesses(home, home).has("hermes")).toBe(true);
 	});
 
-	it("pi marker (~/.pi/agent/extensions/hivemind.ts) → pi in the set", () => {
-		touchFile(".pi", "agent", "extensions", "hivemind.ts");
+	it("pi honeycomb marker (~/.pi/honeycomb) → pi in the set", () => {
+		touchDir(".pi", "honeycomb");
 		expect(detectInstalledHarnesses(home, home).has("pi")).toBe(true);
 	});
 
-	it("openclaw marker (~/.openclaw/extensions/hivemind) → openclaw in the set", () => {
-		touchDir(".openclaw", "extensions", "hivemind");
+	it("openclaw honeycomb marker (~/.openclaw/honeycomb) → openclaw in the set", () => {
+		touchDir(".openclaw", "honeycomb");
 		expect(detectInstalledHarnesses(home, home).has("openclaw")).toBe(true);
+	});
+});
+
+describe("W2-FIX-2: dead hivemind-v1 leftovers alone do NOT read installed", () => {
+	it("a stale ~/.hermes/config.yaml (hivemind-v1) does NOT make hermes read installed", () => {
+		touchFile(".hermes", "config.yaml");
+		touchDir(".hermes", "hivemind");
+		expect(detectInstalledHarnesses(home, home).has("hermes")).toBe(false);
+	});
+
+	it("a stale ~/.codex/hivemind (hivemind-v1) alone does NOT make codex read installed", () => {
+		touchDir(".codex", "hivemind");
+		expect(detectInstalledHarnesses(home, home).has("codex")).toBe(false);
+	});
+
+	it("stale ~/.pi/agent/* + ~/.openclaw/extensions/hivemind (hivemind-v1) do NOT read installed", () => {
+		touchFile(".pi", "agent", "AGENTS.md");
+		touchFile(".pi", "agent", "extensions", "hivemind.ts");
+		touchDir(".openclaw", "extensions", "hivemind");
+		const set = detectInstalledHarnesses(home, home);
+		expect(set.has("pi")).toBe(false);
+		expect(set.has("openclaw")).toBe(false);
 	});
 });
 
 describe("PRD-039a a-AC-3: detectInstalledHarnesses — a present/absent MIX is faithful", () => {
 	it("wires claude-code + codex + openclaw, leaves cursor/hermes/pi absent", () => {
 		touchFile(".claude", "settings.json");
-		touchDir(".codex", "hivemind");
-		touchDir(".openclaw", "extensions", "hivemind");
+		touchFile(".codex", "hooks.json");
+		touchDir(".openclaw", "honeycomb");
 		const set = detectInstalledHarnesses(home, home);
 		expect(set.has("claude-code")).toBe(true);
 		expect(set.has("codex")).toBe(true);
@@ -106,9 +134,9 @@ describe("PRD-039a a-AC-3: detectInstalledHarnesses — a present/absent MIX is 
 		touchFile(".claude", "settings.json");
 		touchFile(".cursor", "hooks.json");
 		touchFile(".codex", "hooks.json");
-		touchFile(".hermes", "config.yaml");
-		touchFile(".pi", "agent", "AGENTS.md");
-		touchDir(".openclaw", "extensions", "hivemind");
+		touchDir(".hermes", "honeycomb");
+		touchDir(".pi", "honeycomb");
+		touchDir(".openclaw", "honeycomb");
 		const set = detectInstalledHarnesses(home, home);
 		expect([...set].sort()).toEqual([...CANONICAL_HARNESS_IDS].sort());
 	});

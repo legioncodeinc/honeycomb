@@ -165,6 +165,23 @@ describe("PRD-059b POST /api/diagnostics/projects/bind (b-AC-4)", () => {
 		expect(res.status).toBe(400);
 		expect(((await res.json()) as BindAck).bound).toBe(false);
 	});
+
+	it("rejects case/name VARIANTS of the reserved inbox on bind (049a-AC-6 security remediation)", async () => {
+		// The guard is `isReservedProjectId` (trim + case-insensitive, id AND display name), not an
+		// exact-string match — `__UNSORTED__` / `Unsorted` must be refused the same as `__unsorted__`.
+		const folder = join(browseRoot, "scratch-variants");
+		mkdirSync(folder, { recursive: true });
+		const daemon = buildDaemon();
+		for (const name of ["__UNSORTED__", " __Unsorted__ ", "Unsorted", "unsorted"]) {
+			const res = await daemon.app.request("/api/diagnostics/projects/bind", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ path: folder, name }),
+			});
+			expect(res.status).toBe(400);
+			expect(((await res.json()) as BindAck).bound).toBe(false);
+		}
+	});
 });
 
 describe("PRD-059d POST /api/diagnostics/projects/bind-existing (d-AC-2)", () => {

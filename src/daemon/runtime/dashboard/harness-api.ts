@@ -33,17 +33,12 @@
  */
 
 import type { Context } from "hono";
-
-import { sqlIdent } from "../../storage/sql.js";
-import { isOk, type StorageRow } from "../../storage/result.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
+import { isOk, type StorageRow } from "../../storage/result.js";
+import { sqlIdent } from "../../storage/sql.js";
 import { resolveScopeOrLocalDefault } from "../scope.js";
 import type { Daemon } from "../server.js";
-import {
-	CANONICAL_SHIMS,
-	capabilitiesFor,
-	type HarnessCapabilities,
-} from "./harness-registry.js";
+import { CANONICAL_SHIMS, capabilitiesFor, type HarnessCapabilities } from "./harness-registry.js";
 
 /** The route group the harness telemetry endpoint attaches to (already mounted + protected). */
 export const HARNESS_GROUP = "/api/diagnostics" as const;
@@ -92,13 +87,21 @@ export interface MountHarnessOptions {
 	 */
 	readonly defaultScope?: QueryScope;
 	/**
-	 * The set of canonical harness ids the daemon knows to be INSTALLED/wired (a-AC-3 / OQ-1) — a
-	 * CHEAP, cached presence set resolved at assembly from the harness-sync `HarnessTarget` set, NOT a
-	 * per-request file walk or spawn. ABSENT (a unit-constructed daemon / no targets) → every harness
-	 * reads `installed: false`, so the endpoint still returns all six with activity intact (the honest
-	 * "wired nothing yet" picture). A test injects a fixed set to drive the installed/uninstalled mix.
+	 * A STATIC snapshot of the wired-harness set — the legacy shape, kept for back-compat (a
+	 * unit-constructed daemon / a test that injects a fixed mix). When {@link resolveInstalled} is
+	 * ABSENT this snapshot is used verbatim on every request. ABSENT too → every harness reads
+	 * `installed: false` (the honest "wired nothing yet" picture).
 	 */
 	readonly installedHarnesses?: ReadonlySet<string>;
+	/**
+	 * Resolve the wired-harness set PER REQUEST (a-AC-3 / OQ-1) — a CHEAP `existsSync`-only probe, NO
+	 * spawn / network / directory walk. This is the LIVE seam: a harness wired AFTER the daemon booted
+	 * (e.g. cursor wired post-boot) is reflected on the very next read WITHOUT a daemon restart, instead
+	 * of being frozen to a stale boot-time snapshot. Production injects `() => detectInstalledHarnesses()`;
+	 * a test injects a resolver to drive the re-probe. When absent, falls back to the static
+	 * {@link installedHarnesses} snapshot.
+	 */
+	readonly resolveInstalled?: () => ReadonlySet<string>;
 }
 
 /** Number coercion that never returns NaN/undefined for a count column. */
@@ -139,10 +142,7 @@ export function buildHarnessActivitySql(): string {
  * `active: false`. `installed` comes from the injected presence set; `capabilities` is folded from the
  * shim-derived descriptor (c-OQ-2). The order is the canonical shim order (stable).
  */
-export function buildHarnessStatuses(
-	rows: readonly StorageRow[],
-	installed: ReadonlySet<string>,
-): HarnessStatus[] {
+export function buildHarnessStatuses(rows: readonly StorageRow[], installed: ReadonlySet<string>): HarnessStatus[] {
 	// Index the activity rows by agent id for an O(1) per-harness lookup (the result may omit harnesses).
 	const byAgent = new Map<string, { turns: number; last: string | null }>();
 	for (const r of rows) {
@@ -186,7 +186,11 @@ export function mountHarnessApi(daemon: Daemon, options: MountHarnessOptions): v
 	if (group === undefined) return;
 
 	const storage = options.storage;
-	const installed = options.installedHarnesses ?? new Set<string>();
+	// The wired-harness set is resolved PER REQUEST (a-AC-3): a live re-probe reflects a harness wired
+	// AFTER daemon boot without a restart, instead of serving a frozen boot-time snapshot. Falls back to
+	// the static snapshot (back-compat) when no resolver is injected.
+	const resolveInstalled: () => ReadonlySet<string> =
+		options.resolveInstalled ?? ((): ReadonlySet<string> => options.installedHarnesses ?? new Set<string>());
 	// Scope precedence (PRD-022): header → (local-mode) injected default → null/400. Header ALWAYS
 	// wins; the fallback fires ONLY in local mode with a `defaultScope` (mirrors mountDashboardApi).
 	const resolveScope = (c: Context): QueryScope | null =>
@@ -195,6 +199,8 @@ export function mountHarnessApi(daemon: Daemon, options: MountHarnessOptions): v
 	group.get(HARNESS_PATH, async (c) => {
 		const scope = resolveScope(c);
 		if (scope === null) return c.json(NO_ORG_BODY, 400);
+		// Re-probe the wired set on THIS request (cheap existsSync only) so a post-boot wiring shows up.
+		const installed = resolveInstalled();
 		// ONE guarded GROUP BY; fail-soft to [] so the endpoint still returns all six with zeroed
 		// activity (never a 500). The canonical six are enumerated from the shim set, NOT discovered
 		// from the result, so an idle harness still appears.

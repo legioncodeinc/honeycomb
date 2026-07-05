@@ -47,6 +47,7 @@ import { isAbsolute, join, resolve, sep } from "node:path";
 import { z } from "zod";
 
 import type { DeploymentMode } from "../config.js";
+import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import type { Daemon } from "../server.js";
 import {
 	bindFolderToProject,
@@ -55,8 +56,10 @@ import {
 	type GitRemoteReader,
 	loadProjectsCache,
 	saveProjectsCache,
-	UNSORTED_PROJECT_ID,
 } from "../../../hooks/shared/index.js";
+import { isReservedProjectId } from "../../storage/catalog/index.js";
+import type { CacheInvalidator } from "./projects-view-cache.js";
+import { upsertProjectRow } from "./registry-write.js";
 
 /** The already-mounted, protected route group these attach to (no `server.ts` edit). */
 export const ONBOARDING_GROUP = "/api/diagnostics" as const;
@@ -102,6 +105,13 @@ export interface BindAck {
 	readonly path: string;
 	/** The project id the folder is now bound to. */
 	readonly projectId: string;
+	/**
+	 * PRD-062 FIX 1: whether the project row was upserted into the Deeplake `projects` registry. The
+	 * local bind is authoritative for the UX (a bind SUCCEEDS regardless), so this is BEST-EFFORT — a
+	 * flapped registry write reports `false` and the project heals into the registry on the next sync.
+	 * Absent when no storage seam is wired (unit mounts) or on a rejected bind (nothing was written).
+	 */
+	readonly registrySynced?: boolean;
 	/** A redacted reason on a rejected bind (e.g. the reserved inbox id). */
 	readonly error?: string;
 }
@@ -126,6 +136,18 @@ export interface MountOnboardingOptions {
 	readonly browseRoot?: string;
 	/** The git-remote reader used to suggest a project name on bind (tests inject a fake). */
 	readonly readRemote?: GitRemoteReader;
+	/**
+	 * PRD-062 FIX 1: the storage seam the bind path upserts the new project row into the Deeplake
+	 * `projects` registry through (so a bind PERSISTS cross-device and survives a sync). ABSENT → the
+	 * bind writes only the local cache (the legacy behavior; unit mounts that don't need durability).
+	 */
+	readonly storage?: StorageQuery;
+	/**
+	 * PRD-062 FIX 3: the shared projects view cache to INVALIDATE on a bind/unbind, so a fresh bind
+	 * shows on the very next `scope/projects` read instead of after the TTL lapses. ABSENT → no
+	 * invalidation (the read still self-refreshes on its own TTL).
+	 */
+	readonly projectsViewCache?: CacheInvalidator;
 }
 
 /** zod boundary for the `bind` body (059b): an absolute path + an optional explicit name. */
@@ -311,8 +333,17 @@ export function mountOnboardingApi(daemon: Daemon, options: MountOnboardingOptio
 		// The name: explicit if given, else the CLI-identical suggestion (git remote repo, else basename).
 		const explicit = parsed.value.name !== undefined && parsed.value.name.trim().length > 0 ? parsed.value.name.trim() : "";
 		const projectId = explicit.length > 0 ? explicit : suggestProjectId(absPath, readRemote);
-		const ack = writeBind(absPath, projectId, options, readRemote, /* recordRemote */ true);
-		return c.json(ack, ack.bound ? 200 : 400);
+		// 059b new bind records the folder's canonical git remote on the inline-created project.
+		const remoteSignal = remoteFor(absPath, readRemote);
+		const ack = writeBind(absPath, projectId, options, remoteSignal);
+		if (!ack.bound) return c.json(ack, 400);
+		// PRD-062 FIX 1: PERSIST the new project into the Deeplake `projects` registry (best-effort). The
+		// local bind above is authoritative; a flapped registry write still returns bound:true and heals
+		// on the next sync (registry-sync merges + re-upserts local-only projects).
+		const registrySynced = await upsertBoundProject(options, projectId, remoteSignal, absPath);
+		// PRD-062 FIX 3: a fresh bind must show on the NEXT scope/projects read, not after the TTL.
+		options.projectsViewCache?.invalidate();
+		return c.json({ ...ack, registrySynced }, 200);
 	});
 
 	// ── 059d: POST /projects/bind-existing { path, projectId } → bind to an EXISTING registry project. ──
@@ -325,9 +356,13 @@ export function mountOnboardingApi(daemon: Daemon, options: MountOnboardingOptio
 			return c.json(rejectBind(parsed.value.path, "path must be an absolute folder path"), 400);
 		}
 		// Import = bind-to-existing: the project_id ALREADY exists in the registry (created on another
-		// device). Do NOT record a remote here (the existing project keeps its registry remote_signal).
-		const ack = writeBind(absPath, parsed.value.projectId.trim(), options, readRemote, /* recordRemote */ false);
-		return c.json(ack, ack.bound ? 200 : 400);
+		// device). Do NOT record a remote here (the existing project keeps its registry remote_signal),
+		// and do NOT upsert (the registry row is authoritative — an empty remote here would clobber it).
+		const ack = writeBind(absPath, parsed.value.projectId.trim(), options, "");
+		if (!ack.bound) return c.json(ack, 400);
+		// FIX 3: importing flips the project's boundLocally state, so the projects read must refresh.
+		options.projectsViewCache?.invalidate();
+		return c.json(ack, 200);
 	});
 
 	// ── 059c: POST /projects/unbind { path } → remove the LOCAL folder binding only (registry untouched). ──
@@ -341,8 +376,33 @@ export function mountOnboardingApi(daemon: Daemon, options: MountOnboardingOptio
 			return c.json(body, 400);
 		}
 		const ack = removeBinding(absPath, options);
+		// FIX 3: an unbind changes the project's boundLocally state, so invalidate the read cache.
+		if (ack.unbound) options.projectsViewCache?.invalidate();
 		return c.json(ack, 200);
 	});
+}
+
+/**
+ * PRD-062 FIX 1: upsert a freshly-bound project into the Deeplake `projects` registry (best-effort).
+ * Returns `true` when the row landed, `false` when no storage seam is wired OR the write flapped — the
+ * bind UX treats this as advisory (the local bind already succeeded and the project heals on the next
+ * sync). NEVER throws: {@link upsertProjectRow} maps a failure to a typed result.
+ */
+async function upsertBoundProject(
+	options: MountOnboardingOptions,
+	projectId: string,
+	remoteSignal: string,
+	absPath: string,
+): Promise<boolean> {
+	if (options.storage === undefined) return false;
+	const scope: QueryScope = { org: options.org, workspace: options.workspace };
+	const res = await upsertProjectRow(options.storage, scope, {
+		projectId,
+		name: projectId,
+		remoteSignal,
+		boundPaths: [absPath],
+	});
+	return res.ok;
 }
 
 /** A parsed body result: the validated value, or a redacted reason. */
@@ -383,24 +443,24 @@ function rejectBind(path: string, reason: string): BindAck {
 /**
  * Write a folder→project binding to the local `~/.deeplake/projects.json` through the SAME
  * {@link bindFolderToProject} writer the CLI uses (single-sourced store). Rejects the reserved
- * `__unsorted__` inbox id and a degenerate (empty) project id. When `recordRemote` is true (059b new
- * bind), the folder's canonical git remote is recorded on an inline-created project so the daemon sync
- * can mirror it; for a 059d import (`recordRemote` false) the existing registry remote is preserved.
+ * `__unsorted__` inbox id and a degenerate (empty) project id. `remoteSignal` is the canonical git
+ * remote to record on an inline-created project (059b new bind passes the folder's remote; a 059d
+ * import passes `""` so the existing registry `remote_signal` is preserved).
  */
 function writeBind(
 	absPath: string,
 	projectId: string,
 	options: MountOnboardingOptions,
-	readRemote: GitRemoteReader,
-	recordRemote: boolean,
+	remoteSignal: string,
 ): BindAck {
 	if (projectId.length === 0) {
 		return rejectBind(absPath, "could not derive a project name from the folder");
 	}
-	if (projectId === UNSORTED_PROJECT_ID) {
-		return rejectBind(absPath, `"${UNSORTED_PROJECT_ID}" is the reserved inbox and cannot be bound`);
+	// 049a-AC-6: trim + case-insensitive over BOTH the reserved id and the reserved display name, so
+	// `__UNSORTED__` / `Unsorted` cannot shadow the inbox any more than the exact `__unsorted__` can.
+	if (isReservedProjectId(projectId)) {
+		return rejectBind(absPath, `"${projectId}" collides with the reserved inbox and cannot be bound`);
 	}
-	const remoteSignal = recordRemote ? remoteFor(absPath, readRemote) : "";
 	bindFolderToProject({
 		cwd: absPath,
 		projectId,

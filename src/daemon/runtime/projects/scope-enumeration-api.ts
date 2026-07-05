@@ -50,7 +50,8 @@ import { loadDiskCredentials } from "../auth/credentials-store.js";
 import { getRequestIdentity } from "../middleware/permission.js";
 import { loadProjectsCache } from "../../../hooks/shared/index.js";
 import { syncRegistryToCache } from "./registry-sync.js";
-import { type ProjectCounts, ZERO_PROJECT_COUNTS, readProjectCounts } from "./project-counts.js";
+import { type ProjectCounts, type ProjectCountsMap, ZERO_PROJECT_COUNTS, readProjectCounts } from "./project-counts.js";
+import { PROJECTS_VIEW_TTL_MS, ProjectsViewCache } from "./projects-view-cache.js";
 
 /** The route group the scope-enumeration reads attach to (already mounted + protected in `server.ts`). */
 export const SCOPE_ENUM_GROUP = "/api/diagnostics" as const;
@@ -161,6 +162,13 @@ export interface MountScopeEnumerationOptions {
 	 * (so the 49e-AC-3 reMint-before-listWorkspaces assertion is deterministic) without a network.
 	 */
 	readonly authClientFactory?: (apiUrl: string) => DeeplakeAuthClient;
+	/**
+	 * PRD-062 FIX 3: the shared projects view cache. The `scope/projects` read memoizes the expensive
+	 * Deeplake work (registry sync + counts) behind it; the onboarding bind/unbind handlers hold the
+	 * SAME instance and INVALIDATE it so a fresh bind shows immediately. ABSENT → a private per-mount
+	 * cache is created (the read is still cached; it just cannot be invalidated from outside).
+	 */
+	readonly projectsViewCache?: ProjectsViewCache<ProjectCountsMap>;
 }
 
 /** A resolved token + its bound org + the apiUrl, or `null` when no usable credential exists. */
@@ -203,6 +211,10 @@ export function mountScopeEnumerationApi(daemon: Daemon, options: MountScopeEnum
 	if (group === undefined) return;
 	const mode: DeploymentMode = daemon.config.mode;
 	const makeClient = options.authClientFactory ?? ((apiUrl: string) => createDeeplakeAuthClient({ apiUrl }));
+	// FIX 3: memoize the expensive projects Deeplake work (sync + counts) behind a short-TTL cache. A
+	// shared instance (injected + held by the onboarding writer for invalidation) wins; else a private one.
+	const projectsViewCache =
+		options.projectsViewCache ?? new ProjectsViewCache<ProjectCountsMap>(PROJECTS_VIEW_TTL_MS);
 
 	const notLocal = (c: Context): boolean => mode !== "local";
 
@@ -266,11 +278,23 @@ export function mountScopeEnumerationApi(daemon: Daemon, options: MountScopeEnum
 	group.get(SCOPE_PROJECTS_PATH, async (c) => {
 		if (notLocal(c)) return c.json({ error: "not_found" }, 404);
 		const scope = resolveProjectsScope(c, options.defaultScope);
-		// Best-effort refresh (fail-soft): a registry-read miss leaves the prior cache intact.
-		await syncRegistryToCache({
-			storage: options.storage,
-			scope,
-			...(options.projectsDir !== undefined ? { dir: options.projectsDir } : {}),
+		// FIX 3: memoize the two Deeplake round-trips (registry sync + per-project counts) behind the
+		// short-TTL cache, keyed by scope. On a MISS both run IN PARALLEL — the counts read does not
+		// depend on the sync result (they target different tables: `projects` vs `memories`/`sessions`),
+		// so composing them concurrently instead of sequentially halves the wall-clock on a cold read.
+		// On a HIT both are skipped entirely. A bind/unbind invalidates the cache so a fresh bind shows
+		// on the next read. The local-cache shaping below is cheap and runs every request off the fresh
+		// (or freshly-synced) `projects.json`.
+		const { value: counts } = await projectsViewCache.resolve(projectsCacheKey(scope), async () => {
+			const [, freshCounts] = await Promise.all([
+				syncRegistryToCache({
+					storage: options.storage,
+					scope,
+					...(options.projectsDir !== undefined ? { dir: options.projectsDir } : {}),
+				}),
+				readProjectCounts(options.storage, scope),
+			]);
+			return freshCounts;
 		});
 		const cache = loadProjectsCache(options.projectsDir);
 		// PRD-059d: a project is "bound locally on this device" when a local folder→project binding
@@ -293,9 +317,8 @@ export function mountScopeEnumerationApi(daemon: Daemon, options: MountScopeEnum
 		for (const b of cache.bindings) addPath(b.projectId, b.path);
 		for (const p of cache.projects) for (const bp of p.boundPaths) addPath(p.projectId, bp);
 
-		// PRD-059c c-AC-1 / c-AC-2: per-project capture counts via TWO fail-soft grouped aggregates.
+		// PRD-059c c-AC-1 / c-AC-2: per-project capture counts (from the cached `counts` computed above).
 		// BEST-EFFORT — a backend flap zeroes counts but NEVER 500s the read (paths/remote always served).
-		const counts = await readProjectCounts(options.storage, scope);
 		const countsFor = (projectId: string): ProjectCounts => counts.byProjectId.get(projectId) ?? ZERO_PROJECT_COUNTS;
 
 		const projects: ScopeProject[] = cache.projects
@@ -339,6 +362,11 @@ export function mountScopeEnumerationApi(daemon: Daemon, options: MountScopeEnum
  * the workspace is taken from `identity.workspace` (the token's own workspace), NOT from the header.
  * The header is trusted ONLY in local mode (no Identity).
  */
+/** NUL-join the scope into a cache key no org/workspace value can forge a boundary in (FIX 3). */
+function projectsCacheKey(scope: QueryScope): string {
+	return `${scope.org}\u0000${scope.workspace ?? ""}`;
+}
+
 function resolveProjectsScope(c: Context, defaultScope: QueryScope): QueryScope {
 	const org = c.req.header("x-honeycomb-org");
 	if (org !== undefined && org.length > 0) {

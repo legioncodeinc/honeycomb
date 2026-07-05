@@ -30,7 +30,19 @@
  * server projects for the git-signal branch). It MERGES rather than clobbers: the
  * LOCAL folder→project `bindings[]` a `honeycomb project bind` wrote are PRESERVED, so a
  * registry refresh never un-binds a folder a developer just bound (the bind round-trip
- * survives a concurrent sync). Only the `projects[]` copy is replaced from the registry.
+ * survives a concurrent sync).
+ *
+ * ── Local-only projects are MERGED, not clobbered (PRD-062 FIX 1) ────────────
+ * Historically the sync replaced `projects[]` WHOLESALE with the registry rows. Combined
+ * with the (previously) missing registry write path, that erased a project that lived
+ * ONLY in the local cache (a bind whose registry upsert had not yet landed): the next
+ * sync overwrote it out of existence. The sync now MERGES local-only projects (present in
+ * the prior cache, absent from the registry read) INTO the refreshed `projects[]` instead
+ * of dropping them, and attempts to HEAL each into the registry via {@link upsertProjectRow}
+ * (best-effort — a flapped upsert leaves the project local-only and the next sync retries).
+ * So a bind is durable: even if its upsert-on-bind flapped, the project stays visible and
+ * reconciles on the next sync. The tenancy guard still applies — a foreign-tenancy prior
+ * cache contributes no local-only projects (they belong to another workspace).
  */
 
 import {
@@ -42,8 +54,9 @@ import {
 } from "../../../hooks/shared/index.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import { PROJECTS_CACHE_SCHEMA_VERSION } from "../../../hooks/shared/index.js";
-import { buildListProjectsSql } from "../../storage/catalog/index.js";
+import { buildListProjectsSql, UNSORTED_PROJECT_ID } from "../../storage/catalog/index.js";
 import { isOk, type StorageRow } from "../../storage/result.js";
+import { upsertProjectRow } from "./registry-write.js";
 
 /** The typed outcome of a sync (never a throw — fail-soft, mirrors the resolver). */
 export type RegistrySyncResult =
@@ -118,11 +131,12 @@ export async function syncRegistryToCache(input: RegistrySyncInput): Promise<Reg
 		return { ok: false, reason };
 	}
 
-	const projects: CachedProject[] = [];
+	const registryProjects: CachedProject[] = [];
 	for (const row of result.rows) {
 		const mapped = rowToCachedProject(row);
-		if (mapped !== null) projects.push(mapped);
+		if (mapped !== null) registryProjects.push(mapped);
 	}
+	const registryIds = new Set(registryProjects.map((p) => p.projectId));
 
 	// Preserve the local bindings only when the prior cache belongs to THIS tenancy; a foreign-tenancy
 	// cache's bindings must not leak into the new workspace (mirrors the resolver's read guard).
@@ -131,6 +145,24 @@ export async function syncRegistryToCache(input: RegistrySyncInput): Promise<Reg
 		(prior.org === "" || prior.org === org) && (prior.workspace === "" || prior.workspace === workspace);
 	const bindings: readonly FolderBinding[] = sameTenancy ? prior.bindings : [];
 
+	// FIX 1 merge: keep local-only projects (in the same-tenancy prior cache, absent from the registry
+	// read) instead of clobbering them, and best-effort HEAL each into the registry so it becomes durable.
+	const localOnly: CachedProject[] = sameTenancy
+		? prior.projects.filter(
+				(p) => p.projectId.length > 0 && p.projectId !== UNSORTED_PROJECT_ID && !registryIds.has(p.projectId),
+			)
+		: [];
+	for (const p of localOnly) {
+		// Fail-soft: a flapped upsert leaves the project local-only; the NEXT sync retries the heal.
+		await upsertProjectRow(input.storage, input.scope, {
+			projectId: p.projectId,
+			name: p.name,
+			remoteSignal: p.remoteSignal,
+			boundPaths: p.boundPaths,
+		});
+	}
+
+	const projects: CachedProject[] = [...registryProjects, ...localOnly];
 	const next: ProjectsCache = {
 		schemaVersion: PROJECTS_CACHE_SCHEMA_VERSION,
 		org,

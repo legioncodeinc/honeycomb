@@ -18,24 +18,28 @@
  * so a seventh shim cannot silently skip the page.
  */
 
-import { describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { createStorageClient } from "../../../../src/daemon/storage/index.js";
-import type { TransportRequest } from "../../../../src/daemon/storage/transport.js";
-import { type RuntimeConfig } from "../../../../src/daemon/runtime/config.js";
-import { createRequestLogger } from "../../../../src/daemon/runtime/logger.js";
-import { createDaemon } from "../../../../src/daemon/runtime/server.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { RuntimeConfig } from "../../../../src/daemon/runtime/config.js";
 import {
 	buildHarnessActivitySql,
 	buildHarnessStatuses,
-	mountHarnessApi,
 	type HarnessStatus,
+	mountHarnessApi,
 } from "../../../../src/daemon/runtime/dashboard/harness-api.js";
+import { detectInstalledHarnesses } from "../../../../src/daemon/runtime/dashboard/harness-detect.js";
 import {
 	CANONICAL_HARNESS_IDS,
 	CANONICAL_SHIMS,
 	HARNESS_CAPABILITIES,
 } from "../../../../src/daemon/runtime/dashboard/harness-registry.js";
+import { createRequestLogger } from "../../../../src/daemon/runtime/logger.js";
+import { createDaemon } from "../../../../src/daemon/runtime/server.js";
+import { createStorageClient } from "../../../../src/daemon/storage/index.js";
+import type { TransportRequest } from "../../../../src/daemon/storage/transport.js";
 import {
 	createClaudeCodeShim,
 	createCodexShim,
@@ -281,6 +285,54 @@ describe("attribution: the page-counted `agent` token EQUALS the shim's canonica
 			expect(s.active).toBe(false);
 			expect(s.lastSeen).toBeNull();
 		}
+	});
+});
+
+describe("W2-FIX-2: `installed` is a LIVE per-request re-probe, not a frozen boot snapshot", () => {
+	let home: string;
+	beforeEach(() => {
+		home = mkdtempSync(join(tmpdir(), "honeycomb-reprobe-"));
+	});
+	afterEach(() => {
+		rmSync(home, { recursive: true, force: true });
+	});
+
+	function touchFile(...segments: string[]): void {
+		const full = join(home, ...segments);
+		mkdirSync(join(full, ".."), { recursive: true });
+		writeFileSync(full, "");
+	}
+
+	async function installedMap(res: Response): Promise<Map<string, boolean>> {
+		expect(res.status).toBe(200);
+		const json = (await res.json()) as { harnesses: HarnessStatus[] };
+		return new Map(json.harnesses.map((h) => [h.name, h.installed]));
+	}
+
+	it("a marker created AFTER mount is reflected on the very next read (no restart)", async () => {
+		const { daemon, storage } = makeDaemon(false);
+		// The LIVE resolver re-probes the fixture home on every request (production wires the same
+		// `() => detectInstalledHarnesses()` seam). Mounted ONCE, before any marker exists.
+		mountHarnessApi(daemon, { storage, resolveInstalled: () => detectInstalledHarnesses(home, home) });
+		// BEFORE: nothing wired → cursor reads not-installed.
+		const before = await installedMap(await daemon.app.request("/api/diagnostics/harnesses", { headers: headers() }));
+		expect(before.get("cursor")).toBe(false);
+		// Wire cursor AFTER the mount (the field scenario: cursor wired post-boot).
+		touchFile(".cursor", "hooks.json");
+		// AFTER: the SAME mounted handler re-probes → cursor now reads installed, no daemon restart.
+		const after = await installedMap(await daemon.app.request("/api/diagnostics/harnesses", { headers: headers() }));
+		expect(after.get("cursor")).toBe(true);
+	});
+
+	it("a dead hivemind-v1 leftover alone (~/.hermes/config.yaml) does NOT read installed live", async () => {
+		const { daemon, storage } = makeDaemon(false);
+		touchFile(".hermes", "config.yaml");
+		mountHarnessApi(daemon, { storage, resolveInstalled: () => detectInstalledHarnesses(home, home) });
+		const installed = await installedMap(
+			await daemon.app.request("/api/diagnostics/harnesses", { headers: headers() }),
+		);
+		// The legacy path must not masquerade as a honeycomb install on the live endpoint.
+		expect(installed.get("hermes")).toBe(false);
 	});
 });
 

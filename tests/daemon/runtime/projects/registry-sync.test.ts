@@ -143,6 +143,77 @@ describe("fail-soft: a non-ok storage result leaves the prior cache intact", () 
 	});
 });
 
+/**
+ * A routed fake: the registry LIST read (`SELECT * FROM "projects"`) returns `listRows`; every OTHER
+ * statement (the upsert probe SELECT + its INSERT/UPDATE) is answered by `upsert()` so a test can make
+ * the heal write succeed or flap. Records all SQL for assertions.
+ */
+function routedStorage(listRows: StorageRow[], upsert: () => QueryResult = () => ok([], 0)): {
+	storage: StorageQuery;
+	sql: string[];
+} {
+	const sql: string[] = [];
+	const storage: StorageQuery = {
+		async query(q: string): Promise<QueryResult> {
+			sql.push(q);
+			if (/SELECT \* FROM "projects"/.test(q)) return ok(listRows, 1);
+			return upsert();
+		},
+	};
+	return { storage, sql };
+}
+
+describe("PRD-062 FIX 1: local-only projects are MERGED, not clobbered, and healed into the registry", () => {
+	it("reg-AC-6: a local-only project survives a sync and its heal upsert is attempted", async () => {
+		// Seed a prior cache with a project that exists ONLY locally (absent from the registry read).
+		saveProjectsCache(
+			{
+				schemaVersion: 1,
+				org: "acme",
+				workspace: "backend",
+				bindings: [],
+				projects: [{ projectId: "local-x", name: "Local X", remoteSignal: "", boundPaths: [resolve(dir, "work", "x")] }],
+			},
+			dir,
+		);
+		// The registry read returns a DIFFERENT project (api); local-x must NOT be clobbered.
+		const { storage, sql } = routedStorage([registryRow({ project_id: "api" })]);
+		const result = await syncRegistryToCache({ storage, scope: SCOPE, dir });
+		expect(result.ok).toBe(true);
+
+		const cache = loadProjectsCache(dir);
+		expect(cache.projects.map((p) => p.projectId).sort()).toEqual(["api", "local-x"]); // merged, not clobbered.
+		// The heal path attempted to upsert the local-only project into the registry.
+		expect(sql.some((s) => /INSERT INTO "projects"/.test(s) && s.includes("'local-x'"))).toBe(true);
+	});
+
+	it("reg-AC-7: a flapped registry write leaves the project local-only and heals on the NEXT sync", async () => {
+		saveProjectsCache(
+			{
+				schemaVersion: 1,
+				org: "acme",
+				workspace: "backend",
+				bindings: [],
+				projects: [{ projectId: "local-x", name: "Local X", remoteSignal: "", boundPaths: [] }],
+			},
+			dir,
+		);
+		let upsertFails = true;
+		const { storage, sql } = routedStorage([], () => (upsertFails ? queryError("flap", 500) : ok([], 0)));
+
+		// First sync: the heal upsert FLAPS, but the project must remain visible locally (not dropped).
+		await syncRegistryToCache({ storage, scope: SCOPE, dir });
+		expect(loadProjectsCache(dir).projects.some((p) => p.projectId === "local-x")).toBe(true);
+
+		// Next sync: the write now succeeds → the project heals into the registry.
+		upsertFails = false;
+		sql.length = 0;
+		await syncRegistryToCache({ storage, scope: SCOPE, dir });
+		expect(loadProjectsCache(dir).projects.some((p) => p.projectId === "local-x")).toBe(true);
+		expect(sql.some((s) => /INSERT INTO "projects"/.test(s) && s.includes("'local-x'"))).toBe(true);
+	});
+});
+
 describe("tenancy guard: a foreign-tenancy prior cache's bindings are dropped on sync", () => {
 	it("does not carry another workspace's bindings into the synced cache", async () => {
 		// Prior cache belongs to a DIFFERENT workspace.

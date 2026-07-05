@@ -270,6 +270,64 @@ function internalToDisk(c: Credentials, savedAt: string, apiUrl: string = DEFAUL
 export const DEFAULT_DEEPLAKE_API_URL = "https://api.deeplake.ai";
 
 /**
+ * Read the RAW on-disk {@link DiskCredentials} at the SHARED credentials path ONLY (no env-token
+ * override, no legacy fallback). This is the record {@link saveCredentials} is about to overwrite;
+ * it is read so a NON-tenancy rewrite can PRESERVE the additive fields the in-memory
+ * {@link Credentials} cannot carry (the tenancy markers, `userName`, a self-hosted `apiUrl`).
+ * Returns `null` on a missing OR malformed file — a fresh write has nothing to preserve.
+ */
+function readPriorDiskRecord(dir?: string): DiskCredentials | null {
+	const path = credentialsPath(dir);
+	if (!existsSync(path)) return null;
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+		return isDiskCredentials(parsed) ? (parsed as DiskCredentials) : null;
+	} catch {
+		// A malformed prior file has nothing usable to preserve (b-AC-3 posture) — never a throw.
+		return null;
+	}
+}
+
+/**
+ * Preserve the additive on-disk fields a plain (NON-tenancy) rewrite would otherwise DROP, because
+ * the in-memory {@link Credentials} carries none of them: the tenancy markers
+ * ({@link DiskCredentials.tenancyConfirmedAt} / {@link DiskCredentials.tenancyPending}) plus the
+ * org-independent {@link DiskCredentials.userName}. Fixes the credential-integrity bug where an
+ * {@link import("./device-flow.js").healOrgDrift} (or any {@link saveCredentials} re-write) silently
+ * left the file marker-less.
+ *
+ * SAME-ORG rewrite (a re-login, or a heal that did not change org): the markers are carried VERBATIM,
+ * so a confirmed tenancy stays confirmed and a pending one stays pending.
+ *
+ * ORG-CHANGING rewrite (e.g. {@link import("./device-flow.js").healOrgDrift} REALIGNS to a different
+ * org): a `tenancyConfirmedAt` stamped for the OLD org is NOT honest under the NEW org, so it is
+ * DROPPED and `tenancyPending: true` is set — the honest "unconfirmed under the new org" posture.
+ *
+ * An EXPLICIT tenancy decision never flows through here: it uses {@link saveDiskCredentials} with the
+ * marker fields set on the record it writes, keeping full control (a select stamps `tenancyConfirmedAt`,
+ * an unconfirmed link sets `tenancyPending`).
+ */
+function preserveDiskMarkers(next: DiskCredentials, prior: DiskCredentials): DiskCredentials {
+	// `userName` is the authenticated user's display identity — org-independent, so preserved either way.
+	const userName = next.userName ?? prior.userName;
+	const base: DiskCredentials = {
+		...next,
+		...(userName !== undefined ? { userName } : {}),
+	};
+	if (prior.orgId === next.orgId) {
+		// Same org: carry the tenancy markers verbatim (a plain rewrite must not silently drop them).
+		return {
+			...base,
+			...(prior.tenancyConfirmedAt !== undefined ? { tenancyConfirmedAt: prior.tenancyConfirmedAt } : {}),
+			...(prior.tenancyPending !== undefined ? { tenancyPending: prior.tenancyPending } : {}),
+		};
+	}
+	// Org changed: a stale confirm from the OLD org must NOT ride onto the NEW org. Drop the confirm
+	// marker and mark pending — the honest unconfirmed posture until an explicit re-selection stamps it.
+	return { ...base, tenancyPending: true };
+}
+
+/**
  * Read + parse a credentials file into an internal {@link Credentials} via the given
  * validate + adapt pair. Returns `null` on a missing OR malformed file (b-AC-3) —
  * never a throw. Shared by the new-shape (`~/.deeplake`) and legacy (`~/.honeycomb`)
@@ -417,6 +475,13 @@ export function loadDiskCredentials(
  *
  * Returns the in-memory credentials (with the stamped `savedAt`) so a caller can use
  * the canonical record without re-reading the file.
+ *
+ * ── Additive-field preservation (credential-integrity) ──────────────────────
+ * Because the in-memory {@link Credentials} carries no tenancy markers / `userName`, a naive
+ * rewrite would silently DROP them from the on-disk record. So this reads the prior on-disk record
+ * and MERGES those additive fields via {@link preserveDiskMarkers}: a same-org rewrite keeps them
+ * verbatim; an org-CHANGING rewrite drops a stale `tenancyConfirmedAt` and sets `tenancyPending`.
+ * Explicit tenancy decisions use {@link saveDiskCredentials} (full control), never this path.
  */
 export function saveCredentials(
 	creds: Credentials,
@@ -431,9 +496,18 @@ export function saveCredentials(
 	// Stamp `savedAt` server-side, IGNORING any value on `creds` (b-AC-4).
 	const stampedAt = clock.now();
 	const stamped: Credentials = { ...creds, savedAt: stampedAt };
+	// PRESERVE the additive on-disk fields the in-memory `Credentials` cannot carry (tenancy markers,
+	// `userName`, a self-hosted `apiUrl`) from the record we are about to overwrite. Without this a
+	// plain rewrite (re-login, org-drift heal) silently DROPS a tenancy decision — the observed
+	// marker-less write. Same-org keeps the markers verbatim; an org CHANGE drops a stale confirm and
+	// marks pending (see {@link preserveDiskMarkers}). An explicit tenancy path uses saveDiskCredentials.
+	const prior = readPriorDiskRecord(dir);
+	// The caller-supplied apiUrl (self-hosted-login) wins; else the prior record's apiUrl is preserved;
+	// else `internalToDisk` falls back to the canonical endpoint default.
+	const effectiveApiUrl = apiUrl ?? prior?.apiUrl;
 	// Map onto the Hivemind on-disk shape so the file is byte-cross-compatible (D-1).
-	// The caller-supplied apiUrl (self-hosted-login) overrides the default endpoint.
-	const onDisk: DiskCredentials = internalToDisk(stamped, stampedAt, apiUrl);
+	const base: DiskCredentials = internalToDisk(stamped, stampedAt, effectiveApiUrl);
+	const onDisk: DiskCredentials = prior !== null ? preserveDiskMarkers(base, prior) : base;
 	const path = credentialsPath(dir);
 	// `mode` on writeFileSync sets perms only when the file is CREATED; an existing
 	// file keeps its perms, so we explicitly write then the platform-correct perms

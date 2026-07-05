@@ -30,6 +30,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { redactToken, type StorageConfig } from "./config.js";
 import { type MeterSnapshot, QueryMeter, type QuerySource } from "./query-meter.js";
 import { connectionError, isOk, ok, type QueryResult, queryError, timeoutResult } from "./result.js";
+import { Semaphore } from "./semaphore.js";
 import { type DeepLakeTransport, TransportError, type TransportRequest } from "./transport.js";
 
 /**
@@ -125,6 +126,29 @@ function summarizeSql(sql: string, maxLen = 220): string {
 // The fake transport in tests settles on attempt 1 (it returns an ok / a
 // non-transient error), so the retry path is a LIVE-ONLY cost and the existing
 // classification tests are unaffected.
+
+// ── Bounded in-flight concurrency cap (Semaphore(5)) ────────────────────────
+//
+// The transport (transport.ts) issues one request with NO concurrency control —
+// its JSDoc says "the daemon adds a Semaphore/retry layer on top". This file owns
+// BOTH halves: the transient-retry layer below AND the Semaphore that bounds how
+// many transport requests are in flight AT ONCE. PRD-062 (and transport.ts:66-72)
+// call for a `Semaphore(5)`: without it, a burst of dashboard reads + recall arms +
+// grader batches fans out unbounded concurrent DeepLake queries and multiplies
+// gateway latency (the 40-80s diagnostics stalls). The cap is the amplification
+// ceiling — at most {@link MAX_CONCURRENT_QUERIES} statements reach the backend
+// concurrently; the rest wait FIFO for a permit.
+//
+// SEMANTICS — the permit is held PER ATTEMPT, not per logical query. A permit is
+// acquired around each {@link StorageClient.attemptOnce} (the actual transport
+// round-trip) and released the instant that attempt settles — so the backoff SLEEP
+// between a flapped attempt and its retry does NOT hold a permit. This is the
+// faithful reading of "bound in-flight queries": the cap counts real concurrent
+// wire requests, and a retrying query yields its slot to another during backoff
+// rather than squatting on it. Reads AND writes (safe + unsafe) go through the cap.
+
+/** The maximum number of transport requests in flight at once (PRD-062 Semaphore(5)). */
+export const MAX_CONCURRENT_QUERIES = 5;
 
 /** HTTP statuses that mark a `query_error` as a transient backend flap. */
 const TRANSIENT_STATUSES: ReadonlySet<number> = new Set([429, 500, 502, 503, 504]);
@@ -348,6 +372,14 @@ export class StorageClient {
 	private readonly meter: QueryMeter;
 
 	/**
+	 * The in-flight concurrency cap (PRD-062 Semaphore(5)). Bounds how many transport
+	 * requests reach the backend AT ONCE — every attempt acquires a permit and releases
+	 * it the instant it settles (see {@link attemptOnce}). One per client, so the cap is
+	 * daemon-wide (the daemon holds a single shared client).
+	 */
+	private readonly querySemaphore: Semaphore;
+
+	/**
 	 * @param sleep injectable backoff clock for the read-retry layer. Defaults to
 	 * the real timer; a test injects a no-op so the bounded backoff costs zero
 	 * wall-clock time and the retry count stays deterministic.
@@ -355,14 +387,19 @@ export class StorageClient {
 	 * {@link QueryMeter}; the daemon may inject a shared one so diagnostics and a
 	 * later persistence path observe the SAME counts. The meter is a pure observer:
 	 * supplying it never changes any query's behavior or result.
+	 * @param maxConcurrency the in-flight query cap (PRD-062). Defaults to
+	 * {@link MAX_CONCURRENT_QUERIES}; a test may inject a smaller value to assert the
+	 * cap deterministically. Clamped to `>= 1` by {@link Semaphore}.
 	 */
 	constructor(
 		private readonly transport: DeepLakeTransport,
 		private readonly config: StorageConfig,
 		private readonly sleep: SleepFn = realSleep,
 		meter: QueryMeter = new QueryMeter(),
+		maxConcurrency: number = MAX_CONCURRENT_QUERIES,
 	) {
 		this.meter = meter;
+		this.querySemaphore = new Semaphore(maxConcurrency);
 	}
 
 	/** The endpoint the client is bound to (for diagnostics; no secrets). */
@@ -449,12 +486,28 @@ export class StorageClient {
 	}
 
 	/**
-	 * Issue ONE statement: the org scope, the per-statement timeout/abort race,
-	 * the trace lines, and the result-union mapping. This is the unit the read
-	 * retry loop above re-invokes; each call gets its OWN timer/AbortController so
-	 * a retry is bounded by a fresh per-statement timeout, not the previous one.
+	 * Issue ONE statement UNDER THE CONCURRENCY CAP: acquire a Semaphore permit, run
+	 * the org scope + per-statement timeout/abort race + trace + result-union mapping,
+	 * then ALWAYS release the permit (even on throw — `Semaphore.run`'s `finally`). This
+	 * is the unit the read retry loop above re-invokes; each call gets its OWN
+	 * timer/AbortController so a retry is bounded by a fresh per-statement timeout, not
+	 * the previous one. The permit is acquired PER ATTEMPT (not per logical query), so
+	 * the backoff sleep between a flapped attempt and its retry does not hold a slot —
+	 * the cap counts only real in-flight transport requests (PRD-062).
+	 *
+	 * The timeout timer starts AFTER the permit is acquired: time parked waiting for a
+	 * free slot is not charged against the per-statement timeout (only the actual wire
+	 * round-trip is), so a busy cap never spuriously times a fast query out.
 	 */
-	private async attemptOnce(sql: string, scope: QueryScope, opts: QueryOptions = {}): Promise<QueryResult> {
+	private attemptOnce(sql: string, scope: QueryScope, opts: QueryOptions = {}): Promise<QueryResult> {
+		return this.querySemaphore.run(() => this.runAttempt(sql, scope, opts));
+	}
+
+	/**
+	 * The actual single-statement round-trip (the body {@link attemptOnce} runs while
+	 * holding a permit). Never throws for an expected failure — those are result kinds.
+	 */
+	private async runAttempt(sql: string, scope: QueryScope, opts: QueryOptions = {}): Promise<QueryResult> {
 		const workspace = scope.workspace ?? this.config.workspace;
 		const timeoutMs = opts.timeoutMs ?? this.config.queryTimeoutMs;
 		const trace = this.config.traceSql;

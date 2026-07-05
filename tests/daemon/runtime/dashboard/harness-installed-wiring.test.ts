@@ -20,14 +20,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-
-import { type RuntimeConfig } from "../../../../src/daemon/runtime/config.js";
-import { createRequestLogger } from "../../../../src/daemon/runtime/logger.js";
 import { assembleDaemon } from "../../../../src/daemon/runtime/assemble.js";
+import type { RuntimeConfig } from "../../../../src/daemon/runtime/config.js";
 import { detectInstalledHarnesses } from "../../../../src/daemon/runtime/dashboard/harness-detect.js";
+import { createRequestLogger } from "../../../../src/daemon/runtime/logger.js";
 import type { StorageClient } from "../../../../src/daemon/storage/client.js";
 import type { QueryResult } from "../../../../src/daemon/storage/result.js";
-import { stubProvider, fakeCredentialRecord } from "../../../helpers/fake-deeplake.js";
+import { fakeCredentialRecord, stubProvider } from "../../../helpers/fake-deeplake.js";
 
 interface HarnessStatus {
 	readonly name: string;
@@ -134,7 +133,7 @@ describe("PRD-039a a-AC-3 (production wiring): live `installed` reflects real on
 	it("wiring claude-code + cursor + codex on disk → those three read installed:true live, the rest false", async () => {
 		touchFile(".claude", "settings.json"); // claude-code wired
 		touchFile(".cursor", "hooks.json"); // cursor wired
-		touchDir(".codex", "hivemind"); // codex wired
+		touchDir(".codex", "plugins", "honeycomb"); // codex wired (honeycomb connector pluginRoot)
 		const harnesses = await liveHarnesses();
 		const by = new Map(harnesses.map((h) => [h.name, h]));
 		expect(by.get("claude-code")?.installed).toBe(true);
@@ -166,9 +165,9 @@ describe("PRD-039a a-AC-3 (production wiring): live `installed` reflects real on
 		touchFile(".claude", "settings.json");
 		touchFile(".cursor", "hooks.json");
 		touchFile(".codex", "hooks.json");
-		touchFile(".hermes", "config.yaml");
-		touchFile(".pi", "agent", "AGENTS.md");
-		touchDir(".openclaw", "extensions", "hivemind");
+		touchDir(".hermes", "honeycomb");
+		touchDir(".pi", "honeycomb");
+		touchDir(".openclaw", "honeycomb");
 		const harnesses = await liveHarnesses();
 		expect(harnesses).toHaveLength(6);
 		for (const h of harnesses) expect(h.installed).toBe(true);

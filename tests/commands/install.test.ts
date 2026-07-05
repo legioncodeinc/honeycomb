@@ -20,6 +20,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+	type ConnectorRunner,
+	type ConnectorVerbArgs,
+	type ConnectorVerbResult,
 	createFakeDaemonClient,
 	DASHBOARD_PORTAL_NOT_RUNNING_MESSAGE,
 	type DaemonLifecycle,
@@ -581,6 +584,102 @@ describe("PRD-071 Contract A — install registers honeycomb with doctor's stati
 		});
 		expect(res.exitCode).toBe(0);
 		expect(lines.join("\n")).toMatch(/Honeycomb is ready/);
+	});
+});
+
+/**
+ * A recording fake {@link ConnectorRunner}: records every verb it is asked to run, and either returns
+ * a scripted result (the harnesses "wired") or throws (the fail-soft path). No real connector engine,
+ * no `node:fs`, no harness config is touched.
+ */
+function fakeConnector(
+	behavior: { wired: readonly string[] } | { throws: string },
+): ConnectorRunner & { calls: ConnectorVerbArgs[] } {
+	const calls: ConnectorVerbArgs[] = [];
+	return {
+		calls,
+		async run(args: ConnectorVerbArgs): Promise<ConnectorVerbResult> {
+			calls.push(args);
+			if ("throws" in behavior) throw new Error(behavior.throws);
+			return { exitCode: 0, harnesses: behavior.wired };
+		},
+	};
+}
+
+describe("W2-FIX-3 — install wires harness hooks best-effort (D5-until-manual-setup fix)", () => {
+	it("runs the connector `setup` at the end of a successful install and prints what got wired", async () => {
+		const lines: string[] = [];
+		const connector = fakeConnector({ wired: ["claude-code", "codex", "cursor"] });
+		const res = await runInstallCommand([], {
+			daemon: createFakeDaemonClient({ alive: true }),
+			lifecycle: fakeLifecycle({}),
+			openDashboard: () => true,
+			probeDashboard: reachablePortalProbe,
+			detectFleet: fleetDefer,
+			connector,
+			dir: tmpDir,
+			out: (l) => lines.push(l),
+		});
+		expect(res.exitCode).toBe(0);
+		// The install ran the SAME `setup` verb the connector engine uses.
+		expect(connector.calls).toEqual([{ verb: "setup" }]);
+		const text = lines.join("\n");
+		expect(text).toMatch(/wired harness hooks: claude-code, codex, cursor/);
+		expect(text).toMatch(/Honeycomb is ready/);
+	});
+
+	it("wires hooks in FLEET mode too (not gated to solo)", async () => {
+		const connector = fakeConnector({ wired: ["cursor"] });
+		const res = await runInstallCommand([], {
+			daemon: createFakeDaemonClient({ alive: true }),
+			lifecycle: fakeLifecycle({}),
+			openDashboard: () => true,
+			probeDashboard: reachablePortalProbe,
+			detectFleet: fleetDefer, // Hive detected → fleet; setup must STILL run.
+			connector,
+			dir: tmpDir,
+			out: () => {},
+		});
+		expect(res.exitCode).toBe(0);
+		expect(connector.calls).toEqual([{ verb: "setup" }]);
+	});
+
+	it("a setup FAILURE does not fail the install (fail-soft: exit 0, one actionable line)", async () => {
+		const lines: string[] = [];
+		const connector = fakeConnector({ throws: "connector engine blew up" });
+		const res = await runInstallCommand([], {
+			daemon: createFakeDaemonClient({ alive: true }),
+			lifecycle: fakeLifecycle({}),
+			openDashboard: () => true,
+			probeDashboard: reachablePortalProbe,
+			detectFleet: fleetDefer,
+			connector,
+			dir: tmpDir,
+			out: (l) => lines.push(l),
+		});
+		expect(res.exitCode).toBe(0);
+		const text = lines.join("\n");
+		// One plain-language line pointing at the manual escape hatch — never a raw stack.
+		expect(text).toMatch(/could not wire harness hooks.*honeycomb setup/);
+		expect(text).not.toMatch(/at .*\(.*:\d+:\d+\)/);
+		expect(text).toMatch(/Honeycomb is ready/);
+	});
+
+	it("no connector seam bound → the setup step is a silent no-op (install unchanged)", async () => {
+		const lines: string[] = [];
+		const res = await runInstallCommand([], {
+			daemon: createFakeDaemonClient({ alive: true }),
+			lifecycle: fakeLifecycle({}),
+			openDashboard: () => true,
+			probeDashboard: reachablePortalProbe,
+			detectFleet: fleetDefer,
+			dir: tmpDir,
+			out: (l) => lines.push(l),
+		});
+		expect(res.exitCode).toBe(0);
+		const text = lines.join("\n");
+		expect(text).not.toMatch(/wired harness hooks/);
+		expect(text).toMatch(/Honeycomb is ready/);
 	});
 });
 

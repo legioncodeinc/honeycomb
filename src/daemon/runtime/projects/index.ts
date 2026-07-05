@@ -13,6 +13,17 @@ export {
 	syncRegistryToCache,
 } from "./registry-sync.js";
 export {
+	type ProjectUpsert,
+	type RegistryWriteResult,
+	upsertProjectRow,
+} from "./registry-write.js";
+export {
+	type CacheInvalidator,
+	type CacheLookup,
+	PROJECTS_VIEW_TTL_MS,
+	ProjectsViewCache,
+} from "./projects-view-cache.js";
+export {
 	type MountProjectsSyncOptions,
 	type ProjectsSyncAck,
 	PROJECTS_SYNC_GROUP,
