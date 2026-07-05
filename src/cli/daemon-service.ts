@@ -371,7 +371,7 @@ function windowsSystem32Dir(env: NodeJS.ProcessEnv): string {
 
 /** The absolute `conhost.exe` path (`--headless` runs the action with NO visible console window). */
 function conhostPath(env: NodeJS.ProcessEnv = process.env): string {
-	return join(windowsSystem32Dir(env), "conhost.exe");
+	return win32.join(windowsSystem32Dir(env), "conhost.exe");
 }
 
 /**
@@ -405,7 +405,7 @@ function parseWhoamiSid(csv: string): string | null {
  */
 export function resolveWindowsUserId(runner: ServiceRunner, env: NodeJS.ProcessEnv = process.env): string {
 	try {
-		const out = runner.run(join(windowsSystem32Dir(env), "whoami.exe"), ["/user", "/fo", "csv", "/nh"]);
+		const out = runner.run(win32.join(windowsSystem32Dir(env), "whoami.exe"), ["/user", "/fo", "csv", "/nh"]);
 		const sid = parseWhoamiSid(out);
 		if (sid !== null) return sid;
 	} catch {
