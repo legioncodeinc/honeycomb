@@ -218,6 +218,15 @@ describe("resolvePollConsolidateConfig: the HONEYCOMB_POLL_CONSOLIDATE boundary 
 		expect(resolvePollConsolidateConfig({ read: () => ({ enabled: "true" }) }).enabled).toBe(true);
 		expect(resolvePollConsolidateConfig({ read: () => ({ enabled: "1" }) }).enabled).toBe(true);
 	});
+
+	it("trims surrounding whitespace on the enabled flag (the trailing-space env class)", () => {
+		// A Windows scheduled-task `set "VAR=true" && …` chain leaks a trailing space; the trim keeps
+		// `"true "` / `" true "` reading as ON and `"false "` / junk as OFF.
+		expect(resolvePollConsolidateConfig({ read: () => ({ enabled: "true " }) }).enabled).toBe(true);
+		expect(resolvePollConsolidateConfig({ read: () => ({ enabled: " true " }) }).enabled).toBe(true);
+		expect(resolvePollConsolidateConfig({ read: () => ({ enabled: "false " }) }).enabled).toBe(false);
+		expect(resolvePollConsolidateConfig({ read: () => ({ enabled: " nope " }) }).enabled).toBe(false);
+	});
 });
 
 describe("LeaseCoordinator: observability — lifecycle + dispatch events (job-observability)", () => {

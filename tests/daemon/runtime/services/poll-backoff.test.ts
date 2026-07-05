@@ -119,6 +119,15 @@ describe("resolvePollBackoffConfig: the zod boundary + default-ON env posture (A
 		expect(resolvePollBackoffConfig({ read: () => ({ enabled: "0" }) }).enabled).toBe(false);
 	});
 
+	it("trims surrounding whitespace on the enabled flag (the trailing-space env class)", () => {
+		// A Windows scheduled-task `set "VAR=true" && …` chain leaks a trailing space; the trim keeps
+		// `"true "` / `" true "` reading as ON and `"false "` / junk as OFF.
+		expect(resolvePollBackoffConfig({ read: () => ({ enabled: "true " }) }).enabled).toBe(true);
+		expect(resolvePollBackoffConfig({ read: () => ({ enabled: " true " }) }).enabled).toBe(true);
+		expect(resolvePollBackoffConfig({ read: () => ({ enabled: "false " }) }).enabled).toBe(false);
+		expect(resolvePollBackoffConfig({ read: () => ({ enabled: " nope " }) }).enabled).toBe(false);
+	});
+
 	it("enabled:'true' / '1' enables; clamps the floor/ceiling knobs", () => {
 		const cfg = resolvePollBackoffConfig({
 			read: () => ({ enabled: "true", floorMs: "2000", ceilingMs: "60000", jitter: "0.2" }),

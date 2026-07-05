@@ -90,6 +90,7 @@ import {
 } from "./health.js";
 import {
 	buildInferenceModelClient,
+	buildInferenceModelClientWithStatus,
 	PORTKEY_API_KEY_NAME,
 	PORTKEY_API_KEY_REF,
 	type PortkeySelection,
@@ -2043,6 +2044,14 @@ async function buildPipelineWorker(
 	} catch {
 		config = resolvePipelineConfig({ read: () => ({}) });
 	}
+	// Observability: announce the RESOLVED pipeline gate at boot. `enabled:false` or
+	// `extractionProvider:'none'` means the extraction stage returns empty WITHOUT a model call — the
+	// exact "jobs complete but nothing hits the LLM / no memory" signature — so this makes the gate
+	// state visible instead of inferred.
+	logger?.event("pipeline.config.resolved", {
+		enabled: config.enabled,
+		extractionProvider: config.extractionProvider,
+	});
 
 	// The real inference ModelClient (the 010 router). NEVER throws — degrades to the
 	// no-op client (empty, zero-mutation passes) when no `agent.yaml`/`inference:` block
@@ -2056,12 +2065,20 @@ async function buildPipelineWorker(
 		});
 		// PRD-063b: route the pipeline's extraction/decision inference through Portkey too when the
 		// gateway is on (the SUPERSESSION), with the same last-failure observer; off → unchanged.
-		model = await buildInferenceModelClient({
+		const built = await buildInferenceModelClientWithStatus({
 			scope: secretScopeFromQueryScope(scope),
 			secretsStore,
 			config: resolveAgentConfigPath(options),
 			...(portkeyDeps?.selection !== undefined ? { portkey: portkeyDeps.selection } : {}),
 			...(portkeyDeps !== undefined ? { onPortkeyUnreachable: portkeyDeps.onUnreachable } : {}),
+		});
+		model = built.client;
+		// Observability: is the PIPELINE's inference client real (Portkey `ok`) or the no-op? A no-op
+		// makes extraction return empty WITHOUT any HTTP — the "jobs complete, nothing hits the LLM"
+		// signature. Also record whether the Portkey selection even reached this build.
+		logger?.event("pipeline.model.resolved", {
+			portkeyStatus: built.portkeyStatus,
+			hasPortkeySelection: portkeyDeps?.selection !== undefined,
 		});
 	} catch {
 		model = noopModelClient;
@@ -2081,7 +2098,10 @@ async function buildPipelineWorker(
 	// The real stage handlers, CHAINED via the fan-out enqueuers (045a). Each stage's
 	// optional forward seam is wired to enqueue the next stage's job onto the same queue.
 	const handlers = createPipelineHandlers({
-		extraction: { config, model, onResult: extractionFanOut(queue) },
+		// Wire the extraction stage's logger so a swallowed model-call failure (extraction.model_error)
+		// or unparseable output is VISIBLE — otherwise "jobs complete, nothing hits the LLM, no facts"
+		// is a silent dead end. Structurally an ExtractionLogger (same { event } shape).
+		extraction: { config, model, logger, onResult: extractionFanOut(queue) },
 		decision: {
 			storage,
 			scope: queryScope,

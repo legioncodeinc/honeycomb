@@ -50,7 +50,12 @@ export const MIN_RECALL_MAX_CONCURRENCY = 1;
 const OnByDefaultFlag = z.preprocess((raw) => {
 	if (typeof raw === "boolean") return raw;
 	if (raw === undefined || raw === null || raw === "") return true; // unset → the live ON default.
-	return !(raw === "false" || raw === "0"); // only explicit off tokens disable it.
+	// TRIM before comparing the OFF tokens: env values routinely arrive with surrounding whitespace (a
+	// Windows scheduled-task `set "VAR=false" && …` chain) — without it `"false "` slipped past the
+	// off-token check and stayed ON (the same trailing-space class as the APIARY_HOME bug). Duplicated
+	// helper; shared-helper follow-up.
+	const s = typeof raw === "string" ? raw.trim() : raw;
+	return !(s === "false" || s === "0"); // only explicit off tokens disable it.
 }, z.boolean());
 
 /**

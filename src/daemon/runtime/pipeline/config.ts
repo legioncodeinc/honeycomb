@@ -66,7 +66,12 @@ export const EXTRACTION_PROVIDER_NONE = "none" as const;
 /** A boolean flag read from an env string: `true`/`1` → true, anything else → false. */
 const BoolFlag = z.preprocess((raw) => {
 	if (typeof raw === "boolean") return raw;
-	return raw === "true" || raw === "1";
+	// TRIM before comparing: env values routinely arrive with surrounding whitespace (a Windows
+	// scheduled-task `set "VAR=true" && …` chain, a shell heredoc, a copy-paste). Without the trim an
+	// exact `=== "true"` silently read `"true "` as FALSE — which disabled the ENTIRE memory pipeline
+	// on a real install while `/health` looked fine (the same trailing-space class as the APIARY_HOME bug).
+	const s = typeof raw === "string" ? raw.trim() : raw;
+	return s === "true" || s === "1";
 }, z.boolean());
 
 /**

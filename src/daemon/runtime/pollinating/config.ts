@@ -37,7 +37,11 @@ export const DEFAULT_MAX_INPUT_TOKENS = 128_000;
 /** A boolean flag read from an env string: `true`/`1` → true, anything else → false. */
 const BoolFlag = z.preprocess((raw) => {
 	if (typeof raw === "boolean") return raw;
-	return raw === "true" || raw === "1";
+	// TRIM before comparing: env values routinely arrive with surrounding whitespace (a Windows
+	// scheduled-task `set "VAR=true" && …` chain) — without it an exact `=== "true"` read `"true "` as
+	// FALSE (the same trailing-space class as the APIARY_HOME bug). Duplicated helper; shared-helper follow-up.
+	const s = typeof raw === "string" ? raw.trim() : raw;
+	return s === "true" || s === "1";
 }, z.boolean());
 
 /**
