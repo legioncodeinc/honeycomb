@@ -190,6 +190,8 @@ export interface JobQueueConfig {
 	readonly deadRetentionMs?: number;
 	/** Unique owner id this queue instance stamps on leases. Default a generated id. */
 	readonly owner?: string;
+	/** Page size for the `stats()` paginated scan. Default 2000; lowered in tests to force multi-page. */
+	readonly statsPageSize?: number;
 	/**
 	 * The physical table name to read/write/heal. Defaults to the catalog's
 	 * canonical `memory_jobs` (the production name). It exists so an isolated
@@ -237,6 +239,7 @@ interface ResolvedConfig {
 	readonly deadRetentionMs: number;
 	readonly owner: string;
 	readonly tableName: string;
+	readonly statsPageSize: number;
 }
 
 /** Resolve the public config into concrete numbers, applying D-3 defaults. */
@@ -252,6 +255,9 @@ function resolveConfig(config: JobQueueConfig | undefined, ownerFallback: string
 		deadRetentionMs: config?.deadRetentionMs ?? 7 * 24 * 60 * 60 * 1_000,
 		owner: config?.owner ?? ownerFallback,
 		tableName: config?.tableName ?? MEMORY_JOBS_TABLE,
+		// Page size for the `stats()` paginated scan. Defaulted high (one round trip for any realistic
+		// live table); a test lowers it to force multi-page accumulation without thousands of jobs.
+		statsPageSize: Math.max(1, Math.trunc(config?.statsPageSize ?? 2_000)),
 	};
 }
 
@@ -497,9 +503,41 @@ class DeepLakeJobQueueService implements JobQueueService {
 	 * nothing. Fail-soft by construction — `discoverIds` degrades to whatever it can read.
 	 */
 	async stats(): Promise<JobQueueStats> {
-		const states = await this.discoverIds();
+		// A PAGINATED scan of (id, type, status, version), reducing every observed row to the CURRENT
+		// (highest-version) row per job id as we go. This is O(pages) round-trips — vs the O(N) per-id
+		// resolve `discoverIds` does (one point read PER job), which was UNUSABLE over a real backlog
+		// (500+ jobs × per-id reads timed the endpoint out at minutes). Pagination keeps it bounded:
+		// per-page memory is capped even as the append-only table grows unbounded between reaps, and a
+		// hard page cap prevents a pathological table from hanging the read. Best-effort: OFFSET paging
+		// over a segment-flapping backend may skip/dup a row, acceptable for a READ-ONLY diagnostic that
+		// never leases/mutates. A `connection_error`/`timeout` mid-scan returns what was gathered so far.
+		const PAGE_SIZE = this.cfg.statsPageSize;
+		const MAX_PAGES = 10_000; // safety ceiling so a runaway table can never hang the endpoint
+		const current = new Map<string, { type: string; status: string; version: number }>();
+		for (let page = 0; page < MAX_PAGES; page++) {
+			// A stable ORDER BY makes OFFSET paging deterministic on a settled table; `id, version` also
+			// groups a job's versions together. Integer LIMIT/OFFSET are code constants (no injection).
+			const sql =
+				`SELECT ${sqlIdent("id")}, ${sqlIdent("type")}, ${sqlIdent("status")}, ${sqlIdent("version")} ` +
+				`FROM "${this.tbl()}" ORDER BY ${sqlIdent("id")}, ${sqlIdent("version")} ` +
+				`LIMIT ${PAGE_SIZE} OFFSET ${page * PAGE_SIZE}`;
+			const res = await this.storage.query(sql, this.scope);
+			if (!isOk(res)) break; // fail-soft: stop paging, aggregate whatever we gathered.
+			const rows = res.rows as StorageRow[];
+			for (const row of rows) {
+				const id = rowText(row, "id");
+				if (id === "" || id === "__ensure__") continue; // skip the ensure-table sentinel
+				const version = rowNumber(row, "version");
+				const prev = current.get(id);
+				if (prev === undefined || version > prev.version) {
+					current.set(id, { type: rowText(row, "type"), status: rowText(row, "status"), version });
+				}
+			}
+			if (rows.length < PAGE_SIZE) break; // short page → the table is exhausted.
+		}
+
 		const byKind = new Map<string, { queued: number; leased: number; done: number; failed: number; dead: number; total: number }>();
-		for (const s of states) {
+		for (const s of current.values()) {
 			let e = byKind.get(s.type);
 			if (e === undefined) {
 				e = { queued: 0, leased: 0, done: 0, failed: 0, dead: 0, total: 0 };
@@ -515,7 +553,7 @@ class DeepLakeJobQueueService implements JobQueueService {
 		const list: JobKindStats[] = [...byKind.entries()]
 			.map(([kind, e]) => ({ kind, ...e }))
 			.sort((a, b) => b.total - a.total || a.kind.localeCompare(b.kind));
-		return { byKind: list, total: states.length };
+		return { byKind: list, total: current.size };
 	}
 
 	/**

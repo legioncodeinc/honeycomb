@@ -197,6 +197,12 @@ class CombinedLeaseCoordinator implements LeaseCoordinator {
 			return true;
 		}
 
+		// Observability: a job was leased + dispatched this pass. The presence of these events (vs a
+		// `started` with no dispatches) tells an operator the loop is actually DRAINING the queue,
+		// distinguishing "loop ticking but leasing nothing" (a lease-filter/kind mismatch) from "loop
+		// draining normally". Carries only the job id + kind — no payload, no secret.
+		this.logger?.event("lease.coordinator.dispatched", { id: leased.id, kind: leased.kind });
+
 		// The participant owns route+run+complete/fail (it never throws for a job
 		// failure — it routes the throw to queue.fail itself), exactly as its standalone
 		// runOnce did. The coordinator only dispatches.
@@ -205,6 +211,12 @@ class CombinedLeaseCoordinator implements LeaseCoordinator {
 	}
 
 	start(): void {
+		// Observability: announce that the SINGLE combined lease loop is running and the exact union of
+		// kinds it leases. In the consolidate-poll path (the production default) this coordinator — NOT
+		// the stage worker's own loop — is what drives the pipeline, so this is the "did the driver
+		// start, and does its union include the backlogged kind" signal. Its absence means no loop is
+		// pumping the queue at all.
+		this.logger?.event("lease.coordinator.started", { unionKinds: this.unionKinds, participants: this.participants.length });
 		this.loop.start();
 	}
 

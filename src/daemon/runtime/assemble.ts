@@ -122,6 +122,7 @@ import {
 	type PipelineConfig,
 	resolvePipelineConfig,
 	type StageWorker,
+	type StageWorkerLogger,
 } from "./pipeline/index.js";
 import type { ModelClient } from "./pipeline/model-client.js";
 import { mountPollinateApi } from "./pollinating/api.js";
@@ -2031,6 +2032,7 @@ async function buildPipelineWorker(
 	embed: EmbedAttachment,
 	backoff: PollBackoffConfig,
 	portkeyDeps?: PortkeyWorkerDeps,
+	logger?: StageWorkerLogger,
 ): Promise<StageWorker> {
 	// Resolve the pipeline config fail-soft: a malformed knob must NEVER take the daemon
 	// down — degrade to the schema's false-safe defaults (every stage gate defaults OFF,
@@ -2100,7 +2102,7 @@ async function buildPipelineWorker(
 		retention: { storage, scope: queryScope, config },
 	});
 
-	return createStageWorker({ queue, handlers, backoff });
+	return createStageWorker({ queue, handlers, backoff, logger });
 }
 
 /**
@@ -2868,6 +2870,12 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			}
 			const shouldConsolidatePoll = consolidatePoll && startPollinatingWorker;
 
+			// Observability: route the background workers' structured events to the daemon's log channel
+			// (the SAME `daemon.logger` the request log + fleet tap read). Until now the stage worker +
+			// lease coordinator were built with NO logger, so their `worker.started` / `dispatched` /
+			// `completed` / `failed` events were silent no-ops — a stuck queue was invisible from the logs.
+			const workerLogger: StageWorkerLogger = { event: (name, fields) => daemon.logger.event(name, fields) };
+
 			// ── PRD-063b (b-AC-7): resolve the Portkey selection + assembly-time health status ONCE,
 			// here (async, alongside the other vault reads), so `/health` `reasons.portkey` is honest
 			// INDEPENDENT of whether pollinating/the pipeline is enabled (the gateway toggle is its own
@@ -2965,6 +2973,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 						embed,
 						pollBackoff,
 						portkeyWorkerDeps,
+						workerLogger,
 					);
 					// PRD-062b (AC-4): when consolidation is ON, DEFER starting the pipeline
 					// worker's own loop — the single lease coordinator (built at the pollinating
@@ -3064,6 +3073,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 								participants,
 								backoff: pollBackoff,
 								flatIntervalMs: 1_000,
+								logger: workerLogger,
 							});
 							leaseCoordinator.start();
 						}

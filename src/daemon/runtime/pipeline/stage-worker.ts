@@ -260,6 +260,11 @@ class PipelineStageWorker implements StageWorker {
 	}
 
 	start(): void {
+		// Observability: announce that the pipeline stage worker's OWN poll loop is running and which
+		// kinds it leases. This is the load-bearing "did the worker even start" signal — its absence
+		// (with a backlogged queue) tells an operator the standalone loop never started (e.g. it was
+		// deferred to the lease coordinator under `HONEYCOMB_POLL_CONSOLIDATE`), instead of guessing.
+		this.logger?.event("stage.worker.started", { leaseKinds: this.leaseKinds });
 		this.loop.start();
 	}
 
