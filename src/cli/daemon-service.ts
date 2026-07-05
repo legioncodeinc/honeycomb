@@ -39,7 +39,7 @@
 
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { join, normalize, resolve, sep } from "node:path";
+import { join, normalize, resolve, sep, win32 } from "node:path";
 
 import { PRODUCT_SLUG } from "../shared/constants.js";
 import { APIARY_HOME_ENV, honeycombStateDir } from "../shared/fleet-root.js";
@@ -364,7 +364,9 @@ export const STAGED_TASK_XML_NAME = "honeycomb-task.xml" as const;
 /** Resolve `<SystemRoot>\System32` (the fixed, trusted dir the whoami/conhost binaries live in). */
 function windowsSystem32Dir(env: NodeJS.ProcessEnv): string {
 	const systemRoot = (env.SystemRoot ?? env.SYSTEMROOT ?? "").trim();
-	return join(systemRoot.length > 0 ? systemRoot : "C:\\Windows", "System32");
+	// win32.join, not join: these are Windows paths by definition, and the CI quality gate
+	// also runs this code on POSIX hosts where the generic join would emit forward slashes.
+	return win32.join(systemRoot.length > 0 ? systemRoot : "C:\\Windows", "System32");
 }
 
 /** The absolute `conhost.exe` path (`--headless` runs the action with NO visible console window). */
