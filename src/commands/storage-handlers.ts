@@ -131,7 +131,7 @@ function buildSecretRequest(argv: readonly string[]): DaemonRequest {
 	const sub = subcommandOf(argv);
 	const rest = argv.filter((a) => !a.startsWith("--"));
 	const name = rest[1] ?? "";
-	if (sub === "rm" || sub === "remove" || sub === "delete" || sub === "unset") {
+	if (["rm", "remove", "delete", "unset"].includes(sub)) {
 		return { method: "DELETE", path: `/api/secrets/${encodeURIComponent(name)}` };
 	}
 	if (sub === "set") {

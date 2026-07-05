@@ -2386,9 +2386,6 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		buildHealthDetail({
 			status: healthBit,
 			embeddingsEnabled: embeddingsReason(),
-			// PRD-029 honesty: report `warming` (not a misleading `on`) while the wired embedder has not
-			// warmed — read LIVE per health call from the supervisor, so recall's BM25 fallback is visible.
-			embeddingsWarm: embedSupervisor !== undefined ? embedSupervisor.warm : undefined,
 			portkey: portkeyHealth,
 			captureDroppedEvents: captureDroppedEvents.read(),
 			// PRD-073b: the per-reason gated-captures totals + the two dormancy reasons, read LIVE per

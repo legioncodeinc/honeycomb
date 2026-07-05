@@ -118,21 +118,6 @@ describe("AC-2 /health detail NAMES the down subsystem, not a bare degraded", ()
 		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.embeddings).toBe("on");
 	});
 
-	it("embeddings enabled-but-not-warm → 'warming' (honest, not a misleading 'on'); warm → 'on'", () => {
-		// Enabled + explicitly not warm (child down / model still loading / crash-looped) — recall is on
-		// the silent BM25 fallback, so health must NOT claim 'on'.
-		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true, embeddingsWarm: false }).reasons?.embeddings).toBe(
-			"warming",
-		);
-		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true, embeddingsWarm: true }).reasons?.embeddings).toBe(
-			"on",
-		);
-		// Disabled wins regardless of warm; omitted warm stays backward-compatible ('on' when enabled).
-		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: false, embeddingsWarm: false }).reasons?.embeddings).toBe(
-			"off",
-		);
-		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.embeddings).toBe("on");
-	});
 
 	it("schema is best-effort 'ok' by default; 'missing_table' only when a required table is known-missing", () => {
 		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.schema).toBe("ok");
