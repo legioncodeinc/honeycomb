@@ -215,7 +215,9 @@ class InMemoryJobs {
 				if (ai !== bi) return ai < bi ? -1 : 1;
 				return Number(a.version) - Number(b.version);
 			});
-			return sorted.slice(offset, offset + limit).map((r) => ({ id: r.id, type: r.type, status: r.status, version: r.version }));
+			// Return the FULL row (all columns): stats() reads id/type/status/version; discoverIds' scan
+			// reads every STATE_COLUMN via toJobState. The service reduces to highest-version-per-id.
+			return sorted.slice(offset, offset + limit).map((r) => ({ ...r }));
 		}
 		return [];
 	}
@@ -682,11 +684,11 @@ describe("job-observability stats() reports the CURRENT-status breakdown by kind
 		expect(distill).toEqual({ kind: "distill", queued: 1, leased: 0, done: 0, failed: 0, dead: 0, total: 1 });
 	});
 
-	it("PAGINATES: accumulates the highest-version-per-id across pages, not just page 0 (statsPageSize=2)", async () => {
+	it("PAGINATES: accumulates the highest-version-per-id across pages, not just page 0 (scanPageSize=2)", async () => {
 		// A tiny page size forces the scan to span multiple pages. A queued→leased→done job's three
 		// append-only rows land across page boundaries, so this proves the reduction accumulates over
 		// ALL pages (page 0 alone would miss the `done` row and mis-count the job as still queued).
-		const { queue } = makeQueue({ config: { statsPageSize: 2 } });
+		const { queue } = makeQueue({ config: { scanPageSize: 2 } });
 
 		const a = await queue.enqueue({ kind: "summary", payload: {} }); // → done (3 rows)
 		await queue.enqueue({ kind: "summary", payload: {} }); // queued (1 row)
