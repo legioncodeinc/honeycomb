@@ -384,6 +384,14 @@ export interface DaemonServiceController {
 	register(spec: ServiceSpec): ServiceOpResult;
 	/** Deregister the service (unload/disable + remove the unit). Idempotent + never throws. */
 	unregister(spec: ServiceSpec): ServiceOpResult;
+	/**
+	 * Best-effort removal of the PRE-decision-#32 LEGACY unit/label for this manager (PRD-003b
+	 * uninstall). The `register` path already deregisters the legacy unit on migration; `uninstall`
+	 * reuses THAT same cleanup so a full removal also strips a lingering legacy unit. Idempotent and
+	 * never throws (a missing legacy unit is success). Optional on the seam (additive); callers guard
+	 * with `?.`.
+	 */
+	unregisterLegacy?(spec: ServiceSpec): void;
 	/** Ask the manager to (re)start the daemon, the rung-1 path Doctor calls (AC-064h.5). */
 	restart(spec: ServiceSpec): ServiceOpResult;
 	/** Ask the manager to stop the daemon. */
@@ -417,22 +425,28 @@ function launchdController(runner: ServiceRunner): DaemonServiceController {
 	function domain(): string {
 		return `gui/${process.getuid?.() ?? 501}`;
 	}
+	/**
+	 * Best-effort boot out + remove the legacy `ai.honeycomb.daemon` agent (decision #32 migration on
+	 * register; PRD-003b legacy cleanup on uninstall). Never throws — a missing legacy agent is success.
+	 */
+	function cleanupLegacy(spec: ServiceSpec): void {
+		try {
+			runner.run("launchctl", ["bootout", `${domain()}/${LEGACY_SERVICE_LABEL}`]);
+		} catch {
+			// No legacy agent loaded, fine.
+		}
+		try {
+			runner.removeFile(legacyLaunchdPlistPath(specHome(spec)));
+		} catch {
+			// Best-effort cleanup only.
+		}
+	}
 	return {
 		manager: "launchd",
 		register(spec): ServiceOpResult {
-			// Decision #32 migration: best-effort boot out + remove the legacy `ai.honeycomb.daemon`
-			// agent so a re-run never leaves two agents racing over one daemon. Expected to fail
-			// harmlessly when no legacy agent exists.
-			try {
-				runner.run("launchctl", ["bootout", `${domain()}/${LEGACY_SERVICE_LABEL}`]);
-			} catch {
-				// No legacy agent loaded, fine.
-			}
-			try {
-				runner.removeFile(legacyLaunchdPlistPath(specHome(spec)));
-			} catch {
-				// Best-effort cleanup only.
-			}
+			// Decision #32 migration: strip a lingering legacy agent so a re-run never leaves two agents
+			// racing over one daemon.
+			cleanupLegacy(spec);
 			const path = launchdPlistPath(specHome(spec));
 			runner.writeFile(path, renderLaunchdPlist(spec));
 			// bootstrap loads + (RunAtLoad) starts the agent; the `||` re-bootstrap is handled by callers.
@@ -448,6 +462,9 @@ function launchdController(runner: ServiceRunner): DaemonServiceController {
 			}
 			runner.removeFile(path);
 			return { ok: true, manager: "launchd" };
+		},
+		unregisterLegacy(spec): void {
+			cleanupLegacy(spec);
 		},
 		restart(_spec): ServiceOpResult {
 			// kickstart -k kills + restarts the service THROUGH launchd (AC-064h.5: no second spawn).
@@ -469,21 +486,28 @@ function launchdController(runner: ServiceRunner): DaemonServiceController {
 /** systemd --user controller (`systemctl --user enable --now`/`disable`/`restart`). */
 function systemdController(runner: ServiceRunner): DaemonServiceController {
 	const unit = SERVICE_SYSTEMD_UNIT;
+	/**
+	 * Best-effort disable + remove the legacy `ai.honeycomb.daemon.service` unit (decision #32
+	 * migration on register; PRD-003b legacy cleanup on uninstall). Never throws when absent.
+	 */
+	function cleanupLegacy(spec: ServiceSpec): void {
+		try {
+			runner.run("systemctl", ["--user", "disable", "--now", LEGACY_SERVICE_SYSTEMD_UNIT]);
+		} catch {
+			// No legacy unit enabled, fine.
+		}
+		try {
+			runner.removeFile(legacySystemdUnitPath(specHome(spec)));
+		} catch {
+			// Best-effort cleanup only.
+		}
+	}
 	return {
 		manager: "systemd-user",
 		register(spec): ServiceOpResult {
-			// Decision #32 migration: best-effort disable + remove the legacy unit so a re-run
-			// never leaves two units racing over one daemon. Fails harmlessly when absent.
-			try {
-				runner.run("systemctl", ["--user", "disable", "--now", LEGACY_SERVICE_SYSTEMD_UNIT]);
-			} catch {
-				// No legacy unit enabled, fine.
-			}
-			try {
-				runner.removeFile(legacySystemdUnitPath(specHome(spec)));
-			} catch {
-				// Best-effort cleanup only.
-			}
+			// Decision #32 migration: strip a lingering legacy unit so a re-run never leaves two units
+			// racing over one daemon.
+			cleanupLegacy(spec);
 			const path = systemdUnitPath(specHome(spec));
 			runner.writeFile(path, renderSystemdUnit(spec));
 			runner.run("systemctl", ["--user", "daemon-reload"]);
@@ -505,6 +529,9 @@ function systemdController(runner: ServiceRunner): DaemonServiceController {
 			}
 			return { ok: true, manager: "systemd-user" };
 		},
+		unregisterLegacy(spec): void {
+			cleanupLegacy(spec);
+		},
 		restart(_spec): ServiceOpResult {
 			// restart goes THROUGH systemd (AC-064h.5: no second spawn, no double-bind).
 			runner.run("systemctl", ["--user", "restart", unit]);
@@ -522,21 +549,28 @@ function systemdController(runner: ServiceRunner): DaemonServiceController {
 
 /** Windows per-user Scheduled Task controller (`schtasks /Create`/`/Delete`/`/Run`/`/End`/`/Query`). */
 function schtasksController(runner: ServiceRunner): DaemonServiceController {
+	/**
+	 * Best-effort end + delete the legacy `HoneycombDaemon` task (decision #32 migration on register;
+	 * PRD-003b legacy cleanup on uninstall). Never throws when the legacy task is absent.
+	 */
+	function cleanupLegacy(): void {
+		try {
+			runner.run("schtasks", ["/End", "/TN", LEGACY_SERVICE_TASK_NAME]);
+		} catch {
+			// No legacy task running, fine.
+		}
+		try {
+			runner.run("schtasks", ["/Delete", "/TN", LEGACY_SERVICE_TASK_NAME, "/F"]);
+		} catch {
+			// No legacy task registered, fine.
+		}
+	}
 	return {
 		manager: "schtasks",
 		register(spec): ServiceOpResult {
-			// Decision #32 migration: best-effort end + delete the legacy `HoneycombDaemon` task so a
-			// re-run never leaves two tasks racing over one daemon. Fails harmlessly when absent.
-			try {
-				runner.run("schtasks", ["/End", "/TN", LEGACY_SERVICE_TASK_NAME]);
-			} catch {
-				// No legacy task running, fine.
-			}
-			try {
-				runner.run("schtasks", ["/Delete", "/TN", LEGACY_SERVICE_TASK_NAME, "/F"]);
-			} catch {
-				// No legacy task registered, fine.
-			}
+			// Decision #32 migration: strip a lingering legacy task so a re-run never leaves two tasks
+			// racing over one daemon.
+			cleanupLegacy();
 			// /Create /F is idempotent (overwrites). /SC ONLOGON starts the daemon on login (boot floor).
 			runner.run("schtasks", buildSchtasksCreateArgs(spec));
 			// Start it immediately so register == running (the install path expects an up daemon).
@@ -555,6 +589,9 @@ function schtasksController(runner: ServiceRunner): DaemonServiceController {
 				// A missing task on delete is success, the goal (no task) already holds.
 			}
 			return { ok: true, manager: "schtasks" };
+		},
+		unregisterLegacy(): void {
+			cleanupLegacy();
 		},
 		restart(spec): ServiceOpResult {
 			// AC-064h.5: stop THEN start the SAME task, no second daemon spawn. The single-instance

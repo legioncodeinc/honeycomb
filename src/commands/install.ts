@@ -39,7 +39,9 @@
 
 import { execFileSync } from "node:child_process";
 import { isAbsolute, resolve } from "node:path";
-
+import type { Credentials } from "../daemon/runtime/auth/contracts.js";
+import { loadCredentials } from "../daemon/runtime/auth/credentials-store.js";
+import { defaultBrowserOpener, loginWithDeviceFlow } from "../daemon/runtime/auth/deeplake-issuer.js";
 import { resolveRuntimeConfig } from "../daemon/runtime/config.js";
 import {
 	DEFAULT_REF,
@@ -50,6 +52,7 @@ import {
 import { type RegistryBind, registerHoneycombWithDoctor } from "../daemon/runtime/telemetry/fleet-registry.js";
 import { type EmitDeps, emitTelemetry, recordVersionAndEmitUpdated } from "../daemon/runtime/telemetry/index.js";
 import { DAEMON_HOST, DAEMON_PORT, HIVE_HOST, HIVE_PORT } from "../shared/constants.js";
+import { classifyFleet, type FleetClassification, fleetSignalLine } from "../shared/fleet-detection.js";
 import type { CommandResult, OutputSink } from "./contracts.js";
 import { type DaemonVerbDeps, ensureDaemonRunning } from "./daemon.js";
 
@@ -169,6 +172,25 @@ export interface InstallVerbDeps extends DaemonVerbDeps {
 	 * — `emitTelemetry`'s defaults apply (and an empty build key makes it a no-op).
 	 */
 	readonly telemetry?: EmitDeps;
+	/**
+	 * PRD-003a: the solo-vs-fleet classifier (a-AC-6). Defaults to the real {@link classifyFleet}
+	 * (registry read + 127.0.0.1:3853 probe + npm global read). A test injects a fixed result so the
+	 * fleet-defer vs solo-auto-login branch is driven without touching the network or the npm tree.
+	 */
+	readonly detectFleet?: () => Promise<FleetClassification>;
+	/**
+	 * PRD-003a: read the shared `~/.deeplake/credentials.json` (a-AC-3: only auto-login when it is
+	 * ABSENT). Defaults to the real {@link loadCredentials}; a test injects a fake so no real
+	 * credential file is read.
+	 */
+	readonly loadInstallCredentials?: () => Credentials | null;
+	/**
+	 * PRD-003a: run the device-flow login on the SOLO auto-login path (a-AC-3 / a-AC-7). Defaults to
+	 * {@link defaultInstallDeviceLogin} (the same `loginWithDeviceFlow` `honeycomb login` runs, with
+	 * the validated browser opener; headless degrades to printing the URL + code and polling). A test
+	 * injects a recorder so no real browser launches and no real device flow runs.
+	 */
+	readonly runDeviceLogin?: (out: OutputSink) => Promise<boolean>;
 }
 
 /** Parse the effective referral code off the argv tail (`--ref <code>`), else `undefined`. */
@@ -360,6 +382,74 @@ async function reportDaemonSupervision(deps: InstallVerbDeps, out: OutputSink): 
 }
 
 /**
+ * The production SOLO auto-login (PRD-003a a-AC-3 / a-AC-7): run the SAME device flow `honeycomb
+ * login` runs (`loginWithDeviceFlow`) with the validated OS browser opener. It PRINTS the
+ * verification URL + user code through the reporter BEFORE any open attempt, and on a headless host
+ * the opener simply returns false (never throws) and the flow polls to completion — so a no-browser
+ * environment degrades to "print + poll" rather than hanging or crashing (a-AC-7). Resolves `true`
+ * on a persisted credential; `loginWithDeviceFlow` throws on failure, which the caller reports.
+ */
+async function defaultInstallDeviceLogin(out: OutputSink): Promise<boolean> {
+	await loginWithDeviceFlow({
+		reporter: { prompt: (line: string): void => out(line) },
+		openBrowser: defaultBrowserOpener,
+	});
+	return true;
+}
+
+/**
+ * The PRD-003a install-time login decision (a-AC-1 / a-AC-3 / a-AC-6 / a-AC-7), run from the install
+ * path ONLY (never daemon boot). Classifies solo vs fleet, LOGS which signals fired (a-AC-6), then:
+ *
+ *   - FLEET (Hive detected): print ONE line that login is deferred to Hive onboarding and initiate
+ *     NOTHING — no browser popup, no prompt (a-AC-1). The daemon sits degraded on /health until
+ *     Hive-side login writes the shared credential; the 15s SELECT-1 health probe flips it healthy
+ *     with no restart (a-AC-2).
+ *   - SOLO with credentials already present: no popup — say the user is already signed in (a-AC-3).
+ *   - SOLO with NO credentials: auto-open the device-flow popup (a-AC-3); headless degrades to
+ *     printing the URL + code and polling (a-AC-7).
+ *
+ * Fail-soft (parent AC-9): this NEVER changes the install exit code. A detection error DEFERS
+ * (suppressing a popup wrongly is cheap; opening one wrongly is the bug), and a login failure prints
+ * a plain-language "run `honeycomb login`" hint rather than aborting the install.
+ */
+async function runInstallLoginStep(deps: InstallVerbDeps, out: OutputSink): Promise<void> {
+	let classification: FleetClassification;
+	try {
+		classification = await (deps.detectFleet ?? (() => classifyFleet()))();
+	} catch {
+		// Detection blew up: DEFER (treat as fleet) so we never pop a wrong browser. Actionable line.
+		out("note: could not determine solo vs fleet mode; deferring login (run `honeycomb login` to sign in).");
+		return;
+	}
+	// a-AC-6: the classification's inputs (which signals fired) are visible in the install output.
+	out(fleetSignalLine(classification));
+
+	if (classification.mode === "fleet") {
+		// a-AC-1: defer ALL login initiation to Hive; never open a browser or prompt.
+		out("→ login is deferred to Hive onboarding (Hive detected); Honeycomb connects once Hive signs in.");
+		return;
+	}
+
+	// SOLO. Only auto-open when the shared credential is absent (a-AC-3).
+	const creds = (deps.loadInstallCredentials ?? loadCredentials)();
+	if (creds !== null) {
+		out("✓ already signed in (existing credentials found); no browser opened.");
+		return;
+	}
+
+	out("→ no credentials found; opening sign-in…");
+	try {
+		const ok = await (deps.runDeviceLogin ?? defaultInstallDeviceLogin)(out);
+		out(ok ? "✓ signed in." : "note: sign-in did not complete; run `honeycomb login` to finish.");
+	} catch (err) {
+		// a-AC-9: a login failure is a plain-language, actionable line — never a raw stack, never a fail.
+		const reason = err instanceof Error ? err.message : "sign-in failed";
+		out(`note: automatic sign-in could not complete (${reason}); run \`honeycomb login\` to sign in.`);
+	}
+}
+
+/**
  * Run `honeycomb install [--ref <code>]` (a-AC-1..6). Health-gates the daemon up (idempotent, no
  * double-bind), persists the onboarding "installed" marker + effective ref, then opens the dashboard
  * (`honeycomb.local` best-effort → loopback fallback). Every effect goes through an injected seam;
@@ -408,6 +498,11 @@ export async function runInstallCommand(argv: readonly string[], deps: InstallVe
 	// 2b) Register (or refresh) honeycomb's doctor static-registry entry (PRD-071 Contract A).
 	// Fail-soft — see `writeDoctorRegistryEntry`.
 	writeDoctorRegistryEntry(deps.dir, out);
+
+	// 2c) PRD-003a: the solo-vs-fleet login decision (a-AC-1 / a-AC-3 / a-AC-6 / a-AC-7). Fires from
+	//     the install path ONLY. Fleet → defer to Hive (no popup); solo + no creds → auto device flow;
+	//     solo + creds → already signed in. Fail-soft: it never changes the install exit code.
+	await runInstallLoginStep(deps, out);
 
 	// 3) Probe the dashboard portal first. Reachable: open friendly->loopback. Not reachable:
 	// print one plain sentence and do not open a browser tab (C-6). FAIL-SOFT: a throwing probe

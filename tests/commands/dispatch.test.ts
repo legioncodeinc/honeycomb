@@ -127,6 +127,12 @@ describe("PRD-020a a-AC-1 — the unified dispatcher parses + routes", () => {
 					return true;
 				},
 				probeDashboard: async () => true,
+				// PRD-003a: a fleet-defer classifier so the install login step never hits the network.
+				detectFleet: async () => ({
+					mode: "fleet" as const,
+					signals: { registryHiveEntry: true, hivePortAnswering: false, hiveNpmGlobal: false },
+					firedSignals: ["test"],
+				}),
 				out: (l: string) => lines.push(l),
 				dir,
 			} as unknown as CommandDeps;
@@ -153,6 +159,12 @@ describe("PRD-020a a-AC-1 — the unified dispatcher parses + routes", () => {
 					return true;
 				},
 				probeDashboard: async () => false,
+				// PRD-003a: a fleet-defer classifier so the install login step never hits the network.
+				detectFleet: async () => ({
+					mode: "fleet" as const,
+					signals: { registryHiveEntry: true, hivePortAnswering: false, hiveNpmGlobal: false },
+					firedSignals: ["test"],
+				}),
 				out: (l: string) => lines.push(l),
 				dir,
 			} as unknown as CommandDeps;

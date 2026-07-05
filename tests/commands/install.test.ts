@@ -20,8 +20,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-	DASHBOARD_PORTAL_NOT_RUNNING_MESSAGE,
 	createFakeDaemonClient,
+	DASHBOARD_PORTAL_NOT_RUNNING_MESSAGE,
 	type DaemonLifecycle,
 	type DaemonStatus,
 	dashboardPortalNotRunningMessage,
@@ -35,6 +35,18 @@ import {
 } from "../../src/commands/index.js";
 import { DEFAULT_REF, loadOnboarding } from "../../src/daemon/runtime/onboarding/index.js";
 import { doctorRegistryPath } from "../../src/daemon/runtime/telemetry/fleet-registry.js";
+import type { FleetClassification } from "../../src/shared/fleet-detection.js";
+
+/**
+ * PRD-003a: a fixed fleet-defer classification so these install tests never touch the network / npm
+ * tree (the real classifier) or attempt a real device-flow login. In fleet mode the install login
+ * step just prints the defer line and returns — reading no credentials and running no login.
+ */
+const fleetDefer = async (): Promise<FleetClassification> => ({
+	mode: "fleet",
+	signals: { registryHiveEntry: true, hivePortAnswering: false, hiveNpmGlobal: false },
+	firedSignals: ["test-injected registry Hive entry"],
+});
 
 /** A recording fake DaemonLifecycle: scripts start/status results + records every call. */
 function fakeLifecycle(script: {
@@ -96,6 +108,7 @@ describe("PRD-050a — honeycomb install (a-AC-4 health-gated open)", () => {
 			lifecycle,
 			openDashboard: opener.open,
 			probeDashboard: reachablePortalProbe,
+			detectFleet: fleetDefer,
 			dir: tmpDir,
 			out: (l) => lines.push(l),
 		});
@@ -116,6 +129,7 @@ describe("PRD-050a — honeycomb install (a-AC-4 health-gated open)", () => {
 			lifecycle,
 			openDashboard: opener.open,
 			probeDashboard: reachablePortalProbe,
+			detectFleet: fleetDefer,
 			dir: tmpDir,
 			out: (l) => lines.push(l),
 		});
@@ -150,6 +164,7 @@ describe("PRD-064h: install reports daemon supervision (fail-soft, additive)", (
 			lifecycle,
 			openDashboard: () => true,
 			probeDashboard: reachablePortalProbe,
+			detectFleet: fleetDefer,
 			dir: tmpDir,
 			out: (l) => lines.push(l),
 		});
@@ -168,6 +183,7 @@ describe("PRD-064h: install reports daemon supervision (fail-soft, additive)", (
 			lifecycle: fakeLifecycle({}),
 			openDashboard: () => true,
 			probeDashboard: reachablePortalProbe,
+			detectFleet: fleetDefer,
 			dir: tmpDir,
 			out: (l) => lines.push(l),
 		});
@@ -193,6 +209,7 @@ describe("PRD-064h: install reports daemon supervision (fail-soft, additive)", (
 			lifecycle,
 			openDashboard: () => true,
 			probeDashboard: reachablePortalProbe,
+			detectFleet: fleetDefer,
 			dir: tmpDir,
 			out: (l) => lines.push(l),
 		});
@@ -210,6 +227,7 @@ describe("PRD-050a — honeycomb install (a-AC-2 idempotency)", () => {
 			lifecycle,
 			openDashboard: opener.open,
 			probeDashboard: reachablePortalProbe,
+			detectFleet: fleetDefer,
 			dir: tmpDir,
 			out: () => {},
 		});
@@ -227,6 +245,7 @@ describe("PRD-050a — honeycomb install (a-AC-2 idempotency)", () => {
 			lifecycle,
 			openDashboard: opener.open,
 			probeDashboard: reachablePortalProbe,
+			detectFleet: fleetDefer,
 			dir: tmpDir,
 			out: () => {},
 		};
@@ -248,6 +267,7 @@ describe("PRD-050a — honeycomb install (a-AC-6 honeycomb.local → loopback fa
 			lifecycle: fakeLifecycle({}),
 			openDashboard: opener.open,
 			probeDashboard: reachablePortalProbe,
+			detectFleet: fleetDefer,
 			dir: tmpDir,
 			out: () => {},
 		});
@@ -265,6 +285,7 @@ describe("PRD-050a — honeycomb install (a-AC-6 honeycomb.local → loopback fa
 			lifecycle: fakeLifecycle({}),
 			openDashboard: opener.open,
 			probeDashboard: reachablePortalProbe,
+			detectFleet: fleetDefer,
 			dir: tmpDir,
 			out: (l) => lines.push(l),
 		});
@@ -282,6 +303,7 @@ describe("PRD-050a — honeycomb install (a-AC-6 honeycomb.local → loopback fa
 			lifecycle: fakeLifecycle({}),
 			openDashboard: opener.open,
 			probeDashboard: async () => false,
+			detectFleet: fleetDefer,
 			dir: tmpDir,
 			out: (l) => lines.push(l),
 		});
@@ -300,6 +322,7 @@ describe("PRD-050a — honeycomb install (a-AC-6 honeycomb.local → loopback fa
 			probeDashboard: async () => {
 				throw new Error("probe blew up");
 			},
+			detectFleet: fleetDefer,
 			dir: tmpDir,
 			out: (l) => lines.push(l),
 		});
@@ -375,6 +398,7 @@ describe("PRD-050a — honeycomb install (a-AC-5 onboarding 'installed' + ref)",
 			lifecycle: fakeLifecycle({}),
 			openDashboard: () => true,
 			probeDashboard: reachablePortalProbe,
+			detectFleet: fleetDefer,
 			dir: tmpDir,
 			out: () => {},
 		});
@@ -390,6 +414,7 @@ describe("PRD-050a — honeycomb install (a-AC-5 onboarding 'installed' + ref)",
 			lifecycle: fakeLifecycle({}),
 			openDashboard: () => true,
 			probeDashboard: reachablePortalProbe,
+			detectFleet: fleetDefer,
 			dir: tmpDir,
 			out: () => {},
 		});
@@ -406,6 +431,7 @@ describe("PRD-050a — honeycomb install (a-AC-5 onboarding 'installed' + ref)",
 			lifecycle: fakeLifecycle({}),
 			openDashboard: () => true,
 			probeDashboard: reachablePortalProbe,
+			detectFleet: fleetDefer,
 			dir: tmpDir,
 			out: () => {},
 		};
@@ -425,6 +451,7 @@ describe("PRD-071 Contract A — install registers honeycomb with doctor's stati
 			lifecycle: fakeLifecycle({}),
 			openDashboard: () => true,
 			probeDashboard: reachablePortalProbe,
+			detectFleet: fleetDefer,
 			dir: tmpDir,
 			out: () => {},
 		});
@@ -447,6 +474,7 @@ describe("PRD-071 Contract A — install registers honeycomb with doctor's stati
 			lifecycle: fakeLifecycle({}),
 			openDashboard: () => true,
 			probeDashboard: reachablePortalProbe,
+			detectFleet: fleetDefer,
 			dir: tmpDir,
 			out: () => {},
 		};
@@ -468,6 +496,7 @@ describe("PRD-071 Contract A — install registers honeycomb with doctor's stati
 			lifecycle: fakeLifecycle({}),
 			openDashboard: () => true,
 			probeDashboard: reachablePortalProbe,
+			detectFleet: fleetDefer,
 			dir: notADir,
 			out: (l) => lines.push(l),
 		});

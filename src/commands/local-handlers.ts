@@ -19,11 +19,7 @@
 
 import { DEFAULT_REF, loadOnboarding } from "../daemon/runtime/onboarding/index.js";
 import { type EmitDeps, emitTelemetry } from "../daemon/runtime/telemetry/index.js";
-import {
-	type CommandDeps,
-	type CommandResult,
-	type OutputSink,
-} from "./contracts.js";
+import type { CommandDeps, CommandResult, OutputSink } from "./contracts.js";
 
 /** The parsed connector invocation handed to the 019a engine (`setup`/`connect`/`uninstall`). */
 export interface ConnectorVerbArgs {
@@ -56,6 +52,25 @@ export interface DashboardLauncher {
 	launch(): Promise<{ readonly reachable: boolean }>;
 }
 
+/**
+ * The PRD-003b fleet-lifecycle uninstall steps (b-AC-2 / b-AC-3 / b-AC-4). Each is a self-contained,
+ * best-effort operation the FULL `uninstall` verb runs IN ADDITION to reversing harness hooks. The
+ * real bindings are assembled in `src/cli/runtime.ts` (the daemon lifecycle, the OS-service
+ * controller, the doctor-registry delete writer, and the resolved state-dir remover); a test injects
+ * a recording fake so no daemon, no service manager, no real registry, and no real dir are touched.
+ * Every method REPORTS what it did (or that there was nothing to do) so the caller narrates each step.
+ */
+export interface UninstallLifecycleSteps {
+	/** Stop the running daemon (fronts the DaemonLifecycle stop path). */
+	stopDaemon(): Promise<{ readonly stopped: boolean }>;
+	/** Remove honeycomb's OS service unit (current label + best-effort legacy labels). */
+	unregisterService(): { readonly removed: boolean; readonly manager?: string };
+	/** Delete honeycomb's entry from doctor's registry, leaving every other entry intact. */
+	deleteRegistryEntry(): { readonly removed: boolean };
+	/** Remove honeycomb's own state dir under the fleet root (by resolved absolute path). */
+	removeStateDir(): { readonly removed: boolean; readonly dir: string };
+}
+
 /** The deps the local verbs add on top of {@link CommandDeps} — the connector + dashboard seams. */
 export interface LocalDeps extends CommandDeps {
 	/** The 019a connector engine (setup/connect/uninstall). Bound at assembly. */
@@ -69,6 +84,13 @@ export interface LocalDeps extends CommandDeps {
 	 * defaults apply, and an empty build key makes it a no-op).
 	 */
 	readonly telemetry?: EmitDeps;
+	/**
+	 * PRD-003b: the fleet-lifecycle uninstall steps (b-AC-2/3/4). Bound by `src/cli/runtime.ts` for the
+	 * FULL `uninstall` verb (stop daemon → unregister the OS service unit → delete the doctor registry
+	 * entry → remove the state dir), run alongside the existing harness-hook reversal. Optional so the
+	 * older connector-only tests still type-check; when unbound, `uninstall` reverses hooks only.
+	 */
+	readonly uninstallSteps?: UninstallLifecycleSteps;
 }
 
 /** Parse the harness slug (first non-flag word) off a connector verb's argv tail. */
@@ -99,7 +121,8 @@ export async function runConnectorVerb(verb: string, argv: readonly string[], de
 	// onboarding state, fail-soft to the build default. NOTE: no honeycomb verb removes the npm
 	// package or the state dir today; PACKAGE-removal coverage is the installer's `product_removed`
 	// event (see version-check.ts's module docstring for the full split).
-	if (verb === "uninstall" && harness === undefined) {
+	const isFullUninstall = verb === "uninstall" && harness === undefined;
+	if (isFullUninstall) {
 		let ref = DEFAULT_REF;
 		try {
 			ref = loadOnboarding(deps.dir).ref;
@@ -112,13 +135,81 @@ export async function runConnectorVerb(verb: string, argv: readonly string[], de
 			{ ...(deps.telemetry ?? {}), ...(deps.dir !== undefined ? { dir: deps.dir } : {}) },
 		);
 	}
+	// PRD-003b (b-AC-2/3/4): the FULL uninstall ALSO removes the OS service unit, the doctor registry
+	// entry, and the state dir — in the contract order (stop → unregister → delete registry → remove
+	// state dir) — BEFORE the harness-hook reversal below. Each step is best-effort and reported. When
+	// the seam is unbound (older tests / a degraded build), uninstall reverses hooks only (unchanged).
+	let fleetRemovedSomething = false;
+	if (isFullUninstall && deps.uninstallSteps !== undefined) {
+		fleetRemovedSomething = await runUninstallLifecycleSteps(deps.uninstallSteps, out);
+	}
 	const result = await deps.connector.run({ verb, ...(harness !== undefined ? { harness } : {}) });
 	if (result.harnesses.length > 0) {
 		out(`${verb}: ${verb === "uninstall" ? "reversed" : "wired"} ${result.harnesses.join(", ")}.`);
 	} else {
 		out(`${verb}: no harnesses ${verb === "uninstall" ? "reversed" : "wired"}.`);
 	}
+	// b-AC-6: a full uninstall on a machine where NOTHING was installed exits 0 with a friendly
+	// nothing-to-remove line (in addition to the per-step reports above).
+	if (isFullUninstall && deps.uninstallSteps !== undefined && !fleetRemovedSomething && result.harnesses.length === 0) {
+		out("uninstall: nothing to remove — Honeycomb was not installed here.");
+	}
 	return { exitCode: result.exitCode };
+}
+
+/**
+ * Run the PRD-003b fleet-lifecycle uninstall steps in the contract order (stop → unregister service →
+ * delete registry entry → remove state dir). Every step is best-effort: a throw is caught and reported
+ * as a per-step note so a single failing step never aborts the uninstall (parent AC-9). Returns
+ * whether ANY step actually removed something (drives the b-AC-6 nothing-to-remove message).
+ */
+async function runUninstallLifecycleSteps(steps: UninstallLifecycleSteps, out: OutputSink): Promise<boolean> {
+	let removedSomething = false;
+	// 1. Stop the daemon first so doctor never sees a registered-but-gone product mid-flight.
+	try {
+		const { stopped } = await steps.stopDaemon();
+		out(stopped ? "uninstall: stopped the daemon." : "uninstall: daemon was not running.");
+	} catch {
+		out("uninstall: could not stop the daemon (continuing).");
+	}
+	// 2. Remove the OS service unit (current + best-effort legacy) so it no longer starts at boot.
+	try {
+		const r = steps.unregisterService();
+		out(
+			r.removed
+				? `uninstall: removed the OS service unit${r.manager !== undefined ? ` (${r.manager})` : ""}.`
+				: "uninstall: no OS service unit to remove.",
+		);
+		removedSomething = removedSomething || r.removed;
+	} catch {
+		out("uninstall: could not remove the OS service unit (continuing).");
+	}
+	// 3. Delete honeycomb's entry from doctor's registry, leaving every other entry intact.
+	try {
+		const r = steps.deleteRegistryEntry();
+		out(
+			r.removed
+				? "uninstall: removed Honeycomb's entry from doctor's registry."
+				: "uninstall: no doctor registry entry to remove.",
+		);
+		removedSomething = removedSomething || r.removed;
+	} catch {
+		out("uninstall: could not update doctor's registry (continuing).");
+	}
+	// 4. Remove honeycomb's state dir LAST, by resolved absolute path (never a glob, never a symlink
+	//    followed out of the fleet root).
+	try {
+		const r = steps.removeStateDir();
+		out(
+			r.removed
+				? `uninstall: removed the Honeycomb state directory (${r.dir}).`
+				: "uninstall: no state directory to remove.",
+		);
+		removedSomething = removedSomething || r.removed;
+	} catch {
+		out("uninstall: could not remove the state directory (continuing).");
+	}
+	return removedSomething;
 }
 
 /**
@@ -133,7 +224,11 @@ export async function runDashboardCommand(deps: LocalDeps): Promise<CommandResul
 		return { exitCode: 1 };
 	}
 	const { reachable } = await deps.dashboard.launch();
-	out(reachable ? "dashboard: launched (daemon reachable)." : "dashboard: daemon is not reachable — start it with `honeycomb setup`.");
+	out(
+		reachable
+			? "dashboard: launched (daemon reachable)."
+			: "dashboard: daemon is not reachable — start it with `honeycomb setup`.",
+	);
 	return { exitCode: 0 };
 }
 

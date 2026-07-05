@@ -14,17 +14,25 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
 	type ConnectorRunner,
+	createFakeDaemonClient,
 	type DaemonLifecycle,
 	type DaemonStatus,
-	createFakeDaemonClient,
 	runConnectorVerb,
 	runInstallCommand,
 	runTelemetryCommand,
 } from "../../src/commands/index.js";
-import { type TelemetryFetchRequestInit } from "../../src/daemon/runtime/telemetry/index.js";
 import { loadOnboarding } from "../../src/daemon/runtime/onboarding/index.js";
+import type { TelemetryFetchRequestInit } from "../../src/daemon/runtime/telemetry/index.js";
+import type { FleetClassification } from "../../src/shared/fleet-detection.js";
 
 const KEY = "phc_test_write_only_key";
+
+/** PRD-003a: a fixed fleet-defer classifier so install never hits the network / npm tree / a real login. */
+const fleetDefer = async (): Promise<FleetClassification> => ({
+	mode: "fleet",
+	signals: { registryHiveEntry: true, hivePortAnswering: false, hiveNpmGlobal: false },
+	firedSignals: ["test-injected registry Hive entry"],
+});
 
 function fakeLifecycle(): DaemonLifecycle {
 	return {
@@ -83,6 +91,7 @@ describe("e-AC-1/e-AC-5 honeycomb install emits honeycomb_installed once, dedupe
 			lifecycle: fakeLifecycle(),
 			openDashboard: () => true,
 			probeDashboard: reachablePortalProbe,
+			detectFleet: fleetDefer,
 			dir,
 			out: () => {},
 			telemetry: { fetch: rec.fetch, posthogKey: KEY },
@@ -111,6 +120,7 @@ describe("e-AC-4 install telemetry is fire-and-forget: a throwing fetch leaves t
 			lifecycle: fakeLifecycle(),
 			openDashboard: () => true,
 			probeDashboard: reachablePortalProbe,
+			detectFleet: fleetDefer,
 			dir: d,
 			out: () => {},
 			telemetry: { fetch: telemetryFetch, posthogKey: KEY },
@@ -138,6 +148,7 @@ describe("honeycomb_updated fires from the install verb when the build version c
 			lifecycle: fakeLifecycle(),
 			openDashboard: () => true,
 			probeDashboard: reachablePortalProbe,
+			detectFleet: fleetDefer,
 			dir,
 			out: () => {},
 			telemetry: { fetch: rec.fetch, posthogKey: KEY, version },
@@ -246,6 +257,7 @@ describe("e-AC-8 honeycomb telemetry --show renders the glass box", () => {
 			lifecycle: fakeLifecycle(),
 			openDashboard: () => true,
 			probeDashboard: reachablePortalProbe,
+			detectFleet: fleetDefer,
 			dir,
 			out: () => {},
 			telemetry: { fetch: rec.fetch, posthogKey: KEY },
