@@ -55,7 +55,7 @@ import { createCredentialReader } from "./shared/credential-reader.js";
 import { createSessionStartSeams } from "./shared/session-start-seams.js";
 import {
 	createContextRenderer,
-	createOnboardingNoticeGate,
+	createSessionBindNoticeGate,
 	createPrimeRenderer,
 	type CredentialReader,
 	type DaemonHookClient,
@@ -174,8 +174,7 @@ export function createHookRuntime(options: HookRuntimeOptions = {}): HookRuntime
 	// c-AC-2: the credential reader (the SAME identity the CLI + daemon use).
 	const credentials = options.credentials ?? createCredentialReader();
 	// c-AC-1: the production loopback daemon client, fed tenancy by the credential reader.
-	const daemon =
-		options.daemon ?? createDaemonHookClient({ credentials, host, port, fetch: doFetch });
+	const daemon = options.daemon ?? createDaemonHookClient({ credentials, host, port, fetch: doFetch });
 	// c-AC-1/4: the real read-only context renderer (asks the daemon for the rules/goals block).
 	const context = createContextRenderer(daemon);
 	// PRD-046d (d-AC-1..5): the real session-start prime renderer — a fail-soft loopback
@@ -186,8 +185,7 @@ export function createHookRuntime(options: HookRuntimeOptions = {}): HookRuntime
 	const deps: HookCoreDeps = { daemon, credentials, context };
 
 	// c-AC-4: the REAL 020d notifications pipeline (real state + lock + daemon-backed source).
-	const notifications =
-		options.notifications ?? createDefaultNotificationsPipeline(host, port, doFetch);
+	const notifications = options.notifications ?? createDefaultNotificationsPipeline(host, port, doFetch);
 
 	const summarySpawn = options.summarySpawn ?? noopSummarySpawn;
 	const captureEnv = { captureFlag: options.captureFlag ?? process.env.HONEYCOMB_CAPTURE };
@@ -202,16 +200,12 @@ export function createHookRuntime(options: HookRuntimeOptions = {}): HookRuntime
 	// PRD-059a / IRD-123 (a-AC-2): the REAL first-run onboarding-notice gate — a pure local read of
 	// `~/.deeplake/projects.json`. When the active workspace has bound no project yet, session-start
 	// prepends the one-per-session "bind a project to start" notice. Fail-soft (no DeepLake call).
-	const onboardingNotice = options.onboardingNotice ?? createOnboardingNoticeGate();
+	const onboardingNotice = options.onboardingNotice ?? createSessionBindNoticeGate();
 
 	return {
 		deps,
 		notifications,
-		async runEvent(
-			shim: HarnessShim,
-			event: NativeHookEvent,
-			meta: HookSessionMeta,
-		): Promise<HookEventOutcome> {
+		async runEvent(shim: HarnessShim, event: NativeHookEvent, meta: HookSessionMeta): Promise<HookEventOutcome> {
 			// 019c shim: native event → normalized HookInput. A dropped (non-lifecycle)
 			// event makes NO daemon call (fail-soft).
 			const input = shim.normalize({ name: event.name, payload: event.payload }, meta);
@@ -290,11 +284,7 @@ async function drainNotificationsSoft(pipeline: NotificationsPipeline): Promise<
  * over loopback. This CALLS the existing pipeline factory — it does not reimplement
  * the drain logic.
  */
-function createDefaultNotificationsPipeline(
-	host: string,
-	port: number,
-	doFetch: typeof fetch,
-): NotificationsPipeline {
+function createDefaultNotificationsPipeline(host: string, port: number, doFetch: typeof fetch): NotificationsPipeline {
 	const state: NotificationsState = createNotificationsState();
 	const lock: ClaimLock = createClaimLock();
 	const backend = createDaemonBackendSource(host, port, doFetch);
@@ -307,11 +297,7 @@ function createDefaultNotificationsPipeline(
  * error / non-200 / malformed body yields `[]`, so the pipeline's bounded drain treats
  * an unreachable daemon as "no backend notifications" and never blocks the session.
  */
-function createDaemonBackendSource(
-	host: string,
-	port: number,
-	doFetch: typeof fetch,
-): BackendNotificationSource {
+function createDaemonBackendSource(host: string, port: number, doFetch: typeof fetch): BackendNotificationSource {
 	const url = `http://${host}:${port}${NOTIFICATIONS_ENDPOINT}`;
 	return {
 		async fetch(): Promise<readonly Notification[]> {

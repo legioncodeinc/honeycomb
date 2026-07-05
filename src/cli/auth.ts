@@ -31,6 +31,7 @@
  */
 
 import { existsSync, unlinkSync } from "node:fs";
+import { createInterface } from "node:readline";
 
 import {
 	type AuthFetch,
@@ -46,6 +47,8 @@ import {
 	type Sleeper,
 	saveCredentials,
 	systemClock,
+	type TenancyCandidates,
+	type TenancySelector,
 } from "../daemon/runtime/auth/index.js";
 import { redactEndpointCredentials } from "../shared/redact-endpoint.js";
 
@@ -89,6 +92,16 @@ export interface AuthCommandDeps {
 	readonly sleep?: Sleeper;
 	/** Override the login flows wholesale (tests / Wave 4); defaults to the real deeplake flows. */
 	readonly flows?: AuthLoginFlows;
+	/**
+	 * PRD-073d: whether stdin+stdout are a TTY (interactive). Injectable so tests drive the prompt vs
+	 * refusal branch deterministically. Defaults to `process.stdin.isTTY && process.stdout.isTTY`.
+	 */
+	readonly isTTY?: boolean;
+	/**
+	 * PRD-073d: the interactive prompt reader (a question → the user's typed line). Injectable so the
+	 * suite scripts answers with no real stdin. Defaults to a `node:readline` reader (used only on a TTY).
+	 */
+	readonly prompt?: (question: string) => Promise<string>;
 }
 
 /** Outcome of a login/logout command: exit code + whether the file changed. */
@@ -184,6 +197,99 @@ function withDefaults(
 	};
 }
 
+/** A default `node:readline` prompt reader — used only on a real TTY; the suite injects a scripted one. */
+function defaultPrompt(question: string): Promise<string> {
+	const rl = createInterface({ input: process.stdin, output: process.stdout });
+	return new Promise<string>((resolve) => {
+		rl.question(question, (answer) => {
+			rl.close();
+			resolve(answer);
+		});
+	});
+}
+
+/**
+ * Build the PRD-073d tenancy selector the CLI hands to the login flows. Only INVOKED by the issuer for
+ * a multi-tenancy account (env pins + single-tenancy auto-select short-circuit before it). Resolves
+ * `--org`/`--workspace` flags (by name or id) against the enumerated lists; on a TTY prompts a numbered
+ * picker for the unfixed half; on a non-TTY with no flag it REFUSES with an actionable, org-listing
+ * error and writes NOTHING (parent AC-6 / 073d-AC-2). An unknown flag value also refuses.
+ */
+function buildTenancySelector(inv: AuthInvocation, deps: ReturnType<typeof withDefaults>): TenancySelector {
+	const orgFlag = inv.org !== undefined && inv.org.trim().length > 0 ? inv.org.trim() : undefined;
+	const wsFlag = inv.workspace !== undefined && inv.workspace.trim().length > 0 ? inv.workspace.trim() : undefined;
+	const isTTY = deps.isTTY ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
+	const promptFn = deps.prompt ?? defaultPrompt;
+
+	return async (candidates: TenancyCandidates): Promise<{ orgId: string; workspaceId: string }> => {
+		const orgId = await resolveOrg(candidates.orgs, orgFlag, isTTY, promptFn);
+		const workspaces = await candidates.listWorkspaces(orgId);
+		const workspaceId = await resolveWorkspace(candidates.orgs, workspaces, wsFlag, isTTY, promptFn);
+		return { orgId, workspaceId };
+	};
+}
+
+/** Resolve the chosen org id from a flag / prompt / refusal (073d). */
+async function resolveOrg(
+	orgs: TenancyCandidates["orgs"],
+	flag: string | undefined,
+	isTTY: boolean,
+	promptFn: (q: string) => Promise<string>,
+): Promise<string> {
+	if (flag !== undefined) {
+		const lc = flag.toLowerCase();
+		const match = orgs.find((o) => o.id === flag || o.name.toLowerCase() === lc);
+		if (match === undefined) throw new Error(`no organization named or id'd "${flag}" is accessible to this account`);
+		return match.id;
+	}
+	if (orgs.length === 1) return orgs[0].id;
+	if (!isTTY) throw new Error(refusalMessage(orgs));
+	return promptPick("Select an organization", orgs, promptFn);
+}
+
+/** Resolve the chosen workspace id from a flag / prompt / auto (073d). */
+async function resolveWorkspace(
+	orgs: TenancyCandidates["orgs"],
+	workspaces: readonly { id: string; name: string }[],
+	flag: string | undefined,
+	isTTY: boolean,
+	promptFn: (q: string) => Promise<string>,
+): Promise<string> {
+	if (flag !== undefined) {
+		if (flag.toLowerCase() === "default") return "default";
+		const lc = flag.toLowerCase();
+		const match = workspaces.find((w) => w.id === flag || w.name.toLowerCase() === lc);
+		if (match === undefined) throw new Error(`no workspace named or id'd "${flag}" in the chosen organization`);
+		return match.id;
+	}
+	if (workspaces.length === 0) return "default";
+	if (workspaces.length === 1) return workspaces[0].id;
+	if (!isTTY) throw new Error(refusalMessage(orgs));
+	return promptPick("Select a workspace", workspaces, promptFn);
+}
+
+/** The non-TTY refusal message: names the orgs + the required flags (073d-AC-2.1). NO token. */
+function refusalMessage(orgs: TenancyCandidates["orgs"]): string {
+	const list = orgs.map((o) => `${o.name} (${o.id})`).join(", ");
+	return `this account has multiple organizations or workspaces; re-run with --org <name|id> --workspace <name|id>. Available orgs: ${list}`;
+}
+
+/** Render a numbered picker, read the answer, and return the chosen entity id (re-prompts on a bad answer). */
+async function promptPick(
+	title: string,
+	items: readonly { id: string; name: string }[],
+	promptFn: (q: string) => Promise<string>,
+): Promise<string> {
+	const lines = items.map((it, i) => `  ${i + 1}. ${it.name} (${it.id})`).join("\n");
+	// One re-prompt on an out-of-range/blank answer, then give up (the selector throws → login refuses).
+	for (let attempt = 0; attempt < 2; attempt += 1) {
+		const answer = (await promptFn(`${title}:\n${lines}\nEnter a number: `)).trim();
+		const n = Number.parseInt(answer, 10);
+		if (Number.isInteger(n) && n >= 1 && n <= items.length) return items[n - 1].id;
+	}
+	throw new Error(`no valid ${title.toLowerCase()} was chosen`);
+}
+
 /** Print the logged-in identity WITHOUT the token (D-4). */
 function reportLoggedIn(out: OutputSink, disk: DiskCredentials): void {
 	const user = disk.userName !== undefined && disk.userName.length > 0 ? disk.userName : "(unknown user)";
@@ -215,15 +321,19 @@ async function login(inv: AuthInvocation, deps: ReturnType<typeof withDefaults>)
 	}
 	// The headless token: the explicit `--token` arg wins, else `HONEYCOMB_TOKEN` (AC-2 / parity).
 	const headlessToken = inv.token ?? deps.env.HONEYCOMB_TOKEN;
+	// PRD-073d: the explicit tenancy selector (flags/prompt/refusal). The issuer only invokes it for a
+	// multi-tenancy account — env pins and single-tenancy accounts auto-select before it (parent AC-8/10).
+	const selectTenancy = buildTenancySelector(inv, deps);
 
 	let disk: DiskCredentials;
 	try {
 		if (headlessToken !== undefined && headlessToken.length > 0) {
-			// AC-2: skip the browser, validate via /me, persist.
+			// AC-2: skip the browser, validate via /me, persist. Tenancy still requires an explicit choice.
 			disk = await deps.flows.tokenLogin(headlessToken, {
 				dir: dirArg(deps.dir),
 				clock: deps.clock,
 				env: deps.env,
+				selectTenancy,
 				...(deps.fetch !== undefined ? { fetch: deps.fetch } : {}),
 				...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
 			});
@@ -234,6 +344,7 @@ async function login(inv: AuthInvocation, deps: ReturnType<typeof withDefaults>)
 				clock: deps.clock,
 				env: deps.env,
 				reporter: { prompt: (line: string): void => out(line) },
+				selectTenancy,
 				...(deps.fetch !== undefined ? { fetch: deps.fetch } : {}),
 				...(deps.openBrowser !== undefined ? { openBrowser: deps.openBrowser } : {}),
 				...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),

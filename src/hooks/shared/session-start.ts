@@ -31,7 +31,7 @@ import {
 	type SessionStartDeps,
 	type SessionStartSeams,
 } from "./contracts.js";
-import { hasBoundProjectOnDisk } from "./project-resolver.js";
+import { hasBoundProjectOnDisk, resolveScopeFromDisk } from "./project-resolver.js";
 
 /**
  * The single, quiet "bind a project to start" notice (PRD-059a a-AC-2 / IRD-123). Rendered ONCE per
@@ -42,7 +42,20 @@ import { hasBoundProjectOnDisk } from "./project-resolver.js";
  */
 export const BIND_PROJECT_NOTICE =
 	"Honeycomb is paused: no project is bound to this workspace yet, so nothing is being captured. " +
-	'Bind a folder to start — open the Honeycomb dashboard and pick a folder, or run "honeycomb project bind" in the folder you want Honeycomb to remember.';
+	'Bind a folder to start: open the Honeycomb dashboard and pick a folder, or run "honeycomb project bind" in the folder you want Honeycomb to remember.';
+
+/**
+ * The PRD-073b cwd-specific variant of {@link BIND_PROJECT_NOTICE}. Rendered once per session when
+ * THIS session's cwd is unbound (the per-session gate, inbox opt-in off) even though the workspace
+ * already has OTHER bound projects, so the user learns capture is paused FOR THIS FOLDER specifically.
+ * Plain prose, no secret, no path.
+ */
+export const BIND_PROJECT_CWD_NOTICE =
+	"Honeycomb is paused for this folder: it is not bound to a project, so nothing is being captured here. " +
+	'Bind it to start: open the Honeycomb dashboard and pick this folder, or run "honeycomb project bind" in it.';
+
+/** The env flag the per-session notice gate reads to suppress itself when the inbox opt-in is ON. */
+const INBOX_CAPTURE_ENV_KEY = "HONEYCOMB_INBOX_CAPTURE" as const;
 
 /**
  * The default production {@link OnboardingNoticeGate}: read the thin-client `~/.deeplake/projects.json`
@@ -71,6 +84,70 @@ export function createOnboardingNoticeGate(dir?: string): OnboardingNoticeGate {
 			}
 		},
 	};
+}
+
+/**
+ * The PRD-073b PER-SESSION bind-notice gate: the default production notice gate. Unlike the 059a
+ * workspace-level {@link createOnboardingNoticeGate}, this resolves THIS session's cwd and shows a
+ * notice whenever the cwd is unbound (inbox opt-in off) even after other projects are bound — so a
+ * session in an unbound folder is never silently dormant. Reads the thin-client
+ * `~/.deeplake/projects.json` cache with NO DeepLake call (a-AC-3) and is FAIL-SOFT (a throw shows
+ * nothing). `dir` overrides the cache directory; `env` overrides the inbox-flag source (tests).
+ */
+export function createSessionBindNoticeGate(
+	opts: { readonly dir?: string; readonly env?: NodeJS.ProcessEnv } = {},
+): OnboardingNoticeGate {
+	const dir = opts.dir;
+	const env = opts.env ?? process.env;
+	// INTENTIONAL duplication of the daemon's `resolveInboxCaptureEnabled` truthy set ("true"/"1"): the
+	// hooks tier must not import daemon runtime modules (thin-client tier direction), so the parse is
+	// mirrored here; if the daemon's BoolFlag set ever widens, hoist the shared parse into `src/shared`.
+	const inboxOn =
+		(env[INBOX_CAPTURE_ENV_KEY] ?? "").trim() === "true" || (env[INBOX_CAPTURE_ENV_KEY] ?? "").trim() === "1";
+	return {
+		hasBoundProject(meta: HookSessionMeta, credential: HookCredential | undefined): boolean {
+			return resolveNotice(meta, credential, dir, inboxOn) === null;
+		},
+		noticeText(meta: HookSessionMeta, credential: HookCredential | undefined): string | null {
+			return resolveNotice(meta, credential, dir, inboxOn);
+		},
+	};
+}
+
+/**
+ * The per-session notice decision (PRD-073b). Returns the notice TEXT to show, or `null` to show
+ * nothing. Suppressed when: not logged in (login precedes bind), the inbox opt-in is ON (unbound
+ * folders are inboxed, not dormant), or THIS cwd resolves to a bound project. Otherwise shows the
+ * cwd-specific copy when the workspace has OTHER bound projects, else the workspace-level copy (a
+ * genuinely fresh install). FAIL-SOFT: any throw returns `null` (never break session-start).
+ */
+function resolveNotice(
+	meta: HookSessionMeta,
+	credential: HookCredential | undefined,
+	dir: string | undefined,
+	inboxOn: boolean,
+): string | null {
+	if (credential === undefined || credential.token === undefined || credential.token.length === 0) return null;
+	if (inboxOn) return null;
+	try {
+		const cwd = meta.cwd;
+		if (cwd !== undefined && cwd.trim().length > 0) {
+			const resolved = resolveScopeFromDisk({
+				cwd,
+				...(credential.org !== undefined ? { org: credential.org } : {}),
+				...(credential.workspace !== undefined ? { workspace: credential.workspace } : {}),
+				...(dir !== undefined ? { dir } : {}),
+			});
+			if (resolved.bound) return null; // this session is captured — no notice.
+		}
+		const workspaceHasBinding = hasBoundProjectOnDisk({
+			...(credential.workspace !== undefined ? { workspace: credential.workspace } : {}),
+			...(dir !== undefined ? { dir } : {}),
+		});
+		return workspaceHasBinding ? BIND_PROJECT_CWD_NOTICE : BIND_PROJECT_NOTICE;
+	} catch {
+		return null;
+	}
 }
 
 /**
@@ -133,7 +210,10 @@ export async function runSessionStart(input: HookInput, deps: SessionStartDeps):
 	// notice so a brand-new user learns capture is paused until they pick a folder. This runs at
 	// SESSION-START only (not per turn). FAIL-SOFT: the gate's own try/catch absorbs a read error
 	// (no notice), and the whole step is wrapped so it can never break session-start.
-	const noticeBlock = await safe(() => Promise.resolve(renderOnboardingNotice(deps.onboardingNotice, meta, credential)), "");
+	const noticeBlock = await safe(
+		() => Promise.resolve(renderOnboardingNotice(deps.onboardingNotice, meta, credential)),
+		"",
+	);
 
 	// The injected `additionalContext` is the rendered rules/goals block plus the prime
 	// digest, joined when both are present so neither is lost. Either alone is returned
@@ -183,6 +263,11 @@ function renderOnboardingNotice(
 ): string {
 	if (gate === undefined) return "";
 	try {
+		// PRD-073b: prefer the per-session `noticeText` (cwd-specific copy) when the gate provides it;
+		// fall back to the 059a boolean path + the workspace-level notice for a `hasBoundProject`-only gate.
+		if (gate.noticeText !== undefined) {
+			return gate.noticeText(meta, credential) ?? "";
+		}
 		return gate.hasBoundProject(meta, credential) ? "" : BIND_PROJECT_NOTICE;
 	} catch {
 		return "";

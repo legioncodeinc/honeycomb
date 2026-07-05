@@ -78,12 +78,16 @@ export {
 	type DeeplakeAuthClient,
 	type DeeplakeAuthClientOptions,
 	type DeviceCodeResponse,
+	type DeviceFlowAuthResult,
 	type DeviceFlowLoginDeps,
 	type DeviceFlowReporter as DeeplakeDeviceFlowReporter,
 	type DeviceTokenResponse,
 	type LoginDeps,
 	type MeResponse,
 	type OrgRow,
+	type ResolvedTenancyChoice,
+	type TenancyCandidates,
+	type TenancySelector,
 	type WorkspaceRow,
 	AuthHttpError,
 	DEFAULT_MAX_POLLS as DEEPLAKE_DEFAULT_MAX_POLLS,
@@ -93,15 +97,29 @@ export {
 	ENV_ORG_ID as ENV_DEEPLAKE_ORG_ID,
 	HIVEMIND_REFERRER_HEADER,
 	HONEYCOMB_REFERRER_HEADER,
+	TenancySelectionRequiredError,
+	authenticateDeviceFlow,
+	computeAutoSelection,
 	createDeeplakeAuthClient,
 	defaultBrowserOpener,
 	loginWithDeviceFlow,
 	loginWithToken,
+	persistSelectedTenancy,
 	referrerHeaders,
 	resolveApiUrl,
 	resolveEffectiveRef,
+	resolvePinnedTenancy,
+	resolveTenancyChoice,
 	validateVerificationUrl,
 } from "./deeplake-issuer.js";
+
+// ── PRD-073c — the confirmed-tenancy read model (capture-gate tie + status marker) ──
+export {
+	type TenancyConfirmation,
+	type TenancyConfirmationDeps,
+	isTenancyConfirmed,
+	resolveTenancyConfirmation,
+} from "./tenancy-confirmation.js";
 
 // ── 011a request-scope tenancy resolution + PRD-049a per-request cwd-aware scope ──
 export {

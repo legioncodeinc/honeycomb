@@ -46,6 +46,7 @@ import type { EmbedAttachment } from "../services/embed-client.js";
 import { SUMMARY_JOB_KIND } from "../summaries/index.js";
 import { type CaptureHandler, type CaptureLogger, createCaptureHandler, HOOKS_GROUP } from "./capture-handler.js";
 import type { CaptureDroppedEventsCounter } from "./dropped-events.js";
+import type { GatedCapturesCounter } from "./gated-captures.js";
 import type { BufferClock } from "./capture-buffer.js";
 import type { CaptureConfig } from "./capture-config.js";
 
@@ -93,6 +94,20 @@ export interface AttachHooksOptions {
 	 * passes `false` (or seeds a bound project) to restore the pre-059a always-capture behaviour.
 	 */
 	readonly firstRunGate?: boolean;
+	/**
+	 * PRD-073a: the PER-SESSION bound-project capture gate (default ON in production). Threaded to the
+	 * capture handler's `boundProjectGate` — an unbound-cwd capture no-ops with a reasoned gated ack
+	 * unless {@link inboxCapture} is on. Supersedes the one-shot {@link firstRunGate} in production.
+	 */
+	readonly boundProjectGate?: boolean;
+	/** PRD-073a: the `__unsorted__` inbox opt-in (default off). Threaded to the handler. */
+	readonly inboxCapture?: boolean;
+	/** PRD-073c: the confirmed-tenancy boolean seam. Threaded to the handler's `tenancyConfirmed`. */
+	readonly tenancyConfirmed?: () => boolean;
+	/** PRD-073b: the per-reason gated-captures counter. Threaded to the handler. */
+	readonly gatedCaptures?: GatedCapturesCounter;
+	/** The env the `HONEYCOMB_PROJECT_ID` override is read from (defaults to `process.env`). */
+	readonly env?: NodeJS.ProcessEnv;
 	/**
 	 * PRD-059a: override the local `~/.deeplake/projects.json` directory the gate (and the 049b
 	 * project attribution) read. Defaults to `~/.deeplake` in production; a test points it at a temp
@@ -150,6 +165,11 @@ export function attachHooksHandlers(daemon: Daemon, options: AttachHooksOptions)
 		...(options.embed !== undefined ? { embed: options.embed } : {}),
 		...(options.enqueuePipelineEntry !== undefined ? { enqueuePipelineEntry: options.enqueuePipelineEntry } : {}),
 		...(options.firstRunGate !== undefined ? { firstRunGate: options.firstRunGate } : {}),
+		...(options.boundProjectGate !== undefined ? { boundProjectGate: options.boundProjectGate } : {}),
+		...(options.inboxCapture !== undefined ? { inboxCapture: options.inboxCapture } : {}),
+		...(options.tenancyConfirmed !== undefined ? { tenancyConfirmed: options.tenancyConfirmed } : {}),
+		...(options.gatedCaptures !== undefined ? { gatedCaptures: options.gatedCaptures } : {}),
+		...(options.env !== undefined ? { env: options.env } : {}),
 		...(options.projectsDir !== undefined ? { projectsDir: options.projectsDir } : {}),
 		...(options.logger !== undefined ? { logger: options.logger } : {}),
 		...(options.droppedEvents !== undefined ? { droppedEvents: options.droppedEvents } : {}),

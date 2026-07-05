@@ -66,7 +66,9 @@ export const CaptureConfigSchema = z.object({
 	/** Size-flush cap in events (AC-5). */
 	maxEvents: ClampedInt(DEFAULT_CAPTURE_MAX_EVENTS, 1).default(DEFAULT_CAPTURE_MAX_EVENTS),
 	/** Per-field tool-I/O byte budget; `0` disables trimming (full envelope, pre-062c). */
-	envelopeBudgetBytes: ClampedInt(DEFAULT_CAPTURE_ENVELOPE_BUDGET_BYTES, 0).default(DEFAULT_CAPTURE_ENVELOPE_BUDGET_BYTES),
+	envelopeBudgetBytes: ClampedInt(DEFAULT_CAPTURE_ENVELOPE_BUDGET_BYTES, 0).default(
+		DEFAULT_CAPTURE_ENVELOPE_BUDGET_BYTES,
+	),
 });
 
 /** The resolved capture-domain config a consumer takes as a dep (never re-resolves). */
@@ -78,6 +80,8 @@ export const CAPTURE_ENV_KEYS = {
 	windowMs: "HONEYCOMB_CAPTURE_WINDOW_MS",
 	maxEvents: "HONEYCOMB_CAPTURE_MAX_EVENTS",
 	envelopeBudgetBytes: "HONEYCOMB_CAPTURE_ENVELOPE_BUDGET_BYTES",
+	/** PRD-073a: the `__unsorted__` inbox opt-in (default OFF). */
+	inboxCapture: "HONEYCOMB_INBOX_CAPTURE",
 } as const;
 
 /**
@@ -97,4 +101,17 @@ export function resolveCaptureConfig(env: NodeJS.ProcessEnv = process.env): Capt
 	// safeParse can only fail if a default itself is invalid (it cannot) — fall back
 	// to the all-defaults config so resolution is total.
 	return parsed.success ? parsed.data : CaptureConfigSchema.parse({});
+}
+
+/**
+ * Resolve the PRD-073a `__unsorted__` inbox opt-in from the env (default OFF). Kept as a STANDALONE
+ * parse — separate from {@link CaptureConfig} — so the pre-073 config shape (and every test literal
+ * that constructs it) is unchanged, while the flag still lives in one place (this module). `true`/`1`
+ * ⇒ ON (the PRD-049a inbox behavior is restored for unbound-cwd captures); anything else ⇒ OFF (a
+ * session in an unbound folder is GATED, not inboxed). Total: a malformed value reads as OFF.
+ */
+export function resolveInboxCaptureEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = env[CAPTURE_ENV_KEYS.inboxCapture];
+	const parsed = BoolFlag.safeParse(raw);
+	return parsed.success ? parsed.data : false;
 }

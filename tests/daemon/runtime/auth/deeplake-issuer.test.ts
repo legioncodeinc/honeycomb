@@ -63,7 +63,7 @@ function jsonResponse(status: number, body: unknown): AuthFetchResponse {
  * recorded so a test can assert the token never reaches a URL.
  */
 function fakeFetch(opts: {
-	pollScript?: (DeviceTokenStep)[];
+	pollScript?: DeviceTokenStep[];
 	meStatus?: number;
 	urls: string[];
 	bodies: string[];
@@ -158,13 +158,17 @@ describe("AC-1 device flow → minted long-lived token → shared file in Hivemi
 		expect(disk.orgName).toBe("Acme Inc");
 		expect(disk.userName).toBe("Ada Lovelace");
 		expect(disk.apiUrl).toBe("https://api.deeplake.ai");
-		expect(disk.workspaceId).toBe("default");
+		// PRD-073c: a single-org + single-workspace account AUTO-SELECTS the one workspace (`ws-1`),
+		// no longer the silent `"default"` guess, and stamps the confirmed-tenancy marker.
+		expect(disk.workspaceId).toBe("ws-1");
+		expect(disk.tenancyConfirmedAt).toBe(FIXED);
 		expect(disk.savedAt).toBe(FIXED); // server-stamped
 
-		// The file on disk parses to the EXACT Hivemind shape (cross-tool interchange).
+		// The file on disk parses to the EXACT Hivemind shape (cross-tool interchange) plus the
+		// additive PRD-073c `tenancyConfirmedAt` marker.
 		const onDisk = JSON.parse(readFileSync(credentialsPath(dir), "utf8")) as DiskCredentials;
 		expect(Object.keys(onDisk).sort()).toEqual(
-			["apiUrl", "orgId", "orgName", "savedAt", "token", "userName", "workspaceId"].sort(),
+			["apiUrl", "orgId", "orgName", "savedAt", "tenancyConfirmedAt", "token", "userName", "workspaceId"].sort(),
 		);
 		expect(onDisk.token).toBe(LONG_LIVED_TOKEN);
 
@@ -257,7 +261,8 @@ describe("D-4 the device flow REJECTS a non-https verification_uri_complete (nev
 			if (path === "/auth/device/token") return Promise.resolve(jsonResponse(200, { access_token: AUTH0_TOKEN }));
 			if (path === "/me") return Promise.resolve(jsonResponse(200, { id: "u-1", name: "Ada", email: "a@b.io" }));
 			if (path === "/organizations") return Promise.resolve(jsonResponse(200, [{ id: "org-acme", name: "Acme" }]));
-			if (path === "/users/me/tokens") return Promise.resolve(jsonResponse(200, { token: { token: LONG_LIVED_TOKEN } }));
+			if (path === "/users/me/tokens")
+				return Promise.resolve(jsonResponse(200, { token: { token: LONG_LIVED_TOKEN } }));
 			return Promise.resolve(jsonResponse(404, "x"));
 		};
 		const rec = recorderOpener();
@@ -276,7 +281,9 @@ describe("D-4 the device flow REJECTS a non-https verification_uri_complete (nev
 	});
 
 	it("validateVerificationUrl gates the scheme (https only)", () => {
-		expect(validateVerificationUrl("https://app.deeplake.ai/device?code=X")).toBe("https://app.deeplake.ai/device?code=X");
+		expect(validateVerificationUrl("https://app.deeplake.ai/device?code=X")).toBe(
+			"https://app.deeplake.ai/device?code=X",
+		);
 		expect(validateVerificationUrl("http://app.deeplake.ai/device")).toBeNull();
 		expect(validateVerificationUrl("javascript:alert(1)")).toBeNull();
 		expect(validateVerificationUrl("file:///etc/passwd")).toBeNull();

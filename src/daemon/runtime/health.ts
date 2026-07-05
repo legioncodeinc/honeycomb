@@ -61,6 +61,16 @@ export type SubsystemState = "ok" | "degraded";
  */
 export type PortkeyHealth = "off" | "ok" | "unconfigured" | "unreachable";
 
+/** PRD-073b: the machine-readable dormancy reason codes surfaced on the health detail. */
+export const CAPTURE_DORMANT_NO_PROJECT = "capture_dormant_no_project" as const;
+/** PRD-073b: the machine-readable capture-blocked-on-tenancy reason code. */
+export const CAPTURE_BLOCKED_TENANCY_UNCONFIRMED = "capture_blocked_tenancy_unconfirmed" as const;
+/** PRD-073b: the human-readable guidance for the dormant-no-project reason (parent AC-3). */
+export const NO_ACTIVE_PROJECT_GUIDANCE = "no active project; bind one in the Hive dashboard" as const;
+/** PRD-073b: the human-readable guidance for the tenancy-unconfirmed reason. */
+export const TENANCY_UNCONFIRMED_GUIDANCE =
+	"tenancy not confirmed; choose an org and workspace in the Hive dashboard" as const;
+
 /**
  * The per-subsystem reasons behind a `/health` status (AC-2). Each field NAMES a
  * subsystem and its coarse state — never a bare `degraded` — so an operator sees WHY
@@ -78,7 +88,34 @@ export interface HealthReasons {
 	readonly portkey: PortkeyHealth;
 	/** Capture persistence observability: events acked but not durably written since boot. */
 	readonly capture?: {
+		/** Events acked to the hook but lost on flush/batch-insert since boot (PRD-062c). */
 		readonly droppedEvents: number;
+		/**
+		 * PRD-073b (b-AC-3.1): captures GATED by the dormancy ladder since boot, partitioned by reason
+		 * (`no_bound_project` / `tenancy_unconfirmed`). Present only when the composition root wires the
+		 * gated-captures counter; omitted on a bare `createDaemon`.
+		 */
+		readonly gated?: {
+			readonly no_bound_project: number;
+			readonly tenancy_unconfirmed: number;
+		};
+	};
+	/**
+	 * PRD-073b: present WHILE zero folder bindings exist (capture is dormant — parent AC-3). Carries
+	 * the machine-readable code + the "bind one in the Hive dashboard" guidance. Absent once any
+	 * project is bound (the next read clears it — AC-073b.1.1).
+	 */
+	readonly captureDormant?: {
+		readonly code: typeof CAPTURE_DORMANT_NO_PROJECT;
+		readonly guidance: string;
+	};
+	/**
+	 * PRD-073b: present WHILE tenancy is unconfirmed (capture is blocked — AC-073b.1.2). Carries the
+	 * machine-readable code + guidance. Absent once tenancy is confirmed (the next read clears it).
+	 */
+	readonly captureTenancyUnconfirmed?: {
+		readonly code: typeof CAPTURE_BLOCKED_TENANCY_UNCONFIRMED;
+		readonly guidance: string;
 	};
 }
 
@@ -121,6 +158,26 @@ export interface HealthDetailInputs {
 	 * composition root does not wire the counter (bare `createDaemon` / pre-C-4 posture).
 	 */
 	readonly captureDroppedEvents?: number;
+	/**
+	 * PRD-073b (b-AC-3.1): the per-reason gated-captures totals since boot. Omitted when the
+	 * composition root does not wire the gated-captures counter.
+	 */
+	readonly captureGated?: {
+		readonly no_bound_project: number;
+		readonly tenancy_unconfirmed: number;
+	};
+	/**
+	 * PRD-073b (AC-073b.1.1 / parent AC-3): true WHILE zero folder bindings exist → the health detail
+	 * carries the `capture_dormant_no_project` reason. Read live per health call so binding a project
+	 * clears it on the next read. Defaults `false` (no dormancy reason) when the composition root does
+	 * not wire the probe.
+	 */
+	readonly captureDormantNoProject?: boolean;
+	/**
+	 * PRD-073b (AC-073b.1.2): true WHILE tenancy is unconfirmed → the detail carries the
+	 * `capture_blocked_tenancy_unconfirmed` reason. Read live so confirming clears it. Defaults `false`.
+	 */
+	readonly captureTenancyUnconfirmed?: boolean;
 }
 
 /**
@@ -134,14 +191,40 @@ export interface HealthDetailInputs {
  * `status` still reports. Embeddings off → `reasons.embeddings === "off"`.
  */
 export function buildHealthDetail(inputs: HealthDetailInputs): HealthDetail {
+	// PRD-062c + PRD-073b: the capture observability sub-block — dropped events (062c) plus the
+	// per-reason gated totals (073b). Present when EITHER counter is wired.
+	const capture =
+		inputs.captureDroppedEvents !== undefined || inputs.captureGated !== undefined
+			? {
+					droppedEvents: Math.max(0, Math.trunc(inputs.captureDroppedEvents ?? 0)),
+					...(inputs.captureGated !== undefined
+						? {
+								gated: {
+									no_bound_project: Math.max(0, Math.trunc(inputs.captureGated.no_bound_project)),
+									tenancy_unconfirmed: Math.max(0, Math.trunc(inputs.captureGated.tenancy_unconfirmed)),
+								},
+							}
+						: {}),
+				}
+			: undefined;
 	const reasons: HealthReasons = {
 		storage: inputs.status === "ok" ? "reachable" : "unreachable",
 		embeddings: inputs.embeddingsEnabled ? "on" : "off",
 		schema: inputs.schemaMissingTable === true ? "missing_table" : "ok",
 		// PRD-063b / b-AC-7: read the supplied Portkey state verbatim (no probe). Omitted → `off`.
 		portkey: inputs.portkey ?? "off",
-		...(inputs.captureDroppedEvents !== undefined
-			? { capture: { droppedEvents: Math.max(0, Math.trunc(inputs.captureDroppedEvents)) } }
+		...(capture !== undefined ? { capture } : {}),
+		// PRD-073b: the dormancy reasons — present ONLY while their condition holds (parent AC-3).
+		...(inputs.captureDormantNoProject === true
+			? { captureDormant: { code: CAPTURE_DORMANT_NO_PROJECT, guidance: NO_ACTIVE_PROJECT_GUIDANCE } }
+			: {}),
+		...(inputs.captureTenancyUnconfirmed === true
+			? {
+					captureTenancyUnconfirmed: {
+						code: CAPTURE_BLOCKED_TENANCY_UNCONFIRMED,
+						guidance: TENANCY_UNCONFIRMED_GUIDANCE,
+					},
+				}
 			: {}),
 	};
 	return { status: inputs.status, reasons };

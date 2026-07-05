@@ -41,6 +41,7 @@ import type { DeploymentMode } from "../config.js";
 import type { Daemon } from "../server.js";
 import { verifyTokenClaims } from "./contracts.js";
 import { ENV_TOKEN, loadCredentials } from "./credentials-store.js";
+import { resolveTenancyConfirmation } from "./tenancy-confirmation.js";
 
 /** The route group the auth read-model attaches to (declared + protected in `server.ts`). */
 export const AUTH_GROUP = "/api/auth" as const;
@@ -71,6 +72,14 @@ export interface AuthStatusBody {
 	readonly savedAt: string;
 	/** Token expiry (epoch seconds) — ONLY when a real `TokenClaims.exp` exists; never faked. */
 	readonly expiresAt?: number;
+	/**
+	 * PRD-073c: whether the active tenancy is CONFIRMED — an explicit link-time selection stamped the
+	 * marker, OR a pre-073 credential is grandfathered by its non-empty orgId (parent AC-5). The
+	 * dashboard header reads this to show "org X / workspace Y (confirmed)".
+	 */
+	readonly tenancyConfirmed: boolean;
+	/** PRD-073c: the explicit-selection marker timestamp — present ONLY for an explicitly-selected credential. */
+	readonly tenancyConfirmedAt?: string;
 }
 
 /** The honest disconnected body — never a blank panel, never a fabricated org (044a). */
@@ -82,6 +91,7 @@ export const DISCONNECTED_STATUS: AuthStatusBody = Object.freeze({
 	agentId: "",
 	source: "none",
 	savedAt: "",
+	tenancyConfirmed: false,
 });
 
 /** Deps for {@link mountAuthStatusApi}. Everything injected for testability. */
@@ -119,6 +129,13 @@ export function resolveAuthStatus(deps: AuthStatusApiDeps = {}): AuthStatusBody 
 	const claims = verifyTokenClaims(creds.token);
 	const expiresAt = claims !== null && typeof claims.exp === "number" ? claims.exp : undefined;
 
+	// PRD-073c: the confirmed-tenancy state read from the SAME persisted credential (marker OR
+	// grandfathered non-empty orgId). Never throws; never reads the token into the body.
+	const confirmation = resolveTenancyConfirmation({
+		...(deps.credentialsDir !== undefined ? { credentialsDir: deps.credentialsDir } : {}),
+		env,
+	});
+
 	return {
 		connected: true,
 		orgId: creds.orgId,
@@ -128,6 +145,8 @@ export function resolveAuthStatus(deps: AuthStatusApiDeps = {}): AuthStatusBody 
 		source,
 		savedAt: creds.savedAt,
 		...(expiresAt !== undefined ? { expiresAt } : {}),
+		tenancyConfirmed: confirmation.confirmed,
+		...(confirmation.confirmedAt !== undefined ? { tenancyConfirmedAt: confirmation.confirmedAt } : {}),
 	};
 }
 

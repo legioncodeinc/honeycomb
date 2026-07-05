@@ -58,6 +58,16 @@ import { mountAuthStatusApi } from "./auth/status-api.js";
 import { attachHooksHandlers } from "./capture/attach.js";
 import type { CaptureHandler } from "./capture/capture-handler.js";
 import { createCaptureDroppedEventsCounter, type CaptureDroppedEventsCounter } from "./capture/dropped-events.js";
+import { createGatedCapturesCounter, type GatedCapturesCounter } from "./capture/gated-captures.js";
+import { resolveInboxCaptureEnabled } from "./capture/capture-config.js";
+import { isTenancyConfirmed } from "./auth/tenancy-confirmation.js";
+import {
+	createPendingLinkStore,
+	makePendingLinkRunner,
+	mountSetupTenancyApi,
+	type PendingLinkStore,
+} from "./dashboard/setup-tenancy.js";
+import { hasBoundProjectOnDisk } from "../../hooks/shared/project-resolver.js";
 import { buildCodebaseGraphSnapshot, mountGraphApi } from "./codebase/api.js";
 import { type DeploymentMode, type RuntimeConfig, resolveRuntimeConfig } from "./config.js";
 import { mountActionsApi } from "./dashboard/actions-api.js";
@@ -913,6 +923,8 @@ export function assembleSeams(
 	rerankerDeps?: RerankerMountDeps,
 	projectsDir?: string,
 	captureDroppedEvents?: CaptureDroppedEventsCounter,
+	gatedCaptures?: GatedCapturesCounter,
+	pendingLinkStore?: PendingLinkStore,
 ): CaptureHandler {
 	// The daemon's configured default tenancy scope (the single LOCAL tenant) is RESOLVED ONCE
 	// at the composition root (`assembleDaemon`) from the SAME credential source the storage
@@ -947,13 +959,19 @@ export function assembleSeams(
 		queue: daemon.services.queue,
 		embed,
 		enqueuePipelineEntry: makePipelineEntryEnqueuer(daemon.services.queue),
-		// PRD-059a / IRD-123: the first-run capture gate is ON in production. Until the active
-		// workspace binds its first project (via the dashboard folder-picker or `honeycomb project
-		// bind`), a capture NO-OPs rather than hoarding unscoped sessions in `__unsorted__`. The gate
-		// reads the local `~/.deeplake/projects.json` cache (NO DeepLake call); once a project is bound
-		// it opens and the 049a inbox fallback for unbound folders resumes (a-AC-4 / a-AC-5).
-		firstRunGate: true,
+		// PRD-073a: the PER-SESSION bound-project capture gate is ON in production (superseding the
+		// one-shot PRD-059a first-run gate). A capture whose cwd resolves to no bound project NO-OPs
+		// FOREVER (not just before the first binding) unless the inbox opt-in is on, returning a
+		// reasoned gated ack. The gate reads the local `~/.deeplake/projects.json` cache (NO DeepLake).
+		boundProjectGate: true,
+		// PRD-073a: the `__unsorted__` inbox opt-in (default OFF via HONEYCOMB_INBOX_CAPTURE).
+		inboxCapture: resolveInboxCaptureEnabled(),
+		// PRD-073c: capture stays blocked until tenancy is confirmed (an explicit link-time selection
+		// stamped the marker, or a pre-073 credential is grandfathered by its non-empty orgId). Read
+		// live per capture from the shared `~/.deeplake/credentials.json` (NO DeepLake call).
+		tenancyConfirmed: () => isTenancyConfirmed({}),
 		logger: daemon.logger,
+		...(gatedCaptures !== undefined ? { gatedCaptures } : {}),
 		...(captureDroppedEvents !== undefined ? { droppedEvents: captureDroppedEvents } : {}),
 		...(projectsDir !== undefined ? { projectsDir } : {}),
 	});
@@ -1012,9 +1030,30 @@ export function assembleSeams(
 		//     a mount error never crashes the daemon (guarded + present-only like the other newer seams).
 		if (seams.mountSetupLogin !== undefined) {
 			try {
-				seams.mountSetupLogin(daemon);
+				// PRD-073c: wire the device flow to the PENDING-LINK runner so phase 1 authenticates + parks
+				// a pending window (or auto-selects a single-tenancy account) instead of persisting a silent
+				// `orgs[0]` guess. The `/setup/tenancy/select` route (mounted below) consumes the pending
+				// window. The store is shared between the two mounts. When no store is threaded (a seam-fake
+				// test), fall back to the default runner so those tests stay unchanged.
+				if (pendingLinkStore !== undefined) {
+					seams.mountSetupLogin(daemon, { runDeviceFlow: makePendingLinkRunner({ store: pendingLinkStore }) });
+				} else {
+					seams.mountSetupLogin(daemon);
+				}
 			} catch {
 				// A mount failure degrades the on-page login (the user falls back to the CLI), never crashes.
+			}
+		}
+		// 6b. PRD-073c: the link-time tenancy-selection routes — `/setup/tenancy*`. Beside the other setup
+		//     routes on the SAME unprotected root group + local-mode gate. They serve the pending-link
+		//     window (enumerate orgs/workspaces) and persist the explicit `{orgId, workspaceId}` choice
+		//     with the confirmed-tenancy marker. Shares the pending-link store with the login runner above.
+		//     Fail-soft: a mount error degrades the tenancy picker (the user falls back to the CLI), never crashes.
+		if (pendingLinkStore !== undefined) {
+			try {
+				mountSetupTenancyApi(daemon, { store: pendingLinkStore });
+			} catch {
+				// A mount failure degrades the on-page tenancy selection, never crashes the daemon.
 			}
 		}
 		// 6c. The pre-auth guided-setup STATE read — `GET /setup/state` (PRD-050b b-AC-2). Sits beside the
@@ -2152,6 +2191,11 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	});
 
 	const captureDroppedEvents = createCaptureDroppedEventsCounter();
+	// PRD-073b: the per-reason gated-captures counter (surfaced on the health detail). PRD-073c: the
+	// single-slot in-memory pending-link store shared between `/setup/login` (the pending-link runner)
+	// and the `/setup/tenancy*` routes.
+	const gatedCaptures = createGatedCapturesCounter();
+	const pendingLinkStore = createPendingLinkStore();
 
 	let pollinatingConfig: ReturnType<typeof resolvePollinatingConfig>;
 	try {
@@ -2269,6 +2313,12 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			embeddingsEnabled: embeddingsReason(),
 			portkey: portkeyHealth,
 			captureDroppedEvents: captureDroppedEvents.read(),
+			// PRD-073b: the per-reason gated-captures totals + the two dormancy reasons, read LIVE per
+			// health call (local `~/.deeplake` reads, no DeepLake) so binding a project / confirming
+			// tenancy clears the reason on the next read (AC-073b.1.1 / 1.2).
+			captureGated: gatedCaptures.read(),
+			captureDormantNoProject: !hasBoundProjectOnDisk({ workspace: scope.workspace ?? "" }),
+			captureTenancyUnconfirmed: !isTenancyConfirmed({}),
 		});
 
 	// ── PRD-063c (c-D-2 / c-AC-1 / c-AC-3): the Cohere-via-Portkey rerank seam, late-bound.
@@ -2408,6 +2458,8 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		rerankerMountDeps,
 		options.projectsDir,
 		captureDroppedEvents,
+		gatedCaptures,
+		pendingLinkStore,
 	);
 
 	// ── PRD-032d / AC-6: FIRE the Wave-1 `/api/settings` mount ONCE so the CLI/dashboard

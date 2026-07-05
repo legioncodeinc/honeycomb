@@ -56,7 +56,13 @@ export {
 	type VfsToolOp,
 } from "./contracts.js";
 
-export { BIND_PROJECT_NOTICE, createOnboardingNoticeGate, runSessionStart } from "./session-start.js";
+export {
+	BIND_PROJECT_CWD_NOTICE,
+	BIND_PROJECT_NOTICE,
+	createOnboardingNoticeGate,
+	createSessionBindNoticeGate,
+	runSessionStart,
+} from "./session-start.js";
 
 export {
 	buildCaptureBody,
