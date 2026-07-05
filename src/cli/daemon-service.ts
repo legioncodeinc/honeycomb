@@ -41,7 +41,8 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join, normalize, resolve, sep } from "node:path";
 
-import { APIARY_HOME_ENV } from "../shared/fleet-root.js";
+import { PRODUCT_SLUG } from "../shared/constants.js";
+import { APIARY_HOME_ENV, honeycombStateDir } from "../shared/fleet-root.js";
 
 /** The three OS service managers this module can target (the resolved per-OS default). */
 export type ServiceManager = "launchd" | "systemd-user" | "schtasks";
@@ -122,8 +123,12 @@ export function detectServiceManager(
 export interface ServiceRunner {
 	/** Run `cmd` with fixed `args`. Returns trimmed stdout. Throws on failure / missing binary. */
 	run(cmd: string, args: readonly string[]): string;
-	/** Write a unit/plist file to `path` with `contents` (launchd/systemd). Throws on failure. */
-	writeFile(path: string, contents: string): void;
+	/**
+	 * Write a unit/plist/task file to `path` with `contents`. `encoding` defaults to `utf8`
+	 * (launchd/systemd); the Windows task XML is written as `utf16le` (schtasks `/XML` requires a
+	 * UTF-16 file with a BOM, else it fails with "unable to switch the encoding"). Throws on failure.
+	 */
+	writeFile(path: string, contents: string, encoding?: BufferEncoding): void;
 	/** Remove a unit/plist file at `path`. Never throws (a missing file is success). */
 	removeFile(path: string): void;
 	/** True iff `path` exists (used to report service status for file-based managers). */
@@ -152,9 +157,9 @@ export function defaultServiceRunner(): ServiceRunner {
 			});
 			return typeof out === "string" ? out.trim() : "";
 		},
-		writeFile(path: string, contents: string): void {
+		writeFile(path: string, contents: string, encoding: BufferEncoding = "utf8"): void {
 			fs.mkdirSync(join(path, ".."), { recursive: true });
-			fs.writeFileSync(path, contents, { encoding: "utf8" });
+			fs.writeFileSync(path, contents, { encoding });
 		},
 		removeFile(path: string): void {
 			try {
@@ -245,9 +250,19 @@ export function legacySystemdUnitPath(home: string): string {
 	return containedUnitPath(home, [".config", "systemd", "user", LEGACY_SERVICE_SYSTEMD_UNIT]);
 }
 
-/** XML-escape a value bound into a plist `<string>` (the entry/workspace can contain `&`/`<`). */
+/**
+ * XML-escape a value bound into XML text (a launchd plist `<string>`, or the Windows task XML's
+ * `<Command>`/`<Arguments>`/`<UserId>`). Escapes all five predefined XML entities (`& < > " '`); the
+ * apostrophe matters on Windows because a path such as `C:\Users\O'Brien\...` passes the cmd-safety
+ * guard (`'` is not a cmd metacharacter) yet still has to be escaped once it becomes XML text.
+ */
 function xmlEscape(value: string): string {
-	return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+	return value
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&apos;");
 }
 
 /**
@@ -320,53 +335,188 @@ WantedBy=default.target
 }
 
 /**
- * Reject a path bound into the Windows `/TR` command string if it carries a cmd.exe
- * metacharacter (PRD-064h security hardening). The `/TR` value is the ONE place this module
- * composes a SHELL string instead of fixed argv: schtasks stores it and cmd.exe RE-PARSES it
- * at every logon. `spec.workspace` is derived from `HONEYCOMB_WORKSPACE` / the CLI cwd
- * (src/cli/runtime.ts resolveDaemonWorkspace), and `spec.entry` can be overridden via
- * `HONEYCOMB_DAEMON_ENTRY`, so a path containing `& | < > ^ " %` (or a CR/LF) would break out
- * of the intended command and execute arbitrary commands under the user's login session on
- * every boot. We THROW on such a path; a throw is this module's documented "service path
+ * Reject a path bound into the Windows task command string if it carries a cmd.exe
+ * metacharacter (PRD-064h security hardening). Even though the task is now registered from a staged
+ * XML definition (not an inline `/TR`), the action's `<Arguments>` still embeds a `cmd /c "..."`
+ * string that cmd.exe RE-PARSES at every logon. `spec.workspace` is derived from
+ * `HONEYCOMB_WORKSPACE` / the CLI cwd (src/cli/runtime.ts resolveDaemonWorkspace), and `spec.entry`
+ * can be overridden via `HONEYCOMB_DAEMON_ENTRY`, so a path containing `& | < > ^ " %` (or a CR/LF)
+ * would break out of the intended command and execute arbitrary commands under the user's login
+ * session on every boot. We THROW on such a path; a throw is this module's documented "service path
  * unavailable" signal, so runtime.ts falls back to the safe detached spawn (which passes the
- * workspace as a real argv/env value, never a shell string) rather than registering a
- * poisoned task. Legitimate Windows paths never contain these characters.
+ * workspace as a real argv/env value, never a shell string) rather than registering a poisoned task.
+ * Legitimate Windows paths never contain these characters. XML escaping ({@link xmlEscape}) is a
+ * SECOND, independent layer applied after this guard because the values also become XML text.
  */
 function assertCmdSafe(value: string): void {
 	// cmd.exe command separators / redirection / escape / env-expansion / quote, plus CR/LF.
 	if (/[&|<>^"%\r\n]/.test(value)) {
-		throw new Error("unsafe character in service path; refusing to build schtasks /TR command");
+		throw new Error("unsafe character in service path; refusing to build the schtasks task command");
 	}
 }
 
+/** The pattern a `whoami /user` SID must match before it is trusted as the task principal UserId. */
+const WINDOWS_SID_PATTERN = /^S-1-[0-9]+(-[0-9]+)+$/;
+
+/** The staged task-definition XML file name written under honeycomb's state dir. */
+export const STAGED_TASK_XML_NAME = "honeycomb-task.xml" as const;
+
+/** Resolve `<SystemRoot>\System32` (the fixed, trusted dir the whoami/conhost binaries live in). */
+function windowsSystem32Dir(env: NodeJS.ProcessEnv): string {
+	const systemRoot = (env.SystemRoot ?? env.SYSTEMROOT ?? "").trim();
+	return join(systemRoot.length > 0 ? systemRoot : "C:\\Windows", "System32");
+}
+
+/** The absolute `conhost.exe` path (`--headless` runs the action with NO visible console window). */
+function conhostPath(env: NodeJS.ProcessEnv = process.env): string {
+	return join(windowsSystem32Dir(env), "conhost.exe");
+}
+
 /**
- * Build the `schtasks /Create` argv for the per-user Scheduled Task (AC-064h.4: the task's command
- * pins `HONEYCOMB_WORKSPACE` via a `cmd /c set ... &&` prefix so the daemon never inherits system32,
- * and `/SC ONLOGON` makes the task the start-on-boot/login liveness floor). `/F` is idempotent
- * (overwrites an existing task), `/RL LIMITED` keeps it userland (no admin / no UAC).
- *
- * Returned as ARGV (not a string) so the injected runner shells out fixed-argv and a test asserts
- * the exact tokens. The `/TR` value IS a single command string (schtasks' own format); we keep it
- * conservative: a `cmd /c` that sets the workspace env then launches node with the entry.
+ * Parse the SID out of `whoami /user /fo csv /nh` output. The row is
+ * `"DOMAIN\\user","S-1-5-21-..."`; we take the LAST comma-separated field, strip the surrounding
+ * quotes, and return it only when it matches {@link WINDOWS_SID_PATTERN}. Returns `null` on any
+ * shape we do not recognise (the caller then falls back to `DOMAIN\\USER`).
  */
-export function buildSchtasksCreateArgs(spec: ServiceSpec): readonly string[] {
-	// SECURITY: the /TR value is a cmd.exe-parsed string (the lone non-fixed-argv path here).
-	// Refuse any path with a cmd metacharacter so a poisoned HONEYCOMB_WORKSPACE / cwd /
-	// HONEYCOMB_DAEMON_ENTRY cannot inject a command into the stored, auto-running task. A throw
-	// makes runtime.ts fall back to the safe detached spawn.
+function parseWhoamiSid(csv: string): string | null {
+	const line = csv.trim().split(/\r?\n/).pop() ?? "";
+	const lastField = line.split(",").pop() ?? "";
+	const candidate = lastField.trim().replace(/^"+/, "").replace(/"+$/, "").trim();
+	return WINDOWS_SID_PATTERN.test(candidate) ? candidate : null;
+}
+
+/**
+ * Resolve the current user's identity for the task's `<LogonTrigger><UserId>` AND its
+ * `<Principal id="Author"><UserId>` (PRD-064h Windows Administrator-Protection fix). Windows 11 25H2
+ * with Administrator Protection refuses an UNSCOPED any-user `/SC ONLOGON` trigger without
+ * elevation; scoping BOTH the trigger and the principal to the current user's SID is the proven,
+ * non-elevated recipe.
+ *
+ * Resolution:
+ *   1. Fixed-argv `<SystemRoot>\System32\whoami.exe /user /fo csv /nh` through the injected runner
+ *      (never bare `whoami`, never a shell). A returned SID is regex-validated ⇒ it carries no XML
+ *      metacharacter ⇒ it is safe as raw XML text.
+ *   2. Fallback to `${USERDOMAIN}\\${USERNAME}` (XML-escaped, since a `DOMAIN\\user` becomes XML
+ *      text and could in principle carry an escapable character).
+ *   3. If neither resolves, THROW: the documented "service path unavailable" signal, so runtime.ts
+ *      falls back to the safe detached spawn instead of registering an unusable task.
+ */
+export function resolveWindowsUserId(runner: ServiceRunner, env: NodeJS.ProcessEnv = process.env): string {
+	try {
+		const out = runner.run(join(windowsSystem32Dir(env), "whoami.exe"), ["/user", "/fo", "csv", "/nh"]);
+		const sid = parseWhoamiSid(out);
+		if (sid !== null) return sid;
+	} catch {
+		// whoami missing / errored, fall through to the DOMAIN\USER env fallback below.
+	}
+	const domain = (env.USERDOMAIN ?? "").trim();
+	const user = (env.USERNAME ?? "").trim();
+	if (user.length > 0) return xmlEscape(domain.length > 0 ? `${domain}\\${user}` : user);
+	throw new Error("cannot resolve the current Windows user SID/account for the scheduled-task principal");
+}
+
+/**
+ * Resolve the staged task-XML path under honeycomb's state dir (`<fleetRoot>/honeycomb/`), validated
+ * to stay CONTAINED within that dir (the same hardening {@link containedUnitPath} applies to the
+ * launchd/systemd unit files). `spec.fleetRoot` is the caller-resolved root; when absent we fall
+ * back to {@link honeycombStateDir}. A throw is the "service path unavailable" fallback signal.
+ */
+export function stagedTaskXmlPath(spec: ServiceSpec): string {
+	const stateDir = spec.fleetRoot !== undefined ? join(spec.fleetRoot, PRODUCT_SLUG) : honeycombStateDir();
+	const resolvedBase = normalize(resolve(stateDir));
+	const candidate = normalize(resolve(resolvedBase, STAGED_TASK_XML_NAME));
+	const baseWithSep = resolvedBase.endsWith(sep) ? resolvedBase : resolvedBase + sep;
+	if (candidate !== resolvedBase && !candidate.startsWith(baseWithSep)) {
+		throw new Error("resolved staged task XML path escapes the honeycomb state dir");
+	}
+	return candidate;
+}
+
+/**
+ * Render the per-user Scheduled Task definition XML (Task schema 1.2), the SID-scoped replacement for
+ * the legacy inline `/TR` command (PRD-064h Windows Administrator-Protection fix). The `userId`
+ * (from {@link resolveWindowsUserId}) scopes BOTH the `<LogonTrigger>` and the `<Principal>` to the
+ * current user, which is what lets a non-elevated `schtasks /Create /XML` succeed on Windows 11 25H2.
+ *
+ * The action runs `conhost.exe --headless cmd /c "..."` so the task fires with NO visible console
+ * window (the proven fix). The inner `cmd /c` keeps the EXACT command semantics of the old task:
+ * `cd /d <workspace>` + `set HONEYCOMB_WORKSPACE=<workspace>` (+ optional `set APIARY_HOME=<root>`,
+ * PRD-072d) then `node <flags> <entry>`. Every embedded path passes {@link assertCmdSafe} (the value
+ * is re-parsed by cmd.exe) AND is XML-escaped (the value is XML text). `StartWhenAvailable`,
+ * `ExecutionTimeLimit PT0S`, and `RestartOnFailure` (PT1M x 999) preserve the liveness-floor
+ * semantics of the old `/SC ONLOGON /RL LIMITED` task.
+ */
+export function renderScheduledTaskXml(spec: ServiceSpec, userId: string, conhost: string = conhostPath()): string {
+	// SECURITY: the `<Arguments>` embeds a cmd.exe-parsed string, so refuse any path with a cmd
+	// metacharacter before it is embedded (a poisoned HONEYCOMB_WORKSPACE / cwd / HONEYCOMB_DAEMON_ENTRY
+	// / APIARY_HOME must never inject a command). A throw makes runtime.ts fall back to the safe spawn.
 	assertCmdSafe(spec.workspace);
 	assertCmdSafe(spec.nodePath);
 	assertCmdSafe(spec.entry);
-	// PRD-072d: the pinned fleet root passes the SAME cmd-metacharacter guard before it is embedded in
-	// the auto-running task command (a poisoned APIARY_HOME must never inject a command).
 	if (spec.fleetRoot !== undefined) assertCmdSafe(spec.fleetRoot);
 	const nodeFlags = spec.nodeFlags.length > 0 ? `${spec.nodeFlags.join(" ")} ` : "";
-	// The /TR command: set HONEYCOMB_WORKSPACE (and APIARY_HOME when pinned) for the child, then launch
-	// node on the entry. `cd /d` pins the working directory to the writable workspace (the system32
-	// footgun close). Quote the paths so spaces survive. schtasks runs this exact string under cmd.exe.
 	const apiaryHomeSet = spec.fleetRoot !== undefined ? `set ${APIARY_HOME_ENV}=${spec.fleetRoot} && ` : "";
-	const tr = `cmd /c "cd /d "${spec.workspace}" && set HONEYCOMB_WORKSPACE=${spec.workspace} && ${apiaryHomeSet}"${spec.nodePath}" ${nodeFlags}"${spec.entry}""`;
-	return ["/Create", "/TN", SERVICE_TASK_NAME, "/TR", tr, "/SC", "ONLOGON", "/RL", "LIMITED", "/F"];
+	// The inner command: identical semantics to the legacy /TR string (cd + env pin + node entry).
+	const innerCmd = `cmd /c "cd /d "${spec.workspace}" && set HONEYCOMB_WORKSPACE=${spec.workspace} && ${apiaryHomeSet}"${spec.nodePath}" ${nodeFlags}"${spec.entry}""`;
+	// conhost --headless <inner> => no console window pops when the task runs (proven probe: Result 0).
+	const args = xmlEscape(`--headless ${innerCmd}`);
+	const command = xmlEscape(conhost);
+	// UTF-16 declaration: the file is staged as utf16le + BOM (schtasks /XML requirement, see the
+	// register path); the declaration must agree with the on-disk encoding or schtasks rejects it.
+	return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Honeycomb primary daemon (127.0.0.1:3850)</Description>
+    <URI>\\${SERVICE_TASK_NAME}</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>${userId}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>${userId}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>${command}</Command>
+      <Arguments>${args}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+`;
+}
+
+/**
+ * Build the `schtasks /Create` argv that registers the task from the STAGED XML definition
+ * (`schtasks /Create /XML <file> /TN <name> /F`). This is the non-elevated recipe proven on Windows
+ * 11 25H2 with Administrator Protection: the SID-scoped XML (see {@link renderScheduledTaskXml})
+ * replaces the inline `/SC ONLOGON /TR ...` form that Windows now refuses without elevation. `/F` is
+ * idempotent (overwrites an existing task). Returned as ARGV (not a string) so the injected runner
+ * shells out fixed-argv and a test asserts the exact tokens.
+ */
+export function buildSchtasksCreateArgs(xmlPath: string): readonly string[] {
+	return ["/Create", "/XML", xmlPath, "/TN", SERVICE_TASK_NAME, "/F"];
 }
 
 /** The outcome of a service operation, what happened, for the CLI to report honestly. */
@@ -571,13 +721,20 @@ function schtasksController(runner: ServiceRunner): DaemonServiceController {
 			// Decision #32 migration: strip a lingering legacy task so a re-run never leaves two tasks
 			// racing over one daemon.
 			cleanupLegacy();
-			// /Create /F is idempotent (overwrites). /SC ONLOGON starts the daemon on login (boot floor).
-			runner.run("schtasks", buildSchtasksCreateArgs(spec));
+			// Administrator-Protection fix: scope the task to the current user (SID) and register it from
+			// a STAGED XML definition. `resolveWindowsUserId` throws when it cannot resolve an identity,
+			// which propagates as the "service path unavailable" signal (runtime.ts falls back to spawn).
+			const userId = resolveWindowsUserId(runner);
+			const xmlPath = stagedTaskXmlPath(spec);
+			// schtasks /XML wants a UTF-16 file with a BOM; prepend U+FEFF and write utf16le.
+			runner.writeFile(xmlPath, `\ufeff${renderScheduledTaskXml(spec, userId)}`, "utf16le");
+			// /Create /XML <file> /F is idempotent (overwrites); the XML's LogonTrigger is the boot floor.
+			runner.run("schtasks", buildSchtasksCreateArgs(xmlPath));
 			// Start it immediately so register == running (the install path expects an up daemon).
 			runner.run("schtasks", ["/Run", "/TN", SERVICE_TASK_NAME]);
 			return { ok: true, manager: "schtasks" };
 		},
-		unregister(_spec): ServiceOpResult {
+		unregister(spec): ServiceOpResult {
 			try {
 				runner.run("schtasks", ["/End", "/TN", SERVICE_TASK_NAME]);
 			} catch {
@@ -587,6 +744,12 @@ function schtasksController(runner: ServiceRunner): DaemonServiceController {
 				runner.run("schtasks", ["/Delete", "/TN", SERVICE_TASK_NAME, "/F"]);
 			} catch {
 				// A missing task on delete is success, the goal (no task) already holds.
+			}
+			try {
+				// Best-effort: drop the staged XML definition (a missing file is success).
+				runner.removeFile(stagedTaskXmlPath(spec));
+			} catch {
+				// A containment throw / removal failure never aborts unregister.
 			}
 			return { ok: true, manager: "schtasks" };
 		},

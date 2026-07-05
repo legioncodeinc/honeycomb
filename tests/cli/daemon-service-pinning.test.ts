@@ -11,12 +11,17 @@
 import { describe, expect, it } from "vitest";
 
 import {
-	buildSchtasksCreateArgs,
 	renderLaunchdPlist,
+	renderScheduledTaskXml,
 	renderSystemdUnit,
 	type ServiceSpec,
 } from "../../src/cli/daemon-service.js";
 import { APIARY_HOME_ENV, resolveFleetRoot } from "../../src/shared/fleet-root.js";
+
+/** A representative Windows SID used to render the SID-scoped task XML in these tests. */
+const FAKE_SID = "S-1-5-21-1111111111-2222222222-3333333333-1001";
+/** A fixed conhost path so the rendered XML is deterministic regardless of the test host. */
+const CONHOST = "C:\\Windows\\System32\\conhost.exe";
 
 const SPEC: ServiceSpec = {
 	nodePath: "/usr/local/bin/node",
@@ -50,11 +55,10 @@ describe("PRD-072d AC-072d.1.1 — every rendered unit pins APIARY_HOME beside H
 		expect(unit).toContain("Environment=HONEYCOMB_WORKSPACE=/home/ada/.apiary/honeycomb");
 	});
 
-	it("AC-072d.1.1 schtasks /TR sets APIARY_HOME beside HONEYCOMB_WORKSPACE", () => {
-		const args = buildSchtasksCreateArgs(WIN_SPEC);
-		const tr = args[args.indexOf("/TR") + 1] ?? "";
-		expect(tr).toContain(`set ${APIARY_HOME_ENV}=C:\\Users\\ada\\.apiary`);
-		expect(tr).toContain("set HONEYCOMB_WORKSPACE=C:\\Users\\ada\\hc");
+	it("AC-072d.1.1 the schtasks task XML sets APIARY_HOME beside HONEYCOMB_WORKSPACE", () => {
+		const xml = renderScheduledTaskXml(WIN_SPEC, FAKE_SID, CONHOST);
+		expect(xml).toContain(`set ${APIARY_HOME_ENV}=C:\\Users\\ada\\.apiary`);
+		expect(xml).toContain("set HONEYCOMB_WORKSPACE=C:\\Users\\ada\\hc");
 	});
 
 	it("with no fleetRoot pinned, the renderers omit the env line (back-compat, pin decided by caller)", () => {
@@ -74,9 +78,9 @@ describe("PRD-072d AC-072d.1.2 — a changed root produces a changed pin", () =>
 });
 
 describe("PRD-072d AC-072d.2 — poisoned roots never reach a unit", () => {
-	it("AC-072d.2.1 a cmd-metacharacter fleetRoot is refused on Windows (schtasks /TR)", () => {
+	it("AC-072d.2.1 a cmd-metacharacter fleetRoot is refused on Windows (schtasks task XML)", () => {
 		const poisoned: ServiceSpec = { ...WIN_SPEC, fleetRoot: "C:\\x & calc.exe" };
-		expect(() => buildSchtasksCreateArgs(poisoned)).toThrow();
+		expect(() => renderScheduledTaskXml(poisoned, FAKE_SID, CONHOST)).toThrow();
 	});
 
 	it("AC-072d.2.2 an XML-significant fleetRoot is escaped by the plist renderer on macOS", () => {
