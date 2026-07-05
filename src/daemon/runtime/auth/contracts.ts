@@ -446,30 +446,94 @@ export const STUB_TOKEN_PREFIX = "hcmt.v1.";
  * change. The contract callers rely on is: a returned non-null value has a verified
  * `org`; a `null` value means "do not trust this token".
  *
+ * REAL JWT (FIX #3): after a real Deeplake device-flow login,
+ * `~/.deeplake/credentials.json` holds a STANDARD JWT (`eyJhbGci…`, three dot-
+ * separated `header.payload.signature` segments), NOT the stub shape. The prior
+ * decoder returned `null` for it, so `resolveTenancy` threw on EVERY real token —
+ * breaking `honeycomb project status`, scope resolution, and reporting
+ * `tenancy:{org:null,workspace:null}`. This decoder now ALSO accepts a real JWT:
+ * it splits on ".", base64url-decodes the PAYLOAD (middle) segment, `JSON.parse`s
+ * it, and maps the real claim keys into the same {@link TokenClaims} shape.
+ *
+ * REAL-CLAIM DECODE (not grandfathering): the actual payload of the token at
+ * `~/.deeplake/credentials.json` was decoded to discover the claim key names —
+ * the org claim is carried under `org_id` (a UUID string), with `exp` (epoch
+ * seconds) also present; there is NO `workspace`/`agentId`/`role`/`project` claim
+ * in the real JWT. Because the org claim key IS discoverable, we decode the REAL
+ * claim (the safer of "decode real claim" vs "grandfather" — grandfathering would
+ * trust the file's orgId without ANY token cross-check). This preserves the
+ * security property `resolveTenancy` relies on: a non-empty, well-formed token
+ * yields claims carrying a real `org`, so the file-orgId-vs-token-org agreement
+ * check (tamper protection) still runs against a value that came from the token.
+ * A JWT whose payload carries no org-like claim decodes to `null` (fail-closed) —
+ * we do NOT grandfather it, so a token that cannot vouch for an org can never pass
+ * the integrity gate.
+ *
  * Pure + total: it never throws (a throw would be a swallow-or-crash fork at every
  * call site); a bad token is `null`.
  */
 export function verifyTokenClaims(token: string): TokenClaims | null {
-	if (typeof token !== "string" || !token.startsWith(STUB_TOKEN_PREFIX)) return null;
-	const body = token.slice(STUB_TOKEN_PREFIX.length);
-	let json: unknown;
+	if (typeof token !== "string") return null;
+	if (token.startsWith(STUB_TOKEN_PREFIX)) {
+		const body = token.slice(STUB_TOKEN_PREFIX.length);
+		return claimsFromDecodedBody(decodeBase64UrlJson(body));
+	}
+	// Real JWT path: `header.payload.signature` — decode the PAYLOAD (middle) segment.
+	// We do NOT verify the signature here (no signing key in this environment); the
+	// contract is the same integrity-by-shape as the stub, so callers are unchanged.
+	const segments = token.split(".");
+	if (segments.length !== 3) return null;
+	const payload = segments[1];
+	if (typeof payload !== "string" || payload.length === 0) return null;
+	return claimsFromDecodedBody(decodeBase64UrlJson(payload));
+}
+
+/**
+ * Base64url-decode + `JSON.parse` a token body segment. Total: any decode/parse
+ * failure (bad base64url, non-JSON) returns `null` — never a throw (the caller
+ * relies on a typed null, not a try/catch at every site).
+ */
+function decodeBase64UrlJson(body: string): unknown {
 	try {
-		const decoded = Buffer.from(body, "base64url").toString("utf8");
-		json = JSON.parse(decoded);
+		return JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
 	} catch {
-		// A malformed body is an untrustworthy token → null (fail-closed), not a throw.
 		return null;
 	}
+}
+
+/**
+ * Map a decoded token body (stub JSON or real-JWT payload) onto the {@link TokenClaims}
+ * shape. The org claim is read from EITHER the stub `org` key OR the real-JWT `org_id`
+ * key (the discovered claim name); a body with neither (or a blank/typed-wrong org)
+ * yields `null` — fail-closed, never a partial claim set. Only known fields are copied,
+ * so a prototype-pollution claim key can never leak onto the result.
+ */
+function claimsFromDecodedBody(json: unknown): TokenClaims | null {
 	if (typeof json !== "object" || json === null) return null;
 	const record = json as Record<string, unknown>;
-	const org = record.org;
-	if (typeof org !== "string" || org.trim() === "") return null;
+	// The stub uses `org`; the real Deeplake JWT uses `org_id` (discovered by decoding
+	// the actual payload). Prefer the stub key, fall back to the real-JWT key.
+	const rawOrg = typeof record.org === "string" ? record.org : record.org_id;
+	if (typeof rawOrg !== "string" || rawOrg.trim() === "") return null;
+	// Optional claims: honor both the stub key and (where the real JWT differs) its key.
+	const workspace =
+		typeof record.workspace === "string"
+			? record.workspace
+			: typeof record.workspace_id === "string"
+				? record.workspace_id
+				: undefined;
+	const project =
+		typeof record.project === "string"
+			? record.project
+			: typeof record.project_id === "string"
+				? record.project_id
+				: undefined;
 	const claims: TokenClaims = {
-		org,
-		...(typeof record.workspace === "string" ? { workspace: record.workspace } : {}),
+		org: rawOrg,
+		...(workspace !== undefined ? { workspace } : {}),
 		...(typeof record.agentId === "string" ? { agentId: record.agentId } : {}),
 		...(typeof record.role === "string" ? { role: record.role } : {}),
-		...(typeof record.project === "string" ? { project: record.project } : {}),
+		...(project !== undefined ? { project } : {}),
 		...(typeof record.exp === "number" ? { exp: record.exp } : {}),
 	};
 	return claims;

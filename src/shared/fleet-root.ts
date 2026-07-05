@@ -80,11 +80,15 @@ export function resolveFleetRoot(options: FleetRootOptions = {}): string {
 	const platform = options.platform ?? process.platform;
 	const home = options.home ?? homedir();
 
-	const apiaryHome = env[APIARY_HOME_ENV];
+	// Trim surrounding whitespace defensively: a service manager can pin a polluted value (e.g. a
+	// Windows scheduled task whose `set VAR=value && ...` captured the space before `&&`). An untrimmed
+	// trailing space here yields a DIVERGENT `<root> /honeycomb` state dir that doctor's registry can
+	// never find — so trim before both the absolute-path check and the return.
+	const apiaryHome = env[APIARY_HOME_ENV]?.trim();
 	if (isSet(apiaryHome) && isAbsoluteRoot(apiaryHome)) return apiaryHome;
 
 	if (platform === "linux") {
-		const xdgStateHome = env[XDG_STATE_HOME_ENV];
+		const xdgStateHome = env[XDG_STATE_HOME_ENV]?.trim();
 		if (isSet(xdgStateHome) && isAbsoluteRoot(xdgStateHome)) return join(xdgStateHome, APIARY_XDG_SUBDIR);
 	}
 

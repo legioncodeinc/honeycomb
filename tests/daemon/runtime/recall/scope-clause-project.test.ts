@@ -84,6 +84,46 @@ describe("buildProjectScopeClause — the project-segment predicate (49b-AC-2)",
 		expect(clause.sql).toContain("project_id = 'p'");
 	});
 
+	// FIX #6 — legacy rows a backend healed to SQL NULL (rather than the '' DEFAULT) must
+	// ALSO be admitted: `project_id = ''` never matches NULL under SQL three-valued logic.
+	it("a BOUND session ALSO admits `project_id IS NULL` alongside the '' sentinel (FIX #6)", () => {
+		const clause = buildProjectScopeClause({ projectId: "proj-A", bound: true });
+		expect(clause.sql).toContain("project_id = 'proj-A'");
+		expect(clause.sql).toContain("project_id = ''");
+		// NULL is treated identically to '' as "unset/legacy".
+		expect(clause.sql).toContain("project_id IS NULL");
+		// `IS NULL` carries no interpolated value — it must not pollute the auditable `values`.
+		expect(clause.values).toEqual(["proj-A", ""]);
+	});
+
+	it("an UNBOUND session ALSO admits `project_id IS NULL` alongside the inbox + '' (FIX #6)", () => {
+		const clause = buildProjectScopeClause({ projectId: UNSORTED_PROJECT_ID, bound: false });
+		expect(clause.sql).toContain(`project_id = '${UNSORTED_PROJECT_ID}'`);
+		expect(clause.sql).toContain("project_id = ''");
+		expect(clause.sql).toContain("project_id IS NULL");
+		expect(clause.values).toEqual([UNSORTED_PROJECT_ID, ""]);
+	});
+
+	it("the NULL arm rides the custom project column too (049c skills reuse)", () => {
+		const clause = buildProjectScopeClause({
+			projectId: "p",
+			bound: true,
+			projectColumn: "cross_project_scope_dummy",
+		});
+		// Whatever column the '' equality targets (sqlIdent emits a safe identifier — bare
+		// when no quoting is needed), the IS NULL arm targets the SAME column.
+		expect(clause.sql).toContain("cross_project_scope_dummy = ''");
+		expect(clause.sql).toContain("cross_project_scope_dummy IS NULL");
+	});
+
+	it("the NULL arm is a bare keyword — no value is interpolated (injection-safe)", () => {
+		const clause = buildProjectScopeClause({ projectId: "proj-A", bound: true });
+		// The IS NULL predicate must be a keyword, never `IS NULL = '<something>'` or a literal.
+		expect(clause.sql).toMatch(/project_id IS NULL/);
+		expect(clause.sql).not.toContain("IS NULL = ");
+		expect(clause.sql).not.toContain("'NULL'");
+	});
+
 	it("the parenthesized fragment carries no leading WHERE/AND (the caller composes it)", () => {
 		const clause = buildProjectScopeClause({ projectId: "p", bound: true });
 		expect(clause.sql.startsWith("(")).toBe(true);

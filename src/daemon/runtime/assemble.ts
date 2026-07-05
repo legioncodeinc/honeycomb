@@ -39,11 +39,12 @@ import { CATALOG } from "../storage/catalog/index.js";
 import type { QueryScope, StorageClient } from "../storage/client.js";
 import { type CredentialProvider, defaultCredentialProvider } from "../storage/config.js";
 import { createLazyStorageClient } from "../storage/index.js";
+import { createMtimeGatedResolver, fileMtimeReader } from "../storage/live-reload.js";
 import { isOk } from "../storage/result.js";
 // ── The asset-sync substrate `/api/assets` mount (PRD-033c / D-6) ──
 import { mountAssetsApi } from "./assets/api.js";
 import type { TrustedTableProbe } from "./assets/sync.js";
-import { DIR_MODE } from "./auth/credentials-store.js";
+import { credentialsPath, DIR_MODE } from "./auth/credentials-store.js";
 import {
 	type Authenticator,
 	type AuthorizationPolicy,
@@ -2187,9 +2188,25 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// an override and `"local"` ONLY as the true no-creds fallback (a fake client / no env).
 	// The queue + health probe run under this scope; the dashboard settings view shows the
 	// friendly `orgName`.
-	const tenancy = resolveDaemonTenancy(provider);
-	const scope = tenancy.scope;
-	const daemonOrgName = tenancy.orgName;
+	//
+	// ── Live tenancy re-resolution (no restart on `login`/re-point) ────────────────
+	// Historically the daemon SNAPSHOTTED this scope ONCE at boot: a `login` that changed the
+	// org/workspace written AFTER the daemon started was invisible to every subsequent request
+	// (the local-mode default-scope fallback in `scope.ts` kept resolving the boot-time tenancy)
+	// until an operator restarted. For the REAL production assembly (a live file-backed provider,
+	// no injected fake `storage`) the daemon's `defaultScope` is now a LIVE object: its `org` /
+	// `workspace` re-resolve from `~/.deeplake/credentials.json`, mtime-gated + debounced (one
+	// stat per window, re-derive only when the file changed), so a `login` written after boot is
+	// honored by the NEXT request with no watcher handle and no restart. When a fake `storage` is
+	// injected (the deterministic unit suite) OR there is no provider, the scope is the frozen
+	// snapshot exactly as before — the suite never re-stats a real file.
+	const bootTenancy = resolveDaemonTenancy(provider);
+	const liveTenancy = options.storage === undefined && provider !== undefined;
+	const scope: QueryScope = liveTenancy ? createLiveDaemonScope(provider) : bootTenancy.scope;
+	// The friendly org name is a display-only field the settings view shows; it is read at boot
+	// from the same resolve (a `login` that changes it is a rare cosmetic case, not load-bearing
+	// for tenancy, so it need not be live — the partition-bearing `scope` above IS live).
+	const daemonOrgName = bootTenancy.orgName;
 
 	// ── PRD-032d / AC-6: construct the daemon's vault `setting`-class READER ONCE, over the
 	// SAME workspace base dir + machine-key + daemon scope the secrets store uses (so the vault,
@@ -3237,4 +3254,34 @@ function resolveDaemonTenancy(provider: CredentialProvider | undefined): DaemonT
 /** Narrow an unknown provider-record field to a non-empty string, else `undefined`. */
 function asNonEmptyString(value: unknown): string | undefined {
 	return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Build the daemon's LIVE default scope — a {@link QueryScope} whose `org` / `workspace` re-resolve
+ * from `~/.deeplake/credentials.json` on read, mtime-gated + debounced, so a `login` written AFTER
+ * boot is honored by the NEXT request with no daemon restart (the live-reload goal). The scope is
+ * exposed as GETTERS over a debounced resolver: a property read (or a per-request `{ ...scope }`
+ * spread) sees the current tenancy, while a burst of reads inside the debounce window pays no stat.
+ *
+ * The resolver re-runs {@link resolveDaemonTenancy} (the SAME env-over-file precedence the storage
+ * client connects under) only when the credentials file's mtime moves, so the daemon's default
+ * partition can never disagree with the client's. A transient no-creds/hiccup read keeps the last
+ * resolved scope (fail-soft, via the resolver's mtime gate). Used ONLY in the real production
+ * assembly; the deterministic unit suite gets the frozen snapshot (see the call site).
+ */
+function createLiveDaemonScope(provider: CredentialProvider): QueryScope {
+	const resolveScope = createMtimeGatedResolver<QueryScope>(fileMtimeReader(credentialsPath()), () =>
+		resolveDaemonTenancy(provider).scope,
+	);
+	// A getter-backed QueryScope: `org` is always present; `workspace` is present when the resolved
+	// scope carries one (the client defaults a missing workspace to its config workspace). Getters
+	// keep every existing by-value read + spread untouched — they just see the live tenancy now.
+	return {
+		get org(): string {
+			return resolveScope().org;
+		},
+		get workspace(): string | undefined {
+			return resolveScope().workspace;
+		},
+	};
 }

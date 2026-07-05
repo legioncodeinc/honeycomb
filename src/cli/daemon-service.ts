@@ -457,9 +457,15 @@ export function renderScheduledTaskXml(spec: ServiceSpec, userId: string, conhos
 	assertCmdSafe(spec.entry);
 	if (spec.fleetRoot !== undefined) assertCmdSafe(spec.fleetRoot);
 	const nodeFlags = spec.nodeFlags.length > 0 ? `${spec.nodeFlags.join(" ")} ` : "";
-	const apiaryHomeSet = spec.fleetRoot !== undefined ? `set ${APIARY_HOME_ENV}=${spec.fleetRoot} && ` : "";
+	// cmd's `set VAR=value && next` captures EVERYTHING up to `&&`, INCLUDING the space before it, into
+	// VAR — so an unquoted `set APIARY_HOME=<root> && ...` pins a TRAILING SPACE onto the value, and the
+	// daemon then resolves a divergent `<root> /honeycomb` state dir that doctor's registry can never
+	// find (fleet telemetry reads as "missing" ⇒ the dashboard shows honeycomb degraded forever). The
+	// fix is the canonical cmd idiom: quote the whole `VAR=value` assignment so the space before `&&`
+	// stays OUTSIDE the value. `set "VAR=C:\...\path with spaces"` also preserves spaces WITHIN a path.
+	const apiaryHomeSet = spec.fleetRoot !== undefined ? `set "${APIARY_HOME_ENV}=${spec.fleetRoot}" && ` : "";
 	// The inner command: identical semantics to the legacy /TR string (cd + env pin + node entry).
-	const innerCmd = `cmd /c "cd /d "${spec.workspace}" && set HONEYCOMB_WORKSPACE=${spec.workspace} && ${apiaryHomeSet}"${spec.nodePath}" ${nodeFlags}"${spec.entry}""`;
+	const innerCmd = `cmd /c "cd /d "${spec.workspace}" && set "HONEYCOMB_WORKSPACE=${spec.workspace}" && ${apiaryHomeSet}"${spec.nodePath}" ${nodeFlags}"${spec.entry}""`;
 	// conhost --headless <inner> => no console window pops when the task runs (proven probe: Result 0).
 	const args = xmlEscape(`--headless ${innerCmd}`);
 	const command = xmlEscape(conhost);

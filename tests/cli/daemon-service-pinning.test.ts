@@ -57,8 +57,15 @@ describe("PRD-072d AC-072d.1.1 — every rendered unit pins APIARY_HOME beside H
 
 	it("AC-072d.1.1 the schtasks task XML sets APIARY_HOME beside HONEYCOMB_WORKSPACE", () => {
 		const xml = renderScheduledTaskXml(WIN_SPEC, FAKE_SID, CONHOST);
-		expect(xml).toContain(`set ${APIARY_HOME_ENV}=C:\\Users\\ada\\.apiary`);
-		expect(xml).toContain("set HONEYCOMB_WORKSPACE=C:\\Users\\ada\\hc");
+		// The assignments MUST be quoted (`set "VAR=value"`) so cmd's `set` does not capture the space
+		// before `&&` into the value — an unquoted `set APIARY_HOME=<root> && ...` pins a trailing space
+		// that diverts the daemon's state dir away from doctor's registered path.
+		// The `"` are XML-escaped to `&quot;` in the rendered <Arguments>.
+		expect(xml).toContain(`set &quot;${APIARY_HOME_ENV}=C:\\Users\\ada\\.apiary&quot;`);
+		expect(xml).toContain(`set &quot;HONEYCOMB_WORKSPACE=C:\\Users\\ada\\hc&quot;`);
+		// Regression guard: never emit the unquoted form that leaks a trailing space before `&&`.
+		expect(xml).not.toContain(`set ${APIARY_HOME_ENV}=C:\\Users\\ada\\.apiary &`);
+		expect(xml).not.toContain("set HONEYCOMB_WORKSPACE=C:\\Users\\ada\\hc &");
 	});
 
 	it("with no fleetRoot pinned, the renderers omit the env line (back-compat, pin decided by caller)", () => {
