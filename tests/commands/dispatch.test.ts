@@ -127,11 +127,21 @@ describe("PRD-020a a-AC-1 — the unified dispatcher parses + routes", () => {
 					return true;
 				},
 				probeDashboard: async () => true,
-				// PRD-003a: a fleet-defer classifier so the install login step never hits the network.
+				// BUG 1: the dashboard opens in SOLO mode only. Drive a SOLO classification + creds-present
+				// loader so the login step short-circuits ("already signed in", no network) and the open path
+				// runs. (Fleet mode opens nothing — covered by install.test.ts.)
 				detectFleet: async () => ({
-					mode: "fleet" as const,
-					signals: { registryHiveEntry: true, hivePortAnswering: false, hiveNpmGlobal: false },
-					firedSignals: ["test"],
+					mode: "solo" as const,
+					signals: { registryHiveEntry: false, hivePortAnswering: false, hiveNpmGlobal: false },
+					firedSignals: [],
+				}),
+				loadInstallCredentials: () => ({
+					token: "t",
+					orgId: "o",
+					orgName: "O",
+					workspace: "default",
+					agentId: "default",
+					savedAt: "",
 				}),
 				out: (l: string) => lines.push(l),
 				dir,
@@ -159,11 +169,20 @@ describe("PRD-020a a-AC-1 — the unified dispatcher parses + routes", () => {
 					return true;
 				},
 				probeDashboard: async () => false,
-				// PRD-003a: a fleet-defer classifier so the install login step never hits the network.
+				// BUG 1: the C-6 not-running branch runs in SOLO mode only. Drive SOLO + creds-present so the
+				// login step short-circuits and the unreachable-portal probe leads to the honest sentence.
 				detectFleet: async () => ({
-					mode: "fleet" as const,
-					signals: { registryHiveEntry: true, hivePortAnswering: false, hiveNpmGlobal: false },
-					firedSignals: ["test"],
+					mode: "solo" as const,
+					signals: { registryHiveEntry: false, hivePortAnswering: false, hiveNpmGlobal: false },
+					firedSignals: [],
+				}),
+				loadInstallCredentials: () => ({
+					token: "t",
+					orgId: "o",
+					orgName: "O",
+					workspace: "default",
+					agentId: "default",
+					savedAt: "",
 				}),
 				out: (l: string) => lines.push(l),
 				dir,

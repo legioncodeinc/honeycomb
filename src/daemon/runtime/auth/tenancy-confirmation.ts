@@ -71,9 +71,18 @@ export function resolveTenancyConfirmation(deps: TenancyConfirmationDeps = {}): 
 		typeof disk.tenancyConfirmedAt === "string" && disk.tenancyConfirmedAt.length > 0
 			? disk.tenancyConfirmedAt
 			: undefined;
-	return marker !== undefined
-		? { confirmed: true, confirmedAt: marker, grandfathered: false }
-		: { confirmed: true, grandfathered: true };
+	if (marker !== undefined) {
+		return { confirmed: true, confirmedAt: marker, grandfathered: false };
+	}
+	// BUG 2: a BASE credential the on-page login persisted for auth-only (so `/setup/state.authenticated`
+	// could flip immediately) explicitly carries `tenancyPending: true` and NO marker. It is provisionally
+	// bound to the first enumerated org but the user has NOT yet picked, so the capture gate MUST stay
+	// closed (`tenancy_unconfirmed`) until the explicit `/setup/tenancy/select` stamps `tenancyConfirmedAt`.
+	// This is distinct from a pre-073 credential (no marker AND no pending flag), which stays grandfathered.
+	if (disk.tenancyPending === true) {
+		return { confirmed: false, grandfathered: false };
+	}
+	return { confirmed: true, grandfathered: true };
 }
 
 /**

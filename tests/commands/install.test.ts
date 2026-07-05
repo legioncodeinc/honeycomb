@@ -25,7 +25,6 @@ import {
 	type DaemonLifecycle,
 	type DaemonStatus,
 	dashboardPortalNotRunningMessage,
-	localDashboardUrl,
 	loopbackDashboardUrl,
 	openLocalDashboardUrl,
 	parseRefArg,
@@ -33,6 +32,7 @@ import {
 	resolveEffectiveRef,
 	runInstallCommand,
 } from "../../src/commands/index.js";
+import type { Credentials } from "../../src/daemon/runtime/auth/contracts.js";
 import { DEFAULT_REF, loadOnboarding } from "../../src/daemon/runtime/onboarding/index.js";
 import { doctorRegistryPath } from "../../src/daemon/runtime/telemetry/fleet-registry.js";
 import type { FleetClassification } from "../../src/shared/fleet-detection.js";
@@ -40,12 +40,34 @@ import type { FleetClassification } from "../../src/shared/fleet-detection.js";
 /**
  * PRD-003a: a fixed fleet-defer classification so these install tests never touch the network / npm
  * tree (the real classifier) or attempt a real device-flow login. In fleet mode the install login
- * step just prints the defer line and returns — reading no credentials and running no login.
+ * step just prints the defer line and returns — reading no credentials and running no login. BUG 1:
+ * fleet mode ALSO opens NO dashboard (Hive's onboarding owns the portal).
  */
 const fleetDefer = async (): Promise<FleetClassification> => ({
 	mode: "fleet",
 	signals: { registryHiveEntry: true, hivePortAnswering: false, hiveNpmGlobal: false },
 	firedSignals: ["test-injected registry Hive entry"],
+});
+
+/**
+ * PRD-003a: a fixed SOLO classification so a test can drive the solo dashboard-open path (the only
+ * path that opens a browser after BUG 1). Paired with {@link credsPresent} so the solo login step
+ * short-circuits on "already signed in" and never attempts a real device flow.
+ */
+const soloDetect = async (): Promise<FleetClassification> => ({
+	mode: "solo",
+	signals: { registryHiveEntry: false, hivePortAnswering: false, hiveNpmGlobal: false },
+	firedSignals: [],
+});
+
+/** A stub credentials loader so the SOLO login step reports "already signed in" (no device flow). */
+const credsPresent = (): Credentials => ({
+	token: "tok",
+	orgId: "org-1",
+	orgName: "Org One",
+	workspace: "default",
+	agentId: "default",
+	savedAt: "2026-01-01T00:00:00.000Z",
 });
 
 /** A recording fake DaemonLifecycle: scripts start/status results + records every call. */
@@ -99,7 +121,7 @@ afterEach(() => {
 });
 
 describe("PRD-050a — honeycomb install (a-AC-4 health-gated open)", () => {
-	it("a-AC-4 opens the dashboard ONLY after the daemon is reachable (already-up path)", async () => {
+	it("a-AC-4 opens the dashboard ONLY after the daemon is reachable (solo already-up path)", async () => {
 		const lines: string[] = [];
 		const opener = recordingOpener(() => true);
 		const lifecycle = fakeLifecycle({});
@@ -108,7 +130,9 @@ describe("PRD-050a — honeycomb install (a-AC-4 health-gated open)", () => {
 			lifecycle,
 			openDashboard: opener.open,
 			probeDashboard: reachablePortalProbe,
-			detectFleet: fleetDefer,
+			// SOLO with creds present → the only path that opens a browser after BUG 1.
+			detectFleet: soloDetect,
+			loadInstallCredentials: credsPresent,
 			dir: tmpDir,
 			out: (l) => lines.push(l),
 		});
@@ -227,7 +251,8 @@ describe("PRD-050a — honeycomb install (a-AC-2 idempotency)", () => {
 			lifecycle,
 			openDashboard: opener.open,
 			probeDashboard: reachablePortalProbe,
-			detectFleet: fleetDefer,
+			detectFleet: soloDetect,
+			loadInstallCredentials: credsPresent,
 			dir: tmpDir,
 			out: () => {},
 		});
@@ -245,7 +270,8 @@ describe("PRD-050a — honeycomb install (a-AC-2 idempotency)", () => {
 			lifecycle,
 			openDashboard: opener.open,
 			probeDashboard: reachablePortalProbe,
-			detectFleet: fleetDefer,
+			detectFleet: soloDetect,
+			loadInstallCredentials: credsPresent,
 			dir: tmpDir,
 			out: () => {},
 		};
@@ -258,26 +284,27 @@ describe("PRD-050a — honeycomb install (a-AC-2 idempotency)", () => {
 	});
 });
 
-describe("PRD-050a — honeycomb install (a-AC-6 honeycomb.local → loopback fallback)", () => {
-	it("a-AC-6 attempts honeycomb.local first, then falls back to loopback when that open fails", async () => {
-		// The friendly honeycomb.local open FAILS; loopback succeeds. The run must still succeed.
+describe("PRD-050a / BUG 1 — honeycomb install (solo opens the loopback dashboard only)", () => {
+	it("solo opens the loopback URL (honeycomb.local dropped) when the portal is reachable", async () => {
+		// After BUG 1 there is no honeycomb.local attempt: the SOLO open targets the loopback URL only.
 		const opener = recordingOpener((url) => url === loopbackDashboardUrl());
 		const res = await runInstallCommand([], {
 			daemon: createFakeDaemonClient({ alive: true }),
 			lifecycle: fakeLifecycle({}),
 			openDashboard: opener.open,
 			probeDashboard: reachablePortalProbe,
-			detectFleet: fleetDefer,
+			detectFleet: soloDetect,
+			loadInstallCredentials: credsPresent,
 			dir: tmpDir,
 			out: () => {},
 		});
 		expect(res.exitCode).toBe(0);
-		// First attempt = honeycomb.local; fallback = loopback (a-AC-6).
-		expect(opener.urls[0]).toBe(localDashboardUrl());
-		expect(opener.urls).toContain(loopbackDashboardUrl());
+		// The ONLY URL handed to the opener is the loopback URL — never a `honeycomb.local` address.
+		expect(opener.urls).toEqual([loopbackDashboardUrl()]);
+		expect(opener.urls.join("\n")).not.toContain("honeycomb.local");
 	});
 
-	it("a-AC-6 the run still succeeds even if BOTH opens fail (no browser available)", async () => {
+	it("solo run still succeeds even if the open fails (no browser available)", async () => {
 		const lines: string[] = [];
 		const opener = recordingOpener(() => false); // no browser anywhere
 		const res = await runInstallCommand([], {
@@ -285,7 +312,8 @@ describe("PRD-050a — honeycomb install (a-AC-6 honeycomb.local → loopback fa
 			lifecycle: fakeLifecycle({}),
 			openDashboard: opener.open,
 			probeDashboard: reachablePortalProbe,
-			detectFleet: fleetDefer,
+			detectFleet: soloDetect,
+			loadInstallCredentials: credsPresent,
 			dir: tmpDir,
 			out: (l) => lines.push(l),
 		});
@@ -295,7 +323,7 @@ describe("PRD-050a — honeycomb install (a-AC-6 honeycomb.local → loopback fa
 		expect(lines.join("\n")).toMatch(/Honeycomb is ready/);
 	});
 
-	it("C-6 does not open a browser tab when the portal is unreachable; it prints one honest sentence", async () => {
+	it("C-6 solo: does not open a browser tab when the portal is unreachable; prints one honest sentence", async () => {
 		const lines: string[] = [];
 		const opener = recordingOpener(() => true);
 		const res = await runInstallCommand([], {
@@ -303,7 +331,8 @@ describe("PRD-050a — honeycomb install (a-AC-6 honeycomb.local → loopback fa
 			lifecycle: fakeLifecycle({}),
 			openDashboard: opener.open,
 			probeDashboard: async () => false,
-			detectFleet: fleetDefer,
+			detectFleet: soloDetect,
+			loadInstallCredentials: credsPresent,
 			dir: tmpDir,
 			out: (l) => lines.push(l),
 		});
@@ -312,7 +341,7 @@ describe("PRD-050a — honeycomb install (a-AC-6 honeycomb.local → loopback fa
 		expect(lines).toContain(DASHBOARD_PORTAL_NOT_RUNNING_MESSAGE);
 	});
 
-	it("C-6 a THROWING probe degrades to the not-running branch (fail-soft): no tab, sentence printed, exit 0", async () => {
+	it("C-6 solo: a THROWING probe degrades to the not-running branch (fail-soft): no tab, sentence, exit 0", async () => {
 		const lines: string[] = [];
 		const opener = recordingOpener(() => true);
 		const res = await runInstallCommand([], {
@@ -322,13 +351,63 @@ describe("PRD-050a — honeycomb install (a-AC-6 honeycomb.local → loopback fa
 			probeDashboard: async () => {
 				throw new Error("probe blew up");
 			},
-			detectFleet: fleetDefer,
+			detectFleet: soloDetect,
+			loadInstallCredentials: credsPresent,
 			dir: tmpDir,
 			out: (l) => lines.push(l),
 		});
 		expect(res.exitCode).toBe(0);
 		expect(opener.urls).toHaveLength(0);
 		expect(lines).toContain(DASHBOARD_PORTAL_NOT_RUNNING_MESSAGE);
+		expect(lines.join("\n")).toMatch(/Honeycomb is ready/);
+	});
+});
+
+describe("BUG 1 — honeycomb install in FLEET mode opens NO dashboard (Hive owns the portal)", () => {
+	it("opens NOTHING and never probes the portal when Hive is detected", async () => {
+		const lines: string[] = [];
+		const opener = recordingOpener(() => true);
+		let probed = false;
+		const res = await runInstallCommand([], {
+			daemon: createFakeDaemonClient({ alive: true }),
+			lifecycle: fakeLifecycle({}),
+			openDashboard: opener.open,
+			probeDashboard: async () => {
+				probed = true;
+				return true;
+			},
+			detectFleet: fleetDefer,
+			dir: tmpDir,
+			out: (l) => lines.push(l),
+		});
+		expect(res.exitCode).toBe(0);
+		// The competing-window field bug: fleet mode must open NO browser at all.
+		expect(opener.urls).toHaveLength(0);
+		// And it must not even probe the portal (the open decision is short-circuited on fleet).
+		expect(probed).toBe(false);
+		const text = lines.join("\n");
+		// One plain line that the Hive portal owns the dashboard, and no honeycomb.local anywhere.
+		expect(text).toMatch(/Hive portal owns it/i);
+		expect(text).not.toContain("honeycomb.local");
+		expect(text).toMatch(/Honeycomb is ready/);
+	});
+
+	it("a detection failure defers to fleet: still opens NO dashboard", async () => {
+		const lines: string[] = [];
+		const opener = recordingOpener(() => true);
+		const res = await runInstallCommand([], {
+			daemon: createFakeDaemonClient({ alive: true }),
+			lifecycle: fakeLifecycle({}),
+			openDashboard: opener.open,
+			probeDashboard: reachablePortalProbe,
+			detectFleet: async () => {
+				throw new Error("classifier blew up");
+			},
+			dir: tmpDir,
+			out: (l) => lines.push(l),
+		});
+		expect(res.exitCode).toBe(0);
+		expect(opener.urls).toHaveLength(0);
 		expect(lines.join("\n")).toMatch(/Honeycomb is ready/);
 	});
 });
@@ -519,14 +598,15 @@ describe("PRD-050a — ref parsing + URL helpers (units)", () => {
 		expect(resolveEffectiveRef(["--ref", "carol"])).toBe("carol");
 	});
 
-	it("the URLs are the loopback + honeycomb.local dashboard hosts on port 3850", () => {
+	it("the dashboard URL is the loopback portal host on port 3853 (honeycomb.local dropped)", () => {
 		expect(loopbackDashboardUrl()).toBe("http://127.0.0.1:3853/");
-		expect(localDashboardUrl()).toBe("http://honeycomb.local:3853/");
 	});
 
-	it("openLocalDashboardUrl REFUSES a non-local or non-http(s) URL without launching", () => {
+	it("openLocalDashboardUrl REFUSES a non-local (incl. honeycomb.local) or non-http(s) URL without launching", () => {
 		// A remote host is refused (returns false, never reaches an OS opener).
 		expect(openLocalDashboardUrl("http://evil.example.com/dashboard")).toBe(false);
+		// honeycomb.local is no longer a permitted host (BUG 1 dropped the friendly name).
+		expect(openLocalDashboardUrl("http://honeycomb.local:3853/")).toBe(false);
 		expect(openLocalDashboardUrl("file:///etc/passwd")).toBe(false);
 		expect(openLocalDashboardUrl("not a url")).toBe(false);
 	});

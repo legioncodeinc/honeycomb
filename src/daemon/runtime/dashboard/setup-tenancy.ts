@@ -58,6 +58,7 @@ import {
 	type DeviceFlowLoginDeps,
 	type OrgRow,
 	persistSelectedTenancy,
+	persistUnconfirmedTenancy,
 	resolveApiUrl,
 	resolveTenancyChoice,
 	TenancySelectionRequiredError,
@@ -233,8 +234,32 @@ export function makePendingLinkRunner(options: SetupTenancyOptions): (deps: Devi
 			// pending window behind, so no GET could ever carry it.
 			return { persisted: { orgId: choice.orgId, workspaceId: choice.workspaceId } };
 		} catch (err: unknown) {
-			// A multi-tenancy account needs an explicit choice → PARK the pending window (no persist).
+			// A multi-tenancy account needs an explicit choice → PARK the pending window for the
+			// `/setup/tenancy/select` step. BUG 2: BEFORE parking, persist BASE credentials (auth-only,
+			// tenancy unselected) so `/setup/state.authenticated` flips the instant the device is approved
+			// (the field hive polls). The base credential is provisionally bound to the FIRST enumerated
+			// org and carries `tenancyPending: true` with NO `tenancyConfirmedAt`, so the capture gate
+			// stays closed (`tenancy_unconfirmed`) and NO data is written to the provisional org before the
+			// explicit pick. The `/setup/tenancy/select` step then re-mints for the CHOSEN org and
+			// OVERWRITES the file with the confirmed marker. Persist is fail-soft: a base-credential write
+			// hiccup still parks the pending window so the tenancy picker works.
 			if (err instanceof TenancySelectionRequiredError) {
+				const provisional = err.orgs[0];
+				if (provisional !== undefined) {
+					try {
+						await persistUnconfirmedTenancy(
+							client,
+							authToken,
+							{ orgId: provisional.id, orgName: provisional.name },
+							{
+								...(options.credentialsDir !== undefined ? { dir: options.credentialsDir } : {}),
+								clock,
+							},
+						);
+					} catch {
+						// A base-credential persist failure must not block the tenancy picker — park anyway.
+					}
+				}
 				options.store.set({ authToken, apiUrl, orgs: err.orgs, createdAt: now() });
 				return { pending: true };
 			}

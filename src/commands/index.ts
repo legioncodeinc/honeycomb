@@ -57,14 +57,12 @@ export {
 } from "./daemon.js";
 export { createDispatcher, dispatch, parseInvocation, usageText } from "./dispatch.js";
 export {
-	DASHBOARD_LOCAL_HOST,
 	DASHBOARD_PATH,
 	DASHBOARD_PORTAL_NOT_RUNNING_MESSAGE,
 	type DashboardOpener,
 	type DashboardProbe,
 	dashboardPortalNotRunningMessage,
 	type InstallVerbDeps,
-	localDashboardUrl,
 	loopbackDashboardUrl,
 	openLocalDashboardUrl,
 	parseRefArg,

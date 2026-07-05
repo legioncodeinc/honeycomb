@@ -727,6 +727,23 @@ export async function resolveTenancyChoice(
 }
 
 /**
+ * Mint a long-lived token bound to `orgId` and hydrate the user display name via `GET /me` (AC-2 /
+ * AC-3). Shared by {@link persistSelectedTenancy} (the confirmed pick) and
+ * {@link persistUnconfirmedTenancy} (the BUG-2 auth-only base credential) so the mint+identity
+ * sequence lives in one place. The token NEVER reaches a log (D-4).
+ */
+async function mintOrgBoundIdentity(
+	client: DeeplakeAuthClient,
+	authToken: string,
+	orgId: string,
+): Promise<{ token: string; userName: string }> {
+	const token = await client.reMint(authToken, orgId);
+	const me = await client.getMe(token, orgId);
+	const userName = me.name.length > 0 ? me.name : me.email ? me.email.split("@")[0] : "unknown";
+	return { token, userName };
+}
+
+/**
  * Phase 2 of the link (PRD-073c): mint the long-lived token bound to the CHOSEN org, validate + hydrate
  * identity via `GET /me`, and persist the shared `~/.deeplake/credentials.json` (0600) with the chosen
  * `{ orgId, workspaceId }` PLUS the confirmed-tenancy marker (`tenancyConfirmedAt`). The token NEVER
@@ -739,13 +756,10 @@ export async function persistSelectedTenancy(
 	deps: LoginDeps,
 ): Promise<DiskCredentials> {
 	const clock = deps.clock ?? systemClock;
-	// Mint the long-lived token bound to the CHOSEN org (never a guessed org).
-	const longLived = await client.reMint(authToken, choice.orgId);
-	// `GET /me` validates the minted token AND supplies the user display name (AC-2 / AC-3).
-	const me = await client.getMe(longLived, choice.orgId);
-	const userName = me.name.length > 0 ? me.name : me.email ? me.email.split("@")[0] : "unknown";
+	// Mint the long-lived token bound to the CHOSEN org (never a guessed org) + hydrate identity.
+	const { token, userName } = await mintOrgBoundIdentity(client, authToken, choice.orgId);
 	const disk: DiskCredentials = {
-		token: longLived,
+		token,
 		orgId: choice.orgId,
 		orgName: choice.orgName,
 		userName,
@@ -754,6 +768,44 @@ export async function persistSelectedTenancy(
 		// PRD-073c: the explicit-selection marker. `savedAt` is stamped server-side by saveDiskCredentials;
 		// the marker is stamped here from the same injected clock so both are deterministic under test.
 		tenancyConfirmedAt: clock.now(),
+		savedAt: "",
+	};
+	return saveDiskCredentials(disk, deps.dir, clock);
+}
+
+/**
+ * BUG 2 — persist BASE credentials (auth-only, tenancy UNSELECTED) from an approved device token so
+ * `/setup/state.authenticated` flips the instant the user approves, WITHOUT waiting on the interactive
+ * org/workspace pick (the field bug: hive's onboarding polled `/setup/state.authenticated`, which only
+ * flips when a credential PERSISTS, but a multi-tenancy account parked a pending window and persisted
+ * nothing — so the page hung forever).
+ *
+ * The credential is provisionally bound to the first enumerated org (`provisional`) purely so it is a
+ * structurally-usable credential (a mint needs SOME org). It carries `tenancyPending: true` and NO
+ * `tenancyConfirmedAt`, so {@link import("./tenancy-confirmation.js").resolveTenancyConfirmation}
+ * reports it UNCONFIRMED and the capture gate stays closed — NO data is ever written to the provisional
+ * org before the explicit pick. The later `/setup/tenancy/select` step re-mints for the CHOSEN org and
+ * OVERWRITES this file with the confirmed marker set + the pending flag cleared. The token NEVER reaches
+ * a log (D-4); the file is `0600`, the dir `0700` (via {@link saveDiskCredentials}).
+ */
+export async function persistUnconfirmedTenancy(
+	client: DeeplakeAuthClient,
+	authToken: string,
+	provisional: { orgId: string; orgName: string },
+	deps: LoginDeps,
+): Promise<DiskCredentials> {
+	const clock = deps.clock ?? systemClock;
+	const { token, userName } = await mintOrgBoundIdentity(client, authToken, provisional.orgId);
+	const disk: DiskCredentials = {
+		token,
+		orgId: provisional.orgId,
+		orgName: provisional.orgName,
+		userName,
+		// Auth-only: the workspace is the server-resolving `default` sentinel until the explicit pick.
+		workspaceId: DEFAULT_WORKSPACE,
+		apiUrl: client.apiUrl,
+		// The auth-only, tenancy-unselected marker — capture stays gated until `/setup/tenancy/select`.
+		tenancyPending: true,
 		savedAt: "",
 	};
 	return saveDiskCredentials(disk, deps.dir, clock);

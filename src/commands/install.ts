@@ -21,10 +21,14 @@
  *      (`__HONEYCOMB_REF_DEFAULT__`, default "mario"). 050c's login reads this ref; this verb only
  *      PERSISTS it (the device-flow/referral header is 050c's job, not here). The write is fail-soft
  *      — an onboarding-write hiccup never fails the install, it only logs a warning.
- *   3. Open the dashboard honestly (a-AC-6): first probe the loopback portal URL
- *      (`http://127.0.0.1:3853/`). If reachable, open `http://honeycomb.local:3853/` first
- *      (best-effort) and fall back to `http://127.0.0.1:3853/`. If not reachable, do not open a
- *      browser and print one plain sentence that names the one command to install Hive.
+ *   3. Open the dashboard honestly (a-AC-6) — SOLO mode ONLY. When Hive is present (FLEET mode),
+ *      the dashboard IS the Hive portal and Hive's own onboarding owns it, so this verb opens
+ *      NOTHING and prints one plain line saying so (it must never race a second, competing browser
+ *      window against the tab Hive already opened). In SOLO mode it probes the loopback portal URL
+ *      (`http://127.0.0.1:3853/`); if reachable it opens the loopback URL (`http://127.0.0.1:3853/`),
+ *      and if not reachable it opens no browser and prints one plain sentence naming the one command
+ *      to install Hive. The friendly `honeycomb.local` host was dropped: it does not resolve on a
+ *      normal machine, so showing it only confused users — the always-correct loopback URL is used.
  *
  * ── Idempotency (a-AC-2) ─────────────────────────────────────────────────────────────────────
  *   Re-running is safe: ensure-running short-circuits on an already-healthy daemon (no start, no
@@ -56,23 +60,15 @@ import { classifyFleet, type FleetClassification, fleetSignalLine } from "../sha
 import type { CommandResult, OutputSink } from "./contracts.js";
 import { type DaemonVerbDeps, ensureDaemonRunning } from "./daemon.js";
 
-/**
- * The mDNS/hosts name the dashboard is attempted at FIRST (a-AC-6). It is NEVER required: if it
- * does not resolve, the open falls back to the {@link loopbackDashboardUrl} and the run still
- * succeeds. The daemon binds loopback only (it does not serve on this name); `honeycomb.local`
- * resolving to 127.0.0.1 (via a future hosts/mDNS entry) is a nicety, not a dependency.
- */
-export const DASHBOARD_LOCAL_HOST = "honeycomb.local" as const;
-
 /** The portal route hive serves the dashboard SPA at (ADR-0001). */
 export const DASHBOARD_PATH = "/" as const;
 
-/** The best-effort friendly portal URL (`http://honeycomb.local:3853/`). */
-export function localDashboardUrl(): string {
-	return `http://${DASHBOARD_LOCAL_HOST}:${HIVE_PORT}${DASHBOARD_PATH}`;
-}
-
-/** The always-correct loopback portal URL (`http://127.0.0.1:3853/`) — the a-AC-6 fallback. */
+/**
+ * The always-correct loopback portal URL (`http://127.0.0.1:3853/`) — the ONLY dashboard URL the
+ * SOLO install ever opens. The former friendly `honeycomb.local` host was dropped because it does
+ * not resolve on a normal machine (no hosts/mDNS entry ships), so surfacing it only stranded users
+ * on a non-resolving address. The daemon binds loopback only; the portal is Hive's, also on loopback.
+ */
 export function loopbackDashboardUrl(): string {
 	return `http://${HIVE_HOST}:${HIVE_PORT}${DASHBOARD_PATH}`;
 }
@@ -102,7 +98,7 @@ export const DASHBOARD_PORTAL_NOT_RUNNING_MESSAGE = dashboardPortalNotRunningMes
 /**
  * The browser-opener seam (a-AC-6). Returns `true` iff it launched the URL. The production default
  * is {@link openLocalDashboardUrl}; a test injects a recorder so no real browser launches and the
- * `honeycomb.local`→loopback fallback is asserted by the URLs it was handed.
+ * loopback URL it opens is asserted by the URLs it was handed.
  */
 export type DashboardOpener = (url: string) => boolean;
 
@@ -112,16 +108,16 @@ export type DashboardProbe = () => Promise<boolean>;
 /**
  * Open a LOCAL dashboard URL in the OS browser via a fixed-argv `execFileSync` (never a shell) —
  * the SAME safe-open discipline as `defaultBrowserOpener` in `deeplake-issuer.ts`, but admitting an
- * `http:` LOOPBACK / `honeycomb.local` URL (the auth opener is https-only because it opens a
- * server-derived OAuth URL; the dashboard URL is a fixed local loopback we construct ourselves, so
- * `http:` is correct and safe here).
+ * `http:` LOOPBACK URL (the auth opener is https-only because it opens a server-derived OAuth URL;
+ * the dashboard URL is a fixed local loopback we construct ourselves, so `http:` is correct and
+ * safe here).
  *
  * The guard still REFUSES anything that is not a parsed `http:`/`https:` URL whose host is the
- * loopback IP, `localhost`, or `honeycomb.local` — so a malformed or non-local URL never reaches an
- * OS opener. On open it uses `open` (darwin) / `rundll32 url.dll,FileProtocolHandler` (win32, which
- * avoids `cmd /c start` re-parsing metacharacters) / `xdg-open` (linux), each fixed-argv. Returns
- * `false` (never throws) on a refused URL or a failed launch, so the caller treats a missing browser
- * as non-fatal and prints the URL instead.
+ * loopback IP or `localhost` — so a malformed or non-local URL never reaches an OS opener. On open it
+ * uses `open` (darwin) / `rundll32 url.dll,FileProtocolHandler` (win32, which avoids `cmd /c start`
+ * re-parsing metacharacters) / `xdg-open` (linux), each fixed-argv. Returns `false` (never throws) on
+ * a refused URL or a failed launch, so the caller treats a missing browser as non-fatal and prints
+ * the URL instead.
  */
 export function openLocalDashboardUrl(url: string): boolean {
 	let safeUrl: string;
@@ -129,7 +125,7 @@ export function openLocalDashboardUrl(url: string): boolean {
 		const parsed = new URL(url);
 		if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
 		const host = parsed.hostname;
-		const isLocal = host === DAEMON_HOST || host === "localhost" || host === "::1" || host === DASHBOARD_LOCAL_HOST;
+		const isLocal = host === DAEMON_HOST || host === "localhost" || host === "::1";
 		if (!isLocal) return false;
 		safeUrl = parsed.href;
 	} catch {
@@ -334,25 +330,14 @@ export async function probeLoopbackDashboard(timeoutMs: number = DASHBOARD_PROBE
 }
 
 /**
- * Open the dashboard with the `honeycomb.local`→loopback fallback (a-AC-6). Tries the friendly
- * `honeycomb.local` URL first; if that opener returns false (it could not launch, e.g. the name does
- * not resolve to a reachable opener target), falls back to the loopback URL. ALWAYS prints the URL
- * actually targeted so a headless/no-browser host still learns where the dashboard lives. A failed
- * launch is non-fatal — the run still succeeds on the printed loopback URL.
+ * Open the SOLO dashboard at the always-correct loopback URL (`http://127.0.0.1:3853/`). The former
+ * friendly `honeycomb.local` first-attempt was dropped (it does not resolve on a normal machine, so a
+ * user was shown a non-resolving address). ALWAYS prints the URL so a headless/no-browser host still
+ * learns where the dashboard lives; a failed launch is non-fatal — the run still succeeds. This is
+ * called ONLY in SOLO mode; in FLEET mode Hive's onboarding owns the portal and this never runs.
  */
-function openDashboardWithFallback(opener: DashboardOpener, out: OutputSink): void {
-	const friendly = localDashboardUrl();
+function openSoloDashboard(opener: DashboardOpener, out: OutputSink): void {
 	const loopback = loopbackDashboardUrl();
-	// Best-effort friendly host first (a-AC-6) — never required. A successful OS-opener launch only means
-	// the browser was handed the URL, NOT that `honeycomb.local` resolves on this machine. So even on the
-	// happy path we ALSO print the always-correct loopback URL as the guaranteed fallback link — a user
-	// whose `.local` name does not resolve is never stranded on a broken page with no working URL to try.
-	if (opener(friendly)) {
-		out(`→ opening dashboard at ${friendly}…`);
-		out(`  (if that doesn't load, use ${loopback})`);
-		return;
-	}
-	// Fall back to the always-correct loopback URL; the run succeeds regardless of the launch result.
 	const opened = opener(loopback);
 	out(
 		opened ? `→ opening dashboard at ${loopback}…` : `→ dashboard is ready at ${loopback} (open it in your browser).`,
@@ -413,14 +398,16 @@ async function defaultInstallDeviceLogin(out: OutputSink): Promise<boolean> {
  * (suppressing a popup wrongly is cheap; opening one wrongly is the bug), and a login failure prints
  * a plain-language "run `honeycomb login`" hint rather than aborting the install.
  */
-async function runInstallLoginStep(deps: InstallVerbDeps, out: OutputSink): Promise<void> {
+async function runInstallLoginStep(deps: InstallVerbDeps, out: OutputSink): Promise<FleetClassification> {
 	let classification: FleetClassification;
 	try {
 		classification = await (deps.detectFleet ?? (() => classifyFleet()))();
 	} catch {
-		// Detection blew up: DEFER (treat as fleet) so we never pop a wrong browser. Actionable line.
+		// Detection blew up: DEFER (treat as fleet) so we never pop a wrong browser NOR a competing
+		// dashboard window. Actionable line, and the returned fleet classification gates the dashboard
+		// step to "open nothing" too.
 		out("note: could not determine solo vs fleet mode; deferring login (run `honeycomb login` to sign in).");
-		return;
+		return { mode: "fleet", signals: { registryHiveEntry: false, hivePortAnswering: false, hiveNpmGlobal: false }, firedSignals: [] };
 	}
 	// a-AC-6: the classification's inputs (which signals fired) are visible in the install output.
 	out(fleetSignalLine(classification));
@@ -428,14 +415,14 @@ async function runInstallLoginStep(deps: InstallVerbDeps, out: OutputSink): Prom
 	if (classification.mode === "fleet") {
 		// a-AC-1: defer ALL login initiation to Hive; never open a browser or prompt.
 		out("→ login is deferred to Hive onboarding (Hive detected); Honeycomb connects once Hive signs in.");
-		return;
+		return classification;
 	}
 
 	// SOLO. Only auto-open when the shared credential is absent (a-AC-3).
 	const creds = (deps.loadInstallCredentials ?? loadCredentials)();
 	if (creds !== null) {
 		out("✓ already signed in (existing credentials found); no browser opened.");
-		return;
+		return classification;
 	}
 
 	out("→ no credentials found; opening sign-in…");
@@ -447,13 +434,15 @@ async function runInstallLoginStep(deps: InstallVerbDeps, out: OutputSink): Prom
 		const reason = err instanceof Error ? err.message : "sign-in failed";
 		out(`note: automatic sign-in could not complete (${reason}); run \`honeycomb login\` to sign in.`);
 	}
+	return classification;
 }
 
 /**
  * Run `honeycomb install [--ref <code>]` (a-AC-1..6). Health-gates the daemon up (idempotent, no
- * double-bind), persists the onboarding "installed" marker + effective ref, then opens the dashboard
- * (`honeycomb.local` best-effort → loopback fallback). Every effect goes through an injected seam;
- * a handled failure is a single readable line + a non-zero exit, never a raw stack (parent AC-7).
+ * double-bind), persists the onboarding "installed" marker + effective ref, then — in SOLO mode only —
+ * opens the dashboard at the loopback URL (in FLEET mode Hive's onboarding owns the portal, so this
+ * opens nothing). Every effect goes through an injected seam; a handled failure is a single readable
+ * line + a non-zero exit, never a raw stack (parent AC-7).
  */
 export async function runInstallCommand(argv: readonly string[], deps: InstallVerbDeps): Promise<CommandResult> {
 	const out: OutputSink = deps.out ?? ((line: string): void => console.log(line));
@@ -501,22 +490,30 @@ export async function runInstallCommand(argv: readonly string[], deps: InstallVe
 
 	// 2c) PRD-003a: the solo-vs-fleet login decision (a-AC-1 / a-AC-3 / a-AC-6 / a-AC-7). Fires from
 	//     the install path ONLY. Fleet → defer to Hive (no popup); solo + no creds → auto device flow;
-	//     solo + creds → already signed in. Fail-soft: it never changes the install exit code.
-	await runInstallLoginStep(deps, out);
+	//     solo + creds → already signed in. Fail-soft: it never changes the install exit code. The
+	//     returned classification also gates the dashboard-open step below (solo-only).
+	const classification = await runInstallLoginStep(deps, out);
 
-	// 3) Probe the dashboard portal first. Reachable: open friendly->loopback. Not reachable:
-	// print one plain sentence and do not open a browser tab (C-6). FAIL-SOFT: a throwing probe
-	// (an injected seam misbehaving) degrades to the not-running branch, never a failed install.
-	let portalReachable = false;
-	try {
-		portalReachable = await probeDashboard();
-	} catch {
-		portalReachable = false;
-	}
-	if (portalReachable) {
-		openDashboardWithFallback(opener, out);
+	// 3) Open the dashboard — SOLO mode ONLY. When Hive is present (FLEET) the dashboard IS the Hive
+	//    portal and Hive's own onboarding already opened it; opening a SECOND competing window here is
+	//    the field bug this gate kills. So in fleet mode we open NOTHING and print one plain line.
+	//    In solo mode we probe the portal first: reachable → open the loopback URL; not reachable →
+	//    print one plain sentence and open no tab (C-6). FAIL-SOFT: a throwing probe (an injected seam
+	//    misbehaving) degrades to the not-running branch, never a failed install.
+	if (classification.mode === "fleet") {
+		out("→ dashboard: the Hive portal owns it; Hive onboarding opened it, so Honeycomb opens nothing here.");
 	} else {
-		out(DASHBOARD_PORTAL_NOT_RUNNING_MESSAGE);
+		let portalReachable = false;
+		try {
+			portalReachable = await probeDashboard();
+		} catch {
+			portalReachable = false;
+		}
+		if (portalReachable) {
+			openSoloDashboard(opener, out);
+		} else {
+			out(DASHBOARD_PORTAL_NOT_RUNNING_MESSAGE);
+		}
 	}
 
 	out("✓ Honeycomb is ready.");

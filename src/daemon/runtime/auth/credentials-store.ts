@@ -106,6 +106,19 @@ export interface DiskCredentials {
 	 * NO credential at all, so the absence of a credential file is the "unconfirmed" state.
 	 */
 	tenancyConfirmedAt?: string;
+	/**
+	 * PRD-073c / BUG 2: the AUTH-ONLY, tenancy-UNSELECTED marker. Set to `true` ONLY by the on-page
+	 * `/setup/login` background flow when it persists BASE credentials for a multi-tenancy account so
+	 * that `/setup/state.authenticated` can flip the instant the device is approved (the field hive
+	 * polls), WITHOUT waiting on the interactive org/workspace pick. A base credential is provisionally
+	 * bound to the first enumerated org purely so it is a structurally-usable credential; capture stays
+	 * GATED (`tenancy_unconfirmed`) while this flag is `true` and no `tenancyConfirmedAt` is set, so no
+	 * data is ever written to the provisional org before the explicit pick. The later `/setup/tenancy/
+	 * select` step re-mints for the CHOSEN org and overwrites the file with `tenancyConfirmedAt` set and
+	 * this flag cleared. Additive + Hivemind-ignored. A credential with NEITHER this flag NOR the marker
+	 * is a pre-073 credential, grandfathered as confirmed (existing installs unchanged — parent AC-5).
+	 */
+	tenancyPending?: boolean;
 	/** ISO timestamp stamped server-side on save (b-AC-4). */
 	savedAt: string;
 }
