@@ -42,7 +42,7 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { hasBoundProjectOnDisk } from "../../hooks/shared/project-resolver.js";
 import { honeycombStateDir, legacyHoneycombDir } from "../../shared/fleet-root.js";
 import { CATALOG } from "../storage/catalog/index.js";
@@ -1569,19 +1569,31 @@ function consolidateWorkspaceVaultIntoFixedRoot(): void {
 	const from = resolveWorkspaceBaseDir();
 	const to = resolveVaultBaseDir();
 	if (from === to) return;
+	// Path-containment guard: every entry comes from `readdirSync` of a dir WE own (single components,
+	// never `..`), but validate before EVERY fs read/copy so a joined path can never escape its scope
+	// dir — mirrors the {@link stagedTaskXmlPath} / service-unit containment checks.
+	const contains = (base: string, child: string): boolean => {
+		const b = resolve(base);
+		const c = resolve(child);
+		return c === b || c.startsWith(b + sep);
+	};
 	for (const sub of [".secrets", join(".vault", "setting")]) {
 		try {
 			const srcRoot = join(from, sub);
+			const dstRoot = join(to, sub);
 			if (!existsSync(srcRoot)) continue;
 			for (const scopeDir of readdirSync(srcRoot)) {
 				const srcScope = join(srcRoot, scopeDir);
+				const dstScope = join(dstRoot, scopeDir);
+				if (!contains(srcRoot, srcScope) || !contains(dstRoot, dstScope)) continue;
 				if (!statSync(srcScope).isDirectory()) continue;
-				const dstScope = join(to, sub, scopeDir);
 				for (const name of readdirSync(srcScope)) {
+					const srcFile = join(srcScope, name);
 					const dstFile = join(dstScope, name);
+					if (!contains(srcScope, srcFile) || !contains(dstScope, dstFile)) continue;
 					if (existsSync(dstFile)) continue; // the fixed root wins — never overwrite.
 					mkdirSync(dstScope, { recursive: true, mode: DIR_MODE });
-					copyFileSync(join(srcScope, name), dstFile);
+					copyFileSync(srcFile, dstFile);
 				}
 			}
 		} catch {
