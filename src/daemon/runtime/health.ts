@@ -42,6 +42,63 @@
 export type PipelineStatus = "ok" | "degraded" | "unconfigured";
 
 /**
+ * The storage `SELECT 1` probe timeout (ms). Raised from the original 5s so a slow-but-working
+ * Deeplake gateway (a `SELECT 1` that returns 200 but takes several seconds of wall time) is not
+ * misread as unreachable. A genuinely unreachable backend still surfaces: the probe fails on the
+ * timeout and the consecutive-failure rule below flips the bit after repeated misses.
+ */
+export const DEFAULT_HEALTH_PROBE_TIMEOUT_MS = 12_000;
+
+/**
+ * Consecutive failed probes required before the cached health bit flips to `degraded`. A SINGLE
+ * slow/timed-out probe must not flap the daemon to `degraded` (the live-dogfood pain: one slow
+ * gateway round trip turned the whole dashboard red). Recovery is immediate: the first successful
+ * probe clears the bit back to `ok`. A genuinely unreachable backend keeps failing, so it still
+ * reaches `degraded` on the second miss (never masked).
+ */
+export const HEALTH_DEGRADE_CONSECUTIVE_FAILURES = 2;
+
+/** A tolerant health-bit tracker: it debounces transient probe failures (see the two constants above). */
+export interface HealthBitTracker {
+	/**
+	 * Feed one probe outcome and return the resulting coarse bit. `true` (a reachable probe) resets
+	 * the failure streak and reports `ok` immediately (recover-on-first-success). `false` increments
+	 * the streak and reports `degraded` only once the streak reaches the configured threshold; below
+	 * it the previously-reported bit stands, so a single failure never flaps to `degraded`.
+	 */
+	record(ok: boolean): PipelineStatus;
+	/** The current coarse bit without feeding a new outcome. */
+	current(): PipelineStatus;
+}
+
+/**
+ * Build a {@link HealthBitTracker}. `degradeAfter` is the number of CONSECUTIVE failed probes
+ * required before flipping to `degraded` (default {@link HEALTH_DEGRADE_CONSECUTIVE_FAILURES}, min 1).
+ * The initial bit is `ok` (a freshly-assembled live client is assumed reachable until proven otherwise,
+ * matching the pre-existing probe posture).
+ */
+export function createHealthBitTracker(degradeAfter: number = HEALTH_DEGRADE_CONSECUTIVE_FAILURES): HealthBitTracker {
+	const threshold = Math.max(1, Math.trunc(degradeAfter));
+	let consecutiveFailures = 0;
+	let bit: PipelineStatus = "ok";
+	return {
+		record(ok: boolean): PipelineStatus {
+			if (ok) {
+				consecutiveFailures = 0;
+				bit = "ok";
+				return bit;
+			}
+			consecutiveFailures += 1;
+			if (consecutiveFailures >= threshold) bit = "degraded";
+			return bit;
+		},
+		current(): PipelineStatus {
+			return bit;
+		},
+	};
+}
+
+/**
  * A per-subsystem coarse state (PRD-029). `ok` is the healthy state; the down state is
  * named per subsystem in {@link HealthReasons}. Kept as a closed enum so a reason can
  * never carry a free-form (secret-bearing) string.

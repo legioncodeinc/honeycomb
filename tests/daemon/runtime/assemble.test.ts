@@ -604,6 +604,10 @@ describe("a-AC-4 /health performs a live storage probe → 200 reachable, 503 un
 			logger: createRequestLogger({ silent: true }),
 			runtimeDir,
 			embedSupervisor: noopEmbedSupervisor,
+			// The probe now debounces (2 consecutive failures by default). Inject `1` so the single boot
+			// probe degrades immediately. This test exercises the 503 /health wiring end to end; the
+			// default 2-failure tolerance is proven separately below and in the health tracker unit suite.
+			healthDegradeAfter: 1,
 		});
 		await assembled.start();
 		try {
@@ -613,6 +617,29 @@ describe("a-AC-4 /health performs a live storage probe → 200 reachable, 503 un
 			expect(body.status).toBe("degraded");
 			expect(body.pipeline).toBe("degraded");
 			expect(assembled.pipelineStatus()).toBe("degraded");
+		} finally {
+			await assembled.shutdown();
+		}
+	});
+
+	it("FIX 2 (probe tolerance): a SINGLE failed boot probe stays ok (200), one slow gateway round trip must not flap to degraded", async () => {
+		// The default tolerance is 2 consecutive failures. The single priming probe at start() sees the
+		// error result once, so the bit must stay `ok` and /health must still return 200. A slow-but-
+		// working gateway (a `SELECT 1` that times out once) never strands the dashboard on degraded.
+		const assembled = assembleDaemon({
+			config: cfg(),
+			storage: fakeStorage(ERR_RESULT),
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+			embedSupervisor: noopEmbedSupervisor,
+		});
+		await assembled.start();
+		try {
+			const res = await assembled.daemon.app.request("/health");
+			expect(res.status).toBe(200);
+			const body = (await res.json()) as Record<string, unknown>;
+			expect(body.status).toBe("ok");
+			expect(assembled.pipelineStatus()).toBe("ok");
 		} finally {
 			await assembled.shutdown();
 		}

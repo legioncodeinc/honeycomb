@@ -79,7 +79,14 @@ import { mountSetupMigrate } from "./dashboard/setup-migrate.js";
 import { mountSetupStateApi } from "./dashboard/setup-state.js";
 import { mountSyncApi } from "./dashboard/sync-mount.js";
 import { mountDiagnosticsHealthApi } from "./diagnostics-health.js";
-import { buildHealthDetail, type HealthDetail, type PortkeyHealth } from "./health.js";
+import {
+	buildHealthDetail,
+	createHealthBitTracker,
+	DEFAULT_HEALTH_PROBE_TIMEOUT_MS,
+	HEALTH_DEGRADE_CONSECUTIVE_FAILURES,
+	type HealthDetail,
+	type PortkeyHealth,
+} from "./health.js";
 import {
 	buildInferenceModelClient,
 	PORTKEY_API_KEY_NAME,
@@ -289,6 +296,13 @@ export interface AssembleDaemonOptions {
 	readonly runtimeDir?: string;
 	/** Cached-health-bit refresh interval (a-AC-4). Default 15s. */
 	readonly healthProbeIntervalMs?: number;
+	/**
+	 * How many CONSECUTIVE failed storage probes must occur before the cached health bit flips to
+	 * `degraded`. Defaults to {@link HEALTH_DEGRADE_CONSECUTIVE_FAILURES} (2) so a single slow/timed-out
+	 * probe against a slow-but-working gateway does not flap the daemon to degraded; the first success
+	 * recovers to `ok`. Tests inject `1` to assert the immediate-degrade wiring end to end.
+	 */
+	readonly healthDegradeAfter?: number;
 	/**
 	 * Test/proof override for whether start() awaits the first storage health probe. Production
 	 * defaults to false so a slow DeepLake request cannot prevent the daemon from binding.
@@ -2131,6 +2145,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	const legacyRuntimeDir = options.runtimeDir === undefined ? legacyHoneycombDir() : undefined;
 	const lockOptions: SingleInstanceLockOptions = legacyRuntimeDir !== undefined ? { legacyDir: legacyRuntimeDir } : {};
 	const probeIntervalMs = options.healthProbeIntervalMs ?? DEFAULT_HEALTH_PROBE_INTERVAL_MS;
+	const healthDegradeAfter = options.healthDegradeAfter ?? HEALTH_DEGRADE_CONSECUTIVE_FAILURES;
 
 	// ── a-AC-1: construct the LIVE storage client. This is the ONLY production code
 	// that imports `daemon/storage` to get a live client; allowed because this file is
@@ -2219,7 +2234,11 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// Declared BEFORE the services block (moved up from its original a-AC-4 position) so the
 	// PRD-071 telemetry service constructed below can close over the SAME `healthBit` thunk
 	// `/health` reads (AC-071a.2.2: the check-in health value is never recomputed independently).
-	let healthBit: PipelineStatus = "ok";
+	// The tolerant tracker debounces transient probe failures: a single slow/timed-out `SELECT 1`
+	// keeps the bit `ok`; only `healthDegradeAfter` CONSECUTIVE misses flip it to `degraded`, and the
+	// first success recovers immediately. Initial bit is `ok` (see createHealthBitTracker).
+	const healthTracker = createHealthBitTracker(healthDegradeAfter);
+	let healthBit: PipelineStatus = healthTracker.current();
 	const pipelineProbe = (): PipelineStatus => healthBit;
 
 	// ── a-AC-3: the three REAL services replace the no-op stubs.
@@ -2596,12 +2615,14 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	let probeTimer: ReturnType<typeof setInterval> | null = null;
 	async function refreshHealth(): Promise<void> {
 		try {
-			const res = await storage.query("SELECT 1", scope, { timeoutMs: 5_000 });
-			healthBit = isOk(res) ? "ok" : "degraded";
+			// A generous timeout so a slow-but-working gateway (a `SELECT 1` that returns late) is not
+			// misread as unreachable. The tracker debounces: one miss stays `ok`, repeated misses degrade.
+			const res = await storage.query("SELECT 1", scope, { timeoutMs: DEFAULT_HEALTH_PROBE_TIMEOUT_MS });
+			healthBit = healthTracker.record(isOk(res));
 		} catch {
-			// A thrown probe (should not happen — the client returns a typed result) is
-			// treated as degraded, never a crash of the refresher loop.
-			healthBit = "degraded";
+			// A thrown probe (should not happen — the client returns a typed result) counts as one
+			// failed probe, never a crash of the refresher loop. It only degrades after the streak.
+			healthBit = healthTracker.record(false);
 		}
 	}
 

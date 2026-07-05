@@ -62,6 +62,7 @@ import {
 	resolveApiUrl,
 	resolveTenancyChoice,
 	TenancySelectionRequiredError,
+	type WorkspaceRow,
 } from "../auth/deeplake-issuer.js";
 import { type Clock, type DiskCredentials, loadDiskCredentials, systemClock } from "../auth/credentials-store.js";
 import { resolveTenancyConfirmation } from "../auth/tenancy-confirmation.js";
@@ -286,6 +287,62 @@ function loadCredential(options: SetupTenancyOptions): DiskCredentials | null {
 	return loadDiskCredentials(options.credentialsDir, options.env ?? process.env);
 }
 
+/**
+ * Where a `POST /setup/tenancy/select` resolves its enumerated orgs + minting token from. Two
+ * sources back it: the in-memory pending-link window (the initial sign-in fast path), and (once
+ * that single-use window is consumed) the PERSISTED credential (FIX 1, the re-selection keystone).
+ */
+interface SelectionSource {
+	/** The auth client bound to the source's apiUrl. */
+	readonly client: DeeplakeAuthClient;
+	/** The orgs the selection is validated against (enumerated, privilege-scoped). */
+	readonly orgs: readonly OrgRow[];
+	/** The token {@link persistSelectedTenancy} re-mints from for the chosen org (memory-only or persisted). */
+	readonly mintToken: string;
+	/** List a target org's workspaces (to validate a non-`default` workspace choice). */
+	listWorkspaces(orgId: string): Promise<WorkspaceRow[]>;
+}
+
+/**
+ * Resolve the {@link SelectionSource} for a select/re-select:
+ *   - a live pending window → enumerate + mint from its short-lived in-memory token (initial link);
+ *   - else the PERSISTED credential (FIX 1) → enumerate orgs/workspaces with the long-lived org-bound
+ *     token already on disk and re-mint from it, so re-selection works AFTER the pending window is
+ *     gone WITHOUT a fresh device-flow sign-in;
+ *   - else `null` (genuinely not linked: no window and no credential).
+ * The token rides ONLY in the auth client's `Authorization` header (D-4); it never touches a body.
+ */
+async function resolveSelectionSource(
+	options: SetupTenancyOptions,
+	pending: PendingLink | null,
+): Promise<SelectionSource | null> {
+	if (pending !== null) {
+		const client = clientFor(options, pending.apiUrl);
+		return {
+			client,
+			orgs: pending.orgs,
+			mintToken: pending.authToken,
+			listWorkspaces: (orgId: string): Promise<WorkspaceRow[]> => client.listWorkspaces(pending.authToken, orgId),
+		};
+	}
+	const disk = loadCredential(options);
+	if (disk === null || disk.token.length === 0) return null;
+	const apiUrl = disk.apiUrl ?? resolveApiUrl(options.env ?? process.env);
+	const client = clientFor(options, apiUrl);
+	const orgs = await client.listOrgs(disk.token);
+	return {
+		client,
+		orgs,
+		mintToken: disk.token,
+		listWorkspaces: async (orgId: string): Promise<WorkspaceRow[]> => {
+			// A credential token is bound to its own org; enumerating a DIFFERENT org needs a reMint
+			// first (mirrors the GET /setup/tenancy/workspaces path).
+			const token = orgId !== disk.orgId ? await client.reMint(disk.token, orgId) : disk.token;
+			return client.listWorkspaces(token, orgId);
+		},
+	};
+}
+
 /** zod boundary for `POST /setup/tenancy/select`. */
 const SelectBodySchema = z.object({ orgId: z.string().min(1), workspaceId: z.string().min(1) });
 /** zod boundary for `POST /setup/tenancy/workspaces`. */
@@ -445,34 +502,47 @@ export function mountSetupTenancyApi(daemon: Daemon, options: SetupTenancyOption
 		if (!parsed.ok) return c.json({ selected: false, error: "invalid request body" }, 400);
 		const { orgId, workspaceId } = parsed.value;
 		const pending = options.store.get();
-		if (pending === null) {
+		// FIX 1 (the re-selection keystone): resolve the enumerated orgs + minting token from the pending
+		// window when present, else from the PERSISTED credential, so a user can re-select an org/workspace
+		// AFTER the single-use pending window is consumed, without a fresh device-flow sign-in.
+		let source: SelectionSource | null;
+		try {
+			source = await resolveSelectionSource(options, pending);
+		} catch (err: unknown) {
+			// The persisted-credential enumeration failed (e.g. the org-list call errored); fail soft
+			// with a redacted reason (NEVER the token, per D-4). Nothing is persisted; the caller can retry.
+			return c.json({ selected: false, error: redactedReason(err) }, 200);
+		}
+		if (source === null) {
+			// No pending window AND no persisted credential → genuinely not linked. Run the sign-in flow.
 			return c.json({ selected: false, error: "no pending link — start the sign-in flow again" }, 400);
 		}
 		// Validate the org against the ENUMERATED list (AC-073c.1.3) — a selection not on the list 400s.
-		const org = pending.orgs.find((o) => o.id === orgId);
+		const org = source.orgs.find((o) => o.id === orgId);
 		if (org === undefined) {
 			return c.json({ selected: false, error: "org is not in the enumerated list" }, 400);
 		}
-		const client = clientFor(options, pending.apiUrl);
 		// Validate the workspace against the org's enumerated workspaces (the `default` sentinel is
-		// always allowed — it resolves server-side).
+		// always allowed; it resolves server-side), then re-mint + persist for the chosen pair.
 		try {
 			if (workspaceId !== DEFAULT_WORKSPACE) {
-				const workspaces = await client.listWorkspaces(pending.authToken, orgId);
+				const workspaces = await source.listWorkspaces(orgId);
 				if (!workspaces.some((w) => w.id === workspaceId)) {
 					return c.json({ selected: false, error: "workspace is not in the enumerated list" }, 400);
 				}
 			}
 			const persisted = await persistSelectedTenancy(
-				client,
-				pending.authToken,
+				source.client,
+				source.mintToken,
 				{ orgId, orgName: org.name, workspaceId },
 				{
 					...(options.credentialsDir !== undefined ? { dir: options.credentialsDir } : {}),
 					clock: options.clock ?? systemClock,
 				},
 			);
-			options.store.clear(); // the pending window is consumed; discard the short-lived token.
+			// A pending window (if any) is consumed; discard the short-lived token. A persisted-credential
+			// re-selection has no window to clear; clear() is idempotent, so this is safe either way.
+			options.store.clear();
 			return c.json({
 				selected: true,
 				org: { id: persisted.orgId, name: persisted.orgName ?? persisted.orgId },

@@ -97,6 +97,10 @@ describe("PRD-003a a-AC-2 — fleet defer: 503 degraded → healthy on /health w
 			embedSupervisor: noopEmbedSupervisor,
 			// Shorten the cached-health refresh so the recovery lands within the test budget.
 			healthProbeIntervalMs: 25,
+			// This test exercises the degraded → ok RECOVERY transition, not the FIX 2 debounce. Pin the
+			// degrade threshold to 1 so the single pre-login boot probe deterministically reports 503;
+			// the 2-consecutive-failure tolerance is proven in assemble.test.ts + the health tracker suite.
+			healthDegradeAfter: 1,
 		});
 		await assembled.start();
 		try {

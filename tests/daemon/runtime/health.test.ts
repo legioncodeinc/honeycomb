@@ -20,7 +20,14 @@
 
 import { describe, expect, it } from "vitest";
 
-import { buildHealthDetail, publicHealthDetail, type HealthDetail } from "../../../src/daemon/runtime/health.js";
+import {
+	buildHealthDetail,
+	createHealthBitTracker,
+	DEFAULT_HEALTH_PROBE_TIMEOUT_MS,
+	HEALTH_DEGRADE_CONSECUTIVE_FAILURES,
+	type HealthDetail,
+	publicHealthDetail,
+} from "../../../src/daemon/runtime/health.js";
 import { createDaemon } from "../../../src/daemon/runtime/server.js";
 import { createRequestLogger } from "../../../src/daemon/runtime/logger.js";
 import { type RuntimeConfig } from "../../../src/daemon/runtime/config.js";
@@ -393,5 +400,48 @@ describe("AC-5 no token / org GUID / header value in the health detail or the de
 		// It DOES carry the coarse subsystem state.
 		expect(serialized).toContain("lexical_fallback");
 		expect(serialized).toContain("memories");
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX 2 storage-probe tolerance: the tracker debounces a slow-but-working gateway.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("FIX 2 createHealthBitTracker: a slow gateway must not flap the daemon to degraded", () => {
+	it("starts ok, and a SINGLE failed probe stays ok (below the 2-failure threshold)", () => {
+		const tracker = createHealthBitTracker();
+		expect(tracker.current()).toBe("ok");
+		expect(tracker.record(false)).toBe("ok");
+		expect(tracker.current()).toBe("ok");
+	});
+
+	it("TWO consecutive failed probes flip to degraded (a genuinely unreachable backend still surfaces)", () => {
+		const tracker = createHealthBitTracker();
+		expect(tracker.record(false)).toBe("ok");
+		expect(tracker.record(false)).toBe("degraded");
+		expect(tracker.current()).toBe("degraded");
+	});
+
+	it("the FIRST success clears degraded back to ok (recover-on-first-success)", () => {
+		const tracker = createHealthBitTracker();
+		tracker.record(false);
+		tracker.record(false);
+		expect(tracker.current()).toBe("degraded");
+		expect(tracker.record(true)).toBe("ok");
+		expect(tracker.current()).toBe("ok");
+	});
+
+	it("a success resets the failure streak, so an alternating slow/ok gateway never degrades", () => {
+		const tracker = createHealthBitTracker();
+		expect(tracker.record(false)).toBe("ok");
+		expect(tracker.record(true)).toBe("ok");
+		expect(tracker.record(false)).toBe("ok");
+		expect(tracker.record(true)).toBe("ok");
+		expect(tracker.current()).toBe("ok");
+	});
+
+	it("the default threshold is 2 and the probe timeout is at least 12s", () => {
+		expect(HEALTH_DEGRADE_CONSECUTIVE_FAILURES).toBe(2);
+		expect(DEFAULT_HEALTH_PROBE_TIMEOUT_MS).toBeGreaterThanOrEqual(12_000);
 	});
 });

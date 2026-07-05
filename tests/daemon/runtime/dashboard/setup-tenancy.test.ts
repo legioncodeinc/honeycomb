@@ -316,6 +316,145 @@ describe("POST /setup/tenancy/select — phase 2 (persist the choice + marker)",
 	});
 });
 
+describe("FIX 1 re-selection from the PERSISTED credential AFTER the pending window is consumed", () => {
+	const OLD = "2026-07-01T00:00:00.000Z";
+
+	it("a second select (no pending window) to a DIFFERENT workspace succeeds and rewrites the credential to the new pair", async () => {
+		// Simulate the post-confirmation state: a credential is already on disk (bound to org-a / ws-1,
+		// explicitly confirmed) and there is NO pending window (it was single-use and consumed). The user
+		// re-selects ws-2. This must work WITHOUT a fresh device-flow sign-in (the re-selection keystone).
+		saveDiskCredentials(
+			{
+				token: "tok-initial",
+				orgId: "org-a",
+				orgName: "Acme",
+				workspaceId: "ws-1",
+				apiUrl: "https://api.deeplake.ai",
+				tenancyConfirmedAt: OLD,
+				savedAt: "",
+			},
+			dir,
+			{ now: () => OLD },
+		);
+		const { daemon, store } = build({
+			script: {
+				orgs: [{ id: "org-a", name: "Acme" }],
+				workspaces: {
+					"org-a": [
+						{ id: "ws-1", name: "Prod" },
+						{ id: "ws-2", name: "Staging" },
+					],
+				},
+			},
+		});
+		// Pre-condition: no pending window (the fast path is gone).
+		expect(store.get()).toBeNull();
+
+		const res = await daemon.app.request("/setup/tenancy/select", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ orgId: "org-a", workspaceId: "ws-2" }),
+		});
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as Record<string, unknown>;
+		expect(body).toEqual({
+			selected: true,
+			org: { id: "org-a", name: "Acme" },
+			workspace: { id: "ws-2", name: "ws-2" },
+			reminted: true,
+		});
+		// The credential file was rewritten to the NEW pair with a FRESH confirmed-tenancy marker.
+		const onDisk = JSON.parse(readFileSync(credentialsPath(dir), "utf8")) as DiskCredentials;
+		expect(onDisk.orgId).toBe("org-a");
+		expect(onDisk.workspaceId).toBe("ws-2");
+		expect(onDisk.tenancyConfirmedAt).toBe(FIXED); // re-minted with the current clock, not OLD.
+		// The re-mint overwrote the token; tenancy is still confirmed (no re-onboarding).
+		expect(isTenancyConfirmed({ credentialsDir: dir, env: {} })).toBe(true);
+		// D-4: no token in the ack.
+		expect(JSON.stringify(body)).not.toContain("long-lived-tok");
+	});
+
+	it("a second select to a workspace NOT in the org's enumerated list is rejected (nothing rewritten)", async () => {
+		saveDiskCredentials(
+			{
+				token: "tok-initial",
+				orgId: "org-a",
+				orgName: "Acme",
+				workspaceId: "ws-1",
+				apiUrl: "https://api.deeplake.ai",
+				tenancyConfirmedAt: OLD,
+				savedAt: "",
+			},
+			dir,
+			{ now: () => OLD },
+		);
+		const { daemon } = build({
+			script: { orgs: [{ id: "org-a", name: "Acme" }], workspaces: { "org-a": [{ id: "ws-1", name: "Prod" }] } },
+		});
+		const res = await daemon.app.request("/setup/tenancy/select", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ orgId: "org-a", workspaceId: "ws-EVIL" }),
+		});
+		const body = (await res.json()) as Record<string, unknown>;
+		expect(body.selected).toBe(false);
+		// The on-disk credential is untouched (still ws-1 / the OLD marker).
+		const onDisk = JSON.parse(readFileSync(credentialsPath(dir), "utf8")) as DiskCredentials;
+		expect(onDisk.workspaceId).toBe("ws-1");
+		expect(onDisk.tenancyConfirmedAt).toBe(OLD);
+	});
+
+	it("GET /setup/tenancy/orgs enumerates from the persisted token when there is NO pending window", async () => {
+		saveDiskCredentials(
+			{ token: "tok-initial", orgId: "org-a", orgName: "Acme", workspaceId: "ws-1", savedAt: "" },
+			dir,
+			{ now: () => OLD },
+		);
+		const { daemon } = build({
+			script: {
+				orgs: [
+					{ id: "org-a", name: "Acme" },
+					{ id: "org-b", name: "Beta" },
+				],
+				workspaces: {},
+			},
+		});
+		const body = (await (await daemon.app.request("/setup/tenancy/orgs")).json()) as Record<string, unknown>;
+		expect(body).toEqual({
+			orgs: [
+				{ id: "org-a", name: "Acme" },
+				{ id: "org-b", name: "Beta" },
+			],
+		});
+	});
+
+	it("GET /setup/tenancy/workspaces?org= enumerates from the persisted token when there is NO pending window", async () => {
+		saveDiskCredentials(
+			{ token: "tok-initial", orgId: "org-a", orgName: "Acme", workspaceId: "ws-1", savedAt: "" },
+			dir,
+			{ now: () => OLD },
+		);
+		const { daemon } = build({
+			script: {
+				orgs: [{ id: "org-a", name: "Acme" }],
+				workspaces: { "org-a": [{ id: "ws-1", name: "Prod" }, { id: "ws-2", name: "Staging" }] },
+			},
+		});
+		const body = (await (await daemon.app.request("/setup/tenancy/workspaces?org=org-a")).json()) as Record<
+			string,
+			unknown
+		>;
+		expect(body).toEqual({
+			org: "org-a",
+			workspaces: [
+				{ id: "ws-1", name: "Prod" },
+				{ id: "ws-2", name: "Staging" },
+			],
+			canCreate: true,
+		});
+	});
+});
+
 describe("POST /setup/tenancy/workspaces — workspace creation (Deeplake supports it)", () => {
 	it("creates a workspace, returning { created:true, workspace } with a slugged id", async () => {
 		const store = createPendingLinkStore();
