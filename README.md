@@ -158,7 +158,11 @@ One unified `honeycomb` binary drives everything. Run `honeycomb --help` for the
 honeycomb install                    # one-shot install on a fresh machine
 honeycomb setup                      # detect your coding assistants and wire hooks
 honeycomb status                     # daemon + environment health at a glance
-honeycomb daemon start|stop|status   # drive the daemon directly
+honeycomb login                      # sign in via the Deeplake device flow, any time
+honeycomb start                      # start the daemon (bare verb)
+honeycomb stop                       # stop the daemon (bare verb)
+honeycomb daemon start|stop|status   # the same lifecycle, spelled the classic way
+honeycomb uninstall                  # remove hooks, service unit, registry entry, state dir
 honeycomb remember "<fact>"          # write a memory from anywhere
 honeycomb recall "<query>"           # search the shared memory
 honeycomb sessions                   # browse captured sessions
@@ -168,6 +172,11 @@ honeycomb sources                    # manage capture sources
 honeycomb graph                      # query the codebase and knowledge graphs
 honeycomb dashboard                  # open the dashboard (Hive portal, :3853)
 ```
+
+A few lifecycle notes:
+
+- **Sign-in knows who owns it.** When [Hive](https://github.com/legioncodeinc/hive#readme) is installed alongside, `honeycomb install` never opens its own sign-in; Hive's onboarding is the one login surface, and the daemon sits degraded on `/health` until that login writes the shared `~/.deeplake/credentials.json`, then recovers on its own, no restart needed. Solo (no Hive), a fresh install with no credentials opens the device-flow sign-in automatically, and headless sessions get the URL and code printed instead of a browser. `honeycomb login` works the same way in both modes whenever you want it.
+- **`uninstall` is surgical.** It removes only Honeycomb's things: assistant hooks, the OS service unit (current and legacy labels), Honeycomb's entry in Doctor's registry, and `~/.apiary/honeycomb`. Shared credentials and every other product survive. Running it when nothing is installed is a friendly no-op. For a full-machine wipe, use `doctor purge` or the one-command uninstall at [get.theapiary.sh](https://get.theapiary.sh).
 
 <img src="assets/brand/divider-minor.svg" width="100%" height="3">
 
