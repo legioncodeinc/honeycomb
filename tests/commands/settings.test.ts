@@ -319,9 +319,17 @@ describe("PRD-032b b-AC-4 — loopback-only + the secret verb stays names-only (
 		const listReq = buildStorageRequest("secret", ["list"]);
 		expect(listReq.method).toBe("GET");
 		expect(listReq.path).toBe("/api/secrets");
+		// `secret set <name> <value>` keys the NAME in the PATH and the value in the body — NOT the
+		// generic `POST /api/secrets/set {args}` shape, which mis-routed the value and stored a secret
+		// literally named "set" (the regression this fixes). The value never appears in the path.
 		const setReq = buildStorageRequest("secret", ["set", "ANTHROPIC_API_KEY", "sk-xxx"]);
 		expect(setReq.method).toBe("POST");
-		expect(setReq.path).toBe("/api/secrets/set");
+		expect(setReq.path).toBe("/api/secrets/ANTHROPIC_API_KEY");
+		expect(setReq.body).toEqual({ value: "sk-xxx" });
+		// `secret rm <name>` → DELETE by name.
+		const rmReq = buildStorageRequest("secret", ["rm", "ANTHROPIC_API_KEY"]);
+		expect(rmReq.method).toBe("DELETE");
+		expect(rmReq.path).toBe("/api/secrets/ANTHROPIC_API_KEY");
 		// The settings surface never targets the secrets group.
 		const daemonPaths = [SETTINGS_ENDPOINT];
 		expect(daemonPaths.every((p) => !p.includes("/api/secrets"))).toBe(true);

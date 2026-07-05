@@ -118,6 +118,7 @@ describe("AC-2 /health detail NAMES the down subsystem, not a bare degraded", ()
 		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.embeddings).toBe("on");
 	});
 
+
 	it("schema is best-effort 'ok' by default; 'missing_table' only when a required table is known-missing", () => {
 		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.schema).toBe("ok");
 		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true, schemaMissingTable: true }).reasons?.schema).toBe(

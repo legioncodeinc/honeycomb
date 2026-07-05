@@ -1431,12 +1431,11 @@ function resolveProductDataDeps(
 	sources?: SourcesApiDeps;
 	defaultScope: QueryScope;
 } {
-	// The secrets store base dir is the workspace root ($HONEYCOMB_WORKSPACE), defaulting to
-	// the daemon's cwd when unset (the same default the secrets CONVENTIONS document). Routed
-	// through the HARDENED resolver so a detached daemon that inherited a non-writable cwd
-	// (the `C:\WINDOWS\system32` footgun) falls back to `~/.honeycomb` instead of 502ing every
-	// secret save — see {@link resolveWorkspaceBaseDir}.
-	const baseDir = resolveWorkspaceBaseDir();
+	// The VAULT (secrets + settings) base dir is the FIXED fleet state root ({@link resolveVaultBaseDir}
+	// → `~/.apiary/honeycomb`), NOT the workspace/cwd: this store holds daemon-GLOBAL config (Portkey key,
+	// provider/model, pollinating/embeddings toggles), so pinning it cwd-independent is what stops
+	// secrets/settings from scattering across whatever directory the daemon was launched from.
+	const baseDir = resolveVaultBaseDir();
 	const secrets: SecretsApiDeps = {
 		store: new SecretsStore({ baseDir, machineKey: createMachineKeyProvider() }),
 		// PRD-022 local-mode default: the dashboard's `GET /api/secrets` (names-only) carries no
@@ -1527,6 +1526,22 @@ function resolveWorkspaceBaseDir(): string {
 	}
 	workspaceBaseDirMemo = fallback;
 	return fallback;
+}
+
+/**
+ * The base dir for the daemon's VAULT — `secret`-class records (`.secrets/`) AND `setting`-class
+ * records (`.vault/setting/`). Unlike logs (`.daemon/`), the local job queue, and `agent.yaml` — all
+ * legitimately PER-WORKSPACE — the vault holds DAEMON-GLOBAL config: the Portkey/inference key, the
+ * provider/model selection, and the pollinating/embeddings toggles. It MUST be a FIXED, cwd-independent
+ * location so a daemon launched from ANY directory reads and writes the SAME secrets/settings.
+ * {@link resolveWorkspaceBaseDir} falls back to `process.cwd()` when `HONEYCOMB_WORKSPACE` is unset,
+ * which scatters config across whatever folder the daemon happened to start in (observed: the same key
+ * / toggle landing in `~/.apiary/honeycomb/.vault`, `~/GitHub/<repo>/honeycomb/.vault`, … so a boot read
+ * sees an inconsistent subset and Portkey/pollinating silently never engage). Anchoring the vault to the
+ * fleet state root {@link honeycombStateDir} (`~/.apiary/honeycomb`) removes that entire class.
+ */
+function resolveVaultBaseDir(): string {
+	return honeycombStateDir();
 }
 
 /**
@@ -1627,7 +1642,7 @@ function catalogTrustedTableProbe(): TrustedTableProbe {
 
 function buildVaultStore(): VaultStore {
 	return new VaultStore({
-		baseDir: resolveWorkspaceBaseDir(),
+		baseDir: resolveVaultBaseDir(),
 		machineKey: createMachineKeyProvider(),
 		registry: createVaultRegistry(),
 	});
@@ -1720,7 +1735,7 @@ async function resolvePortkeyAssemblyStatus(
 	if (selection === undefined || !selection.enabled) return "off";
 	try {
 		const secretsStore = new SecretsStore({
-			baseDir: resolveWorkspaceBaseDir(),
+			baseDir: resolveVaultBaseDir(),
 			machineKey: createMachineKeyProvider(),
 		});
 		const names = secretsStore.listSecretNames(secretScopeFromQueryScope(scope));
@@ -1894,7 +1909,7 @@ async function buildGatedPollinatingWorker(
 	// override (when set) wins over the `agent.yaml` selection; the `${SECRET_REF}` credential
 	// still resolves through the `secret` class unchanged (FR-2 — the key is never inlined).
 	const secretsStore = new SecretsStore({
-		baseDir: resolveWorkspaceBaseDir(),
+		baseDir: resolveVaultBaseDir(),
 		machineKey: createMachineKeyProvider(),
 	});
 	// PRD-063b: when the Portkey gateway is ON (selection present), the factory routes inference
@@ -2033,7 +2048,7 @@ async function buildPipelineWorker(
 	let model: ModelClient;
 	try {
 		const secretsStore = new SecretsStore({
-			baseDir: resolveWorkspaceBaseDir(),
+			baseDir: resolveVaultBaseDir(),
 			machineKey: createMachineKeyProvider(),
 		});
 		// PRD-063b: route the pipeline's extraction/decision inference through Portkey too when the
@@ -2856,7 +2871,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				// order (c-AC-4). Fail-soft: a build error leaves the inner seam absent (RRF order).
 				if (portkeySelection !== undefined) {
 					const rerankSecrets = createSecretResolver(
-						new SecretsStore({ baseDir: resolveWorkspaceBaseDir(), machineKey: createMachineKeyProvider() }),
+						new SecretsStore({ baseDir: resolveVaultBaseDir(), machineKey: createMachineKeyProvider() }),
 						secretScopeFromQueryScope(scope),
 					);
 					const rerankClient = createPortkeyRerankClient({
