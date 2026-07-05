@@ -10,7 +10,12 @@ import {
 	type HybridJobQueueConfig,
 	resolveHybridJobQueueConfig,
 } from "../../../../src/daemon/runtime/services/hybrid-job-queue.js";
-import type { JobInput, JobQueueService, LeasedJob } from "../../../../src/daemon/runtime/services/job-queue.js";
+import type {
+	JobInput,
+	JobQueueService,
+	JobQueueStats,
+	LeasedJob,
+} from "../../../../src/daemon/runtime/services/job-queue.js";
 import { openLocalJobQueue } from "../../../../src/daemon/runtime/services/local-job-queue.js";
 
 class RecordingQueue implements JobQueueService {
@@ -33,6 +38,10 @@ class RecordingQueue implements JobQueueService {
 		if (idx < 0) return null;
 		const [job] = this.queued.splice(idx, 1);
 		return job ?? null;
+	}
+
+	async stats(): Promise<JobQueueStats> {
+		return { byKind: [], total: 0 };
 	}
 
 	async complete(id: string, _leaseAttempt?: number): Promise<void> {
@@ -245,5 +254,70 @@ describe("PRD-066b hybrid job queue routing", () => {
 		expect(parsed.enabled).toBe(true);
 		expect(parsed.drainSharedLocalKinds).toBe(true);
 		expect(parsed.localKinds.has("summary")).toBe(true);
+	});
+});
+
+/** A JobQueueService fake whose `stats()` returns a scripted snapshot; every other method is inert. */
+class StubStatsQueue extends RecordingQueue {
+	constructor(private readonly snapshot: JobQueueStats) {
+		super();
+	}
+	override async stats(): Promise<JobQueueStats> {
+		return this.snapshot;
+	}
+}
+
+describe("job-observability hybrid stats() merges local + shared", () => {
+	it("sums total and unions distinct kinds across the two queues", async () => {
+		const local = new StubStatsQueue({
+			byKind: [{ kind: "summary", queued: 3, leased: 1, done: 2, failed: 0, dead: 0, total: 6 }],
+			total: 6,
+		});
+		const shared = new StubStatsQueue({
+			byKind: [{ kind: "distill", queued: 5, leased: 0, done: 1, failed: 1, dead: 2, total: 9 }],
+			total: 9,
+		});
+		const queue = createHybridJobQueueService({ local, shared, config: config() });
+
+		const stats = await queue.stats();
+		expect(stats.total).toBe(15);
+		expect(stats.byKind.find((k) => k.kind === "summary")).toEqual({
+			kind: "summary",
+			queued: 3,
+			leased: 1,
+			done: 2,
+			failed: 0,
+			dead: 0,
+			total: 6,
+		});
+		expect(stats.byKind.find((k) => k.kind === "distill")).toEqual({
+			kind: "distill",
+			queued: 5,
+			leased: 0,
+			done: 1,
+			failed: 1,
+			dead: 2,
+			total: 9,
+		});
+		// Sorted by descending total: distill (9) before summary (6).
+		expect(stats.byKind.map((k) => k.kind)).toEqual(["distill", "summary"]);
+	});
+
+	it("defensively sums a kind that appears in BOTH queues (migration overlap)", async () => {
+		const local = new StubStatsQueue({
+			byKind: [{ kind: "summary", queued: 2, leased: 0, done: 1, failed: 0, dead: 0, total: 3 }],
+			total: 3,
+		});
+		const shared = new StubStatsQueue({
+			byKind: [{ kind: "summary", queued: 1, leased: 1, done: 0, failed: 2, dead: 1, total: 5 }],
+			total: 5,
+		});
+		const queue = createHybridJobQueueService({ local, shared, config: config() });
+
+		const stats = await queue.stats();
+		expect(stats.total).toBe(8);
+		expect(stats.byKind).toEqual([
+			{ kind: "summary", queued: 3, leased: 1, done: 1, failed: 2, dead: 1, total: 8 },
+		]);
 	});
 });

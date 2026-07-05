@@ -102,6 +102,38 @@ export interface LeasedJob {
 	readonly attempt: number;
 }
 
+/** The CURRENT-status job counts for one `type` (kind), plus a per-kind total. */
+export interface JobKindStats {
+	/** The job kind (the `memory_jobs.type` discriminator). */
+	readonly kind: string;
+	/** Jobs whose current row is `queued` (waiting to be leased). */
+	readonly queued: number;
+	/** Jobs whose current row is `leased` (a worker is — or crashed while — holding it). */
+	readonly leased: number;
+	/** Jobs whose current row is `done` (completed). */
+	readonly done: number;
+	/** Jobs whose current row is `failed` (will retry after backoff). */
+	readonly failed: number;
+	/** Jobs whose current row is `dead` (exhausted retries; no longer leasable). */
+	readonly dead: number;
+	/** All current jobs of this kind (queued+leased+done+failed+dead, plus any other status). */
+	readonly total: number;
+}
+
+/**
+ * A point-in-time snapshot of the queue's CURRENT job states (PRD job-observability). Computed from
+ * the highest-version row per job id, so it reflects real current status — NOT a raw row count over
+ * the append-only history (which would over-count every job that transitioned). This is the signal
+ * that makes "N jobs of kind K are stuck queued and never processed" answerable in one read instead
+ * of an opaque queue. Carries NO secret — only kind names + integer counts.
+ */
+export interface JobQueueStats {
+	/** Per-kind current-status breakdown, one entry per observed kind. */
+	readonly byKind: readonly JobKindStats[];
+	/** The total number of current jobs across all kinds. */
+	readonly total: number;
+}
+
 /**
  * The durable job queue (PRD-004b). Extends {@link DaemonService} so the
  * bootstrap starts/stops it uniformly. Methods are async because they round-trip
@@ -110,6 +142,13 @@ export interface LeasedJob {
 export interface JobQueueService extends DaemonService {
 	/** Enqueue a job for durable, retried background processing; returns its id. */
 	enqueue(job: JobInput): Promise<string>;
+	/**
+	 * A CURRENT-status snapshot of the queue (job-observability). Reads the highest-version row per
+	 * job (via the same discovery scan `lease()` uses) and aggregates by kind + status. Read-only —
+	 * it never leases, mutates, or advances any job. Used by the `/api/diagnostics/jobs` surface so an
+	 * operator can see a stuck/backlogged queue instead of guessing.
+	 */
+	stats(): Promise<JobQueueStats>;
 	/**
 	 * Lease the next runnable job, or `null` when nothing is leasable.
 	 *
@@ -449,6 +488,34 @@ class DeepLakeJobQueueService implements JobQueueService {
 		]);
 		if (!ok) this.logger?.event("job.enqueue.failed", { id, kind: job.kind });
 		return id;
+	}
+
+	/**
+	 * A CURRENT-status snapshot of the queue (job-observability). Discovers every job's
+	 * highest-version row (the SAME scan `lease()` uses) and aggregates by kind + status, so the
+	 * counts reflect real current state, not raw append-only history. Read-only: it leases/mutates
+	 * nothing. Fail-soft by construction — `discoverIds` degrades to whatever it can read.
+	 */
+	async stats(): Promise<JobQueueStats> {
+		const states = await this.discoverIds();
+		const byKind = new Map<string, { queued: number; leased: number; done: number; failed: number; dead: number; total: number }>();
+		for (const s of states) {
+			let e = byKind.get(s.type);
+			if (e === undefined) {
+				e = { queued: 0, leased: 0, done: 0, failed: 0, dead: 0, total: 0 };
+				byKind.set(s.type, e);
+			}
+			e.total += 1;
+			if (s.status === JOB_QUEUED) e.queued += 1;
+			else if (s.status === JOB_LEASED) e.leased += 1;
+			else if (s.status === JOB_DONE) e.done += 1;
+			else if (s.status === JOB_FAILED) e.failed += 1;
+			else if (s.status === JOB_DEAD) e.dead += 1;
+		}
+		const list: JobKindStats[] = [...byKind.entries()]
+			.map(([kind, e]) => ({ kind, ...e }))
+			.sort((a, b) => b.total - a.total || a.kind.localeCompare(b.kind));
+		return { byKind: list, total: states.length };
 	}
 
 	/**
@@ -887,6 +954,9 @@ export const noopJobQueueService: JobQueueService = {
 	},
 	async lease(_kinds?: readonly string[]): Promise<LeasedJob | null> {
 		return null;
+	},
+	async stats(): Promise<JobQueueStats> {
+		return { byKind: [], total: 0 };
 	},
 	async complete(): Promise<void> {
 		/* no-op stub */

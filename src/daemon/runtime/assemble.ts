@@ -68,6 +68,7 @@ import { mountActionsApi } from "./dashboard/actions-api.js";
 import { mountDashboardApi } from "./dashboard/api.js";
 import { mountHarnessApi } from "./dashboard/harness-api.js";
 import { detectInstalledHarnesses } from "./dashboard/harness-detect.js";
+import { mountJobsDiagnosticsApi } from "./dashboard/jobs-diagnostics-api.js";
 import { mountSetupLogin } from "./dashboard/setup-login.js";
 import { mountSetupMigrate } from "./dashboard/setup-migrate.js";
 import { mountSetupStateApi } from "./dashboard/setup-state.js";
@@ -2601,6 +2602,19 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	} catch (err: unknown) {
 		const reason = err instanceof Error ? err.message : String(err);
 		process.stderr.write(`honeycomb: actions API mount failed (non-fatal): ${reason}\n`);
+	}
+
+	// Durable-queue observability read — `GET /api/diagnostics/jobs` (job-observability). Attaches
+	// onto the already-mounted, protected `/api/diagnostics` group (NO `server.ts` edit), inheriting
+	// the dashboard JSON views' operator-only auth/RBAC. It returns the CURRENT-status breakdown of
+	// the daemon's OWN durable job queue (`daemon.services.queue`) by kind + status, so an operator
+	// can see a stuck/backlogged queue in one query. FAIL-SOFT: the handler never 500s (a `stats()`
+	// throw returns a clean empty snapshot), and a mount error never crashes the daemon.
+	try {
+		mountJobsDiagnosticsApi(daemon, { queue: daemon.services.queue });
+	} catch (err: unknown) {
+		const reason = err instanceof Error ? err.message : String(err);
+		process.stderr.write(`honeycomb: jobs diagnostics API mount failed (non-fatal): ${reason}\n`);
 	}
 
 	// PRD-049e (49e-AC-1 / 49e-AC-3): FIRE the dashboard SCOPE-SWITCHER enumeration reads ONCE so the
