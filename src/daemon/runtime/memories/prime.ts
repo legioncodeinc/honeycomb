@@ -49,6 +49,10 @@ import {
 } from "../summaries/prime-digest.js";
 import { MEMORIES_GROUP } from "./api.js";
 
+// Re-exported so `mountMemoriesApi` (api.ts) can register /prime before /:id using the SAME
+// testable core + budget type this module owns, without re-importing from prime-digest directly.
+export type { PrimeDigestBudget };
+
 /** Options for {@link mountMemoriesPrimeApi}. Mirrors the storage/defaultScope half of {@link import("./api.js").MountMemoriesOptions}. */
 export interface MountMemoriesPrimeOptions {
 	/** The storage client the prime skim runs through (never a raw fetch). */
@@ -98,7 +102,7 @@ export type PrimeResponse = z.infer<typeof PrimeResponseSchema>;
 const NO_ORG_BODY = { error: "bad_request", reason: "x-honeycomb-org header is required" } as const;
 
 /** Parse a `?limit=` / `?maxTokens=` query param into a positive integer, or `undefined` when absent/bad. */
-function parsePositiveInt(raw: string | undefined): number | undefined {
+export function parsePositiveInt(raw: string | undefined): number | undefined {
 	if (raw === undefined) return undefined;
 	const n = Number(raw);
 	return Number.isFinite(n) && n > 0 ? Math.trunc(n) : undefined;
@@ -131,13 +135,26 @@ export async function buildPrimeForScope(
 
 /**
  * Attach `GET /api/memories/prime` onto the daemon's already-mounted `/api/memories` SESSION
- * group (the 022a mount seam). The handler resolves the request scope (fail-closed 400), assembles
- * the digest over the single `skimPrimeKeys` read, validates the response against
- * {@link PrimeResponseSchema}, and returns it. Call ONCE after `createDaemon(...)`. If the group
- * is not mounted (unknown daemon shape) the attach is a no-op.
+ * group. The handler resolves the request scope (fail-closed 400), assembles the digest over
+ * the single `skimPrimeKeys` read, validates the response against {@link PrimeResponseSchema},
+ * and returns it. Call ONCE after `createDaemon(...)`. If the group is not mounted (unknown
+ * daemon shape) the attach is a no-op.
  *
  * The group's runtime-path middleware already enforced the `x-honeycomb-session` requirement
  * before this handler runs (the same session-group posture as the rest of `/api/memories/*`).
+ *
+ * ── The route-shadow bug (why production ALSO mounts /prime inside mountMemoriesApi) ────────
+ * Hono's RegExpRouter matches a literal segment vs a parametric segment (`/prime` vs `/:id`)
+ * by REGISTRATION ORDER within the group. When this standalone mount runs AFTER
+ * {@link mountMemoriesApi} (which registers `/:id`), the parametric route wins and `/prime`
+ * 404s with `{error:"not_found", id:"prime"}` — the hook's fail-soft prime renderer swallows
+ * the 404, so Claude Code SessionStart always received `{}` and never injected memories.
+ *
+ * The fix: {@link mountMemoriesApi} now registers `/prime` ITSELF, BEFORE `/:id`, via the
+ * same {@link buildPrimeForScope} core. THIS standalone mount remains for callers/tests that
+ * mount ONLY the prime route on a fresh daemon (no `/:id` to shadow — the unit-test path).
+ * When BOTH are mounted (production), the earlier registration inside mountMemoriesApi wins
+ * and this call harmlessly adds a duplicate handler that is never reached.
  */
 export function mountMemoriesPrimeApi(daemon: Daemon, options: MountMemoriesPrimeOptions): void {
 	const group = daemon.group(MEMORIES_GROUP);

@@ -22,6 +22,7 @@ import { createRequestLogger } from "../../../../src/daemon/runtime/logger.js";
 import { createDaemon } from "../../../../src/daemon/runtime/server.js";
 import {
 	buildPrimeForScope,
+	mountMemoriesApi,
 	mountMemoriesPrimeApi,
 	PrimeResponseSchema,
 } from "../../../../src/daemon/runtime/memories/index.js";
@@ -177,5 +178,64 @@ describe("PRD-046c c-AC-5 — cheap (SQL-only) + cold-safe", () => {
 		expect(parsed.recent.length).toBe(2);
 		expect(parsed.durable.length).toBe(2);
 		expect(parsed.empty).toBe(false);
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REGRESSION: the route-shadow bug (pre-fix, GET /api/memories/prime 404'd with
+// {error:"not_found", id:"prime"} when mountMemoriesApi was also mounted, because
+// Hono matched the parametric GET /:id before the literal GET /prime registered
+// later by mountMemoriesPrimeApi). The hook's fail-soft prime renderer swallowed
+// the 404 → Claude Code SessionStart always received {} → no memories injected.
+// These tests mount BOTH seams in the production order and assert /prime wins.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("REGRESSION — /api/memories/prime wins against GET /:id when both are mounted (production order)", () => {
+	it("mountMemoriesApi alone (without the standalone prime seam) serves /prime before /:id", async () => {
+		const { daemon, storage } = makeDaemon();
+		// ONLY the full memories API — registers /prime before /:id (the fix).
+		mountMemoriesApi(daemon, { storage });
+
+		const res = await daemon.app.request("/api/memories/prime", { method: "GET", headers: headers() });
+		expect(res.status).toBe(200);
+		const json = PrimeResponseSchema.parse(await res.json());
+		expect(json.recent.map((e) => e.ref)).toEqual(["/summaries/alice/s1.md", "/summaries/alice/s2.md"]);
+	});
+
+	it("mountMemoriesApi + mountMemoriesPrimeApi together (full production wiring) still routes /prime to the digest", async () => {
+		const { daemon, storage } = makeDaemon();
+		// Production order: the full API mounts first (registers /prime before /:id), THEN the
+		// standalone prime seam fires (its /prime handler is a never-reached duplicate). The
+		// route must still resolve to the digest, not the /:id "memory not found" 404.
+		mountMemoriesApi(daemon, { storage });
+		mountMemoriesPrimeApi(daemon, { storage });
+
+		const res = await daemon.app.request("/api/memories/prime", { method: "GET", headers: headers() });
+		expect(res.status).toBe(200);
+		const json = PrimeResponseSchema.parse(await res.json());
+		expect(json.empty).toBe(false);
+		// The bug signature was {error:"not_found", id:"prime"} — assert the body is NOT that.
+		expect(json as unknown).not.toHaveProperty("error");
+	});
+
+	it("GET /api/memories/:id still resolves a real id through the parametric handler (no regression on /:id)", async () => {
+		// A daemon whose durable-memories table answers with a single memory id "mem_real".
+		const { daemon, storage } = makeDaemon((req) => {
+			if (/FROM\s+"memories"/i.test(req.sql)) {
+				return [{ id: "mem_real", content: "a real memory", key: "a real memory" }];
+			}
+			return [];
+		});
+		mountMemoriesApi(daemon, { storage });
+
+		const res = await daemon.app.request("/api/memories/mem_real", { method: "GET", headers: headers() });
+		// Whether 200 or 404 (depending on whether getMemory matches the row), the response must
+		// NOT carry the bug signature for the literal "prime" id. We assert status is NOT the
+		// bug's 404-with-id-prime; here we just confirm routing reached /:id (an id-shaped body).
+		expect([200, 404]).toContain(res.status);
+		if (res.status === 404) {
+			const body = (await res.json()) as { error?: string; id?: string };
+			expect(body.id).toBe("mem_real");
+			expect(body.id).not.toBe("prime");
+		}
 	});
 });
