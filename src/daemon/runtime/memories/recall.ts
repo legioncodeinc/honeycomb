@@ -361,24 +361,58 @@ export function buildMemoryArmSql(term: string, perArmLimit: number, projectClau
 }
 
 /**
- * Build the `sessions` arm: raw captured turns (JSONB `message`, matched as
- * `::text`), keyed by `path`. Same guard discipline as {@link buildMemoriesArmSql}.
+ * Build the `sessions` arm: raw captured turns, keyed by `path`. Same guard discipline
+ * as {@link buildMemoriesArmSql}.
+ *
+ * ── PRD-074 (m-AC-2 / a-AC-6): match + return `prose`, not the JSONB blob ────────
+ * The projection AND the `ILIKE` predicate read a COALESCE that PREFERS the dedicated
+ * `prose` column (PRD-074a/b) and FALLS BACK to `message::text` for legacy rows whose
+ * `prose` is empty:
+ *
+ *   COALESCE(NULLIF("prose", ''), "message"::text)
+ *
+ * `NULLIF(prose, '')` converts the empty string (legacy rows that healed in before the
+ * prose column existed, or a row whose event produced empty prose) to NULL, which the
+ * COALESCE then replaces with `message::text`. A non-empty `prose` (every new capture)
+ * wins outright — the harness never sees the escaped JSON nesting again. This means:
+ *   - NEW rows: matched + returned on `prose` (clean text).
+ *   - LEGACY rows: matched + returned on `message::text` (the JSONB cast — old bloat,
+ *     the documented acceptable posture, mirrors PRD-060a's "legacy reads back as absent").
+ *
+ * The COALESCE is inlined VERBATIM at BOTH the projection and the predicate (two sites,
+ * kept in sync by hand) so they CANNOT drift apart (a per-row mismatch would let a row
+ * match on `prose` but return `message::text`, or vice versa). It is NOT factored into a
+ * shared local: the SQL-safety audit (`scripts/audit-sql-safety.mjs`) recognizes a DIRECT
+ * `sqlIdent`-guarded interpolation but does not trace through a multi-piece concatenation
+ * local, so each `${proseCol}` / `${messageCol}` must appear inline at each site. The
+ * row-to-hit mapper (`rowsToRankedArm`)
+ * reads the uniform `text` alias and never knows which column filled it. The `<#>`
+ * cosine semantic arm is untouched (it operates on `message_embedding`, not the text
+ * column); the native `deeplake_hybrid_record` reference candidate (`hybrid-recall.ts`)
+ * is out of scope (PRD-047a, ADR-0001, RRF is production).
  */
 export function buildSessionsArmSql(term: string, perArmLimit: number, projectClause = ""): string {
 	const pattern = `'%${sqlLike(term)}%'`;
 	const sessionsTbl = sqlIdent("sessions");
 	const pathCol = sqlIdent("path");
+	const proseCol = sqlIdent("prose");
 	const messageCol = sqlIdent("message");
 	// PRD-047d: the `sessions` table stamps `creation_date`; alias it to the uniform
 	// `created_at` projection the dampener reads (no new column).
 	const createdAtCol = sqlIdent("creation_date");
 	const perArm = Math.max(1, Math.trunc(perArmLimit));
+	// PRD-074: the COALESCE(NULLIF(prose, ''), message::text) match expression is inlined
+	// VERBATIM at the projection (below) AND the ILIKE predicate (further below) — the two
+	// sites MUST stay identical so a row that matches on `prose` is also returned on `prose`
+	// (and a legacy row falls through to `message::text` in BOTH places). It is inlined, not
+	// factored into a local, so each `${proseCol}` / `${messageCol}` is a direct sqlIdent-guarded
+	// interpolation the SQL-safety audit (scripts/audit-sql-safety.mjs) recognizes.
 	// PRD-049b (49b-AC-2): project-segment predicate ANDed in so a raw turn from another
 	// project never surfaces — the broadest leak surface (raw dialogue) is filtered server-side.
 	return (
-		`SELECT 'sessions' AS source, ${pathCol} AS id, ${messageCol}::text AS text, ${createdAtCol}::text AS created_at ` +
+		`SELECT 'sessions' AS source, ${pathCol} AS id, COALESCE(NULLIF(${proseCol}, ''), ${messageCol}::text) AS text, ${createdAtCol}::text AS created_at ` +
 		`FROM "${sessionsTbl}" ` +
-		`WHERE ${messageCol}::text ILIKE ${pattern}${projectClause} ` +
+		`WHERE COALESCE(NULLIF(${proseCol}, ''), ${messageCol}::text) ILIKE ${pattern}${projectClause} ` +
 		`LIMIT ${perArm}`
 	);
 }
