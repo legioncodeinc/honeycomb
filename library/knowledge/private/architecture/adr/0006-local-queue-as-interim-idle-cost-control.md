@@ -1,8 +1,10 @@
 # ADR-0006, Local queue as interim idle-cost control
 
+> **Evolved by [ADR-0009](0009-local-queue-as-default-deeplake-is-not-a-queue.md) (2026-07-05):** the local queue is now the DEFAULT (not opt-in), and the driver is correctness — the shared DeepLake `memory_jobs` queue is unreliable under read-after-write lag — not just idle cost. This ADR's scope boundary and idle-cost invariants still hold.
+
 > **Status:** Proposed (exploratory) | **Date:** 2026-06-29
-> **Supersedes:** none | **Superseded by:** none
-> **Owners:** daemon, operations, storage | **Related:** PRD-062, PRD-066, ADR-0004
+> **Supersedes:** none | **Superseded by:** none (evolved by ADR-0009)
+> **Owners:** daemon, operations, storage | **Related:** PRD-062, PRD-066, ADR-0004, ADR-0009
 
 ## Context
 

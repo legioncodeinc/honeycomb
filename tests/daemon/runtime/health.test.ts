@@ -160,6 +160,16 @@ describe("AC-2 /health detail NAMES the down subsystem, not a bare degraded", ()
 		expect(zero.reasons?.memoryFormation).toEqual({ committedSinceBoot: 0 });
 	});
 
+	it("memoryQueue: omitted when unwired; 'local' healthy / 'shared' degraded when wired", () => {
+		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.memoryQueue).toBeUndefined();
+		expect(
+			buildHealthDetail({ status: "ok", embeddingsEnabled: true, memoryQueue: "local" }).reasons?.memoryQueue,
+		).toBe("local");
+		expect(
+			buildHealthDetail({ status: "ok", embeddingsEnabled: true, memoryQueue: "shared" }).reasons?.memoryQueue,
+		).toBe("shared");
+	});
+
 
 	it("schema is best-effort 'ok' by default; 'missing_table' only when a required table is known-missing", () => {
 		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.schema).toBe("ok");
@@ -195,6 +205,23 @@ describe("AC-2 /health detail NAMES the down subsystem, not a bare degraded", ()
 		expect(body.reasons?.storage).toBe("unreachable");
 		expect(body.reasons?.embeddings).toBe("off");
 		expect(body.reasons?.schema).toBe("ok");
+	});
+
+	it("the /health BODY surfaces the memoryQueue reason ('shared' = the degraded pipeline-queue signal)", async () => {
+		const daemon = createDaemon({
+			config: cfg("local"),
+			storage: {
+				async query() {
+					return ok([]);
+				},
+			},
+			logger: createRequestLogger({ silent: true }),
+			pipelineProbe: () => "ok",
+			healthDetail: () => buildHealthDetail({ status: "ok", embeddingsEnabled: true, memoryQueue: "shared" }),
+		});
+		const res = await daemon.app.request("/health");
+		const body = (await res.json()) as { reasons?: { memoryQueue?: string } };
+		expect(body.reasons?.memoryQueue, "the shared-queue degraded-coordination signal is glanceable").toBe("shared");
 	});
 });
 

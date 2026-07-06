@@ -211,6 +211,15 @@ export interface HealthReasons {
 		readonly lastCommittedAt?: string;
 		readonly lastAction?: string;
 	};
+	/**
+	 * Which queue backs the memory pipeline. `local` is the healthy default — the transactional
+	 * daemon-local SQLite queue. `shared` means pipeline jobs route to the DeepLake `memory_jobs` queue,
+	 * which is UNRELIABLE under read-after-write lag (version collisions re-lease completed jobs, so the
+	 * pipeline may never drain and memories may not form). `shared` is the loud, glanceable signal that a
+	 * daemon is in the degraded coordination mode — set `HONEYCOMB_LOCAL_QUEUE_ENABLED=true` (the default)
+	 * to fix it. Present only when the composition root wires the signal. A closed enum — no secret.
+	 */
+	readonly memoryQueue?: "local" | "shared";
 }
 
 /**
@@ -296,6 +305,11 @@ export interface HealthDetailInputs {
 		readonly lastCommittedAt?: string;
 		readonly lastAction?: string;
 	};
+	/**
+	 * Which queue backs the memory pipeline (`local` healthy default / `shared` degraded). Omitted when
+	 * the composition root does not wire it → the `memoryQueue` reason is absent. See {@link HealthReasons.memoryQueue}.
+	 */
+	readonly memoryQueue?: "local" | "shared";
 }
 
 /**
@@ -372,6 +386,8 @@ export function buildHealthDetail(inputs: HealthDetailInputs): HealthDetail {
 					},
 				}
 			: {}),
+		// The pipeline's queue backend — present only when wired. `shared` is the degraded-coordination signal.
+		...(inputs.memoryQueue !== undefined ? { memoryQueue: inputs.memoryQueue } : {}),
 	};
 	return { status: inputs.status, reasons };
 }

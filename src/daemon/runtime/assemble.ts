@@ -2306,6 +2306,27 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		local: localQueue,
 		config: localQueueConfig,
 	});
+	// ── Bucket-#2 guard: the memory pipeline must NEVER silently run on the shared DeepLake queue.
+	// The hybrid router routes pipeline kinds to the shared queue in exactly two cases: the local queue is
+	// disabled (an explicit `=false` or a declared fleet/multi_device topology), OR it failed to OPEN
+	// (`persistent === false`) so the router fell back to shared. Both mean the pipeline is on the
+	// append-only version scheme that collides under DeepLake read-after-write lag — memories may never
+	// form. Surface it LOUDLY: a boot warning + a durable event + the `/health` `memoryQueue` reason, so a
+	// silent zero-memories regression becomes an at-a-glance signal, not a multi-hour forensic hunt. The
+	// warning/event fire only on the REAL assembly (no injected storage) so the unit suite stays quiet.
+	const sharedPipelinePathActive = !localQueueConfig.enabled || localQueue.persistent === false;
+	if (sharedPipelinePathActive && options.storage === undefined) {
+		const reason =
+			localQueue.persistent === false
+				? "the local queue failed to open — the pipeline fell back to the shared DeepLake queue"
+				: "the local queue is disabled (HONEYCOMB_LOCAL_QUEUE_ENABLED / a declared fleet topology)";
+		process.stderr.write(
+			`honeycomb: the memory pipeline is running on the SHARED DeepLake job queue — ${reason}. This queue is ` +
+				`unreliable under read-after-write lag and memories may not form. Set HONEYCOMB_LOCAL_QUEUE_ENABLED=true ` +
+				`(the default) to use the transactional local queue.\n`,
+		);
+		logger.event("queue.shared_pipeline_path_active", { reason });
+	}
 
 	const captureDroppedEvents = createCaptureDroppedEventsCounter();
 	// The committed-memories signal for `/health` (the glanceable "is this daemon forming memories?"
@@ -2459,6 +2480,8 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// The committed-memories signal, read LIVE per health call — a glanceable "is the pipeline
 			// forming memories?" answer that needs no DeepLake round-trip.
 			memoryFormation: memoryFormation.snapshot(),
+			// Which queue backs the pipeline: `shared` is the degraded-coordination signal (see the guard above).
+			memoryQueue: sharedPipelinePathActive ? "shared" : "local",
 		});
 
 	// ── PRD-063c (c-D-2 / c-AC-1 / c-AC-3): the Cohere-via-Portkey rerank seam, late-bound.
