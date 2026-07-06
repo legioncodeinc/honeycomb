@@ -1,177 +1,79 @@
-# EXECUTION LEDGER - PRD-058 Memory Lifecycle
+# Execution Ledger — PRD-058 Memory Lifecycle (058a-058e)
 
-> Orchestrator: `/the-smoker` · Branch: `legion/zealous-payne-b1e0d3`
-> Worktree: `C:\Users\mario\GitHub\honeycomb\.claude\worktrees\zealous-payne-b1e0d3`
-> Goal: drive PRD-058 and all five sub-PRDs to 100% verified completion. The best memory on the market.
-> Source of truth. Survives context loss. Status: OPEN / IN_PROGRESS / DONE / VERIFIED / BLOCKED.
+> **Run:** the-smoker · branch `prd-058-memory-lifecycle-completion` · worktree `C:\Users\mario\GitHub\honeycomb-prd-058\`
+> **Source PRD:** [`library/requirements/in-work/prd-058-memory-lifecycle/`](../requirements/in-work/prd-058-memory-lifecycle/prd-058-memory-lifecycle-index.md)
+> **Model:** GLM 5.2 for every Bee (per Mario's directive — model matrix ignored)
+> **Gate:** `npm run ci` = typecheck + jscpd + vitest + audit:sql. A criterion is DONE only when fully implemented, wired into a production path (not just defined+tested), and the gate is green.
+> **Status legend:** OPEN · IN PROGRESS · DONE · VERIFIED · BLOCKED
 
-## Verification gates (offline, runnable here)
-- `npm run typecheck` (tsc --noEmit)
-- `npm run dup` (jscpd threshold 7)
-- `npm run test` (vitest run - unit + mocked integration)
-- `npm run audit:sql` (no hand-quoted SQL in src/daemon)
+## Recon finding (grounded in code, not PRD status)
 
-## Credential-gated gates (BLOCKED here - need `HONEYCOMB_DEEPLAKE_TOKEN` + running embed daemon)
-- `npm run eval:recall` numeric verdict (skips without token; harness CODE is delivered + unit-tested)
-- Live dogfood against a real daemon + real DeepLake store
+The user warned that PRD status fields are inaccurate. Recon confirms: **the math/logic layer of all five sub-PRDs is shipped and 151 tests pass.** What's missing is **wiring** — four production seams in `assemble.ts` that are never constructed, plus a few genuinely missing pieces. The diagnosis matches the live-DB symptom: every `memories` row has `importance=0.5`, `access_count=0`, `last_reinforced_at=1970-01-01`, `ref_status=NULL`, because the writers are inert.
 
----
+## Ground-truth AC classifications
 
-## Wave plan (dependency-ordered; shared-file contention on recall.ts + schema registry forces serialization)
+- **058a (recency activation):** ALL 9 ACs SHIPPED. `applyRecencyActivation` is wired into the production ranker at `recall.ts:2305`.
+- **058b (conflict resolution):** 14 of 15 ACs SHIPPED. The conflict hook (`conflict-hook.ts`) IS wired into the production write path (`assemble.ts:2079` → `controlled-writes.ts:515,622`). The κ gate IS wired into recall (`recall.ts:2326`). ONE AC is DEFINED-NOT-WIRED: **AC-55b.2.4 (keep-both memoization)**.
+- **058c (stale-reference healing):** Logic is SHIPPED but reachable only via manual HTTP trigger (`POST /api/diagnostics/stale-refs`). The σ ranker multiplier is DEFINED-NOT-WIRED (`stalenessSource` never supplied to recall). The reverify scheduler is MISSING (no production caller for `reverify-schedule.ts`).
+- **058d (surfaces + controls):** CLI parity SHIPPED (`honeycomb memory conflicts/resolve/stale-refs/inspect --lifecycle`). History audit SHIPPED. Config resolver DEFINED-NOT-WIRED. Dashboard lifecycle/health panel MISSING. Settings-page flag reference MISSING.
+- **058e (reinforcement + calibration):** Math SHIPPED. **Everything else DEFINED-NOT-WIRED or MISSING.** `recordAccess`/`maintainMemoryCache` have zero production callers → `access_count`/`last_reinforced_at` never advance. `activationSource` never injected → ACT-R Stage-2 never runs. `calibration` never injected → `C(m)` never applied. No compaction loop, no refit worker, no reverify scheduler.
 
-| Wave | Sub-PRD | Owner Bee (armed) | Model | Why this model |
-|---|---|---|---|---|
-| 1 | 058a recency-decay (`A` Stage 1) | retrieval-worker-bee + retrieval-stinger | Opus | keystone: recall-pipeline math + freshnessScore contract every later term reuses |
-| 2 | 058e reinforcement/calibration (`A` Stage 2 + `C`) | retrieval-worker-bee + retrieval-stinger | Opus | ACT-R activation + isotonic calibration + 3 new tables; deepest math |
-| 3 | 058c stale-ref healing (`σ`) | retrieval-worker-bee + retrieval-stinger | Opus | codebase-graph cross-ref diagnostic (retrieval owns the tree-sitter graph) |
-| 4 | 058b conflict resolution (`κ`) | retrieval-worker-bee + retrieval-stinger | Opus | the only zeroing gate; highest-stakes correctness surface |
-| 5 | 058d surfaces & controls | typescript-node-worker-bee + react-worker-bee | Opus | config single-source + read API + CLI + dashboard panel |
-| 6 | close-out: security | security-worker-bee + security-stinger | Opus | OWASP/PII/SQL-injection on new endpoints + tables |
-| 7 | close-out: quality | quality-worker-bee + quality-stinger | Opus | implementation-vs-PRD audit, fresh grader |
+## AC Ledger (consolidated, by work item)
 
-Serialization rationale: `recall.ts` is edited by 058a/058e/058c/058b and the schema registry by 058e/058c/058b. Parallel edits to the same files = merge chaos (project memory: "subagents scatter across worktrees"). Each wave owns its files exclusively and is verified green before the next starts.
+| ID | Source | Work item (what's actually missing) | Owner Bee | Wave | Status |
+|---|---|---|---|---|---|
+| **L-W1** | 058e.1.x | Wire `recordRecallAccess` into production recall: every recall hit calls `recordAccess` → bumps `access_count` + advances `last_reinforced_at`. Thread the dep through `MountMemoriesOptions` → `api.ts:545` → `recall.ts:2346`. | retrieval-worker-bee | 1 | OPEN |
+| **L-W2** | 058e.1.x | Wire `activationSource` into `assemble.ts:1135-1148` so ACT-R Stage-2 activation runs instead of the Stage-1 fallback. `MemoryRecallHit.accessCount` gets populated. | retrieval-worker-bee | 1 | OPEN |
+| **L-W3** | 058e.2.x | Wire `calibration` into `assemble.ts` so `applyCalibrationStage` runs. Construct the calibration model from `calibration-store.ts` and inject it. | retrieval-worker-bee | 1 | OPEN |
+| **L-W4** | 058c.2.x | Wire `stalenessSource` into `assemble.ts:1135-1148` so the σ multiplier runs in the ranker. The math at `recall.ts:1660` already works; it just needs the dep supplied. | retrieval-worker-bee | 1 | OPEN |
+| **L-W5** | 058d.1.x | Wire `resolveLifecycleConfig`/`resolveLifecycleConfigLayered` into production: read at boot (or per-request), thread `a`/`c`/`s`/`posture`/`auto-resolve` into the recall + conflict deps. | retrieval-worker-bee | 1 | OPEN |
+| **L-W6** | 058b.2.4 | Ship a production `KeepBothMemoStore` (in-process Map, same shape as the test fake) and wire it into both `createControlledWriteConflictHook` and `mountConflictsApi` at `assemble.ts`. | typescript-node-worker-bee | 2 | OPEN |
+| **L-W7** | 058c.3.x / 058e.3.x | Ship the reverify scheduler: a periodic maintenance worker (on the local job queue, same pattern as compaction) that calls `reverify-schedule.ts`'s `isDueForReverify` over memories and POSTs to the stale-ref trigger when due. | typescript-node-worker-bee | 2 | OPEN |
+| **L-W8** | 058e.2.x | Ship the access-log compaction loop: a periodic worker that calls `compactAccessLog` to fold raw `memory_access` events into `access_count` + advance the watermark. Idempotent (the `(at, id)` cursor makes it so). | typescript-node-worker-bee | 2 | OPEN |
+| **L-W9** | 058e.2.x | Ship the calibration refit worker: a periodic job that reads resolved outcomes from `memory_conflicts`, calls `fitIsotonic` + `shouldAdoptRefit`, writes the adopted curve to `memory_calibration`. | typescript-node-worker-bee | 2 | OPEN |
+| **L-W10** | 058d.2.x | Ship the dashboard lifecycle/health panel: a new view in `src/dashboard/views.ts` rendering `H=A·C·(1−σ)·κ`, freshness, open-conflict count, stale-ref count, calibration ECE. Consumes the already-shipped `GET /api/memories/calibration` + `GET /api/memories/history?type=lifecycle`. | typescript-node-worker-bee | 2 | OPEN |
+| **L-W11** | 058d.1.3 | Ship the settings-page flag reference: render `LIFECYCLE_FLAG_REFERENCE` onto the settings view so the knobs are visible + documented. | typescript-node-worker-bee | 2 | OPEN |
+| **L-X1** | all | Full `npm run ci` green (typecheck + jscpd + audit:sql + vitest) | orchestrator | 3 | OPEN |
+| **L-X2** | all | Verify on the live DB: after a recall + a write, confirm `access_count > 0`, `last_reinforced_at` advanced, a conflict row exists for a real contradiction. | orchestrator | 3 | OPEN |
+| **L-S1** | close-out | Security audit (SQL injection in new wiring, PII in audit rows, supply chain) | security-worker-bee | 4 | OPEN |
+| **L-Q1** | close-out | QA verify against PRD-058 ACs + write report | quality-worker-bee | 5 | OPEN |
 
----
+## Default rulings adopted
 
-## AC Ledger
-
-### PRD-058a - recency activation & decay (`A` Stage 1) - Wave 1 VERIFIED (tsc clean, 34 tests pass, audit:sql clean)
-| ID | Criterion | Status |
+| # | Question | Ruling |
 |---|---|---|
-| 58a.1.1 | Equal R, larger Δt → smaller freshnessScore, ranks below (P=R·A^a orders by A) | VERIFIED |
-| 58a.1.2 | Never removed by age alone; A_simple ∈ (0,1] no cutoff | VERIFIED |
-| 58a.1.3 | Recency is LAST score adjustment (fuse→rerank→dedup→recency→budget+MMR) | VERIFIED |
-| 58a.2.1 | sessions hit > penalty than memories at equal age (h(sessions)<h(memories)) | VERIFIED |
-| 58a.2.2 | caller override `halfLifeDaysByClass` honored | VERIFIED |
-| 58a.2.3 | class w/o configured half-life → documented default, never 100yr neutral | VERIFIED |
-| 58a.3.1 | every hit carries freshnessScore ∈ [0,1] = applied multiplier | VERIFIED |
-| 58a.3.2 | embeddings off → freshnessScore still computed from age, degraded:true honest | VERIFIED |
-| 58a.3.3 | missing/unparseable timestamp → A=1, not dropped/errored | VERIFIED |
-| 58a.eval | freshness-sensitivity eval slice committed (CODE) | VERIFIED (code; live numeric run BLOCKED on creds → IDX-1) |
+| R1 | Should Stage-2 ACT-R activation replace Stage-1, or run alongside? | **Replace.** When `activationSource` is wired, `recall.ts:2302-2305` already picks Stage-2 over Stage-1. The fallback path (Stage-1) stays for cold-start / unwired deployments. |
+| R2 | Where does the access-log compaction + reverify scheduler run? | **On the local job queue** (`local-job-queue.ts`), same pattern as `compact-api.ts`. A periodic `lifecycle-maintenance` job kind, default cadence ~5 min. Fail-soft — a maintenance miss never breaks recall. |
+| R3 | Calibration refit cadence | **~1 hour** (or on-demand via a maintenance trigger). Refit is expensive (reads all resolved outcomes) and the curve moves slowly. |
+| R4 | The keep-both memo store | **In-process `Map`** (same shape as test fakes). The memo is an optimization (avoids re-flagging known keep-both pairs), not a correctness invariant; a daemon restart loses it, which is fine — the next write re-evaluates the pair. |
+| R5 | Dashboard panel scope | **Read-only first.** Show `H`, freshness, conflict count, stale-ref count, calibration ECE. The conflict-resolve action button is a follow-up — the CLI already has it. |
 
-### PRD-058e - reinforcement, activation, calibration (`A` Stage 2 + `C`) - Wave 2 VERIFIED (tsc clean, 304 tests pass, audit:sql + dup clean)
-| ID | Criterion | Status |
-|---|---|---|
-| 58e.1.1 | reinforced useful access → A_actr strictly higher | VERIFIED |
-| 58e.1.2 | spread accesses ≥ bunched (spacing effect) | VERIFIED |
-| 58e.1.3 | contradicted/ignored same turn → u_k→0, no inflation | VERIFIED |
-| 58e.1.4 | cold memory → A_actr ≥ A_min | VERIFIED |
-| 58e.2.1 | calibration refit → held-out ECE non-increasing | VERIFIED |
-| 58e.2.2 | insufficient data → g identity (C=f), c stays 0 | VERIFIED |
-| 58e.2.3 | g clears ECE gate → c activatable, eval-gated | VERIFIED |
-| 58e.3.1 | two stale-eligible → higher A_actr checked shorter interval | VERIFIED |
-| 58e.3.2 | cold low-activation → longest interval/deferred, never starves hot set | VERIFIED |
-| 58e.schema | memory_access + last_reinforced_at/access_count + memory_calibration (lazy-heal) | VERIFIED |
-| 58e.note | DESIGN RECONCILIATION: memory_access org/workspace via QueryScope partition (codebase D-2 convention), not explicit cols; agent_id carried. Flag for quality. | NOTE |
+## Wave plan
 
-### PRD-058c - stale-reference healing (`σ`) - Wave 3 VERIFIED (tsc clean, 75 tests pass, audit:sql + dup clean)
-| ID | Criterion | Status |
-|---|---|---|
-| 58c.1.1 | absent symbol → resolve=0, σ=1, ref_status=stale, verified_at=now, stale_refs recorded | VERIFIED |
-| 58c.1.2 | all refs resolve → σ≈0, fresh | VERIFIED |
-| 58c.1.3 | ref outside indexed graph → excluded, unknown never stale | VERIFIED |
-| 58c.1.4 | no indexed refs → σ=0 (empty product), never demoted | VERIFIED |
-| 58c.1.5 | fuzzy rename candidate → resolve=sim∈(0,1), partial demote | VERIFIED |
-| 58c.2.1 | observe (s=0) → (1-σ)^0=1, flagged+dashboard, ranking unchanged | VERIFIED |
-| 58c.2.2 | execute (s>0) → (1-σ)^s<1 fed into 058a stage, demoted not hard-dropped | VERIFIED |
-| 58c.2.3 | ref returns later snapshot → σ falls, fresh, demotion lifted | VERIFIED |
-| 58c.2.4 | detection/heal appended to memory_history (actor,reason,σ,stale_refs) | VERIFIED |
-| 58c.3.1 | verified_at old, v below threshold → re-queued | VERIFIED |
-| 58c.3.2 | stale memory + new snapshot → re-verification re-checks | VERIFIED |
-| 58c.3.3 | snapshot reads poll to convergence, not single read | VERIFIED |
-| 58c.schema | ref_status/verified_at/stale_refs columns on memories (lazy-heal) | VERIFIED |
+```
+Wave 1 (retrieval-worker-bee): wire the 4 inert recall seams + lifecycle config
+  → L-W1 (recordRecallAccess), L-W2 (activationSource), L-W3 (calibration),
+    L-W4 (stalenessSource), L-W5 (lifecycle config)
+  Exit: 5 seams wired in assemble.ts/api.ts; existing tests green; new wiring tests added.
 
-### PRD-058b - semantic conflict detection & resolution (`κ`) - Wave 4 VERIFIED (tsc clean, 137 tests pass incl. 058a/c/e regression, audit:sql + dup clean)
-| ID | Criterion | Status |
-|---|---|---|
-| 58b.1.1 | Contra>θ pair → at most winner returned | VERIFIED |
-| 58b.1.2 | supersede → loser κ=0 excluded by MAX(version) | VERIFIED |
-| 58b.1.3 | review → loser κ=ρ suppressed, reversible | VERIFIED |
-| 58b.1.4 | uncontested → κ=1 untouched | VERIFIED |
-| 58b.2.1 | high sim opposite outcome, 0 shared tokens → Contra=sim·P_contradiction clears θ, signal=model | VERIFIED |
-| 58b.2.2 | cheap lexical → opp=max flags from lexical alone, signal=lexical, before model call | VERIFIED |
-| 58b.2.3 | provider none → P_contradiction skipped, opp=opp_lexical, still recorded, no throw | VERIFIED |
-| 58b.2.4 | keep-both memoized → no re-flag same normalized pair | VERIFIED |
-| 58b.3.1 | w_i=A·C·prov·corr, winner argmax; distilled outvotes raw at equal-else | VERIFIED |
-| 58b.3.2 | close scores → margin∈[τ_review,τ_supersede) → review, neither superseded | VERIFIED |
-| 58b.3.3 | corr counts independent sources; duplicates count once | VERIFIED |
-| 58b.3.4 | margin≥τ_supersede → supersede, loser κ=0, margin+contra_score persisted | VERIFIED |
-| 58b.4.1 | detection/resolution → memory_history + memory_conflicts row | VERIFIED |
-| 58b.4.2 | reverse supersede → loser restored κ=1 via version bump, status=reversed, recorded | VERIFIED |
-| 58b.4.3 | no destructive delete/in-place mutate; append-only version-bump only | VERIFIED |
-| 58b.schema | memory_conflicts table (lazy-heal) | VERIFIED |
-| 58b.api | POST /api/memories/conflicts/:id/resolve (zod, scope-checked) | VERIFIED |
+Wave 2 (typescript-node-worker-bee): ship the missing pieces
+  → L-W6 (KeepBothMemoStore), L-W7 (reverify scheduler), L-W8 (access-log compaction),
+    L-W9 (calibration refit), L-W10 (dashboard panel), L-W11 (settings flag reference)
+  Exit: 6 missing pieces shipped; each has tests; full suite green.
 
-### PRD-058d - lifecycle config, audit, dashboard, CLI - Wave 5 VERIFIED (tsc clean, 58 tests pass, audit:sql + dup clean)
-| ID | Criterion | Status |
-|---|---|---|
-| 58d.1.1 | fresh install defaults non-destructive: a=1, c=0, s=0, auto-resolve off | VERIFIED |
-| 58d.1.2 | env override per-key over yaml; precedence documented | VERIFIED |
-| 58d.1.3 | every flag on settings page + config reference (symbol, default, effect) | VERIFIED |
-| 58d.1.4 | stale-ref posture observe→execute → s 0→configured, visible, no other term changes | VERIFIED |
-| 58d.2.1 | memories page: health badge H, freshness, open-conflict count, stale-ref count, ECE | VERIFIED |
-| 58d.2.2 | dashboard resolve → calls 058b endpoint, polls to convergence | VERIFIED |
-| 58d.2.3 | memory_history filtered by lifecycle type → actor,reason,confidence,timestamp | VERIFIED |
-| 58d.2.4 | calibration view → reliability diagram + ECE/Brier from memory_calibration | VERIFIED |
-| 58d.3.1 | `honeycomb memory conflicts` list scope-filtered | VERIFIED |
-| 58d.3.2 | `honeycomb memory conflicts resolve <id> --verdict --winner` same endpoint/path | VERIFIED |
-| 58d.3.3 | `honeycomb memory stale-refs` list | VERIFIED |
-| 58d.3.4 | inspection `--lifecycle` → freshnessScore, calibratedConfidence, refStatus, conflict, H | VERIFIED |
+Wave 3 (orchestrator): full gate + live DB verification
+  → L-X1 (npm run ci), L-X2 (live DB: access_count, last_reinforced_at, conflict row)
 
-### PRD-058 parent index - rollups + integration
-| ID | Criterion | Status |
-|---|---|---|
-| IDX-1 | recency ships measured non-neutral default half-life passing eval:recall gate | BLOCKED (needs creds) - code + slice delivered |
-| IDX-2 | two contradictory never both appear; loser suppressed; recorded to history | VERIFIED (Wave 6: live call site assemble.ts:1545 + controlled-writes.ts:503/610; conflict-live-path.spec proves it; orchestrator-confirmed by call-site grep) |
-| C-1 | (QA Critical) wire detectAndProject into controlled-writes decision stage + live-path test | VERIFIED (Wave 6) |
-| W-1 | (QA Warning) useful-context@k end-to-end eval aggregator CODE | VERIFIED (Wave 6) |
-| W-2 | (QA Warning) ECE-over-time eval slice CODE | VERIFIED (Wave 6) |
-| IDX-3 | memory naming absent symbol detected by maintenance worker, flagged stale_ref | VERIFIED (rollup of 58c.1.1; live-wired via stale-ref-api) |
-| IDX-4 | every lifecycle action gated by config flag, non-destructive default, visible in dashboard | VERIFIED (rollup of 58d.1.x/2.1) |
-| IDX-5 | recalled+useful harder to forget (activation rises); ECE monotone non-increasing | VERIFIED (rollup of 58e.1.1/2.1; ECE-over-time slice W-2) |
-| IDX-6 | recall fail-soft: embeddings off / daemon down -> every stage degrades, recall answers | VERIFIED (fail-soft tests across 058a/b/c/e recall path) |
-| IDX-7 | useful-context@k improves over baseline; no term regresses recall@5/MRR/nDCG@10 below baseline−ε | BLOCKED (needs creds) - metric + slice code delivered |
-| IDX-8 | live dogfood exercises all lifecycle paths end-to-end vs real daemon + real DeepLake | BLOCKED (needs creds) |
+Wave 4 (security-worker-bee): SQL/PII/supply-chain audit
+  → L-S1
 
----
+Wave 5 (quality-worker-bee): verify against PRD-058 ACs + QA report
+  → L-Q1
+```
 
-## Wave log
-- Phase 0: all five sub-PRDs + scoring doc + recall pipeline read; ledger built; gates identified.
-- Wave 1 (058a recency): VERIFIED. tsc + 34 tests + audit:sql + dup green.
-- Wave 2 (058e reinforcement/calibration): VERIFIED. tsc + 304 tests (incl. storage heal) + gates green.
-- Wave 3 (058c stale-ref): VERIFIED. tsc + 75 tests + gates green.
-- Wave 4 (058b conflict): VERIFIED. tsc + 137 tests (incl. 058a/c/e regression) + gates green.
-- Wave 5 (058d surfaces): VERIFIED. tsc + 58 tests + gates green. Ledger em-dashes fixed (prose rule).
-- Close-out security: CLEAN (no Critical/High; zero code changes).
-- Close-out quality: found Critical C-1 (conflict detection not wired live) + W-1/W-2 eval gaps.
-- Wave 6 (reopen): C-1 wired into controlled-writes decision stage + assemble.ts (LIVE); live-path test proves IDX-2; W-1 useful-context@k + W-2 ECE-over-time slices added. VERIFIED (148 + 64 tests).
-- Full suite: 3538 pass / 14 fail / 8 skip; all 14 failures are pre-existing environmental flakes (hook-runtime, json-parsers) NOT in this change set; both pass 30/30 in isolation.
-- Ship: commit 6fc192d (79 files, +12471). Pushed. PR #125 (legioncodeinc/honeycomb).
-- CI: Quality gate Node 22.x + 24.x GREEN, Windows smoke GREEN, CodeQL GREEN, Secret gate GREEN. Full suite passed on CI runners (local flakes did not recur). DeepLake live jobs skipped (creds-gated).
-- RESULT: 53/56 ACs VERIFIED. IDX-1/IDX-7/IDX-8 BLOCKED on HONEYCOMB_DEEPLAKE_TOKEN + embed daemon (live numeric eval verdict + dogfood). PRD stays in-work until that live run promotes it to completed.
+## Watchdog triggers
 
-## Post-ship review remediation (PR #125)
-- CodeQL: 1 finding (`js/incomplete-sanitization` in `sqlLike`), PRE-EXISTING on main, not from #125. Fixed in a separate PR #129 (output-identical local-backslash refactor + regression tests). CodeQL now 0 open alerts on both branches.
-- CodeRabbit review (29 findings): 28 real, 1 false positive (documented + locked with a test).
-  - Wave A (retrieval-worker-bee, daemon internals): 2 TENANCY leaks fixed (calibration read + access-log now agent_id/visibility-scoped), Critical compaction idempotency fixed (persisted `access_compacted_at` watermark, additive heal), append-ordering + concurrency-atomic increments, conflict-path correctness (margin/timestamp preserve, reversed-only-on-restore, kappa_loser-respecting suppression, self-candidate exclusion, non-rejecting hydration), calibration monotone-guard, grader timeout, reference-extract module#symbol exclusion, reverify clamp, typing, + test rigor. 120 targeted tests green.
-  - Wave B (typescript-node-worker-bee, surfaces): dashboard health now H=A*C*(1-sigma)*kappa with freshness labeled honestly (A row distinct from C; A read-side aggregate not yet on the wire, surfaced honestly not faked), CLI positional/flag-value parsing fixed, eval recall-K DRY, reliability-bin stable key. 520 tests green.
-- Version bumped to 0.1.6 across all manifests + README (commit 06bd1dc). v0.1.6 tag created locally, HELD until #125 merges (push triggers the real npm publish).
-- QA report reconciled with a post-audit resolution note (C-1/W-1/W-2 resolved); ledger is authority.
-
-## CodeRabbit review loop (PR #125), converged
-- Round 1: 29 findings (28 fixed + 1 documented false positive) - tenancy, compaction idempotency, conflict-path, dashboard H, CLI.
-- Round 2: 6 (watermark error-vs-absent, (at,id) cursor, scoped-pkg, prior-verdict read-error, test, doc).
-- Round 3: 4 (access_count single-owner double-count, abort-on-missing-row, 2 tests).
-- Round 4: 1 minor (invariant-test fake driven by the real append).
-- Round 5: CLEAN (no actionable). CodeQL: 0 open alerts on #125; the one pre-existing sqlLike finding is fixed in PR #129 (green).
-
-## Final close-out (HEAD ad9a29c)
-- security-worker-bee: CLEAN. No Critical/High, zero code changes. All 8 categories verified (SQL injection, tenancy, authz, input validation, data-integrity fail-soft, prompt-injection, PII/secrets, dangerous-sinks/ReDoS).
-- quality-worker-bee: PASS. 61/64 ACs verified, 0 real gaps; math verified term-for-term; C-1/W-1/W-2 resolutions + CodeRabbit rounds 1-4 verified in code. Final report: qa/2026-06-26-qa-report-final.md. IDX-1/7/8 BLOCKED-on-creds only.
-- Gates: typecheck, dup, audit:sql clean; the 2 full-suite failures are pre-existing environmental flakes (hook-runtime, secrets/exec), green on CI.
-- VERDICT: PR #125 is ship-ready modulo the credential-gated live verification.
-
-## The one remaining ask (to reach 56/56 and promote to completed)
-Run, on a machine with the gitignored live creds + the embed daemon up:
-  `set -a; . ./.env.local; set +a; HONEYCOMB_EMBEDDINGS=true npm run eval:recall`
-plus the live dogfood loop each sub-PRD describes (store a fact + its contradiction + a stale ref against a real daemon; confirm suppression, demotion, dashboard + CLI surfaces, memory_history). That closes IDX-1 (recency half-life passes the gate), IDX-7 (useful-context@k uplift, no baseline regression), and IDX-8 (live dogfood).
+- A Wave 1 Bee that wires a seam but doesn't add a test asserting the wire fires in production composition = stalled (re-dispatch).
+- A Wave 2 Bee that ships the dashboard panel without consuming the shipped endpoints = scope violation.
+- Any Bee that edits `hybrid-recall.ts` = scope violation (out of scope per ADR-0001/ADR-0009).
+- Gate failures on the new wiring tests = real, not flake. Decompose.

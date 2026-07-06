@@ -108,7 +108,31 @@ import { mountConflictsApi } from "./memories/conflicts-api.js";
 import { mountMemoriesApi, mountMemoriesPrimeApi } from "./memories/index.js";
 import { mountLifecycleApi } from "./memories/lifecycle-api.js";
 import { resolveNectarRrfMultiplierAtBoot } from "./memories/nectar-recall-config.js";
-import type { CohereRerankSeam } from "./memories/recall.js";
+import type { CohereRerankSeam, ActivationSource, StalenessSource, MemoryActivationInputs, StalenessVerdictInput, MemoryRecallHit } from "./memories/recall.js";
+// PRD-058e (L-W1/L-W2): the access-log recorder + the access-history reader used to build the real
+// activation source. recordAccess appends a `recall` event + maintains the denormalized cache;
+// readAccessHistory loads a memory's retained access series for the ACT-R activation math.
+import { recordAccess, readAccessHistory, type AccessLogDeps } from "./memories/access-log.js";
+// PRD-058e (L-W3): the calibration model. The cold-start IDENTITY model is the dormant default
+// (C = f, the c exponent stays 0); deserializeModel reads a fitted curve from `memory_calibration`
+// when one exists. Either way the calibration stage RUNS so a refit lands later.
+import { IDENTITY_MODEL, deserializeModel, type CalibrationModel } from "./memories/calibration.js";
+// PRD-058d (L-W5): the lifecycle config resolver + the recency/staleness projections. Resolved ONCE
+// at boot from `HONEYCOMB_LIFECYCLE_*` env (env-over-yaml is the documented precedence). The
+// defaults (a=1, c=0, s=0, posture=observe) are NON-DESTRUCTIVE (AC-55d.1.1), so wiring this in is
+// safe even before the dashboard ships.
+import {
+	resolveLifecycleConfigLayered,
+	lifecycleRecency,
+	effectiveStalenessExponent,
+	type LifecycleConfig,
+} from "./memories/lifecycle-config.js";
+import { DEFAULT_ACTR_PARAMS } from "./memories/activation.js";
+import { buildLatestCalibrationSql, type CalibrationAgentScope } from "../storage/catalog/memory-lifecycle.js";
+import type { RefStatus } from "../storage/catalog/memories.js";
+import { sLiteral, sqlIdent } from "../storage/sql.js";
+import type { StorageRow } from "../storage/result.js";
+import type { StorageQuery } from "../storage/client.js";
 import { createRuntimePathService } from "./middleware/runtime-path.js";
 import { mountNotificationsApi } from "./notifications/api.js";
 import { mountOntologyApi } from "./ontology/api.js";
@@ -912,6 +936,210 @@ function authForMode(
 	return { authenticator: composeAuthenticator(storage, scope, mode), policy: defaultDenyPolicy };
 }
 
+// ── PRD-058 Wave 1 wiring (L-W1 … L-W5): construct the lifecycle seams the recall engine ──
+// ── already knows how to consume and inject them at the mount site. The engine code is    ──
+// ── UNCHANGED (the seams are optional deps it has gated on since 058a–058e); these          ──
+// ── factories close over the storage client the composition root already built. Each is    ──
+// ── FAIL-SOFT by construction (mirrors `createConflictSuppressionSource`): a missing table   ──
+// ── or a query error degrades to the engine's documented dormant path, never a thrown recall. ─
+
+/**
+ * L-W1 (PRD-058e.1.x): build the `recordRecallAccess` callback the recall engine calls per injected
+ * `memories` hit. Each call appends ONE `recall` access event via {@link recordAccess} (which also
+ * maintains the `memories.access_count` / `last_reinforced_at` denormalized cache). The usefulness
+ * grade arrives LATER from the session-end worker, so recall records with a neutral `0` usefulness
+ * (a `recall` event bumps `access_count` but does NOT advance `last_reinforced_at` — only a
+ * `reinforce` event does, per `access-log.ts`). The callback NEVER throws: `recordAccess` is
+ * best-effort + off the answer path, and a storage failure is swallowed inside the engine's own
+ * `recordRecallAccessEvents` try/catch as well. The closure captures the request scope at call time
+ * (the engine hands the memory id; the scope is the request's resolved tenancy).
+ */
+function createRecordRecallAccess(storage: StorageQuery, scope: QueryScope): (memoryId: string) => Promise<void> {
+	const deps: AccessLogDeps = { storage };
+	return async (memoryId: string): Promise<void> => {
+		// `recall` kind + usefulness 0: the recall is the FIRST half of the reinforcement loop; the
+		// usefulness grade is assigned later. A `recall` event counts the access but does not reinforce.
+		await recordAccess(memoryId, 0, "recall", deps, scope);
+	};
+}
+
+/**
+ * L-W2 (PRD-058e.1.x): build the real {@link ActivationSource} from storage — the ACT-R Stage-2
+ * activation reads each surviving `memories` hit's retained access history (`memory_access`) plus
+ * the denormalized `access_count` in ONE batched pass, keyed by `source+id`. A memory absent from
+ * the map degrades to the 058a Stage-1 activation PER-HIT inside the engine (fail-soft). A throw
+ * here degrades the WHOLE stage to Stage-1 inside the engine. `memory`/`sessions` hits carry no
+ * access log (only the durable `memories` arm does), so they are intentionally absent → Stage-1.
+ */
+function createActivationSource(storage: StorageQuery, params = DEFAULT_ACTR_PARAMS): ActivationSource {
+	return {
+		params,
+		async load(hits: readonly MemoryRecallHit[], scope: QueryScope): Promise<Map<string, MemoryActivationInputs>> {
+			const out = new Map<string, MemoryActivationInputs>();
+			// Only the durable `memories` arm keys into the access log.
+			const memoryIds = hits.filter((h) => h.source === "memories" && h.id !== "").map((h) => h.id);
+			if (memoryIds.length === 0) return out;
+			const deps: AccessLogDeps = { storage };
+			// Batched: one history read + one access_count read per memory. A read failure inside
+			// readAccessHistory yields an empty history (fail-soft); the hit then floors at A_min.
+			const accessCountById = await readAccessCountBatch(storage, memoryIds, scope);
+			await Promise.all(
+				memoryIds.map(async (id) => {
+					try {
+						const history = await readAccessHistory(id, deps, scope);
+						const accessCount = accessCountById.get(id) ?? history.length;
+						out.set(`memories ${id}`, { history, accessCount });
+					} catch {
+						// Per-memory fail-soft: skip — the engine treats an absent key as Stage-1.
+					}
+				}),
+			);
+			return out;
+		},
+	};
+}
+
+/**
+ * L-W2 helper: read the denormalized `access_count` (the lifetime total) for a batch of memory ids
+ * in ONE guarded statement. FAIL-SOFT: a missing table / query error yields an empty map (each
+ * memory then falls back to its retained-history length). Every id routes through `sLiteral`, every
+ * identifier through `sqlIdent` (audit:sql-safe — mirrors the recall engine's batch fetches).
+ */
+async function readAccessCountBatch(
+	storage: StorageQuery,
+	memoryIds: readonly string[],
+	scope: QueryScope,
+): Promise<Map<string, number>> {
+	const out = new Map<string, number>();
+	if (memoryIds.length === 0) return out;
+	const tbl = sqlIdent("memories");
+	const idCol = sqlIdent("id");
+	const accessCountCol = sqlIdent("access_count");
+	const inList = memoryIds.map((id) => sLiteral(id)).join(", ");
+	const sql = `SELECT ${idCol} AS id, ${accessCountCol} AS access_count FROM "${tbl}" WHERE ${idCol} IN (${inList})`;
+	let res;
+	try {
+		res = await storage.query(sql, scope);
+	} catch {
+		return out; // fail-soft: empty map → history-length fallback.
+	}
+	if (!isOk(res)) return out;
+	for (const row of res.rows as StorageRow[]) {
+		const id = String(row.id ?? "");
+		if (id === "") continue;
+		const raw = row.access_count;
+		const n = typeof raw === "number" ? raw : Number(raw);
+		if (Number.isFinite(n) && n > 0) out.set(id, Math.trunc(n));
+	}
+	return out;
+}
+
+/**
+ * L-W3 (PRD-058e.2.x): read the live {@link CalibrationModel} from `memory_calibration` (the highest
+ * `fit_at` row), deserializing its `model_blob`. FAIL-SOFT: a missing table, an empty table, or any
+ * read error returns the IDENTITY cold-start model (`C = f`, the `c` exponent stays 0 — AC-55e.2.2).
+ * The point of L-W3 is that the calibration stage RUNS so when a refit lands later it takes effect
+ * immediately; the identity model is the dormant default that still surfaces `C = f`.
+ */
+async function readCalibrationModel(
+	storage: StorageQuery,
+	scope: QueryScope,
+	agent?: CalibrationAgentScope,
+): Promise<CalibrationModel> {
+	let res;
+	try {
+		res = await storage.query(buildLatestCalibrationSql(agent), scope);
+	} catch {
+		return IDENTITY_MODEL; // fail-soft: cold-start identity.
+	}
+	if (!isOk(res) || res.rows.length === 0) return IDENTITY_MODEL;
+	const row = res.rows[0] as StorageRow;
+	const blob = String(row.model_blob ?? "");
+	return deserializeModel(blob); // empty blob → IDENTITY_MODEL inside deserializeModel.
+}
+
+/**
+ * L-W4 (PRD-058c.2.x): build the real {@link StalenessSource} from storage — the σ multiplier reads
+ * each surviving `memories` hit's `(ref_status, stale_refs, verified_at)` in ONE batched pass, keyed
+ * by `source+id`. σ is derived from `ref_status` + the verification half-life (the diagnostic already
+ * wrote the verdict; recall just reads it back). A memory absent from the map is `unknown` (NEUTRAL,
+ * factor 1 — never demoted) inside the engine. The `s` exponent is posture-gated by the caller
+ * (L-W5): `observe` → `s = 0` (visible but inert), `execute` → `s > 0` (demote).
+ */
+function createStalenessSource(storage: StorageQuery, exponent: number): StalenessSource {
+	return {
+		exponent,
+		async load(hits: readonly MemoryRecallHit[], scope: QueryScope): Promise<Map<string, StalenessVerdictInput>> {
+			return readStalenessBatch(storage, hits, scope);
+		},
+	};
+}
+
+/**
+ * L-W4 helper: read `(ref_status, stale_refs, verified_at)` for the `memories`-arm hits in ONE
+ * guarded statement and shape each into a {@link StalenessVerdictInput}. σ is computed from the
+ * stored verdict + the verification half-life `h_verify` (PRD-058c `v(m,t) = 2^(−(t − verified_at)/h_verify)`):
+ * `fresh` → σ 0; `stale` → σ 1; `unknown`/NULL → σ 0 (neutral, never demoted). FAIL-SOFT: a missing
+ * `ref_status` column / table or any query error yields an empty map (every hit then `unknown`).
+ */
+async function readStalenessBatch(
+	storage: StorageQuery,
+	hits: readonly MemoryRecallHit[],
+	scope: QueryScope,
+): Promise<Map<string, StalenessVerdictInput>> {
+	const out = new Map<string, StalenessVerdictInput>();
+	const memoryIds = hits.filter((h) => h.source === "memories" && h.id !== "").map((h) => h.id);
+	if (memoryIds.length === 0) return out;
+	const tbl = sqlIdent("memories");
+	const idCol = sqlIdent("id");
+	const refStatusCol = sqlIdent("ref_status");
+	const staleRefsCol = sqlIdent("stale_refs");
+	const inList = memoryIds.map((id) => sLiteral(id)).join(", ");
+	const sql = `SELECT ${idCol} AS id, ${refStatusCol} AS ref_status, ${staleRefsCol} AS stale_refs FROM "${tbl}" WHERE ${idCol} IN (${inList})`;
+	let res;
+	try {
+		res = await storage.query(sql, scope);
+	} catch {
+		return out; // fail-soft: empty map → every hit unknown (neutral).
+	}
+	if (!isOk(res)) return out;
+	for (const row of res.rows as StorageRow[]) {
+		const id = String(row.id ?? "");
+		if (id === "") continue;
+		const refStatus = readRefStatus(row.ref_status);
+		const staleRefsRaw = row.stale_refs;
+		const staleRefs = parseStaleRefs(staleRefsRaw);
+		// σ: stale → 1 (fully stale), fresh/unknown → 0 (the engine clamps + treats unknown as neutral).
+		const sigma = refStatus === "stale" ? 1 : 0;
+		const verdict: StalenessVerdictInput = {
+			sigma,
+			refStatus,
+			...(staleRefs.length > 0 ? { staleRefs } : {}),
+		};
+		out.set(`memories ${id}`, verdict);
+	}
+	return out;
+}
+
+/** Coerce a stored `ref_status` cell into a {@link RefStatus}; missing/unrecognized → `unknown`. */
+function readRefStatus(value: unknown): RefStatus {
+	const s = String(value ?? "").toLowerCase();
+	if (s === "fresh") return "fresh";
+	if (s === "stale") return "stale";
+	return "unknown";
+}
+
+/** Parse a `stale_refs` cell (newline- or comma-separated tokens) into a list; empty → []. */
+function parseStaleRefs(value: unknown): string[] {
+	if (value === null || value === undefined) return [];
+	const s = String(value);
+	if (s.trim() === "") return [];
+	return s
+		.split(/[\n,]/)
+		.map((t) => t.trim())
+		.filter((t) => t !== "");
+}
+
 /**
  * Fire the mount/attach seams EXACTLY ONCE, after construction, in a deterministic order
  * (a-AC-2 / FR-3): hooks → dashboard → notifications → sessions-prune → logs →
@@ -1132,6 +1360,44 @@ export function assembleSeams(
 	// daemon logger, so a surprising recall mix is diagnosable from the boot log alone. Threaded into
 	// the recall mount so the fusion scales ONLY the hive-graph arm.
 	const nectarRrfMultiplier = resolveNectarRrfMultiplierAtBoot(daemon.logger);
+	// ── PRD-058 Wave 1 (L-W1 … L-W5): construct the lifecycle seams the recall engine already
+	//    knows how to consume (each is an optional dep the engine has gated on since 058a–058e)
+	//    and inject them here. The engine + math modules are UNCHANGED; this is wiring only.
+	//
+	// L-W5: resolve the lifecycle config ONCE at boot from `HONEYCOMB_LIFECYCLE_*` env (the env-over-
+	// yaml precedence; a bare boot is env-over-default). The defaults (a=1, c=0, s=0, posture=observe)
+	// are NON-DESTRUCTIVE (AC-55d.1.1): every demotion term ships behind an exponent that defaults to
+	// the identity, so wiring this in is safe even before the dashboard ships. Resolution is coerce-
+	// and-clamp, so a fat-fingered env value falls back to its default, never a daemon crash.
+	const lifecycleConfig: LifecycleConfig = resolveLifecycleConfigLayered();
+	// L-W5 projections: the recency-facing knobs (`a` + per-class half-lives) routed through the
+	// recall schema (no second clamp model — `lifecycleRecency` owns the projection); the effective
+	// staleness exponent `s` posture-gated (`observe` → 0, visible but inert; `execute` → >0, demote).
+	const lifecycleRecencyConfig = lifecycleRecency(lifecycleConfig);
+	const stalenessExponent = effectiveStalenessExponent(lifecycleConfig);
+	// L-W1: the recordRecallAccess FACTORY — a (scope) → (memoryId) → Promise<void> closure. The
+	// factory closes over `storage`; the per-request scope is applied in the recall handler (api.ts),
+	// where the request's resolved tenancy is known. Each call appends ONE `recall` access event
+	// (usefulness 0; the grade arrives later) + maintains the `access_count` cache. FAIL-SOFT: a
+	// storage failure is swallowed (best-effort, off the answer path).
+	const recordRecallAccessFactory = (scope: QueryScope) => createRecordRecallAccess(storage, scope);
+	// L-W2: the real ActivationSource — ACT-R Stage-2 activation reads each `memories` hit's access
+	// history + count in one batched pass. The Stage-1 fallback stays as the cold-start path inside
+	// the engine (per-hit fail-soft when storage is unavailable or a memory has no history).
+	const activationSource = createActivationSource(storage, {
+		decay: lifecycleConfig.actrDecay,
+		aMin: lifecycleConfig.activationFloor,
+		bStar: DEFAULT_ACTR_PARAMS.bStar,
+	});
+	// L-W4: the real StalenessSource — the σ multiplier reads each `memories` hit's
+	// (ref_status, stale_refs) verdict in one batched pass. The `s` exponent is posture-gated here
+	// (`observe` → 0, inert; `execute` → demote). ABSENT verdict → `unknown` (neutral) in the engine.
+	const stalenessSource = createStalenessSource(storage, stalenessExponent);
+	// L-W3: read the live CalibrationModel from `memory_calibration` (the highest `fit_at` row).
+	// FAIL-SOFT to the IDENTITY cold-start model (C = f, the `c` exponent stays 0 — AC-55e.2.2). The
+	// point is the calibration stage RUNS so when a refit lands later, it takes effect immediately.
+	// Resolved asynchronously below (the boot mount is sync), then attached via the late-bound seam.
+	const calibrationModelPromise = readCalibrationModel(storage, defaultScope ?? { org: "", workspace: "" });
 	seams.mountMemories(daemon, {
 		storage,
 		defaultScope,
@@ -1139,6 +1405,15 @@ export function assembleSeams(
 		logger: daemon.logger,
 		conflictSuppression,
 		nectarRrfMultiplier,
+		// PRD-058 Wave 1: the five lifecycle seams. Each is consumed by the recall engine's optional
+		// deps; ABSENT (a unit-constructed mount) → the engine's documented dormant path, byte-for-byte.
+		recordRecallAccessFactory,
+		activationSource,
+		stalenessSource,
+		stalenessExponent,
+		lifecycleRecency: lifecycleRecencyConfig,
+		calibrationModel: calibrationModelPromise,
+		confidenceExponent: lifecycleConfig.confidenceExponent,
 		...(vault !== undefined ? { vault } : {}),
 		// PRD-063c: the operator-selected reranker config + the late-bound Cohere-via-Portkey seam.
 		// The `cohere` strategy only does anything when BOTH the strategy is `cohere` (env) AND the
