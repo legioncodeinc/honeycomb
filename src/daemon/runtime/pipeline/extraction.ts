@@ -308,6 +308,16 @@ export async function extractFromText(
 		});
 	}
 
+	// Observability: the extraction OUTCOME. `inputChars:0` means the job payload carried no content
+	// (a capture-side gap) → the model has nothing to extract → 0 facts → no fan-out → no memory,
+	// which is invisible without this. `facts:0` on non-empty input points at the model/prompt instead.
+	logger?.event("extraction.result", {
+		inputChars: text.length,
+		facts: factResult.facts.length,
+		entities: entityResult.entities.length,
+		dropped: droppedCount,
+	});
+
 	return { facts: factResult.facts, entities: entityResult.entities, droppedCount };
 }
 

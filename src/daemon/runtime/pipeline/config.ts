@@ -12,11 +12,17 @@
  * ── The flags (ledger "Pipeline config flags") ──────────────────────────────
  * - `enabled`                  master switch; off → no stage runs (a-AC-5 / FR-9).
  * - `extractionProvider`       router-selection token for the extraction model.
- *                              The literal `'none'` DISABLES extraction even when
- *                              `enabled` is true (a-AC-5 / FR-9). Any other value
- *                              is an opaque provider/router selector the stage
- *                              passes to the ModelClient — the stage holds NO
- *                              provider knowledge (006a FR-3).
+ *                              DEFAULTS to the `'auto'` sentinel (PRD: memory as a
+ *                              discoverable feature): when unset, extraction is
+ *                              DERIVED from whether a real inference ModelClient is
+ *                              configured — the user never sets a SECOND provider
+ *                              token for the pipeline. The literal `'none'` still
+ *                              DISABLES extraction even when `enabled` is true
+ *                              (a-AC-5 / FR-9, the deliberate opt-out). Any OTHER
+ *                              explicit value is an opaque provider/router selector
+ *                              (an override/escape hatch) the stage passes to the
+ *                              ModelClient — the stage holds NO provider knowledge
+ *                              (006a FR-3). Absence no longer means "disabled".
  * - `shadowMode`               proposals logged, NO memory written (006c c-AC-4).
  * - `mutationsFrozen`          nothing written even if shadow is off; frozen
  *                              SUPERSEDES shadow (006c c-AC-5).
@@ -35,6 +41,8 @@
  */
 
 import { z } from "zod";
+
+import { BoolFlag } from "../../../shared/bool-flag.js";
 
 // ── D-1 extraction caps + write threshold ──────────────────────────────────────
 /** Input cap before the extraction model call (D-1 / a-AC-2 / FR-6). */
@@ -60,14 +68,19 @@ export const DEFAULT_HISTORY_RETENTION_MS = 90 * 24 * 60 * 60 * 1_000;
 /** Tombstone (soft-deleted memory) retention window (30d, D-5). */
 export const DEFAULT_TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 
-/** The disabling sentinel for `extractionProvider` (a-AC-5 / FR-9). */
+/** The disabling sentinel for `extractionProvider` (a-AC-5 / FR-9). Explicit opt-out. */
 export const EXTRACTION_PROVIDER_NONE = "none" as const;
 
-/** A boolean flag read from an env string: `true`/`1` → true, anything else → false. */
-const BoolFlag = z.preprocess((raw) => {
-	if (typeof raw === "boolean") return raw;
-	return raw === "true" || raw === "1";
-}, z.boolean());
+/**
+ * The DEFAULT sentinel for `extractionProvider` — "derive extraction enablement from whether a
+ * real inference provider is configured". This is what the flag resolves to when
+ * `HONEYCOMB_PIPELINE_EXTRACTION_PROVIDER` is UNSET (the common case for a normal install). Under
+ * `'auto'`, extraction runs iff the pipeline is `enabled` AND the assembled ModelClient is a REAL
+ * (non-noop) client — so the user configures their model provider ONCE (Portkey key / `agent.yaml`
+ * inference block / provider env) and never a second pipeline-specific token. `'none'` still opts
+ * out; any other explicit value is a deliberate override that force-enables extraction.
+ */
+export const EXTRACTION_PROVIDER_AUTO = "auto" as const;
 
 /**
  * A positive-integer tuning knob: a non-numeric value falls back to the default,
@@ -144,8 +157,12 @@ export const RetentionConfigSchema = z.object({
 export const PipelineConfigSchema = z.object({
 	/** Master switch; off → no stage runs (a-AC-5 / FR-9). */
 	enabled: BoolFlag.default(false),
-	/** Router-selection token; `'none'` disables extraction (a-AC-5 / FR-9). */
-	extractionProvider: z.string().trim().min(1).default(EXTRACTION_PROVIDER_NONE),
+	/**
+	 * Router-selection token; defaults to `'auto'` (derive from a configured provider). `'none'`
+	 * disables extraction (a-AC-5 / FR-9); any other explicit value is an override (see
+	 * {@link EXTRACTION_PROVIDER_AUTO} / {@link EXTRACTION_PROVIDER_NONE}).
+	 */
+	extractionProvider: z.string().trim().min(1).default(EXTRACTION_PROVIDER_AUTO),
 	/** Shadow mode: proposals logged, no memory written (006c c-AC-4). */
 	shadowMode: BoolFlag.default(false),
 	/** Frozen: nothing written even if shadow off; supersedes shadow (006c c-AC-5). */
@@ -294,10 +311,82 @@ export function resolvePipelineConfig(
 }
 
 /**
- * Is extraction live for this config? True only when the pipeline is `enabled`
- * AND the extraction provider is not the disabling `'none'` sentinel (a-AC-5 /
- * FR-9). The extraction stage calls this as its single gate.
+ * Is extraction live for this config? The decision now honors the `'auto'` default (PRD: memory
+ * as a discoverable, provider-derived feature):
+ *
+ *   1. the pipeline must be `enabled` (master switch) — off → always false;
+ *   2. `extractionProvider === 'none'` → always false (the deliberate opt-out, a-AC-5 / FR-9);
+ *   3. `extractionProvider === 'auto'` (the UNSET default) → derive from `providerConfigured`:
+ *      extraction runs iff a REAL (non-noop) inference ModelClient is configured. Absence of the
+ *      env override no longer means "disabled";
+ *   4. any OTHER explicit value (an override / escape hatch) → enabled (the operator asked for it).
+ *
+ * `providerConfigured` is the assembly-time "is a real model provider wired?" signal (the
+ * ModelClient is non-noop). It defaults to `false` so a PURE-config caller (no provider knowledge —
+ * the config unit tests, the stage gate before a client exists) gets the conservative answer: under
+ * `'auto'` with no provider signal, extraction is off. The worker passes the real signal.
  */
-export function isExtractionEnabled(config: PipelineConfig): boolean {
-	return config.enabled && config.extractionProvider !== EXTRACTION_PROVIDER_NONE;
+export function isExtractionEnabled(config: PipelineConfig, providerConfigured = false): boolean {
+	if (!config.enabled) return false;
+	if (config.extractionProvider === EXTRACTION_PROVIDER_NONE) return false;
+	if (config.extractionProvider === EXTRACTION_PROVIDER_AUTO) return providerConfigured;
+	return true;
+}
+
+/**
+ * Collapse the `'auto'` extraction sentinel down to a CONCRETE provider token now that the
+ * provider-configured signal is known (the worker calls this once, at boot, after building the
+ * inference ModelClient). The returned config is what the STAGES read — so the extraction stage's
+ * `isExtractionEnabled(config)` (which has no provider knowledge) sees a concrete value and behaves
+ * exactly as before `'auto'` existed:
+ *
+ *   - `extractionProvider === 'auto'` + `providerConfigured` → rewrite to `EXTRACTION_PROVIDER_AUTO`
+ *     kept as-is is NOT enough for the pure gate, so we rewrite to a REAL marker token that the pure
+ *     gate treats as "enabled" — `'auto-resolved'` (any non-sentinel value enables). This keeps the
+ *     stage provider-agnostic;
+ *   - `extractionProvider === 'auto'` + NOT `providerConfigured` → rewrite to `'none'` (no provider
+ *     wired → nothing to extract with, the honest disabled state);
+ *   - an explicit `'none'` or any explicit override → returned UNCHANGED.
+ *
+ * Pure + total: returns a config (the input is treated as immutable). Idempotent for non-`'auto'`
+ * inputs.
+ */
+export function resolveEffectiveExtractionProvider(
+	config: PipelineConfig,
+	providerConfigured: boolean,
+): PipelineConfig {
+	if (config.extractionProvider !== EXTRACTION_PROVIDER_AUTO) return config;
+	return {
+		...config,
+		extractionProvider: providerConfigured ? EXTRACTION_PROVIDER_AUTO_RESOLVED : EXTRACTION_PROVIDER_NONE,
+	};
+}
+
+/**
+ * The concrete provider token `'auto'` resolves to when a real provider IS configured. It is NOT a
+ * sentinel (it is neither `'auto'` nor `'none'`), so the pure {@link isExtractionEnabled} gate treats
+ * it as "enabled" — the stage stays provider-agnostic. The value is opaque to the stage; the router
+ * maps the workload to the actual model as always (the stage holds no provider knowledge, 006a FR-3).
+ */
+export const EXTRACTION_PROVIDER_AUTO_RESOLVED = "auto-resolved" as const;
+
+/**
+ * The VAULT-FIRST master-`enabled` precedence (this PRD), mirroring the embeddings/pollinating boot
+ * resolution: the dashboard-persisted `memory.enabled` vault value WINS when present (true OR false),
+ * otherwise the env-resolved `HONEYCOMB_PIPELINE_ENABLED` (`config.enabled`) stands. Pure + total so
+ * the precedence is unit-testable in isolation from the vault/scope machinery.
+ *
+ *   - vault PRESENT (`decidedByVault: true`) → the vault value wins (a saved `true` enables memory
+ *     with NO env editing; a saved `false` disables even when the env says true);
+ *   - vault ABSENT (`decidedByVault: false`) → the env fallback (`envEnabled`) stands;
+ *   - both absent/off → `false` (the false-safe default the schema already documents).
+ *
+ * @param vault the vault decision: whether a value was present, and (if so) its coerced boolean.
+ * @param envEnabled the env-resolved `config.enabled` (the `HONEYCOMB_PIPELINE_ENABLED` fallback).
+ */
+export function resolveMemoryEnabledVaultFirst(
+	vault: { decidedByVault: boolean; enabled: boolean },
+	envEnabled: boolean,
+): boolean {
+	return vault.decidedByVault ? vault.enabled : envEnabled;
 }

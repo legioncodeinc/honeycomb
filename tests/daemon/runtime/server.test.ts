@@ -9,6 +9,7 @@
 import { describe, expect, it } from "vitest";
 import { HONEYCOMB_VERSION } from "../../../src/shared/constants.js";
 import { type RuntimeConfig } from "../../../src/daemon/runtime/config.js";
+import { buildHealthDetail, type HealthDetailInputs } from "../../../src/daemon/runtime/health.js";
 import { createRequestLogger } from "../../../src/daemon/runtime/logger.js";
 import { createDaemon } from "../../../src/daemon/runtime/server.js";
 
@@ -98,6 +99,86 @@ describe("a-AC-3 /api/status returns resolved config, providers, tenancy", () =>
 		const daemon = createDaemon({ config: cfg("team"), storage: storageStub, logger: createRequestLogger({ silent: true }) });
 		const res = await daemon.app.request("/api/status");
 		expect(res.status).toBe(200);
+	});
+});
+
+describe("PRD-029 /api/status carries the additive, mode-gated `reasons` (single-sourced with /health)", () => {
+	// A representative full health-detail input the daemon composition root builds — memory feature
+	// gating (enabled + provider), embeddings on, Portkey ok. The SAME thunk feeds /health and
+	// /api/status, so the two surfaces can never drift.
+	const detailInputs: HealthDetailInputs = {
+		status: "ok",
+		embeddingsEnabled: true,
+		embeddingsWarm: true,
+		portkey: "ok",
+		memory: { enabled: true, providerConfigured: true },
+	};
+	const healthDetail = () => buildHealthDetail(detailInputs);
+
+	it("includes reasons.memory {enabled, provider} + embeddings + portkey on the local body", async () => {
+		const daemon = createDaemon({
+			config: cfg("local"),
+			storage: storageStub,
+			logger: createRequestLogger({ silent: true }),
+			healthDetail,
+		});
+		const res = await daemon.app.request("/api/status");
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as any;
+		// The at-minimum shape the Hive portal's Memory Formation control consumes.
+		expect(body.reasons.memory).toEqual({ enabled: true, provider: "configured" });
+		expect(body.reasons.embeddings).toBe("on");
+		expect(body.reasons.portkey).toBe("ok");
+	});
+
+	it("reasons on /api/status are IDENTICAL to /health for the same daemon state (no drift)", async () => {
+		const daemon = createDaemon({
+			config: cfg("local"),
+			storage: storageStub,
+			logger: createRequestLogger({ silent: true }),
+			healthDetail,
+		});
+		const statusBody = (await (await daemon.app.request("/api/status")).json()) as any;
+		const healthBody = (await (await daemon.app.request("/health")).json()) as any;
+		// Single-sourced: both surfaces emit the exact same reasons object (memory/embeddings/portkey).
+		expect(statusBody.reasons).toEqual(healthBody.reasons);
+		expect(statusBody.reasons.memory.provider).toBe("configured");
+	});
+
+	it("reflects an unconfigured provider so the portal fail-closes the Memory Formation control", async () => {
+		const daemon = createDaemon({
+			config: cfg("local"),
+			storage: storageStub,
+			logger: createRequestLogger({ silent: true }),
+			healthDetail: () =>
+				buildHealthDetail({ ...detailInputs, memory: { enabled: false, providerConfigured: false } }),
+		});
+		const body = (await (await daemon.app.request("/api/status")).json()) as any;
+		expect(body.reasons.memory).toEqual({ enabled: false, provider: "unconfigured" });
+	});
+
+	it("STRIPS reasons on the public team/hybrid body (no subsystem topology to an unauthenticated remote)", async () => {
+		for (const mode of ["team", "hybrid"] as const) {
+			const daemon = createDaemon({
+				config: cfg(mode),
+				storage: storageStub,
+				logger: createRequestLogger({ silent: true }),
+				healthDetail,
+			});
+			const body = (await (await daemon.app.request("/api/status")).json()) as any;
+			// Mode-gated exactly like /health: the public non-local body carries NO reasons block.
+			expect(body.reasons).toBeUndefined();
+			// The pre-029 fields are unaffected (purely additive change).
+			expect(body.config.mode).toBe(mode);
+			expect(body.providers.storage).toBe("configured");
+		}
+	});
+
+	it("keeps the pre-029 shape when the healthDetail seam is unset (bare daemon)", async () => {
+		const daemon = createDaemon({ config: cfg("local"), storage: storageStub, logger: createRequestLogger({ silent: true }) });
+		const body = (await (await daemon.app.request("/api/status")).json()) as any;
+		expect(body.reasons).toBeUndefined();
+		expect(body.catalog.tableCount).toBeGreaterThan(0);
 	});
 });
 

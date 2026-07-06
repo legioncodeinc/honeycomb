@@ -354,6 +354,16 @@ export function createDaemon(options: CreateDaemonOptions = {}): Daemon {
 
 	// ── FR-5 / a-AC-3: /api/status — resolved config, providers, tenancy.
 	app.get("/api/status", (c) => {
+		// PRD-029 (D-2/AC-3): the per-subsystem `reasons` block is layered on ADDITIVELY here,
+		// from the SAME `healthDetail()` thunk `/health` uses — so `/api/status.reasons` and
+		// `/health.reasons` are single-sourced and can NEVER drift (memory/embeddings/portkey
+		// signals come from one builder). `/api/status` is an UNPROTECTED surface (like the
+		// public `/health`), so it gets the SAME mode-gate: `publicHealthDetail` includes
+		// `reasons` on the `local`/loopback body (the Hive portal reads honeycomb here) and
+		// STRIPS it on the public team/hybrid body (no subsystem topology to an unauthenticated
+		// remote — the full detail rides the protected `/api/diagnostics/health` surface). When
+		// the detail seam is unset (bare daemon / 004a suite), `/api/status` keeps its prior shape.
+		const detail = healthDetail !== undefined ? publicHealthDetail(healthDetail(), config.mode) : undefined;
 		return c.json({
 			version: HONEYCOMB_VERSION,
 			config: {
@@ -379,6 +389,10 @@ export function createDaemon(options: CreateDaemonOptions = {}): Daemon {
 			// derived from the in-memory CATALOG (no query). Lets an operator
 			// confirm the catalog loaded without probing DeepLake.
 			catalog: { tableCount: CATALOG.length },
+			// PRD-029: the additive, mode-gated per-subsystem reasons (single-sourced with
+			// `/health` above). A cross-daemon consumer that only proxies `/api/status` (the
+			// Hive portal, over loopback) reads the memory/embeddings/provider signal here.
+			...(detail?.reasons !== undefined ? { reasons: detail.reasons } : {}),
 		});
 	});
 

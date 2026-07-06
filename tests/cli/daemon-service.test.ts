@@ -195,7 +195,8 @@ describe("PRD-064h AC-064h.4, renderScheduledTaskXml is SID-scoped + conhost-hea
 	});
 	it("wraps the command in conhost --headless so no console window pops", () => {
 		expect(xml).toContain("<Command>C:\\Windows\\System32\\conhost.exe</Command>");
-		expect(xml).toContain("--headless cmd /c");
+		// `/v:on` enables delayed expansion so the relaunch loop can read `!errorlevel!` (see below).
+		expect(xml).toContain("--headless cmd /v:on /c");
 	});
 	it("pins cd /d <workspace> + HONEYCOMB_WORKSPACE + APIARY_HOME + node entry (system32 close)", () => {
 		expect(xml).toContain("cd /d &quot;C:\\Users\\ada\\hc&quot;");
@@ -203,6 +204,17 @@ describe("PRD-064h AC-064h.4, renderScheduledTaskXml is SID-scoped + conhost-hea
 		expect(xml).toContain(`set &quot;HONEYCOMB_WORKSPACE=C:\\Users\\ada\\hc&quot;`);
 		expect(xml).toContain(`set &quot;APIARY_HOME=C:\\Users\\ada\\.apiary&quot;`);
 		expect(xml).toContain("daemon\\index.js");
+	});
+	it("wraps node in a conhost-independent relaunch loop that restarts on a NON-ZERO exit only", () => {
+		// conhost --headless masks the child's exit code (always reports 0 to Task Scheduler), so the
+		// task's <RestartOnFailure> can never fire. The auto-restart must live INSIDE the cmd, where the
+		// real errorlevel is visible. The loop re-launches node on a non-zero exit and BREAKS on a clean
+		// exit (a deliberate `daemon stop` is not fought). XML-escaped: `&`→`&amp;`, `>`→`&gt;`.
+		expect(xml).toContain("for /l %i in (1,1,60)"); // bounded relaunch loop
+		expect(xml).toContain("if !errorlevel! equ 0 (exit /b 0)"); // clean exit breaks the loop
+		expect(xml).toContain("timeout /t 5 /nobreak"); // backoff between relaunches
+		expect(xml).toContain("&amp;"); // the `& ` command chaining is XML-escaped
+		expect(xml).toContain("&gt;nul"); // the `>nul` redirect is XML-escaped
 	});
 	it("omits the APIARY_HOME set when no fleet root is pinned", () => {
 		const plain = renderScheduledTaskXml(WIN_SPEC, FAKE_SID, "C:\\Windows\\System32\\conhost.exe");
@@ -217,6 +229,14 @@ describe("PRD-064h AC-064h.4, renderScheduledTaskXml is SID-scoped + conhost-hea
 	it("THROWS on a cmd-metacharacter in a path (the service-unavailable fallback signal)", () => {
 		const poisoned: ServiceSpec = { ...WIN_SPEC, workspace: 'C:\\hc" & calc' };
 		expect(() => renderScheduledTaskXml(poisoned, FAKE_SID)).toThrow(/unsafe character/);
+	});
+	it("THROWS on a `!` in a path (delayed-expansion injection — the action runs `cmd /v:on`)", () => {
+		// `/v:on` makes `!VAR!` expand at execution time on the command line these paths embed into,
+		// so `!` must be rejected exactly like the other cmd metacharacters. Guards workspace + entry.
+		const poisonedWs: ServiceSpec = { ...WIN_SPEC, workspace: "C:\\Users\\!APPDATA!\\hc" };
+		expect(() => renderScheduledTaskXml(poisonedWs, FAKE_SID)).toThrow(/unsafe character/);
+		const poisonedEntry: ServiceSpec = { ...WIN_SPEC, entry: "C:\\hc\\!PROGRAMDATA!\\index.js" };
+		expect(() => renderScheduledTaskXml(poisonedEntry, FAKE_SID)).toThrow(/unsafe character/);
 	});
 });
 

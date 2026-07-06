@@ -7,6 +7,7 @@
  */
 
 import type { JobInput, JobKindStats, JobQueueService, JobQueueStats, LeasedJob } from "./job-queue.js";
+import { resolveLocalQueueTopology } from "./local-queue-diagnostics.js";
 
 export const HONEYCOMB_LOCAL_QUEUE_ENABLED = "HONEYCOMB_LOCAL_QUEUE_ENABLED" as const;
 export const HONEYCOMB_LOCAL_QUEUE_DRAIN_SHARED = "HONEYCOMB_LOCAL_QUEUE_DRAIN_SHARED" as const;
@@ -43,8 +44,21 @@ export interface HybridJobQueueDeps {
 }
 
 export function resolveHybridJobQueueConfig(env: NodeJS.ProcessEnv = process.env): HybridJobQueueConfig {
+	// Precedence: an EXPLICIT `HONEYCOMB_LOCAL_QUEUE_ENABLED` (true/false) always wins — it is both the
+	// opt-in and the rollback lever. When it is UNSET, fall back to the topology gate's default-on
+	// decision. The gate treats an undeclared (unknown) or single-machine topology as eligible, so a
+	// plain local daemon gets the transactional local queue OUT OF THE BOX; only an explicitly-declared
+	// `fleet`/`multi_device` topology stays on the shared queue (or an explicit opt-in overrides that).
+	//
+	// This deliberately REVERSES PRD-066e's original "unknown ⇒ shared" default. Production proved the
+	// shared DeepLake `memory_jobs` queue unreliable under read-after-write lag (version-number collisions
+	// re-lease completed jobs forever, so the pipeline never drains and forms zero memories). Absence of a
+	// declared topology must therefore mean "assume the correct local default", not "assume the broken
+	// shared queue". `=false` still rolls back to shared for anyone who needs it.
+	const explicit = parseOptionalBooleanFlag(env[HONEYCOMB_LOCAL_QUEUE_ENABLED]);
+	const enabled = explicit ?? resolveLocalQueueTopology(env).eligibleForDefaultOn;
 	return {
-		enabled: parseBooleanFlag(env[HONEYCOMB_LOCAL_QUEUE_ENABLED]),
+		enabled,
 		drainSharedLocalKinds: parseBooleanFlag(env[HONEYCOMB_LOCAL_QUEUE_DRAIN_SHARED]),
 		localKinds: new Set(DEFAULT_LOCAL_JOB_KINDS),
 	};
@@ -189,4 +203,18 @@ function parseBooleanFlag(raw: string | undefined): boolean {
 	if (raw === undefined) return false;
 	const normalized = raw.trim().toLowerCase();
 	return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+/**
+ * Parse a tri-state boolean env flag: `true`/`false`/`undefined`. Distinguishes an EXPLICITLY-set
+ * value (which must win over any default) from an UNSET/blank/unrecognized one (which falls back to
+ * the topology default-on gate). Unrecognized tokens are treated as unset — never silently `false` —
+ * so a typo can never accidentally force the (broken) shared queue.
+ */
+function parseOptionalBooleanFlag(raw: string | undefined): boolean | undefined {
+	if (raw === undefined) return undefined;
+	const normalized = raw.trim().toLowerCase();
+	if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on") return true;
+	if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off") return false;
+	return undefined;
 }

@@ -42,6 +42,7 @@
 
 import { z } from "zod";
 
+import { BoolFlag } from "../../../shared/bool-flag.js";
 import type { JobQueueService, LeasedJob } from "./job-queue.js";
 import type { PollBackoffConfig } from "./poll-backoff.js";
 import { createPollLoop, type PollLoop } from "./poll-loop.js";
@@ -236,15 +237,6 @@ export function createLeaseCoordinator(deps: LeaseCoordinatorDeps): LeaseCoordin
 }
 
 // ── HONEYCOMB_POLL_CONSOLIDATE flag (AC-9) ──────────────────────────────────────
-
-/**
- * A boolean flag read from an env string: `true`/`1` → true, anything else →
- * false. Mirrors `pollinating/config.ts` `BoolFlag` so the env contract is uniform.
- */
-const BoolFlag = z.preprocess((raw) => {
-	if (typeof raw === "boolean") return raw;
-	return raw === "true" || raw === "1";
-}, z.boolean());
 
 /**
  * The validated consolidation config. `enabled` defaults FALSE-SAFE in the schema so

@@ -126,6 +126,18 @@ class InMemoryJobs {
 			const row = id !== undefined ? this.current(id) : undefined;
 			return row ? [{ ...row }] : [];
 		}
+		// Paginated full-column scan (discoverIds): SELECT <cols> FROM ... ORDER BY id,version LIMIT N OFFSET M.
+		if (!/WHERE/i.test(sql) && /LIMIT\s+\d+\s+OFFSET\s+\d+/i.test(sql)) {
+			const limit = Number(sql.match(/LIMIT\s+(\d+)/i)?.[1] ?? "0");
+			const offset = Number(sql.match(/OFFSET\s+(\d+)/i)?.[1] ?? "0");
+			const sorted = [...this.all].sort((a, b) => {
+				const ai = String(a.id);
+				const bi = String(b.id);
+				if (ai !== bi) return ai < bi ? -1 : 1;
+				return Number(a.version) - Number(b.version);
+			});
+			return sorted.slice(offset, offset + limit).map((r) => ({ ...r }));
+		}
 		return [];
 	}
 	private splitTopLevel(list: string): string[] {

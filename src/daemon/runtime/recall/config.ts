@@ -38,6 +38,8 @@
  */
 
 import { z } from "zod";
+
+import { BoolFlag } from "../../../shared/bool-flag.js";
 import { DEFAULT_OVERFETCH_MULTIPLIER } from "../../storage/vector.js";
 
 // ── D-1 over-fetch ──────────────────────────────────────────────────────────
@@ -231,12 +233,6 @@ export const DEFAULT_MIN_INJECTION_SCORE = 0.6;
 export const RERANKER_STRATEGIES = Object.freeze(["embedding-cosine", "llm", "cohere", "none"] as const);
 /** A reranker strategy token. */
 export type RerankerStrategy = (typeof RERANKER_STRATEGIES)[number];
-
-/** A boolean flag read from an env string: `true`/`1` → true, anything else → false. */
-const BoolFlag = z.preprocess((raw) => {
-	if (typeof raw === "boolean") return raw;
-	return raw === "true" || raw === "1";
-}, z.boolean());
 
 /**
  * A non-negative-integer tuning knob: a non-numeric value falls back to the

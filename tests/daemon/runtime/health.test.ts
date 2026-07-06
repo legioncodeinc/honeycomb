@@ -141,6 +141,56 @@ describe("AC-2 /health detail NAMES the down subsystem, not a bare degraded", ()
 		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: false }).reasons?.embeddingsState).toBe("off");
 	});
 
+	it("memory-formation: omitted when unwired; surfaced (normalized) when the tracker is supplied", () => {
+		// Unwired (no snapshot) → the reason is ABSENT, exactly like the other additive blocks.
+		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.memoryFormation).toBeUndefined();
+		// Wired with commits → surfaced verbatim with a non-negative integer count + last-write detail.
+		const formed = buildHealthDetail({
+			status: "ok",
+			embeddingsEnabled: true,
+			memoryFormation: { committedSinceBoot: 3, lastCommittedAt: "2026-07-05T23:15:04.611Z", lastAction: "inserted" },
+		});
+		expect(formed.reasons?.memoryFormation).toEqual({
+			committedSinceBoot: 3,
+			lastCommittedAt: "2026-07-05T23:15:04.611Z",
+			lastAction: "inserted",
+		});
+		// Fresh daemon, nothing formed yet → zero (the glanceable "stalled?" symptom), no last-* fields.
+		const zero = buildHealthDetail({ status: "ok", embeddingsEnabled: true, memoryFormation: { committedSinceBoot: 0 } });
+		expect(zero.reasons?.memoryFormation).toEqual({ committedSinceBoot: 0 });
+	});
+
+	it("memoryQueue: omitted when unwired; 'local' healthy / 'shared' degraded when wired", () => {
+		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.memoryQueue).toBeUndefined();
+		expect(
+			buildHealthDetail({ status: "ok", embeddingsEnabled: true, memoryQueue: "local" }).reasons?.memoryQueue,
+		).toBe("local");
+		expect(
+			buildHealthDetail({ status: "ok", embeddingsEnabled: true, memoryQueue: "shared" }).reasons?.memoryQueue,
+		).toBe("shared");
+	});
+
+	it("memory feature-gating: omitted when unwired; enabled + provider enum surfaced when wired", () => {
+		// Unwired (the deterministic unit suite / a daemon that never builds the pipeline worker) → absent.
+		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.memory).toBeUndefined();
+		// Enabled + a real provider configured → the dashboard may offer + reflect the ON control.
+		expect(
+			buildHealthDetail({
+				status: "ok",
+				embeddingsEnabled: true,
+				memory: { enabled: true, providerConfigured: true },
+			}).reasons?.memory,
+		).toEqual({ enabled: true, provider: "configured" });
+		// Disabled + NO provider → the control is gated (memory cannot extract without a provider).
+		expect(
+			buildHealthDetail({
+				status: "ok",
+				embeddingsEnabled: false,
+				memory: { enabled: false, providerConfigured: false },
+			}).reasons?.memory,
+		).toEqual({ enabled: false, provider: "unconfigured" });
+	});
+
 
 	it("schema is best-effort 'ok' by default; 'missing_table' only when a required table is known-missing", () => {
 		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.schema).toBe("ok");
@@ -176,6 +226,23 @@ describe("AC-2 /health detail NAMES the down subsystem, not a bare degraded", ()
 		expect(body.reasons?.storage).toBe("unreachable");
 		expect(body.reasons?.embeddings).toBe("off");
 		expect(body.reasons?.schema).toBe("ok");
+	});
+
+	it("the /health BODY surfaces the memoryQueue reason ('shared' = the degraded pipeline-queue signal)", async () => {
+		const daemon = createDaemon({
+			config: cfg("local"),
+			storage: {
+				async query() {
+					return ok([]);
+				},
+			},
+			logger: createRequestLogger({ silent: true }),
+			pipelineProbe: () => "ok",
+			healthDetail: () => buildHealthDetail({ status: "ok", embeddingsEnabled: true, memoryQueue: "shared" }),
+		});
+		const res = await daemon.app.request("/health");
+		const body = (await res.json()) as { reasons?: { memoryQueue?: string } };
+		expect(body.reasons?.memoryQueue, "the shared-queue degraded-coordination signal is glanceable").toBe("shared");
 	});
 });
 

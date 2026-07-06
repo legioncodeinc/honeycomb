@@ -340,7 +340,7 @@ WantedBy=default.target
  * XML definition (not an inline `/TR`), the action's `<Arguments>` still embeds a `cmd /c "..."`
  * string that cmd.exe RE-PARSES at every logon. `spec.workspace` is derived from
  * `HONEYCOMB_WORKSPACE` / the CLI cwd (src/cli/runtime.ts resolveDaemonWorkspace), and `spec.entry`
- * can be overridden via `HONEYCOMB_DAEMON_ENTRY`, so a path containing `& | < > ^ " %` (or a CR/LF)
+ * can be overridden via `HONEYCOMB_DAEMON_ENTRY`, so a path containing `& | < > ^ " % !` (or a CR/LF)
  * would break out of the intended command and execute arbitrary commands under the user's login
  * session on every boot. We THROW on such a path; a throw is this module's documented "service path
  * unavailable" signal, so runtime.ts falls back to the safe detached spawn (which passes the
@@ -350,7 +350,14 @@ WantedBy=default.target
  */
 function assertCmdSafe(value: string): void {
 	// cmd.exe command separators / redirection / escape / env-expansion / quote, plus CR/LF.
-	if (/[&|<>^"%\r\n]/.test(value)) {
+	// `!` is a metacharacter ONLY under delayed expansion, but the scheduled-task action now runs
+	// `cmd /v:on` (renderScheduledTaskXml, for the relaunch loop's `!errorlevel!` read), which makes
+	// `!VAR!` expand at execution time on the SAME command line these paths are embedded in. An
+	// unfiltered `!` in a poisoned HONEYCOMB_WORKSPACE / HONEYCOMB_DAEMON_ENTRY / APIARY_HOME would
+	// therefore expand an arbitrary env var into the command (and, if that var's value carries a
+	// separator, re-introduce a metacharacter AFTER this guard ran) — a delayed-expansion injection.
+	// Reject it here; legitimate Windows paths never contain `!`.
+	if (/[&|<>^"%!\r\n]/.test(value)) {
 		throw new Error("unsafe character in service path; refusing to build the schtasks task command");
 	}
 }
@@ -440,13 +447,24 @@ export function stagedTaskXmlPath(spec: ServiceSpec): string {
  * (from {@link resolveWindowsUserId}) scopes BOTH the `<LogonTrigger>` and the `<Principal>` to the
  * current user, which is what lets a non-elevated `schtasks /Create /XML` succeed on Windows 11 25H2.
  *
- * The action runs `conhost.exe --headless cmd /c "..."` so the task fires with NO visible console
- * window (the proven fix). The inner `cmd /c` keeps the EXACT command semantics of the old task:
- * `cd /d <workspace>` + `set HONEYCOMB_WORKSPACE=<workspace>` (+ optional `set APIARY_HOME=<root>`,
- * PRD-072d) then `node <flags> <entry>`. Every embedded path passes {@link assertCmdSafe} (the value
- * is re-parsed by cmd.exe) AND is XML-escaped (the value is XML text). `StartWhenAvailable`,
- * `ExecutionTimeLimit PT0S`, and `RestartOnFailure` (PT1M x 999) preserve the liveness-floor
- * semantics of the old `/SC ONLOGON /RL LIMITED` task.
+ * The action runs `conhost.exe --headless cmd /v:on /c "..."` so the task fires with NO visible
+ * console window. The inner `cmd` does `cd /d <workspace>` + `set HONEYCOMB_WORKSPACE=<workspace>`
+ * (+ optional `set APIARY_HOME=<root>`, PRD-072d) then runs `node <flags> <entry>` INSIDE A BOUNDED
+ * RELAUNCH LOOP. Every embedded path passes {@link assertCmdSafe} (the value is re-parsed by cmd.exe)
+ * AND is XML-escaped (the value is XML text).
+ *
+ * ── Why the relaunch loop (the auto-restart fix) ─────────────────────────────
+ * `conhost.exe --headless` ALWAYS reports exit code 0 to Task Scheduler regardless of the child's
+ * real exit code (empirically verified). So the task's `<RestartOnFailure>` — which fires ONLY on a
+ * NON-ZERO Last Result — can NEVER observe a daemon crash and never restarts it: the task sits Ready
+ * with Last Result 0 and the daemon stays dead. The restart therefore must live INSIDE the cmd, where
+ * the real errorlevel is visible: `for /l %i in (1,1,60) do (node … & if !errorlevel! equ 0 (exit /b 0)
+ * & timeout /t 5 …)` relaunches node on a NON-ZERO exit (a crash / the daemon's `uncaughtException`
+ * net exiting 1) with a 5s backoff, and BREAKS on a clean exit 0 so a deliberate `daemon stop` is not
+ * fought. `/v:on` enables the delayed `!errorlevel!` read. This is the conhost-independent equivalent
+ * of systemd `Restart=on-failure` / launchd `KeepAlive`. `StartWhenAvailable`, `ExecutionTimeLimit
+ * PT0S`, and the task's own `RestartOnFailure` (PT1M x 999) remain as the liveness floor / belt-and-
+ * suspenders for the rare case the conhost host process itself dies non-zero.
  */
 export function renderScheduledTaskXml(spec: ServiceSpec, userId: string, conhost: string = conhostPath()): string {
 	// SECURITY: the `<Arguments>` embeds a cmd.exe-parsed string, so refuse any path with a cmd
@@ -464,8 +482,35 @@ export function renderScheduledTaskXml(spec: ServiceSpec, userId: string, conhos
 	// fix is the canonical cmd idiom: quote the whole `VAR=value` assignment so the space before `&&`
 	// stays OUTSIDE the value. `set "VAR=C:\...\path with spaces"` also preserves spaces WITHIN a path.
 	const apiaryHomeSet = spec.fleetRoot !== undefined ? `set "${APIARY_HOME_ENV}=${spec.fleetRoot}" && ` : "";
-	// The inner command: identical semantics to the legacy /TR string (cd + env pin + node entry).
-	const innerCmd = `cmd /c "cd /d "${spec.workspace}" && set "HONEYCOMB_WORKSPACE=${spec.workspace}" && ${apiaryHomeSet}"${spec.nodePath}" ${nodeFlags}"${spec.entry}""`;
+	// The inner command: cd + env pin + node entry, WRAPPED IN A CONHOST-INDEPENDENT RELAUNCH LOOP.
+	//
+	// WHY THE LOOP (the auto-restart fix) — the task's Action is `conhost.exe --headless cmd /c ...`,
+	// and `conhost --headless` ALWAYS reports exit code 0 to Task Scheduler regardless of the child's
+	// real code (empirically verified: `exit 7` under conhost --headless → Last Result 0). So the
+	// task's `<RestartOnFailure>` — which fires ONLY on a NON-ZERO Last Result — can NEVER see a crash
+	// and never restarts the daemon. The fix must live INSIDE the cmd (where the real errorlevel is
+	// visible), independent of the code conhost forwards.
+	//
+	// The loop re-launches node whenever it exits with a NON-ZERO errorlevel (a crash / the daemon's
+	// `uncaughtException` net exiting 1), after a short backoff, up to a bounded count. A CLEAN exit
+	// (errorlevel 0 — `honeycomb daemon stop`, a graceful SIGTERM) breaks the loop so a deliberate stop
+	// is NOT fought. The daemon's own single-instance lock + stale-lock reclaim make a relaunch safe.
+	// `delims=` + delayed expansion (`cmd /v:on`) read `!errorlevel!` inside the loop body. This mirrors
+	// the OS supervisor contract (systemd `Restart=on-failure`, launchd `KeepAlive`) that conhost breaks
+	// on Windows. The bound (60) with PT1M framing caps a hard boot-loop; the task's own PT1M x999 stays
+	// as a belt-and-suspenders for the (rare) case the whole conhost host itself dies non-zero.
+	const nodeInvoke = `"${spec.nodePath}" ${nodeFlags}"${spec.entry}"`;
+	// NOTE `%i` (single, not `%%i`): the loop runs on the cmd COMMAND LINE (conhost passes a command
+	// string, not a `.bat` file), where `for` uses a single `%`. `%%i` is a batch-file-only escaping and
+	// errors ("%%i was unexpected at this time") on the command line. The counter var is unreferenced —
+	// `%i` is only the loop's iteration variable; the body relaunches node until a clean (0) exit.
+	const relaunchLoop =
+		`for /l %i in (1,1,60) do (` +
+		`${nodeInvoke} & ` +
+		`if !errorlevel! equ 0 (exit /b 0) & ` +
+		`timeout /t 5 /nobreak ^>nul` +
+		`)`;
+	const innerCmd = `cmd /v:on /c "cd /d "${spec.workspace}" && set "HONEYCOMB_WORKSPACE=${spec.workspace}" && ${apiaryHomeSet}${relaunchLoop}"`;
 	// conhost --headless <inner> => no console window pops when the task runs (proven probe: Result 0).
 	const args = xmlEscape(`--headless ${innerCmd}`);
 	const command = xmlEscape(conhost);

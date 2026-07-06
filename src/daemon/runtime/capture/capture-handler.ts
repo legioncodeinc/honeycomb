@@ -461,10 +461,22 @@ class CaptureRouteHandler {
 	private ensureBuffer(): CaptureBuffer<BufferedRow> {
 		if (this.buffer === null) {
 			const cfg = { maxEvents: this.config.maxEvents, windowMs: this.config.windowMs };
+			// The TIME-triggered flush has no external awaiter, so its rejection is routed here rather
+			// than being left dangling (a dangling rejection kills the daemon under Node ≥15 — the live
+			// capture-death bug). flushBatch already logged `capture.batch_insert.failed` + counted the
+			// dropped rows before it threw; this sink is the belt-and-suspenders log so a timer-flush
+			// failure is ALWAYS observable and NEVER fatal. flushBatch owns the dropped-row count, so we
+			// only log here (counting again would double-count).
+			const onFlushError = (err: unknown): void => {
+				this.deps.logger?.event("capture.flush.failed", {
+					reason: err instanceof Error ? err.message : String(err),
+				});
+			};
+			const clock = this.deps.bufferClock;
 			this.buffer =
-				this.deps.bufferClock !== undefined
-					? new CaptureBuffer<BufferedRow>((batch) => this.flushBatch(batch), cfg, this.deps.bufferClock)
-					: new CaptureBuffer<BufferedRow>((batch) => this.flushBatch(batch), cfg);
+				clock !== undefined
+					? new CaptureBuffer<BufferedRow>((batch) => this.flushBatch(batch), cfg, clock, onFlushError)
+					: new CaptureBuffer<BufferedRow>((batch) => this.flushBatch(batch), cfg, undefined, onFlushError);
 		}
 		return this.buffer;
 	}

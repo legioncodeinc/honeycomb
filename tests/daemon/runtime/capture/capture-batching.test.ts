@@ -356,6 +356,70 @@ describe("C-4: dropped-events counter on acked-but-lost capture writes", () => {
 		expect(logged.some((name) => name === "capture.flush.failed" || name === "capture.batch_insert.failed")).toBe(true);
 	});
 
+	it("REGRESSION: a TIME-triggered flush failure is fail-soft (logged, counted, daemon survives)", async () => {
+		// THE PRODUCTION DEATH PATH. A single captured event's 1s window closes and the DeepLake append
+		// times out / query-errors. This flush fires from the TIMER with NO awaiter — historically the
+		// rejection escaped as an unhandled rejection and (Node ≥15) killed the daemon. The fix routes it
+		// to the buffer's onFlushError sink. Here we prove: the capture ack still returns 201 (the write
+		// path never surfaced the failure to the turn), the failure IS logged + counted, and — crucially —
+		// NO unhandled rejection escapes (a listener asserts none fired).
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown): void => {
+			unhandled.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			const dropped = createCaptureDroppedEventsCounter();
+			const logged: string[] = [];
+			const logger = createRequestLogger({ silent: true });
+			const origEvent = logger.event.bind(logger);
+			logger.event = (name, fields) => {
+				logged.push(name);
+				origEvent(name, fields);
+			};
+			const clock = new FakeClock();
+			const failInsert = (req: TransportRequest): Record<string, unknown>[] => {
+				if (/information_schema\.columns/i.test(req.sql)) {
+					return healTargetFor("sessions").columns.map((c) => ({ column_name: c.name }));
+				}
+				if (/^\s*INSERT/i.test(req.sql)) {
+					throw new TransportError("timeout", "deeplake batch insert timed out", 504);
+				}
+				return [];
+			};
+			const { daemon } = buildDaemon(BATCH_ON, clock, {
+				responder: failInsert,
+				droppedEvents: dropped,
+				logger,
+			});
+
+			// ONE capture (a single-event window — the exact shape of the live deaths). The ack is 201:
+			// the row is committed to the in-memory window; the append happens later on the timer.
+			const res = await daemon.app.request("/api/hooks/capture", {
+				method: "POST",
+				headers: sessionHeaders(),
+				body: JSON.stringify(userBody("a turn whose flush will time out")),
+			});
+			expect(res.status, "the capture is acked before the (later) flush — never fails the turn").toBe(201);
+
+			// Close the window → the timer fires flushNow() with NO external awaiter → the append rejects.
+			clock.advance(1_000);
+			// Let the rejected flush + onFlushError routing settle, and give any (bug) unhandled rejection
+			// a full macrotask to surface.
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+			await new Promise((r) => setTimeout(r, 0));
+
+			// Fail-soft: the failure was logged + counted, and NOTHING escaped to kill the process.
+			expect(logged, "the timed-out append was logged").toContain("capture.batch_insert.failed");
+			expect(dropped.read(), "the lost row was counted").toBe(1);
+			expect(unhandled, "NO unhandled rejection escaped — the daemon survives").toEqual([]);
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+		}
+	});
+
 	it("counts each row of a failed SIZE-triggered flush exactly once (no off-by-one on the trigger row)", async () => {
 		// The row that trips the size cap gets the flush promise back from `add()`, so its
 		// rejection is observed by bufferRow's catch AND by flushBatch — the count must be
