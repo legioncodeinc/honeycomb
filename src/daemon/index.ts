@@ -206,9 +206,53 @@ function isMainEntry(): boolean {
 	return isDaemonMainEntry(import.meta.url, process.argv[1]);
 }
 
+/**
+ * Install the top-level process safety net (fail-soft).
+ *
+ * WHY THIS EXISTS — the daemon is a long-lived HTTP server; its event loop stays alive on the
+ * listening socket, so a mere logged capture-flush failure must NEVER end the process. But a stray
+ * promise rejection that escapes with no `.catch` (historically: the time-triggered capture flush,
+ * fixed in `capture-buffer.ts`) is, under Node ≥15, FATAL by default — Node prints the rejection and
+ * calls `process.exit(1)`. That is exactly how a DeepLake `capture.batch_insert.failed` was observed
+ * to kill the daemon. This net is the backstop for any FUTURE such escape on any code path:
+ *
+ *   - `unhandledRejection` → LOG to stderr and KEEP RUNNING. A background async failure (a capture
+ *     write, an embed, a queue tick) must degrade to a logged error, not a process death. The daemon
+ *     keeps serving; the specific escape is fixed at its source (the primary fix), this only ensures
+ *     no NEW escape is silently fatal.
+ *   - `uncaughtException` → this is a genuinely unexpected synchronous throw with no handler. We LOG
+ *     and, for a truly unknowable state, exit NON-ZERO so the OS supervisor (the Windows scheduled
+ *     task's `RestartOnFailure`, systemd `Restart=on-failure`, launchd `KeepAlive`) restarts us. A
+ *     non-zero code is deliberate: it is the ONLY signal that makes the supervisor re-up the daemon.
+ *
+ * The asymmetry is intentional: a stray REJECTION (almost always a fail-soft background op) keeps the
+ * daemon alive; a stray synchronous THROW (a corrupt-state signal) restarts it clean. Neither exits 0.
+ *
+ * Exported so a test can assert the contract (rejection → alive, uncaught throw → non-zero exit)
+ * without executing the module as the main entry.
+ */
+export function installProcessSafetyNet(): void {
+	process.on("unhandledRejection", (reason: unknown) => {
+		const message = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+		// Fail-soft: a background async failure must not end a long-lived HTTP daemon. Log + keep serving.
+		process.stderr.write(`[honeycomb] unhandledRejection (kept alive): ${message}\n`);
+	});
+	process.on("uncaughtException", (err: unknown) => {
+		const message = err instanceof Error ? (err.stack ?? err.message) : String(err);
+		// A synchronous throw with no handler = unknowable state. Log, then exit NON-ZERO so the OS
+		// supervisor restarts us clean (a zero exit would leave the scheduled task Ready + never restart).
+		process.stderr.write(`[honeycomb] uncaughtException (restarting): ${message}\n`);
+		process.exitCode = 1;
+		// Give the write + any in-flight graceful close a tick, then force the non-zero exit so the
+		// supervisor's restart-on-failure fires. `process.exitCode` alone would let a wedged handle hang.
+		setTimeout(() => process.exit(1), 100).unref();
+	});
+}
+
 // Production auto-listen: ONLY when run as the main entry (the bundled daemon binary),
 // never on import (a test imports `assembleDaemon`/`runAssembledDaemon` without binding).
 if (isMainEntry()) {
+	installProcessSafetyNet();
 	runAssembledDaemon().catch((err: unknown) => {
 		const message = err instanceof Error ? err.message : String(err);
 		process.stderr.write(`[honeycomb] daemon failed to start: ${message}\n`);
