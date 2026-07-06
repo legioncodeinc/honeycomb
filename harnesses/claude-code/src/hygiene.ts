@@ -37,12 +37,15 @@
  * Same discipline as `index.ts`: NO DeepLake. The seams POST to the loopback daemon.
  */
 
+import { pathToFileURL } from "node:url";
+
 import { createCredentialReader } from "../../../src/hooks/shared/credential-reader.js";
 import { createSessionStartSeams } from "../../../src/hooks/shared/session-start-seams.js";
-import type { HookSessionMeta } from "../../../src/hooks/shared/contracts.js";
+import { HYGIENE_META_ENV, type HookSessionMeta } from "../../../src/hooks/shared/contracts.js";
 
-/** The env var the parent sets to pass the session metadata JSON to this child. */
-export const HYGIENE_META_ENV = "HONEYCOMB_HYGIENE_META" as const;
+// Re-export so callers that import from this module still see the constant (back-compat).
+// The single source of truth lives in `src/hooks/shared/contracts.ts`.
+export { HYGIENE_META_ENV };
 
 /**
  * Run the three hygiene seams in this child process. Reads the meta from the env,
@@ -86,9 +89,33 @@ export async function runHygieneChild(): Promise<void> {
 
 // Production: when invoked as the bundled binary, run the hygiene pulls. Never on
 // import — a test imports `runHygieneChild` to drive it deterministically.
-if (import.meta.url === `file://${process.argv[1]}` || import.meta.url.endsWith("/hygiene.js")) {
+//
+// Main-module check: compare ABSOLUTE REAL PATHS so it is cross-platform (the previous
+// `file://${process.argv[1]}` form was malformed on Windows, where `argv[1]` is a `C:\…`
+// path, and the `endsWith("/hygiene.js")` fallback could fire on any module whose path
+// happened to end that way). `pathToFileURL(argv[1]).href` normalizes `argv[1]` to the
+// same `file:///…` shape `import.meta.url` uses, on every platform. We deliberately do
+// NOT use `import.meta.main` (Node 24+) because `engines.node >= 22.5.0` does not
+// guarantee it.
+if (isMainEntry()) {
 	void runHygieneChild().finally(() => {
 		// The child has NO response to emit, so let the loop drain naturally once the pulls
 		// settle. The seams' own timeouts bound how long this takes.
 	});
+}
+
+/**
+ * True when THIS module is the process entry point (i.e. the bundled `hygiene.js` is run
+ * directly via `node bundle/hygiene.js`), as opposed to imported by a test. Cross-platform:
+ * both sides are normalized to `file:///…` hrefs so Windows `C:\…` paths compare correctly.
+ * Never throws — a missing/odd `argv[1]` reads as "not the entry."
+ */
+function isMainEntry(): boolean {
+	const entry = process.argv[1];
+	if (typeof entry !== "string" || entry.length === 0) return false;
+	try {
+		return import.meta.url === pathToFileURL(entry).href;
+	} catch {
+		return false;
+	}
 }

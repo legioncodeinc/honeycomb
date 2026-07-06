@@ -40,7 +40,7 @@ import {
 	userMessageData,
 } from "../normalize.js";
 import { readTranscriptTurnUsage } from "./transcript.js";
-import type { HookSessionMeta, LogicalEvent } from "../shared/contracts.js";
+import { HYGIENE_META_ENV, type HookSessionMeta, type LogicalEvent } from "../shared/contracts.js";
 
 /** The Claude Code native → logical event name map (FR-1). The full six-event reference. */
 export const CLAUDE_CODE_EVENT_MAP: Readonly<Record<string, LogicalEvent>> = {
@@ -144,15 +144,9 @@ export function createClaudeCodeShim(): HarnessShim {
 }
 
 /**
- * The env var the hygiene child reads the session metadata JSON from. Set by
- * {@link spawnClaudeCodeHygieneChild} before spawn; consumed by the
- * `harnesses/claude-code/src/hygiene.ts` child entry point.
- */
-export const HYGIENE_META_ENV = "HONEYCOMB_HYGIENE_META" as const;
-
-/**
  * Spawn the bundled hygiene child (`bundle/hygiene.js` next to this running `index.js`)
- * DETACHED + `unref()`'d, with the session metadata JSON in {@link HYGIENE_META_ENV}.
+ * DETACHED + `unref()`'d, with the session metadata JSON in {@link HYGIENE_META_ENV}
+ * (the shared contract constant — single source of truth with the hygiene child).
  *
  * The child inherits the parent's env (so HOME resolves the credential file the same
  * way) and gets `stdio: "ignore"` (the parent already owns stdout; the child's stderr

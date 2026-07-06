@@ -84,6 +84,15 @@ export type LogicalEvent = (typeof LOGICAL_EVENTS)[number];
  */
 export type RuntimePath = "plugin" | "legacy";
 
+/**
+ * The env var carrying the session-metadata JSON from the hook parent to the detached
+ * hygiene child (the off-process latency fix). SINGLE SOURCE OF TRUTH — both the
+ * claude-code shim (`spawnHygieneChild`, which sets it before spawn) and the hygiene
+ * child entrypoint (`harnesses/claude-code/src/hygiene.ts`, which reads it on boot)
+ * import THIS constant, so the wire contract cannot drift between the two literals.
+ */
+export const HYGIENE_META_ENV = "HONEYCOMB_HYGIENE_META" as const;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // HookInput — the normalized payload every shim produces (FR-2)
 // ─────────────────────────────────────────────────────────────────────────────
