@@ -297,4 +297,75 @@ describe("CalibrationModelProvider — the L-W3 staleness fix", () => {
 		expect(model).toBeDefined();
 		expect(Array.isArray(model.knots)).toBe(true);
 	});
+
+	it("INVALIDATE/IN-FLIGHT RACE: an in-flight read that resolves AFTER invalidate does NOT pin its stale model (generation counter)", async () => {
+		// The race this test closes: a recall starts a re-read (in-flight), then the worker writes
+		// a new curve + calls invalidate(). The in-flight read returns the PRE-write (stale) model.
+		// Without the generation counter, that stale model would populate `entry` and be served for
+		// up to ttlMs — the exact concurrency the holder is meant to fix. The generation counter
+		// bumps on invalidate(), so the in-flight read's `.then()` sees a mismatched generation and
+		// SKIPS populating entry. The next caller re-reads fresh.
+		const clock = fakeClock();
+
+		// A storage whose query is gated on a deferred latch, so we can start the read, then
+		// invalidate while it's in flight, then release it. The FIRST query (priming) resolves
+		// immediately; only the SECOND query (the in-flight read under test) blocks on the latch.
+		// CRITICAL: the blob is CAPTURED when the query starts (before the latch), so the in-flight
+		// read returns the PRE-write model even though the worker swaps `blob` to the new curve
+		// while the read is blocked — that's the race (the read started before the write).
+		let releaseQuery: (() => void) | undefined;
+		let blob: string | undefined = serializeModel(FITTED_MODEL);
+		let queryCount = 0;
+		const storage: StorageQuery = {
+			async query(): Promise<QueryResult> {
+				queryCount += 1;
+				// Capture the blob at request time so a later swap doesn't affect this read.
+				const capturedBlob = blob;
+				if (queryCount === 2) {
+					await new Promise<void>((resolve) => {
+						releaseQuery = resolve;
+					});
+				}
+				if (capturedBlob === undefined) return { kind: "ok", rows: [], durationMs: 0 } as QueryResult;
+				return { kind: "ok", rows: [{ model_blob: capturedBlob }] as unknown as StorageRow[], durationMs: 0 } as QueryResult;
+			},
+		};
+
+		const provider = createCalibrationModelProvider({
+			storage,
+			scope: SCOPE,
+			ttlMs: 60_000,
+			now: clock.now,
+		});
+
+		// Prime the cache with the fitted model.
+		const first = await provider;
+		expect(first.knots).toEqual(FITTED_MODEL.knots);
+		expect(queryCount, "priming the cache fired one query").toBe(1);
+
+		// Expire the entry + start a new read (it will block on the latch).
+		clock.advance(61_000);
+		const inflightPromise = provider as PromiseLike<CalibrationModel>;
+		const inflight = inflightPromise.then((m) => m);
+		// Yield once so the read actually starts + blocks on releaseQuery.
+		await Promise.resolve();
+
+		// While the read is in flight, the worker writes a NEW curve + invalidates.
+		const NEW_MODEL: CalibrationModel = { identity: false, knots: [{ x: 0.7, y: 0.65 }] };
+		blob = serializeModel(NEW_MODEL);
+		provider.invalidate();
+
+		// Now release the in-flight read. It returns the PRE-write model (FITTED), but the
+		// generation counter should prevent it from populating entry.
+		releaseQuery?.();
+		const staleFromInflight = await inflight;
+		expect(staleFromInflight.knots, "the in-flight read returned the pre-write model").toEqual(FITTED_MODEL.knots);
+		expect(provider.cachedExpiresAt, "the stale in-flight result did NOT populate the cache").toBe(0);
+
+		// The next caller re-reads fresh (the generation was bumped, so entry was not populated).
+		// queryCount is 3: (1) priming, (2) the in-flight read, (3) this fresh re-read.
+		const fresh = await provider;
+		expect(queryCount, "the fresh re-read fired a third query (priming + in-flight + fresh)").toBe(3);
+		expect(fresh.knots, "the next read observed the post-write curve, not the stale in-flight one").toEqual(NEW_MODEL.knots);
+	});
 });

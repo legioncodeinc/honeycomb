@@ -288,6 +288,13 @@ export function createCalibrationModelProvider(
 	// The in-flight re-read promise (thundering-herd dedupe). Set when a re-read starts,
 	// cleared when it resolves. Concurrent callers `await` this same promise.
 	let inflight: Promise<CalibrationModel> | undefined;
+	// Generation counter — bumped on every `invalidate()`. Each in-flight read captures the
+	// generation active when it STARTED; its `.then()` only populates `entry` if the generation
+	// has NOT been bumped by an intervening invalidate(). This closes the race where a read
+	// started BEFORE a worker write would otherwise populate `entry` with the pre-write (stale)
+	// model AFTER invalidate() cleared it — serving stale data for up to ttlMs in the exact
+	// concurrent scenario (recall in-flight + worker write) the holder exists to fix.
+	let generation = 0;
 
 	/**
 	 * Resolve to the model the caller should see. Serves the cached entry when fresh;
@@ -301,6 +308,10 @@ export function createCalibrationModelProvider(
 		}
 		// Stale or absent. Dedupe: if a re-read is already in flight, join it.
 		if (inflight !== undefined) return inflight;
+		// Capture the generation active when this read STARTS. If invalidate() bumps it before the
+		// read resolves, the `.then()` skips populating `entry` (the read returns the pre-write
+		// model, which is now stale — the next caller will re-read fresh).
+		const startGeneration = generation;
 		// Start a single re-read. On resolve, populate the cache + clear the in-flight handle.
 		// `readLiveCalibrationModel` is itself fail-soft (returns IDENTITY on any read error), so
 		// the `.then(populate)` runs on EVERY resolution — including error-induced identity — and
@@ -308,7 +319,13 @@ export function createCalibrationModelProvider(
 		// in case a future change makes the read reject); it currently never fires.
 		inflight = readLiveCalibrationModel(storage, scope, agent)
 			.then((model: CalibrationModel) => {
-				entry = { model, expiresAt: now() + ttlMs };
+				// Only commit the result to the cache if no invalidate() bumped the generation
+				// while this read was in flight. A bumped generation means a worker write (or another
+				// invalidate) happened after this read started, so the model this read returned may be
+				// stale — drop it, let the next caller re-read fresh.
+				if (startGeneration === generation) {
+					entry = { model, expiresAt: now() + ttlMs };
+				}
 				inflight = undefined;
 				return model;
 			})
@@ -328,19 +345,11 @@ export function createCalibrationModelProvider(
 		},
 		invalidate(): void {
 			entry = undefined;
-			// NOTE: we deliberately do NOT cancel `inflight` here. If a re-read is mid-flight
-			// when the worker writes, the in-flight read returns the OLD curve (the worker's
-			// write commits AFTER the read started). The cache would then be populated with the
-			// stale model. To avoid that, invalidate() clears `entry` AFTER the in-flight
-			// resolves too: the .then() callback sets `entry` from the in-flight result, but
-			// the very next caller (post-write) sees `entry === undefined` only if the in-flight
-			// has NOT yet resolved. If it HAS resolved (and populated a stale `entry`), the next
-			// caller serves that stale entry for up to ttlMs. This is the documented TTL bound;
-			// a worker write that races an in-flight read is bounded by ttlMs, not infinity —
-			// strictly better than the prior "stale forever" behaviour.
-			//
-			// For the COMMON case (worker write happens between recalls, no in-flight read),
-			// invalidate() + the next recall's re-read observes the new curve immediately.
+			// Bump the generation so any in-flight read whose `.then()` hasn't fired yet will NOT
+			// populate `entry` with its (now-stale) result. This closes the invalidate/in-flight
+			// race: a read that started before the worker write returns the pre-write model, but it
+			// cannot pin that stale model into the cache — the next caller re-reads fresh.
+			generation += 1;
 		},
 		get cachedExpiresAt(): number {
 			return entry?.expiresAt ?? 0;
