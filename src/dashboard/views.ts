@@ -19,6 +19,7 @@
  *   removing a field, or changing a builder's signature is a breaking change for 020c.
  */
 
+import { LIFECYCLE_FLAG_REFERENCE, type LifecycleFlagRef } from "../shared/lifecycle-flags.js";
 import {
 	type GraphView,
 	type KpisView,
@@ -78,7 +79,35 @@ export function buildSessionsView(view: SessionsView): ViewBlock {
 	return { kind: "table", title: "Sessions", rows, data: view.sessions };
 }
 
-/** Build the settings panel (FR-4). Renders the active org/workspace + exposed config. */
+/**
+ * Build the read-only lifecycle-flag reference section (PRD-058d AC-55d.1.3 / L-W11).
+ *
+ * The flags are NOT interactive controls — their knobs are env vars / config, never mutated from
+ * the UI. This renders {@link LIFECYCLE_FLAG_REFERENCE} (the single-sourced table from
+ * `src/shared/lifecycle-flags.ts`) as one row per flag: `symbol — configPath = default (envOverride)`,
+ * with the master-equation effect on a second line. The data block carries the full reference so a
+ * host (webview / TUI) can paint a richer table without re-importing it.
+ *
+ * Rendered as a NESTED child of {@link buildSettingsView}, NOT a 7th top-level view, so the frozen
+ * six-view render contract (D-6 / b-AC-1) is preserved — `ViewBlock.children` is additive-safe and
+ * the HTML serializer recurses into it.
+ */
+export function buildLifecycleFlagsView(): ViewBlock {
+	const rows = LIFECYCLE_FLAG_REFERENCE.map(formatLifecycleFlagRow);
+	return {
+		kind: "table",
+		title: "Lifecycle flags",
+		rows,
+		data: LIFECYCLE_FLAG_REFERENCE as readonly LifecycleFlagRef[],
+	};
+}
+
+/** Format one flag row as `symbol — configPath = default (envOverride)` + the effect on its own line. */
+function formatLifecycleFlagRow(flag: LifecycleFlagRef): string {
+	return `${flag.symbol} — ${flag.configPath} = ${flag.defaultValue} (${flag.envOverride}) · ${flag.effect}`;
+}
+
+/** Build the settings panel (FR-4). Renders the active org/workspace + exposed config + the lifecycle-flag reference. */
 export function buildSettingsView(view: SettingsView): ViewBlock {
 	const rows: string[] = [
 		`Org: ${view.orgName} (${view.orgId})`,
@@ -87,7 +116,9 @@ export function buildSettingsView(view: SettingsView): ViewBlock {
 	for (const [label, value] of Object.entries(view.settings)) {
 		rows.push(`${label}: ${value}`);
 	}
-	return { kind: "panel", title: "Settings", rows, data: view };
+	// PRD-058d AC-55d.1.3 / L-W11: the lifecycle-flag reference renders inline as a child block so the
+	// frozen six-view top-level contract (D-6 / b-AC-1) stays intact and the flags travel WITH settings.
+	return { kind: "panel", title: "Settings", rows, data: view, children: [buildLifecycleFlagsView()] };
 }
 
 /**

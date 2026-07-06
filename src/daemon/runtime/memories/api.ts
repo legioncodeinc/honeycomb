@@ -186,10 +186,62 @@ export interface MountMemoriesOptions {
 	 */
 	readonly nectarRrfMultiplier?: number;
 	/**
+	 * PRD-058e (L-W1): the `recordRecallAccess` FACTORY. The composition root closes over `storage`;
+	 * the recall handler applies the per-request `scope` (the request's resolved tenancy) to produce
+	 * the `(memoryId) => Promise<void>` callback threaded into {@link recallMemories}. Each call
+	 * appends ONE `recall` access event (usefulness 0; the grade arrives later from the session-end
+	 * worker) + maintains the `memories.access_count` cache. FAIL-SOFT: a storage failure is
+	 * swallowed (best-effort, off the answer path). ABSENT (a unit-constructed mount) → no events
+	 * recorded (the deterministic suite is unchanged).
+	 */
+	readonly recordRecallAccessFactory?: (scope: QueryScope) => (memoryId: string) => Promise<void>;
+	/**
+	 * PRD-058e (L-W2): the ACT-R activation source. When injected, recall computes each hit's
+	 * reinforcement-aware `A_actr` from its usefulness-weighted access history and uses it IN PLACE
+	 * of the 058a Stage-1 `A_simple`. ABSENT → the byte-for-byte 058a Stage-1 path (cold-start). The
+	 * `load(hits, scope)` method receives the request scope from the engine, so the source itself is
+	 * constructed ONCE at boot. FAIL-SOFT: a per-hit miss or a source throw degrades to Stage-1.
+	 */
+	readonly activationSource?: import("./recall.js").ActivationSource;
+	/**
+	 * PRD-058c (L-W4): the staleness source. When injected, recall feeds `(1 − σ)^s` into the recency
+	 * stage as one bounded multiplier. ABSENT → no staleness factor (the dormant pre-058c path). The
+	 * `s` exponent is posture-gated by the composition root (`observe` → 0 inert; `execute` → demote)
+	 * and threaded as {@link stalenessExponent}; the source's own `exponent` field is the same value.
+	 */
+	readonly stalenessSource?: import("./recall.js").StalenessSource;
+	/**
+	 * PRD-058c (L-W4/L-W5): the posture-gated staleness exponent `s`. Threaded separately so the
+	 * recall handler can pass it to the engine's `stalenessSource.exponent` consistently. `observe`
+	 * → `0` (visible but inert, AC-55c.2.1); `execute` → `> 0` (demote, AC-55c.2.2).
+	 */
+	readonly stalenessExponent?: number;
+	/**
+	 * PRD-058a/058d (L-W5): the lifecycle-resolved recency config (the `a` activation exponent + the
+	 * per-class half-lives, projected through the recall schema so the recall boundary owns the
+	 * clamp). Threaded into {@link recallMemories} as the `recency` config UNLESS the request carries
+	 * a per-request override (which takes precedence). ABSENT → the engine's per-class defaults.
+	 */
+	readonly lifecycleRecency?: import("../recall/config.js").RecencyConfig;
+	/**
+	 * PRD-058e (L-W3): the calibration model promise. The composition root reads the live curve from
+	 * `memory_calibration` (fail-soft to the IDENTITY cold-start model); the recall handler awaits it
+	 * (idempotent — re-awaiting a resolved promise is free) and threads the resolved model into the
+	 * engine so the calibration stage RUNS (surfacing `C = g(f)` even at cold-start, AC-55e.2.2). The
+	 * `c` exponent stays 0 until eval-gated (no reorder). ABSENT → no calibration stage (dormant).
+	 */
+	readonly calibrationModel?: PromiseLike<import("./calibration.js").CalibrationModel>;
+	/**
+	 * PRD-058e (L-W5): the confidence exponent `c` from the resolved lifecycle config. Surfaced here
+	 * for the dashboard / introspection consumers; the engine's calibration stage does NOT reorder
+	 * (the `c` exponent stays 0 until eval-gated, AC-55e.2.3), so this is informational at this wave.
+	 */
+	readonly confidenceExponent?: number;
+	/**
 	 * The prime-digest budget knobs (PRD-046c/d) for the `GET /api/memories/prime` route this mount
-	 * registers BEFORE `/:id` (the route-shadow fix). Optional — the assembler defaults each. ABSENT
-	 * (a unit-constructed mount) → the assembler defaults (byte-identical to today). The composition
-	 * root threads the SAME budget the standalone `mountMemoriesPrimeApi` consumed.
+	 * registers BEFORE `/:id` (the route-shadow fix from #255). Optional — the assembler defaults
+	 * each. ABSENT (a unit-constructed mount) → the assembler defaults (byte-identical to today). The
+	 * composition root threads the SAME budget the standalone `mountMemoriesPrimeApi` consumed.
 	 */
 	readonly primeBudget?: PrimeDigestBudget;
 }
@@ -557,8 +609,27 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 		}
 		// PRD-058a: build the per-request recency config from the optional override. ABSENT → undefined
 		// so the engine applies its per-class defaults + activationExponent 1.0 (recency live by default,
-		// AC-55a.2.3). A present override is honored over the defaults (AC-55a.2.2).
-		const recency = resolveRecencyOverride(parsed.data.recency);
+		// AC-55a.2.3). A present override is honored over the defaults (AC-55a.2.2). PRD-058d (L-W5):
+		// when no per-request override is present, fall back to the boot-resolved lifecycle recency
+		// (the operator-governed `a` exponent + per-class half-lives), so the operator's knobs take
+		// effect without a per-request override. A per-request override still wins (AC-55a.2.2).
+		const requestRecency = resolveRecencyOverride(parsed.data.recency);
+		const recency = requestRecency ?? options.lifecycleRecency;
+		// PRD-058e (L-W1): construct the per-request recordRecallAccess callback from the factory. The
+		// factory closes over `storage`; we apply THIS request's resolved scope so the access event is
+		// recorded against the owning tenant. ABSENT factory (a unit-constructed mount) → no callback.
+		const recordRecallAccess =
+			options.recordRecallAccessFactory !== undefined ? options.recordRecallAccessFactory(scope) : undefined;
+		// PRD-058e (L-W3): resolve the calibration model. The composition root reads it at boot (fail-
+		// soft to IDENTITY); awaiting the already-resolved promise here is free. ABSENT → no calibration.
+		let calibration: import("./calibration.js").CalibrationModel | undefined;
+		if (options.calibrationModel !== undefined) {
+			try {
+				calibration = await options.calibrationModel;
+			} catch {
+				calibration = undefined; // fail-soft: no calibration stage rather than a thrown recall.
+			}
+		}
 		const result = await recallMemories(
 			{
 				query: parsed.data.query,
@@ -575,7 +646,7 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 				storage,
 				...(options.embed !== undefined ? { embed: options.embed } : {}),
 				...(recallMode !== undefined ? { recallMode } : {}),
-				// PRD-058a: the per-request recency override (per-class half-lives + activation exponent).
+				// PRD-058a / PRD-058d (L-W5): the recency config — per-request override → boot lifecycle → engine defaults.
 				...(recency !== undefined ? { recency } : {}),
 				// PRD-058b: the κ gate's conflict-suppression seam (drops the κ = ρ open-conflict loser).
 				...(options.conflictSuppression !== undefined ? { conflictSuppression: options.conflictSuppression } : {}),
@@ -588,6 +659,14 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 				// PRD-013a (decision #17): the boot-resolved Nectar multiplier scaling ONLY the
 				// hive-graph fusion contribution. Absent (unit mount) → the engine default 1.0.
 				...(options.nectarRrfMultiplier !== undefined ? { nectarRrfMultiplier: options.nectarRrfMultiplier } : {}),
+				// PRD-058e (L-W1): the per-request recall-access recorder (closes over the request scope).
+				...(recordRecallAccess !== undefined ? { recordRecallAccess } : {}),
+				// PRD-058e (L-W2): the ACT-R activation source (Stage-2; ABSENT → 058a Stage-1 cold-start).
+				...(options.activationSource !== undefined ? { activationSource: options.activationSource } : {}),
+				// PRD-058c (L-W4): the staleness source (the σ multiplier; ABSENT → dormant pre-058c path).
+				...(options.stalenessSource !== undefined ? { stalenessSource: options.stalenessSource } : {}),
+				// PRD-058e (L-W3): the calibration model (surfaced as C = g(f); the c exponent stays 0 this wave).
+				...(calibration !== undefined ? { calibration } : {}),
 			},
 		);
 		// PRD-029 (AC-4): when this recall ran DEGRADED (lexical fallback), emit one
