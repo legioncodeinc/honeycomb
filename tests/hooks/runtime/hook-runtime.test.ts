@@ -42,6 +42,18 @@ import {
  */
 const NOTICE_BOUND: OnboardingNoticeGate = { hasBoundProject: () => true };
 
+/**
+ * Wrap the claude-code shim WITHOUT its `spawnHygieneChild` so a test exercises the
+ * IN-PROCESS hygiene seam path (the recording seam's `autoPullSkills` is called). The
+ * production claude-code shim now ships `spawnHygieneChild` (the off-process latency
+ * fix), so tests that assert on the in-process seams must opt out of it explicitly.
+ */
+function shimWithoutOffProcessHygiene(): typeof createClaudeCodeShim extends () => infer S ? S : never {
+	const full = createClaudeCodeShim();
+	const { spawnHygieneChild: _omit, ...rest } = full;
+	return rest as typeof full;
+}
+
 /** A recording DaemonHookClient: records every send + returns a configurable status. */
 function recordingClient(status = 201, body: unknown = { ok: true, id: "row" }) {
 	const calls: DaemonHookRequest[] = [];
@@ -80,7 +92,9 @@ describe("c-AC-4 session-start: renders prior context via the renderer + drains 
 		// The renderer asks the daemon /context; the recording client returns a block.
 		const { client } = recordingClient(200, { additionalContext: "GOALS: ship 021c." });
 		const pipeline = recordingPipeline(null);
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: pipeline });
+		// Inject a no-op prime so the test does NOT depend on the real prime renderer's behavior
+		// (which fetches 127.0.0.1:3850 and would either time out or pollute the assertion).
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: pipeline, prime: createFakePrimeRenderer("") });
 
 		const outcome = await runtime.runEvent(
 			createClaudeCodeShim(),
@@ -99,7 +113,7 @@ describe("c-AC-4 session-start: renders prior context via the renderer + drains 
 			priority: 10,
 			dedupKey: "welcome",
 		});
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: pipeline });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: pipeline, prime: createFakePrimeRenderer("") });
 
 		const outcome = await runtime.runEvent(
 			createClaudeCodeShim(),
@@ -123,7 +137,7 @@ describe("c-AC-4 session-start: renders prior context via the renderer + drains 
 			backend,
 		});
 		const { client } = recordingClient(200, { additionalContext: "" });
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: pipeline });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: pipeline, prime: createFakePrimeRenderer("") });
 		const outcome = await runtime.runEvent(
 			createClaudeCodeShim(),
 			{ name: "SessionStart", payload: { source: "startup" } },
@@ -139,7 +153,7 @@ describe("c-AC-4 session-start: renders prior context via the renderer + drains 
 				throw new Error("backend exploded");
 			},
 		};
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: throwingPipeline });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: throwingPipeline, prime: createFakePrimeRenderer("") });
 		const outcome = await runtime.runEvent(
 			createClaudeCodeShim(),
 			{ name: "SessionStart", payload: {} },
@@ -368,7 +382,7 @@ describe("c-AC-5 claude-code binary: native stdin event drives the runtime (shim
 
 	it("session-start emits the rendered context block on stdout (model-only additionalContext)", async () => {
 		const { client } = recordingClient(200, { additionalContext: "RULES: be concise." });
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null) });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null), prime: createFakePrimeRenderer("") });
 		const surface = io(JSON.stringify({ hook_event_name: "SessionStart", session_id: "s", source: "startup" }));
 		await runHookBinary({ shim: createClaudeCodeShim(), runtime, io: surface });
 		expect(surface.out).toHaveLength(1);
@@ -477,8 +491,11 @@ describe("PRD-045g g-AC-2: the runtime injects the REAL auto-pull seam on sessio
 	it("calls autoPullSkills ONCE on session-start (the seam is wired into SessionStartDeps)", async () => {
 		const { client } = recordingClient(200, { additionalContext: "" });
 		const seams = recordingSeams();
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null), seams });
-		await runtime.runEvent(createClaudeCodeShim(), { name: "SessionStart", payload: { source: "startup" } }, META);
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null), seams, prime: createFakePrimeRenderer("") });
+		// Use a shim WITHOUT spawnHygieneChild so this test asserts the IN-PROCESS seam path
+		// (the recording seam's autoPullSkills is what we're counting). The production
+		// claude-code shim now ships spawnHygieneChild, which would route the pulls off-process.
+		await runtime.runEvent(shimWithoutOffProcessHygiene(), { name: "SessionStart", payload: { source: "startup" } }, META);
 		expect(seams.pulls, "auto-pull ran at session start").toBe(1);
 	});
 
@@ -502,14 +519,45 @@ describe("PRD-045g g-AC-2: the runtime injects the REAL auto-pull seam on sessio
 				throw new Error("pull exploded");
 			},
 		};
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null), seams: throwingSeams });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null), seams: throwingSeams, prime: createFakePrimeRenderer("") });
+		// Use a shim WITHOUT spawnHygieneChild so the throwing seam is actually exercised
+		// (the production claude-code shim ships spawnHygieneChild, which would route the
+		// pulls off-process and never reach this throwing seam).
 		const outcome = await runtime.runEvent(
-			createClaudeCodeShim(),
+			shimWithoutOffProcessHygiene(),
 			{ name: "SessionStart", payload: { source: "startup" } },
 			META,
 		);
 		expect(outcome.result.ok).toBe(true);
 		expect(outcome.result.additionalContext).toBe("RULES: be concise.");
+	});
+
+	it("when the shim ships spawnHygieneChild, session-start calls IT instead of the in-process seams", async () => {
+		// The production claude-code shim now ships spawnHygieneChild (the off-process latency
+		// fix). When present, the runtime calls it INSTEAD of the three hygiene seams — so the
+		// parent process does no in-process hygiene I/O and exits promptly after the response.
+		const { client } = recordingClient(200, { additionalContext: "" });
+		const seams = recordingSeams();
+		let spawnCalls = 0;
+		let lastSpawnMeta: import("../../../src/hooks/shared/contracts.js").HookSessionMeta | undefined;
+		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
+			daemon: client,
+			notifications: recordingPipeline(null),
+			seams,
+			prime: createFakePrimeRenderer(""),
+		});
+		const shimWithSpawn = {
+			...createClaudeCodeShim(),
+			spawnHygieneChild(meta: import("../../../src/hooks/shared/contracts.js").HookSessionMeta): void {
+				spawnCalls += 1;
+				lastSpawnMeta = meta;
+			},
+		};
+		await runtime.runEvent(shimWithSpawn, { name: "SessionStart", payload: { source: "startup" } }, META);
+		expect(spawnCalls, "spawnHygieneChild was called once").toBe(1);
+		expect(seams.pulls, "in-process autoPullSkills was NOT called (off-process path won)").toBe(0);
+		expect(lastSpawnMeta?.sessionId, "spawn was passed the session meta").toBe(META.sessionId);
 	});
 
 	it("the DEFAULT runtime (no injected seams) builds a real seam that fail-softs when the daemon is down", async () => {

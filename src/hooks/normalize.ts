@@ -75,6 +75,16 @@ export interface ShimSpec {
 	deriveMeta?(raw: unknown, base: HookSessionMeta): HookSessionMeta;
 
 	/**
+	 * OPTIONAL: hand the session-start hygiene pulls to a detached child process. See
+	 * {@link HarnessShim.spawnHygieneChild} for the full rationale. When a spec supplies
+	 * this, `createShim` surfaces it on the resulting {@link HarnessShim}, and
+	 * `runSessionStart` calls it INSTEAD of the three in-process hygiene seams. ABSENT
+	 * → the shim does not opt into the off-process path and the runtime runs the
+	 * hygiene in-process (the prior behavior).
+	 */
+	spawnHygieneChild?(meta: HookSessionMeta): void;
+
+	/**
 	 * OPTIONAL: condense the rendered context block for the `user-visible` channel
 	 * (c-AC-4 / c-AC-5). Codex injects ONLY a brief login-state line, not the full
 	 * block. The default passes the block through verbatim. Ignored for `model-only`.
@@ -126,6 +136,8 @@ export function createShim(spec: ShimSpec): HarnessShim {
 		renderContext(block: string): ContextEnvelope {
 			return renderChannel(spec, block);
 		},
+		// Surface the optional off-process hygiene hook only when the spec supplies it.
+		...(spec.spawnHygieneChild !== undefined ? { spawnHygieneChild: spec.spawnHygieneChild } : {}),
 	};
 }
 

@@ -180,6 +180,36 @@ export interface HarnessShim {
 	 * channel divergence is applied.
 	 */
 	renderContext(block: string): ContextEnvelope;
+
+	/**
+	 * OPTIONAL: hand the session-start hygiene pulls (skills / assets / graph) to a
+	 * DETACHED CHILD process so the parent hook binary does no in-process hygiene I/O
+	 * and can exit promptly after writing its response. When a shim implements this,
+	 * `runSessionStart` calls it INSTEAD of the three hygiene seams (`autoPullSkills` /
+	 * `autoPullAssets` / `spawnGraphPull`) and the runtime builds the parent with no-op
+	 * seams for those three.
+	 *
+	 * Why this exists: `backgroundPull` detaches the await but NOT the underlying fetch
+	 * I/O. The pending loopback sockets keep the parent's event loop alive for seconds
+	 * after stdout is written, so Claude Code's hook runner perceived the hook as still
+	 * running. `process.exit(0)` to force exit CRASHES on Windows (libuv assertion when
+	 * sockets are mid-flight). Spawning the hygiene in a detached + unref'd child keeps
+	 * the parent's loop free of hygiene I/O, so the parent exits naturally in
+	 * milliseconds on every platform. The child runs to completion on its own.
+	 *
+	 * ABSENT (the default for harnesses that have not opted in) → the runtime runs the
+	 * three hygiene seams in-process via `backgroundPull` (the prior behavior). This
+	 * keeps every other harness unchanged; only a harness that ships a hygiene child
+	 * bundle + implements this method opts into the off-process path.
+	 *
+	 * Fail-soft: the implementation MUST never throw (a hygiene spawn failure is
+	 * best-effort — the next session-start tries again). The seams are idempotent, so a
+	 * missed pull here is a no-op for the next run.
+	 *
+	 * @param meta the session metadata (passed to the child via env so it can run the
+	 *   graph-pull seam with the right conversation path).
+	 */
+	spawnHygieneChild?(meta: HookSessionMeta): void;
 }
 
 export type { HookInput, HookSessionMeta, LogicalEvent, RuntimePath };

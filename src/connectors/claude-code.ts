@@ -94,7 +94,7 @@ const CLAUDE_EVENT_MAP: Readonly<Record<string, string>> = {
 
 /** The compiled handler files + their per-event timeouts (mirrors the in-repo hooks.json). */
 const CLAUDE_HANDLERS: ReadonlyArray<{ logical: string; file: string; timeout: number; async?: boolean }> = [
-	{ logical: "session-start", file: "session-start.js", timeout: 10 },
+	{ logical: "session-start", file: "session-start.js", timeout: 30 },
 	{ logical: "user_message", file: "capture.js", timeout: 10, async: true },
 	{ logical: "pre-tool-use", file: "pre-tool-use.js", timeout: 60 },
 	{ logical: "post_tool", file: "capture.js", timeout: 15, async: true },
