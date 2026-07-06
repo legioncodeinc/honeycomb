@@ -38,6 +38,7 @@
 
 import { z } from "zod";
 
+import { BoolFlag } from "../../../shared/bool-flag.js";
 import {
 	DEFAULT_RECENCY_ACTIVATION_EXPONENT,
 	DEFAULT_RECENCY_HALF_LIFE_DAYS_BY_CLASS,
@@ -101,19 +102,9 @@ export const DEFAULT_STALE_REF_POSTURE: StaleRefPosture = "observe";
 
 // ── Coerce-and-clamp helpers (the SAME shapes the recall/pipeline configs use) ───────────────
 //
-// These are small and local on purpose: copy-pasting the recall module's `ClampedFloat`/`BoolFlag`
-// wholesale would trip jscpd; re-deriving the tiny preprocess here keeps each config module
-// self-contained while every knob still degrades on a typo rather than throwing.
-
-/** A boolean flag read from an env string: `true`/`1` → true, anything else → false. */
-const BoolFlag = z.preprocess((raw) => {
-	if (typeof raw === "boolean") return raw;
-	// TRIM before comparing: env values routinely arrive with surrounding whitespace (a Windows
-	// scheduled-task `set "VAR=true" && …` chain) — without it an exact `=== "true"` read `"true "` as
-	// FALSE (the same trailing-space class as the APIARY_HOME bug). Duplicated helper; shared-helper follow-up.
-	const s = typeof raw === "string" ? raw.trim() : raw;
-	return s === "true" || s === "1";
-}, z.boolean());
+// These are small and local on purpose: re-deriving the tiny preprocess here keeps each config
+// module self-contained while every knob still degrades on a typo rather than throwing. The boolean
+// flag helper is now shared (`../../../shared/bool-flag.js`, imported above).
 
 /**
  * A clamped float knob: a non-numeric value falls back to the default; an out-of-range value is

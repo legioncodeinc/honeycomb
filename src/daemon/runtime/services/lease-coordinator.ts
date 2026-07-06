@@ -42,6 +42,7 @@
 
 import { z } from "zod";
 
+import { BoolFlag } from "../../../shared/bool-flag.js";
 import type { JobQueueService, LeasedJob } from "./job-queue.js";
 import type { PollBackoffConfig } from "./poll-backoff.js";
 import { createPollLoop, type PollLoop } from "./poll-loop.js";
@@ -236,19 +237,6 @@ export function createLeaseCoordinator(deps: LeaseCoordinatorDeps): LeaseCoordin
 }
 
 // ── HONEYCOMB_POLL_CONSOLIDATE flag (AC-9) ──────────────────────────────────────
-
-/**
- * A boolean flag read from an env string: `true`/`1` → true, anything else →
- * false. Mirrors `pollinating/config.ts` `BoolFlag` so the env contract is uniform.
- */
-const BoolFlag = z.preprocess((raw) => {
-	if (typeof raw === "boolean") return raw;
-	// TRIM before comparing: env values routinely arrive with surrounding whitespace (a Windows
-	// scheduled-task `set "VAR=true" && …` chain) — without it an exact `=== "true"` read `"true "` as
-	// FALSE (the same trailing-space class as the APIARY_HOME bug). Duplicated helper; shared-helper follow-up.
-	const s = typeof raw === "string" ? raw.trim() : raw;
-	return s === "true" || s === "1";
-}, z.boolean());
 
 /**
  * The validated consolidation config. `enabled` defaults FALSE-SAFE in the schema so

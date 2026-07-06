@@ -2078,6 +2078,8 @@ async function buildPipelineWorker(
 	// or key is present yet, exactly as the pollinating worker threads it. A build error is
 	// caught and degraded to the no-op so the pipeline still wires.
 	let model: ModelClient;
+	let portkeyStatus: "off" | "ok" | "unconfigured" = "unconfigured";
+	let modelBuildFailed = false;
 	try {
 		const secretsStore = new SecretsStore({
 			baseDir: resolveVaultBaseDir(),
@@ -2093,16 +2095,21 @@ async function buildPipelineWorker(
 			...(portkeyDeps !== undefined ? { onPortkeyUnreachable: portkeyDeps.onUnreachable } : {}),
 		});
 		model = built.client;
-		// Observability: is the PIPELINE's inference client real (Portkey `ok`) or the no-op? A no-op
-		// makes extraction return empty WITHOUT any HTTP — the "jobs complete, nothing hits the LLM"
-		// signature. Also record whether the Portkey selection even reached this build.
-		logger?.event("pipeline.model.resolved", {
-			portkeyStatus: built.portkeyStatus,
-			hasPortkeySelection: portkeyDeps?.selection !== undefined,
-		});
+		portkeyStatus = built.portkeyStatus;
 	} catch {
 		model = noopModelClient;
+		modelBuildFailed = true;
 	}
+	// Observability: is the PIPELINE's inference client real (Portkey `ok`) or the no-op? A no-op makes
+	// extraction return empty WITHOUT any HTTP — the "jobs complete, nothing hits the LLM" signature.
+	// Emitted on BOTH paths (success AND the catch → no-op fallback), so a build failure that degrades to
+	// the no-op is VISIBLE here rather than silently re-entering the no-LLM state. Also record whether the
+	// Portkey selection even reached this build.
+	logger?.event("pipeline.model.resolved", {
+		portkeyStatus,
+		hasPortkeySelection: portkeyDeps?.selection !== undefined,
+		modelBuildFailed,
+	});
 
 	const queryScope: QueryScope = scope;
 
@@ -2326,6 +2333,21 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				`(the default) to use the transactional local queue.\n`,
 		);
 		logger.event("queue.shared_pipeline_path_active", { reason });
+	}
+	// A set-but-UNRECOGNIZED HONEYCOMB_TOPOLOGY (e.g. a typo like `flet`) normalizes to `unknown`, which is
+	// eligible for local-queue default-on — so a real multi-daemon node would quietly route onto its PRIVATE
+	// SQLite queue instead of the shared coordination the operator intended. Warn loudly at boot so a
+	// misconfigured fleet is caught early rather than diagnosed later. Real assembly only (unit suite quiet).
+	if (options.storage === undefined) {
+		const topology = resolveLocalQueueTopology();
+		if (topology.mode === "unknown" && topology.source === "env") {
+			process.stderr.write(
+				"honeycomb: HONEYCOMB_TOPOLOGY was set to an unrecognized value and treated as an undeclared " +
+					"single-machine install (local queue default-on). If this is a fleet/multi-device node, set " +
+					"HONEYCOMB_TOPOLOGY=fleet (or multi-device); recognized values are single-machine, multi-device, fleet.\n",
+			);
+			logger.event("queue.topology_unrecognized", {});
+		}
 	}
 
 	const captureDroppedEvents = createCaptureDroppedEventsCounter();

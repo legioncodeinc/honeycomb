@@ -36,6 +36,8 @@
 
 import { z } from "zod";
 
+import { BoolFlag } from "../../../shared/bool-flag.js";
+
 // ── D-1 extraction caps + write threshold ──────────────────────────────────────
 /** Input cap before the extraction model call (D-1 / a-AC-2 / FR-6). */
 export const DEFAULT_INPUT_CHAR_CAP = 12_000;
@@ -62,17 +64,6 @@ export const DEFAULT_TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 
 /** The disabling sentinel for `extractionProvider` (a-AC-5 / FR-9). */
 export const EXTRACTION_PROVIDER_NONE = "none" as const;
-
-/** A boolean flag read from an env string: `true`/`1` → true, anything else → false. */
-const BoolFlag = z.preprocess((raw) => {
-	if (typeof raw === "boolean") return raw;
-	// TRIM before comparing: env values routinely arrive with surrounding whitespace (a Windows
-	// scheduled-task `set "VAR=true" && …` chain, a shell heredoc, a copy-paste). Without the trim an
-	// exact `=== "true"` silently read `"true "` as FALSE — which disabled the ENTIRE memory pipeline
-	// on a real install while `/health` looked fine (the same trailing-space class as the APIARY_HOME bug).
-	const s = typeof raw === "string" ? raw.trim() : raw;
-	return s === "true" || s === "1";
-}, z.boolean());
 
 /**
  * A positive-integer tuning knob: a non-numeric value falls back to the default,

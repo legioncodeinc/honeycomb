@@ -861,18 +861,26 @@ class DeepLakeJobQueueService implements JobQueueService {
 
 		let reclaimed = 0;
 		for (const s of expired) {
-			const ok = await this.append(s.id, s.version + 1, [
-				["id", val.str(s.id)],
-				["type", val.str(s.type)],
-				["payload", val.text(JSON.stringify(s.payload ?? {}))],
+			// CONFIRM current state before mutating (parity with `lease()`'s ownership re-check). The
+			// discovery scan can land on a stale segment and show a `leased`-expired row that a NEWER
+			// version already advanced past (completed, or reaped by a racing sweep). Reaping off that
+			// stale view would append `queued` over a higher true version — resurrecting a done job or
+			// colliding a version. Re-resolve and skip unless the job is STILL a currently-expired lease.
+			const current = await this.resolveCurrent(s.id, SOURCE_REAPER);
+			if (current === null) continue;
+			if (current.status !== JOB_LEASED || current.leaseExpiresAt === "" || current.leaseExpiresAt > nowIso) continue;
+			const ok = await this.append(current.id, current.version + 1, [
+				["id", val.str(current.id)],
+				["type", val.str(current.type)],
+				["payload", val.text(JSON.stringify(current.payload ?? {}))],
 				["status", val.str(JOB_QUEUED)],
 				["lease_owner", val.str("")],
 				["lease_expires_at", val.str("")],
-				["attempts", val.num(s.attempts)],
-				["max_attempts", val.num(s.maxAttempts)],
+				["attempts", val.num(current.attempts)],
+				["max_attempts", val.num(current.maxAttempts)],
 				["next_run_at", val.str(this.nowIso())],
 				["last_error", val.str("")],
-				["created_at", val.str(s.createdAt)],
+				["created_at", val.str(current.createdAt)],
 				["updated_at", val.str(this.nowIso())],
 			]);
 			if (ok) reclaimed += 1;
@@ -900,11 +908,20 @@ class DeepLakeJobQueueService implements JobQueueService {
 		for (const s of states) {
 			// The current row's `updated_at` is when the job entered its terminal state;
 			// it is what the cutoff is measured against.
-			if (s.status === JOB_DONE && s.updatedAt !== "" && s.updatedAt <= doneCutoff) {
-				const res = await this.deleteAllForId(s.id);
+			const doneAged = s.status === JOB_DONE && s.updatedAt !== "" && s.updatedAt <= doneCutoff;
+			const deadAged = s.status === JOB_DEAD && s.updatedAt !== "" && s.updatedAt <= deadCutoff;
+			if (!doneAged && !deadAged) continue;
+			// CONFIRM current state before DELETING the whole chain. `deleteAllForId` drops every version
+			// of the id, so a stale scan that shows a terminal (`done`/`dead`) row for a job a newer version
+			// has already advanced past would delete a STILL-LIVE chain. Re-resolve and delete only when the
+			// confirmed current state is genuinely the aged-out terminal one.
+			const current = await this.resolveCurrent(s.id);
+			if (current === null || current.updatedAt === "") continue;
+			if (current.status === JOB_DONE && current.updatedAt <= doneCutoff) {
+				const res = await this.deleteAllForId(current.id);
 				doneDeleted = doneDeleted && isOk(res);
-			} else if (s.status === JOB_DEAD && s.updatedAt !== "" && s.updatedAt <= deadCutoff) {
-				const res = await this.deleteAllForId(s.id);
+			} else if (current.status === JOB_DEAD && current.updatedAt <= deadCutoff) {
+				const res = await this.deleteAllForId(current.id);
 				deadDeleted = deadDeleted && isOk(res);
 			}
 		}

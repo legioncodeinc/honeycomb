@@ -38,6 +38,8 @@
  * that strips `reasons` for the public-by-mode body so the gating is one named call.
  */
 
+import type { MemoryFormationSnapshot } from "./pipeline/memory-formation.js";
+
 /** The coarse pipeline status the cached `/health` bit reports (mirrors `server.ts`). */
 export type PipelineStatus = "ok" | "degraded" | "unconfigured";
 
@@ -206,11 +208,7 @@ export interface HealthReasons {
 	 * a stalled pipeline. Present only when the composition root wires the tracker. Carries NO secret —
 	 * a count, an ISO timestamp, and a closed-set action word.
 	 */
-	readonly memoryFormation?: {
-		readonly committedSinceBoot: number;
-		readonly lastCommittedAt?: string;
-		readonly lastAction?: string;
-	};
+	readonly memoryFormation?: MemoryFormationSnapshot;
 	/**
 	 * Which queue backs the memory pipeline. `local` is the healthy default — the transactional
 	 * daemon-local SQLite queue. `shared` means pipeline jobs route to the DeepLake `memory_jobs` queue,
@@ -300,11 +298,7 @@ export interface HealthDetailInputs {
 	 * composition root does not wire the tracker (bare `createDaemon` / the deterministic unit suite);
 	 * present → surfaced verbatim as `reasons.memoryFormation`.
 	 */
-	readonly memoryFormation?: {
-		readonly committedSinceBoot: number;
-		readonly lastCommittedAt?: string;
-		readonly lastAction?: string;
-	};
+	readonly memoryFormation?: MemoryFormationSnapshot;
 	/**
 	 * Which queue backs the memory pipeline (`local` healthy default / `shared` degraded). Omitted when
 	 * the composition root does not wire it → the `memoryQueue` reason is absent. See {@link HealthReasons.memoryQueue}.

@@ -34,6 +34,8 @@
 
 import { z } from "zod";
 
+import { BoolFlag } from "../../../shared/bool-flag.js";
+
 /** Default fast floor the backoff starts at (and resets to on any lease). */
 export const DEFAULT_POLL_BACKOFF_FLOOR_MS = 1_000;
 /** Default ceiling the backoff doubles toward while the queue stays empty (~30s). */
@@ -43,19 +45,6 @@ export const DEFAULT_POLL_BACKOFF_CEILING_MS = 30_000;
  * daemons so they do not re-stampede DeepLake in lockstep at each ceiling wake-up.
  */
 export const DEFAULT_POLL_BACKOFF_JITTER = 0.1;
-
-/**
- * A boolean flag read from an env string: `true`/`1` → true, anything else →
- * false. Mirrors `pollinating/config.ts` `BoolFlag` so the env contract is uniform.
- */
-const BoolFlag = z.preprocess((raw) => {
-	if (typeof raw === "boolean") return raw;
-	// TRIM before comparing: env values routinely arrive with surrounding whitespace (a Windows
-	// scheduled-task `set "VAR=true" && …` chain) — without it an exact `=== "true"` read `"true "` as
-	// FALSE (the same trailing-space class as the APIARY_HOME bug). Duplicated helper; shared-helper follow-up.
-	const s = typeof raw === "string" ? raw.trim() : raw;
-	return s === "true" || s === "1";
-}, z.boolean());
 
 /**
  * A positive-integer tuning knob (ms): a non-numeric value falls back to the
