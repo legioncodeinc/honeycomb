@@ -240,9 +240,13 @@ describe("per-arm recall SQL builders keep the guards, limits, and soft-delete e
 		expect(memorySql).toContain("summary::text ILIKE");
 		expect(memorySql).toMatch(/LIMIT 5\s*$/);
 
+		// PRD-074 (m-AC-2): the sessions arm now reads COALESCE(NULLIF(prose, ''), message::text)
+		// — both the projection AND the ILIKE predicate — so recall matches/returns the clean
+		// `prose` column for new rows and falls back to `message::text` for legacy rows.
 		const sessionsSql = buildSessionsArmSql("term", 5);
 		expect(sessionsSql).toContain('FROM "sessions"');
-		expect(sessionsSql).toContain("message::text ILIKE");
+		expect(sessionsSql).toContain("COALESCE(NULLIF(prose, ''), message::text) AS text");
+		expect(sessionsSql).toContain("COALESCE(NULLIF(prose, ''), message::text) ILIKE");
 		expect(sessionsSql).toMatch(/LIMIT 5\s*$/);
 	});
 

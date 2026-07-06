@@ -67,7 +67,7 @@ import type { JobQueueService } from "../services/job-queue.js";
 import { budgetedStringify } from "./budgeted-stringify.js";
 import { type BufferClock, CaptureBuffer } from "./capture-buffer.js";
 import { type CaptureConfig, resolveCaptureConfig } from "./capture-config.js";
-import { type CaptureEvent, type CaptureMetadata, parseCaptureRequest } from "./event-contract.js";
+import { type CaptureEvent, type CaptureMetadata, parseCaptureRequest, proseForEvent } from "./event-contract.js";
 import type { CaptureDroppedEventsCounter } from "./dropped-events.js";
 import type { GatedCaptureReason, GatedCapturesCounter } from "./gated-captures.js";
 import { type MemoryCue, type TurnCounterConfig, TurnCounters, tryStopCounterTrigger } from "./turn-counters.js";
@@ -461,10 +461,22 @@ class CaptureRouteHandler {
 	private ensureBuffer(): CaptureBuffer<BufferedRow> {
 		if (this.buffer === null) {
 			const cfg = { maxEvents: this.config.maxEvents, windowMs: this.config.windowMs };
+			// The TIME-triggered flush has no external awaiter, so its rejection is routed here rather
+			// than being left dangling (a dangling rejection kills the daemon under Node ≥15 — the live
+			// capture-death bug). flushBatch already logged `capture.batch_insert.failed` + counted the
+			// dropped rows before it threw; this sink is the belt-and-suspenders log so a timer-flush
+			// failure is ALWAYS observable and NEVER fatal. flushBatch owns the dropped-row count, so we
+			// only log here (counting again would double-count).
+			const onFlushError = (err: unknown): void => {
+				this.deps.logger?.event("capture.flush.failed", {
+					reason: err instanceof Error ? err.message : String(err),
+				});
+			};
+			const clock = this.deps.bufferClock;
 			this.buffer =
-				this.deps.bufferClock !== undefined
-					? new CaptureBuffer<BufferedRow>((batch) => this.flushBatch(batch), cfg, this.deps.bufferClock)
-					: new CaptureBuffer<BufferedRow>((batch) => this.flushBatch(batch), cfg);
+				clock !== undefined
+					? new CaptureBuffer<BufferedRow>((batch) => this.flushBatch(batch), cfg, clock, onFlushError)
+					: new CaptureBuffer<BufferedRow>((batch) => this.flushBatch(batch), cfg, undefined, onFlushError);
 		}
 		return this.buffer;
 	}
@@ -579,6 +591,15 @@ class CaptureRouteHandler {
 			// model writes `''` ("model unknown" — the column default); a present model writes the
 			// id via the typed `val.str` SQL guard. Carried on the SAME append-only INSERT.
 			["model", val.str(modelFor(event))],
+			// PRD-074 (a-AC-3): the prose form, derived from the typed CaptureEvent the handler
+			// already holds (no re-parsing of the serialized `message` JSONB). `proseForEvent` is
+			// pure + synchronous, the same shape of helper as `modelFor`/`embedTextFor`. A
+			// `user_message`/`assistant_message` writes `event.text` verbatim; a `tool_call`
+			// writes the file-path-aware bounded format (PRD-074b). Both the single and batched
+			// INSERT paths flow through `buildRow`, so both populate `prose` identically. Recall's
+			// lexical arm matches + returns `prose` (COALESCE fallback to `message::text` for
+			// legacy rows); the structured `message` JSONB stays verbatim for downstream parsers.
+			["prose", val.str(proseForEvent(event))],
 			["creation_date", val.str(nowIso)],
 			["last_update_date", val.str(nowIso)],
 		];

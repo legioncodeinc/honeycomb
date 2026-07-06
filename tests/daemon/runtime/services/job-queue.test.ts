@@ -215,7 +215,9 @@ class InMemoryJobs {
 				if (ai !== bi) return ai < bi ? -1 : 1;
 				return Number(a.version) - Number(b.version);
 			});
-			return sorted.slice(offset, offset + limit).map((r) => ({ id: r.id, type: r.type, status: r.status, version: r.version }));
+			// Return the FULL row (all columns): stats() reads id/type/status/version; discoverIds' scan
+			// reads every STATE_COLUMN via toJobState. The service reduces to highest-version-per-id.
+			return sorted.slice(offset, offset + limit).map((r) => ({ ...r }));
 		}
 		return [];
 	}
@@ -274,6 +276,28 @@ function makeQueue(opts: { store?: InMemoryJobs; clock?: ManualClock; config?: J
 		clock,
 	});
 	return { queue, store, clock, fake };
+}
+
+/**
+ * A queue over `store` whose DISCOVERY scan lands on a STALE segment: the paginated full-table scan
+ * (no WHERE, `LIMIT..OFFSET`) hides versions ≥ `hideFromVersion` for `hideId`, while the by-id resolve
+ * (`WHERE id = … ORDER BY version DESC`) is untouched — so `discoverIds()` under-reports but
+ * `resolveCurrent()` still returns the true current. Used to prove reap/purge CONFIRM before mutating.
+ */
+function makeStaleScanQueue(store: InMemoryJobs, clock: ManualClock, hideId: string, hideFromVersion: number) {
+	const original = store.responder;
+	const staleResponder: InMemoryJobs["responder"] = (req) => {
+		const rows = original(req);
+		if (!/WHERE/i.test(req.sql) && /LIMIT\s+\d+\s+OFFSET/i.test(req.sql)) {
+			return rows.filter((r) => !(String(r.id) === hideId && Number(r.version) >= hideFromVersion));
+		}
+		return rows;
+	};
+	const storage: StorageClient = createStorageClient({
+		transport: new FakeDeepLakeTransport(staleResponder),
+		provider: stubProvider(fakeCredentialRecord()),
+	});
+	return createJobQueueService({ storage, scope: SCOPE, config: { owner: "owner-A" }, clock });
 }
 
 describe("b-AC-6 first enqueue creates/heals memory_jobs and retries once", () => {
@@ -433,6 +457,46 @@ describe("b-AC-3 reaper reclaims an expired lease", () => {
 		// And it is leasable again now.
 		const released = await queue.lease();
 		expect(released?.id).toBe(id);
+	});
+
+	it("CONFIRMS current state — a stale scan showing a leased-expired job that actually COMPLETED is not resurrected", async () => {
+		const clock = manualClock();
+		const store = new InMemoryJobs();
+		const leaseMs = 5 * 60 * 1_000;
+		const base = makeQueue({ store, clock, config: { leaseMs } });
+		const id = await base.queue.enqueue({ kind: "x", payload: {} });
+		await base.queue.lease(); // v2 leased
+		await base.queue.complete(id); // v3 done — the TRUE current
+		expect(store.current(id)?.status).toBe("done");
+		clock.advance(leaseMs + 1); // the stale v2 lease would now look expired
+
+		// The reaper's discovery scan lands on a stale segment (misses the v3 `done` append) and still
+		// sees v2 `leased`-expired. Without the confirm it would append `queued` at v3 — resurrecting a
+		// completed job and colliding the version. The confirm re-resolves to `done` and skips.
+		const staleQueue = makeStaleScanQueue(store, clock, id, 3);
+		const reaped = await staleQueue.reapExpiredLeases();
+		expect(reaped, "re-resolved to done → no resurrection").toBe(0);
+		expect(store.current(id)?.status, "still done; no queued row appended").toBe("done");
+	});
+
+	it("PURGE confirms current state — a stale scan showing an OLD aged-out `done` version does not delete a chain whose current `done` is still fresh", async () => {
+		const clock = manualClock();
+		const store = new InMemoryJobs();
+		const doneRetentionMs = 60_000;
+		const base = makeQueue({ store, clock, config: { doneRetentionMs } });
+		const id = await base.queue.enqueue({ kind: "x", payload: {} });
+		await base.queue.lease(); // v2 leased
+		await base.queue.complete(id); // v3 done at T0 (this version will age out)
+		clock.advance(doneRetentionMs * 10); // T0 is now well past the cutoff
+		await base.queue.complete(id); // v4 done at T_now — the TRUE current, still FRESH
+
+		// A stale scan hides v4 and surfaces the aged v3 `done` as current → a purge candidate. The confirm
+		// re-resolves to the fresh v4 `done` (updated_at > cutoff) and skips, so the chain is NOT deleted.
+		const staleQueue = makeStaleScanQueue(store, clock, id, 4);
+		const purged = await staleQueue.purgeRetained();
+		expect(purged.doneDeleted).toBe(true);
+		expect(store.current(id), "the confirmed-fresh chain survives the purge").not.toBeUndefined();
+		expect(store.current(id)?.status).toBe("done");
 	});
 
 	it("the reaper timer started by start() reclaims on a clock tick", async () => {
@@ -682,11 +746,11 @@ describe("job-observability stats() reports the CURRENT-status breakdown by kind
 		expect(distill).toEqual({ kind: "distill", queued: 1, leased: 0, done: 0, failed: 0, dead: 0, total: 1 });
 	});
 
-	it("PAGINATES: accumulates the highest-version-per-id across pages, not just page 0 (statsPageSize=2)", async () => {
+	it("PAGINATES: accumulates the highest-version-per-id across pages, not just page 0 (scanPageSize=2)", async () => {
 		// A tiny page size forces the scan to span multiple pages. A queued→leased→done job's three
 		// append-only rows land across page boundaries, so this proves the reduction accumulates over
 		// ALL pages (page 0 alone would miss the `done` row and mis-count the job as still queued).
-		const { queue } = makeQueue({ config: { statsPageSize: 2 } });
+		const { queue } = makeQueue({ config: { scanPageSize: 2 } });
 
 		const a = await queue.enqueue({ kind: "summary", payload: {} }); // → done (3 rows)
 		await queue.enqueue({ kind: "summary", payload: {} }); // queued (1 row)

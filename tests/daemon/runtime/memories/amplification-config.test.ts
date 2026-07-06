@@ -47,6 +47,17 @@ describe("amplification config: the batch flag OFF tokens (the parity escape hat
 		expect(resolveAmplificationConfig(provider({ fanoutBatch: "true" })).fanoutBatch).toBe(true);
 		expect(resolveAmplificationConfig(provider({ fanoutBatch: "yes" })).fanoutBatch).toBe(true);
 	});
+
+	it("trims surrounding whitespace on the OFF tokens (the trailing-space env class)", () => {
+		// A Windows scheduled-task `set "VAR=false" && …` chain leaks a trailing space; without the trim
+		// `"false "` slipped past the off-token check and stayed ON. Here the OFF tokens must still flip
+		// off, and `"true "` / junk stays ON (this flag is default-ON — the inverse of the false-safe ones).
+		expect(resolveAmplificationConfig(provider({ fanoutBatch: "false " })).fanoutBatch).toBe(false);
+		expect(resolveAmplificationConfig(provider({ fanoutBatch: " false " })).fanoutBatch).toBe(false);
+		expect(resolveAmplificationConfig(provider({ fanoutBatch: "0 " })).fanoutBatch).toBe(false);
+		expect(resolveAmplificationConfig(provider({ fanoutBatch: "true " })).fanoutBatch).toBe(true);
+		expect(resolveAmplificationConfig(provider({ fanoutBatch: " nope " })).fanoutBatch).toBe(true);
+	});
 });
 
 describe("amplification config: the concurrency knob coerces + clamps", () => {

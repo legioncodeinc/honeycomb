@@ -41,6 +41,11 @@ describe("PRD-045e — Sources + Documents surface is LIVE on the assembled daem
 		// Embeddings OFF → the document worker writes null-vector (keyword-searchable) chunks,
 		// no fetch to a non-existent embed daemon. `assembleDaemon` reads this at assembly.
 		vi.stubEnv("HONEYCOMB_EMBEDDINGS", "false");
+		// Pin to the shared queue: this suite proves the sources surface is WIRED (a connect enqueues an
+		// index job and returns its id), not the queue backend. With the local queue now default-ON, every
+		// assembled test daemon would otherwise open the SAME on-disk `.daemon/local-queue.db` and collide;
+		// the shared fake-storage queue keeps this wiring proof deterministic and isolated.
+		vi.stubEnv("HONEYCOMB_LOCAL_QUEUE_ENABLED", "false");
 		net = assembleTestDaemonApp({ mode: "local" });
 	});
 

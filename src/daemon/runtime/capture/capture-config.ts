@@ -31,18 +31,14 @@
 
 import { z } from "zod";
 
+import { BoolFlag } from "../../../shared/bool-flag.js";
+
 /** Default time-flush window in ms (AC-5). */
 export const DEFAULT_CAPTURE_WINDOW_MS = 1_000;
 /** Default size-flush cap in events (AC-5). */
 export const DEFAULT_CAPTURE_MAX_EVENTS = 25;
 /** Default per-field tool-I/O byte budget before truncation (AC-6). */
 export const DEFAULT_CAPTURE_ENVELOPE_BUDGET_BYTES = 16_384;
-
-/** A boolean flag read from an env string: `true`/`1` → true, `false`/`0` → false. */
-const BoolFlag = z.preprocess((raw) => {
-	if (typeof raw === "boolean") return raw;
-	return raw === "true" || raw === "1";
-}, z.boolean());
 
 /**
  * A non-negative-integer tuning knob: a non-numeric value falls back to the default,

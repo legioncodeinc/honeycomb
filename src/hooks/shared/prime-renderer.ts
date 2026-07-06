@@ -42,8 +42,14 @@ import type { CredentialReader, HookCredential, PrimeRenderer, PrimeRenderReques
 /** The daemon route the renderer GETs (046c). */
 export const PRIME_PATH = "/api/memories/prime" as const;
 
-/** The default fetch timeout (ms) — a slow daemon must not stall session start (d-AC-4). */
-export const DEFAULT_PRIME_TIMEOUT_MS = 2_000;
+/**
+ * The default fetch timeout (ms) — a slow daemon must not stall session start (d-AC-4), but the
+ * prime skim itself runs TWO SQL SELECTs over DeepLake (episodic `memory` + durable `memories`)
+ * which measure ~1-2s warm and can exceed 2s cold. The original 2s budget raced the computation
+ * and lost intermittently, so the prime silently degraded to "" (no injection). 5s gives warm +
+ * cold prime computations comfortable headroom while still bounding a genuinely-hung daemon.
+ */
+export const DEFAULT_PRIME_TIMEOUT_MS = 5_000;
 
 /** The `default` workspace sentinel when the credential carries no workspace (mirrors the daemon-client). */
 const DEFAULT_WORKSPACE = "default" as const;

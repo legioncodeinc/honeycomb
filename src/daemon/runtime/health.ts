@@ -38,6 +38,8 @@
  * that strips `reasons` for the public-by-mode body so the gating is one named call.
  */
 
+import type { MemoryFormationSnapshot } from "./pipeline/memory-formation.js";
+
 /** The coarse pipeline status the cached `/health` bit reports (mirrors `server.ts`). */
 export type PipelineStatus = "ok" | "degraded" | "unconfigured";
 
@@ -198,6 +200,42 @@ export interface HealthReasons {
 		readonly code: typeof CAPTURE_BLOCKED_TENANCY_UNCONFIRMED;
 		readonly guidance: string;
 	};
+	/**
+	 * Memory-formation observability: memories the controlled-write stage actually committed since boot.
+	 * The glanceable "is this daemon forming memories?" signal — it exists BECAUSE the recurring storage
+	 * probe is disabled in local-queue mode (PRD-066 idle-cost boundary), so `storage: reachable` no
+	 * longer implies writes are landing. `committedSinceBoot: 0` on a busy daemon is the loud symptom of
+	 * a stalled pipeline. Present only when the composition root wires the tracker. Carries NO secret —
+	 * a count, an ISO timestamp, and a closed-set action word.
+	 */
+	readonly memoryFormation?: MemoryFormationSnapshot;
+	/**
+	 * Which queue backs the memory pipeline. `local` is the healthy default — the transactional
+	 * daemon-local SQLite queue. `shared` means pipeline jobs route to the DeepLake `memory_jobs` queue,
+	 * which is UNRELIABLE under read-after-write lag (version collisions re-lease completed jobs, so the
+	 * pipeline may never drain and memories may not form). `shared` is the loud, glanceable signal that a
+	 * daemon is in the degraded coordination mode — set `HONEYCOMB_LOCAL_QUEUE_ENABLED=true` (the default)
+	 * to fix it. Present only when the composition root wires the signal. A closed enum — no secret.
+	 */
+	readonly memoryQueue?: "local" | "shared";
+	/**
+	 * Memory-formation FEATURE gating — the two signals the dashboard's future "Memory Formation"
+	 * control reads to decide show/hide + on/off, carrying NO secret (both are fixed enums):
+	 *   - `enabled`  — is the memory pipeline's master switch ON right now (vault-first `memory.enabled`,
+	 *                  else the `HONEYCOMB_PIPELINE_ENABLED` env)? The toggle's current state.
+	 *   - `provider` — is a REAL inference model provider configured (the assembled ModelClient is
+	 *                  non-noop: a Portkey key / `agent.yaml` inference block / provider env resolved)?
+	 *                  `configured` → the dashboard may offer the memory-enable action; `unconfigured`
+	 *                  → the control is gated (memory formation cannot extract without a provider).
+	 * Present only when the composition root wires the pipeline worker (which computes both at boot).
+	 * `provider` is a BOOLEAN-equivalent enum, never a key/name/URL — the no-secret health posture.
+	 */
+	readonly memory?: {
+		/** Whether the pipeline master switch is on (vault-first `memory.enabled`, else env). */
+		readonly enabled: boolean;
+		/** Whether a real model provider is configured (the ModelClient is non-noop). */
+		readonly provider: "configured" | "unconfigured";
+	};
 }
 
 /**
@@ -272,6 +310,29 @@ export interface HealthDetailInputs {
 	 * `capture_blocked_tenancy_unconfirmed` reason. Read live so confirming clears it. Defaults `false`.
 	 */
 	readonly captureTenancyUnconfirmed?: boolean;
+	/**
+	 * Memories committed by the controlled-write stage since boot (the in-process
+	 * {@link import("./pipeline/memory-formation.js").MemoryFormationSnapshot}). Omitted when the
+	 * composition root does not wire the tracker (bare `createDaemon` / the deterministic unit suite);
+	 * present → surfaced verbatim as `reasons.memoryFormation`.
+	 */
+	readonly memoryFormation?: MemoryFormationSnapshot;
+	/**
+	 * Which queue backs the memory pipeline (`local` healthy default / `shared` degraded). Omitted when
+	 * the composition root does not wire it → the `memoryQueue` reason is absent. See {@link HealthReasons.memoryQueue}.
+	 */
+	readonly memoryQueue?: "local" | "shared";
+	/**
+	 * The memory-formation feature-gating signal (this PRD). Omitted when the composition root does not
+	 * wire the pipeline worker → the `memory` reason is absent. When present, surfaced verbatim as
+	 * {@link HealthReasons.memory}. See that field for the dashboard's use. No secret (two enums).
+	 */
+	readonly memory?: {
+		/** Whether the pipeline master switch is on (vault-first `memory.enabled`, else env). */
+		readonly enabled: boolean;
+		/** Whether a real model provider is configured (the ModelClient is non-noop). */
+		readonly providerConfigured: boolean;
+	};
 }
 
 /**
@@ -330,6 +391,33 @@ export function buildHealthDetail(inputs: HealthDetailInputs): HealthDetail {
 					captureTenancyUnconfirmed: {
 						code: CAPTURE_BLOCKED_TENANCY_UNCONFIRMED,
 						guidance: TENANCY_UNCONFIRMED_GUIDANCE,
+					},
+				}
+			: {}),
+		// Memory-formation signal — present only when the composition root wires the tracker. Normalized
+		// defensively (non-negative integer count) and surfaced verbatim otherwise.
+		...(inputs.memoryFormation !== undefined
+			? {
+					memoryFormation: {
+						committedSinceBoot: Math.max(0, Math.trunc(inputs.memoryFormation.committedSinceBoot)),
+						...(inputs.memoryFormation.lastCommittedAt !== undefined
+							? { lastCommittedAt: inputs.memoryFormation.lastCommittedAt }
+							: {}),
+						...(inputs.memoryFormation.lastAction !== undefined
+							? { lastAction: inputs.memoryFormation.lastAction }
+							: {}),
+					},
+				}
+			: {}),
+		// The pipeline's queue backend — present only when wired. `shared` is the degraded-coordination signal.
+		...(inputs.memoryQueue !== undefined ? { memoryQueue: inputs.memoryQueue } : {}),
+		// The memory-formation feature-gating signal — present only when the pipeline worker is wired.
+		// `provider` is the closed enum the dashboard gates the "Memory Formation" control on. No secret.
+		...(inputs.memory !== undefined
+			? {
+					memory: {
+						enabled: inputs.memory.enabled === true,
+						provider: inputs.memory.providerConfigured === true ? "configured" : "unconfigured",
 					},
 				}
 			: {}),

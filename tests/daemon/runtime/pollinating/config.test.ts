@@ -43,6 +43,15 @@ describe("pollinating config (memory.pollinating) boundary", () => {
 	it("exposes a structured error type for a structurally-impossible config", () => {
 		expect(PollinatingConfigError).toBeTypeOf("function");
 	});
+
+	it("trims surrounding whitespace on env flags (the trailing-space env class)", () => {
+		// A Windows scheduled-task `set "VAR=true" && …` chain leaks a trailing space; the trim keeps
+		// `"true "` / `" true "` reading as ON and `"false "` / junk as OFF.
+		expect(resolvePollinatingConfig({ read: () => ({ enabled: "true " }) }).enabled).toBe(true);
+		expect(resolvePollinatingConfig({ read: () => ({ enabled: " true " }) }).enabled).toBe(true);
+		expect(resolvePollinatingConfig({ read: () => ({ enabled: "false " }) }).enabled).toBe(false);
+		expect(resolvePollinatingConfig({ read: () => ({ enabled: " nope " }) }).enabled).toBe(false);
+	});
 });
 
 describe("pollinating contracts boundary", () => {

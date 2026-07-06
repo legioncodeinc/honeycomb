@@ -84,6 +84,15 @@ export type LogicalEvent = (typeof LOGICAL_EVENTS)[number];
  */
 export type RuntimePath = "plugin" | "legacy";
 
+/**
+ * The env var carrying the session-metadata JSON from the hook parent to the detached
+ * hygiene child (the off-process latency fix). SINGLE SOURCE OF TRUTH — both the
+ * claude-code shim (`spawnHygieneChild`, which sets it before spawn) and the hygiene
+ * child entrypoint (`harnesses/claude-code/src/hygiene.ts`, which reads it on boot)
+ * import THIS constant, so the wire contract cannot drift between the two literals.
+ */
+export const HYGIENE_META_ENV = "HONEYCOMB_HYGIENE_META" as const;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // HookInput — the normalized payload every shim produces (FR-2)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -563,6 +572,18 @@ export interface SessionStartDeps extends HookCoreDeps {
 	 * absorbed and no notice is shown (never break session-start over the notice — 059a impl-note).
 	 */
 	readonly onboardingNotice?: OnboardingNoticeGate;
+	/**
+	 * OPTIONAL off-process hygiene spawn. When supplied (the harness shim implements
+	 * `HarnessShim.spawnHygieneChild`), session-start calls this INSTEAD of the three
+	 * in-process hygiene seams (`autoPullSkills` / `autoPullAssets` / `spawnGraphPull`).
+	 * The implementation spawns a detached child that runs the three pulls in its OWN
+	 * process; the parent returns immediately with no in-process hygiene I/O pending, so
+	 * its event loop empties and Node exits promptly after writing the response. See
+	 * `HarnessShim.spawnHygieneChild` for the latency-budget + Windows-libuv rationale.
+	 * ABSENT → session-start runs the three hygiene seams in-process via `backgroundPull`
+	 * (the prior behavior — every harness that has not opted into the off-process path).
+	 */
+	readonly spawnHygieneChild?: (meta: HookSessionMeta) => void;
 }
 
 /**

@@ -65,11 +65,23 @@ export const SETTINGS_GROUP = "/api/settings" as const;
  */
 export const EMBEDDINGS_ENABLED_KEY = "embeddings.enabled" as const;
 
+/**
+ * The `setting`-class key the memory-formation on/off preference persists under (dashboard actions).
+ * The single source of truth shared by the `/api/settings` allow-list (below), the boot read that
+ * resolves the pipeline worker's master `enabled` gate VAULT-FIRST (`assemble.ts`), and the
+ * `POST /api/actions/memory` toggle that writes it. Mirrors {@link EMBEDDINGS_ENABLED_KEY} exactly:
+ * a present vault value WINS over the `HONEYCOMB_PIPELINE_ENABLED` env at boot; absent → the env
+ * fallback stands. This is what makes memory formation a discoverable, settings-driven feature
+ * instead of an env-only, default-off flag no product surface ever sets.
+ */
+export const MEMORY_ENABLED_KEY = "memory.enabled" as const;
+
 export const KNOWN_SETTING_KEYS = [
 	"activeProvider",
 	"activeModel",
 	"pollinating.enabled",
 	EMBEDDINGS_ENABLED_KEY,
+	MEMORY_ENABLED_KEY,
 	"recallMode",
 	"portkey.enabled",
 	"portkey.config",

@@ -181,6 +181,19 @@ function emitResponse(io: BinaryIo, shim: HarnessShim, outcome: HookEventOutcome
  * — so the `isMainEntry` guard + the fail-soft `runHookBinary` invocation live ONCE
  * here, not duplicated per harness (jscpd discipline). Drives the hook ONLY when the
  * module is executed directly as the bundled binary; importing it (a test) is inert.
+ *
+ * EXIT DISCIPLINE — why the parent hook process exits promptly without `process.exit`:
+ * The session-start hygiene seams (autoPullSkills / autoPullAssets / spawnGraphPull)
+ * are NOT run in this process. They are handed to a DETACHED CHILD via the shim's
+ * `spawnHygieneChild` (see `harnesses/claude-code/src/hygiene.ts` + the runtime's
+ * no-op-seam wiring), so the parent's only I/O is the response path (stdin read +
+ * stdout write + the prime fetch). Once `emitResponse` writes stdout, the parent has
+ * no pending I/O and Node exits naturally in milliseconds. We deliberately do NOT
+ * call `process.exit(0)` here: on Windows it triggers a libuv assertion
+ * (`!(handle->flags & UV_HANDLE_CLOSING)`, src\win\async.c:76) when the prime fetch's
+ * socket is mid-flight during the same tick as the exit. Letting the loop drain
+ * naturally avoids that crash while still exiting promptly (the parent has no
+ * long-running work pending).
  */
 export function maybeRunHookBinaryMain(shim: HarnessShim, importMetaUrl: string): void {
 	if (!isMainEntry(importMetaUrl)) return;

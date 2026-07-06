@@ -80,6 +80,16 @@ import {
 	type ResolveResult,
 } from "./resolve.js";
 import type { KeySource } from "../summaries/prime-keys.js";
+// The prime route is registered inside mountMemoriesApi (BEFORE /:id) so it wins the Hono
+// route match against the parametric /:id handler (the route-shadow fix). The handler body
+// is the testable core from prime.ts; mountMemoriesPrimeApi remains as a standalone shim
+// for callers/tests that mount only the prime route on a fresh daemon (no /:id to shadow).
+import {
+	buildPrimeForScope,
+	parsePositiveInt,
+	PrimeResponseSchema,
+	type PrimeDigestBudget,
+} from "./prime.js";
 
 /** The route group the memories API attaches to (already mounted in `server.ts`). */
 export const MEMORIES_GROUP = "/api/memories" as const;
@@ -227,6 +237,13 @@ export interface MountMemoriesOptions {
 	 * (the `c` exponent stays 0 until eval-gated, AC-55e.2.3), so this is informational at this wave.
 	 */
 	readonly confidenceExponent?: number;
+	/**
+	 * The prime-digest budget knobs (PRD-046c/d) for the `GET /api/memories/prime` route this mount
+	 * registers BEFORE `/:id` (the route-shadow fix from #255). Optional — the assembler defaults
+	 * each. ABSENT (a unit-constructed mount) → the assembler defaults (byte-identical to today). The
+	 * composition root threads the SAME budget the standalone `mountMemoriesPrimeApi` consumed.
+	 */
+	readonly primeBudget?: PrimeDigestBudget;
 }
 
 /**
@@ -769,6 +786,28 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 		const agent = agentId !== undefined && agentId !== "" ? { agentId } : undefined;
 		const introspection = await readCalibrationIntrospection(storage, scope, undefined, agent);
 		return c.json(introspection);
+	});
+
+	// ── PRD-046c: GET /api/memories/prime → the session-start prime digest. ─────
+	// REGISTERED BEFORE /:id so the parametric route does not shadow this literal segment.
+	// Pre-fix, /prime was mounted in a separate mountMemoriesPrimeApi call AFTER /:id, and
+	// Hono matched /:id first → c.req.param("id") === "prime" → getMemory("prime") → 404
+	// {error:"not_found", id:"prime"} → the hook's fail-soft prime renderer swallowed it
+	// → Claude Code SessionStart always received {} and never injected memories. The
+	// handler body delegates to the testable buildPrimeForScope core in prime.ts.
+	group.get("/prime", async (c) => {
+		const scope = resolveScope(c);
+		if (scope === null) return c.json(NO_ORG_BODY, 400);
+		// Optional per-request overrides: ?limit= (per-source skim cap) + ?maxTokens= (budget).
+		const limitOverride = parsePositiveInt(c.req.query("limit"));
+		const maxTokens = parsePositiveInt(c.req.query("maxTokens"));
+		const budget: PrimeDigestBudget = {
+			...(options.primeBudget ?? {}),
+			...(maxTokens !== undefined ? { maxTokens } : {}),
+		};
+		const response = await buildPrimeForScope(storage, scope, limitOverride, budget);
+		// Validate the response shape at the boundary (the 046d hook's contract) before send.
+		return c.json(PrimeResponseSchema.parse(response));
 	});
 
 	// ── FR-4: GET /api/memories/:id → get one memory by id. ─────────────────────

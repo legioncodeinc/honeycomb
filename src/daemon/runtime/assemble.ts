@@ -90,6 +90,7 @@ import {
 } from "./health.js";
 import {
 	buildInferenceModelClient,
+	buildInferenceModelClientWithStatus,
 	PORTKEY_API_KEY_NAME,
 	PORTKEY_API_KEY_REF,
 	type PortkeySelection,
@@ -159,12 +160,16 @@ import { mountNotificationsApi } from "./notifications/api.js";
 import { mountOntologyApi } from "./ontology/api.js";
 import {
 	controlledWriteFanOut,
+	createMemoryFormationTracker,
 	createPipelineHandlers,
 	createStageWorker,
 	decisionFanOut,
 	extractionFanOut,
+	type MemoryFormationTracker,
 	noopModelClient,
 	type PipelineConfig,
+	resolveEffectiveExtractionProvider,
+	resolveMemoryEnabledVaultFirst,
 	resolvePipelineConfig,
 	type StageWorker,
 	type StageWorkerLogger,
@@ -239,7 +244,7 @@ import {
 	openFleetTelemetryStore,
 } from "./telemetry/fleet-store.js";
 import { combineLogWriteThrough, createFleetLogTap } from "./telemetry/logs.js";
-import { EMBEDDINGS_ENABLED_KEY, mountSettingsApi } from "./vault/api.js";
+import { EMBEDDINGS_ENABLED_KEY, MEMORY_ENABLED_KEY, mountSettingsApi } from "./vault/api.js";
 import { isValidProviderModel, providerEntry } from "./vault/catalog.js";
 import { migrateDeeplakeToken } from "./vault/migrate.js";
 import { createVaultRegistry } from "./vault/registry.js";
@@ -1493,11 +1498,16 @@ export function assembleSeams(
 		seams.mountLifecycle(daemon, { storage, defaultScope });
 	}
 
-	// 7b. The session-priming PRIME digest (PRD-046c): `GET /api/memories/prime` attaches onto the
-	//    SAME `/api/memories` SESSION group, inheriting its auth/RBAC + session gate. The prime is a
-	//    PURE SQL skim (`skimPrimeKeys`, 046b) + a pure token-bounded/deduped assembly — NO embed,
-	//    NO gate, NO vector at read time. A cold scope answers an honest empty digest, never a 500.
-	//    Guarded + present-only (like the graph seam) so an out-of-scope fake `SeamFns` is unaffected.
+	// 7b. The session-priming PRIME digest (PRD-046c): `GET /api/memories/prime`.
+	//    PRODUCTION PATH: the route is now registered INSIDE `mountMemoriesApi` (step 7 above),
+	//    BEFORE `/:id`, so the parametric `:id` route can no longer shadow the literal `/prime`
+	//    segment (the route-shadow bug that 404'd every prime call → Claude Code SessionStart
+	//    always received {} and never injected memories). This standalone call is RETAINED as a
+	//    backwards-compat safety net: when `mountMemoriesApi` has already registered `/prime`,
+	//    this call adds a duplicate handler that is never reached; when a caller/test mounts
+	//    ONLY this seam on a fresh daemon (no `/:id`), it is the sole registration. The prime is
+	//    a PURE SQL skim (`skimPrimeKeys`, 046b) + a pure token-bounded/deduped assembly — NO
+	//    embed, NO gate, NO vector at read time. A cold scope answers an honest empty digest.
 	if (seams.mountMemoriesPrime !== undefined) {
 		seams.mountMemoriesPrime(daemon, { storage, defaultScope });
 	}
@@ -2165,6 +2175,32 @@ async function readBootEmbeddingsEnabled(vault: VaultSettingsReader | undefined,
 	return resolveEmbedClientOptions().enabled;
 }
 
+/**
+ * Resolve the BOOT memory-formation-enabled decision (dashboard actions), VAULT-FIRST — the exact
+ * mirror of {@link readBootEmbeddingsEnabled} / {@link readVaultPollinatingEnabled}, for the memory
+ * pipeline's MASTER `enabled` gate. Precedence:
+ *   1. the vault `setting` `memory.enabled` when PRESENT + readable → it WINS (the user's saved
+ *      dashboard choice enables memory formation with NO env editing, and persists across restarts);
+ *   2. else the env-resolved `HONEYCOMB_PIPELINE_ENABLED` (`config.enabled`, the prior override —
+ *      preserved when no preference was ever saved).
+ * Returns `decidedByVault` so the worker knows whether to OVERRIDE `config.enabled` with the vault
+ * value or fall through to the env. NEVER throws: an unreadable/missing setting (a fresh vault, no
+ * creds) degrades to `decidedByVault:false` so the env/default stands.
+ */
+async function readVaultMemoryEnabled(
+	vault: VaultSettingsReader | undefined,
+	scope: SecretScope,
+): Promise<{ decidedByVault: boolean; enabled: boolean }> {
+	if (vault === undefined) return { decidedByVault: false, enabled: false };
+	try {
+		const res = await vault.getSetting(MEMORY_ENABLED_KEY, scope);
+		if (!res.ok) return { decidedByVault: false, enabled: false };
+		return { decidedByVault: true, enabled: coerceSettingBool(res.value) };
+	} catch {
+		return { decidedByVault: false, enabled: false };
+	}
+}
+
 /** Coerce a scalar `setting` value (boolean | number | string) to a boolean (`true`/`1` → true). */
 function coerceSettingBool(value: unknown): boolean {
 	if (typeof value === "boolean") return value;
@@ -2371,6 +2407,23 @@ function makePipelineEntryEnqueuer(
 }
 
 /**
+ * Wrap the controlled-write `onOutcome` fan-out so a committed memory is RECORDED to the
+ * in-process {@link MemoryFormationTracker} (the `/health` "are memories forming?" signal) before
+ * the fan-out runs. Recording never throws and only counts committed outcomes (the tracker filters),
+ * so the count lands even if the recoverable fan-out enqueue later fails. Generic over the job/outcome
+ * shapes to avoid importing the pipeline stage types here; `O` is constrained to what the tracker reads.
+ */
+function withMemoryFormationTracking<J, O extends { action: string; memoryId?: string }>(
+	fanOut: (job: J, outcome: O) => Promise<void> | void,
+	tracker: MemoryFormationTracker | undefined,
+): (job: J, outcome: O) => Promise<void> {
+	return async (job: J, outcome: O): Promise<void> => {
+		if (tracker !== undefined) tracker.record(outcome);
+		await fanOut(job, outcome);
+	};
+}
+
+/**
  * Build the daemon-resident MEMORY-PIPELINE stage worker (PRD-045a a-AC-1) — the live
  * CONSUMER PRD-006 shipped but never constructed. It leases the FIVE pipeline kinds
  * (`memory_extraction` / `memory_decision` / `memory_controlled_write` /
@@ -2401,6 +2454,9 @@ async function buildPipelineWorker(
 	portkeyDeps?: PortkeyWorkerDeps,
 	logger?: StageWorkerLogger,
 	keepBothMemo?: KeepBothMemo,
+	memoryFormation?: MemoryFormationTracker,
+	vault?: VaultSettingsReader,
+	onMemoryFeature?: (signal: { enabled: boolean; providerConfigured: boolean }) => void,
 ): Promise<StageWorker> {
 	// Resolve the pipeline config fail-soft: a malformed knob must NEVER take the daemon
 	// down — degrade to the schema's false-safe defaults (every stage gate defaults OFF,
@@ -2412,11 +2468,39 @@ async function buildPipelineWorker(
 		config = resolvePipelineConfig({ read: () => ({}) });
 	}
 
+	// ── VAULT-FIRST master `enabled` (mirrors embeddings/pollinating). The dashboard-persisted
+	// `memory.enabled` setting WINS over the `HONEYCOMB_PIPELINE_ENABLED` env: a present vault value
+	// (true OR false) overrides `config.enabled`; absent → the env-resolved value stands. This is
+	// what turns memory formation on from settings with NO env editing. Fail-soft — an unreadable
+	// vault degrades to the env value, never a throw.
+	const vaultMemory = await readVaultMemoryEnabled(vault, secretScopeFromQueryScope(scope));
+	const enabled = resolveMemoryEnabledVaultFirst(vaultMemory, config.enabled);
+	if (enabled !== config.enabled) config = { ...config, enabled };
+	// Observability: announce the RESOLVED pipeline gate at boot. `enabled:false` or
+	// `extractionProvider:'none'` means the extraction stage returns empty WITHOUT a model call — the
+	// exact "jobs complete but nothing hits the LLM / no memory" signature — so this makes the gate
+	// state visible instead of inferred. `enabledSource` names WHERE the master switch came from.
+	logger?.event("pipeline.config.resolved", {
+		enabled: config.enabled,
+		extractionProvider: config.extractionProvider,
+		enabledSource: vaultMemory.decidedByVault ? "vault" : "env",
+	});
+
 	// The real inference ModelClient (the 010 router). NEVER throws — degrades to the
 	// no-op client (empty, zero-mutation passes) when no `agent.yaml`/`inference:` block
 	// or key is present yet, exactly as the pollinating worker threads it. A build error is
 	// caught and degraded to the no-op so the pipeline still wires.
 	let model: ModelClient;
+	let portkeyStatus: "off" | "ok" | "unconfigured" = "unconfigured";
+	let modelBuildFailed = false;
+	// ── The HONEST "provider configured?" signal — fail-closed by default (`false`). It is `true`
+	// ONLY when the selected provider's CREDENTIAL RESOLVES (Portkey key present, or an `agent.yaml`
+	// account whose `${SECRET_REF}` names a present secret), NOT merely when routing is declared. The
+	// factory now derives this from secret-NAME presence with no network probe; a build failure (the
+	// catch below) leaves it `false`. This drives BOTH `/health reasons.memory.provider` AND the
+	// `'auto'` extraction gate, so a routable-but-keyless `agent.yaml` reports `unconfigured` and
+	// `'auto'` does NOT enable extraction (closing the "looks configured, forms nothing" false positive).
+	let providerConfigured = false;
 	try {
 		const secretsStore = new SecretsStore({
 			baseDir: resolveVaultBaseDir(),
@@ -2424,16 +2508,47 @@ async function buildPipelineWorker(
 		});
 		// PRD-063b: route the pipeline's extraction/decision inference through Portkey too when the
 		// gateway is on (the SUPERSESSION), with the same last-failure observer; off → unchanged.
-		model = await buildInferenceModelClient({
+		const built = await buildInferenceModelClientWithStatus({
 			scope: secretScopeFromQueryScope(scope),
 			secretsStore,
 			config: resolveAgentConfigPath(options),
 			...(portkeyDeps?.selection !== undefined ? { portkey: portkeyDeps.selection } : {}),
 			...(portkeyDeps !== undefined ? { onPortkeyUnreachable: portkeyDeps.onUnreachable } : {}),
 		});
+		model = built.client;
+		portkeyStatus = built.portkeyStatus;
+		// The credential-resolution-aware signal (NOT the coarse `model !== noopModelClient` identity
+		// check the per-provider path false-positives on when the key is absent).
+		providerConfigured = built.providerConfigured;
 	} catch {
 		model = noopModelClient;
+		modelBuildFailed = true;
 	}
+
+	// Publish the memory-formation FEATURE-GATING signal (this PRD) to the `/health` cell: the RESOLVED
+	// master `enabled` (vault-first) + whether a real provider is configured. The dashboard's future
+	// "Memory Formation" control gates on these. Total + non-throwing (a plain assignment sink).
+	onMemoryFeature?.({ enabled: config.enabled, providerConfigured });
+
+	// ── Collapse the `'auto'` extraction sentinel now that the provider signal is known. When the
+	// pipeline is enabled and `extractionProvider` is UNSET (`'auto'`, the default), extraction runs
+	// iff a real provider is configured — the user never sets a SECOND pipeline-specific token.
+	// Explicit `'none'` still opts out; an explicit override is untouched. The STAGES read the
+	// resolved config so `isExtractionEnabled(config)` (provider-agnostic) sees a concrete value.
+	config = resolveEffectiveExtractionProvider(config, providerConfigured);
+
+	// Observability: is the PIPELINE's inference client real (Portkey `ok`) or the no-op? A no-op makes
+	// extraction return empty WITHOUT any HTTP — the "jobs complete, nothing hits the LLM" signature.
+	// Emitted on BOTH paths (success AND the catch → no-op fallback), so a build failure that degrades to
+	// the no-op is VISIBLE here rather than silently re-entering the no-LLM state. Also record whether the
+	// Portkey selection even reached this build, and the RESOLVED extraction provider (post-`'auto'`).
+	logger?.event("pipeline.model.resolved", {
+		portkeyStatus,
+		hasPortkeySelection: portkeyDeps?.selection !== undefined,
+		modelBuildFailed,
+		providerConfigured,
+		extractionProvider: config.extractionProvider,
+	});
 
 	const queryScope: QueryScope = scope;
 
@@ -2458,7 +2573,10 @@ async function buildPipelineWorker(
 	// The real stage handlers, CHAINED via the fan-out enqueuers (045a). Each stage's
 	// optional forward seam is wired to enqueue the next stage's job onto the same queue.
 	const handlers = createPipelineHandlers({
-		extraction: { config, model, onResult: extractionFanOut(queue) },
+		// Wire the extraction stage's logger so a swallowed model-call failure (extraction.model_error)
+		// or unparseable output is VISIBLE — otherwise "jobs complete, nothing hits the LLM, no facts"
+		// is a silent dead end. Structurally an ExtractionLogger (same { event } shape).
+		extraction: { config, model, logger, onResult: extractionFanOut(queue) },
 		decision: {
 			storage,
 			scope: queryScope,
@@ -2472,7 +2590,10 @@ async function buildPipelineWorker(
 			storage,
 			config,
 			embed: embed.client,
-			onOutcome: controlledWriteFanOut(queue),
+			// Record the committed-memory signal BEFORE the graph-persist fan-out, so the health tracker
+			// counts the write even if the (recoverable) fan-out enqueue later throws. `record` never
+			// throws and only counts committed outcomes (the tracker filters internally).
+			onOutcome: withMemoryFormationTracking(controlledWriteFanOut(queue), memoryFormation),
 			onConflict: conflictHook,
 		},
 		graphPersist: { storage, scope: queryScope, config },
@@ -2640,8 +2761,56 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		local: localQueue,
 		config: localQueueConfig,
 	});
+	// ── Bucket-#2 guard: the memory pipeline must NEVER silently run on the shared DeepLake queue.
+	// The hybrid router routes pipeline kinds to the shared queue in exactly two cases: the local queue is
+	// disabled (an explicit `=false` or a declared fleet/multi_device topology), OR it failed to OPEN
+	// (`persistent === false`) so the router fell back to shared. Both mean the pipeline is on the
+	// append-only version scheme that collides under DeepLake read-after-write lag — memories may never
+	// form. Surface it LOUDLY: a boot warning + a durable event + the `/health` `memoryQueue` reason, so a
+	// silent zero-memories regression becomes an at-a-glance signal, not a multi-hour forensic hunt. The
+	// warning/event fire only on the REAL assembly (no injected storage) so the unit suite stays quiet.
+	const sharedPipelinePathActive = !localQueueConfig.enabled || localQueue.persistent === false;
+	if (sharedPipelinePathActive && options.storage === undefined) {
+		const reason =
+			localQueue.persistent === false
+				? "the local queue failed to open — the pipeline fell back to the shared DeepLake queue"
+				: "the local queue is disabled (HONEYCOMB_LOCAL_QUEUE_ENABLED / a declared fleet topology)";
+		process.stderr.write(
+			`honeycomb: the memory pipeline is running on the SHARED DeepLake job queue — ${reason}. This queue is ` +
+				`unreliable under read-after-write lag and memories may not form. Set HONEYCOMB_LOCAL_QUEUE_ENABLED=true ` +
+				`(the default) to use the transactional local queue.\n`,
+		);
+		logger.event("queue.shared_pipeline_path_active", { reason });
+	}
+	// A set-but-UNRECOGNIZED HONEYCOMB_TOPOLOGY (e.g. a typo like `flet`) normalizes to `unknown`, which is
+	// eligible for local-queue default-on — so a real multi-daemon node would quietly route onto its PRIVATE
+	// SQLite queue instead of the shared coordination the operator intended. Warn loudly at boot so a
+	// misconfigured fleet is caught early rather than diagnosed later. Real assembly only (unit suite quiet).
+	if (options.storage === undefined) {
+		const topology = resolveLocalQueueTopology();
+		if (topology.mode === "unknown" && topology.source === "env") {
+			process.stderr.write(
+				"honeycomb: HONEYCOMB_TOPOLOGY was set to an unrecognized value and treated as an undeclared " +
+					"single-machine install (local queue default-on). If this is a fleet/multi-device node, set " +
+					"HONEYCOMB_TOPOLOGY=fleet (or multi-device); recognized values are single-machine, multi-device, fleet.\n",
+			);
+			logger.event("queue.topology_unrecognized", {});
+		}
+	}
 
 	const captureDroppedEvents = createCaptureDroppedEventsCounter();
+	// The committed-memories signal for `/health` (the glanceable "is this daemon forming memories?"
+	// answer). Fed by the controlled-write stage's `onOutcome` seam; read on each health call. Especially
+	// load-bearing in local-queue mode, where the recurring storage probe is off so `storage: reachable`
+	// no longer implies writes are landing.
+	const memoryFormation = createMemoryFormationTracker();
+	// ── The memory-formation FEATURE-GATING signal for `/health` (this PRD). A mutable cell the
+	// pipeline worker POPULATES at boot with the RESOLVED master `enabled` (vault-first `memory.enabled`,
+	// else env) + whether a REAL model provider is configured (the ModelClient is non-noop). The future
+	// dashboard "Memory Formation" control gates on `provider` (show/hide) and reflects `enabled`
+	// (on/off). Undefined until the pipeline worker wires it (a daemon that never builds the worker —
+	// the deterministic unit suite — omits the `memory` reason). No secret: two booleans.
+	let memoryFeature: { enabled: boolean; providerConfigured: boolean } | undefined;
 	// PRD-073b: the per-reason gated-captures counter (surfaced on the health detail). PRD-073c: the
 	// single-slot in-memory pending-link store shared between `/setup/login` (the pending-link runner)
 	// and the `/setup/tenancy*` routes.
@@ -2785,6 +2954,15 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			captureGated: gatedCaptures.read(),
 			captureDormantNoProject: !hasBoundProjectOnDisk({ workspace: scope.workspace ?? "" }),
 			captureTenancyUnconfirmed: !isTenancyConfirmed({}),
+			// The committed-memories signal, read LIVE per health call — a glanceable "is the pipeline
+			// forming memories?" answer that needs no DeepLake round-trip.
+			memoryFormation: memoryFormation.snapshot(),
+			// Which queue backs the pipeline: `shared` is the degraded-coordination signal (see the guard above).
+			memoryQueue: sharedPipelinePathActive ? "shared" : "local",
+			// The memory-formation feature-gating signal (this PRD) — read LIVE per health call from the
+			// cell the pipeline worker populated at boot. Present only once the worker is wired. Lets the
+			// future dashboard control gate on `provider` + reflect the current `enabled` state. No secret.
+			...(memoryFeature !== undefined ? { memory: memoryFeature } : {}),
 		});
 
 	// ── PRD-063c (c-D-2 / c-AC-1 / c-AC-3): the Cohere-via-Portkey rerank seam, late-bound.
@@ -2984,6 +3162,9 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			embed: daemon.services.embed,
 			defaultScope: scope,
 			...(vault instanceof VaultStore ? { store: vault } : {}),
+			// The `memory` toggle persists `memory.enabled` (vault-first at next boot) and emits this
+			// structured event so the deferred reconcile is observable in the boot log. No secret.
+			onMemoryToggle: (event) => daemon.logger.event("memory.toggle", { enabled: event.enabled }),
 		});
 	} catch (err: unknown) {
 		const reason = err instanceof Error ? err.message : String(err);
@@ -3410,6 +3591,15 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 						// into the resolve endpoint above. The closure captures it; the worker injects it into
 						// the post-commit conflict-detection hook (the read side of the AC-55b.2.4 memo).
 						keepBothMemo,
+						memoryFormation,
+						// VAULT-FIRST master `enabled`: the dashboard-persisted `memory.enabled` setting wins
+						// over `HONEYCOMB_PIPELINE_ENABLED`. The SAME reader the embed supervisor is seeded from.
+						vault,
+						// Publish the memory-formation feature-gating signal into the `/health` cell so the
+						// future dashboard control can gate on `provider` + reflect the current `enabled`.
+						(signal) => {
+							memoryFeature = signal;
+						},
 					);
 					// PRD-062b (AC-4): when consolidation is ON, DEFER starting the pipeline
 					// worker's own loop — the single lease coordinator (built at the pollinating

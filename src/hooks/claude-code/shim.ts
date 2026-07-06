@@ -21,6 +21,10 @@
  * `createShim` engine; the shared core owns the lifecycle. No SQL, no DeepLake (D-2).
  */
 
+import { spawn } from "node:child_process";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import type { ContextChannel, HarnessShim, HostCli, RuntimePath } from "../contracts.js";
 import {
 	assistantMessageData,
@@ -36,7 +40,7 @@ import {
 	userMessageData,
 } from "../normalize.js";
 import { readTranscriptTurnUsage } from "./transcript.js";
-import type { HookSessionMeta, LogicalEvent } from "../shared/contracts.js";
+import { HYGIENE_META_ENV, type HookSessionMeta, type LogicalEvent } from "../shared/contracts.js";
 
 /** The Claude Code native → logical event name map (FR-1). The full six-event reference. */
 export const CLAUDE_CODE_EVENT_MAP: Readonly<Record<string, LogicalEvent>> = {
@@ -129,5 +133,72 @@ export function createClaudeCodeShim(): HarnessShim {
 			// from the transcript at `meta.path` (the Stop hook payload carries neither).
 			return claudeCodeExtractData(raw, logical, meta);
 		},
+		// Off-process hygiene: hand the session-start skills/assets/graph pulls to a DETACHED
+		// CHILD so the parent hook binary does no in-process hygiene I/O and exits promptly
+		// after writing its response. See `HarnessShim.spawnHygieneChild` for the full
+		// rationale (the latency-budget + Windows-libuv-assertion fix).
+		spawnHygieneChild(meta: HookSessionMeta): void {
+			spawnClaudeCodeHygieneChild(meta);
+		},
 	});
+}
+
+/**
+ * Spawn the bundled hygiene child (`bundle/hygiene.js` next to this running `index.js`)
+ * DETACHED + `unref()`'d, with the session metadata JSON in {@link HYGIENE_META_ENV}
+ * (the shared contract constant — single source of truth with the hygiene child).
+ *
+ * The child inherits the parent's env (so HOME resolves the credential file the same
+ * way) and gets `stdio: "ignore"` (the parent already owns stdout; the child's stderr
+ * is dropped to keep Claude Code's hook output clean — a hygiene failure is
+ * best-effort). `detached: true` puts the child in its own process group so it
+ * survives the parent's exit; `unref()` lets the parent's event loop empty while the
+ * child is still running. Never throws: a spawn failure is swallowed (best-effort).
+ */
+function spawnClaudeCodeHygieneChild(meta: HookSessionMeta): void {
+	try {
+		const childPath = resolveHygieneChildPath();
+		if (childPath === undefined) return; // not running from the bundled binary — no-op.
+		const child = spawn(process.execPath, [childPath], {
+			detached: true,
+			stdio: "ignore",
+			env: {
+				...process.env,
+				[HYGIENE_META_ENV]: JSON.stringify({
+					sessionId: meta.sessionId,
+					path: meta.path,
+					...(meta.cwd !== undefined ? { cwd: meta.cwd } : {}),
+				}),
+			},
+		});
+		child.unref();
+		// Swallow any late 'error' event from the spawned child (best-effort; never throw).
+		child.on?.("error", () => {});
+	} catch {
+		// Best-effort: a spawn failure never breaks the session (the next session-start tries again).
+	}
+}
+
+/**
+ * Resolve the absolute path to the bundled `hygiene.js` that sits next to THIS running
+ * `index.js` under the harness bundle dir. Returns `undefined` when this shim is NOT
+ * running from the bundled binary (a test imports the shim — no `import.meta.url` match
+ * under `bundle/`), so the spawn becomes a no-op rather than a bad-path spawn.
+ */
+function resolveHygieneChildPath(): string | undefined {
+	try {
+		const here = dirname(fileURLToPath(import.meta.url));
+		// The bundled binary lives at `<pluginRoot>/bundle/index.js`; the hygiene child ships
+		// alongside it at `<pluginRoot>/bundle/hygiene.js`. Resolve relative to this file.
+		const candidate = join(here, "hygiene.js");
+		// Only return it when this file is actually AT a `bundle` dir (the bundled shape —
+		// `dirname(.../bundle/index.js)` is `.../bundle`); an in-repo source file (a test) would
+		// otherwise point at a non-existent dist path. Match either `/bundle/` (when nested) OR
+		// a path that ENDS with `/bundle` (the common case: the bundle dir itself).
+		const normalized = here.replace(/\\/g, "/");
+		if (normalized.includes("/bundle/") || normalized.endsWith("/bundle")) return candidate;
+		return undefined;
+	} catch {
+		return undefined;
+	}
 }

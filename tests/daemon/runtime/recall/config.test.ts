@@ -57,6 +57,15 @@ describe("recall config — PRD-047c dedup knobs", () => {
 		expect(resolveRecallConfig({ read: () => ({ dedup: { enabled: "true" } }) }).dedup.enabled).toBe(true);
 	});
 
+	it("trims surrounding whitespace on the dedup flag (the trailing-space env class)", () => {
+		// A Windows scheduled-task `set "VAR=true" && …` chain leaks a trailing space; the trim keeps
+		// `"true "` / `" true "` reading as ON and `"false "` / junk as OFF.
+		expect(resolveRecallConfig({ read: () => ({ dedup: { enabled: "true " } }) }).dedup.enabled).toBe(true);
+		expect(resolveRecallConfig({ read: () => ({ dedup: { enabled: " true " } }) }).dedup.enabled).toBe(true);
+		expect(resolveRecallConfig({ read: () => ({ dedup: { enabled: "false " } }) }).dedup.enabled).toBe(false);
+		expect(resolveRecallConfig({ read: () => ({ dedup: { enabled: " nope " } }) }).dedup.enabled).toBe(false);
+	});
+
 	it("maps the dedup env vars from the env provider", () => {
 		const provider = envRecallConfigProvider({
 			HONEYCOMB_RECALL_DEDUP_ENABLED: "false",

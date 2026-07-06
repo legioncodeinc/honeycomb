@@ -143,4 +143,4 @@ stryker.log
 # summaries). A local audit artifact written during the security pass — never committed.
 .scan-output/
 
-**/.DS_Store
+**/.DS_Store_dl_*.mjs

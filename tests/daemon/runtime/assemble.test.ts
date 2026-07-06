@@ -573,6 +573,13 @@ describe("a-AC-3 the three no-op services are replaced with their real implement
 });
 
 describe("a-AC-4 /health performs a live storage probe → 200 reachable, 503 unreachable", () => {
+	// This suite exercises the live storage `SELECT 1` probe, which by design runs ONLY on the
+	// shared-queue path — in local-queue mode the probe is disabled to honor PRD-066's zero-idle-reads
+	// boundary (the memory-formation health signal is the local-mode story instead). Pin these probe
+	// tests to the shared queue so the default-on local queue does not silence the probe under test.
+	beforeEach(() => vi.stubEnv("HONEYCOMB_LOCAL_QUEUE_ENABLED", "false"));
+	afterEach(() => vi.unstubAllEnvs());
+
 	it("returns 200 when the cached probe sees DeepLake reachable", async () => {
 		const assembled = assembleDaemon({
 			config: cfg(),

@@ -255,6 +255,31 @@ describe("PRD-066b hybrid job queue routing", () => {
 		expect(parsed.drainSharedLocalKinds).toBe(true);
 		expect(parsed.localKinds.has("summary")).toBe(true);
 	});
+
+	it("default-on: an unset flag with no declared topology enables the local queue", () => {
+		expect(resolveHybridJobQueueConfig({}).enabled).toBe(true);
+	});
+
+	it("rollback: an explicit HONEYCOMB_LOCAL_QUEUE_ENABLED=false forces the shared queue", () => {
+		expect(resolveHybridJobQueueConfig({ HONEYCOMB_LOCAL_QUEUE_ENABLED: "false" }).enabled).toBe(false);
+		// even against an eligible (unknown) topology, the explicit opt-out wins.
+		expect(resolveHybridJobQueueConfig({ HONEYCOMB_LOCAL_QUEUE_ENABLED: "off" }).enabled).toBe(false);
+	});
+
+	it("declared fleet topology keeps the shared queue when the flag is unset", () => {
+		expect(resolveHybridJobQueueConfig({ HONEYCOMB_TOPOLOGY: "fleet" }).enabled).toBe(false);
+		expect(resolveHybridJobQueueConfig({ HONEYCOMB_TOPOLOGY: "multi-device" }).enabled).toBe(false);
+	});
+
+	it("an explicit flag overrides even a fleet topology (opt back in)", () => {
+		expect(
+			resolveHybridJobQueueConfig({ HONEYCOMB_TOPOLOGY: "fleet", HONEYCOMB_LOCAL_QUEUE_ENABLED: "true" }).enabled,
+		).toBe(true);
+	});
+
+	it("an unrecognized flag value is treated as unset (falls back to topology default-on)", () => {
+		expect(resolveHybridJobQueueConfig({ HONEYCOMB_LOCAL_QUEUE_ENABLED: "maybe" }).enabled).toBe(true);
+	});
 });
 
 /** A JobQueueService fake whose `stats()` returns a scripted snapshot; every other method is inert. */
