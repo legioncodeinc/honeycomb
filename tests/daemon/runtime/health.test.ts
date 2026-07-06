@@ -170,6 +170,27 @@ describe("AC-2 /health detail NAMES the down subsystem, not a bare degraded", ()
 		).toBe("shared");
 	});
 
+	it("memory feature-gating: omitted when unwired; enabled + provider enum surfaced when wired", () => {
+		// Unwired (the deterministic unit suite / a daemon that never builds the pipeline worker) → absent.
+		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.memory).toBeUndefined();
+		// Enabled + a real provider configured → the dashboard may offer + reflect the ON control.
+		expect(
+			buildHealthDetail({
+				status: "ok",
+				embeddingsEnabled: true,
+				memory: { enabled: true, providerConfigured: true },
+			}).reasons?.memory,
+		).toEqual({ enabled: true, provider: "configured" });
+		// Disabled + NO provider → the control is gated (memory cannot extract without a provider).
+		expect(
+			buildHealthDetail({
+				status: "ok",
+				embeddingsEnabled: false,
+				memory: { enabled: false, providerConfigured: false },
+			}).reasons?.memory,
+		).toEqual({ enabled: false, provider: "unconfigured" });
+	});
+
 
 	it("schema is best-effort 'ok' by default; 'missing_table' only when a required table is known-missing", () => {
 		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.schema).toBe("ok");

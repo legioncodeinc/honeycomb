@@ -218,6 +218,24 @@ export interface HealthReasons {
 	 * to fix it. Present only when the composition root wires the signal. A closed enum — no secret.
 	 */
 	readonly memoryQueue?: "local" | "shared";
+	/**
+	 * Memory-formation FEATURE gating — the two signals the dashboard's future "Memory Formation"
+	 * control reads to decide show/hide + on/off, carrying NO secret (both are fixed enums):
+	 *   - `enabled`  — is the memory pipeline's master switch ON right now (vault-first `memory.enabled`,
+	 *                  else the `HONEYCOMB_PIPELINE_ENABLED` env)? The toggle's current state.
+	 *   - `provider` — is a REAL inference model provider configured (the assembled ModelClient is
+	 *                  non-noop: a Portkey key / `agent.yaml` inference block / provider env resolved)?
+	 *                  `configured` → the dashboard may offer the memory-enable action; `unconfigured`
+	 *                  → the control is gated (memory formation cannot extract without a provider).
+	 * Present only when the composition root wires the pipeline worker (which computes both at boot).
+	 * `provider` is a BOOLEAN-equivalent enum, never a key/name/URL — the no-secret health posture.
+	 */
+	readonly memory?: {
+		/** Whether the pipeline master switch is on (vault-first `memory.enabled`, else env). */
+		readonly enabled: boolean;
+		/** Whether a real model provider is configured (the ModelClient is non-noop). */
+		readonly provider: "configured" | "unconfigured";
+	};
 }
 
 /**
@@ -304,6 +322,17 @@ export interface HealthDetailInputs {
 	 * the composition root does not wire it → the `memoryQueue` reason is absent. See {@link HealthReasons.memoryQueue}.
 	 */
 	readonly memoryQueue?: "local" | "shared";
+	/**
+	 * The memory-formation feature-gating signal (this PRD). Omitted when the composition root does not
+	 * wire the pipeline worker → the `memory` reason is absent. When present, surfaced verbatim as
+	 * {@link HealthReasons.memory}. See that field for the dashboard's use. No secret (two enums).
+	 */
+	readonly memory?: {
+		/** Whether the pipeline master switch is on (vault-first `memory.enabled`, else env). */
+		readonly enabled: boolean;
+		/** Whether a real model provider is configured (the ModelClient is non-noop). */
+		readonly providerConfigured: boolean;
+	};
 }
 
 /**
@@ -382,6 +411,16 @@ export function buildHealthDetail(inputs: HealthDetailInputs): HealthDetail {
 			: {}),
 		// The pipeline's queue backend — present only when wired. `shared` is the degraded-coordination signal.
 		...(inputs.memoryQueue !== undefined ? { memoryQueue: inputs.memoryQueue } : {}),
+		// The memory-formation feature-gating signal — present only when the pipeline worker is wired.
+		// `provider` is the closed enum the dashboard gates the "Memory Formation" control on. No secret.
+		...(inputs.memory !== undefined
+			? {
+					memory: {
+						enabled: inputs.memory.enabled === true,
+						provider: inputs.memory.providerConfigured === true ? "configured" : "unconfigured",
+					},
+				}
+			: {}),
 	};
 	return { status: inputs.status, reasons };
 }
