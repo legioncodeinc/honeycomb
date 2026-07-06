@@ -72,6 +72,44 @@ Every handled failure is a single readable line and a non-zero exit; the verb ne
 
 ---
 
+## Solo vs fleet at install (PR #234)
+
+Before the install path decides whether to open a browser, it decides whether this machine is running **solo** or as part of a **fleet**. `src/shared/fleet-detection.ts` reads three live signals, and **any one** of them means fleet:
+
+1. A hive registry entry for this machine (in the fleet registry or the legacy registry).
+2. A 750 ms loopback probe of `127.0.0.1:3853` that answers.
+3. `@legioncodeinc/hive` present in the npm global tree.
+
+Every fired signal is logged, so the reason for a defer is always recoverable from the log.
+
+The install-path login then branches on that result:
+
+- **Fleet mode:** the installer prints a defer line and **opens no browser**. Login is the fleet orchestrator's job; the hive supplies the shared credential. The daemon's existing 15 s storage probe flips `/health` from `503` to `200` on its own, no restart, the moment hive-side login lands `~/.deeplake/credentials.json`.
+- **Solo mode with no `~/.deeplake/credentials.json`:** the installer runs the same device flow `honeycomb login` uses. The verification URL and code are printed **before** any browser-open attempt, so a headless box still onboards.
+- **Solo mode with credentials already present:** the installer opens nothing.
+
+`honeycomb login` is unchanged in both modes; only the install-path login defers. The state view of this branch is in [`../auth/device-and-fleet-enrollment-state-machine.md`](../auth/device-and-fleet-enrollment-state-machine.md).
+
+---
+
+## Lifecycle verbs and uninstall (PR #234)
+
+The CLI now exposes bare lifecycle verbs. `honeycomb start` and `honeycomb stop` run the daemon lifecycle directly; the older `honeycomb daemon start|stop|status` forms are kept as aliases so existing scripts and docs keep working (`src/commands/{contracts,dispatch,index,local-handlers}.ts`, `src/cli/{daemon-service,runtime}.ts`).
+
+`honeycomb uninstall` is a complete three-part teardown, run in order:
+
+1. **Stop** the running daemon.
+2. **Unregister the unit.** Removes the current `com.legioncode.honeycomb` service unit and, via `unregisterLegacy`, the legacy `ai.honeycomb.daemon` family, so an upgrade path never leaves an orphaned old unit behind.
+3. **Delete the registry entry and state.** Removes Honeycomb's own registry entry atomically, preserving every other entry in the shared registry, then removes the state directory in a symlink-safe way. Harness-hook cleanup is preserved.
+
+When nothing is installed, `uninstall` is a friendly exit-0 no-op rather than an error, so re-running or running it on a clean machine is safe.
+
+### The Windows APIARY_HOME trailing-space trap (PR #236)
+
+On Windows the scheduled task that launches the daemon pinned `APIARY_HOME` with a **trailing space** before the `&&`, and `cmd` folds that space into the variable's value. The daemon then wrote its state and telemetry directory to a path one space off from the one Doctor had registered, so Honeycomb showed permanently degraded ("Deeplake not connected") even though everything else was healthy. The fix quotes the assignment as `set "VAR=value"` in `daemon-service`, and `src/shared/fleet-root.ts` defensively trims `APIARY_HOME` and `XDG` values, so a stray trailing space can no longer divert the state root. This is an install-health fix: a mispinned home is why a freshly installed daemon could report degraded with no other visible cause.
+
+---
+
 ## The one-daemon / two-phase model
 
 The pivotal architectural realization is **no second daemon: one daemon, two phases.**

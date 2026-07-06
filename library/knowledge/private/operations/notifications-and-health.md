@@ -117,6 +117,25 @@ Surfacing logged-out, daemon-down, and missing states upfront prevents the share
 
 ---
 
+## Health Must Report the True Runtime State
+
+The recent fixes in this area establish one governing principle: `/health` must report the true runtime state, not the intended or configured flag. A toggle being *enabled* is not evidence that the subsystem is *running*. When the health surface reports the flag instead of the fact, a total failure becomes invisible, and the operator has no signal that anything is wrong.
+
+### The embeddings spawn-path bug
+
+PR #242 caught the sharpest example. The Hive Embeddings toggle did nothing: with embeddings enabled, semantic recall silently ran on BM25, and `/health` cheerfully reported `embeddings: "on"` the whole time.
+
+The root cause was a resolve-path mismatch between the dev layout and the shipped bundle. In the shipped bundle the embed supervisor is inlined into `daemon/index.js`, but `resolveEmbedEntry` hard-coded a five-parent-directory walk that is correct only for the dev `dist/src/daemon/runtime/services/` layout. In a bundled install that walk resolved to `<npm-root>/../embeddings/embed-daemon.js`, a path outside the package. The spawn was handed a file that does not exist, the child process exited 1, the crash-restart budget drained, and nothing ever came up on port 3851. Meanwhile the health surface read `embeddings: "on"` straight from the enabled flag, so the failure left no trace.
+
+The fix has two halves:
+
+1. **Probe candidate paths instead of hard-coding one.** `resolveEmbedEntry` now checks both the bundled sibling path (`../embeddings/...`) and the dev five-up path and picks whichever actually exists on disk. The selection logic was extracted as a pure `pickEmbedEntry` with a regression test covering both layouts, so a future packaging change that breaks one layout is caught in CI rather than in the field.
+2. **Report the honest embeddings state.** The supervisor now reads the embed daemon's own `/health.warmFailed` and tracks restart-exhaustion, and `/health` reports the real state, ready, failed, or falling back to BM25, rather than echoing the enabled flag. A user who turned embeddings on and is silently getting BM25 now sees that in `/health`.
+
+The general lesson applies beyond embeddings: every subsystem that `/health` describes should be probed for its actual state (process alive, warmup succeeded, restart budget intact), never reported from the flag that was supposed to turn it on.
+
+---
+
 ## Auto-Wiring and Idempotency
 
 The auto-wiring engine removes the friction of manual hook setup by managing the `~/.cursor/hooks.json` configuration file on the developer's behalf.

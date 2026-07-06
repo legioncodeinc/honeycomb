@@ -10,6 +10,7 @@ How Honeycomb surfaces the engine's degradation modes, embeddings off, lexical f
 - [`fleet-and-usage-telemetry.md`](fleet-and-usage-telemetry.md)
 - [`deeplake-compute-cost.md`](deeplake-compute-cost.md)
 - [`../ai/retrieval.md`](../ai/retrieval.md)
+- [`../ai/memory-pipeline.md`](../ai/memory-pipeline.md)
 - [`../data/deeplake-storage.md`](../data/deeplake-storage.md)
 - [`../architecture/daemon-surface.md`](../architecture/daemon-surface.md)
 - [`../security/scoping-and-visibility.md`](../security/scoping-and-visibility.md)
@@ -60,6 +61,29 @@ No new probe is introduced, the `reasons` read facts the runtime already knows. 
 ### Partial storage degradation
 
 A partial degradation, storage reachable but a single arm or table missing, is captured by the combination of the two signals above. The overall `/health` bit can still report `ok` for reachability while `schema` reports `missing_table`, and a recall over the missing arm returns `degraded: true` with that arm absent from `sources`. The operator sees a reachable store with one subsystem named as down, rather than a flat "degraded" with no decomposition.
+
+## The memory pipeline: a queue snapshot and a driver heartbeat
+
+The recall and `/health` signals above answer "is the store reachable and did this query fall back." They do not answer a different silent-degradation question the pipeline raised: the daemon captures sessions and queues extraction jobs, but forms zero memories, and nothing says why. The durable `memory_jobs` queue was a black box, and a stalled driver looked identical to an empty one. Two additions close that gap: a read-only queue snapshot (PR #244) and the pipeline's own lifecycle log events (PR #246).
+
+### The job-queue snapshot (`GET /api/diagnostics/jobs`)
+
+Before PR #244 the queue endpoint returned `501` and there was no way to see that 400+ `memory_extraction` jobs were sitting queued. `JobQueueService.stats()` now returns a current-status breakdown by kind: `{ byKind: [{ kind, queued, leased, done, failed, dead, total }], total }`. The counts are computed from the highest-version row per job, the same discovery scan `lease()` uses, so they reflect real current status rather than raw append-only append counts (a job that went queued then leased then done shows once as `done`, not three times across the history). Every queue implementation carries it: the Deep Lake queue, the local SQLite queue (which maps its `retrying` state to `failed` and its terminal states to `dead`), the hybrid queue (which merges both), and the no-op. The route `GET /api/diagnostics/jobs` attaches to the already `protect:true` `/api/diagnostics` group (`src/daemon/runtime/dashboard/jobs-diagnostics-api.ts`), so it is operator-only and strictly read-only: it reports the queue, it never leases or mutates a job.
+
+An operator reading a stuck pipeline sees the backlog directly: a large `queued` with a zero or stale `leased` for the `memory_extraction` kind is the O(N) lease wedge (or a driver that never started), and a climbing `failed` / `dead` is a handler problem rather than a scheduling one.
+
+### The driver heartbeat (pipeline lifecycle log events)
+
+The queue snapshot shows the backlog; the pipeline's log events show whether anything is draining it. PR #246 wired the daemon logger into the stage worker and the lease coordinator (they had logging seams but were assembled with no logger, so every event was a silent no-op) and added the load-bearing lifecycle events an operator reads to answer "is a loop actually pumping the queue":
+
+| Event | Meaning |
+|---|---|
+| `stage.worker.started` | The stage worker's own poll loop came up. |
+| `lease.coordinator.started` | The lease coordinator came up; carries `leaseKinds` / `unionKinds` and the participant count. In the production consolidate-poll default (`HONEYCOMB_POLL_CONSOLIDATE`) the coordinator, not the stage worker's loop, drives the pipeline, so this is the "did the driver start, and does its union include the backlogged kind" signal. |
+| `lease.coordinator.dispatched` | Fires per leased job, so a running-but-empty coordinator is distinguishable from one actually handing work to stage handlers. |
+| `stage.completed` / `stage.failed` | Per-stage outcome (these predate #246 but were silent until the logger was wired). |
+
+The diagnostic reading is direct: absence of a `started` event means no loop is pumping the queue, which is exactly the state the lease wedge and the trailing-space `HONEYCOMB_PIPELINE_ENABLED` bug both produced (both fixed in PR #248; see [`../ai/memory-pipeline.md`](../ai/memory-pipeline.md)). A `started` with no `dispatched` under a non-empty `queued` count from `/api/diagnostics/jobs` is a coordinator whose union does not include the backlogged kind. These events carry stage and kind names and counts only, so they inherit the no-secret invariant below.
 
 ## Mode-gated detail: do not leak topology
 

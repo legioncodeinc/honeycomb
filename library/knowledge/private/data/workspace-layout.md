@@ -11,6 +11,7 @@ The on-disk shape of a Honeycomb workspace: the identity files that shape the ne
 - [`../architecture/daemon-surface.md`](../architecture/daemon-surface.md)
 - [`../multi-tenant/org-workspace-model.md`](../multi-tenant/org-workspace-model.md)
 - [`../security/secrets.md`](../security/secrets.md)
+- [`../architecture/adr/0008-fleet-directory-ownership-and-neutral-state-root.md`](../architecture/adr/0008-fleet-directory-ownership-and-neutral-state-root.md)
 
 ---
 
@@ -20,9 +21,19 @@ The workspace is the thing the user actually owns. Models, providers, and harnes
 
 This split is the whole custody pitch. A workspace maps to a tenancy boundary: an org owns workspaces, and a workspace is the unit that scopes every durable row (see [`../multi-tenant/org-workspace-model.md`](../multi-tenant/org-workspace-model.md)). The local files are the readable face of that workspace; DeepLake is its durable body.
 
+## Two roots, not one
+
+Honeycomb resolves two independent on-disk roots, and conflating them is the source of a whole class of bugs (see the trailing-space section below). Keep them distinct:
+
+1. The **fleet state root** is the neutral, home-anchored directory the fleet coordinates under. As of PR #229 (PRD-072) it moved from the original `~/.honeycomb/` to `~/.apiary/honeycomb/`, per ADR-0008 (the honeycomb-local mirror of the superproject fleet-directory ADR, see [`../architecture/adr/0008-fleet-directory-ownership-and-neutral-state-root.md`](../architecture/adr/0008-fleet-directory-ownership-and-neutral-state-root.md)). This root holds honeycomb's own runtime state: the PID and single-instance lock, telemetry SQLite, the machine key, the skillify lock/state, the graph cache, and the secrets store and vault. It is resolved from `os.homedir()` through the Tier-1 canonical chain in `src/shared/fleet-root.ts`, never from `process.cwd()`.
+
+2. The **workspace base dir** is the user-owned identity surface: the directory `$HONEYCOMB_WORKSPACE` points at (default `~/.honeycomb/`). It anchors `agent.yaml`, the identity markdown files, `.secrets/`, and `.daemon/logs.db`. It is resolved separately by `resolveWorkspaceBaseDir`, described below.
+
+The two often coincide on a default single-machine install, but they are resolved by different code paths and can diverge. The directory tree below shows the workspace base dir (the identity surface); the fleet state root under `~/.apiary/honeycomb/` is described in [the fleet state root](#the-fleet-state-root-and-the-apiary-migration) section.
+
 ## The directory tree
 
-`$HONEYCOMB_WORKSPACE` defaults to `~/.honeycomb/`.
+`$HONEYCOMB_WORKSPACE` (the workspace base dir) defaults to `~/.honeycomb/`.
 
 ```text
 $HONEYCOMB_WORKSPACE/                 (default ~/.honeycomb/)
@@ -102,12 +113,41 @@ On Windows that arbitrary directory is the trap. A CLI invoked from a service or
 Two layers now keep the daemon on writable ground:
 
 1. The CLI pins both `cwd` and `HONEYCOMB_WORKSPACE` when it spawns the daemon. `resolveDaemonWorkspace()` returns the first writable of an explicit `HONEYCOMB_WORKSPACE`, the CLI cwd, then `~/.honeycomb`.
-2. The daemon repeats the same fallback as defense in depth. `resolveWorkspaceBaseDir()` is memoized, probes the candidate, and on failure falls back to `~/.honeycomb` after writing a one-line stderr warning so the operator sees the substitution.
+2. The daemon repeats the same fallback as defense in depth. `resolveWorkspaceBaseDir()` is memoized, probes the candidate, and on failure falls back to `~/.honeycomb` after writing a one-line stderr warning so the operator sees the substitution. It derives its candidate through the pure `workspaceBaseDirCandidate(env)` helper, which trims `HONEYCOMB_WORKSPACE` before use (see [the two-source trailing-space bug class](#the-two-source-trailing-space-bug-class)).
 
-Writability is tested by a real create-write-unlink round trip, not by `accessSync(W_OK)`. On Windows `accessSync` inspects the read-only attribute rather than the ACL, so `system32` falsely reports writable. The honest probe (`canWriteDir`) does `mkdirSync` then creates and removes an exclusive `mkdtemp` directory inside the candidate. The randomly suffixed temp name means the probe only ever creates and deletes a path it owns, so it can never truncate or remove a pre-existing workspace file the way a deterministic marker name could. The `~/.honeycomb` runtime directory that holds the PID and single-instance lock is always resolved from the home directory and is never affected by this fallback.
+Writability is tested by a real create-write-unlink round trip, not by `accessSync(W_OK)`. On Windows `accessSync` inspects the read-only attribute rather than the ACL, so `system32` falsely reports writable. The honest probe (`canWriteDir`) does `mkdirSync` then creates and removes an exclusive `mkdtemp` directory inside the candidate. The randomly suffixed temp name means the probe only ever creates and deletes a path it owns, so it can never truncate or remove a pre-existing workspace file the way a deterministic marker name could. The runtime directory that holds the PID and single-instance lock is always resolved from the home directory (the fleet state root) and is never affected by this fallback.
+
+## The fleet state root and the .apiary migration
+
+PR #229 (PRD-072) moved honeycomb's runtime state out of the workload-branded `~/.honeycomb/` and into the neutral, home-anchored fleet root `~/.apiary/honeycomb/`. The motivation and the four-repo contract are in ADR-0008; this section covers what it means for honeycomb's on-disk shape.
+
+The canonical resolver lives in `src/shared/fleet-root.ts` and is Tier-1 (imported, not duplicated, inside honeycomb). It resolves the root from `os.homedir()` down a fixed chain: an absolute `APIARY_HOME`, then on Linux an absolute `$XDG_STATE_HOME` joined with `apiary`, otherwise `<home>/.apiary`. Per-product state is that root plus `/honeycomb`; the shared coordination surface (`registry.json`, `device.json`, `install-id`) sits at the root itself.
+
+**Env roots are honored only when absolute.** A relative `APIARY_HOME` or `$XDG_STATE_HOME` is ignored and the chain falls through to `<home>/.apiary`. This is a security fix, not a convenience: honoring a relative value would anchor the fleet root, and everything derived from it including the machine key that encrypts secrets, on `process.cwd()`, which is the exact cwd footgun the neutral root exists to prevent. Absoluteness is checked with `path.win32.isAbsolute` so a relative value is never mistaken for absolute on any host.
+
+The move runs once, on first boot after upgrade, and covers seven families of state (`src/daemon/runtime/state-migration/{families,index,migrate,move}.ts`). It is non-destructive: the migration primitives distinguish a migrated move (legacy files carried into the new layout) from a freshly minted directory, and until the migration completes readers fall back to the legacy `~/.honeycomb` location so a partially-migrated install never loses pid, lock, or registry continuity. Several families get bespoke handling:
+
+- **Telemetry SQLite:** if the mover fails, it opens the legacy database in place rather than minting a fresh empty one and stranding the history (`src/daemon/runtime/state-migration/telemetry/{fleet-registry,fleet-store}.ts`).
+- **Skillify lock and state:** cut over with a legacy in-flight probe so an in-progress skillify run is not orphaned.
+- **Graph cache:** not moved, rebuilt lazily under the new root on next use.
+- **Machine key:** byte-verified after the move so a corrupted or partial copy is caught before it is trusted to decrypt secrets.
+
+**Registry writes never double-write.** A registry-window write goes to `~/.apiary/registry.json` when the fleet root exists, else to the legacy path, never to both, and always advertises the daemon's resolved absolute paths rather than a path relative to some cwd.
+
+**VFS memory-mount dual recognition.** The virtual filesystem that fronts memory recognizes both the new `.apiary/honeycomb/memory` mount and the legacy `.honeycomb/memory` mount during the migration window. The matcher is hardened against Windows backslash and case bypass so neither `\.apiary\honeycomb\memory` nor a case-shifted variant can slip a path past the recognizer.
+
+The installer pins `APIARY_HOME` into the service units so a daemon launched by the service manager resolves the same absolute root the CLI does. The secrets store and the unified vault both move under the new root; their contract is in [`../security/secrets.md`](../security/secrets.md).
+
+## The two-source trailing-space bug class
+
+The two roots are resolved by two resolvers, and each reads a different environment variable, so a stray trailing space can strand state in a divergent directory in two independent ways. Understanding both is the point of keeping the roots distinct.
+
+The v0.5.7 fix trimmed `APIARY_HOME` and quoted the scheduled-task `set` assignments, which corrected the fleet-root side: telemetry SQLite and the state directory started landing at the clean path. But that was only the first source. PR #238 caught the second: the workspace base dir is resolved by `resolveWorkspaceBaseDir`, which reads `HONEYCOMB_WORKSPACE` and, before the fix, did not trim it. Observed live on 0.5.7, telemetry landed at the clean fleet-root path while `.daemon/logs.db`, `.secrets/`, and `agent.yaml` landed in a divergent `"<dir> "` trailing-space directory that the CLI and the uninstaller never look in. Because the secrets store is anchored to the workspace base dir, this splits the vault: a `DEEPLAKE_TOKEN` written on one side is invisible on the other, which can break inference-key delivery and therefore session-to-memory consolidation.
+
+PR #238 fixed the workspace side by extracting a pure, exported `workspaceBaseDirCandidate(env)` that trims `HONEYCOMB_WORKSPACE` (a whitespace-only value collapses to `process.cwd()`); `resolveWorkspaceBaseDir` now delegates to it. The lesson the two PRs together encode: any environment variable that feeds a root resolver must be trimmed at the resolver, because a trailing space is invisible in a shell yet forms a real, distinct directory name on disk. There are two such variables (`APIARY_HOME` for the fleet root, `HONEYCOMB_WORKSPACE` for the workspace base dir) and both are now hardened.
 
 ## What lives where, and why DeepLake
 
 Application state, memories, embeddings, the graph, jobs, sessions, telemetry, lives in DeepLake tables the daemon owns. Embeddings are 768-dim `nomic-embed-text-v1.5` vectors stored as DeepLake tensors. Tables are created lazily with lazy schema-healing, the query endpoint has no parameterized queries (values are escaped and interpolated), structured payloads are `jsonb`, and concurrent-edit tables use append-only version-bumped writes to work around an UPDATE-coalescing quirk. The full schema is documented in [`schema.md`](schema.md) and the storage mechanics in [`deeplake-storage.md`](deeplake-storage.md).
 
-Local JSON and JSONL sidecars are not allowed as the default for app state, caches, queues, indexes, or cursors; those belong in DeepLake. Sidecars are fine only for genuine user-facing artifacts: import and export bundles, attachments, logs, and backups. Secrets are the one thing that never lives in DeepLake or the identity files; they sit encrypted under `.secrets/`, as described in [`../security/secrets.md`](../security/secrets.md).
+Local JSON and JSONL sidecars are not allowed as the default for app state, caches, queues, indexes, or cursors; those belong in DeepLake. Sidecars are fine only for genuine user-facing artifacts: import and export bundles, attachments, logs, and backups. Secrets are the one thing that never lives in DeepLake or the identity files; they sit encrypted under `.secrets/` (with the vault and secrets store now under the migrated `~/.apiary/honeycomb/` fleet root), as described in [`../security/secrets.md`](../security/secrets.md).

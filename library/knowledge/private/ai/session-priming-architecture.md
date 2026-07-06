@@ -1,6 +1,6 @@
 # Session Priming Architecture (push the index, pull the detail)
 
-> Category: Ai | Version: 2.0 | Date: June 2026 | Status: Active
+> Category: Ai | Version: 2.1 | Date: July 2026 | Status: Active
 
 How a coding agent gets *primed* with Honeycomb memory: a tiny index pushed once at session start,
 and a pull-on-demand resolve/search path the agent drives itself. Covers the cadence (session, not
@@ -110,8 +110,17 @@ To expand any item, call hivemind_read(<id>); to search memory, hivemind_search(
 
 The digest is assembled by `GET /api/memories/prime` (`src/daemon/runtime/memories/prime.ts`),
 attached onto the daemon's already-mounted `/api/memories` session group so it inherits the same
-auth/RBAC + session gate. It skims the Tier-1 `key` columns directly, a pure SQL read with no
-generation at request time (see `src/daemon/runtime/summaries/prime-digest.ts`,
+auth/RBAC + session gate. **Route ordering is load-bearing here (PR #255).** `/prime` is a literal
+path on the same `/api/memories` group that also carries the parametric `GET /:id` memory-read route.
+Hono's `RegExpRouter` matches the parametric route greedily, so if `/prime` is registered *after*
+`GET /:id`, a request to `/api/memories/prime` is captured by `/:id` with `c.req.param("id") ===
+"prime"`, runs `getMemory("prime")`, and returns `404 {error: "not_found"}`. The prime renderer's
+fail-soft posture then swallowed that 404 and injected `{}`, so SessionStart silently received an
+empty prime while every other layer looked healthy. The fix registers `/prime` **inside**
+`mountMemoriesApi` **before** `/:id` (`src/daemon/runtime/memories/api.ts`), so the literal route wins;
+`mountMemoriesPrimeApi` (`src/daemon/runtime/memories/prime.ts`) is retained as a standalone shim for
+unit tests, and `assemble.ts` reflects the new mount order. It skims the Tier-1 `key` columns directly,
+a pure SQL read with no generation at request time (see `src/daemon/runtime/summaries/prime-digest.ts`,
 `prime-keys.ts`). The block is token-bounded, scoped to the repo/agent, recency-weighted, and
 **deduped** so the same fact never appears twice, the prime composes with the same PRD-047c semantic
 dedup and PRD-047d recency dampening the recall pipeline uses: the recent list is age-weighted, the
@@ -146,6 +155,29 @@ session-start hook (`src/hooks/shared/session-start.ts`) fetches the prime once 
 branch (never on per-turn capture), renders it verbatim via the prime seam
 (`src/hooks/shared/prime-renderer.ts`), and joins it with the rules/goals context block so neither is
 lost. When no prime is available yet (a cold repo) the hook injects nothing, never an error.
+
+**The hook must return the recall within the harness timeout budget (PR #257).** Fixing the route
+(PR #255) made the daemon *serve* the prime, but the SessionStart hook was still being killed before its
+output reached the model: a warm-daemon profile showed the context render at 62ms and `prime.render()`
+(the recall itself) ready at T+1.1s (1043ms), yet `runSessionStart` then `await`ed `autoPullSkills`
+(~5005ms) and `autoPullAssets` (~2870ms) before returning, pushing the total to ~9s warm and past the
+10s deadline on a cold start. Claude Code cancelled the hook (`hook_cancelled`, `durationMs 10649`,
+`timeoutMs 10000`) and the recall, though computed, never landed in `additionalContext`. Two fixes ship
+together:
+
+1. **Raise the SessionStart timeout 10s → 30s.** The budget is bumped in
+   `harnesses/claude-code/hooks/hooks.json` and mirrored in `src/connectors/claude-code.ts` so the
+   installed hook and the connector-generated config agree.
+2. **Detach the hygiene pulls so recall returns first.** `autoPullSkills`, `autoPullAssets`, and
+   `spawnGraphPull` are side-effecting session hygiene (skills + assets pulls, next-session graph
+   context); they never touch `additionalContext`. They are moved off the critical path into a
+   fire-and-forget `backgroundPull()` (detached, wrapped in a swallow guard that tolerates both async
+   rejections and synchronous throws), so `runSessionStart` returns the rendered context (rules/goals +
+   prime) as soon as the recall is ready and lets the pulls finish in the background.
+
+A third fix removes a latent race in the renderer itself: the prime renderer's fetch timeout was racing
+the ~2s skim, so a slow-but-valid prime could be abandoned mid-flight; the timeout in
+`src/hooks/shared/prime-renderer.ts` is widened so the recall is not cut off before it resolves.
 
 ```mermaid
 sequenceDiagram
@@ -204,5 +236,6 @@ real.
 
 | Date | Version | Change |
 |------|---------|--------|
+| 2026-07-06 | 2.1 | Folded in the three-layer recall-delivery fix. PR #255: register `/prime` before `/:id` inside `mountMemoriesApi` so Hono's `RegExpRouter` stops shadowing the prime route with the parametric memory-read (the 404 that had SessionStart receiving `{}`). PR #257: raise the SessionStart timeout 10s → 30s (`hooks.json` + `src/connectors/claude-code.ts`), detach `autoPullSkills` / `autoPullAssets` / `spawnGraphPull` into a fire-and-forget `backgroundPull()` so recall returns first, and widen the prime-renderer fetch timeout so the ~2s skim is not cut off. |
 | 2026-06 | 2.0 | Status → Active: PRD-046 shipped (merged #77). Prime endpoint, Tier-1 key columns, resolve/mine tools, CC + Cursor SessionStart hooks, and the prime eval are all live; rewrote in present tense and grounded the endpoint/hook/eval paths in `src/`. |
 | 2026-06 | 1.0 | Initial capture of the push-prime / pull-resolve architecture and CC/Cursor wiring. |

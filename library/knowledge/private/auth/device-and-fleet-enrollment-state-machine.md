@@ -65,6 +65,48 @@ These states should be reflected in API responses and user-facing surfaces.
 | `rotation_recommended` | Device was revoked and may still have local DeepLake material. | Rotate DeepLake credentials. |
 | `rotated` | DeepLake credential has been rotated. | Upload/rewrap the fresh credential blob. |
 | `rewrap_required` | New credential blob exists and eligible custodians need fresh wrapped keys. | Bring custodians online or re-link. |
+| `tenancy_pending` | Device is signed in but has not persisted an explicit org/workspace choice. | Pick an org and workspace; capture stays blocked until then. |
+| `tenancy_confirmed` | An explicit org/workspace choice is persisted (`tenancyConfirmedAt` stamped). | None; capture is now permitted. |
+| `login_deferred` | Install ran in fleet mode; the daemon deferred login to the fleet orchestrator. | None; the hive supplies credentials. |
+
+## Solo vs Fleet Detection (PR #234)
+
+At install time Honeycomb decides whether it is running solo or inside a fleet before it ever
+considers opening a browser. `src/shared/fleet-detection.ts` reads three live signals, and **any one**
+of them means fleet:
+
+1. A hive registry entry for this machine in the fleet or legacy registry.
+2. A 750 ms loopback probe of `127.0.0.1:3853` that answers.
+3. `@legioncodeinc/hive` present in the npm global tree.
+
+Every fired signal is logged, so a "why did this install defer?" question is answerable from the log.
+
+The install-path login then branches on the result:
+
+- **Fleet mode:** the installer prints a defer line and **never opens a browser**. The daemon parks in
+  `login_deferred`; the fleet orchestrator supplies the shared credential. The existing 15 s storage
+  probe flips `/health` from `503` to `200` without a restart once the hive-side login lands
+  credentials on disk.
+- **Solo mode, no `~/.deeplake/credentials.json`:** the installer runs the same device flow that
+  `honeycomb login` uses, printing the verification URL and code **before** any browser-open attempt so
+  the flow is headless-safe.
+- **Solo mode, credentials already present:** the installer opens nothing.
+
+`honeycomb login` itself is unchanged in both modes; only the install-path login defers. The full
+install/onboarding narrative is in
+[`../operations/install-and-onboarding.md`](../operations/install-and-onboarding.md).
+
+## Tenancy Confirmation (PR #232)
+
+Signing in is no longer the last gate before memory. A freshly linked device sits in `tenancy_pending`
+until the user persists an **explicit** org and workspace choice through the canonical
+`/setup/tenancy/*` API, which stamps a `tenancyConfirmedAt` marker and moves the device to
+`tenancy_confirmed`. The device link no longer silently assumes `orgs[0]` plus a `"default"`
+workspace. Capture, skillify, and every write pipeline stay dormant while the device is in
+`tenancy_pending`; they activate only on `tenancy_confirmed`. Existing installs that were already
+capturing are grandfathered as confirmed and are not forced back through this step. The org/workspace
+model behind this state is in
+[`../multi-tenant/org-workspace-model.md`](../multi-tenant/org-workspace-model.md).
 
 ## First Trusted Device
 

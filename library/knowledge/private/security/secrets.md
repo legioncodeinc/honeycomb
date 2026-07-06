@@ -23,7 +23,7 @@ Secrets are owned by a bundled core plugin, `honeycomb.secrets` (under `plugins/
 
 ## Storage and encryption
 
-Secrets live in `$HONEYCOMB_WORKSPACE/.secrets/` as encrypted JSON with mode 0600 (dirs 0700): human-readable names, ciphertext values. The workspace root here is the daemon's resolved filesystem base, so a daemon that comes up pinned to an unwritable directory makes every secret write fail with a `502 store_failed`; the writable-workspace resolution and the Windows `system32` failure mode are covered in [`../data/workspace-layout.md`](../data/workspace-layout.md). Encryption is XSalsa20-Poly1305 (the libsodium `crypto_secretbox` construction) implemented with the audited, zero-dependency `@noble/ciphers` library rather than a native libsodium binding, there is no native module to compile or heal. The key is derived from a machine-bound identifier (`/etc/machine-id` on Linux, `IOPlatformUUID` on macOS, with a hostname-plus-username fallback) stretched to 32 bytes with HKDF, scope-bound so org/workspace records derive distinct keys. Each value gets a random nonce prepended to its ciphertext. The practical consequence is that the store cannot be decrypted on another machine without the same machine identity, so copying the encrypted tree to a different box yields nothing usable.
+Secrets live under `.secrets/` as encrypted JSON with mode 0600 (dirs 0700): human-readable names, ciphertext values. As of PR #229 (PRD-072) the secrets store and the unified vault moved under the migrated fleet state root `~/.apiary/honeycomb/`, resolved through the Tier-1 canonical chain in `src/shared/fleet-root.ts` from `os.homedir()` and never from `process.cwd()`; the `.apiary` migration is covered in [`../data/workspace-layout.md`](../data/workspace-layout.md). A daemon that comes up pinned to an unwritable directory makes every secret write fail with a `502 store_failed`; the writable-workspace resolution and the Windows `system32` failure mode are covered in the same doc. Encryption is XSalsa20-Poly1305 (the libsodium `crypto_secretbox` construction) implemented with the audited, zero-dependency `@noble/ciphers` library rather than a native libsodium binding, there is no native module to compile or heal. The key is derived from a machine-bound identifier (`/etc/machine-id` on Linux, `IOPlatformUUID` on macOS, with a hostname-plus-username fallback) stretched to 32 bytes with HKDF, scope-bound so org/workspace records derive distinct keys. Each value gets a random nonce prepended to its ciphertext. The practical consequence is that the store cannot be decrypted on another machine without the same machine identity, so copying the encrypted tree to a different box yields nothing usable.
 
 This is distinct from the device-flow credentials file used by the daemon's own auth and provider sign-in, which is covered in [`credential-storage.md`](credential-storage.md). User secrets and the daemon's stored credentials are deliberately separate stores with separate rules, though the vault below now offers an encrypted-at-rest *copy* of the DeepLake login token.
 
@@ -42,11 +42,19 @@ The read posture is **data, not scattered conditionals**: a record-class registr
 
 The vault deliberately stays a per-record encrypted **file** store; it is not a SQLite database. The file store already owns the encryption primitive, machine binding, permission discipline, scope segmentation, and redacted audit, and it is `audit:sql`-clean precisely because it touches no SQL. SQLite would add a native dependency and a *second* at-rest encryption story (SQLCipher or app-level field encryption, re-deriving the same machine key anyway) to buy a queryability that tens of settings and a handful of secrets per scope do not need. A settings read is one file read; a settings write is one atomic file write. The vault is local by design and is never a DeepLake table, and copying its directory to another host yields nothing, because the machine key differs.
 
+### The vault-scatter fix (fixed root, not cwd)
+
+PR #240 closed a cwd-scatter bug that split both the secrets vault and the settings vault across directories. The vault base dir had been derived from `resolveWorkspaceBaseDir()`, which falls back to `process.cwd()` when `HONEYCOMB_WORKSPACE` is unset. Because a daemon inherits the working directory of whatever spawned it, daemon-global config (the Portkey key, the active provider and model, `pollinating.enabled`, `embeddings.enabled`) landed in whatever directory the daemon happened to launch from. This was confirmed on disk: the same toggle appeared under three roots at once, `~/.apiary/honeycomb/.vault`, `~/GitHub/the-apiary/honeycomb/.vault`, and `~/GitHub/honeycomb/.vault`. A boot read saw an inconsistent subset of those files, so the Portkey key took several restarts to stick and `pollinating.enabled` never engaged at all.
+
+The fix pins the vault to a fixed, cwd-independent path rather than to the cwd-sensitive workspace base dir. Daemon-global config is fleet-global, so it must resolve from the fleet state root (`os.homedir()` down the `fleet-root.ts` chain), not from the directory the daemon started in. This is the same lesson as the trailing-space split (see [`../data/workspace-layout.md`](../data/workspace-layout.md)): state that must be found again later cannot be anchored on a value that varies per launch.
+
 ### COPY-not-move credential migration
 
 The vault offers an encrypted-at-rest copy of the DeepLake login token, and the migration that creates it is the single highest-risk operation in the subsystem, so it is non-destructive **by construction**. The shared `~/.deeplake/credentials.json` is the user's live login, byte-cross-compatible with Hivemind. The migration **copies** the token into the vault as a `secret`-class record (`DEEPLAKE_TOKEN`) and performs zero writes to `~/.deeplake`: there is no move, delete, rewrite, re-chmod, or rename of the plaintext file anywhere in the migration path. The plaintext file stays byte-unchanged and authoritative for the shared login; the vault copy is an additive cache, not a replacement.
 
 Token resolution then follows a fixed precedence, **vault → env → plaintext file**: the migrated vault copy first, then a `HONEYCOMB_TOKEN` env override, then the plaintext file as the never-regressed fallback. The login resolves in every case, so an empty vault is not a regression. Tightening or removing the plaintext file is deliberately deferred to a later change gated on this proving out; this subsystem never makes the user's login unrecoverable. The credentials file contract itself is documented in [`credential-storage.md`](credential-storage.md).
+
+Because the `DEEPLAKE_TOKEN` vault record is anchored to a resolved directory, it inherits the path-hygiene concerns of the roots it sits under. PR #238 fixed a case where a trailing space in `HONEYCOMB_WORKSPACE` sent `.secrets/` (and with it the `DEEPLAKE_TOKEN` record) to a divergent `"<dir> "` directory the CLI and uninstaller never look in, while telemetry landed at the clean path. That split can break inference-key delivery and, downstream, session-to-memory consolidation. The resolver now trims the environment variable so the vault cannot land in a phantom trailing-space directory; the full two-source trailing-space story is in [`../data/workspace-layout.md`](../data/workspace-layout.md).
 
 ## What agents can and cannot do
 
@@ -61,6 +69,18 @@ The API exposes names but never values.
 | `/api/secrets/exec/:jobId` | GET | inspect a queued exec job |
 
 There is deliberately no `GET /api/secrets/:name`. An agent cannot read a value through the API, the SDK, MCP, the dashboard, a connector, or plugin diagnostics. It can list names and it can ask for a secret to be used, nothing more.
+
+### The `honeycomb secret` CLI contract
+
+PR #240 fixed the `honeycomb secret` CLI, which had been silently broken. The generic command dispatch turned `secret set <name> <value>` into `POST /api/secrets/set {args:[name,value]}`, so the daemon stored a secret literally named `set` and dropped the value entirely. A bespoke secret command builder now maps each subcommand to the correct route:
+
+| CLI command | HTTP call |
+|---|---|
+| `secret set <name> <value>` | `POST /api/secrets/<name>` with `{value}` |
+| `secret rm <name>` | `DELETE /api/secrets/<name>` |
+| `secret list` | `GET /api/secrets` (names only) |
+
+The read posture is preserved: `secret list` returns names only, and there is still no CLI path that returns a decrypted value.
 
 ## The exec model
 

@@ -99,3 +99,5 @@ honeycomb recall "self hosted"
 ```
 
 If `recall` returns the memory you just wrote, the daemon is reading and writing your self-hosted backend.
+
+> Honeycomb only starts capturing once you have selected an org and workspace (the `--org` and `--workspace` you passed at login count) and connected a project. Until then it stays dormant and saves nothing. If capture looks quiet, check that a workspace is selected and a project is bound.

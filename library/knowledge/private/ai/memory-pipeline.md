@@ -11,6 +11,8 @@ How a raw memory becomes structured, deduplicated, graph-linked recall. The extr
 - [`pollinating-loop.md`](pollinating-loop.md)
 - [`model-provider-router.md`](model-provider-router.md)
 - [`../data/schema.md`](../data/schema.md)
+- [`../architecture/adr/0009-local-queue-as-default-deeplake-is-not-a-queue.md`](../architecture/adr/0009-local-queue-as-default-deeplake-is-not-a-queue.md)
+- [`../operations/observability-and-degradation.md`](../operations/observability-and-degradation.md)
 
 ---
 
@@ -20,7 +22,7 @@ A memory comes in as raw text. On its own that is searchable but dumb. The pipel
 
 Where the raw content comes from is the job of [`session-capture.md`](session-capture.md): the harness hooks and shims that observe a session and hand structured events to the daemon. Session capture feeds this pipeline. This doc starts where capture ends, the moment a raw memory has been written to a DeepLake table and the daemon needs to make it smart.
 
-The work runs as durable jobs in the `memory_jobs` table with a lease/complete/fail/dead lifecycle, exponential backoff, and a stale-lease reaper. Jobs survive daemon restarts. Only the daemon touches DeepLake; harness shims and hooks are thin clients that post events over HTTP and never see the store.
+The work runs as durable jobs with a lease/complete/fail/dead lifecycle, exponential backoff, and a stale-lease reaper. Jobs survive daemon restarts. The default queue backend is the in-process local (SQLite) queue, not the Deep Lake `memory_jobs` table: Deep Lake is a versioned append-only store and is not a queue, so leasing against it means scanning append-only history for the live row per job. That is the decision recorded in [`../architecture/adr/0009-local-queue-as-default-deeplake-is-not-a-queue.md`](../architecture/adr/0009-local-queue-as-default-deeplake-is-not-a-queue.md), and the hybrid queue can still merge the Deep Lake queue when a durable cross-process view is wanted (PR #248). Only the daemon touches Deep Lake; harness shims and hooks are thin clients that post events over HTTP and never see the store.
 
 ## The stages
 
@@ -60,6 +62,25 @@ If hints are enabled, a final pass generates hypothetical future queries for the
 ## Default posture and how to enable
 
 The pipeline worker is constructed and started by the daemon on every boot (`src/daemon/runtime/assemble.ts`, `buildPipelineWorker`), but the stage handlers default **off** by design: no model spend occurs without an explicit opt-in. Enable stages individually via `HONEYCOMB_PIPELINE_*` environment variables or the equivalent `memory.pipelineV2` flags in `agent.yaml`. This was a deliberate product decision (PRD-045a) to avoid surprise model charges on first install.
+
+## Two silent failures behind "captures sessions but forms zero memories"
+
+For a stretch the pipeline captured sessions and queued jobs but formed no memories, and `/health` looked fine the whole time. PR #248 found two independent silent failures, both of which let the daemon look healthy while the pipeline did nothing.
+
+The first was an O(N) lease wedge in the Deep Lake job queue. `discoverIds` did one point-read per job to find each job's live (highest-version) row, so under a 400+ job backlog a single `lease()` call took minutes. No `memory_extraction` job was ever leased inside its window, so extraction never ran even though jobs were piling up. PR #248 rewrote discovery as a paginated bulk scan that unions the max-version-per-id across pages, making leasing O(pages) rather than O(N). The same rewrite was applied to `stats()`, which dropped from about two minutes to under a second. These live in `src/daemon/runtime/services/{lease-coordinator,job-queue,hybrid-job-queue,local-queue-diagnostics}.ts`.
+
+The second was a trailing-space `BoolFlag` bug. `HONEYCOMB_PIPELINE_ENABLED` arrived as `"true "` with a trailing space, an artifact of the Windows scheduled-task `set "VAR=true" && ...` quoting. The old flag parser compared the raw string against `"true"` without trimming, so `"true "` read as **false** and silently disabled the whole pipeline while `/health` stayed green. PR #248 moved the parser to a single source of truth, `src/shared/bool-flag.ts`, whose `BoolFlag` trims before comparing and only enables on `true` / `1`. The same trailing-space gating class was hardened across seven sibling configs (capture, pollinating, lifecycle, recall, poll-backoff, lease-coordinator, and the pipeline config itself) plus the inverse `OnByDefaultFlag` used by amplification, which trims before checking its off-tokens. `bool-flag.ts` deliberately stays out of the `@honeycomb/shared` barrel so its `zod` dependency never crosses into the browser dashboard bundle.
+
+The rule the two fixes encode: a config value that silently reads false, or a lease that never completes in time, must not be able to disable the pipeline without a visible signal. The observability seam below (PR #244 and PR #246) is the visible signal.
+
+## Is the loop actually pumping? Worker and coordinator logging
+
+The stage worker and the lease coordinator both had structured-logging seams and already emitted `stage.completed` / `stage.failed`, but assembly constructed both of them with **no logger**, so every event was a silent no-op. PR #246 wired `daemon.logger` into the stage worker (through `buildPipelineWorker`) and into the lease coordinator, and added the load-bearing lifecycle events that tell an operator whether a loop is running at all:
+
+- `stage.worker.started` and `lease.coordinator.started` fire when each driver comes up. The coordinator's `started` event carries its `leaseKinds` / `unionKinds` and its participant count. This matters because in the production default, consolidate-poll mode (`HONEYCOMB_POLL_CONSOLIDATE`), it is the lease coordinator, not the stage worker's own poll loop, that drives the pipeline. So `lease.coordinator.started` is the "did the driver start, and does its union include the backlogged kind" signal. Absence of a `started` event means no loop is pumping the queue, which is precisely the state the #248 wedge produced.
+- `lease.coordinator.dispatched` fires per leased job, so a running-but-empty coordinator is distinguishable from one that is actually handing work to stage handlers.
+
+These events are the pipeline's outward-facing debug surface. They are documented from the operator's side in [`../operations/observability-and-degradation.md`](../operations/observability-and-degradation.md), alongside the `GET /api/diagnostics/jobs` queue snapshot (PR #244) that shows the backlog those events are draining.
 
 ## Modes
 

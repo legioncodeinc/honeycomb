@@ -33,7 +33,7 @@ flowchart LR
 
 ## Capture and summaries
 
-`sessions` holds the raw event stream from capture: one row per prompt, tool call, or response. Its `message` is `JSONB` because each row is a structured payload, and `message_embedding` is the optional 768-dim vector. Rows are append-only INSERTs; readers concatenate by `path` ordered by `creation_date`.
+`sessions` holds the raw event stream from capture: one row per prompt, tool call, or response. Its `message` is `JSONB` because each row is a structured payload, and `message_embedding` is the optional 768-dim vector. Its `prose` is the clean-text projection of that event (PRD-074), so lexical recall reads readable prose instead of casting the JSONB envelope to text (see below). Rows are append-only INSERTs; readers concatenate by `path` ordered by `creation_date`.
 
 ```sql
 CREATE TABLE IF NOT EXISTS "sessions" (
@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS "sessions" (
   path              TEXT NOT NULL DEFAULT '',
   filename          TEXT NOT NULL DEFAULT '',
   message           JSONB,
+  prose             TEXT NOT NULL DEFAULT '',
   message_embedding FLOAT4[],
   author            TEXT NOT NULL DEFAULT '',
   agent             TEXT NOT NULL DEFAULT '',
@@ -55,6 +56,8 @@ CREATE TABLE IF NOT EXISTS "sessions" (
 ```
 
 The `project` column is the existing free-text raw cwd path, kept for display and back-compat. `project_id` is the **resolved registry key** the scope clause segments on (per-project isolation), defaulting to `''` which resolves to the workspace `__unsorted__` inbox at read time. The same `project` / `project_id` pair, and the `agent_id` / `visibility` scope columns, are added to `memory` and `memories` below. The resolution and isolation model is documented in [`../architecture/multi-project-and-context-switching.md`](../architecture/multi-project-and-context-switching.md).
+
+The `prose` column (PRD-074) is the readable-text projection of the row's event, added additively as `NOT NULL DEFAULT ''` and heal-safe (mirroring the additive PRD-060a pattern), so a legacy `sessions` table converges to it on the next heal pass and a row written before the column existed still reads as `''`. It is populated at capture time by `buildRow` via `proseForEvent`: a `user_message` / `assistant_message` row stores `event.text` verbatim; a `tool_call` row stores a file-path-aware line 1 plus a bounded response slice. Its purpose is recall quality: the lexical (`ILIKE`) `sessions` arm now matches and returns `prose` (with a `COALESCE` fallback for legacy rows) instead of casting the JSONB `message` envelope to `::text`, so a `Read` tool call that had surfaced as ~400 chars of escaped JSON now surfaces as ~80 chars of clean prose. The recall side is documented in [`../ai/retrieval.md`](../ai/retrieval.md).
 
 `memory` holds wiki summaries and the virtual-filesystem file rows. Its `summary` is the file body and `summary_embedding` powers semantic recall over summaries. It is UPDATE-or-INSERT keyed by `path`. The VFS dispatch over this table is documented in [`memory-virtual-filesystem.md`](memory-virtual-filesystem.md).
 

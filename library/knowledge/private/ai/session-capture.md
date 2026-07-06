@@ -1,6 +1,6 @@
 # Session Capture
 
-> Category: Ai | Version: 1.1 | Date: July 2026 | Status: Active
+> Category: Ai | Version: 1.2 | Date: July 2026 | Status: Active
 
 The input layer: how every prompt, tool call, and response becomes a durable raw event that feeds the distillation pipeline, and the guards that keep capture cheap and safe.
 
@@ -19,6 +19,18 @@ The input layer: how every prompt, tool call, and response becomes a durable raw
 Honeycomb's engine distills memory, but distillation needs raw material, and that material has to be captured the instant it happens, before any model runs. Capture is the cheap, always-on front of the system: it records what the agent did as structured events, commits them durably, and gets out of the way. Everything smart, extraction, the knowledge graph, summaries, skill mining, happens afterward in daemon workers off the turn path. This is the input half of the request lifecycle in [`../architecture/request-lifecycle.md`](../architecture/request-lifecycle.md).
 
 Capture is the part of Honeycomb that came directly from Hivemind, where it was already proven across many harnesses, and it now feeds our memory engine's pipeline instead of only powering wiki summaries.
+
+## Dormant by default, gated on a bound project
+
+Capture no longer runs for an unbound session. As of PR #232, capture, skillify, and every write pipeline are gated on the session cwd resolving to a **BOUND project**, mirroring nectar's activation contract: if the working directory does not map to a bound project, capture does not fire. This is the opposite of the old always-on default, and it is deliberate: an unbound session has no tenant to attribute memory to, so recording it would either drop the rows or scatter them into the wrong scope.
+
+The old catch-all `__unsorted__` inbox is now **opt-in**. It is enabled only when `HONEYCOMB_INBOX_CAPTURE` is set (default **off**), so unbound work is silently not captured unless an operator explicitly asks for the inbox. Tenancy must also be confirmed for capture to fire; the explicit org/workspace selection that unblocks capture is described in [`../multi-tenant/org-workspace-model.md`](../multi-tenant/org-workspace-model.md) and [`../auth/device-and-fleet-enrollment-state-machine.md`](../auth/device-and-fleet-enrollment-state-machine.md).
+
+Dormancy is surfaced honestly rather than hidden. `/health` reports the dormant state so an operator can see at a glance that the daemon is up but capture is intentionally idle, and the hook exits report dormancy too, so a "nothing is being captured" situation reads as a deliberate gate, not a silent failure. The gating and config live in `capture/{attach,capture-config,capture-handler,gated-captures}.ts` and the shim entry in `hooks/shared/{capture,session-start}.ts`.
+
+### The no_bound_project drop and boot-snapshot staleness
+
+A related failure mode is worth naming because PR #236 fixed it. The daemon (and nectar) used to snapshot `~/.deeplake/credentials.json` and `projects.json` once at boot and never reload. A `project bind` or login performed **after** the daemon booted therefore never took effect: hooks still fired, but every capture was dropped as `no_bound_project`, and only `memory_jobs` materialized in Deep Lake, which looked exactly like a fleet-wide connectivity failure. PR #236 made the daemon's storage and assemble paths mtime-gated live-reloads, so a bind or login is honored on the next request without a restart. With that fix, a session that binds a project mid-run starts capturing instead of silently dropping. The daemon-side reload is documented in [`../multi-tenant/org-workspace-model.md`](../multi-tenant/org-workspace-model.md).
 
 ## One INSERT per event
 
@@ -49,7 +61,7 @@ If embeddings are enabled, capture attaches a 768-dimension `nomic-embed-text-v1
 
 ## Guards
 
-Capture runs on every turn, so it has to be defensible. Several guards gate it. A capture switch (`HONEYCOMB_CAPTURE=false`) disables it outright. A plugin-enabled check skips capture when the integration is turned off. An entrypoint check ensures only the intended hook process captures. A recursion guard keeps the summary and skillify workers, which themselves run the harness CLI, from capturing their own activity as new turns. Hooks must also fail soft: if capture errors, the hook exits cleanly rather than breaking the agent's turn. These guards live in the shim layer documented in [`../integrations/hook-lifecycle.md`](../integrations/hook-lifecycle.md).
+Capture runs on every turn of a bound, tenancy-confirmed session, so it has to be defensible. Several guards gate it. The bound-project gate is the first and most important: an unbound session is dormant and captures nothing (with the `__unsorted__` inbox opt-in via `HONEYCOMB_INBOX_CAPTURE`, default off, as above). A capture switch (`HONEYCOMB_CAPTURE=false`) disables it outright. A plugin-enabled check skips capture when the integration is turned off. An entrypoint check ensures only the intended hook process captures. A recursion guard keeps the summary and skillify workers, which themselves run the harness CLI, from capturing their own activity as new turns. Hooks must also fail soft: if capture errors, the hook exits cleanly rather than breaking the agent's turn, and a dormant gate exits the same clean way. These guards live in the shim layer documented in [`../integrations/hook-lifecycle.md`](../integrations/hook-lifecycle.md).
 
 ## What capture triggers
 

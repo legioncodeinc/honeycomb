@@ -1,6 +1,6 @@
 # Retrieval
 
-> Category: Ai | Version: 2.2 | Date: July 2026 | Status: Active
+> Category: Ai | Version: 2.3 | Date: July 2026 | Status: Active
 
 How recall works: hybrid lexical + semantic candidate collection over DeepLake, RRF fusion, the reranker/dedup/recency/MMR shaping stages (including the `cohere` provider reranker via the Portkey gateway), the authorization boundary, GPU-backed vector search, the virtual-filesystem browse surface, and the nDCG eval harness that gates every ranking change.
 
@@ -55,6 +55,8 @@ A fresh `honeycomb login` user gets hybrid lexical + 768-dim semantic recall out
 - `memory` (per-session summaries), via `buildMemoryArmSql`.
 - `sessions` (raw dialogue rows), via `buildSessionsArmSql`.
 - `hive_graph_versions` (Nectar's LLM-minted file descriptions, PRD-013a), via `buildHiveGraphVersionsArmSql`.
+
+The `sessions` arm reads a clean **prose** column, not the raw JSONB envelope (PRD-074, PR #249). Before this, three of the four arms already returned clean TEXT (`memories`, `memory`, `hive_graph_versions`) while `sessions` was the lone holdout: it cast the JSONB `message` envelope to `::text` and shipped an escaped JSON blob into the harness context, so a `Read` tool call that carried ~80 chars of signal surfaced as ~400 chars of quoted JSON. PRD-074 adds a `prose TEXT NOT NULL DEFAULT ''` column to the `sessions` table (heal-safe, mirroring the additive PRD-060a pattern), populated at capture time by `buildRow` via `proseForEvent`: a `user_message` / `assistant_message` row stores `event.text` verbatim, a `tool_call` row stores a file-path-aware line 1 plus a bounded response slice. The lexical (`ILIKE`) `sessions` arm now matches and returns `prose` with a `COALESCE` fallback so a legacy row written before the column existed still recalls from whatever text it has. The capture side is documented in [`session-capture.md`](session-capture.md); the column itself is in [`../data/schema.md`](../data/schema.md).
 
 Each arm is its **own** separately-guarded `storage.query` rather than one `UNION ALL`, precisely so a missing sibling table degrades *that arm* to empty rather than 500-ing the whole recall. On a fresh workspace the store's heal-on-insert creates `memories`, but `memory`, `sessions`, and `hive_graph_versions` may not exist yet; a single `UNION ALL` would fail as a whole and silently wipe the real `memories` hit (the live dogfood bug), so per-arm isolation is load-bearing. Recall still fails-soft overall: every arm failing yields an empty result, never a 500. Every value interpolated into a query passes through the `sqlStr`/`sqlLike`/`sqlIdent` helpers because the DeepLake query endpoint has no parameterized queries.
 
@@ -119,6 +121,13 @@ Every ranking change is provable on a committed golden set, not vibed. The harne
 - **nDCG@10** (`ndcgAtK`), a position-discounted, graded-relevance metric so the rank-order improvements from rerank/recency/MMR are *visible*, not just pass/fail. PRD-047f upgraded the harness to graded relevance and made nDCG@10 a gating-eligible metric.
 
 nDCG here is **dedup-invariant**: a relevance-CLASS map (`RelevanceClasses`) credits duplicate copies of the same fact once, so the metric scores the same whether or not the engine collapses near-duplicates, which is exactly what lets the dedup stage be measured honestly. A committed baseline (`recall@5` / `MRR`) is enforced: a change that regresses it fails the eval.
+
+## Planned: read-time chunking and on-demand recall (not yet shipped)
+
+Two forward-looking arcs are recorded but **not yet implemented**; a future agent should treat them as design, not behavior.
+
+- **Sessions recall chunking (ADR-0009, PR #251).** The prose column (PRD-074, above) surfaced the next gap: a matched term past ~character 500 of a long prose row is invisible to the recall snippet. ADR-0009 records the decision to close it by building the chunker **in-tree** rather than pulling a chunker dependency, reusing what already exists (`chunkText` in `document-worker.ts`, `chunksFor` in `obsidian.ts`, the `document_chunk` table shape, the `codebase/extractors` tree-sitter tree, and the `@huggingface/transformers` tokenizer). The planned work splits into PRD-075 (read-time windowing plus a `matchRange`) and PRD-076 (capture-time chunking for `sessions` and nectar descriptions). The ADR is committed; the code is not.
+- **On-demand PreToolUse recall (PRD-075 command surface, PR #260, Backlog).** Today recall is bound to `SessionStart` (a blind, stale, keyed-on-nothing dump) while `UserPromptSubmit` is `async: true` (capture-only, its stdout never injected). The highest-signal surface, the synchronous `PreToolUse` VFS intercept, already exists but is stubbed at three points: `runtime.ts:252` passes no `vfs` so `createFakeVfsIntercept()` is used, `pre-tool-use.ts:96` ignores its deps, the intercept decision is discarded, and the Claude Code shim has no pre-tool decision renderer. The Backlog PRD-075 spec would light this up for prompt-conditioned recall with zero added latency on turns the agent does not ask, and add a `honeycomb recall "<query>"` sentinel plus a SessionStart awareness notice. **Docs-only so far: no code has shipped.**
 
 ## The browse surface
 

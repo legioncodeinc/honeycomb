@@ -1,8 +1,8 @@
 # Hook Lifecycle
 
-> Category: Integrations | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Integrations | Version: 1.1 | Date: July 2026 | Status: Active
 
-Which hook events fire on each of the six harnesses, what each hook does, and how the shared session-start seam now auto-pulls both team skills and portable assets, every hook a thin client that hands capture, recall, and pipeline work to the Honeycomb daemon.
+Which hook events fire on each of the six harnesses, what each hook does, and how the shared session-start seam returns recall first and then fire-and-forget auto-pulls both team skills and portable assets in the background, every hook a thin client that hands capture, recall, and pipeline work to the Honeycomb daemon.
 
 **Related:**
 - [`harness-integration.md`](harness-integration.md)
@@ -59,7 +59,7 @@ The cross-harness logic lives in `src/hooks/shared/`. Every shim routes through 
 
 | File | Role |
 |---|---|
-| `src/hooks/shared/session-start.ts` | The session-start lifecycle: credentials → heal → autoUpdate → ensure tables → placeholder → render context → prime → **autoPullSkills** + **assets** → spawn graph-pull → return context. |
+| `src/hooks/shared/session-start.ts` | The session-start lifecycle: credentials → heal → autoUpdate → ensure tables → placeholder → render context → prime → **return context**, then fire-and-forget **autoPullSkills** + **assets** + graph-pull in the background (PR #257). |
 | `src/hooks/shared/session-start-seams.ts` | The production `SessionStartSeams`, the real, fail-soft, time-budgeted loopback auto-pull wiring for skills and assets. |
 | `src/hooks/shared/capture.ts` | Capture core: one normalized capture request per event to the daemon, which writes one `sessions` row. |
 | `src/hooks/shared/pre-tool-use.ts` | The VFS intercept core: routes memory-path tool calls to daemon-backed reads/searches. |
@@ -86,15 +86,16 @@ The session-start core (`src/hooks/shared/session-start.ts`) runs once when the 
 4. Ensure the `memory` and `sessions` tables exist. **Gated** on `HONEYCOMB_CAPTURE !== "false"`.
 5. Write a placeholder summary row so the session is visible while in progress. **Gated** on capture.
 6. Render the rules/goals context block (read-only, runs regardless of the gate), then append the session-start memory-prime digest.
-7. **Auto-pull team skills** *and* **portable assets** (see below).
-8. Spawn the detached graph-pull worker for the next session's codebase context.
-9. Return the assembled context to the harness, routed through its channel.
+7. **Return the assembled context to the harness, routed through its channel**, as soon as the prime is ready.
+8. In the background (fire-and-forget, after the return): **auto-pull team skills** *and* **portable assets** (see below), and spawn the detached graph-pull worker for the next session's codebase context.
 
 The two gated steps (table-ensure + placeholder) reuse the pure `shouldCapture` gate; when capture is off, neither runs, but the context block still renders and is returned.
 
+**Recall returns first; hygiene runs detached (PR #257).** The recall (rules/goals + prime) is the only session-start output the model actually consumes, so it is on the critical path and everything else is not. The auto-pulls and graph-pull are side-effecting hygiene that never touch the returned context, so they were moved off the critical path into a fire-and-forget `backgroundPull()` (a detached call wrapped in a swallow guard that tolerates both async rejection and synchronous throws). Before this, `runSessionStart` `await`ed `autoPullSkills` (~5s) and `autoPullAssets` (~3s) *before* returning, so a warm session took ~9s and a cold one blew past the SessionStart deadline, and Claude Code cancelled the hook (`hook_cancelled`) with the already-computed recall never reaching `additionalContext`. The same PR also **raised the Claude Code SessionStart timeout from 10s to 30s** (`harnesses/claude-code/hooks/hooks.json`, mirrored in `src/connectors/claude-code.ts`), so even a cold-daemon recall has headroom to land. The two fixes are complementary: the detach makes the common case fast, the wider budget makes the cold case safe.
+
 ### The shared auto-pull seam
 
-Steps 7's auto-pulls are the seam that makes team collaboration live. Both ride the same injectable `SessionStartSeams` object so they share one wiring discipline (`src/hooks/shared/session-start-seams.ts`):
+Step 8's background auto-pulls are the seam that makes team collaboration live. Both ride the same injectable `SessionStartSeams` object so they share one wiring discipline (`src/hooks/shared/session-start-seams.ts`), and both now run detached from the context return (PR #257) so a slow pull never delays the recall:
 
 - **Skills** POST to `POST /api/skills/pull`; **assets** POST to `POST /api/assets/pull`. The hook states "pull now"; the daemon runs the idempotent team pull plus the cross-harness symlink fan-out and the install/retract daemon-side. The hook opens no DeepLake.
 - Both are **idempotent** (a re-pull of a version already on disk writes nothing), **fail-soft** (any error, daemon down, non-200, refused socket, timeout, is swallowed, so session start is never blocked), and **time-budgeted** (a 5-second abort timer; a hung daemon never delays the first turn).

@@ -37,7 +37,7 @@ The terminal shows a short progress log, and when it finishes it **opens a dashb
 
 On the dashboard you will see a **First time setup** button. Click it. Honeycomb runs the sign-in for you: it shows a short code right on the page and opens a tab where you approve it (and create a free Deep Lake account if you do not have one). No copying codes out of a terminal.
 
-When you approve, the same dashboard lights up its connected views. You are ready. Nothing to restart.
+When you approve, the same dashboard lights up its connected views. It then asks you to pick which workspace this machine should use (if you only have one, it picks it for you). Until you have chosen a workspace and connected a project, Honeycomb stays quiet and saves nothing; it only starts remembering once you have made that choice. You are ready. Nothing to restart.
 
 > Already using Hivemind? The dashboard will notice and offer to move you over cleanly. Running both at once is not supported, so let Honeycomb handle the switch.
 
@@ -75,6 +75,16 @@ honeycomb dashboard
 ```
 
 You will find your memories, the state of each connected assistant, your team's shared skills, a map of your codebase, and the overall health of the system, all in one local page.
+
+## Changed your mind?
+
+To remove Honeycomb completely, run one command:
+
+```bash
+honeycomb uninstall
+```
+
+It stops the background helper, removes it, and cleans up after itself. Running it when nothing is installed is harmless.
 
 ## What next
 
