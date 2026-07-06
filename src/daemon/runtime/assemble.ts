@@ -2120,6 +2120,14 @@ async function buildPipelineWorker(
 	let model: ModelClient;
 	let portkeyStatus: "off" | "ok" | "unconfigured" = "unconfigured";
 	let modelBuildFailed = false;
+	// ── The HONEST "provider configured?" signal — fail-closed by default (`false`). It is `true`
+	// ONLY when the selected provider's CREDENTIAL RESOLVES (Portkey key present, or an `agent.yaml`
+	// account whose `${SECRET_REF}` names a present secret), NOT merely when routing is declared. The
+	// factory now derives this from secret-NAME presence with no network probe; a build failure (the
+	// catch below) leaves it `false`. This drives BOTH `/health reasons.memory.provider` AND the
+	// `'auto'` extraction gate, so a routable-but-keyless `agent.yaml` reports `unconfigured` and
+	// `'auto'` does NOT enable extraction (closing the "looks configured, forms nothing" false positive).
+	let providerConfigured = false;
 	try {
 		const secretsStore = new SecretsStore({
 			baseDir: resolveVaultBaseDir(),
@@ -2136,15 +2144,13 @@ async function buildPipelineWorker(
 		});
 		model = built.client;
 		portkeyStatus = built.portkeyStatus;
+		// The credential-resolution-aware signal (NOT the coarse `model !== noopModelClient` identity
+		// check the per-provider path false-positives on when the key is absent).
+		providerConfigured = built.providerConfigured;
 	} catch {
 		model = noopModelClient;
 		modelBuildFailed = true;
 	}
-	// ── The "provider configured?" signal: is the assembled ModelClient a REAL (non-noop) client?
-	// A real client means a provider is wired (Portkey key / `agent.yaml` inference block / provider
-	// env resolved to a router client); the no-op singleton means nothing is configured. This is the
-	// SAME identity check the whole factory uses to mean "no provider" — no secret, just a boolean.
-	const providerConfigured = model !== noopModelClient;
 
 	// Publish the memory-formation FEATURE-GATING signal (this PRD) to the `/health` cell: the RESOLVED
 	// master `enabled` (vault-first) + whether a real provider is configured. The dashboard's future
