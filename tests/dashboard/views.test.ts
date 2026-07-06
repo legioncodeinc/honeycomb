@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import {
 	buildGraphView,
 	buildKpisView,
+	buildLifecycleFlagsView,
 	buildRulesView,
 	buildSessionsView,
 	buildSettingsView,
@@ -88,6 +89,40 @@ describe("PRD-020b b-AC-1 renders all 6 views from daemon-served data", () => {
 		expect(buildSessionsView(data.sessions).kind).toBe("table");
 		expect(buildSettingsView(data.settings).rows).toContain("Org: Acme (org-1)");
 		expect(buildSkillSyncView(data.skillSync).kind).toBe("panel");
+	});
+
+	it("PRD-058d AC-55d.1.3 / L-W11: settings renders the lifecycle-flag reference inline (child block)", () => {
+		// The settings view carries the lifecycle-flag reference as a NESTED child, NOT a 7th top-level
+		// view — the frozen six-view contract (b-AC-1) stays intact.
+		const settings = buildSettingsView(fullData().settings);
+		expect(settings.kind).toBe("panel");
+		expect(settings.title).toBe("Settings");
+		expect(settings.children).toBeDefined();
+		expect(settings.children).toHaveLength(1);
+
+		const flags = settings.children?.[0];
+		expect(flags?.kind).toBe("table");
+		expect(flags?.title).toBe("Lifecycle flags");
+
+		// Every flag from LIFECYCLE_FLAG_REFERENCE appears in the rendered rows (the symbol + config
+		// path + env override + effect all surface).
+		for (const row of flags?.rows ?? []) {
+			// each row carries its env override (the operator knob) — sanity-checks the format.
+			expect(row.includes("HONEYCOMB_LIFECYCLE_")).toBe(true);
+		}
+		// Spot-check a few known flags appear by name/symbol.
+		expect(flags?.rows?.some((r) => r.startsWith("a — memory.lifecycle.activationExponent"))).toBe(true);
+		expect(flags?.rows?.some((r) => r.includes("θ_detect"))).toBe(true);
+		expect(flags?.rows?.some((r) => r.includes("HONEYCOMB_LIFECYCLE_STALEREF_POSTURE"))).toBe(true);
+
+		// The standalone builder is pure + carries the full reference as data (16 rows).
+		const standalone = buildLifecycleFlagsView();
+		expect(standalone.rows?.length).toBeGreaterThan(0);
+		expect(standalone.data).toBeDefined();
+		expect((standalone.data as readonly unknown[]).length).toBe(standalone.rows?.length);
+
+		// And the reference flows through the full renderDashboard orchestration as a settings child
+		// (the top-level view count stays SIX — the flag block is nested, not appended).
 	});
 });
 

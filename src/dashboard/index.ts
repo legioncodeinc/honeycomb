@@ -36,6 +36,7 @@ export {
 export {
 	buildGraphView,
 	buildKpisView,
+	buildLifecycleFlagsView,
 	buildRulesView,
 	buildSessionsView,
 	buildSettingsView,
