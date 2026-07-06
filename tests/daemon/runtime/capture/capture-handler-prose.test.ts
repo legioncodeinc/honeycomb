@@ -78,8 +78,7 @@ function toolCallBody(over: { event?: Record<string, unknown>; metadata?: Record
 			response: { file: { content: "// 'healthReasons' is no longer polled here — the SHEL…" } },
 			...over.event,
 		},
-		metadata: userMessageBody().metadata,
-		...over.metadata,
+		metadata: { ...userMessageBody().metadata, ...over.metadata },
 	};
 }
 
@@ -281,7 +280,7 @@ describe("L-B1 / a-AC-3 — capture handler populates `prose` for every new sess
 		// ONLY inside the `message` E'...' JSONB literal, never in the prose. Assert by splitting
 		// the VALUES list on the column boundaries: the prose literal is the value between the
 		// empty `model` literal ('' = unknown model) and the `creation_date` timestamp.
-		const proseRegion = sql.split(/,\s*'2026-/)[0]; // everything before the creation_date timestamp
+		const proseRegion = sql.split(/,\s*'\d{4}-/)[0]; // everything before the creation_date timestamp
 		// The prose region tail (after the last occurrence of `Read →`) is the prose literal body.
 		const afterRead = proseRegion.slice(proseRegion.lastIndexOf("Read →"));
 		expect(afterRead).toContain("Read → web\\\\pages\\\\dashboard.tsx:175-250");
