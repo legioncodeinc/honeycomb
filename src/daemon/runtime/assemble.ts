@@ -136,9 +136,14 @@ import type { CohereRerankSeam, ActivationSource, StalenessSource, MemoryActivat
 // readAccessHistory loads a memory's retained access series for the ACT-R activation math.
 import { recordAccess, readAccessHistory, type AccessLogDeps } from "./memories/access-log.js";
 // PRD-058e (L-W3): the calibration model. The cold-start IDENTITY model is the dormant default
-// (C = f, the c exponent stays 0); deserializeModel reads a fitted curve from `memory_calibration`
-// when one exists. Either way the calibration stage RUNS so a refit lands later.
-import { IDENTITY_MODEL, deserializeModel, type CalibrationModel } from "./memories/calibration.js";
+// The calibration-model TYPE only — the read + the IDENTITY fallback + the deserialize live in
+// `calibration-store.ts` now (the TTL-cached provider that replaced this module's boot-once
+// cached promise, so a worker refit actually reaches recall without a daemon restart).
+import type { CalibrationModel } from "./memories/calibration.js";
+import {
+	type CalibrationModelProvider,
+	createCalibrationModelProvider,
+} from "./memories/calibration-store.js";
 // PRD-058d (L-W5): the lifecycle config resolver + the recency/staleness projections. Resolved ONCE
 // at boot from `HONEYCOMB_LIFECYCLE_*` env (env-over-yaml is the documented precedence). The
 // defaults (a=1, c=0, s=0, posture=observe) are NON-DESTRUCTIVE (AC-55d.1.1), so wiring this in is
@@ -1085,29 +1090,12 @@ async function readAccessCountBatch(
 	return out;
 }
 
-/**
- * L-W3 (PRD-058e.2.x): read the live {@link CalibrationModel} from `memory_calibration` (the highest
- * `fit_at` row), deserializing its `model_blob`. FAIL-SOFT: a missing table, an empty table, or any
- * read error returns the IDENTITY cold-start model (`C = f`, the `c` exponent stays 0 — AC-55e.2.2).
- * The point of L-W3 is that the calibration stage RUNS so when a refit lands later it takes effect
- * immediately; the identity model is the dormant default that still surfaces `C = f`.
- */
-async function readCalibrationModel(
-	storage: StorageQuery,
-	scope: QueryScope,
-	agent?: CalibrationAgentScope,
-): Promise<CalibrationModel> {
-	let res;
-	try {
-		res = await storage.query(buildLatestCalibrationSql(agent), scope);
-	} catch {
-		return IDENTITY_MODEL; // fail-soft: cold-start identity.
-	}
-	if (!isOk(res) || res.rows.length === 0) return IDENTITY_MODEL;
-	const row = res.rows[0] as StorageRow;
-	const blob = String(row.model_blob ?? "");
-	return deserializeModel(blob); // empty blob → IDENTITY_MODEL inside deserializeModel.
-}
+// L-W3 (PRD-058e.2.x): the calibration-model read previously lived here as `readCalibrationModel`
+// — a boot-once cached promise that left recall reading the boot-time curve forever (worker refits
+// never reached recall until daemon restart). It has been replaced by `createCalibrationModelProvider`
+// in `./memories/calibration-store.js` (a TTL-cached, worker-invalidateable, thenable holder). The
+// holder is constructed in the composition root below and shared between the recall wiring (reads)
+// and the calibration worker (invalidates after a write).
 
 /**
  * L-W4 (PRD-058c.2.x): build the real {@link StalenessSource} from storage — the σ multiplier reads
@@ -1225,6 +1213,16 @@ export function assembleSeams(
 	gatedCaptures?: GatedCapturesCounter,
 	pendingLinkStore?: PendingLinkStore,
 	keepBothMemo?: KeepBothMemoStore,
+	/**
+	 * The shared calibration-model provider (the L-W3 staleness fix). When supplied, `mountMemories`
+	 * threads it as the `calibrationModel` so recall re-reads on TTL-expiry / invalidation (instead
+	 * of the prior boot-once cached promise). `assembleDaemon` constructs it and passes it BOTH here
+	 * (for the recall read path) AND keeps its own reference to wire the calibrate tick + route to
+	 * call `invalidate()` after a successful refit write. ABSENT (a unit-constructed `assembleSeams`
+	 * call) → `assembleSeams` constructs a provider itself (preserving the prior wiring shape so the
+	 * existing test suites stay hermetic), but the daemon path always supplies the shared one.
+	 */
+	sharedCalibrationProvider?: CalibrationModelProvider,
 ): CaptureHandler {
 	// The daemon's configured default tenancy scope (the single LOCAL tenant) is RESOLVED ONCE
 	// at the composition root (`assembleDaemon`) from the SAME credential source the storage
@@ -1445,11 +1443,22 @@ export function assembleSeams(
 	// (ref_status, stale_refs) verdict in one batched pass. The `s` exponent is posture-gated here
 	// (`observe` → 0, inert; `execute` → demote). ABSENT verdict → `unknown` (neutral) in the engine.
 	const stalenessSource = createStalenessSource(storage, stalenessExponent);
-	// L-W3: read the live CalibrationModel from `memory_calibration` (the highest `fit_at` row).
-	// FAIL-SOFT to the IDENTITY cold-start model (C = f, the `c` exponent stays 0 — AC-55e.2.2). The
-	// point is the calibration stage RUNS so when a refit lands later, it takes effect immediately.
-	// Resolved asynchronously below (the boot mount is sync), then attached via the late-bound seam.
-	const calibrationModelPromise = readCalibrationModel(storage, defaultScope ?? { org: "", workspace: "" });
+	// L-W3: the live CalibrationModel from `memory_calibration` (the highest `fit_at` row),
+	// served through a TTL-cached, worker-invalidateable, THENABLE holder. The holder replaces
+	// the prior boot-once cached promise (which left recall reading the boot-time curve forever
+	// — the worker's hourly refits never reached recall until daemon restart). The holder is
+	// thenable so it satisfies the `calibrationModel: PromiseLike<CalibrationModel>` contract
+	// (`await holder` re-reads when stale or invalidated; serves the cached model within the TTL).
+	// The calibration worker calls `provider.invalidate()` after a successful refit write, so the
+	// next recall observes the new curve immediately.
+	//
+	// When the caller supplied a shared provider (the daemon path — `assembleDaemon` constructs
+	// it so it can also hand it to the calibrate tick), use it; otherwise construct a local one
+	// (the unit-test path — preserves the prior wiring shape so hermetic suites stay unchanged,
+	// though their provider is not connected to any worker invalidate).
+	const calibrationModelProvider: CalibrationModelProvider =
+		sharedCalibrationProvider ??
+		createCalibrationModelProvider({ storage, scope: defaultScope ?? { org: "", workspace: "" } });
 	seams.mountMemories(daemon, {
 		storage,
 		defaultScope,
@@ -1464,7 +1473,7 @@ export function assembleSeams(
 		stalenessSource,
 		stalenessExponent,
 		lifecycleRecency: lifecycleRecencyConfig,
-		calibrationModel: calibrationModelPromise,
+		calibrationModel: calibrationModelProvider,
 		confidenceExponent: lifecycleConfig.confidenceExponent,
 		...(vault !== undefined ? { vault } : {}),
 		// PRD-063c: the operator-selected reranker config + the late-bound Cohere-via-Portkey seam.
@@ -1624,7 +1633,13 @@ export function assembleSeams(
 	//      FAIL-SOFT.
 	if (seams.mountCalibrate !== undefined) {
 		try {
-			seams.mountCalibrate(daemon, { storage, defaultScope });
+			seams.mountCalibrate(daemon, {
+				storage,
+				defaultScope,
+				// L-W3 fix: invalidate the recall-side calibration cache when the route writes a new
+				// curve, so the next recall observes it immediately (matches the periodic-tick wiring).
+				onWrite: () => calibrationModelProvider.invalidate(),
+			});
 		} catch (err: unknown) {
 			const reason = err instanceof Error ? err.message : String(err);
 			process.stderr.write(`honeycomb: calibrate route mount failed (non-fatal): ${reason}\n`);
@@ -3094,7 +3109,14 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// reader). One instance, two injection sites: the operator's `keep-both` verdict suppresses
 	// re-detection on the very next write of either side of the pair.
 	const keepBothMemo = createInProcessKeepBothMemoStore();
-	const captureHandler = assembleSeams(
+	// L-W3 fix: construct the CalibrationModelProvider ONCE at the composition root (mirrors
+	// `keepBothMemo`) so the SAME instance is threaded into `assembleSeams` (the recall read path
+	// via `mountMemories`) AND — via this closure — into the calibrate tick + the manual route
+	// (the invalidate-on-write path). One instance, two injection sites: a worker refit writes a
+	// new curve, calls `invalidate()`, and the very next recall re-reads it (no daemon restart,
+	// no TTL wait). The prior boot-once cached promise left recall stale until restart.
+	const calibrationModelProvider = createCalibrationModelProvider({ storage, scope });
+	const seamsResult = assembleSeams(
 		daemon,
 		storage,
 		scope,
@@ -3114,6 +3136,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		gatedCaptures,
 		pendingLinkStore,
 		keepBothMemo,
+		calibrationModelProvider,
 	);
 
 	// ── PRD-032d / AC-6: FIRE the Wave-1 `/api/settings` mount ONCE so the CLI/dashboard
@@ -3375,7 +3398,11 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		calibrateTick = startLifecycleTick(
 			"lifecycle_calibrate",
 			async () => {
-				await runCalibratePass(scope, { storage, defaultScope: scope });
+				const summary = await runCalibratePass(scope, { storage, defaultScope: scope });
+				// L-W3 fix: when the worker wrote a new curve, invalidate the recall-side cache so
+				// the very next recall observes it (no waiting for the TTL to expire). A cold-start
+				// or rejected-candidate pass writes nothing, so skip the invalidate (no-op anyway).
+				if (summary?.written) calibrationModelProvider.invalidate();
 			},
 			{ intervalMs: DEFAULT_CALIBRATE_TICK_INTERVAL_MS },
 		);
@@ -3854,7 +3881,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// services stop — a clean shutdown never loses a buffered event. `flush()` is idempotent
 			// and never throws (a flush failure is logged inside the handler, not surfaced here). The
 			// `?.` tolerates a test seam whose fake capture handler does not implement `flush`.
-			await captureHandler.flush?.();
+			await seamsResult.flush?.();
 			// Stop the idle-cost hibernation monitor first so a wake can never race the teardown
 			// below. It only cancels its own timer; the workers' own stop() does the real teardown.
 			hibernation?.stop();

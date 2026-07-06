@@ -169,6 +169,58 @@ describe("PRD-058e L-W9 — runCalibratePass (the route + tick shared pass)", ()
 		expect(out.written).toBe(out.adopted);
 		expect(writes.length).toBe(out.adopted ? 1 : 0);
 	});
+
+	it("L-W3 fix: the route fires onWrite AFTER a pass that writes (so the recall-side cache invalidates)", async () => {
+		// A clean warm signal that will trigger a write (the same shape as the warm-signal test above).
+		const outcomes: OutcomeRow[] = Array.from({ length: 30 }, (_, i) => ({
+			winner_id: `w${i}`,
+			loser_id: `l${i}`,
+			winner_f: 0.9,
+			loser_f: 0.1,
+		}));
+		const { storage } = scriptedStorage({ outcomes, priorBlob: undefined });
+		let onWriteCalls = 0;
+		const daemon = createDaemon({ config: cfg(), storage: storage as never, logger: createRequestLogger({ silent: true }) });
+		mountCalibrateApi(daemon, {
+			storage,
+			defaultScope: DEFAULT_SCOPE,
+			minSamples: 10,
+			heldOutFraction: 0.3,
+			now: () => new Date("2026-07-05T00:00:00.000Z"),
+			newId: () => "snap-onwrite",
+			onWrite: () => {
+				onWriteCalls += 1;
+			},
+		});
+		const { status, out } = await postCalibrate(daemon);
+		expect(status).toBe(200);
+		if (out.written) {
+			// When the pass wrote a new curve, onWrite fired exactly once — so the composition root's
+			// `calibrationModelProvider.invalidate()` is called and the next recall re-reads.
+			expect(onWriteCalls, "a writing pass fired onWrite once").toBe(1);
+		} else {
+			// A tie at the gate (identity separates clean f perfectly) → no write → no onWrite.
+			expect(onWriteCalls, "a non-writing pass did NOT fire onWrite").toBe(0);
+		}
+	});
+
+	it("L-W3 fix: the route does NOT fire onWrite on a cold-start no-write pass", async () => {
+		// Cold-start: no resolved outcomes → identity, no write.
+		const { storage } = scriptedStorage({ outcomes: [], priorBlob: undefined });
+		let onWriteCalls = 0;
+		const daemon = createDaemon({ config: cfg(), storage: storage as never, logger: createRequestLogger({ silent: true }) });
+		mountCalibrateApi(daemon, {
+			storage,
+			defaultScope: DEFAULT_SCOPE,
+			onWrite: () => {
+				onWriteCalls += 1;
+			},
+		});
+		const { status, out } = await postCalibrate(daemon);
+		expect(status).toBe(200);
+		expect(out.written, "cold-start writes nothing").toBe(false);
+		expect(onWriteCalls, "cold-start did NOT fire onWrite (no invalidation needed)").toBe(0);
+	});
 });
 
 describe("PRD-058e L-W9 — buildResolvedOutcomesSql", () => {

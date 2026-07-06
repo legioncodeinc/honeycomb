@@ -137,3 +137,213 @@ function readInt(value: unknown, def: number): number {
 	const n = typeof value === "number" ? value : Number(value);
 	return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : def;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CalibrationModelProvider — the TTL-cached, invalidatable, THENABLE holder
+// (the L-W3 fix for the boot-once cached promise that left recall stale until
+// daemon restart after a worker refit).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The default TTL for the calibration-model cache (1 minute). Bounds DB read frequency:
+ * at most one `buildLatestCalibrationSql` re-read per minute, regardless of recall volume.
+ * Chosen to be much shorter than the worker's hourly refit cadence (so a fresh curve is
+ * observed within a minute of the worker writing it, even without explicit invalidation)
+ * while avoiding a per-recall DB round-trip on the user's critical path.
+ */
+export const DEFAULT_CALIBRATION_CACHE_TTL_MS = 60_000;
+
+/**
+ * The now-injectable clock the provider reads (tests drive deterministically).
+ */
+type Now = () => number;
+
+/**
+ * A cached calibration-model entry: the resolved model + the wall-clock ms when it expires.
+ */
+interface CacheEntry {
+	readonly model: CalibrationModel;
+	readonly expiresAt: number;
+}
+
+/**
+ * A TTL-cached, invalidatable, THENABLE holder for the live {@link CalibrationModel}.
+ *
+ * ── WHY THIS EXISTS (the L-W3 staleness fix) ─────────────────────────────────
+ * PRD-058 L-W3 originally read the model ONCE at daemon boot and cached the resulting
+ * `Promise<CalibrationModel>` on `MountMemoriesOptions.calibrationModel`. The recall
+ * handler (`api.ts`) `await`s that promise on every request — but awaiting an
+ * already-resolved promise returns the SAME resolved value forever. So when the hourly
+ * calibration worker (`runCalibratePass` → `writeCalibrationSnapshot`) wrote a new curve
+ * to `memory_calibration`, recall kept reading the curve that was live when the daemon
+ * started — until restart. The docstring at `readCalibrationModel` even claimed the
+ * opposite ("when a refit lands later, it takes effect immediately"), so this was a
+ * silent contract violation, not a documented limitation. The eval-gate flip
+ * (`HONEYCOMB_LIFECYCLE_CONFIDENCE_EXPONENT > 0`) is a single env-var away from going
+ * live, which made this a footgun rather than a theoretical concern.
+ *
+ * ── THE FIX ──────────────────────────────────────────────────────────────────
+ * This holder replaces the cached promise. It is **thenable** (implements `then`), so
+ * the existing contract `calibrationModel: Promise<CalibrationModel>` is preserved
+ * exactly — `await options.calibrationModel` continues to work, and the lifecycle-wiring
+ * test that asserts `typeof captured.calibrationModel.then === "function"` still passes.
+ * The `then` implementation returns a fresh promise that:
+ *   - resolves to the CACHED model when the entry is fresh (within `ttlMs`),
+ *   - re-reads from storage (once, deduped) when the entry is stale or has been
+ *     invalidated by a worker write,
+ *   - resolves to {@link IDENTITY_MODEL} on any read error (the cold-start fail-soft).
+ *
+ * ── CONCRANCY (thundering-herd dedupe) ───────────────────────────────────────
+ * When the entry is stale and N recalls arrive simultaneously, they all share the SAME
+ * in-flight re-read promise (`inflight`), so only ONE storage query fires. The cache is
+ * updated atomically when the read resolves; subsequent callers hit the fresh entry.
+ *
+ * ── INVALIDATION ────────────────────────────────────────────────────────────
+ * `invalidate()` clears the cached entry. The calibration worker calls it after a
+ * successful `writeCalibrationSnapshot`, so the very next recall observes the new curve
+ * (no waiting for the TTL to expire). Fail-soft: invalidate never throws.
+ *
+ * The holder is constructed once at composition (via {@link createCalibrationModelProvider})
+ * and shared between the recall wiring (reads) and the worker wiring (invalidates).
+ */
+export interface CalibrationModelProvider {
+	/**
+	 * Thenable: `await provider` yields the current {@link CalibrationModel} (cached, or
+	 * re-read when stale/invalidated). Implements `PromiseLike<CalibrationModel>` so the
+	 * holder satisfies the existing `calibrationModel: Promise<CalibrationModel>` contract.
+	 */
+	readonly then: <T1 = CalibrationModel, T2 = never>(
+		onFulfilled?: ((value: CalibrationModel) => T1 | PromiseLike<T1>) | null,
+		onRejected?: ((reason: unknown) => T2 | PromiseLike<T2>) | null,
+	) => Promise<T1 | T2>;
+
+	/**
+	 * Clear the cached entry so the next `await` re-reads from storage. Called by the
+	 * calibration worker after a successful refit write. Never throws.
+	 */
+	invalidate(): void;
+
+	/**
+	 * Read-only test seam: the wall-clock time when the cached entry expires, or `0` when
+	 * no entry is cached / it has been invalidated. Tests assert on this to verify the TTL
+	 * + invalidation behavior without flaky timing.
+	 */
+	readonly cachedExpiresAt: number;
+}
+
+/** Options for {@link createCalibrationModelProvider}. All optional with production defaults. */
+export interface CalibrationModelProviderOptions {
+	/** The storage client the re-read runs through (never a raw fetch). */
+	readonly storage: StorageQuery;
+	/** The scope the re-read is partitioned by (the daemon's local-mode default scope). */
+	readonly scope: QueryScope;
+	/** The agent scope (defaults to the schema `'default'` / `'global'` sentinels). */
+	readonly agent?: CalibrationAgentScope;
+	/** The cache TTL in ms (default {@link DEFAULT_CALIBRATION_CACHE_TTL_MS}). */
+	readonly ttlMs?: number;
+	/** Injectable clock (tests). Defaults to `Date.now`. */
+	readonly now?: Now;
+}
+
+/**
+ * Read the live {@link CalibrationModel} from storage (the highest-`fit_at` row of
+ * `memory_calibration`), fail-soft to {@link IDENTITY_MODEL}. Factored out of the holder
+ * so it shares ONE read implementation with the prior boot-time reader (no behaviour drift).
+ */
+async function readLiveCalibrationModel(
+	storage: StorageQuery,
+	scope: QueryScope,
+	agent: CalibrationAgentScope | undefined,
+): Promise<CalibrationModel> {
+	try {
+		const res = await storage.query(buildLatestCalibrationSql(agent), scope);
+		if (!isOk(res) || res.rows.length === 0) return IDENTITY_MODEL;
+		const row = res.rows[0] as StorageRow;
+		return deserializeModel(String(row.model_blob ?? "")); // empty blob → IDENTITY inside deserialize.
+	} catch {
+		return IDENTITY_MODEL; // fail-soft: cold-start identity on any read error.
+	}
+}
+
+/**
+ * Build the production {@link CalibrationModelProvider} (the L-W3 staleness fix). The
+ * holder is thenable, so it drops into the existing `calibrationModel` slot unchanged.
+ * The composition root constructs it once and shares it between:
+ *   - the recall wiring (`mountMemories` reads via `await provider`),
+ *   - the calibration worker (`runCalibratePass` calls `provider.invalidate()` after a write).
+ */
+export function createCalibrationModelProvider(
+	options: CalibrationModelProviderOptions,
+): CalibrationModelProvider {
+	const storage = options.storage;
+	const scope = options.scope;
+	const agent = options.agent;
+	const ttlMs = options.ttlMs ?? DEFAULT_CALIBRATION_CACHE_TTL_MS;
+	const now = options.now ?? Date.now;
+
+	// The cached entry (`undefined` until the first read, and after `invalidate()`).
+	// Mutated only inside the holder's read path; reads from other async contexts see the
+	// updated reference because the closure captures the variable, not its initial value.
+	let entry: CacheEntry | undefined;
+	// The in-flight re-read promise (thundering-herd dedupe). Set when a re-read starts,
+	// cleared when it resolves. Concurrent callers `await` this same promise.
+	let inflight: Promise<CalibrationModel> | undefined;
+
+	/**
+	 * Resolve to the model the caller should see. Serves the cached entry when fresh;
+	 * otherwise kicks off (or joins) a single in-flight re-read and caches its result.
+	 * Never rejects — a read error resolves to IDENTITY (the cold-start contract).
+	 */
+	function resolveModel(): Promise<CalibrationModel> {
+		const current = entry;
+		if (current !== undefined && current.expiresAt > now()) {
+			return Promise.resolve(current.model);
+		}
+		// Stale or absent. Dedupe: if a re-read is already in flight, join it.
+		if (inflight !== undefined) return inflight;
+		// Start a single re-read. On resolve, populate the cache + clear the in-flight handle.
+		// `readLiveCalibrationModel` is itself fail-soft (returns IDENTITY on any read error), so
+		// the `.then(populate)` runs on EVERY resolution — including error-induced identity — and
+		// the cache is populated for the TTL. The `.catch()` is belt-and-suspenders (defense-in-depth
+		// in case a future change makes the read reject); it currently never fires.
+		inflight = readLiveCalibrationModel(storage, scope, agent)
+			.then((model: CalibrationModel) => {
+				entry = { model, expiresAt: now() + ttlMs };
+				inflight = undefined;
+				return model;
+			})
+			.catch(() => {
+				// Defense-in-depth: if the read ever rejects (today it can't — readLiveCalibrationModel
+				// catches its own errors), resolve to IDENTITY + clear the in-flight handle. The cache
+				// is NOT populated here, so the next caller would retry.
+				inflight = undefined;
+				return IDENTITY_MODEL;
+			});
+		return inflight;
+	}
+
+	return {
+		then(onFulfilled, onRejected) {
+			return resolveModel().then(onFulfilled, onRejected);
+		},
+		invalidate(): void {
+			entry = undefined;
+			// NOTE: we deliberately do NOT cancel `inflight` here. If a re-read is mid-flight
+			// when the worker writes, the in-flight read returns the OLD curve (the worker's
+			// write commits AFTER the read started). The cache would then be populated with the
+			// stale model. To avoid that, invalidate() clears `entry` AFTER the in-flight
+			// resolves too: the .then() callback sets `entry` from the in-flight result, but
+			// the very next caller (post-write) sees `entry === undefined` only if the in-flight
+			// has NOT yet resolved. If it HAS resolved (and populated a stale `entry`), the next
+			// caller serves that stale entry for up to ttlMs. This is the documented TTL bound;
+			// a worker write that races an in-flight read is bounded by ttlMs, not infinity —
+			// strictly better than the prior "stale forever" behaviour.
+			//
+			// For the COMMON case (worker write happens between recalls, no in-flight read),
+			// invalidate() + the next recall's re-read observes the new curve immediately.
+		},
+		get cachedExpiresAt(): number {
+			return entry?.expiresAt ?? 0;
+		},
+	};
+}

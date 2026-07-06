@@ -230,7 +230,7 @@ export interface MountMemoriesOptions {
 	 * engine so the calibration stage RUNS (surfacing `C = g(f)` even at cold-start, AC-55e.2.2). The
 	 * `c` exponent stays 0 until eval-gated (no reorder). ABSENT → no calibration stage (dormant).
 	 */
-	readonly calibrationModel?: Promise<import("./calibration.js").CalibrationModel>;
+	readonly calibrationModel?: PromiseLike<import("./calibration.js").CalibrationModel>;
 	/**
 	 * PRD-058e (L-W5): the confidence exponent `c` from the resolved lifecycle config. Surfaced here
 	 * for the dashboard / introspection consumers; the engine's calibration stage does NOT reorder

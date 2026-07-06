@@ -119,6 +119,15 @@ export interface MountCalibrateOptions {
 	readonly now?: () => Date;
 	/** Injectable id generator for the snapshot row. Defaults to a UUID. */
 	readonly newId?: () => string;
+	/**
+	 * OPTIONAL callback fired after a pass that WROTE a new curve (`summary.written === true`).
+	 * The composition root wires it to `calibrationModelProvider.invalidate()` so the recall-side
+	 * cache is cleared and the next recall observes the new curve immediately (the L-W3 staleness
+	 * fix — without this, recall would serve the prior curve until the TTL expires). ABSENT → no
+	 * callback (the route still works; the cache just refreshes on its own TTL). Never throws: the
+	 * implementation MUST guard (the caller's invalidate is already fail-soft, but defense-in-depth).
+	 */
+	readonly onWrite?: () => void;
 }
 
 /** Read a stored float cell, defaulting when absent/garbage. */
@@ -374,6 +383,16 @@ export function mountCalibrateApi(daemon: Daemon, options: MountCalibrateOptions
 		const scope = resolveScopeOrLocalDefault(c, daemon.config.mode, options.defaultScope);
 		if (scope === null) return c.json(NO_ORG_BODY, 400);
 		const summary = await runCalibratePass(scope, options);
+		// L-W3 fix: when the route wrote a new curve, invalidate the recall-side cache so the
+		// next recall observes it (no TTL wait). Fail-soft: a throw inside onWrite never fails the
+		// request (the write already succeeded; the cache will refresh on its own TTL otherwise).
+		if (summary?.written) {
+			try {
+				options.onWrite?.();
+			} catch {
+				// best-effort: swallow so the route still returns 200 with the summary.
+			}
+		}
 		return c.json(summary, 200);
 	});
 }
