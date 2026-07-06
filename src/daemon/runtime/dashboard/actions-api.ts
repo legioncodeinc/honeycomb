@@ -42,7 +42,7 @@ import type { DeploymentMode } from "../config.js";
 import { localDefaultScopeResolver, type ScopeResolver } from "../secrets/api.js";
 import type { EmbedSupervisor } from "../services/embed-supervisor.js";
 import type { Daemon } from "../server.js";
-import { EMBEDDINGS_ENABLED_KEY } from "../vault/api.js";
+import { EMBEDDINGS_ENABLED_KEY, MEMORY_ENABLED_KEY } from "../vault/api.js";
 import type { VaultStore } from "../vault/store.js";
 import { detectInstalledHarnesses } from "./harness-detect.js";
 
@@ -82,6 +82,14 @@ export interface MountActionsOptions {
 	readonly spawnRestart?: () => void;
 	/** Produce the uninstall outcome. Default: the guided result (detect harnesses + the CLI command). */
 	readonly uninstall?: () => UninstallOutcome;
+	/**
+	 * A structured-event sink the `memory` toggle emits on each successful write (this PRD). The memory
+	 * pipeline worker snapshots its master `enabled` gate at BOOT, so a live in-place reconcile is
+	 * invasive; the toggle instead PERSISTS the `memory.enabled` setting (vault-first at next boot) and
+	 * emits this event so the change is observable. Default: a no-op (no wiring → the persist still
+	 * happens, the event is simply dropped). Carries NO secret — a name + a boolean.
+	 */
+	readonly onMemoryToggle?: (event: { enabled: boolean }) => void;
 }
 
 /** Whether an `Origin` header names a loopback host (the only origin the dashboard is served from). */
@@ -207,6 +215,7 @@ export function mountActionsGroup(group: Hono, mode: DeploymentMode, options: Mo
 	const shutdown = options.shutdown ?? defaultShutdown;
 	const spawnRestart = options.spawnRestart ?? defaultSpawnRestart;
 	const uninstall = options.uninstall ?? defaultUninstall;
+	const onMemoryToggle = options.onMemoryToggle;
 	// The SAME scope resolver the `/api/settings` write path uses, so the embeddings preference
 	// persists under the identical tenancy a CLI `honeycomb settings set` would (local-default fallback).
 	const settingsScope: ScopeResolver = localDefaultScopeResolver(mode, options.defaultScope);
@@ -242,6 +251,39 @@ export function mountActionsGroup(group: Hono, mode: DeploymentMode, options: Mo
 		// Actuate the running supervisor: spawn + warm (enable) or stop the child (disable).
 		await embed.setEnabled(enabled);
 		return c.json({ ok: true, enabled });
+	});
+
+	// POST /api/actions/memory — turn MEMORY FORMATION on/off by persisting `memory.enabled` (vault-first
+	// at next boot). Mirrors the embeddings toggle's auth/scope/validation shape EXACTLY. Unlike embeddings
+	// (which has a live supervisor to actuate), the memory pipeline worker snapshots its master gate at
+	// boot, so this toggle PERSISTS the choice + emits a structured event; it takes effect on the next
+	// daemon start (a `restart` action is available for an immediate apply). The response echoes the new
+	// boolean + `appliesOnRestart:true` so the UI can tell the user the change is queued, not live.
+	group.post("/memory", async (c) => {
+		const denied = actionGuard(c, mode);
+		if (denied) return denied;
+		const enabled = await readEnabled(c);
+		if (enabled === null) {
+			return c.json({ error: "bad_request", reason: "body must carry { enabled: boolean }" }, 400);
+		}
+		// Persist the choice (best-effort) so it survives — and takes effect on — a daemon restart; a
+		// missing store / no resolvable scope skips persistence (no live supervisor to fall back to, so
+		// with no store the toggle is a structured-event-only no-op this run, surfaced honestly below).
+		let persisted = false;
+		if (store !== undefined) {
+			const sc = settingsScope.resolve(c);
+			if (sc !== null) {
+				try {
+					await store.setSetting(MEMORY_ENABLED_KEY, enabled, sc);
+					persisted = true;
+				} catch {
+					// A vault write failure must not 500 the toggle — it just won't persist this run.
+				}
+			}
+		}
+		// Emit the structured event so the toggle is observable even though the reconcile is deferred.
+		onMemoryToggle?.({ enabled });
+		return c.json({ ok: true, enabled, persisted, appliesOnRestart: true });
 	});
 
 	// POST /api/actions/restart — respawn a fresh daemon, then gracefully stop this one.

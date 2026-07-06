@@ -100,6 +100,15 @@ describe("PRD-058d lifecycle config — coerce-and-clamp (a typo never crashes t
 		const config = resolveLifecycleConfig(staticLifecycleConfigProvider({ staleRefPosture: "bananas" }));
 		expect(config.staleRefPosture).toBe("observe");
 	});
+
+	it("trims surrounding whitespace on the conflictAutoResolve flag (the trailing-space env class)", () => {
+		// A Windows scheduled-task `set "VAR=true" && …` chain leaks a trailing space; the trim keeps
+		// `"true "` / `" true "` reading as ON and `"false "` / junk as OFF.
+		expect(resolveLifecycleConfig(staticLifecycleConfigProvider({ conflictAutoResolve: "true " })).conflictAutoResolve).toBe(true);
+		expect(resolveLifecycleConfig(staticLifecycleConfigProvider({ conflictAutoResolve: " true " })).conflictAutoResolve).toBe(true);
+		expect(resolveLifecycleConfig(staticLifecycleConfigProvider({ conflictAutoResolve: "false " })).conflictAutoResolve).toBe(false);
+		expect(resolveLifecycleConfig(staticLifecycleConfigProvider({ conflictAutoResolve: " nope " })).conflictAutoResolve).toBe(false);
+	});
 });
 
 describe("PRD-058d lifecycle config — posture flip (AC-55d.1.4)", () => {

@@ -108,11 +108,17 @@ export function resolveLocalQueueTopology(env: NodeJS.ProcessEnv = process.env):
 		};
 	}
 
+	// Undeclared (unknown) topology defaults to the local queue. Absence of a declared multi-daemon
+	// topology means "assume a single local daemon" — the common case — and the local SQLite queue is
+	// correct-by-construction, whereas the shared DeepLake queue is unreliable under read-after-write lag.
+	// This reverses PRD-066e's original conservative "unknown ⇒ shared" default (see the rationale in
+	// resolveHybridJobQueueConfig). Only an explicit `fleet`/`multi_device` declaration keeps the shared
+	// queue; `HONEYCOMB_LOCAL_QUEUE_ENABLED=false` still forces the shared rollback path.
 	return {
 		mode: topologyMode.mode,
 		source: topologyMode.source,
-		eligibleForDefaultOn: false,
-		reason: "unknown topology is not eligible for local queue default-on without explicit opt-in",
+		eligibleForDefaultOn: true,
+		reason: "undeclared topology defaults to the local queue (declare HONEYCOMB_TOPOLOGY=fleet for shared)",
 	};
 }
 

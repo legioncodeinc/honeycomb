@@ -18,7 +18,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { EmbedSupervisor } from "../../../../src/daemon/runtime/services/embed-supervisor.js";
 import type { VaultStore } from "../../../../src/daemon/runtime/vault/store.js";
-import { EMBEDDINGS_ENABLED_KEY } from "../../../../src/daemon/runtime/vault/api.js";
+import { EMBEDDINGS_ENABLED_KEY, MEMORY_ENABLED_KEY } from "../../../../src/daemon/runtime/vault/api.js";
 import {
 	mountActionsGroup,
 	type MountActionsOptions,
@@ -159,6 +159,54 @@ describe("dashboard actions — embeddings", () => {
 		const res = await app.request("/embeddings", { method: "POST", headers: okHeaders(), body: JSON.stringify({ enabled: true }) });
 		expect(res.status).toBe(200);
 		expect(setEnabledCalls).toEqual([true]);
+	});
+});
+
+describe("dashboard actions — memory (memory.enabled toggle)", () => {
+	it("persists memory.enabled, emits the structured event, and acks appliesOnRestart", async () => {
+		const { sup } = fakeEmbed();
+		const { store, calls } = fakeStore();
+		const events: Array<{ enabled: boolean }> = [];
+		const app = appWith("local", {
+			embed: sup,
+			store,
+			defaultScope: { org: "o", workspace: "w" },
+			onMemoryToggle: (e) => events.push(e),
+		});
+		const res = await app.request("/memory", { method: "POST", headers: okHeaders(), body: JSON.stringify({ enabled: true }) });
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ ok: true, enabled: true, persisted: true, appliesOnRestart: true });
+		// Persisted under the memory key + the structured event fired.
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.key).toBe(MEMORY_ENABLED_KEY);
+		expect(calls[0]?.value).toBe(true);
+		expect(events).toEqual([{ enabled: true }]);
+	});
+
+	it("mirrors the embeddings toggle's guard (403 outside local mode)", async () => {
+		const { sup } = fakeEmbed();
+		const app = appWith("team", { embed: sup });
+		const res = await app.request("/memory", { method: "POST", headers: okHeaders(), body: JSON.stringify({ enabled: true }) });
+		expect(res.status).toBe(403);
+	});
+
+	it("400s a body with no boolean `enabled` and never persists", async () => {
+		const { sup } = fakeEmbed();
+		const { store, calls } = fakeStore();
+		const app = appWith("local", { embed: sup, store, defaultScope: { org: "o", workspace: "w" } });
+		const res = await app.request("/memory", { method: "POST", headers: okHeaders(), body: JSON.stringify({ nope: 1 }) });
+		expect(res.status).toBe(400);
+		expect(calls).toEqual([]);
+	});
+
+	it("with no store wired: no persistence, but the event still fires and appliesOnRestart is honest", async () => {
+		const { sup } = fakeEmbed();
+		const events: Array<{ enabled: boolean }> = [];
+		const app = appWith("local", { embed: sup, defaultScope: { org: "o", workspace: "w" }, onMemoryToggle: (e) => events.push(e) });
+		const res = await app.request("/memory", { method: "POST", headers: okHeaders(), body: JSON.stringify({ enabled: false }) });
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ ok: true, enabled: false, persisted: false, appliesOnRestart: true });
+		expect(events).toEqual([{ enabled: false }]);
 	});
 });
 

@@ -191,7 +191,7 @@ export interface JobQueueConfig {
 	/** Unique owner id this queue instance stamps on leases. Default a generated id. */
 	readonly owner?: string;
 	/** Page size for the `stats()` paginated scan. Default 2000; lowered in tests to force multi-page. */
-	readonly statsPageSize?: number;
+	readonly scanPageSize?: number;
 	/**
 	 * The physical table name to read/write/heal. Defaults to the catalog's
 	 * canonical `memory_jobs` (the production name). It exists so an isolated
@@ -239,7 +239,7 @@ interface ResolvedConfig {
 	readonly deadRetentionMs: number;
 	readonly owner: string;
 	readonly tableName: string;
-	readonly statsPageSize: number;
+	readonly scanPageSize: number;
 }
 
 /** Resolve the public config into concrete numbers, applying D-3 defaults. */
@@ -257,7 +257,7 @@ function resolveConfig(config: JobQueueConfig | undefined, ownerFallback: string
 		tableName: config?.tableName ?? MEMORY_JOBS_TABLE,
 		// Page size for the `stats()` paginated scan. Defaulted high (one round trip for any realistic
 		// live table); a test lowers it to force multi-page accumulation without thousands of jobs.
-		statsPageSize: Math.max(1, Math.trunc(config?.statsPageSize ?? 2_000)),
+		scanPageSize: Math.max(1, Math.trunc(config?.scanPageSize ?? 2_000)),
 	};
 }
 
@@ -281,6 +281,14 @@ const RESOLVE_POLLS = 8;
  * growing, so the fake and a quiet live table finish in one round trip.
  */
 const DISCOVER_POLLS = 8;
+
+/**
+ * Hard page ceiling for any paginated full-table scan ({@link DeepLakeJobQueueService.discoverIds} +
+ * {@link DeepLakeJobQueueService.stats}). At the default page size this is millions of rows — far
+ * beyond any real (reaped) table — so it never truncates in practice; it exists purely so a runaway
+ * table can never spin the scan loop forever.
+ */
+const SCAN_MAX_PAGES = 10_000;
 
 /**
  * How many distinct candidates a single {@link DeepLakeJobQueueService.lease} call
@@ -511,10 +519,9 @@ class DeepLakeJobQueueService implements JobQueueService {
 		// hard page cap prevents a pathological table from hanging the read. Best-effort: OFFSET paging
 		// over a segment-flapping backend may skip/dup a row, acceptable for a READ-ONLY diagnostic that
 		// never leases/mutates. A `connection_error`/`timeout` mid-scan returns what was gathered so far.
-		const PAGE_SIZE = this.cfg.statsPageSize;
-		const MAX_PAGES = 10_000; // safety ceiling so a runaway table can never hang the endpoint
+		const PAGE_SIZE = this.cfg.scanPageSize;
 		const current = new Map<string, { type: string; status: string; version: number }>();
-		for (let page = 0; page < MAX_PAGES; page++) {
+		for (let page = 0; page < SCAN_MAX_PAGES; page++) {
 			// A stable ORDER BY makes OFFSET paging deterministic on a settled table; `id, version` also
 			// groups a job's versions together. Integer LIMIT/OFFSET are code constants (no injection).
 			const sql =
@@ -659,30 +666,47 @@ class DeepLakeJobQueueService implements JobQueueService {
 	 * `__ensure__` sentinel row (see {@link ensureTable}) is filtered out.
 	 */
 	private async discoverIds(source?: QuerySource): Promise<JobState[]> {
-		const ids = new Set<string>();
+		// Union the CURRENT (highest-version) FULL state per id across a few PAGINATED full-column scans.
+		// A single scan can land on a stale segment (miss the newest version, or an id entirely), so
+		// unioning by MAX(version) across DISCOVER_POLLS scans converges UP to the true current state —
+		// the SAME monotone-version convergence the old code relied on, but in O(polls × pages) BULK
+		// reads instead of O(N) per-id POINT reads. That per-id resolve collapsed under a real backlog
+		// (500+ jobs → minutes per lease/reaper sweep, wedging the queue so no job was ever leased).
+		// Best-effort is safe: the per-CANDIDATE `resolveCurrent` ownership-confirm on the ACTUAL lease
+		// (unchanged) rejects a stale/lost candidate, so a one-version-stale row here never mis-leases.
+		const cols = STATE_COLUMNS.map((c) => sqlIdent(c)).join(", ");
+		const opts = source !== undefined ? { source } : {};
+		const byId = new Map<string, JobState>();
 		let lastSize = -1;
 		for (let poll = 0; poll < DISCOVER_POLLS; poll++) {
-			const sql = `SELECT DISTINCT ${sqlIdent("id")} FROM "${this.tbl()}"`;
-			// PRD-062b: tag the discovery scan with the poll-path `source` so the 062a
-			// meter attributes the idle-poll baseline (`source` is meter-only; it never
-			// changes the query result).
-			const res = await this.storage.query(sql, this.scope, source !== undefined ? { source } : {});
-			if (isOk(res)) {
-				for (const row of res.rows as StorageRow[]) {
+			let changed = false;
+			for (let page = 0; page < SCAN_MAX_PAGES; page++) {
+				// A stable ORDER BY makes OFFSET paging deterministic on a settled table; `id, version`
+				// also groups a job's versions. Integer LIMIT/OFFSET are code constants (no injection).
+				const sql =
+					`SELECT ${cols} FROM "${this.tbl()}" ` +
+					`ORDER BY ${sqlIdent("id")}, ${sqlIdent("version")} ` +
+					`LIMIT ${this.cfg.scanPageSize} OFFSET ${page * this.cfg.scanPageSize}`;
+				const res = await this.storage.query(sql, this.scope, opts);
+				if (!isOk(res)) break; // connectivity blip → stop paging this poll; a later poll retries.
+				const rows = res.rows as StorageRow[];
+				for (const row of rows) {
 					const id = rowText(row, "id");
-					if (id !== "" && id !== "__ensure__") ids.add(id);
+					if (id === "" || id === "__ensure__") continue; // skip the ensure-table sentinel
+					const state = toJobState(row);
+					const prev = byId.get(id);
+					if (prev === undefined || state.version > prev.version) {
+						byId.set(id, state);
+						changed = true;
+					}
 				}
+				if (rows.length < this.cfg.scanPageSize) break; // short page → table exhausted this poll.
 			}
-			if (ids.size > 0 && ids.size === lastSize) break;
-			lastSize = ids.size;
+			// Converged once a full poll adds no new id AND lifts no id's version.
+			if (!changed && byId.size === lastSize) break;
+			lastSize = byId.size;
 		}
-
-		const states: JobState[] = [];
-		for (const id of ids) {
-			const state = await this.resolveCurrent(id, source);
-			if (state !== null) states.push(state);
-		}
-		return states;
+		return [...byId.values()];
 	}
 
 	/**
@@ -837,18 +861,26 @@ class DeepLakeJobQueueService implements JobQueueService {
 
 		let reclaimed = 0;
 		for (const s of expired) {
-			const ok = await this.append(s.id, s.version + 1, [
-				["id", val.str(s.id)],
-				["type", val.str(s.type)],
-				["payload", val.text(JSON.stringify(s.payload ?? {}))],
+			// CONFIRM current state before mutating (parity with `lease()`'s ownership re-check). The
+			// discovery scan can land on a stale segment and show a `leased`-expired row that a NEWER
+			// version already advanced past (completed, or reaped by a racing sweep). Reaping off that
+			// stale view would append `queued` over a higher true version — resurrecting a done job or
+			// colliding a version. Re-resolve and skip unless the job is STILL a currently-expired lease.
+			const current = await this.resolveCurrent(s.id, SOURCE_REAPER);
+			if (current === null) continue;
+			if (current.status !== JOB_LEASED || current.leaseExpiresAt === "" || current.leaseExpiresAt > nowIso) continue;
+			const ok = await this.append(current.id, current.version + 1, [
+				["id", val.str(current.id)],
+				["type", val.str(current.type)],
+				["payload", val.text(JSON.stringify(current.payload ?? {}))],
 				["status", val.str(JOB_QUEUED)],
 				["lease_owner", val.str("")],
 				["lease_expires_at", val.str("")],
-				["attempts", val.num(s.attempts)],
-				["max_attempts", val.num(s.maxAttempts)],
+				["attempts", val.num(current.attempts)],
+				["max_attempts", val.num(current.maxAttempts)],
 				["next_run_at", val.str(this.nowIso())],
 				["last_error", val.str("")],
-				["created_at", val.str(s.createdAt)],
+				["created_at", val.str(current.createdAt)],
 				["updated_at", val.str(this.nowIso())],
 			]);
 			if (ok) reclaimed += 1;
@@ -876,11 +908,20 @@ class DeepLakeJobQueueService implements JobQueueService {
 		for (const s of states) {
 			// The current row's `updated_at` is when the job entered its terminal state;
 			// it is what the cutoff is measured against.
-			if (s.status === JOB_DONE && s.updatedAt !== "" && s.updatedAt <= doneCutoff) {
-				const res = await this.deleteAllForId(s.id);
+			const doneAged = s.status === JOB_DONE && s.updatedAt !== "" && s.updatedAt <= doneCutoff;
+			const deadAged = s.status === JOB_DEAD && s.updatedAt !== "" && s.updatedAt <= deadCutoff;
+			if (!doneAged && !deadAged) continue;
+			// CONFIRM current state before DELETING the whole chain. `deleteAllForId` drops every version
+			// of the id, so a stale scan that shows a terminal (`done`/`dead`) row for a job a newer version
+			// has already advanced past would delete a STILL-LIVE chain. Re-resolve and delete only when the
+			// confirmed current state is genuinely the aged-out terminal one.
+			const current = await this.resolveCurrent(s.id);
+			if (current === null || current.updatedAt === "") continue;
+			if (current.status === JOB_DONE && current.updatedAt <= doneCutoff) {
+				const res = await this.deleteAllForId(current.id);
 				doneDeleted = doneDeleted && isOk(res);
-			} else if (s.status === JOB_DEAD && s.updatedAt !== "" && s.updatedAt <= deadCutoff) {
-				const res = await this.deleteAllForId(s.id);
+			} else if (current.status === JOB_DEAD && current.updatedAt <= deadCutoff) {
+				const res = await this.deleteAllForId(current.id);
 				deadDeleted = deadDeleted && isOk(res);
 			}
 		}

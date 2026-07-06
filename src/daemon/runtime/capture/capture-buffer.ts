@@ -84,6 +84,19 @@ export const DEFAULT_WINDOW_MS = 1_000;
 export type FlushFn<T> = (batch: readonly T[]) => Promise<void>;
 
 /**
+ * Sink for a flush rejection that has NO external awaiter — the TIME-triggered and
+ * FORCE-triggered flushes fire from a timer/shutdown with no caller holding the
+ * returned promise. Without this, a rejecting flush on those paths becomes an
+ * UNHANDLED promise rejection, which under Node ≥15 tears the process down (the
+ * live daemon-death bug: a single-event window whose 1s timer fires, the DeepLake
+ * append times out, and nobody is awaiting the timer's flush). The buffer routes
+ * every internally-initiated flush rejection here so the owner can log + count it
+ * and the process stays alive. Size-triggered flushes still ALSO reject their
+ * awaiting `add()` (the pre-existing observable contract) — this is additive.
+ */
+export type FlushErrorSink = (err: unknown) => void;
+
+/**
  * An in-memory, time-and-size-bounded write buffer that coalesces items into
  * batched flushes. Generic over the buffered item `T` (the capture handler buffers
  * a pre-built row + its scope), so the buffer owns ONLY the windowing — never the
@@ -94,6 +107,8 @@ export class CaptureBuffer<T> {
 	private readonly windowMs: number;
 	private readonly clock: BufferClock;
 	private readonly flushFn: FlushFn<T>;
+	/** Where a rejection from a timer/force flush (no external awaiter) is routed so it never escapes. */
+	private readonly onFlushError: FlushErrorSink;
 
 	/** The current window's buffered items. */
 	private items: T[] = [];
@@ -101,14 +116,28 @@ export class CaptureBuffer<T> {
 	private timer: TimerHandle | null = null;
 	/** The in-flight flush, so a second trigger awaits it rather than racing it. */
 	private inFlight: Promise<void> = Promise.resolve();
+	/**
+	 * The serialization GATE: an always-resolving promise the next flush chains off. It mirrors
+	 * `inFlight`'s settlement but with any rejection SWALLOWED, so a failed append keeps appends
+	 * ordered WITHOUT poisoning the chain (a rejected `inFlight` would otherwise short-circuit every
+	 * later flush via `.then`). The real flush result — including a rejection — is still returned to
+	 * the triggering caller through `inFlight`/the returned promise; only this gate copy is silenced.
+	 */
+	private gate: Promise<void> = Promise.resolve();
 	/** Set on `close()` so a late `add` after shutdown is rejected, not silently buffered-then-lost. */
 	private closed = false;
 
-	constructor(flushFn: FlushFn<T>, config: CaptureBufferConfig = {}, clock: BufferClock = realBufferClock) {
+	constructor(
+		flushFn: FlushFn<T>,
+		config: CaptureBufferConfig = {},
+		clock: BufferClock = realBufferClock,
+		onFlushError: FlushErrorSink = () => {},
+	) {
 		this.flushFn = flushFn;
 		this.maxEvents = Math.max(1, config.maxEvents ?? DEFAULT_MAX_EVENTS);
 		this.windowMs = Math.max(1, config.windowMs ?? DEFAULT_WINDOW_MS);
 		this.clock = clock;
+		this.onFlushError = onFlushError;
 	}
 
 	/** Number of items currently buffered (for assertions / diagnostics). */
@@ -146,9 +175,20 @@ export class CaptureBuffer<T> {
 		if (this.items.length === 0) return this.inFlight;
 		const batch = this.items;
 		this.items = [];
-		// Chain after any in-flight flush so appends are serialized, never concurrent.
-		this.inFlight = this.inFlight.then(() => this.flushFn(batch));
-		return this.inFlight;
+		// Serialize appends without ever letting a PRIOR flush's rejection short-circuit THIS one.
+		// `this.gate` is a promise that ALWAYS resolves (a rejection is swallowed on the gate copy
+		// only — never on the promise a caller awaits): the next flush chains off the gate so appends
+		// stay ordered, but a failed DeepLake write does not poison the chain and skip every later
+		// window (the pre-fix chain would stay rejected forever). The flush's REAL result (including a
+		// rejection) is returned to the triggering caller unchanged, and the gate is advanced to the
+		// settlement of this flush so ordering is preserved.
+		const flush = this.gate.then(() => this.flushFn(batch));
+		this.gate = flush.then(
+			() => undefined,
+			() => undefined,
+		);
+		this.inFlight = flush;
+		return flush;
 	}
 
 	/**
@@ -172,9 +212,12 @@ export class CaptureBuffer<T> {
 		this.cancelTimer();
 		this.timer = this.clock.setTimer(() => {
 			this.timer = null;
-			// Fire-and-forget: the timer path has no awaiter, so a rejection is surfaced
-			// to whoever awaits the per-item promise the flush settles; nothing is swallowed.
-			void this.flushNow();
+			// The timer path has NO external awaiter, so a rejection here would otherwise become
+			// an UNHANDLED promise rejection and (Node ≥15) kill the daemon — the live capture-death
+			// bug. Route the rejection to `onFlushError` (the owner logs + counts it) so the failed
+			// DeepLake append is fail-soft: recorded, never fatal. Size-triggered flushes still
+			// reject their awaiting `add()` (unchanged); this only handles the ownerless timer flush.
+			this.flushNow().catch((err: unknown) => this.onFlushError(err));
 		}, this.windowMs);
 	}
 

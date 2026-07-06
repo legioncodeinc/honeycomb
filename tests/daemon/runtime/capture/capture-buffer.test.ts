@@ -148,3 +148,59 @@ describe("a flush failure is surfaced, never swallowed", () => {
 		await expect(buf.add(1)).rejects.toThrow(/append failed/);
 	});
 });
+
+/**
+ * THE DAEMON-DEATH REGRESSION (fix). The time-triggered flush has NO external awaiter — a single
+ * buffered event whose 1s window closes fires `flushNow()` from the timer with nobody holding the
+ * returned promise. When the DeepLake append rejects (timeout / query_error), the rejection MUST be
+ * routed to `onFlushError` and NEVER escape as an unhandled rejection (which, under Node ≥15, kills
+ * the long-lived daemon — the live capture-death bug seen twice in production).
+ */
+describe("REGRESSION: a TIME-triggered flush failure never escapes as an unhandled rejection", () => {
+	it("routes the timer-flush rejection to onFlushError instead of leaving it dangling", async () => {
+		const clock = new FakeClock();
+		const failing = async (): Promise<void> => {
+			throw new Error("capture batch append failed: timeout");
+		};
+		const seen: unknown[] = [];
+		const buf = new CaptureBuffer<number>(failing, { maxEvents: 25, windowMs: 1_000 }, clock, (err) =>
+			seen.push(err),
+		);
+
+		// A single event with NO awaiter (fire-and-forget batching — exactly the production path).
+		void buf.add(1);
+		clock.advance(1_000); // window closes → timer fires flushNow() with no external awaiter
+		// Let the rejected flush + its onFlushError routing settle (a macrotask covers every microtask hop).
+		await new Promise((r) => setTimeout(r, 0));
+
+		expect(seen.length, "the timer-flush rejection reached onFlushError").toBe(1);
+		expect((seen[0] as Error).message).toMatch(/timeout/);
+		expect(buf.size, "the window was consumed (rows are gone, not re-buffered)").toBe(0);
+	});
+
+	it("HEALS the flush chain: a failed window does not skip the NEXT window's append", async () => {
+		const clock = new FakeClock();
+		let calls = 0;
+		const flushed: number[][] = [];
+		const flakyFlush = async (batch: readonly number[]): Promise<void> => {
+			calls += 1;
+			if (calls === 1) throw new Error("capture batch append failed: timeout"); // first window fails
+			flushed.push([...batch]); // second window MUST still be attempted + succeed
+		};
+		const buf = new CaptureBuffer<number>(flakyFlush, { maxEvents: 25, windowMs: 1_000 }, clock, () => {});
+
+		void buf.add(1);
+		clock.advance(1_000); // window 1 → flush rejects
+		await Promise.resolve();
+		await Promise.resolve();
+
+		void buf.add(2);
+		clock.advance(1_000); // window 2 → MUST flush [2] (chain healed, not stuck-rejected)
+		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(calls, "both windows attempted a flush").toBe(2);
+		expect(flushed, "the second window's row was appended despite the first window failing").toEqual([[2]]);
+	});
+});

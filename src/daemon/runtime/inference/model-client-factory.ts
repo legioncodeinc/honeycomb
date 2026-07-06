@@ -187,6 +187,24 @@ export interface InferenceModelClientResult {
 	readonly client: ModelClient;
 	/** The honest Portkey status for `/health` (`off` when Portkey is not in force). */
 	readonly portkeyStatus: PortkeyStatus;
+	/**
+	 * The HONEST "is a model provider actually USABLE?" signal — `true` ONLY when the selected
+	 * provider's CREDENTIAL RESOLVES, never merely because routing is declared. This is the signal
+	 * assembly feeds to `/health` `reasons.memory.provider` AND the `'auto'` extraction gate, so both
+	 * fail-closed: a routable-but-keyless `agent.yaml`, or Portkey ON with no `PORTKEY_API_KEY`, is
+	 * `false` (so `'auto'` stays disabled and no session content is LLM-processed on a false positive).
+	 *
+	 * Derived WITHOUT a synchronous network probe — from secret-NAME presence (`listSecretNames`),
+	 * mirroring how the Portkey `unconfigured` status is derived. It is stricter than
+	 * `client !== noopModelClient`: the per-provider path can return a REAL `RouterModelClient` from a
+	 * routable config whose `${SECRET_REF}` key is absent (every call would then no-op) — that client
+	 * is non-noop yet `providerConfigured` is `false`.
+	 *
+	 *   - Portkey `ok`           → `true`  (the `PORTKEY_API_KEY` presence was already verified).
+	 *   - Portkey `unconfigured` → `false` (the key is absent; the no-op client is in force).
+	 *   - Portkey `off`/unset    → the per-provider CREDENTIAL check ({@link providerCredentialResolves}).
+	 */
+	readonly providerConfigured: boolean;
 }
 
 /**
@@ -207,6 +225,55 @@ async function resolveConfig(source: InferenceConfigSource): Promise<InferenceCo
 /** Whether a resolved config actually has something routable (at least one account + workload). */
 function isRoutable(config: InferenceConfig): boolean {
 	return config.accounts.length > 0 && config.workloads.length > 0;
+}
+
+/**
+ * Strip an optional `${...}` wrapper from a secret reference, yielding the bare secret NAME the
+ * `.secrets/` store keys by. Mirrors the same-named helper in `secrets/store.ts` (kept private
+ * there); a bare (unwrapped) ref is returned as-is. Total + pure.
+ */
+function apiKeyRefToSecretName(ref: string): string {
+	const m = ref.match(/^\$\{(.+)\}$/);
+	return m && m[1] ? m[1] : ref;
+}
+
+/**
+ * Does the per-provider config have at least one account whose `${SECRET_REF}` credential ACTUALLY
+ * RESOLVES to a present secret? This is the honest "provider usable" check the coarse
+ * `client !== noopModelClient` identity check gets WRONG: {@link buildProviderPathClient} builds a
+ * real {@link RouterModelClient} from any routable config, even when every account's key is absent —
+ * every runtime model call then silently no-ops (the "looks configured, forms nothing" trap).
+ *
+ * FAIL-CLOSED + NO NETWORK PROBE: we check secret-NAME presence via
+ * {@link SecretsStore.listSecretNames} (names-only, never a value read, never a decrypt), exactly as
+ * the Portkey path checks `PORTKEY_API_KEY` presence before building its client. A missing store, an
+ * empty scope, or no matching name → `false`. We do NOT decrypt the key or make a provider call —
+ * presence is the assembly-time signal; a genuinely bad key surfaces later as a runtime call failure
+ * (and flips the runtime health signal), never a synchronous boot probe.
+ *
+ * When a {@link ProviderModelOverride} is in force it changes only `account.provider`/`target.model`
+ * and NEVER the `apiKeyRef` (FR-2), so the credential presence check reads the SAME account refs
+ * whether or not an override is applied — we check the base config's account refs directly.
+ */
+function providerCredentialResolves(config: InferenceConfig, deps: InferenceModelClientDeps): boolean {
+	let presentNames: readonly string[];
+	try {
+		presentNames = deps.secretsStore.listSecretNames(deps.scope);
+	} catch {
+		// A store/read failure is treated as "no resolvable credential" (fail-closed), never a throw.
+		return false;
+	}
+	const present = new Set<string>(presentNames);
+	// A provider is usable iff at least one account's referenced secret is present in this scope.
+	return config.accounts.some((account) => present.has(apiKeyRefToSecretName(account.apiKeyRef)));
+}
+
+/** The per-provider path outcome: the built client PLUS the honest credential-resolution signal. */
+interface ProviderPathResult {
+	/** The built model client — a {@link RouterModelClient} for a routable config, else the no-op. */
+	readonly client: ModelClient;
+	/** `true` ONLY when a routable config resolved AND at least one account credential is present. */
+	readonly providerConfigured: boolean;
 }
 
 /**
@@ -250,7 +317,7 @@ function applyProviderModelOverride(config: InferenceConfig, override: ProviderM
  * the Portkey fallback target (D-3) can reuse it verbatim. With Portkey OFF/unset, the public
  * entry point delegates straight here, so the off-path is byte-identical (b-AC-5).
  */
-async function buildProviderPathClient(deps: InferenceModelClientDeps): Promise<ModelClient> {
+async function buildProviderPathClient(deps: InferenceModelClientDeps): Promise<ProviderPathResult> {
 	let config: InferenceConfig | null;
 	try {
 		config = await resolveConfig(deps.config);
@@ -258,11 +325,17 @@ async function buildProviderPathClient(deps: InferenceModelClientDeps): Promise<
 		// A malformed config file (or any load error) → run without inference. We do not
 		// log the error body here (it could name a config path or value); the loader
 		// itself surfaces a redacted InferenceConfigError to anyone who calls it directly.
-		return noopModelClient;
+		return { client: noopModelClient, providerConfigured: false };
 	}
 	if (config === null || !isRoutable(config)) {
-		return noopModelClient;
+		return { client: noopModelClient, providerConfigured: false };
 	}
+	// The HONEST provider signal: a routable config is NOT enough — the selected account's
+	// `${SECRET_REF}` credential must actually resolve (be present). A routable-but-keyless
+	// `agent.yaml` still builds a real RouterModelClient below (so the pipeline wires), but every
+	// call would no-op; reporting `providerConfigured: false` keeps `/health` honest and the `'auto'`
+	// extraction gate fail-closed. Checked from secret-NAME presence — no decrypt, no network probe.
+	const providerConfigured = providerCredentialResolves(config, deps);
 	// PRD-032d / AC-6: the vault wins over `agent.yaml` for provider/model SELECTION. When the
 	// daemon resolved an active provider/model from the `setting` class, graft it onto the
 	// routable base config (keeping the `${SECRET_REF}` apiKeyRef untouched — FR-2). Absent →
@@ -284,7 +357,7 @@ async function buildProviderPathClient(deps: InferenceModelClientDeps): Promise<
 		secrets,
 		history: deps.history ?? noopRoutingHistoryStore,
 	});
-	return new RouterModelClient(router);
+	return { client: new RouterModelClient(router), providerConfigured };
 }
 
 /**
@@ -311,9 +384,11 @@ export async function buildInferenceModelClientWithStatus(
 	deps: InferenceModelClientDeps,
 ): Promise<InferenceModelClientResult> {
 	const portkey = deps.portkey;
-	// Portkey OFF/unset → today's per-provider path, byte-identical (b-AC-5). Status `off`.
+	// Portkey OFF/unset → today's per-provider path, byte-identical (b-AC-5). Status `off`, and the
+	// honest `providerConfigured` comes from the per-provider CREDENTIAL check (not client identity).
 	if (portkey === undefined || !portkey.enabled) {
-		return { client: await buildProviderPathClient(deps), portkeyStatus: "off" };
+		const provider = await buildProviderPathClient(deps);
+		return { client: provider.client, portkeyStatus: "off", providerConfigured: provider.providerConfigured };
 	}
 	// Portkey ON: try to build the Portkey-backed client. A missing key is a typed, honest error
 	// (PortkeyUnconfiguredError) that we map to fail-closed: the no-op client + `unconfigured`
@@ -321,16 +396,18 @@ export async function buildInferenceModelClientWithStatus(
 	// ON (a MISSING key is a hard error regardless, D-3 / b-AC-4).
 	try {
 		const client = await resolvePortkeyClient(deps, portkey);
-		return { client, portkeyStatus: "ok" };
+		// `ok` means the PORTKEY_API_KEY presence was verified in resolvePortkeyClient (names-only),
+		// so the provider is genuinely configured.
+		return { client, portkeyStatus: "ok", providerConfigured: true };
 	} catch (err) {
 		if (err instanceof PortkeyUnconfiguredError) {
 			// Fail-closed: no provider key is used. The no-op client boots cleanly (empty,
 			// zero-mutation passes) and `/health` reports the honest `unconfigured` reason.
-			return { client: noopModelClient, portkeyStatus: "unconfigured" };
+			return { client: noopModelClient, portkeyStatus: "unconfigured", providerConfigured: false };
 		}
 		// Any other unexpected build error also fails closed to the no-op (never a provider-key
 		// leak); the daemon boots and reports `unconfigured` rather than throwing.
-		return { client: noopModelClient, portkeyStatus: "unconfigured" };
+		return { client: noopModelClient, portkeyStatus: "unconfigured", providerConfigured: false };
 	}
 }
 
@@ -382,7 +459,7 @@ async function resolvePortkeyClient(deps: InferenceModelClientDeps, portkey: Por
 	// D-3 fallback ON: build the per-provider path client too and wrap both so an UNREACHABLE
 	// gateway transparently retries the SAME request through the provider path. A missing
 	// PORTKEY_API_KEY already hard-errored above, so this branch is only reached with the key present.
-	const providerClient = await buildProviderPathClient(deps);
+	const { client: providerClient } = await buildProviderPathClient(deps);
 	return new PortkeyFallbackModelClient(portkeyClient, providerClient);
 }
 

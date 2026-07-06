@@ -106,13 +106,14 @@ describe("b-AC-2 / b-AC-3 Portkey ON + key present → routes through the Portke
 
 		const seen = stubFetch((url) => (url === PORTKEY_CHAT_COMPLETIONS_URL ? { status: 200, body: PORTKEY_OK_BODY } : { status: 500, body: "wrong-url" }));
 
-		const { client, portkeyStatus } = await buildInferenceModelClientWithStatus({
+		const { client, portkeyStatus, providerConfigured } = await buildInferenceModelClientWithStatus({
 			scope: SCOPE,
 			secretsStore: store,
 			config: routableConfig(),
 			portkey: portkeyOn({ config: "pc-cfg-xyz" }),
 		});
 		expect(portkeyStatus).toBe("ok");
+		expect(providerConfigured, "portkey ok → configured").toBe(true);
 		expect(client).not.toBe(noopModelClient);
 
 		const out = await client.complete("memory_pollinating", "consolidate");
@@ -185,13 +186,14 @@ describe("b-AC-4 precedence + fallback: missing key hard-errors (fail-closed) in
 		await store.setSecret("ANTHROPIC_API_KEY", PROVIDER_KEY, SCOPE);
 		const seen = stubFetch(() => ({ status: 200, body: ANTHROPIC_OK_BODY }));
 
-		const { client, portkeyStatus } = await buildInferenceModelClientWithStatus({
+		const { client, portkeyStatus, providerConfigured } = await buildInferenceModelClientWithStatus({
 			scope: SCOPE,
 			secretsStore: store,
 			config: routableConfig(),
 			portkey: portkeyOn({ fallbackToProvider: false }),
 		});
 		expect(portkeyStatus).toBe("unconfigured");
+		expect(providerConfigured, "portkey unconfigured → not configured").toBe(false);
 		expect(client, "fail-closed → the no-op client (never the provider path)").toBe(noopModelClient);
 		expect(await client.complete("memory_pollinating", "x")).toBe("");
 		expect(seen, "NO call is made — not Portkey, not the provider").toHaveLength(0);
@@ -202,13 +204,14 @@ describe("b-AC-4 precedence + fallback: missing key hard-errors (fail-closed) in
 		await store.setSecret("ANTHROPIC_API_KEY", PROVIDER_KEY, SCOPE);
 		const seen = stubFetch(() => ({ status: 200, body: ANTHROPIC_OK_BODY }));
 
-		const { client, portkeyStatus } = await buildInferenceModelClientWithStatus({
+		const { client, portkeyStatus, providerConfigured } = await buildInferenceModelClientWithStatus({
 			scope: SCOPE,
 			secretsStore: store,
 			config: routableConfig(),
 			portkey: portkeyOn({ fallbackToProvider: true }),
 		});
 		expect(portkeyStatus, "a missing key is unconfigured even with fallback ON").toBe("unconfigured");
+		expect(providerConfigured, "a missing key is not configured even with fallback ON").toBe(false);
 		expect(client).toBe(noopModelClient);
 		expect(seen, "fallback never papers over a MISSING key").toHaveLength(0);
 	});

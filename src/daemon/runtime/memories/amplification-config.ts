@@ -34,24 +34,14 @@
 
 import { z } from "zod";
 
+import { OnByDefaultFlag } from "../../../shared/bool-flag.js";
+
 /** The default for `HONEYCOMB_FANOUT_BATCH` — ON (the live cost-reducing posture, parent AC-9). */
 export const DEFAULT_FANOUT_BATCH = true;
 /** The default in-flight DeepLake-query ceiling for recall + grading (AC-62d.2.1). */
 export const DEFAULT_RECALL_MAX_CONCURRENCY = 6;
 /** The floor for the concurrency knob: a pool must admit at least one task (no deadlock). */
 export const MIN_RECALL_MAX_CONCURRENCY = 1;
-
-/**
- * A boolean flag read from an env string, DEFAULT-TRUE: only the explicit off tokens
- * (`false`/`0`) flip it off; absent / anything else stays the live ON posture. This is
- * the inverse of the pipeline-config `BoolFlag` (which is false-safe), because the
- * PRD-062d knobs default to the cost-reducing posture and the flag is the OFF-switch.
- */
-const OnByDefaultFlag = z.preprocess((raw) => {
-	if (typeof raw === "boolean") return raw;
-	if (raw === undefined || raw === null || raw === "") return true; // unset → the live ON default.
-	return !(raw === "false" || raw === "0"); // only explicit off tokens disable it.
-}, z.boolean());
 
 /**
  * The concurrency knob: a positive integer, clamped UP to {@link MIN_RECALL_MAX_CONCURRENCY}.

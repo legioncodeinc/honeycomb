@@ -21,7 +21,17 @@ import {
 } from "../../../../src/daemon/runtime/secrets/contracts.js";
 import { SecretsStore } from "../../../../src/daemon/runtime/secrets/store.js";
 import type { InferenceConfig } from "../../../../src/daemon/runtime/inference/contracts.js";
-import { buildInferenceModelClient } from "../../../../src/daemon/runtime/inference/model-client-factory.js";
+import {
+	buildInferenceModelClient,
+	buildInferenceModelClientWithStatus,
+} from "../../../../src/daemon/runtime/inference/model-client-factory.js";
+import {
+	EXTRACTION_PROVIDER_AUTO_RESOLVED,
+	EXTRACTION_PROVIDER_NONE,
+	isExtractionEnabled,
+	resolveEffectiveExtractionProvider,
+	resolvePipelineConfig,
+} from "../../../../src/daemon/runtime/pipeline/config.js";
 
 const SCOPE: SecretScope = { org: "acme", workspace: "backend" };
 
@@ -200,5 +210,103 @@ describe("AC-T factory: routable config → working RouterModelClient", () => {
 		});
 		expect(client).not.toBe(noopModelClient);
 		await expect(client.complete("memory_pollinating", "go")).rejects.toThrow();
+	});
+});
+
+describe("providerConfigured: honest, fail-closed on CREDENTIAL resolution (the false-positive fix)", () => {
+	it("routable config but NO stored key → providerConfigured is FALSE even though the client is non-noop", async () => {
+		// The exact false positive: `isRoutable` is satisfied (account + workload declared), so the
+		// factory returns a REAL RouterModelClient — but the `${ANTHROPIC_API_KEY}` secret is absent,
+		// so every runtime call would silently no-op. The honest signal must be FALSE (so `/health`
+		// says `unconfigured` and the `'auto'` extraction gate stays disabled), NOT the coarse
+		// `client !== noopModelClient` identity that this bug reported as `true`.
+		const { client, providerConfigured, portkeyStatus } = await buildInferenceModelClientWithStatus({
+			scope: SCOPE,
+			secretsStore: makeStore(), // no secret stored
+			config: routableConfig(),
+		});
+		expect(portkeyStatus).toBe("off");
+		expect(client, "the client is still a real router client (so the pipeline wires)").not.toBe(noopModelClient);
+		expect(providerConfigured, "but the credential is ABSENT → fail-closed to false").toBe(false);
+	});
+
+	it("routable config WITH the stored key present → providerConfigured is TRUE", async () => {
+		const store = makeStore();
+		expect((await store.setSecret("ANTHROPIC_API_KEY", "sk-ant-secret-KEY", SCOPE)).ok).toBe(true);
+		const { client, providerConfigured } = await buildInferenceModelClientWithStatus({
+			scope: SCOPE,
+			secretsStore: store,
+			config: routableConfig(),
+		});
+		expect(client).not.toBe(noopModelClient);
+		expect(providerConfigured, "the ${SECRET_REF} key resolves → configured").toBe(true);
+	});
+
+	it("a stored key under a DIFFERENT name than the account's apiKeyRef → providerConfigured is FALSE", async () => {
+		// Presence is checked against the account's REFERENCED name, not any stored secret. A key
+		// stored under the wrong name does not make the declared provider usable.
+		const store = makeStore();
+		await store.setSecret("SOME_OTHER_KEY", "sk-ant-secret-KEY", SCOPE);
+		const { providerConfigured } = await buildInferenceModelClientWithStatus({
+			scope: SCOPE,
+			secretsStore: store,
+			config: routableConfig(), // references ${ANTHROPIC_API_KEY}
+		});
+		expect(providerConfigured).toBe(false);
+	});
+
+	it("no config (absent path) → providerConfigured is FALSE (the honest no-provider posture)", async () => {
+		const { client, providerConfigured } = await buildInferenceModelClientWithStatus({
+			scope: SCOPE,
+			secretsStore: makeStore(),
+			config: join(base, "does-not-exist.yaml"),
+		});
+		expect(client).toBe(noopModelClient);
+		expect(providerConfigured).toBe(false);
+	});
+
+	it("a provider/model override does NOT change the credential check (apiKeyRef is preserved) → key present stays TRUE", async () => {
+		const store = makeStore();
+		await store.setSecret("ANTHROPIC_API_KEY", "sk-ant-secret-KEY", SCOPE);
+		const { providerConfigured } = await buildInferenceModelClientWithStatus({
+			scope: SCOPE,
+			secretsStore: store,
+			config: routableConfig(),
+			providerModelOverride: { provider: "anthropic", model: "claude-opus-4-8" },
+		});
+		expect(providerConfigured, "the override never touches apiKeyRef → the same key still resolves").toBe(true);
+	});
+});
+
+describe("the 'auto' extraction gate follows the CORRECTED provider signal (end-to-end)", () => {
+	// This is the gate assemble.ts drives: it feeds `built.providerConfigured` (now credential-aware)
+	// into `resolveEffectiveExtractionProvider`. We compose the two here to prove the false positive is
+	// closed — a routable-but-keyless config no longer flips `'auto'` on.
+	const enabledAutoConfig = () => resolvePipelineConfig({ read: () => ({ enabled: true }) }); // extractionProvider defaults to 'auto'
+
+	it("routable config, NO key → 'auto' collapses to 'none' → extraction DISABLED", async () => {
+		const { providerConfigured } = await buildInferenceModelClientWithStatus({
+			scope: SCOPE,
+			secretsStore: makeStore(), // no key
+			config: routableConfig(),
+		});
+		expect(providerConfigured).toBe(false);
+		const resolved = resolveEffectiveExtractionProvider(enabledAutoConfig(), providerConfigured);
+		expect(resolved.extractionProvider).toBe(EXTRACTION_PROVIDER_NONE);
+		expect(isExtractionEnabled(resolved)).toBe(false);
+	});
+
+	it("routable config, key present → 'auto' collapses to the resolved marker → extraction ENABLED", async () => {
+		const store = makeStore();
+		await store.setSecret("ANTHROPIC_API_KEY", "sk-ant-secret-KEY", SCOPE);
+		const { providerConfigured } = await buildInferenceModelClientWithStatus({
+			scope: SCOPE,
+			secretsStore: store,
+			config: routableConfig(),
+		});
+		expect(providerConfigured).toBe(true);
+		const resolved = resolveEffectiveExtractionProvider(enabledAutoConfig(), providerConfigured);
+		expect(resolved.extractionProvider).toBe(EXTRACTION_PROVIDER_AUTO_RESOLVED);
+		expect(isExtractionEnabled(resolved)).toBe(true);
 	});
 });
