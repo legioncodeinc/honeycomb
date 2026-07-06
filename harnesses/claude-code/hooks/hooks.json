@@ -7,7 +7,7 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/bundle/index.js\"",
-            "timeout": 10
+            "timeout": 30
           }
         ]
       }

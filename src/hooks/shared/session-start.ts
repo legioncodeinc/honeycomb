@@ -221,20 +221,42 @@ export async function runSessionStart(input: HookInput, deps: SessionStartDeps):
 	// leads so it is the first thing the user sees.
 	const additionalContext = joinBlocks(noticeBlock, joinBlocks(contextBlock, primeBlock));
 
-	// Step 7: pull team/org skills. Fail-soft.
-	await safeVoid(() => seams.autoPullSkills(credential));
-
-	// Step 7b (PRD-033 R-1): pull team/org synced ASSETS and install them in-process. Unlike
-	// the skills pull (a fire-and-forget daemon POST), this runs the thin-client install locally
-	// (the daemon returns rows; this client writes the files). Idempotent + fail-soft + bounded by
-	// the assets thin client's own 5s budget. Ordered right after the skills pull, before graph-pull.
-	await safeVoid(() => seams.autoPullAssets(credential));
-
-	// Step 8: spawn the detached graph-pull worker (fire-and-forget). Fail-soft.
-	await safeVoid(() => seams.spawnGraphPull(meta));
+	// Steps 7, 7b, 8: side-effecting hygiene pulls (skills, assets, graph). These do NOT touch
+	// `additionalContext` — they are background hygiene, not recall. Measured on a warm daemon
+	// the skills pull alone takes ~5s (its own loopback POST budget) and the assets pull ~3s;
+	// awaiting them in the session-start hot path pushed total wall clock past Claude Code's
+	// SessionStart hook timeout, so the hook was cancelled and the prime never reached the model.
+	// Fire them off in the background AFTER the response is computed, with a swallow-rejection
+	// guard so a late failure can never crash the process (fail-soft preserved). The seams are
+	// already idempotent + bounded by their own budgets, so a duplicate fire on a re-invocation
+	// is a no-op. `spawnGraphPull` was already fire-and-forget at the seam level; the same shape
+	// now applies to the skills + assets pulls.
+	void backgroundPull(() => seams.autoPullSkills(credential));
+	void backgroundPull(() => seams.autoPullAssets(credential));
+	void backgroundPull(() => seams.spawnGraphPull(meta));
 
 	// Step 9: return the rendered block; the shim chooses the channel (c-AC-5).
 	return additionalContext === "" ? { ok: true } : { ok: true, additionalContext };
+}
+
+/**
+ * Run a session-start side-effect in the background, swallowing any rejection OR synchronous
+ * throw so a late failure (after the response has been returned) can never become an unhandled
+ * rejection and crash the hook process, and a partial seam object missing the method (or a
+ * method that throws synchronously before returning a promise) is tolerated the same as an
+ * async rejection. Mirrors the `safeVoid` fail-soft contract but without awaiting — the call
+ * returns immediately, the work continues on the event loop. The seams are already idempotent +
+ * bounded by their own timeouts, so this never leaks indefinite work.
+ */
+function backgroundPull(fn: () => Promise<void>): Promise<void> {
+	try {
+		return Promise.resolve(fn()).catch(() => {
+			// Fail-soft: a background pull failure (async rejection) is swallowed.
+		});
+	} catch {
+		// Fail-soft: a synchronous throw from `fn` (e.g. a missing seam method) is swallowed.
+		return Promise.resolve();
+	}
 }
 
 /**

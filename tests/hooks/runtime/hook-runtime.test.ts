@@ -80,7 +80,9 @@ describe("c-AC-4 session-start: renders prior context via the renderer + drains 
 		// The renderer asks the daemon /context; the recording client returns a block.
 		const { client } = recordingClient(200, { additionalContext: "GOALS: ship 021c." });
 		const pipeline = recordingPipeline(null);
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: pipeline });
+		// Inject a no-op prime so the test does NOT depend on the real prime renderer's behavior
+		// (which fetches 127.0.0.1:3850 and would either time out or pollute the assertion).
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: pipeline, prime: createFakePrimeRenderer("") });
 
 		const outcome = await runtime.runEvent(
 			createClaudeCodeShim(),
@@ -99,7 +101,7 @@ describe("c-AC-4 session-start: renders prior context via the renderer + drains 
 			priority: 10,
 			dedupKey: "welcome",
 		});
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: pipeline });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: pipeline, prime: createFakePrimeRenderer("") });
 
 		const outcome = await runtime.runEvent(
 			createClaudeCodeShim(),
@@ -123,7 +125,7 @@ describe("c-AC-4 session-start: renders prior context via the renderer + drains 
 			backend,
 		});
 		const { client } = recordingClient(200, { additionalContext: "" });
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: pipeline });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: pipeline, prime: createFakePrimeRenderer("") });
 		const outcome = await runtime.runEvent(
 			createClaudeCodeShim(),
 			{ name: "SessionStart", payload: { source: "startup" } },
@@ -139,7 +141,7 @@ describe("c-AC-4 session-start: renders prior context via the renderer + drains 
 				throw new Error("backend exploded");
 			},
 		};
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: throwingPipeline });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: throwingPipeline, prime: createFakePrimeRenderer("") });
 		const outcome = await runtime.runEvent(
 			createClaudeCodeShim(),
 			{ name: "SessionStart", payload: {} },
@@ -368,7 +370,7 @@ describe("c-AC-5 claude-code binary: native stdin event drives the runtime (shim
 
 	it("session-start emits the rendered context block on stdout (model-only additionalContext)", async () => {
 		const { client } = recordingClient(200, { additionalContext: "RULES: be concise." });
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null) });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null), prime: createFakePrimeRenderer("") });
 		const surface = io(JSON.stringify({ hook_event_name: "SessionStart", session_id: "s", source: "startup" }));
 		await runHookBinary({ shim: createClaudeCodeShim(), runtime, io: surface });
 		expect(surface.out).toHaveLength(1);
@@ -477,7 +479,7 @@ describe("PRD-045g g-AC-2: the runtime injects the REAL auto-pull seam on sessio
 	it("calls autoPullSkills ONCE on session-start (the seam is wired into SessionStartDeps)", async () => {
 		const { client } = recordingClient(200, { additionalContext: "" });
 		const seams = recordingSeams();
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null), seams });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null), seams, prime: createFakePrimeRenderer("") });
 		await runtime.runEvent(createClaudeCodeShim(), { name: "SessionStart", payload: { source: "startup" } }, META);
 		expect(seams.pulls, "auto-pull ran at session start").toBe(1);
 	});
@@ -502,7 +504,7 @@ describe("PRD-045g g-AC-2: the runtime injects the REAL auto-pull seam on sessio
 				throw new Error("pull exploded");
 			},
 		};
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null), seams: throwingSeams });
+		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null), seams: throwingSeams, prime: createFakePrimeRenderer("") });
 		const outcome = await runtime.runEvent(
 			createClaudeCodeShim(),
 			{ name: "SessionStart", payload: { source: "startup" } },
