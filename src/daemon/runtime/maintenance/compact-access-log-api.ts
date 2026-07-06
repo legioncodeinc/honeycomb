@@ -36,7 +36,7 @@
 
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import { isOk, type StorageRow } from "../../storage/result.js";
-import { sLiteral, sqlIdent } from "../../storage/sql.js";
+import { sqlIdent } from "../../storage/sql.js";
 import { resolveScopeOrLocalDefault } from "../scope.js";
 import type { Daemon } from "../server.js";
 import {

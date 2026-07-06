@@ -151,6 +151,7 @@ export function buildResolvedOutcomesSql(limit: number): string {
 	const verdictCol = sqlIdent("verdict");
 	const statusCol = sqlIdent("status");
 	const versionCol = sqlIdent("version");
+	const createdAtCol = sqlIdent("created_at");
 	const memIdCol = sqlIdent("id");
 	const confidenceCol = sqlIdent("confidence");
 	const isDeletedCol = sqlIdent("is_deleted");
@@ -166,6 +167,11 @@ export function buildResolvedOutcomesSql(limit: number): string {
 		`WHERE c.${versionCol} = (SELECT MAX(i.${versionCol}) FROM "${conflictsTbl}" i WHERE i.${idCol} = c.${idCol}) ` +
 		`AND c.${statusCol} = ${sLiteral("resolved")} AND c.${verdictCol} = ${sLiteral("supersede")} ` +
 		`AND c.${winnerCol} IS NOT NULL AND c.${winnerCol} <> '' ` +
+		// ORDER BY created_at DESC so the LIMIT holds out the MOST RECENT resolved outcomes
+		// (the recency-based evaluation contract runCalibratePass documents). Without this the
+		// held-out slice was arbitrary — Aikido + CodeRabbit flagged the LIMIT-without-ORDER BY.
+		// Tie-broken by id for deterministic pagination (two rows can share a created_at stamp).
+		`ORDER BY c.${createdAtCol} DESC, c.${idCol} DESC ` +
 		`LIMIT ${safeLimit}`
 	);
 }
@@ -299,7 +305,12 @@ export async function runCalibratePass(
 			ok: true,
 			nSamples: samples.length,
 			identity: true,
-			candidateEce: expectedCalibrationError(heldOut, candidate),
+			// Per the CalibrationSummary contract: candidateEce is `0` for the identity model
+			// (the held-out ECE of an identity curve is not a meaningful gate metric — there is
+			// no candidate curve to evaluate). The priorEce is still computed (the prior's ECE
+			// is meaningful regardless of what the candidate turned out to be). Aikido flagged
+			// the prior non-zero candidateEce as a contract contradiction.
+			candidateEce: 0,
 			priorEce: expectedCalibrationError(heldOut, prior),
 			adopted: false,
 			written: false,

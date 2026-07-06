@@ -31,7 +31,7 @@ The user warned that PRD status fields are inaccurate. Recon confirms: **the mat
 | **L-W7** | 058c.3.x / 058e.3.x | Ship the reverify scheduler: a periodic maintenance worker (on the local job queue, same pattern as compaction) that calls `reverify-schedule.ts`'s `isDueForReverify` over memories and POSTs to the stale-ref trigger when due. | typescript-node-worker-bee | 2 | OPEN |
 | **L-W8** | 058e.2.x | Ship the access-log compaction loop: a periodic worker that calls `compactAccessLog` to fold raw `memory_access` events into `access_count` + advance the watermark. Idempotent (the `(at, id)` cursor makes it so). | typescript-node-worker-bee | 2 | OPEN |
 | **L-W9** | 058e.2.x | Ship the calibration refit worker: a periodic job that reads resolved outcomes from `memory_conflicts`, calls `fitIsotonic` + `shouldAdoptRefit`, writes the adopted curve to `memory_calibration`. | typescript-node-worker-bee | 2 | OPEN |
-| **L-W10** | 058d.2.x | Ship the dashboard lifecycle/health panel: a new view in `src/dashboard/views.ts` rendering `H=A·C·(1−σ)·κ`, freshness, open-conflict count, stale-ref count, calibration ECE. Consumes the already-shipped `GET /api/memories/calibration` + `GET /api/memories/history?type=lifecycle`. | typescript-node-worker-bee | 2 | OPEN |
+| **L-W10** | 058d.2.x | Ship the dashboard lifecycle/health panel: a new view in `src/dashboard/views.ts` rendering `H=A·C·(1−σ)·κ`, freshness, open-conflict count, stale-ref count, calibration ECE. Consumes the already-shipped `GET /api/memories/calibration` + `GET /api/memories/history?type=lifecycle`. | typescript-node-worker-bee | 2 | DEFERRED → follow-up (backend shipped; UI panel is a separate wave) |
 | **L-W11** | 058d.1.3 | Ship the settings-page flag reference: render `LIFECYCLE_FLAG_REFERENCE` onto the settings view so the knobs are visible + documented. | typescript-node-worker-bee | 2 | OPEN |
 | **L-X1** | all | Full `npm run ci` green (typecheck + jscpd + audit:sql + vitest) | orchestrator | 3 | OPEN |
 | **L-X2** | all | Verify on the live DB: after a recall + a write, confirm `access_count > 0`, `last_reinforced_at` advanced, a conflict row exists for a real contradiction. | orchestrator | 3 | OPEN |
@@ -50,7 +50,7 @@ The user warned that PRD status fields are inaccurate. Recon confirms: **the mat
 
 ## Wave plan
 
-```
+```text
 Wave 1 (retrieval-worker-bee): wire the 4 inert recall seams + lifecycle config
   → L-W1 (recordRecallAccess), L-W2 (activationSource), L-W3 (calibration),
     L-W4 (stalenessSource), L-W5 (lifecycle config)
