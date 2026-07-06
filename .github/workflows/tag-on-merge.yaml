@@ -1,0 +1,53 @@
+name: Tag on merge
+
+# When a version bump merges to main (spec #2: the bump lands ON the PR, so main
+# already carries the new package.json version), push the matching vX.Y.Z tag so
+# the existing release.yaml publish pipeline fires.
+#
+# WHY A PAT: tags pushed with the default GITHUB_TOKEN do NOT trigger other
+# workflows, so a token-pushed tag would never start release.yaml. We push with
+# secrets.RELEASE_PAT (a fine-grained PAT with contents:write on this repo) so
+# the tag push is seen as an external event and release.yaml runs. If you would
+# rather not manage a PAT, convert release.yaml to trigger on push-to-main
+# instead (see RELEASE-AUTOMATION.md).
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: tag-on-merge
+  cancel-in-progress: false
+
+permissions:
+  contents: read # the PAT (not GITHUB_TOKEN) performs the tag push
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Create + push tag if the version is new
+        env:
+          GH_PAT: ${{ secrets.RELEASE_PAT }}
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          TAG="v$VERSION"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists — nothing to do."
+            exit 0
+          fi
+          if [ -z "${GH_PAT}" ]; then
+            echo "::error::RELEASE_PAT is not set — cannot push a tag that triggers release.yaml."
+            exit 1
+          fi
+          git config user.name  "honeycomb-release-bot"
+          git config user.email "release-bot@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push "https://x-access-token:${GH_PAT}@github.com/${GITHUB_REPOSITORY}.git" "$TAG"
+          echo "Pushed $TAG — release.yaml will publish it."

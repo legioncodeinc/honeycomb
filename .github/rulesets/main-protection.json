@@ -29,7 +29,8 @@
           { "context": "Quality gate (Node 22.x)" },
           { "context": "Quality gate (Node 24.x)" },
           { "context": "Windows smoke (build + test)" },
-          { "context": "license/cla" }
+          { "context": "license/cla" },
+          { "context": "release-gate" }
         ]
       }
     }
