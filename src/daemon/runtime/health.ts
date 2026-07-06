@@ -198,6 +198,19 @@ export interface HealthReasons {
 		readonly code: typeof CAPTURE_BLOCKED_TENANCY_UNCONFIRMED;
 		readonly guidance: string;
 	};
+	/**
+	 * Memory-formation observability: memories the controlled-write stage actually committed since boot.
+	 * The glanceable "is this daemon forming memories?" signal — it exists BECAUSE the recurring storage
+	 * probe is disabled in local-queue mode (PRD-066 idle-cost boundary), so `storage: reachable` no
+	 * longer implies writes are landing. `committedSinceBoot: 0` on a busy daemon is the loud symptom of
+	 * a stalled pipeline. Present only when the composition root wires the tracker. Carries NO secret —
+	 * a count, an ISO timestamp, and a closed-set action word.
+	 */
+	readonly memoryFormation?: {
+		readonly committedSinceBoot: number;
+		readonly lastCommittedAt?: string;
+		readonly lastAction?: string;
+	};
 }
 
 /**
@@ -272,6 +285,17 @@ export interface HealthDetailInputs {
 	 * `capture_blocked_tenancy_unconfirmed` reason. Read live so confirming clears it. Defaults `false`.
 	 */
 	readonly captureTenancyUnconfirmed?: boolean;
+	/**
+	 * Memories committed by the controlled-write stage since boot (the in-process
+	 * {@link import("./pipeline/memory-formation.js").MemoryFormationSnapshot}). Omitted when the
+	 * composition root does not wire the tracker (bare `createDaemon` / the deterministic unit suite);
+	 * present → surfaced verbatim as `reasons.memoryFormation`.
+	 */
+	readonly memoryFormation?: {
+		readonly committedSinceBoot: number;
+		readonly lastCommittedAt?: string;
+		readonly lastAction?: string;
+	};
 }
 
 /**
@@ -330,6 +354,21 @@ export function buildHealthDetail(inputs: HealthDetailInputs): HealthDetail {
 					captureTenancyUnconfirmed: {
 						code: CAPTURE_BLOCKED_TENANCY_UNCONFIRMED,
 						guidance: TENANCY_UNCONFIRMED_GUIDANCE,
+					},
+				}
+			: {}),
+		// Memory-formation signal — present only when the composition root wires the tracker. Normalized
+		// defensively (non-negative integer count) and surfaced verbatim otherwise.
+		...(inputs.memoryFormation !== undefined
+			? {
+					memoryFormation: {
+						committedSinceBoot: Math.max(0, Math.trunc(inputs.memoryFormation.committedSinceBoot)),
+						...(inputs.memoryFormation.lastCommittedAt !== undefined
+							? { lastCommittedAt: inputs.memoryFormation.lastCommittedAt }
+							: {}),
+						...(inputs.memoryFormation.lastAction !== undefined
+							? { lastAction: inputs.memoryFormation.lastAction }
+							: {}),
 					},
 				}
 			: {}),

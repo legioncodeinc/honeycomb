@@ -141,6 +141,25 @@ describe("AC-2 /health detail NAMES the down subsystem, not a bare degraded", ()
 		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: false }).reasons?.embeddingsState).toBe("off");
 	});
 
+	it("memory-formation: omitted when unwired; surfaced (normalized) when the tracker is supplied", () => {
+		// Unwired (no snapshot) → the reason is ABSENT, exactly like the other additive blocks.
+		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.memoryFormation).toBeUndefined();
+		// Wired with commits → surfaced verbatim with a non-negative integer count + last-write detail.
+		const formed = buildHealthDetail({
+			status: "ok",
+			embeddingsEnabled: true,
+			memoryFormation: { committedSinceBoot: 3, lastCommittedAt: "2026-07-05T23:15:04.611Z", lastAction: "inserted" },
+		});
+		expect(formed.reasons?.memoryFormation).toEqual({
+			committedSinceBoot: 3,
+			lastCommittedAt: "2026-07-05T23:15:04.611Z",
+			lastAction: "inserted",
+		});
+		// Fresh daemon, nothing formed yet → zero (the glanceable "stalled?" symptom), no last-* fields.
+		const zero = buildHealthDetail({ status: "ok", embeddingsEnabled: true, memoryFormation: { committedSinceBoot: 0 } });
+		expect(zero.reasons?.memoryFormation).toEqual({ committedSinceBoot: 0 });
+	});
+
 
 	it("schema is best-effort 'ok' by default; 'missing_table' only when a required table is known-missing", () => {
 		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.schema).toBe("ok");

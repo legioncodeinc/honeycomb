@@ -58,20 +58,30 @@ describe("PRD-066e local queue diagnostics", () => {
 		});
 	});
 
-	it("AC-9: fleet, multi-device, and unknown topologies are blocked without explicit opt-in", () => {
-		for (const value of ["fleet", "multi-device", undefined]) {
+	it("AC-9: fleet and multi-device topologies stay on the shared queue without explicit opt-in", () => {
+		for (const value of ["fleet", "multi-device"]) {
 			const topology = resolveLocalQueueTopology({ HONEYCOMB_TOPOLOGY: value });
 			expect(topology.eligibleForDefaultOn).toBe(false);
 		}
 	});
 
-	it("labels unrecognized topology env values as env-sourced unknowns", () => {
+	it("undeclared (unknown) topology now DEFAULTS to the local queue (reverses PRD-066e)", () => {
+		const topology = resolveLocalQueueTopology({ HONEYCOMB_TOPOLOGY: undefined });
+
+		expect(topology).toMatchObject({
+			mode: "unknown",
+			source: "default",
+			eligibleForDefaultOn: true,
+		});
+	});
+
+	it("labels unrecognized topology env values as env-sourced unknowns, still default-on", () => {
 		const topology = resolveLocalQueueTopology({ HONEYCOMB_TOPOLOGY: "shared-workstation" });
 
 		expect(topology).toMatchObject({
 			mode: "unknown",
 			source: "env",
-			eligibleForDefaultOn: false,
+			eligibleForDefaultOn: true,
 		});
 	});
 

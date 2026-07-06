@@ -115,10 +115,12 @@ import { mountNotificationsApi } from "./notifications/api.js";
 import { mountOntologyApi } from "./ontology/api.js";
 import {
 	controlledWriteFanOut,
+	createMemoryFormationTracker,
 	createPipelineHandlers,
 	createStageWorker,
 	decisionFanOut,
 	extractionFanOut,
+	type MemoryFormationTracker,
 	noopModelClient,
 	type PipelineConfig,
 	resolvePipelineConfig,
@@ -2005,6 +2007,23 @@ function makePipelineEntryEnqueuer(
 }
 
 /**
+ * Wrap the controlled-write `onOutcome` fan-out so a committed memory is RECORDED to the
+ * in-process {@link MemoryFormationTracker} (the `/health` "are memories forming?" signal) before
+ * the fan-out runs. Recording never throws and only counts committed outcomes (the tracker filters),
+ * so the count lands even if the recoverable fan-out enqueue later fails. Generic over the job/outcome
+ * shapes to avoid importing the pipeline stage types here; `O` is constrained to what the tracker reads.
+ */
+function withMemoryFormationTracking<J, O extends { action: string; memoryId?: string }>(
+	fanOut: (job: J, outcome: O) => Promise<void> | void,
+	tracker: MemoryFormationTracker | undefined,
+): (job: J, outcome: O) => Promise<void> {
+	return async (job: J, outcome: O): Promise<void> => {
+		if (tracker !== undefined) tracker.record(outcome);
+		await fanOut(job, outcome);
+	};
+}
+
+/**
  * Build the daemon-resident MEMORY-PIPELINE stage worker (PRD-045a a-AC-1) — the live
  * CONSUMER PRD-006 shipped but never constructed. It leases the FIVE pipeline kinds
  * (`memory_extraction` / `memory_decision` / `memory_controlled_write` /
@@ -2034,6 +2053,7 @@ async function buildPipelineWorker(
 	backoff: PollBackoffConfig,
 	portkeyDeps?: PortkeyWorkerDeps,
 	logger?: StageWorkerLogger,
+	memoryFormation?: MemoryFormationTracker,
 ): Promise<StageWorker> {
 	// Resolve the pipeline config fail-soft: a malformed knob must NEVER take the daemon
 	// down — degrade to the schema's false-safe defaults (every stage gate defaults OFF,
@@ -2115,7 +2135,10 @@ async function buildPipelineWorker(
 			storage,
 			config,
 			embed: embed.client,
-			onOutcome: controlledWriteFanOut(queue),
+			// Record the committed-memory signal BEFORE the graph-persist fan-out, so the health tracker
+			// counts the write even if the (recoverable) fan-out enqueue later throws. `record` never
+			// throws and only counts committed outcomes (the tracker filters internally).
+			onOutcome: withMemoryFormationTracking(controlledWriteFanOut(queue), memoryFormation),
 			onConflict: conflictHook,
 		},
 		graphPersist: { storage, scope: queryScope, config },
@@ -2285,6 +2308,11 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	});
 
 	const captureDroppedEvents = createCaptureDroppedEventsCounter();
+	// The committed-memories signal for `/health` (the glanceable "is this daemon forming memories?"
+	// answer). Fed by the controlled-write stage's `onOutcome` seam; read on each health call. Especially
+	// load-bearing in local-queue mode, where the recurring storage probe is off so `storage: reachable`
+	// no longer implies writes are landing.
+	const memoryFormation = createMemoryFormationTracker();
 	// PRD-073b: the per-reason gated-captures counter (surfaced on the health detail). PRD-073c: the
 	// single-slot in-memory pending-link store shared between `/setup/login` (the pending-link runner)
 	// and the `/setup/tenancy*` routes.
@@ -2428,6 +2456,9 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			captureGated: gatedCaptures.read(),
 			captureDormantNoProject: !hasBoundProjectOnDisk({ workspace: scope.workspace ?? "" }),
 			captureTenancyUnconfirmed: !isTenancyConfirmed({}),
+			// The committed-memories signal, read LIVE per health call — a glanceable "is the pipeline
+			// forming memories?" answer that needs no DeepLake round-trip.
+			memoryFormation: memoryFormation.snapshot(),
 		});
 
 	// ── PRD-063c (c-D-2 / c-AC-1 / c-AC-3): the Cohere-via-Portkey rerank seam, late-bound.
@@ -2994,6 +3025,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 						pollBackoff,
 						portkeyWorkerDeps,
 						workerLogger,
+						memoryFormation,
 					);
 					// PRD-062b (AC-4): when consolidation is ON, DEFER starting the pipeline
 					// worker's own loop — the single lease coordinator (built at the pollinating

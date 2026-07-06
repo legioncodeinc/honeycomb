@@ -24,7 +24,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { assembleDaemon } from "../../../src/daemon/runtime/assemble.js";
 import type { RuntimeConfig } from "../../../src/daemon/runtime/config.js";
 import { createRequestLogger } from "../../../src/daemon/runtime/logger.js";
@@ -81,9 +81,14 @@ async function waitForHealthStatus(
 let runtimeDir: string;
 beforeEach(() => {
 	runtimeDir = mkdtempSync(join(tmpdir(), "hc-fleet-health-"));
+	// The 503-degraded ↔ 200-healthy transition is driven by the live storage probe, which runs only
+	// on the shared-queue path (in local-queue mode the probe is off per PRD-066's zero-idle-reads
+	// boundary). Pin to the shared queue so the default-on local queue does not silence the probe.
+	vi.stubEnv("HONEYCOMB_LOCAL_QUEUE_ENABLED", "false");
 });
 afterEach(() => {
 	rmSync(runtimeDir, { recursive: true, force: true });
+	vi.unstubAllEnvs();
 });
 
 describe("PRD-003a a-AC-2 — fleet defer: 503 degraded → healthy on /health with no restart", () => {
