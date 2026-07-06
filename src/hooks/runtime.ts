@@ -212,7 +212,18 @@ export function createHookRuntime(options: HookRuntimeOptions = {}): HookRuntime
 			if (input === undefined) {
 				return { result: { ok: true }, dropped: true };
 			}
-			return dispatchLifecycle(input, deps, captureEnv, notifications, summarySpawn, prime, seams, onboardingNotice);
+			return dispatchLifecycle(
+				input,
+				deps,
+				captureEnv,
+				notifications,
+				summarySpawn,
+				prime,
+				seams,
+				onboardingNotice,
+				// Thread the shim's optional off-process hygiene spawn through to session-start.
+				shim.spawnHygieneChild !== undefined ? shim.spawnHygieneChild.bind(shim) : undefined,
+			);
 		},
 	};
 }
@@ -232,6 +243,7 @@ async function dispatchLifecycle(
 	prime: PrimeRenderer,
 	seams: SessionStartSeams,
 	onboardingNotice: OnboardingNoticeGate,
+	spawnHygieneChild: ((meta: HookSessionMeta) => void) | undefined,
 ): Promise<HookEventOutcome> {
 	try {
 		switch (input.event) {
@@ -242,7 +254,17 @@ async function dispatchLifecycle(
 				// PRD-045g (g-AC-2): the REAL step seams are injected here so `autoPullSkills`
 				// runs a real (idempotent, fail-soft, time-budgeted) loopback pull instead of the
 				// no-op default — freshly-mined team skills reach this session at its start.
-				const sessionDeps: SessionStartDeps = { ...deps, captureEnv, prime, seams, onboardingNotice };
+				const sessionDeps: SessionStartDeps = {
+					...deps,
+					captureEnv,
+					prime,
+					seams,
+					onboardingNotice,
+					// Thread the shim's optional off-process hygiene spawn: when the harness
+					// implements `spawnHygieneChild`, session-start calls it instead of the three
+					// in-process hygiene seams (the parent stays free of hygiene I/O).
+					...(spawnHygieneChild !== undefined ? { spawnHygieneChild } : {}),
+				};
 				const result = await runSessionStart(input, sessionDeps);
 				// c-AC-4: drain the 020d notifications pipeline (call it; do not reimplement).
 				const drain = await drainNotificationsSoft(notifications);

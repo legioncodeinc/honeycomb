@@ -563,6 +563,18 @@ export interface SessionStartDeps extends HookCoreDeps {
 	 * absorbed and no notice is shown (never break session-start over the notice — 059a impl-note).
 	 */
 	readonly onboardingNotice?: OnboardingNoticeGate;
+	/**
+	 * OPTIONAL off-process hygiene spawn. When supplied (the harness shim implements
+	 * `HarnessShim.spawnHygieneChild`), session-start calls this INSTEAD of the three
+	 * in-process hygiene seams (`autoPullSkills` / `autoPullAssets` / `spawnGraphPull`).
+	 * The implementation spawns a detached child that runs the three pulls in its OWN
+	 * process; the parent returns immediately with no in-process hygiene I/O pending, so
+	 * its event loop empties and Node exits promptly after writing the response. See
+	 * `HarnessShim.spawnHygieneChild` for the latency-budget + Windows-libuv rationale.
+	 * ABSENT → session-start runs the three hygiene seams in-process via `backgroundPull`
+	 * (the prior behavior — every harness that has not opted into the off-process path).
+	 */
+	readonly spawnHygieneChild?: (meta: HookSessionMeta) => void;
 }
 
 /**

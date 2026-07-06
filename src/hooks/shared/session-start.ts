@@ -223,30 +223,56 @@ export async function runSessionStart(input: HookInput, deps: SessionStartDeps):
 
 	// Steps 7, 7b, 8: side-effecting hygiene pulls (skills, assets, graph). These do NOT touch
 	// `additionalContext` — they are background hygiene, not recall. Measured on a warm daemon
-	// the skills pull alone takes ~5s (its own loopback POST budget) and the assets pull ~3s;
-	// awaiting them in the session-start hot path pushed total wall clock past Claude Code's
-	// SessionStart hook timeout, so the hook was cancelled and the prime never reached the model.
-	// Fire them off in the background AFTER the response is computed, with a swallow-rejection
-	// guard so a late failure can never crash the process (fail-soft preserved). The seams are
-	// already idempotent + bounded by their own budgets, so a duplicate fire on a re-invocation
-	// is a no-op. `spawnGraphPull` was already fire-and-forget at the seam level; the same shape
-	// now applies to the skills + assets pulls.
-	void backgroundPull(() => seams.autoPullSkills(credential));
-	void backgroundPull(() => seams.autoPullAssets(credential));
-	void backgroundPull(() => seams.spawnGraphPull(meta));
+	// the skills pull alone takes ~5s (its own loopback POST budget) and the assets pull ~3s.
+	//
+	// TWO EXECUTION MODES:
+	//
+	// 1. OFF-PROCESS (preferred when `deps.spawnHygieneChild` is supplied — the harness shim
+	//    implements `HarnessShim.spawnHygieneChild`). Call the shim's spawn, which forks a
+	//    DETACHED + `unref()`'d child to run the three pulls in its OWN process. The parent
+	//    does NO hygiene I/O, so its event loop empties and Node exits naturally in
+	//    milliseconds after the response is written. This is the latency-budget fix: the
+	//    parent's wall clock is bounded by the prime fetch (~1-2s), not by the pulls (~8s).
+	//    (See `HarnessShim.spawnHygieneChild` for why `process.exit(0)` is NOT a viable
+	//    alternative — Windows libuv assertion when sockets are mid-flight.)
+	//
+	// 2. IN-PROCESS (the fallback, the prior behavior). Run the three seams WITHOUT awaiting
+	//    via `backgroundPull`. NOTE: this detaches the await but NOT the underlying fetch I/O —
+	//    the pending loopback sockets keep the Node event loop alive until they settle. This is
+	//    acceptable for non-hook callers (a long-running daemon importing this module) where the
+	//    loop draining on its own schedule is fine; it is NOT acceptable for a hook binary whose
+	//    wall clock Claude Code is timing. Harnesses that ship a hygiene child opt into mode 1.
+	//
+	// Both modes are fail-soft (a rejection or sync throw never propagates) and idempotent (the
+	// seams are bounded by their own budgets; a duplicate fire on a re-invocation is a no-op).
+	if (deps.spawnHygieneChild !== undefined) {
+		try {
+			deps.spawnHygieneChild(meta);
+		} catch {
+			// Best-effort: a spawn failure never breaks the session (the next session-start tries again).
+		}
+	} else {
+		void backgroundPull(() => seams.autoPullSkills(credential));
+		void backgroundPull(() => seams.autoPullAssets(credential));
+		void backgroundPull(() => seams.spawnGraphPull(meta));
+	}
 
 	// Step 9: return the rendered block; the shim chooses the channel (c-AC-5).
 	return additionalContext === "" ? { ok: true } : { ok: true, additionalContext };
 }
 
 /**
- * Run a session-start side-effect in the background, swallowing any rejection OR synchronous
+ * Run a session-start side-effect without awaiting it, swallowing any rejection OR synchronous
  * throw so a late failure (after the response has been returned) can never become an unhandled
  * rejection and crash the hook process, and a partial seam object missing the method (or a
  * method that throws synchronously before returning a promise) is tolerated the same as an
- * async rejection. Mirrors the `safeVoid` fail-soft contract but without awaiting — the call
- * returns immediately, the work continues on the event loop. The seams are already idempotent +
- * bounded by their own timeouts, so this never leaks indefinite work.
+ * async rejection.
+ *
+ * NOTE on process-lifetime: this detaches the await, NOT the underlying I/O. The fetch/file
+ * work inside a seam keeps the Node event loop alive until it settles. This is fine for a
+ * long-running caller (a daemon) but NOT for a hook binary whose wall clock is timed by the
+ * host — harnesses that need the parent to exit promptly opt into `spawnHygieneChild`
+ * (the off-process mode) so the parent never runs these seams at all.
  */
 function backgroundPull(fn: () => Promise<void>): Promise<void> {
 	try {

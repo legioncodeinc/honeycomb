@@ -184,6 +184,13 @@ const HOOK_HARNESSES = [
   { name: "pi", entry: "dist/harnesses/pi/src/index.js", outdir: "harnesses/pi/bundle" },
 ];
 
+// Extra standalone entries per harness — built from their OWN source (NOT aliases of
+// index.js). Used for the detached hygiene child (claude-code/src/hygiene.ts), which
+// has different imports + a different runtime path than the hook binary.
+const HARNESS_EXTRA_ENTRIES = [
+  { entry: "dist/harnesses/claude-code/src/hygiene.js", outdir: "harnesses/claude-code/bundle", name: "hygiene" },
+];
+
 for (const h of HOOK_HARNESSES) {
   await build({
     entryPoints: { index: h.entry },
@@ -200,6 +207,21 @@ for (const h of HOOK_HARNESSES) {
     stampExecutable(`${h.outdir}/${alias}`);
   }
   stampEsm(h.outdir);
+}
+
+// Extra standalone harness entries (the detached hygiene child). Each builds from its
+// own source into the named file under the harness bundle dir.
+for (const extra of HARNESS_EXTRA_ENTRIES) {
+  await build({
+    entryPoints: { [extra.name]: extra.entry },
+    bundle: true,
+    platform: "node",
+    format: "esm",
+    outdir: extra.outdir,
+    external: THIN_CLIENT_EXTERNAL,
+    define: VERSION_DEFINE,
+  });
+  stampExecutable(`${extra.outdir}/${extra.name}.js`);
 }
 
 // ---------------------------------------------------------------------------
