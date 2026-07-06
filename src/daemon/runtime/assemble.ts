@@ -1171,11 +1171,16 @@ export function assembleSeams(
 		seams.mountLifecycle(daemon, { storage, defaultScope });
 	}
 
-	// 7b. The session-priming PRIME digest (PRD-046c): `GET /api/memories/prime` attaches onto the
-	//    SAME `/api/memories` SESSION group, inheriting its auth/RBAC + session gate. The prime is a
-	//    PURE SQL skim (`skimPrimeKeys`, 046b) + a pure token-bounded/deduped assembly — NO embed,
-	//    NO gate, NO vector at read time. A cold scope answers an honest empty digest, never a 500.
-	//    Guarded + present-only (like the graph seam) so an out-of-scope fake `SeamFns` is unaffected.
+	// 7b. The session-priming PRIME digest (PRD-046c): `GET /api/memories/prime`.
+	//    PRODUCTION PATH: the route is now registered INSIDE `mountMemoriesApi` (step 7 above),
+	//    BEFORE `/:id`, so the parametric `:id` route can no longer shadow the literal `/prime`
+	//    segment (the route-shadow bug that 404'd every prime call → Claude Code SessionStart
+	//    always received {} and never injected memories). This standalone call is RETAINED as a
+	//    backwards-compat safety net: when `mountMemoriesApi` has already registered `/prime`,
+	//    this call adds a duplicate handler that is never reached; when a caller/test mounts
+	//    ONLY this seam on a fresh daemon (no `/:id`), it is the sole registration. The prime is
+	//    a PURE SQL skim (`skimPrimeKeys`, 046b) + a pure token-bounded/deduped assembly — NO
+	//    embed, NO gate, NO vector at read time. A cold scope answers an honest empty digest.
 	if (seams.mountMemoriesPrime !== undefined) {
 		seams.mountMemoriesPrime(daemon, { storage, defaultScope });
 	}
