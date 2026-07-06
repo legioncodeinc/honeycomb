@@ -117,10 +117,122 @@ function toLastSeen(value: unknown): string | null {
 	return s.length > 0 ? s : null;
 }
 
-/** Run the activity SELECT through storage, returning rows or `[]` on any non-ok result (fail-soft). */
+/**
+ * Run the activity SELECT through storage, returning rows or `[]` on any non-ok result (fail-soft).
+ * This is the single-poll primitive; {@link selectRowsConverged} wraps it with the poll-max loop.
+ */
 async function selectRows(storage: StorageQuery, sql: string, scope: QueryScope): Promise<StorageRow[]> {
 	const result = await storage.query(sql, scope);
 	return isOk(result) ? result.rows : [];
+}
+
+// ── Poll-max convergence (DeepLake read-replica staleness mitigation) ─────────
+//
+// DeepLake's read replicas can serve stale under-counts for `COUNT(*)` on `sessions` — a query that
+// should return ~1800 rows for an agent randomly returns ~18 on some replicas. The staleness only
+// ever UNDER-reports (the real count is always the higher number), so polling N times within a
+// bounded wall-clock budget and taking the MAX `n` per `agent` across all polls converges on the
+// truth without needing a monotone freshness signal (which DeepLake does not expose for aggregates).
+// This mirrors the `readConverged` budget structure but with a max-reduce accumulator instead of a
+// predicate-stop, because ANY single poll could be the stale one.
+
+/**
+ * Default maximum number of polls the convergence loop fires. Tight (3, not 10) because the dashboard
+ * polls frequently and each poll adds latency — the goal is "reliably hit a fresh replica within 3
+ * tries," not "exhaust every possible attempt."
+ */
+const DEFAULT_HARNESS_ACTIVITY_MAX_POLLS = 3;
+
+/**
+ * Default wall-clock budget for the convergence loop, in ms. Short enough to not stall the dashboard
+ * (the endpoint is polled every ~5s), long enough to absorb 3 polls with backoff on a slow DeepLake.
+ */
+const DEFAULT_HARNESS_ACTIVITY_BUDGET_MS = 1_500;
+
+/** Base backoff between polls, in ms (matches the storage client's retry backoff base). */
+const HARNESS_ACTIVITY_BACKOFF_BASE_MS = 50;
+
+/** Read `HONEYCOMB_HARNESS_ACTIVITY_POLLS` (the max-polls env knob), falling back to the default. */
+function resolveMaxPolls(): number {
+	const raw = Number(process.env.HONEYCOMB_HARNESS_ACTIVITY_POLLS);
+	return Number.isFinite(raw) && raw >= 1 ? Math.trunc(raw) : DEFAULT_HARNESS_ACTIVITY_MAX_POLLS;
+}
+
+/** Read `HONEYCOMB_HARNESS_ACTIVITY_BUDGET_MS` (the wall-clock budget env knob), falling back to the default. */
+function resolveBudgetMs(): number {
+	const raw = Number(process.env.HONEYCOMB_HARNESS_ACTIVITY_BUDGET_MS);
+	return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : DEFAULT_HARNESS_ACTIVITY_BUDGET_MS;
+}
+
+/** Injectable seams so a test drives the loop deterministically (no real timers). */
+interface ConvergeSeams {
+	/** The clock the budget reads. Defaults to `Date.now`. */
+	readonly now?: () => number;
+	/** The sleep the backoff uses. Defaults to `setTimeout`. */
+	readonly sleep?: (ms: number) => Promise<void>;
+}
+
+/**
+ * Poll the activity SELECT up to `maxPolls` times within `budgetMs`, accumulating the MAX `n`
+ * (turn count) and the latest `last` (most-recent timestamp) per `agent` across ALL polls.
+ *
+ * Returns a merged `StorageRow[]` where each agent appears once with its highest-seen count — the
+ * same shape `buildHarnessStatuses` consumes. If every poll fails (non-ok), returns `[]` (the
+ * existing fail-soft). Never throws.
+ *
+ * Why max-reduce (not predicate-stop): DeepLake exposes no monotone freshness signal for an aggregate
+ * `COUNT(*)`, so there is no predicate to "converge on." Any single result could be the stale one.
+ * The max across N polls is the honest best-effort answer; it is monotonically non-decreasing across
+ * polls, so more polls only ever improve the accuracy.
+ */
+async function selectRowsConverged(
+	storage: StorageQuery,
+	sql: string,
+	scope: QueryScope,
+	seams: ConvergeSeams = {},
+): Promise<StorageRow[]> {
+	const maxPolls = resolveMaxPolls();
+	const budgetMs = resolveBudgetMs();
+	const now = seams.now ?? Date.now;
+	const sleep = seams.sleep ?? ((ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms)));
+
+	const deadline = now() + budgetMs;
+	// The merged max: agent → { maxN, latestLast }. Accumulated across all polls.
+	const merged = new Map<string, { maxN: number; latestLast: string | null }>();
+
+	for (let poll = 1; poll <= maxPolls; poll++) {
+		const rows = await selectRows(storage, sql, scope);
+		for (const row of rows) {
+			const agent = row.agent === undefined || row.agent === null ? "" : String(row.agent);
+			if (agent === "") continue;
+			const n = toCount(row.n);
+			const last = toLastSeen(row.last);
+			const existing = merged.get(agent);
+			if (existing === undefined) {
+				merged.set(agent, { maxN: n, latestLast: last });
+			} else {
+				// Max-reduce: keep the higher count + the later timestamp (staleness under-reports counts;
+				// the fresh replica always has ≥ the stale count).
+				if (n > existing.maxN) existing.maxN = n;
+				if (last !== null && (existing.latestLast === null || last > existing.latestLast)) {
+					existing.latestLast = last;
+				}
+			}
+		}
+
+		// Stop early if the budget is exhausted (no point starting another poll that would breach it).
+		if (poll < maxPolls && now() + HARNESS_ACTIVITY_BACKOFF_BASE_MS > deadline) break;
+		// Back off briefly between polls so we don't hammer a flaky replica (and to give a different
+		// replica a chance to serve the fresh data on a load-balanced reroute).
+		if (poll < maxPolls) await sleep(HARNESS_ACTIVITY_BACKOFF_BASE_MS);
+	}
+
+	// Materialize the merged map as the StorageRow[] shape buildHarnessStatuses expects.
+	return Array.from(merged.entries()).map(([agent, { maxN, latestLast }]) => ({
+		agent,
+		n: maxN,
+		last: latestLast ?? "",
+	}));
 }
 
 /**
@@ -201,10 +313,11 @@ export function mountHarnessApi(daemon: Daemon, options: MountHarnessOptions): v
 		if (scope === null) return c.json(NO_ORG_BODY, 400);
 		// Re-probe the wired set on THIS request (cheap existsSync only) so a post-boot wiring shows up.
 		const installed = resolveInstalled();
-		// ONE guarded GROUP BY; fail-soft to [] so the endpoint still returns all six with zeroed
-		// activity (never a 500). The canonical six are enumerated from the shim set, NOT discovered
-		// from the result, so an idle harness still appears.
-		const rows = await selectRows(storage, buildHarnessActivitySql(), scope);
+		// Poll the activity GROUP BY up to N times (poll-max convergence) so a stale DeepLake read
+		// replica does not under-report turnsCaptured. Fail-soft to [] so the endpoint still returns
+		// all six with zeroed activity (never a 500). The canonical six are enumerated from the shim
+		// set, NOT discovered from the result, so an idle harness still appears.
+		const rows = await selectRowsConverged(storage, buildHarnessActivitySql(), scope);
 		const body: HarnessStatusResponse = { harnesses: buildHarnessStatuses(rows, installed) };
 		return c.json(body);
 	});
