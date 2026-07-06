@@ -101,9 +101,30 @@ import { mountLogsApi } from "./logs/api.js";
 import { type LogStore, NULL_LOG_STORE, openLogStore } from "./logs/log-store.js";
 import { mountCompactApi } from "./maintenance/compact-api.js";
 import { mountStaleRefApi } from "./maintenance/stale-ref-api.js";
+// L-W7 / L-W8 / L-W9 (PRD-058c / 058e): the three lifecycle maintenance routes — reverify scheduler,
+// access-log compaction, calibration refit. Each attaches onto the same `/api/diagnostics` group as
+// the existing compact/stale-ref triggers (ZERO `server.ts` edits) and is fired by a periodic tick.
+import { mountReverifyApi, runReverifyPass } from "./maintenance/reverify-api.js";
+import { mountCompactAccessLogApi, runCompactAccessLogPass } from "./maintenance/compact-access-log-api.js";
+import { mountCalibrateApi, runCalibratePass } from "./maintenance/calibrate-api.js";
+// The shared periodic-tick scheduler for the three lifecycle workers. Each tick calls the SAME pass
+// function the route calls (one definition of the work); the route is for operators, the tick is the
+// autopilot. Mirrors `startPollinatingMaintenanceTick` (fail-soft, unref'd, self-rescheduling).
+import {
+	startLifecycleTick,
+	DEFAULT_REVERIFY_TICK_INTERVAL_MS,
+	DEFAULT_COMPACT_ACCESS_TICK_INTERVAL_MS,
+	DEFAULT_CALIBRATE_TICK_INTERVAL_MS,
+	type LifecycleTickHandle,
+} from "./maintenance/lifecycle-tick.js";
 import { createControlledWriteConflictHook } from "./memories/conflict-hook.js";
+import type { KeepBothMemo } from "./memories/conflict-detect.js";
 import { createConflictSuppressionSource } from "./memories/conflict-resolve.js";
-import { mountConflictsApi } from "./memories/conflicts-api.js";
+import { mountConflictsApi, type KeepBothMemoStore } from "./memories/conflicts-api.js";
+// L-W6 (PRD-058b AC-55b.2.4): the production in-process KeepBothMemoStore — a daemon-lifetime
+// object constructed ONCE at boot and injected into BOTH the resolve endpoint (the writer) and
+// the post-commit detection hook (the reader) so a `keep-both` verdict suppresses re-detection.
+import { createInProcessKeepBothMemoStore } from "./memories/keep-both-memo.js";
 // ── Data-API mount seams (PRD-022a / 022b / 022c) the composition root fires (D-2 / d-AC-1) ──
 import { mountMemoriesApi, mountMemoriesPrimeApi } from "./memories/index.js";
 import { mountLifecycleApi } from "./memories/lifecycle-api.js";
@@ -604,6 +625,28 @@ export interface SeamFns {
 	 */
 	readonly mountStaleRef: typeof mountStaleRefApi;
 	/**
+	 * L-W7 (PRD-058c/058e) — the reverify-scheduler trigger `POST /api/diagnostics/reverify`. OPTIONAL
+	 * on the seam record (like {@link mountConflicts}) so a pre-existing recording-fake `SeamFns` stays
+	 * type-compatible WITHOUT editing those out-of-scope suites; `assembleSeams` fires it only when present
+	 * (always present in {@link defaultSeamFns}). Scans memories past their activation-paced reverify
+	 * interval and routes the due subset through the stale-ref diagnostic. Fail-soft — a mount error never
+	 * crashes the daemon; a missing graph marks nothing stale.
+	 */
+	readonly mountReverify?: typeof mountReverifyApi;
+	/**
+	 * L-W8 (PRD-058e) — the access-log compaction trigger `POST /api/diagnostics/compact-access-log`.
+	 * OPTIONAL on the seam record (same posture as {@link mountReverify}). Folds raw `memory_access`
+	 * events into `access_count` + advances the watermark cursor so the log stays bounded. Fail-soft.
+	 */
+	readonly mountCompactAccessLog?: typeof mountCompactAccessLogApi;
+	/**
+	 * L-W9 (PRD-058e) — the calibration refit trigger `POST /api/diagnostics/calibrate`. OPTIONAL on the
+	 * seam record (same posture as {@link mountReverify}). Reads resolved outcomes from `memory_conflicts`,
+	 * fits a calibration curve, and writes it to `memory_calibration` when it beats the prior on held-out
+	 * ECE (AC-55e.2.1). Cold-start → identity, no write (AC-55e.2.2). Fail-soft.
+	 */
+	readonly mountCalibrate?: typeof mountCalibrateApi;
+	/**
 	 * The protected per-subsystem health detail — `GET /api/diagnostics/health` (PRD-029 /
 	 * AC-3). Fires UNCONDITIONALLY: its `/api/diagnostics` group is already `protect:true`, so
 	 * the full `reasons` detail it exposes is gated in team/hybrid (open in local) — exactly
@@ -715,6 +758,9 @@ export const defaultSeamFns: SeamFns = {
 	mountProjectsSync: mountProjectsSyncApi,
 	mountCompact: mountCompactApi,
 	mountStaleRef: mountStaleRefApi,
+	mountReverify: mountReverifyApi,
+	mountCompactAccessLog: mountCompactAccessLogApi,
+	mountCalibrate: mountCalibrateApi,
 	mountDiagnosticsHealth: mountDiagnosticsHealthApi,
 	mountLocalQueueDiagnostics: mountLocalQueueDiagnosticsApi,
 	mountGraph: mountGraphApi,
@@ -1173,6 +1219,7 @@ export function assembleSeams(
 	captureDroppedEvents?: CaptureDroppedEventsCounter,
 	gatedCaptures?: GatedCapturesCounter,
 	pendingLinkStore?: PendingLinkStore,
+	keepBothMemo?: KeepBothMemoStore,
 ): CaptureHandler {
 	// The daemon's configured default tenancy scope (the single LOCAL tenant) is RESOLVED ONCE
 	// at the composition root (`assembleDaemon`) from the SAME credential source the storage
@@ -1428,7 +1475,12 @@ export function assembleSeams(
 	//    (append-only, never a destructive delete), every path appends `memory_history` + projects the
 	//    new state, and the read-back polls to convergence. Guarded + present-only (like the prime seam).
 	if (seams.mountConflicts !== undefined) {
-		seams.mountConflicts(daemon, { storage, defaultScope });
+		// L-W6: thread the SAME KeepBothMemoStore the composition root constructed (AC-55b.2.4) so a
+		// `keep-both` verdict is memoized for the post-commit detection hook. The store is the writer;
+		// the hook reads it. ABSENT (a unit-constructed seam call) → construct one inline so the resolve
+		// endpoint still memoizes within its own process (the hook simply is not wired in that case).
+		const memo = keepBothMemo ?? createInProcessKeepBothMemoStore();
+		seams.mountConflicts(daemon, { storage, defaultScope, keepBothMemo: memo });
 	}
 
 	// 7a-ter. The lifecycle READ endpoints (PRD-058d): `GET /api/memories/conflicts`,
@@ -1527,6 +1579,46 @@ export function assembleSeams(
 	} catch (err: unknown) {
 		const reason = err instanceof Error ? err.message : String(err);
 		process.stderr.write(`honeycomb: stale-ref route mount failed (non-fatal): ${reason}\n`);
+	}
+
+	// 11c. L-W7 (PRD-058c/058e): the reverify-scheduler trigger `POST /api/diagnostics/reverify`.
+	//      Same group, same posture. Scans memories past their activation-paced reverify interval and
+	//      routes the due subset through the stale-ref diagnostic (the `σ(m,t)` re-check). The periodic
+	//      tick (fired in `start()`) calls the same pass on a ~5-minute cadence. FAIL-SOFT.
+	if (seams.mountReverify !== undefined) {
+		try {
+			seams.mountReverify(daemon, { storage, defaultScope, workspaceDir });
+		} catch (err: unknown) {
+			const reason = err instanceof Error ? err.message : String(err);
+			process.stderr.write(`honeycomb: reverify route mount failed (non-fatal): ${reason}\n`);
+		}
+	}
+
+	// 11d. L-W8 (PRD-058e): the access-log compaction trigger `POST /api/diagnostics/compact-access-log`.
+	//      Same group, same posture. Folds raw `memory_access` events into `access_count` + advances the
+	//      watermark cursor so the log stays bounded. The periodic tick fires on a ~5-minute cadence.
+	//      FAIL-SOFT.
+	if (seams.mountCompactAccessLog !== undefined) {
+		try {
+			seams.mountCompactAccessLog(daemon, { storage, defaultScope });
+		} catch (err: unknown) {
+			const reason = err instanceof Error ? err.message : String(err);
+			process.stderr.write(`honeycomb: compact-access-log route mount failed (non-fatal): ${reason}\n`);
+		}
+	}
+
+	// 11e. L-W9 (PRD-058e): the calibration refit trigger `POST /api/diagnostics/calibrate`.
+	//      Same group, same posture. Reads resolved outcomes from `memory_conflicts`, fits a calibration
+	//      curve, and writes it to `memory_calibration` when it beats the prior on held-out ECE
+	//      (AC-55e.2.1). The periodic tick fires on a ~1-hour cadence. Cold-start → identity, no write.
+	//      FAIL-SOFT.
+	if (seams.mountCalibrate !== undefined) {
+		try {
+			seams.mountCalibrate(daemon, { storage, defaultScope });
+		} catch (err: unknown) {
+			const reason = err instanceof Error ? err.message : String(err);
+			process.stderr.write(`honeycomb: calibrate route mount failed (non-fatal): ${reason}\n`);
+		}
 	}
 
 	// 12. The protected per-subsystem health detail — `GET /api/diagnostics/health` (PRD-029 /
@@ -2308,6 +2400,7 @@ async function buildPipelineWorker(
 	backoff: PollBackoffConfig,
 	portkeyDeps?: PortkeyWorkerDeps,
 	logger?: StageWorkerLogger,
+	keepBothMemo?: KeepBothMemo,
 ): Promise<StageWorker> {
 	// Resolve the pipeline config fail-soft: a malformed knob must NEVER take the daemon
 	// down — degrade to the schema's false-safe defaults (every stage gate defaults OFF,
@@ -2351,7 +2444,16 @@ async function buildPipelineWorker(
 	// mount) finally reads a non-empty projection. Fail-soft by construction (a down judge / missing table
 	// never costs a memory). The decision stage's `hydrateCandidates` is turned on IN LOCKSTEP so the
 	// forwarded candidates carry the claim text the detector needs (the two travel together).
-	const conflictHook = createControlledWriteConflictHook({ storage, embed: embed.client, model });
+	// L-W6 (AC-55b.2.4): the SAME KeepBothMemoStore the resolve endpoint writes is injected HERE so the
+	// detector's read side suppresses re-flagging of a known keep-both pair. The composition root
+	// constructs the store ONCE and threads the same reference into both writers (mount) and readers
+	// (this hook) — the verdict the operator applied at the endpoint is visible to the very next write.
+	const conflictHook = createControlledWriteConflictHook({
+		storage,
+		embed: embed.client,
+		model,
+		...(keepBothMemo !== undefined ? { memo: keepBothMemo } : {}),
+	});
 
 	// The real stage handlers, CHAINED via the fan-out enqueuers (045a). Each stage's
 	// optional forward seam is wired to enqueue the next stage's job onto the same queue.
@@ -2808,6 +2910,12 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 
 	// PRD-062c: hold the capture handler the seams construct so `shutdown()` can drain its
 	// write buffer (AC-5). `assembleSeams` returns it from its `attachHooks` step.
+	// L-W6 (PRD-058b AC-55b.2.4): construct the KeepBothMemoStore ONCE at the composition root so the
+	// SAME instance is threaded into `assembleSeams` (the resolve-endpoint writer) AND — via the
+	// `keepBothMemo` closure captured by `start()` — into `buildPipelineWorker` (the detection-hook
+	// reader). One instance, two injection sites: the operator's `keep-both` verdict suppresses
+	// re-detection on the very next write of either side of the pair.
+	const keepBothMemo = createInProcessKeepBothMemoStore();
 	const captureHandler = assembleSeams(
 		daemon,
 		storage,
@@ -2827,6 +2935,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		captureDroppedEvents,
 		gatedCaptures,
 		pendingLinkStore,
+		keepBothMemo,
 	);
 
 	// ── PRD-032d / AC-6: FIRE the Wave-1 `/api/settings` mount ONCE so the CLI/dashboard
@@ -3006,6 +3115,12 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	});
 	let graphBuildTimer: ReturnType<typeof setInterval> | null = null;
 	let pollinatingMaintenanceTick: PollinatingMaintenanceTickHandle | null = null;
+	// PRD-058e L-W7/L-W8/L-W9: the three lifecycle maintenance ticks. Each is a self-rescheduling
+	// unref'd setTimeout (same posture as `pollinatingMaintenanceTick`), fail-soft — a maintenance
+	// miss never breaks recall. Null until `start()` arms them; set back to null in `shutdown()`.
+	let reverifyTick: LifecycleTickHandle | null = null;
+	let compactAccessTick: LifecycleTickHandle | null = null;
+	let calibrateTick: LifecycleTickHandle | null = null;
 	let graphBuildInFlight = false;
 	async function rebuildCodebaseGraph(): Promise<void> {
 		if (graphBuildInFlight) return;
@@ -3048,6 +3163,41 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	function armPollinatingMaintenanceTick(): void {
 		if (pollinatingMaintenanceTick !== null) return;
 		pollinatingMaintenanceTick = startPollinatingMaintenanceTick(pollinatingTrigger, { agentId: "default" });
+	}
+	// PRD-058e L-W7/L-W8/L-W9: each lifecycle tick arms iff currently null (idempotent), same
+	// posture as the pollinating tick above. The pass closures capture daemon scope + storage +
+	// the resolved config and call the `runXPass` helpers exported alongside the route mounts.
+	// Fail-soft is enforced INSIDE `startLifecycleTick` (it catches+logs+reschedules), so the arm
+	// itself cannot throw. Cadences: reverify + compact-access ~5 min, calibrate ~1 hour.
+	function armReverifyTick(): void {
+		if (reverifyTick !== null) return;
+		reverifyTick = startLifecycleTick(
+			"lifecycle_reverify",
+			async () => {
+				await runReverifyPass(scope, { storage, defaultScope: scope, workspaceDir: options.workspaceDir ?? process.cwd() });
+			},
+			{ intervalMs: DEFAULT_REVERIFY_TICK_INTERVAL_MS },
+		);
+	}
+	function armCompactAccessTick(): void {
+		if (compactAccessTick !== null) return;
+		compactAccessTick = startLifecycleTick(
+			"lifecycle_compact_access",
+			async () => {
+				await runCompactAccessLogPass(scope, { storage, defaultScope: scope });
+			},
+			{ intervalMs: DEFAULT_COMPACT_ACCESS_TICK_INTERVAL_MS },
+		);
+	}
+	function armCalibrateTick(): void {
+		if (calibrateTick !== null) return;
+		calibrateTick = startLifecycleTick(
+			"lifecycle_calibrate",
+			async () => {
+				await runCalibratePass(scope, { storage, defaultScope: scope });
+			},
+			{ intervalMs: DEFAULT_CALIBRATE_TICK_INTERVAL_MS },
+		);
 	}
 
 	let started = false;
@@ -3124,6 +3274,13 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			if (!startBackgroundWorkers) return;
 
 			armPollinatingMaintenanceTick();
+			// PRD-058e L-W7/L-W8/L-W9: arm the three lifecycle maintenance ticks alongside the pollinating
+			// tick. Each is unref'd + fail-soft + self-rescheduling, so they NEVER keep the process alive
+			// and a maintenance miss NEVER breaks recall. Idempotent (a second arm with a live tick is a
+			// no-op), so a `resume` after a `shutdown` re-arms cleanly. See `armReverifyTick` etc. above.
+			armReverifyTick();
+			armCompactAccessTick();
+			armCalibrateTick();
 
 			// ── PRD-062b: resolve the adaptive-backoff + consolidation knobs ONCE, fail-soft.
 			// A malformed knob must NEVER take the daemon down — degrade to the schema's
@@ -3249,6 +3406,10 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 						pollBackoff,
 						portkeyWorkerDeps,
 						workerLogger,
+						// L-W6: the SAME KeepBothMemoStore constructed at the composition root and threaded
+						// into the resolve endpoint above. The closure captures it; the worker injects it into
+						// the post-commit conflict-detection hook (the read side of the AC-55b.2.4 memo).
+						keepBothMemo,
 					);
 					// PRD-062b (AC-4): when consolidation is ON, DEFER starting the pipeline
 					// worker's own loop — the single lease coordinator (built at the pollinating
@@ -3413,6 +3574,41 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 					},
 					resume: armPollinatingMaintenanceTick,
 				});
+				// PRD-058e L-W7/L-W8/L-W9: the three lifecycle ticks ALSO query Deeplake (the scan + the
+				// diagnostic/compaction/calibration pass), so they hibernate with the workers for the
+				// SAME reason as the pollinating tick — keep the Activeloop pod quiet while hibernated.
+				// Pause stops + drops the handle; resume re-arms a fresh tick (the handle is not
+				// restartable). Identical posture to the pollinating tick above.
+				pausables.push({
+					label: "lifecycle-reverify-tick",
+					pause: () => {
+						if (reverifyTick !== null) {
+							reverifyTick.stop();
+							reverifyTick = null;
+						}
+					},
+					resume: armReverifyTick,
+				});
+				pausables.push({
+					label: "lifecycle-compact-access-tick",
+					pause: () => {
+						if (compactAccessTick !== null) {
+							compactAccessTick.stop();
+							compactAccessTick = null;
+						}
+					},
+					resume: armCompactAccessTick,
+				});
+				pausables.push({
+					label: "lifecycle-calibrate-tick",
+					pause: () => {
+						if (calibrateTick !== null) {
+							calibrateTick.stop();
+							calibrateTick = null;
+						}
+					},
+					resume: armCalibrateTick,
+				});
 				if (storageHealthProbeEnabled) {
 					pausables.push({
 						label: "health-probe",
@@ -3513,6 +3709,21 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			if (pollinatingMaintenanceTick !== null) {
 				pollinatingMaintenanceTick.stop();
 				pollinatingMaintenanceTick = null;
+			}
+			// PRD-058e L-W7/L-W8/L-W9: stop the three lifecycle ticks alongside the pollinating tick.
+			// Each `.stop()` cancels the pending self-rescheduled setTimeout and prevents any further
+			// tick fire; setting back to `null` lets a subsequent `start()` re-arm cleanly.
+			if (reverifyTick !== null) {
+				reverifyTick.stop();
+				reverifyTick = null;
+			}
+			if (compactAccessTick !== null) {
+				compactAccessTick.stop();
+				compactAccessTick = null;
+			}
+			if (calibrateTick !== null) {
+				calibrateTick.stop();
+				calibrateTick = null;
 			}
 			if (started) {
 				await daemon.stopServices();
