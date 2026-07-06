@@ -279,17 +279,46 @@ jobs:
           HONEYCOMB_POSTHOG_KEY: ${{ secrets.HONEYCOMB_POSTHOG_KEY }}
           HONEYCOMB_REF_DEFAULT: ${{ vars.HONEYCOMB_REF_DEFAULT }}
 
+      # ── Release notes (spec #5). ─────────────────────────────────────────────
+      # Generate polished, honest notes with Claude Sonnet 5 on Bedrock from the
+      # CHANGELOG entry + commits since the last tag. Fail-soft: if Bedrock is
+      # unreachable the script falls back to the raw CHANGELOG entry, so notes
+      # never red a release that already published. Real publishes only.
+      - name: Install Bedrock SDK (release notes)
+        if: ${{ github.ref_type == 'tag' && steps.mode.outputs.publish == 'true' }}
+        run: npm i --no-save --ignore-scripts @aws-sdk/client-bedrock-runtime
+
+      - name: Generate release notes (Sonnet 5 on Bedrock)
+        if: ${{ github.ref_type == 'tag' && steps.mode.outputs.publish == 'true' }}
+        env:
+          AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEDROCK_API_KEY }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          BEDROCK_MODEL_ID: ${{ vars.BEDROCK_MODEL_ID }}
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: node scripts/release/ai-release-notes.mjs
+
       # ── GitHub Release. ──────────────────────────────────────────────────────
       # Only on a real tag push AND only after a real publish — a dry-run or a
       # tokenless rehearsal should not mint a Release. Uses the pinned official
-      # action; contents: write (above) is the scope this needs.
+      # action; contents: write (above) is the scope this needs. Body is the
+      # AI-authored RELEASE_NOTES.md (spec #5).
       - name: Create GitHub Release
         if: ${{ github.ref_type == 'tag' && steps.mode.outputs.publish == 'true' }}
         uses: softprops/action-gh-release@v2.4.1
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
+
+      # ── Discord announcement (spec #6). ──────────────────────────────────────
+      # Post the same notes to Discord. Fail-soft (the script exits 0 on any
+      # webhook error) so a Discord hiccup never reds a shipped release.
+      - name: Announce on Discord
+        if: ${{ github.ref_type == 'tag' && steps.mode.outputs.publish == 'true' }}
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: node scripts/release/discord-notify.mjs
 
   # ── Post-publish install smoke. ────────────────────────────────────────────
   # The pre-publish gate (ci.yaml) and the unit tests never install the PUBLISHED
