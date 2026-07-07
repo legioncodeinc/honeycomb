@@ -334,6 +334,28 @@ describe("AdaptivePollLoop: PRD-062e idle-suspend (opt-in, default OFF)", () => 
 		loop.stop();
 	});
 
+	it("wake() is a no-op while merely backed off (not yet suspended): the cadence is not reset to the floor", async () => {
+		const timers = manualTimers();
+		const loop = createPollLoop({ tick: async () => false, backoff: SUSPEND, flatIntervalMs: 1_000, timers });
+		loop.start();
+		// Two empty ticks back off to 4000ms; idleAccum (6000) is well below the 30000
+		// suspend threshold, so the loop is NOT suspended yet.
+		timers.fireNext();
+		await flush();
+		timers.fireNext();
+		await flush();
+		expect(timers.delays.at(-1)).toBe(4_000);
+		const armedBefore = timers.delays.length;
+		loop.wake(); // must be a no-op here — it must NOT reset the backoff or arm a timer.
+		expect(timers.delays.length).toBe(armedBefore);
+		// The next empty tick continues the geometric backoff (8000), proving wake() did
+		// not snap the step back to the floor.
+		timers.fireNext();
+		await flush();
+		expect(timers.delays.at(-1)).toBe(8_000);
+		loop.stop();
+	});
+
 	it("wake() is a safe no-op on the flat (backoff-disabled) path", async () => {
 		const timers = manualTimers();
 		const loop = createPollLoop({ tick: async () => false, backoff: PollBackoffConfigSchema.parse({}), flatIntervalMs: 1_000, timers });

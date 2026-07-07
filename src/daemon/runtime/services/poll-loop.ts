@@ -77,8 +77,9 @@ export interface PollLoop {
 	 * Resume a loop that has SUSPENDED on the long idle backstop (PRD-062e), snapping
 	 * its cadence back to the floor so a just-enqueued job is processed immediately.
 	 * Wire this to the job queue's `enqueue` so a captured memory does not wait for the
-	 * backstop. No-op when suspend is off, when the loop is stopped, or on the flat
-	 * (backoff-disabled) path. Idempotent and safe to call at any time.
+	 * backstop. No-op UNLESS the loop is currently suspended on the backstop, so it never
+	 * disturbs the normal adaptive cadence (and is a no-op when suspend is off, when the
+	 * loop is stopped, or on the flat path). Idempotent and safe to call at any time.
 	 */
 	wake(): void;
 }
@@ -177,9 +178,13 @@ class AdaptivePollLoop implements PollLoop {
 	 */
 	wake(): void {
 		if (this.backoff === null || this.stopped) return;
+		// No-op UNLESS the loop is parked on the long idle backstop — that is the only
+		// state a just-enqueued job would otherwise wait out. `suspended` is never set
+		// when suspend is off, so this is a true no-op there and the normal adaptive
+		// cadence is never disturbed (do not touch the backoff before this guard).
+		if (!this.suspended) return;
 		this.backoff.resume();
-		if (this.running) return; // an in-flight tick's finally() will reschedule at the (now) floor.
-		if (!this.suspended) return; // already on the fast cadence; the reset above is enough.
+		if (this.running) return; // an in-flight backstop tick's finally() reschedules at the (now) floor.
 		this.suspended = false;
 		if (this.handle !== undefined) this.timers.clearTimer(this.handle);
 		this.scheduleNext(this.backoff.nextDelayMs());
