@@ -47,6 +47,23 @@ export const DEFAULT_POLL_BACKOFF_CEILING_MS = 30_000;
 export const DEFAULT_POLL_BACKOFF_JITTER = 0.1;
 
 /**
+ * Default accumulated-idle (ms) at the ceiling before an idle loop SUSPENDS
+ * (PRD-062e, opt-in). PRD-062b's ~30s ceiling still reconnects to DeepLake every
+ * ~30s forever, which resets Activeloop's serverless compute idle-timer so the pod
+ * never scales to zero (a flat `compute (uptime)` charge on an idle daemon). Once a
+ * loop has been idle this long, suspend stops the fast cadence entirely.
+ */
+export const DEFAULT_POLL_SUSPEND_AFTER_MS = 120_000;
+/**
+ * Default backstop poll interval (ms) while SUSPENDED. A suspended loop still polls
+ * on this long cadence so a job enqueued by ANOTHER device into the shared DeepLake
+ * queue is eventually picked up; the local `wake()` path handles same-daemon jobs
+ * instantly. Long enough that the pod scales to zero for the vast majority of idle
+ * time, short enough that cross-device work is not stranded.
+ */
+export const DEFAULT_POLL_SUSPEND_BACKSTOP_MS = 300_000;
+
+/**
  * A positive-integer tuning knob (ms): a non-numeric value falls back to the
  * default, a value below `min` is clamped up to `min`. A fat-fingered floor/ceiling
  * is tuning noise, never a config failure (mirrors `pollinating/config.ts`
@@ -93,6 +110,17 @@ export const PollBackoffConfigSchema = z.object({
 	ceilingMs: ClampedInt(DEFAULT_POLL_BACKOFF_CEILING_MS).default(DEFAULT_POLL_BACKOFF_CEILING_MS),
 	/** +/- jitter fraction of the current step, anti-thundering-herd. */
 	jitter: ClampedFraction(DEFAULT_POLL_BACKOFF_JITTER).default(DEFAULT_POLL_BACKOFF_JITTER),
+	/**
+	 * Opt-in idle SUSPEND (PRD-062e). When on, a loop idle past {@link suspendAfterMs}
+	 * stops the ~30s ceiling cadence and polls only on the long {@link suspendBackstopMs}
+	 * backstop, so DeepLake's compute pod can scale to zero. Default OFF (FALSE-SAFE):
+	 * an absent flag reproduces 062b's steady ceiling cadence, so this is non-breaking.
+	 */
+	suspendEnabled: BoolFlag.default(false),
+	/** Accumulated idle (ms) at the ceiling before the loop suspends (AC: 062e). */
+	suspendAfterMs: ClampedInt(DEFAULT_POLL_SUSPEND_AFTER_MS).default(DEFAULT_POLL_SUSPEND_AFTER_MS),
+	/** Long backstop poll interval (ms) while suspended, so a job enqueued elsewhere is still caught. */
+	suspendBackstopMs: ClampedInt(DEFAULT_POLL_SUSPEND_BACKSTOP_MS).default(DEFAULT_POLL_SUSPEND_BACKSTOP_MS),
 });
 
 /** The validated adaptive-backoff config every poll loop reads. */
@@ -118,6 +146,9 @@ export interface RawPollBackoffConfig {
 	readonly floorMs?: unknown;
 	readonly ceilingMs?: unknown;
 	readonly jitter?: unknown;
+	readonly suspendEnabled?: unknown;
+	readonly suspendAfterMs?: unknown;
+	readonly suspendBackstopMs?: unknown;
 }
 
 /**
@@ -154,6 +185,12 @@ export function envPollBackoffConfigProvider(env: NodeJS.ProcessEnv = process.en
 				floorMs: env.HONEYCOMB_POLL_BACKOFF_FLOOR_MS,
 				ceilingMs: env.HONEYCOMB_POLL_BACKOFF_CEILING_MS,
 				jitter: env.HONEYCOMB_POLL_BACKOFF_JITTER,
+				// Idle-suspend (PRD-062e) is OPT-IN / default-OFF: an absent flag leaves it off
+				// (schema default false), so the steady 062b ceiling cadence is unchanged. An
+				// explicit `HONEYCOMB_POLL_SUSPEND_ENABLED=true`/`1` turns it on.
+				suspendEnabled: env.HONEYCOMB_POLL_SUSPEND_ENABLED,
+				suspendAfterMs: env.HONEYCOMB_POLL_SUSPEND_AFTER_MS,
+				suspendBackstopMs: env.HONEYCOMB_POLL_SUSPEND_BACKSTOP_MS,
 			};
 		},
 	};
@@ -211,6 +248,12 @@ export class PollBackoff {
 	private readonly jitterSource: JitterSource;
 	/** The current un-jittered step. Starts at the floor; doubles toward the ceiling. */
 	private stepMs: number;
+	/** PRD-062e idle-suspend knobs (opt-in). */
+	private readonly suspendEnabled: boolean;
+	private readonly suspendAfterMs: number;
+	private readonly backstopMs: number;
+	/** Accumulated idle (ms) at the ceiling since the last lease; drives {@link shouldSuspend}. */
+	private idleAccumMs = 0;
 
 	/**
 	 * @param config the resolved bounds + jitter fraction. The state machine is only
@@ -220,7 +263,11 @@ export class PollBackoff {
 	 * @param jitterSource injectable `[-1, 1]` source — a test pins it to 0 to assert
 	 *   the exact geometric schedule; production uses the uniform random default.
 	 */
-	constructor(config: Pick<PollBackoffConfig, "floorMs" | "ceilingMs" | "jitter">, jitterSource: JitterSource = defaultJitterSource) {
+	constructor(
+		config: Pick<PollBackoffConfig, "floorMs" | "ceilingMs" | "jitter"> &
+			Partial<Pick<PollBackoffConfig, "suspendEnabled" | "suspendAfterMs" | "suspendBackstopMs">>,
+		jitterSource: JitterSource = defaultJitterSource,
+	) {
 		this.floorMs = config.floorMs;
 		// Guard the window here too (defense in depth) so a directly-constructed
 		// machine with a backwards window still degrades to flat, never negative.
@@ -228,6 +275,11 @@ export class PollBackoff {
 		this.jitter = config.jitter;
 		this.jitterSource = jitterSource;
 		this.stepMs = this.floorMs;
+		// Suspend knobs default OFF/absent so a machine constructed with only the
+		// legacy floor/ceiling/jitter (every existing caller + test) is unchanged.
+		this.suspendEnabled = config.suspendEnabled ?? false;
+		this.suspendAfterMs = config.suspendAfterMs ?? DEFAULT_POLL_SUSPEND_AFTER_MS;
+		this.backstopMs = config.suspendBackstopMs ?? DEFAULT_POLL_SUSPEND_BACKSTOP_MS;
 	}
 
 	/**
@@ -237,14 +289,46 @@ export class PollBackoff {
 	 */
 	onEmptyLease(): void {
 		this.stepMs = Math.min(this.stepMs * 2, this.ceilingMs);
+		// Accumulate idle time so the loop can suspend after `suspendAfterMs` (PRD-062e).
+		// Charging the (new) step approximates the wait about to elapse before the next
+		// empty tick; a few ticks at the ceiling cross the threshold.
+		this.idleAccumMs += this.stepMs;
 	}
 
 	/**
 	 * Reset the delay to the floor after a SUCCESSFUL lease (AC-3): the first real
-	 * job snaps the cadence back to fast so an active session is unchanged.
+	 * job snaps the cadence back to fast so an active session is unchanged. Also
+	 * clears the idle accumulator so a busy loop never suspends.
 	 */
 	onLease(): void {
 		this.stepMs = this.floorMs;
+		this.idleAccumMs = 0;
+	}
+
+	/**
+	 * True when the loop has been idle long enough to SUSPEND (PRD-062e, opt-in):
+	 * suspend enabled AND accumulated idle at/above `suspendAfterMs`. The poll loop
+	 * consults this after an empty tick and, when true, waits {@link suspendBackstopMs}
+	 * instead of the ~30s ceiling so DeepLake's compute pod can scale to zero.
+	 */
+	shouldSuspend(): boolean {
+		return this.suspendEnabled && this.idleAccumMs >= this.suspendAfterMs;
+	}
+
+	/** The long backstop interval to wait while suspended (catches cross-device jobs). */
+	suspendBackstopMs(): number {
+		return this.backstopMs;
+	}
+
+	/**
+	 * Resume a suspended (or backed-off) loop: snap the cadence back to the floor and
+	 * clear the idle accumulator. The poll loop calls this from `wake()` when a job is
+	 * enqueued locally, so a captured memory is processed immediately rather than
+	 * waiting for the backstop.
+	 */
+	resume(): void {
+		this.stepMs = this.floorMs;
+		this.idleAccumMs = 0;
 	}
 
 	/** The current un-jittered step (for assertions on the geometric schedule). */

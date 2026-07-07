@@ -73,6 +73,14 @@ export interface PollLoop {
 	start(): void;
 	/** Stop the loop. Idempotent. */
 	stop(): void;
+	/**
+	 * Resume a loop that has SUSPENDED on the long idle backstop (PRD-062e), snapping
+	 * its cadence back to the floor so a just-enqueued job is processed immediately.
+	 * Wire this to the job queue's `enqueue` so a captured memory does not wait for the
+	 * backstop. No-op when suspend is off, when the loop is stopped, or on the flat
+	 * (backoff-disabled) path. Idempotent and safe to call at any time.
+	 */
+	wake(): void;
 }
 
 /** The concrete loop. */
@@ -86,6 +94,8 @@ class AdaptivePollLoop implements PollLoop {
 	private stopped = false;
 	/** Guards against overlapping ticks on the poll loop (the workers' `running` flag). */
 	private running = false;
+	/** True while parked on the long idle backstop (PRD-062e); `wake()` clears it. */
+	private suspended = false;
 
 	constructor(deps: PollLoopDeps) {
 		this.tick = deps.tick;
@@ -143,8 +153,36 @@ class AdaptivePollLoop implements PollLoop {
 				this.running = false;
 				// Adaptive path re-arms a fresh one-shot at the new delay; flat path
 				// relies on the repeating interval and does not reschedule here.
-				if (backoff !== null) this.scheduleNext(backoff.nextDelayMs());
+				if (backoff === null) return;
+				// PRD-062e: once idle past the suspend threshold, park on the LONG backstop
+				// instead of the ~30s ceiling, so DeepLake's compute pod scales to zero. A
+				// lease (or wake()) resets the machine, so shouldSuspend() flips back off and
+				// the fast cadence resumes. Suspend off → shouldSuspend() is always false and
+				// this is byte-for-byte the 062b ceiling behavior.
+				if (backoff.shouldSuspend()) {
+					this.suspended = true;
+					this.scheduleNext(backoff.suspendBackstopMs());
+				} else {
+					this.suspended = false;
+					this.scheduleNext(backoff.nextDelayMs());
+				}
 			});
+	}
+
+	/**
+	 * Resume a suspended loop (PRD-062e). Resets the backoff to the floor and, when the
+	 * loop is parked on the long backstop and not mid-tick, re-arms the next tick
+	 * immediately so a just-enqueued job is picked up without waiting for the backstop.
+	 * No-op on the flat path (no backoff machine) or when stopped.
+	 */
+	wake(): void {
+		if (this.backoff === null || this.stopped) return;
+		this.backoff.resume();
+		if (this.running) return; // an in-flight tick's finally() will reschedule at the (now) floor.
+		if (!this.suspended) return; // already on the fast cadence; the reset above is enough.
+		this.suspended = false;
+		if (this.handle !== undefined) this.timers.clearTimer(this.handle);
+		this.scheduleNext(this.backoff.nextDelayMs());
 	}
 
 	stop(): void {

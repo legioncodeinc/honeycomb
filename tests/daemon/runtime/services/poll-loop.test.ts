@@ -251,3 +251,95 @@ describe("AdaptivePollLoop: AC-2 / AC-3 — adaptive self-reschedule", () => {
 		loop.stop();
 	});
 });
+
+describe("AdaptivePollLoop: PRD-062e idle-suspend (opt-in, default OFF)", () => {
+	// suspendAfterMs=30000 so a few empty ticks cross it: idleAccum after each empty
+	// tick is 2000, 6000, 14000, 30000 → suspends on the 4th empty tick.
+	const SUSPEND = PollBackoffConfigSchema.parse({
+		enabled: true,
+		floorMs: 1_000,
+		ceilingMs: 30_000,
+		jitter: 0,
+		suspendEnabled: true,
+		suspendAfterMs: 30_000,
+		suspendBackstopMs: 300_000,
+	});
+
+	it("parks on the long backstop once idle past suspendAfterMs (instead of the 30s ceiling)", async () => {
+		const timers = manualTimers();
+		const loop = createPollLoop({ tick: async () => false, backoff: SUSPEND, flatIntervalMs: 1_000, timers });
+		loop.start();
+		// Empty ticks step 2000, 4000, 8000, then the 4th empty tick crosses the idle
+		// threshold and parks on the 300000 backstop rather than the 30000 ceiling.
+		const expected = [2_000, 4_000, 8_000, 300_000];
+		for (const want of expected) {
+			timers.fireNext();
+			await flush();
+			expect(timers.delays.at(-1)).toBe(want);
+		}
+		// It STAYS on the backstop while idle (no drift back to the ceiling).
+		timers.fireNext();
+		await flush();
+		expect(timers.delays.at(-1)).toBe(300_000);
+		loop.stop();
+	});
+
+	it("wake() snaps a suspended loop back to the floor (a just-enqueued job is not stranded)", async () => {
+		const timers = manualTimers();
+		const loop = createPollLoop({ tick: async () => false, backoff: SUSPEND, flatIntervalMs: 1_000, timers });
+		loop.start();
+		for (let i = 0; i < 4; i++) {
+			timers.fireNext();
+			await flush();
+		}
+		expect(timers.delays.at(-1)).toBe(300_000); // suspended on the backstop.
+		loop.wake();
+		// wake() re-arms immediately at the floor and leaves exactly one live timer.
+		expect(timers.delays.at(-1)).toBe(1_000);
+		expect(timers.armedCount()).toBe(1);
+		loop.stop();
+	});
+
+	it("with suspend OFF (default), an idle loop stays at the ceiling forever, never the backstop", async () => {
+		const timers = manualTimers();
+		const NO_SUSPEND = PollBackoffConfigSchema.parse({ enabled: true, floorMs: 1_000, ceilingMs: 30_000, jitter: 0 });
+		const loop = createPollLoop({ tick: async () => false, backoff: NO_SUSPEND, flatIntervalMs: 1_000, timers });
+		loop.start();
+		for (let i = 0; i < 8; i++) {
+			timers.fireNext();
+			await flush();
+		}
+		// Byte-for-byte the 062b behavior: caps at the ceiling, never the backstop.
+		expect(timers.delays.at(-1)).toBe(30_000);
+		expect(timers.delays).not.toContain(300_000);
+		loop.stop();
+	});
+
+	it("a leased job resets the idle accumulator, so a busy loop never suspends", async () => {
+		const timers = manualTimers();
+		let n = 0;
+		// Alternate empty/lease so idle never accumulates to the suspend threshold.
+		const loop = createPollLoop({
+			tick: async () => (n++ % 2 === 1),
+			backoff: SUSPEND,
+			flatIntervalMs: 1_000,
+			timers,
+		});
+		loop.start();
+		for (let i = 0; i < 10; i++) {
+			timers.fireNext();
+			await flush();
+		}
+		expect(timers.delays).not.toContain(300_000); // never suspended.
+		loop.stop();
+	});
+
+	it("wake() is a safe no-op on the flat (backoff-disabled) path", async () => {
+		const timers = manualTimers();
+		const loop = createPollLoop({ tick: async () => false, backoff: PollBackoffConfigSchema.parse({}), flatIntervalMs: 1_000, timers });
+		loop.start();
+		expect(() => loop.wake()).not.toThrow();
+		expect(timers.delays).toEqual([1_000]); // wake did not arm anything on the flat path.
+		loop.stop();
+	});
+});
