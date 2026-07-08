@@ -3034,7 +3034,24 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	let hibernation: DeepLakeHibernation | null = null;
 	const hibernationConfig = envHibernationConfigProvider();
 	const onActivity = (): void => hibernation?.touch();
-	daemon.app.use("*", async (_c, next) => {
+	// TEMP diagnostic (#267): when HONEYCOMB_DEBUG_WAKE is set, log the method+path of
+	// every WORK-CARRYING request that reaches this middleware and resets the hibernation
+	// idle timer. On a genuinely idle daemon this log should be empty; any line names the
+	// caller that keeps the Activeloop pod warm (e.g. doctor or a harness/mcp client
+	// pinging a waking route). `/health` and `/api/status` are registered BEFORE this
+	// middleware (non-waking by design), so they never appear here — their absence is
+	// expected, not a gap. `wasHibernated` shows whether the request actually caused a wake
+	// (true) versus merely deferred an already-active idle window (false). Daemon-only code,
+	// so a direct `process.env` read is fine (mirrors `envHibernationConfigProvider`).
+	const debugWake = process.env.HONEYCOMB_DEBUG_WAKE === "true" || process.env.HONEYCOMB_DEBUG_WAKE === "1";
+	daemon.app.use("*", async (c, next) => {
+		if (debugWake) {
+			daemon.logger.event("hibernation.wake.request", {
+				method: c.req.method,
+				path: c.req.path,
+				wasHibernated: hibernation?.isHibernated() ?? false,
+			});
+		}
 		onActivity();
 		await next();
 	});
