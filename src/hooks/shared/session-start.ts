@@ -58,6 +58,21 @@ export const BIND_PROJECT_CWD_NOTICE =
 const INBOX_CAPTURE_ENV_KEY = "HONEYCOMB_INBOX_CAPTURE" as const;
 
 /**
+ * The one-shot, per-session recall-awareness notice (PRD-075c c-AC-1). The `PreToolUse` recall
+ * surface (075a/075b) is model-commanded, not always-on: a capability the model does not know
+ * about goes unused, so this notice names the `honeycomb recall "<query>"` command explicitly.
+ * A CONSTANT, not a rendered call: it cannot throw, and it is appended UNCONDITIONALLY to every
+ * session-start's `additionalContext` (c-AC-2, c-AC-3) alongside the existing notice/context/prime
+ * blocks, never replacing them. Terse and imperative on purpose: it competes for attention and
+ * decays as the turn's context grows.
+ */
+export const RECALL_AWARENESS_NOTICE =
+	"Memory recall is available on demand: you have a searchable memory of past sessions. " +
+	'To recall it mid task, run honeycomb recall "<what you are looking for>": the result comes ' +
+	"back as the command's output. Reach for it before asking the user to re-explain prior " +
+	"context, decisions, or where something lives. It costs nothing on turns you do not use it.";
+
+/**
  * The default production {@link OnboardingNoticeGate}: read the thin-client `~/.deeplake/projects.json`
  * cache and report whether the active workspace has ≥1 locally-bound project, with NO DeepLake call
  * (a-AC-3). FAIL-SOFT: a throw reads as "has a bound project" (notice SUPPRESSED) so the notice never
@@ -215,11 +230,13 @@ export async function runSessionStart(input: HookInput, deps: SessionStartDeps):
 		"",
 	);
 
-	// The injected `additionalContext` is the rendered rules/goals block plus the prime
-	// digest, joined when both are present so neither is lost. Either alone is returned
-	// as-is; all empty omits `additionalContext` entirely. The first-run notice (when shown)
-	// leads so it is the first thing the user sees.
-	const additionalContext = joinBlocks(noticeBlock, joinBlocks(contextBlock, primeBlock));
+	// The injected `additionalContext` composes the first-run notice, the rendered rules/goals
+	// block, the prime digest, and the recall-awareness notice (PRD-075c c-AC-1/c-AC-2), joined
+	// when present so none is lost. Any block alone is returned as-is; all empty (INCLUDING the
+	// recall notice, hypothetically) omits `additionalContext` entirely (c-AC-3). The first-run
+	// notice leads so it is the first thing the user sees; the recall-awareness notice trails as
+	// a standing reminder, appended after the situational content, never replacing it.
+	const additionalContext = joinBlocks(noticeBlock, contextBlock, primeBlock, RECALL_AWARENESS_NOTICE);
 
 	// Steps 7, 7b, 8: side-effecting hygiene pulls (skills, assets, graph). These do NOT touch
 	// `additionalContext` — they are background hygiene, not recall. Measured on a warm daemon
@@ -286,15 +303,16 @@ function backgroundPull(fn: () => Promise<void>): Promise<void> {
 }
 
 /**
- * Join the rules/goals context block and the 046d prime digest into one
- * `additionalContext` payload. Either-empty returns the other unchanged; both-empty
- * returns `""` (the caller omits `additionalContext`); both-present are separated by a
- * blank line so the two blocks stay legible to the model.
+ * Join any number of `additionalContext` blocks into one payload (PRD-075c c-AC-1/c-AC-2:
+ * generalized from the original 2-block notice/prime join to compose the first-run notice, the
+ * rules/goals context, the 046d prime digest, and the recall-awareness notice). Empty blocks are
+ * dropped; the remaining blocks are separated by a blank line so each stays legible to the model.
+ * A single non-empty block is returned as-is; all-empty (or all-empty-including-the-would-be-notice
+ * slot, c-AC-3) returns `""` so the caller omits `additionalContext` entirely. Pure, exported for
+ * direct unit coverage of the omit/single/multi-block composition rules.
  */
-function joinBlocks(context: string, prime: string): string {
-	if (context === "") return prime;
-	if (prime === "") return context;
-	return `${context}\n\n${prime}`;
+export function joinBlocks(...blocks: readonly string[]): string {
+	return blocks.filter((block) => block !== "").join("\n\n");
 }
 
 /**

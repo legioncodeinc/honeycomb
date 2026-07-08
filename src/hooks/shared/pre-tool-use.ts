@@ -31,6 +31,7 @@
  */
 
 import { classifyPath } from "../../daemon-client/vfs/classify.js";
+import { MEMORY_MOUNT_DISPLAY_PATH } from "../../daemon-client/vfs/index-gen.js";
 import {
 	createFakeVfsIntercept,
 	type HookCoreDeps,
@@ -138,7 +139,8 @@ export async function runPreToolUse(
 
 	// read / search / list / find → resolve through the daemon VFS seam (the ONLY
 	// route to memory content; nothing hits the real filesystem, b-AC-4).
-	const op: VfsToolOp = { verb, path: targetPath, ...(payload.query !== undefined ? { query: payload.query } : {}) };
+	const query = resolveQuery(payload);
+	const op: VfsToolOp = { verb, path: targetPath, ...(query !== undefined ? { query } : {}) };
 	const output = await resolvedVfs.resolve(op);
 	return { result: { ok: true, additionalContext: output }, decision: { kind: "replace", output } };
 }
@@ -156,10 +158,29 @@ function asPayload(data: unknown): PreToolPayload | undefined {
 	};
 }
 
-/** The path the tool targets: the explicit `path`, else the path arg sniffed from a Bash command. */
+/**
+ * The path the tool targets: the explicit `path`, else (for a Bash command) the `honeycomb
+ * recall`/`honeycomb search` sentinel's mount root (PRD-075c c-AC-4, so `onMemoryMount` passes
+ * without the model ever naming a mount path), else the path arg sniffed from the Bash command.
+ */
 function resolveTargetPath(payload: PreToolPayload): string | undefined {
 	if (payload.path !== undefined && payload.path !== "") return payload.path;
-	if (payload.command !== undefined) return sniffBashPath(payload.command);
+	if (payload.command !== undefined) {
+		if (sniffHoneycombRecallSentinel(payload.command) !== undefined) return MEMORY_MOUNT_DISPLAY_PATH;
+		return sniffBashPath(payload.command);
+	}
+	return undefined;
+}
+
+/**
+ * The search/find query for a VFS op: the explicit `payload.query` field (from a harness that
+ * already sniffed a pattern, e.g. `Grep`'s `pattern`) always wins; otherwise, for a Bash command,
+ * fall back to the `honeycomb recall`/`honeycomb search` sentinel's quoted argument (PRD-075c
+ * c-AC-4). Neither source means no query (a plain `cat`/`ls` never carries one).
+ */
+function resolveQuery(payload: PreToolPayload): string | undefined {
+	if (payload.query !== undefined) return payload.query;
+	if (payload.command !== undefined) return sniffHoneycombRecallSentinel(payload.command)?.query;
 	return undefined;
 }
 
@@ -233,8 +254,37 @@ function lowerVerb(payload: PreToolPayload): VfsToolOp["verb"] | undefined {
 	}
 }
 
-/** Sniff the leading command word of a Bash line to a VFS verb (undefined when unmodelable). */
+/**
+ * Recognizes a `honeycomb recall "<query>"` / `honeycomb search "<query>"` Bash sentinel line
+ * (PRD-075c c-AC-4/c-AC-5): the ENTIRE trimmed command must be exactly that shape (a single
+ * double- or single-quoted argument), so the sentinel reads as first-class intent rather than a
+ * loosely-matched substring: an unrelated `honeycomb <subcommand>` invocation is left alone
+ * (falls through to the default Bash-verb switch, currently `undefined` → harmless-echo rewrite,
+ * since no real `honeycomb` CLI subcommand is presently spelled `recall`/`search`).
+ */
+const HONEYCOMB_RECALL_SENTINEL = /^honeycomb\s+(?:recall|search)\s+(?:"([^"]*)"|'([^']*)')\s*$/;
+
+/**
+ * Extract the query from a `honeycomb recall`/`honeycomb search` Bash sentinel line, or
+ * `undefined` when `command` is not that exact shape (PRD-075c c-AC-4). The intercept never
+ * requires a real `honeycomb recall` CLI subcommand to exist: this is a RECOGNITION rule in the
+ * pre-tool intercept, which blocks the literal shell command and returns the daemon's VFS output
+ * before the real command would ever run (c-AC-5).
+ */
+function sniffHoneycombRecallSentinel(command: string): { readonly query: string } | undefined {
+	const match = HONEYCOMB_RECALL_SENTINEL.exec(command.trim());
+	if (match === null) return undefined;
+	return { query: match[1] ?? match[2] ?? "" };
+}
+
+/**
+ * Sniff the leading command word of a Bash line to a VFS verb (undefined when unmodelable). The
+ * `honeycomb recall`/`honeycomb search` sentinel (PRD-075c c-AC-4) is checked FIRST and maps
+ * straight to `search`, ahead of the raw `grep`/`rg`/`egrep` mount fallback below (which stays
+ * unchanged and keeps resolving unrelated `honeycomb` invocations to the default case, c-AC-6).
+ */
 function lowerBashVerb(command: string): VfsToolOp["verb"] | undefined {
+	if (sniffHoneycombRecallSentinel(command) !== undefined) return "search";
 	const head = command.trim().split(/\s+/)[0] ?? "";
 	switch (head) {
 		case "cat":
