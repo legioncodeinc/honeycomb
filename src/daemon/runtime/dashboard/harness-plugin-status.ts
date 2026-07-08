@@ -31,8 +31,8 @@
 /** A tiny process-local holder for the current per-harness plugin-enabled set (ids only, FR-8). */
 export interface HarnessPluginStatusHolder {
 	/**
-	 * Replace the current enabled set with `enabled` (canonical harness ids only). Non-string /
-	 * empty entries are dropped so a malformed push can never poison the set.
+	 * Replace the current enabled set with `enabled` (canonical harness ids only). Non-string,
+	 * empty, and whitespace-only entries are dropped so a malformed push can never poison the set.
 	 */
 	set(enabled: Iterable<string>): void;
 	/** The current per-harness plugin-enabled set (ids only). Empty until the first push. */
@@ -50,7 +50,9 @@ export function createHarnessPluginStatusHolder(): HarnessPluginStatusHolder {
 		set(next: Iterable<string>): void {
 			const cleaned = new Set<string>();
 			for (const id of next) {
-				if (typeof id === "string" && id.length > 0) cleaned.add(id);
+				// Trim before the length check so a whitespace-only id (e.g. "   ") is dropped too,
+				// not just the empty string; the id itself is stored as-given (no silent rewrite).
+				if (typeof id === "string" && id.trim().length > 0) cleaned.add(id);
 			}
 			enabled = cleaned;
 		},

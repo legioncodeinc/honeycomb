@@ -40,15 +40,26 @@ import type { Context } from "hono";
 
 import { z } from "zod";
 
+import { HARNESS_STATUS_INGEST_PATH as HARNESS_STATUS_INGEST_FULL_PATH } from "../../../shared/constants.js";
 import type { DeploymentMode } from "../config.js";
 import type { Daemon } from "../server.js";
+import { CANONICAL_HARNESS_IDS } from "./harness-registry.js";
 import type { HarnessPluginStatusHolder } from "./harness-plugin-status.js";
+
+/** The canonical harness ids, as a set for O(1) membership checks (derived from {@link CANONICAL_HARNESS_IDS}). */
+const CANONICAL_HARNESS_ID_SET: ReadonlySet<string> = new Set(CANONICAL_HARNESS_IDS);
 
 /** The already-mounted, protected route group the ingest attaches to (no `server.ts` edit). */
 export const HARNESS_STATUS_INGEST_GROUP = "/api/diagnostics" as const;
 
-/** `POST /api/diagnostics/harness-status` — the reconcile → daemon plugin-enabled ingest. */
-export const HARNESS_STATUS_INGEST_PATH = "/harness-status" as const;
+/**
+ * `POST /api/diagnostics/harness-status`, the reconcile to daemon plugin-enabled ingest, mounted
+ * relative to {@link HARNESS_STATUS_INGEST_GROUP}. Derived from the single-sourced
+ * `src/shared/constants.ts#HARNESS_STATUS_INGEST_PATH` (the same full path `src/cli/runtime.ts`'s
+ * push uses) by stripping the group prefix, so the CLI push and this mount can never drift onto two
+ * different literals.
+ */
+export const HARNESS_STATUS_INGEST_PATH = HARNESS_STATUS_INGEST_FULL_PATH.slice(HARNESS_STATUS_INGEST_GROUP.length);
 
 /** The ack the ingest returns: whether the push was accepted + how many harnesses read enabled. NO secret. */
 export interface HarnessStatusIngestAck {
@@ -110,7 +121,11 @@ export function mountHarnessStatusIngestApi(daemon: Daemon, options: MountHarnes
 			const ack: HarnessStatusIngestAck = { accepted: false, enabledCount: 0, reason: "invalid request body" };
 			return c.json(ack, 400);
 		}
-		const enabled = parsed.data.harnesses.filter((h) => h.pluginEnabled).map((h) => h.harness);
+		// Fail-soft: drop any id that is not one of the canonical six (never a 500) so a malformed
+		// local push can't populate the holder with a non-canonical entry {@link CANONICAL_HARNESS_IDS}.
+		const enabled = parsed.data.harnesses
+			.filter((h) => h.pluginEnabled && CANONICAL_HARNESS_ID_SET.has(h.harness))
+			.map((h) => h.harness);
 		options.holder.set(enabled);
 		const ack: HarnessStatusIngestAck = { accepted: true, enabledCount: enabled.length };
 		return c.json(ack, 200);

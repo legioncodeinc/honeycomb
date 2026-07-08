@@ -56,7 +56,7 @@ import {
 import { runHoneycombStateMigration } from "../daemon/runtime/state-migration/index.js";
 import { unregisterHoneycombFromDoctor } from "../daemon/runtime/telemetry/fleet-registry.js";
 import { launchDashboard } from "../dashboard/launch.js";
-import { DAEMON_HOST, DAEMON_PORT } from "../shared/constants.js";
+import { DAEMON_HOST, DAEMON_PORT, HARNESS_STATUS_INGEST_PATH } from "../shared/constants.js";
 import { honeycombStateDir, legacyHoneycombDir, preferExistingPath, resolveFleetRoot } from "../shared/fleet-root.js";
 import { authMain } from "./auth.js";
 import { buildConnectorRunner } from "./connector-runner.js";
@@ -680,9 +680,6 @@ export function buildHarnessReconciler(daemon: DaemonClient): HarnessReconciler 
 	// serves REAL plugin-enabled state shortly after daemon-up.
 	return createHarnessReconciler({ onCycleComplete: buildReconcilePluginStatusPush(daemon) });
 }
-
-/** The daemon loopback route the reconcile pushes computed plugin-enabled state to (PRD-006d F-2). */
-const HARNESS_STATUS_INGEST_PATH = "/api/diagnostics/harness-status";
 
 /**
  * Build the fail-soft reconcile → daemon plugin-enabled push (PRD-006d F-2). After each reconcile

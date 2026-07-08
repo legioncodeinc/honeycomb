@@ -129,6 +129,23 @@ describe("PRD-006d F-2 - the holder + ingest serve real plugin-enabled state", (
 		expect(holder.get().has("claude-code")).toBe(true);
 	});
 
+	it("F-2 a non-canonical harness id is dropped, never written to the holder (fail-soft, never a 500)", async () => {
+		const { daemon, holder } = wireBoth();
+		const res = await postStatus(daemon, {
+			harnesses: [
+				{ harness: "claude-code", pluginEnabled: true },
+				{ harness: "not-a-real-harness", pluginEnabled: true },
+			],
+		});
+		expect(res.status).toBe(200);
+		const ack = (await res.json()) as HarnessStatusIngestAck;
+		expect(ack.accepted).toBe(true);
+		// Only the canonical id is counted/written; the bogus id never reaches the holder.
+		expect(ack.enabledCount).toBe(1);
+		expect(holder.get().has("claude-code")).toBe(true);
+		expect(holder.get().has("not-a-real-harness")).toBe(false);
+	});
+
 	it("F-2 the ack carries NO token/secret/path (ids + a count only)", async () => {
 		const { daemon } = wireBoth();
 		const res = await postStatus(daemon, { harnesses: [{ harness: "claude-code", pluginEnabled: true }] });
@@ -147,10 +164,11 @@ describe("PRD-006d F-2 - the in-memory holder (FR-8)", () => {
 		expect([...holder.get()].sort()).toEqual(["claude-code", "cursor"]);
 	});
 
-	it("drops empty / whitespace-safe entries so a malformed push cannot poison the set", () => {
+	it("drops empty and whitespace-only entries so a malformed push cannot poison the set", () => {
 		const holder = createHarnessPluginStatusHolder();
-		holder.set(["claude-code", ""]);
+		holder.set(["claude-code", "", "   "]);
 		expect(holder.get().has("claude-code")).toBe(true);
 		expect(holder.get().has("")).toBe(false);
+		expect(holder.get().has("   ")).toBe(false);
 	});
 });
