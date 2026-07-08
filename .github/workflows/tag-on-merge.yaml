@@ -1,15 +1,17 @@
 name: Tag on merge
 
-# When a version bump merges to main (spec #2: the bump lands ON the PR, so main
-# already carries the new package.json version), push the matching vX.Y.Z tag so
-# the existing release.yaml publish pipeline fires.
+# When a version bump merges to main, push the matching vX.Y.Z tag so release.yaml
+# publishes. This is ALSO the RELEASE SAFETY NET: if a changeset reached main
+# WITHOUT its bump — e.g. the PR-branch bump raced the merge, or someone bypassed
+# the gate and merged early — we consume it HERE (bump on main, then tag), so a
+# merged changeset ALWAYS results in a release. Without this, a raced merge left
+# an orphaned changeset on main and nothing shipped.
 #
-# WHY A PAT: tags pushed with the default GITHUB_TOKEN do NOT trigger other
-# workflows, so a token-pushed tag would never start release.yaml. We push with
-# secrets.RELEASE_PAT (a fine-grained PAT with contents:write on this repo) so
-# the tag push is seen as an external event and release.yaml runs. If you would
-# rather not manage a PAT, convert release.yaml to trigger on push-to-main
-# instead (see RELEASE-AUTOMATION.md).
+# Uses RELEASE_PAT (not GITHUB_TOKEN) for every push, because (a) a GITHUB_TOKEN-
+# pushed tag does NOT trigger release.yaml, and (b) the main branch ruleset grants
+# repository-admin bypass, which the admin-owned PAT inherits — so the safety-net
+# bump can push to protected main. Idempotent: once the changeset is consumed and
+# the tag exists, a re-run finds nothing to do.
 
 on:
   push:
@@ -20,7 +22,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read # the PAT (not GITHUB_TOKEN) performs the tag push
+  contents: read # all writes go through RELEASE_PAT below, not GITHUB_TOKEN
 
 jobs:
   tag:
@@ -31,23 +33,39 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Create + push tag if the version is new
+      - uses: actions/setup-node@v6.4.0
+        with:
+          node-version: '22.x'
+
+      - name: Consume orphaned changeset (safety net) + tag
         env:
           GH_PAT: ${{ secrets.RELEASE_PAT }}
         run: |
           set -euo pipefail
+          if [ -z "${GH_PAT}" ]; then
+            echo "::error::RELEASE_PAT is not set — cannot push tags/bumps that trigger release.yaml."
+            exit 1
+          fi
+          REMOTE="https://x-access-token:${GH_PAT}@github.com/${GITHUB_REPOSITORY}.git"
+          git config user.name  "release-bot"
+          git config user.email "release-bot@users.noreply.github.com"
+
+          # SAFETY NET: a pending changeset on main means the bump never landed
+          # (raced merge / bypass). Consume it here and push the bump to main.
+          CHANGESET="$(ls .changeset/*.md 2>/dev/null | grep -iv 'readme.md' | head -1 || true)"
+          if [ -n "$CHANGESET" ]; then
+            echo "Orphaned changeset $CHANGESET found on main — applying the bump here."
+            node scripts/release/apply-bump.mjs
+            git commit --no-verify -m "chore(release): bump from merged changeset [safety-net]"
+            git push "$REMOTE" HEAD:main
+          fi
+
           VERSION="$(node -p "require('./package.json').version")"
           TAG="v$VERSION"
           if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists — nothing to do."
+            echo "Tag $TAG already exists — nothing to tag."
             exit 0
           fi
-          if [ -z "${GH_PAT}" ]; then
-            echo "::error::RELEASE_PAT is not set — cannot push a tag that triggers release.yaml."
-            exit 1
-          fi
-          git config user.name  "honeycomb-release-bot"
-          git config user.email "release-bot@users.noreply.github.com"
           git tag -a "$TAG" -m "Release $TAG"
-          git push "https://x-access-token:${GH_PAT}@github.com/${GITHUB_REPOSITORY}.git" "$TAG"
+          git push "$REMOTE" "$TAG"
           echo "Pushed $TAG — release.yaml will publish it."
