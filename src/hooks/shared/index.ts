@@ -14,14 +14,22 @@ export {
 	createFakeCredentialReader,
 	createFakeDaemonHookClient,
 	createFakePrimeRenderer,
+	createFakeRecallRenderer,
+	createFakeRecallSessionStore,
 	createFakeSessionStartSeams,
 	createFakeSummaryLock,
 	createFakeVfsIntercept,
 	createNoopSessionStartSeams,
 	type ContextRenderer,
 	type ContextRenderRequest,
+	EMPTY_RECALL_SNAPSHOT,
 	type PrimeRenderer,
 	type PrimeRenderRequest,
+	type RecallHit,
+	type RecallRenderer,
+	type RecallRenderRequest,
+	type RecallSessionSnapshot,
+	type RecallSessionStore,
 	type CredentialReader,
 	type DaemonHookClient,
 	type DaemonHookRequest,
@@ -100,6 +108,26 @@ export {
 	type PrimeRendererOptions,
 	PRIME_PATH,
 } from "./prime-renderer.js";
+
+// ── PRD-076a per-turn query-aware recall (a-AC-1..8) ────────────────────────────
+export {
+	createRecallRenderer,
+	DEFAULT_RECALL_LIMIT,
+	DEFAULT_RECALL_TIMEOUT_MS,
+	DEFAULT_RECALL_TOKEN_BUDGET,
+	type RecallRendererOptions,
+	RECALL_PATH,
+} from "./recall-renderer.js";
+
+export {
+	createFileRecallSessionStore,
+	NUDGE_INTERVAL_TURNS,
+	RECALL_BLOCK_HEADER,
+	RECALL_REMINDER,
+	renderRecallBlock,
+	runUserPromptRecall,
+	shouldFireNudge,
+} from "./user-prompt-recall.js";
 
 // ── PRD-021c production seams (c-AC-1 / c-AC-2) ─────────────────────────────────
 export {

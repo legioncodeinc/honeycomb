@@ -53,6 +53,17 @@ export interface ShimSpec {
 	readonly eventMap: Readonly<Record<string, LogicalEvent>>;
 
 	/**
+	 * OPTIONAL (PRD-076a / a-AC-5): the native hook event name to stamp under
+	 * `hookSpecificOutput.hookEventName` when this shim renders a `model-only` context block.
+	 * ABSENT (the default, e.g. the session-start prime) → `renderContext` emits the flat
+	 * `{ channel, additionalContext }` envelope UNCHANGED (a-AC-8 regression guard). PRESENT
+	 * (the per-turn recall injector shim, `"UserPromptSubmit"`) → the envelope ALSO carries
+	 * `hookSpecificOutput: { hookEventName, additionalContext }`, the host's documented per-event
+	 * delivery channel. Ignored for the `user-visible` channel.
+	 */
+	readonly contextHookEvent?: string;
+
+	/**
 	 * Lower a harness's native payload into the normalized {@link HookInput.data}
 	 * (FR-2). This is the one genuinely per-harness step: each harness names its
 	 * payload fields differently. It returns the SAME canonical `{ kind, ... }`
@@ -146,9 +157,21 @@ function deriveMeta(spec: ShimSpec, raw: unknown, base: HookSessionMeta): HookSe
 	return spec.deriveMeta ? spec.deriveMeta(raw, base) : base;
 }
 
-/** Route the rendered block into the spec's channel envelope (FR-10 / c-AC-5). */
+/**
+ * Route the rendered block into the spec's channel envelope (FR-10 / c-AC-5). PRD-076a
+ * (a-AC-5): a `model-only` shim that declares `contextHookEvent` ALSO wraps the block under
+ * `hookSpecificOutput` with that event name (the per-turn `UserPromptSubmit` recall arm); a
+ * shim WITHOUT it emits the flat envelope unchanged (the session-start prime — a-AC-8).
+ */
 function renderChannel(spec: ShimSpec, block: string): ContextEnvelope {
 	if (spec.contextChannel === "model-only") {
+		if (spec.contextHookEvent !== undefined) {
+			return {
+				channel: "model-only",
+				additionalContext: block,
+				hookSpecificOutput: { hookEventName: spec.contextHookEvent, additionalContext: block },
+			};
+		}
 		return { channel: "model-only", additionalContext: block };
 	}
 	const text = spec.renderUserVisible ? spec.renderUserVisible(block) : block;
