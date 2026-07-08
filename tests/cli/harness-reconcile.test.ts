@@ -135,6 +135,41 @@ describe("PRD-006b b-AC-2 - recurring cadence", () => {
 		await vi.advanceTimersByTimeAsync(5000);
 		expect(wire).toHaveBeenCalledTimes(3);
 	});
+
+	it("b-AC-1/b-AC-2 start() is idempotent - a repeated call while running neither re-fires the immediate pass nor stacks a second cadence timer", async () => {
+		const { wiring, wire } = spyWiring();
+		const reconciler = createHarnessReconciler({
+			harnesses: ["claude-code"],
+			detectAgents: () => new Set(["claude-code"]),
+			isPluginEnabled: () => false,
+			cliAvailable: () => true,
+			buildWiring: () => wiring,
+			intervalMs: 1000,
+			wireTimeoutMs: 1_000_000,
+			now: () => FIXED_NOW,
+		});
+
+		reconciler.start();
+		reconciler.start(); // repeated while already running - must be a total no-op
+		reconciler.start();
+		await vi.advanceTimersByTimeAsync(0);
+		// Only ONE immediate pass fired despite three start() calls.
+		expect(wire).toHaveBeenCalledTimes(1);
+
+		// Only ONE cadence timer is armed - a single interval tick advances exactly one more pass,
+		// never N stacked passes from N stacked timers.
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(wire).toHaveBeenCalledTimes(2);
+
+		reconciler.stop();
+		await vi.advanceTimersByTimeAsync(5000);
+		expect(wire).toHaveBeenCalledTimes(2);
+
+		// start() after stop() resumes normally: fires again and rearms the cadence.
+		reconciler.start();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(wire).toHaveBeenCalledTimes(3);
+	});
 });
 
 describe("PRD-006b b-AC-3 - already-enabled no-op", () => {

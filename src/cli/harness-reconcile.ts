@@ -187,6 +187,68 @@ async function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
 }
 
 /**
+ * Owns the per-harness last-outcome bookkeeping (b-AC-7). Process-local only - no Deeplake, no
+ * sidecar file (FR-8). Extracted so {@link createHarnessReconciler} does not itself hold the `Map`.
+ */
+function createOutcomeBookkeeping(now: () => Date): {
+	record: (harness: string, outcome: ReconcileOutcome, detail?: string) => HarnessReconcileResult;
+	lastOutcome: (harness: string) => HarnessReconcileResult | undefined;
+	lastOutcomes: (harnesses: readonly string[]) => readonly HarnessReconcileResult[];
+} {
+	const last = new Map<string, HarnessReconcileResult>();
+	return {
+		record(harness: string, outcome: ReconcileOutcome, detail?: string): HarnessReconcileResult {
+			const result: HarnessReconcileResult =
+				detail !== undefined
+					? { harness, outcome, at: now().toISOString(), detail }
+					: { harness, outcome, at: now().toISOString() };
+			last.set(harness, result);
+			return result;
+		},
+		lastOutcome(harness: string): HarnessReconcileResult | undefined {
+			return last.get(harness);
+		},
+		lastOutcomes(harnesses: readonly string[]): readonly HarnessReconcileResult[] {
+			return harnesses.map((h) => last.get(h)).filter((r): r is HarnessReconcileResult => r !== undefined);
+		},
+	};
+}
+
+/**
+ * Owns the recurring cadence timer's arm/clear (b-AC-2). Both `arm()` and `clear()` are idempotent -
+ * arming an already-armed cadence, or clearing an already-clear one, is a no-op - so
+ * {@link createHarnessReconciler}'s `start()`/`stop()` need only gate on {@link armed} without holding
+ * the timer handle themselves.
+ */
+function createCadenceTimer(
+	run: () => void,
+	intervalMs: number,
+): {
+	arm: () => void;
+	clear: () => void;
+	readonly armed: boolean;
+} {
+	let timer: IntervalHandle | undefined;
+	return {
+		arm(): void {
+			if (timer !== undefined) return;
+			const handle = setInterval(run, intervalMs);
+			// Never keep a short-lived CLI alive purely for the cadence.
+			if (typeof handle.unref === "function") handle.unref();
+			timer = handle;
+		},
+		clear(): void {
+			if (timer === undefined) return;
+			clearInterval(timer as unknown as ReturnType<typeof setInterval>);
+			timer = undefined;
+		},
+		get armed(): boolean {
+			return timer !== undefined;
+		},
+	};
+}
+
+/**
  * Build the self-healing harness auto-wire reconciler (PRD-006b). Every external effect is behind an
  * injectable seam so a unit test drives every AC branch without a real `claude` binary; the defaults
  * are the real production impls (agent detect + `claude plugin` runner + real connector composition +
@@ -210,18 +272,7 @@ export function createHarnessReconciler(deps: HarnessReconcileDeps = {}): Harnes
 	const cliAvailable = deps.cliAvailable ?? ((_harness: string): boolean => runner.available());
 	const buildWiring = deps.buildWiring ?? ((harness: string): AutoWiring | undefined => buildConnectorWiring(harness));
 
-	// Process-local last-outcome status (b-AC-7). No Deeplake, no sidecar file (FR-8).
-	const last = new Map<string, HarnessReconcileResult>();
-	let timer: IntervalHandle | undefined;
-
-	function record(harness: string, outcome: ReconcileOutcome, detail?: string): HarnessReconcileResult {
-		const result: HarnessReconcileResult =
-			detail !== undefined
-				? { harness, outcome, at: now().toISOString(), detail }
-				: { harness, outcome, at: now().toISOString() };
-		last.set(harness, result);
-		return result;
-	}
+	const { record, lastOutcome, lastOutcomes: lastOutcomesFor } = createOutcomeBookkeeping(now);
 
 	/** Reconcile ONE harness through the gate order, absorbing any throw/timeout to `error` (b-AC-6). */
 	async function reconcileHarness(harness: string, agents: Set<string>): Promise<HarnessReconcileResult> {
@@ -273,38 +324,36 @@ export function createHarnessReconciler(deps: HarnessReconcileDeps = {}): Harnes
 		return results;
 	}
 
+	const cadence = createCadenceTimer((): void => {
+		void reconcileOnce().catch((err: unknown) => {
+			const reason = err instanceof Error ? err.message : "reconcile failed";
+			onError(`harness-reconcile: cadence pass error: ${reason}`);
+		});
+	}, intervalMs);
+
 	return {
 		reconcileOnce,
 		start(): void {
+			// Idempotent (b-AC-1/b-AC-2): gate on the cadence BEFORE firing the immediate pass, so a
+			// repeated start() while already running is a total no-op - it neither re-triggers the
+			// immediate reconcile nor stacks a second cadence timer. Only the FIRST start() (or a
+			// start() after stop()) fires the immediate pass and arms the cadence.
+			if (cadence.armed) return;
 			// Fire an immediate pass (b-AC-1), fire-and-forget + fail-soft so it never blocks the caller
 			// nor the daemon-start path. Any rejection is absorbed (reconcileOnce is already fail-soft).
 			void reconcileOnce().catch((err: unknown) => {
 				const reason = err instanceof Error ? err.message : "reconcile failed";
 				onError(`harness-reconcile: start pass error: ${reason}`);
 			});
-			// Arm the recurring cadence (b-AC-2). Idempotent: a live timer is left in place.
-			if (timer !== undefined) return;
-			const handle = setInterval((): void => {
-				void reconcileOnce().catch((err: unknown) => {
-					const reason = err instanceof Error ? err.message : "reconcile failed";
-					onError(`harness-reconcile: cadence pass error: ${reason}`);
-				});
-			}, intervalMs);
-			// Never keep a short-lived CLI alive purely for the cadence.
-			if (typeof handle.unref === "function") handle.unref();
-			timer = handle;
+			// Arm the recurring cadence (b-AC-2).
+			cadence.arm();
 		},
 		stop(): void {
-			if (timer !== undefined) {
-				clearInterval(timer as unknown as ReturnType<typeof setInterval>);
-				timer = undefined;
-			}
+			cadence.clear();
 		},
-		lastOutcome(harness: string): HarnessReconcileResult | undefined {
-			return last.get(harness);
-		},
+		lastOutcome,
 		lastOutcomes(): readonly HarnessReconcileResult[] {
-			return harnesses.map((h) => last.get(h)).filter((r): r is HarnessReconcileResult => r !== undefined);
+			return lastOutcomesFor(harnesses);
 		},
 	};
 }
