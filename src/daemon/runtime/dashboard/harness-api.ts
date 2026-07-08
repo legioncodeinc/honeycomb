@@ -26,10 +26,22 @@
  *   mapped onto the canonical six; a harness absent from the result reports `0` / `null` / `false`.
  *   So the endpoint NEVER 500s and NEVER fabricates a metric — zeroed activity, never a placeholder.
  *
- * ── No secret in the response (parent AC-8) ──────────────────────────────────────────
+ * ── No secret in the response (parent AC-8 / PRD-006d d-AC-4) ─────────────────────────
  *   The response carries only canonical harness ids, booleans, a count, an ISO timestamp, the static
  *   runtime path, and the shim-static capability descriptor. No token, org GUID, header, or body ever
- *   rides it — by construction (there is no field that could carry one).
+ *   rides it — by construction (there is no field that could carry one). The PRD-006d `pluginEnabled`
+ *   field is a plain boolean too.
+ *
+ * ── PRD-006d d-AC-1: agent-present AND plugin-enabled, tier-legally (LOAD-BEARING) ────────────
+ *   d-AC-1 wants each harness to report BOTH agent-present (the existing `installed`) AND
+ *   plugin-enabled. Plugin-enabled derives from `isPluginEnabled` (`src/connectors`), which is Tier 4
+ *   and which this Tier-2 daemon module MUST NOT import (AGENTS.md build-tier invariant). So this
+ *   module NEVER computes it: it exposes the `pluginEnabled` field fed by an OPTIONAL injected
+ *   {@link MountHarnessOptions.resolvePluginEnabled} seam (mirroring `resolveInstalled`), defaulting
+ *   fail-soft to the empty set → `pluginEnabled: false` (d-AC-4's "false when claude absent"). The
+ *   daemon only ever CALLS the injected fn; the authoritative live derivation (which spawns
+ *   `claude plugin list`) is served at the Tier-4 CLI surface (`honeycomb harness status`), which Hive
+ *   also shells. No Tier-2 → Tier-4 import exists here.
  */
 
 import type { Context } from "hono";
@@ -56,6 +68,14 @@ export interface HarnessStatus {
 	readonly name: string;
 	/** Wired: hooks + identity (harness-sync) targets present (a-AC-3), independent of activity. */
 	readonly installed: boolean;
+	/**
+	 * PRD-006d d-AC-1: whether the honeycomb plugin is ENABLED for this harness (distinct from
+	 * agent-present `installed`). DERIVED from `isPluginEnabled` via the injected
+	 * {@link MountHarnessOptions.resolvePluginEnabled} seam (d-AC-4), fail-soft false when the resolver
+	 * is absent or `claude` is missing. NEVER computed inside the daemon (tier invariant); a plain
+	 * boolean, so no secret/path rides it.
+	 */
+	readonly pluginEnabled: boolean;
 	/** Has >= 1 captured turn (`turnsCaptured > 0`) — derived, included explicitly (a-AC-4). */
 	readonly active: boolean;
 	/** ISO-8601 of the most recent captured turn (`MAX(creation_date)`); null when none. */
@@ -102,6 +122,16 @@ export interface MountHarnessOptions {
 	 * {@link installedHarnesses} snapshot.
 	 */
 	readonly resolveInstalled?: () => ReadonlySet<string>;
+	/**
+	 * PRD-006d d-AC-1/d-AC-4: resolve the set of harnesses whose honeycomb plugin is ENABLED, PER
+	 * REQUEST. The daemon (Tier 2) cannot import `isPluginEnabled` (Tier 4), so it never computes this
+	 * itself — it only calls whatever tier-legal resolver is injected. In the pure daemon assembly no
+	 * resolver is injected (there is no tier-legal in-process source), so this is ABSENT and every
+	 * harness reads `pluginEnabled: false` (fail-soft, the honest "not derivable here" picture); the
+	 * authoritative live value is served by the Tier-4 CLI `honeycomb harness status` surface. A test
+	 * injects a fixed set to drive the field. Returns only canonical harness ids — never a secret/path.
+	 */
+	readonly resolvePluginEnabled?: () => ReadonlySet<string>;
 }
 
 /** Number coercion that never returns NaN/undefined for a count column. */
@@ -254,7 +284,11 @@ export function buildHarnessActivitySql(): string {
  * `active: false`. `installed` comes from the injected presence set; `capabilities` is folded from the
  * shim-derived descriptor (c-OQ-2). The order is the canonical shim order (stable).
  */
-export function buildHarnessStatuses(rows: readonly StorageRow[], installed: ReadonlySet<string>): HarnessStatus[] {
+export function buildHarnessStatuses(
+	rows: readonly StorageRow[],
+	installed: ReadonlySet<string>,
+	pluginEnabled: ReadonlySet<string> = new Set<string>(),
+): HarnessStatus[] {
 	// Index the activity rows by agent id for an O(1) per-harness lookup (the result may omit harnesses).
 	const byAgent = new Map<string, { turns: number; last: string | null }>();
 	for (const r of rows) {
@@ -273,6 +307,8 @@ export function buildHarnessStatuses(rows: readonly StorageRow[], installed: Rea
 		return {
 			name,
 			installed: installed.has(name),
+			// PRD-006d d-AC-1/d-AC-4: derived from the injected resolver (default empty → false).
+			pluginEnabled: pluginEnabled.has(name),
 			active: turnsCaptured > 0,
 			lastSeen: activity?.last ?? null,
 			turnsCaptured,
@@ -303,6 +339,11 @@ export function mountHarnessApi(daemon: Daemon, options: MountHarnessOptions): v
 	// the static snapshot (back-compat) when no resolver is injected.
 	const resolveInstalled: () => ReadonlySet<string> =
 		options.resolveInstalled ?? ((): ReadonlySet<string> => options.installedHarnesses ?? new Set<string>());
+	// PRD-006d d-AC-1/d-AC-4: resolve plugin-enabled PER REQUEST through the injected (tier-legal)
+	// seam. Absent in the pure daemon assembly (no tier-legal in-process source), so it defaults to the
+	// empty set → every harness reads `pluginEnabled: false` fail-soft. The daemon never computes it.
+	const resolvePluginEnabled: () => ReadonlySet<string> =
+		options.resolvePluginEnabled ?? ((): ReadonlySet<string> => new Set<string>());
 	// Scope precedence (PRD-022): header → (local-mode) injected default → null/400. Header ALWAYS
 	// wins; the fallback fires ONLY in local mode with a `defaultScope` (mirrors mountDashboardApi).
 	const resolveScope = (c: Context): QueryScope | null =>
@@ -318,7 +359,9 @@ export function mountHarnessApi(daemon: Daemon, options: MountHarnessOptions): v
 		// all six with zeroed activity (never a 500). The canonical six are enumerated from the shim
 		// set, NOT discovered from the result, so an idle harness still appears.
 		const rows = await selectRowsConverged(storage, buildHarnessActivitySql(), scope);
-		const body: HarnessStatusResponse = { harnesses: buildHarnessStatuses(rows, installed) };
+		// d-AC-1: fold in the injected plugin-enabled set (default empty → false) beside `installed`.
+		const pluginEnabled = resolvePluginEnabled();
+		const body: HarnessStatusResponse = { harnesses: buildHarnessStatuses(rows, installed, pluginEnabled) };
 		return c.json(body);
 	});
 }
