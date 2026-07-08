@@ -40,7 +40,11 @@ release.yaml (unchanged publish core)
 
 **Minor approval:** GitHub user **@thenotoriousllama** comments the phrase
 `Approved Release` (case-insensitive, anywhere in the comment) on the PR. Only
-that login counts.
+that login counts. The comment is handled by `release-approve.yaml`, which does
+nothing but add the `release-approved` label (via `RELEASE_PAT`, so the label
+re-triggers `release-gate.yaml`, which then performs the bump). This split keeps
+the privileged `issue_comment` trigger from ever checking out or running PR code
+— the security posture the CodeQL `actions/untrusted-checkout` alert is about.
 
 **The bump is decided once.** After a patch is applied or a minor is approved,
 the PR carries the version bump, and a double-bump guard (comparing
@@ -64,7 +68,7 @@ with no bump/release regardless of what it touches.
 | --- | --- | --- |
 | `AWS_BEDROCK_API_KEY` | gate + notes | An [Amazon Bedrock API key](https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html). Exported to the SDK as `AWS_BEARER_TOKEN_BEDROCK`; the IAM identity behind it needs `bedrock:InvokeModel` |
 | `DISCORD_WEBHOOK_URL` | release | The Discord webhook URL (keep it a secret — anyone with it can post) |
-| `RELEASE_PAT` | tag-on-merge | Fine-grained PAT, this repo, **Contents: write** (pushes the release tag so release.yaml fires) |
+| `RELEASE_PAT` | tag-on-merge + approve | Fine-grained PAT, this repo, **Contents: write** (pushes the release tag) **+ Pull requests: write** (adds the `release-approved` label so it re-triggers release-gate) |
 
 > **Long-term vs short-term key.** Use a **long-term** Bedrock API key here — it's
 > tied to an IAM user and does not expire, so CI keeps working. A short-term key
@@ -119,6 +123,7 @@ merge.
 | `scripts/release/apply-bump.mjs` | Consumes the changeset, `npm version` on the PR branch, CHANGELOG |
 | `scripts/release/ai-release-notes.mjs` | Release-time: Sonnet 5 writes `RELEASE_NOTES.md` (fail-soft) |
 | `scripts/release/discord-notify.mjs` | Release-time: posts notes to Discord (fail-soft) |
-| `.github/workflows/release-gate.yaml` | The PR gate + the minor-approval comment handler |
+| `.github/workflows/release-gate.yaml` | The PR gate (pull_request only; bump + status) |
+| `.github/workflows/release-approve.yaml` | issue_comment handler; only adds the `release-approved` label (no checkout) |
 | `.github/workflows/tag-on-merge.yaml` | Tags the bumped version on merge to main |
 | `.github/workflows/release.yaml` | Publish core (unchanged) + notes + Discord steps |

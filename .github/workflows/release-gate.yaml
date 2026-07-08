@@ -5,14 +5,24 @@ name: Release gate
 # this workflow drives a single required status check, `release-gate`:
 #
 #   patch  -> auto-approved: bump the version ON THE PR BRANCH now; gate = success.
-#   minor  -> gate = pending until GitHub user @thenotoriousllama comments
-#             "Approved Release" (case-insensitive); on approval we bump and flip
-#             the gate to success.
+#   minor  -> gate = pending until the `release-approved` label is present, then
+#             bump and flip the gate to success. The label is added by
+#             release-approve.yaml when @thenotoriousllama comments
+#             "Approved Release" (case-insensitive).
 #   major  -> gate = failure (blocked). Cut a major release manually.
 #
 # The bump lives on the PR branch (spec #2), so when the PR merges, main already
 # carries the new package.json version; tag-on-merge.yaml then tags it and
 # release.yaml publishes.
+#
+# SECURITY: this workflow is `pull_request`-triggered ONLY — never issue_comment
+# / pull_request_target / workflow_run — so it never checks out or runs PR code
+# in a privileged (secret-bearing, write-token) context. The comment-approval
+# bridge lives in release-approve.yaml, which runs NO repo code (it only adds a
+# label). This resolves CodeQL actions/untrusted-checkout: the privileged job has
+# no checkout, and the job that checks out is unprivileged. `github-script` steps
+# also read all dynamic values from `env:` (never `${{ }}` inside the script) to
+# avoid expression injection.
 #
 # AUTH: an Amazon Bedrock API key (secret AWS_BEDROCK_API_KEY, exported as
 # AWS_BEARER_TOKEN_BEDROCK); region + model id from repo VARIABLES (AWS_REGION /
@@ -25,16 +35,14 @@ name: Release gate
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
-  issue_comment:
-    types: [created, edited]
 
 concurrency:
-  group: release-gate-${{ github.event.pull_request.number || github.event.issue.number }}
+  group: release-gate-${{ github.event.pull_request.number }}
   cancel-in-progress: false
 
 permissions:
   contents: write # commit the changeset / version bump to the PR branch
-  pull-requests: write # labels + comments
+  pull-requests: write # labels
   statuses: write # set the `release-gate` commit status
 
 env:
@@ -45,8 +53,7 @@ jobs:
   # ── Opt-out: a `no-changeset` PR still needs the required check to be green. ─
   skip:
     if: >-
-      github.event_name == 'pull_request'
-      && github.event.pull_request.head.repo.full_name == github.repository
+      github.event.pull_request.head.repo.full_name == github.repository
       && contains(github.event.pull_request.labels.*.name, 'no-changeset')
     runs-on: ubuntu-latest
     steps:
@@ -59,11 +66,13 @@ jobs:
               context: process.env.GATE_CONTEXT, state: 'success',
               description: 'Release skipped (no-changeset label).' });
 
-  # ── PR event: evaluate the bump, write the changeset, set the gate. ─────────
+  # ── Evaluate the bump, write the changeset, set the gate. ───────────────────
+  # Unprivileged (`pull_request`) + same-repo guard: for a fork PR the token is
+  # read-only and this job cannot push or set status, so it is effectively
+  # collaborator-only — the same trust level as any branch pushed to this repo.
   evaluate:
     if: >-
-      github.event_name == 'pull_request'
-      && github.event.pull_request.head.repo.full_name == github.repository
+      github.event.pull_request.head.repo.full_name == github.repository
       && !contains(github.event.pull_request.labels.*.name, 'no-changeset')
     runs-on: ubuntu-latest
     steps:
@@ -168,7 +177,7 @@ jobs:
 
       # MAJOR — hard block: fail the gate, label, and stop the job.
       - name: Block major
-        if: steps.state.outputs.already_bumped != 'true' && steps.ai.outputs.bump == 'major'
+        if: steps.state.outputs.already_bumped != 'true' && steps.docs.outputs.docs_only != 'true' && steps.ai.outputs.bump == 'major'
         uses: actions/github-script@v7.0.1
         with:
           script: |
@@ -184,6 +193,10 @@ jobs:
             core.setFailed('Major change blocked (see the needs-manual-release label).');
 
       # PATCH / MINOR — mutate the branch, then report the final head SHA.
+      # A minor only bumps when the `release-approved` label is present (added by
+      # release-approve.yaml on the approver's comment); otherwise it stays
+      # pending. All dynamic values flow through env, never inline `${{ }}` in the
+      # shell, so a crafted branch name / label cannot inject into the script.
       - name: Apply bump / stage changeset
         id: mut
         if: steps.state.outputs.already_bumped != 'true' && steps.docs.outputs.docs_only != 'true' && steps.ai.outputs.bump != 'major'
@@ -191,6 +204,7 @@ jobs:
           BUMP: ${{ steps.ai.outputs.bump }}
           BRANCH: ${{ github.event.pull_request.head.ref }}
           APPROVER: ${{ env.APPROVER }}
+          APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'release-approved') }}
         run: |
           set -euo pipefail
           STATE=success
@@ -199,14 +213,20 @@ jobs:
             node scripts/release/apply-bump.mjs
             git commit --no-verify -m "chore(release): patch bump [ai]"
             git push origin HEAD:"$BRANCH"
-            STATE=success
             DESC="Patch — auto-approved."
           elif [ "$BUMP" = "minor" ]; then
-            git add .changeset
-            git commit --no-verify -m "chore(release): add changeset [ai] (minor)" || echo "changeset already committed"
-            git push origin HEAD:"$BRANCH"
-            STATE=pending
-            DESC="Minor — comment 'Approved Release' as @${APPROVER} to release."
+            if [ "$APPROVED" = "true" ]; then
+              node scripts/release/apply-bump.mjs
+              git commit --no-verify -m "chore(release): minor bump [approved]"
+              git push origin HEAD:"$BRANCH"
+              DESC="Minor — approved."
+            else
+              git add .changeset
+              git commit --no-verify -m "chore(release): add changeset [ai] (minor)" || echo "changeset already committed"
+              git push origin HEAD:"$BRANCH"
+              STATE=pending
+              DESC="Minor — comment 'Approved Release' as @${APPROVER} to release."
+            fi
           fi
           {
             echo "final_sha=$(git rev-parse HEAD)"
@@ -216,92 +236,16 @@ jobs:
 
       - name: Set release-gate status
         if: steps.state.outputs.already_bumped != 'true' && steps.docs.outputs.docs_only != 'true' && steps.ai.outputs.bump != 'major'
+        env:
+          FINAL_SHA: ${{ steps.mut.outputs.final_sha }}
+          GATE_STATE: ${{ steps.mut.outputs.state }}
+          GATE_DESC: ${{ steps.mut.outputs.desc }}
         uses: actions/github-script@v7.0.1
         with:
           script: |
             await github.rest.repos.createCommitStatus({
               owner: context.repo.owner, repo: context.repo.repo,
-              sha: '${{ steps.mut.outputs.final_sha }}',
+              sha: process.env.FINAL_SHA,
               context: process.env.GATE_CONTEXT,
-              state: '${{ steps.mut.outputs.state }}',
-              description: '${{ steps.mut.outputs.desc }}'.slice(0, 140) });
-
-  # ── Comment event: the human gate for MINOR releases. ───────────────────────
-  approve:
-    if: >-
-      github.event_name == 'issue_comment'
-      && github.event.issue.pull_request
-    runs-on: ubuntu-latest
-    steps:
-      - name: Verify approver + phrase
-        id: check
-        uses: actions/github-script@v7.0.1
-        with:
-          script: |
-            const login = (context.payload.comment.user.login || '').toLowerCase();
-            const body = context.payload.comment.body || '';
-            const ok = login === process.env.APPROVER.toLowerCase()
-                    && /approved release/i.test(body);
-            core.setOutput('ok', ok ? 'true' : 'false');
-            if (!ok) return;
-            const pr = await github.rest.pulls.get({
-              owner: context.repo.owner, repo: context.repo.repo,
-              pull_number: context.payload.issue.number });
-            const sameRepo = pr.data.head.repo.full_name
-              === `${context.repo.owner}/${context.repo.repo}`;
-            core.setOutput('same_repo', String(sameRepo));
-            core.setOutput('head_ref', pr.data.head.ref);
-
-      - name: Checkout PR branch
-        if: steps.check.outputs.ok == 'true' && steps.check.outputs.same_repo == 'true'
-        uses: actions/checkout@v4.2.2
-        with:
-          ref: ${{ steps.check.outputs.head_ref }}
-          fetch-depth: 0
-          persist-credentials: true
-
-      - uses: actions/setup-node@v6.4.0
-        if: steps.check.outputs.ok == 'true' && steps.check.outputs.same_repo == 'true'
-        with:
-          node-version: '22.x'
-
-      - name: Bump on approval
-        id: bump
-        if: steps.check.outputs.ok == 'true' && steps.check.outputs.same_repo == 'true'
-        run: |
-          set -euo pipefail
-          git config user.name  "honeycomb-release-bot"
-          git config user.email "release-bot@users.noreply.github.com"
-          if ! ls .changeset/*.md >/dev/null 2>&1 || [ "$(ls .changeset/*.md 2>/dev/null | grep -iv 'readme.md' | wc -l)" -eq 0 ]; then
-            echo "no_changeset=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          node scripts/release/apply-bump.mjs
-          git commit --no-verify -m "chore(release): minor bump [approved by @${{ github.event.comment.user.login }}]"
-          git push origin HEAD:${{ steps.check.outputs.head_ref }}
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
-      - name: Flip gate to success
-        if: steps.check.outputs.ok == 'true' && steps.check.outputs.same_repo == 'true' && steps.bump.outputs.no_changeset != 'true'
-        uses: actions/github-script@v7.0.1
-        with:
-          script: |
-            await github.rest.repos.createCommitStatus({
-              owner: context.repo.owner, repo: context.repo.repo,
-              sha: '${{ steps.bump.outputs.sha }}',
-              context: process.env.GATE_CONTEXT, state: 'success',
-              description: 'Minor approved by @${{ github.event.comment.user.login }}.' });
-            await github.rest.issues.createComment({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: context.payload.issue.number,
-              body: `✅ Minor release approved — bumped to v${{ steps.bump.outputs.new_version }}. It will publish on merge.` });
-
-      - name: Explain missing changeset
-        if: steps.check.outputs.ok == 'true' && steps.check.outputs.same_repo == 'true' && steps.bump.outputs.no_changeset == 'true'
-        uses: actions/github-script@v7.0.1
-        with:
-          script: |
-            await github.rest.issues.createComment({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: context.payload.issue.number,
-              body: `⚠️ No pending changeset on this PR yet — nothing to approve. Re-comment "Approved Release" once the release-gate check has posted a minor changeset.` });
+              state: process.env.GATE_STATE,
+              description: (process.env.GATE_DESC || '').slice(0, 140) });
