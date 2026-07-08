@@ -31,10 +31,19 @@
  * fully fail-soft and bounded by the pipeline's own ~1.5s budget, so a hung backend
  * never blocks the session.
  *
+ * ── THE PRE-TOOL-USE VFS SEAM (PRD-075a a-AC-1) ─────────────────────────────
+ * The runtime constructs the REAL daemon-backed {@link VfsIntercept}
+ * ({@link createDaemonVfsIntercept}) resolving through the already-mounted
+ * `/memory/{cat,grep,ls,find}` browse routes over loopback, fed tenancy by the SAME
+ * credential reader the daemon client uses. Every pre-tool-use dispatch rebinds a
+ * fresh instance to that event's own session + runtime path before calling
+ * {@link runPreToolUse} — a `createFakeVfsIntercept()` NEVER reaches production deps.
+ *
  * ── THIN CLIENT (D-2) ───────────────────────────────────────────────────────
  * `src/hooks` is a NON_DAEMON_ROOT. This module imports NOTHING from
  * `daemon/storage`; every outbound path is the injected seam (the daemon client, the
- * credential reader, the notifications pipeline) over loopback. No SQL, no DeepLake.
+ * credential reader, the notifications pipeline, the VFS intercept) over loopback.
+ * No SQL, no DeepLake.
  */
 
 import { DAEMON_HOST, DAEMON_PORT } from "../shared/constants.js";
@@ -50,28 +59,45 @@ import {
 	type NotificationsState,
 } from "../notifications/index.js";
 import type { HarnessShim } from "./contracts.js";
-import { createDaemonHookClient } from "./shared/daemon-client.js";
+import {
+	ACTOR_HEADER,
+	createDaemonHookClient,
+	ORG_HEADER,
+	RUNTIME_PATH_HEADER,
+	SESSION_HEADER,
+	WORKSPACE_HEADER,
+} from "./shared/daemon-client.js";
 import { createCredentialReader } from "./shared/credential-reader.js";
 import { createSessionStartSeams } from "./shared/session-start-seams.js";
 import {
 	createContextRenderer,
+	createFileRecallSessionStore,
 	createSessionBindNoticeGate,
 	createPrimeRenderer,
+	createRecallRenderer,
 	type CredentialReader,
 	type DaemonHookClient,
 	type HookCoreDeps,
+	type HookCredential,
 	type HookInput,
 	type HookResult,
 	type HookSessionMeta,
 	type OnboardingNoticeGate,
+	type PreToolDecision,
 	type PrimeRenderer,
+	type RecallRenderer,
+	type RecallSessionStore,
 	runCapture,
 	runPreToolUse,
 	runSessionEnd,
 	runSessionStart,
+	runUserPromptRecall,
+	type RuntimePath,
 	type SessionStartDeps,
 	type SessionStartSeams,
 	type SummarySpawn,
+	type VfsIntercept,
+	type VfsToolOp,
 } from "./shared/index.js";
 
 /** The daemon `GET /api/diagnostics/notifications` route the backend source reads (020d). */
@@ -94,6 +120,19 @@ export interface HookRuntimeOptions {
 	 * 046c digest. Fail-soft by construction — a down/cold daemon contributes nothing.
 	 */
 	readonly prime?: PrimeRenderer;
+	/**
+	 * Inject the per-turn recall renderer (tests / PRD-076a). Defaults to the REAL loopback
+	 * `POST /api/memories/recall` renderer (a-AC-1..3), tightly time-bounded + fail-soft. The
+	 * runtime CALLS it on the `user_prompt_recall` injector branch ONLY; a down/cold daemon
+	 * contributes nothing (a-AC-3). ABSENT → the real renderer.
+	 */
+	readonly recall?: RecallRenderer;
+	/**
+	 * Inject the per-turn recall throttle/dedupe state store (tests / PRD-076a a-AC-6/7).
+	 * Defaults to the REAL file-backed store under `~/.honeycomb/recall-sessions`. A test
+	 * injects an in-memory store shared across the two turns it drives (a-AC-6).
+	 */
+	readonly recallStore?: RecallSessionStore;
 	/**
 	 * Inject the notifications pipeline (tests / c-AC-4). Defaults to the REAL 020d
 	 * pipeline (real state + claim lock + a fail-soft daemon-backed source). The runtime
@@ -125,6 +164,16 @@ export interface HookRuntimeOptions {
 	readonly fetch?: typeof fetch;
 	/** The capture-gate flag channel (`HONEYCOMB_CAPTURE`). Defaults to the process env. */
 	readonly captureFlag?: string;
+	/**
+	 * Inject the pre-tool-use VFS intercept (tests / PRD-075a a-AC-1). Defaults to the
+	 * REAL daemon-backed intercept ({@link createDaemonVfsIntercept}), resolving through
+	 * the already-mounted `/memory/{cat,grep,ls,find}` browse routes over loopback, fed
+	 * tenancy by the SAME credential reader the daemon client uses. `runEvent` rebinds a
+	 * FRESH default instance to each pre-tool-use event's own session + runtime path
+	 * before dispatch; an injected override here is used AS-IS and is NEVER rebound, so a
+	 * test double stays a stable, inspectable seam across every event (a-AC-2..a-AC-5).
+	 */
+	readonly vfs?: VfsIntercept;
 }
 
 /** A constructed hook runtime: the production seams + the lifecycle dispatcher. */
@@ -158,6 +207,14 @@ export interface HookEventOutcome {
 	readonly drain?: DrainResult;
 	/** True when the event was a non-lifecycle event the shim dropped (no daemon call made). */
 	readonly dropped?: boolean;
+	/**
+	 * The pre-tool-use {@link PreToolDecision} (PRD-075a a-AC-3), present ONLY when this
+	 * outcome came from a `pre-tool-use` dispatch. Absent on every other branch
+	 * (session-start / session-end / capture) — they never set it (a-AC-6). The shim
+	 * renderer (075b) consumes this to map the decision onto the harness's native
+	 * pre-tool response format; an absent/`allow` decision is untouched pass-through.
+	 */
+	readonly decision?: PreToolDecision;
 }
 
 /**
@@ -181,8 +238,32 @@ export function createHookRuntime(options: HookRuntimeOptions = {}): HookRuntime
 	// `GET /api/memories/prime`, fed tenancy by the SAME credential reader. Injected on the
 	// session-start branch below; a down/cold daemon contributes nothing (d-AC-4).
 	const prime = options.prime ?? createPrimeRenderer({ credentials, host, port, fetch: doFetch });
+	// PRD-076a (a-AC-1..3): the real per-turn recall renderer - a fail-soft, tightly-bounded
+	// loopback `POST /api/memories/recall`. Injected on the `user_prompt_recall` branch below;
+	// a down/cold daemon contributes nothing (a-AC-3). The recall STATE store persists the
+	// throttle/dedupe snapshot across the per-turn processes (a-AC-6).
+	const recall = options.recall ?? createRecallRenderer({ host, port, fetch: doFetch });
+	const recallStore = options.recallStore ?? createFileRecallSessionStore();
 
-	const deps: HookCoreDeps = { daemon, credentials, context };
+	// PRD-075a (a-AC-1): the pre-tool-use VFS intercept. `vfsOverride` (a test double) is
+	// used AS-IS and NEVER rebound; the real default is rebound to each pre-tool-use
+	// event's own session + runtime path in `runEvent` below (the `/memory` route group
+	// is session-scoped — see `createDaemonVfsIntercept`'s docstring). This base instance
+	// (bound to the `UNBOUND_VFS_SESSION` sentinel) exists so `HookRuntime.deps.vfs` is
+	// provably the REAL seam, not `createFakeVfsIntercept()`, even before the first event.
+	const vfsOverride = options.vfs;
+	const vfs =
+		vfsOverride ??
+		createDaemonVfsIntercept({
+			credentials,
+			host,
+			port,
+			fetch: doFetch,
+			sessionId: UNBOUND_VFS_SESSION,
+			runtimePath: DEFAULT_VFS_RUNTIME_PATH,
+		});
+
+	const deps: HookCoreDeps = { daemon, credentials, context, vfs };
 
 	// c-AC-4: the REAL 020d notifications pipeline (real state + lock + daemon-backed source).
 	const notifications = options.notifications ?? createDefaultNotificationsPipeline(host, port, doFetch);
@@ -212,9 +293,28 @@ export function createHookRuntime(options: HookRuntimeOptions = {}): HookRuntime
 			if (input === undefined) {
 				return { result: { ok: true }, dropped: true };
 			}
+			// PRD-075a (a-AC-1 / a-AC-2): rebind the REAL vfs to THIS event's own session +
+			// runtime path before dispatch — the daemon's `/memory` route group is
+			// session-scoped (runtime-path negotiation), so a single construction-time
+			// instance cannot carry the right headers for every future event. A test
+			// override (`vfsOverride`) is a stable double and is NEVER rebound.
+			const eventDeps: HookCoreDeps =
+				input.event === "pre-tool-use" && vfsOverride === undefined
+					? {
+							...deps,
+							vfs: createDaemonVfsIntercept({
+								credentials,
+								host,
+								port,
+								fetch: doFetch,
+								sessionId: input.meta.sessionId,
+								runtimePath: input.runtimePath,
+							}),
+						}
+					: deps;
 			return dispatchLifecycle(
 				input,
-				deps,
+				eventDeps,
 				captureEnv,
 				notifications,
 				summarySpawn,
@@ -223,6 +323,8 @@ export function createHookRuntime(options: HookRuntimeOptions = {}): HookRuntime
 				onboardingNotice,
 				// Thread the shim's optional off-process hygiene spawn through to session-start.
 				shim.spawnHygieneChild !== undefined ? shim.spawnHygieneChild.bind(shim) : undefined,
+				recall,
+				recallStore,
 			);
 		},
 	};
@@ -244,6 +346,8 @@ async function dispatchLifecycle(
 	seams: SessionStartSeams,
 	onboardingNotice: OnboardingNoticeGate,
 	spawnHygieneChild: ((meta: HookSessionMeta) => void) | undefined,
+	recall: RecallRenderer,
+	recallStore: RecallSessionStore,
 ): Promise<HookEventOutcome> {
 	try {
 		switch (input.event) {
@@ -271,11 +375,20 @@ async function dispatchLifecycle(
 				return { result, drain };
 			}
 			case "pre-tool-use": {
-				const { result } = await runPreToolUse(input, deps);
-				return { result };
+				// PRD-075a (a-AC-3): the decision now rides the outcome alongside the result,
+				// so the shim renderer (075b) can map it onto the harness's native response.
+				const { result, decision } = await runPreToolUse(input, deps);
+				return { result, decision };
 			}
 			case "session-end": {
 				const result = await runSessionEnd(input, deps, summarySpawn);
+				return { result };
+			}
+			case "user_prompt_recall": {
+				// PRD-076a (a-AC-4): the synchronous per-turn recall injector. Calls the recall
+				// renderer + returns `{ ok, additionalContext }`; `emitResponse` renders it to stdout
+				// (unchanged). The async capture entry keeps its own `user_message → runCapture` path.
+				const result = await runUserPromptRecall(input, deps, recall, recallStore);
 				return { result };
 			}
 			// user_message / tool_call / assistant_message → per-turn capture.
@@ -361,3 +474,209 @@ function isNotification(value: unknown): value is Notification {
 const noopSummarySpawn: SummarySpawn = {
 	async spawn(): Promise<void> {},
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The pre-tool-use VFS intercept — PRD-075a (a-AC-1 / a-AC-2). The runtime's real
+// dependency-construction site for the `vfs` seam threaded through `HookCoreDeps`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The daemon's already-mounted VFS browse route group (`src/daemon/runtime/vfs/api.ts`, PRD-022b). */
+const VFS_GROUP_PATH = "/memory" as const;
+
+/**
+ * Bounds a single VFS resolve so a hung/slow daemon degrades to pass-through quickly
+ * rather than riding the harness's own (much longer) pre-tool hook timeout — the PRD's
+ * "target ~2s" open question. TIMEOUT-PLACEMENT DECISION: bounded HERE, at the
+ * transport call inside {@link createDaemonVfsIntercept}, via `AbortController` — NOT
+ * inside the stable {@link VfsIntercept} contract (`resolve(op): Promise<string>` has
+ * no budget parameter and is shared by isolated unit tests that must stay
+ * synchronous-fast). Keeping the bound at this one construction site means every
+ * hook-runtime caller shares the same policy without threading a timeout through the
+ * seam's public shape.
+ */
+const VFS_RESOLVE_TIMEOUT_MS = 2_000;
+
+/**
+ * The `x-honeycomb-session` value the runtime's BASE `deps.vfs` (built once, before any
+ * event is known — see {@link createHookRuntime}) is stamped with. A real `/memory` call
+ * against the base instance alone would 400 (the daemon requires a claimed session); that
+ * is expected — every pre-tool-use dispatch rebinds a fresh instance to the ACTUAL event
+ * session before resolving (`runEvent`), so the base instance exists ONLY so
+ * `HookRuntime.deps.vfs` is provably the real seam (a-AC-1), never a live call target.
+ */
+const UNBOUND_VFS_SESSION = "unbound" as const;
+
+/** The `x-honeycomb-runtime-path` the base `deps.vfs` is stamped with (see {@link UNBOUND_VFS_SESSION}). */
+const DEFAULT_VFS_RUNTIME_PATH: RuntimePath = "plugin";
+
+/** Options for {@link createDaemonVfsIntercept}. */
+interface DaemonVfsInterceptOptions {
+	/** The credential reader the tenancy headers resolve through (mirrors `createDaemonHookClient`). */
+	readonly credentials: CredentialReader;
+	/** The daemon host. */
+	readonly host: string;
+	/** The daemon port. */
+	readonly port: number;
+	/** The `fetch` implementation (real global `fetch` in production; injectable for tests). */
+	readonly fetch: typeof fetch;
+	/** The `x-honeycomb-session` this instance stamps on every resolve. */
+	readonly sessionId: string;
+	/** The `x-honeycomb-runtime-path` this instance stamps on every resolve. */
+	readonly runtimePath: RuntimePath;
+}
+
+/**
+ * Build the production {@link VfsIntercept} (a-AC-1 / a-AC-2). Resolves a lowered
+ * {@link VfsToolOp} against the REAL daemon-mounted VFS browse routes — `GET
+ * /memory/{cat,grep,ls,find}` (`src/daemon/runtime/vfs/api.ts`, PRD-022b) — over real
+ * loopback HTTP, fed tenancy by the SAME credential reader {@link createDaemonHookClient}
+ * uses (mirrors that seam's own construction: host/port/fetch — the PRD's open question
+ * on where the seam is built).
+ *
+ * CROSS-BOUNDARY NOTE (architecture decision, see the sub-PRD's final report): the PRD's
+ * fact table names `DeepLakeFs` (`src/daemon-client/vfs/fs.ts`) as "the real intercept
+ * seam". Wiring that class for real needs a `DaemonDispatch` that POSTs raw escaped SQL
+ * to the daemon — no such endpoint is mounted anywhere in this codebase today (its own
+ * CONVENTIONS.md lists "the real `DaemonDispatch`" as a still-deferred assembly step), and
+ * mounting one would be an `src/daemon` change outside this sub-PRD's file ownership. The
+ * `/memory/*` browse routes below ARE already mounted, already daemon-backed, and (per
+ * `src/daemon/runtime/vfs/CONVENTIONS.md`) are explicitly documented as "the surface the
+ * PRD-015 `DeepLakeFs` client... dispatch to" — hitting them directly resolves the SAME
+ * `memory`-table content `DeepLakeFs`'s read tiers would, without a second storage-access
+ * path. `write` is never reached here — `pre-tool-use.ts` denies it before calling the
+ * seam.
+ *
+ * Bounded by {@link VFS_RESOLVE_TIMEOUT_MS} via `AbortController`; a timeout or transport
+ * failure REJECTS `resolve()` (this function does not itself catch), which the caller
+ * (`dispatchLifecycle`'s existing `try`/`catch`) absorbs fail-soft (a-AC-5).
+ */
+function createDaemonVfsIntercept(options: DaemonVfsInterceptOptions): VfsIntercept {
+	const base = `http://${options.host}:${options.port}${VFS_GROUP_PATH}`;
+	return {
+		async resolve(op: VfsToolOp): Promise<string> {
+			const headers = await vfsRequestHeaders(options.credentials, options.sessionId, options.runtimePath);
+			const controller = new AbortController();
+			const timer = setTimeout(() => controller.abort(), VFS_RESOLVE_TIMEOUT_MS);
+			try {
+				const res = await options.fetch(vfsRequestUrl(base, op), { method: "GET", headers, signal: controller.signal });
+				if (res.status !== 200) return "";
+				return renderVfsBody(op.verb, (await res.json()) as unknown);
+			} finally {
+				clearTimeout(timer);
+			}
+		},
+	};
+}
+
+/**
+ * Resolve the `/memory` request headers (session/runtime-path + tenancy). Mirrors
+ * `createDaemonHookClient`'s tenancy resolution: a credential-read failure resolves to
+ * an unscoped call (the daemon fail-closes an org-less request), never a throw.
+ */
+async function vfsRequestHeaders(
+	credentials: CredentialReader,
+	sessionId: string,
+	runtimePath: RuntimePath,
+): Promise<Record<string, string>> {
+	const headers: Record<string, string> = {
+		[RUNTIME_PATH_HEADER]: runtimePath,
+		[SESSION_HEADER]: sessionId,
+	};
+	let cred: HookCredential | undefined;
+	try {
+		cred = await credentials.read();
+	} catch {
+		cred = undefined;
+	}
+	if (cred?.org !== undefined) headers[ORG_HEADER] = cred.org;
+	if (cred?.workspace !== undefined) headers[WORKSPACE_HEADER] = cred.workspace;
+	if (cred?.actor !== undefined) headers[ACTOR_HEADER] = cred.actor;
+	return headers;
+}
+
+/** Build the `/memory/<route>` URL + query for a lowered {@link VfsToolOp} (verb → route). */
+function vfsRequestUrl(base: string, op: VfsToolOp): string {
+	switch (op.verb) {
+		case "read":
+			return `${base}/cat?path=${encodeURIComponent(op.path)}`;
+		case "search":
+			return `${base}/grep?q=${encodeURIComponent(op.query ?? op.path)}`;
+		case "list":
+			return `${base}/ls?prefix=${encodeURIComponent(op.path)}`;
+		case "find":
+			return `${base}/find?pattern=${encodeURIComponent(op.query ?? op.path)}`;
+		case "write":
+			// Never reached: `pre-tool-use.ts` denies `write` before calling the intercept.
+			return `${base}/cat?path=${encodeURIComponent(op.path)}`;
+		default: {
+			const exhaustive: never = op.verb;
+			throw new Error(`vfs: unmodeled op verb reached the intercept: ${String(exhaustive)}`);
+		}
+	}
+}
+
+/**
+ * Render a `/memory/*` JSON response body to the plain-text `resolve()` output
+ * `runPreToolUse` folds into a `replace` decision. Every field is shape-guarded so a
+ * malformed/unexpected daemon body degrades to `""` rather than throwing (fail-soft).
+ */
+function renderVfsBody(verb: VfsToolOp["verb"], body: unknown): string {
+	const rec = body !== null && typeof body === "object" ? (body as Record<string, unknown>) : {};
+	switch (verb) {
+		case "read":
+			return typeof rec.content === "string" ? rec.content : "";
+		case "search":
+			return renderGrepHits(rec.hits);
+		case "list":
+			return renderLsEntries(rec.entries);
+		case "find":
+			return renderFindMatches(rec.matches);
+		case "write":
+			return "";
+		default: {
+			const exhaustive: never = verb;
+			throw new Error(`vfs: unmodeled op verb reached the intercept: ${String(exhaustive)}`);
+		}
+	}
+}
+
+/** Render a `grep` response's `hits` array (`{ content }[]`) to newline-joined content. */
+function renderGrepHits(hits: unknown): string {
+	if (!Array.isArray(hits)) return "";
+	return hits
+		.map((hit) =>
+			hit !== null && typeof hit === "object" && typeof (hit as { content?: unknown }).content === "string"
+				? (hit as { content: string }).content
+				: "",
+		)
+		.filter((content) => content.length > 0)
+		.join("\n\n");
+}
+
+/** Render an `ls` response's `entries` array (`{ path }[]`) to newline-joined paths. */
+function renderLsEntries(entries: unknown): string {
+	if (!Array.isArray(entries)) return "";
+	return entries
+		.map((entry) =>
+			entry !== null && typeof entry === "object" && typeof (entry as { path?: unknown }).path === "string"
+				? (entry as { path: string }).path
+				: "",
+		)
+		.filter((path) => path.length > 0)
+		.join("\n");
+}
+
+/** Render a `find` response's `matches` array (`{ path, summary }[]`) to `path: summary` lines. */
+function renderFindMatches(matches: unknown): string {
+	if (!Array.isArray(matches)) return "";
+	return matches
+		.map((match) => {
+			if (match === null || typeof match !== "object") return "";
+			const rec = match as { path?: unknown; summary?: unknown };
+			const path = typeof rec.path === "string" ? rec.path : "";
+			const summary = typeof rec.summary === "string" ? rec.summary : "";
+			return path.length > 0 ? `${path}: ${summary}` : "";
+		})
+		.filter((line) => line.length > 0)
+		.join("\n");
+}

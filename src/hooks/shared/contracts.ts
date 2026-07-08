@@ -55,10 +55,16 @@ export function notImplemented(what: string): never {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// LogicalEvent — the six normalized lifecycle events (FR-1)
+// LogicalEvent — the normalized lifecycle events (FR-1)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** The six logical lifecycle events every shim maps its native names onto (FR-1). */
+/**
+ * The logical lifecycle events every shim maps its native names onto (FR-1). The
+ * first six are the 019b core lifecycle; `user_prompt_recall` (PRD-076a) is the
+ * per-turn query-aware recall INJECTOR — a synchronous sibling of the `user_message`
+ * capture that runs `runUserPromptRecall` (recall + inject) instead of `runCapture`,
+ * so the injected recall and the fire-and-forget capture coexist on `UserPromptSubmit`.
+ */
 export const LOGICAL_EVENTS = [
 	"session-start",
 	"user_message",
@@ -66,6 +72,7 @@ export const LOGICAL_EVENTS = [
 	"tool_call",
 	"assistant_message",
 	"session-end",
+	"user_prompt_recall",
 ] as const;
 
 /** One normalized logical lifecycle event. */
@@ -397,6 +404,126 @@ export function createFakePrimeRenderer(digest = ""): PrimeRenderer {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// RecallRenderer — the per-turn query-aware recall (PRD-076a / a-AC-1..3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The recall-render request (PRD-076a). Mirrors {@link PrimeRenderRequest} but adds the
+ * turn's `query` (the user's prompt text). The `cwd` the recall is scoped to rides on
+ * `meta.cwd` (49b-AC-2 — the daemon resolves the project from it). READ-ONLY + fail-soft:
+ * a signed-out credential is sent unscoped and the daemon fail-closes it (a-AC-2).
+ */
+export interface RecallRenderRequest {
+	/** Session metadata (session id + `cwd`) the recall is scoped to. */
+	readonly meta: HookSessionMeta;
+	/** Runtime path stamped on the session-group request. Defaults to `plugin`. */
+	readonly runtimePath?: RuntimePath;
+	/** The credential, when present (resolves the tenancy the recall is scoped to). */
+	readonly credential?: HookCredential;
+	/** The user's prompt text — the recall query (a-AC-1). */
+	readonly query: string;
+}
+
+/**
+ * One coerced recall hit (PRD-076a). `ref` is the dedupe key (the fused `source:id`, or
+ * a content fallback when the daemon carried no id) so a re-scored duplicate of the same
+ * memory still dedupes (the PRD's preferred dedupe key); `text` is the matched content the
+ * injector renders into the context block. The hook does NO ranking — the daemon bounded
+ * and ordered the hits already.
+ */
+export interface RecallHit {
+	/** The dedupe key: `source:id`, or `text:<prefix>` when no id was carried. Never empty. */
+	readonly ref: string;
+	/** The matched memory content to inject. */
+	readonly text: string;
+}
+
+/**
+ * The recall-render seam (PRD-076a / a-AC-1..3). POSTs the turn's prompt to the daemon's
+ * hybrid recall (`/api/memories/recall`) ONCE per qualifying turn and returns the coerced,
+ * daemon-bounded {@link RecallHit}s. READ-ONLY + fail-soft: ANY failure (unreachable daemon,
+ * timeout, non-200, malformed body, signed-out) resolves to `[]` (no injection), never a
+ * throw (a-AC-3), exactly like {@link PrimeRenderer} resolves to `""`.
+ *
+ * Injected so a test drives the whole per-turn arm with a deterministic hit set. The real
+ * impl ({@link import("./recall-renderer.js").createRecallRenderer}) is a loopback POST.
+ */
+export interface RecallRenderer {
+	/** Fetch + coerce the recall hits. Returns `[]` on any error / cold repo (a-AC-3). */
+	render(req: RecallRenderRequest): Promise<readonly RecallHit[]>;
+}
+
+/**
+ * Build a {@link RecallRenderer} fake that returns the supplied hits (default `[]`, the
+ * cold-repo / unreachable case). A test asserts the per-turn arm injects them (a-AC-4) and
+ * that an empty set yields the nudge-or-nothing path (a-AC-7).
+ */
+export function createFakeRecallRenderer(hits: readonly RecallHit[] = []): RecallRenderer {
+	return {
+		async render(): Promise<readonly RecallHit[]> {
+			return hits;
+		},
+	};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RecallSessionStore — the per-turn throttle/dedupe state (PRD-076a / a-AC-6/7)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The per-session recall state the injector reads + writes to throttle the reminder nudge
+ * and dedupe injected hits ACROSS turns (PRD-076a / a-AC-6). Each hook invocation is its own
+ * process, so this state MUST persist out of process (the default impl is file-backed —
+ * {@link import("./user-prompt-recall.js").createFileRecallSessionStore}); a test injects an
+ * in-memory {@link createFakeRecallSessionStore} shared across the two turns it drives.
+ */
+export interface RecallSessionSnapshot {
+	/** The hit refs already injected this session (the dedupe set — a-AC-6). */
+	readonly injectedRefs: readonly string[];
+	/** The count of recall turns seen this session (throttle clock). */
+	readonly turns: number;
+	/** The turn index the reminder nudge last fired on (`-1` = never — a-AC-6/7). */
+	readonly lastNudgeTurn: number;
+}
+
+/** The zero-state snapshot: nothing injected, no turns seen, the nudge never fired. */
+export const EMPTY_RECALL_SNAPSHOT: RecallSessionSnapshot = {
+	injectedRefs: [],
+	turns: 0,
+	lastNudgeTurn: -1,
+};
+
+/**
+ * The recall-state seam (PRD-076a). `load` returns the session's prior snapshot (or
+ * {@link EMPTY_RECALL_SNAPSHOT} for a fresh/unreadable session); `save` persists the updated
+ * snapshot. Both are SYNC + fail-soft: an I/O error degrades to the zero-state (load) or is
+ * swallowed (save) so the turn never breaks over the throttle bookkeeping.
+ */
+export interface RecallSessionStore {
+	/** Read the session's recall snapshot. Fail-soft → {@link EMPTY_RECALL_SNAPSHOT}. */
+	load(sessionId: string): RecallSessionSnapshot;
+	/** Persist the session's recall snapshot. Fail-soft — a write error is swallowed. */
+	save(sessionId: string, snapshot: RecallSessionSnapshot): void;
+}
+
+/**
+ * Build an in-memory {@link RecallSessionStore} fake. A test drives TWO turns through the
+ * SAME fake so the second turn sees the first turn's injected refs (a-AC-6) — the in-process
+ * substitute for the production cross-process file store.
+ */
+export function createFakeRecallSessionStore(): RecallSessionStore {
+	const map = new Map<string, RecallSessionSnapshot>();
+	return {
+		load(sessionId: string): RecallSessionSnapshot {
+			return map.get(sessionId) ?? EMPTY_RECALL_SNAPSHOT;
+		},
+		save(sessionId: string, snapshot: RecallSessionSnapshot): void {
+			map.set(sessionId, snapshot);
+		},
+	};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // HookCoreDeps — what every core module is constructed with (D-2 seam bundle)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -413,6 +540,18 @@ export interface HookCoreDeps {
 	readonly credentials: CredentialReader;
 	/** Renders the read-only context block (FR-3 / FR-10). */
 	readonly context: ContextRenderer;
+	/**
+	 * The pre-tool-use VFS intercept (PRD-075a a-AC-1). OPTIONAL so every existing
+	 * `HookCoreDeps` literal across the other four cores (session-start / capture /
+	 * session-end / context-renderer tests) stays unchanged — only `pre-tool-use.ts`
+	 * reads this field, falling back to its own `vfs` PARAMETER default when this is
+	 * absent (the isolated-unit-test path). The real runtime construction
+	 * (`runtime.ts`'s `createHookRuntime`) ALWAYS populates this with the real
+	 * daemon-backed intercept, rebound to each pre-tool-use event's own session before
+	 * dispatch; `createFakeVfsIntercept()` backs ONLY the function-parameter default,
+	 * never this field, in production.
+	 */
+	readonly vfs?: VfsIntercept;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

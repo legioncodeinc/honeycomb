@@ -104,6 +104,7 @@ otherhive-v1/
 /daemon/
 /sdk/
 /harnesses/openclaw/dist/
+/harnesses/claude-code/mcp/bundle/
 /embeddings/embed-daemon.js
 /embeddings/chunks/
 /harnesses/openclaw/dist/chunks/

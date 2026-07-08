@@ -41,6 +41,7 @@ import {
 } from "../normalize.js";
 import { readTranscriptTurnUsage } from "./transcript.js";
 import { HYGIENE_META_ENV, type HookSessionMeta, type LogicalEvent } from "../shared/contracts.js";
+import type { PreToolDecision } from "../shared/index.js";
 
 /** The Claude Code native → logical event name map (FR-1). The full six-event reference. */
 export const CLAUDE_CODE_EVENT_MAP: Readonly<Record<string, LogicalEvent>> = {
@@ -52,6 +53,39 @@ export const CLAUDE_CODE_EVENT_MAP: Readonly<Record<string, LogicalEvent>> = {
 	SubagentStop: "assistant_message",
 	SessionEnd: "session-end",
 };
+
+/**
+ * The RECALL-mode event map (PRD-076a). The synchronous `UserPromptSubmit` INJECTOR invocation
+ * (hooks.json Option A: a second, non-`async` entry) maps ONLY `UserPromptSubmit` onto the new
+ * `user_prompt_recall` logical event → `runUserPromptRecall` (recall + inject). Every other native
+ * event is dropped in this mode: the injector hook is registered ONLY under `UserPromptSubmit`, and
+ * mapping nothing else guarantees the recall process NEVER double-captures. The UNCHANGED async
+ * capture entry keeps using {@link CLAUDE_CODE_EVENT_MAP} (`UserPromptSubmit → user_message`).
+ */
+export const CLAUDE_CODE_RECALL_EVENT_MAP: Readonly<Record<string, LogicalEvent>> = {
+	UserPromptSubmit: "user_prompt_recall",
+};
+
+/**
+ * The mode a Claude Code shim runs in (PRD-076a coexistence, Option A). `capture` is the default
+ * (the full six-event reference + the async `UserPromptSubmit` capture); `recall` is the synchronous
+ * per-turn injector that maps ONLY `UserPromptSubmit → user_prompt_recall`.
+ */
+export type ClaudeUserPromptMode = "capture" | "recall";
+
+/**
+ * The CLI argument the hooks.json INJECTOR entry passes so the SAME bundled binary runs in `recall`
+ * mode (`node .../index.js --honeycomb-recall`). Both `UserPromptSubmit` hook entries invoke the
+ * same binary with the same stdin, so this argv flag is the ONLY signal that distinguishes the
+ * synchronous injector invocation from the async capture invocation. A distinctive flag (not a bare
+ * token) so a test-runner's argv can never accidentally select recall mode.
+ */
+export const RECALL_HOOK_ARG = "--honeycomb-recall" as const;
+
+/** Detect the {@link ClaudeUserPromptMode} from process argv (the {@link RECALL_HOOK_ARG} flag → recall). */
+export function detectClaudeUserPromptMode(argv: readonly string[] = process.argv): ClaudeUserPromptMode {
+	return argv.slice(2).includes(RECALL_HOOK_ARG) ? "recall" : "capture";
+}
 
 /** Claude Code injects context model-only via `additionalContext` (FR-10). */
 export const CLAUDE_CODE_CONTEXT_CHANNEL: ContextChannel = "model-only";
@@ -82,6 +116,10 @@ export function claudeCodeExtractData(raw: unknown, logical: LogicalEvent, meta:
 		case "session-start":
 			return sessionStartData(pickString(raw, "source") || "startup");
 		case "user_message":
+			return userMessageData(pickString(raw, "prompt", "text", "message"));
+		case "user_prompt_recall":
+			// PRD-076a: the recall injector reads the SAME prompt text as capture; it carries the
+			// canonical `{ kind: "user_message", text }` shape so `runUserPromptRecall` reads the query.
 			return userMessageData(pickString(raw, "prompt", "text", "message"));
 		case "pre-tool-use":
 			return preToolData(pickString(raw, "tool_name", "tool"), {
@@ -115,19 +153,116 @@ export function claudeCodeExtractData(raw: unknown, logical: LogicalEvent, meta:
 }
 
 /**
+ * The Claude Code native `PreToolUse` block-and-inject response (PRD-075b). Only the
+ * shape the renderer emits is modeled here; the INDEPENDENT contract oracle lives at
+ * `references/claude-code/pretool-response-schema.ts` (the conformance test parses the
+ * emitted response through it). `hookEventName` is the fixed event literal; the optional
+ * carriers mirror the harness's PreToolUse decision-control fields.
+ */
+export interface ClaudeCodePreToolResponse {
+	readonly hookSpecificOutput: {
+		readonly hookEventName: "PreToolUse";
+		readonly permissionDecision?: "allow" | "deny" | "ask" | "defer";
+		readonly permissionDecisionReason?: string;
+		readonly updatedInput?: Record<string, unknown>;
+		readonly additionalContext?: string;
+	};
+}
+
+/**
+ * Render a shared-core {@link PreToolDecision} into the Claude Code native `PreToolUse`
+ * response (PRD-075b b-AC-2 / b-AC-3), or `undefined` for a pure pass-through.
+ *
+ * | Decision  | Rendered response |
+ * |-----------|-------------------|
+ * | `allow`   | `undefined` — pass-through: the binary emits the benign `{}` ack, the real tool runs |
+ * | `replace` | `permissionDecision: "deny"` (blocks the tool) + `additionalContext` = the daemon output (injected to the model); `permissionDecisionReason` also carries it (the older-version Channel-2 fallback) |
+ * | `deny`    | `permissionDecision: "deny"` + `permissionDecisionReason` = the mount-write guidance (shown to the model) |
+ * | `rewrite` | `permissionDecision: "allow"` + `updatedInput.command` = the harmless echo (the tool runs but mutates nothing) |
+ *
+ * The block-and-inject channel (`deny` + `additionalContext`) is the one the installed
+ * Claude Code contract supports (`references/claude-code/pretool-response-schema.ts`
+ * pins it as `PINNED_BLOCK_AND_INJECT_CHANNEL`). Never throws (a render is on the hook
+ * path; the binary driver also wraps this fail-soft).
+ */
+export function renderClaudeCodePreTool(decision: PreToolDecision): ClaudeCodePreToolResponse | undefined {
+	switch (decision.kind) {
+		case "allow":
+			// Pass-through: no block, no injection. The real tool runs under the host's normal
+			// permission flow (b-AC-6). Returning `undefined` lets the binary emit the `{}` ack.
+			return undefined;
+		case "replace":
+			// Block the real tool AND deliver the daemon output to the model. `additionalContext`
+			// is the pinned channel; `permissionDecisionReason` carries the same hits so the
+			// content still reaches the model on a build without PreToolUse `additionalContext`.
+			return {
+				hookSpecificOutput: {
+					hookEventName: "PreToolUse",
+					permissionDecision: "deny",
+					permissionDecisionReason: decision.output,
+					additionalContext: decision.output,
+				},
+			};
+		case "deny":
+			// Block + surface the mount-write guidance (shown to the model as the deny reason).
+			return {
+				hookSpecificOutput: {
+					hookEventName: "PreToolUse",
+					permissionDecision: "deny",
+					permissionDecisionReason: decision.guidance,
+				},
+			};
+		case "rewrite":
+			// Substitute the harmless echo: `updatedInput` replaces the tool input; paired with
+			// `allow` it auto-approves so the tool runs but mutates nothing (never the real FS).
+			return {
+				hookSpecificOutput: {
+					hookEventName: "PreToolUse",
+					permissionDecision: "allow",
+					updatedInput: { command: decision.command },
+				},
+			};
+		default: {
+			// Exhaustiveness: a new PreToolDecision kind fails to compile until rendered here.
+			const _exhaustive: never = decision;
+			void _exhaustive;
+			return undefined;
+		}
+	}
+}
+
+/**
  * Construct the Claude Code REFERENCE shim (FR-1 / D-4). Built on the shared
  * `createShim` engine with the reference event map + the canonical `extractData`;
  * every other shim runs the SAME engine, so equivalence to this baseline is
  * structural (c-AC-1).
+ *
+ * PRD-075b: the returned shim additionally carries {@link renderClaudeCodePreTool} as
+ * `renderPreTool`, so the shared binary driver can emit a native `PreToolUse`
+ * block-and-inject response for this reference harness. A harness whose shim does not
+ * carry the renderer keeps its prior pre-tool behavior (b-AC-5).
+ *
+ * PRD-076a: `options.userPromptMode` selects the coexistence arm (Option A). `capture`
+ * (the default, auto-detected from argv) is the full reference + async capture; `recall`
+ * is the synchronous per-turn injector - it maps ONLY `UserPromptSubmit → user_prompt_recall`
+ * and stamps `contextHookEvent: "UserPromptSubmit"` so `renderContext` wraps the injected
+ * recall under `hookSpecificOutput` (a-AC-5). The default reads {@link detectClaudeUserPromptMode}
+ * so the SAME bundled binary, invoked with {@link RECALL_HOOK_ARG}, runs the injector.
  */
-export function createClaudeCodeShim(): HarnessShim {
-	return createShim({
+export function createClaudeCodeShim(options: { readonly userPromptMode?: ClaudeUserPromptMode } = {}): HarnessShim {
+	const mode = options.userPromptMode ?? detectClaudeUserPromptMode();
+	const isRecall = mode === "recall";
+	const shim = createShim({
 		harness: "claude-code",
 		runtimePath: CLAUDE_CODE_RUNTIME_PATH,
 		contextChannel: CLAUDE_CODE_CONTEXT_CHANNEL,
 		hostCli: CLAUDE_CODE_HOST_CLI,
 		references: CLAUDE_CODE_REFERENCES,
-		eventMap: CLAUDE_CODE_EVENT_MAP,
+		eventMap: isRecall ? CLAUDE_CODE_RECALL_EVENT_MAP : CLAUDE_CODE_EVENT_MAP,
+		// PRD-076a (a-AC-5): the recall injector wraps its block under `hookSpecificOutput`
+		// with `hookEventName: "UserPromptSubmit"`; the capture-mode shim leaves this absent so
+		// the session-start prime envelope stays byte-identical (a-AC-8).
+		...(isRecall ? { contextHookEvent: "UserPromptSubmit" } : {}),
 		extractData(raw: unknown, logical: LogicalEvent, meta: HookSessionMeta): unknown | undefined {
 			// Thread `meta` through: the assistant_message branch reads the per-turn usage + model
 			// from the transcript at `meta.path` (the Stop hook payload carries neither).
@@ -136,11 +271,15 @@ export function createClaudeCodeShim(): HarnessShim {
 		// Off-process hygiene: hand the session-start skills/assets/graph pulls to a DETACHED
 		// CHILD so the parent hook binary does no in-process hygiene I/O and exits promptly
 		// after writing its response. See `HarnessShim.spawnHygieneChild` for the full
-		// rationale (the latency-budget + Windows-libuv-assertion fix).
+		// rationale (the latency-budget + Windows-libuv-assertion fix). Only session-start
+		// invokes this; the recall injector never dispatches session-start (map has one event).
 		spawnHygieneChild(meta: HookSessionMeta): void {
 			spawnClaudeCodeHygieneChild(meta);
 		},
 	});
+	// PRD-075b: attach the pre-tool decision renderer. Kept off the shared `HarnessShim`
+	// contract (a harness opts in by carrying it); the binary driver feature-detects it.
+	return Object.assign(shim, { renderPreTool: renderClaudeCodePreTool });
 }
 
 /**

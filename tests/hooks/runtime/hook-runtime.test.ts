@@ -26,6 +26,7 @@ import {
 	type OnboardingNoticeGate,
 	type PrimeRenderer,
 } from "../../../src/hooks/shared/index.js";
+import { RECALL_AWARENESS_NOTICE } from "../../../src/hooks/shared/session-start.js";
 import {
 	createFakeClaimLock,
 	createFakeNotificationsState,
@@ -94,14 +95,21 @@ describe("c-AC-4 session-start: renders prior context via the renderer + drains 
 		const pipeline = recordingPipeline(null);
 		// Inject a no-op prime so the test does NOT depend on the real prime renderer's behavior
 		// (which fetches 127.0.0.1:3850 and would either time out or pollute the assertion).
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: pipeline, prime: createFakePrimeRenderer("") });
+		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
+			daemon: client,
+			notifications: pipeline,
+			prime: createFakePrimeRenderer(""),
+		});
 
 		const outcome = await runtime.runEvent(
 			createClaudeCodeShim(),
 			{ name: "SessionStart", payload: { source: "startup" } },
 			META,
 		);
-		expect(outcome.result.additionalContext, "the rendered rules/goals block").toBe("GOALS: ship 021c.");
+		expect(outcome.result.additionalContext, "the rendered rules/goals block").toBe(
+			`GOALS: ship 021c.\n\n${RECALL_AWARENESS_NOTICE}`,
+		);
 	});
 
 	it("drains the 020d notifications pipeline exactly once on session-start (calls it, does not reimplement)", async () => {
@@ -113,7 +121,12 @@ describe("c-AC-4 session-start: renders prior context via the renderer + drains 
 			priority: 10,
 			dedupKey: "welcome",
 		});
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: pipeline, prime: createFakePrimeRenderer("") });
+		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
+			daemon: client,
+			notifications: pipeline,
+			prime: createFakePrimeRenderer(""),
+		});
 
 		const outcome = await runtime.runEvent(
 			createClaudeCodeShim(),
@@ -137,7 +150,12 @@ describe("c-AC-4 session-start: renders prior context via the renderer + drains 
 			backend,
 		});
 		const { client } = recordingClient(200, { additionalContext: "" });
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: pipeline, prime: createFakePrimeRenderer("") });
+		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
+			daemon: client,
+			notifications: pipeline,
+			prime: createFakePrimeRenderer(""),
+		});
 		const outcome = await runtime.runEvent(
 			createClaudeCodeShim(),
 			{ name: "SessionStart", payload: { source: "startup" } },
@@ -153,13 +171,14 @@ describe("c-AC-4 session-start: renders prior context via the renderer + drains 
 				throw new Error("backend exploded");
 			},
 		};
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: throwingPipeline, prime: createFakePrimeRenderer("") });
-		const outcome = await runtime.runEvent(
-			createClaudeCodeShim(),
-			{ name: "SessionStart", payload: {} },
-			META,
-		);
-		expect(outcome.result.additionalContext).toBe("X");
+		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
+			daemon: client,
+			notifications: throwingPipeline,
+			prime: createFakePrimeRenderer(""),
+		});
+		const outcome = await runtime.runEvent(createClaudeCodeShim(), { name: "SessionStart", payload: {} }, META);
+		expect(outcome.result.additionalContext).toBe(`X\n\n${RECALL_AWARENESS_NOTICE}`);
 		expect(outcome.drain?.banner).toBeNull();
 	});
 });
@@ -192,7 +211,7 @@ describe("PRD-046d session prime: the runtime injects the 046c digest at session
 			{ name: "SessionStart", payload: { source: "startup" } },
 			META,
 		);
-		expect(outcome.result.additionalContext).toBe("## Memory\n- decided X");
+		expect(outcome.result.additionalContext).toBe(`## Memory\n- decided X\n\n${RECALL_AWARENESS_NOTICE}`);
 	});
 
 	it("d-AC-2: the Cursor session-start injects the SAME prime digest (shared runtime, no per-harness fork)", async () => {
@@ -209,7 +228,7 @@ describe("PRD-046d session prime: the runtime injects the 046c digest at session
 			{ name: "sessionStart", payload: { source: "startup" } },
 			META,
 		);
-		expect(outcome.result.additionalContext).toBe("## Memory\n- decided X");
+		expect(outcome.result.additionalContext).toBe(`## Memory\n- decided X\n\n${RECALL_AWARENESS_NOTICE}`);
 	});
 
 	it("d-AC-1: the prime is APPENDED to the rules/goals block when both are present", async () => {
@@ -225,13 +244,20 @@ describe("PRD-046d session prime: the runtime injects the 046c digest at session
 			{ name: "SessionStart", payload: { source: "startup" } },
 			META,
 		);
-		expect(outcome.result.additionalContext).toBe("RULES: be concise.\n\n## Memory\n- decided X");
+		expect(outcome.result.additionalContext).toBe(
+			`RULES: be concise.\n\n## Memory\n- decided X\n\n${RECALL_AWARENESS_NOTICE}`,
+		);
 	});
 
 	it("d-AC-3: the prime renders ONCE at session-start and NOT on a per-turn capture", async () => {
 		const { client } = recordingClient(200, { additionalContext: "" });
 		const prime = recordingPrime("## Memory\n- decided X");
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null), prime });
+		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
+			daemon: client,
+			notifications: recordingPipeline(null),
+			prime,
+		});
 
 		// Session-start → one prime render.
 		await runtime.runEvent(createClaudeCodeShim(), { name: "SessionStart", payload: { source: "startup" } }, META);
@@ -266,7 +292,7 @@ describe("PRD-046d session prime: the runtime injects the 046c digest at session
 		);
 		// The session starts normally with just the context block; no prime, no error.
 		expect(outcome.result.ok).toBe(true);
-		expect(outcome.result.additionalContext).toBe("RULES: be concise.");
+		expect(outcome.result.additionalContext).toBe(`RULES: be concise.\n\n${RECALL_AWARENESS_NOTICE}`);
 	});
 
 	it("d-AC-4: a THROWING prime renderer is absorbed — session-start still completes", async () => {
@@ -288,7 +314,7 @@ describe("PRD-046d session prime: the runtime injects the 046c digest at session
 			META,
 		);
 		expect(outcome.result.ok).toBe(true);
-		expect(outcome.result.additionalContext).toBe("RULES: be concise.");
+		expect(outcome.result.additionalContext).toBe(`RULES: be concise.\n\n${RECALL_AWARENESS_NOTICE}`);
 	});
 
 	it("d-AC-1: the prime digest reaches stdout through the Claude Code binary driver (the real channel)", async () => {
@@ -311,7 +337,7 @@ describe("PRD-046d session prime: the runtime injects the 046c digest at session
 		await runHookBinary({ shim: createClaudeCodeShim(), runtime, io });
 		expect(out).toHaveLength(1);
 		const envelope = JSON.parse(out[0]) as { channel: string; additionalContext: string };
-		expect(envelope.additionalContext).toBe("## Memory\n- decided X");
+		expect(envelope.additionalContext).toBe(`## Memory\n- decided X\n\n${RECALL_AWARENESS_NOTICE}`);
 	});
 
 	it("d-AC-2: the prime digest reaches stdout through the CURSOR binary driver (model-only additional_context)", async () => {
@@ -338,7 +364,7 @@ describe("PRD-046d session prime: the runtime injects the 046c digest at session
 		// Cursor lands context MODEL-ONLY (the shared `renderContext` channel envelope).
 		const envelope = JSON.parse(out[0]) as { channel: string; additionalContext: string };
 		expect(envelope.channel).toBe("model-only");
-		expect(envelope.additionalContext).toBe("## Memory\n- decided X");
+		expect(envelope.additionalContext).toBe(`## Memory\n- decided X\n\n${RECALL_AWARENESS_NOTICE}`);
 	});
 });
 
@@ -358,7 +384,11 @@ describe("c-AC-5 claude-code binary: native stdin event drives the runtime (shim
 
 	it("parses the native Claude Code UserPromptSubmit envelope and POSTs the capture", async () => {
 		const { client, calls } = recordingClient();
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null) });
+		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
+			daemon: client,
+			notifications: recordingPipeline(null),
+		});
 		const stdin = JSON.stringify({
 			hook_event_name: "UserPromptSubmit",
 			session_id: "sess-bin",
@@ -382,18 +412,27 @@ describe("c-AC-5 claude-code binary: native stdin event drives the runtime (shim
 
 	it("session-start emits the rendered context block on stdout (model-only additionalContext)", async () => {
 		const { client } = recordingClient(200, { additionalContext: "RULES: be concise." });
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null), prime: createFakePrimeRenderer("") });
+		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
+			daemon: client,
+			notifications: recordingPipeline(null),
+			prime: createFakePrimeRenderer(""),
+		});
 		const surface = io(JSON.stringify({ hook_event_name: "SessionStart", session_id: "s", source: "startup" }));
 		await runHookBinary({ shim: createClaudeCodeShim(), runtime, io: surface });
 		expect(surface.out).toHaveLength(1);
 		const envelope = JSON.parse(surface.out[0]) as { channel: string; additionalContext: string };
 		expect(envelope.channel).toBe("model-only");
-		expect(envelope.additionalContext).toBe("RULES: be concise.");
+		expect(envelope.additionalContext).toBe(`RULES: be concise.\n\n${RECALL_AWARENESS_NOTICE}`);
 	});
 
 	it("malformed stdin exits cleanly with an empty response (fail-soft, never a throw)", async () => {
 		const { client, calls } = recordingClient();
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null) });
+		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
+			daemon: client,
+			notifications: recordingPipeline(null),
+		});
 		const surface = io("{ not json");
 		const outcome = await runHookBinary({ shim: createClaudeCodeShim(), runtime, io: surface });
 		expect(outcome.dropped).toBe(true);
@@ -403,7 +442,11 @@ describe("c-AC-5 claude-code binary: native stdin event drives the runtime (shim
 
 	it("a non-lifecycle event the shim drops makes no daemon call", async () => {
 		const { client, calls } = recordingClient();
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null) });
+		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
+			daemon: client,
+			notifications: recordingPipeline(null),
+		});
 		const surface = io(JSON.stringify({ hook_event_name: "Notification", session_id: "s" }));
 		const outcome = await runHookBinary({ shim: createClaudeCodeShim(), runtime, io: surface });
 		expect(outcome.dropped).toBe(true);
@@ -414,13 +457,25 @@ describe("c-AC-5 claude-code binary: native stdin event drives the runtime (shim
 describe("c-AC-6 second harness (codex) reuses the SAME runtime + seams (not re-derived)", () => {
 	function io(stdin: string): BinaryIo & { out: string[] } {
 		const out: string[] = [];
-		return { out, async readStdin() { return stdin; }, writeStdout(t) { out.push(t); } };
+		return {
+			out,
+			async readStdin() {
+				return stdin;
+			},
+			writeStdout(t) {
+				out.push(t);
+			},
+		};
 	}
 
 	it("the codex binary drives the SAME runtime instance — proving the runtime is shared", async () => {
 		const { client, calls } = recordingClient();
 		// ONE runtime, used by BOTH harnesses below — the c-AC-6 reuse proof.
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null) });
+		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
+			daemon: client,
+			notifications: recordingPipeline(null),
+		});
 
 		// Drive a claude-code event AND a codex event through the SAME runtime + seams.
 		await runHookBinary({
@@ -444,7 +499,11 @@ describe("c-AC-6 second harness (codex) reuses the SAME runtime + seams (not re-
 
 	it("createHookRuntime builds the three production seams once (deps reused across events)", async () => {
 		const { client } = recordingClient();
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null) });
+		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
+			daemon: client,
+			notifications: recordingPipeline(null),
+		});
 		// The runtime exposes ONE deps bundle (daemon + credentials + context) reused per event.
 		expect(runtime.deps.daemon).toBe(client);
 		expect(runtime.deps.credentials).toBeDefined();
@@ -491,18 +550,33 @@ describe("PRD-045g g-AC-2: the runtime injects the REAL auto-pull seam on sessio
 	it("calls autoPullSkills ONCE on session-start (the seam is wired into SessionStartDeps)", async () => {
 		const { client } = recordingClient(200, { additionalContext: "" });
 		const seams = recordingSeams();
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null), seams, prime: createFakePrimeRenderer("") });
+		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
+			daemon: client,
+			notifications: recordingPipeline(null),
+			seams,
+			prime: createFakePrimeRenderer(""),
+		});
 		// Use a shim WITHOUT spawnHygieneChild so this test asserts the IN-PROCESS seam path
 		// (the recording seam's autoPullSkills is what we're counting). The production
 		// claude-code shim now ships spawnHygieneChild, which would route the pulls off-process.
-		await runtime.runEvent(shimWithoutOffProcessHygiene(), { name: "SessionStart", payload: { source: "startup" } }, META);
+		await runtime.runEvent(
+			shimWithoutOffProcessHygiene(),
+			{ name: "SessionStart", payload: { source: "startup" } },
+			META,
+		);
 		expect(seams.pulls, "auto-pull ran at session start").toBe(1);
 	});
 
 	it("does NOT auto-pull on a per-turn capture event (session-start only)", async () => {
 		const { client } = recordingClient();
 		const seams = recordingSeams();
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null), seams });
+		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
+			daemon: client,
+			notifications: recordingPipeline(null),
+			seams,
+		});
 		await runtime.runEvent(createClaudeCodeShim(), { name: "UserPromptSubmit", payload: { prompt: "x" } }, META);
 		expect(seams.pulls, "no auto-pull on capture").toBe(0);
 	});
@@ -519,7 +593,13 @@ describe("PRD-045g g-AC-2: the runtime injects the REAL auto-pull seam on sessio
 				throw new Error("pull exploded");
 			},
 		};
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null), seams: throwingSeams, prime: createFakePrimeRenderer("") });
+		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
+			daemon: client,
+			notifications: recordingPipeline(null),
+			seams: throwingSeams,
+			prime: createFakePrimeRenderer(""),
+		});
 		// Use a shim WITHOUT spawnHygieneChild so the throwing seam is actually exercised
 		// (the production claude-code shim ships spawnHygieneChild, which would route the
 		// pulls off-process and never reach this throwing seam).
@@ -529,7 +609,7 @@ describe("PRD-045g g-AC-2: the runtime injects the REAL auto-pull seam on sessio
 			META,
 		);
 		expect(outcome.result.ok).toBe(true);
-		expect(outcome.result.additionalContext).toBe("RULES: be concise.");
+		expect(outcome.result.additionalContext).toBe(`RULES: be concise.\n\n${RECALL_AWARENESS_NOTICE}`);
 	});
 
 	it("when the shim ships spawnHygieneChild, session-start calls IT instead of the in-process seams", async () => {
@@ -568,14 +648,19 @@ describe("PRD-045g g-AC-2: the runtime injects the REAL auto-pull seam on sessio
 			throw new Error("ECONNREFUSED");
 		}) as unknown as typeof fetch;
 		const { client } = recordingClient(200, { additionalContext: "RULES: be concise." });
-		const runtime = createHookRuntime({ onboardingNotice: NOTICE_BOUND, daemon: client, notifications: recordingPipeline(null), fetch: failingFetch });
+		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
+			daemon: client,
+			notifications: recordingPipeline(null),
+			fetch: failingFetch,
+		});
 		const outcome = await runtime.runEvent(
 			createClaudeCodeShim(),
 			{ name: "SessionStart", payload: { source: "startup" } },
 			META,
 		);
 		expect(outcome.result.ok).toBe(true);
-		expect(outcome.result.additionalContext).toBe("RULES: be concise.");
+		expect(outcome.result.additionalContext).toBe(`RULES: be concise.\n\n${RECALL_AWARENESS_NOTICE}`);
 	});
 });
 

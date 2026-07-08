@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.7.0 — 2026-07-08
+
+Adds always-on, query-aware memory recall on each prompt, registers the Honeycomb MCP server with the Claude Code plugin, and bundles a honeycomb-memory skill plus /recall, /remember, and /forget slash commands. Also fixes packaging so the MCP server bundle ships inside the Claude Code plugin.
+
 ## v0.6.2 — 2026-07-08
 
 Adds an internal diagnostic log (enabled via HONEYCOMB_DEBUG_WAKE) that records which requests wake or reset the daemon's hibernation idle timer, to help troubleshoot unexpected wake-ups.
