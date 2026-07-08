@@ -33,3 +33,11 @@ export const HONEYCOMB_VERSION: string =
 
 /** Lowercase product slug used for the CLI bin name, config dir, and paths. */
 export const PRODUCT_SLUG = "honeycomb";
+
+/**
+ * The daemon loopback route the PRD-006b harness reconcile POSTs computed plugin-enabled state to
+ * (`src/cli/runtime.ts`), and the PRD-006d ingest mounts (`src/daemon/runtime/dashboard/harness-status-ingest.ts`
+ * derives its group-relative mount path from this same value). Single-sourced so the CLI push and
+ * the daemon mount can never drift onto two different literals.
+ */
+export const HARNESS_STATUS_INGEST_PATH = "/api/diagnostics/harness-status";

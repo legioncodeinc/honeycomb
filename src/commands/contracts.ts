@@ -210,6 +210,12 @@ export const VERB_TABLE: readonly VerbSpec[] = Object.freeze([
 	{ verb: "dashboard", cls: "local", group: "system", summary: "launch the daemon-served dashboard (020b)" },
 	{ verb: "hook", cls: "local", group: "system", summary: "inspect/wire harness hooks" },
 	{
+		verb: "harness",
+		cls: "local",
+		group: "system",
+		summary: "status | connect | repair harness plugin wiring (--json; PRD-006c/006d)",
+	},
+	{
 		verb: "telemetry",
 		cls: "local",
 		group: "system",

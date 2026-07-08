@@ -31,6 +31,7 @@ import {
 	VERB_TABLE,
 } from "./contracts.js";
 import { type DaemonLifecycle, type DaemonVerbDeps, ensureDaemonRunning, runDaemonCommand } from "./daemon.js";
+import { runHarnessVerb } from "./harness-status.js";
 import { type InstallVerbDeps, runInstallCommand } from "./install.js";
 import {
 	type LocalDeps,
@@ -260,6 +261,10 @@ function dispatchLocal(inv: CommandInvocation, deps: LocalDeps & StatusDeps): Pr
 			return runDaemonCommand(inv.argv, daemonVerbDeps(deps));
 		case "hook":
 			return runHookCommand(inv.argv, deps);
+		// PRD-006c/006d: the coherent harness connect/status/repair surface Hive shells. `--json` (the
+		// global flag) switches to the machine-readable body the onboarding step + dashboard card parse.
+		case "harness":
+			return runHarnessVerb(inv.argv, deps, inv.flags.json);
 		case "update":
 			return runUpdateCommand(inv.argv, deps);
 		default:

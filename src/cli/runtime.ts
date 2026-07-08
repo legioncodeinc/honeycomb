@@ -36,6 +36,7 @@ import {
 	type DaemonLifecycle,
 	type DaemonStatus,
 	type DashboardLauncher,
+	type HarnessStatusRunner,
 	type OrgDriftHealer,
 	type StatusHealthSource,
 	type UninstallLifecycleSteps,
@@ -55,10 +56,12 @@ import {
 import { runHoneycombStateMigration } from "../daemon/runtime/state-migration/index.js";
 import { unregisterHoneycombFromDoctor } from "../daemon/runtime/telemetry/fleet-registry.js";
 import { launchDashboard } from "../dashboard/launch.js";
-import { DAEMON_HOST, DAEMON_PORT } from "../shared/constants.js";
+import { DAEMON_HOST, DAEMON_PORT, HARNESS_STATUS_INGEST_PATH } from "../shared/constants.js";
 import { honeycombStateDir, legacyHoneycombDir, preferExistingPath, resolveFleetRoot } from "../shared/fleet-root.js";
 import { authMain } from "./auth.js";
 import { buildConnectorRunner } from "./connector-runner.js";
+import { createHarnessReconciler, type HarnessReconcileResult, type HarnessReconciler } from "./harness-reconcile.js";
+import { buildHarnessStatusRunner } from "./harness-status.js";
 import {
 	createDaemonServiceController,
 	type DaemonServiceController,
@@ -82,6 +85,14 @@ export interface RuntimeDeps extends CommandDeps {
 	readonly loggedIn: boolean;
 	readonly lifecycle: DaemonLifecycle;
 	readonly uninstallSteps: UninstallLifecycleSteps;
+	/** PRD-006b: the self-healing harness auto-wire reconciler (started on daemon-up; status read by 006c/006d). */
+	readonly reconcile: HarnessReconciler;
+	/**
+	 * PRD-006c/006d: the coherent harness connect/status/repair surface Hive shells (`honeycomb
+	 * harness <sub> --json`). Built over the 006b {@link reconcile} at this (Tier 4) tier - the daemon
+	 * (Tier 2) cannot host it (it cannot import the connector / `isPluginEnabled`).
+	 */
+	readonly harnessStatus: HarnessStatusRunner;
 }
 
 /** The daemon base URL the loopback client + health probe dial. */
@@ -316,6 +327,16 @@ export interface DaemonLifecycleOptions {
 	readonly serviceManager?: ServiceManager | null;
 	/** Build the controller for a manager. Defaults to the real {@link createDaemonServiceController}. */
 	readonly controllerFor?: (manager: ServiceManager) => DaemonServiceController;
+	/**
+	 * PRD-006b: a fire-and-forget hook invoked ONCE per `start()` the moment the daemon is confirmed
+	 * up (freshly started OR already running). {@link buildRuntimeDeps} binds it to the self-healing
+	 * harness reconcile ({@link buildHarnessReconciler}), so a supported harness whose agent is present
+	 * but whose plugin is not enabled gets wired on daemon-start and on the reconciler's cadence -
+	 * entirely OUT of the daemon's loopback request path. FAIL-SOFT: a throwing hook is swallowed and
+	 * never affects the start result. Left UNSET by the bare lifecycle (the existing tests) so
+	 * `buildDaemonLifecycle(client)` never triggers a real `claude` shell.
+	 */
+	readonly onDaemonUp?: () => void;
 }
 
 /**
@@ -356,29 +377,45 @@ export function buildDaemonLifecycle(client: DaemonClient, options: DaemonLifecy
 		return controller;
 	}
 
+	/** The 021a start logic (unchanged): already-up short-circuit, service-preferred, spawn fallback. */
+	async function startInner(): Promise<{ readonly started: boolean; readonly alreadyRunning: boolean }> {
+		if (await client.ping()) return { started: false, alreadyRunning: true };
+
+		// Service-preferred (PRD-064h): register + start through the OS manager so the service is the
+		// liveness floor. A register that throws (binary missing / permission) falls back to spawn.
+		const svc = serviceController();
+		if (svc !== null) {
+			try {
+				svc.register(buildServiceSpec());
+				// The manager (RunAtLoad/enable --now/`/Run`) starts it; wait for /health to confirm.
+				if (await waitForHealth(client)) return { started: true, alreadyRunning: false };
+				// Registered but not yet answering: report not-yet-started; status() distinguishes
+				// "warming up" from "failed" exactly as the spawn path does. Do NOT also spawn, that
+				// would race the service for the 3850 bind.
+				return { started: false, alreadyRunning: false };
+			} catch {
+				// Service registration unavailable on this host → fall through to the spawn fallback.
+			}
+		}
+
+		// FALLBACK (HC-1): the documented detached spawn for hosts without a service manager.
+		return spawnDaemonAndWait(client);
+	}
+
 	return {
 		async start(): Promise<{ readonly started: boolean; readonly alreadyRunning: boolean }> {
-			if (await client.ping()) return { started: false, alreadyRunning: true };
-
-			// Service-preferred (PRD-064h): register + start through the OS manager so the service is the
-			// liveness floor. A register that throws (binary missing / permission) falls back to spawn.
-			const svc = serviceController();
-			if (svc !== null) {
+			const result = await startInner();
+			// PRD-006b: the daemon is up (freshly started OR already running) -> fire the self-healing
+			// harness reconcile. FAIL-SOFT + fire-and-forget: a throwing hook must never turn a healthy
+			// start into a reported failure, and it runs OUTSIDE the daemon's loopback request path.
+			if (result.started || result.alreadyRunning) {
 				try {
-					svc.register(buildServiceSpec());
-					// The manager (RunAtLoad/enable --now/`/Run`) starts it; wait for /health to confirm.
-					if (await waitForHealth(client)) return { started: true, alreadyRunning: false };
-					// Registered but not yet answering: report not-yet-started; status() distinguishes
-					// "warming up" from "failed" exactly as the spawn path does. Do NOT also spawn, that
-					// would race the service for the 3850 bind.
-					return { started: false, alreadyRunning: false };
+					options.onDaemonUp?.();
 				} catch {
-					// Service registration unavailable on this host → fall through to the spawn fallback.
+					// The reconcile trigger is best-effort; it never affects the start outcome.
 				}
 			}
-
-			// FALLBACK (HC-1): the documented detached spawn for hosts without a service manager.
-			return spawnDaemonAndWait(client);
+			return result;
 		},
 
 		async stop(): Promise<{ readonly stopped: boolean }> {
@@ -627,6 +664,61 @@ export function buildUninstallLifecycleSteps(lifecycle: DaemonLifecycle): Uninst
 	};
 }
 
+/**
+ * Build the self-healing harness auto-wire reconciler (PRD-006b). This is the tier-legal host for
+ * the reconcile: `src/cli` (Tier 4) MAY import the connector composition (`createConnectorRegistry`)
+ * + `createAutoWiring` that the daemon (Tier 2) cannot. The reconciler reuses `detectInstalledHarnesses`,
+ * the `claude plugin` runner's `isPluginEnabled`/`available`, and the real connector via
+ * `createAutoWiring` - no forked merge logic. {@link buildRuntimeDeps} triggers it on daemon-start
+ * (the {@link buildDaemonLifecycle} `onDaemonUp` seam) and it arms its own recurring cadence, both
+ * OUT of the daemon's loopback request path. Exposed so 006c (onboarding) and 006d (dashboard card)
+ * read its last-outcome status.
+ */
+export function buildHarnessReconciler(daemon: DaemonClient): HarnessReconciler {
+	// PRD-006d F-2: wire the fail-soft reconcile → daemon plugin-enabled push. After each cycle the
+	// reconciler POSTs the computed per-harness set to the daemon's loopback ingest so the endpoint
+	// serves REAL plugin-enabled state shortly after daemon-up.
+	return createHarnessReconciler({ onCycleComplete: buildReconcilePluginStatusPush(daemon) });
+}
+
+/**
+ * Build the fail-soft reconcile → daemon plugin-enabled push (PRD-006d F-2). After each reconcile
+ * cycle it POSTs the computed per-harness plugin-enabled set to the daemon's loopback ingest
+ * (`POST /api/diagnostics/harness-status`) so `GET /api/diagnostics/harnesses` serves REAL
+ * plugin-enabled state instead of a constant `false`. A harness whose outcome is `already-enabled`
+ * or `wired` is plugin-enabled; every other outcome (`agent-absent`/`cli-absent`/`error`) is not.
+ *
+ * ── Tier-legal + fail-soft (D-2) ─────────────────────────────────────────────
+ * This is a Tier-4 → daemon call over the same loopback {@link DaemonClient} + credential-stamped
+ * header discipline every other CLI → daemon call uses — the legal direction (the daemon never
+ * imports Tier 4). Fire-and-forget + fail-soft: a failed push (daemon down, non-local mode 404,
+ * bad body) is swallowed and NEVER affects the reconcile or the daemon; the endpoint simply stays
+ * at its honest last-known set until the next successful push.
+ */
+export function buildReconcilePluginStatusPush(
+	daemon: DaemonClient,
+): (results: readonly HarnessReconcileResult[]) => void {
+	return (results: readonly HarnessReconcileResult[]): void => {
+		void pushReconciledPluginStatus(daemon, results);
+	};
+}
+
+/** POST the per-harness plugin-enabled set derived from a reconcile pass; swallow any failure. */
+async function pushReconciledPluginStatus(
+	daemon: DaemonClient,
+	results: readonly HarnessReconcileResult[],
+): Promise<void> {
+	try {
+		const harnesses = results.map((r) => ({
+			harness: r.harness,
+			pluginEnabled: r.outcome === "already-enabled" || r.outcome === "wired",
+		}));
+		await daemon.send({ method: "POST", path: HARNESS_STATUS_INGEST_PATH, body: { harnesses } });
+	} catch {
+		// Fail-soft: a failed push never affects the reconcile or the daemon.
+	}
+}
+
 /** The dashboard launcher seam (FR-4) — binds 020b's {@link launchDashboard} over the loopback daemon. */
 export function buildDashboardLauncher(headers: Record<string, string>): DashboardLauncher {
 	return {
@@ -655,7 +747,14 @@ export function buildRuntimeDeps(): RuntimeDeps {
 	const creds = loadCredentials();
 	const headers = tenancyHeaders(creds);
 	const daemon = createLoopbackDaemonClient({ baseUrl: daemonBaseUrl(), headers });
-	const lifecycle = buildDaemonLifecycle(daemon);
+	// PRD-006b: one reconciler instance, triggered on daemon-start via the lifecycle's `onDaemonUp`
+	// seam and exposed on the deps so 006c/006d read its last-outcome status. Constructing it is cheap
+	// (no `claude` shell until a reconcile pass actually runs on start).
+	const reconcile = buildHarnessReconciler(daemon);
+	const lifecycle = buildDaemonLifecycle(daemon, { onDaemonUp: () => reconcile.start() });
+	// PRD-006c/006d: the connect/status/repair surface Hive shells, built over the SAME 006b reconcile
+	// (no forked wiring path). Constructing it is cheap (no `claude` shell until a verb runs a pass).
+	const harnessStatus = buildHarnessStatusRunner(reconcile);
 
 	return {
 		daemon,
@@ -668,6 +767,10 @@ export function buildRuntimeDeps(): RuntimeDeps {
 		loggedIn: creds !== null,
 		// PRD-003b: the FULL `uninstall` verb runs these alongside the harness-hook reversal.
 		uninstallSteps: buildUninstallLifecycleSteps(lifecycle),
+		// PRD-006b: the self-healing harness auto-wire reconcile (start-trigger wired above via onDaemonUp).
+		reconcile,
+		// PRD-006c/006d: the connect/status/repair surface (built over the 006b reconcile).
+		harnessStatus,
 	};
 }
 

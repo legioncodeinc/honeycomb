@@ -68,6 +68,8 @@ import { mountActionsApi } from "./dashboard/actions-api.js";
 import { mountDashboardApi } from "./dashboard/api.js";
 import { mountHarnessApi } from "./dashboard/harness-api.js";
 import { detectInstalledHarnesses } from "./dashboard/harness-detect.js";
+import { createHarnessPluginStatusHolder, type HarnessPluginStatusHolder } from "./dashboard/harness-plugin-status.js";
+import { mountHarnessStatusIngestApi } from "./dashboard/harness-status-ingest.js";
 import { mountJobsDiagnosticsApi } from "./dashboard/jobs-diagnostics-api.js";
 import { mountSetupLogin } from "./dashboard/setup-login.js";
 import { mountSetupMigrate } from "./dashboard/setup-migrate.js";
@@ -130,7 +132,14 @@ import { createInProcessKeepBothMemoStore } from "./memories/keep-both-memo.js";
 import { mountMemoriesApi, mountMemoriesPrimeApi } from "./memories/index.js";
 import { mountLifecycleApi } from "./memories/lifecycle-api.js";
 import { resolveNectarRrfMultiplierAtBoot } from "./memories/nectar-recall-config.js";
-import type { CohereRerankSeam, ActivationSource, StalenessSource, MemoryActivationInputs, StalenessVerdictInput, MemoryRecallHit } from "./memories/recall.js";
+import type {
+	CohereRerankSeam,
+	ActivationSource,
+	StalenessSource,
+	MemoryActivationInputs,
+	StalenessVerdictInput,
+	MemoryRecallHit,
+} from "./memories/recall.js";
 // PRD-058e (L-W1/L-W2): the access-log recorder + the access-history reader used to build the real
 // activation source. recordAccess appends a `recall` event + maintains the denormalized cache;
 // readAccessHistory loads a memory's retained access series for the ACT-R activation math.
@@ -140,10 +149,7 @@ import { recordAccess, readAccessHistory, type AccessLogDeps } from "./memories/
 // `calibration-store.ts` now (the TTL-cached provider that replaced this module's boot-once
 // cached promise, so a worker refit actually reaches recall without a daemon restart).
 import type { CalibrationModel } from "./memories/calibration.js";
-import {
-	type CalibrationModelProvider,
-	createCalibrationModelProvider,
-} from "./memories/calibration-store.js";
+import { type CalibrationModelProvider, createCalibrationModelProvider } from "./memories/calibration-store.js";
 // PRD-058d (L-W5): the lifecycle config resolver + the recency/staleness projections. Resolved ONCE
 // at boot from `HONEYCOMB_LIFECYCLE_*` env (env-over-yaml is the documented precedence). The
 // defaults (a=1, c=0, s=0, posture=observe) are NON-DESTRUCTIVE (AC-55d.1.1), so wiring this in is
@@ -698,6 +704,21 @@ export interface SeamFns {
 	 */
 	readonly mountHarness?: typeof mountHarnessApi;
 	/**
+	 * PRD-006d F-2 — the plugin-enabled INGEST route `POST /api/diagnostics/harness-status`. Attaches
+	 * onto the same already-mounted, protected `/api/diagnostics` group (NO `server.ts` edit) and
+	 * self-gates to LOCAL mode. It is the daemon (Tier 2) side of the tier-legal cross-process handoff:
+	 * the Tier-4 harness reconcile POSTs the computed per-harness plugin-enabled set here after each
+	 * cycle, this writes the in-memory {@link HarnessPluginStatusHolder} the step-14 harness telemetry
+	 * mount reads back through `resolvePluginEnabled`, so `GET /api/diagnostics/harnesses` reflects REAL
+	 * plugin-enabled state (F-2 / d-AC-1) without the daemon ever importing Tier 4 or spawning `claude`.
+	 *
+	 * OPTIONAL on the seam record (like {@link mountHarness}) so a pre-existing recording-fake `SeamFns`
+	 * stays type-compatible WITHOUT editing those out-of-scope suites; `assembleSeams` fires it only
+	 * when present (always present in {@link defaultSeamFns}, i.e. production) AND when the holder is
+	 * threaded, inside the same fail-soft try/catch as the harness mount.
+	 */
+	readonly mountHarnessStatusIngest?: typeof mountHarnessStatusIngestApi;
+	/**
 	 * The Sync page data + action surface — `GET /api/diagnostics/assets` (the `installed ∪ synced`
 	 * union view-model) + `POST /api/diagnostics/sync/{promote,pull,demote,enable,disable}` (PRD-042).
 	 * Attaches onto the same already-mounted, protected `/api/diagnostics` group (NO `server.ts` edit),
@@ -775,6 +796,7 @@ export const defaultSeamFns: SeamFns = {
 	mountLocalQueueDiagnostics: mountLocalQueueDiagnosticsApi,
 	mountGraph: mountGraphApi,
 	mountHarness: mountHarnessApi,
+	mountHarnessStatusIngest: mountHarnessStatusIngestApi,
 	mountSync: mountSyncApi,
 	mountOntology: mountOntologyApi,
 	mountSkillPropagation: mountSkillPropagationApi,
@@ -1223,6 +1245,15 @@ export function assembleSeams(
 	 * existing test suites stay hermetic), but the daemon path always supplies the shared one.
 	 */
 	sharedCalibrationProvider?: CalibrationModelProvider,
+	/**
+	 * PRD-006d F-2 — the in-memory plugin-enabled holder threaded from the composition root. When
+	 * supplied, step 14's `mountHarness` reads it back through `resolvePluginEnabled` (so the endpoint
+	 * serves REAL plugin-enabled state) AND the new ingest step fires `mountHarnessStatusIngest` over
+	 * the SAME holder (the write side of the tier-legal reconcile → daemon handoff). ABSENT (a
+	 * unit-constructed `assembleSeams` call) → no resolver + no ingest, so every harness reads
+	 * `pluginEnabled: false` (the honest fail-soft default). The daemon path always supplies it.
+	 */
+	harnessPluginStatus?: HarnessPluginStatusHolder,
 ): CaptureHandler {
 	// The daemon's configured default tenancy scope (the single LOCAL tenant) is RESOLVED ONCE
 	// at the composition root (`assembleDaemon`) from the SAME credential source the storage
@@ -1722,10 +1753,32 @@ export function assembleSeams(
 				defaultScope,
 				installedHarnesses: resolveInstalledHarnesses(),
 				resolveInstalled: resolveInstalledHarnesses,
+				// PRD-006d F-2: read plugin-enabled PER REQUEST from the in-memory holder the Tier-4
+				// reconcile pushes into (via step 14b's ingest). Absent holder → default empty → false.
+				...(harnessPluginStatus !== undefined
+					? { resolvePluginEnabled: (): ReadonlySet<string> => harnessPluginStatus.get() }
+					: {}),
 			});
 		} catch (err: unknown) {
 			const reason = err instanceof Error ? err.message : String(err);
 			process.stderr.write(`honeycomb: harness API mount failed (non-fatal): ${reason}\n`);
+		}
+	}
+
+	// 14b. PRD-006d F-2: the plugin-enabled INGEST route — `POST /api/diagnostics/harness-status`.
+	//     Attaches onto the same already-mounted, protected `/api/diagnostics` group (NO `server.ts`
+	//     edit) and self-gates to LOCAL mode. It is the daemon (Tier 2) side of the tier-legal
+	//     cross-process handoff: the Tier-4 harness reconcile POSTs the computed per-harness
+	//     plugin-enabled set here after each cycle, and this writes the SAME in-memory holder step 14
+	//     reads back — so `GET /api/diagnostics/harnesses` reflects REAL plugin-enabled state (F-2)
+	//     WITHOUT the daemon importing Tier 4 or spawning `claude`. Fired only when both the seam and
+	//     the holder are present (the production path). FAIL-SOFT: a mount error never crashes the daemon.
+	if (seams.mountHarnessStatusIngest !== undefined && harnessPluginStatus !== undefined) {
+		try {
+			seams.mountHarnessStatusIngest(daemon, { holder: harnessPluginStatus });
+		} catch (err: unknown) {
+			const reason = err instanceof Error ? err.message : String(err);
+			process.stderr.write(`honeycomb: harness status ingest API mount failed (non-fatal): ${reason}\n`);
 		}
 	}
 
@@ -3089,6 +3142,14 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 					? (): ReadonlySet<string> => detectInstalledHarnesses()
 					: (): ReadonlySet<string> => new Set<string>();
 
+	// ── PRD-006d F-2: the daemon's in-memory plugin-enabled holder — the tier-legal handoff target.
+	// The Tier-4 harness reconcile pushes the computed per-harness plugin-enabled set into it (via the
+	// step-14b `/api/diagnostics/harness-status` ingest); the step-14 harness telemetry mount reads it
+	// back through `resolvePluginEnabled`. In-memory ONLY (FR-8) — empty until the first push, so the
+	// endpoint honestly reads `pluginEnabled: false` before the reconcile fires. Constructed ONCE here
+	// so the ingest (writer) and the telemetry mount (reader) share the SAME instance.
+	const harnessPluginStatus: HarnessPluginStatusHolder = createHarnessPluginStatusHolder();
+
 	// (The vault `setting`-class READER is constructed earlier, before the services block, so it can
 	// also seed the embed supervisor's boot enabled state. It threads into `assembleSeams` below — the
 	// SAME reader the `/api/memories/recall` mount reads `recallMode` from, PRD-044c.)
@@ -3154,6 +3215,9 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		pendingLinkStore,
 		keepBothMemo,
 		calibrationModelProvider,
+		// PRD-006d F-2: the shared plugin-enabled holder — step 14 reads it (resolvePluginEnabled),
+		// step 14b's ingest writes it (the Tier-4 reconcile push target).
+		harnessPluginStatus,
 	);
 
 	// ── PRD-032d / AC-6: FIRE the Wave-1 `/api/settings` mount ONCE so the CLI/dashboard
@@ -3395,7 +3459,11 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		reverifyTick = startLifecycleTick(
 			"lifecycle_reverify",
 			async () => {
-				await runReverifyPass(scope, { storage, defaultScope: scope, workspaceDir: options.workspaceDir ?? process.cwd() });
+				await runReverifyPass(scope, {
+					storage,
+					defaultScope: scope,
+					workspaceDir: options.workspaceDir ?? process.cwd(),
+				});
 			},
 			{ intervalMs: DEFAULT_REVERIFY_TICK_INTERVAL_MS },
 		);
@@ -4053,8 +4121,9 @@ function asNonEmptyString(value: unknown): string | undefined {
  * assembly; the deterministic unit suite gets the frozen snapshot (see the call site).
  */
 function createLiveDaemonScope(provider: CredentialProvider): QueryScope {
-	const resolveScope = createMtimeGatedResolver<QueryScope>(fileMtimeReader(credentialsPath()), () =>
-		resolveDaemonTenancy(provider).scope,
+	const resolveScope = createMtimeGatedResolver<QueryScope>(
+		fileMtimeReader(credentialsPath()),
+		() => resolveDaemonTenancy(provider).scope,
 	);
 	// A getter-backed QueryScope: `org` is always present; `workspace` is present when the resolved
 	// scope carries one (the client defaults a missing workspace to its config workspace). Getters
