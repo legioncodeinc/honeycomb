@@ -10,13 +10,21 @@
  * Write/Edit on a memory path is DENIED with guidance; an unmodelable command is
  * rewritten to a harmless `echo`. NOTHING reaches the real filesystem (b-AC-4).
  *
- * THIN CLIENT: the VFS resolution lives in `src/daemon-client/vfs/` (PRD-015, the
- * `DeepLakeFs` intercept that dispatches SQL THROUGH the daemon). This core lowers
- * the harness's pre-tool payload into a {@link VfsToolOp} and routes it through the
- * injected {@link VfsIntercept} seam (whose real impl wraps `DeepLakeFs`); it opens
- * NO DeepLake and builds NO SQL directly here (D-2). The ONLY path memory content
- * can come from is the seam — there is no `node:fs` import in this module, so a
- * pre-tool op against the mount can never touch the real filesystem.
+ * THIN CLIENT: this core lowers the harness's pre-tool payload into a
+ * {@link VfsToolOp} and routes it through the injected {@link VfsIntercept} seam
+ * (`deps.vfs`, PRD-075a a-AC-1 / a-AC-2) — it opens NO DeepLake and builds NO SQL
+ * directly here (D-2). The ONLY path memory content can come from is the seam —
+ * there is no `node:fs` import in this module, so a pre-tool op against the mount
+ * can never touch the real filesystem. The REAL seam (constructed at `runtime.ts`'s
+ * dependency-construction site) resolves against the daemon's already-mounted
+ * `/memory/{cat,grep,ls,find}` browse routes (`src/daemon/runtime/vfs/api.ts`,
+ * PRD-022b) over loopback — the SAME `memory`-table content the PRD-015
+ * `DeepLakeFs` client's read tiers and the MCP browse trio resolve too (see
+ * `runtime.ts`'s `createDaemonVfsIntercept` for the routing + the cross-boundary
+ * note on why this core does not reconstruct `DeepLakeFs` + a raw-SQL
+ * `DaemonDispatch` directly). `runPreToolUse`'s OWN `vfs` parameter default
+ * (`createFakeVfsIntercept()`) backs ONLY an isolated unit test that supplies no
+ * `deps.vfs` at all — `deps.vfs`, when present, always wins.
  *
  * The pure path classifier (`classifyPath` / `toMountRelative`) is imported from
  * `daemon-client/vfs` — it is dependency-free routing logic, NOT a storage handle.
@@ -84,16 +92,23 @@ export const WRITE_DENY_GUIDANCE =
  *   - Bash `find` on the mount                   → `replace` with the pattern query.
  *   - an unmodelable Bash command on the mount   → `rewrite` to a harmless `echo`.
  *
- * `vfs` is injected (defaults to a recording fake so an unwired call is inert, not a
- * real FS touch). The result's `additionalContext`/`ok` mirror the decision so a
- * shim that only reads `HookResult` still gets the outcome.
+ * The daemon-backed VFS is read through `deps.vfs` (PRD-075a a-AC-1 / a-AC-2) — the
+ * REAL runtime construction (`runtime.ts`'s `createHookRuntime`) always populates it.
+ * The `vfs` PARAMETER is the fallback for an isolated unit test that constructs no
+ * `deps` at all (defaults to a recording fake so such a call is inert, not a real FS
+ * touch); a `deps.vfs` supplied by the caller ALWAYS wins over that fallback. The
+ * result's `additionalContext`/`ok` mirror the decision so a shim that only reads
+ * `HookResult` still gets the outcome.
  */
 export async function runPreToolUse(
 	input: HookInput,
-	_deps: HookCoreDeps,
+	deps: HookCoreDeps,
 	vfs: VfsIntercept = createFakeVfsIntercept(),
 ): Promise<{ result: HookResult; decision: PreToolDecision }> {
-	void _deps;
+	// a-AC-2: resolve through the deps-carried seam (the real runtime's daemon-backed
+	// intercept); the parameter default backs ONLY an isolated test that supplies no
+	// `deps.vfs` at all.
+	const resolvedVfs = deps.vfs ?? vfs;
 	const payload = asPayload(input.data);
 
 	// A non-memory tool (or an unparseable payload) passes through untouched.
@@ -124,7 +139,7 @@ export async function runPreToolUse(
 	// read / search / list / find → resolve through the daemon VFS seam (the ONLY
 	// route to memory content; nothing hits the real filesystem, b-AC-4).
 	const op: VfsToolOp = { verb, path: targetPath, ...(payload.query !== undefined ? { query: payload.query } : {}) };
-	const output = await vfs.resolve(op);
+	const output = await resolvedVfs.resolve(op);
 	return { result: { ok: true, additionalContext: output }, decision: { kind: "replace", output } };
 }
 
