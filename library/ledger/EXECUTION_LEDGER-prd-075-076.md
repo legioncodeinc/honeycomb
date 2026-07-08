@@ -97,20 +97,20 @@ Gate for every implementation item: `npm run ci` (typecheck + jscpd dup + vitest
 | 075/m-AC-6 | `SessionStart` appends the awareness notice; prime content otherwise unchanged; render never throws | DONE | W3 | 075c (fba71b8); see R-1 test reconciliation at merge |
 | 075/m-AC-7 | `honeycomb recall "<query>"` Bash form → `search` verb, arg → query | DONE | W3 | 075c sentinel |
 | 075/m-AC-8 | Every recall path fail-soft: unreachable/timeout/error daemon → bounded "no memory available", never a thrown/blocked turn | DONE | W2/W3 | 075a ~2s abort + absorbed throw; 075b absent-decision → benign ack |
-| 075/m-AC-9 | `UserPromptSubmit` stays async capture-only; `PostToolUse`/`Stop`/`SubagentStop` capture unchanged; conformance suite green | OPEN | W2/W3 | |
+| 075/m-AC-9 | `UserPromptSubmit` capture stays async; `PostToolUse`/`Stop`/`SubagentStop` capture unchanged; conformance suite green | DONE | W2/W3 | async capture entry preserved; 076a ADDS a complementary sync injector entry (Option A) beside it (intended cross-PRD interaction); conformance green |
 
 ### PRD-076a — Always-On Query-Aware Recall on `UserPromptSubmit`
 
 | ID | Criterion (abridged) | Status | Owner | Evidence |
 |---|---|---|---|---|
-| 076a/a-AC-1 | `createRecallRenderer` POSTs `{ query, limit, tokenBudget, cwd }` to `/api/memories/recall`; recording fetch asserts query=prompt, cwd forwarded, bounded budget | OPEN | W3 ts-node | |
-| 076a/a-AC-2 | Recall stamps runtime-path + session + tenancy headers (mirror `prime-renderer.ts`); signed-out degrades to `""` | OPEN | W3 ts-node | |
-| 076a/a-AC-3 | Tight `AbortController` timeout; `""` on timeout/non-200/malformed, never a throw | OPEN | W3 ts-node | |
-| 076a/a-AC-4 | On `UserPromptSubmit`, injector returns `{ ok, additionalContext }` + `emitResponse` renders it; capture still stores the turn | OPEN | W3 ts-node | |
-| 076a/a-AC-5 | `renderContext` emits `additionalContext` under `hookSpecificOutput` with `hookEventName: "UserPromptSubmit"`; session-start envelope unchanged | OPEN | W3 ts-node | |
-| 076a/a-AC-6 | Throttled + deduped: repeated prompt does not re-inject the same hit; nudge not every turn | OPEN | W3 ts-node | |
-| 076a/a-AC-7 | Empty recall → at most the throttled nudge (or nothing), never an empty/malformed block | OPEN | W3 ts-node | |
-| 076a/a-AC-8 | No session-start regression; per-turn arm never runs on `session-start`; existing session-start tests green | OPEN | W3 ts-node | |
+| 076a/a-AC-1 | `createRecallRenderer` POSTs `{ query, limit, tokenBudget, cwd }` to `/api/memories/recall`; recording fetch asserts query=prompt, cwd forwarded, bounded budget | DONE | W3 ts-node | `recall-renderer.ts`; commit 8f2388a |
+| 076a/a-AC-2 | Recall stamps runtime-path + session + tenancy headers (mirror `prime-renderer.ts`); signed-out degrades to `""` | DONE | W3 ts-node | header stamp + token-redaction test; signed-out → daemon 400 → `[]` |
+| 076a/a-AC-3 | Tight `AbortController` timeout; `""` on timeout/non-200/malformed, never a throw | DONE | W3 ts-node | ~2.5s abort; timeout/500/malformed/no-hits/unreachable all → `[]` |
+| 076a/a-AC-4 | On `UserPromptSubmit`, injector returns `{ ok, additionalContext }` + `emitResponse` renders it; capture still stores the turn | DONE | W3 ts-node | new `user_prompt_recall` event → `runUserPromptRecall`; injector makes no capture call; async capture entry still POSTs |
+| 076a/a-AC-5 | `renderContext` emits `additionalContext` under `hookSpecificOutput` with `hookEventName: "UserPromptSubmit"`; session-start envelope unchanged | DONE | W3 ts-node | event-aware renderContext; session-start stays flat/byte-identical; oracle `userprompt-response-schema.ts` |
+| 076a/a-AC-6 | Throttled + deduped: repeated prompt does not re-inject the same hit; nudge not every turn | DONE | W3 ts-node | dedupe by hit `ref` via cross-process file store; overlapping turn injects nothing |
+| 076a/a-AC-7 | Empty recall → at most the throttled nudge (or nothing), never an empty/malformed block | DONE | W3 ts-node | nudge fires turn 1 then 1/5 turns; throttled-off → benign `{}` |
+| 076a/a-AC-8 | No session-start regression; per-turn arm never runs on `session-start`; existing session-start tests green | DONE | W3 ts-node | session-start renderer never invokes recall (counter 0); full suite green |
 
 ### PRD-076b — Register the Honeycomb MCP Server in the Plugin
 
@@ -138,16 +138,16 @@ Gate for every implementation item: `npm run ci` (typecheck + jscpd dup + vitest
 
 | ID | Criterion (abridged) | Status | Owner | Evidence |
 |---|---|---|---|---|
-| 076/m-AC-1 | First `UserPromptSubmit` POSTs prompt to `/api/memories/recall` (bounded budget + cwd); top hits injected synchronously | OPEN | W3 | |
-| 076/m-AC-2 | Sync recall stamps runtime-path + session + tenancy; missing-session not sent bare | OPEN | W3 | |
-| 076/m-AC-3 | Tight timeout + fail-soft `""` on timeout/non-200/malformed; never a thrown/blocked turn | OPEN | W3 | |
-| 076/m-AC-4 | Existing `UserPromptSubmit` capture still happens (turn stored) | OPEN | W3 | |
-| 076/m-AC-5 | `renderContext` per-event envelope (`hookSpecificOutput.hookEventName`) for both `SessionStart` + `UserPromptSubmit` | OPEN | W3 | |
-| 076/m-AC-6 | Per-turn injection throttled + deduped (no double-inject; per-turn budget) | OPEN | W3 | |
+| 076/m-AC-1 | First `UserPromptSubmit` POSTs prompt to `/api/memories/recall` (bounded budget + cwd); top hits injected synchronously | DONE | W3 | 076a (8f2388a) |
+| 076/m-AC-2 | Sync recall stamps runtime-path + session + tenancy; missing-session not sent bare | DONE | W3 | 076a header stamp |
+| 076/m-AC-3 | Tight timeout + fail-soft `""` on timeout/non-200/malformed; never a thrown/blocked turn | DONE | W3 | 076a ~2.5s abort + fail-soft |
+| 076/m-AC-4 | Existing `UserPromptSubmit` capture still happens (turn stored) | DONE | W3 | 076a Option A: 2nd sync injector entry, async capture entry unchanged |
+| 076/m-AC-5 | `renderContext` per-event envelope (`hookSpecificOutput.hookEventName`) for both `SessionStart` + `UserPromptSubmit` | DONE | W3 | 076a event-aware renderContext; session-start unchanged |
+| 076/m-AC-6 | Per-turn injection throttled + deduped (no double-inject; per-turn budget) | DONE | W3 | 076a ref-dedupe + throttle |
 | 076/m-AC-7 | Plugin registers the MCP server so `memory_search`/`hivemind_search`/`hivemind_read`/`memory_store` appear in the tool list | DONE | W1 | via 076b (`.mcp.json` merged f216748); see packaging follow-up F-1 |
 | 076/m-AC-8 | `honeycomb-memory` skill bundled, valid frontmatter, discoverable | DONE | W2 | via 076c (merged); auto-discovery confirmed |
 | 076/m-AC-9 | `/recall`/`/remember`/`/forget` commands bundled with valid frontmatter | DONE | W2 | via 076c (merged) |
-| 076/m-AC-10 | No PRD-075 surface touched by 076 (pre-tool path default-fake, no decision, no pre-tool renderer, session-start unchanged) | OPEN | W3 | |
+| 076/m-AC-10 | No PRD-075 surface touched by 076 (pre-tool path, session-start unchanged by 076a) | DONE | W3 | 076a did not touch `session-start.ts`/`pre-tool-use.ts`; see F-3 (additive `ContextEnvelope.hookSpecificOutput` field) |
 
 ---
 
@@ -157,12 +157,14 @@ Gate for every implementation item: `npm run ci` (typecheck + jscpd dup + vitest
 - **Wave 1:** COMPLETE. 076b DONE + merged (f216748). 075a DONE + merged (d8628c4). Combined `npm run ci` on feature branch: 427 files, 4553 passed, 12 skipped, SQL-safety OK. Wave-1 worktrees removed.
 - **Wave 2:** 076c DONE + merged (`npm run ci` 4584 passed; all-new files; `plugin.json` untouched via auto-discovery). 075b in progress. Note: 076c flagged two PRE-EXISTING flaky tests (`assemble.test.ts` timeout, `secrets/exec.test.ts` timing) that flake under full-suite CPU contention but pass in isolation, not caused by this work; give combined CI one retry on those per the-smoker flake rule.
 - **Wave 2:** COMPLETE. 075b DONE + merged (cd72728); 076c DONE + merged. Combined `npm run ci` (075a+076b+076c+075b): 429 files, 4599 passed, 12 skipped, SQL-safety OK, no flakes. Aikido scan on 075b: 0 findings. Wave-2 worktrees removed.
-- **Wave 3:** in progress — 076a (ts-node/opus, the big always-on integration), 075c (ts-node/sonnet, notice+sentinel), off feature tip cd72728. Format-only-owned-files brief applied.
-- **Close-out:** pending — security then quality.
+- **Wave 3:** COMPLETE. 076a DONE + merged (6c7054c); 075c DONE + merged (d9308de). R-1 reconciled (fd6e1d6): 13 session-start assertions in `hook-runtime.test.ts` (12) + `user-prompt-recall.test.ts` (1) now reference the imported `RECALL_AWARENESS_NOTICE`. Final combined `npm run ci`: 432 files, 4645 passed, 12 skipped, SQL-safety OK. Wave-3 worktrees removed.
+- **ALL IMPLEMENTATION ACs DONE** (075: 6 module + a/b/c; 076: 10 module + a/b/c). Pending: separate-pass VERIFICATION via close-out.
+- **Close-out:** next — security-worker-bee, then quality-worker-bee (must reconcile F-2 + review F-3).
 
 ## Follow-ups / handoffs
 
 - **F-2 (architecture, from 075a — quality review must reconcile):** the PRD names `DeepLakeFs` (`src/daemon-client/vfs/fs.ts`) as the real VFS seam, but wiring it needs a raw-SQL `DaemonDispatch` daemon endpoint that does not exist (its CONVENTIONS.md lists it deferred). 075a instead wired the real seam to the already-mounted `/memory/{cat,grep,ls,find}` browse routes (`src/daemon/runtime/vfs/api.ts`, PRD-022b) over loopback, same `memory`-table content, no new daemon endpoint, no cross-boundary edit. Documented, tested, `ci` green. Quality-worker-bee must confirm this satisfies 075/m-AC-1 + 075/m-AC-4 intent (real daemon-backed recall) despite deviating from the literal `DeepLakeFs` naming.
+- **F-3 (quality review, from 076a):** 076a made one additive change beyond its explicit MODIFY list, an optional `hookSpecificOutput?` field on the model-only `ContextEnvelope` in `src/hooks/contracts.ts` (the harness contracts, distinct from `src/hooks/shared/contracts.ts`), required to emit the per-event envelope type-safely. Additive + back-compat (session-start omits it, stays byte-identical). Flag for quality-worker-bee awareness; not a boundary violation of concern.
 - **F-1 (ci-release, from 076b):** the install-safe registration path `${CLAUDE_PLUGIN_ROOT}/mcp/bundle/server.js` requires the MCP bundle to physically ship INSIDE the plugin tree (`harnesses/claude-code/mcp/bundle/`). Today `mcp/bundle/server.js` builds to the repo root (gitignored, reaches the tarball via the `files` allowlist). The registration artifact + contract are correct as authored; the build-time bundle placement (esbuild output location + packaging) is a `ci-release` task, out of 076b's file ownership. Dispatch a `ci-release-worker-bee` before ship, or fold into close-out. Does not fail any 076b AC as written.
 
 ## Merge-time reconciliations
