@@ -1,0 +1,10 @@
+{
+	"$schema": "https://modelcontextprotocol.io/schema/mcp.json",
+	"mcpServers": {
+		"honeycomb": {
+			"command": "node",
+			"args": ["${CLAUDE_PLUGIN_ROOT}/mcp/bundle/server.js"],
+			"env": {}
+		}
+	}
+}
