@@ -38,7 +38,26 @@ import {
 	type HookRuntimeOptions,
 	type NativeHookEvent,
 } from "./runtime.js";
-import type { HookSessionMeta } from "./shared/index.js";
+import type { HookSessionMeta, PreToolDecision } from "./shared/index.js";
+
+/**
+ * PRD-075b: a shim that can render a pre-tool-use {@link PreToolDecision} into its
+ * harness-native `PreToolUse` response. The reference (claude-code) shim carries this;
+ * a harness that does NOT is unaffected — its pre-tool behavior is whatever it was
+ * (b-AC-5). Kept off the shared `HarnessShim` contract so a harness opts in by carrying
+ * the method; the driver feature-detects it via {@link hasPreToolRenderer}.
+ *
+ * The renderer returns the harness-native response object, or `undefined` for a pure
+ * pass-through (an `allow` decision) — the driver then emits the benign `{}` ack.
+ */
+export interface PreToolRenderingShim {
+	renderPreTool(decision: PreToolDecision): unknown | undefined;
+}
+
+/** True when `shim` carries a pre-tool decision renderer (PRD-075b). */
+function hasPreToolRenderer(shim: HarnessShim): shim is HarnessShim & PreToolRenderingShim {
+	return typeof (shim as Partial<PreToolRenderingShim>).renderPreTool === "function";
+}
 
 /** A minimal stdio surface so a test drives the driver without a real process. */
 export interface BinaryIo {
@@ -157,12 +176,32 @@ function str(raw: Record<string, unknown>, ...keys: readonly string[]): string |
 }
 
 /**
- * Emit the harness response envelope on stdout. On session-start with a rendered
- * context block, the shim wraps it for its channel (model-only `additionalContext`
- * vs user-visible text); otherwise an empty `{}` acknowledgement. Never throws.
+ * Emit the harness response envelope on stdout. Three cases, in precedence order:
+ *   1. PRD-075b — a pre-tool-use {@link HookEventOutcome.decision} on a shim that carries
+ *      the renderer OWNS the whole response: it can BLOCK the real tool and INJECT the
+ *      daemon output (the claude-code reference). This is checked FIRST because a `replace`
+ *      decision also sets `result.additionalContext`, and the block-and-inject response —
+ *      not the session-start context envelope — is the correct rendering for a pre-tool op.
+ *      An `allow` / pass-through render returns `undefined` → the benign `{}` ack (never a
+ *      malformed block that could strand a turn, b-AC-6).
+ *   2. session-start with a rendered context block → the shim wraps it for its channel
+ *      (model-only `additionalContext` vs user-visible text). A non-claude-code harness's
+ *      pre-tool `replace` (no renderer) also lands here — its prior behavior, unchanged (b-AC-5).
+ *   3. otherwise → an empty `{}` acknowledgement.
+ * Never throws.
  */
 function emitResponse(io: BinaryIo, shim: HarnessShim, outcome: HookEventOutcome): void {
 	try {
+		if (outcome.decision !== undefined && hasPreToolRenderer(shim)) {
+			const rendered = shim.renderPreTool(outcome.decision);
+			if (rendered !== undefined) {
+				io.writeStdout(JSON.stringify(rendered));
+				return;
+			}
+			// `allow` / pass-through: the real tool runs untouched (b-AC-6).
+			io.writeStdout("{}");
+			return;
+		}
 		const block = outcome.result.additionalContext;
 		if (block !== undefined && block.length > 0) {
 			const envelope = shim.renderContext(block);
