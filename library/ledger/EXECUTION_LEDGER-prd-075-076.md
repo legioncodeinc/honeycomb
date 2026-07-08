@@ -78,12 +78,12 @@ Gate for every implementation item: `npm run ci` (typecheck + jscpd dup + vitest
 
 | ID | Criterion (abridged) | Status | Owner | Evidence |
 |---|---|---|---|---|
-| 075c/c-AC-1 | `SessionStart` `additionalContext` includes the recall-awareness notice (test asserts presence) | OPEN | W3 ts-node | |
-| 075c/c-AC-2 | Existing digest/prime/first-run-notice content unchanged; notice composes via `joinBlocks` as an added block | OPEN | W3 ts-node | |
-| 075c/c-AC-3 | Notice-only → carries just the notice; all-empty + notice absent → `additionalContext` omitted; never throws | OPEN | W3 ts-node | |
-| 075c/c-AC-4 | `honeycomb recall "<query>"` Bash op → `search` verb, query extracted, mount root as path so `onMemoryMount` passes | OPEN | W3 ts-node | |
-| 075c/c-AC-5 | `honeycomb recall` resolves through the same VFS intercept + blocks the real command (faked vfs → replace, no exec) | OPEN | W3 ts-node | |
-| 075c/c-AC-6 | Raw mount `Grep`/`cat` fallback still works (regression) | OPEN | W3 ts-node | |
+| 075c/c-AC-1 | `SessionStart` `additionalContext` includes the recall-awareness notice (test asserts presence) | DONE | W3 ts-node | `RECALL_AWARENESS_NOTICE` appended unconditionally; commit fba71b8 |
+| 075c/c-AC-2 | Existing digest/prime/first-run-notice content unchanged; notice composes via `joinBlocks` as an added block | DONE | W3 ts-node | `joinBlocks` variadic; exact composed order asserted |
+| 075c/c-AC-3 | Notice-only → carries just the notice; all-empty + notice absent → `additionalContext` omitted; never throws | DONE | W3 ts-node | verified vs real `runSessionStart` + `joinBlocks`; FR-10 throw-absorption green |
+| 075c/c-AC-4 | `honeycomb recall "<query>"` Bash op → `search` verb, query extracted, mount root as path so `onMemoryMount` passes | DONE | W3 ts-node | `HONEYCOMB_RECALL_SENTINEL` + `sniffHoneycombRecallSentinel`; path = `MEMORY_MOUNT_DISPLAY_PATH` |
+| 075c/c-AC-5 | `honeycomb recall` resolves through the same VFS intercept + blocks the real command (faked vfs → replace, no exec) | DONE | W3 ts-node | faked vfs: replace + exactly one op; no `node:fs`/`child_process` import |
+| 075c/c-AC-6 | Raw mount `Grep`/`cat` fallback still works (regression) | DONE | W3 ts-node | fallbacks re-verified; `honeycomb project bind` not mis-captured (no CLI collision) |
 
 ### PRD-075 — Module-level (index)
 
@@ -94,8 +94,8 @@ Gate for every implementation item: `npm run ci` (typecheck + jscpd dup + vitest
 | 075/m-AC-3 | shim renders `replace` (block + deliver), `deny` (block + guidance), `rewrite` (harmless cmd), `allow` (pass-through) | DONE | W2 | 075b renderer + render-matrix tests |
 | 075/m-AC-4 | Agent recall command returns daemon hybrid hits as the tool result; real FS never touched | DONE | W2 | mount `Grep` E2E (075a+075b) blocks + carries hits; sentinel variant is m-AC-7 (075c) |
 | 075/m-AC-5 | Off-mount `PreToolUse` byte-for-byte unchanged (allow, no daemon call, zero recall latency) | DONE | W1 | 075a throwing-double off-mount test |
-| 075/m-AC-6 | `SessionStart` appends the awareness notice; prime content otherwise unchanged; render never throws | OPEN | W3 | |
-| 075/m-AC-7 | `honeycomb recall "<query>"` Bash form → `search` verb, arg → query | OPEN | W3 | |
+| 075/m-AC-6 | `SessionStart` appends the awareness notice; prime content otherwise unchanged; render never throws | DONE | W3 | 075c (fba71b8); see R-1 test reconciliation at merge |
+| 075/m-AC-7 | `honeycomb recall "<query>"` Bash form → `search` verb, arg → query | DONE | W3 | 075c sentinel |
 | 075/m-AC-8 | Every recall path fail-soft: unreachable/timeout/error daemon → bounded "no memory available", never a thrown/blocked turn | DONE | W2/W3 | 075a ~2s abort + absorbed throw; 075b absent-decision → benign ack |
 | 075/m-AC-9 | `UserPromptSubmit` stays async capture-only; `PostToolUse`/`Stop`/`SubagentStop` capture unchanged; conformance suite green | OPEN | W2/W3 | |
 
@@ -164,6 +164,10 @@ Gate for every implementation item: `npm run ci` (typecheck + jscpd dup + vitest
 
 - **F-2 (architecture, from 075a — quality review must reconcile):** the PRD names `DeepLakeFs` (`src/daemon-client/vfs/fs.ts`) as the real VFS seam, but wiring it needs a raw-SQL `DaemonDispatch` daemon endpoint that does not exist (its CONVENTIONS.md lists it deferred). 075a instead wired the real seam to the already-mounted `/memory/{cat,grep,ls,find}` browse routes (`src/daemon/runtime/vfs/api.ts`, PRD-022b) over loopback, same `memory`-table content, no new daemon endpoint, no cross-boundary edit. Documented, tested, `ci` green. Quality-worker-bee must confirm this satisfies 075/m-AC-1 + 075/m-AC-4 intent (real daemon-backed recall) despite deviating from the literal `DeepLakeFs` naming.
 - **F-1 (ci-release, from 076b):** the install-safe registration path `${CLAUDE_PLUGIN_ROOT}/mcp/bundle/server.js` requires the MCP bundle to physically ship INSIDE the plugin tree (`harnesses/claude-code/mcp/bundle/`). Today `mcp/bundle/server.js` builds to the repo root (gitignored, reaches the tarball via the `files` allowlist). The registration artifact + contract are correct as authored; the build-time bundle placement (esbuild output location + packaging) is a `ci-release` task, out of 076b's file ownership. Dispatch a `ci-release-worker-bee` before ship, or fold into close-out. Does not fail any 076b AC as written.
+
+## Merge-time reconciliations
+
+- **R-1 (075c x 076a, MERGE-TIME):** 075c makes `RECALL_AWARENESS_NOTICE` an unconditional part of session-start `additionalContext`. This breaks 12 exact-string assertions in `tests/hooks/runtime/hook-runtime.test.ts` (owned by 076a's runtime scope, not touched by 075c). Neither isolated worktree shows the failure (075c's ci fails there but it correctly deferred; 076a's tree has no notice). AFTER merging BOTH 075c and 076a, append `\n\n${RECALL_AWARENESS_NOTICE}` to the expected session-start strings (075c cited lines 104,162,195,212,228,269,291,314,341,391,532,578 in the pre-076a tree; fix by CONTENT since 076a shifts line numbers). Mechanical, no logic change. Then run combined `npm run ci` to confirm green.
 
 ## Watchdog / termination log
 
