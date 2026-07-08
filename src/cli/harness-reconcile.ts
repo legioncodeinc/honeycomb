@@ -143,6 +143,15 @@ export interface HarnessReconcileDeps {
 	readonly now?: () => Date;
 	/** A fail-soft log sink for absorbed errors (never throws). Defaults to a no-op (the daemon must stay silent). */
 	readonly onError?: (line: string) => void;
+	/**
+	 * PRD-006d F-2: a fire-and-forget hook invoked with EACH pass's per-harness results the moment a
+	 * `reconcileOnce` cycle completes. {@link buildRuntimeDeps} binds it to the loopback push that POSTs
+	 * the computed plugin-enabled set to the daemon's `/api/diagnostics/harness-status` ingest, so the
+	 * daemon endpoint reflects REAL plugin-enabled state shortly after daemon-up. FAIL-SOFT: any throw is
+	 * absorbed here so a broken push never affects the reconcile or the cadence. Left UNSET by default (a
+	 * bare reconciler pushes nothing). Runs synchronously; the callback itself should be fire-and-forget.
+	 */
+	readonly onCycleComplete?: (results: readonly HarnessReconcileResult[]) => void;
 }
 
 /**
@@ -191,6 +200,7 @@ export function createHarnessReconciler(deps: HarnessReconcileDeps = {}): Harnes
 	const wireTimeoutMs = deps.wireTimeoutMs ?? DEFAULT_RECONCILE_WIRE_TIMEOUT_MS;
 	const now = deps.now ?? ((): Date => new Date());
 	const onError = deps.onError ?? ((): void => {});
+	const onCycleComplete = deps.onCycleComplete;
 
 	// The gate + wiring seams default to ONE shared claude plugin runner (so `available()` and
 	// `isPluginEnabled()` agree) and the real connector composition for `wire()`.
@@ -248,6 +258,17 @@ export function createHarnessReconciler(deps: HarnessReconcileDeps = {}): Harnes
 		const results: HarnessReconcileResult[] = [];
 		for (const harness of harnesses) {
 			results.push(await reconcileHarness(harness, agents));
+		}
+		// PRD-006d F-2: hand the pass results to the (fire-and-forget) push hook so the daemon endpoint
+		// reflects real plugin-enabled state. FAIL-SOFT: a throwing hook is absorbed here — a broken push
+		// must never affect the reconcile or the cadence.
+		if (onCycleComplete !== undefined) {
+			try {
+				onCycleComplete(results);
+			} catch (err) {
+				const reason = err instanceof Error ? err.message : "cycle-complete hook failed";
+				onError(`harness-reconcile: cycle-complete hook error: ${reason}`);
+			}
 		}
 		return results;
 	}

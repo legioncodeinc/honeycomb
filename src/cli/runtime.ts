@@ -60,7 +60,7 @@ import { DAEMON_HOST, DAEMON_PORT } from "../shared/constants.js";
 import { honeycombStateDir, legacyHoneycombDir, preferExistingPath, resolveFleetRoot } from "../shared/fleet-root.js";
 import { authMain } from "./auth.js";
 import { buildConnectorRunner } from "./connector-runner.js";
-import { createHarnessReconciler, type HarnessReconciler } from "./harness-reconcile.js";
+import { createHarnessReconciler, type HarnessReconcileResult, type HarnessReconciler } from "./harness-reconcile.js";
 import { buildHarnessStatusRunner } from "./harness-status.js";
 import {
 	createDaemonServiceController,
@@ -674,8 +674,52 @@ export function buildUninstallLifecycleSteps(lifecycle: DaemonLifecycle): Uninst
  * OUT of the daemon's loopback request path. Exposed so 006c (onboarding) and 006d (dashboard card)
  * read its last-outcome status.
  */
-export function buildHarnessReconciler(): HarnessReconciler {
-	return createHarnessReconciler();
+export function buildHarnessReconciler(daemon: DaemonClient): HarnessReconciler {
+	// PRD-006d F-2: wire the fail-soft reconcile → daemon plugin-enabled push. After each cycle the
+	// reconciler POSTs the computed per-harness set to the daemon's loopback ingest so the endpoint
+	// serves REAL plugin-enabled state shortly after daemon-up.
+	return createHarnessReconciler({ onCycleComplete: buildReconcilePluginStatusPush(daemon) });
+}
+
+/** The daemon loopback route the reconcile pushes computed plugin-enabled state to (PRD-006d F-2). */
+const HARNESS_STATUS_INGEST_PATH = "/api/diagnostics/harness-status";
+
+/**
+ * Build the fail-soft reconcile → daemon plugin-enabled push (PRD-006d F-2). After each reconcile
+ * cycle it POSTs the computed per-harness plugin-enabled set to the daemon's loopback ingest
+ * (`POST /api/diagnostics/harness-status`) so `GET /api/diagnostics/harnesses` serves REAL
+ * plugin-enabled state instead of a constant `false`. A harness whose outcome is `already-enabled`
+ * or `wired` is plugin-enabled; every other outcome (`agent-absent`/`cli-absent`/`error`) is not.
+ *
+ * ── Tier-legal + fail-soft (D-2) ─────────────────────────────────────────────
+ * This is a Tier-4 → daemon call over the same loopback {@link DaemonClient} + credential-stamped
+ * header discipline every other CLI → daemon call uses — the legal direction (the daemon never
+ * imports Tier 4). Fire-and-forget + fail-soft: a failed push (daemon down, non-local mode 404,
+ * bad body) is swallowed and NEVER affects the reconcile or the daemon; the endpoint simply stays
+ * at its honest last-known set until the next successful push.
+ */
+export function buildReconcilePluginStatusPush(
+	daemon: DaemonClient,
+): (results: readonly HarnessReconcileResult[]) => void {
+	return (results: readonly HarnessReconcileResult[]): void => {
+		void pushReconciledPluginStatus(daemon, results);
+	};
+}
+
+/** POST the per-harness plugin-enabled set derived from a reconcile pass; swallow any failure. */
+async function pushReconciledPluginStatus(
+	daemon: DaemonClient,
+	results: readonly HarnessReconcileResult[],
+): Promise<void> {
+	try {
+		const harnesses = results.map((r) => ({
+			harness: r.harness,
+			pluginEnabled: r.outcome === "already-enabled" || r.outcome === "wired",
+		}));
+		await daemon.send({ method: "POST", path: HARNESS_STATUS_INGEST_PATH, body: { harnesses } });
+	} catch {
+		// Fail-soft: a failed push never affects the reconcile or the daemon.
+	}
 }
 
 /** The dashboard launcher seam (FR-4) — binds 020b's {@link launchDashboard} over the loopback daemon. */
@@ -709,7 +753,7 @@ export function buildRuntimeDeps(): RuntimeDeps {
 	// PRD-006b: one reconciler instance, triggered on daemon-start via the lifecycle's `onDaemonUp`
 	// seam and exposed on the deps so 006c/006d read its last-outcome status. Constructing it is cheap
 	// (no `claude` shell until a reconcile pass actually runs on start).
-	const reconcile = buildHarnessReconciler();
+	const reconcile = buildHarnessReconciler(daemon);
 	const lifecycle = buildDaemonLifecycle(daemon, { onDaemonUp: () => reconcile.start() });
 	// PRD-006c/006d: the connect/status/repair surface Hive shells, built over the SAME 006b reconcile
 	// (no forked wiring path). Constructing it is cheap (no `claude` shell until a verb runs a pass).
