@@ -26,3 +26,5 @@ captured once so it doesn't have to be re-litigated from memory.
 | [0007](0007-daemon-readiness-over-boot-time-deeplake-and-graph-work.md) | Daemon readiness over boot-time DeepLake and graph work | Accepted | 2026-06-30 |
 | [0008](0008-fleet-directory-ownership-and-neutral-state-root.md) | Fleet directory ownership and neutral state root (mirror of superproject ADR-0003) | Accepted | 2026-07-04 |
 | [0009](0009-local-queue-as-default-deeplake-is-not-a-queue.md) | Local queue as the default; DeepLake is a store, not a job-coordination primitive | Accepted | 2026-07-05 |
+| [0010](0010-recall-weighted-est-savings.md) | Recall-weighted "Est. savings"; the corpus-length proxy is retired | Accepted | 2026-07-08 |
+| [0011](0011-sessions-recall-chunking-strategy.md) | Sessions recall chunking: build in-tree, do not pull a chunker dependency | Proposed | 2026-07-05 |

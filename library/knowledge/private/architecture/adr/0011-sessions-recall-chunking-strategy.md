@@ -1,4 +1,4 @@
-# ADR-0009, Sessions recall chunking: build in-tree, do not pull a chunker dependency
+# ADR-0011, Sessions recall chunking: build in-tree, do not pull a chunker dependency
 
 > **Status:** Proposed · **Date:** 2026-07-05
 > **Supersedes:** none · **Superseded by:** none
