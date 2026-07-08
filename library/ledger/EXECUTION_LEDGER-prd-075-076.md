@@ -1,0 +1,164 @@
+# Execution Ledger — PRD-075 + PRD-076 (Recall Arms)
+
+> Orchestration: `/the-smoker`. Worktree: `C:/Users/mario/GitHub/honeycomb-recall-arms`. Branch: `feature/prd-075-076-recall-arms` (off `honeycomb` submodule `main`).
+> This ledger is the single source of truth and survives context loss. Status values: `OPEN` / `IN PROGRESS` / `DONE` / `VERIFIED` / `BLOCKED`.
+> `DONE` = implemented + locally verified by the implementer. `VERIFIED` = confirmed by a separate pass (close-out or fresh reviewer). Implementers never self-verify.
+
+## Scope
+
+- **PRD-075** — On-Demand Recall Command Surface (the model-commanded `PreToolUse` recall arm). Sub-PRDs 075a, 075b, 075c.
+- **PRD-076** — Always-On Memory Recall + Claude Code Plugin Packaging (the always-on `UserPromptSubmit` arm + MCP/skill/command packaging). Sub-PRDs 076a, 076b, 076c.
+
+Both PRDs are non-overlapping by construction (076's Non-Goals fence the `PreToolUse`/`SessionStart`-notice surface as 075's, and 075 defers the `UserPromptSubmit`/MCP surface to 076).
+
+## Dependency map
+
+- 075a → 075b (075b renders the `PreToolDecision` that 075a propagates).
+- 075a + 075b → 075c (the awareness notice is inert until the surface is live).
+- 076b → 076c (the skill + commands point at the MCP tools 076b registers).
+- 076a: independent core (but shares hook-runtime files with 075a/075b, so it is sequenced AFTER them to avoid concurrent edits to `runtime.ts` / `shim.ts` / `normalize.ts` / `contracts.ts`).
+
+## Shared-file contention (why waves are sequenced, not all-parallel)
+
+| File | Touched by |
+|---|---|
+| `src/hooks/runtime.ts` | 075a, 076a |
+| `src/hooks/claude-code/shim.ts` | 075b, 076a |
+| `src/hooks/shared/contracts.ts` | 075a, 076a |
+| `src/hooks/normalize.ts` | 075b (maybe), 076a |
+| `src/hooks/shared/pre-tool-use.ts` | 075a, 075c |
+| `references/claude-code/` | 075b, 076b |
+
+Waves are ordered so no two concurrently-running bees edit the same file.
+
+## Wave plan
+
+| Wave | Item | Owner Bee (Stinger) | Model | Owns (file boundaries) | Depends on |
+|---|---|---|---|---|---|
+| 1 | 075a | typescript-node-worker-bee (`typescript-node-stinger`) | claude-sonnet-5-thinking-high | `runtime.ts` (pre-tool branch), `pre-tool-use.ts`, `contracts.ts` (vfs seam + decision), tests | — |
+| 1 | 076b | harness-integration-worker-bee (`harness-integration-stinger`) | claude-opus-4-8-thinking-high | `harnesses/claude-code/.mcp.json` (or `plugin.json`), `references/claude-code/mcp-registration-schema.ts`, `tests/mcp/…` | — |
+| 2 | 075b | harness-integration-worker-bee (`harness-integration-stinger`) | claude-opus-4-8-thinking-high | `claude-code/shim.ts` (pre-tool renderer), `binary.ts`, `references/claude-code/` (response oracle), tests | 075a |
+| 2 | 076c | harness-integration-worker-bee (`harness-integration-stinger`) | claude-sonnet-5-thinking-high | `harnesses/claude-code/skills/`, `harnesses/claude-code/commands/`, tests | 076b |
+| 3 | 076a | typescript-node-worker-bee (`typescript-node-stinger`) | claude-sonnet-5-thinking-high | `recall-renderer.ts` (new), `user-prompt-recall.ts` (new), `runtime.ts`, `shim.ts`, `normalize.ts` (event-aware), `contracts.ts`, `hooks.json`, tests | 075a, 075b (file layering) |
+| 3 | 075c | typescript-node-worker-bee (`typescript-node-stinger`) | claude-sonnet-5-thinking-high | `session-start.ts` (notice), `pre-tool-use.ts` (sentinel), tests | 075a, 075b |
+| Close | security | security-worker-bee (`security-stinger`) | claude-opus-4-8-thinking-high | audit whole branch | all impl DONE |
+| Close | quality | quality-worker-bee (`quality-stinger`) | claude-opus-4-8-thinking-high | verify branch vs PRDs | security clean |
+
+Wave 3 items (076a, 075c) are disjoint in files (076a: shim/runtime/normalize/contracts/hooks.json/new; 075c: session-start/pre-tool-use) so they run in parallel.
+
+Gate for every implementation item: `npm run ci` (typecheck + jscpd dup + vitest + SQL-safety audit) passes in the worktree.
+
+---
+
+## AC Ledger
+
+### PRD-075a — Live the PreToolUse Recall Path
+
+| ID | Criterion (abridged) | Status | Owner | Evidence |
+|---|---|---|---|---|
+| 075a/a-AC-1 | `HookCoreDeps` gains a `vfs` seam; production deps wire the real `DeepLakeFs` intercept over loopback (not the fake) | OPEN | W1 ts-node | |
+| 075a/a-AC-2 | `runPreToolUse` resolves mount ops through `deps.vfs` (drop `void _deps`); recording double observes the `VfsToolOp` and its output becomes `replace.output` | OPEN | W1 ts-node | |
+| 075a/a-AC-3 | pre-tool-use dispatch returns `{ result, decision }`; `HookEventOutcome.decision` carries the `PreToolDecision` | OPEN | W1 ts-node | |
+| 075a/a-AC-4 | Off-mount pass-through unchanged: no `deps.vfs` call, returns `allow` (throwing double never invoked for `cat /etc/hosts`) | OPEN | W1 ts-node | |
+| 075a/a-AC-5 | Fail-soft: a throwing/timing-out `vfs.resolve` is absorbed to a fail-soft result, no `replace`, turn proceeds | OPEN | W1 ts-node | |
+| 075a/a-AC-6 | No behavior change to session-start/session-end/capture; their outcomes never carry a decision; existing runtime tests green | OPEN | W1 ts-node | |
+
+### PRD-075b — Render the PreToolDecision (block-and-inject + conformance)
+
+| ID | Criterion (abridged) | Status | Owner | Evidence |
+|---|---|---|---|---|
+| 075b/b-AC-1 | Real Claude Code `PreToolUse` block-and-inject contract pinned + encoded as an executable oracle under `references/claude-code/`; conformance test parses the shim output against it | OPEN | W2 harness | |
+| 075b/b-AC-2 | `replace` renders to a `PreToolUse` response that (a) prevents the real tool and (b) delivers `output` to the model | OPEN | W2 harness | |
+| 075b/b-AC-3 | `deny` → block + guidance; `rewrite` → substituted command; `allow` → untouched pass-through; each tested | OPEN | W2 harness | |
+| 075b/b-AC-4 | E2E (shim + 075a runtime, daemon vfs faked): mount `Grep` produces a response that blocks the grep and carries the faked hits | OPEN | W2 harness | |
+| 075b/b-AC-5 | Cross-harness conformance suite stays green; a harness without the renderer is unaffected | OPEN | W2 harness | |
+| 075b/b-AC-6 | Fail-soft: absent decision / `allow` → pass-through, never a malformed block | OPEN | W2 harness | |
+
+### PRD-075c — SessionStart Recall-Awareness Notice + `honeycomb recall` sentinel
+
+| ID | Criterion (abridged) | Status | Owner | Evidence |
+|---|---|---|---|---|
+| 075c/c-AC-1 | `SessionStart` `additionalContext` includes the recall-awareness notice (test asserts presence) | OPEN | W3 ts-node | |
+| 075c/c-AC-2 | Existing digest/prime/first-run-notice content unchanged; notice composes via `joinBlocks` as an added block | OPEN | W3 ts-node | |
+| 075c/c-AC-3 | Notice-only → carries just the notice; all-empty + notice absent → `additionalContext` omitted; never throws | OPEN | W3 ts-node | |
+| 075c/c-AC-4 | `honeycomb recall "<query>"` Bash op → `search` verb, query extracted, mount root as path so `onMemoryMount` passes | OPEN | W3 ts-node | |
+| 075c/c-AC-5 | `honeycomb recall` resolves through the same VFS intercept + blocks the real command (faked vfs → replace, no exec) | OPEN | W3 ts-node | |
+| 075c/c-AC-6 | Raw mount `Grep`/`cat` fallback still works (regression) | OPEN | W3 ts-node | |
+
+### PRD-075 — Module-level (index)
+
+| ID | Criterion (abridged) | Status | Owner | Evidence |
+|---|---|---|---|---|
+| 075/m-AC-1 | Mount-targeted read/search/list/find on `PreToolUse` resolves through the real `DeepLakeFs` (not the fake) | OPEN | W1/W2 | |
+| 075/m-AC-2 | `PreToolDecision` propagated out of `dispatchLifecycle` to the shim renderer | OPEN | W1/W2 | |
+| 075/m-AC-3 | shim renders `replace` (block + deliver), `deny` (block + guidance), `rewrite` (harmless cmd), `allow` (pass-through) | OPEN | W2 | |
+| 075/m-AC-4 | Agent recall command returns daemon hybrid hits as the tool result; real FS never touched | OPEN | W2/W3 | |
+| 075/m-AC-5 | Off-mount `PreToolUse` byte-for-byte unchanged (allow, no daemon call, zero recall latency) | OPEN | W1 | |
+| 075/m-AC-6 | `SessionStart` appends the awareness notice; prime content otherwise unchanged; render never throws | OPEN | W3 | |
+| 075/m-AC-7 | `honeycomb recall "<query>"` Bash form → `search` verb, arg → query | OPEN | W3 | |
+| 075/m-AC-8 | Every recall path fail-soft: unreachable/timeout/error daemon → bounded "no memory available", never a thrown/blocked turn | OPEN | W2/W3 | |
+| 075/m-AC-9 | `UserPromptSubmit` stays async capture-only; `PostToolUse`/`Stop`/`SubagentStop` capture unchanged; conformance suite green | OPEN | W2/W3 | |
+
+### PRD-076a — Always-On Query-Aware Recall on `UserPromptSubmit`
+
+| ID | Criterion (abridged) | Status | Owner | Evidence |
+|---|---|---|---|---|
+| 076a/a-AC-1 | `createRecallRenderer` POSTs `{ query, limit, tokenBudget, cwd }` to `/api/memories/recall`; recording fetch asserts query=prompt, cwd forwarded, bounded budget | OPEN | W3 ts-node | |
+| 076a/a-AC-2 | Recall stamps runtime-path + session + tenancy headers (mirror `prime-renderer.ts`); signed-out degrades to `""` | OPEN | W3 ts-node | |
+| 076a/a-AC-3 | Tight `AbortController` timeout; `""` on timeout/non-200/malformed, never a throw | OPEN | W3 ts-node | |
+| 076a/a-AC-4 | On `UserPromptSubmit`, injector returns `{ ok, additionalContext }` + `emitResponse` renders it; capture still stores the turn | OPEN | W3 ts-node | |
+| 076a/a-AC-5 | `renderContext` emits `additionalContext` under `hookSpecificOutput` with `hookEventName: "UserPromptSubmit"`; session-start envelope unchanged | OPEN | W3 ts-node | |
+| 076a/a-AC-6 | Throttled + deduped: repeated prompt does not re-inject the same hit; nudge not every turn | OPEN | W3 ts-node | |
+| 076a/a-AC-7 | Empty recall → at most the throttled nudge (or nothing), never an empty/malformed block | OPEN | W3 ts-node | |
+| 076a/a-AC-8 | No session-start regression; per-turn arm never runs on `session-start`; existing session-start tests green | OPEN | W3 ts-node | |
+
+### PRD-076b — Register the Honeycomb MCP Server in the Plugin
+
+| ID | Criterion (abridged) | Status | Owner | Evidence |
+|---|---|---|---|---|
+| 076b/b-AC-1 | Plugin MCP-registration mechanism pinned vs references gate + encoded as an oracle under `references/claude-code/` | OPEN | W1 harness | |
+| 076b/b-AC-2 | Plugin registers a `honeycomb` MCP server pointing at built `mcp/bundle/server.js` (mirrors hermes shape + its conformance test) | OPEN | W1 harness | |
+| 076b/b-AC-3 | Registration `args` path resolves relative to installed plugin root (`${CLAUDE_PLUGIN_ROOT}` or plugin-relative), install-safe | OPEN | W1 harness | |
+| 076b/b-AC-4 | Launched server lists the existing `TOOL_NAMES` unchanged (no tools added/removed) | OPEN | W1 harness | |
+| 076b/b-AC-5 | `plugin.json` + hooks bundle otherwise unchanged (7 lifecycle events still register); registration is additive | OPEN | W1 harness | |
+| 076b/b-AC-6 | If manifest version single-sourced, registration stays version-consistent (no drift) | OPEN | W1 harness | |
+
+### PRD-076c — Bundle a Memory Skill + Slash Commands
+
+| ID | Criterion (abridged) | Status | Owner | Evidence |
+|---|---|---|---|---|
+| 076c/c-AC-1 | `honeycomb-memory` skill bundled with valid frontmatter + a description targeting memory-relevant work | OPEN | W2 harness | |
+| 076c/c-AC-2 | Skill body instructs search-before-task (`hivemind_search`/`memory_search`), cite + zoom (`hivemind_read`), store-with-type (`memory_store`) | OPEN | W2 harness | |
+| 076c/c-AC-3 | `/recall`, `/remember`, `/forget` commands bundled with valid frontmatter | OPEN | W2 harness | |
+| 076c/c-AC-4 | `/forget` collects a `reason` (`memory_forget` requires one) | OPEN | W2 harness | |
+| 076c/c-AC-5 | Skill + commands in plugin-contract-correct dirs (confirmed vs references gate) so the loader discovers them | OPEN | W2 harness | |
+| 076c/c-AC-6 | Additive: `plugin.json`, hooks, and 076b registration unchanged by this sub-PRD | OPEN | W2 harness | |
+
+### PRD-076 — Module-level (index)
+
+| ID | Criterion (abridged) | Status | Owner | Evidence |
+|---|---|---|---|---|
+| 076/m-AC-1 | First `UserPromptSubmit` POSTs prompt to `/api/memories/recall` (bounded budget + cwd); top hits injected synchronously | OPEN | W3 | |
+| 076/m-AC-2 | Sync recall stamps runtime-path + session + tenancy; missing-session not sent bare | OPEN | W3 | |
+| 076/m-AC-3 | Tight timeout + fail-soft `""` on timeout/non-200/malformed; never a thrown/blocked turn | OPEN | W3 | |
+| 076/m-AC-4 | Existing `UserPromptSubmit` capture still happens (turn stored) | OPEN | W3 | |
+| 076/m-AC-5 | `renderContext` per-event envelope (`hookSpecificOutput.hookEventName`) for both `SessionStart` + `UserPromptSubmit` | OPEN | W3 | |
+| 076/m-AC-6 | Per-turn injection throttled + deduped (no double-inject; per-turn budget) | OPEN | W3 | |
+| 076/m-AC-7 | Plugin registers the MCP server so `memory_search`/`hivemind_search`/`hivemind_read`/`memory_store` appear in the tool list | OPEN | W1 | |
+| 076/m-AC-8 | `honeycomb-memory` skill bundled, valid frontmatter, discoverable | OPEN | W2 | |
+| 076/m-AC-9 | `/recall`/`/remember`/`/forget` commands bundled with valid frontmatter | OPEN | W2 | |
+| 076/m-AC-10 | No PRD-075 surface touched by 076 (pre-tool path default-fake, no decision, no pre-tool renderer, session-start unchanged) | OPEN | W3 | |
+
+---
+
+## Wave log
+
+- **Setup (done):** submodule worktree created off `main`; PRD-075 (tracked) + PRD-076 (untracked, carried over) moved backlog → in-work; `main` working tree restored clean; `npm install` OK; ledger created.
+- **Wave 1:** pending dispatch — 075a (ts-node), 076b (harness).
+- **Wave 2:** pending — 075b (harness), 076c (harness).
+- **Wave 3:** pending — 076a (ts-node), 075c (ts-node).
+- **Close-out:** pending — security then quality.
+
+## Watchdog / termination log
+
+- (none yet)
