@@ -58,10 +58,14 @@ export {
 	CLAUDE_CODE_CONTEXT_CHANNEL,
 	CLAUDE_CODE_EVENT_MAP,
 	CLAUDE_CODE_HOST_CLI,
+	CLAUDE_CODE_RECALL_EVENT_MAP,
 	CLAUDE_CODE_REFERENCES,
 	CLAUDE_CODE_RUNTIME_PATH,
+	type ClaudeUserPromptMode,
 	claudeCodeExtractData,
 	createClaudeCodeShim,
+	detectClaudeUserPromptMode,
+	RECALL_HOOK_ARG,
 } from "./claude-code/shim.js";
 
 // ── PRD-060 ROI fix: the Claude Code transcript reader (per-turn usage + model) ──

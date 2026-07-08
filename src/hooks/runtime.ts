@@ -71,8 +71,10 @@ import { createCredentialReader } from "./shared/credential-reader.js";
 import { createSessionStartSeams } from "./shared/session-start-seams.js";
 import {
 	createContextRenderer,
+	createFileRecallSessionStore,
 	createSessionBindNoticeGate,
 	createPrimeRenderer,
+	createRecallRenderer,
 	type CredentialReader,
 	type DaemonHookClient,
 	type HookCoreDeps,
@@ -83,10 +85,13 @@ import {
 	type OnboardingNoticeGate,
 	type PreToolDecision,
 	type PrimeRenderer,
+	type RecallRenderer,
+	type RecallSessionStore,
 	runCapture,
 	runPreToolUse,
 	runSessionEnd,
 	runSessionStart,
+	runUserPromptRecall,
 	type RuntimePath,
 	type SessionStartDeps,
 	type SessionStartSeams,
@@ -115,6 +120,19 @@ export interface HookRuntimeOptions {
 	 * 046c digest. Fail-soft by construction — a down/cold daemon contributes nothing.
 	 */
 	readonly prime?: PrimeRenderer;
+	/**
+	 * Inject the per-turn recall renderer (tests / PRD-076a). Defaults to the REAL loopback
+	 * `POST /api/memories/recall` renderer (a-AC-1..3), tightly time-bounded + fail-soft. The
+	 * runtime CALLS it on the `user_prompt_recall` injector branch ONLY; a down/cold daemon
+	 * contributes nothing (a-AC-3). ABSENT → the real renderer.
+	 */
+	readonly recall?: RecallRenderer;
+	/**
+	 * Inject the per-turn recall throttle/dedupe state store (tests / PRD-076a a-AC-6/7).
+	 * Defaults to the REAL file-backed store under `~/.honeycomb/recall-sessions`. A test
+	 * injects an in-memory store shared across the two turns it drives (a-AC-6).
+	 */
+	readonly recallStore?: RecallSessionStore;
 	/**
 	 * Inject the notifications pipeline (tests / c-AC-4). Defaults to the REAL 020d
 	 * pipeline (real state + claim lock + a fail-soft daemon-backed source). The runtime
@@ -220,6 +238,12 @@ export function createHookRuntime(options: HookRuntimeOptions = {}): HookRuntime
 	// `GET /api/memories/prime`, fed tenancy by the SAME credential reader. Injected on the
 	// session-start branch below; a down/cold daemon contributes nothing (d-AC-4).
 	const prime = options.prime ?? createPrimeRenderer({ credentials, host, port, fetch: doFetch });
+	// PRD-076a (a-AC-1..3): the real per-turn recall renderer - a fail-soft, tightly-bounded
+	// loopback `POST /api/memories/recall`. Injected on the `user_prompt_recall` branch below;
+	// a down/cold daemon contributes nothing (a-AC-3). The recall STATE store persists the
+	// throttle/dedupe snapshot across the per-turn processes (a-AC-6).
+	const recall = options.recall ?? createRecallRenderer({ host, port, fetch: doFetch });
+	const recallStore = options.recallStore ?? createFileRecallSessionStore();
 
 	// PRD-075a (a-AC-1): the pre-tool-use VFS intercept. `vfsOverride` (a test double) is
 	// used AS-IS and NEVER rebound; the real default is rebound to each pre-tool-use
@@ -299,6 +323,8 @@ export function createHookRuntime(options: HookRuntimeOptions = {}): HookRuntime
 				onboardingNotice,
 				// Thread the shim's optional off-process hygiene spawn through to session-start.
 				shim.spawnHygieneChild !== undefined ? shim.spawnHygieneChild.bind(shim) : undefined,
+				recall,
+				recallStore,
 			);
 		},
 	};
@@ -320,6 +346,8 @@ async function dispatchLifecycle(
 	seams: SessionStartSeams,
 	onboardingNotice: OnboardingNoticeGate,
 	spawnHygieneChild: ((meta: HookSessionMeta) => void) | undefined,
+	recall: RecallRenderer,
+	recallStore: RecallSessionStore,
 ): Promise<HookEventOutcome> {
 	try {
 		switch (input.event) {
@@ -354,6 +382,13 @@ async function dispatchLifecycle(
 			}
 			case "session-end": {
 				const result = await runSessionEnd(input, deps, summarySpawn);
+				return { result };
+			}
+			case "user_prompt_recall": {
+				// PRD-076a (a-AC-4): the synchronous per-turn recall injector. Calls the recall
+				// renderer + returns `{ ok, additionalContext }`; `emitResponse` renders it to stdout
+				// (unchanged). The async capture entry keeps its own `user_message → runCapture` path.
+				const result = await runUserPromptRecall(input, deps, recall, recallStore);
 				return { result };
 			}
 			// user_message / tool_call / assistant_message → per-turn capture.

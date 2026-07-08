@@ -73,7 +73,19 @@ export type ContextChannel = (typeof CONTEXT_CHANNELS)[number];
  * through the correct channel for that harness".
  */
 export type ContextEnvelope =
-	| { readonly channel: "model-only"; readonly additionalContext: string }
+	| {
+			readonly channel: "model-only";
+			readonly additionalContext: string;
+			/**
+			 * PRD-076a (a-AC-5): the OPTIONAL Claude Code `hookSpecificOutput` wrapper. ABSENT for the
+			 * session-start prime (the envelope stays byte-identical to today — a-AC-8 regression guard);
+			 * PRESENT for the per-turn `UserPromptSubmit` recall arm, carrying `{ hookEventName, additionalContext }`
+			 * so the host delivers the recall hits under its documented per-event channel
+			 * (`references/claude-code/userprompt-response-schema.ts`). The top-level `additionalContext` is
+			 * retained alongside it as the Channel-2 fallback, mirroring the 075b block-and-inject precedent.
+			 */
+			readonly hookSpecificOutput?: { readonly hookEventName: string; readonly additionalContext: string };
+	  }
 	| { readonly channel: "user-visible"; readonly text: string };
 
 // ─────────────────────────────────────────────────────────────────────────────

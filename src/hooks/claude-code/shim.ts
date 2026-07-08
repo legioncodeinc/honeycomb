@@ -54,6 +54,39 @@ export const CLAUDE_CODE_EVENT_MAP: Readonly<Record<string, LogicalEvent>> = {
 	SessionEnd: "session-end",
 };
 
+/**
+ * The RECALL-mode event map (PRD-076a). The synchronous `UserPromptSubmit` INJECTOR invocation
+ * (hooks.json Option A: a second, non-`async` entry) maps ONLY `UserPromptSubmit` onto the new
+ * `user_prompt_recall` logical event → `runUserPromptRecall` (recall + inject). Every other native
+ * event is dropped in this mode: the injector hook is registered ONLY under `UserPromptSubmit`, and
+ * mapping nothing else guarantees the recall process NEVER double-captures. The UNCHANGED async
+ * capture entry keeps using {@link CLAUDE_CODE_EVENT_MAP} (`UserPromptSubmit → user_message`).
+ */
+export const CLAUDE_CODE_RECALL_EVENT_MAP: Readonly<Record<string, LogicalEvent>> = {
+	UserPromptSubmit: "user_prompt_recall",
+};
+
+/**
+ * The mode a Claude Code shim runs in (PRD-076a coexistence, Option A). `capture` is the default
+ * (the full six-event reference + the async `UserPromptSubmit` capture); `recall` is the synchronous
+ * per-turn injector that maps ONLY `UserPromptSubmit → user_prompt_recall`.
+ */
+export type ClaudeUserPromptMode = "capture" | "recall";
+
+/**
+ * The CLI argument the hooks.json INJECTOR entry passes so the SAME bundled binary runs in `recall`
+ * mode (`node .../index.js --honeycomb-recall`). Both `UserPromptSubmit` hook entries invoke the
+ * same binary with the same stdin, so this argv flag is the ONLY signal that distinguishes the
+ * synchronous injector invocation from the async capture invocation. A distinctive flag (not a bare
+ * token) so a test-runner's argv can never accidentally select recall mode.
+ */
+export const RECALL_HOOK_ARG = "--honeycomb-recall" as const;
+
+/** Detect the {@link ClaudeUserPromptMode} from process argv (the {@link RECALL_HOOK_ARG} flag → recall). */
+export function detectClaudeUserPromptMode(argv: readonly string[] = process.argv): ClaudeUserPromptMode {
+	return argv.slice(2).includes(RECALL_HOOK_ARG) ? "recall" : "capture";
+}
+
 /** Claude Code injects context model-only via `additionalContext` (FR-10). */
 export const CLAUDE_CODE_CONTEXT_CHANNEL: ContextChannel = "model-only";
 
@@ -83,6 +116,10 @@ export function claudeCodeExtractData(raw: unknown, logical: LogicalEvent, meta:
 		case "session-start":
 			return sessionStartData(pickString(raw, "source") || "startup");
 		case "user_message":
+			return userMessageData(pickString(raw, "prompt", "text", "message"));
+		case "user_prompt_recall":
+			// PRD-076a: the recall injector reads the SAME prompt text as capture; it carries the
+			// canonical `{ kind: "user_message", text }` shape so `runUserPromptRecall` reads the query.
 			return userMessageData(pickString(raw, "prompt", "text", "message"));
 		case "pre-tool-use":
 			return preToolData(pickString(raw, "tool_name", "tool"), {
@@ -204,15 +241,28 @@ export function renderClaudeCodePreTool(decision: PreToolDecision): ClaudeCodePr
  * `renderPreTool`, so the shared binary driver can emit a native `PreToolUse`
  * block-and-inject response for this reference harness. A harness whose shim does not
  * carry the renderer keeps its prior pre-tool behavior (b-AC-5).
+ *
+ * PRD-076a: `options.userPromptMode` selects the coexistence arm (Option A). `capture`
+ * (the default, auto-detected from argv) is the full reference + async capture; `recall`
+ * is the synchronous per-turn injector - it maps ONLY `UserPromptSubmit → user_prompt_recall`
+ * and stamps `contextHookEvent: "UserPromptSubmit"` so `renderContext` wraps the injected
+ * recall under `hookSpecificOutput` (a-AC-5). The default reads {@link detectClaudeUserPromptMode}
+ * so the SAME bundled binary, invoked with {@link RECALL_HOOK_ARG}, runs the injector.
  */
-export function createClaudeCodeShim(): HarnessShim {
+export function createClaudeCodeShim(options: { readonly userPromptMode?: ClaudeUserPromptMode } = {}): HarnessShim {
+	const mode = options.userPromptMode ?? detectClaudeUserPromptMode();
+	const isRecall = mode === "recall";
 	const shim = createShim({
 		harness: "claude-code",
 		runtimePath: CLAUDE_CODE_RUNTIME_PATH,
 		contextChannel: CLAUDE_CODE_CONTEXT_CHANNEL,
 		hostCli: CLAUDE_CODE_HOST_CLI,
 		references: CLAUDE_CODE_REFERENCES,
-		eventMap: CLAUDE_CODE_EVENT_MAP,
+		eventMap: isRecall ? CLAUDE_CODE_RECALL_EVENT_MAP : CLAUDE_CODE_EVENT_MAP,
+		// PRD-076a (a-AC-5): the recall injector wraps its block under `hookSpecificOutput`
+		// with `hookEventName: "UserPromptSubmit"`; the capture-mode shim leaves this absent so
+		// the session-start prime envelope stays byte-identical (a-AC-8).
+		...(isRecall ? { contextHookEvent: "UserPromptSubmit" } : {}),
 		extractData(raw: unknown, logical: LogicalEvent, meta: HookSessionMeta): unknown | undefined {
 			// Thread `meta` through: the assistant_message branch reads the per-turn usage + model
 			// from the transcript at `meta.path` (the Stop hook payload carries neither).
@@ -221,7 +271,8 @@ export function createClaudeCodeShim(): HarnessShim {
 		// Off-process hygiene: hand the session-start skills/assets/graph pulls to a DETACHED
 		// CHILD so the parent hook binary does no in-process hygiene I/O and exits promptly
 		// after writing its response. See `HarnessShim.spawnHygieneChild` for the full
-		// rationale (the latency-budget + Windows-libuv-assertion fix).
+		// rationale (the latency-budget + Windows-libuv-assertion fix). Only session-start
+		// invokes this; the recall injector never dispatches session-start (map has one event).
 		spawnHygieneChild(meta: HookSessionMeta): void {
 			spawnClaudeCodeHygieneChild(meta);
 		},
