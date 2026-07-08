@@ -17,7 +17,7 @@
  *   - the hooks.json coexistence (Option A) CONFORMS to the references gate + carries the injector arg.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -101,6 +101,26 @@ describe("PRD-076a createFileRecallSessionStore: cross-process state (a-AC-6)", 
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	// SECURITY (recall-store default-permission exposure): the persisted `injectedRefs` can embed a
+	// bounded prefix of recalled memory CONTENT (the `text:` ref fallback), so the store is
+	// captured-trace-derived and must not be group/world-readable on a shared POSIX host. The dir is
+	// created 0700 and the file 0600. Skipped on win32 where POSIX modes are a no-op (NTFS ACLs).
+	it.skipIf(process.platform === "win32")(
+		"writes the state dir 0700 and the state file 0600 (no group/world read of recalled content)",
+		() => {
+			const parent = mkdtempSync(join(tmpdir(), "hc-recall-perm-"));
+			const dir = join(parent, "recall-sessions");
+			try {
+				const store = createFileRecallSessionStore(dir);
+				store.save("sess-perm", { injectedRefs: ["text:a recalled memory fragment"], turns: 1, lastNudgeTurn: -1 });
+				expect(statSync(dir).mode & 0o777).toBe(0o700);
+				expect(statSync(join(dir, "sess-perm.json")).mode & 0o777).toBe(0o600);
+			} finally {
+				rmSync(parent, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("is fail-soft: a corrupt state file degrades to the zero-state", () => {
 		const dir = mkdtempSync(join(tmpdir(), "hc-recall-"));

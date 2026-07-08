@@ -72,6 +72,16 @@ export const NUDGE_INTERVAL_TURNS = 5;
 const MAX_TRACKED_REFS = 200;
 
 /**
+ * The state directory / file modes (0700 / 0600). The persisted `injectedRefs` can embed a bounded
+ * prefix of recalled memory CONTENT (the `text:` ref fallback in `recall-renderer.ts`), so the
+ * store is captured-trace-derived and must not be group/world-readable on a shared POSIX host.
+ * Explicit modes match the credential/state-store convention used across the codebase
+ * (`credentials-store.ts`, `onboarding-store.ts`, `secrets/store.ts`); both are no-ops on win32.
+ */
+const RECALL_STORE_DIR_MODE = 0o700;
+const RECALL_STORE_FILE_MODE = 0o600;
+
+/**
  * Run the per-turn recall injector (a-AC-4/6/7). Reads the prompt, calls the recall renderer,
  * and returns the injectable `additionalContext` - the NEW hits (deduped), or the throttled
  * nudge when recall returned nothing, or nothing at all. Never throws (fail-soft throughout).
@@ -195,8 +205,11 @@ export function createFileRecallSessionStore(dir?: string): RecallSessionStore {
 		},
 		save(sessionId: string, snapshot: RecallSessionSnapshot): void {
 			try {
-				mkdirSync(baseDir, { recursive: true });
-				writeFileSync(snapshotPath(baseDir, sessionId), JSON.stringify(snapshot), "utf8");
+				mkdirSync(baseDir, { recursive: true, mode: RECALL_STORE_DIR_MODE });
+				writeFileSync(snapshotPath(baseDir, sessionId), JSON.stringify(snapshot), {
+					encoding: "utf8",
+					mode: RECALL_STORE_FILE_MODE,
+				});
 			} catch {
 				// Fail-soft: a write error never breaks the turn (the next turn re-attempts).
 			}
