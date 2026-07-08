@@ -41,6 +41,7 @@ import {
 } from "../normalize.js";
 import { readTranscriptTurnUsage } from "./transcript.js";
 import { HYGIENE_META_ENV, type HookSessionMeta, type LogicalEvent } from "../shared/contracts.js";
+import type { PreToolDecision } from "../shared/index.js";
 
 /** The Claude Code native → logical event name map (FR-1). The full six-event reference. */
 export const CLAUDE_CODE_EVENT_MAP: Readonly<Record<string, LogicalEvent>> = {
@@ -115,13 +116,97 @@ export function claudeCodeExtractData(raw: unknown, logical: LogicalEvent, meta:
 }
 
 /**
+ * The Claude Code native `PreToolUse` block-and-inject response (PRD-075b). Only the
+ * shape the renderer emits is modeled here; the INDEPENDENT contract oracle lives at
+ * `references/claude-code/pretool-response-schema.ts` (the conformance test parses the
+ * emitted response through it). `hookEventName` is the fixed event literal; the optional
+ * carriers mirror the harness's PreToolUse decision-control fields.
+ */
+export interface ClaudeCodePreToolResponse {
+	readonly hookSpecificOutput: {
+		readonly hookEventName: "PreToolUse";
+		readonly permissionDecision?: "allow" | "deny" | "ask" | "defer";
+		readonly permissionDecisionReason?: string;
+		readonly updatedInput?: Record<string, unknown>;
+		readonly additionalContext?: string;
+	};
+}
+
+/**
+ * Render a shared-core {@link PreToolDecision} into the Claude Code native `PreToolUse`
+ * response (PRD-075b b-AC-2 / b-AC-3), or `undefined` for a pure pass-through.
+ *
+ * | Decision  | Rendered response |
+ * |-----------|-------------------|
+ * | `allow`   | `undefined` — pass-through: the binary emits the benign `{}` ack, the real tool runs |
+ * | `replace` | `permissionDecision: "deny"` (blocks the tool) + `additionalContext` = the daemon output (injected to the model); `permissionDecisionReason` also carries it (the older-version Channel-2 fallback) |
+ * | `deny`    | `permissionDecision: "deny"` + `permissionDecisionReason` = the mount-write guidance (shown to the model) |
+ * | `rewrite` | `permissionDecision: "allow"` + `updatedInput.command` = the harmless echo (the tool runs but mutates nothing) |
+ *
+ * The block-and-inject channel (`deny` + `additionalContext`) is the one the installed
+ * Claude Code contract supports (`references/claude-code/pretool-response-schema.ts`
+ * pins it as `PINNED_BLOCK_AND_INJECT_CHANNEL`). Never throws (a render is on the hook
+ * path; the binary driver also wraps this fail-soft).
+ */
+export function renderClaudeCodePreTool(decision: PreToolDecision): ClaudeCodePreToolResponse | undefined {
+	switch (decision.kind) {
+		case "allow":
+			// Pass-through: no block, no injection. The real tool runs under the host's normal
+			// permission flow (b-AC-6). Returning `undefined` lets the binary emit the `{}` ack.
+			return undefined;
+		case "replace":
+			// Block the real tool AND deliver the daemon output to the model. `additionalContext`
+			// is the pinned channel; `permissionDecisionReason` carries the same hits so the
+			// content still reaches the model on a build without PreToolUse `additionalContext`.
+			return {
+				hookSpecificOutput: {
+					hookEventName: "PreToolUse",
+					permissionDecision: "deny",
+					permissionDecisionReason: decision.output,
+					additionalContext: decision.output,
+				},
+			};
+		case "deny":
+			// Block + surface the mount-write guidance (shown to the model as the deny reason).
+			return {
+				hookSpecificOutput: {
+					hookEventName: "PreToolUse",
+					permissionDecision: "deny",
+					permissionDecisionReason: decision.guidance,
+				},
+			};
+		case "rewrite":
+			// Substitute the harmless echo: `updatedInput` replaces the tool input; paired with
+			// `allow` it auto-approves so the tool runs but mutates nothing (never the real FS).
+			return {
+				hookSpecificOutput: {
+					hookEventName: "PreToolUse",
+					permissionDecision: "allow",
+					updatedInput: { command: decision.command },
+				},
+			};
+		default: {
+			// Exhaustiveness: a new PreToolDecision kind fails to compile until rendered here.
+			const _exhaustive: never = decision;
+			void _exhaustive;
+			return undefined;
+		}
+	}
+}
+
+/**
  * Construct the Claude Code REFERENCE shim (FR-1 / D-4). Built on the shared
  * `createShim` engine with the reference event map + the canonical `extractData`;
  * every other shim runs the SAME engine, so equivalence to this baseline is
  * structural (c-AC-1).
+ *
+ * PRD-075b: the returned shim additionally carries {@link renderClaudeCodePreTool} as
+ * `renderPreTool`, so the shared binary driver can emit a native `PreToolUse`
+ * block-and-inject response for this reference harness. A harness whose shim does not
+ * carry the renderer keeps its prior pre-tool behavior (b-AC-5).
  */
 export function createClaudeCodeShim(): HarnessShim {
-	return createShim({
+	const shim = createShim({
 		harness: "claude-code",
 		runtimePath: CLAUDE_CODE_RUNTIME_PATH,
 		contextChannel: CLAUDE_CODE_CONTEXT_CHANNEL,
@@ -141,6 +226,9 @@ export function createClaudeCodeShim(): HarnessShim {
 			spawnClaudeCodeHygieneChild(meta);
 		},
 	});
+	// PRD-075b: attach the pre-tool decision renderer. Kept off the shared `HarnessShim`
+	// contract (a harness opts in by carrying it); the binary driver feature-detects it.
+	return Object.assign(shim, { renderPreTool: renderClaudeCodePreTool });
 }
 
 /**
