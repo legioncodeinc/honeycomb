@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.8.0 — 2026-07-08
+
+Adds a self-healing Claude Code plugin connector that automatically detects and repairs harness wiring, plus a new `honeycomb harness status|connect|repair` CLI command and dashboard status reporting. Also fixes plugin packaging so `.mcp.json`, skills, and commands are correctly included in the published Claude Code plugin.
+
+
 ## v0.7.0 — 2026-07-08
 
 Adds always-on, query-aware memory recall on each prompt, registers the Honeycomb MCP server with the Claude Code plugin, and bundles a honeycomb-memory skill plus /recall, /remember, and /forget slash commands. Also fixes packaging so the MCP server bundle ships inside the Claude Code plugin.
