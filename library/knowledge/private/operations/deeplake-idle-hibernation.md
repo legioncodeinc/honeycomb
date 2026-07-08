@@ -1,6 +1,6 @@
 # DeepLake Idle Connection Hibernation
 
-> Category: Operations | Version: 1.0 | Date: July 2026 | Status: Active
+> Category: Operations | Version: 1.1 | Date: July 2026 | Status: Active
 
 How the daemon takes its idle DeepLake compute bill to ~zero by pausing every background timer that touches DeepLake, letting the idle socket close and Activeloop scale the per-tenant compute pod to zero. This is the capstone of the idle-cost story: PRD-062 cut query volume and PRD-066 moved local coordination off DeepLake, but a fully idle daemon still re-touched the shared queue on the poll ceiling and kept the pod warm. Read this if you are diagnosing a per-hour idle compute floor that survives PRD-062, wiring a new daemon work loop that touches DeepLake on a timer, or reasoning about why `/health` does not wake the daemon.
 
@@ -58,6 +58,17 @@ The pollinating maintenance tick is the consolidation's key integration: it quer
 
 A single root middleware (`daemon.app.use("*", () => hibernation?.touch())`) records activity, so every capture, recall, hooks, MCP, and dashboard request resumes the fleet without instrumenting each handler. Background worker queries are not inbound requests, so they never spuriously keep the daemon awake. Only real agent activity does. A woken worker's adaptive loop snaps back to the fast floor on its first leased job, so active-session pickup latency is unchanged. The first post-wake query pays Activeloop's cold start (a few seconds to re-provision the pod); responses are simply slower at spin-up, which is the accepted trade for an idle cost of ~zero.
 
+### Diagnosing what keeps the pod warm: `HONEYCOMB_DEBUG_WAKE`
+
+Hibernation is default-on, so a truly idle daemon *should* stop touching DeepLake within the idle window and let the pod scale to zero. When an operator sees a per-hour idle floor survive anyway, the open question is always the same: **is hibernation firing, and if not, what keeps waking it?** The answer is rarely a background timer (those are all `Pausable` and cannot escape the controller); it is almost always some caller still hitting a **work-carrying** route on a short interval, doctor, a harness, or an MCP client.
+
+The `HONEYCOMB_DEBUG_WAKE` env flag (set to `1` or `true`) turns the wake middleware into a diagnostic: for every work-carrying request that resets the idle timer, the daemon logs a `hibernation.wake.request` event carrying the `method`, `path`, and `wasHibernated` of that request (added in [PR #269](https://github.com/legioncodeinc/honeycomb/pull/269), wired in [`assemble.ts`](../../../../src/daemon/runtime/assemble.ts)). The addition is zero-overhead when the flag is off and changes no behavior on the wake path; it only names the caller.
+
+The read is simple. Start the daemon with `HONEYCOMB_DEBUG_WAKE=1` (leave the hibernation master switch at its default-on), idle it (no capture, recall, or dashboard), and watch the event log:
+
+- **No `hibernation.wake.request` lines, and `deeplake.hibernated` fires after the idle window** means hibernation is working and the idle floor is coming from somewhere other than a waking route.
+- **Recurring lines every less-than-idle-window interval** name the exact `method` and `path` that keeps re-provisioning the pod. That caller, not the hibernation controller, is the real fix target (typically it should be moved to a non-waking liveness route, or stopped from polling a work-carrying surface).
+
 ### Liveness endpoints are deliberately non-waking
 
 `/health` and `/api/status` intentionally do **not** touch the controller, and this is load-bearing design, not an oversight. Monitoring pollers (including `honeycomb status` and `honeycomb daemon status`) hit `/health` on a short interval. If a liveness probe counted as activity, the idle window would never elapse, the pod would stay warm forever, and hibernation would never fire, which is exactly the cost bug the controller exists to fix. A hibernated daemon still answers `/health` from its cached health bit with no DeepLake round trip.
@@ -97,6 +108,7 @@ Transitions and handle failures emit through the daemon's structured logger:
 | `deeplake.woke` | An inbound request resumed every handle (field: `handles` count) |
 | `hibernate.pause.error` | A handle's `pause()` threw during the hibernate sweep (fields: `handle` label, `error`) |
 | `wake.resume.error` | A handle's `resume()` threw during the wake sweep (fields: `handle` label, `error`) |
+| `hibernation.wake.request` | Diagnostic only, gated on `HONEYCOMB_DEBUG_WAKE`: a work-carrying request reset the idle timer (fields: `method`, `path`, `wasHibernated`) |
 
 A throwing handle is logged with its label and skipped, never vanished, so a wedged worker is visible in the daemon log rather than silently stranding the rest of the sweep.
 

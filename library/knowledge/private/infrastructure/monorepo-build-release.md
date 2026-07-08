@@ -12,6 +12,7 @@ How Honeycomb compiles, bundles, and packages its monorepo core, the daemon, and
 - [`../operations/cli-command-architecture.md`](../operations/cli-command-architecture.md)
 - [`../integrations/mcp-and-sdk.md`](../integrations/mcp-and-sdk.md)
 - [`npm-publishing.md`](npm-publishing.md)
+- [`release-automation.md`](release-automation.md)
 
 ---
 

@@ -1,6 +1,6 @@
 # Harness Integration
 
-> Category: Integrations | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Integrations | Version: 1.1 | Date: July 2026 | Status: Active
 
 How Honeycomb plugs underneath coding harnesses: the install-time connector base, the per-harness shims, MCP-server-via-install, and the capability detection plus idempotent install/uninstall contract that wires 3 supported harnesses today (Claude Code, Codex, Cursor) while tracking Hermes, pi, and OpenClaw as in progress.
 
@@ -98,13 +98,34 @@ For harnesses that speak the Model Context Protocol, the Honeycomb MCP server is
 
 and the Hermes shim appends a user-visible mention so the agent knows the tools exist: `(Honeycomb MCP tools available: honeycomb_search, honeycomb_read, honeycomb_index.)`. The same `node mcp/bundle/server.js` stdio entry registers into the other MCP-speaking harnesses during their connect step. The tool surface, the read/resolve and search/mine clusters, and the registration mechanics are documented in [`mcp-and-sdk.md`](mcp-and-sdk.md).
 
+## The Claude Code plugin: packaging and delivery
+
+Claude Code is wired as a **marketplace plugin**, not raw `settings.json` hooks. A plugin is a self-contained tree, and everything the plugin declares has to actually ship in the npm tarball or the installed plugin is inert. Two PRDs closed the gap where declared components never reached users.
+
+**What the plugin declares (PRD-076b/c, [PR #271](https://github.com/legioncodeinc/honeycomb/pull/271)).** The Honeycomb MCP server is registered *inside the plugin tree* via a bundled `harnesses/claude-code/.mcp.json`, and the plugin also ships a `honeycomb-memory` **skill** (`harnesses/claude-code/skills/honeycomb-memory/SKILL.md`) plus three slash **commands**, `/recall`, `/remember`, and `/forget` (`harnesses/claude-code/commands/*.md`). These make recall and memory management first-class, discoverable surfaces in a Claude Code session rather than only CLI verbs.
+
+**The packaging bug and its guard (PRD-006a, [PR #274](https://github.com/legioncodeinc/honeycomb/pull/274)).** The declared components existed in the repo but were **not in the npm `files` allowlist**, so `npm i -g` shipped a plugin with no `.mcp.json`, no `skills/`, and no `commands/`, an installed-but-inert plugin. The fix adds `harnesses/claude-code/{.mcp.json,skills,commands}` (and the plugin-internal `harnesses/claude-code/mcp/bundle/server.js`, F-1 in #271) to the allowlist, and hardens `scripts/pack-check.mjs` into a **declaration-derived guard**: it reads the plugin's `.mcp.json` args and `hooks.json` handlers plus the conventional `skills/`/`commands/` dirs, and **fails the build** if any declared component is missing from the pack. The guard is proven to bite (removing a component fails `pack:check`), so a future declaration can never silently ship without its files. This is the packaging analogue of the `files`-allowlist discipline in [`../infrastructure/npm-publishing.md`](../infrastructure/npm-publishing.md).
+
+## Self-healing: reconcile and the `honeycomb harness` verbs
+
+An installed agent whose plugin is present but **not enabled** is a silent failure: capture and recall simply do not happen, and nothing tells the user. PRD-006 (PR #274) adds a self-healing path and an inspection surface.
+
+**Self-healing reconcile (006b).** `src/cli/harness-reconcile.ts`, fired via a new `onDaemonUp` seam, wires any harness whose agent is detected but whose plugin is not enabled. It reuses the existing `detectInstalledHarnesses` + `isPluginEnabled` + `createAutoWiring` over the real connector, so it is not a second install path, just the same wiring applied on a schedule. The gate order keeps steady state a cheap no-op (a fully-wired box reconciles to nothing), and every step is fail-soft.
+
+**Inspection and repair verbs (006c/d).** Three new verbs expose the wiring state and let a user fix it: `honeycomb harness status | connect | repair [--json]`. The Hive onboarding step and the dashboard harness card consume `harness status --json`, and `GET /api/diagnostics/harnesses` gained a `pluginEnabled` field (separate from "agent installed") fed by an injected seam.
+
+**The load-bearing tier constraint.** The daemon (Tier 2) may **not** import the connector composition (Tier 4). Both the reconcile and the status/repair surface therefore live at the **CLI tier** and are exposed to the daemon only through injected seams, never a direct Tier-2-to-Tier-4 import. Two documented consequences follow:
+
+- **W-1:** the recurring reconcile cadence is hosted in the short-lived CLI process (via `onDaemonUp` and each daemon-ensuring CLI verb), not a durable in-daemon idle loop; a persistent in-daemon loop is deferred because it needs a currently-forbidden contention-seam edit.
+- **W-2:** `GET /api/diagnostics/harnesses` `pluginEnabled` returns `false` in production because the resolver is not injected at the composition root. The **authoritative** value is `honeycomb harness status --json`; the dashboard/hive card must read the verb, not the endpoint field.
+
 ## Identity sync
 
 `AGENTS.md` in the workspace is the source of truth for operating instructions, and the daemon's file watcher syncs it into each harness's identity file (`~/.claude/CLAUDE.md`, the pi `AGENTS.md` block, and so on), each copy stamped do-not-edit. A manual re-sync is `POST /api/harnesses/regenerate`. The watcher behavior is documented in [`../architecture/daemon-surface.md`](../architecture/daemon-surface.md).
 
 ## Capture and recall, directly
 
-Beyond the hook lifecycle, a harness can call recall and remember directly through the CLI skills (`/recall`, `/remember`), the MCP tools, the SDK, or the virtual filesystem browse surface. These explicit calls bypass the inject-on-confidence rule, because the agent is asking rather than the daemon volunteering. The tool and SDK surfaces are documented in [`mcp-and-sdk.md`](mcp-and-sdk.md).
+Beyond the hook lifecycle, a harness can call recall and remember directly through the plugin slash commands (`/recall`, `/remember`, `/forget`) and the `honeycomb-memory` skill, the MCP tools, the SDK, or the virtual filesystem browse surface. These explicit calls bypass the inject-on-confidence rule, because the agent is asking rather than the daemon volunteering. The tool and SDK surfaces are documented in [`mcp-and-sdk.md`](mcp-and-sdk.md).
 
 ## The references gate
 

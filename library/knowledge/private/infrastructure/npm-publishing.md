@@ -6,6 +6,7 @@ How Honeycomb ships to npm as the scoped package `@legioncodeinc/honeycomb`, the
 
 **Related:**
 - [`monorepo-build-release.md`](monorepo-build-release.md)
+- [`release-automation.md`](release-automation.md), the AI-authored changeset + gated-publish layer that produces the tag this pipeline consumes
 - [`../operations/install-and-onboarding.md`](../operations/install-and-onboarding.md)
 - [`../operations/cli-command-architecture.md`](../operations/cli-command-architecture.md)
 - [`../security/secrets.md`](../security/secrets.md)

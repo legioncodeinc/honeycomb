@@ -1,6 +1,6 @@
 # Hook Lifecycle
 
-> Category: Integrations | Version: 1.1 | Date: July 2026 | Status: Active
+> Category: Integrations | Version: 1.2 | Date: July 2026 | Status: Active
 
 Which hook events fire on each of the six harnesses, what each hook does, and how the shared session-start seam returns recall first and then fire-and-forget auto-pulls both team skills and portable assets in the background, every hook a thin client that hands capture, recall, and pipeline work to the Honeycomb daemon.
 
@@ -85,7 +85,7 @@ The session-start core (`src/hooks/shared/session-start.ts`) runs once when the 
 3. `autoUpdate`, self-update if a newer plugin exists.
 4. Ensure the `memory` and `sessions` tables exist. **Gated** on `HONEYCOMB_CAPTURE !== "false"`.
 5. Write a placeholder summary row so the session is visible while in progress. **Gated** on capture.
-6. Render the rules/goals context block (read-only, runs regardless of the gate), then append the session-start memory-prime digest.
+6. Render the rules/goals context block (read-only, runs regardless of the gate), then append the session-start memory-prime digest and a short **recall-awareness notice** (PRD-075c): a one-line reminder that the model can pull deeper memory on demand, plus a `honeycomb recall "<query>"` sentinel it can invoke. The notice now renders unconditionally, so session-start assertions were updated to expect it (merge reconciliation R-1 in [PR #271](https://github.com/legioncodeinc/honeycomb/pull/271)).
 7. **Return the assembled context to the harness, routed through its channel**, as soon as the prime is ready.
 8. In the background (fire-and-forget, after the return): **auto-pull team skills** *and* **portable assets** (see below), and spawn the detached graph-pull worker for the next session's codebase context.
 
@@ -103,6 +103,18 @@ Step 8's background auto-pulls are the seam that makes team collaboration live. 
 - Both stamp tenancy headers (`x-honeycomb-org` / `x-honeycomb-workspace` / `x-honeycomb-actor`) from the credential. A signed-out session POSTs unscoped and the daemon fail-closes it to a no-op.
 
 This is why a teammate's freshly-mined skill or promoted asset becomes visible within seconds of publication. The skills loop is detailed in [`../collaboration/team-skills-sharing.md`](../collaboration/team-skills-sharing.md); the asset substrate it generalizes is in [`../collaboration/asset-sync-substrate.md`](../collaboration/asset-sync-substrate.md).
+
+### Prompt-time recall (always-on)
+
+Session-start priming is a once-per-session push. PRD-076a adds the **deterministic recall floor**: query-aware recall injected synchronously on **every** `UserPromptSubmit`, so a long session stays informed by the specific prompt in front of the model rather than only the stale session-start digest. A `prime-renderer` sibling (`src/hooks/shared/user-prompt-recall.ts`) POSTs the prompt to the existing hybrid `POST /api/memories/recall` and renders the result into the context channel before the turn runs. No new recall engine is involved; both arms reuse the same daemon recall verbatim.
+
+Three properties keep it safe to run on every prompt:
+
+- **Twice-registered hook.** `UserPromptSubmit` is registered for both capture and recall. Capture stays **async** (fire-and-forget, as it always was) so the recall injection is the only synchronous work added to the turn; the two do not serialize behind each other.
+- **Event-aware render.** `renderContext` knows which event it is rendering for, so the prompt-time recall block is shaped for a mid-session inject, not reusing the session-start digest layout.
+- **Throttle + ref-dedupe.** A throttle bounds how often recall fires, and a reference-dedupe store suppresses re-injecting a memory the session has already seen, so a repetitive prompt does not spam the context with the same rows. The dedupe store is written with tightened `0700`/`0600` permissions (the one Medium security finding on the PR, fixed in place).
+
+Recall is **fail-soft**: a daemon-down or non-200 recall is swallowed and the turn proceeds with no injected block, never blocked. At a mount without an embed client wired, `/memory/grep` recall runs the hybrid engine's lexical floor (`degraded:true`), matching the documented degrade-to-lexical posture; wiring the embed seam there is a recorded follow-up.
 
 ### Per-turn capture
 
@@ -123,6 +135,8 @@ The pre-tool-use core is the VFS intercept. It runs before tool execution and lo
 - `ls` becomes a path-prefix listing; `find` becomes a path-pattern query.
 
 Write and Edit on a memory path are denied with guidance to use the CLI instead. Commands the VFS cannot model (interpreters, pipes, command substitution) are rewritten to a harmless `echo`. The harnesses differ on coverage: Claude Code and Codex intercept Bash; Cursor normalizes its `Shell` tool to the canonical `Bash` shape so the same intercept applies; Hermes intercepts terminal tools only; pi and OpenClaw have no pre-tool intercept.
+
+**This path went live in PRD-075.** It was previously scaffolded but dormant. 075a wires the real daemon-backed `VfsIntercept` and propagates a `PreToolDecision` back out of the shared core, and 075b renders that decision into the Claude Code `PreToolUse` contract as a **block-and-inject**: `permissionDecision: "deny"` plus `hookSpecificOutput.additionalContext` carrying the recalled content, so the model's tool call is intercepted and the memory is handed back in one response. The rendered shape is pinned to the real Claude Code contract by conformance tests (`references/claude-code/pretool-response-schema.ts`) so a harness contract change cannot silently break the inject. This is the **model-commanded recall arm**: the model reaches for a memory path and the hook answers, complementary to the always-on prompt-time floor above.
 
 ```mermaid
 flowchart TD

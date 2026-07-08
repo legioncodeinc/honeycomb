@@ -1,6 +1,6 @@
 # Everyday use
 
-> Category: Guides | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Guides | Version: 1.1 | Date: July 2026 | Status: Active
 
 How Honeycomb fits into a normal day of coding: remembering and recalling, letting it work on its own, reading the dashboard, and the skills that travel with you.
 
@@ -28,12 +28,20 @@ honeycomb recall "staging database schedule"
 
 `remember` saves a note. `recall` pulls back whatever is relevant to your question. Recall matches both the words you used and, when enabled, the *meaning*, so you can find a note even if you would not have guessed its exact wording.
 
+Inside a supported assistant (like Claude Code) you have the same three actions as slash commands, without dropping to a terminal:
+
+- `/recall <question>` pulls back relevant memories.
+- `/remember <note>` pins something down.
+- `/forget <note>` drops a memory you no longer want.
+
+And you do not have to ask at all for the everyday case: as of the latest release, Honeycomb quietly checks your memory on **every** message and hands the assistant whatever is relevant to what you just typed, not only at the start of the session. If nothing relevant exists, it stays out of the way.
+
 ## Reading the dashboard
 
 Run `honeycomb dashboard` (or just keep the tab open) to see everything in one place:
 
 - **Home** gives you the at-a-glance picture: how much has been remembered, how things are trending, overall health.
-- **Harnesses** shows each AI assistant Honeycomb is connected to and whether its wiring is healthy.
+- **Harnesses** shows each AI assistant Honeycomb is connected to and whether its wiring is healthy. If one ever shows as connected but not fully working, `honeycomb harness repair` re-wires it, and `honeycomb harness status` prints the same picture in the terminal. Honeycomb also self-heals this on its own when the background helper starts, so most of the time you never need to run it.
 - **Memories** is your captured knowledge, browsable.
 - **Graph** is the map of your codebase you can explore.
 - **Sync** shows the skills and assets being shared, mined, and pulled.

@@ -1,6 +1,6 @@
 # DeepLake Storage
 
-> Category: Data | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Data | Version: 1.1 | Date: July 2026 | Status: Active
 
 The storage substrate: DeepLake as a GPU-backed SQL and vector store, the write patterns that sidestep its UPDATE quirk, the lazy schema-healing primitive, and the SQL-escaping rules that stand in for parameterized queries.
 
@@ -82,6 +82,16 @@ The contract has a few deliberate properties:
 - **Complementary to transport retry.** `StorageClient.query` already retries on transport failures (connection error, timeout, transient 5xx), a non-ok result. `readConverged` is different: it polls on *ok* results until a freshness predicate holds, the stale-segment under-report case where the read succeeded but the data is not yet fresh. A transport failure short-circuits naturally, because the predicate will not hold against a non-ok result.
 
 The seam is live and consumed where read-your-writes matters: asset-sync confirms a write through it, the dashboard sync API reads back convergently before reporting success, and the live integration tests poll through it instead of each re-deriving a loop. The same discipline appears in [`../operations/observability-and-degradation.md`](../operations/observability-and-degradation.md): a premature read is a degradation that must never pass silently.
+
+### Aggregates: poll-max, not predicate-stop
+
+`readConverged` has a predicate-stop shape: poll until a freshness predicate passes, then stop. That shape needs a monotone freshness signal to converge *on*, the watermark (id + version) a controlled write emits. An **aggregate read has no such signal**. A `COUNT(*)` or a `GROUP BY` count over a table like `sessions` returns a single number with no version or watermark attached, so no predicate can decide whether any one result is the fresh one or a stale-replica under-count. This is not the same problem `readConverged` solves, and it needs a different loop.
+
+The concrete failure it caused: the `turnsCaptured` count on `GET /api/diagnostics/harnesses` oscillated between the real value (~1800) and a stale under-count (18) on successive dashboard polls. DeepLake load-balances queries across backend nodes whose row counts for `sessions` are inconsistent, so a single `storage.query` per request randomly hit a "full" or a "partial" node. Measured directly, 8 of 10 rounds showed `GROUP BY` and `COUNT(*)` disagreeing on the same table (see [PR #264](https://github.com/legioncodeinc/honeycomb/pull/264)).
+
+The fix is a **poll-max** loop, `selectRowsConverged()` in [`harness-api.ts`](../../../../src/daemon/runtime/dashboard/harness-api.ts), which replaces the single read. It queries the activity `GROUP BY` up to a few times within a wall-clock budget and takes the **MAX** turn count (plus the latest timestamp) per `agent` across all polls. The correctness argument is that **staleness only ever under-reports**: the real count is always the higher number, because a lagging replica is missing rows, never inventing them. So the max across N polls converges on the truth without any freshness predicate to stop on, the loop simply spends its whole budget and keeps the best-seen value. Its degenerate cases are safe by the same logic: all-stale returns the best under-count seen (never zero), consistent data makes the max equal to a single read (no regression), and all-fail zeroes every harness (fail-soft preserved).
+
+Two env knobs bound the cost: `HONEYCOMB_HARNESS_ACTIVITY_POLLS` (default 3) caps the polls per request and `HONEYCOMB_HARNESS_ACTIVITY_BUDGET_MS` (default 1500) caps the wall clock. The added latency is ~150ms on a diagnostic endpoint polled every ~5s, an acceptable trade for a count that no longer flaps. The rule of thumb: **read-your-own-writes uses `readConverged` (predicate-stop on a watermark); replica-inconsistent aggregates use poll-max (best-of-N over a budget).**
 
 ## Lazy schema healing
 
