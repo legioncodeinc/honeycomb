@@ -39,6 +39,7 @@ import {
 	RECALL_BLOCK_HEADER,
 	RECALL_REMINDER,
 } from "../../../../src/hooks/shared/index.js";
+import { RECALL_AWARENESS_NOTICE } from "../../../../src/hooks/shared/session-start.js";
 import type { NotificationsPipeline } from "../../../../src/notifications/index.js";
 import {
 	assertClaudeCodeUserPromptResponse,
@@ -354,7 +355,7 @@ describe("a-AC-8: no session-start regression - the recall arm never runs on ses
 			hookSpecificOutput?: unknown;
 		};
 		expect(envelope.channel).toBe("model-only");
-		expect(envelope.additionalContext).toBe("RULES: be concise.");
+		expect(envelope.additionalContext).toBe(`RULES: be concise.\n\n${RECALL_AWARENESS_NOTICE}`);
 		expect(envelope.hookSpecificOutput, "session-start stays flat (no hookSpecificOutput)").toBeUndefined();
 	});
 });
