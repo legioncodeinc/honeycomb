@@ -1,0 +1,57 @@
+name: Release approve
+
+# The human gate for MINOR releases (spec #1). When GitHub user @thenotoriousllama
+# comments "Approved Release" (case-insensitive) on a PR, add the
+# `release-approved` label. release-gate.yaml then performs the minor bump.
+#
+# SECURITY: `issue_comment` is a PRIVILEGED trigger (it runs on the base repo
+# with secrets + a write token, even for comments on fork PRs). This workflow
+# therefore does NOT check out the PR or run ANY repo code — it only calls the
+# GitHub API to add a label and post an ack. All code execution (the bump) stays
+# in the unprivileged, pull_request-triggered release-gate.yaml. This is the
+# split that keeps CodeQL actions/untrusted-checkout clean.
+#
+# WHY RELEASE_PAT: the label is added with RELEASE_PAT (not GITHUB_TOKEN) because
+# a label change made by GITHUB_TOKEN would NOT re-trigger release-gate.yaml
+# (GitHub suppresses workflow events from the built-in token). RELEASE_PAT needs
+# `Pull requests: write` (to label + comment) in addition to `Contents: write`
+# (used by tag-on-merge.yaml). See RELEASE-AUTOMATION.md.
+
+on:
+  issue_comment:
+    types: [created, edited]
+
+concurrency:
+  group: release-approve-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+# No repo-code execution here; the default token needs nothing beyond read. The
+# label/comment writes are done with RELEASE_PAT, passed explicitly below.
+permissions:
+  contents: read
+
+env:
+  APPROVER: thenotoriousllama
+
+jobs:
+  approve:
+    if: ${{ github.event.issue.pull_request }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify approver + phrase, then label
+        uses: actions/github-script@v7.0.1
+        with:
+          github-token: ${{ secrets.RELEASE_PAT }}
+          script: |
+            const login = (context.payload.comment.user.login || '').toLowerCase();
+            const body = context.payload.comment.body || '';
+            if (login !== process.env.APPROVER.toLowerCase()) return;
+            if (!/approved release/i.test(body)) return;
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              labels: ['release-approved'] });
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              body: '✅ Approved — applying the minor bump. The release-gate check will go green; it publishes on merge.' });
