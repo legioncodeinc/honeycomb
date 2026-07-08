@@ -56,12 +56,12 @@ Gate for every implementation item: `npm run ci` (typecheck + jscpd dup + vitest
 
 | ID | Criterion (abridged) | Status | Owner | Evidence |
 |---|---|---|---|---|
-| 075a/a-AC-1 | `HookCoreDeps` gains a `vfs` seam; production deps wire the real `DeepLakeFs` intercept over loopback (not the fake) | OPEN | W1 ts-node | |
-| 075a/a-AC-2 | `runPreToolUse` resolves mount ops through `deps.vfs` (drop `void _deps`); recording double observes the `VfsToolOp` and its output becomes `replace.output` | OPEN | W1 ts-node | |
-| 075a/a-AC-3 | pre-tool-use dispatch returns `{ result, decision }`; `HookEventOutcome.decision` carries the `PreToolDecision` | OPEN | W1 ts-node | |
-| 075a/a-AC-4 | Off-mount pass-through unchanged: no `deps.vfs` call, returns `allow` (throwing double never invoked for `cat /etc/hosts`) | OPEN | W1 ts-node | |
-| 075a/a-AC-5 | Fail-soft: a throwing/timing-out `vfs.resolve` is absorbed to a fail-soft result, no `replace`, turn proceeds | OPEN | W1 ts-node | |
-| 075a/a-AC-6 | No behavior change to session-start/session-end/capture; their outcomes never carry a decision; existing runtime tests green | OPEN | W1 ts-node | |
+| 075a/a-AC-1 | `HookCoreDeps` gains a `vfs` seam; production deps wire the real intercept over loopback (not the fake) | DONE | W1 ts-node | `createDaemonVfsIntercept` in runtime.ts; test proves non-fake (real loopback fetch). SEE F-2: wired to `/memory/{cat,grep,ls,find}` browse routes, not `DeepLakeFs` |
+| 075a/a-AC-2 | `runPreToolUse` resolves mount ops through `deps.vfs` (drop `void _deps`); recording double observes the `VfsToolOp` and its output becomes `replace.output` | DONE | W1 ts-node | commit ba1f832; recording-double test |
+| 075a/a-AC-3 | pre-tool-use dispatch returns `{ result, decision }`; `HookEventOutcome.decision` carries the `PreToolDecision` | DONE | W1 ts-node | dispatch branch returns decision end-to-end |
+| 075a/a-AC-4 | Off-mount pass-through unchanged: no `deps.vfs` call, returns `allow` (throwing double never invoked for `cat /etc/hosts`) | DONE | W1 ts-node | throwing-double test at core + runtime level |
+| 075a/a-AC-5 | Fail-soft: a throwing/timing-out `vfs.resolve` is absorbed to a fail-soft result, no `replace`, turn proceeds | DONE | W1 ts-node | ~2s AbortController in runtime construction site; absorbed by dispatch try/catch |
+| 075a/a-AC-6 | No behavior change to session-start/session-end/capture; their outcomes never carry a decision; existing runtime tests green | DONE | W1 ts-node | combined `npm run ci` 4553 passed on feature branch |
 
 ### PRD-075b — Render the PreToolDecision (block-and-inject + conformance)
 
@@ -90,10 +90,10 @@ Gate for every implementation item: `npm run ci` (typecheck + jscpd dup + vitest
 | ID | Criterion (abridged) | Status | Owner | Evidence |
 |---|---|---|---|---|
 | 075/m-AC-1 | Mount-targeted read/search/list/find on `PreToolUse` resolves through the real `DeepLakeFs` (not the fake) | OPEN | W1/W2 | |
-| 075/m-AC-2 | `PreToolDecision` propagated out of `dispatchLifecycle` to the shim renderer | OPEN | W1/W2 | |
+| 075/m-AC-2 | `PreToolDecision` propagated out of `dispatchLifecycle` to the shim renderer | DONE | W1/W2 | propagation DONE by 075a (ba1f832); shim consumption is 075b |
 | 075/m-AC-3 | shim renders `replace` (block + deliver), `deny` (block + guidance), `rewrite` (harmless cmd), `allow` (pass-through) | OPEN | W2 | |
 | 075/m-AC-4 | Agent recall command returns daemon hybrid hits as the tool result; real FS never touched | OPEN | W2/W3 | |
-| 075/m-AC-5 | Off-mount `PreToolUse` byte-for-byte unchanged (allow, no daemon call, zero recall latency) | OPEN | W1 | |
+| 075/m-AC-5 | Off-mount `PreToolUse` byte-for-byte unchanged (allow, no daemon call, zero recall latency) | DONE | W1 | 075a throwing-double off-mount test |
 | 075/m-AC-6 | `SessionStart` appends the awareness notice; prime content otherwise unchanged; render never throws | OPEN | W3 | |
 | 075/m-AC-7 | `honeycomb recall "<query>"` Bash form → `search` verb, arg → query | OPEN | W3 | |
 | 075/m-AC-8 | Every recall path fail-soft: unreachable/timeout/error daemon → bounded "no memory available", never a thrown/blocked turn | OPEN | W2/W3 | |
@@ -154,13 +154,14 @@ Gate for every implementation item: `npm run ci` (typecheck + jscpd dup + vitest
 ## Wave log
 
 - **Setup (done):** submodule worktree created off `main`; PRD-075 (tracked) + PRD-076 (untracked, carried over) moved backlog → in-work; `main` working tree restored clean; `npm install` OK; ledger created.
-- **Wave 1:** 076b DONE + merged into feature branch (merge f216748, `npm run ci` 4538 passed). 075a in progress.
-- **Wave 2:** pending — 075b (harness), 076c (harness).
+- **Wave 1:** COMPLETE. 076b DONE + merged (f216748). 075a DONE + merged (d8628c4). Combined `npm run ci` on feature branch: 427 files, 4553 passed, 12 skipped, SQL-safety OK. Wave-1 worktrees removed.
+- **Wave 2:** in progress — 075b (harness/opus), 076c (harness/sonnet), off feature tip d8628c4. Briefs corrected: format only owned files (`npx biome format --write <files>`), never repo-wide `npm run format`.
 - **Wave 3:** pending — 076a (ts-node), 075c (ts-node).
 - **Close-out:** pending — security then quality.
 
 ## Follow-ups / handoffs
 
+- **F-2 (architecture, from 075a — quality review must reconcile):** the PRD names `DeepLakeFs` (`src/daemon-client/vfs/fs.ts`) as the real VFS seam, but wiring it needs a raw-SQL `DaemonDispatch` daemon endpoint that does not exist (its CONVENTIONS.md lists it deferred). 075a instead wired the real seam to the already-mounted `/memory/{cat,grep,ls,find}` browse routes (`src/daemon/runtime/vfs/api.ts`, PRD-022b) over loopback, same `memory`-table content, no new daemon endpoint, no cross-boundary edit. Documented, tested, `ci` green. Quality-worker-bee must confirm this satisfies 075/m-AC-1 + 075/m-AC-4 intent (real daemon-backed recall) despite deviating from the literal `DeepLakeFs` naming.
 - **F-1 (ci-release, from 076b):** the install-safe registration path `${CLAUDE_PLUGIN_ROOT}/mcp/bundle/server.js` requires the MCP bundle to physically ship INSIDE the plugin tree (`harnesses/claude-code/mcp/bundle/`). Today `mcp/bundle/server.js` builds to the repo root (gitignored, reaches the tarball via the `files` allowlist). The registration artifact + contract are correct as authored; the build-time bundle placement (esbuild output location + packaging) is a `ci-release` task, out of 076b's file ownership. Dispatch a `ci-release-worker-bee` before ship, or fold into close-out. Does not fail any 076b AC as written.
 
 ## Watchdog / termination log
