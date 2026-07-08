@@ -127,12 +127,12 @@ Gate for every implementation item: `npm run ci` (typecheck + jscpd dup + vitest
 
 | ID | Criterion (abridged) | Status | Owner | Evidence |
 |---|---|---|---|---|
-| 076c/c-AC-1 | `honeycomb-memory` skill bundled with valid frontmatter + a description targeting memory-relevant work | OPEN | W2 harness | |
-| 076c/c-AC-2 | Skill body instructs search-before-task (`hivemind_search`/`memory_search`), cite + zoom (`hivemind_read`), store-with-type (`memory_store`) | OPEN | W2 harness | |
-| 076c/c-AC-3 | `/recall`, `/remember`, `/forget` commands bundled with valid frontmatter | OPEN | W2 harness | |
-| 076c/c-AC-4 | `/forget` collects a `reason` (`memory_forget` requires one) | OPEN | W2 harness | |
-| 076c/c-AC-5 | Skill + commands in plugin-contract-correct dirs (confirmed vs references gate) so the loader discovers them | OPEN | W2 harness | |
-| 076c/c-AC-6 | Additive: `plugin.json`, hooks, and 076b registration unchanged by this sub-PRD | OPEN | W2 harness | |
+| 076c/c-AC-1 | `honeycomb-memory` skill bundled with valid frontmatter + a description targeting memory-relevant work | DONE | W2 harness | `skills/honeycomb-memory/SKILL.md`; commit 0b056b5 |
+| 076c/c-AC-2 | Skill body instructs search-before-task (`hivemind_search`/`memory_search`), cite + zoom (`hivemind_read`), store-with-type (`memory_store`) | DONE | W2 harness | body names all three tools + closed taxonomy |
+| 076c/c-AC-3 | `/recall`, `/remember`, `/forget` commands bundled with valid frontmatter | DONE | W2 harness | `commands/{recall,remember,forget}.md` |
+| 076c/c-AC-4 | `/forget` collects a `reason` (`memory_forget` requires one) | DONE | W2 harness | `forget.md` args `[path, reason]`, body refuses without reason |
+| 076c/c-AC-5 | Skill + commands in plugin-contract-correct dirs (confirmed vs references gate) so the loader discovers them | DONE | W2 harness | oracle `references/claude-code/plugin-skills-commands-schema.ts`; confirmed vs 2026 Claude Code plugin docs (auto-discovery, no manifest enumeration) |
+| 076c/c-AC-6 | Additive: `plugin.json`, hooks, and 076b registration unchanged by this sub-PRD | DONE | W2 harness | hooks + `.mcp.json` still conform; `plugin.json` untouched |
 
 ### PRD-076 — Module-level (index)
 
@@ -145,8 +145,8 @@ Gate for every implementation item: `npm run ci` (typecheck + jscpd dup + vitest
 | 076/m-AC-5 | `renderContext` per-event envelope (`hookSpecificOutput.hookEventName`) for both `SessionStart` + `UserPromptSubmit` | OPEN | W3 | |
 | 076/m-AC-6 | Per-turn injection throttled + deduped (no double-inject; per-turn budget) | OPEN | W3 | |
 | 076/m-AC-7 | Plugin registers the MCP server so `memory_search`/`hivemind_search`/`hivemind_read`/`memory_store` appear in the tool list | DONE | W1 | via 076b (`.mcp.json` merged f216748); see packaging follow-up F-1 |
-| 076/m-AC-8 | `honeycomb-memory` skill bundled, valid frontmatter, discoverable | OPEN | W2 | |
-| 076/m-AC-9 | `/recall`/`/remember`/`/forget` commands bundled with valid frontmatter | OPEN | W2 | |
+| 076/m-AC-8 | `honeycomb-memory` skill bundled, valid frontmatter, discoverable | DONE | W2 | via 076c (merged); auto-discovery confirmed |
+| 076/m-AC-9 | `/recall`/`/remember`/`/forget` commands bundled with valid frontmatter | DONE | W2 | via 076c (merged) |
 | 076/m-AC-10 | No PRD-075 surface touched by 076 (pre-tool path default-fake, no decision, no pre-tool renderer, session-start unchanged) | OPEN | W3 | |
 
 ---
@@ -155,7 +155,7 @@ Gate for every implementation item: `npm run ci` (typecheck + jscpd dup + vitest
 
 - **Setup (done):** submodule worktree created off `main`; PRD-075 (tracked) + PRD-076 (untracked, carried over) moved backlog → in-work; `main` working tree restored clean; `npm install` OK; ledger created.
 - **Wave 1:** COMPLETE. 076b DONE + merged (f216748). 075a DONE + merged (d8628c4). Combined `npm run ci` on feature branch: 427 files, 4553 passed, 12 skipped, SQL-safety OK. Wave-1 worktrees removed.
-- **Wave 2:** in progress — 075b (harness/opus), 076c (harness/sonnet), off feature tip d8628c4. Briefs corrected: format only owned files (`npx biome format --write <files>`), never repo-wide `npm run format`.
+- **Wave 2:** 076c DONE + merged (`npm run ci` 4584 passed; all-new files; `plugin.json` untouched via auto-discovery). 075b in progress. Note: 076c flagged two PRE-EXISTING flaky tests (`assemble.test.ts` timeout, `secrets/exec.test.ts` timing) that flake under full-suite CPU contention but pass in isolation, not caused by this work; give combined CI one retry on those per the-smoker flake rule.
 - **Wave 3:** pending — 076a (ts-node), 075c (ts-node).
 - **Close-out:** pending — security then quality.
 
