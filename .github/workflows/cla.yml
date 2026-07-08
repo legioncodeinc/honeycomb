@@ -47,6 +47,12 @@ jobs:
           path-to-signatures: "signatures/cla.json"
           path-to-document: "https://github.com/legioncodeinc/honeycomb/blob/main/CLA.md"
           branch: "cla-signatures"
-          allowlist: "dependabot[bot]"
+          # `release-bot` is the release-automation identity (commit email
+          # release-bot@users.noreply.github.com, which GitHub resolves to the
+          # handle `release-bot`). It authors the changeset/version-bump commits
+          # from release-gate.yaml, which are machine-generated and not covered
+          # by the CLA. The `*-release-bot` wildcard also covers the per-repo
+          # display names (honeycomb-release-bot, etc.).
+          allowlist: "dependabot[bot],release-bot,*-release-bot"
           custom-pr-sign-comment: "I have read the CLA Document and I hereby sign the CLA"
           custom-notsigned-prcomment: "Thanks for the PR. Before we can merge, please read our [CLA](https://github.com/legioncodeinc/honeycomb/blob/main/CLA.md) and sign it by posting the comment below."
