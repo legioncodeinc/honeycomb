@@ -57,6 +57,16 @@ export {
 } from "./daemon.js";
 export { createDispatcher, dispatch, parseInvocation, usageText } from "./dispatch.js";
 export {
+	CONNECT_STATUSES,
+	type ConnectSeamResult,
+	type ConnectStatus,
+	connectStatusLine,
+	type HarnessConnectionState,
+	type HarnessStatusRunner,
+	type RepairResult,
+	runHarnessVerb,
+} from "./harness-status.js";
+export {
 	DASHBOARD_PATH,
 	DASHBOARD_PORTAL_NOT_RUNNING_MESSAGE,
 	type DashboardOpener,

@@ -20,6 +20,7 @@
 import { DEFAULT_REF, loadOnboarding } from "../daemon/runtime/onboarding/index.js";
 import { type EmitDeps, emitTelemetry } from "../daemon/runtime/telemetry/index.js";
 import type { CommandDeps, CommandResult, OutputSink } from "./contracts.js";
+import type { HarnessStatusRunner } from "./harness-status.js";
 
 /** The parsed connector invocation handed to the 019a engine (`setup`/`connect`/`uninstall`). */
 export interface ConnectorVerbArgs {
@@ -91,6 +92,13 @@ export interface LocalDeps extends CommandDeps {
 	 * older connector-only tests still type-check; when unbound, `uninstall` reverses hooks only.
 	 */
 	readonly uninstallSteps?: UninstallLifecycleSteps;
+	/**
+	 * PRD-006c/006d: the coherent harness connect/status/repair surface the `harness` verb routes to.
+	 * Bound by `src/cli/runtime.ts` over the 006b reconcile (Tier 4). Optional so the older
+	 * connector-only handler tests still type-check; when unbound the verb reports the deferred-assembly
+	 * line and exits non-zero (it never throws).
+	 */
+	readonly harnessStatus?: HarnessStatusRunner;
 }
 
 /** Parse the harness slug (first non-flag word) off a connector verb's argv tail. */

@@ -36,6 +36,7 @@ import {
 	type DaemonLifecycle,
 	type DaemonStatus,
 	type DashboardLauncher,
+	type HarnessStatusRunner,
 	type OrgDriftHealer,
 	type StatusHealthSource,
 	type UninstallLifecycleSteps,
@@ -60,6 +61,7 @@ import { honeycombStateDir, legacyHoneycombDir, preferExistingPath, resolveFleet
 import { authMain } from "./auth.js";
 import { buildConnectorRunner } from "./connector-runner.js";
 import { createHarnessReconciler, type HarnessReconciler } from "./harness-reconcile.js";
+import { buildHarnessStatusRunner } from "./harness-status.js";
 import {
 	createDaemonServiceController,
 	type DaemonServiceController,
@@ -85,6 +87,12 @@ export interface RuntimeDeps extends CommandDeps {
 	readonly uninstallSteps: UninstallLifecycleSteps;
 	/** PRD-006b: the self-healing harness auto-wire reconciler (started on daemon-up; status read by 006c/006d). */
 	readonly reconcile: HarnessReconciler;
+	/**
+	 * PRD-006c/006d: the coherent harness connect/status/repair surface Hive shells (`honeycomb
+	 * harness <sub> --json`). Built over the 006b {@link reconcile} at this (Tier 4) tier - the daemon
+	 * (Tier 2) cannot host it (it cannot import the connector / `isPluginEnabled`).
+	 */
+	readonly harnessStatus: HarnessStatusRunner;
 }
 
 /** The daemon base URL the loopback client + health probe dial. */
@@ -703,6 +711,9 @@ export function buildRuntimeDeps(): RuntimeDeps {
 	// (no `claude` shell until a reconcile pass actually runs on start).
 	const reconcile = buildHarnessReconciler();
 	const lifecycle = buildDaemonLifecycle(daemon, { onDaemonUp: () => reconcile.start() });
+	// PRD-006c/006d: the connect/status/repair surface Hive shells, built over the SAME 006b reconcile
+	// (no forked wiring path). Constructing it is cheap (no `claude` shell until a verb runs a pass).
+	const harnessStatus = buildHarnessStatusRunner(reconcile);
 
 	return {
 		daemon,
@@ -717,6 +728,8 @@ export function buildRuntimeDeps(): RuntimeDeps {
 		uninstallSteps: buildUninstallLifecycleSteps(lifecycle),
 		// PRD-006b: the self-healing harness auto-wire reconcile (start-trigger wired above via onDaemonUp).
 		reconcile,
+		// PRD-006c/006d: the connect/status/repair surface (built over the 006b reconcile).
+		harnessStatus,
 	};
 }
 
