@@ -324,3 +324,36 @@ describe("resolveScopeFromDisk ignores a cache synced for a DIFFERENT workspace"
 		expect(result.bound).toBe(true);
 	});
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Windows drive-root binding — must NOT over-match every path on the drive
+//
+// REGRESSION: normalizePath stripped the trailing separator from a Windows drive
+// root `C:\` (length 3 > 1), collapsing it to `"C:"`. Then isPathPrefix("C:", <any C: path>)
+// matched EVERYTHING on the C: drive, so a binding to the drive root resolved
+// unrelated sibling folders (e.g. `C:\Users\me\docs`) to that project instead of
+// the inbox. The fix keeps a root's trailing separator. POSIX-only CI cannot hit
+// this (its root `/` is length 1 and already preserved), so skip there.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe.skipIf(process.platform !== "win32")(
+	"Windows drive-root binding does not over-match sibling folders",
+	() => {
+		it("a binding to the C:\\ drive root does NOT bind an unrelated sibling folder", () => {
+			const cache = cacheOf({ bindings: [{ path: "C:\\", projectId: "proj-drive-root" }] });
+			const sibling = "C:\\Users\\me\\docs";
+			const result = resolveScope({ cwd: sibling, cache });
+			// Bug: this resolved to "proj-drive-root". Correct: the sibling is NOT the
+			// drive root, so it falls to the inbox, unbound.
+			expect(result.projectId).toBe(UNSORTED_PROJECT_ID);
+			expect(result.bound).toBe(false);
+		});
+
+		it("a binding to the C:\\ drive root still binds the root path itself", () => {
+			const cache = cacheOf({ bindings: [{ path: "C:\\", projectId: "proj-drive-root" }] });
+			const result = resolveScope({ cwd: "C:\\", cache });
+			expect(result.projectId).toBe("proj-drive-root");
+			expect(result.bound).toBe(true);
+		});
+	},
+);
