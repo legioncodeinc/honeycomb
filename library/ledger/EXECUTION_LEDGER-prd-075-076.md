@@ -67,12 +67,12 @@ Gate for every implementation item: `npm run ci` (typecheck + jscpd dup + vitest
 
 | ID | Criterion (abridged) | Status | Owner | Evidence |
 |---|---|---|---|---|
-| 075b/b-AC-1 | Real Claude Code `PreToolUse` block-and-inject contract pinned + encoded as an executable oracle under `references/claude-code/`; conformance test parses the shim output against it | OPEN | W2 harness | |
-| 075b/b-AC-2 | `replace` renders to a `PreToolUse` response that (a) prevents the real tool and (b) delivers `output` to the model | OPEN | W2 harness | |
-| 075b/b-AC-3 | `deny` → block + guidance; `rewrite` → substituted command; `allow` → untouched pass-through; each tested | OPEN | W2 harness | |
-| 075b/b-AC-4 | E2E (shim + 075a runtime, daemon vfs faked): mount `Grep` produces a response that blocks the grep and carries the faked hits | OPEN | W2 harness | |
-| 075b/b-AC-5 | Cross-harness conformance suite stays green; a harness without the renderer is unaffected | OPEN | W2 harness | |
-| 075b/b-AC-6 | Fail-soft: absent decision / `allow` → pass-through, never a malformed block | OPEN | W2 harness | |
+| 075b/b-AC-1 | Real Claude Code `PreToolUse` block-and-inject contract pinned + encoded as an executable oracle under `references/claude-code/`; conformance test parses the shim output against it | DONE | W2 harness | `references/claude-code/pretool-response-schema.ts`; channel `deny+additionalContext` pinned vs 2026 docs (PreToolUse additionalContext, v2.1.9 #15664); negative controls bite. commit e4e116b |
+| 075b/b-AC-2 | `replace` renders to a `PreToolUse` response that (a) prevents the real tool and (b) delivers `output` to the model | DONE | W2 harness | `permissionDecision: "deny"` + `hookSpecificOutput.additionalContext`; serialized-stdout test |
+| 075b/b-AC-3 | `deny` → block + guidance; `rewrite` → substituted command; `allow` → untouched pass-through; each tested | DONE | W2 harness | deny→reason=guidance; rewrite→allow+updatedInput.command; allow→`{}`; render matrix |
+| 075b/b-AC-4 | E2E (shim + 075a runtime, daemon vfs faked): mount `Grep` produces a response that blocks the grep and carries the faked hits | DONE | W2 harness | E2E test: blocksTool + injectedContext |
+| 075b/b-AC-5 | Cross-harness conformance suite stays green; a harness without the renderer is unaffected | DONE | W2 harness | only claude-code carries `renderPreTool`; codex unaffected; suite green |
+| 075b/b-AC-6 | Fail-soft: absent decision / `allow` → pass-through, never a malformed block | DONE | W2 harness | absent decision + allow → benign `{}` ack |
 
 ### PRD-075c — SessionStart Recall-Awareness Notice + `honeycomb recall` sentinel
 
@@ -91,12 +91,12 @@ Gate for every implementation item: `npm run ci` (typecheck + jscpd dup + vitest
 |---|---|---|---|---|
 | 075/m-AC-1 | Mount-targeted read/search/list/find on `PreToolUse` resolves through the real `DeepLakeFs` (not the fake) | OPEN | W1/W2 | |
 | 075/m-AC-2 | `PreToolDecision` propagated out of `dispatchLifecycle` to the shim renderer | DONE | W1/W2 | propagation DONE by 075a (ba1f832); shim consumption is 075b |
-| 075/m-AC-3 | shim renders `replace` (block + deliver), `deny` (block + guidance), `rewrite` (harmless cmd), `allow` (pass-through) | OPEN | W2 | |
-| 075/m-AC-4 | Agent recall command returns daemon hybrid hits as the tool result; real FS never touched | OPEN | W2/W3 | |
+| 075/m-AC-3 | shim renders `replace` (block + deliver), `deny` (block + guidance), `rewrite` (harmless cmd), `allow` (pass-through) | DONE | W2 | 075b renderer + render-matrix tests |
+| 075/m-AC-4 | Agent recall command returns daemon hybrid hits as the tool result; real FS never touched | DONE | W2 | mount `Grep` E2E (075a+075b) blocks + carries hits; sentinel variant is m-AC-7 (075c) |
 | 075/m-AC-5 | Off-mount `PreToolUse` byte-for-byte unchanged (allow, no daemon call, zero recall latency) | DONE | W1 | 075a throwing-double off-mount test |
 | 075/m-AC-6 | `SessionStart` appends the awareness notice; prime content otherwise unchanged; render never throws | OPEN | W3 | |
 | 075/m-AC-7 | `honeycomb recall "<query>"` Bash form → `search` verb, arg → query | OPEN | W3 | |
-| 075/m-AC-8 | Every recall path fail-soft: unreachable/timeout/error daemon → bounded "no memory available", never a thrown/blocked turn | OPEN | W2/W3 | |
+| 075/m-AC-8 | Every recall path fail-soft: unreachable/timeout/error daemon → bounded "no memory available", never a thrown/blocked turn | DONE | W2/W3 | 075a ~2s abort + absorbed throw; 075b absent-decision → benign ack |
 | 075/m-AC-9 | `UserPromptSubmit` stays async capture-only; `PostToolUse`/`Stop`/`SubagentStop` capture unchanged; conformance suite green | OPEN | W2/W3 | |
 
 ### PRD-076a — Always-On Query-Aware Recall on `UserPromptSubmit`
@@ -156,7 +156,8 @@ Gate for every implementation item: `npm run ci` (typecheck + jscpd dup + vitest
 - **Setup (done):** submodule worktree created off `main`; PRD-075 (tracked) + PRD-076 (untracked, carried over) moved backlog → in-work; `main` working tree restored clean; `npm install` OK; ledger created.
 - **Wave 1:** COMPLETE. 076b DONE + merged (f216748). 075a DONE + merged (d8628c4). Combined `npm run ci` on feature branch: 427 files, 4553 passed, 12 skipped, SQL-safety OK. Wave-1 worktrees removed.
 - **Wave 2:** 076c DONE + merged (`npm run ci` 4584 passed; all-new files; `plugin.json` untouched via auto-discovery). 075b in progress. Note: 076c flagged two PRE-EXISTING flaky tests (`assemble.test.ts` timeout, `secrets/exec.test.ts` timing) that flake under full-suite CPU contention but pass in isolation, not caused by this work; give combined CI one retry on those per the-smoker flake rule.
-- **Wave 3:** pending — 076a (ts-node), 075c (ts-node).
+- **Wave 2:** COMPLETE. 075b DONE + merged (cd72728); 076c DONE + merged. Combined `npm run ci` (075a+076b+076c+075b): 429 files, 4599 passed, 12 skipped, SQL-safety OK, no flakes. Aikido scan on 075b: 0 findings. Wave-2 worktrees removed.
+- **Wave 3:** in progress — 076a (ts-node/opus, the big always-on integration), 075c (ts-node/sonnet, notice+sentinel), off feature tip cd72728. Format-only-owned-files brief applied.
 - **Close-out:** pending — security then quality.
 
 ## Follow-ups / handoffs
