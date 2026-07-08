@@ -413,6 +413,18 @@ export interface HookCoreDeps {
 	readonly credentials: CredentialReader;
 	/** Renders the read-only context block (FR-3 / FR-10). */
 	readonly context: ContextRenderer;
+	/**
+	 * The pre-tool-use VFS intercept (PRD-075a a-AC-1). OPTIONAL so every existing
+	 * `HookCoreDeps` literal across the other four cores (session-start / capture /
+	 * session-end / context-renderer tests) stays unchanged — only `pre-tool-use.ts`
+	 * reads this field, falling back to its own `vfs` PARAMETER default when this is
+	 * absent (the isolated-unit-test path). The real runtime construction
+	 * (`runtime.ts`'s `createHookRuntime`) ALWAYS populates this with the real
+	 * daemon-backed intercept, rebound to each pre-tool-use event's own session before
+	 * dispatch; `createFakeVfsIntercept()` backs ONLY the function-parameter default,
+	 * never this field, in production.
+	 */
+	readonly vfs?: VfsIntercept;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
