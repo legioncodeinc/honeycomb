@@ -515,8 +515,15 @@ export interface ResolveScopeInput {
 function normalizePath(p: string): string {
 	const abs = resolve(p);
 	// Strip a trailing separator so `~/work/api/` and `~/work/api` compare equal,
-	// but keep a root path's separator (e.g. `C:\` / `/`).
-	if (abs.length > 1 && abs.endsWith(sep)) return abs.slice(0, -1);
+	// but KEEP a root path's separator (e.g. `C:\` / `/`). A root has NO separator
+	// LEFT after stripping the trailing one (a drive root `C:\` becomes just `C:`),
+	// so re-keep it; otherwise strip (the common case of a nested folder). Without
+	// this, `C:\` normalizes to `C:` and over-matches every path on the drive.
+	if (abs.length > 1 && abs.endsWith(sep)) {
+		const stripped = abs.slice(0, -1);
+		if (stripped.length === 0 || !stripped.includes(sep)) return abs;
+		return stripped;
+	}
 	return abs;
 }
 
