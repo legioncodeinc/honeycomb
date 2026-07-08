@@ -49,6 +49,7 @@ if (hits.length) {
 const REQUIRED = [
   /(^|\/)bundle\/cli\.js$/, // the `honeycomb` bin
   /(^|\/)daemon\/index\.js$/, // the daemon entry the CLI spawns
+  /(^|\/)harnesses\/claude-code\/mcp\/bundle\/server\.js$/, // Claude Code plugin-internal MCP server path
   /(^|\/)assets\/styles\.css$/, // resolveAssetsDir() locator
   /(^|\/)assets\/tokens\/base\.css$/, // the DS token CSS the dashboard serves
   /(^|\/)assets\/logos\/honeycomb-memory-cluster\.svg$/, // the brand mark the header renders

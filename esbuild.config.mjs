@@ -292,19 +292,30 @@ stampExecutable("harnesses/openclaw/dist/index.js");
 
 // ---------------------------------------------------------------------------
 // 4. MCP server (stdio). Thin client; Node hash-bang so it runs directly.
+//    PRD-076b Claude plugin registration points at
+//    ${CLAUDE_PLUGIN_ROOT}/mcp/bundle/server.js, so we emit the server into:
+//      - repo-root mcp/bundle (shared MCP distribution path)
+//      - plugin-internal harnesses/claude-code/mcp/bundle (install-safe path)
 // ---------------------------------------------------------------------------
-await build({
-  entryPoints: { server: "dist/mcp/src/index.js" },
-  bundle: true,
-  platform: "node",
-  format: "esm",
-  outdir: "mcp/bundle",
-  external: THIN_CLIENT_EXTERNAL,
-  banner: { js: "#!/usr/bin/env node" },
-  define: VERSION_DEFINE,
-});
-stampExecutable("mcp/bundle/server.js");
-stampEsm("mcp/bundle");
+const MCP_SERVER_OUTDIRS = [
+  "mcp/bundle",
+  "harnesses/claude-code/mcp/bundle",
+];
+
+for (const outdir of MCP_SERVER_OUTDIRS) {
+  await build({
+    entryPoints: { server: "dist/mcp/src/index.js" },
+    bundle: true,
+    platform: "node",
+    format: "esm",
+    outdir,
+    external: THIN_CLIENT_EXTERNAL,
+    banner: { js: "#!/usr/bin/env node" },
+    define: VERSION_DEFINE,
+  });
+  stampExecutable(`${outdir}/server.js`);
+  stampEsm(outdir);
+}
 
 // ---------------------------------------------------------------------------
 // 4b. @legioncodeinc/honeycomb SDK (PRD-019e) — the fetch-only typed client + 3 framework
@@ -377,5 +388,5 @@ stampExecutable("embeddings/embed-daemon.js");
 // scripts/pack-check.mjs runs build via prepack) don't get log noise mixed
 // into their JSON data pipe.
 console.error(
-  `Built: 1 daemon + ${HOOK_HARNESSES.length} hook-harness + 1 OpenClaw + 1 MCP + ${SDK_ENTRIES.length} SDK + 1 CLI + 1 embed-daemon bundle @ ${HONEYCOMB_VERSION}`,
+  `Built: 1 daemon + ${HOOK_HARNESSES.length} hook-harness + 1 OpenClaw + ${MCP_SERVER_OUTDIRS.length} MCP + ${SDK_ENTRIES.length} SDK + 1 CLI + 1 embed-daemon bundle @ ${HONEYCOMB_VERSION}`,
 );
