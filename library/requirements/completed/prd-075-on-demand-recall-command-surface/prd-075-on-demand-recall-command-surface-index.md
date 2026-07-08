@@ -1,6 +1,6 @@
 # PRD-075: On-Demand Recall Command Surface — Make Honeycomb Recall LLM-Commandable
 
-> **Status:** In-work
+> **Status:** Completed
 > **Priority:** P1 (recall today is either a blind session-start dump or nothing; the highest-signal recall — keyed on what the agent is actually doing mid-task — is architecturally present but unwired, so the memory layer's core value is under-delivered)
 > **Effort:** L (~1-2d)
 > **Schema changes:** None. No catalog columns, no DDL. Pure hook-runtime + shim wiring plus one `SessionStart` context string.

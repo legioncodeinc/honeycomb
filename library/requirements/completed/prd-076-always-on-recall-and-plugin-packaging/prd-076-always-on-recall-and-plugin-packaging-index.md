@@ -1,6 +1,6 @@
 # PRD-076: Always-On Memory Recall + Claude Code Plugin Packaging
 
-> **Status:** In-work
+> **Status:** Completed
 > **Priority:** P1 (per-turn recall is the highest-value memory surface and it does not exist: today the ONLY context injection is at `SessionStart`, before any query, so every turn after the first gets zero recall and zero reminder. The daemon's hybrid recall and a full MCP tool surface both already exist but are unreachable from a Claude Code session, so the memory layer's value is under-delivered on exactly the turns that carry a real query.)
 > **Effort:** L (~1-2d)
 > **Schema changes:** None. No catalog columns, no DDL. Pure hook-runtime + shim wiring, plugin manifest/packaging (a bundled `.mcp.json`, a `skills/` dir, a `commands/` dir), and one query-aware renderer that reuses the existing daemon `/api/memories/recall` route.
