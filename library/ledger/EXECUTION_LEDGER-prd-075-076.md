@@ -116,12 +116,12 @@ Gate for every implementation item: `npm run ci` (typecheck + jscpd dup + vitest
 
 | ID | Criterion (abridged) | Status | Owner | Evidence |
 |---|---|---|---|---|
-| 076b/b-AC-1 | Plugin MCP-registration mechanism pinned vs references gate + encoded as an oracle under `references/claude-code/` | OPEN | W1 harness | |
-| 076b/b-AC-2 | Plugin registers a `honeycomb` MCP server pointing at built `mcp/bundle/server.js` (mirrors hermes shape + its conformance test) | OPEN | W1 harness | |
-| 076b/b-AC-3 | Registration `args` path resolves relative to installed plugin root (`${CLAUDE_PLUGIN_ROOT}` or plugin-relative), install-safe | OPEN | W1 harness | |
-| 076b/b-AC-4 | Launched server lists the existing `TOOL_NAMES` unchanged (no tools added/removed) | OPEN | W1 harness | |
-| 076b/b-AC-5 | `plugin.json` + hooks bundle otherwise unchanged (7 lifecycle events still register); registration is additive | OPEN | W1 harness | |
-| 076b/b-AC-6 | If manifest version single-sourced, registration stays version-consistent (no drift) | OPEN | W1 harness | |
+| 076b/b-AC-1 | Plugin MCP-registration mechanism pinned vs references gate + encoded as an oracle under `references/claude-code/` | DONE | W1 harness | `references/claude-code/mcp-registration-schema.ts`; bundled `.mcp.json` mechanism confirmed vs 2026 Claude Code docs (path-traversal rule + issue #16143 rules out inline) |
+| 076b/b-AC-2 | Plugin registers a `honeycomb` MCP server pointing at built `mcp/bundle/server.js` (mirrors hermes shape + its conformance test) | DONE | W1 harness | `harnesses/claude-code/.mcp.json` stdio server `honeycomb`; commit 120eb21 |
+| 076b/b-AC-3 | Registration `args` path resolves relative to installed plugin root (`${CLAUDE_PLUGIN_ROOT}` or plugin-relative), install-safe | DONE | W1 harness | `${CLAUDE_PLUGIN_ROOT}/mcp/bundle/server.js`; `isInstallSafePluginPath` rejects `../`/absolute/repo-relative |
+| 076b/b-AC-4 | Launched server lists the existing `TOOL_NAMES` unchanged (no tools added/removed) | DONE | W1 harness | static parity vs `mcp/src/tools.ts` (19-tool surface); no `mcp/src` change |
+| 076b/b-AC-5 | `plugin.json` + hooks bundle otherwise unchanged (7 lifecycle events still register); registration is additive | DONE | W1 harness | `hooks.json` still conforms to `hooks-schema.ts`; no inline `mcpServers` |
+| 076b/b-AC-6 | If manifest version single-sourced, registration stays version-consistent (no drift) | DONE | W1 harness | `.mcp.json` carries no version; manifests match root package.json; no sync-versions change |
 
 ### PRD-076c — Bundle a Memory Skill + Slash Commands
 
@@ -144,7 +144,7 @@ Gate for every implementation item: `npm run ci` (typecheck + jscpd dup + vitest
 | 076/m-AC-4 | Existing `UserPromptSubmit` capture still happens (turn stored) | OPEN | W3 | |
 | 076/m-AC-5 | `renderContext` per-event envelope (`hookSpecificOutput.hookEventName`) for both `SessionStart` + `UserPromptSubmit` | OPEN | W3 | |
 | 076/m-AC-6 | Per-turn injection throttled + deduped (no double-inject; per-turn budget) | OPEN | W3 | |
-| 076/m-AC-7 | Plugin registers the MCP server so `memory_search`/`hivemind_search`/`hivemind_read`/`memory_store` appear in the tool list | OPEN | W1 | |
+| 076/m-AC-7 | Plugin registers the MCP server so `memory_search`/`hivemind_search`/`hivemind_read`/`memory_store` appear in the tool list | DONE | W1 | via 076b (`.mcp.json` merged f216748); see packaging follow-up F-1 |
 | 076/m-AC-8 | `honeycomb-memory` skill bundled, valid frontmatter, discoverable | OPEN | W2 | |
 | 076/m-AC-9 | `/recall`/`/remember`/`/forget` commands bundled with valid frontmatter | OPEN | W2 | |
 | 076/m-AC-10 | No PRD-075 surface touched by 076 (pre-tool path default-fake, no decision, no pre-tool renderer, session-start unchanged) | OPEN | W3 | |
@@ -154,11 +154,15 @@ Gate for every implementation item: `npm run ci` (typecheck + jscpd dup + vitest
 ## Wave log
 
 - **Setup (done):** submodule worktree created off `main`; PRD-075 (tracked) + PRD-076 (untracked, carried over) moved backlog → in-work; `main` working tree restored clean; `npm install` OK; ledger created.
-- **Wave 1:** pending dispatch — 075a (ts-node), 076b (harness).
+- **Wave 1:** 076b DONE + merged into feature branch (merge f216748, `npm run ci` 4538 passed). 075a in progress.
 - **Wave 2:** pending — 075b (harness), 076c (harness).
 - **Wave 3:** pending — 076a (ts-node), 075c (ts-node).
 - **Close-out:** pending — security then quality.
 
+## Follow-ups / handoffs
+
+- **F-1 (ci-release, from 076b):** the install-safe registration path `${CLAUDE_PLUGIN_ROOT}/mcp/bundle/server.js` requires the MCP bundle to physically ship INSIDE the plugin tree (`harnesses/claude-code/mcp/bundle/`). Today `mcp/bundle/server.js` builds to the repo root (gitignored, reaches the tarball via the `files` allowlist). The registration artifact + contract are correct as authored; the build-time bundle placement (esbuild output location + packaging) is a `ci-release` task, out of 076b's file ownership. Dispatch a `ci-release-worker-bee` before ship, or fold into close-out. Does not fail any 076b AC as written.
+
 ## Watchdog / termination log
 
-- (none yet)
+- W1 watchdogs: 076b committed within ~6-10 min (healthy). 075a produced no commits/working-tree changes through ~10 min; tight watchdog armed to terminate + decompose if still empty.
