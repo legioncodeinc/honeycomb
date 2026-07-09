@@ -1,0 +1,359 @@
+/**
+ * PRD-077b — hot-lane isolation + load-shedding + server-side deadlines (L-B1..B3, L-B5, L-B7, L-B8).
+ *
+ * Verification posture (mirrors `recall-concurrency.test.ts` for the gated-storage + injected-
+ * Semaphore pattern):
+ *   - The recall engines are driven against a FAKE `StorageQuery`. No live DeepLake.
+ *   - The fast lane (`recallFast`) is a DEDICATED `Semaphore` independent of the shared/heavy pool,
+ *     bounded by a server-side deadline (`AbortSignal.timeout` threaded into every arm's query), and
+ *     load-shed past a waiter-depth threshold. The heavy path keeps the shared pool and gains a
+ *     generous deadline only (D-4) — it is NEVER shed.
+ *   - Deadlines/thresholds are read from `amplificationConfig()`; a test overrides them via env +
+ *     `resetAmplificationConfigCache()` (the documented test seam) and resets the lanes.
+ *   - No `.skip` / `.only`; `vitest run` is CI.
+ */
+
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import type { QueryScope, StorageQuery, QueryOptions } from "../../../../src/daemon/storage/client.js";
+import { ok, queryError, type QueryResult, type StorageRow } from "../../../../src/daemon/storage/result.js";
+import {
+	recallFast,
+	recallMemories,
+	resetFastRecallPool,
+	resetSharedRecallPool,
+} from "../../../../src/daemon/runtime/memories/recall.js";
+import { Semaphore } from "../../../../src/daemon/runtime/memories/bounded-pool.js";
+import {
+	DEFAULT_RECALL_MAX_CONCURRENCY,
+	resetAmplificationConfigCache,
+} from "../../../../src/daemon/runtime/memories/amplification-config.js";
+import { EMBEDDING_DIMS } from "../../../../src/daemon/storage/vector.js";
+import type { EmbedClient } from "../../../../src/daemon/runtime/services/embed-client.js";
+
+const SCOPE: QueryScope = { org: "fake-org", workspace: "fake-ws" };
+const VALID_QUERY_VECTOR: readonly number[] = new Array(EMBEDDING_DIMS).fill(0.05) as number[];
+
+function fakeEmbed(result: readonly number[] | null): EmbedClient {
+	return {
+		async embed(): Promise<readonly number[] | null> {
+			return result;
+		},
+	};
+}
+
+/** The `'<x>' AS source` literal an arm carries (used to route per-arm rows). */
+function sourceLitOf(sql: string): string {
+	const m = sql.match(/'(memories|memory|sessions|hive_graph_versions)'\s+AS\s+source/i);
+	return m ? m[1]!.toLowerCase() : "";
+}
+/** True when the statement is a lexical arm (no `<#>` cosine match). */
+function isLexical(sql: string): boolean {
+	return !/<#>/.test(sql);
+}
+function memoriesRow(id: string, text: string, createdAt = ""): StorageRow {
+	return { source: "memories", id, text, created_at: createdAt };
+}
+function sessionsRow(id: string, text: string, createdAt = ""): StorageRow {
+	return { source: "sessions", id, text, created_at: createdAt };
+}
+
+/** A storage whose every query HANGS until the caller's deadline `opts.signal` aborts it. */
+function hangingStorage(): { storage: StorageQuery } {
+	const storage: StorageQuery = {
+		async query(_sql: string, _scope: QueryScope, opts?: QueryOptions): Promise<QueryResult> {
+			return new Promise<QueryResult>((resolve) => {
+				opts?.signal?.addEventListener("abort", () => resolve(queryError("aborted by deadline signal")), {
+					once: true,
+				});
+			});
+		},
+	};
+	return { storage };
+}
+
+/** A gated storage that counts peak in-flight queries and parks until released (for cap assertions). */
+function gatedStorage(): { storage: StorageQuery; peak: () => number; release: () => void } {
+	let inFlight = 0;
+	let peak = 0;
+	let released = false;
+	const gates: Array<() => void> = [];
+	const storage: StorageQuery = {
+		async query(): Promise<QueryResult> {
+			inFlight += 1;
+			peak = Math.max(peak, inFlight);
+			if (!released) await new Promise<void>((resolve) => gates.push(resolve));
+			inFlight -= 1;
+			return ok([], 0);
+		},
+	};
+	return {
+		storage,
+		peak: () => peak,
+		release: () => {
+			released = true;
+			while (gates.length > 0) gates.shift()?.();
+		},
+	};
+}
+
+const ORIGINAL_ENV = { ...process.env };
+
+afterEach(() => {
+	// Restore any env knob a test mutated, then rebuild the config + both lanes from a clean slate.
+	for (const k of [
+		"HONEYCOMB_RECALL_FAST_DEADLINE_MS",
+		"HONEYCOMB_RECALL_FAST_SHED_QUEUE_DEPTH",
+		"HONEYCOMB_RECALL_HEAVY_DEADLINE_MS",
+		"HONEYCOMB_RECALL_FAST_MAX_CONCURRENCY",
+	]) {
+		if (ORIGINAL_ENV[k] === undefined) delete process.env[k];
+		else process.env[k] = ORIGINAL_ENV[k];
+	}
+	resetAmplificationConfigCache();
+	resetFastRecallPool();
+	resetSharedRecallPool();
+});
+
+// ── L-B1 (b-AC-1): the fast lane is independent of a saturated shared/heavy pool ──
+
+describe("L-B1 (b-AC-1): a fast recall acquires its own lane even when the shared pool is saturated", () => {
+	it("completes on the dedicated fast lane while a control routed through the saturated pool blocks forever", async () => {
+		resetAmplificationConfigCache();
+		resetFastRecallPool();
+
+		// A fully-saturated shared/heavy pool: hold its ONE slot and never release it.
+		const shared = new Semaphore(1);
+		await shared.acquire();
+		expect(shared.inFlight).toBe(1);
+
+		const storage: StorageQuery = {
+			async query(sql: string): Promise<QueryResult> {
+				return isLexical(sql) && sourceLitOf(sql) === "memories"
+					? ok([memoriesRow("m1", "a widget fact")], 1)
+					: ok([], 0);
+			},
+		};
+
+		// CONTROL: a fast recall FORCED onto the saturated shared pool — its 7 arms park forever.
+		let controlDone = false;
+		void recallFast(
+			{ query: "widgets", scope: SCOPE },
+			{ storage, embed: fakeEmbed(VALID_QUERY_VECTOR), recallPool: shared },
+		).then(() => {
+			controlDone = true;
+		});
+
+		// REAL: a fast recall on the DEDICATED lane (no injected pool) — it must complete despite the
+		// shared pool being saturated, proving the lane is independent.
+		const fast = await recallFast(
+			{ query: "widgets", scope: SCOPE },
+			{ storage, embed: fakeEmbed(VALID_QUERY_VECTOR) },
+		);
+
+		expect(fast.hits.map((h) => h.id)).toEqual(["m1"]);
+		// The control (on the saturated shared pool) is still parked — the fast lane did not touch it.
+		await Promise.resolve();
+		expect(controlDone).toBe(false);
+		expect(shared.inFlight).toBe(1); // still fully held; the fast lane consumed none of its slots.
+	});
+});
+
+// ── L-B2 (b-AC-2): the fast-lane server-side deadline aborts + frees the slot ──
+
+describe("L-B2 (b-AC-2): a fast recall past the server-side deadline returns degraded-empty and frees its slot", () => {
+	it("a hanging storage stub is aborted daemon-side at the deadline; the handler returns within it and the slot is reusable", async () => {
+		process.env.HONEYCOMB_RECALL_FAST_DEADLINE_MS = "50";
+		resetAmplificationConfigCache();
+		resetFastRecallPool();
+
+		const pool = new Semaphore(8);
+		const { storage } = hangingStorage();
+
+		const startedAt = Date.now();
+		const result = await recallFast(
+			{ query: "widgets", scope: SCOPE },
+			{ storage, embed: fakeEmbed(VALID_QUERY_VECTOR), recallPool: pool },
+		);
+		const elapsedMs = Date.now() - startedAt;
+
+		// Returned a fail-soft empty degraded result, WITHIN the deadline (well under the 3000ms default).
+		expect(result).toEqual({ hits: [], sources: [], degraded: true });
+		expect(elapsedMs).toBeLessThan(1000);
+		// Every fast-lane slot was released when its arm's query resolved (aborted) — the lane is drained.
+		expect(pool.inFlight).toBe(0);
+		expect(pool.waiting).toBe(0);
+		// The freed slot is reusable by the next acquire (no leaked permit).
+		await pool.acquire();
+		expect(pool.inFlight).toBe(1);
+		pool.release();
+	});
+});
+
+// ── L-B3 (b-AC-3): queue-depth load-shedding on the fast lane only ──
+
+describe("L-B3 (b-AC-3): past the shed queue-depth, a fast recall sheds without issuing a query", () => {
+	it("sheds promptly (query stub NOT called), returns degraded-empty, and emits recall.shed with NO query text", async () => {
+		process.env.HONEYCOMB_RECALL_FAST_SHED_QUEUE_DEPTH = "2";
+		resetAmplificationConfigCache();
+		resetFastRecallPool();
+
+		// Drive the fast lane's waiter backlog above the threshold (2): hold the one slot, park 3 waiters.
+		const pool = new Semaphore(1);
+		await pool.acquire();
+		void pool.acquire();
+		void pool.acquire();
+		void pool.acquire();
+		expect(pool.waiting).toBe(3);
+
+		const query = vi.fn(async (): Promise<QueryResult> => ok([], 0));
+		const onShed = vi.fn();
+		const result = await recallFast(
+			{ query: "super-secret widget query", scope: SCOPE },
+			{ storage: { query }, embed: fakeEmbed(VALID_QUERY_VECTOR), recallPool: pool, onShed },
+		);
+
+		// Shed: degraded-empty, and NO Deep Lake query was enqueued.
+		expect(result).toEqual({ hits: [], sources: [], degraded: true });
+		expect(query).not.toHaveBeenCalled();
+		// The structured `recall.shed` event carried subsystem-state ONLY (lane/depth/threshold).
+		expect(onShed).toHaveBeenCalledTimes(1);
+		expect(onShed).toHaveBeenCalledWith({ lane: "fast", depth: 3, threshold: 2 });
+		// D-5 secret-free: the event body contains NO query text.
+		const payload = JSON.stringify(onShed.mock.calls[0]![0]);
+		expect(payload).not.toContain("super-secret");
+		expect(payload).not.toContain("widget");
+	});
+});
+
+// ── L-B5 (b-AC-5): the heavy path still uses the shared pool at its existing budget ──
+
+describe("L-B5 (b-AC-5): the dashboard/heavy recall is unchanged — shared pool at its existing budget", () => {
+	it("recallMemories caps in-flight at DEFAULT_RECALL_MAX_CONCURRENCY (6) via the shared pool (no fast lane)", async () => {
+		resetAmplificationConfigCache();
+		resetSharedRecallPool();
+
+		const { storage, peak, release } = gatedStorage();
+		// No injected pool → the heavy path uses the process-wide shared pool sized from the config.
+		const run = recallMemories({ query: "widgets", scope: SCOPE }, { storage, embed: fakeEmbed(VALID_QUERY_VECTOR) });
+
+		// Let the 7 heavy arms (3 semantic `<#>` + 4 lexical) attempt to acquire; 6 admit, 1 parks.
+		for (let i = 0; i < 12; i++) await Promise.resolve();
+		expect(peak()).toBe(DEFAULT_RECALL_MAX_CONCURRENCY);
+		expect(peak()).toBe(6);
+
+		release();
+		await run;
+	});
+
+	it("the fast lane admits all 7 of one recall's arms at once (a DISTINCT, wider budget of 8)", async () => {
+		resetAmplificationConfigCache();
+		resetFastRecallPool();
+
+		const { storage, peak, release } = gatedStorage();
+		const run = recallFast({ query: "widgets", scope: SCOPE }, { storage, embed: fakeEmbed(VALID_QUERY_VECTOR) });
+
+		for (let i = 0; i < 12; i++) await Promise.resolve();
+		// All 7 arms run concurrently on the fast lane (width 8) — the ~1.5s parallel wall-clock survives.
+		expect(peak()).toBe(7);
+
+		release();
+		await run;
+	});
+});
+
+// ── L-B7 (b-AC-7): fail-soft end to end — deadline / shed / transport error never throw ──
+
+describe("L-B7 (b-AC-7): every fast-path failure degrades to a clean empty/degraded result, never a throw", () => {
+	it("a server-side deadline degrades to empty (no throw)", async () => {
+		process.env.HONEYCOMB_RECALL_FAST_DEADLINE_MS = "40";
+		resetAmplificationConfigCache();
+		resetFastRecallPool();
+		const { storage } = hangingStorage();
+		await expect(
+			recallFast({ query: "widgets", scope: SCOPE }, { storage, embed: fakeEmbed(VALID_QUERY_VECTOR) }),
+		).resolves.toEqual({ hits: [], sources: [], degraded: true });
+	});
+
+	it("a shed request degrades to empty (no throw)", async () => {
+		process.env.HONEYCOMB_RECALL_FAST_SHED_QUEUE_DEPTH = "0";
+		resetAmplificationConfigCache();
+		resetFastRecallPool();
+		const pool = new Semaphore(1);
+		await pool.acquire();
+		void pool.acquire(); // one waiter → depth 1 > threshold 0 → shed.
+		const query = vi.fn(async (): Promise<QueryResult> => ok([], 0));
+		await expect(
+			recallFast({ query: "widgets", scope: SCOPE }, { storage: { query }, embed: fakeEmbed(VALID_QUERY_VECTOR), recallPool: pool }),
+		).resolves.toEqual({ hits: [], sources: [], degraded: true });
+		expect(query).not.toHaveBeenCalled();
+	});
+
+	it("a transport error on every arm degrades to no injection (no throw)", async () => {
+		resetAmplificationConfigCache();
+		resetFastRecallPool();
+		const storage: StorageQuery = {
+			async query(): Promise<QueryResult> {
+				return queryError("connection reset by peer");
+			},
+		};
+		const result = await recallFast({ query: "widgets", scope: SCOPE }, { storage, embed: fakeEmbed(VALID_QUERY_VECTOR) });
+		expect(result.hits).toEqual([]);
+	});
+});
+
+// ── L-B8 (b-AC-8 / D-4): the heavy path's generous deadline bounds a runaway arm ──
+
+describe("L-B8 (b-AC-8 / D-4): a hanging heavy arm is bounded by the generous deadline; a sub-deadline recall is unchanged", () => {
+	it("a hanging arm is aborted at the heavy deadline; the handler returns the partial set (degraded) and frees its slots", async () => {
+		process.env.HONEYCOMB_RECALL_HEAVY_DEADLINE_MS = "50";
+		resetAmplificationConfigCache();
+		resetSharedRecallPool();
+
+		const pool = new Semaphore(6);
+		// The memories lexical arm returns immediately; the sessions lexical arm HANGS until aborted.
+		const storage: StorageQuery = {
+			async query(sql: string, _scope: QueryScope, opts?: QueryOptions): Promise<QueryResult> {
+				if (isLexical(sql) && sourceLitOf(sql) === "memories") return ok([memoriesRow("m1", "a widget fact")], 1);
+				if (isLexical(sql) && sourceLitOf(sql) === "sessions") {
+					return new Promise<QueryResult>((resolve) => {
+						opts?.signal?.addEventListener("abort", () => resolve(queryError("aborted by heavy deadline")), { once: true });
+					});
+				}
+				return ok([], 0);
+			},
+		};
+
+		const startedAt = Date.now();
+		// Lexical-only (no embed) so the hanging arm is the sessions lexical arm; degraded is true.
+		const result = await recallMemories({ query: "widgets", scope: SCOPE, limit: 10 }, { storage, recallPool: pool });
+		const elapsedMs = Date.now() - startedAt;
+
+		// Returned within the deadline (not a 25-minute hang), with the arm that COMPLETED (partial).
+		expect(elapsedMs).toBeLessThan(1000);
+		expect(result.hits.map((h) => h.id)).toEqual(["m1"]);
+		expect(result.degraded).toBe(true);
+		// The aborted arm's slot (and every other) was released.
+		expect(pool.inFlight).toBe(0);
+	});
+
+	it("a sub-deadline heavy recall is unaffected — full arms + ranking over a fixture", async () => {
+		resetAmplificationConfigCache();
+		resetSharedRecallPool();
+
+		const storage: StorageQuery = {
+			async query(sql: string): Promise<QueryResult> {
+				if (!isLexical(sql)) return ok([], 0);
+				if (sourceLitOf(sql) === "memories") return ok([memoriesRow("m1", "a widget fact")], 1);
+				if (sourceLitOf(sql) === "sessions") return ok([sessionsRow("s1", "a raw widget turn")], 1);
+				return ok([], 0);
+			},
+		};
+		const result = await recallMemories({ query: "widgets", scope: SCOPE, limit: 10 }, { storage });
+
+		// The happy path is byte-for-byte: both arms fuse, degraded reflects the lexical-only run.
+		expect(result.hits.map((h) => h.id)).toEqual(["m1", "s1"]);
+		expect(result.sources).toEqual(["memories", "sessions"]);
+		expect(result.degraded).toBe(true);
+	});
+});

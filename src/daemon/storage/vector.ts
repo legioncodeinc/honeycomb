@@ -322,10 +322,15 @@ export async function vectorSearch(
 		readonly term: string;
 		readonly limit: number;
 	},
+	// PRD-077b (L-B8): the heavy-lane deadline signal, threaded into every statement this
+	// semantic arm issues so a hung `<#>` match is aborted daemon-side at the deadline. ADDITIVE
+	// + optional — an un-set signal is byte-for-byte the pre-077b path.
+	signal?: AbortSignal,
 ): Promise<RecallResult> {
 	assertEmbeddingDim(args.queryVector); // FR-8 / e-AC-6 — before any SQL.
+	const opts = signal !== undefined ? { signal } : undefined;
 
-	const vectorResult = await client.query(buildVectorSearchSql(args), scope);
+	const vectorResult = await client.query(buildVectorSearchSql(args), scope, opts);
 	const ids = toScoredIds(vectorResult);
 	if (ids.length > 0 || !lexicalFallback) {
 		return { ids, degraded: false, result: vectorResult };
@@ -345,6 +350,7 @@ export async function vectorSearch(
 			...(args.extraClause !== undefined ? { extraClause: args.extraClause } : {}),
 		}),
 		scope,
+		opts,
 	);
 	return { ids: toScoredIds(lexicalResult), degraded: true, result: lexicalResult };
 }

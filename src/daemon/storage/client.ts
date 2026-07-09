@@ -51,6 +51,14 @@ export interface QueryOptions {
 	/** Override the per-statement timeout (ms) for this call only. */
 	readonly timeoutMs?: number;
 	/**
+	 * PRD-077b (L-B2 / L-B8): an EXTERNAL caller deadline (an `AbortSignal.timeout(...)` a recall
+	 * lane wraps its whole fan-out with). When it aborts, this statement is aborted daemon-side too
+	 * — the in-flight `fetch` is cut and the Semaphore permit released — so a hung query frees its
+	 * slot at the deadline instead of running to the 25-minute tail. ADDITIVE + optional: an un-set
+	 * signal is byte-for-byte the pre-077b behaviour (only the per-statement timeout bounds the call).
+	 */
+	readonly signal?: AbortSignal;
+	/**
 	 * Attribution label for the query meter (PRD-062a). OPTIONAL — an un-set
 	 * `source` is counted under `"other"` by the meter, so no existing call site
 	 * has to change and an unlabeled query is visibly "unlabeled" until a later
@@ -477,6 +485,10 @@ export class StorageClient {
 			// on attempt 1 so heal sees it — never retried.
 			if (isOk(result) || !isTransientResult(result)) return result;
 			last = result;
+			// PRD-077b (L-B2 / L-B8): once the caller's external deadline has fired, stop retrying — a
+			// re-issue would just abort again on the aborted signal. Surface the transient result now so
+			// the arm degrades to [] immediately at the deadline (no pointless backoff tail).
+			if (opts.signal?.aborted === true) return result;
 			// Transient flap: back off (jittered) and re-issue, unless that was the
 			// last attempt — in which case we fall through and return `last`.
 			if (attempt < RETRY_ATTEMPTS) await this.sleep(backoffMs(attempt));
@@ -529,6 +541,17 @@ export class StorageClient {
 		};
 		controller.signal.addEventListener("abort", onAbort, { once: true });
 
+		// PRD-077b (L-B2 / L-B8): fold the caller's external deadline into this statement's abort. When
+		// the lane's deadline signal fires, abort the in-flight request daemon-side (classified as a
+		// timeout via `onAbort`), so a hung query frees its Semaphore permit at the deadline. An already-
+		// aborted signal aborts on the next tick — never a stalled worker.
+		const external = opts.signal;
+		const onExternalAbort = (): void => controller.abort();
+		if (external !== undefined) {
+			if (external.aborted) controller.abort();
+			else external.addEventListener("abort", onExternalAbort, { once: true });
+		}
+
 		const req: TransportRequest = {
 			sql,
 			org: scope.org,
@@ -546,6 +569,7 @@ export class StorageClient {
 		} finally {
 			clearTimeout(timer);
 			controller.signal.removeEventListener("abort", onAbort);
+			if (external !== undefined) external.removeEventListener("abort", onExternalAbort);
 		}
 	}
 
