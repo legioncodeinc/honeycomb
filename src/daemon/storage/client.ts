@@ -66,6 +66,23 @@ export interface QueryOptions {
 	 * never changes the query's behavior or its result.
 	 */
 	readonly source?: QuerySource;
+	/**
+	 * PRD-077 (capture fail-soft): cap the transient-retry BUDGET for THIS call to at most
+	 * `maxAttempts` transport attempts (default {@link RETRY_ATTEMPTS} = 4). A fail-soft WRITE that is
+	 * dropped-and-logged on failure (the capture batch append) passes `maxAttempts: 1` so a slow /
+	 * timing-out DeepLake can never turn ONE capture into up-to-4 transient-retry attempts — each of
+	 * which holds a {@link querySemaphore} permit for the whole per-statement timeout, saturating the
+	 * shared query concurrency and queueing recall arms tens of seconds behind them. Retrying a
+	 * capture append buys nothing anyway: the write is fail-soft (dropped on failure) AND the wire is
+	 * at-least-once (a timed-out append may have LANDED, so a retry risks a duplicate session row).
+	 *
+	 * ADDITIVE + optional: an un-set `maxAttempts` is byte-for-byte the pre-077 budget, so every
+	 * existing caller keeps the full 4-attempt retry. It only bounds RETRY-ELIGIBLE statements (reads
+	 * + idempotent writes); an INSERT / unsafe-write already runs exactly once regardless (it never
+	 * enters the retry loop), so on the capture INSERT this is an explicit, statement-shape-independent
+	 * restatement of that guarantee. Clamped to `>= 1` — a call always makes at least one attempt.
+	 */
+	readonly maxAttempts?: number;
 }
 
 /**
@@ -452,7 +469,9 @@ export class StorageClient {
 	 * 5xx — the 502/query_error storm class) is re-issued up to
 	 * {@link RETRY_ATTEMPTS} times with jittered backoff, since the DeepLake backend
 	 * flaps stale segments under load and re-running one of these CONVERGES (a read
-	 * has no effect; an idempotent write lands the same final state). An
+	 * has no effect; an idempotent write lands the same final state) — OR up to
+	 * `opts.maxAttempts` when a fail-soft caller caps its budget (PRD-077: the capture batch append
+	 * passes `maxAttempts: 1` so a slow backend can't multiply pool load and starve recall). An
 	 * `INSERT`/non-idempotent write is NEVER retried here (a retried append risks a
 	 * duplicate — at-least-once), and a NON-transient `query_error` (missing-table/
 	 * column, syntax, permission) is returned UNCHANGED on the first attempt so heal
@@ -477,8 +496,13 @@ export class StorageClient {
 		// An INSERT / unsafe-write runs exactly once (no duplicate risk).
 		if (retryability === "unsafe-write") return this.attemptOnce(sql, scope, opts);
 
+		// The per-call transient-retry budget: default RETRY_ATTEMPTS, but a fail-soft caller (the
+		// capture batch append) may cap it via `opts.maxAttempts` so a slow backend can't turn one
+		// write into up-to-4 slot-holding attempts that starve recall (PRD-077). Clamped to `>= 1`
+		// so a call always makes at least one attempt.
+		const maxAttempts = Math.max(1, opts.maxAttempts ?? RETRY_ATTEMPTS);
 		let last: QueryResult | undefined;
-		for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
+		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 			const result = await this.attemptOnce(sql, scope, opts);
 			// Success, or a deterministic (non-transient) failure → final answer now.
 			// A non-transient query_error (42P01 / syntax / permission) MUST surface
@@ -491,7 +515,7 @@ export class StorageClient {
 			if (opts.signal?.aborted === true) return result;
 			// Transient flap: back off (jittered) and re-issue, unless that was the
 			// last attempt — in which case we fall through and return `last`.
-			if (attempt < RETRY_ATTEMPTS) await this.sleep(backoffMs(attempt));
+			if (attempt < maxAttempts) await this.sleep(backoffMs(attempt));
 		}
 		// Every attempt flapped transiently; surface the last failure, no loop.
 		return last as QueryResult;

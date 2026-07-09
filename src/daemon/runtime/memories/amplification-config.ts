@@ -44,6 +44,17 @@ export const DEFAULT_RECALL_MAX_CONCURRENCY = 6;
 export const MIN_RECALL_MAX_CONCURRENCY = 1;
 
 /**
+ * PRD-077 (read/write split) — the dedicated WRITE-client in-flight ceiling. The daemon builds a
+ * SECOND in-process {@link StorageClient} for capture appends ONLY, sized by this knob, so a slow
+ * DeepLake can never let capture writes consume the read client's Semaphore slots and queue recall
+ * arms tens of seconds behind them (the live-observed `armsMs: 73273`). Default 3 leaves the read
+ * client its full {@link MAX_CONCURRENT_QUERIES} (5) for recall/dashboard/heal/prime.
+ */
+export const DEFAULT_WRITE_MAX_CONCURRENCY = 3;
+/** The floor for the write-concurrency knob: the write pool must admit at least one append. */
+export const MIN_WRITE_MAX_CONCURRENCY = 1;
+
+/**
  * PRD-077b (L-B6) — the four hot-lane knobs. All config-backed, env-overridable, coerce-and-clamp
  * like {@link DEFAULT_RECALL_MAX_CONCURRENCY} (a typo never takes the daemon down; it falls back to
  * the documented default or is clamped to a safe floor). Defaults are tuned from `request_log`
@@ -103,6 +114,10 @@ export const AmplificationConfigSchema = z.object({
 	fanoutBatch: OnByDefaultFlag.default(DEFAULT_FANOUT_BATCH),
 	/** `HONEYCOMB_RECALL_MAX_CONCURRENCY` — in-flight DeepLake-query ceiling; 6 by default (AC-62d.2.1). */
 	recallMaxConcurrency: ConcurrencyKnob.default(DEFAULT_RECALL_MAX_CONCURRENCY),
+	/** `HONEYCOMB_WRITE_MAX_CONCURRENCY` — the dedicated write-client in-flight ceiling; 3 by default (PRD-077 read/write split). */
+	writeMaxConcurrency: clampedIntKnob(DEFAULT_WRITE_MAX_CONCURRENCY, MIN_WRITE_MAX_CONCURRENCY).default(
+		DEFAULT_WRITE_MAX_CONCURRENCY,
+	),
 	/** `HONEYCOMB_RECALL_FAST_MAX_CONCURRENCY` — the fast lane's dedicated ceiling; 8 by default (L-B1). */
 	recallFastMaxConcurrency: clampedIntKnob(DEFAULT_RECALL_FAST_MAX_CONCURRENCY, MIN_RECALL_FAST_MAX_CONCURRENCY).default(
 		DEFAULT_RECALL_FAST_MAX_CONCURRENCY,
@@ -156,6 +171,8 @@ export interface AmplificationConfigProvider {
 export interface RawAmplificationConfig {
 	readonly fanoutBatch?: unknown;
 	readonly recallMaxConcurrency?: unknown;
+	/** PRD-077 (read/write split): the dedicated write-client in-flight ceiling. */
+	readonly writeMaxConcurrency?: unknown;
 	/** PRD-077b (L-B6): the four hot-lane knobs — fast-lane width, fast + heavy deadlines, shed depth. */
 	readonly recallFastMaxConcurrency?: unknown;
 	readonly recallFastDeadlineMs?: unknown;
@@ -178,6 +195,8 @@ export function envAmplificationConfigProvider(env: NodeJS.ProcessEnv = process.
 			return {
 				fanoutBatch: env.HONEYCOMB_FANOUT_BATCH,
 				recallMaxConcurrency: env.HONEYCOMB_RECALL_MAX_CONCURRENCY,
+				// PRD-077 (read/write split): the dedicated write-client in-flight ceiling.
+				writeMaxConcurrency: env.HONEYCOMB_WRITE_MAX_CONCURRENCY,
 				// PRD-077b (L-B6): the four hot-lane knobs, env-overridable from `request_log` latency.
 				recallFastMaxConcurrency: env.HONEYCOMB_RECALL_FAST_MAX_CONCURRENCY,
 				recallFastDeadlineMs: env.HONEYCOMB_RECALL_FAST_DEADLINE_MS,

@@ -130,6 +130,7 @@ import { mountConflictsApi, type KeepBothMemoStore } from "./memories/conflicts-
 import { createInProcessKeepBothMemoStore } from "./memories/keep-both-memo.js";
 // ── Data-API mount seams (PRD-022a / 022b / 022c) the composition root fires (D-2 / d-AC-1) ──
 import { mountMemoriesApi, mountMemoriesPrimeApi } from "./memories/index.js";
+import { amplificationConfig } from "./memories/amplification-config.js";
 import { mountLifecycleApi } from "./memories/lifecycle-api.js";
 import { resolveNectarRrfMultiplierAtBoot } from "./memories/nectar-recall-config.js";
 import type {
@@ -332,6 +333,17 @@ export interface AssembleDaemonOptions {
 	 * object so the deterministic bits run without a live DeepLake.
 	 */
 	readonly storage?: StorageClient;
+	/**
+	 * PRD-077 (read/write split): the DEDICATED write-client the capture-append path runs through,
+	 * so a slow DeepLake can never let capture writes consume the read client's Semaphore slots and
+	 * starve recall arms. Production leaves this UNSET → the composition root builds a SECOND lazy
+	 * {@link createLazyStorageClient} with its own transport + a smaller `maxConcurrency` (the
+	 * `writeMaxConcurrency` knob, default 3). When {@link storage} is injected (the deterministic unit
+	 * suite / a fake), the write path falls back to that SAME injected fake unless this is also set —
+	 * so the deterministic suite is unchanged and never spins up a real second client. A test that
+	 * wants to prove read/write isolation injects a DISTINCT fake here.
+	 */
+	readonly writeStorage?: StorageClient;
 	/**
 	 * The credential provider the daemon resolves its OWN tenancy scope (`{ org, workspace }`)
 	 * and friendly `orgName` from — the SAME provider {@link createStorageClient} connects
@@ -1254,6 +1266,15 @@ export function assembleSeams(
 	 * `pluginEnabled: false` (the honest fail-soft default). The daemon path always supplies it.
 	 */
 	harnessPluginStatus?: HarnessPluginStatusHolder,
+	/**
+	 * PRD-077 (read/write split): the DEDICATED write client the capture-append seam (`attachHooks`)
+	 * runs through, so capture writes never consume the read `storage` client's Semaphore slots and
+	 * starve recall. ONLY the capture path uses it; every other mount (dashboard/notifications/prune/
+	 * recall/heal/prime/…) stays on the read `storage`. ABSENT (a unit-constructed `assembleSeams`
+	 * call) → the capture path falls back to `storage`, so existing callers are unchanged. The daemon
+	 * composition root always supplies it.
+	 */
+	writeStorage: StorageClient = storage,
 ): CaptureHandler {
 	// The daemon's configured default tenancy scope (the single LOCAL tenant) is RESOLVED ONCE
 	// at the composition root (`assembleDaemon`) from the SAME credential source the storage
@@ -1284,7 +1305,10 @@ export function assembleSeams(
 	// shutdown path can FORCE-FLUSH its write buffer, draining any batched-but-unwritten
 	// captured rows before the daemon stops (so a clean stop never loses a buffered event).
 	const captureHandler = seams.attachHooks(daemon, {
-		storage,
+		// PRD-077 (read/write split): capture appends run through the DEDICATED write client (its own
+		// transport + Semaphore), so a capture-write burst under a slow DeepLake can never consume the
+		// read client's slots and starve recall arms. Every OTHER seam below stays on the read `storage`.
+		storage: writeStorage,
 		queue: daemon.services.queue,
 		embed,
 		enqueuePipelineEntry: makePipelineEntryEnqueuer(daemon.services.queue),
@@ -2780,6 +2804,24 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// `storage` bypasses this entirely (the deterministic suite is unchanged).
 	const storage = options.storage ?? createLazyStorageClient(provider !== undefined ? { provider } : {});
 
+	// PRD-077 (read/write split): a DEDICATED write client for the capture-append path, with its OWN
+	// transport + its OWN Semaphore (sized by `writeMaxConcurrency`, default 3). The daemon builds ONE
+	// shared read `storage` with `Semaphore(5)` that gates EVERY read (recall, dashboard, heal, prime);
+	// under a slow DeepLake, capture appends held those 5 slots and recall arms queued tens of seconds
+	// behind them (live `armsMs: 73273`). Splitting writes onto their own in-process client means a
+	// capture-write burst can never consume a read slot — writes cannot starve reads. This stays LAZY
+	// (no eager second connection at boot). TEST-INJECTABILITY: when `options.storage` is an injected
+	// fake, BOTH read and write use that SAME fake unless a DISTINCT `options.writeStorage` fake is
+	// supplied — so the deterministic unit suite never spins up a real second client. Only the REAL
+	// (non-injected) production path splits into two live clients.
+	const writeStorage =
+		options.writeStorage ??
+		options.storage ??
+		createLazyStorageClient({
+			...(provider !== undefined ? { provider } : {}),
+			maxConcurrency: amplificationConfig().writeMaxConcurrency,
+		});
+
 	// The daemon's own tenancy partition + friendly org name: resolved from the SAME
 	// credential provider the storage client connected through (env-over-file), with env as
 	// an override and `"local"` ONLY as the true no-creds fallback (a fake client / no env).
@@ -3218,6 +3260,8 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		// PRD-006d F-2: the shared plugin-enabled holder — step 14 reads it (resolvePluginEnabled),
 		// step 14b's ingest writes it (the Tier-4 reconcile push target).
 		harnessPluginStatus,
+		// PRD-077 (read/write split): the dedicated write client the capture-append seam runs through.
+		writeStorage,
 	);
 
 	// ── PRD-032d / AC-6: FIRE the Wave-1 `/api/settings` mount ONCE so the CLI/dashboard

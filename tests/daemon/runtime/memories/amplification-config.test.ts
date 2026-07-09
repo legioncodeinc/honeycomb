@@ -13,7 +13,9 @@ import { describe, expect, it } from "vitest";
 import {
 	DEFAULT_FANOUT_BATCH,
 	DEFAULT_RECALL_MAX_CONCURRENCY,
+	DEFAULT_WRITE_MAX_CONCURRENCY,
 	MIN_RECALL_MAX_CONCURRENCY,
+	MIN_WRITE_MAX_CONCURRENCY,
 	resolveAmplificationConfig,
 	type AmplificationConfigProvider,
 	type RawAmplificationConfig,
@@ -76,6 +78,30 @@ describe("amplification config: the concurrency knob coerces + clamps", () => {
 		// A non-numeric value falls back to the documented default (not a config failure).
 		expect(resolveAmplificationConfig(provider({ recallMaxConcurrency: "abc" })).recallMaxConcurrency).toBe(
 			DEFAULT_RECALL_MAX_CONCURRENCY,
+		);
+	});
+});
+
+describe("PRD-077 read/write split: the write-concurrency knob (writeMaxConcurrency)", () => {
+	it("defaults to 3 (the dedicated write-client ceiling) when unset", () => {
+		expect(resolveAmplificationConfig(provider({})).writeMaxConcurrency).toBe(DEFAULT_WRITE_MAX_CONCURRENCY);
+		expect(resolveAmplificationConfig(provider({})).writeMaxConcurrency).toBe(3);
+	});
+
+	it("honors an explicit override (numeric string or number)", () => {
+		expect(resolveAmplificationConfig(provider({ writeMaxConcurrency: "2" })).writeMaxConcurrency).toBe(2);
+		expect(resolveAmplificationConfig(provider({ writeMaxConcurrency: 4 })).writeMaxConcurrency).toBe(4);
+	});
+
+	it("clamps a sub-1 value to the floor (>=1) and falls back on a non-numeric value", () => {
+		expect(resolveAmplificationConfig(provider({ writeMaxConcurrency: "0" })).writeMaxConcurrency).toBe(
+			MIN_WRITE_MAX_CONCURRENCY,
+		);
+		expect(resolveAmplificationConfig(provider({ writeMaxConcurrency: -9 })).writeMaxConcurrency).toBe(
+			MIN_WRITE_MAX_CONCURRENCY,
+		);
+		expect(resolveAmplificationConfig(provider({ writeMaxConcurrency: "xyz" })).writeMaxConcurrency).toBe(
+			DEFAULT_WRITE_MAX_CONCURRENCY,
 		);
 	});
 });

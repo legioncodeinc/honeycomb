@@ -420,6 +420,56 @@ describe("C-4: dropped-events counter on acked-but-lost capture writes", () => {
 		}
 	});
 
+	it("PRD-077: a capture batch append that TIMES OUT is tried EXACTLY ONCE (no 4× — fail-soft, no pool starvation)", async () => {
+		// THE LIVE FIX. Under an elevated-latency DeepLake the batch append TIMES OUT. A timeout is
+		// classified transient, so a retry-eligible statement would be re-issued up to 4× — each
+		// attempt holding a query Semaphore slot for the WHOLE per-statement timeout, saturating the
+		// shared concurrency and queueing recall arms tens of seconds behind. Capture is fail-soft
+		// (dropped + logged on failure), so it now caps its budget at ONE attempt (maxAttempts:1). We
+		// prove the append is issued exactly once, and the fail-soft drop + log is preserved EXACTLY.
+		const dropped = createCaptureDroppedEventsCounter();
+		const logged: string[] = [];
+		const logger = createRequestLogger({ silent: true });
+		const origEvent = logger.event.bind(logger);
+		logger.event = (name, fields) => {
+			logged.push(name);
+			origEvent(name, fields);
+		};
+		const clock = new FakeClock();
+		const timeoutInsert = (req: TransportRequest): Record<string, unknown>[] => {
+			if (/information_schema\.columns/i.test(req.sql)) {
+				return healTargetFor("sessions").columns.map((c) => ({ column_name: c.name }));
+			}
+			if (/^\s*INSERT/i.test(req.sql)) {
+				throw new TransportError("timeout", "deeplake batch insert timed out", 504);
+			}
+			return [];
+		};
+		const { daemon, fake, handler } = buildDaemon(BATCH_ON, clock, {
+			responder: timeoutInsert,
+			droppedEvents: dropped,
+			logger,
+		});
+
+		const res = await daemon.app.request("/api/hooks/capture", {
+			method: "POST",
+			headers: sessionHeaders(),
+			body: JSON.stringify(userBody("a turn whose append will time out")),
+		});
+		expect(res.status).toBe(201);
+
+		await handler.flush();
+		await Promise.resolve();
+		await new Promise((r) => setTimeout(r, 0));
+
+		// The append hit the wire EXACTLY ONCE — not RETRY_ATTEMPTS(4) times. Each recorded INSERT is
+		// one transport attempt; a pre-fix retry loop on a transient timeout would show 4.
+		expect(insertSqls(fake).length, "capture append is single-attempt on timeout").toBe(1);
+		// Fail-soft preserved EXACTLY: the lost row is counted and `capture.batch_insert.failed` logged.
+		expect(dropped.read(), "the timed-out row is dropped, not retried into a duplicate").toBe(1);
+		expect(logged).toContain("capture.batch_insert.failed");
+	});
+
 	it("counts each row of a failed SIZE-triggered flush exactly once (no off-by-one on the trigger row)", async () => {
 		// The row that trips the size cap gets the flush promise back from `add()`, so its
 		// rejection is observed by bufferRow's catch AND by flushBatch — the count must be

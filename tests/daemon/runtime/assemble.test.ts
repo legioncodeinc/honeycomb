@@ -440,6 +440,62 @@ describe("a-AC-2 / d-AC-1 the mount/attach seams fire exactly once, after constr
 	});
 });
 
+describe("PRD-077 read/write split: capture uses the write client, reads use the read client", () => {
+	it("attachHooks (capture appends) receives writeStorage; mountDashboard (a read) receives storage", () => {
+		const { seams } = recordingSeams([]);
+		let captureStorage: unknown;
+		let dashboardStorage: unknown;
+		const readFake = fakeStorage(OK_RESULT);
+		const writeFake = fakeStorage(OK_RESULT);
+		// Override just the two seams we assert on; every other seam stays the recording default.
+		const wiredSeams: SeamFns = {
+			...seams,
+			attachHooks: ((_daemon, options) => {
+				captureStorage = options.storage;
+				return { register() {}, recordTurn() {} } as never;
+			}) as SeamFns["attachHooks"],
+			mountDashboard: ((_daemon, options) => {
+				dashboardStorage = options.storage;
+			}) as SeamFns["mountDashboard"],
+		};
+		assembleDaemon({
+			config: cfg({ mode: "local" }),
+			storage: readFake,
+			writeStorage: writeFake,
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+			seams: wiredSeams,
+		});
+		// The capture-append seam is wired to the DEDICATED write client; the dashboard read is on the read client.
+		expect(captureStorage).toBe(writeFake);
+		expect(dashboardStorage).toBe(readFake);
+		expect(captureStorage).not.toBe(dashboardStorage);
+	});
+
+	it("with NO writeStorage injected, capture falls back to the injected read fake (deterministic suite unchanged)", () => {
+		const { seams } = recordingSeams([]);
+		let captureStorage: unknown;
+		const readFake = fakeStorage(OK_RESULT);
+		const wiredSeams: SeamFns = {
+			...seams,
+			attachHooks: ((_daemon, options) => {
+				captureStorage = options.storage;
+				return { register() {}, recordTurn() {} } as never;
+			}) as SeamFns["attachHooks"],
+		};
+		// Only `storage` is injected (the deterministic unit posture): BOTH read and write resolve to it,
+		// so no real second client is spun up and the existing suite's behavior is unchanged.
+		assembleDaemon({
+			config: cfg({ mode: "local" }),
+			storage: readFake,
+			logger: createRequestLogger({ silent: true }),
+			runtimeDir,
+			seams: wiredSeams,
+		});
+		expect(captureStorage).toBe(readFake);
+	});
+});
+
 describe("security F-1: guided-setup routes are LOCAL-MODE ONLY (the team-mode tenancy gate holds)", () => {
 	for (const mode of ["team", "hybrid"] as const) {
 		it(`in ${mode.toUpperCase()} mode setup routes are NOT on the unprotected root group`, async () => {

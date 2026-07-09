@@ -81,6 +81,20 @@ export const HOOKS_GROUP = "/api/hooks" as const;
  * cost to `capture-write` and AC-62c.1.3 can show the per-session count drop with batching.
  */
 const CAPTURE_WRITE_SOURCE = "capture-write" as const;
+/**
+ * The `QueryOptions` every capture write (immediate + batched flush) threads to the storage client.
+ *
+ * PRD-077 — `maxAttempts: 1` makes the capture append SINGLE-ATTEMPT. A capture is fail-soft (on a
+ * write failure the rows are dropped + `capture.batch_insert.failed` logged, NEVER surfaced to the
+ * turn), so a slow / timing-out DeepLake must not turn ONE capture into up-to-4 transient-retry
+ * attempts — each holding a query `Semaphore` permit for the whole per-statement timeout, saturating
+ * the shared query concurrency and queueing recall arms tens of seconds behind them. Retrying a
+ * capture append buys nothing anyway: it is dropped-on-failure AND the wire is at-least-once (a
+ * timed-out append may have LANDED, so a retry risks a DUPLICATE session row). The batched INSERT is
+ * already classified `unsafe-write` (runs once regardless), so this is the EXPLICIT, statement-shape-
+ * independent restatement of that guarantee — a future reclassification can't silently re-arm 4×.
+ */
+const CAPTURE_WRITE_OPTS = { source: CAPTURE_WRITE_SOURCE, maxAttempts: 1 } as const;
 /** The capture route, relative to {@link HOOKS_GROUP}. */
 export const CAPTURE_PATH = "/capture" as const;
 /** The conversation read-back route, relative to {@link HOOKS_GROUP}. */
@@ -347,9 +361,13 @@ class CaptureRouteHandler {
 		if (this.config.batch) {
 			this.bufferRow(id, row, scope);
 		} else {
-			const result = await appendOnlyInsertMany(this.deps.storage, this.deps.sessionsTarget, scope, [row], {
-				source: CAPTURE_WRITE_SOURCE,
-			});
+			const result = await appendOnlyInsertMany(
+				this.deps.storage,
+				this.deps.sessionsTarget,
+				scope,
+				[row],
+				CAPTURE_WRITE_OPTS,
+			);
 			if (!isOk(result)) {
 				this.deps.logger?.event("capture.insert.failed", { id, kind: result.kind });
 				return c.json({ error: "capture_failed", reason: "could not write the session row" }, 502);
@@ -492,9 +510,13 @@ class CaptureRouteHandler {
 	private async flushBatch(batch: readonly BufferedRow[]): Promise<void> {
 		for (const [scope, rows] of groupRowsByScope(batch)) {
 			try {
-				const result = await appendOnlyInsertMany(this.deps.storage, this.deps.sessionsTarget, scope, rows, {
-					source: CAPTURE_WRITE_SOURCE,
-				});
+				const result = await appendOnlyInsertMany(
+					this.deps.storage,
+					this.deps.sessionsTarget,
+					scope,
+					rows,
+					CAPTURE_WRITE_OPTS,
+				);
 				if (!isOk(result)) {
 					this.recordDropped(rows.length);
 					this.deps.logger?.event("capture.batch_insert.failed", { count: rows.length, kind: result.kind });
