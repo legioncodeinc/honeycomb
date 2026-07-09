@@ -57,6 +57,15 @@ export const DEFAULT_RECALL_FAST_DEADLINE_MS = 3000;
 export const DEFAULT_RECALL_FAST_SHED_QUEUE_DEPTH = 8;
 /** `HONEYCOMB_RECALL_HEAVY_DEADLINE_MS` — the generous dashboard/heavy deadline (D-4); 15000ms caps the 25-min tail while a human waits for full quality (L-B8). */
 export const DEFAULT_RECALL_HEAVY_DEADLINE_MS = 15000;
+/**
+ * PRD-077 (L-B9) — the two pre-arm EMBED deadlines. The query embed on the recall hot path runs
+ * BEFORE the arm-deadline exists, so a hung embed daemon wedged both paths with zero completions
+ * (the live-observed hang). These bound the embed so a slow/hung embed degrades to lexical-only.
+ */
+/** `HONEYCOMB_RECALL_FAST_EMBED_DEADLINE_MS` — bound on the fast-lane pre-arm query embed; 1500ms is generous over the ~13ms normal embed and keeps total fast ≈ embed + ~1.5s arms within the ~4s client budget (L-B9). */
+export const DEFAULT_RECALL_FAST_EMBED_DEADLINE_MS = 1500;
+/** `HONEYCOMB_RECALL_HEAVY_EMBED_DEADLINE_MS` — bound on the heavy-path pre-arm query embed; 3000ms is generous for the dashboard path where a human waits for full quality (L-B9). */
+export const DEFAULT_RECALL_HEAVY_EMBED_DEADLINE_MS = 3000;
 /** The floor for a concurrency knob: a pool must admit at least one task. */
 export const MIN_RECALL_FAST_MAX_CONCURRENCY = 1;
 /** The floor for a deadline knob (ms): a positive value — a `0` would abort every query on the next tick. */
@@ -110,6 +119,14 @@ export const AmplificationConfigSchema = z.object({
 	recallHeavyDeadlineMs: clampedIntKnob(DEFAULT_RECALL_HEAVY_DEADLINE_MS, MIN_RECALL_DEADLINE_MS).default(
 		DEFAULT_RECALL_HEAVY_DEADLINE_MS,
 	),
+	/** `HONEYCOMB_RECALL_FAST_EMBED_DEADLINE_MS` — bound on the fast-lane pre-arm query embed; 1500ms by default (L-B9). */
+	recallFastEmbedDeadlineMs: clampedIntKnob(DEFAULT_RECALL_FAST_EMBED_DEADLINE_MS, MIN_RECALL_DEADLINE_MS).default(
+		DEFAULT_RECALL_FAST_EMBED_DEADLINE_MS,
+	),
+	/** `HONEYCOMB_RECALL_HEAVY_EMBED_DEADLINE_MS` — bound on the heavy-path pre-arm query embed; 3000ms by default (L-B9). */
+	recallHeavyEmbedDeadlineMs: clampedIntKnob(DEFAULT_RECALL_HEAVY_EMBED_DEADLINE_MS, MIN_RECALL_DEADLINE_MS).default(
+		DEFAULT_RECALL_HEAVY_EMBED_DEADLINE_MS,
+	),
 });
 
 /** The validated amplification config object the fan-out + recall sides consume. */
@@ -144,6 +161,9 @@ export interface RawAmplificationConfig {
 	readonly recallFastDeadlineMs?: unknown;
 	readonly recallFastShedQueueDepth?: unknown;
 	readonly recallHeavyDeadlineMs?: unknown;
+	/** PRD-077 (L-B9): the two pre-arm embed deadlines — fast + heavy. */
+	readonly recallFastEmbedDeadlineMs?: unknown;
+	readonly recallHeavyEmbedDeadlineMs?: unknown;
 }
 
 /**
@@ -163,6 +183,9 @@ export function envAmplificationConfigProvider(env: NodeJS.ProcessEnv = process.
 				recallFastDeadlineMs: env.HONEYCOMB_RECALL_FAST_DEADLINE_MS,
 				recallFastShedQueueDepth: env.HONEYCOMB_RECALL_FAST_SHED_QUEUE_DEPTH,
 				recallHeavyDeadlineMs: env.HONEYCOMB_RECALL_HEAVY_DEADLINE_MS,
+				// PRD-077 (L-B9): the two pre-arm embed deadlines, env-overridable.
+				recallFastEmbedDeadlineMs: env.HONEYCOMB_RECALL_FAST_EMBED_DEADLINE_MS,
+				recallHeavyEmbedDeadlineMs: env.HONEYCOMB_RECALL_HEAVY_EMBED_DEADLINE_MS,
 			};
 		},
 	};

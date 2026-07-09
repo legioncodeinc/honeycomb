@@ -120,9 +120,12 @@ describe("L-A1 (a-AC-1): recallFast issues the arms in PARALLEL, one round-trip 
 			{ query: "widgets", scope: SCOPE },
 			{ storage, embed: fakeEmbed(VALID_QUERY_VECTOR), recallPool: new Semaphore(16) },
 		);
-		// Let the parked arms accumulate, then release them and finish.
-		await Promise.resolve();
-		await Promise.resolve();
+		// Let the parked arms accumulate, then release them and finish. Pump enough microtask turns for
+		// the arms to reach the (still-parked, `released=false`) storage stub: PRD-077 (L-B9) BOUNDS the
+		// pre-arm embed via `Promise.race`, which adds a few microtask hops before the arms fire — so this
+		// drains a generous fixed number of turns (mirrors the sibling `recall-hot-lane` 12-turn pump)
+		// rather than the pre-077 exact-2. The assertion (all 7 parked at once) is unchanged.
+		for (let i = 0; i < 12; i++) await Promise.resolve();
 		expect(gates.length).toBe(7); // all 7 parked BEFORE any resolved → they ran concurrently.
 		released = true;
 		while (gates.length > 0) gates.shift()?.();

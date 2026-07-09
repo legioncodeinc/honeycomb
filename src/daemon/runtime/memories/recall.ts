@@ -161,6 +161,32 @@ export interface RecallShedEvent {
 	readonly threshold: number;
 }
 
+/**
+ * PRD-077 (L-B10): the structured `recall.timing` phase-timing payload for {@link recallFast}. SUBSYSTEM
+ * STATE ONLY — the lane, the per-phase durations (embed / arms / fuse / total), the arm count, whether
+ * the semantic arms ran, and the hit count. It carries NO query text, token, org, or row content by
+ * construction (there is nowhere to put one), mirroring the {@link RecallShedEvent} secret-free
+ * convention. Emitted via {@link MemoryRecallDeps.onTiming}.
+ */
+export interface RecallTimingEvent {
+	/** The lane the timing is for. Only the fast per-turn lane is instrumented (the hot path this PRD bounds). */
+	readonly lane: "fast";
+	/** Wall-clock ms spent in the (bounded) pre-arm query embed. `0` when no embed seam is wired. */
+	readonly embedMs: number;
+	/** Wall-clock ms spent running all arms concurrently (the one `Promise.all` round-trip). */
+	readonly armsMs: number;
+	/** Wall-clock ms spent in RRF fusion + recency dampening (0 when the deadline aborted before fuse). */
+	readonly fuseMs: number;
+	/** Wall-clock ms for the whole `recallFast` embed→arms→fuse span. */
+	readonly totalMs: number;
+	/** The number of arms issued (semantic + lexical). Subsystem state, never content. */
+	readonly arms: number;
+	/** Whether the semantic arms ran (false ⇒ the embed degraded to a lexical-only run). */
+	readonly semanticRan: boolean;
+	/** The number of fused hits returned. */
+	readonly hits: number;
+}
+
 /** The default number of recall hits returned when the caller supplies no limit. */
 export const DEFAULT_RECALL_LIMIT = 20;
 /** The hard ceiling on recall hits (a fat-fingered limit is clamped, never honored). */
@@ -923,6 +949,14 @@ export interface MemoryRecallDeps {
 	 * simply not logged. Only {@link recallFast} sheds — the heavy path never calls this.
 	 */
 	readonly onShed?: (event: RecallShedEvent) => void;
+	/**
+	 * PRD-077 (L-B10): the phase-timing event sink for {@link recallFast}. When wired, the fast path
+	 * emits ONE secret-free {@link RecallTimingEvent} (embed / arms / fuse / total durations + arm/hit
+	 * counts — NO query text) per recall. The composition root wires it to
+	 * `daemon.logger.event("recall.timing", …)`. ABSENT → zero-cost (the seam is never called); only
+	 * {@link recallFast} emits it — the heavy path never calls this.
+	 */
+	readonly onTiming?: (event: RecallTimingEvent) => void;
 }
 
 /** A recall request as it enters the adapter (the zod-validated, scoped body). */
@@ -1240,6 +1274,38 @@ interface SemanticRun {
 }
 
 /**
+ * PRD-077 (L-B9): bound the pre-arm query embed on BOTH recall paths so a slow / hung embed daemon
+ * degrades recall to lexical-only instead of wedging the hot path BEFORE any arm-deadline exists (the
+ * live-observed hang: the embed ran before `AbortSignal.timeout` was created, so a stuck embed blocked
+ * every completion). Races the embed against a timer that resolves to `null` at `deadlineMs`; a `null`,
+ * an (a)sync throw, OR the timeout all yield `null` — the caller's existing null / wrong-dim guard then
+ * drops the semantic arms and runs the lexical arms alone (`degraded: true`). The timer is cleared on
+ * the winning path so a fast embed never leaks a pending handle (mirrors `detectWithTimeout`). NEVER throws.
+ *
+ * When the embed resolves UNDER the deadline the returned vector is exactly what `embed.embed` produced
+ * — byte-for-byte the pre-077 result; the bound only changes the SLOW / HUNG case.
+ */
+async function boundedEmbed(
+	embed: EmbedClient,
+	query: string,
+	deadlineMs: number,
+): Promise<readonly number[] | null> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<null>((resolve) => {
+		timer = setTimeout(() => resolve(null), Math.max(0, deadlineMs));
+	});
+	try {
+		return await Promise.race([embed.embed(query), timeout]);
+	} catch {
+		// The embed-client contract is null-on-failure, but a flaky daemon that THROWS degrades to
+		// lexical too — recall never throws into the route on an embed hiccup (fast + heavy share this).
+		return null;
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+	}
+}
+
+/**
  * Embed the query + run BOTH semantic arms (PRD-025 AC-3). Returns `null` when the
  * semantic path could NOT run — no embed client, or the query embed returned null
  * (embeddings off / daemon unreachable / timeout / wrong-dim) — which is the signal
@@ -1257,14 +1323,10 @@ async function runSemanticArms(
 ): Promise<SemanticRun | null> {
 	if (deps.embed === undefined) return null; // no semantic seam → lexical-only.
 
-	let queryVector: readonly number[] | null;
-	try {
-		queryVector = await deps.embed.embed(request.query);
-	} catch {
-		// The embed-client contract is null-on-failure, but guard an unexpected throw:
-		// a flaky embed daemon degrades recall to lexical, never throws into the route.
-		queryVector = null;
-	}
+	// PRD-077 (L-B9): BOUND the heavy-path embed (its existing null contract already degrades to
+	// lexical-only). A hung embed daemon degrades within `recallHeavyEmbedDeadlineMs` instead of
+	// wedging the heavy fan-out BEFORE its own arm deadline (`heavySignal`) is even created.
+	const queryVector = await boundedEmbed(deps.embed, request.query, amplificationConfig().recallHeavyEmbedDeadlineMs);
 	// Null (off/unreachable/timeout) OR a wrong-dim vector (defense in depth; the
 	// client already dim-guards) → the semantic arm cannot run → fall back to lexical.
 	if (queryVector === null || queryVector.length !== EMBEDDING_DIMS) return null;
@@ -2598,14 +2660,16 @@ export async function recallFast(
 	// Embed the query ONCE (reuse the runSemanticArms embed+guard contract). A null / unavailable
 	// embed, an unexpected throw, or a wrong-dim vector ⇒ the semantic arms cannot run ⇒ drop them,
 	// run the lexical arms alone, and report `degraded: true`. NEVER throws into the route.
+	// PRD-077 (L-B9): the embed is BOUNDED (`boundedEmbed`) so a slow / hung embed daemon degrades to
+	// lexical-only WITHIN `recallFastEmbedDeadlineMs` instead of wedging the hot path before the fast
+	// arm deadline (below) even exists — the live-observed hang this fixes. L-B10: `startedAt` opens the
+	// phase-timing span emitted once via the secret-free `deps.onTiming` seam.
+	const startedAt = Date.now();
 	let queryVector: readonly number[] | null = null;
 	if (deps.embed !== undefined) {
-		try {
-			queryVector = await deps.embed.embed(request.query);
-		} catch {
-			queryVector = null;
-		}
+		queryVector = await boundedEmbed(deps.embed, request.query, config.recallFastEmbedDeadlineMs);
 	}
+	const embedMs = Date.now() - startedAt;
 	const semanticRan = queryVector !== null && queryVector.length === EMBEDDING_DIMS;
 	const degraded = !semanticRan;
 
@@ -2633,16 +2697,37 @@ export async function recallFast(
 	// swallows a non-ok arm to [] (per-arm fail-soft: a starved / missing sibling table never fails the
 	// whole recall — a-AC-9). No hydrate hop, no dedup fetch — the round-trip count == the arm count.
 	const allSqls = [...semanticSqls, ...lexicalSqls];
+	const armsStart = Date.now();
 	const allRows = await Promise.all(allSqls.map((sql) => runArm(sql, request, fastDeps, deadline)));
+	const armsMs = Date.now() - armsStart;
+
+	// PRD-077 (L-B10): emit the ONE secret-free phase-timing event (durations + counts ONLY — NO query
+	// text/token/content), mirroring the `recall.shed` convention. Zero-cost when `deps.onTiming` is
+	// absent (unit-constructed mounts). Defined here so BOTH the deadline-abort and the normal return
+	// emit through one site (no duplicated event literal → the jscpd gate stays green).
+	const emitTiming = (fuseMs: number, hits: number): void => {
+		deps.onTiming?.({
+			lane: "fast",
+			embedMs,
+			armsMs,
+			fuseMs,
+			totalMs: Date.now() - startedAt,
+			arms: allSqls.length,
+			semanticRan,
+			hits,
+		});
+	};
 
 	// PRD-077b (L-B2): if the deadline fired, the arms were aborted daemon-side (their slots freed) —
 	// return a fail-soft empty degraded result rather than a partial/misleading set. NEVER throws.
 	if (deadline.aborted) {
+		emitTiming(0, 0);
 		return { hits: [], sources: [], degraded: true };
 	}
 
 	// Each arm (semantic OR lexical) is a RANKED list in storage order — the semantic arms are already
 	// ORDER BY score DESC, the lexical arms in their storage order — exactly like recallMemories 2259-2267.
+	const fuseStart = Date.now();
 	const arms: RankedArm[] = allRows.map((rows) => rowsToRankedArm(rows));
 
 	// EXISTING RRF fusion (a-AC-3): the same `fuseHits` + arm-class weight + Nectar multiplier the heavy
@@ -2658,6 +2743,8 @@ export async function recallFast(
 	const activationExponent = deps.recency?.activationExponent ?? DEFAULT_RECENCY_ACTIVATION_EXPONENT;
 	const nowMs = (deps.now ?? Date.now)();
 	const activated = applyRecencyActivation(hits, byClass, activationExponent, nowMs);
+	const fuseMs = Date.now() - fuseStart;
 
+	emitTiming(fuseMs, activated.length);
 	return { hits: activated, sources, degraded };
 }
