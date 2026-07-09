@@ -74,6 +74,8 @@ const [counts, savings] = await Promise.all([
 
 The route caches `fetchKpiCounts` at `DIAG_TTL_MS` (10s) and `fetchEstimatedSavings` at `SAVINGS_TTL_MS = 60_000` (60s), so the most expensive query is recomputed roughly six times less often than the counts. `fetchKpisView` stays as the one-call composition so a direct caller or unit test still gets the whole view uncached in a single call.
 
+> **Slated to change.** `fetchEstimatedSavings` computes a corpus-length proxy (`SUM(LENGTH(content)) / 4`), which measures inventory rather than tokens actually saved. [ADR-0010](../architecture/adr/0010-recall-weighted-est-savings.md) (Accepted) pivots "Est. savings" to a recall-weighted metric sourced from the PRD-060 ROI tracker and retires `fetchEstimatedSavings` / `buildEstimatedSavingsSql`; the re-wiring is tracked by IRD-278. The performance note above documents the corpus-SUM read as it stands today; once the pivot lands, the KPI's heaviest read becomes a lighter recall-event rollup that can move to a shorter TTL.
+
 ## Defer the below-the-fold area to a second paint
 
 On the home, the harness area sits below the fold; the KPI band + recall box are what the operator actually looks at first. The home now mounts the harness-area CONTENTS on a SECOND paint (`showSecondary` flips in a passive effect after the first commit paints, `src/dashboard/web/pages/dashboard.tsx`) so the KPI band + recall are interactive first. The landmark element itself always renders (stable layout, no reflow jump); only its contents wait. This is a cold-load latency win with no change to what eventually renders.

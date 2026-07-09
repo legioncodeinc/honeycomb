@@ -66,13 +66,15 @@ The seven pages, each a component under `src/dashboard/web/pages/`:
 
 | Route | Page | What it shows |
 |---|---|---|
-| `/` | Dashboard (home) | The overview: KPIs (Memories / Turns / Est. savings) and at-a-glance health, project-scoped to the active selection (team skills stay workspace-wide). See the scope switcher in [`../architecture/multi-project-and-context-switching.md`](../architecture/multi-project-and-context-switching.md). |
+| `/` | Dashboard (home) | The overview: KPIs (Memories / Turns / Est. savings[^est-savings]) and at-a-glance health, project-scoped to the active selection (team skills stay workspace-wide). See the scope switcher in [`../architecture/multi-project-and-context-switching.md`](../architecture/multi-project-and-context-switching.md). |
 | `/harnesses` | Harnesses | Per-harness wiring state, with dynamic sub-items per detected harness (`/harnesses/<harness>`). |
 | `/memories` | Memories | The captured memory corpus for the workspace. |
 | `/graph` | Graph | The codebase graph canvas (build-graph affordance + visualization). |
 | `/sync` | Sync | Skill and asset sync state, what is mined, published, and pulled. |
 | `/logs` | Logs | The daemon log stream. |
 | `/settings` | Settings | Daemon and workspace settings, including the redacted auth status. |
+
+[^est-savings]: The "Est. savings" KPI today is a corpus-length proxy (`SUM(LENGTH(content)) / 4`), which counts stored inventory rather than tokens actually saved, so it does not move in response to using the harness. [ADR-0010](../architecture/adr/0010-recall-weighted-est-savings.md) (Accepted) pivots it to a recall-weighted metric sourced from the PRD-060 ROI tracker; the re-wiring is tracked by IRD-278 (backlog) and not yet live.
 
 ---
 
