@@ -2698,12 +2698,36 @@ export async function recallFast(
 	// whole recall — a-AC-9). No hydrate hop, no dedup fetch — the round-trip count == the arm count.
 	const allSqls = [...semanticSqls, ...lexicalSqls];
 	const armsStart = Date.now();
-	const allRows = await Promise.all(allSqls.map((sql) => runArm(sql, request, fastDeps, deadline)));
+	const armsPromise = Promise.all(allSqls.map((sql) => runArm(sql, request, fastDeps, deadline)));
+	// PRD-077 (fix A): if the deadline WINS the race below we return WITHOUT awaiting these arms, so attach
+	// a swallow-catch — an arm that REJECTS after we've already returned (a late pool/transport throw) must
+	// never surface as an unhandledRejection. `runArm` already maps a non-ok arm to []; this only guards a
+	// hard throw on the abandoned path. The abandoned arms keep settling in the background: the fast-lane
+	// deadline `AbortSignal` is threaded into each (via `runArm`), so their `storage.query` aborts daemon-
+	// side and its `Semaphore.run` finally RELEASES the fast-lane permit when the fetch returns/aborts.
+	armsPromise.catch(() => {});
+
+	// PRD-077 (fix A): RACE the whole arm phase against a deadline sentinel so `recallFast`'s wall-clock is
+	// bounded by `recallFastDeadlineMs` EVEN WHEN THE FAST LANE IS SATURATED. The per-arm deadline signal
+	// only aborts an arm AFTER it acquires a pool slot and starts its fetch — an arm still QUEUED waiting
+	// for a slot is NOT covered by it, so a saturated lane parked `Promise.all` for tens of seconds past
+	// the deadline (live-observed `armsMs: 73273` vs. the ~3000ms budget). The sentinel promise RESOLVES
+	// (never rejects) when the deadline `AbortSignal` fires — wrapping the EXISTING signal adds NO new timer
+	// (its timeout is already live from the L-B2 line above, and Node unref's it), so nothing dangles.
+	const deadlinePromise = new Promise<void>((resolve) => {
+		if (deadline.aborted) resolve();
+		else deadline.addEventListener("abort", () => resolve(), { once: true });
+	});
+	const raced = await Promise.race([
+		armsPromise.then((rows) => ({ rows, deadline: false as const })),
+		deadlinePromise.then(() => ({ rows: [] as StorageRow[][], deadline: true as const })),
+	]);
 	const armsMs = Date.now() - armsStart;
+	const allRows = raced.rows;
 
 	// PRD-077 (L-B10): emit the ONE secret-free phase-timing event (durations + counts ONLY — NO query
 	// text/token/content), mirroring the `recall.shed` convention. Zero-cost when `deps.onTiming` is
-	// absent (unit-constructed mounts). Defined here so BOTH the deadline-abort and the normal return
+	// absent (unit-constructed mounts). Defined here so BOTH the deadline-cut and the normal return
 	// emit through one site (no duplicated event literal → the jscpd gate stays green).
 	const emitTiming = (fuseMs: number, hits: number): void => {
 		deps.onTiming?.({
@@ -2718,9 +2742,11 @@ export async function recallFast(
 		});
 	};
 
-	// PRD-077b (L-B2): if the deadline fired, the arms were aborted daemon-side (their slots freed) —
-	// return a fail-soft empty degraded result rather than a partial/misleading set. NEVER throws.
-	if (deadline.aborted) {
+	// PRD-077b (L-B2) + fix A: if the deadline fired — whether it WON the race outright (a saturated lane:
+	// the arms never resolved) OR the arms resolved via daemon-side abort at the deadline — return a fail-
+	// soft empty degraded result rather than a partial/misleading set. Emitting timing here keeps the
+	// deadline-cut case observable (`armsMs ≈ deadline`, `hits: 0`, degraded). NEVER throws.
+	if (raced.deadline || deadline.aborted) {
 		emitTiming(0, 0);
 		return { hits: [], sources: [], degraded: true };
 	}

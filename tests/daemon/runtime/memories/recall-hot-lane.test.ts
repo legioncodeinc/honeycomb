@@ -97,6 +97,45 @@ function gatedStorage(): { storage: StorageQuery; peak: () => number; release: (
 	};
 }
 
+/**
+ * A storage whose every query HANGS FOREVER — it never resolves AND ignores the abort signal (a stuck
+ * daemon-side fetch, or an arm queued behind a saturated lane that never gets to run). The pre-fix-A
+ * `await Promise.all(arms)` would wedge on this indefinitely; the raced deadline must cut it loose.
+ */
+function stuckStorage(): { storage: StorageQuery } {
+	const storage: StorageQuery = {
+		async query(): Promise<QueryResult> {
+			return new Promise<QueryResult>(() => {}); // never settles, never observes the signal.
+		},
+	};
+	return { storage };
+}
+
+/**
+ * A gated storage that parks each query until `release()`, then settles it — `resolve` returns an empty
+ * ok, `reject` THROWS (a hard arm throw, the worst case for permit release + unhandled rejections). Used
+ * to prove the ABANDONED arms (the deadline won the race) still free their permits and never surface an
+ * unhandledRejection when they settle in the background AFTER `recallFast` has already returned.
+ */
+function gatedReleasableStorage(outcome: "resolve" | "reject"): { storage: StorageQuery; release: () => void } {
+	const gates: Array<() => void> = [];
+	let released = false;
+	const storage: StorageQuery = {
+		async query(): Promise<QueryResult> {
+			if (!released) await new Promise<void>((resolve) => gates.push(resolve));
+			if (outcome === "reject") throw new Error("arm threw after the deadline cut");
+			return ok([], 0);
+		},
+	};
+	return {
+		storage,
+		release: () => {
+			released = true;
+			while (gates.length > 0) gates.shift()?.();
+		},
+	};
+}
+
 const ORIGINAL_ENV = { ...process.env };
 
 afterEach(() => {
@@ -355,5 +394,165 @@ describe("L-B8 (b-AC-8 / D-4): a hanging heavy arm is bounded by the generous de
 		expect(result.hits.map((h) => h.id)).toEqual(["m1", "s1"]);
 		expect(result.sources).toEqual(["memories", "sessions"]);
 		expect(result.degraded).toBe(true);
+	});
+});
+
+// ── fix A (PRD-077): recallFast RACES the whole arm phase against the deadline ────
+//
+// The bug: the per-arm deadline `AbortSignal` only aborts an arm AFTER it acquires a fast-lane slot and
+// starts its `storage.query`. An arm QUEUED waiting for a slot (a saturated lane) — or a fetch that is
+// stuck and ignores the signal — is NOT bounded by it, so `await Promise.all(arms)` parked for tens of
+// seconds past the ~3000ms budget (live-observed `armsMs: 73273`). The fix races `Promise.all(arms)`
+// against a deadline sentinel that RESOLVES on the deadline signal, so `recallFast`'s wall-clock is
+// bounded by `recallFastDeadlineMs` REGARDLESS of whether the arms have resolved.
+
+describe("fix A (PRD-077): a saturated-lane / stuck-fetch fast recall returns within the deadline, not the hang", () => {
+	it("A-core: with arm queries that HANG FOREVER, recallFast returns degraded-empty within the deadline", async () => {
+		process.env.HONEYCOMB_RECALL_FAST_DEADLINE_MS = "50";
+		resetAmplificationConfigCache();
+		resetFastRecallPool();
+
+		const pool = new Semaphore(8);
+		const { storage } = stuckStorage();
+
+		const startedAt = Date.now();
+		const result = await recallFast(
+			{ query: "widgets", scope: SCOPE },
+			{ storage, embed: fakeEmbed(VALID_QUERY_VECTOR), recallPool: pool },
+		);
+		const elapsedMs = Date.now() - startedAt;
+
+		// Bounded by the 50ms deadline — NOT the never-resolving arms (pre-fix this awaited Promise.all forever).
+		expect(result).toEqual({ hits: [], sources: [], degraded: true });
+		expect(elapsedMs).toBeLessThan(1000);
+	});
+
+	it("A-core (saturated lane): when EVERY fast-lane slot is held, the queued arms never start yet recallFast still returns within the deadline", async () => {
+		process.env.HONEYCOMB_RECALL_FAST_DEADLINE_MS = "50";
+		resetAmplificationConfigCache();
+		resetFastRecallPool();
+
+		// A fully-saturated fast lane: hold its only slot so all 7 arms PARK in `pool.run` (query never called).
+		// The shed gate does not fire (the backlog builds AFTER the start-of-call `waiting` snapshot).
+		const pool = new Semaphore(1);
+		await pool.acquire();
+		const query = vi.fn(async (): Promise<QueryResult> => ok([], 0));
+
+		const startedAt = Date.now();
+		const result = await recallFast(
+			{ query: "widgets", scope: SCOPE },
+			{ storage: { query }, embed: fakeEmbed(VALID_QUERY_VECTOR), recallPool: pool },
+		);
+		const elapsedMs = Date.now() - startedAt;
+
+		expect(result).toEqual({ hits: [], sources: [], degraded: true });
+		expect(elapsedMs).toBeLessThan(1000);
+		// The arms never acquired a slot (they queued behind the held permit) — the deadline race freed the call.
+		expect(query).not.toHaveBeenCalled();
+	});
+
+	it("timing is emitted on the deadline-cut path: onTiming fires once with hits:0, degraded, and a bounded armsMs", async () => {
+		process.env.HONEYCOMB_RECALL_FAST_DEADLINE_MS = "50";
+		resetAmplificationConfigCache();
+		resetFastRecallPool();
+
+		const pool = new Semaphore(8);
+		const { storage } = stuckStorage();
+		const onTiming = vi.fn();
+
+		const result = await recallFast(
+			{ query: "widgets", scope: SCOPE },
+			{ storage, embed: fakeEmbed(VALID_QUERY_VECTOR), recallPool: pool, onTiming },
+		);
+
+		expect(result.degraded).toBe(true);
+		// The L-B10 timing event STILL fires on the deadline cut (one emit site for both paths).
+		expect(onTiming).toHaveBeenCalledTimes(1);
+		const ev = onTiming.mock.calls[0]![0] as {
+			lane: string;
+			armsMs: number;
+			fuseMs: number;
+			arms: number;
+			semanticRan: boolean;
+			hits: number;
+		};
+		expect(ev.lane).toBe("fast");
+		expect(ev.hits).toBe(0); // deadline-cut → no hits injected.
+		expect(ev.fuseMs).toBe(0); // fusion never ran.
+		expect(ev.arms).toBe(7); // 3 semantic + 4 lexical were issued before the cut.
+		expect(ev.semanticRan).toBe(true);
+		// armsMs records the deadline-bounded wait (≈ the 50ms deadline), not a 73s hang.
+		expect(ev.armsMs).toBeLessThan(1000);
+	});
+
+	it("no permit leak + no unhandledRejection: abandoned arms that RESOLVE later free their fast-lane permits", async () => {
+		process.env.HONEYCOMB_RECALL_FAST_DEADLINE_MS = "50";
+		resetAmplificationConfigCache();
+		resetFastRecallPool();
+
+		const pool = new Semaphore(8);
+		const { storage, release } = gatedReleasableStorage("resolve");
+
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown): void => {
+			unhandled.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			const result = await recallFast(
+				{ query: "widgets", scope: SCOPE },
+				{ storage, embed: fakeEmbed(VALID_QUERY_VECTOR), recallPool: pool },
+			);
+			expect(result).toEqual({ hits: [], sources: [], degraded: true });
+			// The 7 arms acquired a slot and parked; after the deadline cut they still hold their permits.
+			expect(pool.inFlight).toBe(7);
+
+			// Let the ABANDONED arms settle in the background → each `pool.run` finally RELEASES its permit.
+			release();
+			await new Promise((r) => setTimeout(r, 20));
+			expect(pool.inFlight).toBe(0);
+			expect(pool.waiting).toBe(0);
+			// The freed slots are reusable (no leaked permit).
+			await pool.acquire();
+			expect(pool.inFlight).toBe(1);
+			pool.release();
+			// The abandoned arms settling produced NO unhandledRejection.
+			expect(unhandled).toEqual([]);
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+		}
+	});
+
+	it("no unhandledRejection: abandoned arms that REJECT (throw) later are swallowed and still free their permits", async () => {
+		process.env.HONEYCOMB_RECALL_FAST_DEADLINE_MS = "50";
+		resetAmplificationConfigCache();
+		resetFastRecallPool();
+
+		const pool = new Semaphore(8);
+		const { storage, release } = gatedReleasableStorage("reject");
+
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown): void => {
+			unhandled.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			const result = await recallFast(
+				{ query: "widgets", scope: SCOPE },
+				{ storage, embed: fakeEmbed(VALID_QUERY_VECTOR), recallPool: pool },
+			);
+			expect(result.degraded).toBe(true);
+			expect(pool.inFlight).toBe(7);
+
+			// Let the abandoned arms THROW in the background.
+			release();
+			await new Promise((r) => setTimeout(r, 20));
+			// The rejecting arms freed their permits (Semaphore.run finally) AND raised no unhandledRejection
+			// (the swallow-catch on the arms promise + the race's own subscription both mark it handled).
+			expect(pool.inFlight).toBe(0);
+			expect(unhandled).toEqual([]);
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+		}
 	});
 });
