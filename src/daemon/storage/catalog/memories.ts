@@ -220,6 +220,23 @@ export function buildDedupCheckSql(hash: string): string {
 }
 
 /**
+ * Build the BATCHED dedup probe (PRD-080c c-AC-2): which of these `content_hash`es already exist? The
+ * coalesced controlled-write drain runs this ONCE over a group of same-scope ADD rows to filter out the
+ * hashes a prior attempt already landed BEFORE a multi-row append, so a coalesced replay preserves the
+ * exact `content_hash` dedup guarantee the per-row {@link buildDedupCheckSql} gives — no duplicate
+ * `memories` row. Returns the matched `content_hash`es (the caller maps them to the group's writes). Every
+ * hash routes through `sLiteral` and the table/columns through `sqlIdent` (the SQL-safety floor, PRD-002b)
+ * — the `IN (…)` list is exactly N single-hash literals fused into one probe, never a new injection sink.
+ * The caller guarantees a non-empty, de-duplicated `hashes` (an empty `IN ()` is never built).
+ */
+export function buildDedupCheckManySql(hashes: readonly string[]): string {
+	const tbl = sqlIdent("memories");
+	const col = sqlIdent("content_hash");
+	const inList = hashes.map((h) => sLiteral(h)).join(", ");
+	return `SELECT ${col} FROM "${tbl}" WHERE ${col} IN (${inList})`;
+}
+
+/**
  * Build the per-project memory-count aggregate (PRD-059c c-AC-1 / c-AC-2): ONE
  * grouped read over `memories` that returns `(project_id, count, last_capture)`
  * for every project in the active org/workspace partition in a single round-trip,
