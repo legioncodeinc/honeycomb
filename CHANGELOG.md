@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.12.2 — 2026-07-11
+
+Fixed a bug where dedup-probe failures during memory writes were logged as an opaque, undiagnosable error; now the real (secret-safe) HTTP status and error message are surfaced for easier troubleshooting.
+
 ## v0.12.1 — 2026-07-11
 
 Fixes a bug where a batched flush window mixing rows with different column shapes (e.g. a plain user turn and an assistant turn with usage data) could be wholesale rejected and dropped; such rows are now grouped by column shape so all events are reliably persisted.
