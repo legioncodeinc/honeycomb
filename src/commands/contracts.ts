@@ -129,6 +129,12 @@ export const VERB_TABLE: readonly VerbSpec[] = Object.freeze([
 		group: "memory",
 		summary: "run version-history compaction over version-bumped tables (030)",
 	},
+	{
+		verb: "capture",
+		cls: "storage",
+		group: "memory",
+		summary: "drain the durable capture retry outbox on the daemon (capture drain, 079b)",
+	},
 	// Knowledge & skills — skills, assets, ontology, the codebase graph, and goals.
 	{
 		verb: "skill",

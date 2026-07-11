@@ -46,11 +46,20 @@
  * interval (so it never keeps the process alive) and re-appends on the dedicated write
  * `Semaphore(3)` (PRD-077 B2) so it never starves recall.
  *
- * ── Observability (a-AC-7) ───────────────────────────────────────────────────
- * `counts()` feeds the `/health` `captureOutbox { pending, retrying }` field, and the
- * drainer emits SECRET-FREE `capture.outbox.{enqueued,drained,retry}` events carrying
+ * ── Observability (a-AC-7 / b-AC-2 / c-AC-4) ─────────────────────────────────
+ * `counts()` feeds the `/health` `captureOutbox { pending, retrying, deadLettered }` field, and the
+ * drainer emits SECRET-FREE `capture.outbox.{enqueued,drained,retry,dead_lettered,shed}` events carrying
  * only counts / durations / attempt numbers — never message content, a token, query
  * text, an org, or a workspace string.
+ *
+ * ── Scale: caps + coalescing + back-pressure (PRD-079c) ──────────────────────
+ * c-AC-1: a `maxRows` cap on the ACTIVE (`pending`) backlog — an enqueue over it SHEDS the oldest pending
+ * rows oldest-first (`capture.outbox.shed { count }`, never a silent truncation); `dead` rows are terminal
+ * and never counted or shed. c-AC-2: on drain the due rows are COALESCED by scope + column signature into
+ * one `appendOnlyInsertMany` per group (a failed group backs off / dead-letters each member independently,
+ * never lost). c-AC-3: `maxDrainPerInterval` is the SINGLE authoritative per-pass attempt cap (it unified
+ * the old 079a `drainBatch`), so a huge backlog drains at a bounded rate and the rest stays due. All three
+ * paths are fail-soft: a fault degrades to the pre-079c behavior and never breaks capture (c-AC-4).
  */
 
 import { mkdirSync } from "node:fs";
@@ -74,8 +83,15 @@ import { CAPTURE_WRITE_OPTS } from "./capture-handler.js";
 
 /** The dedicated outbox table living beside `local_job` inside the SAME `local-queue.db` file (D-1). */
 export const CAPTURE_OUTBOX_TABLE = "capture_outbox" as const;
-/** The single status a queued outbox row carries in the MVP (079b adds `dead`). */
+/** The ACTIVE status a queued outbox row carries: it is due for (or between) drain attempts. */
 export const CAPTURE_OUTBOX_PENDING = "pending" as const;
+/**
+ * PRD-079b (b-AC-1): the TERMINAL dead-letter status. A row that reaches `maxAttempts` failed
+ * re-appends OR exceeds `maxAgeMs` in the outbox is moved here — the row is RETAINED (never deleted,
+ * never re-leased: {@link SqliteCaptureOutbox.leaseDue} filters `status = pending`), so it stops
+ * consuming write slots and stops growing the active backlog. Bounded growth, never a silent vanish.
+ */
+export const CAPTURE_OUTBOX_DEAD = "dead" as const;
 
 /** How often the background drainer re-attempts due rows (unref'd interval). Off the hot path. */
 export const DEFAULT_OUTBOX_DRAIN_INTERVAL_MS = 30_000;
@@ -83,18 +99,97 @@ export const DEFAULT_OUTBOX_DRAIN_INTERVAL_MS = 30_000;
 export const DEFAULT_OUTBOX_BACKOFF_BASE_MS = 5_000;
 /** Bounded exponential backoff CAP so a persistent degraded window can never hot-loop the write client (a-AC-3). */
 export const DEFAULT_OUTBOX_BACKOFF_CAP_MS = 5 * 60 * 1_000;
-/** Max rows leased per drain pass so one tick can never issue an unbounded burst of appends. */
-export const DEFAULT_OUTBOX_DRAIN_BATCH = 50;
+/**
+ * PRD-079c (c-AC-3): the AUTHORITATIVE per-pass attempt cap. One {@link SqliteCaptureOutbox.drainDue}
+ * pass leases (and therefore attempts) at MOST this many rows, so a huge backlog drains at a bounded
+ * rate rather than bursting the write client's `Semaphore(3)`; the remainder is left due for the next
+ * pass. Default 200.
+ */
+export const DEFAULT_OUTBOX_MAX_DRAIN_PER_INTERVAL = 200;
+/**
+ * @deprecated PRD-079c UNIFIED the two overlapping per-pass lease caps into ONE. The 079a "drain batch"
+ * (was 50) and this phase's back-pressure knob were the same concept — how many rows a single pass may
+ * attempt — so {@link DEFAULT_OUTBOX_MAX_DRAIN_PER_INTERVAL} is now the single source of truth and this
+ * alias points at it. Retained only so a pre-079c import does not break; prefer the max-drain constant.
+ */
+export const DEFAULT_OUTBOX_DRAIN_BATCH = DEFAULT_OUTBOX_MAX_DRAIN_PER_INTERVAL;
+/**
+ * PRD-079c (c-AC-1): the ACTIVE-backlog row-count cap. When an enqueue would push the `pending` backlog
+ * over this, the OLDEST pending rows are shed oldest-first (a secret-free `capture.outbox.shed` event,
+ * never a silent truncation). `dead` rows are terminal and do NOT count toward this cap. Default 10,000.
+ */
+export const DEFAULT_OUTBOX_MAX_ROWS = 10_000;
+
+/** PRD-079b (b-AC-1): failed re-appends after which a row dead-letters (`pending → dead`). */
+export const DEFAULT_OUTBOX_MAX_ATTEMPTS = 10;
+/** PRD-079b (b-AC-1): age in the outbox after which a row dead-letters on its next failed attempt (24h). */
+export const DEFAULT_OUTBOX_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
 
 /** The kill-switch env flag (default ON) — mirrors the amplification-config opt-out posture. */
 export const CAPTURE_OUTBOX_ENV = "HONEYCOMB_CAPTURE_OUTBOX" as const;
+/** PRD-079b (b-AC-1): env override for the dead-letter attempt bound (`HONEYCOMB_CAPTURE_OUTBOX_MAX_ATTEMPTS`). */
+export const CAPTURE_OUTBOX_MAX_ATTEMPTS_ENV = "HONEYCOMB_CAPTURE_OUTBOX_MAX_ATTEMPTS" as const;
+/** PRD-079b (b-AC-1): env override for the dead-letter age bound in ms (`HONEYCOMB_CAPTURE_OUTBOX_MAX_AGE_MS`). */
+export const CAPTURE_OUTBOX_MAX_AGE_MS_ENV = "HONEYCOMB_CAPTURE_OUTBOX_MAX_AGE_MS" as const;
+/** PRD-079c (c-AC-1): env override for the active-backlog row cap (`HONEYCOMB_CAPTURE_OUTBOX_MAX_ROWS`). */
+export const CAPTURE_OUTBOX_MAX_ROWS_ENV = "HONEYCOMB_CAPTURE_OUTBOX_MAX_ROWS" as const;
+/** PRD-079c (c-AC-3): env override for the per-pass back-pressure cap (`HONEYCOMB_CAPTURE_OUTBOX_MAX_DRAIN_PER_INTERVAL`). */
+export const CAPTURE_OUTBOX_MAX_DRAIN_PER_INTERVAL_ENV = "HONEYCOMB_CAPTURE_OUTBOX_MAX_DRAIN_PER_INTERVAL" as const;
 
-/** The outbox backlog snapshot surfaced on `/health` (a-AC-7). Carries counts only — no secret. */
+/** The resolved dead-letter bounds — {@link resolveCaptureOutboxLimits}'s output, passed to {@link openCaptureOutbox}. */
+export interface CaptureOutboxLimits {
+	/** Failed re-appends after which a row dead-letters (min 1). */
+	readonly maxAttempts: number;
+	/** Age in the outbox (ms) after which a row dead-letters on its next failed attempt (min 1). */
+	readonly maxAgeMs: number;
+	/** PRD-079c (c-AC-1): active-backlog (`pending`) row cap; over it, oldest pending rows are shed (min 1). */
+	readonly maxRows: number;
+	/** PRD-079c (c-AC-3): per-pass back-pressure cap — rows one drain pass will lease/attempt (min 1). */
+	readonly maxDrainPerInterval: number;
+}
+
+/**
+ * Coerce-and-clamp one env int knob (the amplification-config posture, without pulling zod onto this
+ * daemon-only file): a non-numeric value falls back to `fallback`; a sub-`min` value is clamped UP to
+ * `min` (a `0`/negative bound would dead-letter or never-dead-letter nonsensically). A typo is tuning
+ * noise, never a hard reject — the daemon never fails to boot because a bound was fat-fingered.
+ */
+function clampIntKnob(raw: unknown, fallback: number, min: number): number {
+	const n = typeof raw === "number" ? raw : Number(raw);
+	if (!Number.isFinite(n)) return fallback;
+	return Math.max(min, Math.trunc(n));
+}
+
+/**
+ * Resolve the dead-letter bounds from the environment (b-AC-1), amplification-config style: documented
+ * defaults ({@link DEFAULT_OUTBOX_MAX_ATTEMPTS} / {@link DEFAULT_OUTBOX_MAX_AGE_MS}), env-overridable via
+ * `HONEYCOMB_CAPTURE_OUTBOX_MAX_ATTEMPTS` / `HONEYCOMB_CAPTURE_OUTBOX_MAX_AGE_MS`, coerce-and-clamp (a
+ * non-numeric or sub-1 value falls back / clamps up, never throws). Called ONCE at the composition root
+ * (assemble) and threaded into {@link openCaptureOutbox}, so a fan-out/hot-path module never reads env.
+ */
+export function resolveCaptureOutboxLimits(env: NodeJS.ProcessEnv = process.env): CaptureOutboxLimits {
+	return {
+		maxAttempts: clampIntKnob(env[CAPTURE_OUTBOX_MAX_ATTEMPTS_ENV], DEFAULT_OUTBOX_MAX_ATTEMPTS, 1),
+		maxAgeMs: clampIntKnob(env[CAPTURE_OUTBOX_MAX_AGE_MS_ENV], DEFAULT_OUTBOX_MAX_AGE_MS, 1),
+		// PRD-079c (c-AC-1 / c-AC-3): the scale bounds, same coerce-and-clamp posture (a typo is tuning
+		// noise, never a boot failure) — the cap and the per-pass back-pressure knob.
+		maxRows: clampIntKnob(env[CAPTURE_OUTBOX_MAX_ROWS_ENV], DEFAULT_OUTBOX_MAX_ROWS, 1),
+		maxDrainPerInterval: clampIntKnob(
+			env[CAPTURE_OUTBOX_MAX_DRAIN_PER_INTERVAL_ENV],
+			DEFAULT_OUTBOX_MAX_DRAIN_PER_INTERVAL,
+			1,
+		),
+	};
+}
+
+/** The outbox backlog snapshot surfaced on `/health` (a-AC-7 / b-AC-2). Carries counts only — no secret. */
 export interface CaptureOutboxCounts {
-	/** Total rows still queued for a durable re-append (the whole backlog). */
+	/** ACTIVE rows still queued for a durable re-append (`status = pending`); EXCLUDES terminal `dead`. */
 	readonly pending: number;
-	/** The subset that has already failed at least one drain attempt (`attempts > 0`). */
+	/** The active subset that has already failed at least one drain attempt (`attempts > 0`, `status = pending`). */
 	readonly retrying: number;
+	/** PRD-079b (b-AC-2): TERMINAL dead-lettered rows (`status = dead`) — retained, not re-leased, not active. */
+	readonly deadLettered: number;
 }
 
 /** Outcome of an {@link CaptureOutboxSink.enqueue} — never throws; reports what became durable vs truly lost. */
@@ -109,11 +204,13 @@ export interface CaptureOutboxEnqueueResult {
 export interface CaptureOutboxDrainResult {
 	/** Rows re-appended OK and deleted from the outbox this pass. */
 	readonly drained: number;
-	/** Rows whose re-append failed this pass (attempts bumped + `next_attempt_at` pushed out). */
+	/** Rows whose re-append failed this pass and stayed pending (attempts bumped + `next_attempt_at` pushed out). */
 	readonly retried: number;
+	/** PRD-079b (b-AC-1): rows moved to terminal `dead` this pass (hit `maxAttempts` OR exceeded `maxAgeMs`). */
+	readonly deadLettered: number;
 }
 
-/** The NARROW surface the capture handler needs: persist failed rows, never throw (a-AC-5). */
+/** The NARROW surface the capture handler needs: persist failed rows + kick a recovery drain, never throw (a-AC-5). */
 export interface CaptureOutboxSink {
 	/**
 	 * Persist each `{ row, scope }` under its existing deterministic id (`INSERT OR IGNORE`, a-AC-6).
@@ -121,18 +218,29 @@ export interface CaptureOutboxSink {
 	 * and reported as `dropped` so the caller keeps the drop metric honest.
 	 */
 	enqueue(rows: readonly RowValues[], scope: QueryScope): CaptureOutboxEnqueueResult;
+	/**
+	 * PRD-079b (b-AC-3): the RECOVERY-TRIGGERED drain kick. A SUCCESSFUL capture append is the
+	 * "backend recovered" signal — the capture handler calls this to drain the backlog IMMEDIATELY
+	 * instead of waiting for the 30s interval. Single-flighted against the existing drain guard (a
+	 * kick while a drain is in flight is a no-op) and FULLY FAIL-SOFT (never throws, never blocks the
+	 * capture ack). OPTIONAL on the sink so a pre-079b test stub need not implement it.
+	 */
+	kick?(): void;
 }
 
 /** The full outbox: the enqueue sink + the background drainer + its lifecycle. */
 export interface CaptureOutbox extends CaptureOutboxSink {
-	/** The `{ pending, retrying }` backlog snapshot for `/health` (a-AC-7). */
+	/** The `{ pending, retrying, deadLettered }` backlog snapshot for `/health` (a-AC-7 / b-AC-2). */
 	counts(): CaptureOutboxCounts;
 	/**
 	 * Run ONE drain pass: lease due rows (`next_attempt_at <= now`, skipping not-yet-due rows — a-AC-3),
 	 * re-append each on the injected WRITE client; on OK delete the row, on non-ok bump `attempts` and
-	 * push `next_attempt_at` by the bounded backoff. FAIL-SOFT: never throws.
+	 * push `next_attempt_at` by the bounded backoff, UNLESS the row hit `maxAttempts` OR exceeded
+	 * `maxAgeMs` — then move it to terminal `dead` (b-AC-1). FAIL-SOFT: never throws.
 	 */
 	drainDue(): Promise<CaptureOutboxDrainResult>;
+	/** PRD-079b (b-AC-3): fire an immediate single-flighted drain (recovery kick). Fail-soft, never throws. */
+	kick(): void;
 	/** Arm the unref'd drain interval (idempotent). */
 	start(): void;
 	/** Cancel the drain interval (idempotent). */
@@ -191,8 +299,32 @@ export interface OpenCaptureOutboxOptions {
 	readonly drainIntervalMs?: number;
 	/** Bounded exponential backoff tuning (a-AC-3). */
 	readonly backoff?: CaptureOutboxBackoff;
-	/** Max rows leased per drain pass (default {@link DEFAULT_OUTBOX_DRAIN_BATCH}). */
-	readonly drainBatch?: number;
+	/**
+	 * PRD-079c (c-AC-3): the per-pass back-pressure cap — the max rows one drain pass leases/attempts
+	 * (default {@link DEFAULT_OUTBOX_MAX_DRAIN_PER_INTERVAL}, clamped ≥ 1). This UNIFIES the old 079a
+	 * `drainBatch` (the per-pass lease LIMIT) with the back-pressure knob into ONE authoritative cap, so
+	 * a huge backlog drains at a bounded rate and the remainder stays due for the next pass.
+	 */
+	readonly maxDrainPerInterval?: number;
+	/**
+	 * PRD-079c (c-AC-1): the ACTIVE-backlog (`pending`) row cap (default {@link DEFAULT_OUTBOX_MAX_ROWS},
+	 * clamped ≥ 1). When an enqueue pushes `pending` over this, the oldest pending rows are shed
+	 * oldest-first with a secret-free `capture.outbox.shed` event; `dead` rows never count toward it.
+	 * Resolved at the composition root via {@link resolveCaptureOutboxLimits}.
+	 */
+	readonly maxRows?: number;
+	/**
+	 * PRD-079b (b-AC-1): failed re-appends after which a row dead-letters (default
+	 * {@link DEFAULT_OUTBOX_MAX_ATTEMPTS}, clamped ≥ 1). Resolved at the composition root via
+	 * {@link resolveCaptureOutboxLimits} (env `HONEYCOMB_CAPTURE_OUTBOX_MAX_ATTEMPTS`).
+	 */
+	readonly maxAttempts?: number;
+	/**
+	 * PRD-079b (b-AC-1): age in the outbox (ms) after which a row dead-letters on its next failed attempt
+	 * (default {@link DEFAULT_OUTBOX_MAX_AGE_MS}, clamped ≥ 1). Resolved at the composition root via
+	 * {@link resolveCaptureOutboxLimits} (env `HONEYCOMB_CAPTURE_OUTBOX_MAX_AGE_MS`).
+	 */
+	readonly maxAgeMs?: number;
 }
 
 /** A minimal structured-log sink (matches the capture handler's / request logger's `event` shape). */
@@ -236,11 +368,12 @@ export const NULL_CAPTURE_OUTBOX: CaptureOutbox = Object.freeze({
 		return { enqueued: 0, dropped: rows.length };
 	},
 	counts(): CaptureOutboxCounts {
-		return { pending: 0, retrying: 0 };
+		return { pending: 0, retrying: 0, deadLettered: 0 };
 	},
 	async drainDue(): Promise<CaptureOutboxDrainResult> {
-		return { drained: 0, retried: 0 };
+		return { drained: 0, retried: 0, deadLettered: 0 };
 	},
+	kick(): void {},
 	start(): void {},
 	stop(): void {},
 	close(): void {},
@@ -286,7 +419,10 @@ class SqliteCaptureOutbox implements CaptureOutbox {
 	private readonly drainIntervalMs: number;
 	private readonly backoffBaseMs: number;
 	private readonly backoffCapMs: number;
-	private readonly drainBatch: number;
+	private readonly maxDrainPerInterval: number;
+	private readonly maxAttempts: number;
+	private readonly maxAgeMs: number;
+	private readonly maxRows: number;
 
 	private timer: unknown = null;
 	private draining = false;
@@ -301,7 +437,17 @@ class SqliteCaptureOutbox implements CaptureOutbox {
 		this.drainIntervalMs = Math.max(1, options.drainIntervalMs ?? DEFAULT_OUTBOX_DRAIN_INTERVAL_MS);
 		this.backoffBaseMs = Math.max(1, options.backoff?.baseMs ?? DEFAULT_OUTBOX_BACKOFF_BASE_MS);
 		this.backoffCapMs = Math.max(this.backoffBaseMs, options.backoff?.capMs ?? DEFAULT_OUTBOX_BACKOFF_CAP_MS);
-		this.drainBatch = Math.max(1, options.drainBatch ?? DEFAULT_OUTBOX_DRAIN_BATCH);
+		// PRD-079c (c-AC-3): the unified per-pass back-pressure cap (was `drainBatch`), clamped ≥ 1.
+		this.maxDrainPerInterval = Math.max(
+			1,
+			Math.trunc(options.maxDrainPerInterval ?? DEFAULT_OUTBOX_MAX_DRAIN_PER_INTERVAL),
+		);
+		// PRD-079b (b-AC-1): the dead-letter bounds (clamped ≥ 1 belt-and-suspenders even though the
+		// composition-root resolver already clamped; a direct-construction test may pass a raw value).
+		this.maxAttempts = Math.max(1, Math.trunc(options.maxAttempts ?? DEFAULT_OUTBOX_MAX_ATTEMPTS));
+		this.maxAgeMs = Math.max(1, Math.trunc(options.maxAgeMs ?? DEFAULT_OUTBOX_MAX_AGE_MS));
+		// PRD-079c (c-AC-1): the active-backlog row cap, clamped ≥ 1.
+		this.maxRows = Math.max(1, Math.trunc(options.maxRows ?? DEFAULT_OUTBOX_MAX_ROWS));
 	}
 
 	enqueue(rows: readonly RowValues[], scope: QueryScope): CaptureOutboxEnqueueResult {
@@ -340,57 +486,119 @@ class SqliteCaptureOutbox implements CaptureOutbox {
 			return { enqueued, dropped };
 		}
 		if (enqueued > 0) this.logger?.event("capture.outbox.enqueued", { count: enqueued });
+		// PRD-079c (c-AC-1): enforce the active-backlog cap AFTER persisting the new rows, so the
+		// just-enqueued (newest) rows are retained and the OLDEST pending rows are shed to stay ≤ maxRows.
+		// Fully isolated + fail-soft: a shed fault degrades to the pre-079c behavior (no shed) and never
+		// touches the enqueue accounting the caller relies on (c-AC-4).
+		if (enqueued > 0) this.shedToCap();
 		return { enqueued, dropped };
 	}
 
-	counts(): CaptureOutboxCounts {
-		if (this.closed) return { pending: 0, retrying: 0 };
+	/**
+	 * PRD-079c (c-AC-1): shed the OLDEST `pending` rows (oldest-first by `created_at`, then `id`) whenever
+	 * the ACTIVE backlog exceeds {@link maxRows}, emitting a secret-free `capture.outbox.shed { count }`
+	 * event — never a silent truncation. `dead` rows are terminal and EXCLUDED from the cap (the
+	 * `status = pending` filter), so a dead-letter backlog neither counts nor is shed by this path.
+	 * FAIL-SOFT: a SQLite fault degrades to a no-op (the pre-079c behavior) and never surfaces (c-AC-4).
+	 */
+	private shedToCap(): void {
 		try {
+			const tbl = sqlIdent(CAPTURE_OUTBOX_TABLE);
+			const countRow = this.db
+				.prepare(`SELECT COUNT(*) AS ${sqlIdent("n")} FROM ${tbl} WHERE ${sqlIdent("status")} = ?`)
+				.all(CAPTURE_OUTBOX_PENDING)[0];
+			const pending = countRow === undefined ? 0 : numberField(countRow, "n");
+			const overflow = pending - this.maxRows;
+			if (overflow <= 0) return;
+			// Delete the oldest `overflow` pending rows in ONE targeted statement (the due-index covers the
+			// ordering). A subquery bounds the shed to exactly the pending overflow — dead rows are untouched.
+			const shed = this.db
+				.prepare(
+					`DELETE FROM ${tbl} WHERE ${sqlIdent("id")} IN (` +
+						`SELECT ${sqlIdent("id")} FROM ${tbl} WHERE ${sqlIdent("status")} = ? ` +
+						`ORDER BY ${sqlIdent("created_at")} ASC, ${sqlIdent("id")} ASC LIMIT ?)`,
+				)
+				.run(CAPTURE_OUTBOX_PENDING, overflow);
+			const count = changeCount(shed);
+			if (count > 0) this.logger?.event("capture.outbox.shed", { count });
+		} catch (err: unknown) {
+			// A shed fault must never break capture: leave the backlog as-is for a later enqueue to re-shed.
+			this.logger?.event("capture.outbox.shed_failed", {
+				reason: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	counts(): CaptureOutboxCounts {
+		if (this.closed) return { pending: 0, retrying: 0, deadLettered: 0 };
+		try {
+			// PRD-079b (b-AC-2): partition in ONE pass. `pending`/`retrying` count ACTIVE rows
+			// (`status = pending`) only; `deadLettered` counts terminal `dead` rows — a `dead` row is
+			// NEVER active, so the two never overlap. Conditional SUMs so the partition is a single scan.
 			const rows = this.db
 				.prepare(
-					`SELECT COUNT(*) AS ${sqlIdent("pending")}, ` +
-						`COALESCE(SUM(CASE WHEN ${sqlIdent("attempts")} > 0 THEN 1 ELSE 0 END), 0) AS ${sqlIdent("retrying")} ` +
-						`FROM ${sqlIdent(CAPTURE_OUTBOX_TABLE)} WHERE ${sqlIdent("status")} = ?`,
+					`SELECT ` +
+						`COALESCE(SUM(CASE WHEN ${sqlIdent("status")} = ? THEN 1 ELSE 0 END), 0) AS ${sqlIdent("pending")}, ` +
+						`COALESCE(SUM(CASE WHEN ${sqlIdent("status")} = ? AND ${sqlIdent("attempts")} > 0 THEN 1 ELSE 0 END), 0) AS ${sqlIdent("retrying")}, ` +
+						`COALESCE(SUM(CASE WHEN ${sqlIdent("status")} = ? THEN 1 ELSE 0 END), 0) AS ${sqlIdent("dead")} ` +
+						`FROM ${sqlIdent(CAPTURE_OUTBOX_TABLE)}`,
 				)
-				.all(CAPTURE_OUTBOX_PENDING);
+				.all(CAPTURE_OUTBOX_PENDING, CAPTURE_OUTBOX_PENDING, CAPTURE_OUTBOX_DEAD);
 			const row = rows[0];
-			if (row === undefined) return { pending: 0, retrying: 0 };
-			return { pending: numberField(row, "pending"), retrying: numberField(row, "retrying") };
+			if (row === undefined) return { pending: 0, retrying: 0, deadLettered: 0 };
+			return {
+				pending: numberField(row, "pending"),
+				retrying: numberField(row, "retrying"),
+				deadLettered: numberField(row, "dead"),
+			};
 		} catch {
 			// counts() is a read-only observability call; a fault must never propagate to `/health`.
-			return { pending: 0, retrying: 0 };
+			return { pending: 0, retrying: 0, deadLettered: 0 };
 		}
 	}
 
 	async drainDue(): Promise<CaptureOutboxDrainResult> {
-		// Single-flight: the timer and an explicit call must never lease the same rows concurrently.
-		if (this.closed || this.draining) return { drained: 0, retried: 0 };
+		// Single-flight: the timer, the recovery kick, and an explicit call must never lease the same
+		// rows concurrently. A kick or timer tick while a pass is in flight is a no-op (b-AC-3).
+		if (this.closed || this.draining) return { drained: 0, retried: 0, deadLettered: 0 };
 		this.draining = true;
 		const startMs = this.clock.now();
 		let drained = 0;
 		let retried = 0;
+		let deadLettered = 0;
 		try {
 			const due = this.leaseDue(this.nowIso());
-			for (const lease of due) {
-				const parsed = this.parseRow(lease.rowJson);
-				if (parsed === null) {
-					// A corrupt persisted row can never be replayed — remove it so it does not poison the pass.
-					this.deleteRow(lease.id);
-					this.logger?.event("capture.outbox.drain_failed", { reason: "corrupt_row" });
-					continue;
-				}
-				const scope: QueryScope =
-					lease.workspace.length > 0 ? { org: lease.org, workspace: lease.workspace } : { org: lease.org };
-				const ok = await this.reappend(scope, parsed);
+			// PRD-079c (c-AC-2): COALESCE the due rows into groups that share BOTH a scope AND an identical
+			// column signature, then re-append each group with ONE `appendOnlyInsertMany` — mirroring the
+			// flush batcher so a recovery drains in few write ops. Heterogeneous shapes (e.g. assistant
+			// turns carrying `usage` columns vs user turns) land in SEPARATE groups so `buildInsertMany`'s
+			// same-columns assertion never rejects a batch. A corrupt row is dropped up front (never grouped).
+			const groups = this.groupDue(due);
+			for (const group of groups) {
+				const rows = group.members.map((m) => m.row);
+				const ok = await this.reappendMany(group.scope, rows);
 				if (ok) {
-					this.deleteRow(lease.id);
-					drained += 1;
+					// Whole-group success: delete EVERY member (drained += group size). No row is double-counted.
+					for (const member of group.members) {
+						this.deleteRow(member.lease.id);
+						drained += 1;
+					}
 				} else {
-					const attempt = lease.attempts + 1;
-					this.pushBackoff(lease.id, attempt);
-					retried += 1;
-					// Secret-free: attempt number only — no content, org, or workspace string (a-AC-7).
-					this.logger?.event("capture.outbox.retry", { attempt });
+					// PRD-079c (c-AC-2): a group append failure fails EACH member INDEPENDENTLY, exactly as the
+					// 079a/079b per-row path did — attempts+1 + pushBackoff, with the SAME per-member dead-letter
+					// check (maxAttempts / maxAgeMs). No row is lost; a member hitting a bound dead-letters while
+					// its siblings back off.
+					for (const member of group.members) {
+						if (this.deadLetter(member.lease)) {
+							deadLettered += 1;
+						} else {
+							const attempt = member.lease.attempts + 1;
+							this.pushBackoff(member.lease.id, attempt);
+							retried += 1;
+							// Secret-free: attempt number only — no content, org, or workspace string (a-AC-7).
+							this.logger?.event("capture.outbox.retry", { attempt });
+						}
+					}
 				}
 			}
 		} catch (err: unknown) {
@@ -404,7 +612,49 @@ class SqliteCaptureOutbox implements CaptureOutbox {
 		if (drained > 0) {
 			this.logger?.event("capture.outbox.drained", { count: drained, durationMs: this.clock.now() - startMs });
 		}
-		return { drained, retried };
+		return { drained, retried, deadLettered };
+	}
+
+	/**
+	 * PRD-079b (b-AC-3): fire an IMMEDIATE drain, single-flighted through the existing `draining`
+	 * guard (a kick while a pass is in flight is a no-op; a kick otherwise runs exactly one pass). The
+	 * recovery signal — a SUCCESSFUL capture append — reaches here so a recovered backend drains its
+	 * backlog promptly instead of waiting for the 30s interval. FULLY FAIL-SOFT: the drain promise has
+	 * no external awaiter, so a rejection here would become an unhandled rejection and (Node ≥15) kill
+	 * the daemon; `drainDue` already swallows every fault, but the `.catch` is the belt-and-suspenders
+	 * floor. A kick after `close()` (or while draining) is a silent no-op. Never throws.
+	 */
+	kick(): void {
+		if (this.closed || this.draining) return;
+		void this.drainDue().catch(() => {});
+	}
+
+	/**
+	 * PRD-079b (b-AC-1): move a FAILED-this-pass row to terminal `dead` when it hit `maxAttempts` OR
+	 * exceeded `maxAgeMs` in the outbox, and emit the secret-free `capture.outbox.dead_lettered` event
+	 * (b-AC-2: attempt / ageMs / count only — never content, token, org, or workspace). Returns `true`
+	 * when the row was dead-lettered (so the caller counts it), `false` to fall through to the normal
+	 * backoff retry. FAIL-SOFT: a SQLite fault on the terminal UPDATE degrades to a no-op — the row
+	 * stays pending for a later pass rather than escaping to the pass-level catch (b-AC-5).
+	 */
+	private deadLetter(lease: OutboxLease): boolean {
+		const attempt = lease.attempts + 1;
+		const createdMs = Date.parse(lease.createdAt);
+		const ageMs = Number.isFinite(createdMs) ? this.clock.now() - createdMs : 0;
+		const overAttempts = attempt >= this.maxAttempts;
+		const overAge = ageMs >= this.maxAgeMs;
+		if (!overAttempts && !overAge) return false;
+		try {
+			this.markDead(lease.id, attempt);
+		} catch (err: unknown) {
+			// A terminal-UPDATE fault must never abort the pass: leave the row pending for a later attempt.
+			this.logger?.event("capture.outbox.drain_failed", {
+				reason: err instanceof Error ? err.message : String(err),
+			});
+			return false;
+		}
+		this.logger?.event("capture.outbox.dead_lettered", { attempt, ageMs: Math.max(0, ageMs), count: 1 });
+		return true;
 	}
 
 	start(): void {
@@ -436,42 +686,96 @@ class SqliteCaptureOutbox implements CaptureOutbox {
 	}
 
 	/**
-	 * Re-append one persisted row on the WRITE client with the SAME single-attempt capture opts. A THROW
-	 * from the append (not just a non-ok result) is caught and reported as `false` so it becomes a NORMAL
-	 * failed attempt in {@link drainDue} (attempts+1 + pushBackoff + `retry` event) — never an escape to the
-	 * pass-level catch, which would skip this row's backoff and let the next pass re-lease it immediately
-	 * and hot-loop the write client (a-AC-3 / D-4).
+	 * PRD-079c (c-AC-2): coalesce the leased due rows into groups keyed by scope + column signature. A
+	 * corrupt persisted row (fails schema re-parse) can never be replayed, so it is DELETED here and
+	 * excluded from every group (never poisons a batch). Each surviving group carries members sharing the
+	 * SAME scope AND the SAME ordered column names, so one {@link reappendMany} lands them in one append
+	 * and `buildInsertMany`'s same-columns assertion always holds. Rows preserve their lease (attempts +
+	 * createdAt) so a failed group backs off / dead-letters each member independently.
 	 */
-	private async reappend(scope: QueryScope, row: RowValues): Promise<boolean> {
+	private groupDue(due: readonly OutboxLease[]): OutboxGroup[] {
+		const groups = new Map<string, OutboxGroup>();
+		for (const lease of due) {
+			const row = this.parseRow(lease.rowJson);
+			if (row === null) {
+				// A corrupt persisted row can never be replayed — remove it so it does not poison the pass.
+				this.deleteRow(lease.id);
+				this.logger?.event("capture.outbox.drain_failed", { reason: "corrupt_row" });
+				continue;
+			}
+			const scope: QueryScope =
+				lease.workspace.length > 0 ? { org: lease.org, workspace: lease.workspace } : { org: lease.org };
+			const key = groupKey(lease.org, lease.workspace, row);
+			const existing = groups.get(key);
+			if (existing === undefined) {
+				groups.set(key, { scope, members: [{ lease, row }] });
+			} else {
+				existing.members.push({ lease, row });
+			}
+		}
+		return [...groups.values()];
+	}
+
+	/**
+	 * Re-append a coalesced GROUP of same-scope/same-shape rows on the WRITE client with the SAME
+	 * single-attempt capture opts, in ONE multi-row append (c-AC-2). A THROW from the append (not just a
+	 * non-ok result) is caught and reported as `false` so the group becomes a NORMAL failed attempt in
+	 * {@link drainDue} (each member: attempts+1 + pushBackoff + `retry`, or dead-letter) — never an escape
+	 * to the pass-level catch, which would skip the members' backoff and let the next pass re-lease them
+	 * immediately and hot-loop the write client (a-AC-3 / D-4).
+	 */
+	private async reappendMany(scope: QueryScope, rows: readonly RowValues[]): Promise<boolean> {
 		try {
-			const result = await appendOnlyInsertMany(this.storage, this.sessionsTarget, scope, [row], CAPTURE_WRITE_OPTS);
+			const result = await appendOnlyInsertMany(this.storage, this.sessionsTarget, scope, rows, CAPTURE_WRITE_OPTS);
 			return isOk(result);
 		} catch {
 			return false;
 		}
 	}
 
-	/** Lease the due rows (`next_attempt_at <= now`), oldest-first, bounded to {@link drainBatch}. Skips future rows (a-AC-3). */
+	/**
+	 * Lease the due ACTIVE rows (`status = pending AND next_attempt_at <= now`), oldest-first, bounded
+	 * to {@link maxDrainPerInterval} — PRD-079c (c-AC-3): the SINGLE authoritative per-pass attempt cap
+	 * (it replaced the 079a `drainBatch`), so a huge backlog attempts at most this many rows and the rest
+	 * stay due for the next pass. Skips future rows (a-AC-3) AND terminal `dead` rows (the status filter,
+	 * so a dead-lettered row is NEVER re-leased — b-AC-1). `created_at` is carried so the drainer can
+	 * compute the row's age for the `maxAgeMs` dead-letter check ({@link deadLetter}).
+	 */
 	private leaseDue(nowIso: string): OutboxLease[] {
 		const rows = this.db
 			.prepare(
 				`SELECT ${sqlIdent("id")}, ${sqlIdent("org")}, ${sqlIdent("workspace")}, ${sqlIdent("row_json")}, ` +
-					`${sqlIdent("attempts")} FROM ${sqlIdent(CAPTURE_OUTBOX_TABLE)} ` +
+					`${sqlIdent("attempts")}, ${sqlIdent("created_at")} FROM ${sqlIdent(CAPTURE_OUTBOX_TABLE)} ` +
 					`WHERE ${sqlIdent("status")} = ? AND ${sqlIdent("next_attempt_at")} <= ? ` +
 					`ORDER BY ${sqlIdent("next_attempt_at")} ASC, ${sqlIdent("created_at")} ASC LIMIT ?`,
 			)
-			.all(CAPTURE_OUTBOX_PENDING, nowIso, this.drainBatch);
+			.all(CAPTURE_OUTBOX_PENDING, nowIso, this.maxDrainPerInterval);
 		return rows.map((row) => ({
 			id: stringField(row, "id"),
 			org: stringField(row, "org"),
 			workspace: stringField(row, "workspace"),
 			rowJson: stringField(row, "row_json"),
 			attempts: numberField(row, "attempts"),
+			createdAt: stringField(row, "created_at"),
 		}));
 	}
 
 	private deleteRow(id: string): void {
 		this.db.prepare(`DELETE FROM ${sqlIdent(CAPTURE_OUTBOX_TABLE)} WHERE ${sqlIdent("id")} = ?`).run(id);
+	}
+
+	/**
+	 * PRD-079b (b-AC-1): move a row to terminal `dead` (retained, never deleted). The row keeps its
+	 * final `attempts` so a forensic read sees how many re-appends it survived, and {@link leaseDue}'s
+	 * `status = pending` filter guarantees it is never leased again.
+	 */
+	private markDead(id: string, attempt: number): void {
+		this.db
+			.prepare(
+				`UPDATE ${sqlIdent(CAPTURE_OUTBOX_TABLE)} SET ${sqlIdent("attempts")} = ?, ` +
+					`${sqlIdent("status")} = ? WHERE ${sqlIdent("id")} = ?`,
+			)
+			.run(attempt, CAPTURE_OUTBOX_DEAD, id);
 	}
 
 	/** Bump `attempts` and push `next_attempt_at` out by the bounded exponential backoff (a-AC-3). */
@@ -513,6 +817,37 @@ interface OutboxLease {
 	readonly workspace: string;
 	readonly rowJson: string;
 	readonly attempts: number;
+	/** ISO `created_at`, so the drainer can compute the row's age for the `maxAgeMs` dead-letter check (b-AC-1). */
+	readonly createdAt: string;
+}
+
+/** PRD-079c (c-AC-2): one leased row paired with its parsed {@link RowValues}, a member of a coalesced group. */
+interface OutboxGroupMember {
+	readonly lease: OutboxLease;
+	readonly row: RowValues;
+}
+
+/** PRD-079c (c-AC-2): a coalesced drain group — same scope + same column signature, appended in ONE statement. */
+interface OutboxGroup {
+	readonly scope: QueryScope;
+	readonly members: OutboxGroupMember[];
+}
+
+/**
+ * PRD-079c (c-AC-2): the coalescing key — scope (org + workspace) AND the ordered column-name signature of
+ * the row. Two rows share a key ONLY when they can be safely fused into one multi-row `appendOnlyInsertMany`
+ * (same scope, identical columns in identical order), so `buildInsertMany`'s same-columns assertion never
+ * rejects a group. A NUL separator (unprintable) cannot appear in an org/workspace slug or a
+ * `sessions` column name, so the join is unambiguous — no two distinct triples collide, none splits.
+ */
+function groupKey(org: string, workspace: string, row: RowValues): string {
+	const signature = row.map(([name]) => name).join("\u0000");
+	return `${org}\u0000${workspace}\u0000${signature}`;
+}
+
+/** Normalize a SQLite `run()` change count (`number | bigint`) into a plain number (c-AC-1 shed count). */
+function changeCount(result: { readonly changes: number | bigint }): number {
+	return typeof result.changes === "bigint" ? Number(result.changes) : result.changes;
 }
 
 /**

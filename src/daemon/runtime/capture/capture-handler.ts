@@ -391,6 +391,10 @@ class CaptureRouteHandler {
 				this.enqueueToOutbox([row], scope);
 				return c.json({ error: "capture_failed", reason: "could not write the session row" }, 502);
 			}
+			// PRD-079b (b-AC-3): a LANDED append is the "backend recovered" signal — kick an immediate
+			// outbox drain so a backlog from the just-ended degraded window clears promptly instead of
+			// waiting for the 30s interval. Fail-soft + off the hot path (the ack is unaffected).
+			this.kickOutboxDrain();
 		}
 
 		// Per-turn counters → cue background workers, NEVER inline (FR-8 / a-AC-5 / D-1).
@@ -511,6 +515,24 @@ class CaptureRouteHandler {
 		}
 	}
 
+	/**
+	 * PRD-079b (b-AC-3): kick the durable outbox to drain IMMEDIATELY after a SUCCESSFUL capture append
+	 * (the "backend recovered" signal). The kick is single-flighted + fail-soft inside the outbox; this
+	 * wrapper is the belt-and-suspenders guard so even a throwing/absent seam never breaks the capture
+	 * ack (the ack was already computed above; the drain is off the hot path). A no-op when no outbox is
+	 * wired (the pre-079b posture) or the sink does not implement `kick`.
+	 */
+	private kickOutboxDrain(): void {
+		try {
+			this.deps.outbox?.kick?.();
+		} catch (err: unknown) {
+			// A recovery-kick fault must NEVER surface to the captured turn — surface it, do not throw.
+			this.deps.logger?.event("capture.outbox.kick_failed", {
+				reason: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
 	private bufferRow(id: string, row: RowValues, scope: QueryScope): void {
 		const buffer = this.ensureBuffer();
 		void buffer.add({ row, scope }).catch((err: unknown) => {
@@ -573,6 +595,9 @@ class CaptureRouteHandler {
 					this.onAppendFailure(rows, scope);
 					throw new Error(`capture batch append failed: ${result.kind}`);
 				}
+				// PRD-079b (b-AC-3): a LANDED batched append is the "backend recovered" signal — kick an
+				// immediate outbox drain so the degraded-window backlog clears promptly (off the hot path).
+				this.kickOutboxDrain();
 			} catch (err: unknown) {
 				const alreadyHandled = err instanceof Error && err.message.startsWith("capture batch append failed:");
 				if (!alreadyHandled) {

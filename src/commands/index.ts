@@ -93,6 +93,8 @@ export {
 	type UninstallLifecycleSteps,
 } from "./local-handlers.js";
 
+export { CAPTURE_DRAIN_ENDPOINT, runCaptureVerb } from "./capture.js";
+
 export {
 	MAINTENANCE_COMPACT_ENDPOINT,
 	type MaintenanceCliInvocation,
