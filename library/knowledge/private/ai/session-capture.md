@@ -1,6 +1,6 @@
 # Session Capture
 
-> Category: Ai | Version: 1.2 | Date: July 2026 | Status: Active
+> Category: Ai | Version: 1.3 | Date: July 2026 | Status: Active
 
 The input layer: how every prompt, tool call, and response becomes a durable raw event that feeds the distillation pipeline, and the guards that keep capture cheap and safe.
 
@@ -48,6 +48,19 @@ flowchart TD
 ```
 
 The `message` column is `JSONB` because each event is a structured payload (prompt text, tool input, tool response), and storing it as structured JSON keeps the original shape intact for later extraction. The capture call goes to the daemon, which owns the write to DeepLake; the shim never touches storage directly. The table shape is documented in [`../data/schema.md`](../data/schema.md).
+
+## Durable across degraded windows: the capture outbox
+
+The daemon-side append to DeepLake is not always available. The hosted backend hibernates and flaps, and when a degraded window pushes an append past the 10s statement timeout the write fails. Before PRD-079a (PR #287, v0.11.0) that failed batch was counted, logged (`capture.batch_insert.failed {timeout}`), and then **dropped**, so a captured event the harness believed had landed was silently lost, and any memory that would have distilled from it never formed. Live measurement showed these clusters in warm windows (roughly 103 to 251s post-boot), not just on cold boot, so the loss was real in steady operation.
+
+PRD-079a closes that gap with a durable retry-later outbox. When the DeepLake append fails, the capture path enqueues the `{row, scope}` into a dedicated `capture_outbox` table instead of dropping it, and a background drainer re-appends it once the backend recovers:
+
+- The outbox lives inside the home-anchored `local-queue.db` (`~/.apiary/honeycomb/.daemon/`, the fleet-anchored SQLite store from PR #285), in its own table kept out of the pipeline job queue's payload guard. Because it is home-anchored it survives a daemon restart, so a window that outlasts the process still drains later. Its placement is covered in [`../data/workspace-layout.md`](../data/workspace-layout.md).
+- Enqueue is keyed by the deterministic `makeRowId` id with `INSERT OR IGNORE`, so replaying a row that actually did land is idempotent (read-time dedup on the same id closes the rest). Enqueue never throws into the hot path, and the happy path is byte-unchanged.
+- The drainer is an unref'd loop that re-appends on the dedicated **write** client (`Semaphore(3)`), so draining a backlog cannot starve recall. It uses bounded exponential backoff (5s base, 5min cap) and skips not-yet-due rows so it never hot-loops: a successful re-append deletes the row, a failure bumps `attempts` and pushes `next_attempt_at`.
+- The whole subsystem is fail-soft: any outbox open, enqueue, or drain fault degrades to a no-op (`NULL_CAPTURE_OUTBOX`), so a broken outbox can never break capture itself, and it is behind the `HONEYCOMB_CAPTURE_OUTBOX` kill-switch (default on).
+
+Its backlog is visible on `/health` as `captureOutbox { pending, retrying }` and through the secret-free `capture.outbox.{enqueued,drained,retry}` events, described from the operator side in [`../operations/observability-and-degradation.md`](../operations/observability-and-degradation.md). The mechanics live in `src/daemon/runtime/capture/capture-outbox.ts`. This is the write-side twin of the read-side isolation work in [`retrieval.md`](retrieval.md): recall was made independent of DeepLake latency, and capture is now durable across DeepLake availability gaps.
 
 ## Bounded read-back
 

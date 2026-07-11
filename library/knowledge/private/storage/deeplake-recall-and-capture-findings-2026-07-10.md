@@ -2,7 +2,7 @@
 
 > **Scope.** A technical record of a single deep investigation + implementation session focused on why per-turn memory recall was injecting nothing and why captures were being dropped, what we measured about the hosted Deeplake (`api.deeplake.ai`, workspace `apiary`) backend, and what we changed **on our side** (the daemon) to work around it. Includes the standing theories about Deeplake's behavior and an honest log of the diagnostic dead-ends that were disproved by measurement.
 >
-> **TL;DR.** Deeplake, as we use it (hosted Activeloop, `USING deeplake` tables over the SQL-over-HTTP transport), is a **versioned, append-only, columnar store with NO vector-index primitive and intermittently unstable hosted latency.** That makes it structurally slow for semantic reads (brute-force cosine scans) and unreliable for frequent writes (appends time out during backend degradation windows). We made the recall path **bounded, isolated, and fail-soft**, and added an **in-daemon local ANN index** so per-turn semantic recall no longer depends on Deeplake latency. The capture-write reliability (dropped memories during degraded windows) is the remaining backend-health gap.
+> **TL;DR.** Deeplake, as we use it (hosted Activeloop, `USING deeplake` tables over the SQL-over-HTTP transport), is a **versioned, append-only, columnar store with NO vector-index primitive and intermittently unstable hosted latency.** That makes it structurally slow for semantic reads (brute-force cosine scans) and unreliable for frequent writes (appends time out during backend degradation windows). We made the recall path **bounded, isolated, and fail-soft**, and added an **in-daemon local ANN index** so per-turn semantic recall no longer depends on Deeplake latency. The capture-write reliability gap (dropped memories during degraded windows) was subsequently closed by PRD-079a's **durable retry-later capture outbox** (§3.3), so a transient window no longer costs a memory.
 
 ---
 
@@ -61,6 +61,18 @@ The core architectural response to §1.1 (no vector index): move vector search *
 
 **Live result:** the local index returns the **identical top-5 ranking to Deeplake's `<#>`**, scores identically (both true cosine), sub-100ms, cloud-independent — the first real per-turn injection of the session. What it can return is bounded only by what is actually stored (see §5).
 
+### 3.3 PRD-079a: durable retry-later capture queue (branch `feat/prd-079-durable-capture-retry-queue`, PR #287, v0.11.0)
+
+The write-side twin of PRD-078: PRD-078 decoupled per-turn *reads* from Deeplake latency; this decouples *captures* from Deeplake *availability*. It is the fix §5 prescribed for the last open backend-health gap (captures dropped during degraded windows), so that gap is now closed on our side.
+
+- **`capture_outbox`, a durable local outbox.** Instead of dropping a timed-out append, the capture path persists the failed row to a dedicated `capture_outbox` table *inside* the home-anchored `local-queue.db` (`~/.apiary/honeycomb/.daemon/`, reusing PR #285's fleet anchoring and the `local-job-queue` SQLite/trusted-root helpers, kept out of the pipeline job queue's payload guard). New subsystem in `src/daemon/runtime/capture/capture-outbox.ts` (~537 lines).
+- **Enqueue-on-failure, not drop.** The `flushBatch` and immediate-path failure branches now enqueue `{row, scope}` keyed by the deterministic `makeRowId` id (`INSERT OR IGNORE`, so replay is idempotent). It never throws into the hot path, and the happy path is byte-unchanged.
+- **Background drainer.** An unref'd loop re-appends via `appendOnlyInsertMany` on the dedicated **write** client (`Semaphore(3)`, PRD-077 B2, so drains can't starve recall), with bounded exponential backoff (5s base / 5min cap) and a future-row skip so a not-yet-due row never hot-loops. OK deletes the row; a non-ok result bumps `attempts` and pushes `next_attempt_at`.
+- **Fail-soft and gated.** Any outbox open / enqueue / drain fault degrades to a no-op (`NULL_CAPTURE_OUTBOX`): capture is never broken and no dangling rejection can kill the daemon. The whole subsystem is behind the `HONEYCOMB_CAPTURE_OUTBOX` kill-switch (default-on).
+- **Observability.** `/health` gains a `captureOutbox { pending, retrying }` block and the path emits secret-free `capture.outbox.{enqueued,drained,retry}` events (counts / durations / attempt only). Surfaced from the operator side in [`../operations/observability-and-degradation.md`](../operations/observability-and-degradation.md).
+
+**Verification.** All 7 code ACs re-verified independently at close-out. a-AC-8 (a live degraded-window dogfood) is VERIFIED-by-mechanism: a natural Deeplake degraded window can't be induced on demand, so the end-to-end path is proven by controlled fault-injection through the real capture route (`tests/daemon/runtime/capture/capture-outbox-a-ac-8-mechanism.test.ts`: 201 ack → forced failing append → outbox `pending==1` → recover → drains to `0` with the original id). The natural-window observation is a non-blocking post-merge dogfood. Follow-on scope stays Draft: 079b (dead-letter + recovery-triggered drain) and 079c (max-backlog cap + coalescing).
+
 ---
 
 ## 4. Standing theories about Deeplake
@@ -75,7 +87,7 @@ The core architectural response to §1.1 (no vector index): move vector search *
 
 ## 5. Open issues / not yet addressed
 
-- **Capture-write drops during degraded windows.** `capture.batch_insert.failed {timeout}` clusters in the backend's bad windows (measured 103–251s post-boot, i.e. warm — *not* cold-boot). On failure the batch is **dropped** (no retry). **Recommended fix: a durable retry-later queue** — re-queue the timed-out capture (the `local-queue.db` exists) and flush when the backend recovers. Until then, memories captured during a degraded window are lost, which caps how good recall can be regardless of the index.
+- **Capture-write drops during degraded windows (ADDRESSED by PRD-079a, PR #287, §3.3).** `capture.batch_insert.failed {timeout}` clustered in the backend's bad windows (measured 103 to 251s post-boot, i.e. warm, *not* cold-boot), and on failure the batch was **dropped** (no retry), so memories captured during a degraded window were lost, which capped how good recall could be regardless of the index. This is the "recommended fix: a durable retry-later queue" that PRD-079a shipped: a failed append is now persisted to a durable `capture_outbox` in the existing `local-queue.db` and re-appended by a background drainer when the backend recovers. See §3.3. Remaining hardening (dead-letter, max-backlog cap, coalescing) is Draft as 079b / 079c.
 - **Local index freshness (PRD-078b/c, drafted, not built).** 078a cold-builds on boot only. Needs write-through on new `memories`, an `updated_at` watermark pull for fleet writes, lifecycle/activation eviction, and HNSW beyond ~100k vectors/workspace.
 - **State-dir bug (C).** The daemon writes `.daemon/`/`.secrets/` into `process.cwd()` when `HONEYCOMB_WORKSPACE` is unset (`assemble.ts:1950-1952`), violating ADR-0003 (neutral `~/.apiary/honeycomb/` root). This scattered state across ≥8 repo dirs and caused stale-log misreads during this investigation. Own branch/IRD.
 - **Dashboard read contention (D / BUG-19).** Hive dashboard polling competes on the read client; a recall-dedicated read lane (or a saner poll cadence) is the follow-up.
@@ -105,7 +117,7 @@ Across this session Deeplake was shown to fail, with evidence, at all three of i
 - **Writes** — flapping hosted latency → appends time out past the 10s statement bound → memories dropped.
 - **Availability** — the workspace hibernates and cold-wakes (minutes-long blocks).
 
-Our side is now well-defended: recall is bounded/isolated/fail-soft and runs semantic search from an in-daemon index independent of Deeplake latency. But the durable answer to the write/availability side — and the removal of the local-index cache-coherence burden — is a store with **native vector indexing and reliable row-level writes** (pgvector on Postgres/Neon/Supabase, or Qdrant). Deeplake would remain viable only as durable/fleet blob storage behind such a tier; used as the live query+write engine it is a poor fit for a latency-critical per-turn memory loop. This is a deliberate architecture decision for the owner; the local ANN index (D-3) is the pragmatic bridge that unblocks recall today without forcing that decision.
+Our side is now well-defended on both hot paths: recall is bounded/isolated/fail-soft and runs semantic search from an in-daemon index independent of Deeplake latency, and captures survive degraded/hibernation windows via the durable outbox that drains on recovery (§3.3) rather than dropping. Those are client-side defenses against a backend that flaps; the durable answer to the write/availability side (and the removal of the local-index cache-coherence and outbox-drain burden) is a store with **native vector indexing and reliable row-level writes** (pgvector on Postgres/Neon/Supabase, or Qdrant). Deeplake would remain viable only as durable/fleet blob storage behind such a tier; used as the live query+write engine it is a poor fit for a latency-critical per-turn memory loop. This is a deliberate architecture decision for the owner; the local ANN index (D-3) is the pragmatic bridge that unblocks recall today without forcing that decision.
 
 ---
 
@@ -115,7 +127,8 @@ Our side is now well-defended: recall is bounded/isolated/fail-soft and runs sem
 - Vector ops: `src/daemon/storage/vector.ts` (`buildVectorSearchSql`, `<#>` score norm `:242`, `cosineSimilarity` `:137`, `deeplakeCosineScore`, `readEmbeddingCell`).
 - Recall engine: `src/daemon/runtime/memories/recall.ts` (`recallMemories`, `recallFast`, `fuseHits`, `runArm`, `applyRecencyActivation`, `SEMANTIC_ARMS`).
 - Local index: `src/daemon/runtime/memories/local-vector-index.ts` (`InMemoryLocalVectorIndex`, `coldBuildLocalVectorIndex`, `buildMemoriesColdBuildSql`).
-- Capture write: `src/daemon/runtime/capture/capture-handler.ts` (`flushBatch` → `appendOnlyInsertMany`, `capture.batch_insert.failed`).
+- Capture write: `src/daemon/runtime/capture/capture-handler.ts` (`flushBatch` → `appendOnlyInsertMany`, `capture.batch_insert.failed`, enqueue-on-failure).
+- Capture outbox (PRD-079a): `src/daemon/runtime/capture/capture-outbox.ts` (`capture_outbox` table, enqueue, drainer, backoff, `NULL_CAPTURE_OUTBOX` fail-soft), wired in `capture/attach.ts` + `assemble.ts`; `/health captureOutbox` in `src/daemon/runtime/health.ts`; the shared SQLite/trusted-root helpers in `src/daemon/runtime/services/local-job-queue.ts`.
 - Composition root: `src/daemon/runtime/assemble.ts` (read/write client split, cold-build wiring, `workspaceBaseDirCandidate:1950`).
 - Config knobs: `src/daemon/runtime/memories/amplification-config.ts` (`recallFast*`, `recallHeavyDeadlineMs`, `writeMaxConcurrency`, `localAnnIndex`).
 
@@ -123,3 +136,4 @@ Our side is now well-defended: recall is bounded/isolated/fail-soft and runs sem
 
 - PRD-077 (PR #281): B/B2 `9340a6c` (read/write split + single-attempt), A `0e1a198` (deadline-bounded recall).
 - PRD-078 (`feat/prd-078-local-ann-recall-index`): `1249f85` (078a index), `8dcdee9` (partial fusion), `1b0774f` (parser DRY + `recall.index.built`), `dcfdfcf` (`<#>` scorer + corrected comment).
+- PRD-079a (`feat/prd-079-durable-capture-retry-queue`, PR #287, merged `b0713ae`, released v0.11.0): durable `capture_outbox` + background drainer + `/health captureOutbox` + `capture.outbox.*` events.

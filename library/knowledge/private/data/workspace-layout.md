@@ -148,6 +148,8 @@ The fix adds `resolveLocalQueueBaseDir()` = `honeycombStateDir()` in `assemble.t
 
 There is no auto-migration: on the next restart the old `<workspace>/.daemon/local-queue.db` is orphaned, but queues drain in seconds so this costs at most a few in-flight jobs, and all future jobs land in the stable location. `.daemon/logs.db` and `agent.yaml` stay per-workspace by design, since diagnostics-per-workspace is defensible and neither is pipeline-critical.
 
+The same fleet-anchored `local-queue.db` now holds a second durable table. PR #287 (PRD-079a, v0.11.0) added the **`capture_outbox`**: a dedicated table for capture appends that failed against a degraded DeepLake window, so the row can be re-appended by a background drainer on recovery instead of being dropped. It reuses this file's fleet anchoring and the `local-job-queue` SQLite / trusted-root helpers (which is why it is home-anchored and survives restart), but it is a distinct table kept out of the pipeline job queue's payload guard, so the two share a DB without sharing a schema. The capture-side narrative is in [`../ai/session-capture.md`](../ai/session-capture.md) and the recovery mechanics in [`../storage/deeplake-recall-and-capture-findings-2026-07-10.md`](../storage/deeplake-recall-and-capture-findings-2026-07-10.md) §3.3.
+
 ## The two-source trailing-space bug class
 
 The two roots are resolved by two resolvers, and each reads a different environment variable, so a stray trailing space can strand state in a divergent directory in two independent ways. Understanding both is the point of keeping the roots distinct.
