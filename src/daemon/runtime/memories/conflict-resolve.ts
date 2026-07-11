@@ -606,14 +606,16 @@ export async function detectAndProject(
  */
 export function createConflictSuppressionSource(storage: StorageQuery): ConflictSuppressionSource {
 	return {
-		async loadSuppressed(hits: readonly MemoryRecallHit[], scope: QueryScope): Promise<ReadonlySet<string>> {
+		async loadSuppressed(hits: readonly MemoryRecallHit[], scope: QueryScope, signal?: AbortSignal): Promise<ReadonlySet<string>> {
 			const suppressed = new Set<string>();
 			// Only the durable `memories` arm carries a suppressable id; nothing to do if no memories hit.
 			const hitIds = new Set(hits.filter((h) => h.source === "memories").map((h) => h.id));
 			if (hitIds.size === 0) return suppressed;
 			let result;
 			try {
-				result = await storage.query(buildOpenConflictProjectionSql(), scope);
+				// PRD-077: thread the heavy-path deadline signal so this post-fan-out `memory_conflicts` read is
+				// bounded by `recallHeavyDeadlineMs` too (additive — absent signal is byte-for-byte the old read).
+				result = await storage.query(buildOpenConflictProjectionSql(), scope, signal !== undefined ? { signal } : {});
 			} catch {
 				return suppressed; // fail-soft: a query failure → no suppression (both sides returned).
 			}

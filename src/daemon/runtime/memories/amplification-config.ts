@@ -44,15 +44,81 @@ export const DEFAULT_RECALL_MAX_CONCURRENCY = 6;
 export const MIN_RECALL_MAX_CONCURRENCY = 1;
 
 /**
+ * PRD-077 (read/write split) — the dedicated WRITE-client in-flight ceiling. The daemon builds a
+ * SECOND in-process {@link StorageClient} for capture appends ONLY, sized by this knob, so a slow
+ * DeepLake can never let capture writes consume the read client's Semaphore slots and queue recall
+ * arms tens of seconds behind them (the live-observed `armsMs: 73273`). Default 3 leaves the read
+ * client its full {@link MAX_CONCURRENT_QUERIES} (5) for recall/dashboard/heal/prime.
+ */
+export const DEFAULT_WRITE_MAX_CONCURRENCY = 3;
+/** The floor for the write-concurrency knob: the write pool must admit at least one append. */
+export const MIN_WRITE_MAX_CONCURRENCY = 1;
+
+/**
+ * PRD-077b (L-B6) — the four hot-lane knobs. All config-backed, env-overridable, coerce-and-clamp
+ * like {@link DEFAULT_RECALL_MAX_CONCURRENCY} (a typo never takes the daemon down; it falls back to
+ * the documented default or is clamped to a safe floor). Defaults are tuned from `request_log`
+ * latency (the ~1.5s fast query, the ~4s client budget, the 25-min heavy tail), never hard-guessed.
+ */
+/** `HONEYCOMB_RECALL_FAST_MAX_CONCURRENCY` — the fast lane's dedicated in-flight ceiling; 8 sizes it to run one per-turn recall's 7 arms concurrently with headroom (L-B1). */
+export const DEFAULT_RECALL_FAST_MAX_CONCURRENCY = 8;
+/** `HONEYCOMB_RECALL_FAST_DEADLINE_MS` — the fast-lane server-side deadline; 3000ms sits above the ~1.5s fast query and below the ~4s client budget (L-B2). */
+export const DEFAULT_RECALL_FAST_DEADLINE_MS = 3000;
+/** `HONEYCOMB_RECALL_FAST_SHED_QUEUE_DEPTH` — the fast-lane waiter backlog past which a per-turn recall sheds instead of queuing (L-B3). */
+export const DEFAULT_RECALL_FAST_SHED_QUEUE_DEPTH = 8;
+/** `HONEYCOMB_RECALL_HEAVY_DEADLINE_MS` — the generous dashboard/heavy deadline (D-4); 15000ms caps the 25-min tail while a human waits for full quality (L-B8). */
+export const DEFAULT_RECALL_HEAVY_DEADLINE_MS = 15000;
+/**
+ * PRD-077 (L-B9) — the two pre-arm EMBED deadlines. The query embed on the recall hot path runs
+ * BEFORE the arm-deadline exists, so a hung embed daemon wedged both paths with zero completions
+ * (the live-observed hang). These bound the embed so a slow/hung embed degrades to lexical-only.
+ */
+/** `HONEYCOMB_RECALL_FAST_EMBED_DEADLINE_MS` — bound on the fast-lane pre-arm query embed; 1500ms is generous over the ~13ms normal embed and keeps total fast ≈ embed + ~1.5s arms within the ~4s client budget (L-B9). */
+export const DEFAULT_RECALL_FAST_EMBED_DEADLINE_MS = 1500;
+/** `HONEYCOMB_RECALL_HEAVY_EMBED_DEADLINE_MS` — bound on the heavy-path pre-arm query embed; 3000ms is generous for the dashboard path where a human waits for full quality (L-B9). */
+export const DEFAULT_RECALL_HEAVY_EMBED_DEADLINE_MS = 3000;
+/** The floor for a concurrency knob: a pool must admit at least one task. */
+export const MIN_RECALL_FAST_MAX_CONCURRENCY = 1;
+/** The floor for a deadline knob (ms): a positive value — a `0` would abort every query on the next tick. */
+export const MIN_RECALL_DEADLINE_MS = 1;
+/** The floor for the shed queue-depth knob: `0` is legal (shed the moment ANY waiter parks). */
+export const MIN_RECALL_SHED_QUEUE_DEPTH = 0;
+
+/**
+ * The upper bound EVERY integer knob is clamped to. A large FINITE env typo (e.g.
+ * `HONEYCOMB_RECALL_FAST_MAX_CONCURRENCY=1e21`) must be clamped like a sub-`min` value, NOT left to
+ * overflow `z.number().int()`'s safe-integer check and THROW {@link AmplificationConfigError} out of
+ * {@link resolveAmplificationConfig} — a knob typo must never take the daemon down; that is the whole
+ * point of coerce-and-clamp (a typo is tuning noise, never a hard reject). `Number.MAX_SAFE_INTEGER`
+ * is the tightest bound that (a) still satisfies `.int()` and (b) never clips a LEGITIMATE operational
+ * value: this ONE factory is shared across BOTH the single-digit concurrency knobs AND the
+ * millisecond deadline knobs, so a domain cap tight enough to feel "friendly" for concurrency (say
+ * `1_000_000`) would wrongly clip a legitimately long deadline. The safe-integer ceiling catches ONLY
+ * the overflow typo this guards against and nothing an operator would ever set on purpose.
+ */
+export const MAX_INT_KNOB = Number.MAX_SAFE_INTEGER;
+
+/**
+ * A coerce-and-clamp integer-knob factory (the ONE preprocess shape all five recall knobs share, so
+ * the duplication gate stays green): a non-numeric value falls back to `fallback`; a value out of range
+ * is CLAMPED to `[min, MAX_INT_KNOB]` — a sub-`min` value UP to `min` (a `0` concurrency would deadlock
+ * the pool, so it becomes the near-serial 1), and an oversized finite typo DOWN to {@link MAX_INT_KNOB}
+ * so it can never overflow `.int()`'s safe-integer check and throw (coerce-and-clamp, never reject).
+ */
+function clampedIntKnob(fallback: number, min: number) {
+	return z.preprocess((raw) => {
+		const n = typeof raw === "number" ? raw : Number(raw);
+		if (!Number.isFinite(n)) return fallback;
+		return Math.min(MAX_INT_KNOB, Math.max(min, Math.trunc(n)));
+	}, z.number().int());
+}
+
+/**
  * The concurrency knob: a positive integer, clamped UP to {@link MIN_RECALL_MAX_CONCURRENCY}.
  * A non-numeric value falls back to the default; a sub-1 value is clamped (a `0` would
  * deadlock the pool, so it becomes 1, the near-serial posture) — a typo is tuning noise.
  */
-const ConcurrencyKnob = z.preprocess((raw) => {
-	const n = typeof raw === "number" ? raw : Number(raw);
-	if (!Number.isFinite(n)) return DEFAULT_RECALL_MAX_CONCURRENCY;
-	return Math.max(MIN_RECALL_MAX_CONCURRENCY, Math.trunc(n));
-}, z.number().int());
+const ConcurrencyKnob = clampedIntKnob(DEFAULT_RECALL_MAX_CONCURRENCY, MIN_RECALL_MAX_CONCURRENCY);
 
 /**
  * The validated amplification config the fan-out + recall sides read. Resolved once
@@ -64,6 +130,34 @@ export const AmplificationConfigSchema = z.object({
 	fanoutBatch: OnByDefaultFlag.default(DEFAULT_FANOUT_BATCH),
 	/** `HONEYCOMB_RECALL_MAX_CONCURRENCY` — in-flight DeepLake-query ceiling; 6 by default (AC-62d.2.1). */
 	recallMaxConcurrency: ConcurrencyKnob.default(DEFAULT_RECALL_MAX_CONCURRENCY),
+	/** `HONEYCOMB_WRITE_MAX_CONCURRENCY` — the dedicated write-client in-flight ceiling; 3 by default (PRD-077 read/write split). */
+	writeMaxConcurrency: clampedIntKnob(DEFAULT_WRITE_MAX_CONCURRENCY, MIN_WRITE_MAX_CONCURRENCY).default(
+		DEFAULT_WRITE_MAX_CONCURRENCY,
+	),
+	/** `HONEYCOMB_RECALL_FAST_MAX_CONCURRENCY` — the fast lane's dedicated ceiling; 8 by default (L-B1). */
+	recallFastMaxConcurrency: clampedIntKnob(DEFAULT_RECALL_FAST_MAX_CONCURRENCY, MIN_RECALL_FAST_MAX_CONCURRENCY).default(
+		DEFAULT_RECALL_FAST_MAX_CONCURRENCY,
+	),
+	/** `HONEYCOMB_RECALL_FAST_DEADLINE_MS` — the fast-lane server-side deadline; 3000ms by default (L-B2). */
+	recallFastDeadlineMs: clampedIntKnob(DEFAULT_RECALL_FAST_DEADLINE_MS, MIN_RECALL_DEADLINE_MS).default(
+		DEFAULT_RECALL_FAST_DEADLINE_MS,
+	),
+	/** `HONEYCOMB_RECALL_FAST_SHED_QUEUE_DEPTH` — the fast-lane shed queue-depth; 8 waiters by default (L-B3). */
+	recallFastShedQueueDepth: clampedIntKnob(DEFAULT_RECALL_FAST_SHED_QUEUE_DEPTH, MIN_RECALL_SHED_QUEUE_DEPTH).default(
+		DEFAULT_RECALL_FAST_SHED_QUEUE_DEPTH,
+	),
+	/** `HONEYCOMB_RECALL_HEAVY_DEADLINE_MS` — the generous heavy-path deadline (D-4); 15000ms by default (L-B8). */
+	recallHeavyDeadlineMs: clampedIntKnob(DEFAULT_RECALL_HEAVY_DEADLINE_MS, MIN_RECALL_DEADLINE_MS).default(
+		DEFAULT_RECALL_HEAVY_DEADLINE_MS,
+	),
+	/** `HONEYCOMB_RECALL_FAST_EMBED_DEADLINE_MS` — bound on the fast-lane pre-arm query embed; 1500ms by default (L-B9). */
+	recallFastEmbedDeadlineMs: clampedIntKnob(DEFAULT_RECALL_FAST_EMBED_DEADLINE_MS, MIN_RECALL_DEADLINE_MS).default(
+		DEFAULT_RECALL_FAST_EMBED_DEADLINE_MS,
+	),
+	/** `HONEYCOMB_RECALL_HEAVY_EMBED_DEADLINE_MS` — bound on the heavy-path pre-arm query embed; 3000ms by default (L-B9). */
+	recallHeavyEmbedDeadlineMs: clampedIntKnob(DEFAULT_RECALL_HEAVY_EMBED_DEADLINE_MS, MIN_RECALL_DEADLINE_MS).default(
+		DEFAULT_RECALL_HEAVY_EMBED_DEADLINE_MS,
+	),
 });
 
 /** The validated amplification config object the fan-out + recall sides consume. */
@@ -93,6 +187,16 @@ export interface AmplificationConfigProvider {
 export interface RawAmplificationConfig {
 	readonly fanoutBatch?: unknown;
 	readonly recallMaxConcurrency?: unknown;
+	/** PRD-077 (read/write split): the dedicated write-client in-flight ceiling. */
+	readonly writeMaxConcurrency?: unknown;
+	/** PRD-077b (L-B6): the four hot-lane knobs — fast-lane width, fast + heavy deadlines, shed depth. */
+	readonly recallFastMaxConcurrency?: unknown;
+	readonly recallFastDeadlineMs?: unknown;
+	readonly recallFastShedQueueDepth?: unknown;
+	readonly recallHeavyDeadlineMs?: unknown;
+	/** PRD-077 (L-B9): the two pre-arm embed deadlines — fast + heavy. */
+	readonly recallFastEmbedDeadlineMs?: unknown;
+	readonly recallHeavyEmbedDeadlineMs?: unknown;
 }
 
 /**
@@ -107,6 +211,16 @@ export function envAmplificationConfigProvider(env: NodeJS.ProcessEnv = process.
 			return {
 				fanoutBatch: env.HONEYCOMB_FANOUT_BATCH,
 				recallMaxConcurrency: env.HONEYCOMB_RECALL_MAX_CONCURRENCY,
+				// PRD-077 (read/write split): the dedicated write-client in-flight ceiling.
+				writeMaxConcurrency: env.HONEYCOMB_WRITE_MAX_CONCURRENCY,
+				// PRD-077b (L-B6): the four hot-lane knobs, env-overridable from `request_log` latency.
+				recallFastMaxConcurrency: env.HONEYCOMB_RECALL_FAST_MAX_CONCURRENCY,
+				recallFastDeadlineMs: env.HONEYCOMB_RECALL_FAST_DEADLINE_MS,
+				recallFastShedQueueDepth: env.HONEYCOMB_RECALL_FAST_SHED_QUEUE_DEPTH,
+				recallHeavyDeadlineMs: env.HONEYCOMB_RECALL_HEAVY_DEADLINE_MS,
+				// PRD-077 (L-B9): the two pre-arm embed deadlines, env-overridable.
+				recallFastEmbedDeadlineMs: env.HONEYCOMB_RECALL_FAST_EMBED_DEADLINE_MS,
+				recallHeavyEmbedDeadlineMs: env.HONEYCOMB_RECALL_HEAVY_EMBED_DEADLINE_MS,
 			};
 		},
 	};

@@ -518,6 +518,68 @@ describe("bounded read-only transient-retry layer (fix/heal-introspection-transi
 	});
 });
 
+describe("per-call retry budget (opts.maxAttempts) — PRD-077 capture fail-soft", () => {
+	it("maxAttempts:1 on a transient-failing READ makes EXACTLY ONE attempt (the fail-soft cap)", async () => {
+		const fake = new FakeDeepLakeTransport();
+		// A SELECT is normally RETRIED up to 4× on a transient 502. With maxAttempts:1 the budget is
+		// capped: exactly one transport attempt, then the transient result surfaces. The success
+		// enqueued behind it must NOT be consumed — there is no second attempt to reach it.
+		fake.enqueueQueryError("502 <html>bad gateway</html>", 502);
+		fake.enqueueRows([{ id: "must-not-be-read" }]); // must NOT be consumed — no retry.
+		const client = clientWith(fake);
+
+		const result = await client.query("SELECT id FROM sessions", { org: "o" }, { maxAttempts: 1 });
+		expect(result.kind).toBe("query_error");
+		if (result.kind === "query_error") expect(result.status).toBe(502);
+		expect(fake.requests).toHaveLength(1); // capped — one transport attempt, no retry.
+	});
+
+	it("maxAttempts:1 on a TIMED-OUT read surfaces the timeout after ONE attempt (the capture-append shape)", async () => {
+		const fake = new FakeDeepLakeTransport();
+		// The live capture-death shape: a slow backend. With the budget capped at 1 there is no
+		// second attempt, so the timeout surfaces after a single per-statement race — a slow DeepLake
+		// holds ONE Semaphore slot for one timeout, not four in a row (the pool-starvation fix).
+		fake.enqueueSlow([{ id: "late" }], 5_000);
+		const client = clientWith(fake);
+
+		const result = await client.query("SELECT pg_sleep(5)", { org: "o" }, { timeoutMs: 20, maxAttempts: 1 });
+		expect(result.kind).toBe("timeout");
+		expect(fake.requests).toHaveLength(1); // one attempt only — the cap held.
+	});
+
+	it("the SAME transient-failing read WITHOUT maxAttempts still retries the full 4× (read path UNCHANGED)", async () => {
+		const fake = new FakeDeepLakeTransport();
+		// Regression guard: the default budget is untouched by the additive option. Four 502s → four
+		// attempts. Recall/heal/every existing read keeps its pre-077 4-attempt transient resilience.
+		for (let i = 0; i < 4; i++) fake.enqueueQueryError("502 bad gateway", 502);
+		const client = clientWith(fake);
+
+		const result = await client.query("SELECT id FROM sessions", { org: "o" });
+		expect(result.kind).toBe("query_error");
+		expect(fake.requests).toHaveLength(4); // un-set maxAttempts = the pre-077 4-attempt budget.
+	});
+
+	it("maxAttempts is clamped to >= 1: a 0 budget still makes ONE attempt (never zero)", async () => {
+		const fake = new FakeDeepLakeTransport();
+		fake.enqueueQueryError("503 service unavailable", 503);
+		const client = clientWith(fake);
+
+		const result = await client.query("SELECT 1", { org: "o" }, { maxAttempts: 0 });
+		expect(result.kind).toBe("query_error");
+		expect(fake.requests).toHaveLength(1); // clamped to a single attempt, not zero.
+	});
+
+	it("maxAttempts is a CEILING not a target: a read that succeeds on attempt 1 makes one attempt", async () => {
+		const fake = new FakeDeepLakeTransport();
+		fake.enqueueRows([{ id: "ok" }]);
+		const client = clientWith(fake);
+
+		const result = await client.query("SELECT 1", { org: "o" }, { maxAttempts: 4 });
+		expect(result.kind).toBe("ok");
+		expect(fake.requests).toHaveLength(1); // budget bounds retries; it never forces them.
+	});
+});
+
 describe("isReadStatement / isTransientResult unit guards", () => {
 	it("classifies SELECT and read-only WITH as reads; data-modifying statements as writes", () => {
 		expect(isReadStatement("SELECT 1")).toBe(true);

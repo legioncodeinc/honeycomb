@@ -243,12 +243,20 @@ export function createStorageClient(
 		 * diagnostics surface and the idle-baseline harness read the SAME counts.
 		 */
 		meter?: QueryMeter;
+		/**
+		 * Override the in-flight query cap (PRD-077 read/write split). Defaults (unset) to
+		 * {@link MAX_CONCURRENT_QUERIES} (5) — every existing caller keeps today's behavior.
+		 * The composition root threads a SMALLER value here to size a dedicated WRITE client
+		 * whose Semaphore is independent of the read client's, so capture appends can never
+		 * starve recall reads. Clamped to `>= 1` by the {@link StorageClient} Semaphore.
+		 */
+		maxConcurrency?: number;
 	} = {},
 ): StorageClient {
 	const provider = options.provider ?? defaultCredentialProvider();
 	const config: StorageConfig = resolveStorageConfig(provider);
 	const transport: DeepLakeTransport = options.transport ?? createDefaultTransport(config);
-	return new StorageClient(transport, config, options.sleep, options.meter);
+	return new StorageClient(transport, config, options.sleep, options.meter, options.maxConcurrency);
 }
 
 /**
@@ -300,6 +308,13 @@ export function createLazyStorageClient(
 		transport?: DeepLakeTransport;
 		sleep?: SleepFn;
 		meter?: QueryMeter;
+		/**
+		 * Override the in-flight query cap (PRD-077 read/write split). Threaded straight into the
+		 * deferred {@link createStorageClient} build, so a lazily-built WRITE client carries its own
+		 * SMALLER Semaphore, independent of the read client's. Unset ⇒ {@link MAX_CONCURRENT_QUERIES}
+		 * (5) — the existing read-client behavior is unchanged.
+		 */
+		maxConcurrency?: number;
 		/**
 		 * Override the mtime source for the live config re-resolve (tests). Defaults to a
 		 * `statSync` of `~/.deeplake/credentials.json`. A test injects a controllable reader so
@@ -362,6 +377,7 @@ export function createLazyStorageClient(
 				provider,
 				...(options.transport !== undefined ? { transport: options.transport } : {}),
 				...(options.sleep !== undefined ? { sleep: options.sleep } : {}),
+				...(options.maxConcurrency !== undefined ? { maxConcurrency: options.maxConcurrency } : {}),
 				meter,
 			});
 			// Record the identity the freshly-built client connects under so a later change is detected.

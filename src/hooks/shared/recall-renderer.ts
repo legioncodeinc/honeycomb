@@ -50,9 +50,14 @@ export const RECALL_PATH = "/api/memories/recall" as const;
 /**
  * The default fetch timeout (ms). Tighter than {@link import("./prime-renderer.js").DEFAULT_PRIME_TIMEOUT_MS}
  * (5s) because this recall rides EVERY qualifying turn, not once per session: a slow daemon
- * must not stall the turn, so a ~2.5s bound degrades to "no injection" quickly (a-AC-3).
+ * must not stall the turn, so the bound degrades to "no injection" quickly (a-AC-3).
+ *
+ * PRD-077b (L-B4): raised 2_500 → 4_000 to give the ~1.5s single-round-trip fast recall real
+ * headroom — the client budget now sits COMFORTABLY above the fast-lane server-side deadline
+ * (`recallFastDeadlineMs`, default 3000ms) so the daemon's own deadline fires first (freeing its
+ * slot) while the client still fails soft to `""` past 4s. In-family with the prime path's 5s.
  */
-export const DEFAULT_RECALL_TIMEOUT_MS = 2_500;
+export const DEFAULT_RECALL_TIMEOUT_MS = 4_000;
 
 /** The default per-turn hit `limit` - small, because this injects on every turn (recall cadence open question). */
 export const DEFAULT_RECALL_LIMIT = 5;
@@ -118,6 +123,10 @@ export function createRecallRenderer(options: RecallRendererOptions = {}): Recal
 				query,
 				limit,
 				tokenBudget,
+				// PRD-077a (D-1): route the daemon to the single-round-trip `recallFast` so this
+				// per-turn recall fits its budget - the SAME arms/RRF/recency, minus the hydrate hop,
+				// dedup, rerank, and lifecycle. Headers, AbortController, fail-soft `[]` are unchanged.
+				fast: true,
 				...(req.meta.cwd !== undefined ? { cwd: req.meta.cwd } : {}),
 			});
 

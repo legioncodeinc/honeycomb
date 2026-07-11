@@ -125,3 +125,51 @@ describe("PRD-062 FIX 2: StorageClient in-flight concurrency cap", () => {
 		expect(calls).toBe(2); // one retry, each attempt acquiring + releasing a permit.
 	});
 });
+
+describe("PRD-077 read/write split: the maxConcurrency override sizes the in-flight cap", () => {
+	it("maxConcurrency:3 caps in-flight at 3; a 4th query waits until one completes", async () => {
+		const transport = new GatedTransport();
+		const client = createStorageClient({
+			transport,
+			provider: stubProvider(fakeCredentialRecord()),
+			sleep: async () => {},
+			maxConcurrency: 3, // the dedicated write-client cap (default writeMaxConcurrency).
+		});
+
+		// Fire 4 concurrent queries — with a cap of 3, only 3 reach the transport; the 4th parks.
+		const running = Array.from({ length: 4 }, (_, i) => client.query(`SELECT ${i}`, SCOPE));
+		await tick();
+		expect(transport.started.length).toBe(3);
+
+		// Free one permit → the parked 4th proceeds to the transport.
+		transport.releaseOne();
+		await tick();
+		expect(transport.started.length).toBe(4);
+
+		// Drain: release each in-flight query and tick so the next parked one starts before we release it.
+		for (let i = 0; i < 4; i++) {
+			transport.releaseOne();
+			await tick();
+		}
+		const results = await Promise.all(running);
+		expect(results.every((r) => r.kind === "ok")).toBe(true);
+	});
+
+	it("an unset maxConcurrency keeps the default cap of 5 (existing read-client behavior)", async () => {
+		const transport = new GatedTransport();
+		const client = clientWith(transport); // no maxConcurrency → default 5.
+
+		const running = Array.from({ length: 6 }, (_, i) => client.query(`SELECT ${i}`, SCOPE));
+		await tick();
+		// The default cap holds the 6th at the semaphore: only 5 reached the transport.
+		expect(transport.started.length).toBe(5);
+
+		// Drain: release + tick so the parked 6th starts and then gets released too.
+		for (let i = 0; i < 6; i++) {
+			transport.releaseOne();
+			await tick();
+		}
+		const results = await Promise.all(running);
+		expect(results.every((r) => r.kind === "ok")).toBe(true);
+	});
+});

@@ -64,7 +64,7 @@
 import { isOk, type StorageRow } from "../../storage/result.js";
 import { sLiteral, sqlIdent, sqlLike } from "../../storage/sql.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
-import { cosineSimilarity, EMBEDDING_DIMS, type ScoredId, vectorSearch } from "../../storage/vector.js";
+import { cosineSimilarity, EMBEDDING_DIMS, type ScoredId, serializeFloat4Array, vectorSearch } from "../../storage/vector.js";
 import { buildProjectScopeConjunct } from "../recall/scope-clause.js";
 import {
 	DEFAULT_DEDUP_ENABLED,
@@ -87,7 +87,7 @@ import {
 import type { EmbedClient } from "../services/embed-client.js";
 import type { RecallMode } from "../vault/api.js";
 import { Semaphore } from "./bounded-pool.js";
-import { amplificationConfig } from "./amplification-config.js";
+import { amplificationConfig, type AmplificationConfig } from "./amplification-config.js";
 import { clampNectarRrfMultiplier, DEFAULT_NECTAR_RRF_MULTIPLIER } from "./nectar-recall-config.js";
 import type { QuerySource } from "../../storage/query-meter.js";
 import { actrActivation, type AccessEvent, type ActrParams, DEFAULT_ACTR_PARAMS } from "./activation.js";
@@ -124,6 +124,92 @@ function resolveRecallPool(deps: MemoryRecallDeps): Semaphore {
 /** Reset the shared recall pool (test-only seam, paired with `resetAmplificationConfigCache`). */
 export function resetSharedRecallPool(): void {
 	sharedRecallPool = undefined;
+}
+
+/**
+ * PRD-077b (L-B1): the DEDICATED fast-recall concurrency lane — a SEPARATE {@link Semaphore} from
+ * {@link sharedRecallPool}, sized by `recallFastMaxConcurrency` (default 8 ≥ the 7 fast arms) so ONE
+ * per-turn recall's arms all run concurrently (its ~1.5s wall-clock survives). Because it is an
+ * INDEPENDENT lane, a fully-saturated shared/dashboard pool can NEVER starve a per-turn fast recall:
+ * the fast arms queue only behind OTHER fast recalls, never behind heavy dashboard work.
+ *
+ * ── Why a module-level mutable (a DELIBERATE process-wide shared lane) ───────────────────────────
+ * This mirrors the pre-existing {@link sharedRecallPool} EXACTLY: a lazily-built, process-wide,
+ * shared concurrency lane, not per-request state. It MUST be shared across every concurrent fast
+ * recall — a per-recall pool would let N recalls each fire `recallFastMaxConcurrency` queries (N×
+ * width), defeating the whole point of a bounded lane. It holds NO per-request / per-tenant / per-org
+ * state: it is a pure CONCURRENCY COUNTER (a permit tally) — no query text, scope, rows, or secrets
+ * ever live on it, so there is nothing to leak or cross-contaminate between recalls. Its lifecycle is
+ * made EXPLICIT by the {@link resetFastRecallPool} test seam (paired with `resetAmplificationConfigCache`),
+ * which lets a test rebuild the lane from a clean slate after mutating the sizing env. Production wires
+ * exactly one; a unit test injects its own via {@link MemoryRecallDeps.recallPool} when it needs a
+ * deterministic in-flight assertion.
+ */
+let fastRecallPool: Semaphore | undefined;
+
+/** Resolve the fast lane: the lazily-built process-wide fast pool (independent of the shared pool). A pure concurrency counter — no per-request/tenant state. */
+function resolveFastRecallPool(): Semaphore {
+	if (fastRecallPool === undefined) fastRecallPool = new Semaphore(amplificationConfig().recallFastMaxConcurrency);
+	return fastRecallPool;
+}
+
+/** Reset the fast recall lane (test-only seam, mirrors {@link resetSharedRecallPool}; makes the shared lane's lifecycle explicit). */
+export function resetFastRecallPool(): void {
+	fastRecallPool = undefined;
+}
+
+/**
+ * PRD-077b (L-B3 / D-5): the structured `recall.shed` load-shedding event payload. SUBSYSTEM STATE
+ * ONLY — the lane, the fast lane's waiter depth at shed time, and the configured threshold. It
+ * carries NO query text, token, org, or row content by construction (there is nowhere to put one),
+ * mirroring the `recall.degraded` secret-free convention. Emitted via {@link MemoryRecallDeps.onShed}.
+ */
+export interface RecallShedEvent {
+	/** The lane that shed. Only the fast lane sheds; the heavy lane relies on its deadline (D-4). */
+	readonly lane: "fast";
+	/** The fast lane's waiter/queue depth at the moment the recall was shed. */
+	readonly depth: number;
+	/** The configured `recallFastShedQueueDepth` the depth exceeded. */
+	readonly threshold: number;
+}
+
+/**
+ * PRD-077 (fix A) observability: the structured `recall.arm_error` payload — an UNEXPECTED rejection from a
+ * fast-lane arm. `runArm` maps every EXPECTED failure (a non-ok storage result, INCLUDING a deadline abort)
+ * to `[]`, so this fires SOLELY on a genuine throw (a pool/transport bug or programming error) that the
+ * per-arm `.catch` would otherwise swallow silently to prevent an unhandledRejection on the deliberately-
+ * abandoned arms. SUBSYSTEM STATE ONLY — a reason string; NO query text, token, org, or row content.
+ * Emitted via {@link MemoryRecallDeps.onArmError}.
+ */
+export interface RecallArmErrorEvent {
+	/** The rejection reason (an `Error.message` or the stringified throw). Never carries query content. */
+	readonly reason: string;
+}
+
+/**
+ * PRD-077 (L-B10): the structured `recall.timing` phase-timing payload for {@link recallFast}. SUBSYSTEM
+ * STATE ONLY — the lane, the per-phase durations (embed / arms / fuse / total), the arm count, whether
+ * the semantic arms ran, and the hit count. It carries NO query text, token, org, or row content by
+ * construction (there is nowhere to put one), mirroring the {@link RecallShedEvent} secret-free
+ * convention. Emitted via {@link MemoryRecallDeps.onTiming}.
+ */
+export interface RecallTimingEvent {
+	/** The lane the timing is for. Only the fast per-turn lane is instrumented (the hot path this PRD bounds). */
+	readonly lane: "fast";
+	/** Wall-clock ms spent in the (bounded) pre-arm query embed. `0` when no embed seam is wired. */
+	readonly embedMs: number;
+	/** Wall-clock ms spent running all arms concurrently (the one `Promise.all` round-trip). */
+	readonly armsMs: number;
+	/** Wall-clock ms spent in RRF fusion + recency dampening (0 when the deadline aborted before fuse). */
+	readonly fuseMs: number;
+	/** Wall-clock ms for the whole `recallFast` embed→arms→fuse span. */
+	readonly totalMs: number;
+	/** The number of arms issued (semantic + lexical). Subsystem state, never content. */
+	readonly arms: number;
+	/** Whether the semantic arms ran (false ⇒ the embed degraded to a lexical-only run). */
+	readonly semanticRan: boolean;
+	/** The number of fused hits returned. */
+	readonly hits: number;
 }
 
 /** The default number of recall hits returned when the caller supplies no limit. */
@@ -618,8 +704,13 @@ export interface MemoryActivationInputs {
 export interface ActivationSource {
 	/** The ACT-R params (`d`, `A_min`, `B*`); defaults to {@link DEFAULT_ACTR_PARAMS}. */
 	readonly params?: ActrParams;
-	/** Fetch the activation inputs for the given hits, keyed by `source+id`. Fail-soft: a throw → 058a path. */
-	load(hits: readonly MemoryRecallHit[], scope: QueryScope): Promise<Map<string, MemoryActivationInputs>>;
+	/**
+	 * Fetch the activation inputs for the given hits, keyed by `source+id`. Fail-soft: a throw → 058a path.
+	 * PRD-077: the OPTIONAL `signal` is the heavy-path deadline — an implementation that reads storage
+	 * should thread it into its `storage.query` opts so the read is bounded by `recallHeavyDeadlineMs`; an
+	 * implementation that ignores it (or a unit fake) is unchanged (additive, no breaking change).
+	 */
+	load(hits: readonly MemoryRecallHit[], scope: QueryScope, signal?: AbortSignal): Promise<Map<string, MemoryActivationInputs>>;
 }
 
 /**
@@ -654,8 +745,13 @@ export interface StalenessSource {
 	 * ranking. Floored ≥ 0 by the stage (a negative would BOOST a stale row, forbidden).
 	 */
 	readonly exponent?: number;
-	/** Fetch each hit's staleness verdict, keyed by `source+id`. Fail-soft: a throw → neutral for all. */
-	load(hits: readonly MemoryRecallHit[], scope: QueryScope): Promise<Map<string, StalenessVerdictInput>>;
+	/**
+	 * Fetch each hit's staleness verdict, keyed by `source+id`. Fail-soft: a throw → neutral for all.
+	 * PRD-077: the OPTIONAL `signal` is the heavy-path deadline — an implementation that reads storage
+	 * should thread it into its `storage.query` opts so the read is bounded by `recallHeavyDeadlineMs`
+	 * (additive: a fake / signal-ignoring implementation is unchanged).
+	 */
+	load(hits: readonly MemoryRecallHit[], scope: QueryScope, signal?: AbortSignal): Promise<Map<string, StalenessVerdictInput>>;
 }
 
 /**
@@ -677,8 +773,11 @@ export interface ConflictSuppressionSource {
 	 * for the scope. Keyed by the durable `memories.id` (only the `memories` arm carries a
 	 * suppressable id; `memory`/`sessions` hits are never conflict losers). Fail-soft: a throw or a
 	 * missing table → an empty set (both sides returned).
+	 * PRD-077: the OPTIONAL `signal` is the heavy-path deadline — an implementation that reads storage
+	 * should thread it into its `storage.query` opts so the `memory_conflicts` read is bounded by
+	 * `recallHeavyDeadlineMs` (additive: a fake / signal-ignoring implementation is unchanged).
 	 */
-	loadSuppressed(hits: readonly MemoryRecallHit[], scope: QueryScope): Promise<ReadonlySet<string>>;
+	loadSuppressed(hits: readonly MemoryRecallHit[], scope: QueryScope, signal?: AbortSignal): Promise<ReadonlySet<string>>;
 }
 
 /**
@@ -879,6 +978,32 @@ export interface MemoryRecallDeps {
 	 * (parity, AC-62d.2.2 / AC-8). With a width ≥ the arm count it is a no-op on output.
 	 */
 	readonly recallPool?: Semaphore;
+	/**
+	 * PRD-077b (L-B3): the load-shedding event sink for {@link recallFast}. When the fast lane's
+	 * waiter backlog exceeds `recallFastShedQueueDepth`, the recall is shed (returns a degraded empty
+	 * result WITHOUT issuing any Deep Lake query) and this callback fires with the subsystem-state-only
+	 * {@link RecallShedEvent}. The composition root wires it to `daemon.logger.event("recall.shed", …)`.
+	 * ABSENT → shedding still happens (the tail bound is structural, not observability-gated); it is
+	 * simply not logged. Only {@link recallFast} sheds — the heavy path never calls this.
+	 */
+	readonly onShed?: (event: RecallShedEvent) => void;
+	/**
+	 * PRD-077 (L-B10): the phase-timing event sink for {@link recallFast}. When wired, the fast path
+	 * emits ONE secret-free {@link RecallTimingEvent} (embed / arms / fuse / total durations + arm/hit
+	 * counts — NO query text) per recall. The composition root wires it to
+	 * `daemon.logger.event("recall.timing", …)`. ABSENT → zero-cost (the seam is never called); only
+	 * {@link recallFast} emits it — the heavy path never calls this.
+	 */
+	readonly onTiming?: (event: RecallTimingEvent) => void;
+	/**
+	 * PRD-077 (fix A) observability: the sink for an UNEXPECTED fast-lane arm rejection. The per-arm
+	 * `.catch` swallows late rejections on the deliberately-abandoned arms so they never surface as an
+	 * unhandledRejection; when wired, this callback ALSO surfaces the (only-ever-unexpected) reason via a
+	 * secret-free {@link RecallArmErrorEvent}, so a genuine pool/transport bug is observable rather than
+	 * hidden. The composition root wires it to `daemon.logger.event("recall.arm_error", …)`. ABSENT → the
+	 * rejection is still swallowed (no unhandledRejection) but not logged. Fast lane only.
+	 */
+	readonly onArmError?: (event: RecallArmErrorEvent) => void;
 }
 
 /** A recall request as it enters the adapter (the zod-validated, scoped body). */
@@ -941,13 +1066,22 @@ function projectConjunctFor(request: MemoryRecallRequest): string {
  * (`recall/collection.ts` `toScoredIds`): a sibling arm whose table does not yet
  * exist must NOT erase the hits from the arms whose tables DO.
  */
-async function runArm(sql: string, request: MemoryRecallRequest, deps: MemoryRecallDeps): Promise<StorageRow[]> {
+async function runArm(
+	sql: string,
+	request: MemoryRecallRequest,
+	deps: MemoryRecallDeps,
+	// PRD-077b (L-B2 / L-B8): the lane deadline signal, threaded into the statement's query options so
+	// a hung arm is aborted daemon-side at the deadline and its permit released. The per-arm `[]`-on-
+	// non-ok tolerance below then drops the aborted arm from fusion (fast/heavy share this ONE seam).
+	signal?: AbortSignal,
+): Promise<StorageRow[]> {
 	// PRD-062d (L-D2 / AC-62d.2.1): every recall-arm read runs UNDER the bounded pool so the
 	// in-flight DeepLake-query count has a ceiling across all arms (semantic hydrate, the three
 	// lexical arms, and the rerank/dedup batch fetches all flow through here). PRD-062a: tag the
 	// read `recall-arm` so the meter attributes it. The pool changes timing, not the result rows.
 	const pool = resolveRecallPool(deps);
-	const result = await pool.run(() => deps.storage.query(sql, request.scope, { source: SOURCE_RECALL_ARM }));
+	const opts = signal !== undefined ? { source: SOURCE_RECALL_ARM, signal } : { source: SOURCE_RECALL_ARM };
+	const result = await pool.run(() => deps.storage.query(sql, request.scope, opts));
 	return isOk(result) ? result.rows : [];
 }
 
@@ -1011,6 +1145,65 @@ const SEMANTIC_ARMS: readonly SemanticArmSpec[] = [
 ];
 
 /**
+ * Build a CONTENT-INLINE semantic arm for the PRD-077a fast path (D-2). This is the
+ * single-round-trip sibling of the heavy path's two-hop semantic arm: instead of
+ * {@link buildVectorSearchSql} (ids + score ONLY) followed by a SEPARATE
+ * {@link buildSemanticHydrateSql} to fetch the text, it SELECTs the `<#>` cosine score
+ * AND the `text` + `created_at` INLINE in ONE statement, so the semantic arm costs one
+ * DeepLake round-trip, not two. The projected columns are the SAME uniform shape
+ * ({@link rowsToRankedArm} reads `source`/`id`/`text`/`created_at`) the lexical arms emit,
+ * so the fast semantic + lexical arms fuse identically to the heavy path — only the extra
+ * `score` column rides along (ignored by the row-order rank signal, present so the SQL can
+ * `ORDER BY score DESC`, which IS the arm's rank).
+ *
+ * Driven off the SAME {@link SemanticArmSpec} the heavy path uses, so `memories` / `sessions`
+ * / `hive_graph_versions` all work with no per-table code. The spec's `hydrateFilter` (the
+ * soft-delete / `describe_status` exclusion) is applied INLINE in the WHERE (alongside the
+ * `ARRAY_LENGTH(<emb>,1) > 0` null-embedding guard) rather than at a later hydrate hop —
+ * equivalent-or-tighter, since a filtered row is dropped in the SAME statement as the match.
+ *
+ * SQL safety (a-AC-5): every identifier routes through `sqlIdent`, the `source` literal
+ * through `sLiteral`, the 768-float query vector through the existing `serializeFloat4Array`
+ * (a pre-validated numeric fragment), and the project segment through the prebuilt
+ * `projectClause` (`buildProjectScopeConjunct`). No value is hand-quoted — the guards ride
+ * INLINE so `audit:sql` reads each interpolation as pre-escaped. The caller has already
+ * validated the vector is 768-dim + finite (mirrors {@link buildVectorSearchSql}, which
+ * defers the dim assert to {@link vectorSearch}).
+ */
+export function buildFastSemanticArmSql(
+	spec: SemanticArmSpec,
+	queryVector: readonly number[],
+	perArmLimit: number,
+	projectClause = "",
+): string {
+	const tbl = sqlIdent(spec.table);
+	const idCol = sqlIdent(spec.idColumn);
+	const embCol = sqlIdent(spec.embeddingColumn);
+	const textCol = sqlIdent(spec.textColumn);
+	// PRD-047d: project the row's creation timestamp inline (aliased to the uniform `created_at`
+	// the recency-activation stage reads) so the fast path keeps recency with no hydrate hop.
+	const tsCol = sqlIdent(spec.timestampColumn);
+	const sourceLit = sLiteral(spec.source);
+	// The query vector rides the SAME `serializeFloat4Array` numeric fragment the heavy `<#>`
+	// arm uses (a pre-validated `ARRAY[…]::float4[]` literal), so score normalization is verbatim.
+	const vecLit = serializeFloat4Array(queryVector);
+	const perArm = Math.max(1, Math.trunc(perArmLimit));
+	// The spec's hydrate filter (soft-delete / describe_status exclusion) is applied INLINE at the
+	// match, not at a later hop — a filtered row is dropped in the SAME statement (no hydrate).
+	const filterClause = spec.hydrateFilter === "" ? "" : ` ${spec.hydrateFilter}`;
+	// `(emb <#> vec)` is the cosine distance; `(1 + …) / 2` maps [-1,1] → [0,1] — the EXACT
+	// normalization `buildVectorSearchSql` uses (vector.ts:242), so the fast score is on the same scale.
+	const scoreSql = `((1 + (${embCol} <#> ${vecLit})) / 2)`;
+	return (
+		`SELECT ${sourceLit} AS source, ${idCol} AS id, ${textCol}::text AS text, ${tsCol}::text AS created_at, ${scoreSql} AS score ` +
+		`FROM "${tbl}" ` +
+		`WHERE ARRAY_LENGTH(${embCol}, 1) > 0${filterClause}${projectClause} ` +
+		`ORDER BY score DESC ` +
+		`LIMIT ${perArm}`
+	);
+}
+
+/**
  * Build the hydration SELECT for a semantic arm: given the scored ids the `<#>`
  * match returned, fetch `(source, id, text)` for those ids so the semantic hit
  * carries text like the lexical arms. Every id routes through `sLiteral` and every
@@ -1051,6 +1244,8 @@ async function runSemanticArm(
 	request: MemoryRecallRequest,
 	deps: MemoryRecallDeps,
 	limit: number,
+	// PRD-077b (L-B8): the heavy-lane deadline, threaded into BOTH the `<#>` match and the hydrate hop.
+	signal?: AbortSignal,
 ): Promise<RankedArmEntry[]> {
 	// PRD-049b (49b-AC-2): the project segment rides the `<#>` match (extraClause) AND the
 	// hydrate, so a strong cross-project cosine hit is filtered server-side before its id leaves.
@@ -1064,15 +1259,21 @@ async function runSemanticArm(
 		// concurrently, each over a table) counts against the shared in-flight ceiling (AC-62d.2.1).
 		const pool = resolveRecallPool(deps);
 		const recall = await pool.run(() =>
-			vectorSearch(deps.storage, request.scope, {
-				table: spec.table,
-				idColumn: spec.idColumn,
-				embeddingColumn: spec.embeddingColumn,
-				queryVector,
-				scope: {},
-				limit,
-				...(projectClause !== "" ? { extraClause: projectClause } : {}),
-			}),
+			vectorSearch(
+				deps.storage,
+				request.scope,
+				{
+					table: spec.table,
+					idColumn: spec.idColumn,
+					embeddingColumn: spec.embeddingColumn,
+					queryVector,
+					scope: {},
+					limit,
+					...(projectClause !== "" ? { extraClause: projectClause } : {}),
+				},
+				undefined,
+				signal,
+			),
 		);
 		scored = recall.ids;
 	} catch {
@@ -1086,7 +1287,7 @@ async function runSemanticArm(
 	// cosine ranking the vector match produced (the IN-list read order is unspecified).
 	const ids = scored.map((s) => s.id).filter((id) => id !== "");
 	if (ids.length === 0) return [];
-	const hydrated = await runArm(buildSemanticHydrateSql(spec, ids, projectClause), request, deps);
+	const hydrated = await runArm(buildSemanticHydrateSql(spec, ids, projectClause), request, deps, signal);
 	const textById = new Map<string, string>();
 	const tsById = new Map<string, string>(); // PRD-047d: id → creation timestamp (ISO, or "").
 	for (const row of hydrated) {
@@ -1120,6 +1321,38 @@ interface SemanticRun {
 }
 
 /**
+ * PRD-077 (L-B9): bound the pre-arm query embed on BOTH recall paths so a slow / hung embed daemon
+ * degrades recall to lexical-only instead of wedging the hot path BEFORE any arm-deadline exists (the
+ * live-observed hang: the embed ran before `AbortSignal.timeout` was created, so a stuck embed blocked
+ * every completion). Races the embed against a timer that resolves to `null` at `deadlineMs`; a `null`,
+ * an (a)sync throw, OR the timeout all yield `null` — the caller's existing null / wrong-dim guard then
+ * drops the semantic arms and runs the lexical arms alone (`degraded: true`). The timer is cleared on
+ * the winning path so a fast embed never leaks a pending handle (mirrors `detectWithTimeout`). NEVER throws.
+ *
+ * When the embed resolves UNDER the deadline the returned vector is exactly what `embed.embed` produced
+ * — byte-for-byte the pre-077 result; the bound only changes the SLOW / HUNG case.
+ */
+async function boundedEmbed(
+	embed: EmbedClient,
+	query: string,
+	deadlineMs: number,
+): Promise<readonly number[] | null> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<null>((resolve) => {
+		timer = setTimeout(() => resolve(null), Math.max(0, deadlineMs));
+	});
+	try {
+		return await Promise.race([embed.embed(query), timeout]);
+	} catch {
+		// The embed-client contract is null-on-failure, but a flaky daemon that THROWS degrades to
+		// lexical too — recall never throws into the route on an embed hiccup (fast + heavy share this).
+		return null;
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+	}
+}
+
+/**
  * Embed the query + run BOTH semantic arms (PRD-025 AC-3). Returns `null` when the
  * semantic path could NOT run — no embed client, or the query embed returned null
  * (embeddings off / daemon unreachable / timeout / wrong-dim) — which is the signal
@@ -1132,23 +1365,21 @@ async function runSemanticArms(
 	request: MemoryRecallRequest,
 	deps: MemoryRecallDeps,
 	limit: number,
+	// PRD-077b (L-B8): the heavy-lane deadline, threaded into each semantic arm's `<#>` match + hydrate.
+	signal?: AbortSignal,
 ): Promise<SemanticRun | null> {
 	if (deps.embed === undefined) return null; // no semantic seam → lexical-only.
 
-	let queryVector: readonly number[] | null;
-	try {
-		queryVector = await deps.embed.embed(request.query);
-	} catch {
-		// The embed-client contract is null-on-failure, but guard an unexpected throw:
-		// a flaky embed daemon degrades recall to lexical, never throws into the route.
-		queryVector = null;
-	}
+	// PRD-077 (L-B9): BOUND the heavy-path embed (its existing null contract already degrades to
+	// lexical-only). A hung embed daemon degrades within `recallHeavyEmbedDeadlineMs` instead of
+	// wedging the heavy fan-out BEFORE its own arm deadline (`heavySignal`) is even created.
+	const queryVector = await boundedEmbed(deps.embed, request.query, amplificationConfig().recallHeavyEmbedDeadlineMs);
 	// Null (off/unreachable/timeout) OR a wrong-dim vector (defense in depth; the
 	// client already dim-guards) → the semantic arm cannot run → fall back to lexical.
 	if (queryVector === null || queryVector.length !== EMBEDDING_DIMS) return null;
 
 	const armEntries = await Promise.all(
-		SEMANTIC_ARMS.map((spec) => runSemanticArm(spec, queryVector!, request, deps, limit)),
+		SEMANTIC_ARMS.map((spec) => runSemanticArm(spec, queryVector!, request, deps, limit, signal)),
 	);
 	// Each semantic table is its OWN ranked arm so RRF sees its cosine ranking distinctly.
 	return { arms: armEntries.map((entries) => ({ entries })), queryVector };
@@ -1223,6 +1454,11 @@ async function fetchCandidateEmbeddings(
 	candidates: readonly MemoryRecallHit[],
 	request: MemoryRecallRequest,
 	deps: MemoryRecallDeps,
+	// PRD-077 (heavy-deadline propagation): the heavy-path deadline signal, threaded into the per-table
+	// embedding-fetch `runArm`s so this POST-fan-out storage read is bounded by the SAME `recallHeavyDeadlineMs`
+	// as the arm fan-out — a slow retry storm on the dedup/rerank/MMR embedding fetch can no longer pin the
+	// heavy recall past its deadline. Optional + defaults to un-bounded, so every existing caller is unchanged.
+	signal?: AbortSignal,
 ): Promise<Map<string, number[]>> {
 	// Group candidate ids by their embedding-bearing table. PRD-013b: `hive_graph_versions`
 	// joins `memories`/`sessions` as an embedding-bearing source, so the rerank fetch keys on it too.
@@ -1244,8 +1480,9 @@ async function fetchCandidateEmbeddings(
 			if (embeddingColumn === null) return;
 			const sql = buildRerankEmbeddingSql(source, idColumnFor(source), embeddingColumn, ids);
 			// `runArm` swallows a non-ok result to [] (per-arm tolerance) — a failed fetch
-			// just means no embeddings for this table, so its candidates keep RRF position.
-			const rows = await runArm(sql, request, deps);
+			// just means no embeddings for this table, so its candidates keep RRF position. The heavy-path
+			// `signal` (when threaded) bounds this read at `recallHeavyDeadlineMs`, like the arm fan-out.
+			const rows = await runArm(sql, request, deps, signal);
 			for (const row of rows) {
 				const id = cell(row.id);
 				if (id === "") continue;
@@ -1278,6 +1515,9 @@ async function rerankHits(
 	config: RerankerConfig,
 	request: MemoryRecallRequest,
 	deps: MemoryRecallDeps,
+	// PRD-077 (heavy-deadline propagation): threaded into the candidate-embedding fetch so the rerank's
+	// storage read is bounded by the heavy deadline. Optional — a lexical/`none` rerank never fetches.
+	signal?: AbortSignal,
 ): Promise<MemoryRecallHit[]> {
 	const rrfOrder = [...hits];
 	if (hits.length === 0) return rrfOrder;
@@ -1304,7 +1544,7 @@ async function rerankHits(
 	const tail = rrfOrder.slice(window);
 
 	try {
-		const embByKey = await fetchCandidateEmbeddings(head, request, deps);
+		const embByKey = await fetchCandidateEmbeddings(head, request, deps, signal);
 		// Budget check AFTER the fetch (the only async/I/O cost): a slow fetch yields the
 		// pre-rerank order, never a partial/blank reorder (b-AC-2).
 		if (now() - start > config.timeoutMs) return rrfOrder;
@@ -1507,6 +1747,9 @@ async function dedupHits(
 	config: DedupConfig,
 	request: MemoryRecallRequest,
 	deps: MemoryRecallDeps,
+	// PRD-077 (heavy-deadline propagation): threaded into the dedup candidate-embedding fetch so this
+	// POST-fan-out storage read is bounded by the heavy deadline. Optional — defaults to un-bounded.
+	signal?: AbortSignal,
 ): Promise<MemoryRecallHit[]> {
 	const input = [...hits];
 	if (!config.enabled || input.length < 2) return input;
@@ -1514,7 +1757,7 @@ async function dedupHits(
 	try {
 		// Source the candidate embeddings ourselves (rerank may be `none`, so they are
 		// NOT already hydrated): ONE guarded batch-fetch per embedding-bearing table.
-		const embByKey = await fetchCandidateEmbeddings(input, request, deps);
+		const embByKey = await fetchCandidateEmbeddings(input, request, deps, signal);
 		const threshold = config.similarityThreshold;
 
 		const clusters: DedupCluster[] = [];
@@ -1723,13 +1966,17 @@ async function resolveStaleness(
 	hits: readonly MemoryRecallHit[],
 	deps: MemoryRecallDeps,
 	scope: QueryScope,
+	// PRD-077 (heavy-deadline propagation): the heavy deadline signal, threaded into the staleness seam's
+	// batched storage read so a slow `memories.ref_status` fetch is bounded by `recallHeavyDeadlineMs` too.
+	// Optional — a seam that ignores it is unchanged; a source throw/timeout still degrades to neutral.
+	signal?: AbortSignal,
 ): Promise<ResolvedStaleness | undefined> {
 	const source = deps.stalenessSource;
 	if (source === undefined) return undefined;
 	const rawExp = source.exponent ?? DEFAULT_STALENESS_EXPONENT;
 	const exponent = Math.max(0, Number.isFinite(rawExp) ? rawExp : DEFAULT_STALENESS_EXPONENT);
 	try {
-		const byKey = await source.load(hits, scope);
+		const byKey = await source.load(hits, scope, signal);
 		return { byKey, exponent };
 	} catch {
 		// Fail-soft: a staleness-source failure leaves recall neutral (no demotion), never a thrown recall.
@@ -1750,12 +1997,16 @@ async function applyConflictGate(
 	hits: readonly MemoryRecallHit[],
 	deps: MemoryRecallDeps,
 	scope: QueryScope,
+	// PRD-077 (heavy-deadline propagation): the heavy deadline signal, threaded into the conflict seam's
+	// `memory_conflicts` projection read so this LAST post-fan-out storage read is bounded too. Optional —
+	// a seam that ignores it is unchanged; a source throw/timeout still degrades to returning both sides.
+	signal?: AbortSignal,
 ): Promise<MemoryRecallHit[]> {
 	const source = deps.conflictSuppression;
 	if (source === undefined) return [...hits];
 	let suppressed: ReadonlySet<string>;
 	try {
-		suppressed = await source.loadSuppressed(hits, scope);
+		suppressed = await source.loadSuppressed(hits, scope, signal);
 	} catch {
 		// Fail-soft: a conflict-source failure leaves recall returning both sides, never a thrown recall.
 		return [...hits];
@@ -1942,6 +2193,10 @@ async function applyActrActivation(
 	nowMs: number,
 	scope: QueryScope,
 	staleness?: ResolvedStaleness,
+	// PRD-077 (heavy-deadline propagation): the heavy deadline signal, threaded into the activation seam's
+	// batched `memory_access` read so this post-fan-out storage read is bounded too. Optional — a seam that
+	// ignores it is unchanged; a source throw/timeout still degrades to the 058a Stage-1 path (fail-soft).
+	signal?: AbortSignal,
 ): Promise<MemoryRecallHit[]> {
 	const exponent = Math.max(0, Number.isFinite(activationExponent) ? activationExponent : DEFAULT_RECENCY_ACTIVATION_EXPONENT);
 	const params = source.params ?? DEFAULT_ACTR_PARAMS;
@@ -1950,7 +2205,7 @@ async function applyActrActivation(
 	// 058a Stage-1 path (fail-soft) — never a thrown recall. The staleness factor still rides along there.
 	let inputs: Map<string, MemoryActivationInputs>;
 	try {
-		inputs = await source.load(hits, scope);
+		inputs = await source.load(hits, scope, signal);
 	} catch {
 		return applyRecencyActivation(hits, byClass, activationExponent, nowMs, staleness);
 	}
@@ -2034,12 +2289,15 @@ async function applyCalibrationStage(
 	model: CalibrationModel,
 	request: MemoryRecallRequest,
 	deps: MemoryRecallDeps,
+	// PRD-077 (heavy-deadline propagation): threaded into the confidence-fetch `runArm` so this post-fan-out
+	// storage read is bounded by the heavy deadline too. Optional — a fail-soft fetch keeps the hits without C.
+	signal?: AbortSignal,
 ): Promise<MemoryRecallHit[]> {
 	const memoryIds = hits.filter((h) => h.source === "memories" && h.id !== "").map((h) => h.id);
 	if (memoryIds.length === 0) return [...hits];
 	let confById = new Map<string, number>();
 	try {
-		const rows = await runArm(buildConfidenceFetchSql(memoryIds), request, deps);
+		const rows = await runArm(buildConfidenceFetchSql(memoryIds), request, deps, signal);
 		for (const row of rows) {
 			const id = cell(row.id);
 			if (id === "") continue;
@@ -2230,20 +2488,30 @@ export async function recallMemories(
 	// from another project is filtered server-side in the SAME statement as the match.
 	const projectClause = projectConjunctFor(request);
 
+	// PRD-077b (L-B8 / D-4): a GENEROUS server-side deadline around the heavy fan-out. A human waits on
+	// the dashboard path and wants full quality, so this is set high (default 15s) — but FINITE, so a
+	// runaway arm (the measured 25-minute tail) is aborted daemon-side at the deadline and its Semaphore
+	// slot released instead of hanging. On the happy path (a sub-deadline recall) NOTHING changes: the
+	// signal never fires, every arm completes normally, and ranking/arms/weights are byte-for-byte the
+	// same. On expiry, the aborted arms degrade to [] via the SAME per-arm tolerance the fast path uses
+	// (`runArm` → non-ok → []), so fusion proceeds with whatever COMPLETED (partial), never a 500/hang.
+	// The heavy lane is NEVER shed and NEVER rerouted — it gets a deadline only (D-4).
+	const heavySignal = AbortSignal.timeout(amplificationConfig().recallHeavyDeadlineMs);
+
 	// Run the semantic arms (embed-query → `<#>`) and the lexical arms concurrently.
 	// The semantic path returns null when it could not run (→ degraded:true); the
 	// lexical arms always run (the resilient floor). Each lexical arm is bounded by the
 	// overall limit so a single arm cannot starve the fusion. In `keyword` mode the
 	// semantic arm is never invoked — it short-circuits to `null` before the await.
 	const [semanticRun, memoriesRows, memoryRows, sessionsRows, hiveGraphRows] = await Promise.all([
-		keywordOnly ? Promise.resolve(null) : runSemanticArms(request, deps, limit),
-		runArm(buildMemoriesArmSql(term, limit, projectClause), request, deps),
-		runArm(buildMemoryArmSql(term, limit, projectClause), request, deps),
-		runArm(buildSessionsArmSql(term, limit, projectClause), request, deps),
+		keywordOnly ? Promise.resolve(null) : runSemanticArms(request, deps, limit, heavySignal),
+		runArm(buildMemoriesArmSql(term, limit, projectClause), request, deps, heavySignal),
+		runArm(buildMemoryArmSql(term, limit, projectClause), request, deps, heavySignal),
+		runArm(buildSessionsArmSql(term, limit, projectClause), request, deps, heavySignal),
 		// PRD-013a: the 4th (hive-graph) lexical arm — its OWN guarded statement, so a missing
 		// `hive_graph_versions` table (fresh workspace, brooding not run) degrades to [] for THIS
 		// arm only (`runArm`), never wiping the other three.
-		runArm(buildHiveGraphVersionsArmSql(term, limit, projectClause), request, deps),
+		runArm(buildHiveGraphVersionsArmSql(term, limit, projectClause), request, deps, heavySignal),
 	]);
 
 	// `degraded` is HONEST (PRD-025 AC-3): false iff the semantic arm actually ran — EXCEPT in
@@ -2298,7 +2566,7 @@ export async function recallMemories(
 		(rerankerConfig.strategy !== "cohere" && semanticRun === null);
 	const ranked = skipRerank
 		? hits
-		: await rerankHits(hits, semanticRun?.queryVector ?? null, rerankerConfig, request, deps);
+		: await rerankHits(hits, semanticRun?.queryVector ?? null, rerankerConfig, request, deps, heavySignal);
 
 	// PRD-047c: collapse semantic near-duplicates over the fused/reranked top-N, keeping
 	// the highest-provenance copy of each fact (`memories` > `memory` > `sessions`). Runs
@@ -2308,7 +2576,7 @@ export async function recallMemories(
 	const dedupConfig: DedupConfig =
 		deps.dedup ??
 		({ enabled: DEFAULT_DEDUP_ENABLED, similarityThreshold: DEFAULT_DEDUP_SIMILARITY_THRESHOLD } as const);
-	const deduped = await dedupHits(ranked, dedupConfig, request, deps);
+	const deduped = await dedupHits(ranked, dedupConfig, request, deps, heavySignal);
 	const dedupedSources = deduped.length === ranked.length ? sources : [...new Set(deduped.map((h) => h.source))];
 
 	// PRD-058a: apply the class-aware recency ACTIVATION LAST, after fusion, rerank, AND dedup, so it
@@ -2328,14 +2596,14 @@ export async function recallMemories(
 	// be folded INTO the recency-multiplier stage below (the SAME single demotion step, not a parallel
 	// path). FAIL-SOFT: a source throw → no staleness factor (neutral), never a thrown recall. ABSENT
 	// source → undefined → the stage runs the byte-for-byte pre-058c path.
-	const staleness = await resolveStaleness(deduped, deps, request.scope);
+	const staleness = await resolveStaleness(deduped, deps, request.scope, heavySignal);
 	// PRD-058e: when an activationSource is wired, swap the Stage-1 A_simple for the ACT-R Stage-2 A_actr
 	// BEHIND the same freshnessScore field + `a` exponent (invisible to callers). ABSENT → the byte-for-byte
 	// 058a Stage-1 path runs, so every existing caller/test is unchanged. Both are fail-soft + never drop a
 	// hit, and both fold the PRD-058c `(1 − σ)^s` staleness factor into the SAME ordering weight.
 	const activated =
 		deps.activationSource !== undefined
-			? await applyActrActivation(deduped, deps.activationSource, byClass, activationExponent, nowMs, request.scope, staleness)
+			? await applyActrActivation(deduped, deps.activationSource, byClass, activationExponent, nowMs, request.scope, staleness, heavySignal)
 			: applyRecencyActivation(deduped, byClass, activationExponent, nowMs, staleness);
 
 	// PRD-058e: stamp the calibrated confidence C(m) = g(f) on the surviving hits when a calibration model
@@ -2349,7 +2617,7 @@ export async function recallMemories(
 	// always emitted once a model is present.
 	const calibrated =
 		deps.calibration !== undefined
-			? await applyCalibrationStage(activated, deps.calibration, request, deps)
+			? await applyCalibrationStage(activated, deps.calibration, request, deps, heavySignal)
 			: activated;
 
 	// PRD-058b: apply the `κ(m,t)` gate as the LAST currentness filter, layered OVER (not replacing) the
@@ -2357,7 +2625,7 @@ export async function recallMemories(
 	// matching BOTH sides of a contradiction returns at most the winner; the `κ = 0` hard-superseded losers
 	// are already excluded by supersession upstream. FAIL-SOFT: a missing/unreadable `memory_conflicts`
 	// degrades to returning BOTH sides, never a 500. ABSENT source → byte-for-byte the pre-058b path.
-	const dampened = await applyConflictGate(calibrated, deps, request.scope);
+	const dampened = await applyConflictGate(calibrated, deps, request.scope, heavySignal);
 
 	// PRD-047e: OPTIONAL token-budget + MMR context assembly. ADDITIVE + OPT-IN — it engages ONLY
 	// when the request carries a positive `tokenBudget`. With NO budget the row-`limit` path runs
@@ -2382,7 +2650,7 @@ export async function recallMemories(
 	}
 	try {
 		const lambda = deps.contextAssembly?.mmrLambda ?? DEFAULT_MMR_LAMBDA;
-		const embByKey = await fetchCandidateEmbeddings(dampened, request, deps);
+		const embByKey = await fetchCandidateEmbeddings(dampened, request, deps, heavySignal);
 		const assembled = selectWithinTokenBudget(dampened, budget, lambda, embByKey);
 		const assembledSources = assembled.length === dampened.length ? dedupedSources : [...new Set(assembled.map((h) => h.source))];
 		// Credit reinforcement to the post-budget injected set only.
@@ -2394,4 +2662,251 @@ export async function recallMemories(
 		await recordRecallAccessEvents(dampened, deps);
 		return { hits: dampened, sources: dedupedSources, degraded };
 	}
+}
+
+/**
+ * The result of {@link resolveFastLaneOrShed}: either the recall was load-shed (the caller returns a
+ * degraded-empty result), or it was NOT and carries the fast-lane-bound `fastDeps` to run the arms with.
+ * A discriminated union so the caller narrows `fastDeps` without a non-null assertion.
+ */
+type FastLaneResolution =
+	| { readonly shed: true }
+	| { readonly shed: false; readonly fastDeps: MemoryRecallDeps };
+
+/**
+ * PRD-077b (L-B1 + L-B3): resolve the fast recall's DEDICATED lane and apply the queue-depth LOAD-SHED
+ * gate in ONE cohesive step (extracted from {@link recallFast} to keep that hot-path function focused —
+ * a mechanical, behavior-preserving split). Binds the fast lane onto `deps.recallPool` (an INJECTED pool
+ * still wins — test-injectability preserved; otherwise the module fast lane), then checks the lane's
+ * waiter backlog against `recallFastShedQueueDepth`: when it EXCEEDS the threshold the recall is SHED —
+ * it emits the subsystem-state-only `recall.shed` event and signals the caller to return degraded-empty
+ * WITHOUT issuing any Deep Lake query (so the tail is bounded by construction). The waiter count measures
+ * how many arm-tasks from OTHER concurrent fast recalls are already parked on the lane (its `waiting`
+ * getter); the heavy/dashboard lane is NEVER shed (a human waits — it relies on its deadline). Behavior +
+ * the emitted event are byte-identical to the inline gate this replaces.
+ */
+function resolveFastLaneOrShed(deps: MemoryRecallDeps, config: AmplificationConfig): FastLaneResolution {
+	const fastPool = deps.recallPool ?? resolveFastRecallPool();
+	if (fastPool.waiting > config.recallFastShedQueueDepth) {
+		deps.onShed?.({ lane: "fast", depth: fastPool.waiting, threshold: config.recallFastShedQueueDepth });
+		return { shed: true };
+	}
+	return { shed: false, fastDeps: { ...deps, recallPool: fastPool } };
+}
+
+/**
+ * The PRD-077a single-round-trip FAST recall — the per-turn hot-lane entrypoint (D-2).
+ *
+ * ── WHAT IT IS ────────────────────────────────────────────────────────────────
+ * A latency-shaped sibling of {@link recallMemories}. It runs the SAME arm set — the
+ * three semantic `<#>` arms ({@link SEMANTIC_ARMS}: `memories` / `sessions` /
+ * `hive_graph_versions`) PLUS the four lexical arms (`memories` / `memory` / `sessions` /
+ * `hive_graph_versions`) — and fuses them with the EXISTING in-memory {@link fuseHits} RRF
+ * and the EXISTING {@link applyRecencyActivation} recency stage, so **RRF, recency, and full
+ * cross-table breadth are PRESERVED**. The ONLY difference from the heavy path is that it
+ * DROPS the I/O-heavy refinements:
+ *   - the semantic IDs-then-hydrate SECOND hop — every semantic arm returns `content` +
+ *     `created_at` INLINE via {@link buildFastSemanticArmSql} (one round-trip per arm);
+ *   - the dedup candidate-embedding fetch ({@link fetchCandidateEmbeddings});
+ *   - the (off-in-prod) Cohere / cosine rerank;
+ *   - the dormant lifecycle stages (activation source / staleness / conflict / calibration /
+ *     access recording).
+ * All 7 arms are issued CONCURRENTLY in ONE `Promise.all` through {@link runArm}, which
+ * acquires a slot from {@link resolveRecallPool} — so PRD-077b can inject a dedicated fast-lane
+ * `deps.recallPool` with ZERO rework here. Wall-clock ≈ one ~1.5s round-trip.
+ *
+ * ── DEGRADE (a-AC-4) ─────────────────────────────────────────────────────────
+ * The query embeds ONCE (mirroring {@link runSemanticArms}); a null / unavailable / wrong-dim
+ * embed DROPS the three semantic arms, runs the four lexical arms alone, and returns
+ * `degraded: true`. NEVER throws — an embed daemon hiccup degrades to lexical, exactly like the
+ * heavy path's honesty.
+ *
+ * ── RESULT PARITY ─────────────────────────────────────────────────────────────
+ * Returns a standard {@link MemoryRecallResult} (`hits` / `sources` / `degraded`), identical in
+ * shape to {@link recallMemories}, so the renderer / `runUserPromptRecall` need no change. For
+ * the same query + scope, the fast path's top-k EQUALS the heavy path with dedup + rerank +
+ * lifecycle disabled (same arms, same `fuseHits`, same recency).
+ */
+export async function recallFast(
+	request: MemoryRecallRequest,
+	deps: MemoryRecallDeps,
+): Promise<MemoryRecallResult> {
+	const term = request.query.trim();
+	const limit = resolveRecallLimit(request.limit);
+	if (term === "") {
+		// An empty query embeds to nothing meaningful; report the lexical floor honestly (mirrors heavy).
+		return { hits: [], sources: [], degraded: true };
+	}
+
+	const config = amplificationConfig();
+
+	// PRD-077b (L-B1 + L-B3): resolve the DEDICATED fast lane (independent of the shared/heavy pool, so a
+	// saturated dashboard pool cannot starve this per-turn recall) and apply the queue-depth LOAD-SHED gate
+	// in one cohesive step. On a shed the recall returns a degraded-empty result IMMEDIATELY without issuing
+	// ANY Deep Lake query (the tail is bounded by construction); `recall.shed` is emitted inside the helper.
+	const lane = resolveFastLaneOrShed(deps, config);
+	if (lane.shed) return { hits: [], sources: [], degraded: true };
+	const fastDeps = lane.fastDeps;
+
+	// PRD-049b (49b-AC-2): compute the project-segment conjunct ONCE and AND it into EVERY arm
+	// (semantic + lexical), so a fast recall in project A never returns a project-B row.
+	const projectClause = projectConjunctFor(request);
+
+	// Embed the query ONCE (reuse the runSemanticArms embed+guard contract). A null / unavailable
+	// embed, an unexpected throw, or a wrong-dim vector ⇒ the semantic arms cannot run ⇒ drop them,
+	// run the lexical arms alone, and report `degraded: true`. NEVER throws into the route.
+	// PRD-077 (L-B9): the embed is BOUNDED (`boundedEmbed`) so a slow / hung embed daemon degrades to
+	// lexical-only WITHIN `recallFastEmbedDeadlineMs` instead of wedging the hot path before the fast
+	// arm deadline (below) even exists — the live-observed hang this fixes. L-B10: `startedAt` opens the
+	// phase-timing span emitted once via the secret-free `deps.onTiming` seam.
+	const startedAt = Date.now();
+	let queryVector: readonly number[] | null = null;
+	if (deps.embed !== undefined) {
+		queryVector = await boundedEmbed(deps.embed, request.query, config.recallFastEmbedDeadlineMs);
+	}
+	const embedMs = Date.now() - startedAt;
+	const semanticRan = queryVector !== null && queryVector.length === EMBEDDING_DIMS;
+	const degraded = !semanticRan;
+
+	// Build the arm SQLs: the three content-inline semantic arms (only when the query embedded to a
+	// real 768-dim vector) + the four lexical arm builders (which already SELECT `content` inline).
+	const semanticSqls = semanticRan
+		? SEMANTIC_ARMS.map((spec) => buildFastSemanticArmSql(spec, queryVector as readonly number[], limit, projectClause))
+		: [];
+	const lexicalSqls = [
+		buildMemoriesArmSql(term, limit, projectClause),
+		buildMemoryArmSql(term, limit, projectClause),
+		buildSessionsArmSql(term, limit, projectClause),
+		buildHiveGraphVersionsArmSql(term, limit, projectClause),
+	];
+
+	// PRD-077b (L-B2): the fast-lane SERVER-SIDE deadline. `AbortSignal.timeout(recallFastDeadlineMs)`
+	// is threaded into EVERY arm's `storage.query` (via `runArm`), so a hung arm is aborted daemon-side
+	// at the deadline and its fast-lane permit released — independent of the client's `AbortController`
+	// (the bug this fixes: the client aborts at ~2.5s but the daemon kept running the query, holding a
+	// slot). Set above the ~1.5s fast query and below the ~4s client budget (default 3000ms).
+	const deadline = AbortSignal.timeout(config.recallFastDeadlineMs);
+
+	// Run ALL arms in ONE `Promise.all` (semantic first, then lexical) so wall-clock ≈ one round-trip.
+	// `runArm` routes each read through the FAST lane (`fastDeps`) and threads the deadline signal, and
+	// swallows a non-ok arm to [] (per-arm fail-soft: a starved / missing sibling table never fails the
+	// whole recall — a-AC-9). No hydrate hop, no dedup fetch — the round-trip count == the arm count.
+	const allSqls = [...semanticSqls, ...lexicalSqls];
+	const armsStart = Date.now();
+
+	// PRD-077 (fix A / 078a-fix, adapted): capture each arm's rows into a PER-ARM slot as it settles,
+	// instead of the all-or-nothing `Promise.all(...).then(rows => …)`. On a deadline cut the arms that
+	// ALREADY resolved keep their rows in `armRows`, so the PARTIAL fusion below can surface them rather
+	// than discarding everything — the bug this fixes: 6 of 7 arms succeeding and one straggler aborted at
+	// the boundary threw the WHOLE recall away. An unfilled slot stays `[]`, identical to a per-arm
+	// fail-soft empty (a-AC-9). NOTE (PRD-077 vs PRD-078): this branch carries NO local ANN index — every
+	// arm is a Deep Lake round-trip, so there are no in-RAM `memoriesIndexRows` to prepend.
+	const armRows: StorageRow[][] = allSqls.map(() => []);
+	// PRD-077 (fix A): each arm is captured into its slot AS IT SETTLES via the two-arg `.then(onOk, onErr)`
+	// — INCREMENTAL by design, so a deadline cut can surface whatever already landed (a plain
+	// `Promise.allSettled(rawArms)` would give the outcomes only AFTER all settle, defeating the partial
+	// tail). `onErr` NEVER re-throws, so each wrapped arm resolves either way and cannot surface as an
+	// unhandledRejection. `runArm` already maps every EXPECTED failure (a non-ok result, INCLUDING a
+	// deadline abort) to `[]`, so a rejection reaching `onErr` is a GENUINE unexpected throw (a late
+	// pool/transport error on the abandoned path) — SURFACE it (subsystem-state only) via `onArmError`
+	// instead of hiding it. The abandoned arms keep settling in the background: the fast-lane deadline
+	// `AbortSignal` is threaded into each (via `runArm`), so `storage.query` aborts daemon-side and
+	// `Semaphore.run`'s finally RELEASES the fast-lane permit when the fetch returns/aborts.
+	// Capture each arm into its slot AS IT SETTLES (INCREMENTAL by design, so a deadline cut can surface
+	// whatever already landed — a plain `Promise.allSettled(rawArms)` yields outcomes only AFTER all settle,
+	// defeating the partial tail). `captureArm` NEVER re-throws, so an arm can't surface as an
+	// unhandledRejection. `runArm` already maps every EXPECTED failure (a non-ok result, INCLUDING a
+	// deadline abort) to `[]`, so a throw reaching the `catch` is a GENUINE unexpected error (a late
+	// pool/transport throw on the abandoned path) — SURFACE it (subsystem-state only) via `onArmError`
+	// instead of hiding it. Abandoned arms keep settling in the background: the fast-lane deadline
+	// `AbortSignal` is threaded into each (via `runArm`), so `storage.query` aborts daemon-side and
+	// `Semaphore.run`'s finally RELEASES the fast-lane permit when the fetch returns/aborts.
+	const captureArm = async (sql: string, i: number): Promise<void> => {
+		try {
+			armRows[i] = await runArm(sql, request, fastDeps, deadline);
+		} catch (err: unknown) {
+			deps.onArmError?.({ reason: err instanceof Error ? err.message : String(err) });
+		}
+	};
+	// `Promise.allSettled` is the "all arms settled" barrier — resolves once every arm has settled and
+	// NEVER rejects (`captureArm` swallows), so the deadline race below is clean.
+	const armsPromise = Promise.allSettled(allSqls.map((sql, i) => captureArm(sql, i)));
+
+	// PRD-077 (fix A): RACE the "all arms settled" signal against a deadline sentinel so `recallFast`'s
+	// wall-clock is bounded by `recallFastDeadlineMs` EVEN WHEN THE FAST LANE IS SATURATED. The per-arm
+	// deadline signal only aborts an arm AFTER it acquires a pool slot and starts its fetch — an arm still
+	// QUEUED waiting for a slot is NOT covered by it, so a saturated lane parked `Promise.all` for tens of
+	// seconds past the deadline (live-observed `armsMs: 73273` vs. the ~3000ms budget). The sentinel
+	// RESOLVES (never rejects) when the deadline `AbortSignal` fires — wrapping the EXISTING signal adds NO
+	// new timer (its timeout is already live from the L-B2 line above, and Node unref's it), so nothing dangles.
+	const deadlinePromise = new Promise<void>((resolve) => {
+		if (deadline.aborted) resolve();
+		else deadline.addEventListener("abort", () => resolve(), { once: true });
+	});
+	const raced = await Promise.race([
+		armsPromise.then(() => ({ deadline: false as const })),
+		deadlinePromise.then(() => ({ deadline: true as const })),
+	]);
+	const armsMs = Date.now() - armsStart;
+	// PRD-077 (fix A / 078a-fix): whether the deadline cut the arms short (some may still be in flight). A
+	// cut makes this recall a PARTIAL (whatever settled) → `degraded: true`; an all-settled run keeps the
+	// honest embed-based `degraded`.
+	const deadlineFired = raced.deadline || deadline.aborted;
+	const fastDegraded = degraded || deadlineFired;
+
+	// PRD-077 (L-B10): emit the ONE secret-free phase-timing event (durations + counts ONLY — NO query
+	// text/token/content), mirroring the `recall.shed` convention. Zero-cost when `deps.onTiming` is
+	// absent (unit-constructed mounts). Defined here so BOTH the deadline-cut-empty and the (partial or
+	// full) fusion return emit through one site (no duplicated event literal → the jscpd gate stays green).
+	const emitTiming = (fuseMs: number, hits: number): void => {
+		deps.onTiming?.({
+			lane: "fast",
+			embedMs,
+			armsMs,
+			fuseMs,
+			totalMs: Date.now() - startedAt,
+			arms: allSqls.length,
+			semanticRan,
+			hits,
+		});
+	};
+
+	// PRD-077 (fix A / 078a-fix, adapted): the TRULY-empty deadline cut — the deadline fired AND nothing is
+	// in hand (no Deep Lake arm resolved before the cut). Return the fail-soft empty degraded result exactly
+	// as fix A did (fusion never runs → `fuseMs: 0`), keeping the deadline-cut-empty case cheap and its
+	// timing observable (`armsMs ≈ deadline`, `hits: 0`, degraded). NEVER throws. When the deadline did NOT
+	// fire, an all-settled run flows through the fusion below even if every arm was empty, so the happy path
+	// stays byte-identical to today.
+	const anyArmRows = armRows.some((rows) => rows.length > 0);
+	if (deadlineFired && !anyArmRows) {
+		emitTiming(0, 0);
+		return { hits: [], sources: [], degraded: fastDegraded };
+	}
+
+	// PRD-077 (fix A / 078a-fix, adapted): PARTIAL fusion — build the ranked arms from whatever is in hand at
+	// this instant. Each arm (semantic OR lexical) is a RANKED list in storage order — the semantic arms are
+	// already ORDER BY score DESC, the lexical arms in their storage order — exactly like recallMemories. On
+	// the all-settled path `armRows` holds every arm's rows in issue order, so this is byte-identical to
+	// today's happy-path fusion; on a deadline cut the cut arms are `[]` (dropped from fusion) and the
+	// survivors still fuse rather than being discarded.
+	const fuseStart = Date.now();
+	const arms: RankedArm[] = armRows.map((rows) => rowsToRankedArm(rows));
+
+	// EXISTING RRF fusion (a-AC-3): the same `fuseHits` + arm-class weight + Nectar multiplier the heavy
+	// path uses, over ALL arms. Cross-arm corroboration accumulates on `source+id`, capped at the limit.
+	const nectarRrfMultiplier = clampNectarRrfMultiplier(deps.nectarRrfMultiplier);
+	const { hits, sources } = fuseHits(arms, limit, nectarRrfMultiplier);
+
+	// EXISTING recency dampening (a-AC-3): the class-aware `applyRecencyActivation` (058a Stage-1) over the
+	// fused hits — per-class half-lives (caller override or documented default) + the `a` exponent, computed
+	// from the inline `created_at`. NO staleness/activation source is passed (dropped on the fast path), so
+	// this is the pure age-decay demotion; it never drops a hit and never throws. Pure + sync, no extra I/O.
+	const byClass = deps.recency?.halfLifeDaysByClass;
+	const activationExponent = deps.recency?.activationExponent ?? DEFAULT_RECENCY_ACTIVATION_EXPONENT;
+	const nowMs = (deps.now ?? Date.now)();
+	const activated = applyRecencyActivation(hits, byClass, activationExponent, nowMs);
+	const fuseMs = Date.now() - fuseStart;
+
+	emitTiming(fuseMs, activated.length);
+	return { hits: activated, sources, degraded: fastDegraded };
 }

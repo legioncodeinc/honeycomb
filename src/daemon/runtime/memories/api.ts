@@ -60,7 +60,14 @@ import {
 	type RequestProjectScope,
 } from "../scope.js";
 import { getRequestIdentity } from "../middleware/permission.js";
-import { recallMemories, type MemoryRecallResult } from "./recall.js";
+import {
+	recallFast,
+	recallMemories,
+	type MemoryRecallResult,
+	type RecallArmErrorEvent,
+	type RecallShedEvent,
+	type RecallTimingEvent,
+} from "./recall.js";
 import { RecencyConfigSchema, type RecencyConfig } from "../recall/config.js";
 import { isValidRecallMode, type RecallMode } from "../vault/api.js";
 import type { VaultStore } from "../vault/store.js";
@@ -100,6 +107,32 @@ export const MEMORIES_GROUP = "/api/memories" as const;
  * dashboard live-log panel (Wave 2) and a test can filter on exactly this line.
  */
 export const RECALL_DEGRADED_EVENT = "recall.degraded" as const;
+
+/**
+ * PRD-077b (L-B3 / D-5): the structured event emitted when a per-turn FAST recall is load-shed —
+ * the fast lane's waiter backlog exceeded `recallFastShedQueueDepth`, so the recall returned a
+ * degraded empty result WITHOUT issuing any Deep Lake query (the tail is bounded by construction).
+ * A fixed, greppable identifier. Carries SUBSYSTEM STATE ONLY (lane / depth / threshold) — NO query
+ * text, token, org, or row content, per the secret-free convention. Only the fast lane sheds.
+ */
+export const RECALL_SHED_EVENT = "recall.shed" as const;
+
+/**
+ * PRD-077 (L-B10): the structured event emitted once per FAST recall carrying its phase timings —
+ * embed / arms / fuse / total durations plus the arm and hit counts. A fixed, greppable identifier.
+ * Carries SUBSYSTEM STATE ONLY (durations + counts) — NO query text, token, org, or row content, per
+ * the secret-free convention (the {@link RecallTimingEvent} has nowhere to put one). Fast lane only.
+ */
+export const RECALL_TIMING_EVENT = "recall.timing" as const;
+
+/**
+ * PRD-077 (fix A): the structured event emitted when a FAST recall's abandoned/settling arm rejects
+ * UNEXPECTEDLY (a genuine pool/transport throw — `runArm` maps every expected failure, incl. a deadline
+ * abort, to `[]`). A fixed, greppable identifier. Carries SUBSYSTEM STATE ONLY (a reason string) — NO
+ * query text, token, org, or row content. Surfacing it keeps the swallowed rejection observable rather
+ * than hidden; the swallow itself still prevents an unhandledRejection. Fast lane only.
+ */
+export const RECALL_ARM_ERROR_EVENT = "recall.arm_error" as const;
 
 /**
  * PRD-049b (D8): the structured event emitted when a recall could NOT resolve its session
@@ -320,6 +353,17 @@ const RecallBodySchema = z.object({
 	 * unbound inbox session, never an error.
 	 */
 	cwd: z.string().optional(),
+	/**
+	 * PRD-077a (D-1): the per-turn FAST-recall selector. `true` reroutes this request to
+	 * {@link recallFast} — the same arms (semantic + lexical, all tables) run content-inline +
+	 * in parallel, fused with the SAME `fuseHits` RRF + recency, but SKIPPING the hydrate hop,
+	 * the dedup embedding fetch, the rerank, and the dormant lifecycle stages — so a per-turn
+	 * recall costs one wall-clock round-trip instead of ~10-15. ABSENT / `false` → the unchanged
+	 * heavy {@link recallMemories} dashboard path. Optional + back-compat: an omitted flag is the
+	 * heavy path, never an error. The scope, tenancy headers, session-group middleware, and
+	 * response shape are IDENTICAL on both paths.
+	 */
+	fast: z.boolean().optional(),
 });
 
 /**
@@ -477,6 +521,47 @@ function logDegradedRecall(logger: RequestLogger | undefined, result: MemoryReca
 	});
 }
 
+/**
+ * Emit the structured `recall.shed` event (PRD-077b / L-B3 / D-5) when a per-turn fast recall is
+ * load-shed. SUBSYSTEM STATE ONLY: the lane, the fast lane's waiter depth at shed time, and the
+ * configured threshold — NO query text, token, org, or row content (the {@link RecallShedEvent}
+ * carries none). A no-op when no logger is wired.
+ */
+function logRecallShed(logger: RequestLogger | undefined, event: RecallShedEvent): void {
+	if (logger === undefined) return;
+	logger.event(RECALL_SHED_EVENT, { lane: event.lane, depth: event.depth, threshold: event.threshold });
+}
+
+/**
+ * Emit the structured `recall.arm_error` event (PRD-077 / fix A) when a fast recall's abandoned/settling
+ * arm rejects UNEXPECTEDLY. SUBSYSTEM STATE ONLY: a reason string — NO query text, token, org, or row
+ * content (the {@link RecallArmErrorEvent} carries none). A no-op when no logger is wired.
+ */
+function logRecallArmError(logger: RequestLogger | undefined, event: RecallArmErrorEvent): void {
+	if (logger === undefined) return;
+	logger.event(RECALL_ARM_ERROR_EVENT, { reason: event.reason });
+}
+
+/**
+ * Emit the structured `recall.timing` event (PRD-077 / L-B10) with a fast recall's phase timings.
+ * SUBSYSTEM STATE ONLY: the lane, the per-phase durations (embed / arms / fuse / total), the arm
+ * count, whether the semantic arms ran, and the hit count — NO query text, token, org, or row content
+ * (the {@link RecallTimingEvent} carries none). A no-op when no logger is wired.
+ */
+function logRecallTiming(logger: RequestLogger | undefined, event: RecallTimingEvent): void {
+	if (logger === undefined) return;
+	logger.event(RECALL_TIMING_EVENT, {
+		lane: event.lane,
+		embedMs: event.embedMs,
+		armsMs: event.armsMs,
+		fuseMs: event.fuseMs,
+		totalMs: event.totalMs,
+		arms: event.arms,
+		semanticRan: event.semanticRan,
+		hits: event.hits,
+	});
+}
+
 /** Map a recall {@link QueryScope} to the {@link SecretScope} the vault `setting` is partitioned under. */
 function secretScopeOf(scope: QueryScope): SecretScope {
 	// The settings-API write resolves `workspace` defaulting to "default" (`headerScopeResolver`);
@@ -630,7 +715,14 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 				calibration = undefined; // fail-soft: no calibration stage rather than a thrown recall.
 			}
 		}
-		const result = await recallMemories(
+		// PRD-077a (D-1): when the request opts into the fast path (`fast: true`), route to the
+		// single-round-trip `recallFast` instead of the heavy `recallMemories`. Both take the SAME
+		// (request, deps) and return the SAME `MemoryRecallResult` shape, so the scope, tenancy,
+		// project segment, logging, and response assembly below are byte-for-byte identical. The
+		// lifecycle deps (reranker/dedup/staleness/activation/calibration/…) are still spread into
+		// deps and simply ignored by `recallFast` — no fast-path-specific branch downstream.
+		const recallEngine = parsed.data.fast === true ? recallFast : recallMemories;
+		const result = await recallEngine(
 			{
 				query: parsed.data.query,
 				scope,
@@ -667,6 +759,25 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 				...(options.stalenessSource !== undefined ? { stalenessSource: options.stalenessSource } : {}),
 				// PRD-058e (L-W3): the calibration model (surfaced as C = g(f); the c exponent stays 0 this wave).
 				...(calibration !== undefined ? { calibration } : {}),
+				// PRD-077b (L-B3): on the fast path, wire the load-shed event sink to the daemon logger so a
+				// shed emits a structured `recall.shed` (subsystem-state only — lane/depth/threshold, no query
+				// text). Only `recallFast` calls `onShed`; the heavy path ignores it, so gating on `fast` keeps
+				// the closure off the dashboard path.
+				...(parsed.data.fast === true && options.logger !== undefined
+					? { onShed: (e: RecallShedEvent) => logRecallShed(options.logger, e) }
+					: {}),
+				// PRD-077 (L-B10): on the fast path, wire the phase-timing sink to the daemon logger so each
+				// per-turn recall emits ONE structured `recall.timing` (subsystem-state only — embed/arms/fuse/
+				// total durations + counts, no query text). Fast lane only, mirroring `onShed`.
+				...(parsed.data.fast === true && options.logger !== undefined
+					? { onTiming: (e: RecallTimingEvent) => logRecallTiming(options.logger, e) }
+					: {}),
+				// PRD-077 (fix A): on the fast path, surface an UNEXPECTED abandoned-arm rejection as a
+				// structured `recall.arm_error` (subsystem-state only — a reason string, no query text) so a
+				// genuine pool/transport throw is observable instead of silently swallowed. Fast lane only.
+				...(parsed.data.fast === true && options.logger !== undefined
+					? { onArmError: (e: RecallArmErrorEvent) => logRecallArmError(options.logger, e) }
+					: {}),
 			},
 		);
 		// PRD-029 (AC-4): when this recall ran DEGRADED (lexical fallback), emit one

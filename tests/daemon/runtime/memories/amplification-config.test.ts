@@ -12,8 +12,12 @@ import { describe, expect, it } from "vitest";
 
 import {
 	DEFAULT_FANOUT_BATCH,
+	DEFAULT_RECALL_FAST_MAX_CONCURRENCY,
 	DEFAULT_RECALL_MAX_CONCURRENCY,
+	DEFAULT_WRITE_MAX_CONCURRENCY,
+	MAX_INT_KNOB,
 	MIN_RECALL_MAX_CONCURRENCY,
+	MIN_WRITE_MAX_CONCURRENCY,
 	resolveAmplificationConfig,
 	type AmplificationConfigProvider,
 	type RawAmplificationConfig,
@@ -76,6 +80,48 @@ describe("amplification config: the concurrency knob coerces + clamps", () => {
 		// A non-numeric value falls back to the documented default (not a config failure).
 		expect(resolveAmplificationConfig(provider({ recallMaxConcurrency: "abc" })).recallMaxConcurrency).toBe(
 			DEFAULT_RECALL_MAX_CONCURRENCY,
+		);
+	});
+
+	it("clamps an OVERSIZED finite value to MAX_INT_KNOB rather than throwing (a knob typo is tuning noise)", () => {
+		// A large finite env typo (`1e21`) overflows `z.number().int()`'s safe-integer check. Pre-fix that
+		// threw `AmplificationConfigError` out of `resolveAmplificationConfig` and took the daemon down;
+		// it must instead be CLAMPED to the safe-integer ceiling, exactly like a sub-`min` value is clamped up.
+		expect(() => resolveAmplificationConfig(provider({ recallMaxConcurrency: 1e21 }))).not.toThrow();
+		expect(resolveAmplificationConfig(provider({ recallMaxConcurrency: 1e21 })).recallMaxConcurrency).toBe(
+			MAX_INT_KNOB,
+		);
+		// The oversized-typo clamp holds across every knob that shares the factory (here the fast-lane width),
+		// and a numeric STRING typo is coerced then clamped just the same.
+		expect(resolveAmplificationConfig(provider({ recallFastMaxConcurrency: "1e21" })).recallFastMaxConcurrency).toBe(
+			MAX_INT_KNOB,
+		);
+		// A merely-large-but-legitimate value is untouched (only the overflow typo is clipped).
+		expect(resolveAmplificationConfig(provider({ recallFastMaxConcurrency: DEFAULT_RECALL_FAST_MAX_CONCURRENCY }))
+			.recallFastMaxConcurrency).toBe(DEFAULT_RECALL_FAST_MAX_CONCURRENCY);
+	});
+});
+
+describe("PRD-077 read/write split: the write-concurrency knob (writeMaxConcurrency)", () => {
+	it("defaults to 3 (the dedicated write-client ceiling) when unset", () => {
+		expect(resolveAmplificationConfig(provider({})).writeMaxConcurrency).toBe(DEFAULT_WRITE_MAX_CONCURRENCY);
+		expect(resolveAmplificationConfig(provider({})).writeMaxConcurrency).toBe(3);
+	});
+
+	it("honors an explicit override (numeric string or number)", () => {
+		expect(resolveAmplificationConfig(provider({ writeMaxConcurrency: "2" })).writeMaxConcurrency).toBe(2);
+		expect(resolveAmplificationConfig(provider({ writeMaxConcurrency: 4 })).writeMaxConcurrency).toBe(4);
+	});
+
+	it("clamps a sub-1 value to the floor (>=1) and falls back on a non-numeric value", () => {
+		expect(resolveAmplificationConfig(provider({ writeMaxConcurrency: "0" })).writeMaxConcurrency).toBe(
+			MIN_WRITE_MAX_CONCURRENCY,
+		);
+		expect(resolveAmplificationConfig(provider({ writeMaxConcurrency: -9 })).writeMaxConcurrency).toBe(
+			MIN_WRITE_MAX_CONCURRENCY,
+		);
+		expect(resolveAmplificationConfig(provider({ writeMaxConcurrency: "xyz" })).writeMaxConcurrency).toBe(
+			DEFAULT_WRITE_MAX_CONCURRENCY,
 		);
 	});
 });

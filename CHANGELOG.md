@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.9.0 — 2026-07-09
+
+Adds a fast, single-round-trip recall path for per-turn memory lookups (opt-in via a `fast` flag), with dedicated concurrency, deadlines, and load-shedding so per-turn recall stays within its latency budget without changing the existing heavy recall behavior.
+
 ## v0.8.0 — 2026-07-08
 
 Adds a self-healing Claude Code plugin connector that automatically detects and repairs harness wiring, plus a new `honeycomb harness status|connect|repair` CLI command and dashboard status reporting. Also fixes plugin packaging so `.mcp.json`, skills, and commands are correctly included in the published Claude Code plugin.

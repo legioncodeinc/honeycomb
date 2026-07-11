@@ -260,8 +260,12 @@ export async function readAccessHistory(
 	memoryId: string,
 	deps: AccessLogDeps,
 	scope: QueryScope,
+	// PRD-077: the OPTIONAL heavy-path recall deadline signal. Threaded into the read's query opts so a
+	// recall-time activation fetch is bounded by `recallHeavyDeadlineMs`; every existing caller (workers,
+	// grading) omits it and is byte-for-byte unchanged (additive, no breaking change).
+	signal?: AbortSignal,
 ): Promise<AccessEvent[]> {
-	const res = await deps.storage.query(buildAccessHistorySql(memoryId), scope);
+	const res = await deps.storage.query(buildAccessHistorySql(memoryId), scope, signal !== undefined ? { signal } : {});
 	if (!isOk(res)) return []; // missing table / any error → cold floor, never a throw.
 	const events: AccessEvent[] = [];
 	for (const row of res.rows as StorageRow[]) {
