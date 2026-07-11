@@ -64,9 +64,10 @@ import { type Proposal, parseProposal } from "./contracts.js";
 import { type PipelineConfig } from "./config.js";
 import type { StageHandler, StageJob } from "./stage-worker.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
+import { isTransientResult } from "../../storage/client.js";
 import type { HealTarget } from "../../storage/heal.js";
 import { classifyFailure } from "../../storage/heal.js";
-import { isOk, type StorageRow } from "../../storage/result.js";
+import { isOk, type QueryResult, type StorageRow } from "../../storage/result.js";
 import {
 	appendVersionBumped,
 	type ColumnValue,
@@ -478,9 +479,28 @@ async function applyAdd(
 			});
 			// Fall through to the INSERT (which heals the table) — NOT deduped, NOT skipped.
 		} else {
-			// A genuine failure (permission/syntax/connection/timeout): surface it so the
-			// job fails and the queue retries, rather than risk an unguarded duplicate insert.
-			throw new Error(`controlled-write dedup probe failed: ${dedup.kind}`);
+			// A genuine failure (permission/syntax/connection/timeout) OR a DeepLake degraded-window
+			// flap (5xx/429/402/eventual-consistency): surface it so the job fails and the queue retries,
+			// rather than risk an unguarded duplicate insert. BUG-04: the live symptom is 101 jobs (×5
+			// attempts = 505) dropped here with an OPAQUE `query_error` because the REAL DeepLake error
+			// text (and HTTP status) was discarded — leaving prod blind to whether a memory dropped on a
+			// 5xx backend flap, a 402 balance exhaustion, or a permission fault. Surface a SECRET-FREE
+			// diagnostic in a structured event AND the thrown error (which lands in the queue's
+			// `last_error_class`), so the next degraded window is diagnosable instead of an
+			// unattributable `query_error`. The token/org are header-only (never in the request body,
+			// so never echoed back), but a statement-rejection body CAN echo the probe SQL verbatim —
+			// which interpolates the SHA-256 `content_hash` — so `describeProbeFailure` strips that
+			// content fingerprint before it reaches the event or the at-rest `last_error_class`.
+			const probe = describeProbeFailure(dedup, hash);
+			logger.event("controlled_write.dedup_probe_failed", {
+				classification: failure,
+				kind: probe.kind,
+				...(probe.status !== undefined ? { status: probe.status } : {}),
+				transient: isTransientResult(dedup),
+				reason: probe.message,
+			});
+			const statusPart = probe.status !== undefined ? ` status=${probe.status}` : "";
+			throw new Error(`controlled-write dedup probe failed: ${probe.kind}${statusPart} :: ${probe.message}`);
 		}
 	}
 
@@ -714,6 +734,51 @@ function clampConfidence(value: number): number {
 function readId(row: StorageRow): string {
 	const raw = row.id;
 	return typeof raw === "string" ? raw : String(raw ?? "");
+}
+
+/**
+ * Extract the diagnostic descriptor from a failed dedup-probe {@link QueryResult} (BUG-04). Every
+ * non-ok kind (`query_error`/`connection_error`/`timeout`) carries a `.message`; only a
+ * `query_error` carries an HTTP `.status`. The client keeps the token out of the message (it is
+ * never interpolated into SQL or errors), but the message ultimately originates from the HTTP
+ * transport as `${status}: ${body.slice(0,200)}` (see `storage/transport.ts`) — the RAW DeepLake
+ * error body. A statement rejection can echo the offending SQL, and the dedup probe interpolates the
+ * SHA-256 `content_hash`, so the body may carry that fingerprint. {@link redactProbedHash} strips it
+ * before the message is surfaced. Used to turn the opaque `query_error` the register saw into a
+ * diagnosable, secret-free `${kind}${status} :: ${message}`.
+ */
+function describeProbeFailure(
+	result: Exclude<QueryResult, { kind: "ok" }>,
+	probedHash: string,
+): {
+	readonly kind: string;
+	readonly status?: number;
+	readonly message: string;
+} {
+	const message = redactProbedHash(result.message, probedHash);
+	if (result.kind === "query_error" && result.status !== undefined) {
+		return { kind: result.kind, status: result.status, message };
+	}
+	return { kind: result.kind, message };
+}
+
+/**
+ * Strip the probed SHA-256 `content_hash` out of a DeepLake error message before it is surfaced in
+ * the `controlled_write.dedup_probe_failed` event or folded into the thrown error (whose message is
+ * persisted at-rest as the local queue's `last_error_class`).
+ *
+ * The message originates from the transport as the RAW DeepLake error body (`transport.ts`); on a
+ * statement rejection DeepLake can echo the offending SQL verbatim, and the dedup probe interpolates
+ * `... WHERE content_hash = '<hash>' ...`. That hash is a one-way fingerprint of normalized memory
+ * content, so persisting it to an at-rest log is a content-derived-PII leak. Remove the exact probed
+ * value, plus any residual long hex run (SHA-256 material a 200-char truncation may have clipped
+ * mid-hash), while preserving the HTTP status, the error class, and the human-readable failure text
+ * that make BUG-04's diagnostic worth having (degraded-window `429`/`402`/`5xx` bodies carry no hex
+ * and are untouched).
+ */
+function redactProbedHash(message: string, probedHash: string): string {
+	const withoutExact = probedHash.length > 0 ? message.split(probedHash).join("<content_hash>") : message;
+	return withoutExact.replace(/[0-9a-f]{16,}/gi, "<hex>");
 }
 
 // ── handler wiring ────────────────────────────────────────────────────────────────
