@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.10.1 — 2026-07-11
+
+Fixed a bug where the daemon's local job queue could be created in different directories depending on the launch working directory, causing pending memory-pipeline jobs to be silently orphaned after a restart. The queue is now anchored to a fixed fleet-wide location so it's reliably found across restarts.
+
 ## v0.10.0 — 2026-07-11
 
 Adds an in-daemon local ANN vector index that dramatically speeds up per-turn memory recall, with automatic fallback to the previous behavior when disabled or not yet built. Includes a new HONEYCOMB_LOCAL_ANN_INDEX configuration flag (on by default) and improved recall observability.

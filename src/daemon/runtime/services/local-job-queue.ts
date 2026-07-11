@@ -14,6 +14,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 
 import { z } from "zod";
 
+import { resolveFleetRoot } from "../../../shared/fleet-root.js";
 import { sqlIdent } from "../../storage/sql.js";
 import type { JobQueueStats } from "./job-queue.js";
 import type { DaemonService } from "./types.js";
@@ -299,7 +300,11 @@ function assertTrustedLocalQueueBaseDir(candidate: string): string {
 }
 
 function trustedLocalQueueRoots(): readonly string[] {
-	const roots = [process.cwd(), homedir(), tmpdir()];
+	// The fleet state root (`~/.apiary` or the `APIARY_HOME` pin) is a trusted root so the daemon-global
+	// queue base ({@link honeycombStateDir}, `<fleetRoot>/honeycomb`) is admitted even when `APIARY_HOME`
+	// points OUTSIDE `homedir()` — otherwise a custom absolute pin would trip the guard and the queue would
+	// fail to open, silently forcing the memory pipeline onto the unreliable shared DeepLake queue.
+	const roots = [process.cwd(), homedir(), tmpdir(), resolveFleetRoot()];
 	const workspace = process.env.HONEYCOMB_WORKSPACE;
 	if (workspace !== undefined && workspace.length > 0) roots.push(workspace);
 	return roots.map((root) => resolve(root));
