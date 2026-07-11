@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.12.1 — 2026-07-11
+
+Fixes a bug where a batched flush window mixing rows with different column shapes (e.g. a plain user turn and an assistant turn with usage data) could be wholesale rejected and dropped; such rows are now grouped by column shape so all events are reliably persisted.
+
 ## v0.12.0 — 2026-07-11
 
 Adds dead-lettering, recovery-triggered drain, a new `honeycomb capture drain` command, and configurable caps/coalescing/back-pressure for the durable capture retry queue, making it more resilient and observable during backend outages.
