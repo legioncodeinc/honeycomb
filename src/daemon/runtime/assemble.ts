@@ -131,6 +131,13 @@ import { createInProcessKeepBothMemoStore } from "./memories/keep-both-memo.js";
 // ── Data-API mount seams (PRD-022a / 022b / 022c) the composition root fires (D-2 / d-AC-1) ──
 import { mountMemoriesApi, mountMemoriesPrimeApi } from "./memories/index.js";
 import { amplificationConfig } from "./memories/amplification-config.js";
+import {
+	COLD_BUILD_PAGE_SIZE,
+	coldBuildLocalVectorIndex,
+	InMemoryLocalVectorIndex,
+	type LocalVectorIndex,
+} from "./memories/local-vector-index.js";
+import { logRecallIndexBuilt } from "./memories/api.js";
 import { mountLifecycleApi } from "./memories/lifecycle-api.js";
 import { resolveNectarRrfMultiplierAtBoot } from "./memories/nectar-recall-config.js";
 import type {
@@ -1280,6 +1287,14 @@ export function assembleSeams(
 	 * composition root always supplies it.
 	 */
 	writeStorage: StorageClient = storage,
+	/**
+	 * PRD-078a: the in-daemon LOCAL ANN recall index, built + cold-filled by `assembleDaemon` OFF the
+	 * hot path and threaded here so `mountMemories` hands it to `recallFast` (the memories semantic arm
+	 * answers from RAM when `HONEYCOMB_LOCAL_ANN_INDEX` is on AND the index is `ready`; else the `<#>`
+	 * SQL fallback, D-4). ABSENT (a unit-constructed `assembleSeams` call) → no index, so recall uses the
+	 * `<#>` SQL path — byte-for-byte the pre-078a behaviour. The daemon composition root always supplies it.
+	 */
+	localVectorIndex?: LocalVectorIndex,
 ): CaptureHandler {
 	// The daemon's configured default tenancy scope (the single LOCAL tenant) is RESOLVED ONCE
 	// at the composition root (`assembleDaemon`) from the SAME credential source the storage
@@ -1541,6 +1556,9 @@ export function assembleSeams(
 		// gateway is ON (the seam's inner transport is wired in `start()`); otherwise RRF / local
 		// cosine, byte-identical to today (c-AC-4). Absent rerankerDeps (a unit mount) → engine default.
 		...(rerankerDeps !== undefined ? { reranker: rerankerDeps.reranker, cohereRerank: rerankerDeps.cohereRerank } : {}),
+		// PRD-078a: the in-daemon local ANN index. `recallFast` consumes it for the memories semantic arm
+		// when enabled + ready; ABSENT → the `<#>` SQL path (D-4). Only the fast path reads it.
+		...(localVectorIndex !== undefined ? { localVectorIndex } : {}),
 	});
 
 	// 7a-bis. The conflict-resolution endpoint (PRD-058b): `POST /api/memories/conflicts/:id/resolve`
@@ -2852,6 +2870,31 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// for tenancy, so it need not be live — the partition-bearing `scope` above IS live).
 	const daemonOrgName = bootTenancy.orgName;
 
+	// ── PRD-078a: the in-daemon LOCAL ANN recall index (the fast per-turn `memories` semantic arm). ──
+	// Built ONLY on the REAL production path (a live `storage`, no injected fake) AND when the
+	// `HONEYCOMB_LOCAL_ANN_INDEX` kill-switch is on (default ON — the intended prod path). The COLD-BUILD
+	// pages embedded `memories` rows through the READ `storage` under the daemon `scope`; it is fired
+	// NON-BLOCKING (fire-and-forget) so it runs OFF the recall hot path and MAY exceed the 3s per-turn
+	// budget — recall falls back to the `<#>` SQL path until the index is `ready` (D-4). A cold-build
+	// throw is swallowed here so a paging failure never crashes boot; recall simply keeps using `<#>`.
+	// When a fake `storage` is injected (the deterministic unit suite) OR the flag is off, the index is
+	// absent, so `recallFast` uses the `<#>` SQL path — byte-for-byte the pre-078a behaviour.
+	let localVectorIndex: LocalVectorIndex | undefined;
+	if (options.storage === undefined && amplificationConfig().localAnnIndex) {
+		const annIndex = new InMemoryLocalVectorIndex();
+		localVectorIndex = annIndex;
+		// PRD-078a-fix: thread the daemon logger through the cold-build's secret-free `onBuilt` seam so
+		// it emits ONE `recall.index.built` line ({ loaded, skipped, pages, ms }) when the scan lands —
+		// the direct signal a dogfood reads to confirm the index actually populated (loaded ≈ corpus,
+		// skipped ≈ 0), rather than inferring build health from the indirect per-query `annHits`.
+		void coldBuildLocalVectorIndex(annIndex, storage, scope, COLD_BUILD_PAGE_SIZE, (event) =>
+			logRecallIndexBuilt(logger, event),
+		).catch((err: unknown) => {
+			const reason = err instanceof Error ? err.message : String(err);
+			process.stderr.write(`honeycomb: local ANN index cold-build failed (non-fatal): ${reason}\n`);
+		});
+	}
+
 	// ── PRD-032d / AC-6: construct the daemon's vault `setting`-class READER ONCE, over the
 	// SAME workspace base dir + machine-key + daemon scope the secrets store uses (so the vault,
 	// the `.secrets/` records, and the `${SECRET_REF}` resolver all agree on ONE location). A
@@ -3267,6 +3310,8 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		harnessPluginStatus,
 		// PRD-077 (read/write split): the dedicated write client the capture-append seam runs through.
 		writeStorage,
+		// PRD-078a: the in-daemon local ANN index (built + cold-filled above), consumed by `recallFast`.
+		localVectorIndex,
 	);
 
 	// ── PRD-032d / AC-6: FIRE the Wave-1 `/api/settings` mount ONCE so the CLI/dashboard

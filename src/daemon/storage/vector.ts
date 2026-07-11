@@ -98,6 +98,32 @@ export function serializeFloat4Array(vector: readonly number[]): string {
 }
 
 /**
+ * Coerce a stored `FLOAT4[]` cell (as returned by a live DeepLake `SELECT` row —
+ * `columns`/`rows` JSON over the HTTP transport, or `pg` rows over the direct
+ * transport) into a `number[]`, or `null` when it is not a usable vector. This is
+ * the ONE canonical reader of a returned embedding cell, shared by BOTH the
+ * PRD-047b rerank fetch ({@link import("../runtime/memories/recall.js")} `fetchCandidateEmbeddings`)
+ * and the PRD-078a local-ANN cold-build ({@link import("../runtime/memories/local-vector-index.js")}),
+ * so the on-the-wire coercion never forks into a second homegrown parser that
+ * drifts from the live format. It intentionally does NOT enforce the 768-dim
+ * contract — a caller that needs the fixed dimension applies its own guard AFTER
+ * this parse (the cold-build packs into a `Float32Array(768)`; the reranker
+ * cosine-guards on equal length), so this stays the format reader, not the
+ * dimension policy. Each element is `Number`-coerced and a non-finite entry
+ * rejects the whole cell; an empty array is `null` (a back-filled NULL embedding).
+ */
+export function readEmbeddingCell(value: unknown): number[] | null {
+	if (!Array.isArray(value)) return null;
+	const vec: number[] = [];
+	for (const v of value) {
+		const n = typeof v === "number" ? v : Number(v);
+		if (!Number.isFinite(n)) return null;
+		vec.push(n);
+	}
+	return vec.length === 0 ? null : vec;
+}
+
+/**
  * In-memory cosine similarity of two equal-length vectors, normalized to 0..1
  * (PRD-047b reranker). Mirrors the SQL `<#>` arm's score normalization
  * (`(1 + cosine) / 2`) so a rerank score is on the SAME 0..1 scale as the
@@ -236,9 +262,15 @@ export function buildVectorSearchSql(args: VectorSearchArgs): string {
 	// PRD-049b: the prebuilt project-segment conjunct (a disjunction the VectorScopeFilter
 	// cannot express) is appended inline so the project filter rides the SAME `<#>` statement.
 	const extraClause = args.extraClause ?? "";
-	// `(emb <#> vec)` is the cosine distance; normalize to a 0..1 similarity.
-	// The `<#>` operator returns negative inner product in pgvector-style
-	// engines; `(1 + (emb <#> vec)) / 2` maps the cosine range [-1,1] → [0,1].
+	// `(emb <#> vec)` is Deep Lake's COSINE SIMILARITY — NOT a negative/raw inner product.
+	// Measured live 2026-07-09 (PRD-078a score-parity investigation): `<#>` NORMALIZES BOTH
+	// operands (scaling the query vector by 2 left `<#>` byte-unchanged) and is positive-oriented
+	// (higher = more similar), i.e. `emb <#> vec == dot(emb,vec)/(|emb|·|vec|)` in [-1,1]. The
+	// stored `content_embedding` and the nomic-q8 query are already unit-normalized (|v| ≈ 1), so
+	// here `<#>` also equals the raw dot — but the operator itself is the normalized cosine, which
+	// is why `(1 + (emb <#> vec)) / 2` maps [-1,1] → a 0..1 similarity and `ORDER BY score DESC`
+	// ranks correctly. {@link deeplakeCosineScore} is the in-process single source of this exact
+	// normalization for the PRD-078a local-ANN path, so the index and this SQL score verbatim.
 	const scoreSql = `((1 + (${emb} <#> ${vecLit})) / 2)`;
 	return [
 		"SELECT ", id, " AS id, ", scoreSql, " AS score ",
@@ -247,6 +279,35 @@ export function buildVectorSearchSql(args: VectorSearchArgs): string {
 		"ORDER BY score DESC ",
 		"LIMIT ", String(fetchLimit),
 	].join("");
+}
+
+/**
+ * The IN-PROCESS single source of the on-wire `<#>` scoring semantics (PRD-078a D-3).
+ *
+ * Returns the score `((1 + (embedding <#> query)) / 2)` that {@link buildVectorSearchSql} computes
+ * server-side, so the PRD-078a local ANN index and the `<#>` SQL fallback are INTERCHANGEABLE — the
+ * same (query, embedding) yields the same magnitude AND the same rank on both paths, and the
+ * recency / threshold / fusion stages downstream cannot tell which arm produced a hit.
+ *
+ * ── Why this equals `cosineSimilarity` (measured, not assumed) ────────────────────────────────────
+ * Deep Lake's `<#>` was proven live (2026-07-09) to be TRUE COSINE SIMILARITY, not a raw or negative
+ * inner product: scaling the query vector by 2 left `<#>` byte-unchanged (it normalizes BOTH operands),
+ * and `emb <#> q` reproduced `dot(emb,q)/(|emb|·|q|)` to ~2e-8. Because `<#>` is cosine, the exact
+ * `<#>` normalization `((1 + cos) / 2)` IS what {@link cosineSimilarity} already computes. So this
+ * scorer DELEGATES to it rather than forking a second copy of the cosine math (which would risk drift
+ * and a jscpd duplication flag) — they are PROVABLY identical, verified against the live operator to 8
+ * decimals across a real top-5 (see the parity suite's baked oracle).
+ *
+ * It is a SEPARATE, named export (not just a `cosineSimilarity` call at the index call site) so the
+ * on-wire scoring contract has ONE home NEXT TO the `<#>` builder: if Deep Lake's operator semantics
+ * ever change, this function changes and the local index follows, WITHOUT disturbing the PRD-047b
+ * reranker's independent {@link cosineSimilarity} usage. Returns `null` on an unusable pair (mismatched
+ * length, empty, or a zero-magnitude vector), exactly as `cosineSimilarity` does, so a caller keeps the
+ * candidate's prior position rather than scoring it on garbage.
+ */
+export function deeplakeCosineScore(query: readonly number[], embedding: readonly number[]): number | null {
+	// `<#>` is cosine (measured), so its `((1+cos)/2)` normalization == cosineSimilarity's output.
+	return cosineSimilarity(query, embedding);
 }
 
 /**
