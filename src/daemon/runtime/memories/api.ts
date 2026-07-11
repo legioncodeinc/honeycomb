@@ -147,6 +147,16 @@ export const PROJECT_SCOPE_DEGRADED_WARNING: string =
 	"project scoping degraded: no working directory was resolvable for this session, so recall " +
 	"was narrowed to the workspace inbox + workspace-global rows only (no project could be resolved).";
 
+/**
+ * PRD-078a-fix: the structured event emitted ONCE when the in-daemon local ANN cold-build finishes.
+ * A fixed, greppable identifier so a dogfood can filter on exactly this line. Carries SUBSYSTEM STATE
+ * ONLY (loaded / skipped / pages / ms) — NO query text, id, org, token, or row content, per the
+ * secret-free convention shared with `recall.shed` / `recall.timing`. Its whole point is to make the
+ * index's populated size DIRECTLY observable (`loaded ≈ corpus`, `skipped ≈ 0`) instead of inferring
+ * build health from the indirect per-query `annHits` metric.
+ */
+export const RECALL_INDEX_BUILT_EVENT = "recall.index.built" as const;
+
 /** Options for {@link mountMemoriesApi}. Mirrors {@link import("../dashboard/api.js").MountDashboardOptions}. */
 export interface MountMemoriesOptions {
 	/** The storage client every read + write runs through (never a raw fetch). */
@@ -277,6 +287,15 @@ export interface MountMemoriesOptions {
 	 * composition root threads the SAME budget the standalone `mountMemoriesPrimeApi` consumed.
 	 */
 	readonly primeBudget?: PrimeDigestBudget;
+	/**
+	 * PRD-078a: the in-daemon LOCAL ANN recall index, threaded into {@link recallFast} so the
+	 * `memories` SEMANTIC arm answers from RAM (sub-100ms flat cosine) instead of the ~2.6s `<#>`
+	 * Deep Lake scan — gated by `HONEYCOMB_LOCAL_ANN_INDEX` + the index's `ready` state (D-4 fail-soft
+	 * fallback to `<#>` when off/cold/absent). The composition root builds it once, cold-fills it OFF
+	 * the hot path, and threads it here; ABSENT (a unit-constructed mount, or the heavy path) → the
+	 * engine uses the `<#>` SQL path, byte-for-byte the pre-078a behaviour.
+	 */
+	readonly localVectorIndex?: import("./local-vector-index.js").LocalVectorIndex;
 }
 
 /**
@@ -559,6 +578,30 @@ function logRecallTiming(logger: RequestLogger | undefined, event: RecallTimingE
 		arms: event.arms,
 		semanticRan: event.semanticRan,
 		hits: event.hits,
+		// PRD-078a: the local-index contribution (a COUNT only — secret-free), so a dogfood can confirm
+		// the instant ANN memories arm contributed even when a deadline cut the slow Deep Lake arms.
+		annHits: event.annHits,
+	});
+}
+
+/**
+ * Emit the structured `recall.index.built` event (PRD-078a-fix) when the in-daemon local ANN
+ * cold-build finishes. SUBSYSTEM STATE ONLY: the loaded vector count, the skipped-row count, the
+ * pages scanned, and the wall-clock ms — NO query text, id, org, token, or row content (the
+ * {@link import("./local-vector-index.js").RecallIndexBuiltEvent} carries none). A no-op when no
+ * logger is wired. Exported so the composition root ({@link import("../assemble.js")}) can pass it as
+ * the cold-build's `onBuilt` seam, the same posture as `logRecallShed` / `logRecallTiming`.
+ */
+export function logRecallIndexBuilt(
+	logger: RequestLogger | undefined,
+	event: import("./local-vector-index.js").RecallIndexBuiltEvent,
+): void {
+	if (logger === undefined) return;
+	logger.event(RECALL_INDEX_BUILT_EVENT, {
+		loaded: event.loaded,
+		skipped: event.skipped,
+		pages: event.pages,
+		ms: event.ms,
 	});
 }
 
@@ -777,6 +820,12 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 				// genuine pool/transport throw is observable instead of silently swallowed. Fast lane only.
 				...(parsed.data.fast === true && options.logger !== undefined
 					? { onArmError: (e: RecallArmErrorEvent) => logRecallArmError(options.logger, e) }
+					: {}),
+				// PRD-078a: the in-daemon local ANN index. Threaded only on the fast path (recallFast is the
+				// sole consumer; recallMemories ignores it) so the memories semantic arm answers from RAM when
+				// the index is enabled + ready, with the `<#>` SQL as the fail-soft fallback (D-4).
+				...(parsed.data.fast === true && options.localVectorIndex !== undefined
+					? { localVectorIndex: options.localVectorIndex }
 					: {}),
 			},
 		);

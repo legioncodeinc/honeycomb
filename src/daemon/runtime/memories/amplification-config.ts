@@ -38,6 +38,14 @@ import { OnByDefaultFlag } from "../../../shared/bool-flag.js";
 
 /** The default for `HONEYCOMB_FANOUT_BATCH` — ON (the live cost-reducing posture, parent AC-9). */
 export const DEFAULT_FANOUT_BATCH = true;
+/**
+ * PRD-078a — the default for `HONEYCOMB_LOCAL_ANN_INDEX`. ON by default: the in-daemon local ANN
+ * index is the INTENDED prod path (`recallFast`'s `memories` semantic arm answers from RAM in
+ * sub-100ms instead of the ~2.6s `<#>` Deep Lake scan that overruns the fast-lane deadline). The
+ * flag exists as the kill-switch — OFF ⇒ the memories arm falls back to the `<#>` SQL path (D-4),
+ * byte-for-byte the pre-078a behaviour. Mirrors the DEFAULT-ON cost-incident posture of `fanoutBatch`.
+ */
+export const DEFAULT_LOCAL_ANN_INDEX = true;
 /** The default in-flight DeepLake-query ceiling for recall + grading (AC-62d.2.1). */
 export const DEFAULT_RECALL_MAX_CONCURRENCY = 6;
 /** The floor for the concurrency knob: a pool must admit at least one task (no deadlock). */
@@ -128,6 +136,8 @@ const ConcurrencyKnob = clampedIntKnob(DEFAULT_RECALL_MAX_CONCURRENCY, MIN_RECAL
 export const AmplificationConfigSchema = z.object({
 	/** `HONEYCOMB_FANOUT_BATCH` — batched fan-out enqueue; ON by default (AC-62d.1.1 / AC-9). */
 	fanoutBatch: OnByDefaultFlag.default(DEFAULT_FANOUT_BATCH),
+	/** `HONEYCOMB_LOCAL_ANN_INDEX` — the in-daemon local ANN recall index; ON by default (PRD-078a a-AC-5). */
+	localAnnIndex: OnByDefaultFlag.default(DEFAULT_LOCAL_ANN_INDEX),
 	/** `HONEYCOMB_RECALL_MAX_CONCURRENCY` — in-flight DeepLake-query ceiling; 6 by default (AC-62d.2.1). */
 	recallMaxConcurrency: ConcurrencyKnob.default(DEFAULT_RECALL_MAX_CONCURRENCY),
 	/** `HONEYCOMB_WRITE_MAX_CONCURRENCY` — the dedicated write-client in-flight ceiling; 3 by default (PRD-077 read/write split). */
@@ -186,6 +196,8 @@ export interface AmplificationConfigProvider {
 /** The raw, un-validated shape the provider yields. */
 export interface RawAmplificationConfig {
 	readonly fanoutBatch?: unknown;
+	/** PRD-078a: the `HONEYCOMB_LOCAL_ANN_INDEX` kill-switch for the in-daemon local ANN recall index. */
+	readonly localAnnIndex?: unknown;
 	readonly recallMaxConcurrency?: unknown;
 	/** PRD-077 (read/write split): the dedicated write-client in-flight ceiling. */
 	readonly writeMaxConcurrency?: unknown;
@@ -210,6 +222,8 @@ export function envAmplificationConfigProvider(env: NodeJS.ProcessEnv = process.
 		read(): RawAmplificationConfig {
 			return {
 				fanoutBatch: env.HONEYCOMB_FANOUT_BATCH,
+				// PRD-078a: the local ANN index kill-switch (default ON).
+				localAnnIndex: env.HONEYCOMB_LOCAL_ANN_INDEX,
 				recallMaxConcurrency: env.HONEYCOMB_RECALL_MAX_CONCURRENCY,
 				// PRD-077 (read/write split): the dedicated write-client in-flight ceiling.
 				writeMaxConcurrency: env.HONEYCOMB_WRITE_MAX_CONCURRENCY,

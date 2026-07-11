@@ -64,7 +64,15 @@
 import { isOk, type StorageRow } from "../../storage/result.js";
 import { sLiteral, sqlIdent, sqlLike } from "../../storage/sql.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
-import { cosineSimilarity, EMBEDDING_DIMS, type ScoredId, serializeFloat4Array, vectorSearch } from "../../storage/vector.js";
+import {
+	cosineSimilarity,
+	EMBEDDING_DIMS,
+	readEmbeddingCell,
+	type ScoredId,
+	serializeFloat4Array,
+	vectorSearch,
+} from "../../storage/vector.js";
+import type { LocalVectorIndex } from "./local-vector-index.js";
 import { buildProjectScopeConjunct } from "../recall/scope-clause.js";
 import {
 	DEFAULT_DEDUP_ENABLED,
@@ -210,6 +218,8 @@ export interface RecallTimingEvent {
 	readonly semanticRan: boolean;
 	/** The number of fused hits returned. */
 	readonly hits: number;
+	/** PRD-078a: how many rows the local ANN index contributed to the memories arm (a COUNT only). */
+	readonly annHits: number;
 }
 
 /** The default number of recall hits returned when the caller supplies no limit. */
@@ -1004,6 +1014,18 @@ export interface MemoryRecallDeps {
 	 * rejection is still swallowed (no unhandledRejection) but not logged. Fast lane only.
 	 */
 	readonly onArmError?: (event: RecallArmErrorEvent) => void;
+	/**
+	 * PRD-078a: the in-daemon LOCAL ANN recall index. When present, {@link recallFast}'s `memories`
+	 * SEMANTIC arm is answered from this in-RAM flat-cosine index (sub-100ms, no Deep Lake round-trip)
+	 * INSTEAD of the `buildFastSemanticArmSql` `<#>` query — BUT only when the `HONEYCOMB_LOCAL_ANN_INDEX`
+	 * flag is on AND the index is {@link LocalVectorIndex.ready} (cold-built). ABSENT / flag off / cold /
+	 * a `search` throw → the memories arm falls back to the existing `<#>` SQL path (D-4, fail-soft —
+	 * never a hard dependency). Only the `memories` semantic arm is affected; the sessions/hive semantic
+	 * arms and every lexical arm still hit Deep Lake this phase. The index's `search` returns rows in the
+	 * SAME shape {@link buildFastSemanticArmSql} produces, so fusion/recency downstream are byte-identical.
+	 * The composition root builds + cold-fills it off the hot path; a unit test injects a fake.
+	 */
+	readonly localVectorIndex?: LocalVectorIndex;
 }
 
 /** A recall request as it enters the adapter (the zod-validated, scoped body). */
@@ -1429,18 +1451,6 @@ function idColumnFor(source: RecallSource): string {
 	if (source === "sessions" || source === "memory") return "path";
 	if (source === "hive_graph_versions") return "nectar"; // PRD-013b: the stable file identity the rerank fetch keys on.
 	return "id";
-}
-
-/** Coerce a stored `FLOAT4[]` cell into a `number[]`, or `null` when it is not a usable vector. */
-function readEmbeddingCell(value: unknown): number[] | null {
-	if (!Array.isArray(value)) return null;
-	const vec: number[] = [];
-	for (const v of value) {
-		const n = typeof v === "number" ? v : Number(v);
-		if (!Number.isFinite(n)) return null;
-		vec.push(n);
-	}
-	return vec.length === 0 ? null : vec;
 }
 
 /**
@@ -2768,10 +2778,33 @@ export async function recallFast(
 	const semanticRan = queryVector !== null && queryVector.length === EMBEDDING_DIMS;
 	const degraded = !semanticRan;
 
-	// Build the arm SQLs: the three content-inline semantic arms (only when the query embedded to a
-	// real 768-dim vector) + the four lexical arm builders (which already SELECT `content` inline).
+	// PRD-078a: answer the `memories` SEMANTIC arm from the in-daemon local ANN index when it is ENABLED
+	// (`HONEYCOMB_LOCAL_ANN_INDEX`) AND `ready` (cold-built) — an in-RAM flat-cosine scan (sub-100ms,
+	// content-inline, NO Deep Lake round-trip) instead of the `<#>` `buildFastSemanticArmSql` query (the
+	// ~2.6s brute-force full-column scan that overruns the fast-lane deadline). FAIL-SOFT (D-4): the flag
+	// off, a cold/absent index, OR a `search` THROW all leave `memoriesIndexRows` null, so the memories
+	// arm falls back to the `<#>` SQL below. Only the `memories` arm is served locally; sessions/hive
+	// semantic + all lexical arms still hit Deep Lake this phase. The rows come back in the SAME shape
+	// `buildFastSemanticArmSql` produces, so `rowsToRankedArm` → `fuseHits` → recency consume them unchanged.
+	const localIndex = deps.localVectorIndex;
+	const useMemoriesIndex = semanticRan && config.localAnnIndex && localIndex !== undefined && localIndex.ready;
+	let memoriesIndexRows: StorageRow[] | null = null;
+	if (useMemoriesIndex) {
+		try {
+			memoriesIndexRows = localIndex!.search(queryVector as readonly number[], request.projectId ?? "", limit);
+		} catch {
+			memoriesIndexRows = null; // fail-soft: fall through to the `<#>` SQL arm for memories.
+		}
+	}
+
+	// Build the arm SQLs: the content-inline semantic arms (only when the query embedded to a real
+	// 768-dim vector) + the four lexical arm builders (which already SELECT `content` inline). PRD-078a:
+	// when the local index served the memories arm, its `<#>` SQL is DROPPED (`memoriesIndexRows !== null`)
+	// so NO Deep Lake query is issued for it; the sessions/hive semantic SQLs are unchanged.
 	const semanticSqls = semanticRan
-		? SEMANTIC_ARMS.map((spec) => buildFastSemanticArmSql(spec, queryVector as readonly number[], limit, projectClause))
+		? SEMANTIC_ARMS.filter((spec) => !(spec.source === "memories" && memoriesIndexRows !== null)).map((spec) =>
+				buildFastSemanticArmSql(spec, queryVector as readonly number[], limit, projectClause),
+			)
 		: [];
 	const lexicalSqls = [
 		buildMemoriesArmSql(term, limit, projectClause),
@@ -2868,6 +2901,9 @@ export async function recallFast(
 			arms: allSqls.length,
 			semanticRan,
 			hits,
+			// PRD-078a: how many rows the local ANN index contributed (a COUNT only), so a dogfood can see
+			// the instant index arm survived a deadline cut even when the slow Deep Lake arms were dropped.
+			annHits: memoriesIndexRows?.length ?? 0,
 		});
 	};
 
@@ -2877,8 +2913,11 @@ export async function recallFast(
 	// timing observable (`armsMs ≈ deadline`, `hits: 0`, degraded). NEVER throws. When the deadline did NOT
 	// fire, an all-settled run flows through the fusion below even if every arm was empty, so the happy path
 	// stays byte-identical to today.
+	// PRD-078a: the local ANN memories arm is INSTANT (in-RAM, never subject to the deadline), so its rows
+	// count as "in hand" here — a deadline cut with local hits present must still fuse them, not discard.
+	const anyLocalRows = memoriesIndexRows !== null && memoriesIndexRows.length > 0;
 	const anyArmRows = armRows.some((rows) => rows.length > 0);
-	if (deadlineFired && !anyArmRows) {
+	if (deadlineFired && !anyArmRows && !anyLocalRows) {
 		emitTiming(0, 0);
 		return { hits: [], sources: [], degraded: fastDegraded };
 	}
@@ -2889,8 +2928,14 @@ export async function recallFast(
 	// the all-settled path `armRows` holds every arm's rows in issue order, so this is byte-identical to
 	// today's happy-path fusion; on a deadline cut the cut arms are `[]` (dropped from fusion) and the
 	// survivors still fuse rather than being discarded.
+	// PRD-078a: when the local index served the memories arm, PREPEND its rows as the FIRST ranked arm —
+	// the SAME position the memories `<#>` arm would have occupied (SEMANTIC_ARMS[0]) since its SQL was
+	// dropped above — so the arm ORDER, RRF fusion, and recency stay byte-identical to the `<#>` SQL path.
 	const fuseStart = Date.now();
-	const arms: RankedArm[] = armRows.map((rows) => rowsToRankedArm(rows));
+	const arms: RankedArm[] = [
+		...(memoriesIndexRows !== null ? [rowsToRankedArm(memoriesIndexRows)] : []),
+		...armRows.map((rows) => rowsToRankedArm(rows)),
+	];
 
 	// EXISTING RRF fusion (a-AC-3): the same `fuseHits` + arm-class weight + Nectar multiplier the heavy
 	// path uses, over ALL arms. Cross-arm corroboration accumulates on `source+id`, capped at the limit.
