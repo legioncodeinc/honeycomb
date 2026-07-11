@@ -225,6 +225,26 @@ describe("PRD-066a retention and validation", () => {
 		expect(fires.join("\n")).toMatch(/trusted runtime directory/i);
 	});
 
+	it("admits a queue base under the fleet state root (APIARY_HOME) so the home-anchored queue opens", async () => {
+		// The daemon anchors the queue on `honeycombStateDir()` (`<APIARY_HOME>/honeycomb`). `resolveFleetRoot()`
+		// is a trusted root so this base is admitted even when APIARY_HOME points outside homedir — without it a
+		// custom pin would trip the guard and force the memory pipeline onto the unreliable shared queue.
+		const prev = process.env.APIARY_HOME;
+		process.env.APIARY_HOME = dir; // absolute; honeycombStateDir() -> <dir>/honeycomb, under the fleet root
+		try {
+			const stateDir = join(dir, "honeycomb");
+			const queue = openLocalJobQueue({ baseDir: stateDir, clock, config: { owner: "fleet" } });
+			const id = await queue.enqueue({ kind: "summary", payload: { sessionId: "s1" } });
+			expect((await queue.counts()).byStatus[LOCAL_JOB_QUEUED]).toBe(1);
+			queue.close();
+			expect(existsSync(join(stateDir, LOCAL_QUEUE_DAEMON_DIR_NAME, LOCAL_QUEUE_DB_FILE_NAME))).toBe(true);
+			expect(id).toBeTruthy();
+		} finally {
+			if (prev === undefined) delete process.env.APIARY_HOME;
+			else process.env.APIARY_HOME = prev;
+		}
+	});
+
 	it("the NULL queue fails closed for writes and returns empty diagnostics", async () => {
 		await expect(NULL_LOCAL_JOB_QUEUE.enqueue({ kind: "x", payload: {} })).rejects.toThrow(/unavailable/);
 		expect(await NULL_LOCAL_JOB_QUEUE.lease()).toBeNull();

@@ -10,7 +10,8 @@
 
 import { describe, expect, it } from "vitest";
 
-import { workspaceBaseDirCandidate } from "../../../src/daemon/runtime/assemble.js";
+import { honeycombStateDir } from "../../../src/shared/fleet-root.js";
+import { resolveLocalQueueBaseDir, workspaceBaseDirCandidate } from "../../../src/daemon/runtime/assemble.js";
 
 describe("workspaceBaseDirCandidate — trims a polluted HONEYCOMB_WORKSPACE", () => {
 	it("returns a clean HONEYCOMB_WORKSPACE verbatim", () => {
@@ -28,5 +29,15 @@ describe("workspaceBaseDirCandidate — trims a polluted HONEYCOMB_WORKSPACE", (
 	it("falls back to process.cwd() when HONEYCOMB_WORKSPACE is unset or whitespace-only", () => {
 		expect(workspaceBaseDirCandidate({})).toBe(process.cwd());
 		expect(workspaceBaseDirCandidate({ HONEYCOMB_WORKSPACE: "   " })).toBe(process.cwd());
+	});
+});
+
+describe("resolveLocalQueueBaseDir — the memory-pipeline queue is home-anchored, NOT cwd/workspace", () => {
+	it("resolves to the fleet state root (~/.apiary/honeycomb), independent of HONEYCOMB_WORKSPACE and cwd", () => {
+		// The queue is DAEMON-GLOBAL durable state: it must land in `honeycombStateDir()` so a restart from
+		// any launch dir reopens the SAME queue. A workspace/cwd anchor scattered it and orphaned pending jobs.
+		expect(resolveLocalQueueBaseDir()).toBe(honeycombStateDir());
+		// It must NOT be the cwd-scattering workspace base (the pre-fix defect this guards against).
+		expect(resolveLocalQueueBaseDir()).not.toBe(process.cwd());
 	});
 });

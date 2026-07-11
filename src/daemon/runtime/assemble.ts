@@ -2024,17 +2024,34 @@ function resolveWorkspaceBaseDir(): string {
 
 /**
  * The base dir for the daemon's VAULT — `secret`-class records (`.secrets/`) AND `setting`-class
- * records (`.vault/setting/`). Unlike logs (`.daemon/`), the local job queue, and `agent.yaml` — all
- * legitimately PER-WORKSPACE — the vault holds DAEMON-GLOBAL config: the Portkey/inference key, the
+ * records (`.vault/setting/`). Unlike logs (`.daemon/logs.db`) and `agent.yaml` — legitimately
+ * PER-WORKSPACE — the vault holds DAEMON-GLOBAL config: the Portkey/inference key, the
  * provider/model selection, and the pollinating/embeddings toggles. It MUST be a FIXED, cwd-independent
  * location so a daemon launched from ANY directory reads and writes the SAME secrets/settings.
  * {@link resolveWorkspaceBaseDir} falls back to `process.cwd()` when `HONEYCOMB_WORKSPACE` is unset,
  * which scatters config across whatever folder the daemon happened to start in (observed: the same key
  * / toggle landing in `~/.apiary/honeycomb/.vault`, `~/GitHub/<repo>/honeycomb/.vault`, … so a boot read
  * sees an inconsistent subset and Portkey/pollinating silently never engage). Anchoring the vault to the
- * fleet state root {@link honeycombStateDir} (`~/.apiary/honeycomb`) removes that entire class.
+ * fleet state root {@link honeycombStateDir} (`~/.apiary/honeycomb`) removes that entire class. The local
+ * job queue ({@link resolveLocalQueueBaseDir}) is anchored the SAME way, for the same reason.
  */
 function resolveVaultBaseDir(): string {
+	return honeycombStateDir();
+}
+
+/**
+ * The base dir for the daemon's LOCAL JOB QUEUE — the transactional SQLite store the memory pipeline runs
+ * on (`<baseDir>/.daemon/local-queue.db`). Like the vault (and UNLIKE logs / `agent.yaml`), this is
+ * DAEMON-GLOBAL DURABLE state, NOT per-workspace: the capture path enqueues pipeline jobs and the pipeline
+ * worker drains them across the daemon's whole lifetime, so the queue must survive a restart and be found
+ * REGARDLESS of the cwd the service manager launched the daemon from. {@link resolveWorkspaceBaseDir} falls
+ * back to `process.cwd()` when `HONEYCOMB_WORKSPACE` is unset, which parks the queue in whatever folder the
+ * daemon happened to start in — a restart (or a service-manager launch) from a different cwd then opens a
+ * DIFFERENT, empty queue, orphaning the pending jobs so their memories never form. Anchoring the queue to
+ * the fleet state root {@link honeycombStateDir} (`~/.apiary/honeycomb`) removes that entire class, exactly
+ * as the vault fix did.
+ */
+export function resolveLocalQueueBaseDir(): string {
 	return honeycombStateDir();
 }
 
@@ -2911,7 +2928,10 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	const localQueueConfig = resolveHybridJobQueueConfig();
 	const storageHealthProbeEnabled = !localQueueConfig.enabled || localQueueConfig.drainSharedLocalKinds;
 	const localQueue = openLocalJobQueue({
-		baseDir: resolveWorkspaceBaseDir(),
+		// PRD-072/ADR-0003: the queue is DAEMON-GLOBAL durable state — anchor it on the fleet state root
+		// (`~/.apiary/honeycomb`), NOT the cwd-scattering workspace base, so a restart from any launch dir
+		// reopens the SAME queue instead of orphaning pending pipeline jobs. See {@link resolveLocalQueueBaseDir}.
+		baseDir: resolveLocalQueueBaseDir(),
 		openExistingOnly: !localQueueConfig.enabled,
 	});
 	const queue = createHybridJobQueueService({
