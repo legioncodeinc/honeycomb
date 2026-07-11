@@ -2812,19 +2812,25 @@ export async function recallFast(
 	// instead of hiding it. The abandoned arms keep settling in the background: the fast-lane deadline
 	// `AbortSignal` is threaded into each (via `runArm`), so `storage.query` aborts daemon-side and
 	// `Semaphore.run`'s finally RELEASES the fast-lane permit when the fetch returns/aborts.
-	const settled = allSqls.map((sql, i) =>
-		runArm(sql, request, fastDeps, deadline).then(
-			(rows) => {
-				armRows[i] = rows;
-			},
-			(err: unknown) => {
-				deps.onArmError?.({ reason: err instanceof Error ? err.message : String(err) });
-			},
-		),
-	);
-	// `Promise.allSettled` is the "all arms settled" barrier — it resolves once every wrapped arm has
-	// settled and NEVER rejects (the wrappers above already can't), so the deadline race below is clean.
-	const armsPromise = Promise.allSettled(settled);
+	// Capture each arm into its slot AS IT SETTLES (INCREMENTAL by design, so a deadline cut can surface
+	// whatever already landed — a plain `Promise.allSettled(rawArms)` yields outcomes only AFTER all settle,
+	// defeating the partial tail). `captureArm` NEVER re-throws, so an arm can't surface as an
+	// unhandledRejection. `runArm` already maps every EXPECTED failure (a non-ok result, INCLUDING a
+	// deadline abort) to `[]`, so a throw reaching the `catch` is a GENUINE unexpected error (a late
+	// pool/transport throw on the abandoned path) — SURFACE it (subsystem-state only) via `onArmError`
+	// instead of hiding it. Abandoned arms keep settling in the background: the fast-lane deadline
+	// `AbortSignal` is threaded into each (via `runArm`), so `storage.query` aborts daemon-side and
+	// `Semaphore.run`'s finally RELEASES the fast-lane permit when the fetch returns/aborts.
+	const captureArm = async (sql: string, i: number): Promise<void> => {
+		try {
+			armRows[i] = await runArm(sql, request, fastDeps, deadline);
+		} catch (err: unknown) {
+			deps.onArmError?.({ reason: err instanceof Error ? err.message : String(err) });
+		}
+	};
+	// `Promise.allSettled` is the "all arms settled" barrier — resolves once every arm has settled and
+	// NEVER rejects (`captureArm` swallows), so the deadline race below is clean.
+	const armsPromise = Promise.allSettled(allSqls.map((sql, i) => captureArm(sql, i)));
 
 	// PRD-077 (fix A): RACE the "all arms settled" signal against a deadline sentinel so `recallFast`'s
 	// wall-clock is bounded by `recallFastDeadlineMs` EVEN WHEN THE FAST LANE IS SATURATED. The per-arm
