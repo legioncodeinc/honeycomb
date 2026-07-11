@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.11.0 — 2026-07-11
+
+Captures that fail to write due to a temporary backend outage are now queued in a durable local retry outbox and automatically re-sent once the backend recovers, instead of being silently lost. Adds a new `/health` capture-outbox backlog indicator for visibility into pending/retrying captures.
+
 ## v0.10.1 — 2026-07-11
 
 Fixed a bug where the daemon's local job queue could be created in different directories depending on the launch working directory, causing pending memory-pipeline jobs to be silently orphaned after a restart. The queue is now anchored to a fixed fleet-wide location so it's reliably found across restarts.

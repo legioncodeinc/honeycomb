@@ -66,6 +66,7 @@ import { type EmbedAttachment, noopEmbedAttachment } from "../services/embed-cli
 import type { JobQueueService } from "../services/job-queue.js";
 import { budgetedStringify } from "./budgeted-stringify.js";
 import { type BufferClock, CaptureBuffer } from "./capture-buffer.js";
+import type { CaptureOutboxSink } from "./capture-outbox.js";
 import { type CaptureConfig, resolveCaptureConfig } from "./capture-config.js";
 import { type CaptureEvent, type CaptureMetadata, parseCaptureRequest, proseForEvent } from "./event-contract.js";
 import type { CaptureDroppedEventsCounter } from "./dropped-events.js";
@@ -94,7 +95,10 @@ const CAPTURE_WRITE_SOURCE = "capture-write" as const;
  * already classified `unsafe-write` (runs once regardless), so this is the EXPLICIT, statement-shape-
  * independent restatement of that guarantee — a future reclassification can't silently re-arm 4×.
  */
-const CAPTURE_WRITE_OPTS = { source: CAPTURE_WRITE_SOURCE, maxAttempts: 1 } as const;
+// Exported (PRD-079a): the durable capture outbox drainer re-appends persisted rows with the EXACT
+// same opts so a replayed capture write carries the identical `capture-write` meter source + the
+// single-attempt cap (the drainer's backoff owns the retry cadence, not the transport retry loop).
+export const CAPTURE_WRITE_OPTS = { source: CAPTURE_WRITE_SOURCE, maxAttempts: 1 } as const;
 /** The capture route, relative to {@link HOOKS_GROUP}. */
 export const CAPTURE_PATH = "/capture" as const;
 /** The conversation read-back route, relative to {@link HOOKS_GROUP}. */
@@ -147,6 +151,16 @@ export interface CaptureHandlerDeps {
 	 * observability). When present, flush failures increment by the number of rows lost.
 	 */
 	readonly droppedEvents?: CaptureDroppedEventsCounter;
+	/**
+	 * PRD-079a: the durable capture retry outbox. On a CONFIRMED non-ok append (batched `flushBatch`
+	 * OR the immediate path), the failed `{ row, scope }` rows are ENQUEUED here instead of being
+	 * silently dropped, and a background drainer re-appends them once DeepLake recovers (a-AC-1). The
+	 * enqueue is FAIL-SOFT (a-AC-5) — it never throws and never changes the capture ack; only rows the
+	 * outbox reports it could NOT persist are counted as truly dropped (the honest drop metric).
+	 * OPTIONAL: absent (a unit test / the pre-079a posture) → the failed rows are dropped exactly as
+	 * before, so existing behavior is byte-identical when the outbox is unwired.
+	 */
+	readonly outbox?: CaptureOutboxSink;
 	/** Injected clock (ISO timestamps) so tests are deterministic. Default `Date.now`. */
 	readonly now?: () => number;
 	/**
@@ -370,6 +384,11 @@ class CaptureRouteHandler {
 			);
 			if (!isOk(result)) {
 				this.deps.logger?.event("capture.insert.failed", { id, kind: result.kind });
+				// PRD-079a (a-AC-1): persist the un-written row to the durable outbox so a degraded DeepLake
+				// window does not lose it — the drainer re-appends it on recovery. FAIL-SOFT (a-AC-5): the
+				// enqueue never throws (guarded by `enqueueToOutbox`); the 502 ack contract is UNCHANGED (the
+				// immediate write did not land, and the caller learns that), the row is simply no longer lost.
+				this.enqueueToOutbox([row], scope);
 				return c.json({ error: "capture_failed", reason: "could not write the session row" }, 502);
 			}
 		}
@@ -462,6 +481,36 @@ class CaptureRouteHandler {
 		this.deps.droppedEvents?.increment(count);
 	}
 
+	/**
+	 * Route a CONFIRMED capture append failure (PRD-079a a-AC-1). When the durable outbox is wired the
+	 * rows are PERSISTED for a later re-append (deferred, NOT lost), so `recordDropped` counts ONLY the
+	 * rows the outbox reports it could not persist — the honest drop metric. When no outbox is wired
+	 * (the pre-079a posture / a direct-construction unit test) every row is counted dropped, byte-for-byte
+	 * the pre-079a behavior.
+	 */
+	private onAppendFailure(rows: readonly RowValues[], scope: QueryScope): void {
+		this.recordDropped(this.enqueueToOutbox(rows, scope));
+	}
+
+	/**
+	 * Fail-soft enqueue to the durable outbox (PRD-079a a-AC-5). Returns the number of rows the outbox
+	 * could NOT persist (which the caller counts as truly dropped). NEVER throws — even a broken/throwing
+	 * outbox is caught here, so the capture path can never break because the outbox faulted (the ack was
+	 * already returned; the flush is off the hot path). No outbox wired → every row is a drop (pre-079a).
+	 */
+	private enqueueToOutbox(rows: readonly RowValues[], scope: QueryScope): number {
+		const outbox = this.deps.outbox;
+		if (outbox === undefined) return rows.length;
+		try {
+			return outbox.enqueue(rows, scope).dropped;
+		} catch (err: unknown) {
+			this.deps.logger?.event("capture.outbox.enqueue_failed", {
+				reason: err instanceof Error ? err.message : String(err),
+			});
+			return rows.length; // a throwing outbox persisted nothing → the whole batch is a confirmed drop.
+		}
+	}
+
 	private bufferRow(id: string, row: RowValues, scope: QueryScope): void {
 		const buffer = this.ensureBuffer();
 		void buffer.add({ row, scope }).catch((err: unknown) => {
@@ -518,18 +567,20 @@ class CaptureRouteHandler {
 					CAPTURE_WRITE_OPTS,
 				);
 				if (!isOk(result)) {
-					this.recordDropped(rows.length);
 					this.deps.logger?.event("capture.batch_insert.failed", { count: rows.length, kind: result.kind });
+					// PRD-079a (a-AC-1): defer the failed rows to the durable outbox instead of dropping them.
+					// `onAppendFailure` counts as dropped ONLY what the outbox could not persist (honest metric).
+					this.onAppendFailure(rows, scope);
 					throw new Error(`capture batch append failed: ${result.kind}`);
 				}
 			} catch (err: unknown) {
-				const alreadyCounted = err instanceof Error && err.message.startsWith("capture batch append failed:");
-				if (!alreadyCounted) {
-					this.recordDropped(rows.length);
+				const alreadyHandled = err instanceof Error && err.message.startsWith("capture batch append failed:");
+				if (!alreadyHandled) {
 					this.deps.logger?.event("capture.batch_insert.failed", {
 						count: rows.length,
 						kind: err instanceof Error ? err.message : String(err),
 					});
+					this.onAppendFailure(rows, scope);
 				}
 				throw err;
 			}
