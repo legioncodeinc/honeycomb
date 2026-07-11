@@ -1,6 +1,6 @@
 # Session Capture
 
-> Category: Ai | Version: 1.3 | Date: July 2026 | Status: Active
+> Category: Ai | Version: 1.4 | Date: July 2026 | Status: Active
 
 The input layer: how every prompt, tool call, and response becomes a durable raw event that feeds the distillation pipeline, and the guards that keep capture cheap and safe.
 
@@ -60,7 +60,14 @@ PRD-079a closes that gap with a durable retry-later outbox. When the DeepLake ap
 - The drainer is an unref'd loop that re-appends on the dedicated **write** client (`Semaphore(3)`), so draining a backlog cannot starve recall. It uses bounded exponential backoff (5s base, 5min cap) and skips not-yet-due rows so it never hot-loops: a successful re-append deletes the row, a failure bumps `attempts` and pushes `next_attempt_at`.
 - The whole subsystem is fail-soft: any outbox open, enqueue, or drain fault degrades to a no-op (`NULL_CAPTURE_OUTBOX`), so a broken outbox can never break capture itself, and it is behind the `HONEYCOMB_CAPTURE_OUTBOX` kill-switch (default on).
 
-Its backlog is visible on `/health` as `captureOutbox { pending, retrying }` and through the secret-free `capture.outbox.{enqueued,drained,retry}` events, described from the operator side in [`../operations/observability-and-degradation.md`](../operations/observability-and-degradation.md). The mechanics live in `src/daemon/runtime/capture/capture-outbox.ts`. This is the write-side twin of the read-side isolation work in [`retrieval.md`](retrieval.md): recall was made independent of DeepLake latency, and capture is now durable across DeepLake availability gaps.
+Its backlog is visible on `/health` as `captureOutbox { pending, retrying, deadLettered }` and through the secret-free `capture.outbox.*` events, described from the operator side in [`../operations/observability-and-degradation.md`](../operations/observability-and-degradation.md). The mechanics live in `src/daemon/runtime/capture/capture-outbox.ts`. This is the write-side twin of the read-side isolation work in [`retrieval.md`](retrieval.md): recall was made independent of DeepLake latency, and capture is now durable across DeepLake availability gaps.
+
+PRD-079b/c (PR #289, v0.12.0) completed PRD-079 by hardening that outbox for terminal failure, recovery, and scale, without changing the happy path or the DeepLake schema:
+
+- **Dead-letter for a row that can never land.** A row that reaches `maxAttempts` failed re-appends (default 10) or exceeds `maxAgeMs` in the outbox (default 24h) is moved to a terminal `dead` status: retained for a forensic read but never re-leased, so a permanently-rejected row stops consuming write slots and stops growing the active backlog. The bounds are env-overridable (`HONEYCOMB_CAPTURE_OUTBOX_MAX_ATTEMPTS` / `_MAX_AGE_MS`), and the health backlog now partitions `{ pending, retrying, deadLettered }` with dead rows excluded from the active counts.
+- **Recovery-triggered drain.** A successful capture append is the "backend recovered" signal, so the capture handler kicks an immediate, single-flighted drain on every landed append rather than waiting for the 30s interval. The drainer also joined the DeepLake hibernation set, so it goes quiet during hibernation (it no longer keeps the Activeloop pod warm while idle) and re-arms plus kicks on the `deeplake.woke` wake.
+- **Caps and coalescing at scale.** An active-backlog row cap (`maxRows`, default 10k) sheds the oldest pending rows oldest-first when an enqueue would exceed it, always counted via `capture.outbox.shed` rather than silently truncated. On drain, due rows are coalesced by scope and column shape into one multi-row append per group (a failed group backs off or dead-letters each member independently, so no row is lost or double-counted), and a single authoritative per-pass cap (`maxDrainPerInterval`, default 200) bounds how fast a huge backlog drains.
+- **Operator force-drain.** `honeycomb capture drain` POSTs to `POST /api/diagnostics/capture-drain` (on the protected diagnostics group, open in local mode) to force one drain pass and print the `{ drained, retried, deadLettered }` counts, so an operator can flush a degraded-window backlog on demand. The re-append runs under each row's own stored scope, so a force-drain stays cross-tenant safe. The recovery mechanics are detailed in [`../storage/deeplake-recall-and-capture-findings-2026-07-10.md`](../storage/deeplake-recall-and-capture-findings-2026-07-10.md) §3.4.
 
 ## Bounded read-back
 
