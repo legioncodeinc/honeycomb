@@ -1,6 +1,6 @@
 # Session Capture
 
-> Category: Ai | Version: 1.4 | Date: July 2026 | Status: Active
+> Category: Ai | Version: 1.5 | Date: July 2026 | Status: Active
 
 The input layer: how every prompt, tool call, and response becomes a durable raw event that feeds the distillation pipeline, and the guards that keep capture cheap and safe.
 
@@ -48,6 +48,17 @@ flowchart TD
 ```
 
 The `message` column is `JSONB` because each event is a structured payload (prompt text, tool input, tool response), and storing it as structured JSON keeps the original shape intact for later extraction. The capture call goes to the daemon, which owns the write to DeepLake; the shim never touches storage directly. The table shape is documented in [`../data/schema.md`](../data/schema.md).
+
+### The batched flush: uniform multi-row appends
+
+One row per event does not mean one HTTP round-trip per event. To keep DeepLake write cost down, the daemon buffers the events in a short window (PRD-062c) and flushes them as a single multi-row `INSERT` per group rather than one statement per row. The grouping is what keeps this correct, and it has two axes:
+
+- **By tenancy scope.** A multi-row `INSERT` cannot span partitions, so rows are first bucketed by `org`+`workspace` (PRD-062c L-C1). In the common single-tenant daemon every row shares one scope, so this is one bucket.
+- **By column signature.** `buildRow` emits a fixed **15-column base** plus **0 to 4 optional usage columns** per turn (`input_tokens` / `output_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens`), each written only when present so that an absent count stays SQL `NULL` and never a silent `0` (PRD-060a a-AC-6). A flush window therefore legitimately holds heterogeneous **15 to 19-column** rows. `buildInsertMany` takes the first row as the header and rejects the whole batch on any width or name mismatch (`row column count 15 != expected 19`), so a mixed-width window has to be split.
+
+Before BUG-03 (PR #291, v0.12.1) the flush grouped **only** by scope, so a window that mixed a 15-column user turn with an assistant-with-usage turn was handed as a single mixed-width batch to `buildInsertMany`, which rejected it wholesale and dropped every captured turn in that window. The single-row path survived; only the multi-row flush failed, so memory and session counts froze while `capture.batch_insert.failed` fired live. (After PRD-079a the dropped batch was caught by the durable outbox rather than lost, but the primary flush still failed on every mixed window and only recovered via the retry path.) The fix makes `groupBufferedRows` sub-group each scope by the ordered column-name signature, so every `appendOnlyInsertMany` is uniform: absent-usage rows group together and keep those columns omitted, same-shape same-scope turns still coalesce into one write, and the common single-shape window is still one append. This is the same scope-plus-signature grouping PRD-079c added for the outbox drain (see below), now applied to the primary capture flush so the two paths share one discipline.
+
+`flushBatch` is also hardened to **continue-then-throw**: a per-group append failure defers that group to the durable outbox (PRD-079a) and records the first error, but the loop continues to the remaining groups, and the first error is re-thrown only after every group had its chance to land or defer. A degraded-window timeout in one group can no longer strand or silently drop the others, including the pre-existing multi-scope case, while the buffer's rejection contract is preserved by the final re-throw. The flush lives in `src/daemon/runtime/capture/capture-handler.ts` (`flushBatch`, `groupBufferedRows`).
 
 ## Durable across degraded windows: the capture outbox
 
