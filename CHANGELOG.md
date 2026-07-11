@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.10.0 — 2026-07-11
+
+Adds an in-daemon local ANN vector index that dramatically speeds up per-turn memory recall, with automatic fallback to the previous behavior when disabled or not yet built. Includes a new HONEYCOMB_LOCAL_ANN_INDEX configuration flag (on by default) and improved recall observability.
+
 ## v0.9.0 — 2026-07-09
 
 Adds a fast, single-round-trip recall path for per-turn memory lookups (opt-in via a `fast` flag), with dedicated concurrency, deadlines, and load-shedding so per-turn recall stays within its latency budget without changing the existing heavy recall behavior.
