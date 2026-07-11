@@ -157,11 +157,84 @@ function toolBody(response: string) {
 	};
 }
 
+/** An assistant turn carrying a FULL usage block → the widest (19-column) `sessions` row. */
+function assistantBody(text: string, usage: { input: number; output: number; cacheRead: number; cacheCreation: number }) {
+	return {
+		event: { kind: "assistant_message", text, usage, model: "claude-opus-4-8" },
+		metadata: userBody("").metadata,
+	};
+}
+
 function insertSqls(fake: FakeDeepLakeTransport): string[] {
 	return fake.requests.filter((r) => /^\s*INSERT\s+INTO\s+"sessions"/i.test(r.sql)).map((r) => r.sql);
 }
 
 const BATCH_ON: CaptureConfig = { batch: true, windowMs: 1_000, maxEvents: 25, envelopeBudgetBytes: 16_384 };
+
+describe("BUG-03: a mixed-width flush window is sub-grouped by column shape, never dropped", () => {
+	it("flushes a 15-col user turn + a 19-col assistant-with-usage turn as TWO uniform appends, both persisted", async () => {
+		const logged: string[] = [];
+		const logger = createRequestLogger({ silent: true });
+		const origEvent = logger.event.bind(logger);
+		logger.event = (name, fields) => {
+			logged.push(name);
+			origEvent(name, fields);
+		};
+		const clock = new FakeClock();
+		const { daemon, fake } = buildDaemon(BATCH_ON, clock, { logger });
+
+		// One window, one scope, TWO shapes: a user turn (15 cols, no usage) + an assistant turn with a full
+		// usage block (19 cols). PRE-FIX these coalesced into ONE mixed-width append that `buildInsertMany`
+		// rejected wholesale (`row column count 15 != expected 19`), dropping the batch. POST-FIX the flush
+		// sub-groups by column signature so each shape is its own uniform append.
+		const user = await daemon.app.request("/api/hooks/capture", {
+			method: "POST",
+			headers: sessionHeaders(),
+			body: JSON.stringify(userBody("hello")),
+		});
+		expect(user.status).toBe(201);
+		const asst = await daemon.app.request("/api/hooks/capture", {
+			method: "POST",
+			headers: sessionHeaders(),
+			body: JSON.stringify(assistantBody("done", { input: 100, output: 50, cacheRead: 10, cacheCreation: 5 })),
+		});
+		expect(asst.status).toBe(201);
+
+		expect(insertSqls(fake).length, "nothing written before the window closes").toBe(0);
+		clock.advance(1_000);
+		// A macrotask boundary drains ALL pending microtasks — the flush issues one append PER column shape,
+		// so both sequential appends settle before we assert (two `Promise.resolve()` ticks would only settle
+		// the first).
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		const inserts = insertSqls(fake);
+		expect(inserts.length, "two shapes → two uniform appends (not one rejected batch)").toBe(2);
+		expect(logged, "no width-mismatch drop").not.toContain("capture.batch_insert.failed");
+		expect(logged, "no flush failure").not.toContain("capture.flush.failed");
+		// The wide append carries the usage columns; the narrow one omits them (→ SQL NULL, PRD-060a a-AC-6).
+		expect(inserts.some((sql) => /input_tokens/.test(sql)), "the assistant append carries usage columns").toBe(true);
+		expect(inserts.some((sql) => !/input_tokens/.test(sql)), "the user append omits usage columns").toBe(true);
+	});
+
+	it("same-shape rows still coalesce into ONE append (the shape split does not fragment uniform batches)", async () => {
+		const clock = new FakeClock();
+		const { daemon, fake } = buildDaemon(BATCH_ON, clock);
+		for (let i = 0; i < 4; i++) {
+			const res = await daemon.app.request("/api/hooks/capture", {
+				method: "POST",
+				headers: sessionHeaders(),
+				body: JSON.stringify(assistantBody(`turn ${i}`, { input: 1, output: 2, cacheRead: 3, cacheCreation: 4 })),
+			});
+			expect(res.status).toBe(201);
+		}
+		clock.advance(1_000);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		const inserts = insertSqls(fake);
+		expect(inserts.length, "4 same-shape turns → exactly ONE append").toBe(1);
+		expect(inserts[0].match(/\),\s*\(/g)?.length, "3 tuple separators for 4 rows").toBe(3);
+	});
+});
 
 describe("AC-62c.1.1: N events within the window produce ONE multi-row append", () => {
 	it("buffers 5 within-window events and flushes them as a single INSERT", async () => {

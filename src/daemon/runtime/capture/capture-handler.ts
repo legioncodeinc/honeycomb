@@ -579,7 +579,15 @@ class CaptureRouteHandler {
 	 * 062a meter source. A failed append rejects so the awaiter ({@link bufferRow}) logs it.
 	 */
 	private async flushBatch(batch: readonly BufferedRow[]): Promise<void> {
-		for (const [scope, rows] of groupRowsByScope(batch)) {
+		// Each (scope, column-shape) group is a UNIFORM multi-row append (BUG-03: mixed-width rows in one
+		// append are rejected wholesale by `buildInsertMany`). A per-group failure defers THAT group to the
+		// durable outbox (PRD-079a) and records the first error, but the loop CONTINUES — so a failure in one
+		// group (a degraded-window timeout, now that width mismatches are gone) never strands the others and
+		// never silently drops them. The buffer's rejection contract (its serialize/ordering gate +
+		// `onFlushError` sink) is preserved by re-throwing the first error AFTER every group had its chance
+		// to land or defer.
+		let firstError: Error | undefined;
+		for (const { scope, rows } of groupBufferedRows(batch)) {
 			try {
 				const result = await appendOnlyInsertMany(
 					this.deps.storage,
@@ -593,23 +601,22 @@ class CaptureRouteHandler {
 					// PRD-079a (a-AC-1): defer the failed rows to the durable outbox instead of dropping them.
 					// `onAppendFailure` counts as dropped ONLY what the outbox could not persist (honest metric).
 					this.onAppendFailure(rows, scope);
-					throw new Error(`capture batch append failed: ${result.kind}`);
+					firstError ??= new Error(`capture batch append failed: ${result.kind}`);
+					continue;
 				}
 				// PRD-079b (b-AC-3): a LANDED batched append is the "backend recovered" signal — kick an
 				// immediate outbox drain so the degraded-window backlog clears promptly (off the hot path).
 				this.kickOutboxDrain();
 			} catch (err: unknown) {
-				const alreadyHandled = err instanceof Error && err.message.startsWith("capture batch append failed:");
-				if (!alreadyHandled) {
-					this.deps.logger?.event("capture.batch_insert.failed", {
-						count: rows.length,
-						kind: err instanceof Error ? err.message : String(err),
-					});
-					this.onAppendFailure(rows, scope);
-				}
-				throw err;
+				this.deps.logger?.event("capture.batch_insert.failed", {
+					count: rows.length,
+					kind: err instanceof Error ? err.message : String(err),
+				});
+				this.onAppendFailure(rows, scope);
+				firstError ??= err instanceof Error ? err : new Error(String(err));
 			}
 		}
+		if (firstError !== undefined) throw firstError;
 	}
 
 	/**
@@ -944,26 +951,44 @@ function modelFor(event: CaptureEvent): string {
 	return event.kind === "assistant_message" && event.model !== undefined ? event.model : "";
 }
 
+/** One uniform-width flush group: rows sharing a tenancy scope AND a column signature. */
+interface FlushGroup {
+	readonly scope: QueryScope;
+	readonly rows: RowValues[];
+}
+
 /**
- * Group buffered rows by their tenancy scope (PRD-062c L-C1). A multi-row INSERT
- * cannot span partitions, so rows are bucketed by `org`+`workspace` and each bucket
- * is appended as one statement. Insertion order is preserved within a bucket (the
- * `Map` keeps first-seen key order) so `creation_date` ordering is unaffected. In the
- * common single-tenant daemon every row shares one scope → one bucket → one append.
+ * Group buffered rows for the batched flush into UNIFORM multi-row appends: first by tenancy scope
+ * (`org`+`workspace` — a multi-row INSERT cannot span partitions, PRD-062c L-C1), THEN by COLUMN
+ * SIGNATURE (the ordered column-name list).
+ *
+ * BUG-03: `buildInsertMany` takes the first row as the header and rejects the WHOLE batch on any
+ * width/name mismatch, so a window mixing a 15-column user turn with a 16–19-column
+ * assistant-with-usage turn failed `row column count 15 != expected 19` and DROPPED the batch.
+ * `buildRow` appends 0–4 nullable usage columns per turn (via {@link usageColumns}, in a fixed order),
+ * so a flush window legitimately holds heterogeneous shapes. Sub-grouping by signature makes every
+ * append uniform — absent-usage rows group together and keep those columns OMITTED (→ SQL NULL,
+ * preserving the "absent = NULL, never a silent 0" semantic, PRD-060a a-AC-6) — while still coalescing
+ * same-shape same-scope turns into one write. Insertion order is preserved within each group (first-seen
+ * `Map` order) so `creation_date` ordering is unaffected. The common single-tenant same-shape window is
+ * still one group → one append. (This mirrors the scope+signature grouping PRD-079c added for the outbox
+ * drain, applied here to the PRIMARY capture flush.)
  */
-function groupRowsByScope(batch: readonly BufferedRow[]): Map<QueryScope, RowValues[]> {
-	const byKey = new Map<string, { scope: QueryScope; rows: RowValues[] }>();
+function groupBufferedRows(batch: readonly BufferedRow[]): readonly FlushGroup[] {
+	const byKey = new Map<string, FlushGroup>();
 	for (const item of batch) {
-		// Collision-free composite key: JSON-encode the pair so a separator char in an
-		// org/workspace value can never alias a different scope into the same bucket.
-		const key = JSON.stringify([item.scope.org, item.scope.workspace ?? ""]);
+		// The column-name signature captures buildInsertMany's uniformity requirement (count + names +
+		// order). Space-joined — column names are `[a-z_]+` identifiers, so a space can never alias two
+		// signatures — then folded into the JSON composite key below.
+		const signature = item.row.map(([col]) => col).join(" ");
+		// Collision-free composite key: JSON-encode scope + signature so a separator char in an
+		// org/workspace value can never alias a different (scope, shape) into the same bucket.
+		const key = JSON.stringify([item.scope.org, item.scope.workspace ?? "", signature]);
 		const bucket = byKey.get(key);
 		if (bucket === undefined) byKey.set(key, { scope: item.scope, rows: [item.row] });
 		else bucket.rows.push(item.row);
 	}
-	const out = new Map<QueryScope, RowValues[]>();
-	for (const { scope, rows } of byKey.values()) out.set(scope, rows);
-	return out;
+	return [...byKey.values()];
 }
 
 /** Serialize an unknown JSON value to a string for embedding (empty when absent). */

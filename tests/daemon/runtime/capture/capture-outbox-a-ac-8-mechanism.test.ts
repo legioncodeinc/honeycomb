@@ -18,7 +18,11 @@
  * proven here). `vitest run` passes `--experimental-sqlite`, so the in-memory `node:sqlite` outbox is live.
  */
 
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { afterEach, describe, expect, it } from "vitest";
 
 import { healTargetFor } from "../../../../src/daemon/storage/catalog/index.js";
 import type { QueryOptions, QueryScope, StorageQuery } from "../../../../src/daemon/storage/client.js";
@@ -153,12 +157,31 @@ function firstInsertId(sql: string): string {
 	return match[1] ?? "";
 }
 
+let outboxDir: string | null = null;
+afterEach(() => {
+	if (outboxDir !== null) {
+		rmSync(outboxDir, { recursive: true, force: true });
+		outboxDir = null;
+	}
+});
+
 describe("a-AC-8 (mechanism): a degraded-window capture lands in the outbox and drains on recovery", () => {
 	it("ack stays 201, pending>0 during the window, pending→0 on recovery with the original id replayed", async () => {
 		// The outbox drains on its OWN write client (switchable) — models the backend recovering between
 		// the failed hot-path capture and the later background drain.
 		const write = switchableWriteStorage();
-		const outbox = openCaptureOutbox({ storage: write.storage, sessionsTarget: SESSIONS_TARGET, memory: true });
+		// DETERMINISM: a file-backed outbox under a temp dir (NOT experimental in-memory `:memory:`, which
+		// races under the CI fork-pool load) + a FIXED clock so `leaseDue`'s `next_attempt_at <= now` is
+		// time-independent. Together these remove the CI-only nondeterminism this end-to-end mechanism test
+		// exhibited (the two legs are also proven separately in `capture-outbox.test.ts`).
+		outboxDir = mkdtempSync(join(tmpdir(), "hc-a-ac-8-"));
+		const outboxClock = { now: () => 1_000, setInterval: () => 0, clearInterval: () => {} };
+		const outbox = openCaptureOutbox({
+			storage: write.storage,
+			sessionsTarget: SESSIONS_TARGET,
+			baseDir: outboxDir,
+			clock: outboxClock,
+		});
 
 		// The capture path's transport fails every `sessions` INSERT (the degraded window on the hot path).
 		const fake = new FakeDeepLakeTransport(failingResponder());
@@ -203,11 +226,24 @@ describe("a-AC-8 (mechanism): a degraded-window capture lands in the outbox and 
 		const originalId = firstInsertId(daemonInserts[0]?.sql ?? "");
 		expect(originalId, "the queued row carried a deterministic makeRowId id").toMatch(/^sess-sess-1-\d+-\d+$/);
 
-		// Leg 3: the backend recovers → the background drainer re-appends the queued row → pending → 0,
-		// and the replayed INSERT carries the ORIGINAL deterministic id (idempotent replay, a-AC-6).
+		// Leg 3: the backend recovers → the drainer re-appends the queued row → pending → 0, and the replayed
+		// INSERT carries the ORIGINAL deterministic id (idempotent replay, a-AC-6). Drain in a BOUNDED loop
+		// until the backlog clears: the queued row is present (pending === 1 above) and the write client is
+		// now OK, so it drains within a couple of passes; looping to empty (capped) makes the assertion
+		// robust to CI scheduling without an unbounded retry, and asserts the TOTAL drained is exactly one.
 		write.setMode("ok");
-		const drain = await outbox.drainDue();
-		expect(drain).toEqual({ drained: 1, retried: 0, deadLettered: 0 });
+		let totalDrained = 0;
+		let totalRetried = 0;
+		let totalDeadLettered = 0;
+		for (let pass = 0; pass < 20 && outbox.counts().pending > 0; pass++) {
+			const drain = await outbox.drainDue();
+			totalDrained += drain.drained;
+			totalRetried += drain.retried;
+			totalDeadLettered += drain.deadLettered;
+		}
+		expect(totalDrained, "the queued row drained on recovery").toBe(1);
+		expect(totalRetried, "no retry was needed once the backend recovered").toBe(0);
+		expect(totalDeadLettered, "the row was replayed, not dead-lettered").toBe(0);
 		expect(outbox.counts().pending).toBe(0);
 		expect(write.appends).toHaveLength(1);
 		expect(write.appends[0]).toMatch(/INSERT\s+INTO\s+"sessions"/i);
