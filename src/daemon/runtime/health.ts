@@ -201,6 +201,18 @@ export interface HealthReasons {
 		readonly guidance: string;
 	};
 	/**
+	 * PRD-079a: the durable capture retry outbox backlog — `pending` queued rows awaiting a durable
+	 * re-append (after a DeepLake degraded-window append failure) + the `retrying` subset that has
+	 * already failed at least one drain attempt (`attempts > 0`). The glanceable "is a degraded window
+	 * backing up captures, and is it draining on recovery?" signal (a-AC-7): `pending > 0` during a bad
+	 * window, `pending → 0` once the backend recovers. Present only when the composition root wires the
+	 * outbox; omitted on a bare `createDaemon`. Carries NO secret — two counts.
+	 */
+	readonly captureOutbox?: {
+		readonly pending: number;
+		readonly retrying: number;
+	};
+	/**
 	 * Memory-formation observability: memories the controlled-write stage actually committed since boot.
 	 * The glanceable "is this daemon forming memories?" signal — it exists BECAUSE the recurring storage
 	 * probe is disabled in local-queue mode (PRD-066 idle-cost boundary), so `storage: reachable` no
@@ -311,6 +323,15 @@ export interface HealthDetailInputs {
 	 */
 	readonly captureTenancyUnconfirmed?: boolean;
 	/**
+	 * PRD-079a: the capture retry outbox backlog (`{ pending, retrying }`). Omitted when the composition
+	 * root does not wire the outbox → the `captureOutbox` reason is absent. Present → surfaced verbatim
+	 * (normalized to non-negative integers) as {@link HealthReasons.captureOutbox}.
+	 */
+	readonly captureOutbox?: {
+		readonly pending: number;
+		readonly retrying: number;
+	};
+	/**
 	 * Memories committed by the controlled-write stage since boot (the in-process
 	 * {@link import("./pipeline/memory-formation.js").MemoryFormationSnapshot}). Omitted when the
 	 * composition root does not wire the tracker (bare `createDaemon` / the deterministic unit suite);
@@ -409,6 +430,17 @@ export function buildHealthDetail(inputs: HealthDetailInputs): HealthDetail {
 					},
 				}
 			: {}),
+		// PRD-079a: the capture retry outbox backlog — present only when the outbox is wired. Normalized to
+		// non-negative integers (a negative/NaN/float input is clamped, so /health never carries a fractional,
+		// negative, or `null`-serializing count); carries no secret. `pending > 0` marks a degraded-window backlog.
+		...(inputs.captureOutbox !== undefined
+			? {
+					captureOutbox: {
+						pending: nonNegativeInt(inputs.captureOutbox.pending),
+						retrying: nonNegativeInt(inputs.captureOutbox.retrying),
+					},
+				}
+			: {}),
 		// The pipeline's queue backend — present only when wired. `shared` is the degraded-coordination signal.
 		...(inputs.memoryQueue !== undefined ? { memoryQueue: inputs.memoryQueue } : {}),
 		// The memory-formation feature-gating signal — present only when the pipeline worker is wired.
@@ -423,6 +455,15 @@ export function buildHealthDetail(inputs: HealthDetailInputs): HealthDetail {
 			: {}),
 	};
 	return { status: inputs.status, reasons };
+}
+
+/**
+ * Clamp a count to a non-negative integer for the `/health` wire (PRD-079a). A non-finite input
+ * (NaN/±Infinity) coerces to 0 — `Math.max(0, Math.trunc(NaN))` is itself `NaN` (which would then
+ * serialize to `null`), so the finiteness guard is load-bearing, not cosmetic.
+ */
+function nonNegativeInt(value: number): number {
+	return Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
 }
 
 /**

@@ -45,6 +45,7 @@ import type { JobQueueService } from "../services/job-queue.js";
 import type { EmbedAttachment } from "../services/embed-client.js";
 import { SUMMARY_JOB_KIND } from "../summaries/index.js";
 import { type CaptureHandler, type CaptureLogger, createCaptureHandler, HOOKS_GROUP } from "./capture-handler.js";
+import type { CaptureOutboxSink } from "./capture-outbox.js";
 import type { CaptureDroppedEventsCounter } from "./dropped-events.js";
 import type { GatedCapturesCounter } from "./gated-captures.js";
 import type { BufferClock } from "./capture-buffer.js";
@@ -119,6 +120,12 @@ export interface AttachHooksOptions {
 	/** Acks-but-lost capture counter surfaced on `/health` + dashboard KPIs. */
 	readonly droppedEvents?: CaptureDroppedEventsCounter;
 	/**
+	 * PRD-079a: the durable capture retry outbox. Threaded to the capture handler so a failed append
+	 * ENQUEUEs the rows for a later re-append instead of dropping them (a-AC-1). Optional — absent (a
+	 * unit test) → the pre-079a drop behavior; the daemon composition root wires the real outbox.
+	 */
+	readonly outbox?: CaptureOutboxSink;
+	/**
 	 * PRD-062c (L-C1 / L-C2 / L-X1): the capture write-batching + envelope-trim config.
 	 * Defaults (in the capture handler) to {@link resolveCaptureConfig} — the `HONEYCOMB_CAPTURE_*`
 	 * env flags, DEFAULT-ON. Threaded so a test can force batch on/off + a deterministic budget.
@@ -173,6 +180,7 @@ export function attachHooksHandlers(daemon: Daemon, options: AttachHooksOptions)
 		...(options.projectsDir !== undefined ? { projectsDir: options.projectsDir } : {}),
 		...(options.logger !== undefined ? { logger: options.logger } : {}),
 		...(options.droppedEvents !== undefined ? { droppedEvents: options.droppedEvents } : {}),
+		...(options.outbox !== undefined ? { outbox: options.outbox } : {}),
 		...(options.captureConfig !== undefined ? { captureConfig: options.captureConfig } : {}),
 		...(options.bufferClock !== undefined ? { bufferClock: options.bufferClock } : {}),
 	});

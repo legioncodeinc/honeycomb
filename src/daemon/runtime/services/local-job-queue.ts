@@ -166,18 +166,21 @@ const SECRET_KEY_TERMS = new Set([
 	"token",
 ]);
 
-interface SqliteStatement {
+// The minimal `node:sqlite` surface the local queue uses. Exported so the PRD-079a capture outbox
+// (a dedicated table inside the SAME `local-queue.db` file — D-1) reuses the identical types + the
+// open/migrate + trusted-root helpers below rather than re-declaring a parallel SQLite substrate.
+export interface SqliteStatement {
 	run(...params: unknown[]): { changes: number | bigint };
 	all(...params: unknown[]): Array<Record<string, unknown>>;
 }
 
-interface SqliteDatabase {
+export interface SqliteDatabase {
 	exec(sql: string): void;
 	prepare(sql: string): SqliteStatement;
 	close(): void;
 }
 
-interface SqliteModule {
+export interface SqliteModule {
 	DatabaseSync: new (path: string) => SqliteDatabase;
 }
 
@@ -259,7 +262,11 @@ function createDatabase(options: OpenLocalJobQueueOptions): SqliteDatabase {
 	return new sqlite.DatabaseSync(dbPath) as SqliteDatabase;
 }
 
-function localQueueDatabasePath(daemonDir: string): string {
+/**
+ * The `local-queue.db` path inside `daemonDir`, guarded so it can never escape the daemon directory.
+ * Exported so the PRD-079a capture outbox opens the SAME file (D-1) through the identical guard.
+ */
+export function localQueueDatabasePath(daemonDir: string): string {
 	const dbPath = resolve(daemonDir, LOCAL_QUEUE_DB_FILE_NAME);
 	if (relative(daemonDir, dbPath) !== LOCAL_QUEUE_DB_FILE_NAME) {
 		throw new Error("local job queue database path must stay inside the daemon directory");
@@ -267,7 +274,11 @@ function localQueueDatabasePath(daemonDir: string): string {
 	return dbPath;
 }
 
-function localQueueDaemonDir(baseDir: string | undefined): string {
+/**
+ * Resolve the `.daemon` dir under a trusted `baseDir`, applying the trusted-root + traversal guard.
+ * Exported so the PRD-079a capture outbox anchors on the SAME home-anchored dir (D-1 / D-5).
+ */
+export function localQueueDaemonDir(baseDir: string | undefined): string {
 	const resolvedBaseDir = resolveLocalQueueBaseDir(baseDir);
 	const daemonDir = resolve(resolvedBaseDir, LOCAL_QUEUE_DAEMON_DIR_NAME);
 	const relativeDaemonDir = relative(resolvedBaseDir, daemonDir);
@@ -315,7 +326,8 @@ function isPathInside(candidate: string, root: string): boolean {
 	return rel === "" || (!rel.startsWith("..") && rel !== ".." && !isAbsolute(rel));
 }
 
-function loadSqlite(): SqliteModule {
+/** Load the built-in `node:sqlite` driver. Exported so the capture outbox opens its handle the same way. */
+export function loadSqlite(): SqliteModule {
 	const req = createRequire(import.meta.url);
 	return req("node:sqlite") as SqliteModule;
 }
@@ -686,13 +698,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function stringField(row: Record<string, unknown>, field: string): string {
+/** Read a required string column off a SQLite result row. Exported for the capture-outbox reader. */
+export function stringField(row: Record<string, unknown>, field: string): string {
 	const value = row[field];
 	if (typeof value !== "string") throw new Error(`expected string field ${field}`);
 	return value;
 }
 
-function numberField(row: Record<string, unknown>, field: string): number {
+/** Read a required numeric column off a SQLite result row (coerces bigint). Exported for the capture-outbox reader. */
+export function numberField(row: Record<string, unknown>, field: string): number {
 	const value = row[field];
 	if (typeof value === "number") return value;
 	if (typeof value === "bigint") return Number(value);

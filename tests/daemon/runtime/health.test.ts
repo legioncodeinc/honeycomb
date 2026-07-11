@@ -170,6 +170,32 @@ describe("AC-2 /health detail NAMES the down subsystem, not a bare degraded", ()
 		).toBe("shared");
 	});
 
+	it("PRD-079a: captureOutbox { pending, retrying } surfaces on /health and normalizes to non-negative ints", () => {
+		// Unwired (bare createDaemon / the deterministic suite) → the reason is absent.
+		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.captureOutbox).toBeUndefined();
+		// Wired → the drainer backlog surfaces verbatim (the a-AC-7 endpoint passthrough).
+		expect(
+			buildHealthDetail({ status: "ok", embeddingsEnabled: true, captureOutbox: { pending: 3, retrying: 1 } }).reasons
+				?.captureOutbox,
+		).toEqual({ pending: 3, retrying: 1 });
+		// Defensive normalization: a negative / NaN / float input clamps via Math.max/Math.trunc to a
+		// non-negative integer (no secret, never a fractional or negative count on the wire).
+		expect(
+			buildHealthDetail({
+				status: "ok",
+				embeddingsEnabled: true,
+				captureOutbox: { pending: -5, retrying: Number.NaN },
+			}).reasons?.captureOutbox,
+		).toEqual({ pending: 0, retrying: 0 });
+		expect(
+			buildHealthDetail({
+				status: "ok",
+				embeddingsEnabled: true,
+				captureOutbox: { pending: 4.9, retrying: 2.9 },
+			}).reasons?.captureOutbox,
+		).toEqual({ pending: 4, retrying: 2 });
+	});
+
 	it("memory feature-gating: omitted when unwired; enabled + provider enum surfaced when wired", () => {
 		// Unwired (the deterministic unit suite / a daemon that never builds the pipeline worker) → absent.
 		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.memory).toBeUndefined();

@@ -35,7 +35,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { join } from "node:path";
 import { hasBoundProjectOnDisk } from "../../hooks/shared/project-resolver.js";
 import { honeycombStateDir, legacyHoneycombDir } from "../../shared/fleet-root.js";
-import { CATALOG } from "../storage/catalog/index.js";
+import { CATALOG, healTargetFor } from "../storage/catalog/index.js";
 import type { QueryScope, StorageClient } from "../storage/client.js";
 import { type CredentialProvider, defaultCredentialProvider } from "../storage/config.js";
 import { createLazyStorageClient } from "../storage/index.js";
@@ -60,6 +60,12 @@ import { isTenancyConfirmed } from "./auth/tenancy-confirmation.js";
 import { attachHooksHandlers } from "./capture/attach.js";
 import { resolveInboxCaptureEnabled } from "./capture/capture-config.js";
 import type { CaptureHandler } from "./capture/capture-handler.js";
+import {
+	CAPTURE_OUTBOX_ENV,
+	type CaptureOutbox,
+	type CaptureOutboxSink,
+	openCaptureOutbox,
+} from "./capture/capture-outbox.js";
 import { type CaptureDroppedEventsCounter, createCaptureDroppedEventsCounter } from "./capture/dropped-events.js";
 import { createGatedCapturesCounter, type GatedCapturesCounter } from "./capture/gated-captures.js";
 import { buildCodebaseGraphSnapshot, mountGraphApi } from "./codebase/api.js";
@@ -1295,6 +1301,13 @@ export function assembleSeams(
 	 * `<#>` SQL path — byte-for-byte the pre-078a behaviour. The daemon composition root always supplies it.
 	 */
 	localVectorIndex?: LocalVectorIndex,
+	/**
+	 * PRD-079a: the durable capture retry outbox threaded into the capture-append seam (`attachHooks`),
+	 * so a failed append ENQUEUEs the rows for a background re-append instead of dropping them (a-AC-1).
+	 * ABSENT (a unit-constructed `assembleSeams` call) → the capture path drops on failure exactly as
+	 * pre-079a. The daemon composition root supplies the real outbox (real assembly only).
+	 */
+	outbox?: CaptureOutboxSink,
 ): CaptureHandler {
 	// The daemon's configured default tenancy scope (the single LOCAL tenant) is RESOLVED ONCE
 	// at the composition root (`assembleDaemon`) from the SAME credential source the storage
@@ -1346,6 +1359,8 @@ export function assembleSeams(
 		logger: daemon.logger,
 		...(gatedCaptures !== undefined ? { gatedCaptures } : {}),
 		...(captureDroppedEvents !== undefined ? { droppedEvents: captureDroppedEvents } : {}),
+		// PRD-079a: the durable outbox — a failed capture append enqueues here instead of dropping (a-AC-1).
+		...(outbox !== undefined ? { outbox } : {}),
 		...(projectsDir !== undefined ? { projectsDir } : {}),
 	});
 
@@ -2977,6 +2992,22 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	}
 
 	const captureDroppedEvents = createCaptureDroppedEventsCounter();
+	// ── PRD-079a: the durable capture retry outbox. On a capture append failure the built `sessions`
+	// row is PERSISTED here (instead of dropped) and a background drainer re-appends it on the dedicated
+	// WRITE client once DeepLake recovers (a-AC-1/a-AC-2). Built ONLY on the REAL production path (no
+	// injected fake `storage`) and when the kill-switch is on (default ON via HONEYCOMB_CAPTURE_OUTBOX),
+	// so the deterministic unit suite stays unchanged. Home-anchored on the SAME fleet state root as the
+	// local queue (D-1/D-5) so a queued capture survives a restart and drains on the next boot (a-AC-4).
+	// FAIL-SOFT: `openCaptureOutbox` degrades to a no-op on any open failure — capture never breaks.
+	const captureOutbox: CaptureOutbox | undefined =
+		options.storage === undefined && parseBooleanEnv(process.env[CAPTURE_OUTBOX_ENV]) !== false
+			? openCaptureOutbox({
+					storage: writeStorage,
+					sessionsTarget: healTargetFor("sessions"),
+					baseDir: resolveLocalQueueBaseDir(),
+					logger,
+				})
+			: undefined;
 	// The committed-memories signal for `/health` (the glanceable "is this daemon forming memories?"
 	// answer). Fed by the controlled-write stage's `onOutcome` seam; read on each health call. Especially
 	// load-bearing in local-queue mode, where the recurring storage probe is off so `storage: reachable`
@@ -3135,6 +3166,10 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// The committed-memories signal, read LIVE per health call — a glanceable "is the pipeline
 			// forming memories?" answer that needs no DeepLake round-trip.
 			memoryFormation: memoryFormation.snapshot(),
+			// PRD-079a: the capture retry outbox backlog, read LIVE per health call (a cheap local SQLite
+			// COUNT, no DeepLake round-trip) so `pending`/`retrying` reflect the current degraded-window
+			// backlog and its drain. Present only when the outbox is wired (the real assembly).
+			...(captureOutbox !== undefined ? { captureOutbox: captureOutbox.counts() } : {}),
 			// Which queue backs the pipeline: `shared` is the degraded-coordination signal (see the guard above).
 			memoryQueue: sharedPipelinePathActive ? "shared" : "local",
 			// The memory-formation feature-gating signal (this PRD) — read LIVE per health call from the
@@ -3332,6 +3367,8 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		writeStorage,
 		// PRD-078a: the in-daemon local ANN index (built + cold-filled above), consumed by `recallFast`.
 		localVectorIndex,
+		// PRD-079a: the durable capture retry outbox — a failed capture append enqueues here (a-AC-1).
+		captureOutbox,
 	);
 
 	// ── PRD-032d / AC-6: FIRE the Wave-1 `/api/settings` mount ONCE so the CLI/dashboard
@@ -3679,6 +3716,11 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// Start the daemon's real services (queue → watcher → runtime-path).
 			await daemon.startServices();
 			if (!startBackgroundWorkers) return;
+
+			// PRD-079a: arm the capture-outbox drainer (unref'd interval). It re-appends any rows queued
+			// during a DeepLake degraded window — INCLUDING rows persisted before a restart, so they drain
+			// on this boot (a-AC-4). Fail-soft + off the hot path; a no-op when the outbox is unwired.
+			captureOutbox?.start();
 
 			armPollinatingMaintenanceTick();
 			// PRD-058e L-W7/L-W8/L-W9: arm the three lifecycle maintenance ticks alongside the pollinating
@@ -4146,6 +4188,9 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				started = false;
 			}
 			await localQueue.stop();
+			// PRD-079a: stop the drainer + close the outbox SQLite handle so no file handle leaks across a
+			// restart. Queued rows persist on disk and drain on the next boot (a-AC-4). Idempotent + never throws.
+			captureOutbox?.close();
 			// PRD-043a: close the durable log store handle so no SQLite file handle leaks across a
 			// restart. Idempotent + never throws (the NULL no-op's close is a no-op).
 			logStore.close();
