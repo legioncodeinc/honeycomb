@@ -64,6 +64,7 @@ import {
 	recallFast,
 	recallMemories,
 	type MemoryRecallResult,
+	type RecallArmErrorEvent,
 	type RecallShedEvent,
 	type RecallTimingEvent,
 } from "./recall.js";
@@ -123,6 +124,15 @@ export const RECALL_SHED_EVENT = "recall.shed" as const;
  * the secret-free convention (the {@link RecallTimingEvent} has nowhere to put one). Fast lane only.
  */
 export const RECALL_TIMING_EVENT = "recall.timing" as const;
+
+/**
+ * PRD-077 (fix A): the structured event emitted when a FAST recall's abandoned/settling arm rejects
+ * UNEXPECTEDLY (a genuine pool/transport throw — `runArm` maps every expected failure, incl. a deadline
+ * abort, to `[]`). A fixed, greppable identifier. Carries SUBSYSTEM STATE ONLY (a reason string) — NO
+ * query text, token, org, or row content. Surfacing it keeps the swallowed rejection observable rather
+ * than hidden; the swallow itself still prevents an unhandledRejection. Fast lane only.
+ */
+export const RECALL_ARM_ERROR_EVENT = "recall.arm_error" as const;
 
 /**
  * PRD-049b (D8): the structured event emitted when a recall could NOT resolve its session
@@ -523,6 +533,16 @@ function logRecallShed(logger: RequestLogger | undefined, event: RecallShedEvent
 }
 
 /**
+ * Emit the structured `recall.arm_error` event (PRD-077 / fix A) when a fast recall's abandoned/settling
+ * arm rejects UNEXPECTEDLY. SUBSYSTEM STATE ONLY: a reason string — NO query text, token, org, or row
+ * content (the {@link RecallArmErrorEvent} carries none). A no-op when no logger is wired.
+ */
+function logRecallArmError(logger: RequestLogger | undefined, event: RecallArmErrorEvent): void {
+	if (logger === undefined) return;
+	logger.event(RECALL_ARM_ERROR_EVENT, { reason: event.reason });
+}
+
+/**
  * Emit the structured `recall.timing` event (PRD-077 / L-B10) with a fast recall's phase timings.
  * SUBSYSTEM STATE ONLY: the lane, the per-phase durations (embed / arms / fuse / total), the arm
  * count, whether the semantic arms ran, and the hit count — NO query text, token, org, or row content
@@ -751,6 +771,12 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 				// total durations + counts, no query text). Fast lane only, mirroring `onShed`.
 				...(parsed.data.fast === true && options.logger !== undefined
 					? { onTiming: (e: RecallTimingEvent) => logRecallTiming(options.logger, e) }
+					: {}),
+				// PRD-077 (fix A): on the fast path, surface an UNEXPECTED abandoned-arm rejection as a
+				// structured `recall.arm_error` (subsystem-state only — a reason string, no query text) so a
+				// genuine pool/transport throw is observable instead of silently swallowed. Fast lane only.
+				...(parsed.data.fast === true && options.logger !== undefined
+					? { onArmError: (e: RecallArmErrorEvent) => logRecallArmError(options.logger, e) }
 					: {}),
 			},
 		);

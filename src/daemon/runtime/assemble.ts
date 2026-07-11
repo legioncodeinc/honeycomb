@@ -1064,19 +1064,20 @@ function createRecordRecallAccess(storage: StorageQuery, scope: QueryScope): (me
 function createActivationSource(storage: StorageQuery, params = DEFAULT_ACTR_PARAMS): ActivationSource {
 	return {
 		params,
-		async load(hits: readonly MemoryRecallHit[], scope: QueryScope): Promise<Map<string, MemoryActivationInputs>> {
+		async load(hits: readonly MemoryRecallHit[], scope: QueryScope, signal?: AbortSignal): Promise<Map<string, MemoryActivationInputs>> {
 			const out = new Map<string, MemoryActivationInputs>();
 			// Only the durable `memories` arm keys into the access log.
 			const memoryIds = hits.filter((h) => h.source === "memories" && h.id !== "").map((h) => h.id);
 			if (memoryIds.length === 0) return out;
 			const deps: AccessLogDeps = { storage };
 			// Batched: one history read + one access_count read per memory. A read failure inside
-			// readAccessHistory yields an empty history (fail-soft); the hit then floors at A_min.
-			const accessCountById = await readAccessCountBatch(storage, memoryIds, scope);
+			// readAccessHistory yields an empty history (fail-soft); the hit then floors at A_min. PRD-077:
+			// thread the heavy-path deadline signal so both reads are bounded by `recallHeavyDeadlineMs`.
+			const accessCountById = await readAccessCountBatch(storage, memoryIds, scope, signal);
 			await Promise.all(
 				memoryIds.map(async (id) => {
 					try {
-						const history = await readAccessHistory(id, deps, scope);
+						const history = await readAccessHistory(id, deps, scope, signal);
 						const accessCount = accessCountById.get(id) ?? history.length;
 						out.set(`memories ${id}`, { history, accessCount });
 					} catch {
@@ -1099,6 +1100,8 @@ async function readAccessCountBatch(
 	storage: StorageQuery,
 	memoryIds: readonly string[],
 	scope: QueryScope,
+	// PRD-077: the heavy-path deadline signal, threaded into the batched read so it is bounded too.
+	signal?: AbortSignal,
 ): Promise<Map<string, number>> {
 	const out = new Map<string, number>();
 	if (memoryIds.length === 0) return out;
@@ -1109,7 +1112,7 @@ async function readAccessCountBatch(
 	const sql = `SELECT ${idCol} AS id, ${accessCountCol} AS access_count FROM "${tbl}" WHERE ${idCol} IN (${inList})`;
 	let res;
 	try {
-		res = await storage.query(sql, scope);
+		res = await storage.query(sql, scope, signal !== undefined ? { signal } : {});
 	} catch {
 		return out; // fail-soft: empty map → history-length fallback.
 	}
@@ -1142,8 +1145,8 @@ async function readAccessCountBatch(
 function createStalenessSource(storage: StorageQuery, exponent: number): StalenessSource {
 	return {
 		exponent,
-		async load(hits: readonly MemoryRecallHit[], scope: QueryScope): Promise<Map<string, StalenessVerdictInput>> {
-			return readStalenessBatch(storage, hits, scope);
+		async load(hits: readonly MemoryRecallHit[], scope: QueryScope, signal?: AbortSignal): Promise<Map<string, StalenessVerdictInput>> {
+			return readStalenessBatch(storage, hits, scope, signal);
 		},
 	};
 }
@@ -1159,6 +1162,8 @@ async function readStalenessBatch(
 	storage: StorageQuery,
 	hits: readonly MemoryRecallHit[],
 	scope: QueryScope,
+	// PRD-077: the heavy-path deadline signal, threaded into the batched read so it is bounded too.
+	signal?: AbortSignal,
 ): Promise<Map<string, StalenessVerdictInput>> {
 	const out = new Map<string, StalenessVerdictInput>();
 	const memoryIds = hits.filter((h) => h.source === "memories" && h.id !== "").map((h) => h.id);
@@ -1171,7 +1176,7 @@ async function readStalenessBatch(
 	const sql = `SELECT ${idCol} AS id, ${refStatusCol} AS ref_status, ${staleRefsCol} AS stale_refs FROM "${tbl}" WHERE ${idCol} IN (${inList})`;
 	let res;
 	try {
-		res = await storage.query(sql, scope);
+		res = await storage.query(sql, scope, signal !== undefined ? { signal } : {});
 	} catch {
 		return out; // fail-soft: empty map → every hit unknown (neutral).
 	}

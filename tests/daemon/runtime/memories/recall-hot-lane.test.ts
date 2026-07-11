@@ -22,6 +22,8 @@ import {
 	recallMemories,
 	resetFastRecallPool,
 	resetSharedRecallPool,
+	type StalenessSource,
+	type StalenessVerdictInput,
 } from "../../../../src/daemon/runtime/memories/recall.js";
 import { Semaphore } from "../../../../src/daemon/runtime/memories/bounded-pool.js";
 import {
@@ -395,6 +397,45 @@ describe("L-B8 (b-AC-8 / D-4): a hanging heavy arm is bounded by the generous de
 		expect(result.sources).toEqual(["memories", "sessions"]);
 		expect(result.degraded).toBe(true);
 	});
+
+	it("POST-fan-out I/O is bounded too: a hanging staleness source is cut at the heavy deadline (the WHOLE heavy recall is bounded, not just the arms)", async () => {
+		// The bug this covers: the heavy deadline was threaded into the arm fan-out but NOT into the
+		// post-fan-out storage reads (dedup/rerank/staleness/conflict/calibration/MMR), so a slow retry
+		// storm on THOSE could still pin the heavy recall past its deadline. Here the arms return instantly
+		// but the staleness source (a post-fan-out read) hangs until the heavy deadline aborts it.
+		process.env.HONEYCOMB_RECALL_HEAVY_DEADLINE_MS = "80";
+		resetAmplificationConfigCache();
+		resetSharedRecallPool();
+
+		const storage: StorageQuery = {
+			async query(sql: string): Promise<QueryResult> {
+				if (isLexical(sql) && sourceLitOf(sql) === "memories") return ok([memoriesRow("m1", "a widget fact")], 1);
+				return ok([], 0);
+			},
+		};
+		// A staleness source that HANGS until the heavy deadline signal aborts it — the exact post-fan-out
+		// retry-storm the fix bounds. Without the heavySignal threaded in, this would pin recall forever.
+		const stalenessSource: StalenessSource = {
+			exponent: 1,
+			load(_hits, _scope, signal?: AbortSignal): Promise<Map<string, StalenessVerdictInput>> {
+				return new Promise((resolve) => {
+					signal?.addEventListener("abort", () => resolve(new Map<string, StalenessVerdictInput>()), { once: true });
+				});
+			},
+		};
+
+		const startedAt = Date.now();
+		const result = await recallMemories(
+			{ query: "widgets", scope: SCOPE, limit: 10 },
+			{ storage, stalenessSource },
+		);
+		const elapsedMs = Date.now() - startedAt;
+
+		// Bounded by the heavy deadline (not a hang), and the fused hit still returns (the source degrades
+		// to neutral on the deadline abort). Proves the heavy deadline now covers the post-fan-out read.
+		expect(elapsedMs).toBeLessThan(1000);
+		expect(result.hits.map((h) => h.id)).toEqual(["m1"]);
+	});
 });
 
 // ── fix A (PRD-077): recallFast RACES the whole arm phase against the deadline ────
@@ -485,6 +526,35 @@ describe("fix A (PRD-077): a saturated-lane / stuck-fetch fast recall returns wi
 		expect(ev.armsMs).toBeLessThan(1000);
 	});
 
+	it("PRD-078a-fix (adapted, no local index): SOME arms resolve before the deadline + others hang → the resolved arms are FUSED (partial), degraded, within the deadline", async () => {
+		// The bug this covers: pre-078a-fix a deadline cut returned {hits:[],degraded:true}, discarding the
+		// arms that ALREADY resolved. Here the memories lexical arm returns instantly while the other 6 arms
+		// hang forever — the deadline must FUSE the one survivor (a partial degraded result), not throw it away.
+		process.env.HONEYCOMB_RECALL_FAST_DEADLINE_MS = "80";
+		resetAmplificationConfigCache();
+		resetFastRecallPool();
+
+		const pool = new Semaphore(8);
+		const storage: StorageQuery = {
+			async query(sql: string): Promise<QueryResult> {
+				if (isLexical(sql) && sourceLitOf(sql) === "memories") return ok([memoriesRow("m1", "a widget fact")], 1);
+				return new Promise<QueryResult>(() => {}); // every other arm hangs forever (ignores the signal).
+			},
+		};
+
+		const startedAt = Date.now();
+		const result = await recallFast(
+			{ query: "widgets", scope: SCOPE },
+			{ storage, embed: fakeEmbed(VALID_QUERY_VECTOR), recallPool: pool },
+		);
+		const elapsedMs = Date.now() - startedAt;
+
+		// The one resolved arm survives the deadline cut — FUSED, not discarded — and the recall is bounded.
+		expect(result.hits.map((h) => h.id)).toEqual(["m1"]);
+		expect(result.degraded).toBe(true); // a partial (deadline-cut) recall is degraded.
+		expect(elapsedMs).toBeLessThan(1000);
+	});
+
 	it("no permit leak + no unhandledRejection: abandoned arms that RESOLVE later free their fast-lane permits", async () => {
 		process.env.HONEYCOMB_RECALL_FAST_DEADLINE_MS = "50";
 		resetAmplificationConfigCache();
@@ -530,6 +600,7 @@ describe("fix A (PRD-077): a saturated-lane / stuck-fetch fast recall returns wi
 
 		const pool = new Semaphore(8);
 		const { storage, release } = gatedReleasableStorage("reject");
+		const onArmError = vi.fn();
 
 		const unhandled: unknown[] = [];
 		const onUnhandled = (reason: unknown): void => {
@@ -539,7 +610,7 @@ describe("fix A (PRD-077): a saturated-lane / stuck-fetch fast recall returns wi
 		try {
 			const result = await recallFast(
 				{ query: "widgets", scope: SCOPE },
-				{ storage, embed: fakeEmbed(VALID_QUERY_VECTOR), recallPool: pool },
+				{ storage, embed: fakeEmbed(VALID_QUERY_VECTOR), recallPool: pool, onArmError },
 			);
 			expect(result.degraded).toBe(true);
 			expect(pool.inFlight).toBe(7);
@@ -548,11 +619,35 @@ describe("fix A (PRD-077): a saturated-lane / stuck-fetch fast recall returns wi
 			release();
 			await new Promise((r) => setTimeout(r, 20));
 			// The rejecting arms freed their permits (Semaphore.run finally) AND raised no unhandledRejection
-			// (the swallow-catch on the arms promise + the race's own subscription both mark it handled).
+			// (the per-arm swallow-catch marks each handled).
 			expect(pool.inFlight).toBe(0);
 			expect(unhandled).toEqual([]);
+			// PRD-077 (fix A) observability: the swallowed rejection is SURFACED (not hidden) — `onArmError`
+			// fires with the reason for every abandoned arm that threw, and the payload is secret-free (a
+			// reason string only, no query text).
+			expect(onArmError).toHaveBeenCalled();
+			expect(onArmError.mock.calls[0]![0]).toEqual({ reason: "arm threw after the deadline cut" });
+			expect(JSON.stringify(onArmError.mock.calls[0]![0])).not.toContain("widgets");
 		} finally {
 			process.off("unhandledRejection", onUnhandled);
 		}
+	});
+
+	it("does NOT fire onArmError on the happy path (arms resolve, no unexpected throw)", async () => {
+		process.env.HONEYCOMB_RECALL_FAST_DEADLINE_MS = "3000";
+		resetAmplificationConfigCache();
+		resetFastRecallPool();
+		const onArmError = vi.fn();
+		const storage: StorageQuery = {
+			async query(): Promise<QueryResult> {
+				return ok([], 0);
+			},
+		};
+		const result = await recallFast(
+			{ query: "widgets", scope: SCOPE },
+			{ storage, embed: fakeEmbed(VALID_QUERY_VECTOR), onArmError },
+		);
+		expect(result.degraded).toBe(false);
+		expect(onArmError).not.toHaveBeenCalled();
 	});
 });

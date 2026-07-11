@@ -85,15 +85,31 @@ export const MIN_RECALL_DEADLINE_MS = 1;
 export const MIN_RECALL_SHED_QUEUE_DEPTH = 0;
 
 /**
+ * The upper bound EVERY integer knob is clamped to. A large FINITE env typo (e.g.
+ * `HONEYCOMB_RECALL_FAST_MAX_CONCURRENCY=1e21`) must be clamped like a sub-`min` value, NOT left to
+ * overflow `z.number().int()`'s safe-integer check and THROW {@link AmplificationConfigError} out of
+ * {@link resolveAmplificationConfig} — a knob typo must never take the daemon down; that is the whole
+ * point of coerce-and-clamp (a typo is tuning noise, never a hard reject). `Number.MAX_SAFE_INTEGER`
+ * is the tightest bound that (a) still satisfies `.int()` and (b) never clips a LEGITIMATE operational
+ * value: this ONE factory is shared across BOTH the single-digit concurrency knobs AND the
+ * millisecond deadline knobs, so a domain cap tight enough to feel "friendly" for concurrency (say
+ * `1_000_000`) would wrongly clip a legitimately long deadline. The safe-integer ceiling catches ONLY
+ * the overflow typo this guards against and nothing an operator would ever set on purpose.
+ */
+export const MAX_INT_KNOB = Number.MAX_SAFE_INTEGER;
+
+/**
  * A coerce-and-clamp integer-knob factory (the ONE preprocess shape all five recall knobs share, so
- * the duplication gate stays green): a non-numeric value falls back to `fallback`; a sub-`min` value
- * is clamped UP to `min` (a `0` concurrency would deadlock the pool, so it becomes the near-serial 1).
+ * the duplication gate stays green): a non-numeric value falls back to `fallback`; a value out of range
+ * is CLAMPED to `[min, MAX_INT_KNOB]` — a sub-`min` value UP to `min` (a `0` concurrency would deadlock
+ * the pool, so it becomes the near-serial 1), and an oversized finite typo DOWN to {@link MAX_INT_KNOB}
+ * so it can never overflow `.int()`'s safe-integer check and throw (coerce-and-clamp, never reject).
  */
 function clampedIntKnob(fallback: number, min: number) {
 	return z.preprocess((raw) => {
 		const n = typeof raw === "number" ? raw : Number(raw);
 		if (!Number.isFinite(n)) return fallback;
-		return Math.max(min, Math.trunc(n));
+		return Math.min(MAX_INT_KNOB, Math.max(min, Math.trunc(n)));
 	}, z.number().int());
 }
 
