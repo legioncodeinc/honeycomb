@@ -2802,24 +2802,29 @@ export async function recallFast(
 	// fail-soft empty (a-AC-9). NOTE (PRD-077 vs PRD-078): this branch carries NO local ANN index — every
 	// arm is a Deep Lake round-trip, so there are no in-RAM `memoriesIndexRows` to prepend.
 	const armRows: StorageRow[][] = allSqls.map(() => []);
-	// PRD-077 (fix A) hygiene: each arm is INDIVIDUALLY `.catch`-guarded, so an arm that REJECTS after the
-	// deadline cut (a late pool/transport throw on the abandoned path) never surfaces as an
-	// unhandledRejection, and `Promise.all(settled)` (the "all arms settled" signal) itself never rejects.
-	// The abandoned arms keep settling in the background: the fast-lane deadline `AbortSignal` is threaded
-	// into each (via `runArm`), so their `storage.query` aborts daemon-side and its `Semaphore.run` finally
-	// RELEASES the fast-lane permit when the fetch returns/aborts. `runArm` already maps every EXPECTED
-	// failure (a non-ok result, INCLUDING a deadline abort) to `[]`, so anything reaching the `.catch` is a
-	// GENUINE unexpected throw — SURFACE it (subsystem-state only) via `onArmError` instead of hiding it.
+	// PRD-077 (fix A): each arm is captured into its slot AS IT SETTLES via the two-arg `.then(onOk, onErr)`
+	// — INCREMENTAL by design, so a deadline cut can surface whatever already landed (a plain
+	// `Promise.allSettled(rawArms)` would give the outcomes only AFTER all settle, defeating the partial
+	// tail). `onErr` NEVER re-throws, so each wrapped arm resolves either way and cannot surface as an
+	// unhandledRejection. `runArm` already maps every EXPECTED failure (a non-ok result, INCLUDING a
+	// deadline abort) to `[]`, so a rejection reaching `onErr` is a GENUINE unexpected throw (a late
+	// pool/transport error on the abandoned path) — SURFACE it (subsystem-state only) via `onArmError`
+	// instead of hiding it. The abandoned arms keep settling in the background: the fast-lane deadline
+	// `AbortSignal` is threaded into each (via `runArm`), so `storage.query` aborts daemon-side and
+	// `Semaphore.run`'s finally RELEASES the fast-lane permit when the fetch returns/aborts.
 	const settled = allSqls.map((sql, i) =>
-		runArm(sql, request, fastDeps, deadline)
-			.then((rows) => {
+		runArm(sql, request, fastDeps, deadline).then(
+			(rows) => {
 				armRows[i] = rows;
-			})
-			.catch((err: unknown) => {
+			},
+			(err: unknown) => {
 				deps.onArmError?.({ reason: err instanceof Error ? err.message : String(err) });
-			}),
+			},
+		),
 	);
-	const armsPromise = Promise.all(settled);
+	// `Promise.allSettled` is the "all arms settled" barrier — it resolves once every wrapped arm has
+	// settled and NEVER rejects (the wrappers above already can't), so the deadline race below is clean.
+	const armsPromise = Promise.allSettled(settled);
 
 	// PRD-077 (fix A): RACE the "all arms settled" signal against a deadline sentinel so `recallFast`'s
 	// wall-clock is bounded by `recallFastDeadlineMs` EVEN WHEN THE FAST LANE IS SATURATED. The per-arm
