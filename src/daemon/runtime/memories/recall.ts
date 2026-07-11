@@ -2705,6 +2705,83 @@ function resolveFastLaneOrShed(deps: MemoryRecallDeps, config: AmplificationConf
 }
 
 /**
+ * PRD-078a: resolve the `memories` SEMANTIC arm from the in-daemon local ANN index, or `null` to fall back
+ * to the `<#>` SQL. Served locally only when the index is ENABLED (`HONEYCOMB_LOCAL_ANN_INDEX`) AND `ready`
+ * (cold-built) AND the query embedded to a real vector — an in-RAM flat-cosine scan (sub-100ms, content-
+ * inline, NO Deep Lake round-trip) instead of the ~2.6s `<#>` brute-force full-column scan. FAIL-SOFT (D-4):
+ * the flag off, a cold/absent index, a non-semantic query, OR a `search` THROW all return `null`, so the
+ * caller issues the `<#>` `buildFastSemanticArmSql` query for memories instead. Only the `memories` arm is
+ * served locally; sessions/hive semantic + all lexical arms still hit Deep Lake. The rows come back in the
+ * SAME shape `buildFastSemanticArmSql` produces, so `rowsToRankedArm` → `fuseHits` → recency consume them
+ * unchanged (arm order, RRF fusion, and recency stay byte-identical to the `<#>` SQL path).
+ */
+function resolveMemoriesIndexRows(
+	deps: MemoryRecallDeps,
+	config: AmplificationConfig,
+	semanticRan: boolean,
+	queryVector: readonly number[] | null,
+	request: MemoryRecallRequest,
+	limit: number,
+): StorageRow[] | null {
+	const localIndex = deps.localVectorIndex;
+	if (!semanticRan || !config.localAnnIndex || localIndex === undefined || !localIndex.ready || queryVector === null) {
+		return null;
+	}
+	try {
+		return localIndex.search(queryVector, request.projectId ?? "", limit);
+	} catch {
+		return null; // fail-soft: fall through to the `<#>` SQL arm for memories.
+	}
+}
+
+/**
+ * PRD-077 (fix A): run every fast-lane arm SQL concurrently, capturing each arm's rows into a PER-ARM slot AS
+ * IT SETTLES, and RACE the "all arms settled" barrier against the fast-lane deadline sentinel. Bundles the
+ * deadline/concurrency + incremental-arm-capture responsibilities so the hot-path `recallFast` reads as a
+ * straight-line pipeline. Returns the per-arm rows in hand at the cut (an unfilled slot stays `[]`, identical
+ * to a per-arm fail-soft empty — a-AC-9) plus whether the deadline fired.
+ *
+ * `captureArm` captures each arm into its slot AS IT SETTLES (INCREMENTAL by design, so a deadline cut can
+ * surface whatever already landed — a plain `Promise.allSettled(rawArms)` yields outcomes only AFTER all
+ * settle, defeating the partial tail) and NEVER re-throws, so an arm can't surface as an unhandledRejection.
+ * `runArm` already maps every EXPECTED failure (a non-ok result, INCLUDING a deadline abort) to `[]`, so a
+ * throw reaching the `catch` is a GENUINE unexpected error (a late pool/transport throw on the abandoned
+ * path) — SURFACE it (subsystem-state only) via `onArmError` instead of hiding it. Abandoned arms keep
+ * settling in the background: the fast-lane deadline `AbortSignal` is threaded into each (via `runArm`), so
+ * `storage.query` aborts daemon-side and `Semaphore.run`'s finally RELEASES the fast-lane permit when the
+ * fetch returns/aborts. The deadline sentinel RESOLVES (never rejects) when the `AbortSignal` fires — wrapping
+ * the EXISTING signal adds NO new timer (its timeout is already live and Node unref's it), so nothing dangles.
+ */
+async function captureArmsToSlots(
+	allSqls: readonly string[],
+	request: MemoryRecallRequest,
+	fastDeps: MemoryRecallDeps,
+	deadline: AbortSignal,
+	onArmError: MemoryRecallDeps["onArmError"],
+): Promise<{ armRows: StorageRow[][]; deadlineFired: boolean }> {
+	const armRows: StorageRow[][] = allSqls.map(() => []);
+	const captureArm = async (sql: string, i: number): Promise<void> => {
+		try {
+			armRows[i] = await runArm(sql, request, fastDeps, deadline);
+		} catch (err: unknown) {
+			onArmError?.({ reason: err instanceof Error ? err.message : String(err) });
+		}
+	};
+	// `Promise.allSettled` is the "all arms settled" barrier — resolves once every arm has settled and NEVER
+	// rejects (`captureArm` swallows), so the deadline race below is clean.
+	const armsPromise = Promise.allSettled(allSqls.map((sql, i) => captureArm(sql, i)));
+	const deadlinePromise = new Promise<void>((resolve) => {
+		if (deadline.aborted) resolve();
+		else deadline.addEventListener("abort", () => resolve(), { once: true });
+	});
+	const raced = await Promise.race([
+		armsPromise.then(() => ({ deadline: false as const })),
+		deadlinePromise.then(() => ({ deadline: true as const })),
+	]);
+	return { armRows, deadlineFired: raced.deadline || deadline.aborted };
+}
+
+/**
  * The PRD-077a single-round-trip FAST recall — the per-turn hot-lane entrypoint (D-2).
  *
  * ── WHAT IT IS ────────────────────────────────────────────────────────────────
@@ -2778,24 +2855,10 @@ export async function recallFast(
 	const semanticRan = queryVector !== null && queryVector.length === EMBEDDING_DIMS;
 	const degraded = !semanticRan;
 
-	// PRD-078a: answer the `memories` SEMANTIC arm from the in-daemon local ANN index when it is ENABLED
-	// (`HONEYCOMB_LOCAL_ANN_INDEX`) AND `ready` (cold-built) — an in-RAM flat-cosine scan (sub-100ms,
-	// content-inline, NO Deep Lake round-trip) instead of the `<#>` `buildFastSemanticArmSql` query (the
-	// ~2.6s brute-force full-column scan that overruns the fast-lane deadline). FAIL-SOFT (D-4): the flag
-	// off, a cold/absent index, OR a `search` THROW all leave `memoriesIndexRows` null, so the memories
-	// arm falls back to the `<#>` SQL below. Only the `memories` arm is served locally; sessions/hive
-	// semantic + all lexical arms still hit Deep Lake this phase. The rows come back in the SAME shape
-	// `buildFastSemanticArmSql` produces, so `rowsToRankedArm` → `fuseHits` → recency consume them unchanged.
-	const localIndex = deps.localVectorIndex;
-	const useMemoriesIndex = semanticRan && config.localAnnIndex && localIndex !== undefined && localIndex.ready;
-	let memoriesIndexRows: StorageRow[] | null = null;
-	if (useMemoriesIndex) {
-		try {
-			memoriesIndexRows = localIndex!.search(queryVector as readonly number[], request.projectId ?? "", limit);
-		} catch {
-			memoriesIndexRows = null; // fail-soft: fall through to the `<#>` SQL arm for memories.
-		}
-	}
+	// PRD-078a: answer the `memories` SEMANTIC arm from the in-daemon local ANN index when it is ENABLED and
+	// `ready` (see {@link resolveMemoriesIndexRows}). FAIL-SOFT (D-4): a `null` here means the memories arm
+	// falls back to the `<#>` SQL built below.
+	const memoriesIndexRows = resolveMemoriesIndexRows(deps, config, semanticRan, queryVector, request, limit);
 
 	// Build the arm SQLs: the content-inline semantic arms (only when the query embedded to a real
 	// 768-dim vector) + the four lexical arm builders (which already SELECT `content` inline). PRD-078a:
@@ -2827,64 +2890,16 @@ export async function recallFast(
 	const allSqls = [...semanticSqls, ...lexicalSqls];
 	const armsStart = Date.now();
 
-	// PRD-077 (fix A / 078a-fix, adapted): capture each arm's rows into a PER-ARM slot as it settles,
-	// instead of the all-or-nothing `Promise.all(...).then(rows => …)`. On a deadline cut the arms that
-	// ALREADY resolved keep their rows in `armRows`, so the PARTIAL fusion below can surface them rather
+	// PRD-077 (fix A / 078a-fix): run + incrementally capture the arms behind the deadline race (deadline/
+	// concurrency + incremental-arm-capture live in {@link captureArmsToSlots}). On a deadline cut the arms
+	// that ALREADY resolved keep their rows in `armRows`, so the PARTIAL fusion below surfaces them rather
 	// than discarding everything — the bug this fixes: 6 of 7 arms succeeding and one straggler aborted at
-	// the boundary threw the WHOLE recall away. An unfilled slot stays `[]`, identical to a per-arm
-	// fail-soft empty (a-AC-9). NOTE (PRD-077 vs PRD-078): this branch carries NO local ANN index — every
-	// arm is a Deep Lake round-trip, so there are no in-RAM `memoriesIndexRows` to prepend.
-	const armRows: StorageRow[][] = allSqls.map(() => []);
-	// PRD-077 (fix A): each arm is captured into its slot AS IT SETTLES via the two-arg `.then(onOk, onErr)`
-	// — INCREMENTAL by design, so a deadline cut can surface whatever already landed (a plain
-	// `Promise.allSettled(rawArms)` would give the outcomes only AFTER all settle, defeating the partial
-	// tail). `onErr` NEVER re-throws, so each wrapped arm resolves either way and cannot surface as an
-	// unhandledRejection. `runArm` already maps every EXPECTED failure (a non-ok result, INCLUDING a
-	// deadline abort) to `[]`, so a rejection reaching `onErr` is a GENUINE unexpected throw (a late
-	// pool/transport error on the abandoned path) — SURFACE it (subsystem-state only) via `onArmError`
-	// instead of hiding it. The abandoned arms keep settling in the background: the fast-lane deadline
-	// `AbortSignal` is threaded into each (via `runArm`), so `storage.query` aborts daemon-side and
-	// `Semaphore.run`'s finally RELEASES the fast-lane permit when the fetch returns/aborts.
-	// Capture each arm into its slot AS IT SETTLES (INCREMENTAL by design, so a deadline cut can surface
-	// whatever already landed — a plain `Promise.allSettled(rawArms)` yields outcomes only AFTER all settle,
-	// defeating the partial tail). `captureArm` NEVER re-throws, so an arm can't surface as an
-	// unhandledRejection. `runArm` already maps every EXPECTED failure (a non-ok result, INCLUDING a
-	// deadline abort) to `[]`, so a throw reaching the `catch` is a GENUINE unexpected error (a late
-	// pool/transport throw on the abandoned path) — SURFACE it (subsystem-state only) via `onArmError`
-	// instead of hiding it. Abandoned arms keep settling in the background: the fast-lane deadline
-	// `AbortSignal` is threaded into each (via `runArm`), so `storage.query` aborts daemon-side and
-	// `Semaphore.run`'s finally RELEASES the fast-lane permit when the fetch returns/aborts.
-	const captureArm = async (sql: string, i: number): Promise<void> => {
-		try {
-			armRows[i] = await runArm(sql, request, fastDeps, deadline);
-		} catch (err: unknown) {
-			deps.onArmError?.({ reason: err instanceof Error ? err.message : String(err) });
-		}
-	};
-	// `Promise.allSettled` is the "all arms settled" barrier — resolves once every arm has settled and
-	// NEVER rejects (`captureArm` swallows), so the deadline race below is clean.
-	const armsPromise = Promise.allSettled(allSqls.map((sql, i) => captureArm(sql, i)));
-
-	// PRD-077 (fix A): RACE the "all arms settled" signal against a deadline sentinel so `recallFast`'s
-	// wall-clock is bounded by `recallFastDeadlineMs` EVEN WHEN THE FAST LANE IS SATURATED. The per-arm
-	// deadline signal only aborts an arm AFTER it acquires a pool slot and starts its fetch — an arm still
-	// QUEUED waiting for a slot is NOT covered by it, so a saturated lane parked `Promise.all` for tens of
-	// seconds past the deadline (live-observed `armsMs: 73273` vs. the ~3000ms budget). The sentinel
-	// RESOLVES (never rejects) when the deadline `AbortSignal` fires — wrapping the EXISTING signal adds NO
-	// new timer (its timeout is already live from the L-B2 line above, and Node unref's it), so nothing dangles.
-	const deadlinePromise = new Promise<void>((resolve) => {
-		if (deadline.aborted) resolve();
-		else deadline.addEventListener("abort", () => resolve(), { once: true });
-	});
-	const raced = await Promise.race([
-		armsPromise.then(() => ({ deadline: false as const })),
-		deadlinePromise.then(() => ({ deadline: true as const })),
-	]);
+	// the boundary threw the WHOLE recall away. NOTE (PRD-077 vs PRD-078): these arms are all Deep Lake
+	// round-trips; the in-RAM `memoriesIndexRows` (if any) are prepended at fusion, not captured here.
+	const { armRows, deadlineFired } = await captureArmsToSlots(allSqls, request, fastDeps, deadline, deps.onArmError);
 	const armsMs = Date.now() - armsStart;
-	// PRD-077 (fix A / 078a-fix): whether the deadline cut the arms short (some may still be in flight). A
-	// cut makes this recall a PARTIAL (whatever settled) → `degraded: true`; an all-settled run keeps the
-	// honest embed-based `degraded`.
-	const deadlineFired = raced.deadline || deadline.aborted;
+	// PRD-077 (fix A / 078a-fix): a deadline cut makes this recall a PARTIAL (whatever settled) →
+	// `degraded: true`; an all-settled run keeps the honest embed-based `degraded`.
 	const fastDegraded = degraded || deadlineFired;
 
 	// PRD-077 (L-B10): emit the ONE secret-free phase-timing event (durations + counts ONLY — NO query
