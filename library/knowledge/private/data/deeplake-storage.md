@@ -16,7 +16,9 @@ The storage substrate: DeepLake as a GPU-backed SQL and vector store, the write 
 
 ## Why DeepLake
 
-Honeycomb stores every durable byte in DeepLake, a tensor-native, GPU-backed store that speaks SQL and holds vectors as first-class columns. That choice does two things at once. It gives recall GPU-accelerated vector search over the same tables that hold the structured memory, so semantic and lexical retrieval run against one store instead of a database plus a bolted-on vector index. And it gives a team a shared substrate where org and workspace boundaries are enforced at the storage layer, so two workspaces never share a row, partition, or index.
+Honeycomb stores every durable byte in DeepLake, a tensor-native store that speaks SQL and holds vectors as first-class columns. That choice does two things at once. It keeps semantic and lexical retrieval against one store, over the same tables that hold the structured memory, instead of a database plus a separate vector service. And it gives a team a shared substrate where org and workspace boundaries are enforced at the storage layer, so two workspaces never share a row, partition, or index.
+
+One caveat is load-bearing for a future reader: DeepLake exposes no ANN/vector-index primitive. A 2026-07-09/10 investigation found `CREATE INDEX ... USING vector` and `USING hnsw` are hard-rejected and `deeplake_index` is BM25/text-only, so the `<#>` cosine over an embedding column is a brute-force full-column scan (measured ~2.6s for ~2,004 rows, linear in corpus size), not an indexed lookup. This is why the per-turn recall path serves its semantic arm from an in-daemon local ANN index rather than this scan; see [`../ai/retrieval.md`](../ai/retrieval.md) and the full record in [`../storage/deeplake-recall-and-capture-findings-2026-07-10.md`](../storage/deeplake-recall-and-capture-findings-2026-07-10.md).
 
 The daemon is the only DeepLake client. Centralizing access in the daemon is what lets the patterns below be applied uniformly: every write goes through the same escaping, the same schema healing, and the same scoping, no matter which harness or hook triggered it.
 
@@ -54,7 +56,7 @@ The version-bumped pattern is the important one for the memory engine. Because D
 
 ## Vectors
 
-Embeddings are 768-dimension `nomic-embed-text-v1.5` vectors stored as DeepLake tensor columns (for example `sessions.message_embedding` and `memory.summary_embedding`), nullable so that recall degrades to lexical search when embedding is disabled or fails. Vector search runs on the GPU-backed engine against those columns, so semantic recall and the structured filters that scope it happen in one query. The retrieval flow that consumes this is [`../ai/retrieval.md`](../ai/retrieval.md).
+Embeddings are 768-dimension `nomic-embed-text-v1.5` vectors stored as DeepLake tensor columns (for example `sessions.message_embedding` and `memory.summary_embedding`), nullable so that recall degrades to lexical search when embedding is disabled or fails. Vector search runs as a `<#>` cosine over those columns, so semantic recall and the structured filters that scope it happen in one SQL statement. That statement is a brute-force full-column scan, not an indexed lookup, because DeepLake has no ANN primitive (above), which is why the per-turn path serves semantic recall from an in-daemon local ANN index instead. The retrieval flow that consumes this is [`../ai/retrieval.md`](../ai/retrieval.md).
 
 ## Read consistency: converging on your own writes
 
