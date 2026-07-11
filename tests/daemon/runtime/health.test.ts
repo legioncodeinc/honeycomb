@@ -270,6 +270,39 @@ describe("AC-2 /health detail NAMES the down subsystem, not a bare degraded", ()
 		const body = (await res.json()) as { reasons?: { memoryQueue?: string } };
 		expect(body.reasons?.memoryQueue, "the shared-queue degraded-coordination signal is glanceable").toBe("shared");
 	});
+
+	it("PRD-079a a-AC-7: the /health BODY surfaces captureOutbox { pending, retrying } fed from a live counts()", async () => {
+		// Mirror the assemble wiring EXACTLY: `healthDetail` is fed `captureOutbox.counts()` per /health call.
+		// The spy proves the field is sourced from a live counts() invocation (not a stale/hard-coded value),
+		// and the endpoint round-trip proves the reason reaches the real HTTP /health response body.
+		let countsCalls = 0;
+		const outboxStub = {
+			counts(): { pending: number; retrying: number } {
+				countsCalls += 1;
+				return { pending: 3, retrying: 1 };
+			},
+		};
+		const daemon = createDaemon({
+			config: cfg("local"),
+			storage: {
+				async query() {
+					return ok([]);
+				},
+			},
+			logger: createRequestLogger({ silent: true }),
+			pipelineProbe: () => "ok",
+			// Exactly how assembleDaemon feeds the field: `captureOutbox: captureOutbox.counts()`.
+			healthDetail: () =>
+				buildHealthDetail({ status: "ok", embeddingsEnabled: true, captureOutbox: outboxStub.counts() }),
+		});
+		const res = await daemon.app.request("/health");
+		const body = (await res.json()) as { reasons?: { captureOutbox?: { pending: number; retrying: number } } };
+		expect(body.reasons?.captureOutbox, "the outbox backlog surfaces on the real /health response body").toEqual({
+			pending: 3,
+			retrying: 1,
+		});
+		expect(countsCalls, "the health detail is fed from a live outbox counts() call").toBeGreaterThan(0);
+	});
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

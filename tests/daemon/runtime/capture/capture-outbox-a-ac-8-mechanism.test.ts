@@ -142,6 +142,17 @@ function userBody(text: string) {
 	};
 }
 
+/**
+ * Extract the FIRST `VALUES (...)` literal from a `sessions` INSERT — `buildRow` always writes the `id`
+ * column first, so the first quoted value IS the deterministic makeRowId id. Throws if absent so a shape
+ * change surfaces loudly rather than silently passing.
+ */
+function firstInsertId(sql: string): string {
+	const match = sql.match(/VALUES\s*\(\s*'([^']*)'/i);
+	if (match === null) throw new Error(`no id literal found in INSERT: ${sql.slice(0, 120)}`);
+	return match[1] ?? "";
+}
+
 describe("a-AC-8 (mechanism): a degraded-window capture lands in the outbox and drains on recovery", () => {
 	it("ack stays 201, pending>0 during the window, pending→0 on recovery with the original id replayed", async () => {
 		// The outbox drains on its OWN write client (switchable) — models the backend recovering between
@@ -184,6 +195,14 @@ describe("a-AC-8 (mechanism): a degraded-window capture lands in the outbox and 
 		expect(outbox.counts().pending).toBeGreaterThan(0);
 		expect(outbox.counts().pending).toBe(1);
 
+		// Capture the ORIGINAL deterministic id the handler minted (makeRowId) from the FAILED hot-path
+		// INSERT the daemon transport recorded (fake.requests records the statement even on a throw) — this
+		// is the exact id that was queued into the outbox.
+		const daemonInserts = fake.requests.filter((r) => /INSERT\s+INTO\s+"sessions"/i.test(r.sql));
+		expect(daemonInserts).toHaveLength(1);
+		const originalId = firstInsertId(daemonInserts[0]?.sql ?? "");
+		expect(originalId, "the queued row carried a deterministic makeRowId id").toMatch(/^sess-sess-1-\d+-\d+$/);
+
 		// Leg 3: the backend recovers → the background drainer re-appends the queued row → pending → 0,
 		// and the replayed INSERT carries the ORIGINAL deterministic id (idempotent replay, a-AC-6).
 		write.setMode("ok");
@@ -191,8 +210,12 @@ describe("a-AC-8 (mechanism): a degraded-window capture lands in the outbox and 
 		expect(drain).toEqual({ drained: 1, retried: 0 });
 		expect(outbox.counts().pending).toBe(0);
 		expect(write.appends).toHaveLength(1);
-		// The row carried a deterministic makeRowId in its `id` column; the drained append replays THAT id.
 		expect(write.appends[0]).toMatch(/INSERT\s+INTO\s+"sessions"/i);
+		// The drained append must replay the ORIGINAL makeRowId id, never a fresh one — a fresh-id replay
+		// (the bug a-AC-6 guards against) would fail this equality and can no longer pass unnoticed.
+		expect(firstInsertId(write.appends[0] ?? ""), "the drained append replays the ORIGINAL id, not a fresh one").toBe(
+			originalId,
+		);
 
 		outbox.close();
 	});

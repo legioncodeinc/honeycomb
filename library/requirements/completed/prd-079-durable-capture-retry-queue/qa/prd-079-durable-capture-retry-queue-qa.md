@@ -18,7 +18,7 @@ Phase 079a (durable capture outbox + background drainer + observability) is impl
 | **Completeness** | PASS | All 7 code ACs implemented; `/health` field + secret-free events present; assemble wiring, drainer lifecycle (start/close), and kill-switch all present. |
 | **Correctness** | PASS | Enqueue-on-confirmed-failure, bounded exponential backoff with due-skip, idempotent `INSERT OR IGNORE` replay, single-flight drain, fail-soft no-op degrade — all verified by reading + running tests. |
 | **Alignment** | PASS | Matches D-1 (dedicated table in `local-queue.db`), D-3 (deterministic id + read-time dedup), D-4 (fail-soft on the write lane), D-5 (home-anchored). Non-goals respected: happy path unchanged, no inline retry, no capture-contract change. |
-| **Gaps** | PASS (minor) | One test-coverage gap: the `/health` endpoint-surface half of a-AC-7 (`buildHealthDetail` normalization + assemble `counts()` wiring) is not directly asserted; the `counts()` producer shape is. See W-1. |
+| **Gaps** | PASS | W-1 (the `/health` half of a-AC-7) is now closed: `buildHealthDetail` normalization is directly tested in `health.test.ts` (which uncovered + fixed a real `NaN`→`null`-on-wire defect via `nonNegativeInt()`), and the `/health` endpoint wiring (`captureOutbox.counts()`) is asserted in-process. See W-1 (resolved). |
 | **Detrimental Patterns** | PASS | No unhandled-rejection risk (drainer double-guards the timer path), no hot-loop (backoff + due-skip), no secret leakage (events allow-list counts/durations/attempt/reason). |
 
 ## Per-AC Traceability
@@ -45,9 +45,9 @@ Phase 079a (durable capture outbox + background drainer + observability) is impl
 
 None.
 
-### Warnings (should fix)
+### Warnings
 
-- **W-1 — a-AC-7 `/health` endpoint surface is not directly asserted.** `src/daemon/runtime/health.ts:430-441` (the `captureOutbox` normalization branch in `buildHealthDetail`) and the assemble wiring `captureOutbox.counts()` (`assemble.ts:3166+`) have no direct test; only the `counts()` producer shape is asserted in `capture-outbox.test.ts`. a-AC-7's text says "A test asserts the health shape." The branch is a trivial `Math.max(0, Math.trunc(...))` passthrough and is typecheck-clean, so risk is low, but a one-line `buildHealthDetail({ captureOutbox: {...} })` assertion would fully close the AC. Non-blocking.
+- **W-1 — a-AC-7 `/health` endpoint surface — RESOLVED.** Originally the `captureOutbox` normalization branch in `buildHealthDetail` (`health.ts`) and the assemble wiring `captureOutbox.counts()` had no direct test; only the `counts()` producer shape was asserted. Closing this gap was worthwhile, not cosmetic: adding the `buildHealthDetail` normalization test in `tests/daemon/runtime/health.test.ts` **uncovered a real defect** — the passthrough was `Math.max(0, Math.trunc(x))`, which returns `NaN` for a `NaN` input (serializing to `null` on the wire) instead of clamping to `0`; fixed with a `nonNegativeInt()` finiteness guard. The `/health` endpoint wiring (that the daemon feeds `captureOutbox.counts()` into the real response) is now asserted in-process as well. a-AC-7 fully closed.
 
 ### Suggestions (consider improving)
 

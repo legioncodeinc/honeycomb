@@ -108,6 +108,26 @@ function stubStorage(): { storage: StorageQuery; setMode(m: "fail" | "ok"): void
 	};
 }
 
+/** A WRITE client whose `sessions` append ALWAYS THROWS (a rejecting transport), counting each attempt. */
+function throwingStorage(): { storage: StorageQuery; appends: number } {
+	const state = { appends: 0 };
+	const storage: StorageQuery = {
+		async query(sql: string, _scope: QueryScope, _opts?: QueryOptions): Promise<QueryResult> {
+			if (/^\s*INSERT\s+INTO\s+"sessions"/i.test(sql)) {
+				state.appends += 1;
+				throw new Error("append rejected (degraded window)");
+			}
+			return ok([], 1);
+		},
+	};
+	return {
+		storage,
+		get appends() {
+			return state.appends;
+		},
+	};
+}
+
 /** Build a `sessions` row carrying its deterministic `id` (as `buildRow` does). */
 function sessionRow(id: string, text = "hello"): RowValues {
 	return [
@@ -220,6 +240,84 @@ describe("a-AC-3: bounded exponential backoff; not-yet-due rows are skipped", ()
 		// One more second (2s total since attempt 2) → due again.
 		clock.advance(1_000);
 		expect(await outbox.drainDue()).toEqual({ drained: 0, retried: 1 });
+		outbox.close();
+	});
+
+	it("the backoff delay saturates at capMs and stops growing (does not grow unboundedly)", async () => {
+		const stub = stubStorage(); // stays failing
+		const clock = fakeClock(Date.parse("2026-07-11T00:00:00.000Z"));
+		const base = 1_000;
+		const cap = 4_000; // small so the test is fast: delays go 1s, 2s, 4s, 4s, 4s, … (pinned at 4s)
+		const outbox = openCaptureOutbox({
+			storage: stub.storage,
+			sessionsTarget: SESSIONS_TARGET,
+			memory: true,
+			clock,
+			backoff: { baseMs: base, capMs: cap },
+		});
+		outbox.enqueue([sessionRow("cap-me")], SCOPE);
+
+		// Drive several failures well past the point the delay would exceed the cap if it kept doubling
+		// (attempt 3 already reaches 4s = cap; attempt 7 would be 64s uncapped). Advance by `cap` each time
+		// so the row is always due regardless of the current (≤ cap) delay.
+		for (let i = 0; i < 6; i++) {
+			expect(await outbox.drainDue()).toEqual({ drained: 0, retried: 1 });
+			clock.advance(cap);
+		}
+
+		// Prove the delay is PINNED at exactly cap, not still doubling: after the next failure the row is
+		// due at +cap. At cap-1 it is NOT due (skipped); one more ms and it IS due — so the delay == cap,
+		// never grew past it (an unbounded backoff would leave the row un-due for far longer than cap).
+		expect(await outbox.drainDue()).toEqual({ drained: 0, retried: 1 });
+		clock.advance(cap - 1);
+		expect(await outbox.drainDue(), "not yet due at cap-1 → the delay is at least cap").toEqual({
+			drained: 0,
+			retried: 0,
+		});
+		clock.advance(1);
+		expect(await outbox.drainDue(), "due at exactly +cap → the delay is EXACTLY cap, not still growing").toEqual({
+			drained: 0,
+			retried: 1,
+		});
+		outbox.close();
+	});
+});
+
+// ── FIX-1 (a-AC-3 hardening): a THROWING append is a normal failed attempt, never a pass abort/hot-loop
+
+describe("a THROWING append (append rejects) is routed as a normal failed attempt, not a pass abort", () => {
+	it("a rejecting storage still increments attempts + pushes backoff for EVERY leased row (no hot-loop)", async () => {
+		const stub = throwingStorage();
+		const clock = fakeClock(Date.parse("2026-07-11T00:00:00.000Z"));
+		const { logger, events } = recordingLogger();
+		const outbox = openCaptureOutbox({
+			storage: stub.storage,
+			sessionsTarget: SESSIONS_TARGET,
+			memory: true,
+			clock,
+			logger,
+			backoff: { baseMs: 1_000, capMs: 60_000 },
+		});
+		// TWO rows so the pre-fix bug (a throw escaping to the pass-level catch) would leave the SECOND
+		// row unattempted and NEITHER row's backoff pushed → the next pass re-leases + hot-loops.
+		outbox.enqueue([sessionRow("x"), sessionRow("y")], SCOPE);
+
+		// Every append REJECTS. With the fix, each rejection is a NORMAL failed attempt: both rows are
+		// attempted (the pass is not aborted), both get attempts+1 + a pushed-out next_attempt_at.
+		expect(await outbox.drainDue()).toEqual({ drained: 0, retried: 2 });
+		expect(stub.appends, "both leased rows were attempted — the pass did not abort on the first throw").toBe(2);
+		expect(outbox.counts()).toEqual({ pending: 2, retrying: 2 });
+
+		// No hot-loop: both rows now carry a FUTURE next_attempt_at, so an immediate second pass attempts
+		// NEITHER (a persistent throwing window cannot spin the write client).
+		const appendsAfterFirstPass = stub.appends;
+		expect(await outbox.drainDue()).toEqual({ drained: 0, retried: 0 });
+		expect(stub.appends, "a throwing window cannot hot-loop the write client").toBe(appendsAfterFirstPass);
+
+		// The failures were routed through the normal retry path (secret-free `retry` events, one per row),
+		// NOT the pass-level `drain_failed` escape the pre-fix code would emit.
+		expect(events.filter((e) => e.name === "capture.outbox.retry")).toHaveLength(2);
+		expect(events.some((e) => e.name === "capture.outbox.drain_failed")).toBe(false);
 		outbox.close();
 	});
 });

@@ -1,6 +1,6 @@
 # PRD-079: Durable Capture Retry Queue
 
-> **Status:** Backlog
+> **Status:** Completed — Phase **079a** shipped & VERIFIED (PR #287); **079b** / **079c** remain Draft (not built).
 > **Priority:** P0 (the last uncovered failure mode on the memory write path — captures are silently *lost* during Deeplake degraded windows, capping how good recall can ever be regardless of the read-side index shipped in PRD-078)
 > **Effort:** M (~few focused days across phases)
 > **Schema changes:** None on Deeplake. Adds ONE new local SQLite table (`capture_outbox`) inside the existing home-anchored `local-queue.db` — no DDL against the hosted backend, no capture-request contract change, no embedding change.
@@ -53,7 +53,7 @@ This is the **write-side twin of PRD-078**: 078 moved reads off Deeplake's laten
 
 | Phase | Scope | Status |
 |---|---|---|
-| **079a — outbox + drainer + observability (MVP)** | A durable `capture_outbox` table in the home-anchored `local-queue.db` (`id`, `org`, `workspace`, `row_json`, `attempts`, `next_attempt_at`, `created_at`, `status`). On a `flushBatch`/immediate append failure the rows are ENQUEUED instead of dropped. A background drainer re-runs `appendOnlyInsertMany` on the write client with bounded exponential backoff; OK → delete, non-ok → increment attempt + push `next_attempt_at`. Home-anchored so it persists across restart. Fail-soft: enqueue/drain never breaks capture. `/health` `captureOutbox { pending, retrying }` + secret-free `capture.outbox.*` events. **This alone stops the silent loss.** | Draft |
+| **079a — outbox + drainer + observability (MVP)** | A durable `capture_outbox` table in the home-anchored `local-queue.db` (`id`, `org`, `workspace`, `row_json`, `attempts`, `next_attempt_at`, `created_at`, `status`). On a `flushBatch`/immediate append failure the rows are ENQUEUED instead of dropped. A background drainer re-runs `appendOnlyInsertMany` on the write client with bounded exponential backoff; OK → delete, non-ok → increment attempt + push `next_attempt_at`. Home-anchored so it persists across restart. Fail-soft: enqueue/drain never breaks capture. `/health` `captureOutbox { pending, retrying }` + secret-free `capture.outbox.*` events. **This alone stops the silent loss.** | **Shipped — VERIFIED (PR #287)** |
 | **079b — dead-letter + recovery-triggered drain** | After `maxAttempts` / `maxAgeMs`, move a row to `dead` with a durable `capture.outbox.dead_lettered` event + a `/health` `deadLettered` count (bounded growth, never silently vanishes). Drain is triggered on backend-recovery signals (the next *successful* capture append, and/or a `deeplake.woke` transition) in addition to the timer, so backlog clears promptly when the window ends. Optional `honeycomb capture drain` operator command. | Draft |
 | **079c — caps + coalescing (scale)** | Disk/row-count cap on the outbox with an oldest-first shed (logged, never silent); coalesce queued rows into multi-row appends per scope on drain (mirrors the flush batcher) to minimize write ops on recovery; back-pressure knob so a huge backlog drains at a bounded rate. | Draft |
 

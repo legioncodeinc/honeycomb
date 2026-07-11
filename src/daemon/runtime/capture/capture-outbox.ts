@@ -435,10 +435,20 @@ class SqliteCaptureOutbox implements CaptureOutbox {
 		}
 	}
 
-	/** Re-append one persisted row on the WRITE client with the SAME single-attempt capture opts. */
+	/**
+	 * Re-append one persisted row on the WRITE client with the SAME single-attempt capture opts. A THROW
+	 * from the append (not just a non-ok result) is caught and reported as `false` so it becomes a NORMAL
+	 * failed attempt in {@link drainDue} (attempts+1 + pushBackoff + `retry` event) — never an escape to the
+	 * pass-level catch, which would skip this row's backoff and let the next pass re-lease it immediately
+	 * and hot-loop the write client (a-AC-3 / D-4).
+	 */
 	private async reappend(scope: QueryScope, row: RowValues): Promise<boolean> {
-		const result = await appendOnlyInsertMany(this.storage, this.sessionsTarget, scope, [row], CAPTURE_WRITE_OPTS);
-		return isOk(result);
+		try {
+			const result = await appendOnlyInsertMany(this.storage, this.sessionsTarget, scope, [row], CAPTURE_WRITE_OPTS);
+			return isOk(result);
+		} catch {
+			return false;
+		}
 	}
 
 	/** Lease the due rows (`next_attempt_at <= now`), oldest-first, bounded to {@link drainBatch}. Skips future rows (a-AC-3). */
