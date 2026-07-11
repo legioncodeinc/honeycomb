@@ -626,7 +626,19 @@ class SqliteCaptureOutbox implements CaptureOutbox {
 	 */
 	kick(): void {
 		if (this.closed || this.draining) return;
-		void this.drainDue().catch(() => {});
+		void this.drainDue().catch((err: unknown) => this.onDrainRejection(err));
+	}
+
+	/**
+	 * The belt-and-suspenders floor for the un-awaited kick/timer drains: `drainDue` already swallows every
+	 * EXPECTED fault, so a rejection reaching here is UNEXPECTED — LOG it (secret-free: message only, never
+	 * content/scope) rather than an empty catch, so observability is retained while a Node ≥15 daemon-killing
+	 * unhandled rejection is still prevented.
+	 */
+	private onDrainRejection(err: unknown): void {
+		this.logger?.event("capture.outbox.drain_rejected", {
+			reason: err instanceof Error ? err.message : String(err),
+		});
 	}
 
 	/**
@@ -662,8 +674,8 @@ class SqliteCaptureOutbox implements CaptureOutbox {
 		this.timer = this.clock.setInterval(() => {
 			// The interval has NO external awaiter, so a rejection here would become an UNHANDLED promise
 			// rejection and (Node ≥15) kill the daemon. drainDue already swallows every fault, but route
-			// belt-and-suspenders so the timer path is ALWAYS fail-soft.
-			void this.drainDue().catch(() => {});
+			// belt-and-suspenders (log, don't empty-catch) so the timer path is ALWAYS fail-soft + observable.
+			void this.drainDue().catch((err: unknown) => this.onDrainRejection(err));
 		}, this.drainIntervalMs);
 	}
 
