@@ -24,6 +24,8 @@ Where the raw content comes from is the job of [`session-capture.md`](session-ca
 
 The work runs as durable jobs with a lease/complete/fail/dead lifecycle, exponential backoff, and a stale-lease reaper. Jobs survive daemon restarts. The default queue backend is the in-process local (SQLite) queue, not the Deep Lake `memory_jobs` table: Deep Lake is a versioned append-only store and is not a queue, so leasing against it means scanning append-only history for the live row per job. That is the decision recorded in [`../architecture/adr/0009-local-queue-as-default-deeplake-is-not-a-queue.md`](../architecture/adr/0009-local-queue-as-default-deeplake-is-not-a-queue.md), and the hybrid queue can still merge the Deep Lake queue when a durable cross-process view is wanted (PR #248). Only the daemon touches Deep Lake; harness shims and hooks are thin clients that post events over HTTP and never see the store.
 
+For "jobs survive daemon restarts" to hold, the local queue's SQLite DB must be reopened at the *same path* on every boot. As of PR #285 (v0.10.1) it is anchored on the fleet state root: `<fleetRoot>/honeycomb/.daemon/local-queue.db` via `resolveLocalQueueBaseDir()` = `honeycombStateDir()`, never on `process.cwd()`. Before that fix the queue was opened at the cwd-scattering workspace base dir, so a restart (or a service-manager launch) from a different directory opened a *different, empty* queue and orphaned every pending job, so those memories never formed. The placement contract and the write-side-twin relationship to the vault-scatter fix are in [`../data/workspace-layout.md`](../data/workspace-layout.md).
+
 ## The stages
 
 ```mermaid
