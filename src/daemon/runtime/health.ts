@@ -201,16 +201,19 @@ export interface HealthReasons {
 		readonly guidance: string;
 	};
 	/**
-	 * PRD-079a: the durable capture retry outbox backlog — `pending` queued rows awaiting a durable
-	 * re-append (after a DeepLake degraded-window append failure) + the `retrying` subset that has
-	 * already failed at least one drain attempt (`attempts > 0`). The glanceable "is a degraded window
-	 * backing up captures, and is it draining on recovery?" signal (a-AC-7): `pending > 0` during a bad
-	 * window, `pending → 0` once the backend recovers. Present only when the composition root wires the
-	 * outbox; omitted on a bare `createDaemon`. Carries NO secret — two counts.
+	 * PRD-079a/079b: the durable capture retry outbox backlog — `pending` ACTIVE queued rows awaiting a
+	 * durable re-append (after a DeepLake degraded-window append failure) + the `retrying` subset that has
+	 * already failed at least one drain attempt (`attempts > 0`) + the `deadLettered` terminal count (rows
+	 * that hit `maxAttempts` or exceeded `maxAgeMs` and were retained but retired — b-AC-2). The glanceable
+	 * "is a degraded window backing up captures, is it draining on recovery, and is anything giving up?"
+	 * signal: `pending > 0` during a bad window, `pending → 0` once the backend recovers, `deadLettered > 0`
+	 * once a row exhausts its bound. Present only when the composition root wires the outbox; omitted on a
+	 * bare `createDaemon`. Carries NO secret — three counts.
 	 */
 	readonly captureOutbox?: {
 		readonly pending: number;
 		readonly retrying: number;
+		readonly deadLettered: number;
 	};
 	/**
 	 * Memory-formation observability: memories the controlled-write stage actually committed since boot.
@@ -323,13 +326,16 @@ export interface HealthDetailInputs {
 	 */
 	readonly captureTenancyUnconfirmed?: boolean;
 	/**
-	 * PRD-079a: the capture retry outbox backlog (`{ pending, retrying }`). Omitted when the composition
-	 * root does not wire the outbox → the `captureOutbox` reason is absent. Present → surfaced verbatim
-	 * (normalized to non-negative integers) as {@link HealthReasons.captureOutbox}.
+	 * PRD-079a/079b: the capture retry outbox backlog (`{ pending, retrying, deadLettered }`). Omitted
+	 * when the composition root does not wire the outbox → the `captureOutbox` reason is absent. Present →
+	 * surfaced verbatim (normalized to non-negative integers) as {@link HealthReasons.captureOutbox}.
+	 * `deadLettered` is optional on the INPUT (a legacy caller passing only `{ pending, retrying }` still
+	 * type-checks; it normalizes to 0) but is ALWAYS emitted on the output reason (b-AC-2).
 	 */
 	readonly captureOutbox?: {
 		readonly pending: number;
 		readonly retrying: number;
+		readonly deadLettered?: number;
 	};
 	/**
 	 * Memories committed by the controlled-write stage since boot (the in-process
@@ -438,6 +444,9 @@ export function buildHealthDetail(inputs: HealthDetailInputs): HealthDetail {
 					captureOutbox: {
 						pending: nonNegativeInt(inputs.captureOutbox.pending),
 						retrying: nonNegativeInt(inputs.captureOutbox.retrying),
+						// PRD-079b (b-AC-2): the terminal dead-letter count, always emitted (a legacy input without
+						// it normalizes to 0), same non-negative-int normalization as the other two counts.
+						deadLettered: nonNegativeInt(inputs.captureOutbox.deadLettered ?? 0),
 					},
 				}
 			: {}),

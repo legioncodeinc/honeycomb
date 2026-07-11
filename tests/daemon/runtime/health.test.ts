@@ -170,30 +170,38 @@ describe("AC-2 /health detail NAMES the down subsystem, not a bare degraded", ()
 		).toBe("shared");
 	});
 
-	it("PRD-079a: captureOutbox { pending, retrying } surfaces on /health and normalizes to non-negative ints", () => {
+	it("PRD-079a/079b: captureOutbox { pending, retrying, deadLettered } surfaces on /health and normalizes to non-negative ints", () => {
 		// Unwired (bare createDaemon / the deterministic suite) → the reason is absent.
 		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.captureOutbox).toBeUndefined();
-		// Wired → the drainer backlog surfaces verbatim (the a-AC-7 endpoint passthrough).
+		// Wired → the drainer backlog surfaces verbatim (the a-AC-7 / b-AC-2 endpoint passthrough).
+		expect(
+			buildHealthDetail({
+				status: "ok",
+				embeddingsEnabled: true,
+				captureOutbox: { pending: 3, retrying: 1, deadLettered: 2 },
+			}).reasons?.captureOutbox,
+		).toEqual({ pending: 3, retrying: 1, deadLettered: 2 });
+		// PRD-079b: a legacy input WITHOUT deadLettered still surfaces the field, normalized to 0.
 		expect(
 			buildHealthDetail({ status: "ok", embeddingsEnabled: true, captureOutbox: { pending: 3, retrying: 1 } }).reasons
 				?.captureOutbox,
-		).toEqual({ pending: 3, retrying: 1 });
+		).toEqual({ pending: 3, retrying: 1, deadLettered: 0 });
 		// Defensive normalization: a negative / NaN / float input clamps via Math.max/Math.trunc to a
 		// non-negative integer (no secret, never a fractional or negative count on the wire).
 		expect(
 			buildHealthDetail({
 				status: "ok",
 				embeddingsEnabled: true,
-				captureOutbox: { pending: -5, retrying: Number.NaN },
+				captureOutbox: { pending: -5, retrying: Number.NaN, deadLettered: -3 },
 			}).reasons?.captureOutbox,
-		).toEqual({ pending: 0, retrying: 0 });
+		).toEqual({ pending: 0, retrying: 0, deadLettered: 0 });
 		expect(
 			buildHealthDetail({
 				status: "ok",
 				embeddingsEnabled: true,
-				captureOutbox: { pending: 4.9, retrying: 2.9 },
+				captureOutbox: { pending: 4.9, retrying: 2.9, deadLettered: 1.9 },
 			}).reasons?.captureOutbox,
-		).toEqual({ pending: 4, retrying: 2 });
+		).toEqual({ pending: 4, retrying: 2, deadLettered: 1 });
 	});
 
 	it("memory feature-gating: omitted when unwired; enabled + provider enum surfaced when wired", () => {
@@ -277,9 +285,9 @@ describe("AC-2 /health detail NAMES the down subsystem, not a bare degraded", ()
 		// and the endpoint round-trip proves the reason reaches the real HTTP /health response body.
 		let countsCalls = 0;
 		const outboxStub = {
-			counts(): { pending: number; retrying: number } {
+			counts(): { pending: number; retrying: number; deadLettered: number } {
 				countsCalls += 1;
-				return { pending: 3, retrying: 1 };
+				return { pending: 3, retrying: 1, deadLettered: 2 };
 			},
 		};
 		const daemon = createDaemon({
@@ -296,10 +304,13 @@ describe("AC-2 /health detail NAMES the down subsystem, not a bare degraded", ()
 				buildHealthDetail({ status: "ok", embeddingsEnabled: true, captureOutbox: outboxStub.counts() }),
 		});
 		const res = await daemon.app.request("/health");
-		const body = (await res.json()) as { reasons?: { captureOutbox?: { pending: number; retrying: number } } };
+		const body = (await res.json()) as {
+			reasons?: { captureOutbox?: { pending: number; retrying: number; deadLettered: number } };
+		};
 		expect(body.reasons?.captureOutbox, "the outbox backlog surfaces on the real /health response body").toEqual({
 			pending: 3,
 			retrying: 1,
+			deadLettered: 2,
 		});
 		expect(countsCalls, "the health detail is fed from a live outbox counts() call").toBeGreaterThan(0);
 	});

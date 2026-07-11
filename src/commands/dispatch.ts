@@ -17,6 +17,7 @@
 
 import { HONEYCOMB_VERSION, PRODUCT_SLUG } from "../shared/constants.js";
 import { runAssetVerb } from "./asset.js";
+import { runCaptureVerb } from "./capture.js";
 import {
 	type CommandDeps,
 	type CommandDispatcher,
@@ -213,6 +214,11 @@ async function dispatchStorage(inv: CommandInvocation, deps: CommandDeps): Promi
 	// `/api/<verb>` storage convention — so it has its own thin-client handler (PRD-030 D-2).
 	if (inv.verb === "maintenance") {
 		return runMaintenanceVerb(inv.argv, deps);
+	}
+	// `capture drain` hits the diagnostics force-drain trigger (`/api/diagnostics/capture-drain`), not
+	// the `/api/<verb>` storage convention — so it has its own thin-client handler (PRD-079b b-AC-4).
+	if (inv.verb === "capture") {
+		return runCaptureVerb(inv.argv, deps);
 	}
 	// `memory` is the PRD-058d lifecycle surface: conflicts (list/resolve via the 058b endpoint),
 	// stale-refs (list), and `inspect <id> --lifecycle`. It has its own thin-client handler because it

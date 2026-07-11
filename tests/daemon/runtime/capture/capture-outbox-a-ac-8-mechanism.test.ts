@@ -207,7 +207,7 @@ describe("a-AC-8 (mechanism): a degraded-window capture lands in the outbox and 
 		// and the replayed INSERT carries the ORIGINAL deterministic id (idempotent replay, a-AC-6).
 		write.setMode("ok");
 		const drain = await outbox.drainDue();
-		expect(drain).toEqual({ drained: 1, retried: 0 });
+		expect(drain).toEqual({ drained: 1, retried: 0, deadLettered: 0 });
 		expect(outbox.counts().pending).toBe(0);
 		expect(write.appends).toHaveLength(1);
 		expect(write.appends[0]).toMatch(/INSERT\s+INTO\s+"sessions"/i);

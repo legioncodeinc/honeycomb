@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.12.0 — 2026-07-11
+
+Adds dead-lettering, recovery-triggered drain, a new `honeycomb capture drain` command, and configurable caps/coalescing/back-pressure for the durable capture retry queue, making it more resilient and observable during backend outages.
+
 ## v0.11.0 — 2026-07-11
 
 Captures that fail to write due to a temporary backend outage are now queued in a durable local retry outbox and automatically re-sent once the backend recovers, instead of being silently lost. Adds a new `/health` capture-outbox backlog indicator for visibility into pending/retrying captures.

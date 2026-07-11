@@ -58,6 +58,7 @@ import {
 import { mountAuthStatusApi } from "./auth/status-api.js";
 import { isTenancyConfirmed } from "./auth/tenancy-confirmation.js";
 import { attachHooksHandlers } from "./capture/attach.js";
+import { mountCaptureDrainApi } from "./capture/capture-drain-api.js";
 import { resolveInboxCaptureEnabled } from "./capture/capture-config.js";
 import type { CaptureHandler } from "./capture/capture-handler.js";
 import {
@@ -65,6 +66,7 @@ import {
 	type CaptureOutbox,
 	type CaptureOutboxSink,
 	openCaptureOutbox,
+	resolveCaptureOutboxLimits,
 } from "./capture/capture-outbox.js";
 import { type CaptureDroppedEventsCounter, createCaptureDroppedEventsCounter } from "./capture/dropped-events.js";
 import { createGatedCapturesCounter, type GatedCapturesCounter } from "./capture/gated-captures.js";
@@ -3006,6 +3008,9 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 					sessionsTarget: healTargetFor("sessions"),
 					baseDir: resolveLocalQueueBaseDir(),
 					logger,
+					// PRD-079b (b-AC-1): the dead-letter bounds, resolved ONCE at the composition root from the
+					// documented defaults + the `HONEYCOMB_CAPTURE_OUTBOX_MAX_ATTEMPTS`/`_MAX_AGE_MS` env knobs.
+					...resolveCaptureOutboxLimits(),
 				})
 			: undefined;
 	// The committed-memories signal for `/health` (the glanceable "is this daemon forming memories?"
@@ -3370,6 +3375,22 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		// PRD-079a: the durable capture retry outbox — a failed capture append enqueues here (a-AC-1).
 		captureOutbox,
 	);
+
+	// ── PRD-079b (b-AC-4): the operator FORCE-DRAIN trigger — `POST /api/diagnostics/capture-drain`.
+	//     Attaches onto the same already-mounted, protected `/api/diagnostics` group (NO `server.ts`
+	//     edit), inheriting the dashboard JSON views' auth/RBAC (open in `local`, gated in team/hybrid).
+	//     It forces ONE `drainDue` pass over the outbox and returns `{ drained, retried, deadLettered }`
+	//     — the SAME seam the interval + the recovery kick run, reused over HTTP for `honeycomb capture
+	//     drain`. Mounted ONLY when the outbox is wired (the real assembly). FAIL-SOFT: the mount is
+	//     wrapped so a mount fault never crashes the daemon (the trigger is best-effort, never boot-load-bearing).
+	if (captureOutbox !== undefined) {
+		try {
+			mountCaptureDrainApi(daemon, { outbox: captureOutbox });
+		} catch (err: unknown) {
+			const reason = err instanceof Error ? err.message : String(err);
+			process.stderr.write(`honeycomb: capture-drain route mount failed (non-fatal): ${reason}\n`);
+		}
+	}
 
 	// ── PRD-032d / AC-6: FIRE the Wave-1 `/api/settings` mount ONCE so the CLI/dashboard
 	// settings surface is LIVE against this daemon. FAIL-SOFT: a vault/settings construction or
@@ -4089,6 +4110,24 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 							}
 						},
 						resume: armGraphBuild,
+					});
+				}
+				// PRD-079b (b-AC-3, the `deeplake.woke` arm of the "and/or"): the capture-outbox drainer
+				// re-appends to DeepLake on its interval, so it hibernates with the other DeepLake-touching
+				// timers (pause = stop the interval so a queued backlog does not keep the Activeloop pod warm
+				// while idle). On WAKE — the `deeplake.woke` transition, the backend-recovered signal — resume
+				// re-arms the interval AND kicks an IMMEDIATE drain so the degraded-window backlog clears
+				// promptly, not on the next 30s tick. `stop`/`start`/`kick` are all idempotent + fail-soft.
+				// Present only when the outbox is wired (the real assembly).
+				if (captureOutbox !== undefined) {
+					const outbox = captureOutbox;
+					pausables.push({
+						label: "capture-outbox-drain",
+						pause: () => outbox.stop(),
+						resume: () => {
+							outbox.start();
+							outbox.kick();
+						},
 					});
 				}
 				if (pausables.length > 0) {
