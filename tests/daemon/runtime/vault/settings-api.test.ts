@@ -217,7 +217,22 @@ describe("PRD-063a Portkey settings — catalog + allow-list + semantics (a-AC-3
 		expect(isKnownSettingKey("portkey.fallbackToProvider")).toBe(true);
 	});
 
+	/** Store a provider + model so `portkey.enabled = true` passes the ISS-005 model gate. */
+	async function storeActiveModel(): Promise<void> {
+		await app.request("/api/settings/activeProvider", {
+			method: "POST",
+			headers: JSON_HEADERS,
+			body: JSON.stringify({ value: "anthropic" }),
+		});
+		await app.request("/api/settings/activeModel", {
+			method: "POST",
+			headers: JSON_HEADERS,
+			body: JSON.stringify({ value: "claude-sonnet-4-6" }),
+		});
+	}
+
 	it("accepts boolean toggles + a config string, and they round-trip through GET", async () => {
+		await storeActiveModel();
 		const enabled = await app.request("/api/settings/portkey.enabled", {
 			method: "POST",
 			headers: JSON_HEADERS,
@@ -263,6 +278,7 @@ describe("PRD-063a Portkey settings — catalog + allow-list + semantics (a-AC-3
 	});
 
 	it("rejects an empty portkey.config WHEN portkey.enabled is true", async () => {
+		await storeActiveModel();
 		await app.request("/api/settings/portkey.enabled", {
 			method: "POST",
 			headers: JSON_HEADERS,
@@ -305,5 +321,83 @@ describe("PRD-063a Portkey settings — catalog + allow-list + semantics (a-AC-3
 			body: JSON.stringify({ value: "pk-cfg-abc123" }),
 		});
 		expect(res.status).toBe(201);
+	});
+
+	// ── ISS-005 (fail closed, report honestly): the enable/clear validation matrix. An enabled
+	// gateway sends `activeModel` verbatim as the requested model, so `portkey.enabled = true`
+	// with no stored model — or clearing the model while enabled — must be a clean 400 at the
+	// settings boundary, never a later stream of `model: ""` POSTs to the gateway.
+	describe("ISS-005 portkey.enabled ⇄ activeModel coherence (fail-closed)", () => {
+		it("rejects enabling portkey.enabled with NO activeModel stored (400)", async () => {
+			const res = await app.request("/api/settings/portkey.enabled", {
+				method: "POST",
+				headers: JSON_HEADERS,
+				body: JSON.stringify({ value: true }),
+			});
+			expect(res.status).toBe(400);
+			const body = await res.json();
+			expect(String(body.reason)).toContain("activeModel");
+		});
+
+		it("rejects enabling portkey.enabled when the stored activeModel is empty/whitespace (400)", async () => {
+			// Bypass the API's own activeModel validation to simulate a legacy/hand-written empty value.
+			const sc = { org: "acme", workspace: "backend" };
+			await store.setSetting("activeModel", "   ", sc);
+			const res = await app.request("/api/settings/portkey.enabled", {
+				method: "POST",
+				headers: JSON_HEADERS,
+				body: JSON.stringify({ value: true }),
+			});
+			expect(res.status).toBe(400);
+		});
+
+		it("accepts enabling portkey.enabled once a non-empty activeModel is stored (201)", async () => {
+			await storeActiveModel();
+			const res = await app.request("/api/settings/portkey.enabled", {
+				method: "POST",
+				headers: JSON_HEADERS,
+				body: JSON.stringify({ value: true }),
+			});
+			expect(res.status).toBe(201);
+		});
+
+		it("disabling portkey.enabled never requires a model (false is always accepted)", async () => {
+			const res = await app.request("/api/settings/portkey.enabled", {
+				method: "POST",
+				headers: JSON_HEADERS,
+				body: JSON.stringify({ value: false }),
+			});
+			expect(res.status).toBe(201);
+		});
+
+		it("rejects clearing activeModel WHILE portkey.enabled is true (400 naming the gateway)", async () => {
+			await storeActiveModel();
+			await app.request("/api/settings/portkey.enabled", {
+				method: "POST",
+				headers: JSON_HEADERS,
+				body: JSON.stringify({ value: true }),
+			});
+			for (const empty of ["", "   "]) {
+				const res = await app.request("/api/settings/activeModel", {
+					method: "POST",
+					headers: JSON_HEADERS,
+					body: JSON.stringify({ value: empty }),
+				});
+				expect(res.status, `clearing with ${JSON.stringify(empty)} must 400`).toBe(400);
+				const body = await res.json();
+				expect(String(body.reason)).toContain("portkey.enabled");
+			}
+		});
+
+		it("rejects an empty activeModel with the gateway off too (never storable)", async () => {
+			const res = await app.request("/api/settings/activeModel", {
+				method: "POST",
+				headers: JSON_HEADERS,
+				body: JSON.stringify({ value: "" }),
+			});
+			expect(res.status).toBe(400);
+			const body = await res.json();
+			expect(String(body.reason)).toContain("non-empty");
+		});
 	});
 });

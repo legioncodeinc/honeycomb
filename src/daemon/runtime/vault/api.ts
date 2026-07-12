@@ -51,7 +51,9 @@ export const SETTINGS_GROUP = "/api/settings" as const;
  *     `keyword | semantic | hybrid` (validated below, fail-closed). UNSET preserves the
  *     PRD-025 runtime default (behavior-neutral), so the key exists to OPT IN to an explicit mode.
  *   - `portkey.enabled` — the Portkey gateway toggle (boolean, PRD-063a). Persisted intent only;
- *     063b makes it take effect on the inference path.
+ *     063b makes it take effect on the inference path. Enabling (writing `true`) REQUIRES a
+ *     non-empty `activeModel` already stored (ISS-005 fail-closed: the gateway sends
+ *     `activeModel` verbatim, so an enabled gateway with no model would request `model: ""`).
  *   - `portkey.config`  — the free-form Portkey config / virtual-key id (string). Validated as a
  *     NON-EMPTY string only WHEN `portkey.enabled === true`; when disabled any/empty string passes.
  *   - `portkey.fallbackToProvider` — the opt-in "fall back to the provider key if Portkey is
@@ -259,6 +261,18 @@ async function validateSettingSemantics(
 		return null;
 	}
 	if (key === "activeModel") {
+		// ISS-005 (fail closed, report honestly): an EMPTY model is never storable. The inference
+		// path sends `activeModel` verbatim as the requested model, so an empty value would produce
+		// `model: ""` requests downstream. While the Portkey gateway is enabled the guard names the
+		// gateway explicitly — clearing the model out from under an enabled gateway is the exact
+		// misconfiguration that shipped 373 `model:""` POSTs on a fresh install.
+		if (String(value).trim().length === 0) {
+			const pkRes = await store.getSetting("portkey.enabled", scope);
+			const pkEnabled = pkRes.ok && pkRes.value === true;
+			return pkEnabled
+				? "cannot clear activeModel while portkey.enabled is true (disable the gateway first)"
+				: "activeModel must be a non-empty string";
+		}
 		// The active provider is whatever is currently stored; a caller sets provider first.
 		const provRes = await store.getSetting("activeProvider", scope);
 		const provider = provRes.ok ? String(provRes.value) : "";
@@ -278,6 +292,16 @@ async function validateSettingSemantics(
 		// rejected 400, the same fail-closed shape the other keys use. The class schema accepts
 		// any scalar, so this layer is what enforces the boolean type for the toggles.
 		if (typeof value !== "boolean") return `${key} must be a boolean`;
+		// ISS-005 (fail closed, report honestly): enabling the gateway REQUIRES a non-empty
+		// `activeModel` already stored — the gateway sends `activeModel` verbatim as the requested
+		// model, so an enabled gateway with no model would POST `model: ""` on every job (the fresh-
+		// install incident: 373 empty-model calls, every one swallowed as done). Mirrors the
+		// `activeProvider` → `activeModel` write-ordering rule: set the model first, then enable.
+		if (key === "portkey.enabled" && value === true) {
+			const modelRes = await store.getSetting("activeModel", scope);
+			const model = modelRes.ok ? String(modelRes.value).trim() : "";
+			if (model.length === 0) return "set a non-empty activeModel before enabling portkey.enabled";
+		}
 		return null;
 	}
 	if (key === "portkey.config") {
