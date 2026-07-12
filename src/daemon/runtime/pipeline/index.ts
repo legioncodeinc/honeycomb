@@ -90,6 +90,21 @@ export {
 	stripChainOfThought,
 } from "./extraction.js";
 
+// ── Live reload (SP-1 / ISS-001/ISS-005 — settings/keys apply without restart) ──
+export {
+	type CreateLiveExtractionGateOptions,
+	type CreatePipelineReloadSeamOptions,
+	createLiveExtractionGate,
+	createPipelineReloadSeam,
+	type ExtractionGateProbe,
+	type LiveExtractionGate,
+	LiveModelClient,
+	PIPELINE_RELOAD_DEBOUNCE_MS,
+	type PipelineReloadController,
+	type PipelineReloadSeam,
+	type ReloadScheduleFn,
+} from "./reload.js";
+
 // ── Handler registry ──────────────────────────────────────────────────────────
 export { createPipelineHandlers, type PipelineHandlerDeps } from "./handlers.js";
 

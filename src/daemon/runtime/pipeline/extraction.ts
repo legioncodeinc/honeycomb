@@ -42,6 +42,7 @@ import {
 	parseFact,
 } from "./contracts.js";
 import { type PipelineConfig, isExtractionEnabled } from "./config.js";
+import type { ExtractionGateProbe } from "./reload.js";
 import { type ModelClient } from "./model-client.js";
 import type { StageHandler, StageJob } from "./stage-worker.js";
 
@@ -267,9 +268,16 @@ export async function extractFromText(
 	config: PipelineConfig,
 	model: ModelClient,
 	logger?: ExtractionLogger,
+	gate?: ExtractionGateProbe,
 ): Promise<ExtractionResult> {
-	// 1. GATE (a-AC-5 / FR-9) — no model call when off.
-	if (!isExtractionEnabled(config)) return EMPTY_RESULT;
+	// 1. GATE (a-AC-5 / FR-9) — no model call when off. Evaluated PER JOB (SP-1 / ISS-001):
+	//    with a live `gate`, the master `enabled` and the `'auto'` provider-configured signal
+	//    are read NOW — a key saved or a toggle flipped after boot is honored by the next job,
+	//    with no daemon restart and no boot-time `'auto'`→`'none'` collapse. Without a gate
+	//    (pure-config callers, unit tests) the config-only decision is unchanged: `'auto'`
+	//    with no provider signal stays conservatively OFF.
+	const effectiveConfig = gate === undefined ? config : { ...config, enabled: gate.enabled() };
+	if (!isExtractionEnabled(effectiveConfig, gate?.providerConfigured() ?? false)) return EMPTY_RESULT;
 
 	// 2. CAP INPUT (a-AC-2 / FR-6) — before the prompt is built, so the model never
 	//    sees more than the cap.
@@ -349,6 +357,13 @@ export interface ExtractionHandlerDeps {
 	 * the bounded result. NEVER writes `memories` (006c owns that).
 	 */
 	readonly onResult?: (job: StageJob, result: ExtractionResult) => Promise<void> | void;
+	/**
+	 * The LIVE per-job gate inputs (SP-1 / ISS-001): the current master `enabled` (vault-first,
+	 * reload-updated) + the current `'auto'` provider-configured signal (TTL-debounced names-only
+	 * secret probe). ABSENT (unit suites, pure-config callers) → the boot config decides alone,
+	 * exactly the pre-SP-1 behavior. The daemon assembly always supplies it.
+	 */
+	readonly gate?: ExtractionGateProbe;
 }
 
 /**
@@ -362,7 +377,7 @@ export interface ExtractionHandlerDeps {
 export function createExtractionHandler(deps: ExtractionHandlerDeps): StageHandler {
 	return async (job: StageJob): Promise<void> => {
 		const content = readContent(job.payload);
-		const result = await extractFromText(content, deps.config, deps.model, deps.logger);
+		const result = await extractFromText(content, deps.config, deps.model, deps.logger, deps.gate);
 		if (deps.onResult) await deps.onResult(job, result);
 	};
 }

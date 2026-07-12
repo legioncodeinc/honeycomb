@@ -334,11 +334,17 @@ export function isExtractionEnabled(config: PipelineConfig, providerConfigured =
 }
 
 /**
- * Collapse the `'auto'` extraction sentinel down to a CONCRETE provider token now that the
- * provider-configured signal is known (the worker calls this once, at boot, after building the
- * inference ModelClient). The returned config is what the STAGES read — so the extraction stage's
- * `isExtractionEnabled(config)` (which has no provider knowledge) sees a concrete value and behaves
- * exactly as before `'auto'` existed:
+ * Collapse the `'auto'` extraction sentinel down to a CONCRETE provider token once the
+ * provider-configured signal is known.
+ *
+ * ── SP-1 / ISS-001: the WORKER no longer calls this at boot ──────────────────
+ * `buildPipelineWorker` used to run this ONCE at boot — which froze `'auto'` into `'none'`
+ * for the daemon's whole lifetime when no key was present at startup (the "save a key, still
+ * no memory until restart" bug). The extraction stage now evaluates
+ * `isExtractionEnabled(config, providerConfiguredNow)` PER JOB against a live TTL-debounced
+ * secret-NAME-presence probe (see `reload.ts`), so the sentinel stays `'auto'` in the running
+ * config. This helper is RETAINED for pure-config callers (one-shot resolution paths, tests)
+ * where a single point-in-time collapse is the right semantics:
  *
  *   - `extractionProvider === 'auto'` + `providerConfigured` → rewrite to `EXTRACTION_PROVIDER_AUTO`
  *     kept as-is is NOT enough for the pure gate, so we rewrite to a REAL marker token that the pure
