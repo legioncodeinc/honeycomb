@@ -1,6 +1,6 @@
 {
   "name": "@legioncodeinc/honeycomb",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "//go-public": "Go-public switches are flipped: scoped name, public+provenance publishConfig live, `private` removed. CI auth is npm Trusted Publishing (OIDC); there is NO NPM_TOKEN. The go-live procedure is RELEASING.md 'Cut the release': the first publish is a one-time manual 2FA bootstrap that creates the package, after which every CI publish from release.yaml is tokenless OIDC.",
   "publishConfig": {
     "access": "public",
