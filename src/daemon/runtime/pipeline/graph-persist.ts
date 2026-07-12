@@ -7,8 +7,11 @@
  * d-AC-2 Same memory reprocessed → no duplicate entities/relationships/mentions.
  * d-AC-3 Graph persistence FAILS → warning logged, handler returns normally
  *         (NON-FATAL). Committed facts are untouched.
- * d-AC-4 `config.graph.enabled` AND `config.graph.extractionWritesEnabled` both
- *         must be true; either off → no rows written.
+ * d-AC-4 The RESOLVED graph gate must be on; off → no rows written. ISS-002 unified
+ *         the two legacy flags (`graph.enabled` + `graph.extractionWritesEnabled`)
+ *         into ONE vault-first switch resolved by the worker (env override > vault
+ *         `graph.enabled` > default-follows-memory); pure-config callers still
+ *         derive the gate from the two-flag conjunction.
  * d-AC-5 Every graph row carries org/workspace/agent scope.
  * ════════════════════════════════════════════════════════════════════════════
  *
@@ -408,8 +411,10 @@ export type InlineLinker = (
  * stage's `extractFromText` / `createExtractionHandler` split).
  *
  * Behaviour:
- *   - Returns immediately when `graph.enabled` or `graph.extractionWritesEnabled`
- *     is false (d-AC-4).
+ *   - Returns immediately when the RESOLVED graph gate is off (d-AC-4, as unified by
+ *     ISS-002): `graphEnabled` (the live vault-first resolution threaded by the worker)
+ *     when supplied, else the legacy two-flag conjunction derived from `config.graph` —
+ *     ONE boolean drives the stage either way.
  *   - Iterates triples: upsert source entity, upsert target entity, upsert
  *     dependency edge, insert-or-ignore mention for source and target (d-AC-1).
  *   - PRD-045c (c-AC-1): AFTER the entities exist, runs the inline linker over the
@@ -428,10 +433,14 @@ export async function persistGraphEntities(
 	logger: GraphPersistLogger,
 	content = "",
 	linkMemory: InlineLinker = inlineLinkMemory,
+	graphEnabled?: boolean,
 ): Promise<void> {
-	// d-AC-4: gate — both flags must be on.
-	if (!config.graph.enabled || !config.graph.extractionWritesEnabled) {
-		logger.info?.("graph_persist.gated_off", { enabled: config.graph.enabled, extractionWritesEnabled: config.graph.extractionWritesEnabled });
+	// d-AC-4 gate, unified by ISS-002: ONE resolved boolean drives the stage. The worker threads
+	// the LIVE vault-first resolution (`graphEnabled`); a pure-config caller (unit tests, one-shot
+	// paths) falls back to the legacy two-flag conjunction so the pre-ISS-002 contract holds.
+	const gateOn = graphEnabled ?? (config.graph.enabled && config.graph.extractionWritesEnabled);
+	if (!gateOn) {
+		logger.info?.("graph_persist.gated_off", { enabled: gateOn });
 		return;
 	}
 
@@ -504,6 +513,14 @@ export interface GraphPersistHandlerDeps {
 	 * pollinating consolidation pass without double-writing the same mention.
 	 */
 	readonly linkMemory?: InlineLinker;
+	/**
+	 * ISS-002: the LIVE resolved graph gate (vault-first `graph.enabled`, env-overridable,
+	 * default-follows-memory), evaluated PER JOB so a `graph.enabled` / `memory.enabled` settings
+	 * write applied through the #304 reload seam gates the very next job — no restart. ABSENT
+	 * (unit mounts, one-shot paths) → the gate derives from `config.graph` (the legacy two-flag
+	 * conjunction). Must be cheap, synchronous, total, and non-throwing (a plain cell read).
+	 */
+	readonly graphEnabled?: () => boolean;
 }
 
 /**
@@ -518,7 +535,7 @@ export interface GraphPersistHandlerDeps {
 export function createGraphPersistHandler(deps?: GraphPersistHandlerDeps): StageHandler {
 	if (!deps) return noopGraphPersistHandler;
 
-	const { storage, scope, config, logger = DEFAULT_LOGGER, linkMemory = inlineLinkMemory } = deps;
+	const { storage, scope, config, logger = DEFAULT_LOGGER, linkMemory = inlineLinkMemory, graphEnabled } = deps;
 
 	return async (job: StageJob): Promise<void> => {
 		// d-AC-3: non-fatal — wrap the whole body. A throw here must NEVER escape.
@@ -526,7 +543,9 @@ export function createGraphPersistHandler(deps?: GraphPersistHandlerDeps): Stage
 			const memoryId = readMemoryId(job.payload);
 			const triples = readEntities(job.payload);
 			const content = readContent(job.payload);
-			await persistGraphEntities(storage, scope, config, memoryId, triples, logger, content, linkMemory);
+			// ISS-002: the live gate is read PER JOB (not captured at handler build) so a settings
+			// flip applied by the reload seam gates the very next job.
+			await persistGraphEntities(storage, scope, config, memoryId, triples, logger, content, linkMemory, graphEnabled?.());
 		} catch (err: unknown) {
 			// d-AC-3: log a warning and return normally — the job is NOT failed.
 			const message = err instanceof Error ? err.message : String(err);

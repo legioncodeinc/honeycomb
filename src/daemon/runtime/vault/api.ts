@@ -48,6 +48,9 @@ export const SETTINGS_GROUP = "/api/settings" as const;
  *   - `activeProvider` — a catalog provider id;
  *   - `activeModel`    — a model id, validated against the chosen `activeProvider`;
  *   - `pollinating.enabled` — the pollinating toggle (boolean);
+ *   - `graph.enabled`  — the memory-graph persistence toggle (ISS-002). Vault-first with the
+ *     legacy env flags as an explicit override and DEFAULT-FOLLOWS-MEMORY when absent (see
+ *     {@link GRAPH_ENABLED_KEY}). Coerced like `memory.enabled` (`true`/`1` → on).
  *   - `recallMode`     — the recall-mode selector (PRD-044c): the CLOSED enum
  *     `keyword | semantic | hybrid` (validated below, fail-closed). UNSET preserves the
  *     PRD-025 runtime default (behavior-neutral), so the key exists to OPT IN to an explicit mode.
@@ -79,12 +82,25 @@ export const EMBEDDINGS_ENABLED_KEY = "embeddings.enabled" as const;
  */
 export const MEMORY_ENABLED_KEY = "memory.enabled" as const;
 
+/**
+ * The `setting`-class key the memory-GRAPH persistence preference persists under (ISS-002). The
+ * single source of truth shared by the `/api/settings` allow-list (below), the pipeline worker's
+ * vault-first graph-gate resolution (`assemble.ts` / `resolveGraphEnabledVaultFirst`), and the
+ * live-reload re-read. Precedence at the resolution site: explicit legacy env flags
+ * (`HONEYCOMB_PIPELINE_GRAPH_ENABLED` / `..._GRAPH_EXTRACTION_WRITES`) > this vault setting >
+ * DEFAULT-FOLLOWS-MEMORY (the resolved {@link MEMORY_ENABLED_KEY} master switch). Absent + no
+ * env → graph persistence simply follows the memory pipeline, so the Memory Graph view's source
+ * tables (`entities` / `entity_dependencies`) populate whenever memory formation runs.
+ */
+export const GRAPH_ENABLED_KEY = "graph.enabled" as const;
+
 export const KNOWN_SETTING_KEYS = [
 	"activeProvider",
 	"activeModel",
 	"pollinating.enabled",
 	EMBEDDINGS_ENABLED_KEY,
 	MEMORY_ENABLED_KEY,
+	GRAPH_ENABLED_KEY,
 	"recallMode",
 	"portkey.enabled",
 	"portkey.config",
@@ -118,6 +134,9 @@ export const PIPELINE_WATCHED_SETTING_KEYS = [
 	"activeProvider",
 	"activeModel",
 	MEMORY_ENABLED_KEY,
+	// ISS-002: the unified graph gate rides the SAME #304 reload seam — a `graph.enabled` write is
+	// re-resolved into the running worker's live graph gate without a restart.
+	GRAPH_ENABLED_KEY,
 	"portkey.enabled",
 	"portkey.config",
 	"portkey.fallbackToProvider",

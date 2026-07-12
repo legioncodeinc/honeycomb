@@ -396,3 +396,76 @@ export function resolveMemoryEnabledVaultFirst(
 ): boolean {
 	return vault.decidedByVault ? vault.enabled : envEnabled;
 }
+
+// ── ISS-002: the UNIFIED graph gate (one switch, vault-first, default-follows-memory) ─────────
+
+/**
+ * The EXPLICIT env decision for the graph-persistence gate (ISS-002 back-compat / opt-out).
+ *
+ * Historically graph persistence hid behind TWO default-off env flags
+ * (`HONEYCOMB_PIPELINE_GRAPH_ENABLED` + `HONEYCOMB_PIPELINE_GRAPH_EXTRACTION_WRITES`) that no
+ * product surface ever set (systemic pattern SP-2), so the `entities` / `entity_dependencies`
+ * tables were never written even though the whole producer chain worked. The two flags are KEPT,
+ * but only as an explicit operator override: when EITHER is set (non-blank), the env decides.
+ * When neither is set, the vault `graph.enabled` setting — and below that, the memory master
+ * switch — decides (see {@link resolveGraphEnabledVaultFirst}).
+ */
+export interface GraphEnvDecision {
+	/** True when EITHER legacy graph env var is explicitly set (non-blank after trim). */
+	readonly explicit: boolean;
+	/**
+	 * The env-resolved gate, meaningful only when `explicit`: the AND of the set flag(s), an
+	 * UNSET flag defaulting ON — so a single explicit `false` opts out and a single explicit
+	 * `true` opts in without requiring the second legacy flag (the ISS-002 two-flag trap).
+	 * `false` when not explicit (the conservative placeholder — never read on that path).
+	 */
+	readonly enabled: boolean;
+}
+
+/** Whether a raw env value counts as EXPLICITLY set (non-blank after trim). */
+function isExplicitEnvValue(raw: string | undefined): boolean {
+	return typeof raw === "string" && raw.trim() !== "";
+}
+
+/**
+ * Read the explicit env decision for the graph gate (ISS-002). Daemon-only code, so a direct env
+ * read is correct here — mirrors {@link envPipelineConfigProvider}. Values coerce through the
+ * same {@link BoolFlag} tokens (`true`/`1`, trimmed) the schema uses, so `"true "` still enables.
+ */
+export function readGraphEnvDecision(env: NodeJS.ProcessEnv = process.env): GraphEnvDecision {
+	const rawEnabled = env.HONEYCOMB_PIPELINE_GRAPH_ENABLED;
+	const rawWrites = env.HONEYCOMB_PIPELINE_GRAPH_EXTRACTION_WRITES;
+	const enabledSet = isExplicitEnvValue(rawEnabled);
+	const writesSet = isExplicitEnvValue(rawWrites);
+	const explicit = enabledSet || writesSet;
+	if (!explicit) return { explicit: false, enabled: false };
+	const enabled =
+		(enabledSet ? BoolFlag.parse(rawEnabled) : true) && (writesSet ? BoolFlag.parse(rawWrites) : true);
+	return { explicit: true, enabled };
+}
+
+/**
+ * THE graph-gate precedence (ISS-002 — the product decision: graph persistence FOLLOWS THE
+ * MEMORY MASTER SWITCH by default). Pure + total so the precedence is unit-testable in
+ * isolation, mirroring {@link resolveMemoryEnabledVaultFirst}:
+ *
+ *   1. EXPLICIT ENV (`env.explicit` — either legacy flag set) → the env decision WINS
+ *      (back-compat / the operator opt-out; see {@link GraphEnvDecision});
+ *   2. else the VAULT `graph.enabled` setting when PRESENT (`decidedByVault`) — a saved `true`
+ *      enables graph writes with NO env editing; a saved `false` disables them even while the
+ *      memory pipeline runs;
+ *   3. else DEFAULT-FOLLOWS-MEMORY: the RESOLVED memory master switch (`memoryEnabled` — itself
+ *      vault-first over `HONEYCOMB_PIPELINE_ENABLED`). Memory on → graph on; memory off → off.
+ *
+ * The old `extractionWritesEnabled` sub-gate collapses into this ONE resolved boolean — after
+ * resolution a single switch drives the graph-persist stage (no second hidden flag).
+ */
+export function resolveGraphEnabledVaultFirst(
+	env: GraphEnvDecision,
+	vault: { decidedByVault: boolean; enabled: boolean },
+	memoryEnabled: boolean,
+): boolean {
+	if (env.explicit) return env.enabled;
+	if (vault.decidedByVault) return vault.enabled;
+	return memoryEnabled;
+}

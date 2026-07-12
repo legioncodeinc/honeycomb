@@ -37,6 +37,8 @@ import {
 	noopGraphPersistHandler,
 	persistGraphEntities,
 } from "../../../../src/daemon/runtime/pipeline/graph-persist.js";
+import { controlledWriteFanOut } from "../../../../src/daemon/runtime/pipeline/fan-out.js";
+import type { JobInput, JobQueueService, LeasedJob } from "../../../../src/daemon/runtime/services/job-queue.js";
 import {
 	FakeDeepLakeTransport,
 	fakeCredentialRecord,
@@ -642,5 +644,188 @@ describe("PRD-045c inline linker invocation (c-AC-1)", () => {
 		).resolves.toBeUndefined();
 		// The non-fatal swallow logged a warning rather than crashing the job.
 		expect(warns).toContain("graph_persist.storage_error");
+	});
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ISS-002: ONE resolved boolean drives the stage — the live unified gate
+// (`graphEnabled`) overrides the config snapshot, and the handler reads it
+// PER JOB so a reload-published settings flip gates the very next job.
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe("ISS-002 unified graph gate: the live resolved boolean drives the stage", () => {
+	it("graphEnabled=true overrides a both-flags-off config snapshot → rows are written", async () => {
+		const { storage, transport } = buildStorage(allNewResponder());
+		const { logger, warns } = makeLogSpy();
+		const config = enabledGraphConfig({ graph: { enabled: false, extractionWritesEnabled: false } });
+
+		await persistGraphEntities(storage, TEST_SCOPE, config, "mem-live-on", [TRIPLE_A], logger, "", noopLinker, true);
+
+		expect(warns).toHaveLength(0);
+		const sqls = transport.requests.map((r) => r.sql.toUpperCase());
+		expect(
+			sqls.some((s) => s.startsWith("INSERT") && s.includes("ENTITIES")),
+			"entity rows written under the live gate",
+		).toBe(true);
+		expect(
+			sqls.some((s) => s.includes("INSERT") && s.includes("ENTITY_DEPENDENCIES")),
+			"dependency rows written under the live gate",
+		).toBe(true);
+	});
+
+	it("graphEnabled=false overrides a both-flags-on config snapshot → gated_off event only, no writes", async () => {
+		const { storage, transport } = buildStorage(allNewResponder());
+		const { logger, infos, warns } = makeLogSpy();
+
+		await persistGraphEntities(
+			storage,
+			TEST_SCOPE,
+			enabledGraphConfig(),
+			"mem-live-off",
+			[TRIPLE_A],
+			logger,
+			"",
+			noopLinker,
+			false,
+		);
+
+		expect(transport.requests, "no storage calls when the live gate is off").toHaveLength(0);
+		expect(infos).toContain("graph_persist.gated_off");
+		expect(warns).toHaveLength(0);
+	});
+
+	it("the handler reads the live probe PER JOB: a mid-run flip gates the very next job (the #304 reload application)", async () => {
+		const { storage, transport } = buildStorage(allNewResponder());
+		const { logger, infos } = makeLogSpy();
+		// The mutable cell stands in for the worker's `graphEnabledLive`, which the reload
+		// closure republishes on a vault `graph.enabled` / `memory.enabled` write.
+		let live = false;
+		const handler = createGraphPersistHandler({
+			storage,
+			scope: TEST_SCOPE,
+			// The config snapshot says ON — proving the probe (not the snapshot) decides.
+			config: enabledGraphConfig(),
+			logger,
+			linkMemory: noopLinker,
+			graphEnabled: () => live,
+		});
+
+		await handler(makeJob("mem-flip-1", [TRIPLE_A]));
+		expect(transport.requests, "gate off → gated_off only").toHaveLength(0);
+		expect(infos).toContain("graph_persist.gated_off");
+
+		live = true; // the reload seam publishes the flipped vault setting…
+		await handler(makeJob("mem-flip-2", [TRIPLE_A]));
+		const sqls = transport.requests.map((r) => r.sql.toUpperCase());
+		expect(
+			sqls.some((s) => s.startsWith("INSERT") && s.includes("ENTITIES")),
+			"…and the very next job writes entity rows",
+		).toBe(true);
+		expect(
+			sqls.some((s) => s.includes("INSERT") && s.includes("ENTITY_DEPENDENCIES")),
+			"…and dependency rows",
+		).toBe(true);
+	});
+
+	it("pure-config callers keep the legacy two-flag conjunction when no live gate is supplied (d-AC-4 back-compat)", async () => {
+		const { storage, transport } = buildStorage(allNewResponder());
+		const { logger } = makeLogSpy();
+		const config = enabledGraphConfig({ graph: { enabled: true, extractionWritesEnabled: false } });
+
+		await persistGraphEntities(storage, TEST_SCOPE, config, "mem-legacy", [TRIPLE_A], logger, "", noopLinker);
+
+		expect(transport.requests, "legacy conjunction still gates config-only callers").toHaveLength(0);
+	});
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ISS-002 producer chain: the EXACT payload `controlledWriteFanOut` enqueues for
+// a committed, entity-bearing memory drives the graph-persist handler under the
+// unified gate → rows land in BOTH tables (`entities` + `entity_dependencies`).
+// This pins the seam (fan-out payload shape ↔ handler payload reader) so neither
+// side can drift silently.
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe("ISS-002 producer chain: committed memory → fan-out payload → graph rows in both tables", () => {
+	it("gate ON: the fan-out-enqueued payload produces entity + dependency + mention writes", async () => {
+		// (1) The controlled-write stage commits a memory and the fan-out enqueues the graph job.
+		const enqueued: JobInput[] = [];
+		const queue: JobQueueService = {
+			async enqueue(job: JobInput): Promise<string> {
+				enqueued.push(job);
+				return "job-chain-1";
+			},
+			async lease(): Promise<LeasedJob | null> {
+				return null;
+			},
+			async complete(): Promise<void> {},
+			async fail(): Promise<void> {},
+			start(): void {},
+			stop(): void {},
+		};
+		const upstream: StageJob = {
+			id: "cw-1",
+			kind: "memory_controlled_write",
+			attempt: 1,
+			scope: { org: "test-org", workspace: "test-ws", agentId: "test-agent" },
+			payload: {
+				entities: [{ source: "Daemon", relationship: "binds", target: "Port 3850" }],
+				content: "The Daemon binds Port 3850.",
+			},
+		};
+		await controlledWriteFanOut(queue)(upstream, { action: "inserted", memoryId: "mem-chain" });
+		expect(enqueued).toHaveLength(1);
+		expect(enqueued[0].kind).toBe("memory_graph_persist");
+
+		// (2) The SAME payload rides into the graph-persist handler with the unified gate ON.
+		const { storage, transport } = buildStorage(allNewResponder());
+		const { logger, warns } = makeLogSpy();
+		const handler = createGraphPersistHandler({
+			storage,
+			scope: TEST_SCOPE,
+			config: enabledGraphConfig({ graph: { enabled: false, extractionWritesEnabled: false } }),
+			logger,
+			linkMemory: noopLinker,
+			graphEnabled: () => true, // the resolved unified gate (vault-first / follows memory)
+		});
+		await handler({
+			id: "gp-1",
+			kind: "memory_graph_persist",
+			attempt: 1,
+			scope: { org: "test-org", workspace: "test-ws", agentId: "test-agent" },
+			payload: enqueued[0].payload,
+		});
+
+		expect(warns).toHaveLength(0);
+		const sqls = transport.requests.map((r) => r.sql.toUpperCase());
+		expect(
+			sqls.some((s) => s.startsWith("INSERT") && s.includes('"ENTITIES"')),
+			"entities table written from the fan-out payload",
+		).toBe(true);
+		expect(
+			sqls.some((s) => s.includes("INSERT") && s.includes("ENTITY_DEPENDENCIES")),
+			"entity_dependencies table written from the fan-out payload",
+		).toBe(true);
+		expect(
+			sqls.some((s) => s.includes("INSERT") && s.includes("MEMORY_ENTITY_MENTIONS")),
+			"mention link written for the committed memory",
+		).toBe(true);
+	});
+
+	it("gate OFF: the same chain produces the gated_off event only — no rows", async () => {
+		const { storage, transport } = buildStorage(allNewResponder());
+		const { logger, infos, warns } = makeLogSpy();
+		const handler = createGraphPersistHandler({
+			storage,
+			scope: TEST_SCOPE,
+			config: enabledGraphConfig(),
+			logger,
+			linkMemory: noopLinker,
+			graphEnabled: () => false,
+		});
+		await handler(makeJob("mem-chain-off", [TRIPLE_A]));
+		expect(transport.requests).toHaveLength(0);
+		expect(infos).toContain("graph_persist.gated_off");
+		expect(warns).toHaveLength(0);
 	});
 });
