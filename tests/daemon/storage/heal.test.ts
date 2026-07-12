@@ -200,6 +200,25 @@ describe("PRD-002c lazy schema healing", () => {
 		expect(classifyFailure(undefined)).toBe("other");
 	});
 
+	it("classifyFailure matches DeepLake's REAL wire phrasing (BUG-04 live-grounded)", () => {
+		// Captured read-only against the live hosted backend (api.deeplake.ai, workspace
+		// `apiary`) — the client message is the transport's `${status}: ${body.slice(0,200)}`.
+		// These strings REFUTE the BUG-04 leading hypothesis that DeepLake's phrasing evades
+		// `classifyFailure`: a real missing-column / missing-table DeepLake error DOES route to
+		// heal, so the dedup probe heals-then-inserts rather than dropping the memory. The
+		// residual `query_error` the register saw is therefore a NON-schema failure (5xx flap /
+		// 402 balance / permission), correctly routed to `other`.
+		const missingColumn =
+			'400: {"error":"Column does not exist: column \\"content_hash\\" does not exist","code":"INVALID_REQUEST","request_id":"x"}';
+		const missingTable =
+			'400: {"error":"Table does not exist: relation \\"memories\\" does not exist","code":"INVALID_REQUEST","request_id":"x"}';
+		expect(classifyFailure(missingColumn)).toBe("missing-column");
+		expect(classifyFailure(missingTable)).toBe("missing-table");
+		// A degraded-window flap / balance / auth error is NOT a schema gap → stays `other`.
+		expect(classifyFailure('503: {"error":"service unavailable"}')).toBe("other");
+		expect(classifyFailure('402: {"error":"insufficient balance"}')).toBe("other");
+	});
+
 	it("introspection transient-fails once then succeeds → heal completes (missing-column)", async () => {
 		// The information_schema SELECT flaps with a transient 503 on its first
 		// attempt, then succeeds on the bounded retry — so the column diff still
