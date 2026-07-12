@@ -325,10 +325,53 @@ describe("b-AC-7 /health reasons.portkey reflects off/ok/unconfigured/unreachabl
 		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true }).reasons?.portkey).toBe("off");
 	});
 
-	it("each supplied state is read VERBATIM (no probe) — off | ok | unconfigured | unreachable", () => {
-		for (const state of ["off", "ok", "unconfigured", "unreachable"] as const) {
+	it("each supplied state is read VERBATIM (no probe) — off | ok | unconfigured | no_model | unreachable", () => {
+		for (const state of ["off", "ok", "unconfigured", "no_model", "unreachable"] as const) {
 			expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true, portkey: state }).reasons?.portkey).toBe(state);
 		}
+	});
+
+	// ISS-005: the typed no_model state (gateway on, activeModel missing/empty → fail closed).
+	it("no_model surfaces verbatim and is independent of the coarse status", () => {
+		const detail = buildHealthDetail({ status: "ok", embeddingsEnabled: true, portkey: "no_model" });
+		expect(detail.status).toBe("ok");
+		expect(detail.reasons?.portkey).toBe("no_model");
+		expect(detail.reasons?.portkeyUnreachableStatus, "no_model carries no failure status code").toBeUndefined();
+	});
+
+	// ISS-005: the last observed failure's HTTP status renders beside `unreachable` — 401 (bad key)
+	// is distinguishable from 400 (bad request) or 503 (network). Present ONLY while unreachable.
+	it("portkeyUnreachableStatus surfaces beside unreachable and ONLY beside unreachable", () => {
+		for (const code of [400, 401, 503]) {
+			const detail = buildHealthDetail({
+				status: "ok",
+				embeddingsEnabled: true,
+				portkey: "unreachable",
+				portkeyUnreachableStatus: code,
+			});
+			expect(detail.reasons?.portkey).toBe("unreachable");
+			expect(detail.reasons?.portkeyUnreachableStatus).toBe(code);
+		}
+		// A recovered/ok/off gateway must never carry a stale status code.
+		for (const state of ["off", "ok", "unconfigured", "no_model"] as const) {
+			const detail = buildHealthDetail({
+				status: "ok",
+				embeddingsEnabled: true,
+				portkey: state,
+				portkeyUnreachableStatus: 401,
+			});
+			expect(detail.reasons?.portkeyUnreachableStatus, `${state} must not carry a status code`).toBeUndefined();
+		}
+	});
+
+	it("portkeyUnreachableStatus is normalized to a non-negative integer (no NaN → null on the wire)", () => {
+		const detail = buildHealthDetail({
+			status: "ok",
+			embeddingsEnabled: true,
+			portkey: "unreachable",
+			portkeyUnreachableStatus: Number.NaN,
+		});
+		expect(detail.reasons?.portkeyUnreachableStatus).toBe(0);
 	});
 
 	it("the portkey reason is independent of the coarse status (storage ok, portkey unreachable)", () => {

@@ -2223,11 +2223,17 @@ async function readProviderModelOverride(
  * `secret`-class value the setting accessor cannot read anyway); the key presence is checked at the
  * factory via the names-only secret listing, so a missing key surfaces as the honest `unconfigured`
  * health status, not a here-and-now failure.
+ *
+ * ── ISS-005 (fail closed, report honestly) ───────────────────────────────────
+ * A missing/empty/whitespace `activeModel` with the gateway otherwise ON returns the sentinel
+ * `"no_model"` — NEVER a routable selection carrying `model: ""` (the fresh-install incident:
+ * 373 empty-model POSTs, every job swallowed as done). The caller builds NO Portkey target and
+ * surfaces the typed `portkey: "no_model"` health state so the operator sees WHY.
  */
 async function readPortkeySelection(
 	vault: VaultSettingsReader | undefined,
 	scope: SecretScope,
-): Promise<PortkeySelection | undefined> {
+): Promise<PortkeySelection | "no_model" | undefined> {
 	if (vault === undefined) return undefined;
 	try {
 		const enabledRes = await vault.getSetting(VAULT_PORTKEY_ENABLED_KEY, scope);
@@ -2238,6 +2244,10 @@ async function readPortkeySelection(
 		if (config.length === 0) return undefined;
 		const modelRes = await vault.getSetting(VAULT_MODEL_KEY, scope);
 		const model = modelRes.ok ? String(modelRes.value) : "";
+		// ISS-005: gateway ON but no usable model → fail closed with the typed sentinel. The vault
+		// API now rejects this combination on write; this is the boot-time defense in depth for
+		// pre-existing/hand-edited vaults.
+		if (model.trim().length === 0) return "no_model";
 		const fallbackRes = await vault.getSetting(VAULT_PORTKEY_FALLBACK_KEY, scope);
 		const fallbackToProvider = fallbackRes.ok && coerceSettingBool(fallbackRes.value);
 		return { enabled: true, config, model, fallbackToProvider };
@@ -3181,9 +3191,17 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// live value on each `/health` call. Initial `off` is the conservative "Portkey not in force" state
 	// the daemon reports until the assembly-time resolution below runs.
 	let portkeyHealth: PortkeyHealth = "off";
-	/** The cached last-failure signal (b-AC-7 / c-AC-3): a real Portkey call failed → `/health` reports `unreachable`. */
-	const recordPortkeyUnreachable = (_statusCode: number): void => {
+	/** ISS-005: the HTTP status of the last observed Portkey failure — rendered beside `unreachable`. */
+	let portkeyUnreachableStatus: number | undefined;
+	/**
+	 * The cached last-failure signal (b-AC-7 / c-AC-3): a real Portkey call failed → `/health` reports
+	 * `unreachable`. ISS-005: the observed HTTP status code is KEPT (not discarded) so health renders
+	 * `unreachable` + `portkeyUnreachableStatus: 401` (bad key) vs `503` (network) — a 401 auth
+	 * rejection no longer masquerades as a generic "unreachable".
+	 */
+	const recordPortkeyUnreachable = (statusCode: number): void => {
 		portkeyHealth = "unreachable";
+		portkeyUnreachableStatus = statusCode;
 	};
 
 	const healthDetail = (): HealthDetail =>
@@ -3195,6 +3213,8 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			embeddingsWarm: liveEmbed()?.warm,
 			embeddingsFailed: liveEmbed()?.failed,
 			portkey: portkeyHealth,
+			// ISS-005: the last observed failure's HTTP status (surfaced only while `unreachable`).
+			...(portkeyUnreachableStatus !== undefined ? { portkeyUnreachableStatus } : {}),
 			captureDroppedEvents: captureDroppedEvents.read(),
 			// PRD-073b: the per-reason gated-captures totals + the two dormancy reasons, read LIVE per
 			// health call (local `~/.deeplake` reads, no DeepLake) so binding a project / confirming
@@ -3873,8 +3893,15 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// Fail-soft: any error leaves the conservative `off`.
 			let portkeyWorkerDeps: PortkeyWorkerDeps = { onUnreachable: recordPortkeyUnreachable };
 			try {
-				const portkeySelection = await readPortkeySelection(vault, secretScopeFromQueryScope(scope));
-				portkeyHealth = await resolvePortkeyAssemblyStatus(portkeySelection, scope);
+				const portkeyRead = await readPortkeySelection(vault, secretScopeFromQueryScope(scope));
+				// ISS-005 (fail closed): the `"no_model"` sentinel means the gateway is ON but
+				// `activeModel` is missing/empty — NO Portkey target is built (`selection` stays
+				// undefined for every consumer below: no chat transport, no rerank seam, so the
+				// daemon can never POST `model: ""`), and `/health` reports the typed `no_model`
+				// state instead of a false `ok`/`off`.
+				const portkeySelection = portkeyRead === "no_model" ? undefined : portkeyRead;
+				portkeyHealth =
+					portkeyRead === "no_model" ? "no_model" : await resolvePortkeyAssemblyStatus(portkeySelection, scope);
 				portkeyWorkerDeps = {
 					...(portkeySelection !== undefined ? { selection: portkeySelection } : {}),
 					onUnreachable: recordPortkeyUnreachable,
