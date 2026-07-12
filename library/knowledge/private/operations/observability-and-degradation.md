@@ -1,6 +1,6 @@
 # Observability and Degradation
 
-> Category: Operations | Version: 1.1 | Date: July 2026 | Status: Active
+> Category: Operations | Version: 1.2 | Date: July 2026 | Status: Active
 
 How Honeycomb surfaces the engine's degradation modes, embeddings off, lexical fallback, partial storage degradation, a missing table, in recall responses, `/health`, and the dashboard, so a degraded daemon never silently looks healthy.
 
@@ -92,6 +92,10 @@ The queue snapshot shows the backlog; the pipeline's log events show whether any
 | `stage.completed` / `stage.failed` | Per-stage outcome (these predate #246 but were silent until the logger was wired). |
 
 The diagnostic reading is direct: absence of a `started` event means no loop is pumping the queue, which is exactly the state the lease wedge and the trailing-space `HONEYCOMB_PIPELINE_ENABLED` bug both produced (both fixed in PR #248; see [`../ai/memory-pipeline.md`](../ai/memory-pipeline.md)). A `started` with no `dispatched` under a non-empty `queued` count from `/api/diagnostics/jobs` is a coordinator whose union does not include the backlogged kind. These events carry stage and kind names and counts only, so they inherit the no-secret invariant below.
+
+### Controlled-write dedup-probe failures
+
+The write stage adds one diagnostic the driver-heartbeat events do not carry. When the controlled-writes dedup SELECT fails for a genuine reason (not a heal-able missing table or column), the stage emits `controlled_write.dedup_probe_failed { classification, kind, status, transient, reason }` and throws an enriched error that lands in the queue's `last_error_class` (BUG-04, PR #293, v0.12.2). Before this, a memory dropped here against an opaque `query_error` that hid the real DeepLake error text and HTTP status, so an operator could not tell a 5xx backend flap from a 402 balance exhaustion from a permission fault. The event and the enriched error now name the failure class and status. The SHA-256 `content_hash` the probe SQL interpolates is stripped before it reaches either surface, so this diagnostic inherits the no-secret invariant below. The full mechanics, including the correctness-preserving safety throw and the still-open durability follow-up (BUG-04b), are in [`../ai/memory-pipeline.md`](../ai/memory-pipeline.md).
 
 ## Mode-gated detail: do not leak topology
 
