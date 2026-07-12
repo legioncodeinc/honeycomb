@@ -83,6 +83,7 @@ export function healTargetFor(name: string): HealTarget {
 export { type CatalogRegistry, PATTERN_PRIMITIVE } from "./registry.js";
 export { type CatalogScope, type CatalogTable, type WritePattern } from "./types.js";
 export {
+	buildDedupCheckManySql,
 	buildDedupCheckSql,
 	buildMemoryCountsByProjectSql,
 	contentHash,

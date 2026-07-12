@@ -1,6 +1,6 @@
 {
   "name": "honeycomb-codex",
-  "version": "0.12.2",
+  "version": "0.13.0",
   "description": "Honeycomb — persistent shared memory for OpenAI Codex CLI via the local Honeycomb daemon",
   "type": "module",
   "license": "AGPL-3.0-or-later"
