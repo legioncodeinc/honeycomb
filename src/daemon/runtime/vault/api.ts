@@ -30,6 +30,7 @@
 
 import type { Context, Hono } from "hono";
 
+import type { PipelineReloadSeam } from "../pipeline/reload.js";
 import { headerScopeResolver, type ScopeResolver } from "../secrets/api.js";
 import type { Daemon } from "../server.js";
 import { catalogView, isValidProviderModel, providerEntry } from "./catalog.js";
@@ -105,6 +106,28 @@ export function isValidRecallMode(value: string): value is RecallMode {
 	return (RECALL_MODES as readonly string[]).includes(value);
 }
 
+/**
+ * The setting keys whose write TRIGGERS the pipeline live-reload seam (SP-1 / ISS-001/ISS-005):
+ * the provider/model selection, the memory master gate, and the three Portkey gateway keys — the
+ * exact inputs `buildPipelineWorker` snapshots into the inference client + extraction gate at
+ * boot. A write to any OTHER key (dashboard prefs, recallMode, pollinating/embeddings toggles —
+ * each with its own live path or no pipeline bearing) does NOT fire the seam, so unrelated
+ * settings churn never costs an inference-client rebuild.
+ */
+export const PIPELINE_WATCHED_SETTING_KEYS = [
+	"activeProvider",
+	"activeModel",
+	MEMORY_ENABLED_KEY,
+	"portkey.enabled",
+	"portkey.config",
+	"portkey.fallbackToProvider",
+] as const;
+
+/** Whether a `setting` write to `key` must trigger the pipeline live-reload (see the list above). */
+export function isPipelineWatchedSettingKey(key: string): boolean {
+	return (PIPELINE_WATCHED_SETTING_KEYS as readonly string[]).includes(key);
+}
+
 /** A dashboard-pref key prefix accepted as a free-form scalar setting. */
 export const DASHBOARD_PREF_PREFIX = "dashboard." as const;
 
@@ -120,6 +143,13 @@ export interface SettingsApiDeps {
 	readonly store: VaultStore;
 	/** The per-request scope resolver (default: the shared header-based resolver). */
 	readonly scope?: ScopeResolver;
+	/**
+	 * SP-1 / ISS-001: the pipeline live-reload trigger, invoked FIRE-AND-FORGET after a successful
+	 * write to a {@link PIPELINE_WATCHED_SETTING_KEYS} key (post-persist, never blocking the 201).
+	 * The seam itself debounces (~1s) so a save burst coalesces into one rebuild. ABSENT (unit
+	 * mounts, deferred assemblies) → the write persists exactly as before with no live effect.
+	 */
+	readonly reload?: PipelineReloadSeam;
 }
 
 /**
@@ -196,6 +226,13 @@ export function mountSettingsGroup(group: Hono, deps: SettingsApiDeps): void {
 				return c.json({ error: "bad_request", reason: "setting class is not writable" }, 400);
 			}
 			return c.json({ error: "store_failed", reason: "could not store the setting" }, 502);
+		}
+		// SP-1 / ISS-001: a PERSISTED write to a pipeline-watched key triggers the live reload —
+		// fire-and-forget (requestReload only schedules; the debounced rebuild runs off this
+		// request), and only AFTER the store accepted the value, so a rejected/failed write never
+		// causes a rebuild. Unwatched keys (dashboard.*, recallMode, …) never fire it.
+		if (deps.reload !== undefined && isPipelineWatchedSettingKey(key)) {
+			deps.reload.requestReload(`setting:${key}`);
 		}
 		// The response echoes the key + value (a setting is daemon-readable) — never a secret.
 		return c.json({ ok: true, key, value }, 201);

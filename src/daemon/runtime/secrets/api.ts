@@ -36,6 +36,7 @@ import type { Hono } from "hono";
 import type { DeploymentMode } from "../config.js";
 import type { QueryScope } from "../../storage/client.js";
 import { getRequestIdentity } from "../middleware/permission.js";
+import type { PipelineReloadSeam } from "../pipeline/reload.js";
 import type { SecretScope } from "./contracts.js";
 import type { SecretExecRequest, SecretExecRunner } from "./exec.js";
 import type { SecretsStore } from "./store.js";
@@ -138,6 +139,15 @@ export interface SecretsApiDeps {
 	 * submission's `vaultRefs`, so there is no separate value-returning vault route by design.
 	 */
 	readonly execRunner?: SecretExecRunner;
+	/**
+	 * SP-1 / ISS-001: the pipeline live-reload trigger, invoked FIRE-AND-FORGET after a successful
+	 * secret POST/DELETE (post-persist, never blocking the response, never carrying a value — the
+	 * reason tag is a fixed string). ANY name may be the provider credential an `apiKeyRef`
+	 * resolves (`ANTHROPIC_API_KEY`, `PORTKEY_API_KEY`, a custom ref), so every persisted write
+	 * fires; the seam's ~1s debounce makes the rebuild cost one pass per burst. ABSENT (unit
+	 * mounts, deferred assemblies) → the store write behaves exactly as before.
+	 */
+	readonly reload?: PipelineReloadSeam;
 }
 
 /**
@@ -241,6 +251,10 @@ export function mountSecretsApi(group: Hono, deps: SecretsApiDeps): void {
 			}
 			return c.json({ error: "store_failed", reason: "could not store the secret" }, 502);
 		}
+		// SP-1 / ISS-001: a PERSISTED key triggers the debounced pipeline live-reload so the saved
+		// credential takes effect on the next extraction job — no daemon restart. Fire-and-forget
+		// (requestReload only schedules) and post-persist only (a rejected write never fires).
+		deps.reload?.requestReload("secret:set");
 		// 201 carries the NAME back (it is public) and NOTHING else — never the value.
 		return c.json({ ok: true, name }, 201);
 	});
@@ -260,6 +274,9 @@ export function mountSecretsApi(group: Hono, deps: SecretsApiDeps): void {
 			}
 			return c.json({ error: "delete_failed", reason: "could not delete the secret" }, 502);
 		}
+		// SP-1: a REMOVED key must also reach the pipeline (the `'auto'` gate + `/health` should
+		// stop claiming a provider that no longer resolves) — same post-persist, fire-and-forget shape.
+		deps.reload?.requestReload("secret:delete");
 		return c.json({ ok: true, name });
 	});
 }
