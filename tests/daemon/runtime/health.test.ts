@@ -121,10 +121,10 @@ describe("AC-2 /health detail NAMES the down subsystem, not a bare degraded", ()
 	it("PRD-025 honesty: embeddingsState reports off/warming/on/failed from the live warm+failed signals", () => {
 		// Disabled → off (coarse + fine agree).
 		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: false }).reasons?.embeddingsState).toBe("off");
-		// Enabled but not-yet-warm → warming (the coarse field still says "on" — this is the dishonesty the
-		// fine state corrects; recall is lexical MEANWHILE).
+		// Enabled but not-yet-warm → warming. ISS-008: the COARSE field now mirrors the honest state
+		// (not-warm → NOT "on") instead of latching "on" from the enabled bit alone.
 		const warming = buildHealthDetail({ status: "ok", embeddingsEnabled: true, embeddingsWarm: false });
-		expect(warming.reasons?.embeddings).toBe("on");
+		expect(warming.reasons?.embeddings).toBe("warming");
 		expect(warming.reasons?.embeddingsState).toBe("warming");
 		// Enabled AND warm → on.
 		expect(buildHealthDetail({ status: "ok", embeddingsEnabled: true, embeddingsWarm: true }).reasons?.embeddingsState).toBe("on");
@@ -133,6 +133,43 @@ describe("AC-2 /health detail NAMES the down subsystem, not a bare degraded", ()
 			buildHealthDetail({ status: "ok", embeddingsEnabled: true, embeddingsWarm: false, embeddingsFailed: true }).reasons
 				?.embeddingsState,
 		).toBe("failed");
+	});
+
+	it("ISS-007/ISS-008: the coarse embeddings field is honest LIVE state — additive suspect/failed values, never 'on' while not warm", () => {
+		// A wedge-in-progress (warm child, one unanswered probe, confirming re-probe pending) → suspect
+		// on BOTH fields: honestly not-"on" while unconfirmed, without flapping to "failed" on one miss.
+		const suspect = buildHealthDetail({
+			status: "ok",
+			embeddingsEnabled: true,
+			embeddingsWarm: true,
+			embeddingsSuspect: true,
+		});
+		expect(suspect.reasons?.embeddings).toBe("suspect");
+		expect(suspect.reasons?.embeddingsState).toBe("suspect");
+		// A confirmed failure wins over suspect (terminal beats pending-confirmation).
+		expect(
+			buildHealthDetail({
+				status: "ok",
+				embeddingsEnabled: true,
+				embeddingsWarm: true,
+				embeddingsSuspect: true,
+				embeddingsFailed: true,
+			}).reasons?.embeddings,
+		).toBe("failed");
+		// Warm + live (no suspect) → the coarse field reports "on", exactly as before.
+		const on = buildHealthDetail({ status: "ok", embeddingsEnabled: true, embeddingsWarm: true, embeddingsSuspect: false });
+		expect(on.reasons?.embeddings).toBe("on");
+		// Disabled stays "off" regardless of stale liveness signals.
+		expect(
+			buildHealthDetail({ status: "ok", embeddingsEnabled: false, embeddingsWarm: true, embeddingsSuspect: true }).reasons
+				?.embeddings,
+		).toBe("off");
+		// ADDITIVE for existing consumers: every value is a plain string (doctor's health-probe keeps
+		// it verbatim — this is what un-blinds doctor with no change on its side), and only the
+		// truly-servable state equals "on".
+		for (const detail of [suspect, on]) {
+			expect(typeof detail.reasons?.embeddings).toBe("string");
+		}
 	});
 
 	it("legacy callers (no warm signal) → embeddingsState mirrors the coarse enabled/disabled field", () => {
