@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.13.1 — 2026-07-12
+
+Fixes several daemon and CLI bugs: the pollinate status now correctly reports below-threshold instead of misleadingly showing 'running', the cursor-agent login check performs a real status probe, project registry sync no longer produces duplicate entries, and memory lifecycle routes (conflicts, stale-refs, history) are no longer incorrectly shadowed.
+
 ## v0.13.0 — 2026-07-12
 
 Adds a durable local outbox that safely queues and later retries memory writes when the storage backend hits transient failures, so distilled memories are no longer dropped during degraded windows. Also introduces a new `honeycomb memory redrive` command and diagnostics endpoint to recover previously lost memories, plus improved health/observability reporting for the outbox backlog.
