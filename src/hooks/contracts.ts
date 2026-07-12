@@ -85,6 +85,15 @@ export type ContextEnvelope =
 			 * retained alongside it as the Channel-2 fallback, mirroring the 075b block-and-inject precedent.
 			 */
 			readonly hookSpecificOutput?: { readonly hookEventName: string; readonly additionalContext: string };
+			/**
+			 * ISS-022 (additive): the OPTIONAL user-visible one-liner (`HookResult.systemMessage`).
+			 * Claude Code renders a top-level `systemMessage` response field to the USER (a documented
+			 * pass-through field — `references/claude-code/userprompt-response-schema.ts:49`), so the
+			 * recall arm surfaces "N memories injected" without touching the model channel. Stamped
+			 * ONLY on the `contextHookEvent` (per-turn recall) envelope; the session-start prime
+			 * envelope NEVER carries it (the a-AC-8 byte-identical guard).
+			 */
+			readonly systemMessage?: string;
 	  }
 	| { readonly channel: "user-visible"; readonly text: string };
 
@@ -190,8 +199,15 @@ export interface HarnessShim {
 	 * envelope (FR-10 / c-AC-5). The core renders ONE block; the shim routes it
 	 * model-only or user-visible per {@link contextChannel}. The ONLY place the
 	 * channel divergence is applied.
+	 *
+	 * ISS-022 (additive, source-compatible): `extras` optionally carries the core's
+	 * user-visible `systemMessage`. The shared engine applies it per channel — spread
+	 * top-level onto the `contextHookEvent` (per-turn recall) model-only envelope,
+	 * appended to the user-visible text — and IGNORES it on the plain model-only
+	 * (session-start prime) envelope so that arm stays byte-identical (a-AC-8).
+	 * Existing single-argument callers are unaffected.
 	 */
-	renderContext(block: string): ContextEnvelope;
+	renderContext(block: string, extras?: { readonly systemMessage?: string }): ContextEnvelope;
 
 	/**
 	 * OPTIONAL: hand the session-start hygiene pulls (skills / assets / graph) to a

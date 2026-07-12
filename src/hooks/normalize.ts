@@ -144,8 +144,8 @@ export function createShim(spec: ShimSpec): HarnessShim {
 				runtimePath: spec.runtimePath,
 			};
 		},
-		renderContext(block: string): ContextEnvelope {
-			return renderChannel(spec, block);
+		renderContext(block: string, extras?: { readonly systemMessage?: string }): ContextEnvelope {
+			return renderChannel(spec, block, extras);
 		},
 		// Surface the optional off-process hygiene hook only when the spec supplies it.
 		...(spec.spawnHygieneChild !== undefined ? { spawnHygieneChild: spec.spawnHygieneChild } : {}),
@@ -162,19 +162,31 @@ function deriveMeta(spec: ShimSpec, raw: unknown, base: HookSessionMeta): HookSe
  * (a-AC-5): a `model-only` shim that declares `contextHookEvent` ALSO wraps the block under
  * `hookSpecificOutput` with that event name (the per-turn `UserPromptSubmit` recall arm); a
  * shim WITHOUT it emits the flat envelope unchanged (the session-start prime — a-AC-8).
+ *
+ * ISS-022 (`extras.systemMessage`, the user-visible injection notice), gated per arm:
+ *   - model-only WITH `contextHookEvent` (the per-turn recall arm): spread top-level
+ *     `systemMessage` onto the envelope — Claude Code renders that documented field to the USER
+ *     (`references/claude-code/userprompt-response-schema.ts:49`).
+ *   - model-only WITHOUT `contextHookEvent` (the session-start prime): extras are IGNORED, so
+ *     the prime envelope stays byte-identical (the a-AC-8 regression guard, unmodified).
+ *   - user-visible: append `"\n" + systemMessage` after the rendered text (future-proofs Codex
+ *     et al. with ZERO per-shim edits — the notice rides the transcript channel they already own).
  */
-function renderChannel(spec: ShimSpec, block: string): ContextEnvelope {
+function renderChannel(spec: ShimSpec, block: string, extras?: { readonly systemMessage?: string }): ContextEnvelope {
+	const systemMessage = extras?.systemMessage;
 	if (spec.contextChannel === "model-only") {
 		if (spec.contextHookEvent !== undefined) {
 			return {
 				channel: "model-only",
 				additionalContext: block,
 				hookSpecificOutput: { hookEventName: spec.contextHookEvent, additionalContext: block },
+				...(systemMessage !== undefined ? { systemMessage } : {}),
 			};
 		}
 		return { channel: "model-only", additionalContext: block };
 	}
-	const text = spec.renderUserVisible ? spec.renderUserVisible(block) : block;
+	const rendered = spec.renderUserVisible ? spec.renderUserVisible(block) : block;
+	const text = systemMessage !== undefined ? `${rendered}\n${systemMessage}` : rendered;
 	return { channel: "user-visible", text };
 }
 

@@ -115,7 +115,9 @@ export async function runUserPromptRecall(
 		if (block.length > 0) {
 			const refs = [...prior.injectedRefs, ...newHits.map((hit) => hit.ref)].slice(-MAX_TRACKED_REFS);
 			store.save(sessionId, { injectedRefs: refs, turns, lastNudgeTurn: prior.lastNudgeTurn });
-			return { ok: true, additionalContext: block };
+			// ISS-022: surface the injection to the USER (not just the model). Fires ONLY on a
+			// genuinely-new block — deduped-only, empty, and nudge turns stay silent below.
+			return { ok: true, additionalContext: block, systemMessage: renderInjectionNotice(newHits, block) };
 		}
 	}
 
@@ -144,6 +146,19 @@ export function renderRecallBlock(hits: readonly RecallHit[]): string {
 		.map((text) => `- ${text}`);
 	if (items.length === 0) return "";
 	return `${RECALL_BLOCK_HEADER}\n\n${items.join("\n\n")}`;
+}
+
+/**
+ * ISS-022: render the user-visible injection notice for a NEW injected block. `N` counts the
+ * non-empty new hits (the ones {@link renderRecallBlock} actually rendered); `~X tokens` is the
+ * local chars/4 heuristic over the rendered block — hooks CANNOT import daemon code (the
+ * NON_DAEMON_ROOT boundary), so the estimate mirrors the daemon's own chars-per-token convention
+ * without reaching for it. Deterministic + cheap: no I/O, no daemon call.
+ */
+export function renderInjectionNotice(newHits: readonly RecallHit[], block: string): string {
+	const injectedCount = newHits.filter((hit) => hit.text.trim().length > 0).length;
+	const approxTokens = Math.ceil(block.length / 4);
+	return `🐝 Honeycomb: ${injectedCount} memories injected (~${approxTokens} tokens)`;
 }
 
 /**

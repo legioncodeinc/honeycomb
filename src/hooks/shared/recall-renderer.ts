@@ -48,16 +48,20 @@ import type { HookCredential, RecallHit, RecallRenderer, RecallRenderRequest } f
 export const RECALL_PATH = "/api/memories/recall" as const;
 
 /**
- * The default fetch timeout (ms). Tighter than {@link import("./prime-renderer.js").DEFAULT_PRIME_TIMEOUT_MS}
- * (5s) because this recall rides EVERY qualifying turn, not once per session: a slow daemon
- * must not stall the turn, so the bound degrades to "no injection" quickly (a-AC-3).
+ * The default fetch timeout (ms). This recall rides EVERY qualifying turn, not once per session:
+ * a slow daemon must not stall the turn indefinitely, so the bound degrades to "no injection"
+ * (a-AC-3) — but the bound must sit ABOVE what a real successful recall costs, or the client
+ * silently discards work the daemon completed.
  *
- * PRD-077b (L-B4): raised 2_500 → 4_000 to give the ~1.5s single-round-trip fast recall real
- * headroom — the client budget now sits COMFORTABLY above the fast-lane server-side deadline
- * (`recallFastDeadlineMs`, default 3000ms) so the daemon's own deadline fires first (freeing its
- * slot) while the client still fails soft to `""` past 4s. In-family with the prime path's 5s.
+ * PRD-077b, revised (ISS-022): raised 4_000 → 6_000. Live end-to-end per-turn recall measures
+ * 3.0–4.6s on Windows: the daemon fast-lane's own server-side deadline (`recallFastDeadlineMs`,
+ * default 3000ms) PLUS embed, loopback transport, and Node hook-binary startup overhead. At the
+ * old 4s budget the client aborted mid-flight at p95 and threw away REAL daemon successes —
+ * recall looked "empty" on turns where the daemon had hits in hand. 6s clears the observed max
+ * with margin while still bounding a genuinely stalled turn, and the server-side fast deadline
+ * (3s) still fires first, freeing the daemon slot well inside the client budget.
  */
-export const DEFAULT_RECALL_TIMEOUT_MS = 4_000;
+export const DEFAULT_RECALL_TIMEOUT_MS = 6_000;
 
 /** The default per-turn hit `limit` - small, because this injects on every turn (recall cadence open question). */
 export const DEFAULT_RECALL_LIMIT = 5;

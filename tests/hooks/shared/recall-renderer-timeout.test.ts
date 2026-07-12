@@ -1,10 +1,11 @@
 /**
- * PRD-077b (L-B4 / b-AC-4) — the per-turn renderer timeout bump (2_500 → 4_000ms).
+ * PRD-077b (L-B4 / b-AC-4), revised by ISS-022 — the per-turn renderer timeout (now 6_000ms).
  *
- * Verifies the constant is 4s (real headroom above the ~1.5s fast query and the fast-lane
- * server-side deadline) AND that the renderer STILL fails soft to `[]` past it — the byte-for-byte
- * PRD-076a fail-soft posture. Drives the production {@link createRecallRenderer} against an injected
- * `fetch` stub (no real socket).
+ * Live end-to-end per-turn recall measures 3.0–4.6s on Windows (daemon fast-lane 3.0s deadline +
+ * embed/transport/node-startup overhead), so the earlier 4s budget silently discarded real daemon
+ * successes at p95. Verifies the constant is 6s AND that the renderer STILL fails soft to `[]`
+ * past it — the byte-for-byte PRD-076a fail-soft posture. Drives the production
+ * {@link createRecallRenderer} against an injected `fetch` stub (no real socket).
  *
  * No `.skip` / `.only`; `vitest run` is CI.
  */
@@ -21,9 +22,9 @@ const META: HookSessionMeta = {
 	agent: "claude-code",
 };
 
-describe("L-B4 (b-AC-4): the per-turn recall timeout is raised to 4s and still fails soft", () => {
-	it("DEFAULT_RECALL_TIMEOUT_MS is 4000ms", () => {
-		expect(DEFAULT_RECALL_TIMEOUT_MS).toBe(4_000);
+describe("ISS-022 (revising L-B4/b-AC-4): the per-turn recall timeout is raised to 6s and still fails soft", () => {
+	it("DEFAULT_RECALL_TIMEOUT_MS is 6000ms (clears the observed 3.0–4.6s live max with margin)", () => {
+		expect(DEFAULT_RECALL_TIMEOUT_MS).toBe(6_000);
 	});
 
 	it("the renderer's default AbortController budget matches the constant and a hang degrades to []", async () => {
@@ -37,8 +38,8 @@ describe("L-B4 (b-AC-4): the per-turn recall timeout is raised to 4s and still f
 			const renderer = createRecallRenderer({ fetch: hangingFetch });
 			const pending = renderer.render({ meta: META, credential: { token: "t", org: "acme" }, query: "auth?" });
 
-			// Just before the 4s budget the fetch is still pending; past it the AbortController fires and
-			// the renderer degrades to [] (fail-soft), proving the default budget IS the 4000ms constant.
+			// Just before the 6s budget the fetch is still pending; past it the AbortController fires and
+			// the renderer degrades to [] (fail-soft), proving the default budget IS the 6000ms constant.
 			await vi.advanceTimersByTimeAsync(DEFAULT_RECALL_TIMEOUT_MS - 1);
 			await vi.advanceTimersByTimeAsync(2);
 			expect(await pending).toEqual([]);
