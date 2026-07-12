@@ -597,13 +597,13 @@ describe("PRD-044c — /api/memories/recall reads the recallMode setting and hon
 
 // ── PRD-049b: per-project recall scoping on the /api/memories/recall handler ──
 describe("PRD-049b recall handler project scoping (49b-AC-2 / D8)", () => {
-	it("with NO cwd, the recall narrows to inbox+global and surfaces the visible D8 warning", async () => {
+	it("with NO cwd, the recall runs WORKSPACE-WIDE (ISS-006 corpus parity) and surfaces the visible D8 warning", async () => {
 		const term = "projterm";
 		const { daemon, storage, fake } = makeDaemon(term);
 		mountMemoriesApi(daemon, { storage });
 		const res = await daemon.app.request("/api/memories/recall", {
 			method: "POST",
-			headers: headers(), // no cwd body field, no x-honeycomb-cwd header → unbound.
+			headers: headers(), // no cwd body field, no x-honeycomb-cwd header → degraded resolution.
 			body: JSON.stringify({ query: term }),
 		});
 		expect(res.status).toBe(200);
@@ -612,12 +612,15 @@ describe("PRD-049b recall handler project scoping (49b-AC-2 / D8)", () => {
 		expect(json.projectScopeDegraded).toBe(true);
 		expect(typeof json.warning).toBe("string");
 		expect(json.warning).toContain("project scoping degraded");
-		// Every memory arm narrowed to the inbox + the unset sentinel (never a real project).
+		// ISS-006 (corpus parity): degraded resolution applies NO project predicate — the recall
+		// corpus is the WHOLE workspace partition, EXACTLY the corpus the degraded GET /api/memories
+		// list shows. (Pre-fix, recall narrowed to inbox-only here — the OPPOSITE fallback of the
+		// list's no-filter for the same input, so search operated over a different set than the
+		// list rendered.)
 		const arms = fake.requests.filter((r) => /FROM\s+"(memories|memory|sessions)"/i.test(r.sql) && /AS source/i.test(r.sql));
 		expect(arms.length).toBeGreaterThan(0);
 		for (const r of arms) {
-			expect(r.sql).toContain("project_id = '__unsorted__'");
-			expect(r.sql).toContain("project_id = ''");
+			expect(r.sql).not.toContain("project_id");
 		}
 	});
 

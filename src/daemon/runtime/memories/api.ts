@@ -145,17 +145,32 @@ export const RECALL_TIMING_EVENT = "recall.timing" as const;
 export const RECALL_ARM_ERROR_EVENT = "recall.arm_error" as const;
 
 /**
- * PRD-049b (D8): the structured event emitted when a recall could NOT resolve its session
- * project (no cwd available) and fell back to the workspace `__unsorted__` inbox + workspace-
- * global rows. A fixed, greppable identifier so the dashboard + a test can filter on exactly
- * this line. Carries NO query text/org/cwd — only the coarse degraded fact (D-5 secret-free).
+ * PRD-049b (D8) / ISS-006: the structured event emitted when a recall could NOT resolve its
+ * session project (no project header, no cwd). A fixed, greppable identifier so the dashboard +
+ * a test can filter on exactly this line. Carries NO query text/org/cwd — only the coarse
+ * degraded fact + the scope decision `mode` (D-5 secret-free).
+ *
+ * ── The unified scope decision (ISS-006 corpus parity) ───────────────────────
+ * Pre-fix the two surfaces resolved the SAME degraded input to OPPOSITE corpora: the list
+ * treated it as NO filter (whole workspace) while recall narrowed to inbox+global — so search
+ * literally operated over a different set than the list showed. The unified semantic is
+ * "no project → the WHOLE-WORKSPACE corpus" (the list is the user's mental model), so the
+ * event's `mode` is now `workspace_wide_fallback` (was `inbox_global_fallback`). The event
+ * keeps firing on every degraded recall, so any future divergence stays observable.
  */
 export const PROJECT_SCOPE_DEGRADED_EVENT = "recall.project_scope_degraded" as const;
 
-/** The visible warning string a project-scope-degraded recall response carries (D8). */
+/**
+ * The fixed `mode` tag the degraded event carries (ISS-006): degraded resolution falls back to
+ * the WHOLE-WORKSPACE corpus — the same corpus the degraded `GET /api/memories` list shows.
+ */
+export const PROJECT_SCOPE_DEGRADED_MODE = "workspace_wide_fallback" as const;
+
+/** The visible warning string a project-scope-degraded recall response carries (D8 / ISS-006). */
 export const PROJECT_SCOPE_DEGRADED_WARNING: string =
 	"project scoping degraded: no working directory was resolvable for this session, so recall " +
-	"was narrowed to the workspace inbox + workspace-global rows only (no project could be resolved).";
+	"ran over the whole workspace corpus (the same corpus the memories list shows) instead of a " +
+	"project-narrowed one.";
 
 /**
  * PRD-078a-fix: the structured event emitted ONCE when the in-daemon local ANN cold-build finishes.
@@ -530,14 +545,15 @@ function recallResponse(
 }
 
 /**
- * Emit the structured `recall.project_scope_degraded` event (PRD-049b / D8) when — and ONLY
- * when — a recall could not resolve its session project (no cwd available) and fell back to the
- * inbox + workspace-global rows. Subsystem state ONLY: a fixed `mode` tag, no query/org/cwd.
+ * Emit the structured `recall.project_scope_degraded` event (PRD-049b / D8, ISS-006) when — and
+ * ONLY when — a recall could not resolve its session project (no project header, no cwd) and
+ * fell back to the WHOLE-WORKSPACE corpus (the unified scope decision — the same corpus the
+ * degraded list shows). Subsystem state ONLY: a fixed `mode` tag, no query/org/cwd.
  * A project-resolved recall (bound OR inbox-with-cwd) logs NOTHING.
  */
 function logProjectScopeDegraded(logger: RequestLogger | undefined, project: RequestProjectScope): void {
 	if (logger === undefined || !project.degraded) return;
-	logger.event(PROJECT_SCOPE_DEGRADED_EVENT, { mode: "inbox_global_fallback" });
+	logger.event(PROJECT_SCOPE_DEGRADED_EVENT, { mode: PROJECT_SCOPE_DEGRADED_MODE });
 }
 
 /**
@@ -795,6 +811,12 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 				// PRD-049b (49b-AC-2): the resolved project segment threaded into recall.
 				projectId: project.projectId,
 				projectBound: project.bound,
+				// ISS-006 (corpus parity): DEGRADED resolution (no project header, no cwd) recalls over
+				// the WHOLE workspace corpus — the exact corpus the degraded GET /api/memories list
+				// shows — instead of the pre-fix inbox-only narrowing (the opposite fallback for the
+				// same input). The decision is observable via `recall.project_scope_degraded`
+				// (mode: workspace_wide_fallback) + the response's visible warning.
+				...(project.degraded ? { projectUnscoped: true } : {}),
 				...(parsed.data.limit !== undefined ? { limit: parsed.data.limit } : {}),
 				// PRD-047e: thread the optional token budget through. ABSENT → the engine skips the
 				// MMR/budget stage and runs the unchanged fixed top-`limit` path (e-AC-4).

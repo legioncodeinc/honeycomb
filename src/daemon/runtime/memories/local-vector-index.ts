@@ -65,6 +65,8 @@ export interface LocalVectorEntry {
 	readonly projectId: string;
 	/** The `is_deleted` flag (BIGINT 0/1); a `1` (soft-deleted) row is never returned. */
 	readonly isDeleted: number;
+	/** ISS-006: the `memories.type` taxonomy tag (or ""), projected as `memory_type` on a hit row. */
+	readonly memoryType: string;
 }
 
 /**
@@ -83,9 +85,13 @@ export interface LocalVectorIndex {
 	 * Flat cosine search over the resident `memories` vectors, scoped + top-k'd.
 	 * Returns rows in the SAME shape {@link import("./recall.js").buildFastSemanticArmSql}
 	 * produces so `recallFast`'s `rowsToRankedArm` consumes them byte-unchanged:
-	 * `{ source: "memories", id, text, created_at, score }`, ordered by `score` DESC.
+	 * `{ source: "memories", id, text, created_at, memory_type, score }`, ordered by `score` DESC.
+	 *
+	 * ISS-006 (corpus parity): the OPTIONAL `unscoped` flag mirrors the recall request's
+	 * `projectUnscoped` — `true` applies NO project filter (the whole workspace partition,
+	 * matching the degraded list), so the in-RAM arm and the `<#>` SQL arms stay corpus-identical.
 	 */
-	search(queryVec: readonly number[], projectId: string, k: number): StorageRow[];
+	search(queryVec: readonly number[], projectId: string, k: number, unscoped?: boolean): StorageRow[];
 }
 
 /** A scored entry the flat scan produces before it is mapped to the row shape. */
@@ -93,20 +99,34 @@ interface ScoredEntry {
 	readonly id: string;
 	readonly content: string;
 	readonly createdAt: string;
+	/** ISS-006: the `memories.type` tag (or "") mapped onto the hit row as `memory_type`. */
+	readonly memoryType: string;
 	/** The VERBATIM `((1 + (emb <#> q)) / 2)` similarity (from {@link deeplakeCosineScore}). */
 	readonly score: number;
 }
 
+/** ISS-006: the reserved workspace-inbox project id — mirrors `UNSORTED_PROJECT_ID` (projects catalog). */
+const INBOX_PROJECT_ID = "__unsorted__";
+
 /**
  * The RESOLVED project-scope admission for one entry — the in-process mirror of
- * the 049b `buildProjectScopeConjunct` predicate (`recall/scope-clause.ts`).
- * A row is admitted iff its `project_id` equals the session's `projectId`, is the
- * UNSET sentinel `""`, or is NULL/undefined (a legacy pre-049b row) — every OTHER
- * project's rows are excluded, EXACTLY as the `<#>` SQL filters them server-side,
- * so a project-B row is never returned even on a strong cosine hit.
+ * the 049b `buildProjectScopeConjunct` predicate (`recall/scope-clause.ts`), as
+ * widened by ISS-006. A row is admitted iff its `project_id` equals the session's
+ * `projectId`, is the UNSET sentinel `""`, is NULL/undefined (a legacy pre-049b
+ * row), or is the workspace `__unsorted__` inbox (ISS-006 inbox reachability —
+ * the SQL arms pass `includeInbox: true`, so the in-RAM filter admits the same
+ * set) — every OTHER project's rows are excluded, EXACTLY as the `<#>` SQL
+ * filters them server-side, so a project-B row is never returned even on a
+ * strong cosine hit.
  */
 function admittedByProjectScope(entryProjectId: string | null | undefined, projectId: string): boolean {
-	return entryProjectId === projectId || entryProjectId === "" || entryProjectId === null || entryProjectId === undefined;
+	return (
+		entryProjectId === projectId ||
+		entryProjectId === "" ||
+		entryProjectId === null ||
+		entryProjectId === undefined ||
+		entryProjectId === INBOX_PROJECT_ID
+	);
 }
 
 /**
@@ -200,6 +220,7 @@ export class InMemoryLocalVectorIndex implements LocalVectorIndex {
 				createdAt: cellText(row.created_at),
 				projectId: cellText(row.project_id),
 				isDeleted: cellNumber(row.is_deleted),
+				memoryType: cellText(row.memory_type), // ISS-006: the taxonomy tag ("" on a thin page).
 			});
 		}
 		this.built = true;
@@ -214,13 +235,15 @@ export class InMemoryLocalVectorIndex implements LocalVectorIndex {
 	 * return the top-k as rows in the {@link import("./recall.js").buildFastSemanticArmSql} shape so
 	 * the downstream RRF/recency is byte-identical to the `<#>` path.
 	 */
-	search(queryVec: readonly number[], projectId: string, k: number): StorageRow[] {
+	search(queryVec: readonly number[], projectId: string, k: number, unscoped = false): StorageRow[] {
 		const topK = Math.max(0, Math.trunc(k));
 		if (topK === 0) return [];
 		const scored: ScoredEntry[] = [];
 		for (const [id, entry] of this.entries) {
 			if (entry.isDeleted === SOFT_DELETED) continue; // soft-deleted rows never surface.
-			if (!admittedByProjectScope(entry.projectId, projectId)) continue; // 049b project scope.
+			// ISS-006 (corpus parity): `unscoped` (the route's degraded resolution) applies NO project
+			// filter — the whole workspace partition, mirroring the SQL arms + the degraded list.
+			if (!unscoped && !admittedByProjectScope(entry.projectId, projectId)) continue; // 049b project scope.
 			// Score through deeplakeCosineScore — the single source of the on-wire `<#>` scoring
 			// semantics (vector.ts). `<#>` is TRUE COSINE (measured live), so this returns the exact
 			// `((1 + (emb <#> q))/2)` the SQL arm produces — verbatim magnitude AND rank. The
@@ -228,7 +251,7 @@ export class InMemoryLocalVectorIndex implements LocalVectorIndex {
 			// the `readonly number[]` parameter type.
 			const score = deeplakeCosineScore(queryVec, entry.vec as unknown as readonly number[]);
 			if (score === null) continue; // unusable (zero-magnitude / non-finite) — never scored on garbage.
-			scored.push({ id, content: entry.content, createdAt: entry.createdAt, score });
+			scored.push({ id, content: entry.content, createdAt: entry.createdAt, memoryType: entry.memoryType, score });
 		}
 		// Sort by score DESC; the arm's row order IS the rank signal RRF consumes, so a
 		// deterministic id tie-break keeps the order stable across equal scores.
@@ -238,6 +261,7 @@ export class InMemoryLocalVectorIndex implements LocalVectorIndex {
 			id: s.id,
 			text: s.content,
 			created_at: s.createdAt,
+			memory_type: s.memoryType, // ISS-006: the taxonomy tag riding the uniform hit-row shape.
 			score: s.score,
 		}));
 	}
@@ -285,6 +309,7 @@ export function buildMemoriesColdBuildSql(pageSize: number, offset: number): str
 	const tbl = sqlIdent("memories");
 	const idCol = sqlIdent("id");
 	const contentCol = sqlIdent("content");
+	const typeCol = sqlIdent("type"); // ISS-006: the taxonomy tag loaded so hits carry `memory_type`.
 	const embCol = sqlIdent("content_embedding");
 	const projectCol = sqlIdent("project_id");
 	const createdCol = sqlIdent("created_at");
@@ -292,7 +317,7 @@ export function buildMemoriesColdBuildSql(pageSize: number, offset: number): str
 	const pageLimit = Math.max(1, Math.trunc(pageSize));
 	const pageOffset = Math.max(0, Math.trunc(offset));
 	return (
-		`SELECT ${idCol} AS id, ${contentCol}::text AS content, ${embCol} AS content_embedding, ` +
+		`SELECT ${idCol} AS id, ${contentCol}::text AS content, ${typeCol}::text AS memory_type, ${embCol} AS content_embedding, ` +
 		`${projectCol} AS project_id, ${createdCol}::text AS created_at, ${deletedCol} AS is_deleted ` +
 		`FROM "${tbl}" ` +
 		`WHERE ARRAY_LENGTH(${embCol}, 1) > 0 ` +

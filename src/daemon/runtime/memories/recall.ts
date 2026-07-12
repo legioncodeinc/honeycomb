@@ -298,6 +298,26 @@ export interface MemoryRecallHit {
 	/** The provenance class (D-3): a distilled `memory` vs a raw `session` dump. */
 	readonly kind: RecallKind;
 	/**
+	 * ISS-006 (presentation parity): the BARE `memories.id` — the ACTIONABLE identity — stamped
+	 * on every hit whose {@link source} is the `memories` table. It is what lets the dashboard
+	 * render a search hit as the SAME interactive card the pre-search list renders (click →
+	 * `GET /api/memories/:id`, edit → `/:id/modify`, forget → `/:id/forget`). ADDITIVE +
+	 * OPTIONAL: ABSENT on `memory` / `sessions` / `hive_graph_versions` hits (a summary or raw
+	 * turn has no memory id — the surface renders those as today). Derived from the hit identity
+	 * (`source === "memories"` → `memoryId === id`), so it is present on lexical, semantic `<#>`,
+	 * AND local-ANN-served memories hits alike. Consumers that ignore it (the hooks fast lane
+	 * reads only `source`/`id`/`text`) are byte-unaffected beyond the additive field.
+	 */
+	readonly memoryId?: string;
+	/**
+	 * ISS-006 (presentation parity): the `memories.type` taxonomy tag (e.g. `fact`) for a
+	 * `memories`-source hit, so the search card renders the SAME type badge the list row shows
+	 * without a second round-trip. ADDITIVE + OPTIONAL: absent on non-`memories` sources and on
+	 * rows whose arm projection carried no type cell (an older row / a thin arm) — the surface
+	 * falls back exactly as the list does (`type || "fact"`). Never a secret: a closed taxonomy tag.
+	 */
+	readonly memoryType?: string;
+	/**
 	 * `true` for a raw `session` dump (drill-down/secondary, D-3 / AC-2); `false` for a
 	 * distilled `memory` hit. The surface renders `secondary` hits demoted, never dropped.
 	 */
@@ -442,30 +462,85 @@ export function resolveRecallLimit(limit: number | undefined): number {
 }
 
 /**
+ * ISS-006 (tokenized fallback): the cap on per-term `ILIKE` conjuncts a lexical match emits.
+ * Bounds the statement size for a pathological many-word query — the first N usable tokens
+ * carry the match; extra tokens only ever WIDEN a conjunction, so dropping them ADMITS a
+ * superset (never silently narrows recall further).
+ */
+export const MAX_LEXICAL_MATCH_TOKENS = 8;
+
+/** Whitespace-split `term` into the usable match tokens: length > 1, de-duped, capped. */
+function lexicalMatchTokens(term: string): string[] {
+	const seen = new Set<string>();
+	const tokens: string[] = [];
+	for (const raw of term.split(/\s+/)) {
+		const token = raw.trim();
+		if (token.length <= 1) continue; // drop stopword-length tokens (ISS-006 fix spec).
+		const key = token.toLowerCase();
+		if (seen.has(key)) continue;
+		seen.add(key);
+		tokens.push(token);
+		if (tokens.length >= MAX_LEXICAL_MATCH_TOKENS) break;
+	}
+	return tokens;
+}
+
+/**
+ * ISS-006 (tokenized fallback): build the lexical match predicate for one text expression.
+ * Pre-fix, the lexical arms matched `content ILIKE '%<ENTIRE QUERY>%'` — the query was never
+ * tokenized, so a 5-word natural query whose every word appears in a memory returned 0 hits
+ * (live-proven; the "BM25 fallback" the comments promised does not exist — Deep Lake's
+ * `deeplake_index` is not wired here). This emits, in ONE predicate (no extra round-trip, so
+ * the fast-lane latency budget is untouched):
+ *
+ *   - single usable token → `<colSql> ILIKE '%<term>%'` — BYTE-IDENTICAL to the pre-fix arm;
+ *   - multi-token → `(<colSql> ILIKE '%<whole query>%' OR (<colSql> ILIKE '%t1%' AND … ))`
+ *     — the whole-phrase arm is kept (and ranked above the conjunct-only rows TS-side by
+ *     {@link rowsToPhraseRankedArm}), the AND-of-terms conjunction is the tokenized floor.
+ *
+ * SQL-safe: every token AND the whole phrase route through `sqlLike`; the caller passes an
+ * already-guarded column expression (`colSql` is built from `sqlIdent` parts at the call site).
+ */
+export function buildLexicalMatchSql(colSql: string, term: string): string {
+	const phrasePatternSql = `'%${sqlLike(term)}%'`;
+	const tokens = lexicalMatchTokens(term);
+	if (tokens.length <= 1) return `${colSql} ILIKE ${phrasePatternSql}`;
+	const conjunctsSql = tokens.map((token) => `${colSql} ILIKE '%${sqlLike(token)}%'`).join(" AND ");
+	return `(${colSql} ILIKE ${phrasePatternSql} OR (${conjunctsSql}))`;
+}
+
+/**
  * Build the `memories` arm: kept facts, excluding soft-deleted rows
- * (`is_deleted = 0`), matched with a guarded `ILIKE`. The term routes through
- * `sqlLike`, every identifier through `sqlIdent`. The per-arm `LIMIT` bounds the
- * arm so it cannot dominate; the caller's overall limit is applied after the merge.
+ * (`is_deleted = 0`), matched with the guarded tokenized predicate
+ * ({@link buildLexicalMatchSql} — whole-phrase OR per-term conjuncts, ISS-006). The term
+ * routes through `sqlLike`, every identifier through `sqlIdent`. The per-arm `LIMIT` bounds
+ * the arm so it cannot dominate; the caller's overall limit is applied after the merge.
  * `perArmLimit` is a clamped integer (resolveRecallLimit) → a bare numeric
  * interpolation, the same shape the rest of the data layer uses for a dynamic
  * LIMIT (audit-safe; never a `String(...)` wrapper, never a hand-quoted value).
+ *
+ * ISS-006 (presentation parity): the projection ALSO carries `type::text AS memory_type` so a
+ * memories hit reaches the surface with the SAME type badge the list row renders — no second
+ * round-trip. Additive column; `rowsToRankedArm` reads it optionally.
  */
 export function buildMemoriesArmSql(term: string, perArmLimit: number, projectClause = ""): string {
-	const pattern = `'%${sqlLike(term)}%'`;
 	const memoriesTbl = sqlIdent("memories");
 	const idCol = sqlIdent("id");
 	const contentCol = sqlIdent("content");
+	const typeCol = sqlIdent("type");
 	const isDeletedCol = sqlIdent("is_deleted");
 	// PRD-047d: project the row's creation timestamp (already on the table) so the
 	// recency dampener can age-decay the fused score — no new column.
 	const createdAtCol = sqlIdent("created_at");
 	const perArm = Math.max(1, Math.trunc(perArmLimit));
+	// ISS-006: the tokenized lexical predicate (whole-phrase OR per-term conjuncts, one statement).
+	const matchSql = buildLexicalMatchSql(`${contentCol}::text`, term);
 	// PRD-049b (49b-AC-2): the project-segment predicate ANDed into the SAME statement as the
 	// lexical match, so a project-B row is filtered server-side and never enters the fusion.
 	return (
-		`SELECT 'memories' AS source, ${idCol} AS id, ${contentCol}::text AS text, ${createdAtCol}::text AS created_at ` +
+		`SELECT 'memories' AS source, ${idCol} AS id, ${contentCol}::text AS text, ${createdAtCol}::text AS created_at, ${typeCol}::text AS memory_type ` +
 		`FROM "${memoriesTbl}" ` +
-		`WHERE ${contentCol}::text ILIKE ${pattern} AND ${isDeletedCol} = 0${projectClause} ` +
+		`WHERE ${matchSql} AND ${isDeletedCol} = 0${projectClause} ` +
 		`LIMIT ${perArm}`
 	);
 }
@@ -475,7 +550,6 @@ export function buildMemoriesArmSql(term: string, perArmLimit: number, projectCl
  * guarded `ILIKE` over `summary`. Same guard discipline as {@link buildMemoriesArmSql}.
  */
 export function buildMemoryArmSql(term: string, perArmLimit: number, projectClause = ""): string {
-	const pattern = `'%${sqlLike(term)}%'`;
 	const memoryTbl = sqlIdent("memory");
 	const pathCol = sqlIdent("path");
 	const summaryCol = sqlIdent("summary");
@@ -483,12 +557,14 @@ export function buildMemoryArmSql(term: string, perArmLimit: number, projectClau
 	// uniform `created_at` projection the dampener reads (no new column).
 	const createdAtCol = sqlIdent("creation_date");
 	const perArm = Math.max(1, Math.trunc(perArmLimit));
+	// ISS-006: the tokenized lexical predicate (whole-phrase OR per-term conjuncts, one statement).
+	const matchSql = buildLexicalMatchSql(`${summaryCol}::text`, term);
 	// PRD-049b (49b-AC-2): project-segment predicate ANDed in so a summary from another
 	// project never surfaces.
 	return (
 		`SELECT 'memory' AS source, ${pathCol} AS id, ${summaryCol}::text AS text, ${createdAtCol}::text AS created_at ` +
 		`FROM "${memoryTbl}" ` +
-		`WHERE ${summaryCol}::text ILIKE ${pattern}${projectClause} ` +
+		`WHERE ${matchSql}${projectClause} ` +
 		`LIMIT ${perArm}`
 	);
 }
@@ -525,7 +601,6 @@ export function buildMemoryArmSql(term: string, perArmLimit: number, projectClau
  * is out of scope (PRD-047a, ADR-0001, RRF is production).
  */
 export function buildSessionsArmSql(term: string, perArmLimit: number, projectClause = ""): string {
-	const pattern = `'%${sqlLike(term)}%'`;
 	const sessionsTbl = sqlIdent("sessions");
 	const pathCol = sqlIdent("path");
 	const proseCol = sqlIdent("prose");
@@ -535,17 +610,19 @@ export function buildSessionsArmSql(term: string, perArmLimit: number, projectCl
 	const createdAtCol = sqlIdent("creation_date");
 	const perArm = Math.max(1, Math.trunc(perArmLimit));
 	// PRD-074: the COALESCE(NULLIF(prose, ''), message::text) match expression is inlined
-	// VERBATIM at the projection (below) AND the ILIKE predicate (further below) — the two
-	// sites MUST stay identical so a row that matches on `prose` is also returned on `prose`
-	// (and a legacy row falls through to `message::text` in BOTH places). It is inlined, not
-	// factored into a local, so each `${proseCol}` / `${messageCol}` is a direct sqlIdent-guarded
+	// VERBATIM at the projection (below) AND at the predicate expression handed to
+	// buildLexicalMatchSql (ISS-006) — the two sites MUST stay identical so a row that matches
+	// on `prose` is also returned on `prose` (and a legacy row falls through to `message::text`
+	// in BOTH places). Each `${proseCol}` / `${messageCol}` stays a direct sqlIdent-guarded
 	// interpolation the SQL-safety audit (scripts/audit-sql-safety.mjs) recognizes.
+	// ISS-006: the tokenized lexical predicate (whole-phrase OR per-term conjuncts, one statement).
+	const matchSql = buildLexicalMatchSql(`COALESCE(NULLIF(${proseCol}, ''), ${messageCol}::text)`, term);
 	// PRD-049b (49b-AC-2): project-segment predicate ANDed in so a raw turn from another
 	// project never surfaces — the broadest leak surface (raw dialogue) is filtered server-side.
 	return (
 		`SELECT 'sessions' AS source, ${pathCol} AS id, COALESCE(NULLIF(${proseCol}, ''), ${messageCol}::text) AS text, ${createdAtCol}::text AS created_at ` +
 		`FROM "${sessionsTbl}" ` +
-		`WHERE COALESCE(NULLIF(${proseCol}, ''), ${messageCol}::text) ILIKE ${pattern}${projectClause} ` +
+		`WHERE ${matchSql}${projectClause} ` +
 		`LIMIT ${perArm}`
 	);
 }
@@ -573,7 +650,6 @@ export function buildSessionsArmSql(term: string, perArmLimit: number, projectCl
  * to the uniform timestamp the recency dampener reads).
  */
 export function buildHiveGraphVersionsArmSql(term: string, perArmLimit: number, projectClause = ""): string {
-	const pattern = `'%${sqlLike(term)}%'`;
 	const versionsTbl = sqlIdent("hive_graph_versions");
 	const nectarCol = sqlIdent("nectar");
 	const seqCol = sqlIdent("seq");
@@ -585,6 +661,11 @@ export function buildHiveGraphVersionsArmSql(term: string, perArmLimit: number, 
 	// the uniform `created_at` projection the recency dampener reads (no new column).
 	const describedAtCol = sqlIdent("described_at");
 	const perArm = Math.max(1, Math.trunc(perArmLimit));
+	// ISS-006: the tokenized lexical predicate per matched column (whole-phrase OR per-term
+	// conjuncts) — the three columns stay OR'd so a match on ANY of title/description/concepts admits.
+	const titleMatchSql = buildLexicalMatchSql(`v.${titleCol}::text`, term);
+	const descriptionMatchSql = buildLexicalMatchSql(`v.${descriptionCol}::text`, term);
+	const conceptsMatchSql = buildLexicalMatchSql(`v.${conceptsCol}::text`, term);
 	// PRD-013a: the latest DESCRIBED version per nectar. The MAX(seq) subquery (grouped by nectar)
 	// collapses the append-only version chain to the one current row; the describe_status filter
 	// excludes pending/failed/skipped rows; the projectClause is the buildProjectScopeConjunct
@@ -594,7 +675,7 @@ export function buildHiveGraphVersionsArmSql(term: string, perArmLimit: number, 
 		`FROM "${versionsTbl}" v ` +
 		`INNER JOIN (SELECT ${nectarCol}, MAX(${seqCol}) AS max_seq FROM "${versionsTbl}" WHERE ${describeStatusCol} = 'described'${projectClause} GROUP BY ${nectarCol}) latest ` +
 		`ON v.${nectarCol} = latest.${nectarCol} AND v.${seqCol} = latest.max_seq ` +
-		`WHERE (v.${titleCol}::text ILIKE ${pattern} OR v.${descriptionCol}::text ILIKE ${pattern} OR v.${conceptsCol}::text ILIKE ${pattern}) ` +
+		`WHERE (${titleMatchSql} OR ${descriptionMatchSql} OR ${conceptsMatchSql}) ` +
 		`LIMIT ${perArm}`
 	);
 }
@@ -649,12 +730,18 @@ function fuseHits(
 					text: entry.text,
 					score: contribution,
 					createdAt: entry.createdAt,
+					// ISS-006: carry the memories arm's projected type tag onto the fused doc.
+					...(entry.memoryType !== undefined && entry.memoryType !== "" ? { memoryType: entry.memoryType } : {}),
 				});
 			} else {
 				existing.score += contribution; // corroboration across arms accumulates.
 				if (existing.text === "" && entry.text !== "") existing.text = entry.text;
 				// PRD-047d: take the first non-empty timestamp seen across the corroborating arms.
 				if (existing.createdAt === "" && entry.createdAt !== "") existing.createdAt = entry.createdAt;
+				// ISS-006: first non-empty type tag across the corroborating arms wins.
+				if (existing.memoryType === undefined && entry.memoryType !== undefined && entry.memoryType !== "") {
+					existing.memoryType = entry.memoryType;
+				}
 			}
 		});
 	}
@@ -683,6 +770,12 @@ function fuseHits(
 			// PRD-058a: seed the no-penalty default; the recency-activation stage overwrites it with the
 			// real `A_simple` for every hit it returns, so the field is ALWAYS present + in [0,1].
 			freshnessScore: 1,
+			// ISS-006 (presentation parity): a `memories`-source hit carries its ACTIONABLE identity —
+			// the bare `memories.id` — plus the type tag when an arm projected it, so the dashboard
+			// renders the SAME interactive card (open/edit/forget) the pre-search list renders. Derived
+			// from the hit identity, so lexical, semantic `<#>`, and local-ANN hits all carry it.
+			...(doc.source === "memories" ? { memoryId: doc.id } : {}),
+			...(doc.source === "memories" && doc.memoryType !== undefined ? { memoryType: doc.memoryType } : {}),
 		});
 		sourceSet.add(doc.source);
 	}
@@ -696,6 +789,8 @@ interface RankedArmEntry {
 	readonly text: string;
 	/** The row's creation timestamp (ISO, PRD-047d); `""` when the arm carries none. */
 	readonly createdAt: string;
+	/** ISS-006: the `memories.type` cell the memories arms project (`memory_type`); absent elsewhere. */
+	readonly memoryType?: string;
 }
 
 /** A single arm's ranked list (1-based rank = array index + 1). */
@@ -711,6 +806,8 @@ interface FusedDoc {
 	score: number;
 	/** The row's creation timestamp (ISO, PRD-047d); first non-empty across arms wins. */
 	createdAt: string;
+	/** ISS-006: the `memories.type` tag; first non-empty across the corroborating arms wins. */
+	memoryType?: string;
 }
 
 /** The fusion identity for a doc: `source+id` (cross-arm dedup key, AC-3). */
@@ -720,13 +817,41 @@ function fusionKey(source: RecallSource, id: string): string {
 
 /** Map raw arm result rows into ranked entries in storage order (the lexical rank signal). */
 function rowsToRankedArm(rows: readonly StorageRow[]): RankedArm {
-	const entries: RankedArmEntry[] = rows.map((row) => ({
-		source: readSource(row.source),
-		id: cell(row.id),
-		text: cell(row.text),
-		createdAt: cell(row.created_at), // PRD-047d: the projected creation timestamp (or "").
-	}));
+	const entries: RankedArmEntry[] = rows.map((row) => {
+		const memoryType = cell(row.memory_type); // ISS-006: the memories arms project `memory_type`.
+		return {
+			source: readSource(row.source),
+			id: cell(row.id),
+			text: cell(row.text),
+			createdAt: cell(row.created_at), // PRD-047d: the projected creation timestamp (or "").
+			...(memoryType !== "" ? { memoryType } : {}),
+		};
+	});
 	return { entries };
+}
+
+/**
+ * ISS-006 (tokenized fallback, rank tier): map a LEXICAL arm's rows into ranked entries with
+ * WHOLE-PHRASE matches ranked ABOVE token-conjunct-only matches. The tokenized predicate
+ * ({@link buildLexicalMatchSql}) admits a row when it contains the whole query OR every token,
+ * in ONE statement (no extra round-trip — the fast-lane budget is untouched); this TS-side,
+ * STABLE partition then makes the arm's order — which IS the RRF rank signal — prefer the
+ * exact-phrase rows, so the whole-phrase match keeps its higher rank without a second arm.
+ * TS-side by design (the DeepLake endpoint's ORDER-BY-expression support is not relied on —
+ * the same posture as the SUM-under-GROUP-BY avoidance). Case-insensitive, mirroring ILIKE.
+ * A single-token query partitions trivially (every admitted row contains the phrase), so the
+ * arm order is byte-identical to today's. NEVER applied to a semantic arm (cosine order rules).
+ */
+function rowsToPhraseRankedArm(rows: readonly StorageRow[], phrase: string): RankedArm {
+	const arm = rowsToRankedArm(rows);
+	const needle = phrase.trim().toLowerCase();
+	if (needle === "" || arm.entries.length <= 1) return arm;
+	const phraseEntries: RankedArmEntry[] = [];
+	const tokenOnlyEntries: RankedArmEntry[] = [];
+	for (const entry of arm.entries) {
+		(entry.text.toLowerCase().includes(needle) ? phraseEntries : tokenOnlyEntries).push(entry);
+	}
+	return { entries: [...phraseEntries, ...tokenOnlyEntries] };
 }
 
 /**
@@ -1100,6 +1225,18 @@ export interface MemoryRecallRequest {
 	 */
 	readonly projectBound?: boolean;
 	/**
+	 * ISS-006 (corpus parity): when `true`, recall applies NO project-segment predicate — the
+	 * corpus is the WHOLE workspace partition, EXACTLY the corpus the degraded (no project
+	 * header, no cwd) `GET /api/memories` list shows. The `/api/memories/recall` route sets it
+	 * ONLY when project resolution DEGRADED (`resolveRequestProject(...).degraded`), so the two
+	 * surfaces resolve the same input class to the same corpus (the acceptance criterion: any
+	 * memory visible in the pre-search list is findable by search under the same scope input).
+	 * A resolved project (bound OR the explicit inbox) never sets it; a direct engine caller
+	 * that omits it keeps the 049b default (absent projectId → inbox + workspace-global).
+	 * The org/workspace partition (the HARD boundary) rides the QueryScope regardless.
+	 */
+	readonly projectUnscoped?: boolean;
+	/**
 	 * OPTIONAL token budget (PRD-047e / e-AC-1). When supplied (and positive), recall replaces the
 	 * fixed top-`limit` slice with a token-BUDGETED, diversity-aware (MMR) selection: it fills the
 	 * budget with the highest-value NON-redundant hits ({@link selectWithinTokenBudget}) rather than a
@@ -1120,9 +1257,15 @@ export interface MemoryRecallRequest {
  * The returned string is ANDed verbatim into each arm's WHERE (SQL-safe via `sLiteral`).
  */
 function projectConjunctFor(request: MemoryRecallRequest): string {
+	// ISS-006 (corpus parity): a degraded-resolution recall (the route sets `projectUnscoped`)
+	// carries NO project predicate — the whole-workspace corpus, mirroring the degraded list.
+	if (request.projectUnscoped === true) return "";
+	// ISS-006 (inbox reachability): `includeInbox` admits the workspace `__unsorted__` rows in a
+	// project-scoped recall — the SAME flag `buildListSql` passes, so list + search stay symmetric.
 	return buildProjectScopeConjunct({
 		projectId: request.projectId ?? "",
 		...(request.projectBound !== undefined ? { bound: request.projectBound } : {}),
+		includeInbox: true,
 	});
 }
 
@@ -1174,6 +1317,12 @@ interface SemanticArmSpec {
 	readonly timestampColumn: string;
 	/** Extra WHERE conjunct for the hydration SELECT (e.g. soft-delete exclusion), or "". */
 	readonly hydrateFilter: string;
+	/**
+	 * ISS-006 (presentation parity): the OPTIONAL taxonomy-tag column projected as `memory_type`
+	 * (`type` on the `memories` table) so a SEMANTIC memories hit carries the same badge field the
+	 * lexical arm projects. Absent on `sessions` / `hive_graph_versions` (no such column).
+	 */
+	readonly typeColumn?: string;
 }
 
 /** The two semantic arms — kept facts + raw turns. (`memory` summaries carry no embedding column.) */
@@ -1187,6 +1336,8 @@ const SEMANTIC_ARMS: readonly SemanticArmSpec[] = [
 		timestampColumn: "created_at", // PRD-047d: `memories` stamps `created_at`.
 		// Exclude soft-deleted rows, mirroring the lexical memories arm.
 		hydrateFilter: `AND ${sqlIdent("is_deleted")} = 0`,
+		// ISS-006: project the taxonomy tag so semantic memories hits carry `memory_type` too.
+		typeColumn: "type",
 	},
 	{
 		source: "sessions",
@@ -1259,11 +1410,14 @@ export function buildFastSemanticArmSql(
 	// The spec's hydrate filter (soft-delete / describe_status exclusion) is applied INLINE at the
 	// match, not at a later hop — a filtered row is dropped in the SAME statement (no hydrate).
 	const filterClause = spec.hydrateFilter === "" ? "" : ` ${spec.hydrateFilter}`;
+	// ISS-006: the additive `memory_type` projection (the `memories` spec's taxonomy tag) so a
+	// semantic memories hit carries the same badge field the lexical arm projects. "" elsewhere.
+	const typeProjectionSql = spec.typeColumn !== undefined ? `, ${sqlIdent(spec.typeColumn)}::text AS memory_type` : "";
 	// `(emb <#> vec)` is the cosine distance; `(1 + …) / 2` maps [-1,1] → [0,1] — the EXACT
 	// normalization `buildVectorSearchSql` uses (vector.ts:242), so the fast score is on the same scale.
 	const scoreSql = `((1 + (${embCol} <#> ${vecLit})) / 2)`;
 	return (
-		`SELECT ${sourceLit} AS source, ${idCol} AS id, ${textCol}::text AS text, ${tsCol}::text AS created_at, ${scoreSql} AS score ` +
+		`SELECT ${sourceLit} AS source, ${idCol} AS id, ${textCol}::text AS text, ${tsCol}::text AS created_at${typeProjectionSql}, ${scoreSql} AS score ` +
 		`FROM "${tbl}" ` +
 		`WHERE ARRAY_LENGTH(${embCol}, 1) > 0${filterClause}${projectClause} ` +
 		`ORDER BY score DESC ` +
@@ -1288,10 +1442,13 @@ function buildSemanticHydrateSql(spec: SemanticArmSpec, ids: readonly string[], 
 	const sourceLit = sLiteral(spec.source);
 	const inList = ids.map((id) => sLiteral(id)).join(", ");
 	const filterClause = spec.hydrateFilter === "" ? "" : ` ${spec.hydrateFilter}`;
+	// ISS-006: hydrate the additive `memory_type` tag on the memories spec (parity with the
+	// lexical + fast semantic projections); "" elsewhere.
+	const typeProjectionSql = spec.typeColumn !== undefined ? `, ${sqlIdent(spec.typeColumn)}::text AS memory_type` : "";
 	// PRD-049b (49b-AC-2 defense-in-depth): the project segment is ALSO applied at hydration,
 	// so even if a cross-project id reached this step it loads no text and is dropped upstream.
 	return (
-		`SELECT ${sourceLit} AS source, ${idCol} AS id, ${textCol}::text AS text, ${tsCol}::text AS created_at ` +
+		`SELECT ${sourceLit} AS source, ${idCol} AS id, ${textCol}::text AS text, ${tsCol}::text AS created_at${typeProjectionSql} ` +
 		`FROM "${tbl}" ` +
 		`WHERE ${idCol} IN (${inList})${filterClause}${projectClause}`
 	);
@@ -1358,9 +1515,11 @@ async function runSemanticArm(
 	const hydrated = await runArm(buildSemanticHydrateSql(spec, ids, projectClause), request, deps, signal);
 	const textById = new Map<string, string>();
 	const tsById = new Map<string, string>(); // PRD-047d: id → creation timestamp (ISO, or "").
+	const typeById = new Map<string, string>(); // ISS-006: id → the `memory_type` tag (or "").
 	for (const row of hydrated) {
 		textById.set(cell(row.id), cell(row.text));
 		tsById.set(cell(row.id), cell(row.created_at));
+		typeById.set(cell(row.id), cell(row.memory_type));
 	}
 
 	const entries: RankedArmEntry[] = [];
@@ -1370,7 +1529,14 @@ async function runSemanticArm(
 		const text = textById.get(s.id);
 		if (text === undefined) continue; // hydration miss (eventual consistency) — skip.
 		seen.add(s.id);
-		entries.push({ source: spec.source, id: s.id, text, createdAt: tsById.get(s.id) ?? "" });
+		const memoryType = typeById.get(s.id) ?? "";
+		entries.push({
+			source: spec.source,
+			id: s.id,
+			text,
+			createdAt: tsById.get(s.id) ?? "",
+			...(memoryType !== "" ? { memoryType } : {}),
+		});
 	}
 	return entries;
 }
@@ -2611,14 +2777,17 @@ export async function recallMemories(
 	// table, each cosine-ranked) come first, then the three lexical arms in their storage
 	// order. A null semantic path contributes no arms (lexical-only); a missing lexical
 	// sibling is simply an empty arm (per-arm fail-soft, AC-7) that contributes nothing.
+	// ISS-006: the lexical arms rank whole-phrase matches above token-conjunct-only matches
+	// (a TS-side stable partition — the arm order IS the RRF rank signal); the semantic arms
+	// keep their cosine order untouched.
 	const arms: RankedArm[] = [
 		...(semanticRun?.arms ?? []),
-		rowsToRankedArm(memoriesRows),
-		rowsToRankedArm(memoryRows),
-		rowsToRankedArm(sessionsRows),
+		rowsToPhraseRankedArm(memoriesRows, term),
+		rowsToPhraseRankedArm(memoryRows, term),
+		rowsToPhraseRankedArm(sessionsRows, term),
 		// PRD-013a: the hive-graph lexical arm joins the fusion in its storage order; a null
 		// semantic path leaves it as the lexical floor (BM25-only), an empty arm contributes nothing.
-		rowsToRankedArm(hiveGraphRows),
+		rowsToPhraseRankedArm(hiveGraphRows, term),
 	];
 	// PRD-013a (decision #17): resolve the per-SOURCE Nectar multiplier (already boot-clamped when
 	// threaded; re-clamped here defensively, fail-soft to 1.0). It scales ONLY the hive-graph
@@ -2805,7 +2974,9 @@ function resolveMemoriesIndexRows(
 		return null;
 	}
 	try {
-		return localIndex.search(queryVector, request.projectId ?? "", limit);
+		// ISS-006 (corpus parity): thread the route's degraded-resolution flag so the in-RAM filter
+		// mirrors the SQL arms — unscoped → the whole workspace partition, exactly like the list.
+		return localIndex.search(queryVector, request.projectId ?? "", limit, request.projectUnscoped === true);
 	} catch {
 		return null; // fail-soft: fall through to the `<#>` SQL arm for memories.
 	}
@@ -3043,9 +3214,12 @@ export async function recallFast(
 	// the SAME position the memories `<#>` arm would have occupied (SEMANTIC_ARMS[0]) since its SQL was
 	// dropped above — so the arm ORDER, RRF fusion, and recency stay byte-identical to the `<#>` SQL path.
 	const fuseStart = Date.now();
+	// ISS-006: the lexical slots (issued AFTER the semantic SQLs in `allSqls`) rank whole-phrase
+	// matches first (TS-side stable partition); the semantic slots keep their cosine ORDER BY.
+	const lexicalSlotOffset = semanticSqls.length;
 	const arms: RankedArm[] = [
 		...(memoriesIndexRows !== null ? [rowsToRankedArm(memoriesIndexRows)] : []),
-		...armRows.map((rows) => rowsToRankedArm(rows)),
+		...armRows.map((rows, slot) => (slot >= lexicalSlotOffset ? rowsToPhraseRankedArm(rows, term) : rowsToRankedArm(rows))),
 	];
 
 	// EXISTING RRF fusion (a-AC-3): the same `fuseHits` + arm-class weight + Nectar multiplier the heavy
