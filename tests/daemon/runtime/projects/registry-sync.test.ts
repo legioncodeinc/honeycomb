@@ -234,8 +234,26 @@ describe("ISS-021 — duplicate registry rows collapse to ONE cached project (ba
 
 		const cache = loadProjectsCache(dir);
 		expect(cache.projects.map((p) => p.projectId).sort()).toEqual(["api", "web"]);
-		// The FIRST row wins; the raced duplicate never reaches the cache.
+		// Same-stamp duplicates (the common byte-identical case) fall back to first-seen.
 		expect(cache.projects.find((p) => p.projectId === "api")?.name).toBe("API (first row)");
+	});
+
+	it("divergent duplicates: the row with the GREATEST updated_at wins, regardless of read order", async () => {
+		// The list read has no ORDER BY, so the winner must be deterministic — prove BOTH read
+		// orders converge on the newer row (CodeRabbit #297 Minor).
+		const older = registryRow({ project_id: "api", name: "API (stale)", updated_at: "2026-07-01T00:00:00.000Z" });
+		const newer = registryRow({ project_id: "api", name: "API (fresh)", updated_at: "2026-07-12T00:00:00.000Z" });
+		for (const rows of [
+			[older, newer],
+			[newer, older],
+		]) {
+			const { storage } = fakeStorage(ok(rows, 1));
+			const result = await syncRegistryToCache({ storage, scope: SCOPE, dir });
+			expect(result.ok).toBe(true);
+			const cache = loadProjectsCache(dir);
+			expect(cache.projects.filter((p) => p.projectId === "api")).toHaveLength(1);
+			expect(cache.projects.find((p) => p.projectId === "api")?.name).toBe("API (fresh)");
+		}
 	});
 });
 

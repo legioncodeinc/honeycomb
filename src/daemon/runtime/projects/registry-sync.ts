@@ -140,13 +140,21 @@ export async function syncRegistryToCache(input: RegistrySyncInput): Promise<Reg
 
 	// ISS-021 backstop dedupe: the registry table has no unique constraint (append-only DeepLake +
 	// non-transactional SELECT→INSERT upserts), so a bind/heal race can leave MORE than one row per
-	// project_id. Collapse the read through a Map keyed by projectId — the FIRST row wins (the list
-	// read's own ordering; the rows are same-key duplicates) — so duplicate registry rows can never
-	// reach the cache or the API again, whatever the table holds.
+	// project_id. Collapse the read through a Map keyed by projectId. The list read has NO ORDER BY
+	// (storage order is unspecified), so the winner is chosen deterministically: the row with the
+	// GREATEST `updated_at` (lexicographic on the ISO-8601 TEXT stamps — the catalog convention);
+	// same-stamp duplicates (the common byte-identical case) fall back to first-seen. Duplicate
+	// registry rows can never reach the cache or the API again, whatever the table holds.
 	const registryById = new Map<string, CachedProject>();
+	const freshestById = new Map<string, string>();
 	for (const row of result.rows) {
 		const mapped = rowToCachedProject(row);
-		if (mapped !== null && !registryById.has(mapped.projectId)) registryById.set(mapped.projectId, mapped);
+		if (mapped === null) continue;
+		const updatedAt = typeof row.updated_at === "string" ? row.updated_at : "";
+		const prev = freshestById.get(mapped.projectId);
+		if (prev !== undefined && updatedAt <= prev) continue;
+		freshestById.set(mapped.projectId, updatedAt);
+		registryById.set(mapped.projectId, mapped);
 	}
 	const registryProjects: CachedProject[] = [...registryById.values()];
 	const registryIds = new Set(registryById.keys());
