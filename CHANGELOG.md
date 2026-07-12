@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.15.0 — 2026-07-12
+
+Fixes a fresh-install bug where an enabled Portkey gateway with no active model could silently POST empty-model requests that always failed; the gateway now fails closed with an honest `no_model` health state, and `/health` also reports swallowed extraction errors so stalled memory formation is visible.
+
 ## v0.14.0 — 2026-07-12
 
 Adds a new measured injected-tokens KPI and real ROI trend/partial-net data to the dashboard, backed by new memory-injection telemetry; also includes a small internal SQL-naming fix.

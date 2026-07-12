@@ -235,3 +235,60 @@ describe("b-AC-7 the onTransportError signal fires on an observed gateway failur
 		expect(seen, "malformed-but-reachable → still no unreachable signal").toEqual([]);
 	});
 });
+
+// ── ISS-005 (fail closed): an empty model NEVER reaches the gateway. The fresh-install incident
+// POSTed `model: ""` 373 times; this final guard makes that structurally impossible even if a
+// misconfigured selection slips past the vault validation + the assembly `no_model` sentinel.
+describe("ISS-005 the transport fails closed on an empty model (no network call, no false unreachable)", () => {
+	it("throws ProviderError(400) WITHOUT calling fetch and WITHOUT firing the unreachable signal", async () => {
+		const { fetch, calls } = recordingFetch(okResponse({ choices: [{ message: { content: "x" } }] }));
+		const seen: number[] = [];
+		const transport = createPortkeyTransport({ config: CONFIG_ID, fetch, onTransportError: (s) => seen.push(s) });
+		for (const model of ["", "   "]) {
+			await expect(
+				transport.execute({
+					target: target({ model }),
+					apiKey: PORTKEY_KEY,
+					request: { requestId: "r", workload: "memory_pollinating", messages: [{ role: "user", content: "hi" }] },
+				}),
+				`model ${JSON.stringify(model)} must fail closed`,
+			).rejects.toMatchObject({ statusCode: 400 });
+		}
+		expect(calls, "the gateway is NEVER contacted with an empty model").toHaveLength(0);
+		expect(seen, "a config error is NOT an observed gateway failure (no unreachable signal)").toEqual([]);
+	});
+
+	it("the thrown message names the fix and never the key", async () => {
+		const { fetch } = recordingFetch(okResponse({ choices: [] }));
+		const transport = createPortkeyTransport({ config: CONFIG_ID, fetch });
+		try {
+			await transport.execute({
+				target: target({ model: "" }),
+				apiKey: PORTKEY_KEY,
+				request: { requestId: "r", workload: "memory_pollinating", messages: [{ role: "user", content: "hi" }] },
+			});
+			expect.unreachable("an empty model must throw");
+		} catch (err) {
+			expect(err).toBeInstanceOf(ProviderError);
+			const message = err instanceof Error ? err.message : "";
+			expect(message).toContain("activeModel");
+			expect(message).not.toContain(PORTKEY_KEY);
+		}
+	});
+
+	it("the stream path fails closed identically (no network call)", async () => {
+		const { fetch, calls } = recordingFetch(okResponse({ choices: [] }));
+		const transport = createPortkeyTransport({ config: CONFIG_ID, fetch });
+		const consume = async (): Promise<void> => {
+			for await (const _chunk of transport.stream({
+				target: target({ model: "" }),
+				apiKey: PORTKEY_KEY,
+				request: { requestId: "r", workload: "memory_pollinating", messages: [{ role: "user", content: "hi" }] },
+			})) {
+				/* drain */
+			}
+		};
+		await expect(consume()).rejects.toMatchObject({ statusCode: 400 });
+		expect(calls).toHaveLength(0);
+	});
+});

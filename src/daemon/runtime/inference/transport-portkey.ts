@@ -240,6 +240,15 @@ export function createPortkeyTransport(deps: PortkeyTransportDeps): ProviderTran
 	 */
 	async function post(call: ProviderCall): Promise<PostResult> {
 		const body = toPortkeyBody(call, defaultMaxTokens);
+		// ISS-005 FINAL GUARD (fail closed): the daemon must NEVER POST `model: ""` to the
+		// gateway. Upstream now fails closed too (vault write validation + the `no_model`
+		// selection sentinel), but this is the last line of defense — a typed ProviderError
+		// WITHOUT a network call. Deliberately does NOT fire `reportTransportError`: the gateway
+		// was never contacted, so flipping `/health` to `unreachable` would be dishonest (the
+		// honest state for a missing model is `no_model`, derived at assembly).
+		if (body.model.trim().length === 0) {
+			throw new ProviderError(400, "portkey transport: empty model (fail-closed; set activeModel)");
+		}
 		let res: FetchResponseLike;
 		try {
 			res = await doFetch(url, {

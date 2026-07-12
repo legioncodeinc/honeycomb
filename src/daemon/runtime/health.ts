@@ -113,12 +113,19 @@ export type SubsystemState = "ok" | "degraded";
  *   - `off`          — the `portkey.enabled` toggle is off; the per-provider path is in force.
  *   - `ok`           — Portkey is on, `PORTKEY_API_KEY` is present, the Portkey path is built.
  *   - `unconfigured` — Portkey is on but `PORTKEY_API_KEY` is absent (fail-closed, b-AC-4).
+ *   - `no_model`     — Portkey is on (+ a config id) but `activeModel` is missing/empty
+ *                      (ISS-005 fail-closed): NO Portkey target is built — the daemon must never
+ *                      POST `model: ""` to the gateway — and this state names WHY. ADDITIVE to
+ *                      the closed enum (an older consumer that only special-cases
+ *                      `unconfigured`/`unreachable` simply renders it as a non-degraded string).
  *   - `unreachable`  — an ACTUAL observed runtime failure: a Portkey call could not connect /
  *                      was auth-rejected. Derived ONLY from a cached last-failure signal updated
  *                      when a real call fails — NEVER a synchronous `/health` network probe, and
- *                      never fabricated (b-AC-7).
+ *                      never fabricated (b-AC-7). The observed HTTP status code travels in the
+ *                      ADDITIVE sibling {@link HealthReasons.portkeyUnreachableStatus} (so an
+ *                      auth-rejection 401 is distinguishable from a bad-request 400 or a 503).
  */
-export type PortkeyHealth = "off" | "ok" | "unconfigured" | "unreachable";
+export type PortkeyHealth = "off" | "ok" | "unconfigured" | "no_model" | "unreachable";
 
 /**
  * The fine-grained embeddings health (PRD-025 honesty). A closed enum, carrying NO secret:
@@ -167,8 +174,16 @@ export interface HealthReasons {
 	readonly embeddingsState?: EmbeddingsHealth;
 	/** A required table's presence (best-effort): `ok` unless a required table is known-missing. */
 	readonly schema: "ok" | "missing_table";
-	/** The Portkey gateway state (PRD-063b / b-AC-7): `off` | `ok` | `unconfigured` | `unreachable`. */
+	/** The Portkey gateway state (PRD-063b / b-AC-7 / ISS-005): `off` | `ok` | `unconfigured` | `no_model` | `unreachable`. */
 	readonly portkey: PortkeyHealth;
+	/**
+	 * ISS-005 (honest gateway status): the HTTP status code of the LAST observed Portkey failure,
+	 * present ONLY while `portkey === "unreachable"`. Lets an operator distinguish
+	 * `unreachable(401)` (bad key) from `unreachable(400)` (bad request) or `unreachable(503)`
+	 * (network). ADDITIVE — the `portkey` literal is unchanged, so existing consumers that match
+	 * on `"unreachable"` keep working. A bare integer status code, never a body/key (no secret).
+	 */
+	readonly portkeyUnreachableStatus?: number;
 	/** Capture persistence observability: events acked but not durably written since boot. */
 	readonly capture?: {
 		/** Events acked to the hook but lost on flush/batch-insert since boot (PRD-062c). */
@@ -316,6 +331,12 @@ export interface HealthDetailInputs {
 	 */
 	readonly portkey?: PortkeyHealth;
 	/**
+	 * ISS-005: the HTTP status code of the last observed Portkey failure (the argument
+	 * `recordPortkeyUnreachable` received). Surfaced as `reasons.portkeyUnreachableStatus` ONLY
+	 * when `portkey` is `unreachable`; ignored otherwise. Additive — omitted by legacy callers.
+	 */
+	readonly portkeyUnreachableStatus?: number;
+	/**
 	 * Capture events acked to the hook but lost on flush/batch-insert since boot. Omitted when the
 	 * composition root does not wire the counter (bare `createDaemon` / pre-C-4 posture).
 	 */
@@ -435,6 +456,11 @@ export function buildHealthDetail(inputs: HealthDetailInputs): HealthDetail {
 		schema: inputs.schemaMissingTable === true ? "missing_table" : "ok",
 		// PRD-063b / b-AC-7: read the supplied Portkey state verbatim (no probe). Omitted → `off`.
 		portkey: inputs.portkey ?? "off",
+		// ISS-005: the last observed failure's HTTP status — present ONLY while `unreachable`, so a
+		// recovered/off gateway never carries a stale code. Normalized to a non-negative integer.
+		...(inputs.portkey === "unreachable" && inputs.portkeyUnreachableStatus !== undefined
+			? { portkeyUnreachableStatus: nonNegativeInt(inputs.portkeyUnreachableStatus) }
+			: {}),
 		...(capture !== undefined ? { capture } : {}),
 		// PRD-073b: the dormancy reasons — present ONLY while their condition holds (parent AC-3).
 		...(inputs.captureDormantNoProject === true
@@ -459,6 +485,18 @@ export function buildHealthDetail(inputs: HealthDetailInputs): HealthDetail {
 							: {}),
 						...(inputs.memoryFormation.lastAction !== undefined
 							? { lastAction: inputs.memoryFormation.lastAction }
+							: {}),
+						// ISS-005 (extraction failure visibility): swallowed extraction model errors since
+						// boot, ALWAYS emitted beside committedSinceBoot (a legacy input without it
+						// normalizes to 0) so "jobs done, zero memories" is diagnosable at a glance. The
+						// last-error string is the stage's capped, key-free reason (a transport status
+						// line, never a body/credential) + its timestamp — passthrough when present.
+						extractionErrorsSinceBoot: nonNegativeInt(inputs.memoryFormation.extractionErrorsSinceBoot ?? 0),
+						...(inputs.memoryFormation.lastExtractionError !== undefined
+							? { lastExtractionError: inputs.memoryFormation.lastExtractionError }
+							: {}),
+						...(inputs.memoryFormation.lastExtractionErrorAt !== undefined
+							? { lastExtractionErrorAt: inputs.memoryFormation.lastExtractionErrorAt }
 							: {}),
 					},
 				}

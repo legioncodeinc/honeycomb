@@ -38,6 +38,14 @@ export interface MemoryFormationOutcome {
 	readonly memoryId?: string;
 }
 
+/**
+ * ISS-005: the stored last-extraction-error reason is CAPPED — a short diagnostic string for the
+ * `/health` wire, never an unbounded log dump. The reasons recorded here come from the extraction
+ * stage's swallowed model-call failures (`err.message` of a `ProviderError`/`RoutingExhaustedError`),
+ * which are short, key-free status strings by construction (the transports never echo a body/key).
+ */
+const MAX_EXTRACTION_ERROR_CHARS = 200;
+
 /** A point-in-time snapshot of memory-formation activity since boot. */
 export interface MemoryFormationSnapshot {
 	/** Memories committed (inserted / version-bumped / deduped) since daemon boot. */
@@ -46,12 +54,31 @@ export interface MemoryFormationSnapshot {
 	readonly lastCommittedAt?: string;
 	/** The action of the most recent committed write; omitted until the first commit. */
 	readonly lastAction?: string;
+	/**
+	 * ISS-005 (extraction failure visibility): `extraction.model_error` occurrences since boot —
+	 * every model call the extraction stage SWALLOWED (returned empty, job completed "done").
+	 * The honest counterpart to `committedSinceBoot`: 373 swallowed gateway failures used to be
+	 * invisible ("jobs done, zero memories, health green"); now they read as a loud non-zero
+	 * count beside a zero commit count. Optional on the TYPE (legacy literals/inputs omit it →
+	 * normalized to 0 on the `/health` wire) but ALWAYS emitted by the tracker.
+	 */
+	readonly extractionErrorsSinceBoot?: number;
+	/** The (capped, key-free) reason of the most recent extraction model error; omitted until the first. */
+	readonly lastExtractionError?: string;
+	/** ISO timestamp of the most recent extraction model error; omitted until the first. */
+	readonly lastExtractionErrorAt?: string;
 }
 
 /** A monotonic committed-memories tracker (process-local, since daemon boot). */
 export interface MemoryFormationTracker {
 	/** Feed one controlled-write outcome; counts it only when it committed a memory. */
 	record(outcome: MemoryFormationOutcome): void;
+	/**
+	 * ISS-005: count one swallowed extraction model failure (`extraction.model_error`). The stage's
+	 * swallow-and-continue behavior is UNCHANGED (a model hiccup never fails the job) — this only
+	 * makes the swallow visible on `/health`. Never throws; the reason is capped + stored verbatim.
+	 */
+	recordExtractionError(reason: string): void;
 	/** The current committed-memories snapshot since boot. */
 	snapshot(): MemoryFormationSnapshot;
 }
@@ -61,6 +88,9 @@ export function createMemoryFormationTracker(now: () => number = Date.now): Memo
 	let committed = 0;
 	let lastCommittedAt: string | undefined;
 	let lastAction: string | undefined;
+	let extractionErrors = 0;
+	let lastExtractionError: string | undefined;
+	let lastExtractionErrorAt: string | undefined;
 	return {
 		record(outcome: MemoryFormationOutcome): void {
 			// Only a committed action with a real memory id counts — a `skipped`/`flagged`
@@ -71,12 +101,51 @@ export function createMemoryFormationTracker(now: () => number = Date.now): Memo
 			lastAction = outcome.action;
 			lastCommittedAt = new Date(now()).toISOString();
 		},
+		recordExtractionError(reason: string): void {
+			extractionErrors += 1;
+			lastExtractionError = reason.slice(0, MAX_EXTRACTION_ERROR_CHARS);
+			lastExtractionErrorAt = new Date(now()).toISOString();
+		},
 		snapshot(): MemoryFormationSnapshot {
 			return {
 				committedSinceBoot: committed,
 				...(lastCommittedAt !== undefined ? { lastCommittedAt } : {}),
 				...(lastAction !== undefined ? { lastAction } : {}),
+				extractionErrorsSinceBoot: extractionErrors,
+				...(lastExtractionError !== undefined ? { lastExtractionError } : {}),
+				...(lastExtractionErrorAt !== undefined ? { lastExtractionErrorAt } : {}),
 			};
+		},
+	};
+}
+
+/** The minimal structured-log sink shape the wrapper below decorates (mirrors `ExtractionLogger`). */
+export interface ExtractionEventSink {
+	/** Record a structured event (e.g. `extraction.model_error`). */
+	event(name: string, fields?: Record<string, unknown>): void;
+}
+
+/**
+ * ISS-005: decorate an extraction-stage logger so every `extraction.model_error` event ALSO
+ * increments the tracker's `extractionErrorsSinceBoot` (with the event's `reason` as the last-error
+ * string). All events still forward to `inner` unchanged — observability is added, never replaced —
+ * and the wrapper is total: a tracker/inner fault never breaks the extraction hot path.
+ */
+export function withExtractionErrorTracking(
+	tracker: MemoryFormationTracker,
+	inner?: ExtractionEventSink,
+): ExtractionEventSink {
+	return {
+		event(name: string, fields?: Record<string, unknown>): void {
+			if (name === "extraction.model_error") {
+				try {
+					const reason = typeof fields?.reason === "string" ? fields.reason : "unknown";
+					tracker.recordExtractionError(reason);
+				} catch {
+					/* the health counter is best-effort — never break the extraction path over it. */
+				}
+			}
+			inner?.event(name, fields);
 		},
 	};
 }
