@@ -43,6 +43,13 @@
  * So a bind is durable: even if its upsert-on-bind flapped, the project stays visible and
  * reconciles on the next sync. The tenancy guard still applies — a foreign-tenancy prior
  * cache contributes no local-only projects (they belong to another workspace).
+ *
+ * ── Duplicate registry rows are collapsed; the heal skips bound projects (ISS-021) ──
+ * The registry read is deduped through a Map keyed by `project_id` (first row wins) so a doubled
+ * row can never reach the cache or the API. And the heal re-upsert SKIPS projects that carry a
+ * local folder binding: the bind path already wrote their registry row moments before this sync
+ * (its cache invalidation is what triggered us), and the eventually-consistent registry read can
+ * miss that INSERT — re-upserting here raced it and doubled the row.
  */
 
 import {
@@ -131,12 +138,18 @@ export async function syncRegistryToCache(input: RegistrySyncInput): Promise<Reg
 		return { ok: false, reason };
 	}
 
-	const registryProjects: CachedProject[] = [];
+	// ISS-021 backstop dedupe: the registry table has no unique constraint (append-only DeepLake +
+	// non-transactional SELECT→INSERT upserts), so a bind/heal race can leave MORE than one row per
+	// project_id. Collapse the read through a Map keyed by projectId — the FIRST row wins (the list
+	// read's own ordering; the rows are same-key duplicates) — so duplicate registry rows can never
+	// reach the cache or the API again, whatever the table holds.
+	const registryById = new Map<string, CachedProject>();
 	for (const row of result.rows) {
 		const mapped = rowToCachedProject(row);
-		if (mapped !== null) registryProjects.push(mapped);
+		if (mapped !== null && !registryById.has(mapped.projectId)) registryById.set(mapped.projectId, mapped);
 	}
-	const registryIds = new Set(registryProjects.map((p) => p.projectId));
+	const registryProjects: CachedProject[] = [...registryById.values()];
+	const registryIds = new Set(registryById.keys());
 
 	// Preserve the local bindings only when the prior cache belongs to THIS tenancy; a foreign-tenancy
 	// cache's bindings must not leak into the new workspace (mirrors the resolver's read guard).
@@ -152,7 +165,17 @@ export async function syncRegistryToCache(input: RegistrySyncInput): Promise<Reg
 				(p) => p.projectId.length > 0 && p.projectId !== UNSORTED_PROJECT_ID && !registryIds.has(p.projectId),
 			)
 		: [];
+	// ISS-021 root mitigation: a project with a LOCAL FOLDER BINDING was just written to the registry
+	// by the bind path itself (onboarding-api / the CLI bind upserts before invalidating the cache that
+	// triggers this sync). The registry read above can lag that INSERT (DeepLake reads are eventually
+	// consistent), so re-upserting here races the bind's own write — the non-transactional
+	// SELECT→INSERT in `updateOrInsertByKey` then lands a SECOND row for the same project_id. Skip the
+	// heal for bound projects (the bind path owns their registry write; the merge above already keeps
+	// them visible locally) and heal only UNBOUND local-only projects (legacy cache entries with no
+	// writer of their own).
+	const boundIds = new Set(bindings.map((b) => b.projectId));
 	for (const p of localOnly) {
+		if (boundIds.has(p.projectId)) continue;
 		// Fail-soft: a flapped upsert leaves the project local-only; the NEXT sync retries the heal.
 		await upsertProjectRow(input.storage, input.scope, {
 			projectId: p.projectId,
@@ -162,7 +185,13 @@ export async function syncRegistryToCache(input: RegistrySyncInput): Promise<Reg
 		});
 	}
 
-	const projects: CachedProject[] = [...registryProjects, ...localOnly];
+	// Final belt: the merged list is deduped by projectId as well (a dirty prior cache could carry
+	// its own same-id duplicates); registry rows take precedence over local-only entries.
+	const mergedById = new Map<string, CachedProject>();
+	for (const p of [...registryProjects, ...localOnly]) {
+		if (!mergedById.has(p.projectId)) mergedById.set(p.projectId, p);
+	}
+	const projects: CachedProject[] = [...mergedById.values()];
 	const next: ProjectsCache = {
 		schemaVersion: PROJECTS_CACHE_SCHEMA_VERSION,
 		org,
