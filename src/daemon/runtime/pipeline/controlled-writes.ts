@@ -669,8 +669,10 @@ export interface ResolvedControlledWrite {
  * The outcome of committing a {@link ResolvedControlledWrite} — the classification the enqueue gate
  * (a-AC-1) and the drainer (a-AC-3) branch on. A non-ok outcome is split into `transient` (route to the
  * outbox / retry) vs `genuine` (throw — the safety invariant, a-AC-2) by the SAME {@link isTransientResult}
- * the storage layer exports (D-2). `detail` carries only the failure STAGE + the result `kind` (an enum
- * like `timeout`/`query_error`) — never a DeepLake message body, so surfacing it leaks no content.
+ * the storage layer exports (D-2). `detail` carries the failure STAGE + the result `kind` (an enum like
+ * `timeout`/`query_error`), plus — for the dedup probe (BUG-04, #293) — the HTTP status and the DeepLake
+ * message REDACTED of the probed `content_hash` (`redactProbedHash`), so the thrown/at-rest diagnostic is
+ * secret-free yet distinguishes a 402 balance from a 5xx flap from a permission fault.
  */
 export type ControlledWriteCommit =
 	| { readonly status: "inserted"; readonly memoryId: string; readonly version: number }
@@ -744,11 +746,11 @@ async function probeDedupForCommit(
 		return null;
 	}
 	// BUG-04 (#293): turn the OPAQUE `query_error` the register saw into a diagnosable, SECRET-FREE
-	// event carrying the HTTP status + the redacted DeepLake message (the probed `content_hash` — a
-	// content-derived fingerprint — is stripped by `redactProbedHash` before it reaches any event or
-	// the at-rest `last_error_class`). The `detail` folded into the transient/genuine outcome stays
-	// KIND-ONLY (PRD-080 D-2, the ControlledWriteCommit contract) so the thrown/deferred error body
-	// leaks nothing; the rich diagnostic lives only in this structured event.
+	// outcome carrying the HTTP status + the redacted DeepLake message — surfaced in BOTH the structured
+	// event AND the `detail` folded into the transient/genuine outcome (the thrown error is persisted
+	// at-rest as the queue's `last_error_class`). The probed `content_hash` (a content-derived
+	// fingerprint) is stripped by `redactProbedHash` before it reaches either, so the status/text
+	// diagnostic is preserved without leaking content.
 	const probe = describeProbeFailure(dedup, hash);
 	logger?.event("controlled_write.dedup_probe_failed", {
 		classification: failure,
@@ -757,9 +759,9 @@ async function probeDedupForCommit(
 		transient: isTransientResult(dedup),
 		reason: probe.message,
 	});
-	return isTransientResult(dedup)
-		? { status: "transient", detail: `dedup probe failed: ${dedup.kind}` }
-		: { status: "genuine", detail: `dedup probe failed: ${dedup.kind}` };
+	const statusPart = probe.status !== undefined ? ` status=${probe.status}` : "";
+	const detail = `dedup probe failed: ${probe.kind}${statusPart} :: ${probe.message}`;
+	return isTransientResult(dedup) ? { status: "transient", detail } : { status: "genuine", detail };
 }
 
 /**
