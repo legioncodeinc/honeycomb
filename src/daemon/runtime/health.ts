@@ -216,6 +216,21 @@ export interface HealthReasons {
 		readonly deadLettered: number;
 	};
 	/**
+	 * PRD-080a/080b: the durable controlled-write outbox backlog — `pending` ACTIVE queued rows awaiting a
+	 * durable re-commit (after a DeepLake degraded-window commit failure) + the `retrying` subset that has
+	 * already failed at least one drain attempt (`attempts > 0`) + the `deadLettered` terminal count (rows
+	 * that hit `maxAttempts` or exceeded `maxAgeMs` and were retained but retired — b-AC-2). The glanceable
+	 * "is a degraded window backing up distilled memories, is it draining on recovery, and is anything giving
+	 * up?" signal: `pending > 0` during a bad window, `pending → 0` once the backend recovers, `deadLettered
+	 * > 0` once a row exhausts its bound. Present only when the composition root wires the memory outbox;
+	 * omitted on a bare `createDaemon`. Carries NO secret — three counts.
+	 */
+	readonly memoryOutbox?: {
+		readonly pending: number;
+		readonly retrying: number;
+		readonly deadLettered: number;
+	};
+	/**
 	 * Memory-formation observability: memories the controlled-write stage actually committed since boot.
 	 * The glanceable "is this daemon forming memories?" signal — it exists BECAUSE the recurring storage
 	 * probe is disabled in local-queue mode (PRD-066 idle-cost boundary), so `storage: reachable` no
@@ -338,6 +353,18 @@ export interface HealthDetailInputs {
 		readonly deadLettered?: number;
 	};
 	/**
+	 * PRD-080a/080b: the controlled-write retry outbox backlog (`{ pending, retrying, deadLettered }`).
+	 * Omitted when the composition root does not wire the outbox → the `memoryOutbox` reason is absent.
+	 * Present → surfaced verbatim (normalized to non-negative integers) as {@link HealthReasons.memoryOutbox}.
+	 * `deadLettered` is optional on the INPUT (a legacy caller passing only `{ pending, retrying }` still
+	 * type-checks; it normalizes to 0) but is ALWAYS emitted on the output reason (b-AC-2).
+	 */
+	readonly memoryOutbox?: {
+		readonly pending: number;
+		readonly retrying: number;
+		readonly deadLettered?: number;
+	};
+	/**
 	 * Memories committed by the controlled-write stage since boot (the in-process
 	 * {@link import("./pipeline/memory-formation.js").MemoryFormationSnapshot}). Omitted when the
 	 * composition root does not wire the tracker (bare `createDaemon` / the deterministic unit suite);
@@ -447,6 +474,19 @@ export function buildHealthDetail(inputs: HealthDetailInputs): HealthDetail {
 						// PRD-079b (b-AC-2): the terminal dead-letter count, always emitted (a legacy input without
 						// it normalizes to 0), same non-negative-int normalization as the other two counts.
 						deadLettered: nonNegativeInt(inputs.captureOutbox.deadLettered ?? 0),
+					},
+				}
+			: {}),
+		// PRD-080a/080b: the controlled-write retry outbox backlog — present only when the outbox is wired.
+		// Same non-negative-int normalization as captureOutbox; carries no secret (three counts). `pending > 0`
+		// marks a degraded-window backlog of distilled memories awaiting a durable re-commit; `deadLettered > 0`
+		// once a row exhausts its bound (b-AC-2, always emitted — a legacy input without it normalizes to 0).
+		...(inputs.memoryOutbox !== undefined
+			? {
+					memoryOutbox: {
+						pending: nonNegativeInt(inputs.memoryOutbox.pending),
+						retrying: nonNegativeInt(inputs.memoryOutbox.retrying),
+						deadLettered: nonNegativeInt(inputs.memoryOutbox.deadLettered ?? 0),
 					},
 				}
 			: {}),

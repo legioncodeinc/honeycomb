@@ -68,6 +68,10 @@ import {
 	openCaptureOutbox,
 	resolveCaptureOutboxLimits,
 } from "./capture/capture-outbox.js";
+import { MEMORY_OUTBOX_ENV, type MemoryOutbox, openMemoryOutbox, resolveMemoryOutboxLimits } from "./pipeline/memory-outbox.js";
+import { type ControlledWriteHandlerDeps, redriveControlledWritePayload } from "./pipeline/controlled-writes.js";
+import { readTerminalControlledWriteJobs, runMemoryRedrive } from "./pipeline/memory-redrive.js";
+import { mountMemoryRedriveApi } from "./pipeline/memory-redrive-api.js";
 import { type CaptureDroppedEventsCounter, createCaptureDroppedEventsCounter } from "./capture/dropped-events.js";
 import { createGatedCapturesCounter, type GatedCapturesCounter } from "./capture/gated-captures.js";
 import { buildCodebaseGraphSnapshot, mountGraphApi } from "./codebase/api.js";
@@ -2606,6 +2610,7 @@ async function buildPipelineWorker(
 	memoryFormation?: MemoryFormationTracker,
 	vault?: VaultSettingsReader,
 	onMemoryFeature?: (signal: { enabled: boolean; providerConfigured: boolean }) => void,
+	memoryOutbox?: MemoryOutbox,
 ): Promise<StageWorker> {
 	// Resolve the pipeline config fail-soft: a malformed knob must NEVER take the daemon
 	// down — degrade to the schema's false-safe defaults (every stage gate defaults OFF,
@@ -2744,6 +2749,10 @@ async function buildPipelineWorker(
 			// throws and only counts committed outcomes (the tracker filters internally).
 			onOutcome: withMemoryFormationTracking(controlledWriteFanOut(queue), memoryFormation),
 			onConflict: conflictHook,
+			// PRD-080a (a-AC-1): on a TRANSIENT commit failure the resolved write is deferred here (the job
+			// acks + does not burn its 5 attempts); the drainer re-commits it on recovery. Undefined → the
+			// stage throws exactly as pre-080 (unit suite / kill-switch off).
+			...(memoryOutbox !== undefined ? { memoryOutbox } : {}),
 		},
 		graphPersist: { storage, scope: queryScope, config },
 		retention: { storage, scope: queryScope, config },
@@ -3016,8 +3025,33 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// The committed-memories signal for `/health` (the glanceable "is this daemon forming memories?"
 	// answer). Fed by the controlled-write stage's `onOutcome` seam; read on each health call. Especially
 	// load-bearing in local-queue mode, where the recurring storage probe is off so `storage: reachable`
-	// no longer implies writes are landing.
+	// no longer implies writes are landing. Declared BEFORE the outbox so the drainer can feed it too (W-1).
 	const memoryFormation = createMemoryFormationTracker();
+	// ── PRD-080a: the durable CONTROLLED-WRITE outbox (BUG-04b). On a TRANSIENT controlled-write commit
+	// failure the resolved write is PERSISTED here (instead of thrown-and-dropped after 5 job attempts) and
+	// a background drainer re-executes the commit on the dedicated WRITE client once DeepLake recovers
+	// (a-AC-1/a-AC-3). Built ONLY on the REAL production path (no injected fake `storage`) and when the
+	// kill-switch is on (default ON via HONEYCOMB_MEMORY_OUTBOX), so the deterministic unit suite stays
+	// unchanged (a transient failure there throws exactly as pre-080). A sibling `memory_outbox` table in
+	// the SAME home-anchored `local-queue.db` as the capture outbox (D-1/D-6), so a queued write survives a
+	// restart and drains on the next boot (a-AC-5). FAIL-SOFT: `openMemoryOutbox` degrades to a no-op on any
+	// open failure — the stage falls back to the pre-080 throw, never a crash at the composition root.
+	const memoryOutbox: MemoryOutbox | undefined =
+		options.storage === undefined && parseBooleanEnv(process.env[MEMORY_OUTBOX_ENV]) !== false
+			? openMemoryOutbox({
+					storage: writeStorage,
+					baseDir: resolveLocalQueueBaseDir(),
+					logger,
+					// PRD-080b (b-AC-1): the dead-letter bounds, resolved ONCE at the composition root from the
+					// documented defaults + the `HONEYCOMB_MEMORY_OUTBOX_MAX_ATTEMPTS`/`_MAX_AGE_MS` env knobs.
+					...resolveMemoryOutboxLimits(),
+					// W-1: a memory RECOVERED by the drainer from a degraded window must count toward the SAME
+					// `committedSinceBoot` signal the live stage feeds (BUG-04's Verify criteria — the counter
+					// must climb THROUGH the window), so route each drain-committed/deduped outcome to the tracker
+					// exactly as the live stage's `withMemoryFormationTracking` does. Fail-soft inside the drainer.
+					onCommitted: (memoryId, action) => memoryFormation.record({ action, memoryId }),
+				})
+			: undefined;
 	// ── The memory-formation FEATURE-GATING signal for `/health` (this PRD). A mutable cell the
 	// pipeline worker POPULATES at boot with the RESOLVED master `enabled` (vault-first `memory.enabled`,
 	// else env) + whether a REAL model provider is configured (the ModelClient is non-noop). The future
@@ -3175,6 +3209,10 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// COUNT, no DeepLake round-trip) so `pending`/`retrying` reflect the current degraded-window
 			// backlog and its drain. Present only when the outbox is wired (the real assembly).
 			...(captureOutbox !== undefined ? { captureOutbox: captureOutbox.counts() } : {}),
+			// PRD-080a: the controlled-write retry outbox backlog, read LIVE per health call (a cheap local
+			// SQLite COUNT, no DeepLake round-trip) so `pending`/`retrying` reflect the current degraded-window
+			// backlog of distilled memories and its drain. Present only when the outbox is wired (real assembly).
+			...(memoryOutbox !== undefined ? { memoryOutbox: memoryOutbox.counts() } : {}),
 			// Which queue backs the pipeline: `shared` is the degraded-coordination signal (see the guard above).
 			memoryQueue: sharedPipelinePathActive ? "shared" : "local",
 			// The memory-formation feature-gating signal (this PRD) — read LIVE per health call from the
@@ -3389,6 +3427,48 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		} catch (err: unknown) {
 			const reason = err instanceof Error ? err.message : String(err);
 			process.stderr.write(`honeycomb: capture-drain route mount failed (non-fatal): ${reason}\n`);
+		}
+	}
+
+	// ── PRD-080b (b-AC-4): the operator RE-DRIVE trigger — `POST /api/diagnostics/memory-redrive`.
+	//     Attaches onto the same already-mounted, protected `/api/diagnostics` group (NO `server.ts` edit),
+	//     inheriting the dashboard JSON views' auth/RBAC (open in `local`, gated in team/hybrid). It reads
+	//     every TERMINAL `memory_controlled_write` job from `local-queue.db` and RE-RUNS each through the
+	//     SINGLE-SOURCED controlled-write path ({@link redriveControlledWritePayload}) — recovering the
+	//     distilled memories dropped before 080a shipped. The re-drive deps are a MINIMAL controlled-write
+	//     handler over the dedicated WRITE client (so a re-commit never starves recall) + the pipeline
+	//     config gates + the SAME memory outbox (a still-degraded window defers into it; idempotent via the
+	//     content_hash dedup). Mounted ONLY on the REAL assembly (no injected fake `storage`). FAIL-SOFT:
+	//     both the read + each re-run are fail-soft, and the mount is wrapped so a fault never crashes boot.
+	if (options.storage === undefined) {
+		try {
+			let redriveConfig: PipelineConfig;
+			try {
+				redriveConfig = resolvePipelineConfig();
+			} catch {
+				redriveConfig = resolvePipelineConfig({ read: () => ({}) });
+			}
+			const redriveDeps: ControlledWriteHandlerDeps = {
+				storage: writeStorage,
+				config: redriveConfig,
+				embed: embed.client,
+				logger,
+				// A still-degraded window defers the re-driven write into the outbox; on a healthy backend it
+				// commits directly. Omitted when the outbox kill-switch is off → the re-run commits or (on a
+				// transient failure) throws-and-is-counted-skipped, exactly the pre-outbox posture.
+				...(memoryOutbox !== undefined ? { memoryOutbox } : {}),
+			};
+			mountMemoryRedriveApi(daemon, {
+				redrive: () =>
+					runMemoryRedrive({
+						readJobs: () => readTerminalControlledWriteJobs({ baseDir: resolveLocalQueueBaseDir(), logger }),
+						redriveOne: (payload) => redriveControlledWritePayload(payload, redriveDeps),
+						logger,
+					}),
+			});
+		} catch (err: unknown) {
+			const reason = err instanceof Error ? err.message : String(err);
+			process.stderr.write(`honeycomb: memory-redrive route mount failed (non-fatal): ${reason}\n`);
 		}
 	}
 
@@ -3742,6 +3822,10 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// during a DeepLake degraded window — INCLUDING rows persisted before a restart, so they drain
 			// on this boot (a-AC-4). Fail-soft + off the hot path; a no-op when the outbox is unwired.
 			captureOutbox?.start();
+			// PRD-080a: arm the controlled-write outbox drainer (unref'd interval). It re-commits any distilled
+			// memories deferred during a DeepLake degraded window — INCLUDING rows persisted before a restart,
+			// so they drain on this boot (a-AC-5). Fail-soft + off the hot path; a no-op when unwired.
+			memoryOutbox?.start();
 
 			armPollinatingMaintenanceTick();
 			// PRD-058e L-W7/L-W8/L-W9: arm the three lifecycle maintenance ticks alongside the pollinating
@@ -3889,6 +3973,9 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 						(signal) => {
 							memoryFeature = signal;
 						},
+						// PRD-080a: the durable controlled-write outbox threaded into the controlled-write handler
+						// deps so a transient commit failure defers instead of throwing-and-dropping.
+						memoryOutbox,
 					);
 					// PRD-062b (AC-4): when consolidation is ON, DEFER starting the pipeline
 					// worker's own loop — the single lease coordinator (built at the pollinating
@@ -4130,6 +4217,24 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 						},
 					});
 				}
+				// PRD-080a: the controlled-write outbox drainer re-commits to DeepLake on its interval, so it
+				// hibernates with the other DeepLake-touching timers (pause = stop the interval so a queued
+				// backlog does not keep the Activeloop pod warm while idle). On WAKE — the `deeplake.woke`
+				// transition, the backend-recovered signal (PRD-080b b-AC-3, the `deeplake.woke` arm of the
+				// "and/or") — resume re-arms the interval AND kicks an IMMEDIATE drain so the degraded-window
+				// backlog of deferred distilled memories clears promptly, not on the next 30s tick.
+				// `stop`/`start`/`kick` are idempotent + fail-soft.
+				if (memoryOutbox !== undefined) {
+					const outbox = memoryOutbox;
+					pausables.push({
+						label: "memory-outbox-drain",
+						pause: () => outbox.stop(),
+						resume: () => {
+							outbox.start();
+							outbox.kick();
+						},
+					});
+				}
 				if (pausables.length > 0) {
 					hibernation = createDeepLakeHibernation({
 						pausables,
@@ -4230,6 +4335,9 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// PRD-079a: stop the drainer + close the outbox SQLite handle so no file handle leaks across a
 			// restart. Queued rows persist on disk and drain on the next boot (a-AC-4). Idempotent + never throws.
 			captureOutbox?.close();
+			// PRD-080a: stop the controlled-write drainer + close its SQLite handle. Deferred writes persist on
+			// disk and drain on the next boot (a-AC-5). Idempotent + never throws.
+			memoryOutbox?.close();
 			// PRD-043a: close the durable log store handle so no SQLite file handle leaks across a
 			// restart. Idempotent + never throws (the NULL no-op's close is a no-op).
 			logStore.close();

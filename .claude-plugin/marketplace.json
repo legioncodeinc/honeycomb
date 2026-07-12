@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Honeycomb — persistent memory daemon and thin harness clients for AI coding assistants",
-    "version": "0.12.1"
+    "version": "0.13.0"
   },
   "plugins": [
     {
       "name": "honeycomb",
       "description": "Honeycomb Claude Code plugin — captures session activity and provides cross-session memory through the local daemon",
-      "version": "0.12.1",
+      "version": "0.13.0",
       "source": "./harnesses/claude-code"
     }
   ]

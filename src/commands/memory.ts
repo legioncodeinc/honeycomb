@@ -44,6 +44,8 @@ export const MEMORY_STALE_REFS_ROUTE = "/api/memories/stale-refs" as const;
 export const MEMORY_DETAIL_ROUTE = "/api/memories" as const;
 /** The 058e calibration introspection route (reused by `inspect --lifecycle`). */
 export const MEMORY_CALIBRATION_ROUTE = "/api/memories/calibration" as const;
+/** PRD-080b (b-AC-4): the controlled-write outbox RE-DRIVE trigger the `memory redrive` verb POSTs to. */
+export const MEMORY_REDRIVE_ENDPOINT = "/api/diagnostics/memory-redrive" as const;
 
 /** The recognized conflict verdicts the CLI accepts (mirrors the daemon `CONFLICT_VERDICTS`). */
 export const MEMORY_CONFLICT_VERDICTS = Object.freeze(["supersede", "review", "keep-both"] as const);
@@ -243,13 +245,62 @@ export async function runMemoryVerb(argv: readonly string[], deps: CommandDeps, 
 		return runInspect(inv, deps, json, out);
 	}
 
-	out("usage: honeycomb memory <conflicts|stale-refs|inspect>");
+	if (inv.sub === "redrive") {
+		return runRedrive(deps, json, out);
+	}
+
+	out("usage: honeycomb memory <conflicts|stale-refs|inspect|redrive>");
 	out("       conflicts [--status open]                 list conflicts in scope");
 	out("       conflicts resolve <id> --verdict <v> [--winner <id>]   resolve via the 058b endpoint");
 	out("       stale-refs                                list memories with stale references");
 	out("       inspect <id> --lifecycle                  show freshness, calibrated confidence, refStatus, conflict, H");
+	out("       redrive                                   recover memories dropped in a degraded window (PRD-080b)");
 	// An empty subcommand is a benign usage print (exit 0); an unknown one is an error (exit 1).
 	return { exitCode: inv.sub === "" ? 0 : 1 };
+}
+
+/** The count pair the daemon returns from the re-drive (defensive: every field optional across the IO boundary). */
+interface RedriveBody {
+	/** Facts recovered — re-committed / deduped / durably deferred to the outbox. */
+	readonly redriven?: number;
+	/** Facts NOT recovered — unparseable / gate-skipped / genuine-failure. */
+	readonly skipped?: number;
+}
+
+/** Narrow an unknown daemon body into a {@link RedriveBody} + coerce each count to a non-negative int. */
+function asRedriveBody(body: unknown): { redriven: number; skipped: number } {
+	const b = typeof body === "object" && body !== null ? (body as RedriveBody) : {};
+	const coerce = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.trunc(v)) : 0);
+	return { redriven: coerce(b.redriven), skipped: coerce(b.skipped) };
+}
+
+/**
+ * `honeycomb memory redrive` (PRD-080b b-AC-4): POST the re-drive trigger and render `{ redriven, skipped }`
+ * — recovering the distilled memories dropped in a past degraded window. THIN CLIENT: the dispatch goes
+ * ONLY through `deps.daemon` (no DeepLake); the daemon owns the terminal-job read + the controlled-write
+ * re-run. READ-THROUGH FAIL-SOFT: a daemon-down / error status is reported cleanly (a one-line message +
+ * a non-zero exit code), never a throw.
+ */
+async function runRedrive(deps: CommandDeps, json: boolean, out: OutputSink): Promise<CommandResult> {
+	let res: DaemonResponse;
+	try {
+		res = await deps.daemon.send({ method: "POST", path: MEMORY_REDRIVE_ENDPOINT });
+	} catch {
+		// Read-through fail-soft: a daemon-down / connection error is reported cleanly, never thrown.
+		out("error: memory redrive could not reach the daemon on 127.0.0.1:3850.");
+		return { exitCode: 1 };
+	}
+	if (res.status >= 400) {
+		out(`error: memory redrive failed (daemon ${res.status}).`);
+		return { exitCode: 1 };
+	}
+	if (json) {
+		out(JSON.stringify(res.body ?? {}, null, 2));
+		return { exitCode: 0 };
+	}
+	const counts = asRedriveBody(res.body);
+	out(`memory redrive: ${counts.redriven} redriven, ${counts.skipped} skipped.`);
+	return { exitCode: 0 };
 }
 
 /** The lifecycle fields the daemon's memory-detail response carries (058a/058b/058c/058e ride the body). */

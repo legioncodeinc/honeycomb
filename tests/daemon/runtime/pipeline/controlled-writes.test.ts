@@ -742,6 +742,90 @@ describe("dedup probe failure: missing-table/column tolerated → INSERT; genuin
 		).rejects.toThrow(/controlled-write dedup probe failed/);
 		expect(requests.some((r) => isInsert(r.sql))).toBe(false);
 	});
+
+	it("BUG-04 diagnostic: a genuine query_error SURFACES its HTTP status + DeepLake error text (thrown + event)", async () => {
+		// The register's live symptom: 101 jobs (×5 attempts = 505) dropped here with an OPAQUE
+		// `query_error` because the REAL DeepLake error text + status were discarded. This proves the
+		// fix: a genuine probe failure (here a 402 balance exhaustion, a NON-transient status so a
+		// single attempt) now throws a DIAGNOSABLE message AND emits a secret-free structured event
+		// carrying kind/status/classification/transient/reason — so prod can tell a 402 balance from a
+		// 5xx flap from a permission fault instead of guessing. The safety invariant holds: no INSERT.
+		const events: { name: string; fields?: Record<string, unknown> }[] = [];
+		const logger = { event: (name: string, fields?: Record<string, unknown>) => events.push({ name, fields }) };
+		const { storage, requests } = storageWith(
+			dedupFails(new TransportError("query", '{"error":"insufficient balance","code":"PAYMENT_REQUIRED"}', 402)),
+		);
+		const embed = recordingEmbed();
+		await expect(
+			applyControlledWrite(input(), SCOPE, deps(storage, config(), embed, { logger })),
+		).rejects.toThrow(/controlled-write dedup probe failed: query_error status=402 :: .*insufficient balance/);
+		// No unguarded duplicate insert on a genuine failure.
+		expect(requests.some((r) => isInsert(r.sql))).toBe(false);
+		// The structured event carries the real, secret-free cause.
+		const failed = events.find((e) => e.name === "controlled_write.dedup_probe_failed");
+		expect(failed).toBeDefined();
+		expect(failed?.fields).toMatchObject({
+			classification: "other",
+			kind: "query_error",
+			status: 402,
+			transient: false,
+		});
+		expect(String(failed?.fields?.reason)).toContain("insufficient balance");
+	});
+
+	it("BUG-04 live-grounded: DeepLake's REAL missing-COLUMN phrasing heals → INSERT proceeds (no drop)", async () => {
+		// Captured read-only from the live `apiary` workspace: a missing column returns 400
+		// {"error":"Column does not exist: column \"x\" does not exist",...}; the client message is
+		// `${status}: ${body}`. `classifyFailure` MUST route this to missing-column so the probe heals
+		// and the memory commits — refuting the hypothesis that DeepLake phrasing evades the classifier.
+		const body =
+			'{"error":"Column does not exist: column \\"content_hash\\" does not exist","code":"INVALID_REQUEST","request_id":"x"}';
+		const { storage, requests } = storageWith(dedupFails(new TransportError("query", `400: ${body}`, 400)));
+		const embed = recordingEmbed();
+		const out = await applyControlledWrite(input(), SCOPE, deps(storage, config(), embed));
+		expect(out.action).toBe("inserted");
+		expect(requests.some((r) => isInsert(r.sql))).toBe(true);
+	});
+
+	it("BUG-04 live-grounded: DeepLake's REAL missing-TABLE phrasing heals → INSERT proceeds (no drop)", async () => {
+		// The live missing-table shape: 400 {"error":"Table does not exist: relation \"x\" does not
+		// exist",...}. Routes to missing-table → the INSERT heals/CREATEs and the memory commits.
+		const body =
+			'{"error":"Table does not exist: relation \\"memories\\" does not exist","code":"INVALID_REQUEST","request_id":"x"}';
+		const { storage, requests } = storageWith(dedupFails(new TransportError("query", `400: ${body}`, 400)));
+		const embed = recordingEmbed();
+		const out = await applyControlledWrite(input(), SCOPE, deps(storage, config(), embed));
+		expect(out.action).toBe("inserted");
+		expect(requests.some((r) => isInsert(r.sql))).toBe(true);
+	});
+
+	it("BUG-04 secret-safety: a DeepLake body that ECHOES the probe SQL never leaks the content_hash into the thrown error or event", async () => {
+		// The transport surfaces the RAW DeepLake body as `${status}: ${body.slice(0,200)}`. A
+		// statement-rejection body can echo the offending statement verbatim, and the dedup probe
+		// interpolates the SHA-256 content_hash (a one-way fingerprint of normalized memory content).
+		// That value must NOT reach the thrown error (persisted at-rest as the queue's
+		// `last_error_class`) nor the structured event — while the status/kind diagnostic still must.
+		const hash = contentHash(input().normalizedContent);
+		const body = `syntax error at or near "LIMIT" in: SELECT id FROM "memories" WHERE content_hash = '${hash}' LIMIT 1`;
+		const events: { name: string; fields?: Record<string, unknown> }[] = [];
+		const logger = { event: (name: string, fields?: Record<string, unknown>) => events.push({ name, fields }) };
+		const { storage } = storageWith(dedupFails(new TransportError("query", `400: ${body}`, 400)));
+		const embed = recordingEmbed();
+		let thrown = "";
+		await applyControlledWrite(input(), SCOPE, deps(storage, config(), embed, { logger })).catch((e: unknown) => {
+			thrown = e instanceof Error ? e.message : String(e);
+		});
+		// Diagnostic value preserved: the class + HTTP status still surface.
+		expect(thrown).toContain("query_error");
+		expect(thrown).toContain("status=400");
+		// Secret stripped: neither the thrown message nor the event's `reason` carries the hash…
+		expect(thrown).not.toContain(hash);
+		const failed = events.find((e) => e.name === "controlled_write.dedup_probe_failed");
+		expect(String(failed?.fields?.reason)).not.toContain(hash);
+		// …and no residual long hex run (a truncation-clipped fragment) survives either.
+		expect(thrown).not.toMatch(/[0-9a-f]{16,}/i);
+		expect(String(failed?.fields?.reason)).not.toMatch(/[0-9a-f]{16,}/i);
+	});
 });
 
 // ── PRD-046 deferred durable-key generator (memories.key on the write path) ───────

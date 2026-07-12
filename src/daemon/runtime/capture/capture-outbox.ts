@@ -153,8 +153,12 @@ export interface CaptureOutboxLimits {
  * daemon-only file): a non-numeric value falls back to `fallback`; a sub-`min` value is clamped UP to
  * `min` (a `0`/negative bound would dead-letter or never-dead-letter nonsensically). A typo is tuning
  * noise, never a hard reject — the daemon never fails to boot because a bound was fat-fingered.
+ *
+ * Exported (PRD-080b): the sibling `memory_outbox` reuses the IDENTICAL coerce-and-clamp for its own
+ * `HONEYCOMB_MEMORY_OUTBOX_*` bounds ({@link import("../pipeline/memory-outbox.js").resolveMemoryOutboxLimits}),
+ * so the two outboxes share ONE env-knob normalizer instead of two byte-identical copies (jscpd).
  */
-function clampIntKnob(raw: unknown, fallback: number, min: number): number {
+export function clampIntKnob(raw: unknown, fallback: number, min: number): number {
 	const n = typeof raw === "number" ? raw : Number(raw);
 	if (!Number.isFinite(n)) return fallback;
 	return Math.max(min, Math.trunc(n));
@@ -333,15 +337,19 @@ export interface OutboxLogger {
 	event(name: string, fields?: Readonly<Record<string, unknown>>): void;
 }
 
-/** The `ColumnValue` shape as persisted in `row_json` — validated on read since the file is a boundary (a-AC-5). */
-const ColumnValueSchema = z.union([
+/**
+ * The `ColumnValue` shape as persisted in `row_json` — validated on read since the file is a boundary
+ * (a-AC-5). Exported so the sibling PRD-080a memory outbox validates its persisted `memories` rows with
+ * the SAME single-sourced schema (a `RowValues` row shape is identical for either outbox).
+ */
+export const OutboxColumnValueSchema = z.union([
 	z.object({ kind: z.literal("text"), value: z.string() }),
 	z.object({ kind: z.literal("literal"), value: z.string() }),
 	z.object({ kind: z.literal("number"), value: z.number() }),
 	z.object({ kind: z.literal("raw"), value: z.string() }),
 ]);
-/** A persisted `sessions` row: the ordered `[column, value]` tuples the append primitive replays. */
-const RowValuesSchema = z.array(z.tuple([z.string(), ColumnValueSchema]));
+/** A persisted append row: the ordered `[column, value]` tuples a write primitive replays (shared by both outboxes). */
+export const OutboxRowValuesSchema = z.array(z.tuple([z.string(), OutboxColumnValueSchema]));
 
 /**
  * Open (or create) the capture outbox over the `capture_outbox` table in the home-anchored
@@ -810,7 +818,7 @@ class SqliteCaptureOutbox implements CaptureOutbox {
 	/** Parse + validate a persisted `row_json` back into {@link RowValues}; `null` on any corruption (a-AC-5). */
 	private parseRow(rowJson: string): RowValues | null {
 		try {
-			const parsed = RowValuesSchema.parse(JSON.parse(rowJson) as unknown);
+			const parsed = OutboxRowValuesSchema.parse(JSON.parse(rowJson) as unknown);
 			return parsed as unknown as RowValues;
 		} catch {
 			return null;

@@ -63,17 +63,21 @@
 import { type Proposal, parseProposal } from "./contracts.js";
 import { type PipelineConfig } from "./config.js";
 import type { StageHandler, StageJob } from "./stage-worker.js";
+import type { MemoryOutboxSink } from "./memory-outbox.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
+import { isTransientResult } from "../../storage/client.js";
 import type { HealTarget } from "../../storage/heal.js";
 import { classifyFailure } from "../../storage/heal.js";
-import { isOk, type StorageRow } from "../../storage/result.js";
+import { isOk, type QueryResult, type StorageRow } from "../../storage/result.js";
 import {
+	appendOnlyInsertMany,
 	appendVersionBumped,
 	type ColumnValue,
 	type RowValues,
 	val,
 } from "../../storage/writes.js";
 import {
+	buildDedupCheckManySql,
 	buildDedupCheckSql,
 	contentHash,
 	MEMORIES_COLUMNS,
@@ -175,6 +179,7 @@ export type ControlledWriteAction =
 	| "deduped" // an ADD whose content hash already existed → existing id returned
 	| "version_bumped" // an UPDATE/DELETE applied as an append-only version bump
 	| "flagged_not_applied" // an UPDATE/DELETE flagged but not applied (autonomous off)
+	| "deferred" // PRD-080a: a TRANSIENT commit failure routed the resolved write to the durable memory outbox
 	| "skipped"; // gate rejected, or shadow/frozen, or action `none`
 
 /** The typed result of applying one controlled write. No throw on a gate rejection. */
@@ -271,6 +276,19 @@ export interface ControlledWriteHandlerDeps {
 	 * NEVER throws into — or replays — the committed write.
 	 */
 	readonly onConflict?: ControlledWriteConflictHook;
+	/**
+	 * PRD-080a (a-AC-1 / D-2): the durable controlled-write outbox. When a commit fails TRANSIENTLY
+	 * (`isTransientResult` — 5xx/429/timeout/connection, a DeepLake degraded window) at EITHER the
+	 * dedup-probe branch OR the version-bumped INSERT branch, the resolved write (`{ action, row, scope }`)
+	 * is ENQUEUED here and the stage returns a `deferred` action instead of throwing — so the
+	 * `memory_controlled_write` job ACKs and does NOT burn its 5 attempts; the outbox's background drainer
+	 * owns the retry once the backend recovers. A GENUINE (non-transient) failure STILL throws (the safety
+	 * invariant — never an unguarded duplicate insert). ABSENT (unit suite, or the kill-switch off) → the
+	 * pre-080 behavior is byte-for-byte unchanged (a transient failure throws exactly as before). FAIL-SOFT
+	 * (a-AC-6): an enqueue that persists nothing (or throws) falls back to the pre-080 throw — never a
+	 * silently-lost-and-forgotten write.
+	 */
+	readonly memoryOutbox?: MemoryOutboxSink;
 }
 
 // ── D-7 contradiction heuristic ─────────────────────────────────────────────────
@@ -452,41 +470,10 @@ async function applyAdd(
 	// (disabled / unreachable / wrong-dim) leaves `content_embedding` NULL.
 	const vector = await prefetchEmbedding(input.content, deps, logger);
 
-	// c-AC-1 / c-AC-2 (FR-5): SELECT-before-INSERT dedup on the content hash.
-	const dedup = await deps.storage.query(buildDedupCheckSql(hash), scope);
-	if (isOk(dedup) && dedup.rows.length > 0) {
-		const existingId = readId(dedup.rows[0]);
-		logger.event("controlled_write.deduped", { id: existingId });
-		// c-AC-2: existing id returned, NO duplicate INSERT.
-		return { action: "deduped", memoryId: existingId, reason: "hash_present" };
-	}
-	if (!isOk(dedup)) {
-		// A dedup probe against a partition whose `memories` table (or `content_hash`
-		// column) does not exist yet is NOT a duplicate: a missing table trivially
-		// contains no rows, and the INSERT below heals/CREATEs it. Classify with the
-		// SAME engine the heal path uses (`classifyFailure`, which forces auth/
-		// permission failures to `other` FIRST). `query_error` carries `.message`;
-		// `connection_error`/`timeout` carry `.message` too but classify as `other`,
-		// so a dropped socket or timeout STILL fails the job — never an unguarded
-		// duplicate insert on a real error. Mirrors the RECALL path, which tolerates a
-		// failed query by returning no rows (recall/collection.ts).
-		const failure = classifyFailure(dedup.message);
-		if (failure === "missing-table" || failure === "missing-column") {
-			logger.event("controlled_write.dedup_probe_table_absent", {
-				kind: dedup.kind,
-				classification: failure,
-			});
-			// Fall through to the INSERT (which heals the table) — NOT deduped, NOT skipped.
-		} else {
-			// A genuine failure (permission/syntax/connection/timeout): surface it so the
-			// job fails and the queue retries, rather than risk an unguarded duplicate insert.
-			throw new Error(`controlled-write dedup probe failed: ${dedup.kind}`);
-		}
-	}
-
-	// Insert a fresh version-1 memory row. The write goes through the version-bumped
-	// HealTarget so the row carries `version` = 1 and the heal engine adds the
-	// `version` column lazily — keeping ADD and UPDATE/DELETE on one row shape.
+	// Build the version-1 memory row up front (pure): the write goes through the version-bumped
+	// HealTarget so the row carries `version` = 1 and the heal engine adds the `version` column
+	// lazily — keeping ADD and UPDATE/DELETE on one row shape, and giving the outbox the SAME
+	// resolved row to persist on a transient defer (PRD-080a).
 	const id = (deps.newId ?? defaultMemoryId)();
 	const now = isoNow(deps.now ?? (() => new Date()));
 	const row = buildMemoryRow({
@@ -499,21 +486,40 @@ async function applyAdd(
 		createdAt: now,
 		updatedAt: now,
 	});
+	const resolved: ResolvedControlledWrite = { action: "add", keyId: id, row, scope };
 
-	const { result } = await appendVersionBumped(deps.storage, MEMORIES_VERSIONED_TARGET, scope, {
-		keyColumn: "id",
-		keyValue: id,
-		row,
-	});
-	if (!isOk(result)) {
-		throw new Error(`controlled-write insert failed: ${result.kind}`);
+	// c-AC-1 / c-AC-2 (FR-5): the durable commit — SELECT-before-INSERT dedup then version-bumped
+	// append — single-sourced in {@link commitControlledWrite} so the outbox drainer replays the
+	// IDENTICAL logic (idempotent via the content hash). It classifies a non-ok outcome transient
+	// vs genuine (PRD-080a D-2) and emits the dedup diagnostics through the passed logger.
+	const commit = await commitControlledWrite(deps.storage, resolved, logger);
+	switch (commit.status) {
+		case "deduped":
+			// c-AC-2: existing id returned, NO duplicate INSERT (logged inside the commit).
+			// PRD-080b (b-AC-3): a clean dedup probe also proves the backend is up — kick a recovery drain.
+			kickMemoryOutboxDrain(deps, logger);
+			return { action: "deduped", memoryId: commit.memoryId, reason: "hash_present" };
+		case "inserted":
+		case "version_bumped":
+			logger.event("controlled_write.inserted", { id });
+			// PRD-080b (b-AC-3): a LANDED commit is the "backend recovered" signal — kick an immediate
+			// outbox drain so a degraded-window backlog of deferred writes clears promptly instead of
+			// waiting for the 30s interval. Fail-soft + off the critical section (the outcome is unaffected).
+			kickMemoryOutboxDrain(deps, logger);
+			// PRD-058b LIVE (C-1): the write is COMMITTED. Run conflict detection over the decision
+			// stage's forwarded candidate set OFF the critical section + fail-soft. Never throws into it.
+			await runConflictHook(id, input.content, input, scope, deps, logger);
+			return { action: "inserted", memoryId: id };
+		case "transient":
+			// PRD-080a (a-AC-1): a DeepLake degraded-window failure at the dedup-probe OR the INSERT →
+			// defer the resolved write to the durable outbox (ack the job), else fall back to the pre-080
+			// throw when no outbox is wired / the enqueue persisted nothing (a-AC-6).
+			return deferOrThrow(resolved, commit.detail, deps, logger);
+		case "genuine":
+			// Safety invariant (a-AC-2): a non-transient failure STILL throws — never an unguarded
+			// duplicate insert, never a deferred ack.
+			throw new Error(`controlled-write ${commit.detail}`);
 	}
-	logger.event("controlled_write.inserted", { id });
-	// PRD-058b LIVE (C-1): the write is COMMITTED. Run conflict detection over the decision stage's
-	// forwarded candidate set OFF the critical section + fail-soft — a flagged pair projects into
-	// `memory_conflicts` so recall's κ gate can suppress the loser. Never throws into the write.
-	await runConflictHook(id, input.content, input, scope, deps, logger);
-	return { action: "inserted", memoryId: id };
 }
 
 /**
@@ -588,6 +594,7 @@ async function applyUpdateOrDelete(
 	}
 
 	const isDelete = proposal.action === "delete";
+	const action: ResolvedWriteAction = isDelete ? "delete" : "update";
 
 	// Prefetch the embedding for an UPDATE's new content BEFORE the write (c-AC-6).
 	// A DELETE carries no new content to embed.
@@ -604,24 +611,342 @@ async function applyUpdateOrDelete(
 		createdAt: now,
 		updatedAt: now,
 	});
+	const resolved: ResolvedControlledWrite = { action, keyId: targetId, row, scope };
 
-	// c-AC-3: append-only version-bumped write, never an in-place UPDATE.
-	const { result, version } = await appendVersionBumped(deps.storage, MEMORIES_VERSIONED_TARGET, scope, {
+	// c-AC-3: append-only version-bumped write, never an in-place UPDATE — single-sourced in
+	// {@link commitControlledWrite} so the outbox drainer replays the identical version bump.
+	const commit = await commitControlledWrite(deps.storage, resolved, logger);
+	switch (commit.status) {
+		case "version_bumped":
+		case "inserted":
+		case "deduped":
+			logger.event("controlled_write.version_bumped", {
+				action: proposal.action,
+				targetId,
+				...(commit.status === "version_bumped" ? { version: commit.version } : {}),
+			});
+			// PRD-080b (b-AC-3): a LANDED version-bump is the "backend recovered" signal — kick a drain.
+			kickMemoryOutboxDrain(deps, logger);
+			// PRD-058b LIVE (C-1): an UPDATE landed NEW content — run conflict detection over the
+			// candidate set (off the critical section, fail-soft). A DELETE is a tombstone, so it
+			// detects nothing — there is no live content to contradict its candidates.
+			if (!isDelete) {
+				await runConflictHook(targetId, input.content, input, scope, deps, logger);
+			}
+			return { action: "version_bumped", memoryId: targetId, contradiction };
+		case "transient":
+			// PRD-080a (a-AC-1): defer the version-bumped write to the durable outbox, else fall back to
+			// the pre-080 throw (a-AC-6).
+			return deferOrThrow(resolved, commit.detail, deps, logger);
+		case "genuine":
+			// Safety invariant (a-AC-2): a non-transient failure STILL throws.
+			throw new Error(`controlled-write ${commit.detail}`);
+	}
+}
+
+// ── durable commit + transient-defer (PRD-080a) ────────────────────────────────────
+
+/** The resolved-write action the outbox persists + the drainer replays (the proposal action). */
+export type ResolvedWriteAction = "add" | "update" | "delete";
+
+/**
+ * A fully-resolved controlled write: the ALREADY-BUILT `memories` row + its key + scope + action.
+ * PRD-080a (D-3): the outbox persists exactly this (the decision already ran), and the drainer replays
+ * the durable COMMIT — never the extraction/decision — via {@link commitControlledWrite}.
+ */
+export interface ResolvedControlledWrite {
+	/** The proposal action — `add` runs the dedup-probe-then-append; `update`/`delete` version-bump. */
+	readonly action: ResolvedWriteAction;
+	/** The `memories.id` key the write lands under (the ADD's new id, or the UPDATE/DELETE target). */
+	readonly keyId: string;
+	/** The built `memories` row (carries `content_hash` + content + vector) — persisted verbatim + replayed. */
+	readonly row: RowValues;
+	/** The org/workspace partition the write is issued under. */
+	readonly scope: QueryScope;
+}
+
+/**
+ * The outcome of committing a {@link ResolvedControlledWrite} — the classification the enqueue gate
+ * (a-AC-1) and the drainer (a-AC-3) branch on. A non-ok outcome is split into `transient` (route to the
+ * outbox / retry) vs `genuine` (throw — the safety invariant, a-AC-2) by the SAME {@link isTransientResult}
+ * the storage layer exports (D-2). `detail` carries the failure STAGE + the result `kind` (an enum like
+ * `timeout`/`query_error`), plus — for the dedup probe (BUG-04, #293) — the HTTP status and the DeepLake
+ * message REDACTED of the probed `content_hash` (`redactProbedHash`), so the thrown/at-rest diagnostic is
+ * secret-free yet distinguishes a 402 balance from a 5xx flap from a permission fault.
+ */
+export type ControlledWriteCommit =
+	| { readonly status: "inserted"; readonly memoryId: string; readonly version: number }
+	| { readonly status: "deduped"; readonly memoryId: string }
+	| { readonly status: "version_bumped"; readonly memoryId: string; readonly version: number }
+	| { readonly status: "transient"; readonly detail: string }
+	| { readonly status: "genuine"; readonly detail: string };
+
+/**
+ * Commit a resolved controlled write to `memories` — the SINGLE-SOURCED durable commit shared by the
+ * live stage (applyAdd / applyUpdateOrDelete) AND the outbox drainer (PRD-080a D-3). An ADD runs the
+ * SELECT-before-INSERT dedup probe then the version-bumped append (so a memory a prior attempt already
+ * landed is `deduped` — idempotent via `content_hash`, NO duplicate INSERT); an UPDATE/DELETE runs the
+ * version-bumped append directly. A missing-table/column probe failure heals through the append (not a
+ * duplicate). NEVER throws — it returns the typed outcome the caller acts on (defer / throw /
+ * delete-from-outbox). The optional `logger` surfaces the same dedup diagnostics the live stage emitted.
+ */
+export async function commitControlledWrite(
+	storage: StorageQuery,
+	write: ResolvedControlledWrite,
+	logger?: ControlledWriteLogger,
+): Promise<ControlledWriteCommit> {
+	if (write.action === "add") {
+		const probe = await probeDedupForCommit(storage, write, logger);
+		if (probe !== null) return probe; // deduped, or a genuine/transient probe failure — done.
+	}
+	// The version-bumped append (ADD's fresh version 1, or the UPDATE/DELETE bump). NEVER an in-place
+	// UPDATE, so two rapid edits both persist and the highest version reads current.
+	const { result, version } = await appendVersionBumped(storage, MEMORIES_VERSIONED_TARGET, write.scope, {
 		keyColumn: "id",
-		keyValue: targetId,
-		row,
+		keyValue: write.keyId,
+		row: write.row,
 	});
-	if (!isOk(result)) {
-		throw new Error(`controlled-write ${proposal.action} failed: ${result.kind}`);
+	if (isOk(result)) {
+		return write.action === "add"
+			? { status: "inserted", memoryId: write.keyId, version }
+			: { status: "version_bumped", memoryId: write.keyId, version };
 	}
-	logger.event("controlled_write.version_bumped", { action: proposal.action, targetId, version });
-	// PRD-058b LIVE (C-1): an UPDATE landed NEW content — run conflict detection over the candidate
-	// set (off the critical section, fail-soft). A DELETE is a tombstone (it removes a fact), so it
-	// detects nothing — there is no live content to contradict its candidates.
-	if (!isDelete) {
-		await runConflictHook(targetId, input.content, input, scope, deps, logger);
+	const prefix = write.action === "add" ? "insert failed" : `${write.action} failed`;
+	return isTransientResult(result)
+		? { status: "transient", detail: `${prefix}: ${result.kind}` }
+		: { status: "genuine", detail: `${prefix}: ${result.kind}` };
+}
+
+/**
+ * Run the ADD dedup probe (a-AC-3 idempotency): a `content_hash` hit → `deduped` (no INSERT). A
+ * missing-table/column probe failure is NOT a duplicate → `null` so the caller heals via the append.
+ * Any OTHER non-ok probe is classified transient vs genuine (a-AC-1 / a-AC-2). `null` also when the
+ * probe is clean-but-empty (proceed to the INSERT). Reads the hash off the row so the drainer replays
+ * the identical probe.
+ */
+async function probeDedupForCommit(
+	storage: StorageQuery,
+	write: ResolvedControlledWrite,
+	logger?: ControlledWriteLogger,
+): Promise<ControlledWriteCommit | null> {
+	const hash = readRowLiteral(write.row, "content_hash");
+	if (hash === null) return null; // no hash on the row (never expected) → cannot dedup; heal via INSERT.
+	const dedup = await storage.query(buildDedupCheckSql(hash), write.scope);
+	if (isOk(dedup) && dedup.rows.length > 0) {
+		const existingId = readId(dedup.rows[0]);
+		logger?.event("controlled_write.deduped", { id: existingId });
+		return { status: "deduped", memoryId: existingId };
 	}
-	return { action: "version_bumped", memoryId: targetId, contradiction };
+	if (isOk(dedup)) return null; // clean, no rows → proceed to the INSERT.
+	// Classify with the SAME engine the heal path uses (`classifyFailure`, auth/permission forced to
+	// `other` FIRST). A missing table/column trivially holds no duplicate → heal via the INSERT.
+	const failure = classifyFailure(dedup.message);
+	if (failure === "missing-table" || failure === "missing-column") {
+		logger?.event("controlled_write.dedup_probe_table_absent", { kind: dedup.kind, classification: failure });
+		return null;
+	}
+	// BUG-04 (#293): turn the OPAQUE `query_error` the register saw into a diagnosable, SECRET-FREE
+	// outcome carrying the HTTP status + the redacted DeepLake message — surfaced in BOTH the structured
+	// event AND the `detail` folded into the transient/genuine outcome (the thrown error is persisted
+	// at-rest as the queue's `last_error_class`). The probed `content_hash` (a content-derived
+	// fingerprint) is stripped by `redactProbedHash` before it reaches either, so the status/text
+	// diagnostic is preserved without leaking content.
+	const probe = describeProbeFailure(dedup, hash);
+	logger?.event("controlled_write.dedup_probe_failed", {
+		classification: failure,
+		kind: probe.kind,
+		...(probe.status !== undefined ? { status: probe.status } : {}),
+		transient: isTransientResult(dedup),
+		reason: probe.message,
+	});
+	const statusPart = probe.status !== undefined ? ` status=${probe.status}` : "";
+	const detail = `dedup probe failed: ${probe.kind}${statusPart} :: ${probe.message}`;
+	return isTransientResult(dedup) ? { status: "transient", detail } : { status: "genuine", detail };
+}
+
+/**
+ * The per-write outcome of a BATCHED ADD commit (PRD-080c c-AC-2): every input `keyId` lands in EXACTLY
+ * one bucket. `committed` = the write LANDED (a fresh multi-row append) OR was ALREADY present (a batched
+ * `content_hash` dedup hit — idempotent, no duplicate), so the outbox DELETES the row; `failed` = the
+ * batched probe or the multi-row append failed transiently/genuinely this pass, so the outbox backs each
+ * off / dead-letters it INDEPENDENTLY (mirrors the capture coalescer's per-member accounting). No `keyId`
+ * is ever lost or double-committed.
+ */
+export interface ControlledWriteCommitManyResult {
+	/**
+	 * The members whose write LANDED (`inserted`) or was already present (`deduped`) — the drainer deletes
+	 * each from the outbox (drained) AND records it to the memory-formation tracker (W-1) with its honest
+	 * committed action.
+	 */
+	readonly committed: readonly ControlledWriteCommittedMember[];
+	/** keyIds whose write FAILED this pass — the drainer backs each off / dead-letters it independently. */
+	readonly failed: readonly string[];
+}
+
+/** One coalesced member that committed — its `memories.id` + the honest committed action (W-1 tracker feed). */
+export interface ControlledWriteCommittedMember {
+	readonly keyId: string;
+	/** The committed action the memory-formation tracker counts (`inserted` fresh append, or `deduped` hit). */
+	readonly action: "inserted" | "deduped";
+}
+
+/**
+ * Commit a COALESCED group of ADD writes (PRD-080c c-AC-2) — the batched twin of {@link commitControlledWrite}
+ * that PRESERVES the dedup guarantee under coalescing. The naive alternative (a bare multi-row append) would
+ * BYPASS the `content_hash` dedup and risk DUPLICATE memories; instead this runs ONE batched dedup probe
+ * ({@link buildDedupCheckManySql}) over the group's hashes, treats every already-landed hash as `deduped`
+ * (committed, NO insert — idempotent), and multi-row appends ONLY the not-present rows in ONE version-bumped
+ * append. PRECONDITION (enforced by the drainer, never here): every write is an `add` carrying a readable
+ * `content_hash`, and the hashes are DISTINCT within the group (an in-group duplicate is NOT provably safe
+ * to batch — the drainer keeps such a group on the per-row path). NEVER throws — a probe / append failure is
+ * reported as `failed` for the affected keys so the drainer backs them off (never a duplicate, never a lost
+ * row). Same single-sourced write primitives + SQL-safety floor as the live stage.
+ */
+export async function commitControlledWriteMany(
+	storage: StorageQuery,
+	writes: readonly ResolvedControlledWrite[],
+): Promise<ControlledWriteCommitManyResult> {
+	if (writes.length === 0) return { committed: [], failed: [] };
+	const allIds = writes.map((w) => w.keyId);
+	const hashes: string[] = [];
+	for (const w of writes) {
+		const hash = memoryRowContentHash(w.row);
+		if (hash === null) return { committed: [], failed: allIds }; // precondition break → whole group fails (drainer re-runs per-row).
+		hashes.push(hash);
+	}
+	const scope = (writes[0] as ResolvedControlledWrite).scope;
+	// c-AC-2: ONE batched dedup probe — which of the group's hashes already landed (idempotent replay)?
+	const present = await probeDedupMany(storage, hashes, scope);
+	if (present === "failed") return { committed: [], failed: allIds }; // probe transient/genuine → back each off.
+	const committed: ControlledWriteCommittedMember[] = [];
+	const toInsert: ResolvedControlledWrite[] = [];
+	for (let i = 0; i < writes.length; i++) {
+		const w = writes[i] as ResolvedControlledWrite;
+		// already landed → deduped, NO insert (idempotent); else it becomes a fresh multi-row insert below.
+		if (present.has(hashes[i] as string)) committed.push({ keyId: w.keyId, action: "deduped" });
+		else toInsert.push(w);
+	}
+	if (toInsert.length === 0) return { committed, failed: [] };
+	// c-AC-2: multi-row VERSION-BUMPED append of the not-present rows. A fresh ADD is version 1 (a unique id
+	// has no prior version), so every coalesced row carries `version = 1` — exactly what the per-row
+	// `appendVersionBumped` writes for a fresh key. Heal-aware via `appendOnlyInsertMany`.
+	const rows: RowValues[] = toInsert.map((w) => [...w.row, ["version", val.num(1)] as const]);
+	let landed = false;
+	try {
+		landed = isOk(await appendOnlyInsertMany(storage, MEMORIES_VERSIONED_TARGET, scope, rows));
+	} catch {
+		landed = false; // a throwing append is a normal failed attempt (each member backs off), never a pass abort.
+	}
+	if (landed) {
+		for (const w of toInsert) committed.push({ keyId: w.keyId, action: "inserted" });
+		return { committed, failed: [] };
+	}
+	return { committed, failed: toInsert.map((w) => w.keyId) };
+}
+
+/**
+ * Run the BATCHED dedup probe for {@link commitControlledWriteMany}: return the set of already-present
+ * `content_hash`es, or `"failed"` when the probe fails transiently/genuinely (the whole group backs off).
+ * A missing-table/column probe is NOT a duplicate → an EMPTY present set (heal via the append), exactly as
+ * the per-row {@link probeDedupForCommit} does. Reads the matched hashes off the probe rows.
+ */
+async function probeDedupMany(
+	storage: StorageQuery,
+	hashes: readonly string[],
+	scope: QueryScope,
+): Promise<ReadonlySet<string> | "failed"> {
+	try {
+		const probe = await storage.query(buildDedupCheckManySql(hashes), scope);
+		if (isOk(probe)) {
+			const present = new Set<string>();
+			for (const row of probe.rows) {
+				const value = (row as StorageRow).content_hash;
+				if (typeof value === "string" && value.length > 0) present.add(value);
+			}
+			return present;
+		}
+		const failure = classifyFailure(probe.message);
+		if (failure === "missing-table" || failure === "missing-column") return new Set(); // no dup → heal via the append.
+		return "failed"; // transient OR genuine → the drainer backs each member off / dead-letters (never a duplicate).
+	} catch {
+		// A rejecting transport is a whole-group failed attempt (the drainer backs each member off), never a throw.
+		return "failed";
+	}
+}
+
+/**
+ * Read the `content_hash` literal off a built `memories` row (the dedup key). PRD-080c: the coalesced outbox
+ * drain reuses this so hash extraction is SINGLE-SOURCED with the per-row commit's {@link readRowLiteral}
+ * (the drainer both decides coalescing eligibility on it and feeds it to {@link commitControlledWriteMany}).
+ */
+export function memoryRowContentHash(row: RowValues): string | null {
+	return readRowLiteral(row, "content_hash");
+}
+
+/**
+ * Read a `literal`/`text`/`raw` string value out of a built row's column (e.g. `content_hash`), or
+ * `null` when absent / non-string — so the commit + drainer recover the dedup key from the row.
+ */
+function readRowLiteral(row: RowValues, column: string): string | null {
+	for (const [name, value] of row) {
+		if (name !== column) continue;
+		if (value.kind === "literal" || value.kind === "text" || value.kind === "raw") {
+			return value.value.length > 0 ? value.value : null;
+		}
+		return null;
+	}
+	return null;
+}
+
+/**
+ * PRD-080a (a-AC-1 / a-AC-6): route a TRANSIENT-failed resolved write to the durable outbox and ack the
+ * job with a `deferred` outcome, OR fall back to the pre-080 throw. The throw is the fallback for EVERY
+ * path that does not durably persist the write: no outbox wired (unit suite / kill-switch off), an
+ * enqueue that persisted nothing (`enqueued === 0`), or an outbox that THREW — so a transient failure is
+ * NEVER silently lost-and-forgotten (it either lands in the outbox, or fails the job for the queue to
+ * retry, exactly as pre-080).
+ */
+function deferOrThrow(
+	write: ResolvedControlledWrite,
+	detail: string,
+	deps: ControlledWriteHandlerDeps,
+	logger: ControlledWriteLogger,
+): ControlledWriteOutcome {
+	const outbox = deps.memoryOutbox;
+	if (outbox !== undefined) {
+		try {
+			const res = outbox.enqueue(write);
+			if (res.enqueued > 0) {
+				// The resolved write is durable — ack the job (no throw, no attempt-burn); the outbox drains it.
+				logger.event("controlled_write.deferred", { action: write.action });
+				return { action: "deferred", memoryId: write.keyId, reason: "transient_deferred" };
+			}
+		} catch (err: unknown) {
+			// a-AC-6: an enqueue fault must NEVER escape as an unhandled rejection — log secret-free and
+			// fall through to the pre-080 throw so the write is not silently lost-and-forgotten.
+			logger.event("controlled_write.defer_failed", { reason: err instanceof Error ? err.name : "unknown_error" });
+		}
+	}
+	throw new Error(`controlled-write ${detail}`);
+}
+
+/**
+ * PRD-080b (b-AC-3): kick the durable outbox to drain IMMEDIATELY after a SUCCESSFUL pipeline `memories`
+ * commit (the "backend recovered" signal — mirrors the capture handler's `kickOutboxDrain` on append
+ * success). The kick is single-flighted + fail-soft inside the outbox; this wrapper is the
+ * belt-and-suspenders guard so even a throwing/absent seam never breaks the committed write (the outcome
+ * is already decided; the drain is off the critical section). A no-op when no outbox is wired (the unit
+ * suite / kill-switch off) or the sink does not implement `kick`. NEVER re-entered by the drainer itself:
+ * the drainer replays via {@link commitControlledWrite} directly (not through {@link applyControlledWrite}),
+ * so this fires only on the LIVE stage path, never from inside a drain pass.
+ */
+function kickMemoryOutboxDrain(deps: ControlledWriteHandlerDeps, logger: ControlledWriteLogger): void {
+	try {
+		deps.memoryOutbox?.kick?.();
+	} catch (err: unknown) {
+		// A recovery-kick fault must NEVER surface to the committed write — log secret-free, never throw.
+		logger.event("controlled_write.kick_failed", { reason: err instanceof Error ? err.name : "unknown_error" });
+	}
 }
 
 /**
@@ -714,6 +1039,51 @@ function clampConfidence(value: number): number {
 function readId(row: StorageRow): string {
 	const raw = row.id;
 	return typeof raw === "string" ? raw : String(raw ?? "");
+}
+
+/**
+ * Extract the diagnostic descriptor from a failed dedup-probe {@link QueryResult} (BUG-04). Every
+ * non-ok kind (`query_error`/`connection_error`/`timeout`) carries a `.message`; only a
+ * `query_error` carries an HTTP `.status`. The client keeps the token out of the message (it is
+ * never interpolated into SQL or errors), but the message ultimately originates from the HTTP
+ * transport as `${status}: ${body.slice(0,200)}` (see `storage/transport.ts`) — the RAW DeepLake
+ * error body. A statement rejection can echo the offending SQL, and the dedup probe interpolates the
+ * SHA-256 `content_hash`, so the body may carry that fingerprint. {@link redactProbedHash} strips it
+ * before the message is surfaced. Used to turn the opaque `query_error` the register saw into a
+ * diagnosable, secret-free `${kind}${status} :: ${message}`.
+ */
+function describeProbeFailure(
+	result: Exclude<QueryResult, { kind: "ok" }>,
+	probedHash: string,
+): {
+	readonly kind: string;
+	readonly status?: number;
+	readonly message: string;
+} {
+	const message = redactProbedHash(result.message, probedHash);
+	if (result.kind === "query_error" && result.status !== undefined) {
+		return { kind: result.kind, status: result.status, message };
+	}
+	return { kind: result.kind, message };
+}
+
+/**
+ * Strip the probed SHA-256 `content_hash` out of a DeepLake error message before it is surfaced in
+ * the `controlled_write.dedup_probe_failed` event or folded into the thrown error (whose message is
+ * persisted at-rest as the local queue's `last_error_class`).
+ *
+ * The message originates from the transport as the RAW DeepLake error body (`transport.ts`); on a
+ * statement rejection DeepLake can echo the offending SQL verbatim, and the dedup probe interpolates
+ * `... WHERE content_hash = '<hash>' ...`. That hash is a one-way fingerprint of normalized memory
+ * content, so persisting it to an at-rest log is a content-derived-PII leak. Remove the exact probed
+ * value, plus any residual long hex run (SHA-256 material a 200-char truncation may have clipped
+ * mid-hash), while preserving the HTTP status, the error class, and the human-readable failure text
+ * that make BUG-04's diagnostic worth having (degraded-window `429`/`402`/`5xx` bodies carry no hex
+ * and are untouched).
+ */
+function redactProbedHash(message: string, probedHash: string): string {
+	const withoutExact = probedHash.length > 0 ? message.split(probedHash).join("<content_hash>") : message;
+	return withoutExact.replace(/[0-9a-f]{16,}/gi, "<hex>");
 }
 
 // ── handler wiring ────────────────────────────────────────────────────────────────
@@ -924,5 +1294,79 @@ async function applyOneControlledWrite(
 			// the idempotent graph-persist + the pollinating re-consolidation. Re-throwing would
 			// duplicate the committed write on the retry (the bug this guard exists to prevent).
 		}
+	}
+}
+
+// ── re-drive (PRD-080b b-AC-4) ──────────────────────────────────────────────────────
+
+/** The count triple a re-drive of one terminal job payload reports (b-AC-4). */
+export interface RedriveCounts {
+	/** Facts recovered — the write LANDED (inserted/deduped/version-bumped) or was durably deferred to the outbox. */
+	readonly redriven: number;
+	/** Facts NOT recovered — an unparseable payload, a gate skip (shadow/frozen/below-confidence/flagged), or a genuine throw. */
+	readonly skipped: number;
+}
+
+/**
+ * PRD-080b (b-AC-4) — RE-DRIVE one terminal `memory_controlled_write` job payload by RE-RUNNING the
+ * controlled-write path over its ALREADY-RESOLVED proposal(s), single-sourced through
+ * {@link applyControlledWrite} (the SAME path the live stage runs). The terminal job payload carries the
+ * proposal + fact material + scope envelope (NOT the built row), so — per the PRD's documented escape
+ * hatch — the re-drive rebuilds the resolved write by re-running the proposal path rather than
+ * reconstructing the `RowValues` by hand: on a healthy backend it commits directly (idempotent via the
+ * `content_hash` dedup — a memory a prior attempt already landed is `deduped`, no duplicate), and during a
+ * still-degraded window it defers into the durable outbox (`deferred`) for the drainer to land on recovery
+ * — either way the dropped memory is recovered. The extraction/decision is NEVER re-run (the proposal is
+ * on the payload). Handles BOTH the batched shape ({@link CONTROLLED_WRITE_BATCH_KEY}) and the legacy
+ * single-proposal shape, exactly as {@link createControlledWriteHandler} does. FAIL-SOFT per fact: a
+ * genuine-failure throw (the a-AC-2 safety invariant) is caught + counted `skipped`, never propagated —
+ * the re-drive of one bad row never aborts the batch or the overall pass.
+ */
+export async function redriveControlledWritePayload(
+	payload: Record<string, unknown>,
+	deps: ControlledWriteHandlerDeps,
+): Promise<RedriveCounts> {
+	const batch = readBatchPayloads(payload);
+	if (batch === null) return redriveOneFact(payload, deps);
+	const envelope = envelopeOf(payload);
+	let redriven = 0;
+	let skipped = 0;
+	for (const factPayload of batch) {
+		const counts = await redriveOneFact({ ...envelope, ...factPayload }, deps);
+		redriven += counts.redriven;
+		skipped += counts.skipped;
+	}
+	return { redriven, skipped };
+}
+
+/** Is a re-driven outcome a RECOVERY (a landed commit, a dedup hit, or a durable defer)? (b-AC-4) */
+function isRecoveredAction(action: ControlledWriteAction): boolean {
+	return action === "inserted" || action === "deduped" || action === "version_bumped" || action === "deferred";
+}
+
+/**
+ * Re-drive ONE fact payload (b-AC-4): parse it into a {@link ControlledWriteInput}, rebuild the scope +
+ * agent off the payload envelope (exactly as {@link applyOneControlledWrite} threads a live job's scope),
+ * and re-run {@link applyControlledWrite}. A recovered outcome counts `redriven`; an unparseable payload,
+ * a gate skip, or a caught genuine-failure throw counts `skipped`. NEVER throws.
+ */
+async function redriveOneFact(payload: Record<string, unknown>, deps: ControlledWriteHandlerDeps): Promise<RedriveCounts> {
+	const parsed = readControlledWriteInput(payload);
+	if (parsed === null) return { redriven: 0, skipped: 1 };
+	const scope: QueryScope = { org: readString(payload.org), workspace: readString(payload.workspace) };
+	const input: ControlledWriteInput = {
+		...parsed,
+		agentId: parsed.agentId ?? (readString(payload.agent_id) || undefined),
+	};
+	try {
+		const outcome = await applyControlledWrite(input, scope, deps);
+		return isRecoveredAction(outcome.action) ? { redriven: 1, skipped: 0 } : { redriven: 0, skipped: 1 };
+	} catch (err: unknown) {
+		// The a-AC-2 genuine-failure throw is a normal "could not recover this fact" — caught + counted
+		// skipped (secret-free), never propagated so one bad row never aborts the re-drive (b-AC-5).
+		(deps.logger ?? silentLogger).event("controlled_write.redrive_failed", {
+			reason: err instanceof Error ? err.name : "unknown_error",
+		});
+		return { redriven: 0, skipped: 1 };
 	}
 }
