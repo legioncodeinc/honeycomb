@@ -200,14 +200,38 @@ describe("dashboard actions — memory (memory.enabled toggle)", () => {
 		expect(calls).toEqual([]);
 	});
 
-	it("with no store wired: no persistence, but the event still fires and appliesOnRestart is honest", async () => {
+	it("with no store wired: no persistence, event still fires, and NOTHING claims to apply (honest ack)", async () => {
 		const { sup } = fakeEmbed();
 		const events: Array<{ enabled: boolean }> = [];
 		const app = appWith("local", { embed: sup, defaultScope: { org: "o", workspace: "w" }, onMemoryToggle: (e) => events.push(e) });
 		const res = await app.request("/memory", { method: "POST", headers: okHeaders(), body: JSON.stringify({ enabled: false }) });
 		expect(res.status).toBe(200);
-		expect(await res.json()).toEqual({ ok: true, enabled: false, persisted: false, appliedLive: false, appliesOnRestart: true });
+		// Unpersisted → applied neither live nor at restart (Aikido #304: appliedLive/appliesOnRestart
+		// must both track the persist, not the seam's existence).
+		expect(await res.json()).toEqual({ ok: true, enabled: false, persisted: false, appliedLive: false, appliesOnRestart: false });
 		expect(events).toEqual([{ enabled: false }]);
+	});
+
+	it("Aikido #304: a FAILED persist never claims appliedLive and never fires the seam", async () => {
+		const { sup } = fakeEmbed();
+		const throwingStore = {
+			async setSetting(): Promise<never> {
+				throw new Error("vault write refused");
+			},
+		} as unknown as VaultStore;
+		const reloadReasons: string[] = [];
+		const app = appWith("local", {
+			embed: sup,
+			store: throwingStore,
+			defaultScope: { org: "o", workspace: "w" },
+			reload: { requestReload: (reason: string) => reloadReasons.push(reason) },
+		});
+		const res = await app.request("/memory", { method: "POST", headers: okHeaders(), body: JSON.stringify({ enabled: true }) });
+		expect(res.status).toBe(200);
+		// The reload re-reads STORED state, so firing it here would republish the OLD value while
+		// the ack claimed the NEW one was applied — the exact contradiction the fix removes.
+		expect(await res.json()).toEqual({ ok: true, enabled: true, persisted: false, appliedLive: false, appliesOnRestart: false });
+		expect(reloadReasons).toEqual([]);
 	});
 
 	it("SP-1: with the reload seam wired the toggle ACTUATES LIVE (appliedLive, no restart)", async () => {

@@ -117,6 +117,11 @@ export function createPipelineReloadSeam(
 
 	let target: (() => Promise<void>) | null = null;
 	let pending = false;
+	// M-304-1: reload runs are SERIALIZED through this chain so an older in-flight rebuild can
+	// never publish (swap/setCredentialNames) AFTER a newer one completed — overlapping reloads
+	// previously raced, and a slow reload-A finishing after reload-B stood stale state until the
+	// next watched write. The chain never rejects (each link catches into onError).
+	let chain: Promise<void> = Promise.resolve();
 
 	return {
 		bind(reload: () => Promise<void>): void {
@@ -130,12 +135,16 @@ export function createPipelineReloadSeam(
 				pending = false;
 				const t = target;
 				if (t === null) return; // unbound (no pipeline worker yet) → clean no-op.
-				// Fire-and-forget: a reload failure is surfaced (never swallowed silently) but can
-				// never throw into the scheduler or an HTTP handler; the last-good clients stand.
-				void t().catch((err: unknown) => {
-					const reason = err instanceof Error ? err.message : String(err);
-					onError?.(reason);
-				});
+				// Fire-and-forget from the caller's view, but SEQUENTIAL among reloads: each run
+				// starts only after the previous one fully settled. A reload failure is surfaced
+				// (never swallowed silently) but can never throw into the scheduler, an HTTP
+				// handler, or the next chained run; the last-good clients stand.
+				chain = chain.then(() =>
+					t().catch((err: unknown) => {
+						const reason = err instanceof Error ? err.message : String(err);
+						onError?.(reason);
+					}),
+				);
 			}, debounceMs);
 		},
 	};

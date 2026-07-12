@@ -120,6 +120,61 @@ describe("createPipelineReloadSeam — debounce + late bind (SP-1)", () => {
 		await settled();
 		expect(ran).toEqual(["new"]);
 	});
+
+	it("M-304-1: overlapping reloads are SERIALIZED — a slow older run fully settles before the next starts", async () => {
+		const timer = manualScheduler();
+		const events: string[] = [];
+		let releaseFirst!: () => void;
+		const firstGate = new Promise<void>((r) => {
+			releaseFirst = r;
+		});
+		let call = 0;
+		const seam = createPipelineReloadSeam({ schedule: timer.schedule });
+		seam.bind(async () => {
+			call += 1;
+			const id = call;
+			events.push(`start:${id}`);
+			if (id === 1) await firstGate; // reload A is SLOW (the stale-publish hazard window)
+			events.push(`publish:${id}`);
+		});
+		// Two separate debounce windows → two scheduled runs.
+		seam.requestReload("setting:activeModel");
+		timer.fire();
+		await settled();
+		seam.requestReload("secret:delete");
+		timer.fire();
+		await settled();
+		// Run 2 must NOT have started while run 1 is still in flight…
+		expect(events).toEqual(["start:1"]);
+		// …and only after run 1 fully settles does run 2 start — publish order is generation order,
+		// so an older rebuild can never overwrite a newer one's swap/setCredentialNames.
+		releaseFirst();
+		await settled();
+		await settled();
+		expect(events).toEqual(["start:1", "publish:1", "start:2", "publish:2"]);
+	});
+
+	it("M-304-1: a REJECTING earlier run still releases the chain for the next run", async () => {
+		const timer = manualScheduler();
+		const errors: string[] = [];
+		const ran: string[] = [];
+		let call = 0;
+		const seam = createPipelineReloadSeam({ schedule: timer.schedule, onError: (r) => errors.push(r) });
+		seam.bind(async () => {
+			call += 1;
+			if (call === 1) throw new Error("first reload died");
+			ran.push("second");
+		});
+		seam.requestReload("setting:activeProvider");
+		timer.fire();
+		await settled();
+		seam.requestReload("secret:set");
+		timer.fire();
+		await settled();
+		await settled();
+		expect(errors).toEqual(["first reload died"]);
+		expect(ran).toEqual(["second"]);
+	});
 });
 
 describe("LiveModelClient — the in-place-swappable ModelClient proxy", () => {

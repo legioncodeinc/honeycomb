@@ -294,9 +294,18 @@ export function mountActionsGroup(group: Hono, mode: DeploymentMode, options: Mo
 		onMemoryToggle?.({ enabled });
 		// SP-1: actuate LIVE via the pipeline reload seam (fire-and-forget, post-persist — the
 		// debounced rebuild re-reads the just-written vault value and flips the extraction gate).
-		const appliedLive = options.reload !== undefined;
-		if (options.reload !== undefined) options.reload.requestReload("action:memory");
-		return c.json({ ok: true, enabled, persisted, appliedLive, appliesOnRestart: !appliedLive });
+		// The reload RE-READS STORED state, so `appliedLive` requires BOTH the seam and a
+		// successful persist: an unpersisted toggle is applied neither live nor at restart, and
+		// firing the seam without a persist would only republish the old value (Aikido finding).
+		const appliedLive = persisted && options.reload !== undefined;
+		if (appliedLive) options.reload?.requestReload("action:memory");
+		return c.json({
+			ok: true,
+			enabled,
+			persisted,
+			appliedLive,
+			appliesOnRestart: persisted && !appliedLive,
+		});
 	});
 
 	// POST /api/actions/restart — respawn a fresh daemon, then gracefully stop this one.
