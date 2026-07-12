@@ -244,6 +244,64 @@ export function redactWarmError(err: unknown): string {
 	return redacted.length > WARM_ERROR_MAX ? `${redacted.slice(0, WARM_ERROR_MAX - 1)}…` : redacted;
 }
 
+/**
+ * ISS-007/ISS-008: cap on QUEUED (not-yet-running) /embed requests. Once the FIFO inference
+ * queue holds this many waiters, further /embed requests 503 immediately ("embed queue full")
+ * instead of piling onto a saturated (or silently degrading) model — the client maps a non-200
+ * to a NULL column / lexical recall, so shedding here is safe and bounded by construction.
+ */
+export const EMBED_QUEUE_MAX = 32 as const;
+
+/** Depth of the inference FIFO (queued + running /embed requests). Surfaced on /health. */
+let inferenceDepth = 0;
+/** The FIFO chain serializing inferences (concurrency 1, with an event-loop yield between). */
+let inferenceChain: Promise<void> = Promise.resolve();
+
+/**
+ * ISS-007/ISS-008 — keep `/health` answerable while inference runs.
+ *
+ * WHY /health can answer mid-inference: transformers.js dispatches to onnxruntime, whose
+ * `session.run` is async — the heavy compute happens on the runtime's own thread pool (node
+ * backend) or in awaited WASM slices, so the JS event loop is not held for the whole embed.
+ * BUT under load, back-to-back inferences dispatched concurrently can saturate the loop with
+ * tensor pre/post-processing and starve a pending `/health` GET for seconds — the live-observed
+ * ISS-007 signature (accepts TCP, never replies; the supervisor's probe times out at 2s).
+ *
+ * The fix is structural, not incidental:
+ *   1. `/health` is handled FIRST in the request handler, reads only in-memory flags, and never
+ *      enters this queue — it is never behind an inference.
+ *   2. /embed requests are SERIALIZED through this FIFO (concurrency 1) instead of all running
+ *      concurrently, so at most one inference occupies the runtime at a time.
+ *   3. A macrotask YIELD (`setImmediate`) runs before EACH dequeued inference, guaranteeing any
+ *      pending `/health` request gets an event-loop turn between inferences.
+ *   4. The queue is BOUNDED ({@link EMBED_QUEUE_MAX}): overflow 503s immediately (the client's
+ *      NULL-column / lexical fallback), so a wedged or slow model produces fast failures, not an
+ *      unbounded pile-up.
+ *
+ * STRETCH SEAM (deliberately not done here): if a future backend performs truly SYNCHRONOUS
+ * single-call inference that blocks the loop for the whole embed, the inside of this function
+ * (the `embed(text, env)` call) is the single seam to move onto a `node:worker_threads` Worker —
+ * the queue, cap, yield, and /health contract above are already worker-shaped and would not change.
+ */
+function enqueueEmbed(text: string, env: NodeJS.ProcessEnv): Promise<number[]> | null {
+	if (inferenceDepth >= EMBED_QUEUE_MAX) return null; // shed: the caller 503s "embed queue full".
+	inferenceDepth += 1;
+	const run: Promise<number[]> = inferenceChain.then(async () => {
+		// Yield one macrotask so a queued /health (or any pending accept) answers between inferences.
+		await new Promise<void>((r) => setImmediate(r));
+		return embed(text, env);
+	});
+	// The chain must survive a rejected inference (the next waiter still runs) — swallow here only
+	// for chaining; the caller still observes the rejection through `run`.
+	inferenceChain = run.then(
+		() => undefined,
+		() => undefined,
+	);
+	return run.finally(() => {
+		inferenceDepth -= 1;
+	});
+}
+
 /** Read a request body to a string with a hard size cap (defends against a runaway body). */
 async function readBody(req: IncomingMessage, maxBytes = 1_000_000): Promise<string> {
 	const chunks: Buffer[] = [];
@@ -319,12 +377,20 @@ export async function startEmbedDaemon(
 		void (async (): Promise<void> => {
 			try {
 				if (req.method === "GET" && (req.url === "/health" || req.url === "/")) {
+					// ISS-007: /health is answered FIRST, from in-memory flags only — it never enters the
+					// inference queue, so it stays answerable while embeds run (the supervisor's liveness
+					// probe depends on exactly this; see the enqueueEmbed doc for the full contract).
 					sendJson(res, 200, {
 						ok: true,
 						ready: extractor !== null,
 						warmFailed,
 						// The redacted warmup-failure reason (null until/unless warmup throws). No secret.
 						warmError,
+						// ISS-007 additive load signals (no secret — two numbers/bools): whether an inference
+						// is queued/running right now, and how deep the FIFO is. The supervisor treats any
+						// 200 as live; these exist for doctor/dashboard glanceability.
+						busy: inferenceDepth > 0,
+						queueDepth: inferenceDepth,
 						...embedDaemonInfo(),
 					});
 					return;
@@ -348,7 +414,15 @@ export async function startEmbedDaemon(
 						sendJson(res, 503, { error: "model not ready" });
 						return;
 					}
-					const vector = await embed(text, env);
+					// ISS-007: route through the BOUNDED serialized inference queue (never a direct
+					// concurrent dispatch) so /health stays answerable between inferences and overload
+					// sheds fast instead of piling up. A full queue → 503 (the client's NULL-column path).
+					const queued = enqueueEmbed(text, env);
+					if (queued === null) {
+						sendJson(res, 503, { error: "embed queue full" });
+						return;
+					}
+					const vector = await queued;
 					sendJson(res, 200, { vector });
 					return;
 				}
@@ -388,6 +462,9 @@ export function __resetForTest(): void {
 	extractor = null;
 	warming = null;
 	loadTransformers = defaultLoadTransformers;
+	// ISS-007: reset the inference FIFO so a suite's shed/depth assertions start clean.
+	inferenceDepth = 0;
+	inferenceChain = Promise.resolve();
 }
 
 /** The production transformers loader, captured so `__resetForTest` can restore it. */
