@@ -66,7 +66,7 @@ import type { Context } from "hono";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import { getRequestIdentity } from "../middleware/permission.js";
 import type { Daemon } from "../server.js";
-import { resolvePollinatingConfig, type PollinatingConfig } from "./config.js";
+import { PollinatingConfigError, resolvePollinatingConfig, type PollinatingConfig } from "./config.js";
 import {
 	createPollinatingTrigger,
 	type PollinatingJobEnqueuer,
@@ -129,6 +129,13 @@ export interface MountPollinateOptions {
 	 * supplied (the composition root only supplies the real queue), false otherwise.
 	 */
 	readonly available?: boolean;
+	/**
+	 * The pollinating-config resolver (tests inject a thrower to prove the mount-time guard).
+	 * Defaults to {@link resolvePollinatingConfig}. A {@link PollinatingConfigError} thrown here
+	 * degrades the route to the `unavailable` ack instead of aborting daemon assembly —
+	 * `mountPollinateApi` runs unguarded from `assemble()`.
+	 */
+	readonly resolveConfig?: () => PollinatingConfig;
 }
 
 /** The ack body the trigger returns (the exact contract Wave 2's button reads). */
@@ -253,7 +260,18 @@ export function mountPollinateApi(daemon: Daemon, options: MountPollinateOptions
 	// circuits to the clean `unavailable` ack below. The config is resolved HERE (not inside
 	// buildRealTrigger) so the below-threshold ack can report the SAME threshold the trigger
 	// enforces (ISS-013); an injected test trigger has no known config → the ack omits it.
-	const config = options.trigger === undefined && available ? resolvePollinatingConfig() : undefined;
+	// GUARDED: mountPollinateApi runs unguarded during daemon assembly, so a malformed
+	// HONEYCOMB_POLLINATING_* env must degrade this route to the `unavailable` ack — never
+	// abort daemon startup (PollinatingConfigError is the config boundary's typed throw).
+	let config: PollinatingConfig | undefined;
+	if (options.trigger === undefined && available) {
+		try {
+			config = (options.resolveConfig ?? resolvePollinatingConfig)();
+		} catch (error) {
+			if (!(error instanceof PollinatingConfigError)) throw error;
+			config = undefined;
+		}
+	}
 	const trigger: PollinateTriggerSeam | null =
 		options.trigger ?? (config !== undefined ? buildRealTrigger(options, config) : null);
 

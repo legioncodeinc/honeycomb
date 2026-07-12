@@ -32,6 +32,7 @@ import {
 	type PollinateTriggerSeam,
 	mountPollinateApi,
 } from "../../../../src/daemon/runtime/pollinating/api.js";
+import { PollinatingConfigError } from "../../../../src/daemon/runtime/pollinating/config.js";
 import type { PollinatingScope, PollinatingTickResult } from "../../../../src/daemon/runtime/pollinating/trigger.js";
 import type { QueryScope } from "../../../../src/daemon/storage/client.js";
 
@@ -290,5 +291,40 @@ describe("AC-6 mounting is fail-safe", () => {
 		const daemon = daemonWithTrigger(trigger);
 		const res = await daemon.app.request("/api/diagnostics/pollinate", { method: "GET" });
 		expect(res.status).not.toBe(202);
+	});
+
+	it("a PollinatingConfigError at mount degrades the route to `unavailable` instead of aborting assembly", async () => {
+		// mountPollinateApi runs unguarded from assemble(): a malformed pollinating config must
+		// cost the pollinate route, never the daemon boot (CodeRabbit #297 Major).
+		const daemon = createDaemon({ config: cfg(), storage: fakeStorage, logger: createRequestLogger({ silent: true }) });
+		const enqueuer = { async enqueue() { return "job-real"; } };
+		expect(() =>
+			mountPollinateApi(daemon, {
+				storage: fakeStorage,
+				defaultScope: DEFAULT_SCOPE,
+				enqueuer,
+				resolveConfig: () => {
+					throw new PollinatingConfigError(["tokenThreshold: structurally impossible"]);
+				},
+			}),
+		).not.toThrow();
+		const { status, ack } = await postPollinate(daemon);
+		expect(status).toBe(202);
+		expect(ack).toEqual({ triggered: false, status: "skipped", reason: "unavailable" });
+	});
+
+	it("a NON-config error from the resolver still propagates (the guard is typed, not a blanket catch)", () => {
+		const daemon = createDaemon({ config: cfg(), storage: fakeStorage, logger: createRequestLogger({ silent: true }) });
+		const enqueuer = { async enqueue() { return "job-real"; } };
+		expect(() =>
+			mountPollinateApi(daemon, {
+				storage: fakeStorage,
+				defaultScope: DEFAULT_SCOPE,
+				enqueuer,
+				resolveConfig: () => {
+					throw new TypeError("not a config problem");
+				},
+			}),
+		).toThrow(TypeError);
 	});
 });
