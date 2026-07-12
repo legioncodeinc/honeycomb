@@ -62,7 +62,7 @@ export const MEMORY_INJECTIONS_TABLES: readonly CatalogTable[] = defineGroup([
 ]);
 
 /** The optional ` WHERE project_id = '<id>'` conjunct (blank/absent → workspace-wide). */
-function projectConjunct(projectId?: string): string {
+function projectWhereClause(projectId?: string): string {
 	return projectId !== undefined && projectId !== ""
 		? ` WHERE ${sqlIdent("project_id")} = ${sLiteral(projectId)}`
 		: "";
@@ -72,20 +72,21 @@ function projectConjunct(projectId?: string): string {
 export function buildInjectionTokenSumSql(projectId?: string): string {
 	const tbl = sqlIdent(MEMORY_INJECTIONS_TABLE);
 	const tokensCol = sqlIdent("tokens");
-	return `SELECT COALESCE(SUM(${tokensCol}), 0) AS tokens FROM "${tbl}"${projectConjunct(projectId)}`;
+	const whereClause = projectWhereClause(projectId);
+	return `SELECT COALESCE(SUM(${tokensCol}), 0) AS tokens FROM "${tbl}"${whereClause}`;
 }
 
 /** Ranged read; day bucketing (`at.slice(0,10)`) in TS. ISO cutoff compares lexicographically. */
 export function buildInjectionRangeSql(sinceIso: string, projectId?: string): string {
 	const tbl = sqlIdent(MEMORY_INJECTIONS_TABLE);
 	const atCol = sqlIdent("at");
-	const proj = projectId !== undefined && projectId !== ""
+	const projectClause = projectId !== undefined && projectId !== ""
 		? ` AND ${sqlIdent("project_id")} = ${sLiteral(projectId)}`
 		: "";
 	return (
 		`SELECT ${atCol} AS at, ${sqlIdent("source")} AS source, ${sqlIdent("hits")} AS hits, ` +
 		`${sqlIdent("tokens")} AS tokens FROM "${tbl}" ` +
-		`WHERE ${atCol} >= ${sLiteral(sinceIso)}${proj} ` +
+		`WHERE ${atCol} >= ${sLiteral(sinceIso)}${projectClause} ` +
 		`ORDER BY ${atCol} ASC`
 	);
 }
