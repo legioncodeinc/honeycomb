@@ -172,6 +172,16 @@ export interface HookResult {
 	readonly additionalContext?: string;
 	/** A machine-readable reason when `ok` is false (fail-soft diagnostics). */
 	readonly reason?: string;
+	/**
+	 * ISS-022 (additive): a short USER-VISIBLE one-liner surfacing that memory was injected
+	 * this turn (e.g. `🐝 Honeycomb: 2 memories injected (~150 tokens)`). Only the per-turn
+	 * recall injector sets it, and only when a NEW block was injected — never on deduped-only,
+	 * empty-recall, or nudge turns. The shim decides HOW it lands per harness: Claude Code
+	 * passes it through as the documented top-level `systemMessage` response field; a
+	 * user-visible-channel harness appends it to the transcript text. ABSENT → every existing
+	 * envelope stays byte-identical (the a-AC-8 guard keeps passing unmodified).
+	 */
+	readonly systemMessage?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.14.0 — 2026-07-12
+
+Adds a new measured injected-tokens KPI and real ROI trend/partial-net data to the dashboard, backed by new memory-injection telemetry; also includes a small internal SQL-naming fix.
+
 ## v0.13.1 — 2026-07-12
 
 Fixes several daemon and CLI bugs: the pollinate status now correctly reports below-threshold instead of misleadingly showing 'running', the cursor-agent login check performs a real status probe, project registry sync no longer produces duplicate entries, and memory lifecycle routes (conflicts, stale-refs, history) are no longer incorrectly shadowed.
