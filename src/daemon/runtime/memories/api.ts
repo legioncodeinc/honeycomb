@@ -97,6 +97,12 @@ import {
 	PrimeResponseSchema,
 	type PrimeDigestBudget,
 } from "./prime.js";
+// The lifecycle READ routes (conflicts / stale-refs / history) are registered inside
+// mountMemoriesApi (BEFORE /:id) for the same route-shadow reason as /prime (ISS-012):
+// Hono matches in registration order, and mountLifecycleApi historically ran AFTER this
+// mount, so the parametric /:id captured the literal segments and 404'd all three.
+// mountLifecycleApi remains as a standalone back-compat shim (see lifecycle-api.ts).
+import { registerLifecycleReadRoutes } from "./lifecycle-api.js";
 
 /** The route group the memories API attaches to (already mounted in `server.ts`). */
 export const MEMORIES_GROUP = "/api/memories" as const;
@@ -969,6 +975,13 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 		// Validate the response shape at the boundary (the 046d hook's contract) before send.
 		return c.json(PrimeResponseSchema.parse(response));
 	});
+
+	// ── PRD-058d / ISS-012: the lifecycle literal GETs (conflicts / stale-refs / history). ──
+	// REGISTERED BEFORE /:id so the parametric route does not shadow these literal segments
+	// (the same ordering rule as /resolve, /calibration, and /prime above). Pre-fix, these
+	// were registered only by mountLifecycleApi AFTER this mount, so Hono matched /:id first
+	// → getMemory("conflicts") → 404 on all three lifecycle reads.
+	registerLifecycleReadRoutes(group, storage, resolveScope);
 
 	// ── FR-4: GET /api/memories/:id → get one memory by id. ─────────────────────
 	group.get("/:id", async (c) => {

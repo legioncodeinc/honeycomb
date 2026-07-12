@@ -57,15 +57,69 @@ function probeCursorAgent(): ProbeOutcome {
 	}
 }
 
-/** D4 — best-effort cursor-agent login check (a present agent dir with a session marker). */
-function probeCursorLogin(): ProbeOutcome {
-	// Without a stable `cursor-agent status` contract in this environment, surface UNKNOWN as a
-	// soft fail with a clear detail rather than a false green. (FR-8: a non-wirable dim is surfaced,
-	// never auto-fixed.)
-	const agentDir = join(homedir(), ".cursor");
-	return existsSync(agentDir)
-		? { ok: false, detail: "cursor present; login state unknown (run `cursor-agent login`)" }
-		: { ok: false, detail: "cursor-agent not configured" };
+/** How long the D4 login probe waits for `cursor-agent status` before soft-failing (ISS-017). */
+const CURSOR_LOGIN_TIMEOUT_MS = 5_000;
+
+/** The slice of a `spawnSync` result the D4 probe reads (tests inject a fake). */
+export interface CursorLoginSpawnResult {
+	readonly status: number | null;
+	readonly stdout?: string | Buffer | null;
+	readonly error?: Error;
+}
+
+/** A `spawnSync`-shaped seam for the D4 login probe (production binds the real `spawnSync`). */
+export type CursorLoginSpawn = (
+	command: string,
+	args: readonly string[],
+	options: {
+		readonly encoding: "utf8";
+		readonly timeout: number;
+		readonly windowsHide: boolean;
+		readonly shell: boolean;
+	},
+) => CursorLoginSpawnResult;
+
+/**
+ * D4 — the REAL cursor-agent login probe (ISS-017): run `cursor-agent status` and parse its
+ * stdout. "Logged in" → ok:true (with the account when the line carries one); an explicit
+ * not-logged-in → ok:false with the actionable `cursor-agent login` hint; a spawn failure or the
+ * 5s timeout → the soft "login state unknown" fail (FR-8: a non-wirable dim is surfaced, never a
+ * false green and never a crash).
+ */
+export function probeCursorLogin(spawn: CursorLoginSpawn = spawnSync): ProbeOutcome {
+	try {
+		// `cursor-agent` ships as a `.cmd` shim on Windows, and since Node's CVE-2024-27980
+		// hardening (all Node >= 22) a `.cmd` cannot be spawned with `shell: false` (EINVAL) —
+		// so win32 ALONE sets `shell: true`. Safe: every argv element is a compile-time constant,
+		// never user input (the same documented pattern as `npm.cmd` in shared/fleet-detection.ts).
+		const probe = spawn("cursor-agent", ["status"], {
+			encoding: "utf8",
+			timeout: CURSOR_LOGIN_TIMEOUT_MS,
+			windowsHide: true,
+			shell: process.platform === "win32",
+		});
+		if (probe.error !== undefined) {
+			// ENOENT / ETIMEDOUT / any spawn-level failure — soft-fail as unknown, like before.
+			return { ok: false, detail: `login state unknown (${probe.error.message})` };
+		}
+		const stdout = typeof probe.stdout === "string" ? probe.stdout : "";
+		// Check the negative FIRST — "Not logged in" contains the substring "logged in".
+		if (/not logged in|logged out/i.test(stdout)) {
+			return { ok: false, detail: "cursor-agent not logged in (run `cursor-agent login`)" };
+		}
+		if (/logged in/i.test(stdout)) {
+			// Surface the account when the status line carries one, e.g. "Logged in as user@x.com".
+			const account = /logged in(?:\s+as)?[:\s]+(\S+@\S+)/i.exec(stdout)?.[1];
+			return { ok: true, detail: account !== undefined ? `logged in as ${account}` : "logged in" };
+		}
+		// Unrecognized output (or a non-zero exit with nothing parseable) — honest unknown.
+		return { ok: false, detail: "login state unknown (run `cursor-agent login`)" };
+	} catch (err) {
+		return {
+			ok: false,
+			detail: err instanceof Error ? `login state unknown (${err.message})` : "login state unknown",
+		};
+	}
 }
 
 /**
