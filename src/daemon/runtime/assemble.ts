@@ -1570,10 +1570,25 @@ export function assembleSeams(
 	const calibrationModelProvider: CalibrationModelProvider =
 		sharedCalibrationProvider ??
 		createCalibrationModelProvider({ storage, scope: defaultScope ?? { org: "", workspace: "" } });
+	// ISS-007/ISS-008: recall's embed fast-skip gate, reading the supervisor's CURRENT liveness
+	// state per recall. `ready()` is true only when semantic is actually servable right now
+	// (state `warm`); while `warming`/`suspect`/`failed` the recall engine SKIPS the embed attempt
+	// entirely — the lexical path answers immediately instead of burning the full embed deadline
+	// on a wedged/cold daemon. `reportTimeout()` fires the supervisor's on-demand liveness check
+	// when a bounded embed DID burn its deadline, so a wedge is confirmed in seconds, not at the
+	// next 30s periodic tick. Structural fakes / the noop supervisor (hermetic suites) expose no
+	// `state`, and a DISABLED supervisor owns no verdict on an injected test embed client — both
+	// read as ready:true, preserving the pre-ISS behavior byte-for-byte there.
+	const embedSupervisorGate = daemon.services.embed;
 	seams.mountMemories(daemon, {
 		storage,
 		defaultScope,
 		embed: embed.client,
+		embedGate: {
+			ready: () =>
+				embedSupervisorGate.disabled || embedSupervisorGate.state === undefined || embedSupervisorGate.state === "warm",
+			reportTimeout: () => embedSupervisorGate.checkNow?.(),
+		},
 		logger: daemon.logger,
 		conflictSuppression,
 		nectarRrfMultiplier,
@@ -3354,10 +3369,13 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		buildHealthDetail({
 			status: healthBit,
 			embeddingsEnabled: embeddingsReason(),
-			// PRD-025 honesty: live warm/failed signals so `/health` reports `warming`/`on`/`failed`
-			// (via `reasons.embeddingsState`) instead of a coarse `on` that only means "enabled".
+			// PRD-025 honesty + ISS-007/ISS-008: live warm/failed/suspect signals read from the
+			// supervisor's CURRENT state per health call, so `/health` reports `warming`/`on`/
+			// `suspect`/`failed` instead of a coarse `on` latched once at first warm. This is what
+			// un-blinds doctor: its only sensor is /health and it already parses `reasons.embeddings`.
 			embeddingsWarm: liveEmbed()?.warm,
 			embeddingsFailed: liveEmbed()?.failed,
+			embeddingsSuspect: liveEmbed()?.suspect,
 			portkey: portkeyHealth,
 			// ISS-005: the last observed failure's HTTP status (surfaced only while `unreachable`).
 			...(portkeyUnreachableStatus !== undefined ? { portkeyUnreachableStatus } : {}),

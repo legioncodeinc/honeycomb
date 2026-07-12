@@ -449,6 +449,43 @@ describe("PRD-025 honesty — the supervisor surfaces warming/on/failed truthful
 		expect(sup.failed).toBe(false);
 	});
 
+	it("exposes the coarse liveness state: off (disabled) / warming (live, not ready) / failed (warm threw)", async () => {
+		// Disabled → off.
+		const off = createEmbedSupervisor({
+			spawnChild: () => fakeChild(),
+			probeHealth: async () => ({ ok: true, ready: true }),
+			clock: instantClock,
+			env: { HONEYCOMB_EMBEDDINGS: "false" },
+		});
+		expect(off.state).toBe("off");
+
+		// Live but never ready → warming (this is the ~40s post-respawn tail state — never a flap).
+		const warming = createEmbedSupervisor({
+			spawnChild: () => fakeChild(),
+			probeHealth: async () => ({ ok: true, ready: false }),
+			clock: instantClock,
+			env: {},
+			config: { warmTimeoutMs: 200 },
+		});
+		await warming.start();
+		expect(warming.state).toBe("warming");
+		await warming.stop();
+
+		// A thrown warmup → failed.
+		const failed = createEmbedSupervisor({
+			spawnChild: () => fakeChild(),
+			probeHealth: async () => ({ ok: true, ready: false, warmFailed: true }),
+			clock: instantClock,
+			env: {},
+			config: { warmTimeoutMs: 500 },
+		});
+		await failed.start();
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(failed.state).toBe("failed");
+		await failed.stop();
+	});
+
 	it("a deliberate restart clears a prior `failed` and re-attempts warmup", async () => {
 		let ready = false;
 		let warmFailed = true;
@@ -473,5 +510,240 @@ describe("PRD-025 honesty — the supervisor surfaces warming/on/failed truthful
 		expect(sup.failed).toBe(false);
 		expect(sup.warm).toBe(true);
 		await sup.stop();
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ISS-007/ISS-008 — the post-warm liveness probe (wedge detection) state machine.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("ISS-007 liveness: wedge detection → respawn → warming → warm (no flap)", () => {
+	/** Drain `n` microtask turns so void-fired async chains settle deterministically. */
+	async function drain(n = 50): Promise<void> {
+		for (let i = 0; i < n; i++) await Promise.resolve();
+	}
+
+	/** A manual probe scheduler: captures scheduled ticks; the test fires them explicitly. */
+	function manualScheduler() {
+		const pending: Array<() => void> = [];
+		return {
+			pending,
+			schedule(cb: () => void, _ms: number): () => void {
+				pending.push(cb);
+				return () => {
+					const i = pending.indexOf(cb);
+					if (i >= 0) pending.splice(i, 1);
+				};
+			},
+			fire(): void {
+				const cb = pending.shift();
+				cb?.();
+			},
+		};
+	}
+
+	/** A clock whose sleeps PAUSE until the test releases them (observe mid-probe states). */
+	function gateClock(): { clock: EmbedSupervisorClock; release: () => void } {
+		const sleeps: Array<() => void> = [];
+		let t = 0;
+		return {
+			clock: {
+				sleep: () =>
+					new Promise<void>((r) => {
+						sleeps.push(r);
+					}),
+				now: () => {
+					t += 50;
+					return t;
+				},
+			},
+			release: () => {
+				sleeps.shift()?.();
+			},
+		};
+	}
+
+	it("a wedged warm child (two missed probes) is killed + respawned via the EXISTING bounded machinery, transitioning warming → warm", async () => {
+		let spawns = 0;
+		const made: ReturnType<typeof fakeChild>[] = [];
+		const spawnChild = vi.fn(() => {
+			spawns += 1;
+			const c = fakeChild(4000 + spawns);
+			made.push(c);
+			return c;
+		});
+		// Scripted world: `fail` consumes probes as ok:false (the wedge — accepts TCP, never
+		// replies, so the bounded fetch times out → ok:false); `ready` models the respawned
+		// child's warmup tail (the live-observed ~40s window where embeds take 10-27s).
+		let fail = 0;
+		let ready = true;
+		const probeHealth = vi.fn(async () => {
+			if (fail > 0) {
+				fail -= 1;
+				return { ok: false, ready: false };
+			}
+			return { ok: true, ready };
+		});
+		const sched = manualScheduler();
+		const events: string[] = [];
+		const sup = createEmbedSupervisor({
+			spawnChild,
+			probeHealth,
+			clock: instantClock,
+			env: {},
+			scheduleProbe: sched.schedule,
+			logger: { event: (name) => events.push(name) },
+			config: { restartBackoffMs: 0 },
+		});
+		await sup.start();
+		await drain();
+		expect(sup.state).toBe("warm");
+		// The periodic probe armed exactly once, and only AFTER warm.
+		expect(sched.pending).toHaveLength(1);
+
+		// The wedge: the child stops answering; the fresh child will need a real re-warm.
+		fail = 2;
+		ready = false;
+		sched.fire();
+		await drain();
+
+		// Two consecutive misses CONFIRMED the wedge: the old child was SIGTERM'd, ONE bounded
+		// respawn ran (the EXISTING D-6 machinery — restarts=1), and the fresh child is live but
+		// re-warming: state is `warming`, never a flap through on/off.
+		expect(made[0]!.killed.length).toBeGreaterThanOrEqual(1);
+		expect(spawns).toBe(2);
+		expect(sup.restarts).toBe(1);
+		expect(sup.live).toBe(true);
+		expect(sup.warm).toBe(false);
+		expect(sup.state).toBe("warming");
+		expect(events).toContain("embed.suspect");
+		expect(events).toContain("embed.wedged");
+
+		// The respawned child finishes its warmup tail → warm again, periodic probe re-armed.
+		ready = true;
+		await drain();
+		expect(sup.state).toBe("warm");
+		expect(sup.suspect).toBe(false);
+		expect(sched.pending).toHaveLength(1);
+		await sup.stop();
+	});
+
+	it("ONE missed probe → suspect (honest /health, recall skips) and a healthy re-probe RECOVERS without a respawn", async () => {
+		const child = fakeChild();
+		let fail = 0;
+		const probeHealth = vi.fn(async () => {
+			if (fail > 0) {
+				fail -= 1;
+				return { ok: false, ready: false };
+			}
+			return { ok: true, ready: true };
+		});
+		const sched = manualScheduler();
+		const gate = gateClock();
+		const spawnChild = vi.fn(() => child);
+		const sup = createEmbedSupervisor({
+			spawnChild,
+			probeHealth,
+			clock: gate.clock,
+			env: {},
+			scheduleProbe: sched.schedule,
+		});
+		await sup.start();
+		await drain();
+		expect(sup.state).toBe("warm");
+		const probesBeforeTick = probeHealth.mock.calls.length;
+
+		// First miss: the probe fails once, the confirming re-probe is PENDING (paused inside the
+		// gate clock's retry sleep) — the supervisor reports `suspect`, not warm, not failed.
+		fail = 1;
+		sched.fire();
+		await drain();
+		expect(sup.suspect).toBe(true);
+		expect(sup.state).toBe("suspect");
+
+		// NON-REENTRANT: overlapping on-demand checks while a probe is in flight coalesce — no
+		// second concurrent probe chain starts.
+		const probesInFlight = probeHealth.mock.calls.length;
+		sup.checkNow?.();
+		sup.checkNow?.();
+		await drain();
+		expect(probeHealth.mock.calls.length).toBe(probesInFlight);
+
+		// Release the retry sleep → the confirming probe answers ok → recovered: warm again, NO
+		// respawn (one transient slow reply never flaps a warm daemon into a restart).
+		gate.release();
+		await drain();
+		expect(sup.suspect).toBe(false);
+		expect(sup.state).toBe("warm");
+		expect(spawnChild).toHaveBeenCalledTimes(1);
+		expect(probeHealth.mock.calls.length).toBeGreaterThan(probesBeforeTick);
+		await sup.stop();
+	});
+
+	it("the periodic probe is NOT armed while warming — the ~40s warmup tail is never probed as a wedge", async () => {
+		const sched = manualScheduler();
+		const sup = createEmbedSupervisor({
+			spawnChild: () => fakeChild(),
+			probeHealth: async () => ({ ok: true, ready: false }),
+			clock: instantClock,
+			env: {},
+			scheduleProbe: sched.schedule,
+			config: { warmTimeoutMs: 200 },
+		});
+		await sup.start();
+		await drain();
+		expect(sup.state).toBe("warming");
+		// No liveness tick exists until warm: a binary alive/dead probe here would flap during the
+		// warmup tail, so the state machine gates arming on warm.
+		expect(sched.pending).toHaveLength(0);
+		await sup.stop();
+	});
+
+	it("checkNow (the recall embed-timeout hook) fires ONE bounded on-demand probe when warm, and is a no-op when not", async () => {
+		let ready = true;
+		const probeHealth = vi.fn(async () => ({ ok: true, ready }));
+		const sched = manualScheduler();
+		const sup = createEmbedSupervisor({
+			spawnChild: () => fakeChild(),
+			probeHealth,
+			clock: instantClock,
+			env: {},
+			scheduleProbe: sched.schedule,
+		});
+		await sup.start();
+		await drain();
+		expect(sup.state).toBe("warm");
+
+		// On-demand check on a warm child: exactly one more probe runs (healthy → stays warm).
+		const before = probeHealth.mock.calls.length;
+		sup.checkNow?.();
+		await drain();
+		expect(probeHealth.mock.calls.length).toBe(before + 1);
+		expect(sup.state).toBe("warm");
+
+		// Not warm (stopped) → checkNow is a silent no-op: no probe, no throw.
+		await sup.stop();
+		const afterStop = probeHealth.mock.calls.length;
+		sup.checkNow?.();
+		await drain();
+		expect(probeHealth.mock.calls.length).toBe(afterStop);
+	});
+
+	it("stop() cancels a pending periodic tick — no probe outlives the lifecycle", async () => {
+		const probeHealth = vi.fn(async () => ({ ok: true, ready: true }));
+		const sched = manualScheduler();
+		const sup = createEmbedSupervisor({
+			spawnChild: () => fakeChild(),
+			probeHealth,
+			clock: instantClock,
+			env: {},
+			scheduleProbe: sched.schedule,
+		});
+		await sup.start();
+		await drain();
+		expect(sched.pending).toHaveLength(1);
+		await sup.stop();
+		// The cancel ran: the tick was removed, and nothing new was scheduled.
+		expect(sched.pending).toHaveLength(0);
 	});
 });

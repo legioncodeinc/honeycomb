@@ -21,9 +21,15 @@
  *   - `storage`     ← the coarse pipeline bit the `refreshHealth` `SELECT 1` probe
  *                     maintains (`assemble.ts`). `ok` → reachable; anything else →
  *                     unreachable. No new round-trip; we read the cached bit.
- *   - `embeddings`  ← the embed-seam state KNOWN AT ASSEMBLY (the no-op vs real embed
- *                     client, ledger D-4). `on` when the real embedder is wired,
- *                     `off` for the no-op / explicit `HONEYCOMB_EMBEDDINGS=false`.
+ *   - `embeddings`  ← the embed supervisor's CURRENT state, read LIVE per health call
+ *                     (ISS-008 — this used to be the assembly-time enabled bit, which kept
+ *                     reporting `on` from a one-shot warm latch while the embed daemon sat
+ *                     wedged). `on` ONLY when the model is warm AND the last liveness probe
+ *                     answered; `warming`/`suspect`/`failed` name the not-servable states
+ *                     ADDITIVELY (doctor parses `reasons.embeddings` as a plain string, so
+ *                     the new values un-blind it for free); `off` for the no-op / explicit
+ *                     `HONEYCOMB_EMBEDDINGS=false`. Legacy callers that supply no live
+ *                     signal keep the coarse enabled→`on` mirror, byte-for-byte.
  *   - `schema`      ← best-effort: `ok` unless a REQUIRED table is known-missing. With
  *                     no cheap always-on signal at the health seam, this stays `ok`
  *                     (conservative — never a false "missing_table"); a caller that
@@ -128,20 +134,29 @@ export type SubsystemState = "ok" | "degraded";
 export type PortkeyHealth = "off" | "ok" | "unconfigured" | "no_model" | "unreachable";
 
 /**
- * The fine-grained embeddings health (PRD-025 honesty). A closed enum, carrying NO secret:
+ * The fine-grained embeddings health (PRD-025 honesty + ISS-007 liveness). A closed enum, carrying
+ * NO secret:
  *   - `off`     — embeddings are disabled (opted out / never enabled); recall is lexical by design.
- *   - `warming` — enabled and the embed child is coming up / downloading + loading the model; recall
- *                 is lexical MEANWHILE (degraded), and this flips to `on` once the model is warm.
- *   - `on`      — enabled AND the model is warm: semantic recall is actually working.
+ *   - `warming` — enabled and the embed child is coming up / downloading + loading the model (this
+ *                 includes the ~40s post-respawn warmup tail); recall is lexical MEANWHILE
+ *                 (degraded), and this flips to `on` once the model is warm.
+ *   - `on`      — enabled AND the model is warm AND the last liveness probe answered: semantic
+ *                 recall is actually working RIGHT NOW (not merely "was warm once").
+ *   - `suspect` — ISS-007 additive: the child WAS warm but the last liveness probe went unanswered
+ *                 and the confirming re-probe is pending. Recall already skips the embed here.
  *   - `failed`  — enabled but the embed child cannot serve (warmup threw, or the crash-restart budget
  *                 was exhausted). Actionable, and honestly distinct from an indefinite `warming`.
  *
- * This is the HONEST successor to the coarse two-state `embeddings` reason (which reports only
- * enabled-vs-disabled, so it reads `on` even while the model is still downloading or has failed to
- * load). It is exposed ADDITIVELY as `HealthReasons.embeddingsState` so the coarse field's contract is
- * unchanged; the Hive dashboard prefers `embeddingsState` when present.
+ * This is the HONEST successor to the coarse two-state `embeddings` reason (which reported only
+ * enabled-vs-disabled, so it read `on` even while the model was still downloading, had failed to
+ * load, or — the ISS-008 blindness — sat wedged behind a one-shot warm latch). It is exposed on
+ * `HealthReasons.embeddingsState`, and since ISS-008 the coarse `embeddings` field mirrors it when
+ * the live supervisor signals are wired (additive: existing consumers that compare against
+ * `"on"`/`"off"` read every new value as not-on — exactly the honest interpretation). The Hive
+ * dashboard prefers `embeddingsState` when present; doctor parses `reasons.embeddings` as a plain
+ * string, so both see the truthful state with no consumer change.
  */
-export type EmbeddingsHealth = "off" | "warming" | "on" | "failed";
+export type EmbeddingsHealth = "off" | "warming" | "on" | "suspect" | "failed";
 
 /** PRD-073b: the machine-readable dormancy reason codes surfaced on the health detail. */
 export const CAPTURE_DORMANT_NO_PROJECT = "capture_dormant_no_project" as const;
@@ -162,14 +177,24 @@ export const TENANCY_UNCONFIRMED_GUIDANCE =
 export interface HealthReasons {
 	/** Storage reachability, from the `SELECT 1` probe bit: `reachable` when the bit is `ok`. */
 	readonly storage: "reachable" | "unreachable";
-	/** The embed seam at assembly: `on` when the real embedder is wired, `off` for the no-op. */
-	readonly embeddings: "on" | "off";
 	/**
-	 * The HONEST fine-grained embeddings state (PRD-025 honesty). ADDITIVE alongside the coarse
-	 * `embeddings` field — present when the builder is given the live warm/failed signals (the daemon
-	 * composition root), so an operator sees `warming`/`failed` rather than a `on` that merely means
-	 * "enabled". Absent only in the degenerate case where a caller passes neither signal AND the coarse
-	 * field is enough. Carries NO secret (a fixed literal). See {@link EmbeddingsHealth}.
+	 * The coarse embeddings state. Historically the two-state assembly-time enabled bit
+	 * (`on`/`off`); since ISS-008 it is derived from the supervisor's CURRENT state and gains the
+	 * additive `warming`/`suspect`/`failed` values so it can never report `on` for a not-warm or
+	 * wedged embed daemon (not-warm → NOT `on`). ADDITIVE for both known consumers: doctor's
+	 * health-probe keeps the value as a plain string (it now sees the truthful state with no
+	 * change on its side — the un-blinding), and the Hive dashboard reads `embeddingsState`
+	 * FIRST (its wire schema parses `warming`/`failed` there; its zod `.catch` folds unknown
+	 * coarse values back to the legacy reading rather than erroring). Legacy callers that wire
+	 * no live signal still get the plain enabled→`on` mirror.
+	 */
+	readonly embeddings: EmbeddingsHealth;
+	/**
+	 * The HONEST fine-grained embeddings state (PRD-025 honesty). Present when the builder is given
+	 * the live warm/failed/suspect signals (the daemon composition root), so an operator sees
+	 * `warming`/`suspect`/`failed` rather than a `on` that merely means "enabled". Since ISS-008 the
+	 * coarse field mirrors this value; both are kept so existing consumers of either keep parsing.
+	 * Carries NO secret (a fixed literal). See {@link EmbeddingsHealth}.
 	 */
 	readonly embeddingsState?: EmbeddingsHealth;
 	/** A required table's presence (best-effort): `ok` unless a required table is known-missing. */
@@ -317,6 +342,13 @@ export interface HealthDetailInputs {
 	 */
 	readonly embeddingsFailed?: boolean;
 	/**
+	 * ISS-007 liveness: whether a previously-warm embed child has an unanswered liveness probe with
+	 * the confirming re-probe pending (the supervisor's `suspect` state). When `true` (and enabled,
+	 * not failed) → `embeddingsState: "suspect"` — honestly not-`on` while the wedge is unconfirmed.
+	 * Omitted → not suspect (legacy callers unchanged).
+	 */
+	readonly embeddingsSuspect?: boolean;
+	/**
 	 * Whether a REQUIRED table is known-missing (best-effort). Defaults to `false`
 	 * (→ `schema: "ok"`) — the conservative posture when there is no cheap signal at the
 	 * health seam. A caller with a real known-missing signal passes `true`.
@@ -437,21 +469,28 @@ export function buildHealthDetail(inputs: HealthDetailInputs): HealthDetail {
 						: {}),
 				}
 			: undefined;
-	// PRD-025 honesty: the fine-grained embeddings state, from the live warm/failed signals when the
-	// composition root supplies them. Legacy callers (no warm signal) → mirror the coarse enabled/disabled
-	// field, so the pre-honesty behavior is preserved verbatim.
+	// PRD-025 honesty + ISS-007/ISS-008: the fine-grained embeddings state, from the live
+	// warm/failed/suspect signals when the composition root supplies them. Precedence: off →
+	// failed (terminal) → suspect (warm-but-unconfirmed probe miss) → on (warm + live) →
+	// warming. Legacy callers (no warm signal) → mirror the coarse enabled/disabled field, so
+	// the pre-honesty behavior is preserved verbatim.
 	const embeddingsState: EmbeddingsHealth = !inputs.embeddingsEnabled
 		? "off"
 		: inputs.embeddingsFailed === true
 			? "failed"
-			: inputs.embeddingsWarm === true
-				? "on"
-				: inputs.embeddingsWarm === false
-					? "warming"
-					: "on";
+			: inputs.embeddingsSuspect === true
+				? "suspect"
+				: inputs.embeddingsWarm === true
+					? "on"
+					: inputs.embeddingsWarm === false
+						? "warming"
+						: "on";
 	const reasons: HealthReasons = {
 		storage: inputs.status === "ok" ? "reachable" : "unreachable",
-		embeddings: inputs.embeddingsEnabled ? "on" : "off",
+		// ISS-008: the coarse field MIRRORS the fine-grained state (not the raw enabled bit), so a
+		// not-warm/wedged embed daemon is never reported `on`. For legacy callers (no live signals)
+		// this reduces to exactly the old enabled→"on" / disabled→"off" mapping.
+		embeddings: embeddingsState,
 		embeddingsState,
 		schema: inputs.schemaMissingTable === true ? "missing_table" : "ok",
 		// PRD-063b / b-AC-7: read the supplied Portkey state verbatim (no probe). Omitted → `off`.
