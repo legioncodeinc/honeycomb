@@ -140,9 +140,15 @@ describe("PRD-046c c-AC-5 — cheap (SQL-only) + cold-safe", () => {
 		// NOTE: the prime mount takes NO `embed` and NO gate CLI — there is no generation seam to wire.
 		mountMemoriesPrimeApi(daemon, { storage });
 		await daemon.app.request("/api/memories/prime", { method: "GET", headers: headers() });
+		// Let the ISS-010 fire-and-forget telemetry append settle so the filter below is deterministic.
+		await new Promise((resolve) => setTimeout(resolve, 25));
 
-		expect(fake.requests.length).toBeGreaterThan(0);
-		for (const req of fake.requests) {
+		// ISS-010: the ONE sanctioned non-SELECT on this path is the fire-and-forget injected-token
+		// meter (a `memory_injections` append) — fail-soft telemetry that never shapes the response.
+		// The DIGEST-SERVING read path itself remains SELECT-only, asserted over everything else.
+		const nonTelemetry = fake.requests.filter((r) => !r.sql.includes('"memory_injections"'));
+		expect(nonTelemetry.length).toBeGreaterThan(0);
+		for (const req of nonTelemetry) {
 			// Every statement is a SELECT (the pure skim) …
 			expect(req.sql.trimStart().toUpperCase().startsWith("SELECT"), req.sql).toBe(true);
 			// … and NONE is a mutation (verb+object, so `last_update_date` does not false-match).

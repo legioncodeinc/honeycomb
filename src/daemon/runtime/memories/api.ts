@@ -61,6 +61,7 @@ import {
 } from "../scope.js";
 import { getRequestIdentity } from "../middleware/permission.js";
 import {
+	estimateTokenCount,
 	recallFast,
 	recallMemories,
 	type MemoryRecallResult,
@@ -68,6 +69,9 @@ import {
 	type RecallShedEvent,
 	type RecallTimingEvent,
 } from "./recall.js";
+// ISS-010: the injected-token meter. Fire-and-forget after the recall result is assembled —
+// `recordInjection` is fail-soft by contract (never throws), so the response is byte-identical.
+import { recordInjection } from "../telemetry/injection-log.js";
 import { RecencyConfigSchema, type RecencyConfig } from "../recall/config.js";
 import { isValidRecallMode, type RecallMode } from "../vault/api.js";
 import type { VaultStore } from "../vault/store.js";
@@ -842,6 +846,25 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 		// PRD-049b (D8): when no cwd was resolvable, project scoping degraded to inbox+global;
 		// emit a structured warning so the degrade is visible (silent-when-surprising guard).
 		logProjectScopeDegraded(options.logger, project);
+		/**
+		 * ISS-010 injected-token metering — HONESTY NOTE: this meters tokens SERVED by the recall
+		 * response, not tokens the harness ultimately injected into the model context. The hook
+		 * dedupes hits across turns before injecting, so served >= injected; the KPI is an upper
+		 * bound on real injection volume. Fire-and-forget (`void`): `recordInjection` is fail-soft
+		 * by contract (never throws, skips zero-hit/zero-token events), so the response body below
+		 * is byte-identical whether or not the telemetry append lands.
+		 */
+		void recordInjection(
+			{
+				source: parsed.data.fast === true ? "recall_fast" : "recall",
+				hits: result.hits.length,
+				tokens: result.hits.reduce((sum, hit) => sum + estimateTokenCount(hit.text), 0),
+				sessionId: c.req.header("x-honeycomb-session") ?? "",
+				projectId: project.bound ? project.projectId : "",
+			},
+			{ storage },
+			scope,
+		);
 		return c.json(recallResponse(result, project));
 	});
 
