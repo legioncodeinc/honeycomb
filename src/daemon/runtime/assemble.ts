@@ -2230,8 +2230,11 @@ async function readProviderModelOverride(
  * `"no_model"` — NEVER a routable selection carrying `model: ""` (the fresh-install incident:
  * 373 empty-model POSTs, every job swallowed as done). The caller builds NO Portkey target and
  * surfaces the typed `portkey: "no_model"` health state so the operator sees WHY.
+ *
+ * Exported for the deterministic ISS-005 suite (a three-line {@link VaultSettingsReader} stub
+ * drives every branch without a daemon assembly).
  */
-async function readPortkeySelection(
+export async function readPortkeySelection(
 	vault: VaultSettingsReader | undefined,
 	scope: SecretScope,
 ): Promise<PortkeySelection | "no_model" | undefined> {
