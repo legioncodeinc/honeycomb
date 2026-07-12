@@ -379,6 +379,36 @@ export interface MemoryRecallHit {
 	readonly staleRefs?: readonly string[];
 }
 
+/**
+ * ISS-007/ISS-008: WHY a degraded recall could not run the semantic arm, when the cause is on
+ * the embed path. A closed, secret-free enum forwarded into the `recall.degraded` event so a
+ * dogfood can tell a healthy skip from a burned deadline at a glance:
+ *   - `embed_not_ready`   — the supervisor's CURRENT state is not warm (warming/suspect/failed),
+ *                           so the embed attempt was SKIPPED outright: the lexical path answered
+ *                           immediately and the embed deadline was never started, let alone burned.
+ *   - `embed_timeout`     — an embed WAS attempted and burned its full bounded deadline (the
+ *                           wedged-daemon signature; also triggers the supervisor's on-demand
+ *                           liveness check via the gate).
+ *   - `embed_unavailable` — the embed attempt failed fast without a timeout (client null contract:
+ *                           daemon unreachable / 503 / wrong-dim / a thrown hiccup).
+ */
+export type RecallDegradedReason = "embed_not_ready" | "embed_timeout" | "embed_unavailable";
+
+/**
+ * ISS-007/ISS-008: the embed-liveness gate the composition root wires from the embed supervisor.
+ * `ready()` reads the supervisor's CURRENT state — `true` only when the model is warm and the
+ * last liveness probe answered, so recall embeds only when semantic is actually servable.
+ * `reportTimeout()` (optional) tells the supervisor a bounded embed just burned its deadline, so
+ * it can fire an on-demand liveness probe and confirm/clear a wedge in seconds. Both are cheap
+ * synchronous state reads/fire-and-forgets — never a network call on the recall hot path.
+ */
+export interface EmbedLivenessGate {
+	/** Whether the embed daemon is warm + live RIGHT NOW (embed attempts are worth making). */
+	ready(): boolean;
+	/** Notify that a bounded embed burned its deadline (kicks the supervisor's on-demand probe). */
+	reportTimeout?(): void;
+}
+
 /** The result of a recall: the surfaced hits, the arms that produced them, and the fallback flag. */
 export interface MemoryRecallResult {
 	/** The surfaced hits, ordered by fused RRF `score` DESC (PRD-027 D-1) — never arm order. */
@@ -389,11 +419,18 @@ export interface MemoryRecallResult {
 	 * The HONEST semantic-vs-lexical signal (PRD-025 AC-3 / D-4): `false` when the
 	 * `<#>` cosine semantic arm actually RAN (embeddings available + the query
 	 * embedded to a 768-dim vector); `true` on genuine fallback — embeddings off, no
-	 * embed client injected, the embed daemon unreachable, a per-call timeout, or the
-	 * query embed returning null/wrong-dim — in which case recall ran the BM25/ILIKE
-	 * lexical arms only.
+	 * embed client injected, the embed daemon not warm (skipped), unreachable, a
+	 * per-call timeout, or the query embed returning null/wrong-dim — in which case
+	 * recall ran the BM25/ILIKE lexical arms only.
 	 */
 	readonly degraded: boolean;
+	/**
+	 * ISS-007/ISS-008: the embed-path cause when `degraded` is true and the cause is knowable
+	 * (see {@link RecallDegradedReason}). ADDITIVE + optional: absent on non-degraded results, on
+	 * legacy embed-less runs, and on non-embed degradations (e.g. a fast-lane deadline cut with a
+	 * healthy embed). Secret-free (a fixed literal); forwarded into the `recall.degraded` event.
+	 */
+	readonly degradedReason?: RecallDegradedReason;
 }
 
 /** Clamp a caller-supplied limit into `[1, MAX_RECALL_LIMIT]`, defaulting a missing/bad value. */
@@ -830,6 +867,15 @@ export interface MemoryRecallDeps {
 	 * (D-1 default-on); a unit test injects a fake to drive both branches deterministically.
 	 */
 	readonly embed?: EmbedClient;
+	/**
+	 * ISS-007/ISS-008: the embed-liveness fast-skip gate (see {@link EmbedLivenessGate}). When
+	 * present AND `ready()` is false, BOTH recall paths SKIP the embed attempt entirely — the
+	 * lexical arms answer immediately (`degraded: true`, `degradedReason: "embed_not_ready"`)
+	 * instead of burning the full embed deadline against a cold/wedged daemon. When an attempted
+	 * embed DOES burn its bounded deadline, `reportTimeout()` is fired so the supervisor runs an
+	 * on-demand liveness probe. ABSENT (unit mounts, legacy callers) → today's behavior verbatim.
+	 */
+	readonly embedGate?: EmbedLivenessGate;
 	/**
 	 * The user-selected recall mode (PRD-044c). The LIVE `/api/memories/recall` handler reads the
 	 * `recallMode` vault `setting` at recall time and threads it here; the closed enum is validated
@@ -1358,30 +1404,40 @@ async function boundedEmbed(
 	embed: EmbedClient,
 	query: string,
 	deadlineMs: number,
-): Promise<readonly number[] | null> {
+): Promise<{ readonly vector: readonly number[] | null; readonly timedOut: boolean }> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
+	// ISS-008: track WHICH way a null happened — a burned deadline (`timedOut`, the wedged-daemon
+	// signature that should kick the supervisor's on-demand liveness probe) vs a fast failure
+	// (unreachable/503/throw). The winning-vector path is byte-for-byte the pre-077 result.
+	let timedOut = false;
 	const timeout = new Promise<null>((resolve) => {
-		timer = setTimeout(() => resolve(null), Math.max(0, deadlineMs));
+		timer = setTimeout(() => {
+			timedOut = true;
+			resolve(null);
+		}, Math.max(0, deadlineMs));
 	});
 	try {
-		return await Promise.race([embed.embed(query), timeout]);
+		const vector = await Promise.race([embed.embed(query), timeout]);
+		return { vector, timedOut };
 	} catch {
 		// The embed-client contract is null-on-failure, but a flaky daemon that THROWS degrades to
 		// lexical too — recall never throws into the route on an embed hiccup (fast + heavy share this).
-		return null;
+		return { vector: null, timedOut: false };
 	} finally {
 		if (timer !== undefined) clearTimeout(timer);
 	}
 }
 
 /**
- * Embed the query + run BOTH semantic arms (PRD-025 AC-3). Returns `null` when the
- * semantic path could NOT run — no embed client, or the query embed returned null
- * (embeddings off / daemon unreachable / timeout / wrong-dim) — which is the signal
- * to fall back to lexical-only with `degraded: true`. Returns a {@link SemanticRun}
- * (one {@link RankedArm} per semantic table, each in its own cosine ranking, plus the
- * query vector) when the arms DID run — `degraded: false`, because "ran and found
- * nothing semantically" is still an honest non-degraded recall (the arms may be empty).
+ * Embed the query + run BOTH semantic arms (PRD-025 AC-3). Returns `{ run: null }` when the
+ * semantic path could NOT run — no embed client, the embed-liveness gate reports the daemon
+ * not warm (ISS-007 fast-skip: NO embed attempted, no deadline burned), or the query embed
+ * returned null (embeddings off / daemon unreachable / timeout / wrong-dim) — which is the
+ * signal to fall back to lexical-only with `degraded: true` (the `reason` names the
+ * embed-path cause when knowable). Returns `{ run: SemanticRun }` (one {@link RankedArm} per
+ * semantic table, each in its own cosine ranking, plus the query vector) when the arms DID
+ * run — `degraded: false`, because "ran and found nothing semantically" is still an honest
+ * non-degraded recall (the arms may be empty).
  */
 async function runSemanticArms(
 	request: MemoryRecallRequest,
@@ -1389,22 +1445,36 @@ async function runSemanticArms(
 	limit: number,
 	// PRD-077b (L-B8): the heavy-lane deadline, threaded into each semantic arm's `<#>` match + hydrate.
 	signal?: AbortSignal,
-): Promise<SemanticRun | null> {
-	if (deps.embed === undefined) return null; // no semantic seam → lexical-only.
+): Promise<{ readonly run: SemanticRun | null; readonly reason?: RecallDegradedReason }> {
+	if (deps.embed === undefined) return { run: null }; // no semantic seam → lexical-only.
+
+	// ISS-007/ISS-008: SKIP the embed outright when the supervisor's CURRENT state is not warm
+	// (warming/suspect/failed). The lexical floor answers immediately — the heavy embed deadline
+	// (default 3s) is never started against a cold or wedged daemon — and the degraded reason is
+	// distinctly `embed_not_ready` (a healthy skip), not `embed_timeout` (a burned deadline).
+	if (deps.embedGate !== undefined && !deps.embedGate.ready()) {
+		return { run: null, reason: "embed_not_ready" };
+	}
 
 	// PRD-077 (L-B9): BOUND the heavy-path embed (its existing null contract already degrades to
 	// lexical-only). A hung embed daemon degrades within `recallHeavyEmbedDeadlineMs` instead of
 	// wedging the heavy fan-out BEFORE its own arm deadline (`heavySignal`) is even created.
-	const queryVector = await boundedEmbed(deps.embed, request.query, amplificationConfig().recallHeavyEmbedDeadlineMs);
+	const bounded = await boundedEmbed(deps.embed, request.query, amplificationConfig().recallHeavyEmbedDeadlineMs);
+	const queryVector = bounded.vector;
 	// Null (off/unreachable/timeout) OR a wrong-dim vector (defense in depth; the
 	// client already dim-guards) → the semantic arm cannot run → fall back to lexical.
-	if (queryVector === null || queryVector.length !== EMBEDDING_DIMS) return null;
+	if (queryVector === null || queryVector.length !== EMBEDDING_DIMS) {
+		// ISS-007: a BURNED deadline is the wedged-daemon signature — kick the supervisor's
+		// on-demand liveness probe so the wedge is confirmed (and respawned) in seconds.
+		if (bounded.timedOut) deps.embedGate?.reportTimeout?.();
+		return { run: null, reason: bounded.timedOut ? "embed_timeout" : "embed_unavailable" };
+	}
 
 	const armEntries = await Promise.all(
 		SEMANTIC_ARMS.map((spec) => runSemanticArm(spec, queryVector!, request, deps, limit, signal)),
 	);
 	// Each semantic table is its OWN ranked arm so RRF sees its cosine ranking distinctly.
-	return { arms: armEntries.map((entries) => ({ entries })), queryVector };
+	return { run: { arms: armEntries.map((entries) => ({ entries })), queryVector } };
 }
 
 // ── PRD-047b — the rerank stage (embedding-cosine over the fused top-N) ──────────
@@ -2513,8 +2583,10 @@ export async function recallMemories(
 	// lexical arms always run (the resilient floor). Each lexical arm is bounded by the
 	// overall limit so a single arm cannot starve the fusion. In `keyword` mode the
 	// semantic arm is never invoked — it short-circuits to `null` before the await.
-	const [semanticRun, memoriesRows, memoryRows, sessionsRows, hiveGraphRows] = await Promise.all([
-		keywordOnly ? Promise.resolve(null) : runSemanticArms(request, deps, limit, heavySignal),
+	const [semanticOutcome, memoriesRows, memoryRows, sessionsRows, hiveGraphRows] = await Promise.all([
+		keywordOnly
+			? Promise.resolve({ run: null } as { readonly run: SemanticRun | null; readonly reason?: RecallDegradedReason })
+			: runSemanticArms(request, deps, limit, heavySignal),
 		runArm(buildMemoriesArmSql(term, limit, projectClause), request, deps, heavySignal),
 		runArm(buildMemoryArmSql(term, limit, projectClause), request, deps, heavySignal),
 		runArm(buildSessionsArmSql(term, limit, projectClause), request, deps, heavySignal),
@@ -2527,7 +2599,12 @@ export async function recallMemories(
 	// `degraded` is HONEST (PRD-025 AC-3): false iff the semantic arm actually ran — EXCEPT in
 	// `keyword` mode, where an intentional lexical-only run is NOT a degraded fallback (PRD-044c /
 	// PRD-029), so it is forced `false` even though the semantic arm never ran.
+	const semanticRun = semanticOutcome.run;
 	const degraded = keywordOnly ? false : semanticRun === null;
+	// ISS-008: the embed-path cause behind a degraded run (not_ready skip / burned timeout /
+	// fast unavailability), forwarded into the result + the `recall.degraded` event. Never set on
+	// an intentional keyword run (not a degradation) or a non-degraded run.
+	const degradedReason = degraded ? semanticOutcome.reason : undefined;
 
 	// PRD-027 D-1/D-2/D-3: assemble every arm as a RANKED list, then fuse with RRF +
 	// the arm-class weight, dedup, and order by fused score. The semantic arms (one per
@@ -2656,7 +2733,7 @@ export async function recallMemories(
 	if (typeof budget !== "number" || !Number.isFinite(budget) || budget <= 0) {
 		// No budget → the unchanged fixed top-k path (e-AC-4 back-compat). The injected set IS `dampened`.
 		await recordRecallAccessEvents(dampened, deps);
-		return { hits: dampened, sources: dedupedSources, degraded };
+		return { hits: dampened, sources: dedupedSources, degraded, ...(degradedReason !== undefined ? { degradedReason } : {}) };
 	}
 	try {
 		const lambda = deps.contextAssembly?.mmrLambda ?? DEFAULT_MMR_LAMBDA;
@@ -2665,12 +2742,12 @@ export async function recallMemories(
 		const assembledSources = assembled.length === dampened.length ? dedupedSources : [...new Set(assembled.map((h) => h.source))];
 		// Credit reinforcement to the post-budget injected set only.
 		await recordRecallAccessEvents(assembled, deps);
-		return { hits: assembled, sources: assembledSources, degraded };
+		return { hits: assembled, sources: assembledSources, degraded, ...(degradedReason !== undefined ? { degradedReason } : {}) };
 	} catch {
 		// e-AC-4: an MMR/budget failure degrades to the fixed top-`limit` list, never a throw. The injected
 		// set in this degraded path is `dampened`, so reinforcement is credited to it.
 		await recordRecallAccessEvents(dampened, deps);
-		return { hits: dampened, sources: dedupedSources, degraded };
+		return { hits: dampened, sources: dedupedSources, degraded, ...(degradedReason !== undefined ? { degradedReason } : {}) };
 	}
 }
 
@@ -2848,8 +2925,27 @@ export async function recallFast(
 	// phase-timing span emitted once via the secret-free `deps.onTiming` seam.
 	const startedAt = Date.now();
 	let queryVector: readonly number[] | null = null;
+	// ISS-007/ISS-008: the embed-path cause when this recall degrades (skip vs timeout vs fast
+	// failure), threaded into the result + the `recall.degraded` event so a healthy skip is
+	// distinguishable from a burned deadline in the logs.
+	let embedDegradedReason: RecallDegradedReason | undefined;
 	if (deps.embed !== undefined) {
-		queryVector = await boundedEmbed(deps.embed, request.query, config.recallFastEmbedDeadlineMs);
+		if (deps.embedGate !== undefined && !deps.embedGate.ready()) {
+			// The supervisor's CURRENT state is not warm (warming/suspect/failed): SKIP the embed
+			// outright. The lexical arms answer immediately — the fast embed deadline (default 1.5s)
+			// is never started against a cold/wedged daemon (`embedMs ≈ 0` in the timing event).
+			embedDegradedReason = "embed_not_ready";
+		} else {
+			const bounded = await boundedEmbed(deps.embed, request.query, config.recallFastEmbedDeadlineMs);
+			queryVector = bounded.vector;
+			if (queryVector === null) {
+				embedDegradedReason = bounded.timedOut ? "embed_timeout" : "embed_unavailable";
+				// A BURNED deadline is the wedged-daemon signature — kick the supervisor's on-demand
+				// liveness probe (fire-and-forget) so the wedge is confirmed in seconds, not at the
+				// next periodic tick.
+				if (bounded.timedOut) deps.embedGate?.reportTimeout?.();
+			}
+		}
 	}
 	const embedMs = Date.now() - startedAt;
 	const semanticRan = queryVector !== null && queryVector.length === EMBEDDING_DIMS;
@@ -2934,7 +3030,7 @@ export async function recallFast(
 	const anyArmRows = armRows.some((rows) => rows.length > 0);
 	if (deadlineFired && !anyArmRows && !anyLocalRows) {
 		emitTiming(0, 0);
-		return { hits: [], sources: [], degraded: fastDegraded };
+		return { hits: [], sources: [], degraded: fastDegraded, ...(embedDegradedReason !== undefined ? { degradedReason: embedDegradedReason } : {}) };
 	}
 
 	// PRD-077 (fix A / 078a-fix, adapted): PARTIAL fusion — build the ranked arms from whatever is in hand at
@@ -2968,5 +3064,5 @@ export async function recallFast(
 	const fuseMs = Date.now() - fuseStart;
 
 	emitTiming(fuseMs, activated.length);
-	return { hits: activated, sources, degraded: fastDegraded };
+	return { hits: activated, sources, degraded: fastDegraded, ...(embedDegradedReason !== undefined ? { degradedReason: embedDegradedReason } : {}) };
 }
