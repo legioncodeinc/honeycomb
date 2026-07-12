@@ -39,6 +39,7 @@ import { DAEMON_PORT } from "../../../shared/constants.js";
 import type { QueryScope } from "../../storage/client.js";
 import { credentialsPath, legacyCredentialsPath } from "../auth/credentials-store.js";
 import type { DeploymentMode } from "../config.js";
+import type { PipelineReloadSeam } from "../pipeline/reload.js";
 import { localDefaultScopeResolver, type ScopeResolver } from "../secrets/api.js";
 import type { EmbedSupervisor } from "../services/embed-supervisor.js";
 import type { Daemon } from "../server.js";
@@ -83,13 +84,20 @@ export interface MountActionsOptions {
 	/** Produce the uninstall outcome. Default: the guided result (detect harnesses + the CLI command). */
 	readonly uninstall?: () => UninstallOutcome;
 	/**
-	 * A structured-event sink the `memory` toggle emits on each successful write (this PRD). The memory
-	 * pipeline worker snapshots its master `enabled` gate at BOOT, so a live in-place reconcile is
-	 * invasive; the toggle instead PERSISTS the `memory.enabled` setting (vault-first at next boot) and
-	 * emits this event so the change is observable. Default: a no-op (no wiring → the persist still
-	 * happens, the event is simply dropped). Carries NO secret — a name + a boolean.
+	 * A structured-event sink the `memory` toggle emits on each successful write. Kept alongside the
+	 * SP-1 live path (`reload` below) so the toggle stays observable in the boot log. Default: a
+	 * no-op (no wiring → the persist still happens, the event is simply dropped). Carries NO secret
+	 * — a name + a boolean.
 	 */
 	readonly onMemoryToggle?: (event: { enabled: boolean }) => void;
+	/**
+	 * SP-1 (kill `appliesOnRestart`): the pipeline live-reload trigger the `memory` toggle fires
+	 * post-persist, so the master extraction gate flips IN-PROCESS (debounced ~1s) instead of
+	 * waiting for the next daemon boot. When wired the ack reports `appliedLive: true` (and keeps
+	 * `appliesOnRestart: false` for hive back-compat); ABSENT (unit mounts, deferred assemblies)
+	 * → the persist-only behavior stands and the ack honestly reports `appliesOnRestart: true`.
+	 */
+	readonly reload?: PipelineReloadSeam;
 }
 
 /** Whether an `Origin` header names a loopback host (the only origin the dashboard is served from). */
@@ -253,12 +261,13 @@ export function mountActionsGroup(group: Hono, mode: DeploymentMode, options: Mo
 		return c.json({ ok: true, enabled });
 	});
 
-	// POST /api/actions/memory — turn MEMORY FORMATION on/off by persisting `memory.enabled` (vault-first
-	// at next boot). Mirrors the embeddings toggle's auth/scope/validation shape EXACTLY. Unlike embeddings
-	// (which has a live supervisor to actuate), the memory pipeline worker snapshots its master gate at
-	// boot, so this toggle PERSISTS the choice + emits a structured event; it takes effect on the next
-	// daemon start (a `restart` action is available for an immediate apply). The response echoes the new
-	// boolean + `appliesOnRestart:true` so the UI can tell the user the change is queued, not live.
+	// POST /api/actions/memory — turn MEMORY FORMATION on/off: persist `memory.enabled` (vault-first,
+	// still authoritative at next boot) AND — SP-1 — actuate it LIVE through the pipeline reload seam,
+	// mirroring how the embeddings toggle actuates its supervisor. The seam re-runs the vault-first
+	// resolution and flips the extraction stage's live master gate in-process (debounced ~1s), so the
+	// ack reports `appliedLive: true`. `appliesOnRestart` is KEPT in the payload for hive back-compat,
+	// as `false` when the live path is wired (and honestly `true` on a seam-less mount, where persist-
+	// at-next-boot is still the only effect).
 	group.post("/memory", async (c) => {
 		const denied = actionGuard(c, mode);
 		if (denied) return denied;
@@ -281,9 +290,22 @@ export function mountActionsGroup(group: Hono, mode: DeploymentMode, options: Mo
 				}
 			}
 		}
-		// Emit the structured event so the toggle is observable even though the reconcile is deferred.
+		// Emit the structured event so the toggle is observable in the boot log either way.
 		onMemoryToggle?.({ enabled });
-		return c.json({ ok: true, enabled, persisted, appliesOnRestart: true });
+		// SP-1: actuate LIVE via the pipeline reload seam (fire-and-forget, post-persist — the
+		// debounced rebuild re-reads the just-written vault value and flips the extraction gate).
+		// The reload RE-READS STORED state, so `appliedLive` requires BOTH the seam and a
+		// successful persist: an unpersisted toggle is applied neither live nor at restart, and
+		// firing the seam without a persist would only republish the old value (Aikido finding).
+		const appliedLive = persisted && options.reload !== undefined;
+		if (appliedLive) options.reload?.requestReload("action:memory");
+		return c.json({
+			ok: true,
+			enabled,
+			persisted,
+			appliedLive,
+			appliesOnRestart: persisted && !appliedLive,
+		});
 	});
 
 	// POST /api/actions/restart — respawn a fresh daemon, then gracefully stop this one.

@@ -126,9 +126,17 @@ export interface UnbindAck {
 
 /** Options for {@link mountOnboardingApi}. All seams injectable for deterministic tests. */
 export interface MountOnboardingOptions {
-	/** The active org id the bindings are written under (the daemon's resolved tenancy). */
+	/**
+	 * The active org id the bindings are written under (the daemon's resolved tenancy).
+	 *
+	 * ── ISS-003 (request-time tenancy) ────────────────────────────────────────
+	 * The handlers read `options.org` / `options.workspace` PER REQUEST (never copied at mount
+	 * time), so the composition root passes GETTERS over the daemon's LIVE scope — a workspace/org
+	 * switch after boot lands the very next bind under the NEW tenant. A plain string (unit mounts)
+	 * still works; it is simply frozen, which is fine for a hermetic test.
+	 */
 	readonly org: string;
-	/** The active workspace id the bindings are written under (the daemon's resolved tenancy). */
+	/** The active workspace id the bindings are written under (read per request — see `org`). */
 	readonly workspace: string;
 	/** Override the projects-cache directory (tests). Defaults to `~/.deeplake`. */
 	readonly projectsDir?: string;

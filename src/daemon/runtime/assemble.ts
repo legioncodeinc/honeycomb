@@ -108,7 +108,9 @@ import {
 	PORTKEY_API_KEY_NAME,
 	PORTKEY_API_KEY_REF,
 	type PortkeySelection,
+	type PortkeyStatus,
 	type ProviderModelOverride,
+	resolveCredentialSecretNames,
 } from "./inference/model-client-factory.js";
 import { mountLocalQueueDiagnosticsApi } from "./local-queue-diagnostics-api.js";
 import { createRequestLogger, type RequestLogger } from "./logger.js";
@@ -191,15 +193,19 @@ import { mountNotificationsApi } from "./notifications/api.js";
 import { mountOntologyApi } from "./ontology/api.js";
 import {
 	controlledWriteFanOut,
+	createLiveExtractionGate,
 	createMemoryFormationTracker,
 	createPipelineHandlers,
+	createPipelineReloadSeam,
 	createStageWorker,
 	decisionFanOut,
 	extractionFanOut,
+	LiveModelClient,
 	type MemoryFormationTracker,
 	noopModelClient,
 	type PipelineConfig,
-	resolveEffectiveExtractionProvider,
+	type PipelineReloadController,
+	type PipelineReloadSeam,
 	resolveMemoryEnabledVaultFirst,
 	resolvePipelineConfig,
 	type StageWorker,
@@ -1315,6 +1321,14 @@ export function assembleSeams(
 	 * pre-079a. The daemon composition root supplies the real outbox (real assembly only).
 	 */
 	outbox?: CaptureOutboxSink,
+	/**
+	 * SP-1 / ISS-001: the pipeline live-reload trigger, threaded into the `/api/secrets` write
+	 * handlers (via {@link resolveProductDataDeps}) so a provider-key POST/DELETE rebuilds the
+	 * pipeline's inference client + re-evaluates the extraction gate WITHOUT a daemon restart.
+	 * ABSENT (a unit-constructed `assembleSeams` call) → the secrets API persists exactly as
+	 * before with no live trigger. The daemon composition root always supplies it.
+	 */
+	pipelineReload?: PipelineReloadSeam,
 ): CaptureHandler {
 	// The daemon's configured default tenancy scope (the single LOCAL tenant) is RESOLVED ONCE
 	// at the composition root (`assembleDaemon`) from the SAME credential source the storage
@@ -1657,7 +1671,7 @@ export function assembleSeams(
 	//    surface this run" (the 501 scaffold) rather than crashing the daemon.
 	seams.mountProductData(
 		daemon,
-		resolveProductDataDeps(storage, defaultScope, daemon.services.queue, embed.client, daemon.config.mode),
+		resolveProductDataDeps(storage, defaultScope, daemon.services.queue, embed.client, daemon.config.mode, pipelineReload),
 	);
 
 	// 10. The "Pollinate now" trigger — `POST /api/diagnostics/pollinate` (PRD-024 / AC-6 backend).
@@ -1960,6 +1974,7 @@ function resolveProductDataDeps(
 	queue: DaemonServices["queue"],
 	embed: EmbedClient,
 	mode: DeploymentMode,
+	pipelineReload?: PipelineReloadSeam,
 ): {
 	storage: StorageClient;
 	secrets?: SecretsApiDeps;
@@ -1977,6 +1992,10 @@ function resolveProductDataDeps(
 		// `x-honeycomb-org` header, so resolve the daemon's single local tenant instead of 400ing.
 		// Team/hybrid stay fail-closed (a missing org still 400s) — cross-tenant access is rejected.
 		scope: localDefaultScopeResolver(mode, defaultScope),
+		// SP-1 / ISS-001: a provider-key POST/DELETE triggers the debounced pipeline reload so the
+		// key takes effect on the next extraction job — no daemon restart, no `'auto'` stuck at
+		// the boot-time `'none'` collapse.
+		...(pipelineReload !== undefined ? { reload: pipelineReload } : {}),
 	};
 
 	// PRD-045e: build the sources deps (registry + providers resolver + document worker)
@@ -2406,6 +2425,16 @@ interface PortkeyWorkerDeps {
 	readonly selection?: PortkeySelection;
 	/** Assembly's last-failure observer (flips `reasons.portkey` to `unreachable`). Total + non-throwing. */
 	readonly onUnreachable: (statusCode: number) => void;
+	/**
+	 * Re-read the CURRENT Portkey selection from the vault (SP-1 live reload). The pipeline's
+	 * reload seam calls this so a `portkey.*` / `activeModel` write is honored WITHOUT a restart,
+	 * through the SAME fail-closed reader boot used ({@link readPortkeySelection} — a missing
+	 * `activeModel` still yields the `"no_model"` sentinel and NO routable target, never a
+	 * `model: ""` POST). ABSENT (test assemblies) → the reload keeps the boot selection.
+	 */
+	readonly readSelection?: () => Promise<PortkeySelection | "no_model" | undefined>;
+	/** Publish the re-derived assembly Portkey health after a live reload (mirrors the boot derive). */
+	readonly onHealth?: (health: PortkeyHealth) => void;
 }
 
 /**
@@ -2644,7 +2673,7 @@ async function buildPipelineWorker(
 	vault?: VaultSettingsReader,
 	onMemoryFeature?: (signal: { enabled: boolean; providerConfigured: boolean }) => void,
 	memoryOutbox?: MemoryOutbox,
-): Promise<StageWorker> {
+): Promise<PipelineWorkerBuild> {
 	// Resolve the pipeline config fail-soft: a malformed knob must NEVER take the daemon
 	// down — degrade to the schema's false-safe defaults (every stage gate defaults OFF,
 	// the conservative posture the pipeline config already documents).
@@ -2654,6 +2683,10 @@ async function buildPipelineWorker(
 	} catch {
 		config = resolvePipelineConfig({ read: () => ({}) });
 	}
+	// The PRISTINE env-resolved master gate (`HONEYCOMB_PIPELINE_ENABLED`) — captured BEFORE the
+	// vault override below so the live-reload path can re-run the SAME vault-first precedence
+	// later (a vault value deleted after boot must fall back to the env, not to the stale merge).
+	const envEnabled = config.enabled;
 
 	// ── VAULT-FIRST master `enabled` (mirrors embeddings/pollinating). The dashboard-persisted
 	// `memory.enabled` setting WINS over the `HONEYCOMB_PIPELINE_ENABLED` env: a present vault value
@@ -2661,7 +2694,7 @@ async function buildPipelineWorker(
 	// what turns memory formation on from settings with NO env editing. Fail-soft — an unreadable
 	// vault degrades to the env value, never a throw.
 	const vaultMemory = await readVaultMemoryEnabled(vault, secretScopeFromQueryScope(scope));
-	const enabled = resolveMemoryEnabledVaultFirst(vaultMemory, config.enabled);
+	const enabled = resolveMemoryEnabledVaultFirst(vaultMemory, envEnabled);
 	if (enabled !== config.enabled) config = { ...config, enabled };
 	// Observability: announce the RESOLVED pipeline gate at boot. `enabled:false` or
 	// `extractionProvider:'none'` means the extraction stage returns empty WITHOUT a model call — the
@@ -2688,20 +2721,29 @@ async function buildPipelineWorker(
 	// `'auto'` extraction gate, so a routable-but-keyless `agent.yaml` reports `unconfigured` and
 	// `'auto'` does NOT enable extraction (closing the "looks configured, forms nothing" false positive).
 	let providerConfigured = false;
-	try {
+	// The inference-build inputs, hoisted so the LIVE-RELOAD closure below re-runs the SAME build
+	// (same scope, same store construction, same agent.yaml path) against the CURRENT vault/secret
+	// state. The agent-config path is boot-stable; everything else is re-read per reload.
+	const agentConfigPath = resolveAgentConfigPath(options);
+	const buildModel = async (
+		selection: PortkeySelection | undefined,
+	): Promise<{ client: ModelClient; portkeyStatus: PortkeyStatus; providerConfigured: boolean }> => {
 		const secretsStore = new SecretsStore({
 			baseDir: resolveVaultBaseDir(),
 			machineKey: createMachineKeyProvider(),
 		});
 		// PRD-063b: route the pipeline's extraction/decision inference through Portkey too when the
 		// gateway is on (the SUPERSESSION), with the same last-failure observer; off → unchanged.
-		const built = await buildInferenceModelClientWithStatus({
+		return buildInferenceModelClientWithStatus({
 			scope: secretScopeFromQueryScope(scope),
 			secretsStore,
-			config: resolveAgentConfigPath(options),
-			...(portkeyDeps?.selection !== undefined ? { portkey: portkeyDeps.selection } : {}),
+			config: agentConfigPath,
+			...(selection !== undefined ? { portkey: selection } : {}),
 			...(portkeyDeps !== undefined ? { onPortkeyUnreachable: portkeyDeps.onUnreachable } : {}),
 		});
+	};
+	try {
+		const built = await buildModel(portkeyDeps?.selection);
 		model = built.client;
 		portkeyStatus = built.portkeyStatus;
 		// The credential-resolution-aware signal (NOT the coarse `model !== noopModelClient` identity
@@ -2717,12 +2759,83 @@ async function buildPipelineWorker(
 	// "Memory Formation" control gates on these. Total + non-throwing (a plain assignment sink).
 	onMemoryFeature?.({ enabled: config.enabled, providerConfigured });
 
-	// ── Collapse the `'auto'` extraction sentinel now that the provider signal is known. When the
-	// pipeline is enabled and `extractionProvider` is UNSET (`'auto'`, the default), extraction runs
-	// iff a real provider is configured — the user never sets a SECOND pipeline-specific token.
-	// Explicit `'none'` still opts out; an explicit override is untouched. The STAGES read the
-	// resolved config so `isExtractionEnabled(config)` (provider-agnostic) sees a concrete value.
-	config = resolveEffectiveExtractionProvider(config, providerConfigured);
+	// ── SP-1 / ISS-001: the `'auto'` extraction sentinel is NO LONGER collapsed at boot. The old
+	// `resolveEffectiveExtractionProvider(config, providerConfigured)` snapshot froze `'auto'` into
+	// `'none'` for the daemon's lifetime whenever no key was present at startup — saving a provider
+	// key afterwards changed nothing until a restart. The extraction stage now evaluates
+	// `isExtractionEnabled(config, providerConfiguredNow)` PER JOB through the live gate below:
+	// `providerConfiguredNow` is a TTL-debounced (~1s) names-only secret-presence probe over the
+	// CURRENT selection's credential names (`PORTKEY_API_KEY` with the gateway on; the `agent.yaml`
+	// accounts' `${SECRET_REF}` names otherwise). Explicit `'none'` still opts out per job; an
+	// explicit override still enables unconditionally — only `'auto'` consults the probe.
+	const liveModel = new LiveModelClient(model);
+	const gateSecretScope = (): SecretScope => secretScopeFromQueryScope(scope);
+	const gate = createLiveExtractionGate({
+		enabled: config.enabled,
+		credentialNames: await resolveCredentialSecretNames(agentConfigPath, portkeyDeps?.selection),
+		listSecretNames: () => {
+			// Names only — never a value read, never a decrypt (fail-closed inside the gate on throw).
+			const store = new SecretsStore({ baseDir: resolveVaultBaseDir(), machineKey: createMachineKeyProvider() });
+			return store.listSecretNames(gateSecretScope());
+		},
+	});
+
+	// ── The LIVE RELOAD (SP-1): re-resolve the vault-first master gate, the Portkey selection, and
+	// the inference client against the CURRENT vault/secret state, then publish in place — the
+	// stage handlers keep their references (the LiveModelClient + the gate), so the next job rides
+	// the rebuilt state with no worker teardown. Invoked debounced + fire-and-forget by the
+	// PipelineReloadSeam the settings/secrets/actions write APIs trigger post-persist. Fail-soft:
+	// every step degrades (a vault/read error keeps the previous value; a build error swaps in the
+	// no-op client) — a reload can never crash the daemon or drop the worker.
+	const reload = async (): Promise<void> => {
+		// (1) Master `enabled` — the SAME vault-first precedence as boot, against the pristine env.
+		const vaultNow = await readVaultMemoryEnabled(vault, gateSecretScope());
+		const enabledNow = resolveMemoryEnabledVaultFirst(vaultNow, envEnabled);
+		gate.setEnabled(enabledNow);
+
+		// (2) Portkey selection — through the SAME fail-closed reader boot used. ISS-005 semantics
+		// are preserved by construction: `"no_model"` yields NO routable selection (the rebuilt
+		// client can never POST `model: ""`), and the typed health state is re-published.
+		let selection = portkeyDeps?.selection;
+		if (portkeyDeps?.readSelection !== undefined) {
+			try {
+				const read = await portkeyDeps.readSelection();
+				selection = read === "no_model" ? undefined : read;
+				const health = read === "no_model" ? "no_model" : await resolvePortkeyAssemblyStatus(selection, scope);
+				portkeyDeps.onHealth?.(health);
+			} catch {
+				// An unreadable vault keeps the boot selection (fail-soft) — never a throw out of reload.
+			}
+		}
+
+		// (3) Rebuild the inference client and publish it atomically (a reference swap).
+		let providerConfiguredNow = false;
+		let portkeyStatusNow: PortkeyStatus = "unconfigured";
+		try {
+			const rebuilt = await buildModel(selection);
+			liveModel.swap(rebuilt.client);
+			providerConfiguredNow = rebuilt.providerConfigured;
+			portkeyStatusNow = rebuilt.portkeyStatus;
+		} catch {
+			// A build failure fails CLOSED to the no-op client (empty, zero-mutation passes) — the
+			// same degradation the boot path applies; never a provider-key leak, never a crash.
+			liveModel.swap(noopModelClient);
+		}
+
+		// (4) Refresh the per-job gate's probe inputs and drop its TTL cache so the very next
+		// extraction job sees the new state (instead of waiting out the window).
+		gate.setCredentialNames(await resolveCredentialSecretNames(agentConfigPath, selection));
+		gate.invalidate();
+
+		// (5) Re-publish the /health feature-gating cell + announce the reload (secret-free).
+		onMemoryFeature?.({ enabled: enabledNow, providerConfigured: providerConfiguredNow });
+		logger?.event("pipeline.reloaded", {
+			enabled: enabledNow,
+			providerConfigured: providerConfiguredNow,
+			portkeyStatus: portkeyStatusNow,
+			extractionProvider: config.extractionProvider,
+		});
+	};
 
 	// Observability: is the PIPELINE's inference client real (Portkey `ok`) or the no-op? A no-op makes
 	// extraction return empty WITHOUT any HTTP — the "jobs complete, nothing hits the LLM" signature.
@@ -2750,10 +2863,12 @@ async function buildPipelineWorker(
 	// detector's read side suppresses re-flagging of a known keep-both pair. The composition root
 	// constructs the store ONCE and threads the same reference into both writers (mount) and readers
 	// (this hook) — the verdict the operator applied at the endpoint is visible to the very next write.
+	// SP-1: every consumer below holds the LIVE proxy (never the raw boot client), so a reload's
+	// `swap` reaches the conflict judge and both LLM stages through their existing references.
 	const conflictHook = createControlledWriteConflictHook({
 		storage,
 		embed: embed.client,
-		model,
+		model: liveModel,
 		...(keepBothMemo !== undefined ? { memo: keepBothMemo } : {}),
 	});
 
@@ -2771,11 +2886,13 @@ async function buildPipelineWorker(
 		// Wire the extraction stage's logger so a swallowed model-call failure (extraction.model_error)
 		// or unparseable output is VISIBLE — otherwise "jobs complete, nothing hits the LLM, no facts"
 		// is a silent dead end. Structurally an ExtractionLogger (same { event } shape).
-		extraction: { config, model, logger: extractionLogger, onResult: extractionFanOut(queue) },
+		// SP-1 / ISS-001: `gate` makes the enabled/`'auto'` decision LIVE per job; `liveModel` makes
+		// a reload's rebuilt client reach the very next extraction/decision call.
+		extraction: { config, model: liveModel, gate, logger: extractionLogger, onResult: extractionFanOut(queue) },
 		decision: {
 			storage,
 			scope: queryScope,
-			model,
+			model: liveModel,
 			config,
 			embed: embed.client,
 			hydrateCandidates: true,
@@ -2799,7 +2916,20 @@ async function buildPipelineWorker(
 		retention: { storage, scope: queryScope, config },
 	});
 
-	return createStageWorker({ queue, handlers, backoff, logger });
+	return { worker: createStageWorker({ queue, handlers, backoff, logger }), reload };
+}
+
+/**
+ * The {@link buildPipelineWorker} result: the stage worker to start, PLUS the live-reload
+ * closure the composition root binds onto the {@link PipelineReloadController} so the
+ * settings/secrets/actions write APIs can rebuild the inference client + re-evaluate the
+ * extraction gate WITHOUT a daemon restart (SP-1 / ISS-001/ISS-005).
+ */
+interface PipelineWorkerBuild {
+	/** The constructed-but-NOT-started pipeline stage worker. */
+	readonly worker: StageWorker;
+	/** Re-resolve vault/secret state and publish it into the running worker's live seams. */
+	readonly reload: () => Promise<void>;
 }
 
 /**
@@ -3429,6 +3559,16 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// reader). One instance, two injection sites: the operator's `keep-both` verdict suppresses
 	// re-detection on the very next write of either side of the pair.
 	const keepBothMemo = createInProcessKeepBothMemoStore();
+	// ── SP-1 / ISS-001/ISS-005: the pipeline LIVE-RELOAD seam. Created UNBOUND here (before the
+	// mounts) so the settings/secrets/actions write APIs hold ONE stable trigger reference;
+	// `start()` binds the real reload once the pipeline worker is built. `requestReload` is
+	// debounced (~1s trailing edge) so a dashboard save burst coalesces into ONE rebuild, and it
+	// never blocks an HTTP response (it only schedules). Before bind — or when the pipeline worker
+	// is disabled/failed — a trigger is a clean no-op. A reload failure is surfaced to stderr and
+	// the last-good inference client stands (fail-soft, never a crash).
+	const pipelineReload: PipelineReloadController = createPipelineReloadSeam({
+		onError: (reason) => process.stderr.write(`honeycomb: pipeline live-reload failed (non-fatal): ${reason}\n`),
+	});
 	// L-W3 fix: construct the CalibrationModelProvider ONCE at the composition root (mirrors
 	// `keepBothMemo`) so the SAME instance is threaded into `assembleSeams` (the recall read path
 	// via `mountMemories`) AND — via this closure — into the calibrate tick + the manual route
@@ -3466,6 +3606,9 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		localVectorIndex,
 		// PRD-079a: the durable capture retry outbox — a failed capture append enqueues here (a-AC-1).
 		captureOutbox,
+		// SP-1: the pipeline live-reload trigger, threaded to the `/api/secrets` write handlers so a
+		// provider-key save rebuilds the inference client without a restart.
+		pipelineReload,
 	);
 
 	// ── PRD-079b (b-AC-4): the operator FORCE-DRAIN trigger — `POST /api/diagnostics/capture-drain`.
@@ -3538,7 +3681,13 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// Thread the LOCAL default-scope resolver (PRD-022) so the dashboard web app — a loopback
 			// thin client that sends NO `x-honeycomb-org` header — resolves the single local tenant
 			// instead of 400ing on `GET /api/settings`. In team/hybrid the resolver stays fail-closed.
-			mountSettingsApi(daemon, { store: vault, scope: localDefaultScopeResolver(daemon.config.mode, scope) });
+			// SP-1 / ISS-001: `reload` makes a watched-key write (activeProvider / activeModel /
+			// memory.enabled / portkey.*) rebuild the pipeline's inference client live, post-persist.
+			mountSettingsApi(daemon, {
+				store: vault,
+				scope: localDefaultScopeResolver(daemon.config.mode, scope),
+				reload: pipelineReload,
+			});
 		} catch (err: unknown) {
 			const reason = err instanceof Error ? err.message : String(err);
 			process.stderr.write(`honeycomb: settings API mount failed (non-fatal): ${reason}\n`);
@@ -3572,9 +3721,12 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			embed: daemon.services.embed,
 			defaultScope: scope,
 			...(vault instanceof VaultStore ? { store: vault } : {}),
-			// The `memory` toggle persists `memory.enabled` (vault-first at next boot) and emits this
-			// structured event so the deferred reconcile is observable in the boot log. No secret.
+			// The `memory` toggle persists `memory.enabled` (vault-first, still authoritative at next
+			// boot) and emits this structured event. No secret.
 			onMemoryToggle: (event) => daemon.logger.event("memory.toggle", { enabled: event.enabled }),
+			// SP-1 (kill `appliesOnRestart`): the toggle ALSO fires the debounced pipeline reload, so
+			// the master gate flips live (the ack reports `appliedLive: true`).
+			reload: pipelineReload,
 		});
 	} catch (err: unknown) {
 		const reason = err instanceof Error ? err.message : String(err);
@@ -3627,8 +3779,16 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// CLI), and every handler returns a clean 400/200 rather than a 500.
 	try {
 		mountOnboardingApi(daemon, {
-			org: scope.org,
-			workspace: scope.workspace ?? "",
+			// ISS-003 (stale tenancy): `org`/`workspace` are GETTERS over the daemon's LIVE `scope`
+			// (itself mtime-gated over `~/.deeplake/credentials.json`), so every bind/unbind reads the
+			// tenancy AT REQUEST TIME. The previous `org: scope.org` snapshot froze the BOOT strings —
+			// a workspace/org switch after boot kept landing binds under the OLD tenant until restart.
+			get org(): string {
+				return scope.org;
+			},
+			get workspace(): string {
+				return scope.workspace ?? "";
+			},
 			// PRD-062 FIX 1: persist a bound project into the Deeplake `projects` registry (best-effort).
 			storage,
 			// PRD-062 FIX 3: invalidate the shared projects view cache so a fresh bind shows immediately.
@@ -3925,7 +4085,17 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// later REAL call failure flips it to `unreachable` via `recordPortkeyUnreachable`. The
 			// resolved selection threads into BOTH worker builds so they route the SAME Portkey path.
 			// Fail-soft: any error leaves the conservative `off`.
-			let portkeyWorkerDeps: PortkeyWorkerDeps = { onUnreachable: recordPortkeyUnreachable };
+			// SP-1: `readSelection` + `onHealth` let the pipeline live-reload re-derive the Portkey
+			// selection + assembly health after a settings/secret write — the same fail-closed reader
+			// + status derive the boot path uses (a `"no_model"` read still yields NO routable target).
+			const portkeyReloadDeps = {
+				readSelection: (): Promise<PortkeySelection | "no_model" | undefined> =>
+					readPortkeySelection(vault, secretScopeFromQueryScope(scope)),
+				onHealth: (health: PortkeyHealth): void => {
+					portkeyHealth = health;
+				},
+			};
+			let portkeyWorkerDeps: PortkeyWorkerDeps = { onUnreachable: recordPortkeyUnreachable, ...portkeyReloadDeps };
 			try {
 				const portkeyRead = await readPortkeySelection(vault, secretScopeFromQueryScope(scope));
 				// ISS-005 (fail closed): the `"no_model"` sentinel means the gateway is ON but
@@ -3939,6 +4109,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 				portkeyWorkerDeps = {
 					...(portkeySelection !== undefined ? { selection: portkeySelection } : {}),
 					onUnreachable: recordPortkeyUnreachable,
+					...portkeyReloadDeps,
 				};
 				// ── PRD-063c (c-D-2 / c-AC-1 / c-AC-2 / c-AC-3): wire the late-bound Cohere rerank seam
 				// ONLY when the gateway is ON. It reuses 063b's foundation: the SAME `${SECRET_REF}`
@@ -4012,7 +4183,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// (zero-mutation passes), exactly as the pollinating worker does (constraint).
 			if (startPipelineWorker) {
 				try {
-					pipelineWorker = await buildPipelineWorker(
+					const pipelineBuild = await buildPipelineWorker(
 						options,
 						storage,
 						scope,
@@ -4038,6 +4209,11 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 						// deps so a transient commit failure defers instead of throwing-and-dropping.
 						memoryOutbox,
 					);
+					pipelineWorker = pipelineBuild.worker;
+					// SP-1: BIND the live-reload seam to this build's reload closure. From here on, a
+					// settings/secret/actions write actually rebuilds the inference client + gate inputs
+					// in-process; before this point (or when the pipeline build failed) a trigger no-ops.
+					pipelineReload.bind(pipelineBuild.reload);
 					// PRD-062b (AC-4): when consolidation is ON, DEFER starting the pipeline
 					// worker's own loop — the single lease coordinator (built at the pollinating
 					// block below, once we know whether pollinating is enabled) drives it. When

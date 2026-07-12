@@ -268,6 +268,35 @@ function providerCredentialResolves(config: InferenceConfig, deps: InferenceMode
 	return config.accounts.some((account) => present.has(apiKeyRefToSecretName(account.apiKeyRef)));
 }
 
+/**
+ * The secret NAMES whose presence makes the given selection "provider configured" — the
+ * LIVE-probe counterpart of the boot-time signal (SP-1 / ISS-001 live extraction gate).
+ * Mirrors {@link buildInferenceModelClientWithStatus}'s derivation exactly:
+ *
+ *   - Portkey ON  → `["PORTKEY_API_KEY"]` (the only credential the gateway path needs;
+ *     a missing key is `unconfigured` fail-closed, never a provider-key fallback);
+ *   - Portkey OFF → the routable per-provider config's account `${SECRET_REF}` names
+ *     (the same refs {@link providerCredentialResolves} checks);
+ *   - no routable config / a load error → `[]` (never configured — fail-closed).
+ *
+ * NAMES ONLY: the caller intersects these with `listSecretNames` (never a value read,
+ * never a decrypt). NEVER throws — a malformed config degrades to the empty list.
+ */
+export async function resolveCredentialSecretNames(
+	config: InferenceConfigSource,
+	portkey?: PortkeySelection,
+): Promise<readonly string[]> {
+	if (portkey !== undefined && portkey.enabled) return [PORTKEY_API_KEY_NAME];
+	let resolved: InferenceConfig | null;
+	try {
+		resolved = await resolveConfig(config);
+	} catch {
+		return [];
+	}
+	if (resolved === null || !isRoutable(resolved)) return [];
+	return resolved.accounts.map((account) => apiKeyRefToSecretName(account.apiKeyRef));
+}
+
 /** The per-provider path outcome: the built client PLUS the honest credential-resolution signal. */
 interface ProviderPathResult {
 	/** The built model client — a {@link RouterModelClient} for a routable config, else the no-op. */
