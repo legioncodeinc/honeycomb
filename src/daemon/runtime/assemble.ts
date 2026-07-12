@@ -3703,9 +3703,12 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			embed: daemon.services.embed,
 			defaultScope: scope,
 			...(vault instanceof VaultStore ? { store: vault } : {}),
-			// The `memory` toggle persists `memory.enabled` (vault-first at next boot) and emits this
-			// structured event so the deferred reconcile is observable in the boot log. No secret.
+			// The `memory` toggle persists `memory.enabled` (vault-first, still authoritative at next
+			// boot) and emits this structured event. No secret.
 			onMemoryToggle: (event) => daemon.logger.event("memory.toggle", { enabled: event.enabled }),
+			// SP-1 (kill `appliesOnRestart`): the toggle ALSO fires the debounced pipeline reload, so
+			// the master gate flips live (the ack reports `appliedLive: true`).
+			reload: pipelineReload,
 		});
 	} catch (err: unknown) {
 		const reason = err instanceof Error ? err.message : String(err);

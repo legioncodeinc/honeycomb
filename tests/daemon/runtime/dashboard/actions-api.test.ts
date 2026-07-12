@@ -175,7 +175,8 @@ describe("dashboard actions — memory (memory.enabled toggle)", () => {
 		});
 		const res = await app.request("/memory", { method: "POST", headers: okHeaders(), body: JSON.stringify({ enabled: true }) });
 		expect(res.status).toBe(200);
-		expect(await res.json()).toEqual({ ok: true, enabled: true, persisted: true, appliesOnRestart: true });
+		// SP-1: with NO reload seam wired, the ack is honest — not applied live, restart still needed.
+		expect(await res.json()).toEqual({ ok: true, enabled: true, persisted: true, appliedLive: false, appliesOnRestart: true });
 		// Persisted under the memory key + the structured event fired.
 		expect(calls).toHaveLength(1);
 		expect(calls[0]?.key).toBe(MEMORY_ENABLED_KEY);
@@ -205,8 +206,40 @@ describe("dashboard actions — memory (memory.enabled toggle)", () => {
 		const app = appWith("local", { embed: sup, defaultScope: { org: "o", workspace: "w" }, onMemoryToggle: (e) => events.push(e) });
 		const res = await app.request("/memory", { method: "POST", headers: okHeaders(), body: JSON.stringify({ enabled: false }) });
 		expect(res.status).toBe(200);
-		expect(await res.json()).toEqual({ ok: true, enabled: false, persisted: false, appliesOnRestart: true });
+		expect(await res.json()).toEqual({ ok: true, enabled: false, persisted: false, appliedLive: false, appliesOnRestart: true });
 		expect(events).toEqual([{ enabled: false }]);
+	});
+
+	it("SP-1: with the reload seam wired the toggle ACTUATES LIVE (appliedLive, no restart)", async () => {
+		const { sup } = fakeEmbed();
+		const { store, calls } = fakeStore();
+		const reloadReasons: string[] = [];
+		const app = appWith("local", {
+			embed: sup,
+			store,
+			defaultScope: { org: "o", workspace: "w" },
+			reload: { requestReload: (reason: string) => reloadReasons.push(reason) },
+		});
+		const res = await app.request("/memory", { method: "POST", headers: okHeaders(), body: JSON.stringify({ enabled: true }) });
+		expect(res.status).toBe(200);
+		// The ack flips: appliedLive true; appliesOnRestart KEPT as false for hive back-compat.
+		expect(await res.json()).toEqual({ ok: true, enabled: true, persisted: true, appliedLive: true, appliesOnRestart: false });
+		// Persist happened FIRST (the seam's debounced reload re-reads the just-written value)…
+		expect(calls).toHaveLength(1);
+		// …and the seam was triggered exactly once, post-persist.
+		expect(reloadReasons).toEqual(["action:memory"]);
+	});
+
+	it("SP-1: a rejected body never fires the seam", async () => {
+		const { sup } = fakeEmbed();
+		const reloadReasons: string[] = [];
+		const app = appWith("local", {
+			embed: sup,
+			reload: { requestReload: (reason: string) => reloadReasons.push(reason) },
+		});
+		const res = await app.request("/memory", { method: "POST", headers: okHeaders(), body: JSON.stringify({ nope: 1 }) });
+		expect(res.status).toBe(400);
+		expect(reloadReasons).toEqual([]);
 	});
 });
 
