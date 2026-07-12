@@ -61,6 +61,9 @@ import type {
 import { EMPTY_ROI_TREND, EMPTY_ROI_VIEW } from "../../../dashboard/contracts.js";
 import { scanInstalledAssets } from "./installed-assets.js";
 import { SYNCED_ASSETS_TABLE, TOMBSTONE_FALSE } from "../../storage/catalog/synced-assets.js";
+// ISS-010: the injected-token KPI reads the `memory_injections` telemetry table through the
+// same guarded-SQL + fail-soft `selectRows` seam as every other KPI aggregate.
+import { buildInjectionTokenSumSql } from "../../storage/catalog/memory-injections.js";
 import {
 	blendedCentsPerMtok,
 	type CapturedTurn,
@@ -244,18 +247,21 @@ const CHARS_PER_TOKEN = 4;
  * `synced_assets` table / storage error fails soft to `0`.
  */
 export async function fetchKpisView(storage: StorageQuery, scope: QueryScope, projectId?: string): Promise<KpisView> {
-	// Composed of two INDEPENDENTLY-CACHEABLE reads (the route caches them at different TTLs — counts churn,
-	// the savings SUM is heavy + slow-moving): the cheap-ish counts and the corpus-length SUM. Composed here
-	// (uncached) so a direct caller / unit test gets the whole view in one call.
-	const [counts, estimatedSavings] = await Promise.all([
+	// Composed of three INDEPENDENTLY-CACHEABLE reads (the route caches them at different TTLs — counts +
+	// the injected-token SUM churn, the savings SUM is heavy + slow-moving): the cheap-ish counts, the
+	// corpus-length SUM, and the ISS-010 injected-token SUM. Composed here (uncached) so a direct caller /
+	// unit test gets the whole view in one call.
+	const [counts, estimatedSavings, injectedTokens] = await Promise.all([
 		fetchKpiCounts(storage, scope, projectId),
 		fetchEstimatedSavings(storage, scope, projectId),
+		fetchInjectedTokens(storage, scope, projectId),
 	]);
-	return { ...counts, estimatedSavings };
+	return { ...counts, estimatedSavings, injectedTokens };
 }
 
-/** The KPI band MINUS the estimated-savings metric — the three counts the route caches on the short TTL. */
-export type KpiCounts = Omit<KpisView, "estimatedSavings">;
+/** The KPI band MINUS the two SUM metrics (estimated savings + injected tokens) — the three counts the
+ * route caches on the short TTL. */
+export type KpiCounts = Omit<KpisView, "estimatedSavings" | "injectedTokens">;
 
 /**
  * The three KPI COUNTS (PRD-035a/036c): Memories + Turns (`sessions`) + Team skills. The two
@@ -299,6 +305,23 @@ export async function fetchEstimatedSavings(
 	const savingsRows = await selectRows(storage, buildEstimatedSavingsSql(projectId), scope);
 	// 035b: chars → tokens via the documented divisor. SUM is NULL on an empty corpus → toNum → 0.
 	return Math.floor(toNum(savingsRows[0]?.chars) / CHARS_PER_TOKEN);
+}
+
+/**
+ * The ISS-010 injected-token KPI (tokens): Σ `memory_injections.tokens` — the MEASURED meter of tokens
+ * actually SERVED by recall responses + prime digests (see the honesty note at the `recordInjection`
+ * call sites: the hook dedupes across turns, so served >= injected). Scoped to the selected project
+ * when one is stamped. FAIL-SOFT: `0` on an empty/missing table or a storage error, never a throw.
+ * The SQL COALESCEs the SUM (NULL on zero rows on this backend) AND the read still rides the
+ * `toNum` guard — belt and braces, the same discipline as {@link fetchEstimatedSavings}.
+ */
+export async function fetchInjectedTokens(
+	storage: StorageQuery,
+	scope: QueryScope,
+	projectId?: string,
+): Promise<number> {
+	const rows = await selectRows(storage, buildInjectionTokenSumSql(projectId), scope);
+	return toNum(rows[0]?.tokens);
 }
 
 /**
@@ -1109,6 +1132,10 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 		// Each `mountDashboardApi` call gets its own instances (mirrors the installed-assets cache, D-1).
 		const countsCache = createTtlViewCache<KpiCounts>(DIAG_TTL_MS);
 		const savingsCache = createTtlViewCache<number>(SAVINGS_TTL_MS);
+		// ISS-010: the injected-token SUM rides the SHORT counts TTL (NOT the savings TTL) — it is a
+		// cheap single-aggregate over a small telemetry table AND it churns with every recall/prime,
+		// so a freshly-metered injection surfaces on the next load like the counts do.
+		const injectedCache = createTtlViewCache<number>(DIAG_TTL_MS);
 		// Served at `/kpis` under the diagnostics group (full `/api/diagnostics/kpis`) so the
 		// canonical `/api/kpis` resource path is left to the PRD-022 product-data data-access API.
 		kpis.get("/kpis", async (c) => {
@@ -1126,14 +1153,16 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 			}
 			const projectId = project.degraded ? undefined : project.projectId;
 			const key = scopeCacheKey(scope, projectId);
-			const [counts, estimatedSavings] = await Promise.all([
+			const [counts, estimatedSavings, injectedTokens] = await Promise.all([
 				countsCache(key, () => fetchKpiCounts(storage, scope, projectId)),
 				savingsCache(key, () => fetchEstimatedSavings(storage, scope, projectId)),
+				injectedCache(key, () => fetchInjectedTokens(storage, scope, projectId)),
 			]);
 			const droppedEvents = options.captureDroppedEvents?.() ?? 0;
 			return c.json({
 				...counts,
 				estimatedSavings,
+				injectedTokens,
 				...(options.captureDroppedEvents !== undefined ? { extra: { captureDroppedEvents: droppedEvents } } : {}),
 			});
 		});

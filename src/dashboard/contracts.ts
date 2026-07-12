@@ -54,8 +54,22 @@ export interface KpisView {
 	 * table is NOT renamed (a schema concern, out of scope — PRD-035a D-3).
 	 */
 	readonly turnCount: number;
-	/** Estimated token/cost savings (the org savings metric). */
+	/**
+	 * Estimated token savings — a CORPUS-MASS PROXY, not a measurement (PRD-035b). It is
+	 * `Σ LENGTH(content) / 4` over the stored memory corpus: the total distilled context AVAILABLE
+	 * to be reused, NOT tokens actually injected into any model context. Honest reading: "how much
+	 * distilled context the corpus could serve", an upper-bound potential. For the MEASURED meter of
+	 * tokens actually served by recall responses + prime digests, read {@link injectedTokens}.
+	 */
 	readonly estimatedSavings: number;
+	/**
+	 * MEASURED injected tokens (ISS-010): Σ `memory_injections.tokens` — tokens actually SERVED by
+	 * recall responses + prime digests, metered at the serving call sites. Still an upper bound on
+	 * tokens the harness ultimately injected (the hook dedupes hits across turns, so served >=
+	 * injected), but unlike {@link estimatedSavings} it counts real serving events, not corpus mass.
+	 * `0` until the first metered injection lands (or on a storage error — the read is fail-soft).
+	 */
+	readonly injectedTokens: number;
 	/**
 	 * Count of TEAM-SHARED skills (PRD-036c) — skills actually shared with the team via the
 	 * `synced_assets` substrate (current-version, non-tombstone skill rows), NOT the union total and
@@ -313,7 +327,7 @@ export interface FakeDashboardDataSourceOptions {
 
 /** An empty-but-valid {@link DashboardData} (the fake default + a Wave-2 loading placeholder). */
 export const EMPTY_DASHBOARD_DATA: DashboardData = Object.freeze({
-	kpis: { memoryCount: 0, sessionCount: 0, turnCount: 0, estimatedSavings: 0, teamSkillCount: 0 },
+	kpis: { memoryCount: 0, sessionCount: 0, turnCount: 0, estimatedSavings: 0, injectedTokens: 0, teamSkillCount: 0 },
 	sessions: { sessions: [] },
 	settings: { orgId: "", orgName: "", workspace: "", settings: {} },
 	graph: { built: false, nodes: [], edges: [] },
