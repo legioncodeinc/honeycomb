@@ -922,7 +922,7 @@ function deferOrThrow(
 		} catch (err: unknown) {
 			// a-AC-6: an enqueue fault must NEVER escape as an unhandled rejection — log secret-free and
 			// fall through to the pre-080 throw so the write is not silently lost-and-forgotten.
-			logger.event("controlled_write.defer_failed", { reason: err instanceof Error ? err.message : String(err) });
+			logger.event("controlled_write.defer_failed", { reason: err instanceof Error ? err.name : "unknown_error" });
 		}
 	}
 	throw new Error(`controlled-write ${detail}`);
@@ -943,7 +943,7 @@ function kickMemoryOutboxDrain(deps: ControlledWriteHandlerDeps, logger: Control
 		deps.memoryOutbox?.kick?.();
 	} catch (err: unknown) {
 		// A recovery-kick fault must NEVER surface to the committed write — log secret-free, never throw.
-		logger.event("controlled_write.kick_failed", { reason: err instanceof Error ? err.message : String(err) });
+		logger.event("controlled_write.kick_failed", { reason: err instanceof Error ? err.name : "unknown_error" });
 	}
 }
 
@@ -1363,7 +1363,7 @@ async function redriveOneFact(payload: Record<string, unknown>, deps: Controlled
 		// The a-AC-2 genuine-failure throw is a normal "could not recover this fact" — caught + counted
 		// skipped (secret-free), never propagated so one bad row never aborts the re-drive (b-AC-5).
 		(deps.logger ?? silentLogger).event("controlled_write.redrive_failed", {
-			reason: err instanceof Error ? err.message : String(err),
+			reason: err instanceof Error ? err.name : "unknown_error",
 		});
 		return { redriven: 0, skipped: 1 };
 	}

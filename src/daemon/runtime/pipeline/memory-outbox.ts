@@ -58,8 +58,10 @@
  * `counts()` feeds the `/health` `memoryOutbox { pending, retrying, deadLettered }` field, and the drainer
  * emits `memory.outbox.{enqueued,drained,retry,dead_lettered}` events carrying ONLY counts / durations /
  * attempt numbers / ageMs — NEVER memory content, a `content_hash`, query text, an org, or a workspace
- * string (PR #293's redaction lesson: a DeepLake error body can echo the hash, so the drainer surfaces no
- * error text at all).
+ * string (PR #293's redaction lesson: a DeepLake error body can echo the hash, so the drainer never surfaces
+ * the actual DeepLake commit error — a non-ok commit is a TYPED outcome, not a message). The fail-soft
+ * `*_failed` / `*_rejected` events carry only the ERROR CLASS NAME (`err.name`), never `err.message` /
+ * `String(err)`, so even an unexpected SQLite/JS fault cannot leak backend or payload text into an event.
  */
 
 import { mkdirSync } from "node:fs";
@@ -329,7 +331,7 @@ export function openMemoryOutbox(options: OpenMemoryOutboxOptions): MemoryOutbox
 		migrate(db);
 		return new SqliteMemoryOutbox(db, options);
 	} catch (err: unknown) {
-		options.logger?.event("memory.outbox.open_failed", { reason: err instanceof Error ? err.message : String(err) });
+		options.logger?.event("memory.outbox.open_failed", { reason: err instanceof Error ? err.name : "unknown_error" });
 		return NULL_MEMORY_OUTBOX;
 	}
 }
@@ -450,7 +452,7 @@ class SqliteMemoryOutbox implements MemoryOutbox {
 			// Fail-soft (a-AC-6): a SQLite/disk fault must NEVER break the stage. Log secret-free + report
 			// the write as dropped so the caller falls back to the pre-080 throw.
 			this.logger?.event("memory.outbox.enqueue_failed", {
-				reason: err instanceof Error ? err.message : String(err),
+				reason: err instanceof Error ? err.name : "unknown_error",
 			});
 			return { enqueued: 0, dropped: 1 };
 		}
@@ -493,7 +495,7 @@ class SqliteMemoryOutbox implements MemoryOutbox {
 		} catch (err: unknown) {
 			// A shed fault must never break the pipeline: leave the backlog as-is for a later enqueue to re-shed.
 			this.logger?.event("memory.outbox.shed_failed", {
-				reason: err instanceof Error ? err.message : String(err),
+				reason: err instanceof Error ? err.name : "unknown_error",
 			});
 		}
 	}
@@ -551,7 +553,7 @@ class SqliteMemoryOutbox implements MemoryOutbox {
 		} catch (err: unknown) {
 			// Fail-soft: a drain fault never surfaces. Rows stay queued for the next pass.
 			this.logger?.event("memory.outbox.drain_failed", {
-				reason: err instanceof Error ? err.message : String(err),
+				reason: err instanceof Error ? err.name : "unknown_error",
 			});
 		} finally {
 			this.draining = false;
@@ -633,7 +635,7 @@ class SqliteMemoryOutbox implements MemoryOutbox {
 			this.onCommitted(memoryId, action);
 		} catch (err: unknown) {
 			this.logger?.event("memory.outbox.record_failed", {
-				reason: err instanceof Error ? err.message : String(err),
+				reason: err instanceof Error ? err.name : "unknown_error",
 			});
 		}
 	}
@@ -710,7 +712,7 @@ class SqliteMemoryOutbox implements MemoryOutbox {
 	 */
 	private onDrainRejection(err: unknown): void {
 		this.logger?.event("memory.outbox.drain_rejected", {
-			reason: err instanceof Error ? err.message : String(err),
+			reason: err instanceof Error ? err.name : "unknown_error",
 		});
 	}
 
@@ -734,7 +736,7 @@ class SqliteMemoryOutbox implements MemoryOutbox {
 		} catch (err: unknown) {
 			// A terminal-UPDATE fault must never abort the pass: leave the row pending for a later attempt.
 			this.logger?.event("memory.outbox.drain_failed", {
-				reason: err instanceof Error ? err.message : String(err),
+				reason: err instanceof Error ? err.name : "unknown_error",
 			});
 			return false;
 		}

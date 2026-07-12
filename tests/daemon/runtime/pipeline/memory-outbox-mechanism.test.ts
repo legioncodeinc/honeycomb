@@ -74,7 +74,12 @@ function backend(): { storage: StorageQuery; setMode(m: "fail" | "ok"): void; ge
 			return ok([], 1);
 		},
 	};
-	return { storage, setMode: (m) => { st.mode = m; }, get inserts() { return st.inserts; } };
+	return {
+		storage,
+		setMode: (m) => { st.mode = m; },
+		get inserts() { return st.inserts; },
+		get committed(): readonly string[] { return st.committed; },
+	};
 }
 
 function deps(storage: StorageQuery, over: Partial<ControlledWriteHandlerDeps> = {}): ControlledWriteHandlerDeps {
@@ -115,11 +120,14 @@ describe("a-AC-8 (mechanism): degraded window → outbox → recovery drain → 
 		expect(drain.drained).toBe(1);
 		expect(outbox.counts().pending, "the backlog cleared on recovery").toBe(0);
 		expect(be.inserts, "the distilled memory is now committed exactly once").toBe(1);
+		// Assert the COMMITTED STATE, not only the INSERT count — the backend actually recorded the hash.
+		expect(be.committed, "exactly one memory hash is durably committed after recovery").toHaveLength(1);
 
 		// ── (3) Idempotency: replaying the SAME write is deduped (content_hash) — the INSERT count never climbs.
 		const replay = await applyControlledWrite(input, SCOPE, deps(be.storage, { memoryOutbox: outbox }));
 		expect(replay.action, "the already-landed memory is deduped, never re-inserted").toBe("deduped");
 		expect(be.inserts, "no duplicate memories row on replay").toBe(1);
+		expect(be.committed, "replay adds no new committed hash — the dedup HIT is a real recorded row").toHaveLength(1);
 		expect(outbox.counts().pending).toBe(0);
 		outbox.close();
 	});

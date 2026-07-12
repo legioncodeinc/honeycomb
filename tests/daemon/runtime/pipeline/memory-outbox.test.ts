@@ -724,7 +724,11 @@ function coalesceStorage(): {
 			if (isInsert(sql)) {
 				state.inserts += 1;
 				state.insertSql.push(sql);
-				return cfg.insert === "ok" ? ok([], 1) : timeoutResult(10_000);
+				if (cfg.insert !== "ok") return timeoutResult(10_000);
+				// Keep the stub's dedup state in sync: a LANDED insert makes its content_hash(es) present, so a
+				// later probe/replay of the same hash is correctly a dedup HIT (content_hash is a 64-hex SHA-256).
+				for (const [, h] of sql.matchAll(/'([0-9a-f]{64})'/g)) present.add(h);
+				return ok([], 1);
 			}
 			return ok([], 1);
 		},

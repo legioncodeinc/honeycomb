@@ -5,13 +5,13 @@
 > **Branch / worktree:** `feat/prd-080-controlled-write-outbox` @ `honeycomb-prd080` (uncommitted working tree)
 > **Source of truth:** `prd-080-durable-controlled-write-outbox-index.md` (AC tables 080a / 080b / 080c)
 > **Order:** runs AFTER `security-worker-bee` (CLEAN at High+, 2 Lows documented) — ordering correct.
-> **Verdict:** **SHIP** (with one non-blocking Warning; all 16 verifiable ACs PASS, a-AC-8 VERIFIED-by-mechanism).
+> **Verdict:** **SHIP** (all 16 verifiable ACs PASS, a-AC-8 VERIFIED-by-mechanism; the one Warning W-1 was FIXED in-branch before ship — see §4).
 
 ---
 
 ## 1. Summary
 
-PRD-080 is implemented faithfully to its spec across all three phases. Every acceptance criterion I could verify against code + tests (a-AC-1..7, b-AC-1..5, c-AC-1..4) PASSES, each backed by a non-tautological test that exercises the real production path (stubs sit only at the `StorageQuery`/DeepLake transport boundary; the classification, enqueue, SQLite persistence, drain-replay, dedup, coalescing, dead-letter, and re-drive logic are all real code). The two trickiest guarantees — the **safety invariant** (a genuine non-transient failure still throws at BOTH the dedup-probe and INSERT branches, never an unguarded duplicate) and **dedup-idempotency under replay + coalescing** — hold under direct inspection and test. The full `npm run ci` is green (4893 passed / 13 skipped, jscpd + typecheck + audit:sql OK, no flake this run). a-AC-8 (live dogfood) is graded **VERIFIED-by-mechanism** via a QA-authored fault-injection integration test through the real controlled-write path. One Warning: outbox-drained recoveries bypass the `MemoryFormationTracker`, so `committedSinceBoot` — the signal BUG-04's Verify criteria explicitly names — does not count drain-recovered memories (durability is unaffected; only that health counter understates recovery).
+PRD-080 is implemented faithfully to its spec across all three phases. Every acceptance criterion I could verify against code + tests (a-AC-1..7, b-AC-1..5, c-AC-1..4) PASSES, each backed by a non-tautological test that exercises the real production path (stubs sit only at the `StorageQuery`/DeepLake transport boundary; the classification, enqueue, SQLite persistence, drain-replay, dedup, coalescing, dead-letter, and re-drive logic are all real code). The two trickiest guarantees — the **safety invariant** (a genuine non-transient failure still throws at BOTH the dedup-probe and INSERT branches, never an unguarded duplicate) and **dedup-idempotency under replay + coalescing** — hold under direct inspection and test. The full `npm run ci` is green (4893 passed / 13 skipped, jscpd + typecheck + audit:sql OK, no flake this run). a-AC-8 (live dogfood) is graded **VERIFIED-by-mechanism** via a QA-authored fault-injection integration test through the real controlled-write path. One Warning was raised and then **fixed in-branch before ship** (W-1): outbox-drained recoveries formerly bypassed the `MemoryFormationTracker`, so `committedSinceBoot` — the signal BUG-04's Verify criteria explicitly names — did not count drain-recovered memories; the drainer now threads an `onCommitted` hook into `openMemoryOutbox` (wired to `memoryFormation.record` at `assemble.ts:3052`), so drain-recovered and deduped commits climb `committedSinceBoot` the same way live commits do. Durability was never at risk (drained rows were always real, present, and recallable); the fix closes the observability-signal gap.
 
 ---
 
@@ -22,7 +22,7 @@ PRD-080 is implemented faithfully to its spec across all three phases. Every acc
 | **Completeness** | PASS | All 13 code ACs (a1-7, b1-5, c1-4) implemented; a-AC-8 proven by mechanism. Re-drive command + route + CLI all present. |
 | **Correctness** | PASS | Safety invariant airtight at both branches; dedup idempotent per-row + coalesced; `isTransientResult` is the gate; deferred path runs no fan-out/conflict/count. |
 | **Alignment** | PASS | Matches D-1..D-7 decisions exactly (sibling table, `isTransientResult` gate, store-resolved-write, inherent idempotency, `deferred` acks, home-anchored, secret-free). |
-| **Gaps** | PASS (1 Warning) | `committedSinceBoot` not fed by the drainer (Warning W-1). No durability gap. |
+| **Gaps** | PASS | Warning W-1 (`committedSinceBoot` not fed by the drainer) **fixed in-branch** — drainer now threads `onCommitted` → `memoryFormation.record`. No durability gap. |
 | **Detrimental patterns** | PASS | Fail-soft everywhere; unref'd interval; single-flight drain; `.catch` floor on un-awaited drains; SQL through `sqlIdent`/`sLiteral`; secret-free events. |
 
 ---
@@ -35,12 +35,14 @@ PRD-080 is implemented faithfully to its spec across all three phases. Every acc
 
 ## 4. Warnings (should fix)
 
-### W-1 — Outbox-drained recoveries bypass `MemoryFormationTracker`; `committedSinceBoot` understates recovery
-- **Where:** `src/daemon/runtime/pipeline/memory-outbox.ts:589-603` (`drainOne`) + `:563-580` (`drainAddGroup`) commit via `commitControlledWrite` / `commitControlledWriteMany` directly; the tracker is wired ONLY on the live stage's `onOutcome` seam at `src/daemon/runtime/assemble.ts:2750` (`withMemoryFormationTracking(controlledWriteFanOut(queue), memoryFormation)`).
-- **What:** A memory that defers during a degraded window (`action: "deferred"`, not counted — correct) and is later committed by the drainer on recovery increments neither `committedSinceBoot` nor `lastCommittedAt` (`memory-formation.ts:65-73`, `COMMITTED_ACTIONS = {inserted, version_bumped, deduped}` at `:33`). The drainer holds no tracker reference (`openMemoryOutbox` options carry none).
-- **Why it matters:** PRD-080 Goals + a-AC-8 + the register's BUG-04 Verify criteria explicitly name "`memoryFormation.committedSinceBoot` climbs through outages" as the proof-of-fix signal. During a **drain-only** recovery (backlog draining with little/no new live traffic), `memoryCount` (the real `memories` table) climbs to complete — the P0 durability goal is met — but `committedSinceBoot` stays flat, so an operator watching that specific counter could wrongly conclude memories are still being lost.
-- **Severity rationale:** Warning, not Critical — durability is fully intact (drained rows are real, present, and recallable; verified by mechanism). This is an observability-signal gap against the metric BUG-04 uses to prove itself, not a lost memory.
-- **Recommended remediation (for the implementing Bee, not this audit):** thread the `MemoryFormationTracker` (or a lightweight `onCommitted(count)` callback) into `openMemoryOutbox` and call `record`/increment on each drained/deduped commit in `drainOne` + `drainAddGroup`, so drain-recovered memories climb `committedSinceBoot` the same way live commits do. Keep it fail-soft (a tracker fault must not abort a drain pass).
+### W-1 — Outbox-drained recoveries bypass `MemoryFormationTracker`; `committedSinceBoot` understates recovery — ✅ FIXED IN-BRANCH
+
+> **Resolution (fixed before ship):** the drainer now threads an `onCommitted(memoryId, action)` hook into `openMemoryOutbox` (`memory-outbox.ts:285`, invoked fail-soft from `recordCommitted` at `:626-636`, called from `drainOne` + `drainAddGroup`). At the composition root it is wired to `memoryFormation.record` (`src/daemon/runtime/assemble.ts:3052`), so a memory recovered by the drainer from a degraded window — and each deduped/version-bumped member of a coalesced group — climbs `committedSinceBoot` and `lastCommittedAt` exactly as a live commit does. Fail-soft is preserved (a tracker fault cannot abort a drain pass). The observability-signal gap below is closed. The remainder of this section is retained as the original finding of record.
+
+- **Where (original):** `src/daemon/runtime/pipeline/memory-outbox.ts` `drainOne` + `drainAddGroup` committed via `commitControlledWrite` / `commitControlledWriteMany` directly; the tracker was wired ONLY on the live stage's `onOutcome` seam at `src/daemon/runtime/assemble.ts:2750` (`withMemoryFormationTracking(controlledWriteFanOut(queue), memoryFormation)`).
+- **What (original):** A memory that defers during a degraded window (`action: "deferred"`, not counted — correct) and is later committed by the drainer on recovery incremented neither `committedSinceBoot` nor `lastCommittedAt` (`memory-formation.ts:65-73`, `COMMITTED_ACTIONS = {inserted, version_bumped, deduped}` at `:33`). The drainer held no tracker reference.
+- **Why it mattered:** PRD-080 Goals + a-AC-8 + the register's BUG-04 Verify criteria explicitly name "`memoryFormation.committedSinceBoot` climbs through outages" as the proof-of-fix signal. During a **drain-only** recovery (backlog draining with little/no new live traffic), `memoryCount` (the real `memories` table) climbed to complete — the P0 durability goal was always met — but `committedSinceBoot` stayed flat, so an operator watching that specific counter could wrongly conclude memories were still being lost.
+- **Severity rationale:** Warning, not Critical — durability was fully intact (drained rows are real, present, and recallable; verified by mechanism). This was an observability-signal gap against the metric BUG-04 uses to prove itself, not a lost memory — and it is now closed.
 
 ---
 
@@ -67,7 +69,7 @@ PRD-080 is implemented faithfully to its spec across all three phases. Every acc
 | a-AC-5 | `openOutboxDatabase`→`localQueueDaemonDir`/`localQueueDatabasePath` (:347); `assemble.ts` `resolveLocalQueueBaseDir()` = `honeycombStateDir()` | enqueue→close→reopen SAME home-anchored db→drain persisted row; asserts file at `.daemon/local-queue.db` | **PASS** |
 | a-AC-6 | `deferOrThrow` try/catch→fallback throw; `NULL_MEMORY_OUTBOX` (:330); `enqueue`/`drainDue` try/catch; `.catch(onDrainRejection)` floor | throwing outbox → pre-080 throw, no unhandled rejection; no-outbox → throws; untrusted baseDir → inert; throwing WRITE client → backoff | **PASS** |
 | a-AC-7 | `counts()` (:491); events `enqueued`/`retry`/`drained` count/durationMs/attempt only; `health.ts` `memoryOutbox` (:477) `nonNegativeInt` | events carry no content/hash/org/workspace (allow-list assertion); /health shape + omitted-when-unwired | **PASS** |
-| a-AC-8 | live dogfood — natural degraded window not inducible in CI | **QA mechanism test** (`memory-outbox-mechanism.test.ts`): real live path defers→drains→present→no-dup; corroborated by a-AC-1/a-AC-3/b-AC-4 | **VERIFIED-by-mechanism** (see §7; W-1 caveat on `committedSinceBoot`) |
+| a-AC-8 | live dogfood — natural degraded window not inducible in CI | **QA mechanism test** (`memory-outbox-mechanism.test.ts`): real live path defers→drains→present→no-dup; corroborated by a-AC-1/a-AC-3/b-AC-4 | **VERIFIED-by-mechanism** (see §7; W-1 `committedSinceBoot` gap fixed in-branch) |
 
 ### 080b — dead-letter + recovery drain + re-drive
 
@@ -98,7 +100,7 @@ PRD-080 is implemented faithfully to its spec across all three phases. Every acc
 2. **Recovery (fault OFF) + `drainDue`:** the deferred write re-commits — `pending → 0`, the memory is present in the backend, exactly ONE INSERT.
 3. **Idempotency:** replaying the same write is `deduped` (content_hash) — the INSERT count never climbs past 1 (no duplicate `memories` row).
 
-The natural-window live observation (real Activeloop degraded window with `pending>0` then `→0` and `committedSinceBoot` climbing) is a **non-blocking post-merge dogfood** — and note W-1: `committedSinceBoot` will climb from new live writes on recovery but NOT from the drained backlog until W-1 is addressed.
+The natural-window live observation (real Activeloop degraded window with `pending>0` then `→0` and `committedSinceBoot` climbing) is a **non-blocking post-merge dogfood**. With W-1 fixed in-branch, `committedSinceBoot` now climbs from BOTH new live writes and the drained backlog on recovery (the drainer feeds `memoryFormation.record` via `onCommitted`), so a drain-only recovery moves that counter exactly as a live-traffic recovery does.
 
 ---
 
@@ -135,4 +137,4 @@ The natural-window live observation (real Activeloop degraded window with `pendi
 
 ## 11. Overall verdict
 
-**SHIP.** The P0 durability goal (BUG-04b: no distilled memory lost to a transient degraded window) is met and proven — the safety invariant is intact, replay is idempotent per-row and coalesced, observability is secret-free, and CI is green. The single Warning (W-1, `committedSinceBoot` not fed by the drainer) is a health-signal gap, not a durability defect, and does not block merge — but should be fixed so BUG-04's own proof-of-fix metric reflects drain-recovered memories. Recommend addressing W-1 before flipping BUG-04 🟢, or explicitly deferring it with a note in the register.
+**SHIP.** The P0 durability goal (BUG-04b: no distilled memory lost to a transient degraded window) is met and proven — the safety invariant is intact, replay is idempotent per-row and coalesced, observability is secret-free, and CI is green. The single Warning (W-1, `committedSinceBoot` not fed by the drainer) was **fixed in-branch before ship**: the drainer now threads `onCommitted` → `memoryFormation.record` (`assemble.ts:3052`), so BUG-04's own proof-of-fix metric reflects drain-recovered memories. No open Warnings remain; BUG-04 🟢 is clear to flip.
