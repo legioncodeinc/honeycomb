@@ -503,17 +503,22 @@ export interface RoiPollinationSection {
 }
 
 /**
- * The NET-ROI section (e-AC-6). The net (`saved − (infra + pollination)`) is computed ONLY
- * when its inputs are present (status `ok`); a missing/unreachable input leaves the section
- * `unreachable`/`absent` with `computed: false` and `netCents: 0` — the net is NEVER
- * fabricated from incomplete inputs (the page shows a dash glyph + scoped retry). Because the
+ * The NET-ROI section (e-AC-6, PARTIAL-NET semantics — ISS-011). The net
+ * (`saved − (infra + pollination)`) is computed when the savings input is confident
+ * (`ok`/`partial`) AND each cost input is usable (`ok`/`partial`/`absent` — an `absent` cost
+ * contributes `0`). When ANY contributing input is less than fully `ok` the section is
+ * `status: "partial"` with `partial: true` and the degraded inputs named in
+ * {@link missingInputs}, so the page can render the net WITH its caveat instead of a dash.
+ * `computed: false` remains ONLY for a truly uncomputable net: savings itself
+ * absent/unreachable/unauthenticated, or a cost input unreachable/unauthenticated (a cost we
+ * KNOW we failed to read would understate the bill — the dishonest direction). Because the
  * net folds a MODELED savings term it inherits `est.` (`modeled: true`); `costBasis` reflects
  * whether the cost half is measured or carries an allocated share.
  */
 export interface RoiNetSection {
-	/** The per-section status (e-AC-2/6): `ok` only when every input was present. */
+	/** The per-section status (e-AC-2/6): `ok` when every input was fully `ok`; `partial` when computed from degraded inputs. */
 	readonly status: RoiSectionStatus;
-	/** True iff the net was actually computed from complete inputs; `false` ⇒ render a dash, not the number. */
+	/** True iff the net was actually computed; `false` ⇒ render a dash, not the number. */
 	readonly computed: boolean;
 	/** The net in INTEGER cents (`0` when `computed: false` — read the STATUS / `computed`, not this). */
 	readonly netCents: number;
@@ -521,6 +526,10 @@ export interface RoiNetSection {
 	readonly modeled: boolean;
 	/** The cost basis on the net (e-AC-15): `allocated` when a per-team/user infra share fed it. */
 	readonly costBasis: RoiCostBasisTag;
+	/** True iff the net was computed from DEGRADED inputs (ISS-011) — render the caveat, not a clean figure. */
+	readonly partial: boolean;
+	/** The inputs that were less than fully `ok` (`"savings"` / `"infra"` / `"pollination"`), for the caveat copy. */
+	readonly missingInputs: readonly string[];
 }
 
 /** One ROLLUP dimension the page's dimension switch offers (e-AC-13). */
@@ -649,7 +658,15 @@ export const EMPTY_ROI_VIEW: RoiView = Object.freeze({
 	},
 	infra: { status: "absent" as const, cents: 0, costBasis: "none" as const },
 	pollination: { status: "absent" as const, cents: 0, lines: [] },
-	net: { status: "absent" as const, computed: false, netCents: 0, modeled: true, costBasis: "none" as const },
+	net: {
+		status: "absent" as const,
+		computed: false,
+		netCents: 0,
+		modeled: true,
+		costBasis: "none" as const,
+		partial: false,
+		missingInputs: [],
+	},
 	rollups: [],
 	perUserAvailable: false,
 	scopedAcrossDevices: false,

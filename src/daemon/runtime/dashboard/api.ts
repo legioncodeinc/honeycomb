@@ -997,38 +997,57 @@ export function assembleRoiView(input: RoiAssemblyInputs): RoiView {
 		lines: pollinationLines,
 	};
 
-	// ── NET (e-AC-6) — computed ONLY from complete inputs, never fabricated ───────
-	// Required inputs: a real measured capture (savings ok/partial) AND a confident cost on BOTH the
-	// infra and pollination halves (ok/partial, not unreachable/unauthenticated/absent). A missing
-	// input leaves the net reflecting it (not `ok`) with `computed:false` and a dash on the page.
-	// PRD honesty contract: a confident net (status "ok", computed true) is emitted ONLY when ALL
-	// THREE inputs are FULLY confident ("ok") - savings AND infra AND pollination. A "partial" cost
-	// would understate the bill and overstate net ROI (the dishonest direction), so it does NOT
-	// qualify even though each section's own dash threshold tolerates partial.
-	const savingsPresent = savingsStatus === "ok";
-	const infraConfident = infraStatus === "ok";
-	const pollinationConfident = pollinationSection.status === "ok";
-	const netComputable = savingsPresent && infraConfident && pollinationConfident;
+	// ── NET (e-AC-6 / ISS-011) — PARTIAL-NET semantics ────────────────────────────
+	// The net is computed when the SAVINGS input is confident (`ok`/`partial`) AND each COST input is
+	// USABLE (`ok`/`partial`/`absent`): an `absent` cost contributes 0 (its `cents` is already 0), a
+	// `partial` cost contributes what was read. When any contributing input is less than fully `ok`
+	// the section is `status:"partial"` with `partial:true` + the degraded inputs named in
+	// `missingInputs` — the page renders the net WITH its caveat instead of a dash (ISS-011).
+	// `computed:false` remains ONLY for a truly uncomputable net: savings itself absent/unreachable/
+	// unauthenticated, or a cost input unreachable/unauthenticated (a cost we KNOW we failed to read
+	// would understate the bill and overstate net ROI — the dishonest direction).
+	const pollinationStatus = pollinationSection.status;
+	const savingsPresent = savingsStatus === "ok" || savingsStatus === "partial";
+	const infraUsable = infraStatus === "ok" || infraStatus === "partial" || infraStatus === "absent";
+	const pollinationUsable =
+		pollinationStatus === "ok" || pollinationStatus === "partial" || pollinationStatus === "absent";
+	const netComputable = savingsPresent && infraUsable && pollinationUsable;
+	// The inputs that were less than fully `ok` — the caveat copy the page renders on a partial net.
+	const missingInputs: string[] = [];
+	if (savingsStatus !== "ok") missingInputs.push("savings");
+	if (infraStatus !== "ok") missingInputs.push("infra");
+	if (pollinationStatus !== "ok") missingInputs.push("pollination");
 	let netSection: RoiView["net"];
 	if (netComputable) {
 		const netCents =
 			measured.value.savingsCents + modeled.value.estimatedCents - (infraCents + pollination.pollinationCents);
+		const partial = missingInputs.length > 0;
 		netSection = {
-			status: "ok",
+			status: partial ? "partial" : "ok",
 			computed: true,
 			netCents,
 			modeled: true, // the net folds a modeled term → ALWAYS `est.` (e-AC-3 net-hero inheritance).
 			costBasis: infraSection.costBasis,
+			partial,
+			missingInputs,
 		};
 	} else {
 		// Reflect WHY the net is unavailable: the worst contributing reason drives the section status,
 		// and `computed:false` ⇒ the page renders a dash + scoped retry, never a fabricated net.
 		const reason: RoiView["net"]["status"] = !savingsPresent
 			? savingsStatus
-			: !infraConfident
+			: !infraUsable
 				? infraStatus
-				: pollinationSection.status;
-		netSection = { status: reason, computed: false, netCents: 0, modeled: true, costBasis: "none" };
+				: pollinationStatus;
+		netSection = {
+			status: reason,
+			computed: false,
+			netCents: 0,
+			modeled: true,
+			costBasis: "none",
+			partial: false,
+			missingInputs,
+		};
 	}
 
 	// ── ROLLUPS (060f) ──────────────────────────────────────────────────────────
@@ -1051,26 +1070,116 @@ export function assembleRoiView(input: RoiAssemblyInputs): RoiView {
 	};
 }
 
+/** The trend window ranges the chart may request, mapped to day counts (default `30d`). */
+const TREND_RANGE_DAYS: Readonly<Record<string, number>> = Object.freeze({ "7d": 7, "30d": 30, "90d": 90 });
+/** The default trend window (days) when the `?range=` is absent/unknown. */
+const DEFAULT_TREND_DAYS = 30;
+
+/** Parse a `?range=` (`7d` | `30d` | `90d`) into its day count, defaulting an absent/unknown value to 30. */
+export function parseTrendRange(range: string): number {
+	return TREND_RANGE_DAYS[range] ?? DEFAULT_TREND_DAYS;
+}
+
+/** One UTC day in milliseconds (the trend bucketing step). */
+const DAY_MS = 86_400_000;
+
 /**
- * Fetch the ROI trend view (PRD-060e, e-AC-10) backing the inline-SVG chart. The trend has NO token
- * history before 060a capture started, so this is HONEST-EMPTY today: it returns `EMPTY_ROI_TREND`
- * (status `absent`) until a real history exists rather than fabricating a flat line. The `range`
- * (e.g. `30d`) is accepted for forward-compat (the window the chart will request); the assembly of a
- * real series defers to a coordinated 060a/060c history read (the trend-backfill open question).
- * FAIL-SOFT: never throws — the chart renders its honest empty state.
+ * Assemble the ROI trend view from the roi_metrics ledger rows (PRD-060e e-AC-10 / ISS-011) — the
+ * PURE transform, no IO, injectable `now` so a test drives it deterministically. The caller
+ * (`fetchRoiTrendView`) already resolved the ledger read (canonical-deduped + read_policy-scoped +
+ * project-scoped via `readRoiMetrics`), so this only buckets and zero-fills.
+ *
+ *   - `startedAt` is the MIN `created_at` across ALL rows (pre-cutoff) — "savings tracked from <date>".
+ *   - The window is the last `days` UTC calendar days ending today, oldest → newest; EVERY day is
+ *     ZERO-FILLED so the polyline never interpolates across a silent gap.
+ *   - Day bucketing is `String(created_at).slice(0, 10)` IN TS — NEVER SQL `GROUP BY` (DeepLake
+ *     returns NULL for SUM under GROUP BY on this backend); a row outside the window is dropped.
+ *   - Exactly two series, labeled `measured-savings` (solid, Σ measured_cache_savings_cents/day) and
+ *     `modeled-savings` (dashed est., Σ modeled_savings_cents/day). The labels are LOAD-BEARING:
+ *     the page's `seriesColor` heuristics key off them (no `net`/`infra`/`cost` substring), so the
+ *     measured line takes the proven-green tone and the modeled line the amber `est.` tone.
+ *
+ * Money stays INTEGER cents at every point (`Math.round` after the `toNum` guard).
+ */
+export function assembleRoiTrend(rows: readonly StorageRow[], days: number, now: Date): RoiTrendView {
+	const windowDays = Math.max(1, Math.trunc(days));
+
+	// startedAt: the earliest ledger stamp across ALL rows, INCLUDING rows older than the window.
+	let startedAt = "";
+	for (const row of rows) {
+		const at = toStr(row.created_at);
+		if (at !== "" && (startedAt === "" || at < startedAt)) startedAt = at;
+	}
+
+	// Zero-filled day buckets: the last `windowDays` UTC calendar days, oldest → newest.
+	const labels: string[] = [];
+	for (let i = windowDays - 1; i >= 0; i--) {
+		labels.push(new Date(now.getTime() - i * DAY_MS).toISOString().slice(0, 10));
+	}
+	const measuredByDay = new Map<string, number>(labels.map((label) => [label, 0]));
+	const modeledByDay = new Map<string, number>(labels.map((label) => [label, 0]));
+
+	// Bucket in TS (`created_at.slice(0,10)`) — a row whose day is outside the window is dropped.
+	for (const row of rows) {
+		const day = toStr(row.created_at).slice(0, 10);
+		const measuredSoFar = measuredByDay.get(day);
+		if (measuredSoFar === undefined) continue; // outside the zero-filled window.
+		measuredByDay.set(day, measuredSoFar + Math.round(toNum(row.measured_cache_savings_cents)));
+		modeledByDay.set(day, (modeledByDay.get(day) ?? 0) + Math.round(toNum(row.modeled_savings_cents)));
+	}
+
+	return {
+		status: "ok",
+		series: [
+			{
+				label: "measured-savings",
+				modeled: false,
+				points: labels.map((period) => ({ period, cents: measuredByDay.get(period) ?? 0 })),
+			},
+			{
+				label: "modeled-savings",
+				modeled: true,
+				points: labels.map((period) => ({ period, cents: modeledByDay.get(period) ?? 0 })),
+			},
+		],
+		startedAt,
+	};
+}
+
+/**
+ * Fetch the ROI trend view (PRD-060e, e-AC-10 / ISS-011) backing the inline-SVG chart — the REAL
+ * series over the `roi_metrics` ledger (the 060a per-turn savings capture). The read resolves the
+ * agent/read-policy/project scope EXACTLY as {@link fetchRoiView} does, reads through
+ * `readRoiMetrics` (canonical-deduped per session, superseded re-price rows excluded), then hands
+ * off to the pure {@link assembleRoiTrend}. HONEST-EMPTY: a missing ledger, a failed read, or zero
+ * rows returns `EMPTY_ROI_TREND` (status `absent`) — never a fabricated flat line. FAIL-SOFT:
+ * never throws — the chart renders its honest empty state.
  */
 export async function fetchRoiTrendView(
 	storage: StorageQuery,
 	scope: QueryScope,
-	_range: string,
-	_options: FetchRoiOptions = {},
+	range: string,
+	options: FetchRoiOptions = {},
 ): Promise<RoiTrendView> {
-	// No token history exists before capture-start (the trend-backfill open question); render the
-	// honest empty trend rather than a fabricated series. The signature is stable so the real history
-	// read folds in here without a route/wire change.
-	void storage;
-	void scope;
-	return EMPTY_ROI_TREND;
+	const days = parseTrendRange(range);
+	// Scope resolution mirrors fetchRoiView (finding isolated-agentid): never default the agent id to
+	// the org — `readRoiMetrics` fails closed to empty on an `isolated` read with no agent to pin to.
+	const agentId = options.agentId !== undefined && options.agentId.trim() !== "" ? options.agentId.trim() : "";
+	const readPolicy = options.readPolicy ?? DEFAULT_ROI_READ_POLICY;
+	const projectId =
+		options.projectId !== undefined && options.projectId.trim() !== "" ? options.projectId.trim() : undefined;
+	try {
+		const ledger = await readRoiMetrics(storage, scope, {
+			agentId,
+			readPolicy,
+			...(projectId !== undefined ? { projectId } : {}),
+		});
+		if (ledger.status !== "ok" || ledger.rows.length === 0) return EMPTY_ROI_TREND;
+		return assembleRoiTrend(ledger.rows, days, new Date());
+	} catch {
+		// Any unexpected throw degrades to the honest-empty trend — the daemon never 500s the chart.
+		return EMPTY_ROI_TREND;
+	}
 }
 
 /** The 400 body a dashboard handler returns when the request carries no resolvable org (fail-closed). */
