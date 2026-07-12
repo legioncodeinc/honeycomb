@@ -88,8 +88,10 @@ describe("ISS-010 memory_injections SQL builders (guarded, DeepLake-quirk-safe)"
 		);
 		// Blank project → no clause (workspace-wide), same posture as the KPI counts.
 		expect(buildInjectionTokenSumSql("")).not.toContain("WHERE");
-		// The value routes through the guard: a quote-bearing id cannot break out of the literal.
-		expect(buildInjectionTokenSumSql("p'--")).toContain("'p''--'");
+		// Defense-in-depth: a quote-bearing id fails the shape allowlist BEFORE interpolation.
+		expect(() => buildInjectionTokenSumSql("p'--")).toThrow(/shape allowlist/);
+		// The inbox sentinel is slug-shaped and passes.
+		expect(buildInjectionTokenSumSql("__unsorted__")).toContain("'__unsorted__'");
 	});
 
 	it("buildInjectionRangeSql ranges lexicographically on the ISO cutoff, guards values, and has NO GROUP BY", () => {
@@ -99,7 +101,9 @@ describe("ISS-010 memory_injections SQL builders (guarded, DeepLake-quirk-safe)"
 		expect(sql).toContain("AND project_id = 'proj-2'");
 		expect(sql).toContain("ORDER BY at ASC");
 		expect(sql).not.toMatch(/GROUP BY/i); // day bucketing is a TS concern (`at.slice(0,10)`).
-		// A quote-bearing cutoff cannot break out of the literal.
-		expect(buildInjectionRangeSql("x'--")).toContain("'x''--'");
+		// Defense-in-depth: a non-toISOString cutoff is rejected BEFORE interpolation.
+		expect(() => buildInjectionRangeSql("x'--")).toThrow(/toISOString/);
+		// And a quote-bearing project id fails the shape allowlist on the range path too.
+		expect(() => buildInjectionRangeSql("2026-07-01T00:00:00.000Z", "p'--")).toThrow(/shape allowlist/);
 	});
 });

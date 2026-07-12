@@ -61,11 +61,23 @@ export const MEMORY_INJECTIONS_TABLES: readonly CatalogTable[] = defineGroup([
 	},
 ]);
 
+/**
+ * Shape allowlist for a registry project id reaching a reader clause: the resolver only ever
+ * produces slug-shaped ids (`the-apiary`, `__unsorted__`); anything else is a programmer error
+ * upstream. Rejecting BEFORE interpolation is defense-in-depth on top of `sLiteral` escaping —
+ * a shape-constrained input cannot carry SQL metacharacters even if escaping regressed.
+ */
+const PROJECT_ID_SHAPE = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
+/** Shape allowlist for the range cutoff: a `Date.toISOString()` UTC stamp, nothing else. */
+const ISO_UTC_SHAPE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
 /** The optional ` WHERE project_id = '<id>'` conjunct (blank/absent → workspace-wide). */
 function projectWhereClause(projectId?: string): string {
-	return projectId !== undefined && projectId !== ""
-		? ` WHERE ${sqlIdent("project_id")} = ${sLiteral(projectId)}`
-		: "";
+	if (projectId === undefined || projectId === "") return "";
+	if (!PROJECT_ID_SHAPE.test(projectId)) {
+		throw new Error(`memory_injections reader: project id fails the shape allowlist`);
+	}
+	return ` WHERE ${sqlIdent("project_id")} = ${sLiteral(projectId)}`;
 }
 
 /** COALESCE guards NULL-on-empty; caller still reads via a toNum-style guard. NO GROUP BY. */
@@ -78,11 +90,12 @@ export function buildInjectionTokenSumSql(projectId?: string): string {
 
 /** Ranged read; day bucketing (`at.slice(0,10)`) in TS. ISO cutoff compares lexicographically. */
 export function buildInjectionRangeSql(sinceIso: string, projectId?: string): string {
+	if (!ISO_UTC_SHAPE.test(sinceIso)) {
+		throw new Error(`memory_injections reader: range cutoff is not a toISOString() stamp`);
+	}
 	const tbl = sqlIdent(MEMORY_INJECTIONS_TABLE);
 	const atCol = sqlIdent("at");
-	const projectClause = projectId !== undefined && projectId !== ""
-		? ` AND ${sqlIdent("project_id")} = ${sLiteral(projectId)}`
-		: "";
+	const projectClause = projectWhereClause(projectId).replace(" WHERE ", " AND ");
 	return (
 		`SELECT ${atCol} AS at, ${sqlIdent("source")} AS source, ${sqlIdent("hits")} AS hits, ` +
 		`${sqlIdent("tokens")} AS tokens FROM "${tbl}" ` +
