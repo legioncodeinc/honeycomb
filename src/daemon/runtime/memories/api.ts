@@ -61,6 +61,7 @@ import {
 } from "../scope.js";
 import { getRequestIdentity } from "../middleware/permission.js";
 import {
+	estimateTokenCount,
 	recallFast,
 	recallMemories,
 	type MemoryRecallResult,
@@ -68,6 +69,9 @@ import {
 	type RecallShedEvent,
 	type RecallTimingEvent,
 } from "./recall.js";
+// ISS-010: the injected-token meter. Fire-and-forget after the recall result is assembled —
+// `recordInjection` is fail-soft by contract (never throws), so the response is byte-identical.
+import { recordInjection } from "../telemetry/injection-log.js";
 import { RecencyConfigSchema, type RecencyConfig } from "../recall/config.js";
 import { isValidRecallMode, type RecallMode } from "../vault/api.js";
 import type { VaultStore } from "../vault/store.js";
@@ -97,6 +101,12 @@ import {
 	PrimeResponseSchema,
 	type PrimeDigestBudget,
 } from "./prime.js";
+// The lifecycle READ routes (conflicts / stale-refs / history) are registered inside
+// mountMemoriesApi (BEFORE /:id) for the same route-shadow reason as /prime (ISS-012):
+// Hono matches in registration order, and mountLifecycleApi historically ran AFTER this
+// mount, so the parametric /:id captured the literal segments and 404'd all three.
+// mountLifecycleApi remains as a standalone back-compat shim (see lifecycle-api.ts).
+import { registerLifecycleReadRoutes } from "./lifecycle-api.js";
 
 /** The route group the memories API attaches to (already mounted in `server.ts`). */
 export const MEMORIES_GROUP = "/api/memories" as const;
@@ -836,6 +846,25 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 		// PRD-049b (D8): when no cwd was resolvable, project scoping degraded to inbox+global;
 		// emit a structured warning so the degrade is visible (silent-when-surprising guard).
 		logProjectScopeDegraded(options.logger, project);
+		/**
+		 * ISS-010 injected-token metering — HONESTY NOTE: this meters tokens SERVED by the recall
+		 * response, not tokens the harness ultimately injected into the model context. The hook
+		 * dedupes hits across turns before injecting, so served >= injected; the KPI is an upper
+		 * bound on real injection volume. Fire-and-forget (`void`): `recordInjection` is fail-soft
+		 * by contract (never throws, skips zero-hit/zero-token events), so the response body below
+		 * is byte-identical whether or not the telemetry append lands.
+		 */
+		void recordInjection(
+			{
+				source: parsed.data.fast === true ? "recall_fast" : "recall",
+				hits: result.hits.length,
+				tokens: result.hits.reduce((sum, hit) => sum + estimateTokenCount(hit.text), 0),
+				sessionId: c.req.header("x-honeycomb-session") ?? "",
+				projectId: project.bound ? project.projectId : "",
+			},
+			{ storage },
+			scope,
+		);
 		return c.json(recallResponse(result, project));
 	});
 
@@ -969,6 +998,13 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 		// Validate the response shape at the boundary (the 046d hook's contract) before send.
 		return c.json(PrimeResponseSchema.parse(response));
 	});
+
+	// ── PRD-058d / ISS-012: the lifecycle literal GETs (conflicts / stale-refs / history). ──
+	// REGISTERED BEFORE /:id so the parametric route does not shadow these literal segments
+	// (the same ordering rule as /resolve, /calibration, and /prime above). Pre-fix, these
+	// were registered only by mountLifecycleApi AFTER this mount, so Hono matched /:id first
+	// → getMemory("conflicts") → 404 on all three lifecycle reads.
+	registerLifecycleReadRoutes(group, storage, resolveScope);
 
 	// ── FR-4: GET /api/memories/:id → get one memory by id. ─────────────────────
 	group.get("/:id", async (c) => {

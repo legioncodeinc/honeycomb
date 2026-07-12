@@ -24,12 +24,25 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { RECALL_HOOK_ARG } from "../../../src/hooks/claude-code/shim.js";
-import { EMPTY_RECALL_SNAPSHOT, type RecallHit } from "../../../src/hooks/shared/contracts.js";
+import {
+	createFakeCredentialReader,
+	createFakeDaemonHookClient,
+	createFakeContextRenderer,
+	createFakeRecallRenderer,
+	createFakeRecallSessionStore,
+	EMPTY_RECALL_SNAPSHOT,
+	type HookCoreDeps,
+	type HookInput,
+	type RecallHit,
+} from "../../../src/hooks/shared/contracts.js";
 import {
 	createFileRecallSessionStore,
 	NUDGE_INTERVAL_TURNS,
 	RECALL_BLOCK_HEADER,
+	RECALL_REMINDER,
+	renderInjectionNotice,
 	renderRecallBlock,
+	runUserPromptRecall,
 	shouldFireNudge,
 } from "../../../src/hooks/shared/user-prompt-recall.js";
 import { assertClaudeCodeHooksConform } from "../../../references/claude-code/hooks-schema.js";
@@ -135,6 +148,105 @@ describe("PRD-076a createFileRecallSessionStore: cross-process state (a-AC-6)", 
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ISS-022 — the user-visible `systemMessage` injection notice on the recall core.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The shared fake seam bundle for driving `runUserPromptRecall` directly. */
+function fakeDeps(): HookCoreDeps {
+	return {
+		daemon: createFakeDaemonHookClient(),
+		credentials: createFakeCredentialReader({ token: "t", org: "acme" }),
+		context: createFakeContextRenderer(),
+	};
+}
+
+/** A `user_prompt_recall` HookInput carrying the given prompt text. */
+function recallInput(text: string): HookInput {
+	return {
+		event: "user_prompt_recall",
+		meta: { sessionId: "sess-iss022", path: "conversations/sess-iss022", cwd: "/repo/honeycomb" },
+		data: { kind: "user_message", text },
+		runtimePath: "plugin",
+	};
+}
+
+describe("ISS-022 runUserPromptRecall: systemMessage fires ONLY when a NEW block is injected", () => {
+	it("a new-hit turn carries the notice with the correct N (non-empty hits) and ~X (chars/4)", async () => {
+		const result = await runUserPromptRecall(
+			recallInput("what changed in auth?"),
+			fakeDeps(),
+			createFakeRecallRenderer(HITS),
+			createFakeRecallSessionStore(),
+		);
+		const block = renderRecallBlock(HITS);
+		expect(result.additionalContext).toBe(block);
+		expect(result.systemMessage).toBe(`🐝 Honeycomb: 2 memories injected (~${Math.ceil(block.length / 4)} tokens)`);
+	});
+
+	it("N counts only NON-EMPTY new hits (a whitespace-only hit does not inflate the count)", async () => {
+		const mixed: readonly RecallHit[] = [...HITS, { ref: "memories:blank", text: "   " }];
+		const result = await runUserPromptRecall(
+			recallInput("auth?"),
+			fakeDeps(),
+			createFakeRecallRenderer(mixed),
+			createFakeRecallSessionStore(),
+		);
+		// The blank hit renders no bullet, so it is not counted in N either.
+		const block = renderRecallBlock(mixed);
+		expect(result.systemMessage).toBe(`🐝 Honeycomb: 2 memories injected (~${Math.ceil(block.length / 4)} tokens)`);
+	});
+
+	it("a deduped-only turn (same hits again) carries NO systemMessage and NO block", async () => {
+		const store = createFakeRecallSessionStore();
+		const deps = fakeDeps();
+		const recall = createFakeRecallRenderer(HITS);
+		const turn1 = await runUserPromptRecall(recallInput("auth?"), deps, recall, store);
+		expect(turn1.systemMessage, "turn 1 injects and notifies").toBeDefined();
+		const turn2 = await runUserPromptRecall(recallInput("auth again?"), deps, recall, store);
+		expect(turn2.additionalContext, "turn 2 injects nothing new").toBeUndefined();
+		expect(turn2.systemMessage, "no notice on a deduped-only turn").toBeUndefined();
+	});
+
+	it("an empty-recall NUDGE turn carries the reminder but NO systemMessage", async () => {
+		const result = await runUserPromptRecall(
+			recallInput("hello?"),
+			fakeDeps(),
+			createFakeRecallRenderer([]),
+			createFakeRecallSessionStore(),
+		);
+		expect(result.additionalContext, "the nudge fires on the first empty turn").toBe(RECALL_REMINDER);
+		expect(result.systemMessage, "the nudge is model-facing only — no user notice").toBeUndefined();
+	});
+
+	it("an empty-recall throttled-off turn carries neither block nor systemMessage", async () => {
+		const store = createFakeRecallSessionStore();
+		const deps = fakeDeps();
+		const recall = createFakeRecallRenderer([]);
+		await runUserPromptRecall(recallInput("hi"), deps, recall, store); // turn 1 nudges.
+		const turn2 = await runUserPromptRecall(recallInput("hi again"), deps, recall, store);
+		expect(turn2.additionalContext).toBeUndefined();
+		expect(turn2.systemMessage).toBeUndefined();
+	});
+});
+
+describe("ISS-022 renderInjectionNotice: the local heuristic (no daemon import across NON_DAEMON_ROOT)", () => {
+	it("formats N from the non-empty hits and ~X = ceil(block.length / 4)", () => {
+		const block = renderRecallBlock(HITS);
+		expect(renderInjectionNotice(HITS, block)).toBe(
+			`🐝 Honeycomb: 2 memories injected (~${Math.ceil(block.length / 4)} tokens)`,
+		);
+	});
+
+	it("singular: one hit reads 'memory', never '1 memories'", () => {
+		const one = HITS.slice(0, 1);
+		const block = renderRecallBlock(one);
+		expect(renderInjectionNotice(one, block)).toBe(
+			`🐝 Honeycomb: 1 memory injected (~${Math.ceil(block.length / 4)} tokens)`,
+		);
 	});
 });
 

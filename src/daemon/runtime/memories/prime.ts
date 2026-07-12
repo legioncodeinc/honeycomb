@@ -47,6 +47,9 @@ import {
 	assemblePrimeDigest,
 	type PrimeDigestBudget,
 } from "../summaries/prime-digest.js";
+// ISS-010: the injected-token meter. Fire-and-forget after the digest is assembled —
+// `recordInjection` is fail-soft by contract (never throws), so the prime response is unchanged.
+import { recordInjection } from "../telemetry/injection-log.js";
 import { MEMORIES_GROUP } from "./api.js";
 
 // Re-exported so `mountMemoriesApi` (api.ts) can register /prime before /:id using the SAME
@@ -124,6 +127,27 @@ export async function buildPrimeForScope(
 	const skimLimit = resolveKeySkimLimit(limit ?? DEFAULT_KEY_SKIM_LIMIT);
 	const keys = await skimPrimeKeys({ storage, scope }, skimLimit);
 	const digest = assemblePrimeDigest(keys, budget ?? {});
+	/**
+	 * ISS-010 injected-token metering — HONESTY NOTE: this meters tokens SERVED in the prime
+	 * digest, not tokens the harness ultimately injected into the model context. The hook
+	 * dedupes across turns before injecting, so served >= injected; the KPI is an upper bound.
+	 * Recorded ONLY for a non-empty digest with a positive token estimate; fire-and-forget
+	 * (`void`) because `recordInjection` is fail-soft by contract (never throws), so the
+	 * response contract below is byte-identical whether or not the telemetry append lands.
+	 */
+	if (!digest.empty && digest.tokens > 0) {
+		void recordInjection(
+			{
+				source: "prime",
+				hits: digest.recent.length + digest.durable.length,
+				tokens: digest.tokens,
+				sessionId: "",
+				projectId: "",
+			},
+			{ storage },
+			scope,
+		);
+	}
 	return {
 		digest: digest.text,
 		recent: digest.recent.map((e) => ({ key: e.key, ref: e.ref })),

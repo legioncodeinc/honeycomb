@@ -32,6 +32,7 @@ import {
 	type PollinateTriggerSeam,
 	mountPollinateApi,
 } from "../../../../src/daemon/runtime/pollinating/api.js";
+import { PollinatingConfigError } from "../../../../src/daemon/runtime/pollinating/config.js";
 import type { PollinatingScope, PollinatingTickResult } from "../../../../src/daemon/runtime/pollinating/trigger.js";
 import type { QueryScope } from "../../../../src/daemon/storage/client.js";
 
@@ -118,12 +119,26 @@ describe("AC-6 the Pollinate-now trigger kicks the real pollinating loop seam (n
 		expect(ack).toEqual({ triggered: true, status: "running", reason: "pending" });
 	});
 
-	it("AC-6 below-threshold (nothing to consolidate yet) also surfaces as {status:'running'} (the loop is healthy)", async () => {
+	it("ISS-013 below-threshold surfaces its OWN status (never 'running' — nothing is in flight) + the token count", async () => {
 		const { trigger } = recordingTrigger({ decision: "below_threshold", reason: "below-threshold", tokens: 10 });
 		const daemon = daemonWithTrigger(trigger);
 
+		const { status, ack } = await postPollinate(daemon);
+		expect(status).toBe(202);
+		// An injected fake trigger has no known config, so the ack omits `threshold`.
+		expect(ack).toEqual({ triggered: true, status: "below-threshold", reason: "below-threshold", tokens: 10 });
+		// The pre-fix lie — the hive UI rendered "already running" when nothing was running.
+		expect(ack.status).not.toBe("running");
+	});
+
+	it("ISS-013 the ack shape stays ADDITIVE: a genuinely-running pass still acks {status:'running'} without the new fields", async () => {
+		const { trigger } = recordingTrigger({ decision: "skipped", reason: "pending", tokens: 42 });
+		const daemon = daemonWithTrigger(trigger);
+
 		const { ack } = await postPollinate(daemon);
-		expect(ack).toEqual({ triggered: true, status: "running", reason: "below-threshold" });
+		expect(ack).toEqual({ triggered: true, status: "running", reason: "pending" });
+		expect(ack).not.toHaveProperty("tokens");
+		expect(ack).not.toHaveProperty("threshold");
 	});
 });
 
@@ -226,12 +241,17 @@ describe("PRD-026 AC-1 — the ENABLEMENT config gate drives the ack (real trigg
 		expect(ack).toEqual({ triggered: false, status: "skipped", reason: "disabled" });
 	});
 
-	it("AC-1 enabled:true (below threshold) → {triggered:true,status:'running'} — the loop is on but nothing new is queued", async () => {
+	it("AC-1 / ISS-013 enabled:true (below threshold) → {status:'below-threshold'} with tokens + the REAL config threshold", async () => {
 		const daemon = withPollinatingEnv("true", () => daemonWithRealTrigger());
 		const { status, ack } = await postPollinate(daemon);
 		expect(status).toBe(202);
 		expect(ack.triggered).toBe(true);
-		expect(ack.status).toBe("running");
+		// ISS-013: an empty counter is below the bar — the ack says so, it does NOT claim "running".
+		expect(ack.status).toBe("below-threshold");
+		expect(ack.tokens).toBe(0);
+		// The REAL trigger path resolves the config at mount, so the ack reports its threshold.
+		expect(typeof ack.threshold).toBe("number");
+		expect(ack.threshold).toBeGreaterThan(0);
 		// The master switch is ON, so the ack is NOT the disabled `skipped` shape.
 		expect(ack.status).not.toBe("skipped");
 	});
@@ -241,7 +261,12 @@ describe("PRD-026 AC-1 — the ENABLEMENT config gate drives the ack (real trigg
 			const daemon = withPollinatingEnv(value, () => daemonWithRealTrigger());
 			const res = await daemon.app.request("/api/diagnostics/pollinate", { method: "POST" });
 			const raw = await res.text();
-			expect(raw).not.toMatch(/token|secret|bearer|authorization|x-honeycomb/i);
+			// No secret material — ISS-013 added the NUMERIC `tokens`/`threshold` counters (documented
+			// non-secret), so the guard excludes the bare field name `"tokens":<number>` while still
+			// rejecting any token-VALUE-shaped field (e.g. "token":"...", access_token, x-honeycomb-*).
+			expect(raw).not.toMatch(/secret|bearer|authorization|x-honeycomb/i);
+			expect(raw).not.toMatch(/"(?:access_|refresh_|api_)?token"\s*:/i);
+			expect(raw.replace(/"tokens":\d+/g, "").replace(/"threshold":\d+/g, "")).not.toMatch(/token/i);
 			// Only the decision + a short machine reason — never the internal job id.
 			expect(raw).not.toMatch(/job-real/);
 		}
@@ -266,5 +291,40 @@ describe("AC-6 mounting is fail-safe", () => {
 		const daemon = daemonWithTrigger(trigger);
 		const res = await daemon.app.request("/api/diagnostics/pollinate", { method: "GET" });
 		expect(res.status).not.toBe(202);
+	});
+
+	it("a PollinatingConfigError at mount degrades the route to `unavailable` instead of aborting assembly", async () => {
+		// mountPollinateApi runs unguarded from assemble(): a malformed pollinating config must
+		// cost the pollinate route, never the daemon boot (CodeRabbit #297 Major).
+		const daemon = createDaemon({ config: cfg(), storage: fakeStorage, logger: createRequestLogger({ silent: true }) });
+		const enqueuer = { async enqueue() { return "job-real"; } };
+		expect(() =>
+			mountPollinateApi(daemon, {
+				storage: fakeStorage,
+				defaultScope: DEFAULT_SCOPE,
+				enqueuer,
+				resolveConfig: () => {
+					throw new PollinatingConfigError(["tokenThreshold: structurally impossible"]);
+				},
+			}),
+		).not.toThrow();
+		const { status, ack } = await postPollinate(daemon);
+		expect(status).toBe(202);
+		expect(ack).toEqual({ triggered: false, status: "skipped", reason: "unavailable" });
+	});
+
+	it("a NON-config error from the resolver still propagates (the guard is typed, not a blanket catch)", () => {
+		const daemon = createDaemon({ config: cfg(), storage: fakeStorage, logger: createRequestLogger({ silent: true }) });
+		const enqueuer = { async enqueue() { return "job-real"; } };
+		expect(() =>
+			mountPollinateApi(daemon, {
+				storage: fakeStorage,
+				defaultScope: DEFAULT_SCOPE,
+				enqueuer,
+				resolveConfig: () => {
+					throw new TypeError("not a config problem");
+				},
+			}),
+		).toThrow(TypeError);
 	});
 });

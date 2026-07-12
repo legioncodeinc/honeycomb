@@ -24,16 +24,20 @@
  *   On success the handler returns HTTP 202 with a small JSON ack:
  *     `{ triggered: true,  status: "enqueued" }`            — a pass was queued.
  *     `{ triggered: true,  status: "running",  reason }`    — a pass is already in flight
- *                                                              (the single-pending guard) or
- *                                                              below the token threshold; the
- *                                                              loop is healthy, nothing new
- *                                                              was queued.
+ *                                                              (the single-pending guard);
+ *                                                              nothing new was queued.
+ *     `{ triggered: true,  status: "below-threshold", reason, tokens, threshold? }`
+ *                                                            — the counter has not reached the
+ *                                                              token threshold (ISS-013: its own
+ *                                                              status, NOT "running", so the UI
+ *                                                              never claims a pass is in flight
+ *                                                              when none is). Additive fields.
  *     `{ triggered: false, status: "skipped",  reason }`    — pollinating is DISABLED in config,
  *                                                              or the pollinating subsystem is not
  *                                                              available (no queue wired). A
  *                                                              clean ack, NEVER a 500.
- *   The ack carries NO token, secret, or header value (D-4) — only the decision + a short
- *   machine reason string from the trigger.
+ *   The ack carries NO token, secret, or header value (D-4) — only the decision, a short
+ *   machine reason string from the trigger, and (below-threshold) the counter/threshold numbers.
  *
  * ── Authz + local posture (D-4) ──────────────────────────────────────────────
  *   The endpoint rides the protected `/api/diagnostics` group, so it inherits the same
@@ -62,7 +66,7 @@ import type { Context } from "hono";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import { getRequestIdentity } from "../middleware/permission.js";
 import type { Daemon } from "../server.js";
-import { resolvePollinatingConfig } from "./config.js";
+import { PollinatingConfigError, resolvePollinatingConfig, type PollinatingConfig } from "./config.js";
 import {
 	createPollinatingTrigger,
 	type PollinatingJobEnqueuer,
@@ -125,16 +129,31 @@ export interface MountPollinateOptions {
 	 * supplied (the composition root only supplies the real queue), false otherwise.
 	 */
 	readonly available?: boolean;
+	/**
+	 * The pollinating-config resolver (tests inject a thrower to prove the mount-time guard).
+	 * Defaults to {@link resolvePollinatingConfig}. A {@link PollinatingConfigError} thrown here
+	 * degrades the route to the `unavailable` ack instead of aborting daemon assembly —
+	 * `mountPollinateApi` runs unguarded from `assemble()`.
+	 */
+	readonly resolveConfig?: () => PollinatingConfig;
 }
 
 /** The ack body the trigger returns (the exact contract Wave 2's button reads). */
 export interface PollinateAck {
-	/** True when the trigger ran (enqueued OR found the loop already busy/below-threshold). */
+	/** True when the trigger ran (enqueued OR found the loop busy / below threshold). */
 	readonly triggered: boolean;
-	/** The coarse status: a pass was queued, one is already running, or the trigger was skipped. */
-	readonly status: "enqueued" | "running" | "skipped";
-	/** A short machine reason (present for `running`/`skipped`); carries no token/secret. */
+	/**
+	 * The coarse status: a pass was queued, one is already running, the counter is below the
+	 * threshold (ISS-013: its OWN value — the UI must not render "already running" when nothing
+	 * is running), or the trigger was skipped. The union is ADDITIVE over the pre-ISS-013 shape.
+	 */
+	readonly status: "enqueued" | "running" | "skipped" | "below-threshold";
+	/** A short machine reason (present for `running`/`skipped`/`below-threshold`); no token/secret. */
 	readonly reason?: string;
+	/** Present for `below-threshold`: the current tokens-since-last-pass counter (never a secret). */
+	readonly tokens?: number;
+	/** Present for `below-threshold` when the trigger's config is known: the token threshold. */
+	readonly threshold?: number;
 }
 
 /** The 400 body for a request with no resolvable tenancy (fail-closed at the edge). */
@@ -178,21 +197,30 @@ function resolveTriggerScope(c: Context, defaultScope: QueryScope): QueryScope |
 
 /**
  * Map a 009a {@link PollinatingTickResult} onto the dashboard ack (D-3). `enqueued` → a pass
- * was queued. `skipped` (already pending) and `below_threshold` → the loop is healthy but
- * nothing new was queued, surfaced as `running`. `disabled` → the pollinating master switch is
- * off; surfaced as `skipped` so the UI can say so. The `reason` is the trigger's own short
- * machine string — never a token or secret.
+ * was queued. `skipped` (already pending) → a pass is genuinely in flight, surfaced as
+ * `running`. `below_threshold` → its OWN `below-threshold` status (ISS-013: pre-fix it was
+ * lumped into `running` and the hive UI rendered "already running" when nothing was running),
+ * carrying the current counter and — when the trigger's config is known — the threshold, so
+ * the UI can say "42 000 / 100 000 tokens". `disabled` → the master switch is off; surfaced as
+ * `skipped` so the UI can say so. The `reason` is the trigger's own short machine string —
+ * never a token or secret.
  */
-function ackFor(result: PollinatingTickResult): PollinateAck {
+function ackFor(result: PollinatingTickResult, tokenThreshold?: number): PollinateAck {
 	switch (result.decision) {
 		case "enqueued":
 			return { triggered: true, status: "enqueued" };
 		case "disabled":
 			return { triggered: false, status: "skipped", reason: result.reason };
-		// `skipped` (a pass already in flight) and `below_threshold` both mean the loop is
-		// alive but no NEW pass was queued — the button surfaces this as "running".
-		case "skipped":
 		case "below_threshold":
+			return {
+				triggered: true,
+				status: "below-threshold",
+				reason: result.reason,
+				tokens: result.tokens,
+				...(tokenThreshold !== undefined ? { threshold: tokenThreshold } : {}),
+			};
+		// `skipped` = a pass already in flight — the button surfaces this as "running".
+		case "skipped":
 		default:
 			return { triggered: true, status: "running", reason: result.reason };
 	}
@@ -229,8 +257,23 @@ export function mountPollinateApi(daemon: Daemon, options: MountPollinateOptions
 	// Build the trigger seam ONCE at mount (not per request): the REAL 009a trigger wired to
 	// the daemon's own job queue + the resolved pollinating config, OR the injected test fake.
 	// When the pollinating subsystem is unavailable we build NO trigger — the handler short-
-	// circuits to the clean `unavailable` ack below.
-	const trigger: PollinateTriggerSeam | null = options.trigger ?? (available ? buildRealTrigger(options) : null);
+	// circuits to the clean `unavailable` ack below. The config is resolved HERE (not inside
+	// buildRealTrigger) so the below-threshold ack can report the SAME threshold the trigger
+	// enforces (ISS-013); an injected test trigger has no known config → the ack omits it.
+	// GUARDED: mountPollinateApi runs unguarded during daemon assembly, so a malformed
+	// HONEYCOMB_POLLINATING_* env must degrade this route to the `unavailable` ack — never
+	// abort daemon startup (PollinatingConfigError is the config boundary's typed throw).
+	let config: PollinatingConfig | undefined;
+	if (options.trigger === undefined && available) {
+		try {
+			config = (options.resolveConfig ?? resolvePollinatingConfig)();
+		} catch (error) {
+			if (!(error instanceof PollinatingConfigError)) throw error;
+			config = undefined;
+		}
+	}
+	const trigger: PollinateTriggerSeam | null =
+		options.trigger ?? (config !== undefined ? buildRealTrigger(options, config) : null);
 
 	group.post(POLLINATE_TRIGGER_PATH, async (c) => {
 		const scope = resolveTriggerScope(c, options.defaultScope);
@@ -246,18 +289,18 @@ export function mountPollinateApi(daemon: Daemon, options: MountPollinateOptions
 		// at most one pass. NON-BLOCKING — `checkAndEnqueuePollinating` only enqueues a job; the
 		// consolidation pass (the model call) is run later by the queue worker.
 		const result = await trigger.checkAndEnqueuePollinating(pollinateScope);
-		return c.json(ackFor(result), 202);
+		return c.json(ackFor(result, config?.tokenThreshold), 202);
 	});
 }
 
 /**
  * Construct the REAL PRD-009a {@link PollinatingTrigger} from the mount options: the live
- * storage client, the daemon's tenancy partition, the env-resolved `memory.pollinating` config,
- * and the daemon's own job queue as the enqueuer. The trigger owns the append-only
+ * storage client, the daemon's tenancy partition, the mount-resolved `memory.pollinating`
+ * config (passed in so the ack and the trigger share ONE threshold — ISS-013), and the
+ * daemon's own job queue as the enqueuer. The trigger owns the append-only
  * `pollinating_state` counter + the single-pending guard; this only wires it.
  */
-function buildRealTrigger(options: MountPollinateOptions): PollinateTriggerSeam {
-	const config = resolvePollinatingConfig();
+function buildRealTrigger(options: MountPollinateOptions, config: PollinatingConfig): PollinateTriggerSeam {
 	// `available` is true only when an enqueuer was supplied, so this non-null assertion holds
 	// by construction (see isQueueAvailable). Guard anyway so a future caller can't crash here.
 	const enqueuer = options.enqueuer;

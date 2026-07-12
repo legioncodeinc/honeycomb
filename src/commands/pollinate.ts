@@ -53,10 +53,14 @@ export interface PollinateCliInvocation {
 interface PollinateAckBody {
 	/** True when the trigger ran (enqueued OR found the loop already busy/below-threshold). */
 	readonly triggered?: boolean;
-	/** The coarse status: a pass was queued, one is already running, or the trigger was skipped. */
+	/** The coarse status: enqueued, running, below-threshold (ISS-013), or skipped. */
 	readonly status?: string;
-	/** A short machine reason (present for `running`/`skipped`); carries no token/secret. */
+	/** A short machine reason (present for `running`/`skipped`/`below-threshold`); no token/secret. */
 	readonly reason?: string;
+	/** Present for `below-threshold`: the current tokens-since-last-pass counter. */
+	readonly tokens?: number;
+	/** Present for `below-threshold` when the daemon knows its config: the token threshold. */
+	readonly threshold?: number;
 }
 
 /**
@@ -85,9 +89,10 @@ function asAck(body: unknown): PollinateAckBody {
 
 /**
  * Render the daemon's pollinate ack as one human line. `enqueued` → a pass was queued; `running`
- * → the loop is healthy but nothing new was queued (a pass is in flight or below threshold);
- * `skipped` → the pollinating master switch is off (or the subsystem is unavailable). The reason
- * is the daemon's short machine string — never a token or secret.
+ * → a pass is already in flight (nothing new queued); `below-threshold` → nothing is running,
+ * the counter has not reached the bar (ISS-013 — with the tokens/threshold progress when the
+ * daemon reports them); `skipped` → the pollinating master switch is off (or the subsystem is
+ * unavailable). The reason is the daemon's short machine string — never a token or secret.
  */
 function renderAck(ack: PollinateAckBody, out: OutputSink): void {
 	const status = ack.status ?? "unknown";
@@ -99,6 +104,15 @@ function renderAck(ack: PollinateAckBody, out: OutputSink): void {
 		case "running":
 			out(`pollinate: the loop is healthy; no new pass queued${suffix}.`);
 			break;
+		case "below-threshold": {
+			// ISS-013: honest wording — nothing is running; the counter simply has not reached the bar.
+			const progress =
+				typeof ack.tokens === "number" && typeof ack.threshold === "number"
+					? ` (${ack.tokens} / ${ack.threshold} tokens)`
+					: suffix;
+			out(`pollinate: below the token threshold; no pass queued${progress}.`);
+			break;
+		}
 		case "skipped":
 			out(`pollinate: skipped${suffix}. Enable with HONEYCOMB_POLLINATING_ENABLED=true.`);
 			break;

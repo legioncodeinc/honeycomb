@@ -124,6 +124,7 @@ export {
 	NUDGE_INTERVAL_TURNS,
 	RECALL_BLOCK_HEADER,
 	RECALL_REMINDER,
+	renderInjectionNotice,
 	renderRecallBlock,
 	runUserPromptRecall,
 	shouldFireNudge,

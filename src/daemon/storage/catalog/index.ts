@@ -25,6 +25,7 @@ import { POLLINATING_STATE_TABLES } from "./pollinating-state.js"; // PRD-009a (
 import { KNOWLEDGE_GRAPH_TABLES } from "./knowledge-graph.js"; // PRD-003b (stub)
 import { MEMORIES_TABLES } from "./memories.js"; // PRD-003a (implemented)
 import { MEMORY_CONFLICTS_TABLES } from "./memory-conflicts.js"; // PRD-058b (semantic-conflict projection)
+import { MEMORY_INJECTIONS_TABLES } from "./memory-injections.js"; // ISS-010 (injected-token telemetry)
 import { MEMORY_LIFECYCLE_TABLES } from "./memory-lifecycle.js"; // PRD-058e (access log + calibration)
 import { PRODUCT_TABLES } from "./product.js"; // PRD-003d (stub)
 import { PROJECTS_TABLES } from "./projects.js"; // PRD-049a (project registry)
@@ -46,6 +47,7 @@ export const CATALOG: readonly CatalogTable[] = Object.freeze([
 	...MEMORIES_TABLES,
 	...MEMORY_CONFLICTS_TABLES,
 	...MEMORY_LIFECYCLE_TABLES,
+	...MEMORY_INJECTIONS_TABLES,
 	...SESSIONS_SUMMARIES_TABLES,
 	...KNOWLEDGE_GRAPH_TABLES,
 	...PRODUCT_TABLES,
@@ -118,6 +120,16 @@ export {
 	MEMORY_CALIBRATION_TABLE,
 	MEMORY_LIFECYCLE_TABLES,
 } from "./memory-lifecycle.js";
+export {
+	buildInjectionRangeSql,
+	buildInjectionTokenSumSql,
+	INJECTION_SOURCES,
+	type InjectionSource,
+	isInjectionSource,
+	MEMORY_INJECTIONS_COLUMNS,
+	MEMORY_INJECTIONS_TABLE,
+	MEMORY_INJECTIONS_TABLES,
+} from "./memory-injections.js";
 export {
 	buildConflictByIdSql,
 	buildOpenConflictProjectionSql,

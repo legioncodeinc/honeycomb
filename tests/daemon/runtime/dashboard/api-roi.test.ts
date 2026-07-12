@@ -325,10 +325,11 @@ describe("PRD-060e composite ROI read-model (daemon data half)", () => {
 
 
 describe("CodeRabbit findings: net-all-ok gate, isolated fail-closed, ordered sample, project scope", () => {
-	// Finding (net-status): the confident net (status ok, computed true) is emitted ONLY when ALL THREE
-	// inputs are FULLY `ok` -- a `partial` cost is NOT good enough (it would understate the bill).
-	it("net is NOT ok/computed when any input is merely `partial` (only all-ok qualifies)", () => {
-		// Infra partial -> net not computed even though savings + pollination are ok.
+	// ISS-011 (supersedes the old all-ok gate): a merely-`partial` cost input no longer BLOCKS the
+	// net — it is COMPUTED from what was read and honestly labeled `status:"partial"` with the
+	// degraded inputs named in `missingInputs`. A confident `ok` net still requires ALL THREE `ok`.
+	it("a `partial` cost input yields a COMPUTED partial net (ISS-011), never a silently-confident `ok`", () => {
+		// Infra partial -> the net IS computed, but carries the partial caveat (never status "ok").
 		const infraPartial = assembleRoiView({
 			turns: [turn(), turn(), turn()],
 			infra: partialInfra(),
@@ -337,11 +338,13 @@ describe("CodeRabbit findings: net-all-ok gate, isolated fail-closed, ordered sa
 			readPolicy: "shared",
 		});
 		expect(infraPartial.infra.status).toBe("partial");
-		expect(infraPartial.net.computed).toBe(false);
+		expect(infraPartial.net.computed).toBe(true);
 		expect(infraPartial.net.status).not.toBe("ok");
 		expect(infraPartial.net.status).toBe("partial"); // reflects the partial input.
+		expect(infraPartial.net.partial).toBe(true);
+		expect(infraPartial.net.missingInputs).toContain("infra");
 
-		// All three ok -> net IS ok + computed.
+		// All three ok -> net IS ok + computed, with NO caveat.
 		const allOk = assembleRoiView({
 			turns: [turn(), turn(), turn()],
 			infra: okInfra(),
@@ -351,6 +354,8 @@ describe("CodeRabbit findings: net-all-ok gate, isolated fail-closed, ordered sa
 		});
 		expect(allOk.net.status).toBe("ok");
 		expect(allOk.net.computed).toBe(true);
+		expect(allOk.net.partial).toBe(false);
+		expect(allOk.net.missingInputs).toEqual([]);
 	});
 
 	// Finding (isolated-agentid): an `isolated` read with NO agent id does NOT filter on the org id and
@@ -454,5 +459,85 @@ describe("PRD-060 ROI fix: the model column prices an Opus turn at the Opus rate
 		});
 		const view = await fetchRoiView(client(fake), SCOPE, { readPolicy: "shared" });
 		expect(view.savings.measuredCents).toBe(SONNET_DEFAULT_CENTS);
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ISS-011 — the PARTIAL-NET matrix. The net is computed when savings is ok|partial
+// AND each cost input is usable (ok|partial|absent — absent contributes its 0);
+// status is "partial" (partial:true, degraded inputs named) unless EVERYTHING is
+// ok. computed:false remains ONLY for an uncomputable net: savings itself
+// absent/unreachable/unauthenticated, or a cost input unreachable/unauthenticated.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("ISS-011 partial-net matrix (assembleRoiView)", () => {
+	it("savings ok + infra partial + pollination absent ⇒ computed:true, status partial, missingInputs [infra, pollination]", () => {
+		// emptyUsageSource → the Haiku half is `absent`; worst-of(absent, partial) → pollination ABSENT.
+		const view = assembleRoiView({
+			turns: [turn(), turn(), turn()],
+			infra: partialInfra(1234),
+			usage: emptyUsageSource,
+			ledger: ledgerOk([]),
+			readPolicy: "shared",
+		});
+		expect(view.savings.status).toBe("ok");
+		expect(view.infra.status).toBe("partial");
+		expect(view.pollination.status).toBe("absent");
+		expect(view.net.computed).toBe(true);
+		expect(view.net.status).toBe("partial");
+		expect(view.net.partial).toBe(true);
+		expect(view.net.missingInputs).toEqual(["infra", "pollination"]);
+		// The net is the honest arithmetic over what WAS read: savings − (partial infra + pollination-as-read).
+		const expected =
+			view.savings.measuredCents + view.savings.modeledCents - (view.infra.cents + view.pollination.cents);
+		expect(view.net.netCents).toBe(expected);
+		expect(view.net.modeled).toBe(true); // still folds a modeled term → est.
+		expect(view.net.costBasis).toBe("measured"); // partial infra is still a measured (billed) basis.
+	});
+
+	it("savings ABSENT ⇒ computed:false (a net can never be fabricated without a capture)", () => {
+		const view = assembleRoiView({
+			turns: [absentTurn(), absentTurn()],
+			infra: okInfra(),
+			usage: measuredUsage(),
+			ledger: ledgerOk([]),
+			readPolicy: "shared",
+		});
+		expect(view.savings.status).toBe("absent");
+		expect(view.net.computed).toBe(false);
+		expect(view.net.status).toBe("absent");
+		expect(view.net.netCents).toBe(0);
+		expect(view.net.partial).toBe(false);
+		expect(view.net.missingInputs).toContain("savings");
+	});
+
+	it("an UNREACHABLE cost input still blocks the net (a known-unread bill would overstate ROI)", () => {
+		const view = assembleRoiView({
+			turns: [turn(), turn()],
+			infra: unreachableInfra(),
+			usage: measuredUsage(),
+			ledger: ledgerOk([]),
+			readPolicy: "shared",
+		});
+		expect(view.infra.status).toBe("unreachable");
+		expect(view.net.computed).toBe(false);
+		expect(view.net.status).toBe("unreachable");
+		expect(view.net.netCents).toBe(0);
+	});
+
+	it("infra ABSENT (no billing line at all) contributes 0 and the net is a computed partial", () => {
+		// An `absent` billing snapshot: no summary, no session types — nothing read, nothing missing.
+		const absentInfra: InfraCostReadModel = { status: "absent", missing: [], sessionTypes: [], fetchedAt: 1 };
+		const view = assembleRoiView({
+			turns: [turn(), turn()],
+			infra: absentInfra,
+			usage: measuredUsage(),
+			ledger: ledgerOk([]),
+			readPolicy: "shared",
+		});
+		expect(view.infra.status).toBe("absent");
+		expect(view.infra.cents).toBe(0); // absent contributes 0 to the cost half.
+		expect(view.net.computed).toBe(true);
+		expect(view.net.status).toBe("partial");
+		expect(view.net.missingInputs).toContain("infra");
 	});
 });

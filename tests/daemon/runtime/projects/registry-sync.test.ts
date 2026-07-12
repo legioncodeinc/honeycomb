@@ -214,6 +214,106 @@ describe("PRD-062 FIX 1: local-only projects are MERGED, not clobbered, and heal
 	});
 });
 
+describe("ISS-021 — duplicate registry rows collapse to ONE cached project (backstop dedupe)", () => {
+	it("a registry read returning two rows for one projectId yields exactly one cached project", async () => {
+		// The bind/heal SELECT→INSERT race doubled the 'api' row in the registry table.
+		const { storage } = fakeStorage(
+			ok(
+				[
+					registryRow({ project_id: "api", name: "API (first row)" }),
+					registryRow({ project_id: "api", name: "API (raced duplicate)" }),
+					registryRow({ project_id: "web", name: "Web" }),
+				],
+				1,
+			),
+		);
+		const result = await syncRegistryToCache({ storage, scope: SCOPE, dir });
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.projectCount).toBe(2);
+
+		const cache = loadProjectsCache(dir);
+		expect(cache.projects.map((p) => p.projectId).sort()).toEqual(["api", "web"]);
+		// Same-stamp duplicates (the common byte-identical case) fall back to first-seen.
+		expect(cache.projects.find((p) => p.projectId === "api")?.name).toBe("API (first row)");
+	});
+
+	it("divergent duplicates: the row with the GREATEST updated_at wins, regardless of read order", async () => {
+		// The list read has no ORDER BY, so the winner must be deterministic — prove BOTH read
+		// orders converge on the newer row (CodeRabbit #297 Minor).
+		const older = registryRow({ project_id: "api", name: "API (stale)", updated_at: "2026-07-01T00:00:00.000Z" });
+		const newer = registryRow({ project_id: "api", name: "API (fresh)", updated_at: "2026-07-12T00:00:00.000Z" });
+		for (const rows of [
+			[older, newer],
+			[newer, older],
+		]) {
+			const { storage } = fakeStorage(ok(rows, 1));
+			const result = await syncRegistryToCache({ storage, scope: SCOPE, dir });
+			expect(result.ok).toBe(true);
+			const cache = loadProjectsCache(dir);
+			expect(cache.projects.filter((p) => p.projectId === "api")).toHaveLength(1);
+			expect(cache.projects.find((p) => p.projectId === "api")?.name).toBe("API (fresh)");
+		}
+	});
+});
+
+describe("ISS-021 — the sync-heal re-upsert skips projects the bind path already wrote (root mitigation)", () => {
+	it("does NOT re-upsert a just-bound project that the lagged registry read has not surfaced yet", async () => {
+		const cwd = join(dir, "work", "just-bound");
+		// The bind path: local binding + local project entry written, its OWN registry upsert issued.
+		bindFolderToProject({ cwd, projectId: "just-bound", org: "acme", workspace: "backend", dir });
+
+		// The sync triggered by the bind's cache invalidation reads a LAGGED registry (no 'just-bound').
+		const { storage, sql } = routedStorage([registryRow({ project_id: "api" })]);
+		const result = await syncRegistryToCache({ storage, scope: SCOPE, dir });
+		expect(result.ok).toBe(true);
+
+		// The heal did NOT race the bind's own registry write with a second INSERT…
+		expect(sql.some((s) => s.includes("'just-bound'"))).toBe(false);
+		// …and the project stays visible locally (merged, not dropped).
+		const cache = loadProjectsCache(dir);
+		expect(cache.projects.map((p) => p.projectId).sort()).toEqual(["api", "just-bound"]);
+	});
+
+	it("still does not re-insert a project the registry read ALREADY contains", async () => {
+		// Prior cache holds 'api' locally; the registry read also returns 'api' — no heal write at all.
+		saveProjectsCache(
+			{
+				schemaVersion: 1,
+				org: "acme",
+				workspace: "backend",
+				bindings: [],
+				projects: [{ projectId: "api", name: "API", remoteSignal: "", boundPaths: [] }],
+			},
+			dir,
+		);
+		const { storage, sql } = routedStorage([registryRow({ project_id: "api" })]);
+		const result = await syncRegistryToCache({ storage, scope: SCOPE, dir });
+		expect(result.ok).toBe(true);
+
+		// Exactly the one LIST read went out — the heal path issued no probe/INSERT for 'api'.
+		expect(sql).toHaveLength(1);
+		expect(sql.some((s) => /INSERT INTO "projects"/.test(s))).toBe(false);
+		expect(loadProjectsCache(dir).projects.map((p) => p.projectId)).toEqual(["api"]);
+	});
+
+	it("an UNBOUND local-only project (no binding writer of its own) is still healed", async () => {
+		saveProjectsCache(
+			{
+				schemaVersion: 1,
+				org: "acme",
+				workspace: "backend",
+				bindings: [],
+				projects: [{ projectId: "legacy-x", name: "Legacy X", remoteSignal: "", boundPaths: [] }],
+			},
+			dir,
+		);
+		const { storage, sql } = routedStorage([]);
+		await syncRegistryToCache({ storage, scope: SCOPE, dir });
+		expect(sql.some((s) => /INSERT INTO "projects"/.test(s) && s.includes("'legacy-x'"))).toBe(true);
+	});
+});
+
 describe("tenancy guard: a foreign-tenancy prior cache's bindings are dropped on sync", () => {
 	it("does not carry another workspace's bindings into the synced cache", async () => {
 		// Prior cache belongs to a DIFFERENT workspace.

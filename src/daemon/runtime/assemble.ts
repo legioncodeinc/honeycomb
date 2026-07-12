@@ -1603,6 +1603,10 @@ export function assembleSeams(
 	//    scope-enforced (org/workspace partition before any content) + paginated; every resolve still
 	//    goes through the 058b POST endpoint above (058d defines NO new write path). Guarded +
 	//    present-only (like the conflicts seam) so an out-of-scope fake `SeamFns` is unaffected.
+	//    PRODUCTION PATH (ISS-012): the three routes are now registered INSIDE `mountMemoriesApi`
+	//    (step 7 above), BEFORE `/:id`, so the parametric route can no longer shadow the literal
+	//    segments (the same route-shadow fix as /prime in step 7b). This standalone call is RETAINED
+	//    as a backwards-compat safety net — its handlers are never-reached duplicates here.
 	if (seams.mountLifecycle !== undefined) {
 		seams.mountLifecycle(daemon, { storage, defaultScope });
 	}

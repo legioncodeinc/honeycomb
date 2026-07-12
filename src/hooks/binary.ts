@@ -204,7 +204,13 @@ function emitResponse(io: BinaryIo, shim: HarnessShim, outcome: HookEventOutcome
 		}
 		const block = outcome.result.additionalContext;
 		if (block !== undefined && block.length > 0) {
-			const envelope = shim.renderContext(block);
+			// ISS-022: thread the core's optional user-visible `systemMessage` through the ONE
+			// shared engine. Only the per-turn recall arm ever sets it; the shim's channel gating
+			// (normalize.ts `renderChannel`) decides whether it lands (recall arm / user-visible)
+			// or is ignored (the session-start prime stays byte-identical — a-AC-8). Absent →
+			// `renderContext(block, undefined)` is envelope-identical to the prior single-arg call.
+			const systemMessage = outcome.result.systemMessage;
+			const envelope = shim.renderContext(block, systemMessage !== undefined ? { systemMessage } : undefined);
 			io.writeStdout(JSON.stringify(envelope));
 			return;
 		}
