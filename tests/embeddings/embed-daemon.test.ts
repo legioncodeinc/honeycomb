@@ -21,6 +21,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	EMBED_DIMS,
 	EMBED_PORT,
+	EMBED_QUEUE_MAX,
 	MODEL_ID,
 	MODEL_QUANTIZATION,
 	MODEL_REVISION,
@@ -308,4 +309,102 @@ describe("Wave-3 live-fix: warmup failure is OBSERVABLE (logged + surfaced on /h
 		const long = redactWarmError(new Error("x".repeat(5000)));
 		expect(long.length).toBeLessThanOrEqual(300);
 	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ISS-007/ISS-008 — /health stays answerable while inference runs (the wedge fix).
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("ISS-007: /health answers while an inference is in flight (never behind the queue)", () => {
+	async function startWarmOnEphemeral(): Promise<{ url: string }> {
+		__resetForTest();
+		__setTransformersLoaderForTest(pendingLoader());
+		running = await startEmbedDaemon({ host: "127.0.0.1", port: 0, env: {} });
+		return { url: `http://127.0.0.1:${running.address.port}` };
+	}
+
+	it("GET /health answers 200 (busy:true, queueDepth>0) while a POST /embed is blocked mid-inference", async () => {
+		const { url } = await startWarmOnEphemeral();
+		// A BLOCKING fake extractor: the embed stays in flight until the test releases it —
+		// the stand-in for the live-observed wedge signature (inference occupying the daemon).
+		let release!: () => void;
+		const blocked = new Promise<void>((r) => {
+			release = r;
+		});
+		__setExtractorForTest(async () => {
+			await blocked;
+			return { data: new Float32Array(EMBED_DIMS).fill(0.01) };
+		});
+
+		// Fire the embed and do NOT await it — it is now queued/running.
+		const embedPromise = fetch(`${url}/embed`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ text: "occupies the inference queue" }),
+		});
+		// Give the daemon a beat to dequeue into the blocked inference.
+		await new Promise((r) => setTimeout(r, 25));
+
+		// THE contract under test: /health answers RIGHT NOW, mid-inference — it reads in-memory
+		// flags only and never enters the inference queue (the supervisor's 2s probe depends on it).
+		const health = await fetch(`${url}/health`);
+		expect(health.status).toBe(200);
+		const body = (await health.json()) as Record<string, unknown>;
+		expect(body.ok).toBe(true);
+		expect(body.ready).toBe(true);
+		expect(body.busy).toBe(true);
+		expect(body.queueDepth as number).toBeGreaterThan(0);
+
+		// Release the inference: the queued embed completes normally (no request was lost).
+		release();
+		const embedRes = await embedPromise;
+		expect(embedRes.status).toBe(200);
+		const embedBody = (await embedRes.json()) as { vector: number[] };
+		expect(embedBody.vector).toHaveLength(EMBED_DIMS);
+
+		// Drained: /health reports idle again.
+		const after = (await (await fetch(`${url}/health`)).json()) as Record<string, unknown>;
+		expect(after.busy).toBe(false);
+		expect(after.queueDepth).toBe(0);
+	});
+
+	it("the inference queue is BOUNDED: overflow /embed requests shed with a fast 503, never an unbounded pile-up", async () => {
+		const { url } = await startWarmOnEphemeral();
+		let release!: () => void;
+		const blocked = new Promise<void>((r) => {
+			release = r;
+		});
+		__setExtractorForTest(async () => {
+			await blocked;
+			return { data: new Float32Array(EMBED_DIMS).fill(0.01) };
+		});
+
+		// Fill the FIFO to its cap: ONE dequeues into the blocked inference (running, no longer
+		// consuming queue capacity) + EMBED_QUEUE_MAX waiters — the documented queued-only cap,
+		// so total admitted capacity is exactly EMBED_QUEUE_MAX + 1 (Aikido #301 Critical).
+		const inFlight = Array.from({ length: EMBED_QUEUE_MAX + 1 }, (_, i) =>
+			fetch(`${url}/embed`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ text: `queued-${i}` }),
+			}),
+		);
+		await new Promise((r) => setTimeout(r, 50));
+
+		// …then one more: it must shed IMMEDIATELY with a 503 (the client's NULL-column /
+		// lexical-fallback path), not join an unbounded queue behind a saturated model.
+		const overflow = await fetch(`${url}/embed`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ text: "one too many" }),
+		});
+		expect(overflow.status).toBe(503);
+		const overflowBody = (await overflow.json()) as Record<string, unknown>;
+		expect(String(overflowBody.error)).toMatch(/queue full/);
+
+		// Unblock and drain the in-flight set so the suite exits cleanly.
+		release();
+		const settled = await Promise.all(inFlight);
+		for (const res of settled) expect(res.status).toBe(200);
+	}, 20_000);
 });

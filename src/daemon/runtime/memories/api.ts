@@ -178,6 +178,15 @@ export interface MountMemoriesOptions {
 	 */
 	readonly embed?: EmbedClient;
 	/**
+	 * ISS-007/ISS-008: the embed-liveness fast-skip gate, wired by the composition root from the
+	 * embed supervisor's CURRENT state. When present and not `ready()`, the recall engine skips
+	 * the embed attempt entirely (lexical answers immediately, `degradedReason: "embed_not_ready"`)
+	 * instead of burning the embed deadline against a cold/wedged daemon; a burned deadline fires
+	 * `reportTimeout()` (the supervisor's on-demand liveness probe). ABSENT (unit mounts) → the
+	 * engine's pre-ISS behavior verbatim.
+	 */
+	readonly embedGate?: import("./recall.js").EmbedLivenessGate;
+	/**
 	 * The daemon's configured default tenancy scope, threaded from the composition root
 	 * (PRD-022). In LOCAL mode a request with no `x-honeycomb-org` header falls back to
 	 * this single configured tenant (a loopback thin client — SDK/MCP — need not know the
@@ -547,6 +556,10 @@ function logDegradedRecall(logger: RequestLogger | undefined, result: MemoryReca
 		// The arm coverage — the distinct arm names that surfaced a hit (`memories`/`memory`/
 		// `sessions`). Plain subsystem names; never row content or a secret.
 		sources: result.sources,
+		// ISS-007/ISS-008: the embed-path cause when knowable — a closed enum (`embed_not_ready` /
+		// `embed_timeout` / `embed_unavailable`), so a healthy not-warm SKIP is distinguishable from
+		// a burned deadline against a wedged daemon. Absent on non-embed degradations. No secret.
+		...(result.degradedReason !== undefined ? { reason: result.degradedReason } : {}),
 	});
 }
 
@@ -790,6 +803,8 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 			{
 				storage,
 				...(options.embed !== undefined ? { embed: options.embed } : {}),
+				// ISS-007/ISS-008: the embed-liveness fast-skip gate (see MountMemoriesOptions.embedGate).
+				...(options.embedGate !== undefined ? { embedGate: options.embedGate } : {}),
 				...(recallMode !== undefined ? { recallMode } : {}),
 				// PRD-058a / PRD-058d (L-W5): the recency config — per-request override → boot lifecycle → engine defaults.
 				...(recency !== undefined ? { recency } : {}),

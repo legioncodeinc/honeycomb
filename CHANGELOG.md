@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.16.0 — 2026-07-12
+
+Improves recall and health reliability when the local embeddings model becomes unresponsive: `/health` now reports a live, honest embeddings state (including a new 'suspect' status) instead of falsely reporting 'on', and semantic recall automatically skips embedding attempts and falls back to lexical search when the embedder isn't warm, avoiding slow timeouts.
+
 ## v0.15.0 — 2026-07-12
 
 Fixes a fresh-install bug where an enabled Portkey gateway with no active model could silently POST empty-model requests that always failed; the gateway now fails closed with an honest `no_model` health state, and `/health` also reports swallowed extraction errors so stalled memory formation is visible.
