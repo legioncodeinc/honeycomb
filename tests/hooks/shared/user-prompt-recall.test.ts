@@ -240,6 +240,14 @@ describe("ISS-022 renderInjectionNotice: the local heuristic (no daemon import a
 			`🐝 Honeycomb: 2 memories injected (~${Math.ceil(block.length / 4)} tokens)`,
 		);
 	});
+
+	it("singular: one hit reads 'memory', never '1 memories'", () => {
+		const one = HITS.slice(0, 1);
+		const block = renderRecallBlock(one);
+		expect(renderInjectionNotice(one, block)).toBe(
+			`🐝 Honeycomb: 1 memory injected (~${Math.ceil(block.length / 4)} tokens)`,
+		);
+	});
 });
 
 describe("PRD-076a coexistence (Option A): hooks.json conforms to the references gate", () => {

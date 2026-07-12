@@ -158,7 +158,8 @@ export function renderRecallBlock(hits: readonly RecallHit[]): string {
 export function renderInjectionNotice(newHits: readonly RecallHit[], block: string): string {
 	const injectedCount = newHits.filter((hit) => hit.text.trim().length > 0).length;
 	const approxTokens = Math.ceil(block.length / 4);
-	return `🐝 Honeycomb: ${injectedCount} memories injected (~${approxTokens} tokens)`;
+	const noun = injectedCount === 1 ? "memory" : "memories";
+	return `🐝 Honeycomb: ${injectedCount} ${noun} injected (~${approxTokens} tokens)`;
 }
 
 /**
