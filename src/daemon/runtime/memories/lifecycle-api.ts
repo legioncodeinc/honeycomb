@@ -34,7 +34,7 @@
  * builders + the local stale-ref/history builders). No hand-quoted SQL (`audit:sql` scans `src/daemon`).
  */
 
-import type { Context } from "hono";
+import type { Context, Hono } from "hono";
 
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import { isOk, type StorageRow } from "../../storage/result.js";
@@ -290,21 +290,22 @@ function resolveStatus(raw: string | undefined): ConflictStatus {
 }
 
 /**
- * Attach the lifecycle READ endpoints onto the daemon's already-mounted `/api/memories` group
- * (PRD-058d). Registers the three scoped, paginated reads BEFORE the `GET /:id` route is matched is
- * unnecessary here — each path is a distinct literal segment (`conflicts`, `stale-refs`, `history`)
- * and these mount AFTER `mountMemoriesApi`, but Hono matches the more-specific literal first only if
- * registered first; to be safe each literal is a non-`:id`-colliding word. Call ONCE after
- * `createDaemon(...)`, beside {@link import("./conflicts-api.js").mountConflictsApi}. No-op if the
- * group is not mounted.
+ * Register the three lifecycle READ routes on the `/api/memories` group router (PRD-058d).
+ *
+ * ── Route order (ISS-012, the same rule as `/resolve` / `/calibration` / `/prime`) ────────────
+ * `conflicts`, `stale-refs`, and `history` are LITERAL segments on the same group that also carries
+ * the parametric `GET /:id` — Hono matches routes in registration order, so these MUST be registered
+ * BEFORE `/:id` or every one of them 404s as `getMemory("conflicts")` etc. The PRODUCTION PATH is
+ * therefore `mountMemoriesApi` calling THIS function right before it registers `GET /:id` (api.ts) —
+ * exactly the shape of the /prime route-shadow fix. {@link mountLifecycleApi} remains as the
+ * standalone back-compat shim for callers/tests that mount only the lifecycle reads on a fresh
+ * daemon (no `/:id` to shadow); when both run, the shim's handlers are never-reached duplicates.
  */
-export function mountLifecycleApi(daemon: Daemon, options: MountLifecycleOptions): void {
-	const group = daemon.group(MEMORIES_GROUP);
-	if (group === undefined) return;
-	const storage = options.storage;
-	const resolveScope = (c: Context): QueryScope | null =>
-		resolveScopeOrLocalDefault(c, daemon.config.mode, options.defaultScope);
-
+export function registerLifecycleReadRoutes(
+	group: Hono,
+	storage: StorageQuery,
+	resolveScope: (c: Context) => QueryScope | null,
+): void {
 	// GET /api/memories/conflicts?status=open — the conflict queue (scoped, paginated).
 	group.get("/conflicts", async (c) => {
 		const scope = resolveScope(c);
@@ -336,4 +337,20 @@ export function mountLifecycleApi(daemon: Daemon, options: MountLifecycleOptions
 		const history = await listLifecycleHistory(storage, scope, limit);
 		return c.json({ history, type: "lifecycle" });
 	});
+}
+
+/**
+ * Attach the lifecycle READ endpoints onto the daemon's already-mounted `/api/memories` group
+ * (PRD-058d). RETAINED as a backwards-compat safety net (mirroring `mountMemoriesPrimeApi`): the
+ * production registration happens INSIDE `mountMemoriesApi` (BEFORE its parametric `GET /:id`, so
+ * the literal segments are never shadowed — ISS-012); when a caller/test mounts ONLY this seam on
+ * a fresh daemon (no `/:id`), it is the sole registration. Call ONCE after `createDaemon(...)`,
+ * beside {@link import("./conflicts-api.js").mountConflictsApi}. No-op if the group is not mounted.
+ */
+export function mountLifecycleApi(daemon: Daemon, options: MountLifecycleOptions): void {
+	const group = daemon.group(MEMORIES_GROUP);
+	if (group === undefined) return;
+	const resolveScope = (c: Context): QueryScope | null =>
+		resolveScopeOrLocalDefault(c, daemon.config.mode, options.defaultScope);
+	registerLifecycleReadRoutes(group, options.storage, resolveScope);
 }
