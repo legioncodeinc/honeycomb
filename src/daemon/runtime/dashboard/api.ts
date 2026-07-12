@@ -37,7 +37,10 @@
 
 import type { Context } from "hono";
 import { sLiteral, sqlIdent } from "../../storage/sql.js";
-import { isOk, type StorageRow } from "../../storage/result.js";
+import { isOk, type QueryResult, type StorageRow } from "../../storage/result.js";
+// ISS-002: the WHY-EMPTY read reuses the heal engine's conservative failure classifier so a
+// benign not-yet-created `entities` table reads as "no entities yet", never a query error.
+import { classifyFailure } from "../../storage/heal.js";
 import type { QueryScope, StorageQuery } from "../../storage/client.js";
 import { resolveRequestProject, resolveScopeOrLocalDefault } from "../scope.js";
 import { getRequestIdentity } from "../middleware/permission.js";
@@ -45,6 +48,7 @@ import type {
 	GraphView,
 	KpisView,
 	LocalAssetInventory,
+	MemoryGraphEmptyReason,
 	MemoryGraphView,
 	RoiCostBasisTag,
 	RoiRollup,
@@ -113,6 +117,15 @@ export interface MountDashboardOptions {
 	readonly roiUsage?: SkillifyUsageSource;
 	/** Capture events acked but not durably written since boot (process-local counter). */
 	readonly captureDroppedEvents?: () => number;
+	/**
+	 * ISS-002: the LIVE resolved memory-graph gate probe (the pipeline worker's current unified
+	 * `graph.enabled` — env override > vault setting > default-follows-memory), threaded from the
+	 * composition root so `GET /api/diagnostics/memory-graph` can report WHY the graph is empty.
+	 * Returns `undefined` before the pipeline worker is built (read as OFF — no worker, no graph
+	 * writes). ABSENT (a unit-constructed daemon) → an empty graph reports `graph_off`, the honest
+	 * degraded answer. Cheap, synchronous, total, non-throwing (a plain cell read).
+	 */
+	readonly memoryGraphGate?: () => boolean | undefined;
 }
 
 /**
@@ -545,14 +558,28 @@ const MEMORY_GRAPH_LIMIT = 500;
  * No secret rides the response by construction: entity name/type + edge type are graph text, never a
  * token/credential. The labels are rendered as React TEXT by the page (XSS-safe — 041b D-6).
  */
-export async function fetchMemoryGraphView(storage: StorageQuery, scope: QueryScope): Promise<MemoryGraphView> {
-	const [entityRows, edgeRows] = await Promise.all([
-		selectRows(storage, buildMemoryEntitiesSql(), scope),
+export async function fetchMemoryGraphView(
+	storage: StorageQuery,
+	scope: QueryScope,
+	graphEnabled?: () => boolean | undefined,
+): Promise<MemoryGraphView> {
+	// ISS-002: the ENTITIES read goes through `storage.query` directly (not `selectRows`) so a real
+	// read failure is DISTINGUISHABLE from a genuinely-empty ontology on the empty path below —
+	// `selectRows`' global fail-soft posture is unchanged (the edges read still uses it: an edge
+	// read failure only drops edges, which cannot stand alone anyway).
+	const [entitiesResult, edgeRows] = await Promise.all([
+		storage.query(buildMemoryEntitiesSql(), scope),
 		selectRows(storage, buildMemoryDependenciesSql(), scope),
 	]);
+	const entityRows = isOk(entitiesResult) ? entitiesResult.rows : [];
 	// built:false ONLY when there are no entities — an empty/absent ontology renders the honest empty
 	// state, never a faked graph (AC-4 / AC-5). Edges without entities cannot stand alone as a graph.
-	if (entityRows.length === 0) return { built: false, nodes: [], edges: [] };
+	// ISS-002 (SP-3): the empty state now carries an ADDITIVE `reason` (+ cheap counts) so "gate off",
+	// "gate on but nothing extracted yet", and "the read failed" are no longer the same silent empty.
+	if (entityRows.length === 0) {
+		const why = await resolveMemoryGraphEmptyReason(storage, scope, entitiesResult, graphEnabled);
+		return { built: false, nodes: [], edges: [], ...why };
+	}
 	const nodes = entityRows.map((r) => ({
 		id: toStr(r.id),
 		// `name` is the human label; fall back to the id when an entity has no name yet.
@@ -595,6 +622,43 @@ function buildMemoryDependenciesSql(): string {
 		`SELECT ${sqlIdent("source_entity_id")}, ${sqlIdent("target_entity_id")}, ${sqlIdent("type")} ` +
 		`FROM "${tbl}" ORDER BY ${sqlIdent("created_at")} DESC LIMIT ${MEMORY_GRAPH_LIMIT}`
 	);
+}
+
+/** The additive WHY-EMPTY fields a `built:false` memory-graph response carries (ISS-002). */
+interface MemoryGraphEmptyDetail {
+	readonly reason: MemoryGraphEmptyReason;
+	readonly memoriesScanned?: number;
+	readonly entitiesFound?: number;
+}
+
+/**
+ * Resolve WHY the memory graph is empty (ISS-002 / SP-3 — the closed reason set):
+ *
+ *   1. `graph_off`       — the RESOLVED gate probe reads off/undefined. Checked FIRST: with the
+ *                          gate off the tables are expected absent, so even a failed read is not
+ *                          the actionable story — turning the gate on is.
+ *   2. `query_error`     — gate ON and the entities read failed with a REAL error (connection,
+ *                          timeout, or a query error that is NOT the benign missing-table shape,
+ *                          per the heal engine's conservative {@link classifyFailure}).
+ *   3. `no_entities_yet` — gate ON, read ok (or the table merely not created yet) and zero rows:
+ *                          the pipeline simply has not persisted an entity yet. Carries the cheap
+ *                          additive counts (`memoriesScanned` — one guarded COUNT over `memories`,
+ *                          fail-soft to 0 — and `entitiesFound: 0`) so the empty state shows how
+ *                          much source material exists upstream of extraction.
+ */
+async function resolveMemoryGraphEmptyReason(
+	storage: StorageQuery,
+	scope: QueryScope,
+	entitiesResult: QueryResult,
+	graphEnabled?: () => boolean | undefined,
+): Promise<MemoryGraphEmptyDetail> {
+	if (graphEnabled?.() !== true) return { reason: "graph_off" };
+	const benignMissingTable =
+		entitiesResult.kind === "query_error" && classifyFailure(entitiesResult.message) === "missing-table";
+	if (!isOk(entitiesResult) && !benignMissingTable) return { reason: "query_error" };
+	const memTbl = sqlIdent("memories");
+	const countRows = await selectRows(storage, `SELECT COUNT(*) AS n FROM "${memTbl}"`, scope);
+	return { reason: "no_entities_yet", memoriesScanned: toNum(countRows[0]?.n), entitiesFound: 0 };
 }
 
 /** Fetch the rules view (FR-1 / d-AC-1): the org-wide rules, active flag from `status`. */
@@ -1330,7 +1394,8 @@ export function mountDashboardApi(daemon: Daemon, options: MountDashboardOptions
 		memoryGraph.get("/memory-graph", async (c) => {
 			const scope = resolveScope(c);
 			if (scope === null) return c.json(NO_ORG_BODY, 400);
-			return c.json(await fetchMemoryGraphView(storage, scope));
+			// ISS-002: thread the live graph-gate probe so the empty state names its reason.
+			return c.json(await fetchMemoryGraphView(storage, scope, options.memoryGraphGate));
 		});
 	}
 

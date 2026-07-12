@@ -206,8 +206,35 @@ export interface GraphView {
  *
  * The implementation contains NO stub that fakes a populated graph — the foundation is honest about
  * the empty state and never implies a memory graph exists when it does not (041b AC-5).
+ *
+ * ── ISS-002 (WHY-EMPTY honesty, SP-3) ─────────────────────────────────────────
+ * A `built:false` response now ALSO carries an ADDITIVE `reason` from the closed
+ * {@link MemoryGraphEmptyReason} set, so the page (and an operator curl) can tell "the gate is
+ * off" apart from "the gate is on but nothing has been extracted yet" apart from "the read
+ * itself failed". Every pre-ISS-002 field is byte-identical (old hive parses this response with
+ * a bare `.catch` — the shape only GAINS optional fields, never changes or loses one).
  */
-export type MemoryGraphView = GraphView;
+
+/**
+ * WHY a memory-graph response is `built:false` (ISS-002 — the closed set):
+ *   - `graph_off`       — the RESOLVED graph gate is off (env override, vault `graph.enabled`
+ *                          saved false, or memory formation itself off / worker not built);
+ *   - `no_entities_yet` — the gate is ON but zero entity rows exist (nothing extracted or
+ *                          persisted yet — including the not-yet-created-table case);
+ *   - `query_error`     — the entities read FAILED (a real storage/connection error, NOT the
+ *                          benign missing-table case). Previously indistinguishable from empty.
+ */
+export type MemoryGraphEmptyReason = "graph_off" | "no_entities_yet" | "query_error";
+
+/** See the docblock above {@link MemoryGraphEmptyReason} — GraphView plus the additive ISS-002 fields. */
+export interface MemoryGraphView extends GraphView {
+	/** Present ONLY when `built:false`: why the graph is empty (ISS-002, additive). */
+	readonly reason?: MemoryGraphEmptyReason;
+	/** With `no_entities_yet`: how many memories exist to be scanned (cheap COUNT, additive). */
+	readonly memoriesScanned?: number;
+	/** With `no_entities_yet`: how many entity rows the read found (always 0 on this path, additive). */
+	readonly entitiesFound?: number;
+}
 
 /** One org-wide rule in the rules view (FR-6 / a-AC-4). */
 export interface RuleRow {

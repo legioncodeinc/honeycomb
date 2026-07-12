@@ -677,6 +677,76 @@ describe("PRD-041b: fetchMemoryGraphView serves the memory-graph view-model (Gra
 	});
 });
 
+describe("ISS-002: the memory-graph WHY-EMPTY reason (SP-3 — the closed graph_off/no_entities_yet/query_error set)", () => {
+	it("reason=graph_off: the resolved gate probe reads OFF (an empty read, whatever its cause, is not the story)", async () => {
+		const storage = fakeStorage(() => []);
+		const view = await fetchMemoryGraphView(storage, SCOPE_OK, () => false);
+		expect(view.built).toBe(false);
+		expect(view.reason).toBe("graph_off");
+	});
+
+	it("reason=graph_off when the probe is ABSENT or returns undefined (no pipeline worker → no graph writes)", async () => {
+		const storage = fakeStorage(() => []);
+		expect((await fetchMemoryGraphView(storage, SCOPE_OK)).reason).toBe("graph_off");
+		expect((await fetchMemoryGraphView(storage, SCOPE_OK, () => undefined)).reason).toBe("graph_off");
+	});
+
+	it("reason=no_entities_yet: gate ON + zero entity rows, with the additive cheap counts", async () => {
+		const storage = fakeStorage((sql) => {
+			if (/COUNT\(\*\).*FROM\s+"memories"/i.test(sql)) return [{ n: 17 }];
+			return [];
+		});
+		const view = await fetchMemoryGraphView(storage, SCOPE_OK, () => true);
+		expect(view.built).toBe(false);
+		expect(view.reason).toBe("no_entities_yet");
+		expect(view.memoriesScanned).toBe(17);
+		expect(view.entitiesFound).toBe(0);
+	});
+
+	it("reason=no_entities_yet for the benign NOT-YET-CREATED entities table (missing-table ≠ query error)", async () => {
+		const storage: StorageQuery = {
+			async query(sql: string): Promise<QueryResult> {
+				if (/FROM\s+"entities"/i.test(sql)) {
+					return { kind: "query_error", message: 'relation "entities" does not exist', status: 400 };
+				}
+				if (/COUNT\(\*\).*FROM\s+"memories"/i.test(sql)) return { kind: "ok", rows: [{ n: 3 }], durationMs: 1 };
+				return { kind: "ok", rows: [], durationMs: 1 };
+			},
+		};
+		const view = await fetchMemoryGraphView(storage, SCOPE_OK, () => true);
+		expect(view.reason).toBe("no_entities_yet");
+		expect(view.memoriesScanned).toBe(3);
+	});
+
+	it("reason=query_error: gate ON + a REAL entities read failure (previously a silent [])", async () => {
+		const storage = fakeStorage((sql) => {
+			if (/FROM\s+"entities"/i.test(sql)) return "error"; // a 500-class query error, not missing-table
+			return [];
+		});
+		const view = await fetchMemoryGraphView(storage, SCOPE_OK, () => true);
+		expect(view.built).toBe(false);
+		expect(view.reason).toBe("query_error");
+	});
+
+	it("byte-compat: a BUILT graph carries NO reason and the pre-ISS-002 fields are unchanged", async () => {
+		const storage = fakeStorage((sql) => {
+			if (/FROM\s+"entities"/i.test(sql)) return [{ id: "e1", name: "Alex", type: "entity" }];
+			return [];
+		});
+		const view = await fetchMemoryGraphView(storage, SCOPE_OK, () => true);
+		expect(view.built).toBe(true);
+		expect(view.reason).toBeUndefined();
+		expect(view.nodes).toEqual([{ id: "e1", label: "Alex", kind: "entity" }]);
+		expect(view.edges).toEqual([]);
+	});
+
+	it("byte-compat: the built:false shape keeps built/nodes/edges exactly (reason is ADDITIVE)", async () => {
+		const storage = fakeStorage(() => []);
+		const view = await fetchMemoryGraphView(storage, SCOPE_OK, () => false);
+		expect(view).toEqual({ built: false, nodes: [], edges: [], reason: "graph_off" });
+	});
+});
+
 describe("PRD-041b: GET /api/diagnostics/memory-graph endpoint (mirrors /api/graph)", () => {
 	it("AC-1/AC-3: AFTER attach returns the memory-graph view-model (built:true) for a populated ontology", async () => {
 		const { daemon, storage } = makeDaemon(true);
@@ -697,6 +767,25 @@ describe("PRD-041b: GET /api/diagnostics/memory-graph endpoint (mirrors /api/gra
 		const json = (await res.json()) as { built: boolean; nodes: unknown[] };
 		expect(json.built).toBe(false);
 		expect(json.nodes).toHaveLength(0);
+	});
+
+	it("ISS-002: the mount threads memoryGraphGate — an empty ontology with the gate ON reports no_entities_yet", async () => {
+		const { daemon, storage } = makeDaemon(false);
+		mountDashboardApi(daemon, { storage, memoryGraphGate: () => true });
+		const res = await daemon.app.request("/api/diagnostics/memory-graph", { headers: headers() });
+		expect(res.status).toBe(200);
+		const json = (await res.json()) as { built: boolean; reason?: string };
+		expect(json.built).toBe(false);
+		expect(json.reason).toBe("no_entities_yet");
+	});
+
+	it("ISS-002: a gate-less mount (unit daemon) reports graph_off on empty — the honest degraded answer", async () => {
+		const { daemon, storage } = makeDaemon(false);
+		mountDashboardApi(daemon, { storage });
+		const res = await daemon.app.request("/api/diagnostics/memory-graph", { headers: headers() });
+		const json = (await res.json()) as { built: boolean; reason?: string };
+		expect(json.built).toBe(false);
+		expect(json.reason).toBe("graph_off");
 	});
 
 	it("BEFORE attach: the diagnostics group answers the 501 scaffold for the memory-graph path", async () => {
