@@ -252,8 +252,15 @@ export function redactWarmError(err: unknown): string {
  */
 export const EMBED_QUEUE_MAX = 32 as const;
 
-/** Depth of the inference FIFO (queued + running /embed requests). Surfaced on /health. */
-let inferenceDepth = 0;
+/**
+ * FIFO accounting, split so the admission gate matches the documented contract exactly:
+ * `queuedCount` is WAITERS ONLY (admission sheds on it — the cap is on queued, not-yet-running
+ * requests), `runningCount` is the at-most-one inference occupying the runtime. `/health`
+ * surfaces the TOTAL (queued + running) as `queueDepth` — "work in the daemon" — which is the
+ * pre-split meaning its consumers already parse.
+ */
+let queuedCount = 0;
+let runningCount = 0;
 /** The FIFO chain serializing inferences (concurrency 1, with an event-loop yield between). */
 let inferenceChain: Promise<void> = Promise.resolve();
 
@@ -284,9 +291,15 @@ let inferenceChain: Promise<void> = Promise.resolve();
  * the queue, cap, yield, and /health contract above are already worker-shaped and would not change.
  */
 function enqueueEmbed(text: string, env: NodeJS.ProcessEnv): Promise<number[]> | null {
-	if (inferenceDepth >= EMBED_QUEUE_MAX) return null; // shed: the caller 503s "embed queue full".
-	inferenceDepth += 1;
+	// Shed on QUEUED waiters only — the documented cap. The running inference does not consume
+	// queue capacity (it already left the queue), so effective capacity is exactly
+	// EMBED_QUEUE_MAX waiters + 1 running, busy or not.
+	if (queuedCount >= EMBED_QUEUE_MAX) return null; // shed: the caller 503s "embed queue full".
+	queuedCount += 1;
 	const run: Promise<number[]> = inferenceChain.then(async () => {
+		// This waiter is now RUNNING, not queued — hand its slot back to the queue.
+		queuedCount -= 1;
+		runningCount += 1;
 		// Yield one macrotask so a queued /health (or any pending accept) answers between inferences.
 		await new Promise<void>((r) => setImmediate(r));
 		return embed(text, env);
@@ -298,7 +311,7 @@ function enqueueEmbed(text: string, env: NodeJS.ProcessEnv): Promise<number[]> |
 		() => undefined,
 	);
 	return run.finally(() => {
-		inferenceDepth -= 1;
+		runningCount -= 1;
 	});
 }
 
@@ -389,8 +402,8 @@ export async function startEmbedDaemon(
 						// ISS-007 additive load signals (no secret — two numbers/bools): whether an inference
 						// is queued/running right now, and how deep the FIFO is. The supervisor treats any
 						// 200 as live; these exist for doctor/dashboard glanceability.
-						busy: inferenceDepth > 0,
-						queueDepth: inferenceDepth,
+						busy: queuedCount + runningCount > 0,
+						queueDepth: queuedCount + runningCount,
 						...embedDaemonInfo(),
 					});
 					return;
@@ -463,7 +476,8 @@ export function __resetForTest(): void {
 	warming = null;
 	loadTransformers = defaultLoadTransformers;
 	// ISS-007: reset the inference FIFO so a suite's shed/depth assertions start clean.
-	inferenceDepth = 0;
+	queuedCount = 0;
+	runningCount = 0;
 	inferenceChain = Promise.resolve();
 }
 

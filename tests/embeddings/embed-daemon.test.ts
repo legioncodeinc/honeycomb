@@ -379,8 +379,10 @@ describe("ISS-007: /health answers while an inference is in flight (never behind
 			return { data: new Float32Array(EMBED_DIMS).fill(0.01) };
 		});
 
-		// Fill the FIFO to its cap with blocked embeds…
-		const inFlight = Array.from({ length: EMBED_QUEUE_MAX }, (_, i) =>
+		// Fill the FIFO to its cap: ONE dequeues into the blocked inference (running, no longer
+		// consuming queue capacity) + EMBED_QUEUE_MAX waiters — the documented queued-only cap,
+		// so total admitted capacity is exactly EMBED_QUEUE_MAX + 1 (Aikido #301 Critical).
+		const inFlight = Array.from({ length: EMBED_QUEUE_MAX + 1 }, (_, i) =>
 			fetch(`${url}/embed`, {
 				method: "POST",
 				headers: { "content-type": "application/json" },
