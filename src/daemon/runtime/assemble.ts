@@ -204,6 +204,7 @@ import {
 	resolvePipelineConfig,
 	type StageWorker,
 	type StageWorkerLogger,
+	withExtractionErrorTracking,
 } from "./pipeline/index.js";
 import type { ModelClient } from "./pipeline/model-client.js";
 import { mountPollinateApi } from "./pollinating/api.js";
@@ -2736,11 +2737,19 @@ async function buildPipelineWorker(
 
 	// The real stage handlers, CHAINED via the fan-out enqueuers (045a). Each stage's
 	// optional forward seam is wired to enqueue the next stage's job onto the same queue.
+	// ISS-005 (extraction failure visibility): decorate the extraction logger so every swallowed
+	// `extraction.model_error` (the stage catches the model throw, returns EMPTY, and the job
+	// completes "done" — behavior deliberately unchanged) ALSO increments the memory-formation
+	// tracker's `extractionErrorsSinceBoot`, surfaced on `/health` beside `committedSinceBoot`.
+	// Without a tracker (bare test assembly) the plain logger is passed through unchanged.
+	const extractionLogger =
+		memoryFormation !== undefined ? withExtractionErrorTracking(memoryFormation, logger) : logger;
+
 	const handlers = createPipelineHandlers({
 		// Wire the extraction stage's logger so a swallowed model-call failure (extraction.model_error)
 		// or unparseable output is VISIBLE — otherwise "jobs complete, nothing hits the LLM, no facts"
 		// is a silent dead end. Structurally an ExtractionLogger (same { event } shape).
-		extraction: { config, model, logger, onResult: extractionFanOut(queue) },
+		extraction: { config, model, logger: extractionLogger, onResult: extractionFanOut(queue) },
 		decision: {
 			storage,
 			scope: queryScope,

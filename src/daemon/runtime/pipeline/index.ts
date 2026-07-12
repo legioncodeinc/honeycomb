@@ -99,9 +99,11 @@ export { controlledWriteFanOut, decisionFanOut, extractionFanOut } from "./fan-o
 // ── Memory-formation observability (the glanceable "are memories committing?" signal) ──
 export {
 	createMemoryFormationTracker,
+	type ExtractionEventSink,
 	type MemoryFormationOutcome,
 	type MemoryFormationSnapshot,
 	type MemoryFormationTracker,
+	withExtractionErrorTracking,
 } from "./memory-formation.js";
 
 // ── Wave-2 stage stubs (now filled — 045a wires + chains them) ────────────────

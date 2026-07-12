@@ -154,10 +154,40 @@ describe("AC-2 /health detail NAMES the down subsystem, not a bare degraded", ()
 			committedSinceBoot: 3,
 			lastCommittedAt: "2026-07-05T23:15:04.611Z",
 			lastAction: "inserted",
+			// ISS-005: always emitted beside committedSinceBoot; a legacy input without it → 0.
+			extractionErrorsSinceBoot: 0,
 		});
 		// Fresh daemon, nothing formed yet → zero (the glanceable "stalled?" symptom), no last-* fields.
 		const zero = buildHealthDetail({ status: "ok", embeddingsEnabled: true, memoryFormation: { committedSinceBoot: 0 } });
-		expect(zero.reasons?.memoryFormation).toEqual({ committedSinceBoot: 0 });
+		expect(zero.reasons?.memoryFormation).toEqual({ committedSinceBoot: 0, extractionErrorsSinceBoot: 0 });
+	});
+
+	// ISS-005 (extraction failure visibility): the swallowed-model-error counter + last-error detail
+	// travel beside committedSinceBoot, so "jobs done, zero memories" is diagnosable from /health.
+	it("memory-formation: extractionErrorsSinceBoot + last-error detail pass through (ISS-005)", () => {
+		const detail = buildHealthDetail({
+			status: "ok",
+			embeddingsEnabled: true,
+			memoryFormation: {
+				committedSinceBoot: 0,
+				extractionErrorsSinceBoot: 373,
+				lastExtractionError: "portkey transport: gateway returned status 401",
+				lastExtractionErrorAt: "2026-07-11T09:00:00.000Z",
+			},
+		});
+		expect(detail.reasons?.memoryFormation).toEqual({
+			committedSinceBoot: 0,
+			extractionErrorsSinceBoot: 373,
+			lastExtractionError: "portkey transport: gateway returned status 401",
+			lastExtractionErrorAt: "2026-07-11T09:00:00.000Z",
+		});
+		// Normalization: a NaN/negative count never reaches the wire as null/negative.
+		const bad = buildHealthDetail({
+			status: "ok",
+			embeddingsEnabled: true,
+			memoryFormation: { committedSinceBoot: 0, extractionErrorsSinceBoot: Number.NaN },
+		});
+		expect(bad.reasons?.memoryFormation?.extractionErrorsSinceBoot).toBe(0);
 	});
 
 	it("memoryQueue: omitted when unwired; 'local' healthy / 'shared' degraded when wired", () => {

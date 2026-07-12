@@ -486,6 +486,18 @@ export function buildHealthDetail(inputs: HealthDetailInputs): HealthDetail {
 						...(inputs.memoryFormation.lastAction !== undefined
 							? { lastAction: inputs.memoryFormation.lastAction }
 							: {}),
+						// ISS-005 (extraction failure visibility): swallowed extraction model errors since
+						// boot, ALWAYS emitted beside committedSinceBoot (a legacy input without it
+						// normalizes to 0) so "jobs done, zero memories" is diagnosable at a glance. The
+						// last-error string is the stage's capped, key-free reason (a transport status
+						// line, never a body/credential) + its timestamp — passthrough when present.
+						extractionErrorsSinceBoot: nonNegativeInt(inputs.memoryFormation.extractionErrorsSinceBoot ?? 0),
+						...(inputs.memoryFormation.lastExtractionError !== undefined
+							? { lastExtractionError: inputs.memoryFormation.lastExtractionError }
+							: {}),
+						...(inputs.memoryFormation.lastExtractionErrorAt !== undefined
+							? { lastExtractionErrorAt: inputs.memoryFormation.lastExtractionErrorAt }
+							: {}),
 					},
 				}
 			: {}),
