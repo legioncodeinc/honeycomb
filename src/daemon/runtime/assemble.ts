@@ -3761,8 +3761,16 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// CLI), and every handler returns a clean 400/200 rather than a 500.
 	try {
 		mountOnboardingApi(daemon, {
-			org: scope.org,
-			workspace: scope.workspace ?? "",
+			// ISS-003 (stale tenancy): `org`/`workspace` are GETTERS over the daemon's LIVE `scope`
+			// (itself mtime-gated over `~/.deeplake/credentials.json`), so every bind/unbind reads the
+			// tenancy AT REQUEST TIME. The previous `org: scope.org` snapshot froze the BOOT strings —
+			// a workspace/org switch after boot kept landing binds under the OLD tenant until restart.
+			get org(): string {
+				return scope.org;
+			},
+			get workspace(): string {
+				return scope.workspace ?? "";
+			},
 			// PRD-062 FIX 1: persist a bound project into the Deeplake `projects` registry (best-effort).
 			storage,
 			// PRD-062 FIX 3: invalidate the shared projects view cache so a fresh bind shows immediately.
