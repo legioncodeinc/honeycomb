@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.17.0 — 2026-07-12
+
+Provider/API key and settings changes (e.g. memory toggle, model selection, Portkey config) now take effect live via an in-process reload instead of requiring a daemon restart, and project onboarding binds correctly track workspace/org switches after boot.
+
 ## v0.16.0 — 2026-07-12
 
 Improves recall and health reliability when the local embeddings model becomes unresponsive: `/health` now reports a live, honest embeddings state (including a new 'suspect' status) instead of falsely reporting 'on', and semantic recall automatically skips embedding attempts and falls back to lexical search when the embedder isn't warm, avoiding slow timeouts.
