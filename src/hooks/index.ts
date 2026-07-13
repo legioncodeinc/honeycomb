@@ -83,6 +83,7 @@ export {
 	CODEX_LOGIN_LINE,
 	CODEX_REFERENCES,
 	CODEX_RUNTIME_PATH,
+	codexRenderHookResponse,
 	codexRenderUserVisible,
 	codexSessionStartSetup,
 	createCodexShim,

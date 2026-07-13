@@ -210,6 +210,19 @@ export interface HarnessShim {
 	renderContext(block: string, extras?: { readonly systemMessage?: string }): ContextEnvelope;
 
 	/**
+	 * OPTIONAL host-native stdout renderer for hook binaries whose response schema
+	 * cannot accept the shared {@link ContextEnvelope} directly. The shared binary
+	 * passes the native event name so the shim can stamp the host's required
+	 * event-specific discriminator. Returning `undefined` keeps the shared envelope
+	 * fallback for events the shim does not override.
+	 */
+	renderHookResponse?(
+		nativeEventName: string,
+		block: string,
+		extras?: { readonly systemMessage?: string },
+	): unknown | undefined;
+
+	/**
 	 * OPTIONAL: hand the session-start hygiene pulls (skills / assets / graph) to a
 	 * DETACHED CHILD process so the parent hook binary does no in-process hygiene I/O
 	 * and can exit promptly after writing its response. When a shim implements this,

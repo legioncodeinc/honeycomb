@@ -48,6 +48,31 @@ export const codexHooksFile = z
 
 export type CodexHooksFile = z.infer<typeof codexHooksFile>;
 
+/**
+ * Codex `SessionStart` JSON stdout contract.
+ *
+ * Codex rejects unknown top-level fields, so a generic channel envelope such as
+ * `{ channel: "user-visible", text: "..." }` is not a valid hook response even
+ * though it is valid JSON. Context must ride under the event-specific wrapper.
+ */
+export const codexSessionStartOutput = z
+	.object({
+		continue: z.boolean().optional(),
+		stopReason: z.string().optional(),
+		suppressOutput: z.boolean().optional(),
+		systemMessage: z.string().optional(),
+		hookSpecificOutput: z
+			.object({
+				hookEventName: z.literal("SessionStart"),
+				additionalContext: z.string().optional(),
+			})
+			.strict()
+			.optional(),
+	})
+	.strict();
+
+export type CodexSessionStartOutput = z.infer<typeof codexSessionStartOutput>;
+
 const EVENT_SET: ReadonlySet<string> = new Set(CODEX_EVENT_NAMES);
 
 export function isCodexEvent(name: string): boolean {
@@ -65,4 +90,8 @@ export function assertCodexHooksConform(config: unknown): CodexHooksFile {
 		}
 	}
 	return parsed;
+}
+
+export function assertCodexSessionStartOutput(output: unknown): CodexSessionStartOutput {
+	return codexSessionStartOutput.parse(output);
 }

@@ -99,7 +99,7 @@ export async function runHookBinary(options: RunHookBinaryOptions): Promise<Hook
 
 	const meta = deriveMeta(native.raw);
 	const outcome = await runtime.runEvent(options.shim, native.event, meta);
-	emitResponse(io, options.shim, outcome);
+	emitResponse(io, options.shim, outcome, native.event.name);
 	return outcome;
 }
 
@@ -190,7 +190,7 @@ function str(raw: Record<string, unknown>, ...keys: readonly string[]): string |
  *   3. otherwise → an empty `{}` acknowledgement.
  * Never throws.
  */
-function emitResponse(io: BinaryIo, shim: HarnessShim, outcome: HookEventOutcome): void {
+function emitResponse(io: BinaryIo, shim: HarnessShim, outcome: HookEventOutcome, nativeEventName?: string): void {
 	try {
 		if (outcome.decision !== undefined && hasPreToolRenderer(shim)) {
 			const rendered = shim.renderPreTool(outcome.decision);
@@ -210,7 +210,10 @@ function emitResponse(io: BinaryIo, shim: HarnessShim, outcome: HookEventOutcome
 			// or is ignored (the session-start prime stays byte-identical — a-AC-8). Absent →
 			// `renderContext(block, undefined)` is envelope-identical to the prior single-arg call.
 			const systemMessage = outcome.result.systemMessage;
-			const envelope = shim.renderContext(block, systemMessage !== undefined ? { systemMessage } : undefined);
+			const extras = systemMessage !== undefined ? { systemMessage } : undefined;
+			const nativeResponse =
+				nativeEventName !== undefined ? shim.renderHookResponse?.(nativeEventName, block, extras) : undefined;
+			const envelope = nativeResponse ?? shim.renderContext(block, extras);
 			io.writeStdout(JSON.stringify(envelope));
 			return;
 		}

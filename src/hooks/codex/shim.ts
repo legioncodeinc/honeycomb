@@ -78,6 +78,22 @@ export function codexRenderUserVisible(block: string): string {
 	return block.trim() === "" ? "honeycomb: read-only (run `honeycomb login`)" : CODEX_LOGIN_LINE;
 }
 
+/** Render Codex's strict, event-specific JSON stdout contract for SessionStart. */
+export function codexRenderHookResponse(
+	nativeEventName: string,
+	block: string,
+	extras?: { readonly systemMessage?: string },
+): unknown | undefined {
+	if (nativeEventName !== "SessionStart") return undefined;
+	return {
+		hookSpecificOutput: {
+			hookEventName: "SessionStart",
+			additionalContext: codexRenderUserVisible(block),
+		},
+		...(extras?.systemMessage !== undefined ? { systemMessage: extras.systemMessage } : {}),
+	};
+}
+
 /**
  * Lower a Codex native payload into the CANONICAL normalized data (c-AC-1). Codex's
  * field names mirror Claude Code's hook shape, but the Bash-ONLY rule lives here: a
@@ -97,7 +113,11 @@ export function codexExtractData(raw: unknown, logical: LogicalEvent): unknown |
 			return preToolData("Bash", { command: pickString(raw, "command") || undefined });
 		}
 		case "tool_call":
-			return toolCallData(pickString(raw, "tool_name", "tool"), nested(raw, "tool_input"), nested(raw, "tool_response"));
+			return toolCallData(
+				pickString(raw, "tool_name", "tool"),
+				nested(raw, "tool_input"),
+				nested(raw, "tool_response"),
+			);
 		case "assistant_message":
 			return assistantMessageData(pickString(raw, "text", "message"));
 		default:
@@ -115,6 +135,7 @@ export function createCodexShim(): HarnessShim {
 		references: CODEX_REFERENCES,
 		eventMap: CODEX_EVENT_MAP,
 		renderUserVisible: codexRenderUserVisible,
+		renderHookResponse: codexRenderHookResponse,
 		extractData(raw: unknown, logical: LogicalEvent, _meta: HookSessionMeta): unknown | undefined {
 			void _meta;
 			return codexExtractData(raw, logical);

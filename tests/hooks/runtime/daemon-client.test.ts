@@ -14,7 +14,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createClaudeCodeShim } from "../../../src/hooks/claude-code/shim.js";
 import {
@@ -136,6 +136,34 @@ describe("c-AC-1 production DaemonHookClient: native event → shim → core →
 		const daemon = createDaemonHookClient({ credentials, fetch: fn });
 		const res = await daemon.send({ endpoint: "capture", body: {}, meta: META, runtimePath: "legacy" });
 		expect(res.status).toBe(0);
+	});
+
+	it("aborts a stalled daemon request before the host hook timeout and fails soft", async () => {
+		vi.useFakeTimers();
+		try {
+			let observedSignal: AbortSignal | undefined;
+			const stalledFetch = ((_url: string | URL | Request, init?: RequestInit) => {
+				observedSignal = init?.signal ?? undefined;
+				return new Promise<Response>((_resolve, reject) => {
+					observedSignal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), {
+						once: true,
+					});
+				});
+			}) as typeof fetch;
+			const daemon = createDaemonHookClient({
+				credentials: createFakeCredentialReader(undefined),
+				fetch: stalledFetch,
+				timeoutMs: 50,
+			});
+
+			const response = daemon.send({ endpoint: "capture", body: {}, meta: META, runtimePath: "legacy" });
+			await vi.advanceTimersByTimeAsync(50);
+
+			expect((await response).status).toBe(0);
+			expect(observedSignal?.aborted).toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("an unscoped (signed-out) credential sends NO tenancy headers and does not enrich the body", async () => {

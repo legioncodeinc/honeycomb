@@ -12,6 +12,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 
+import { assertCodexSessionStartOutput } from "../../../references/codex/hooks-schema.js";
 import { createClaudeCodeShim } from "../../../src/hooks/claude-code/shim.js";
 import { createCodexShim } from "../../../src/hooks/codex/shim.js";
 import { createCursorShim } from "../../../src/hooks/cursor/shim.js";
@@ -424,6 +425,25 @@ describe("c-AC-5 claude-code binary: native stdin event drives the runtime (shim
 		const envelope = JSON.parse(surface.out[0]) as { channel: string; additionalContext: string };
 		expect(envelope.channel).toBe("model-only");
 		expect(envelope.additionalContext).toBe(`RULES: be concise.\n\n${RECALL_AWARENESS_NOTICE}`);
+	});
+
+	it("codex SessionStart emits the host's hookSpecificOutput response schema", async () => {
+		const { client } = recordingClient(200, { additionalContext: "RULES: be concise." });
+		const runtime = createHookRuntime({
+			onboardingNotice: NOTICE_BOUND,
+			daemon: client,
+			notifications: recordingPipeline(null),
+			prime: createFakePrimeRenderer(""),
+		});
+		const surface = io(JSON.stringify({ hook_event_name: "SessionStart", session_id: "s", source: "startup" }));
+		await runHookBinary({ shim: createCodexShim(), runtime, io: surface });
+
+		expect(surface.out).toHaveLength(1);
+		const response = assertCodexSessionStartOutput(JSON.parse(surface.out[0]));
+		expect(response.hookSpecificOutput).toEqual({
+			hookEventName: "SessionStart",
+			additionalContext: "honeycomb: signed in — memory recall active",
+		});
 	});
 
 	it("malformed stdin exits cleanly with an empty response (fail-soft, never a throw)", async () => {
