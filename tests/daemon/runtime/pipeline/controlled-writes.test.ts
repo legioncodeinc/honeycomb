@@ -150,7 +150,7 @@ describe("c-AC-1: ADD gated by confidence + non-empty + hash-not-present", () =>
 	it("c-AC-1 SKIPS an ADD below the confidence threshold (no probe, no insert)", async () => {
 		const { storage, requests } = storageWith(noRows);
 		const embed = recordingEmbed();
-		// Default threshold is 0.7; a 0.5 fact must not write.
+		// Default threshold is 0.8 (ISS-025); a 0.5 fact must not write.
 		const out = await applyControlledWrite(
 			input({ factConfidence: 0.5 }),
 			SCOPE,

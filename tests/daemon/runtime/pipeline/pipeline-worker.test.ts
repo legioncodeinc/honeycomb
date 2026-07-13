@@ -195,6 +195,9 @@ function enabledConfig() {
 		enabled: true,
 		extractionProvider: "fake",
 		minFactConfidenceForWrite: 0.5,
+		// minFactChars: 0 — the canned end-to-end fact is short; the ISS-025 substance
+		// floor has its own coverage in extraction.test.ts.
+		extraction: { minFactChars: 0 },
 		graph: { enabled: true, extractionWritesEnabled: true },
 		autonomous: { enabled: true },
 	});

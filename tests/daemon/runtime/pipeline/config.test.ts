@@ -42,9 +42,12 @@ describe("pipeline config defaults are false-safe (a missing flag is OFF)", () =
 		expect(c.autonomous).toEqual({ enabled: false, frozen: false, allowUpdateDelete: false });
 		expect(c.graph).toEqual({ enabled: false, extractionWritesEnabled: false });
 		expect(c.extraction.inputCharCap).toBe(DEFAULT_INPUT_CHAR_CAP);
-		expect(c.extraction.maxFacts).toBe(20);
+		// ISS-025 richer-memory defaults: few consolidated memories per event, longer
+		// content ceiling, a substance floor under which fragments never write.
+		expect(c.extraction.maxFacts).toBe(4);
 		expect(c.extraction.maxEntities).toBe(50);
-		expect(c.extraction.maxFactChars).toBe(500);
+		expect(c.extraction.maxFactChars).toBe(2_000);
+		expect(c.extraction.minFactChars).toBe(80);
 		expect(c.retention.batchLimit).toBe(500);
 	});
 });

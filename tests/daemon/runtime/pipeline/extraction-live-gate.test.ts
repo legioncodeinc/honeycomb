@@ -33,7 +33,9 @@ const EXTRACTION_JSON = '{"facts":[{"content":"x","type":"fact","confidence":0.9
 
 /** A config whose `extractionProvider` is exactly as given (enabled defaults true here). */
 function cfg(extractionProvider: string, enabled = true): ReturnType<typeof PipelineConfigSchema.parse> {
-	return PipelineConfigSchema.parse({ enabled, extractionProvider });
+	// minFactChars: 0 — this suite's canned fact is deliberately tiny ("x"); the
+	// ISS-025 substance floor has its own coverage in extraction.test.ts.
+	return PipelineConfigSchema.parse({ enabled, extractionProvider, extraction: { minFactChars: 0 } });
 }
 
 /** A live gate over a mutable secret-name set + a manual clock. */

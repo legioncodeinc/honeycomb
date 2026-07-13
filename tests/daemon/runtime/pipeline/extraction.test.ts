@@ -42,11 +42,16 @@ import {
 } from "../../../../src/shared/memory-types.js";
 
 // ── Config fixture: extraction ENABLED with the D-1 caps (override per test). ──
+// The ISS-025 substance floor (`minFactChars`) defaults to 0 here so the suite's
+// deliberately-short canned facts keep exercising the parse/validate/cap paths;
+// the floor has its own dedicated tests below.
 function enabledConfig(overrides: Record<string, unknown> = {}): PipelineConfig {
+	const extraction = (overrides.extraction ?? {}) as Record<string, unknown>;
 	return PipelineConfigSchema.parse({
 		enabled: true,
 		extractionProvider: "fake-router",
 		...overrides,
+		extraction: { minFactChars: 0, ...extraction },
 	});
 }
 
@@ -145,8 +150,8 @@ describe("a-AC-2 oversized input → capped ~12,000 chars before the model call"
 	});
 });
 
-describe("a-AC-3 oversized result → bounded ≤20 facts / ≤50 entities + per-fact length", () => {
-	it("feeds 30 facts and 60 entities → keeps exactly 20 / 50", async () => {
+describe("a-AC-3 oversized result → bounded to maxFacts / maxEntities + per-fact length", () => {
+	it("feeds 30 facts and 60 entities → keeps exactly maxFacts / maxEntities", async () => {
 		const facts = Array.from({ length: 30 }, (_, i) => ({
 			content: `fact number ${i}`,
 			type: "fact",
@@ -159,10 +164,25 @@ describe("a-AC-3 oversized result → bounded ≤20 facts / ≤50 entities + per
 		}));
 		const model = createFakeModelClient({ memory_extraction: JSON.stringify({ facts, entities }) });
 
-		const result = await extractFromText("raw", enabledConfig(), model);
+		const result = await extractFromText(
+			"raw",
+			enabledConfig({ extraction: { maxFacts: 20, maxEntities: 50 } }),
+			model,
+		);
 
 		expect(result.facts).toHaveLength(20);
 		expect(result.entities).toHaveLength(50);
+	});
+
+	it("ISS-025: the default maxFacts keeps only 4 per extraction", async () => {
+		const facts = Array.from({ length: 10 }, (_, i) => ({
+			content: `fact number ${i}`,
+			type: "fact",
+			confidence: 0.8,
+		}));
+		const model = createFakeModelClient({ memory_extraction: JSON.stringify({ facts, entities: [] }) });
+		const result = await extractFromText("raw", enabledConfig(), model);
+		expect(result.facts).toHaveLength(4);
 	});
 
 	it("length-caps each fact's content to maxFactChars", async () => {
@@ -178,6 +198,49 @@ describe("a-AC-3 oversized result → bounded ≤20 facts / ≤50 entities + per
 
 		expect(result.facts).toHaveLength(1);
 		expect(result.facts[0].content.length).toBe(500);
+	});
+});
+
+describe("ISS-025 substance floor — fragments below minFactChars never write", () => {
+	const substantial =
+		"Decision: the-apiary desktop shell spawns all fleet daemons with the bundled sidecar Node as execPath " +
+		"because Electron's own Node breaks the embed daemon's self-spawn (see honeycomb daemon/runtime).";
+
+	it("drops facts below the floor, keeps substantial ones, counts the drops", async () => {
+		const body = JSON.stringify({
+			facts: [
+				{ content: "Test runner is vitest", type: "fact", confidence: 0.9 }, // fragment → dropped
+				{ content: substantial, type: "decision", confidence: 0.9 }, // substantial → kept
+			],
+			entities: [],
+		});
+		const model = createFakeModelClient({ memory_extraction: body });
+		const result = await extractFromText("raw", enabledConfig({ extraction: { minFactChars: 80 } }), model);
+		expect(result.facts).toHaveLength(1);
+		expect(result.facts[0].content).toBe(substantial);
+		expect(result.droppedCount).toBe(1);
+	});
+
+	it("measures the floor on TRIMMED content (whitespace cannot smuggle a fragment past)", async () => {
+		const padded = `   short note${" ".repeat(200)}`;
+		const body = JSON.stringify({
+			facts: [{ content: padded, type: "fact", confidence: 0.9 }],
+			entities: [],
+		});
+		const model = createFakeModelClient({ memory_extraction: body });
+		const result = await extractFromText("raw", enabledConfig({ extraction: { minFactChars: 80 } }), model);
+		expect(result.facts).toHaveLength(0);
+		expect(result.droppedCount).toBe(1);
+	});
+
+	it("minFactChars: 0 disables the floor (the fixture posture used across this suite)", async () => {
+		const body = JSON.stringify({
+			facts: [{ content: "tiny", type: "fact", confidence: 0.9 }],
+			entities: [],
+		});
+		const model = createFakeModelClient({ memory_extraction: body });
+		const result = await extractFromText("raw", enabledConfig(), model);
+		expect(result.facts).toHaveLength(1);
 	});
 });
 
@@ -294,6 +357,18 @@ describe("extraction-type binding — the prompt instructs the closed six-token 
 		// The JSON-shape hint reads as the closed set, not a free-form string.
 		expect(prompt).toContain(`one of ${MEMORY_TYPES.join("|")}`);
 	});
+
+	it("ISS-025: the prompt demands consolidated, durable memories and permits an empty answer", () => {
+		const prompt = buildExtractionPrompt("some captured memory text", 4);
+		// The per-extraction budget is interpolated from config, not a drifting literal.
+		expect(prompt).toContain("AT MOST 4 memories");
+		// The three quality demands + the skip-trivia posture ride every extraction.
+		expect(prompt).toContain("CONSOLIDATED");
+		expect(prompt).toContain("SELF-CONTAINED");
+		expect(prompt).toContain("DURABLE");
+		expect(prompt).toContain("ephemeral run results");
+		expect(prompt).toContain("zero memories is the CORRECT answer");
+	});
 });
 
 describe("extraction-type binding — an off-enum model type flows to a VALID fan-out fact_type", () => {
@@ -325,7 +400,7 @@ describe("extraction-type binding — an off-enum model type flows to a VALID fa
 			entities: [],
 		});
 		const model = createFakeModelClient({ memory_extraction: body });
-		const config = PipelineConfigSchema.parse({ enabled: true, extractionProvider: "fake-router" });
+		const config = PipelineConfigSchema.parse({ enabled: true, extractionProvider: "fake-router", extraction: { minFactChars: 0 } });
 
 		const result = await extractFromText("raw", config, model);
 		expect(result.facts).toHaveLength(1); // KEPT, not dropped.
@@ -354,7 +429,7 @@ describe("extraction-type binding — an off-enum model type flows to a VALID fa
 			entities: [],
 		});
 		const model = createFakeModelClient({ memory_extraction: body });
-		const config = PipelineConfigSchema.parse({ enabled: true, extractionProvider: "fake-router" });
+		const config = PipelineConfigSchema.parse({ enabled: true, extractionProvider: "fake-router", extraction: { minFactChars: 0 } });
 
 		const result = await extractFromText("raw", config, model);
 		expect(result.facts[0].type).toBe("convention");

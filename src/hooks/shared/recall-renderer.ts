@@ -66,8 +66,14 @@ export const DEFAULT_RECALL_TIMEOUT_MS = 6_000;
 /** The default per-turn hit `limit` - small, because this injects on every turn (recall cadence open question). */
 export const DEFAULT_RECALL_LIMIT = 5;
 
-/** The default per-turn `tokenBudget` - small, to protect the turn's token budget + prompt-cache stability. */
-export const DEFAULT_RECALL_TOKEN_BUDGET = 600;
+/**
+ * The default per-turn `tokenBudget` - small, to protect the turn's token budget + prompt-cache
+ * stability. ISS-025: 600 → 1200. Memories are now consolidated, self-contained notes (the
+ * extraction defaults allow ~500 tokens each) instead of one-line fragments; at 600 a single
+ * full-size memory exhausted the budget. 1200 carries 2 substantial or 4-5 medium memories,
+ * still bounded well below the cost of the trivia-flood this replaces.
+ */
+export const DEFAULT_RECALL_TOKEN_BUDGET = 1_200;
 
 /**
  * ISS-024: the minimum fused RRF score a hit must carry to be INJECTED per-turn.

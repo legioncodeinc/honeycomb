@@ -47,14 +47,39 @@ import { BoolFlag } from "../../../shared/bool-flag.js";
 // ── D-1 extraction caps + write threshold ──────────────────────────────────────
 /** Input cap before the extraction model call (D-1 / a-AC-2 / FR-6). */
 export const DEFAULT_INPUT_CHAR_CAP = 12_000;
-/** Max facts kept from one extraction (D-1 / a-AC-3 / FR-7). */
-export const DEFAULT_MAX_FACTS = 20;
+/**
+ * Max facts kept from one extraction (D-1 / a-AC-3 / FR-7).
+ *
+ * ISS-025: 20 → 4. Extraction runs PER CAPTURED EVENT, so 20-per-event minted a
+ * flood of atomic one-liners (live-observed: a 60+-row "the test runner is vitest"
+ * duplicate cluster from one working day). A tight per-event cap forces the model
+ * to keep only what is genuinely worth remembering — the prompt (extraction.ts)
+ * pairs this with consolidate/skip-trivia instructions.
+ */
+export const DEFAULT_MAX_FACTS = 4;
 /** Max entity triples kept from one extraction (D-1 / a-AC-3 / FR-7). */
 export const DEFAULT_MAX_ENTITIES = 50;
-/** Per-fact content length cap (D-1 / a-AC-3 / FR-7). */
-export const DEFAULT_MAX_FACT_CHARS = 500;
-/** ADD confidence gate (D-1 / 006c c-AC-1). */
-export const DEFAULT_MIN_FACT_CONFIDENCE = 0.7;
+/**
+ * Per-fact content length cap (D-1 / a-AC-3 / FR-7).
+ *
+ * ISS-025: 500 → 2000 (~500 tokens). Memories are meant to be consolidated,
+ * self-contained notes (context + what + why), not clipped one-liners; 500 chars
+ * forced fragmentation. The recall injection budget bounds per-turn cost, so a
+ * longer stored memory never blows up the hook path.
+ */
+export const DEFAULT_MAX_FACT_CHARS = 2_000;
+/**
+ * ISS-025: the per-fact substance FLOOR — a fact shorter than this many chars is
+ * dropped at extraction (it cannot carry context + what + why, so it is exactly
+ * the "test runner is vitest" fragment class that polluted recall). `0` disables.
+ */
+export const DEFAULT_MIN_FACT_CHARS = 80;
+/**
+ * ADD confidence gate (D-1 / 006c c-AC-1). ISS-025: 0.7 → 0.8 — the prompt now
+ * defines confidence as "true AND worth recalling in future sessions", so the
+ * gate leans selective (models self-grade generously).
+ */
+export const DEFAULT_MIN_FACT_CONFIDENCE = 0.8;
 
 // ── D-5 retention windows (ms) + batch ─────────────────────────────────────────
 /** Per-run retention batch row limit (D-5 / 006e e-AC-1 / e-AC-6). */
@@ -134,6 +159,8 @@ export const ExtractionConfigSchema = z.object({
 	maxEntities: ClampedInt(DEFAULT_MAX_ENTITIES).default(DEFAULT_MAX_ENTITIES),
 	/** Per-fact content length cap (a-AC-3 / FR-7). */
 	maxFactChars: ClampedInt(DEFAULT_MAX_FACT_CHARS).default(DEFAULT_MAX_FACT_CHARS),
+	/** Per-fact substance floor in chars (ISS-025); shorter facts are dropped. `0` disables. */
+	minFactChars: ClampedInt(DEFAULT_MIN_FACT_CHARS, 0).default(DEFAULT_MIN_FACT_CHARS),
 });
 
 /** Retention windows + batch cap (D-5), grouped so the retention stage reads one object. */
@@ -237,6 +264,7 @@ export interface RawPipelineConfig {
 		readonly maxFacts?: unknown;
 		readonly maxEntities?: unknown;
 		readonly maxFactChars?: unknown;
+		readonly minFactChars?: unknown;
 	};
 	readonly retention?: {
 		readonly batchLimit?: unknown;
@@ -278,6 +306,7 @@ export function envPipelineConfigProvider(env: NodeJS.ProcessEnv = process.env):
 					maxFacts: env.HONEYCOMB_PIPELINE_MAX_FACTS,
 					maxEntities: env.HONEYCOMB_PIPELINE_MAX_ENTITIES,
 					maxFactChars: env.HONEYCOMB_PIPELINE_MAX_FACT_CHARS,
+					minFactChars: env.HONEYCOMB_PIPELINE_MIN_FACT_CHARS,
 				},
 				retention: {
 					batchLimit: env.HONEYCOMB_PIPELINE_RETENTION_BATCH_LIMIT,

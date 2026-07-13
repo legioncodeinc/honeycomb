@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.21.0 — 2026-07-13
+
+Memory formation now produces fewer, richer memories. The extraction prompt asks for consolidated, self-contained notes (context + what + why) instead of discrete facts, keeps at most 4 per captured event (was 20), allows each memory up to 2,000 characters (was 500), drops fragments under a configurable substance floor (default 80 characters, `HONEYCOMB_PIPELINE_MIN_FACT_CHARS`), and explicitly skips ephemeral trivia — run results, one-off command outcomes, tool-choice restatements. The write-confidence gate rises to 0.8, and the per-turn recall injection budget doubles to 1,200 tokens so substantial memories fit.
+
 ## v0.20.1 — 2026-07-13
 
 Per-turn memory injection now applies a relevance gate: raw captured-session dumps are excluded from prompt injection (they remain available via explicit recall, the dashboard, and MCP tools), and hits below a minimum fused relevance score no longer inject. This stops low-signal noise — duplicate trivia and raw tool-call traces — from riding into the model's context on every turn.

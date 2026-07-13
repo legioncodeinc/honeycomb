@@ -41,7 +41,7 @@ import {
 	parseEntityTriple,
 	parseFact,
 } from "./contracts.js";
-import { type PipelineConfig, isExtractionEnabled } from "./config.js";
+import { DEFAULT_MAX_FACTS, type PipelineConfig, isExtractionEnabled } from "./config.js";
 import type { ExtractionGateProbe } from "./reload.js";
 import { type ModelClient } from "./model-client.js";
 import type { StageHandler, StageJob } from "./stage-worker.js";
@@ -178,8 +178,10 @@ function balanceBraces(text: string): string | null {
 /**
  * Validate + bound the raw `facts` array from the parsed JSON (a-AC-3 / a-AC-4 /
  * FR-7 / FR-8). Validates each item via {@link parseFact}, drops the invalid ones,
- * length-caps each valid fact's `content` to `maxFactChars`, and caps the kept
- * count to `maxFacts`. Returns the kept facts + the dropped count.
+ * drops facts below the `minFactChars` substance floor (ISS-025 — a fragment too
+ * short to carry context + what + why is exactly the recall-polluting one-liner
+ * class), length-caps each surviving fact's `content` to `maxFactChars`, and caps
+ * the kept count to `maxFacts`. Returns the kept facts + the dropped count.
  */
 function boundFacts(raw: unknown, config: PipelineConfig): { facts: Fact[]; dropped: number } {
 	if (!Array.isArray(raw)) return { facts: [], dropped: 0 };
@@ -188,6 +190,12 @@ function boundFacts(raw: unknown, config: PipelineConfig): { facts: Fact[]; drop
 	for (const item of raw) {
 		const fact = parseFact(item);
 		if (fact === null) {
+			dropped += 1;
+			continue;
+		}
+		// ISS-025: the substance floor — measured on the TRIMMED content so whitespace
+		// padding cannot smuggle a fragment past the gate. `0` disables the floor.
+		if (fact.content.trim().length < config.extraction.minFactChars) {
 			dropped += 1;
 			continue;
 		}
@@ -233,18 +241,39 @@ function boundEntities(raw: unknown, config: PipelineConfig): { entities: Entity
  * {@link normalizeMemoryType} in the contract is the resilient floor underneath
  * (an off-token answer is coerced, not dropped) — the prompt does the real work.
  */
-export function buildExtractionPrompt(cappedText: string): string {
+export function buildExtractionPrompt(cappedText: string, maxFacts: number = DEFAULT_MAX_FACTS): string {
 	const typeList = MEMORY_TYPES.join("|");
 	return [
-		"Extract discrete facts and entity relationships from the memory below.",
-		`Classify each fact's "type" as EXACTLY ONE of: ${typeList}.`,
+		"You maintain the long-term memory of a software engineering agent. From the",
+		"captured activity below, extract ONLY what will still be worth recalling in a",
+		`future session — AT MOST ${maxFacts} memories, and usually fewer.`,
+		"",
+		"Each memory you keep must be:",
+		"- CONSOLIDATED: merge related observations into ONE memory that carries its",
+		"  context (what, where, why it matters). Prefer one substantial memory over",
+		"  several fragments.",
+		"- SELF-CONTAINED: understandable on its own without this session — name the",
+		"  project, module, or file it concerns.",
+		"- DURABLE: a decision and its rationale, a convention, a non-obvious gotcha or",
+		"  failure mode, a stated preference, or a stable architecture fact.",
+		"",
+		"Do NOT extract (returning fewer or zero memories is the CORRECT answer for",
+		"routine activity):",
+		"- ephemeral run results (test counts, build/typecheck outcomes, timings)",
+		"- one-off command outcomes or progress notes",
+		"- restatements of what is plainly visible in the code or config",
+		"- tool-choice trivia (e.g. which test runner a project uses) unless recording a",
+		"  decision or non-obvious constraint around it",
+		"",
+		`Classify each memory's "type" as EXACTLY ONE of: ${typeList}.`,
 		"Use this guidance to choose the type:",
 		memoryTypeGuidance(),
 		"",
 		'Respond ONLY with JSON of the form:',
 		`{"facts":[{"content":string,"type":one of ${typeList},"confidence":number}],`,
 		'"entities":[{"source":string,"relationship":string,"target":string}]}',
-		"confidence is between 0 and 1. Do not include any other text.",
+		"confidence is between 0 and 1: how confident you are that the memory is BOTH",
+		"true AND worth recalling in a future session. Do not include any other text.",
 		"",
 		"MEMORY:",
 		cappedText,
@@ -289,7 +318,7 @@ export async function extractFromText(
 	//    no usable output and keep the partial (empty) result.
 	let completion: string;
 	try {
-		completion = await model.complete("memory_extraction", buildExtractionPrompt(capped));
+		completion = await model.complete("memory_extraction", buildExtractionPrompt(capped, config.extraction.maxFacts));
 	} catch (err: unknown) {
 		const reason = err instanceof Error ? err.message : String(err);
 		logger?.event("extraction.model_error", { reason });
