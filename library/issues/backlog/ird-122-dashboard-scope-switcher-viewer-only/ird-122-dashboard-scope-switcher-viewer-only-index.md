@@ -40,7 +40,7 @@ The only paths that persist active tenancy are CLI: `honeycomb org switch` (re-m
 
 1. Decide the contract per axis (see open question) and make the switcher honest:
    - **Org/Workspace:** wire the dashboard selection to the daemon `org switch` / `workspace switch` code paths so it persists to `credentials.json` (org switch re-mints, per [`src/cli/org.ts:206`](../../../../src/cli/org.ts)). Surface the re-mint/loading state.
-   - **Project:** present the project dropdown explicitly as a **view filter** (it cannot set capture scope — that is cwd-driven), and point the user to binding (PRD-059) for "make Honeycomb source this."
+   - **Project:** present the project dropdown explicitly as a **view filter** (it cannot set capture scope — that is cwd-driven), and point the user to binding (Hive PRD-014) for "make Honeycomb source this."
 2. Add a visible label/affordance distinguishing "viewing scope" from "active capture scope" wherever the switcher renders.
 3. If org/workspace persistence is wired, ensure it is session-safe and reflects in `honeycomb whoami` immediately.
 
@@ -68,7 +68,7 @@ The only paths that persist active tenancy are CLI: `honeycomb org switch` (re-m
 
 ## Out of scope
 
-- Building the Projects page / folder binding (that is [PRD-059](../../../requirements/backlog/prd-059-projects-onboarding/prd-059-projects-onboarding-index.md)).
+- Building the Projects page / folder binding (that is [Hive PRD-014](../../../../../hive/library/requirements/backlog/prd-014-projects-onboarding/prd-014-projects-onboarding-index.md)).
 - Changing the underlying tenancy model or the cwd-driven project resolution (PRD-049 is unchanged).
 - Workspace/org creation.
 
@@ -77,5 +77,5 @@ The only paths that persist active tenancy are CLI: `honeycomb org switch` (re-m
 ## Related
 
 - [PRD-049e: Dashboard Scope Switcher](../../../requirements/completed/prd-049-multi-project-and-context-switching/prd-049e-multi-project-and-context-switching-dashboard-scope-switcher.md) — the viewer-only design this corrects.
-- [PRD-059: Project Onboarding and the Projects Page](../../../requirements/backlog/prd-059-projects-onboarding/prd-059-projects-onboarding-index.md) — the positive feature this defect motivates (AC-6).
+- [Hive PRD-014: Project Onboarding and the Projects Page](../../../../../hive/library/requirements/backlog/prd-014-projects-onboarding/prd-014-projects-onboarding-index.md) — the positive feature this defect motivates (AC-6).
 - [`src/cli/org.ts`](../../../../src/cli/org.ts) — `org switch` / `workspace switch` persistence mechanics.

@@ -208,8 +208,8 @@ Re-open this decision if any of these become true:
 
 ## Links
 
-- PRD-054: `library/requirements/backlog/prd-054-fleet-observation-control-plane/prd-054-fleet-observation-control-plane-index.md`
-- PRD-055: `library/requirements/backlog/prd-055-fleet-control-enrollment-and-mint-authority/prd-055-fleet-control-enrollment-and-mint-authority-index.md`
+- Queen PRD-007 (was honeycomb PRD-054): `../../../../../queen/library/requirements/backlog/prd-007-fleet-observation-control-plane/prd-007-fleet-observation-control-plane-index.md`
+- Queen PRD-008 (was honeycomb PRD-055): `../../../../../queen/library/requirements/backlog/prd-008-fleet-control-enrollment-and-mint-authority/prd-008-fleet-control-enrollment-and-mint-authority-index.md`
 - PRD-062: `library/requirements/completed/prd-062-deeplake-compute-cost-reduction/prd-062-deeplake-compute-cost-reduction-index.md`
 - Fleet design: `library/knowledge/private/collaboration/fleet-observation-and-on-demand-skills.md`
 - Secrets: `library/knowledge/private/security/secrets.md`

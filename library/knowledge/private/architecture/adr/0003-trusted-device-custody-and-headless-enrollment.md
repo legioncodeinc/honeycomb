@@ -275,8 +275,8 @@ Re-open this decision if any of these become true:
 ## Links
 
 - ADR-0002: `library/knowledge/private/architecture/adr/0002-orchestrator-custodian-for-fleet-memory-plane.md`
-- PRD-054: `library/requirements/backlog/prd-054-fleet-observation-control-plane/prd-054-fleet-observation-control-plane-index.md`
-- PRD-055: `library/requirements/backlog/prd-055-fleet-control-enrollment-and-mint-authority/prd-055-fleet-control-enrollment-and-mint-authority-index.md`
+- Queen PRD-007 (was honeycomb PRD-054): `../../../../../queen/library/requirements/backlog/prd-007-fleet-observation-control-plane/prd-007-fleet-observation-control-plane-index.md`
+- Queen PRD-008 (was honeycomb PRD-055): `../../../../../queen/library/requirements/backlog/prd-008-fleet-control-enrollment-and-mint-authority/prd-008-fleet-control-enrollment-and-mint-authority-index.md`
 - Secrets: `library/knowledge/private/security/secrets.md`
 - Credential storage: `library/knowledge/private/security/credential-storage.md`
 - Trust boundaries: `library/knowledge/private/security/trust-boundaries.md`

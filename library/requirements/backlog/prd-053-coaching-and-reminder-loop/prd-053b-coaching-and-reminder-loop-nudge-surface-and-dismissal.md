@@ -10,11 +10,11 @@
 
 ## Overview
 
-The user-facing half of coaching: where nudges appear, how the user acts on them, and how they make them go away. It reuses existing dashboard surfaces (the Repository Health page from PRD-051c and the existing notification affordance) rather than inventing a new modal regime, consistent with the calm-assistant posture.
+The user-facing half of coaching: where nudges appear, how the user acts on them, and how they make them go away. It reuses existing dashboard surfaces (the Repository Health page from Hive PRD-015c and the existing notification affordance) rather than inventing a new modal regime, consistent with the calm-assistant posture.
 
 ## Goals
 
-- Render the active nudges from `GET /coach/nudges` on the **Repository Health page** (PRD-051c) and/or the existing dashboard notification surface, scoped to the selected project.
+- Render the active nudges from `GET /coach/nudges` on the **Repository Health page** (Hive PRD-015c) and/or the existing dashboard notification surface, scoped to the selected project.
 - For the flagship nudge, provide a **one-click copy** of the `/knowledge-stinger` prompt so the user can act immediately in their agent.
 - Provide a **dismiss** (and optional snooze) control that calls `POST /coach/nudges/<id>/dismiss`, after which the nudge disappears and stays gone until 053a's material-change predicate re-emits it.
 - Keep nudges **calm and non-blocking**: inline, dismissible, never a blocking modal, never auto-acting.
@@ -48,7 +48,7 @@ The user-facing half of coaching: where nudges appear, how the user acts on them
 - Render through existing primitives/panels ([`panels.tsx`](../../../../src/dashboard/web/panels.tsx), [`primitives.tsx`](../../../../src/dashboard/web/primitives.tsx)); a nudge is a small inline card with evidence + a primary action (copy prompt) + a dismiss control.
 - Fetch via the existing wire pattern ([`wire.ts`](../../../../src/dashboard/web/wire.ts)); re-fetch after dismiss so the view reflects nudge-state.
 - The copy action puts the 053a-provided prompt on the clipboard; it never executes anything.
-- Place the primary home on the health page (PRD-051c) and, if a global indicator is used, have it link there rather than duplicating the cards.
+- Place the primary home on the health page (Hive PRD-015c) and, if a global indicator is used, have it link there rather than duplicating the cards.
 
 ## Open questions
 
@@ -58,6 +58,6 @@ The user-facing half of coaching: where nudges appear, how the user acts on them
 
 ## Related
 
-- [PRD-051c: Repository Health Dashboard Page](../prd-051-repository-health-and-knowledge-drift/prd-051c-repository-health-and-knowledge-drift-dashboard-page.md) — the primary host surface.
+- [Hive PRD-015c: Repository Health Dashboard Page](../../../../../hive/library/requirements/backlog/prd-015-repository-health-and-knowledge-drift/prd-015c-repository-health-and-knowledge-drift-dashboard-page.md) — the primary host surface.
 - [`src/dashboard/web/panels.tsx`](../../../../src/dashboard/web/panels.tsx), [`primitives.tsx`](../../../../src/dashboard/web/primitives.tsx), [`wire.ts`](../../../../src/dashboard/web/wire.ts) — the UI + fetch primitives reused.
 - Sibling sub-PRD: [053a signal-to-nudge engine](./prd-053a-coaching-and-reminder-loop-signal-to-nudge-engine.md).

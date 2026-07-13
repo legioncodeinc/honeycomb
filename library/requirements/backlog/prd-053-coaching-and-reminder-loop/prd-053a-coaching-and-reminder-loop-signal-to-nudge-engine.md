@@ -4,22 +4,22 @@
 > **Status:** Draft
 > **Priority:** P2
 > **Effort:** M (1-2d)
-> **Schema changes:** None. Reads PRD-051 signals; writes only the machine-local nudge-state.
+> **Schema changes:** None. Reads Hive PRD-015 signals; writes only the machine-local nudge-state.
 
 ---
 
 ## Overview
 
-The decision layer of coaching: a daemon-side engine that maps PRD-051 signals and a few lifecycle events to a set of active nudges, while enforcing every anti-annoyance rule. It is the difference between a helpful assistant and a thing the user mutes on day two. The engine computes nudges; the surface (053b) renders and dismisses them.
+The decision layer of coaching: a daemon-side engine that maps Hive PRD-015 signals and a few lifecycle events to a set of active nudges, while enforcing every anti-annoyance rule. It is the difference between a helpful assistant and a thing the user mutes on day two. The engine computes nudges; the surface (053b) renders and dismisses them.
 
 ## Goals
 
 - Map inputs to nudges:
-  - **Post-ship gap (flagship):** a PRD/IRD just in `completed/` that PRD-051's PRD-to-knowledge gap flags -> a nudge suggesting `/knowledge-stinger`, naming the PRD, the affected docs, and the change, carrying the copy-paste prompt (reusing 052c generation).
+  - **Post-ship gap (flagship):** a PRD/IRD just in `completed/` that Hive PRD-015's PRD-to-knowledge gap flags -> a nudge suggesting `/knowledge-stinger`, naming the PRD, the affected docs, and the change, carrying the copy-paste prompt (reusing 052c generation).
   - **Drift threshold:** knowledge drift crossing a conservative threshold -> a nudge pointing at the worst-drifted doc(s).
   - **Skill-freshness lag:** watermark lag past a threshold -> a gentle "you have un-mined sessions" nudge.
 - Enforce **anti-annoyance** rules in the engine itself:
-  - never produce a nudge without a live PRD-051 signal backing it;
+  - never produce a nudge without a live Hive PRD-015 signal backing it;
   - never produce a nudge on a clean signal;
   - rate-limit per nudge type;
   - respect dismissal memory (a dismissed nudge stays gone until its condition materially changes);
@@ -30,7 +30,7 @@ The decision layer of coaching: a daemon-side engine that maps PRD-051 signals a
 ## Non-Goals
 
 - Rendering, dismissing UI, or the copy interaction (053b).
-- Computing the signals (PRD-051) or generating the prompt text from scratch (reuse 052c).
+- Computing the signals (Hive PRD-015) or generating the prompt text from scratch (reuse 052c).
 - External notifications.
 
 ## User stories
@@ -43,8 +43,8 @@ The decision layer of coaching: a daemon-side engine that maps PRD-051 signals a
 
 | ID | Criterion |
 |---|---|
-| a-AC-1 | A PRD/IRD entering `completed/` that PRD-051 flags as a knowledge gap produces exactly one post-ship `/knowledge-stinger` nudge, carrying the PRD name, affected docs, and the prompt payload. |
-| a-AC-2 | Every emitted nudge references the specific live PRD-051 signal backing it; a test asserts the engine emits nothing when the backing signal is absent. |
+| a-AC-1 | A PRD/IRD entering `completed/` that Hive PRD-015 flags as a knowledge gap produces exactly one post-ship `/knowledge-stinger` nudge, carrying the PRD name, affected docs, and the prompt payload. |
+| a-AC-2 | Every emitted nudge references the specific live Hive PRD-015 signal backing it; a test asserts the engine emits nothing when the backing signal is absent. |
 | a-AC-3 | The engine emits zero nudges for a clean repo (all signals healthy); asserted by a test. |
 | a-AC-4 | Rate-limiting holds: the same nudge type does not re-emit within its limit; a test drives repeated computation and asserts a single active nudge. |
 | a-AC-5 | Dismissal memory holds: after a dismissal recorded in nudge-state, the engine does not re-emit while the signal-state is unchanged, and does re-emit once the "materially changed" predicate is satisfied; a test drives both directions. |
@@ -53,8 +53,8 @@ The decision layer of coaching: a daemon-side engine that maps PRD-051 signals a
 
 ## Implementation notes
 
-- Read PRD-051 signals from its snapshot/cache rather than recomputing; the engine is a consumer of 051, not a parallel computation.
-- Derive the "PRD moved to completed" event from the same library folder-state PRD-051a reads (folder placement is the source of truth).
+- Read Hive PRD-015 signals from its snapshot/cache rather than recomputing; the engine is a consumer of 051, not a parallel computation.
+- Derive the "PRD moved to completed" event from the same library folder-state Hive PRD-015a reads (folder placement is the source of truth).
 - Encode "materially changed" per nudge type explicitly (e.g. for the post-ship gap: a new completed PRD or a new offending doc in the gap set; for drift: the drift count for the dismissed doc increasing or a new doc entering the threshold).
 - Keep nudge definitions data-driven (a small registry of nudge types with their trigger predicate, rate limit, and material-change predicate) so adding a nudge type later is a contained change.
 - Reuse 052c's prompt generation for the flagship nudge so the prompt the user copies matches the join-time prompt.
@@ -67,7 +67,7 @@ The decision layer of coaching: a daemon-side engine that maps PRD-051 signals a
 
 ## Related
 
-- [PRD-051a: Drift and Staleness Signal Engine](../prd-051-repository-health-and-knowledge-drift/prd-051a-repository-health-and-knowledge-drift-signal-engine.md) — the signals consumed here.
-- [PRD-052c: Onboarding Explainer and Prompt](../prd-052-join-repository-to-hive/prd-052c-join-repository-to-hive-onboarding-explainer-and-prompt.md) — the `/knowledge-stinger` prompt generation reused by the flagship nudge.
+- [Hive PRD-015a: Drift and Staleness Signal Engine](../../../../../hive/library/requirements/backlog/prd-015-repository-health-and-knowledge-drift/prd-015a-repository-health-and-knowledge-drift-signal-engine.md) — the signals consumed here.
+- [Hive PRD-016c: Onboarding Explainer and Prompt](../../../../../hive/library/requirements/backlog/prd-016-join-repository-to-hive/prd-016c-join-repository-to-hive-onboarding-explainer-and-prompt.md) — the `/knowledge-stinger` prompt generation reused by the flagship nudge.
 - [Notifications and Health](../../../knowledge/private/operations/notifications-and-health.md) — the opt-out / do-not-disturb posture the gate reuses.
 - Sibling sub-PRD: [053b nudge surface and dismissal](./prd-053b-coaching-and-reminder-loop-nudge-surface-and-dismissal.md).

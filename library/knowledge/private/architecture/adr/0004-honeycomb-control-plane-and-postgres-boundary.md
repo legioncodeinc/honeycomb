@@ -306,8 +306,8 @@ Re-open this decision if any of these become true:
 
 - ADR-0002: `library/knowledge/private/architecture/adr/0002-orchestrator-custodian-for-fleet-memory-plane.md`
 - ADR-0003: `library/knowledge/private/architecture/adr/0003-trusted-device-custody-and-headless-enrollment.md`
-- PRD-054: `library/requirements/backlog/prd-054-fleet-observation-control-plane/prd-054-fleet-observation-control-plane-index.md`
-- PRD-055: `library/requirements/backlog/prd-055-fleet-control-enrollment-and-mint-authority/prd-055-fleet-control-enrollment-and-mint-authority-index.md`
+- Queen PRD-007 (was honeycomb PRD-054): `../../../../../queen/library/requirements/backlog/prd-007-fleet-observation-control-plane/prd-007-fleet-observation-control-plane-index.md`
+- Queen PRD-008 (was honeycomb PRD-055): `../../../../../queen/library/requirements/backlog/prd-008-fleet-control-enrollment-and-mint-authority/prd-008-fleet-control-enrollment-and-mint-authority-index.md`
 - PRD-062: `library/requirements/completed/prd-062-deeplake-compute-cost-reduction/prd-062-deeplake-compute-cost-reduction-index.md`
 - Trust boundaries: `library/knowledge/private/security/trust-boundaries.md`
 - Cloudflare Hyperdrive: `https://developers.cloudflare.com/hyperdrive/`

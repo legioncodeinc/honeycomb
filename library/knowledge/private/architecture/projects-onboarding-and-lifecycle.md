@@ -21,7 +21,7 @@ How a brand-new user goes from "I just logged in" to "Honeycomb is sourcing the 
 2. **Silent collection before consent.** Capture still ran and accrued to the per-workspace `__unsorted__` inbox (the predecessor's "never drop" policy), so the product hoarded unscoped sessions and memories behind an empty UI before the user had chosen anything to track. This is the defect tracked as IRD-123.
 3. **A switcher that lied.** The Org to Workspace to Project switcher was viewer-side only: selecting a value persisted nothing and changed no capture scope. A user who "switched a project" in the UI had done nothing. This is the defect tracked as IRD-122.
 
-PRD-059 turns Project from an implicit, CLI-only concept into an explicit, dashboard-first onboarding gate and management surface. The third level of tenancy now reads end-to-end as a product flow, not just a data model:
+Hive PRD-014 turns Project from an implicit, CLI-only concept into an explicit, dashboard-first onboarding gate and management surface. The third level of tenancy now reads end-to-end as a product flow, not just a data model:
 
 > **Org = Company → Workspace = Team → Project = a folder you explicitly put Honeycomb to work on.**
 
@@ -51,11 +51,11 @@ stateDiagram-v2
     end note
 ```
 
-The gate is keyed on **local** bindings, not the synced registry. A workspace can have registry projects created on another device while this device has bound nothing yet; that device is still in the zero-projects state and onboards via import (see [Cross-device import](#cross-device-import-bind-this-device-to-an-existing-project-prd-059d)).
+The gate is keyed on **local** bindings, not the synced registry. A workspace can have registry projects created on another device while this device has bound nothing yet; that device is still in the zero-projects state and onboards via import (see [Cross-device import](#cross-device-import-bind-this-device-to-an-existing-project-hive-prd-014d)).
 
-## The capture gate (PRD-059a / IRD-123)
+## The capture gate (Hive PRD-014a / IRD-123)
 
-The predecessor chose "capture is never dropped, an identity-less folder falls to the per-workspace `__unsorted__` inbox." That is the right default for a set-up user. For a brand-new user with zero bound projects it means hoarding unscoped data before the user has opted into anything. PRD-059a is a deliberate, scoped reversal of that policy, limited to the zero-projects pre-onboarding state.
+The predecessor chose "capture is never dropped, an identity-less folder falls to the per-workspace `__unsorted__` inbox." That is the right default for a set-up user. For a brand-new user with zero bound projects it means hoarding unscoped data before the user has opted into anything. Hive PRD-014a is a deliberate, scoped reversal of that policy, limited to the zero-projects pre-onboarding state.
 
 ### What the gate suppresses, and where it reads
 
@@ -90,7 +90,7 @@ The notice gate is itself fail-soft and login-aware: when no credential or token
 
 It does not remove the `__unsorted__` inbox; the inbox stays as the post-onboarding fallback for unbound folders, and resumes the moment the first project is bound. It does not delete or re-file data already in `__unsorted__` from before the gate shipped (an inbox-hygiene concern owned elsewhere). And per the design lean, once the gate opens it stays open for that workspace: the gate is strictly the first-run zero-state.
 
-## The first-run empty state and the folder picker (PRD-059b)
+## The first-run empty state and the folder picker (Hive PRD-014b)
 
 The dashboard's answer to a zero-projects workspace is no longer an empty switcher. On the Dashboard route, once the projects enumeration has resolved with zero locally-bound projects, the primary content is a "Pick a folder to start" call-to-action. It keys off the switcher's `projectsHydrated` flag so it never flashes before the read resolves, and it is gated to the Dashboard route so the Projects and Settings pages stay reachable.
 
@@ -130,7 +130,7 @@ The dashboard bind and the CLI `honeycomb project bind` write the **same** `~/.d
 
 When the daemon is unreachable or local-mode is off, the picker shows a plain message and the `honeycomb project bind` CLI hint, never a hang or a silent failure.
 
-## The Projects page (PRD-059c)
+## The Projects page (Hive PRD-014c)
 
 Once a user has bound at least one project they need a home for managing them. The Projects page is a left-nav entry (slotted right after Dashboard, at the hash route `#/projects`) and the page behind it: a list of every project Honeycomb is actively sourcing in the current workspace, plus a top-right "+ Add" menu.
 
@@ -142,7 +142,7 @@ Per-project actions:
 - **Unbind** removes the local folder binding only, via `POST /api/diagnostics/projects/unbind { path }`. Capture stops for that folder; the registry project and its existing memories are untouched. Because the daemon keys unbind on the absolute folder path (not the project id, and the registry read does not serve the path), Unbind opens a small folder picker to select the folder to release rather than inventing a path the daemon never gave it.
 - **Open** re-scopes the other dashboard surfaces (memories, graph, sync) to that project through the scope context, the same view scope the project dropdown drives.
 
-## Cross-device import: bind this device to an existing project (PRD-059d)
+## Cross-device import: bind this device to an existing project (Hive PRD-014d)
 
 A project is a durable, workspace-scoped registry identity, but a *binding* (folder to project) is local to one device's `projects.json`. So when a user sets up Honeycomb on a second machine, the project they created on machine A exists in the cloud registry but has no local binding on machine B. The git-remote auto-bind signal only fires if that exact repo is checked out with the same remote, which is a coincidence, not a guarantee.
 
@@ -168,7 +168,7 @@ The distinction from a fresh bind is that import is **bind-to-existing**: it doe
 
 ## The switcher-persistence fix (IRD-122)
 
-The Org to Workspace to Project switcher used to be viewer-only: every selection persisted to `localStorage` and nothing else, so selecting a different org in the UI left `honeycomb whoami` and `~/.deeplake/credentials.json` reporting the old org and the daemon capturing into the old scope. The control silently lied. PRD-059 makes it honest by treating the three axes differently, because they genuinely are different.
+The Org to Workspace to Project switcher used to be viewer-only: every selection persisted to `localStorage` and nothing else, so selecting a different org in the UI left `honeycomb whoami` and `~/.deeplake/credentials.json` reporting the old org and the daemon capturing into the old scope. The control silently lied. Hive PRD-014 makes it honest by treating the three axes differently, because they genuinely are different.
 
 | Axis | What a selection does now | Mechanism |
 |---|---|---|

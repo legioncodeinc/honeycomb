@@ -1,5 +1,8 @@
 # Execution Ledger — PRD-059: Project Onboarding and the Projects Page
 
+> **MOVED (2026-07-12):** Product PRD is now Hive PRD-014 at `hive/library/requirements/backlog/prd-014-projects-onboarding/`. This ledger remains the historical implementation record for the honeycomb/hive work that shipped the ACs below.
+
+
 > Source of truth for the `/the-smoker` run. Survives context loss.
 > Branch: `docs/prd-059-projects-onboarding` (docs PR [#124](https://github.com/legioncodeinc/honeycomb/pull/124)); implementation lands on a fresh `feat/` branch.
 > Status legend: OPEN · IN PROGRESS · DONE · VERIFIED · BLOCKED

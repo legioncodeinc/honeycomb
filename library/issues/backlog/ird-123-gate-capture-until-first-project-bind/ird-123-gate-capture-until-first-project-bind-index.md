@@ -32,7 +32,7 @@ By design: [PRD-049a](../../../requirements/completed/prd-049-multi-project-and-
 
 ## Fix plan
 
-(Implemented as [PRD-059a](../../../requirements/backlog/prd-059-projects-onboarding/prd-059a-projects-onboarding-capture-gating.md) — this IRD is the reported-defect view of that sub-PRD.)
+(Implemented as [Hive PRD-014a](../../../../../hive/library/requirements/backlog/prd-014-projects-onboarding/prd-014a-projects-onboarding-capture-gating.md) — this IRD is the reported-defect view of that sub-PRD.)
 
 1. Add a first-run **capture gate**: a local predicate "does the active workspace have ≥1 non-`__unsorted__` project with a binding?" read from `~/.deeplake/projects.json` (no network on the hot path).
 2. While the predicate is false, the capture handler ([`src/daemon/runtime/capture/capture-handler.ts`](../../../../src/daemon/runtime/capture/capture-handler.ts)) no-ops — no rows written, no pipeline jobs enqueued.
@@ -63,7 +63,7 @@ By design: [PRD-049a](../../../requirements/completed/prd-049-multi-project-and-
 
 ## Out of scope
 
-- The onboarding UI ("Pick a folder to start") — [PRD-059b](../../../requirements/backlog/prd-059-projects-onboarding/prd-059b-projects-onboarding-folder-picker.md).
+- The onboarding UI ("Pick a folder to start") — [Hive PRD-014b](../../../../../hive/library/requirements/backlog/prd-014-projects-onboarding/prd-014b-projects-onboarding-folder-picker.md).
 - Re-filing or deleting data already in `__unsorted__` from before the gate ships.
 - Removing the inbox as a post-onboarding fallback (it stays).
 
@@ -71,5 +71,5 @@ By design: [PRD-049a](../../../requirements/completed/prd-049-multi-project-and-
 
 ## Related
 
-- [PRD-059a: Capture Gating Until First Project Bind](../../../requirements/backlog/prd-059-projects-onboarding/prd-059a-projects-onboarding-capture-gating.md) — the implementing sub-PRD.
+- [Hive PRD-014a: Capture Gating Until First Project Bind](../../../../../hive/library/requirements/backlog/prd-014-projects-onboarding/prd-014a-projects-onboarding-capture-gating.md) — the implementing sub-PRD.
 - [PRD-049a: Project Identity and Resolution](../../../requirements/completed/prd-049-multi-project-and-context-switching/prd-049a-multi-project-and-context-switching-project-identity-and-resolution.md) — the "never drop → inbox" policy this scopes for the first-run state.
