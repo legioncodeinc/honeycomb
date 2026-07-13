@@ -158,6 +158,25 @@ export type PortkeyHealth = "off" | "ok" | "unconfigured" | "no_model" | "unreac
  */
 export type EmbeddingsHealth = "off" | "warming" | "on" | "suspect" | "failed";
 
+/**
+ * ISS-023 (SP-3 observability): the embed SUPERVISOR's availability block — the raw state machine
+ * beside the derived {@link EmbeddingsHealth}, so an operator can see restart-budget pressure
+ * BEFORE it exhausts and, once `failed`, that recovery is scheduled (not terminal):
+ *   - `state`        — the supervisor's coarse liveness state, verbatim.
+ *   - `restartsUsed` — restart credits consumed (self-heals: sustained warm earns them back).
+ *   - `restartsCap`  — the configured budget (`maxRestarts`).
+ *   - `nextRetryAt`  — epoch-ms of the next failed-state backoff retry; present ONLY while one
+ *                      is pending. Its presence is the "failed but recovering" signal.
+ * ADDITIVE: hive's health parser wraps unknown fields in `.catch`, and doctor reads only
+ * `reasons.embeddings` — neither consumer needs a change. Carries NO secret (enums + counts).
+ */
+export interface EmbedSupervisorHealth {
+	readonly state: "off" | "warming" | "warm" | "suspect" | "failed";
+	readonly restartsUsed: number;
+	readonly restartsCap: number;
+	readonly nextRetryAt?: number;
+}
+
 /** PRD-073b: the machine-readable dormancy reason codes surfaced on the health detail. */
 export const CAPTURE_DORMANT_NO_PROJECT = "capture_dormant_no_project" as const;
 /** PRD-073b: the machine-readable capture-blocked-on-tenancy reason code. */
@@ -197,6 +216,12 @@ export interface HealthReasons {
 	 * Carries NO secret (a fixed literal). See {@link EmbeddingsHealth}.
 	 */
 	readonly embeddingsState?: EmbeddingsHealth;
+	/**
+	 * ISS-023: the embed supervisor's availability block (state + restart-budget pressure +
+	 * pending-recovery timestamp). Present only when the composition root wires the live
+	 * supervisor; omitted on a bare `createDaemon` / hermetic fakes. See {@link EmbedSupervisorHealth}.
+	 */
+	readonly embedSupervisor?: EmbedSupervisorHealth;
 	/** A required table's presence (best-effort): `ok` unless a required table is known-missing. */
 	readonly schema: "ok" | "missing_table";
 	/** The Portkey gateway state (PRD-063b / b-AC-7 / ISS-005): `off` | `ok` | `unconfigured` | `no_model` | `unreachable`. */
@@ -349,6 +374,13 @@ export interface HealthDetailInputs {
 	 */
 	readonly embeddingsSuspect?: boolean;
 	/**
+	 * ISS-023: the embed supervisor's availability block, read LIVE per health call by the
+	 * composition root. Omitted (legacy callers / hermetic fakes) → the reason is absent.
+	 * Surfaced verbatim (counts normalized to non-negative integers) as
+	 * {@link HealthReasons.embedSupervisor}.
+	 */
+	readonly embedSupervisor?: EmbedSupervisorHealth;
+	/**
 	 * Whether a REQUIRED table is known-missing (best-effort). Defaults to `false`
 	 * (→ `schema: "ok"`) — the conservative posture when there is no cheap signal at the
 	 * health seam. A caller with a real known-missing signal passes `true`.
@@ -492,6 +524,21 @@ export function buildHealthDetail(inputs: HealthDetailInputs): HealthDetail {
 		// this reduces to exactly the old enabled→"on" / disabled→"off" mapping.
 		embeddings: embeddingsState,
 		embeddingsState,
+		// ISS-023: the supervisor availability block — present only when the live supervisor is
+		// wired. Counts are clamped to non-negative integers; `nextRetryAt` (epoch ms) passes
+		// through only while a failed-state retry is actually pending. No secret (enums + counts).
+		...(inputs.embedSupervisor !== undefined
+			? {
+					embedSupervisor: {
+						state: inputs.embedSupervisor.state,
+						restartsUsed: nonNegativeInt(inputs.embedSupervisor.restartsUsed),
+						restartsCap: nonNegativeInt(inputs.embedSupervisor.restartsCap),
+						...(inputs.embedSupervisor.nextRetryAt !== undefined
+							? { nextRetryAt: nonNegativeInt(inputs.embedSupervisor.nextRetryAt) }
+							: {}),
+					},
+				}
+			: {}),
 		schema: inputs.schemaMissingTable === true ? "missing_table" : "ok",
 		// PRD-063b / b-AC-7: read the supplied Portkey state verbatim (no probe). Omitted → `off`.
 		portkey: inputs.portkey ?? "off",

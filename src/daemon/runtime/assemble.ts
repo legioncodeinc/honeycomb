@@ -3328,7 +3328,13 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		// SAME `HONEYCOMB_EMBEDDINGS` opt-out the embed client does, so an explicit `false`/`0`
 		// makes it inert (no child) and unset/on spawns with zero config (D-1). A test injects a
 		// fake supervisor so the hermetic assembly never spawns a real process.
-		embed: options.embedSupervisor ?? createEmbedSupervisor(),
+		// ISS-023 (SP-3): thread the daemon's structured-event logger — the SAME seam
+		// `recall.timing`/`recall.degraded` emit through — so every supervisor transition
+		// (probe miss, suspect, kill, respawn, budget, retry) lands in event_log instead of the
+		// silent default. Pre-ISS-023 this was `createEmbedSupervisor()` with NO deps: the
+		// supervisor already emitted the events, but into a no-op sink — five production
+		// wedge-kills were invisible.
+		embed: options.embedSupervisor ?? createEmbedSupervisor({ logger }),
 		// PRD-071: the fleet check-in + metrics telemetry service. Reuses the SAME cached
 		// `healthBit` `/health` reads and the SAME `storage` + `scope` every other daemon read
 		// goes through (AC-071b.2.1: metrics derive from EXISTING counters, never re-derived).
@@ -3414,17 +3420,34 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		portkeyUnreachableStatus = statusCode;
 	};
 
-	const healthDetail = (): HealthDetail =>
-		buildHealthDetail({
+	const healthDetail = (): HealthDetail => {
+		// PRD-025 honesty + ISS-007/ISS-008: live warm/failed/suspect signals read from the
+		// supervisor's CURRENT state per health call, so `/health` reports `warming`/`on`/
+		// `suspect`/`failed` instead of a coarse `on` latched once at first warm. This is what
+		// un-blinds doctor: its only sensor is /health and it already parses `reasons.embeddings`.
+		const sup = liveEmbed();
+		// ISS-023: the supervisor availability block — state + restart-budget pressure + the
+		// pending failed-retry timestamp, read LIVE per health call. Present only on the real
+		// path (liveEmbed() gates out injected fakes/deterministic overrides) AND only when the
+		// supervisor exposes the additive `state` (structural fakes may not). Additive: hive
+		// parses /health reasons with `.catch`, so a new block is safe.
+		const supState = sup?.state;
+		return buildHealthDetail({
 			status: healthBit,
 			embeddingsEnabled: embeddingsReason(),
-			// PRD-025 honesty + ISS-007/ISS-008: live warm/failed/suspect signals read from the
-			// supervisor's CURRENT state per health call, so `/health` reports `warming`/`on`/
-			// `suspect`/`failed` instead of a coarse `on` latched once at first warm. This is what
-			// un-blinds doctor: its only sensor is /health and it already parses `reasons.embeddings`.
-			embeddingsWarm: liveEmbed()?.warm,
-			embeddingsFailed: liveEmbed()?.failed,
-			embeddingsSuspect: liveEmbed()?.suspect,
+			embeddingsWarm: sup?.warm,
+			embeddingsFailed: sup?.failed,
+			embeddingsSuspect: sup?.suspect,
+			...(sup !== undefined && supState !== undefined
+				? {
+						embedSupervisor: {
+							state: supState,
+							restartsUsed: sup.restarts,
+							restartsCap: sup.restartsCap ?? 0,
+							...(sup.nextRetryAt !== undefined ? { nextRetryAt: sup.nextRetryAt } : {}),
+						},
+					}
+				: {}),
 			portkey: portkeyHealth,
 			// ISS-005: the last observed failure's HTTP status (surfaced only while `unreachable`).
 			...(portkeyUnreachableStatus !== undefined ? { portkeyUnreachableStatus } : {}),
@@ -3453,6 +3476,7 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 			// future dashboard control gate on `provider` + reflect the current `enabled` state. No secret.
 			...(memoryFeature !== undefined ? { memory: memoryFeature } : {}),
 		});
+	};
 
 	// ── PRD-063c (c-D-2 / c-AC-1 / c-AC-3): the Cohere-via-Portkey rerank seam, late-bound.
 	// The seam handed to the `/api/memories/recall` mount is a STABLE delegating object whose `rerank`
