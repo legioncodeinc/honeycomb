@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.20.1 — 2026-07-13
+
+Per-turn memory injection now applies a relevance gate: raw captured-session dumps are excluded from prompt injection (they remain available via explicit recall, the dashboard, and MCP tools), and hits below a minimum fused relevance score no longer inject. This stops low-signal noise — duplicate trivia and raw tool-call traces — from riding into the model's context on every turn.
+
 ## v0.20.0 — 2026-07-13
 
 The embed supervisor's restart budget now self-heals over sustained uptime and automatically retries with backoff after hitting a terminal failed state, instead of requiring a manual daemon restart. The daemon's /health endpoint also gains a new embedSupervisor block reporting live restart-budget and recovery status, and supervisor lifecycle events are now logged.
