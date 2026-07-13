@@ -206,6 +206,8 @@ import {
 	type PipelineConfig,
 	type PipelineReloadController,
 	type PipelineReloadSeam,
+	readGraphEnvDecision,
+	resolveGraphEnabledVaultFirst,
 	resolveMemoryEnabledVaultFirst,
 	resolvePipelineConfig,
 	type StageWorker,
@@ -282,7 +284,7 @@ import {
 	openFleetTelemetryStore,
 } from "./telemetry/fleet-store.js";
 import { combineLogWriteThrough, createFleetLogTap } from "./telemetry/logs.js";
-import { EMBEDDINGS_ENABLED_KEY, MEMORY_ENABLED_KEY, mountSettingsApi } from "./vault/api.js";
+import { EMBEDDINGS_ENABLED_KEY, GRAPH_ENABLED_KEY, MEMORY_ENABLED_KEY, mountSettingsApi } from "./vault/api.js";
 import { isValidProviderModel, providerEntry } from "./vault/catalog.js";
 import { migrateDeeplakeToken } from "./vault/migrate.js";
 import { createVaultRegistry } from "./vault/registry.js";
@@ -1329,6 +1331,16 @@ export function assembleSeams(
 	 * before with no live trigger. The daemon composition root always supplies it.
 	 */
 	pipelineReload?: PipelineReloadSeam,
+	/**
+	 * ISS-002: the LIVE resolved memory-graph gate probe threaded into the dashboard mount so
+	 * `GET /api/diagnostics/memory-graph` can answer WHY it is empty (`graph_off` vs
+	 * `no_entities_yet` vs `query_error`). Returns the pipeline worker's CURRENT resolved
+	 * `graph.enabled` (env override > vault `graph.enabled` > default-follows-memory), or
+	 * `undefined` before the worker is built — read as OFF (no worker, no graph writes). ABSENT
+	 * (a unit-constructed `assembleSeams` call) → the view reports `graph_off` on empty, the
+	 * honest degraded answer.
+	 */
+	memoryGraphGate?: () => boolean | undefined,
 ): CaptureHandler {
 	// The daemon's configured default tenancy scope (the single LOCAL tenant) is RESOLVED ONCE
 	// at the composition root (`assembleDaemon`) from the SAME credential source the storage
@@ -1397,6 +1409,8 @@ export function assembleSeams(
 		defaultScope,
 		orgName,
 		...(captureDroppedEvents !== undefined ? { captureDroppedEvents: () => captureDroppedEvents.read() } : {}),
+		// ISS-002: the live graph-gate probe for the memory-graph view's WHY-EMPTY reason.
+		...(memoryGraphGate !== undefined ? { memoryGraphGate } : {}),
 	});
 
 	// 3. The backend notifications API (020d) — the org's pending notifications.
@@ -2381,24 +2395,26 @@ async function readBootEmbeddingsEnabled(vault: VaultSettingsReader | undefined,
 }
 
 /**
- * Resolve the BOOT memory-formation-enabled decision (dashboard actions), VAULT-FIRST — the exact
- * mirror of {@link readBootEmbeddingsEnabled} / {@link readVaultPollinatingEnabled}, for the memory
- * pipeline's MASTER `enabled` gate. Precedence:
- *   1. the vault `setting` `memory.enabled` when PRESENT + readable → it WINS (the user's saved
- *      dashboard choice enables memory formation with NO env editing, and persists across restarts);
- *   2. else the env-resolved `HONEYCOMB_PIPELINE_ENABLED` (`config.enabled`, the prior override —
- *      preserved when no preference was ever saved).
- * Returns `decidedByVault` so the worker knows whether to OVERRIDE `config.enabled` with the vault
- * value or fall through to the env. NEVER throws: an unreadable/missing setting (a fresh vault, no
+ * Read one boolean `setting`-class vault value with VAULT-PRESENCE semantics — the exact mirror
+ * of {@link readBootEmbeddingsEnabled} / {@link readVaultPollinatingEnabled}, generalized (ISS-002)
+ * so BOTH vault-first pipeline gates read through ONE seam:
+ *   - `memory.enabled` — the pipeline's MASTER gate. Present + readable → it WINS over the
+ *     env-resolved `HONEYCOMB_PIPELINE_ENABLED` (the user's saved dashboard choice enables memory
+ *     formation with NO env editing, and persists across restarts); absent → the env stands.
+ *   - `graph.enabled` — the unified memory-graph gate. Present + readable → it decides (below the
+ *     explicit legacy env override); absent → the gate DEFAULT-FOLLOWS-MEMORY.
+ * Returns `decidedByVault` so the caller knows whether to OVERRIDE with the vault value or fall
+ * through to its own default. NEVER throws: an unreadable/missing setting (a fresh vault, no
  * creds) degrades to `decidedByVault:false` so the env/default stands.
  */
-async function readVaultMemoryEnabled(
+async function readVaultBoolSetting(
 	vault: VaultSettingsReader | undefined,
 	scope: SecretScope,
+	key: string,
 ): Promise<{ decidedByVault: boolean; enabled: boolean }> {
 	if (vault === undefined) return { decidedByVault: false, enabled: false };
 	try {
-		const res = await vault.getSetting(MEMORY_ENABLED_KEY, scope);
+		const res = await vault.getSetting(key, scope);
 		if (!res.ok) return { decidedByVault: false, enabled: false };
 		return { decidedByVault: true, enabled: coerceSettingBool(res.value) };
 	} catch {
@@ -2671,7 +2687,7 @@ async function buildPipelineWorker(
 	keepBothMemo?: KeepBothMemo,
 	memoryFormation?: MemoryFormationTracker,
 	vault?: VaultSettingsReader,
-	onMemoryFeature?: (signal: { enabled: boolean; providerConfigured: boolean }) => void,
+	onMemoryFeature?: (signal: { enabled: boolean; providerConfigured: boolean; graphEnabled: boolean }) => void,
 	memoryOutbox?: MemoryOutbox,
 ): Promise<PipelineWorkerBuild> {
 	// Resolve the pipeline config fail-soft: a malformed knob must NEVER take the daemon
@@ -2693,17 +2709,37 @@ async function buildPipelineWorker(
 	// (true OR false) overrides `config.enabled`; absent → the env-resolved value stands. This is
 	// what turns memory formation on from settings with NO env editing. Fail-soft — an unreadable
 	// vault degrades to the env value, never a throw.
-	const vaultMemory = await readVaultMemoryEnabled(vault, secretScopeFromQueryScope(scope));
+	const vaultMemory = await readVaultBoolSetting(vault, secretScopeFromQueryScope(scope), MEMORY_ENABLED_KEY);
 	const enabled = resolveMemoryEnabledVaultFirst(vaultMemory, envEnabled);
 	if (enabled !== config.enabled) config = { ...config, enabled };
+
+	// ── ISS-002: the UNIFIED graph gate, resolved here — THE resolution site. Precedence:
+	//   1. EXPLICIT env (`HONEYCOMB_PIPELINE_GRAPH_ENABLED` / `HONEYCOMB_PIPELINE_GRAPH_EXTRACTION_WRITES`,
+	//      either one set) → the env decision WINS (back-compat / the operator opt-out; the two
+	//      legacy flags AND together, an unset one defaulting ON so a single explicit value decides);
+	//   2. else the vault `graph.enabled` setting when PRESENT (true OR false — a dashboard save);
+	//   3. else DEFAULT-FOLLOWS-MEMORY: the vault-first master `enabled` resolved just above —
+	//      memory formation on → graph persistence on (the ISS-002 product decision).
+	// The env decision is boot-stable (env never changes mid-process); the vault half is re-read by
+	// the live reload below. The old `extractionWritesEnabled` sub-gate collapses into this ONE
+	// boolean: `config.graph` is overwritten with the resolved value so every config consumer sees
+	// a single switch, and the graph-persist stage reads the LIVE cell per job.
+	const graphEnv = readGraphEnvDecision();
+	const vaultGraph = await readVaultBoolSetting(vault, secretScopeFromQueryScope(scope), GRAPH_ENABLED_KEY);
+	let graphEnabledLive = resolveGraphEnabledVaultFirst(graphEnv, vaultGraph, enabled);
+	config = { ...config, graph: { enabled: graphEnabledLive, extractionWritesEnabled: graphEnabledLive } };
+
 	// Observability: announce the RESOLVED pipeline gate at boot. `enabled:false` or
 	// `extractionProvider:'none'` means the extraction stage returns empty WITHOUT a model call — the
 	// exact "jobs complete but nothing hits the LLM / no memory" signature — so this makes the gate
-	// state visible instead of inferred. `enabledSource` names WHERE the master switch came from.
+	// state visible instead of inferred. `enabledSource` names WHERE the master switch came from;
+	// `graphEnabledSource` does the same for the ISS-002 unified graph gate.
 	logger?.event("pipeline.config.resolved", {
 		enabled: config.enabled,
 		extractionProvider: config.extractionProvider,
 		enabledSource: vaultMemory.decidedByVault ? "vault" : "env",
+		graphEnabled: graphEnabledLive,
+		graphEnabledSource: graphEnv.explicit ? "env" : vaultGraph.decidedByVault ? "vault" : "memory",
 	});
 
 	// The real inference ModelClient (the 010 router). NEVER throws — degrades to the
@@ -2755,9 +2791,10 @@ async function buildPipelineWorker(
 	}
 
 	// Publish the memory-formation FEATURE-GATING signal (this PRD) to the `/health` cell: the RESOLVED
-	// master `enabled` (vault-first) + whether a real provider is configured. The dashboard's future
-	// "Memory Formation" control gates on these. Total + non-throwing (a plain assignment sink).
-	onMemoryFeature?.({ enabled: config.enabled, providerConfigured });
+	// master `enabled` (vault-first) + whether a real provider is configured + the ISS-002 resolved
+	// graph gate. The dashboard's future "Memory Formation" control gates on these, and the memory-graph
+	// view's WHY-EMPTY reason reads `graphEnabled`. Total + non-throwing (a plain assignment sink).
+	onMemoryFeature?.({ enabled: config.enabled, providerConfigured, graphEnabled: graphEnabledLive });
 
 	// ── SP-1 / ISS-001: the `'auto'` extraction sentinel is NO LONGER collapsed at boot. The old
 	// `resolveEffectiveExtractionProvider(config, providerConfigured)` snapshot froze `'auto'` into
@@ -2789,9 +2826,17 @@ async function buildPipelineWorker(
 	// no-op client) — a reload can never crash the daemon or drop the worker.
 	const reload = async (): Promise<void> => {
 		// (1) Master `enabled` — the SAME vault-first precedence as boot, against the pristine env.
-		const vaultNow = await readVaultMemoryEnabled(vault, gateSecretScope());
+		const vaultNow = await readVaultBoolSetting(vault, gateSecretScope(), MEMORY_ENABLED_KEY);
 		const enabledNow = resolveMemoryEnabledVaultFirst(vaultNow, envEnabled);
 		gate.setEnabled(enabledNow);
+
+		// (1b) ISS-002: re-resolve the UNIFIED graph gate — the SAME precedence as boot (the env
+		// decision is boot-stable; the vault half is re-read; the default follows the master gate
+		// just re-resolved). Published into the live cell the graph-persist handler reads PER JOB,
+		// so a `graph.enabled` (or `memory.enabled`) settings write gates the very next graph job
+		// without a restart — the #304 reload seam applied to the graph stage.
+		const vaultGraphNow = await readVaultBoolSetting(vault, gateSecretScope(), GRAPH_ENABLED_KEY);
+		graphEnabledLive = resolveGraphEnabledVaultFirst(graphEnv, vaultGraphNow, enabledNow);
 
 		// (2) Portkey selection — through the SAME fail-closed reader boot used. ISS-005 semantics
 		// are preserved by construction: `"no_model"` yields NO routable selection (the rebuilt
@@ -2828,12 +2873,13 @@ async function buildPipelineWorker(
 		gate.invalidate();
 
 		// (5) Re-publish the /health feature-gating cell + announce the reload (secret-free).
-		onMemoryFeature?.({ enabled: enabledNow, providerConfigured: providerConfiguredNow });
+		onMemoryFeature?.({ enabled: enabledNow, providerConfigured: providerConfiguredNow, graphEnabled: graphEnabledLive });
 		logger?.event("pipeline.reloaded", {
 			enabled: enabledNow,
 			providerConfigured: providerConfiguredNow,
 			portkeyStatus: portkeyStatusNow,
 			extractionProvider: config.extractionProvider,
+			graphEnabled: graphEnabledLive,
 		});
 	};
 
@@ -2912,7 +2958,9 @@ async function buildPipelineWorker(
 			// stage throws exactly as pre-080 (unit suite / kill-switch off).
 			...(memoryOutbox !== undefined ? { memoryOutbox } : {}),
 		},
-		graphPersist: { storage, scope: queryScope, config },
+		// ISS-002: the graph-persist stage reads the LIVE unified gate per job (not the boot
+		// config snapshot), so a reload-published `graph.enabled` flip gates the very next job.
+		graphPersist: { storage, scope: queryScope, config, graphEnabled: () => graphEnabledLive },
 		retention: { storage, scope: queryScope, config },
 	});
 
@@ -3228,8 +3276,9 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 	// else env) + whether a REAL model provider is configured (the ModelClient is non-noop). The future
 	// dashboard "Memory Formation" control gates on `provider` (show/hide) and reflects `enabled`
 	// (on/off). Undefined until the pipeline worker wires it (a daemon that never builds the worker —
-	// the deterministic unit suite — omits the `memory` reason). No secret: two booleans.
-	let memoryFeature: { enabled: boolean; providerConfigured: boolean } | undefined;
+	// the deterministic unit suite — omits the `memory` reason). No secret: three booleans
+	// (`graphEnabled` is the ISS-002 unified graph gate the memory-graph WHY-EMPTY probe reads).
+	let memoryFeature: { enabled: boolean; providerConfigured: boolean; graphEnabled: boolean } | undefined;
 	// PRD-073b: the per-reason gated-captures counter (surfaced on the health detail). PRD-073c: the
 	// single-slot in-memory pending-link store shared between `/setup/login` (the pending-link runner)
 	// and the `/setup/tenancy*` routes.
@@ -3609,6 +3658,9 @@ export function assembleDaemon(options: AssembleDaemonOptions = {}): AssembledDa
 		// SP-1: the pipeline live-reload trigger, threaded to the `/api/secrets` write handlers so a
 		// provider-key save rebuilds the inference client without a restart.
 		pipelineReload,
+		// ISS-002: the memory-graph WHY-EMPTY probe — reads the live feature cell the pipeline
+		// worker populates at boot/reload (undefined until the worker wires it → read as OFF).
+		() => memoryFeature?.graphEnabled,
 	);
 
 	// ── PRD-079b (b-AC-4): the operator FORCE-DRAIN trigger — `POST /api/diagnostics/capture-drain`.

@@ -86,6 +86,8 @@ describe("watched keys fire the seam exactly once per persisted write (post-pers
 		expect(reasons).toEqual(["setting:activeProvider", "setting:activeModel"]);
 
 		expect(await post("memory.enabled", true)).toBe(201);
+		// ISS-002: the unified graph gate rides the SAME seam — a save applies without a restart.
+		expect(await post("graph.enabled", true)).toBe(201);
 		expect(await post("portkey.fallbackToProvider", false)).toBe(201);
 		expect(await post("portkey.config", "pk-config-id")).toBe(201); // valid while disabled
 		expect(await post("portkey.enabled", true)).toBe(201); // model already set above
@@ -93,6 +95,7 @@ describe("watched keys fire the seam exactly once per persisted write (post-pers
 			"setting:activeProvider",
 			"setting:activeModel",
 			"setting:memory.enabled",
+			"setting:graph.enabled",
 			"setting:portkey.fallbackToProvider",
 			"setting:portkey.config",
 			"setting:portkey.enabled",

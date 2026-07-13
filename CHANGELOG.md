@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.19.0 — 2026-07-13
+
+Memory-graph persistence now follows a single, vault-first `graph.enabled` setting (defaulting to the memory-formation switch) that can be toggled live without a restart, and the memory-graph dashboard view now reports why it's empty (gate off, nothing extracted yet, or a read error).
+
 ## v0.18.0 — 2026-07-13
 
 Recall search now finds any memory visible in the list under the same scope, including workspace inbox rows in project-scoped views, and search hits carry actionable memory id/type for richer dashboard cards. Also fixes lexical search to match multi-word queries via tokenized matching instead of requiring an exact phrase.

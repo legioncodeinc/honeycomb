@@ -18,7 +18,9 @@ import {
 	isExtractionEnabled,
 	type PipelineConfigProvider,
 	type RawPipelineConfig,
+	readGraphEnvDecision,
 	resolveEffectiveExtractionProvider,
+	resolveGraphEnabledVaultFirst,
 	resolveMemoryEnabledVaultFirst,
 	resolvePipelineConfig,
 } from "../../../../src/daemon/runtime/pipeline/config.js";
@@ -150,5 +152,97 @@ describe("resolveEffectiveExtractionProvider collapses the 'auto' sentinel", () 
 		expect(resolveEffectiveExtractionProvider(none, true).extractionProvider).toBe(EXTRACTION_PROVIDER_NONE);
 		const override = resolvePipelineConfig(provider({ enabled: true, extractionProvider: "router" }));
 		expect(resolveEffectiveExtractionProvider(override, false).extractionProvider).toBe("router");
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ISS-002 — the UNIFIED graph gate: env override > vault `graph.enabled` >
+// default-follows-memory. `readGraphEnvDecision` reads the two LEGACY env flags
+// as an explicit back-compat/opt-out; `resolveGraphEnabledVaultFirst` is the
+// pure precedence every resolution site (boot + live reload) runs.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("ISS-002 readGraphEnvDecision — the legacy env flags as an explicit override", () => {
+	it("neither flag set (or blank) → NOT explicit (the env abstains)", () => {
+		expect(readGraphEnvDecision({})).toEqual({ explicit: false, enabled: false });
+		expect(
+			readGraphEnvDecision({
+				HONEYCOMB_PIPELINE_GRAPH_ENABLED: "",
+				HONEYCOMB_PIPELINE_GRAPH_EXTRACTION_WRITES: "   ",
+			}),
+		).toEqual({ explicit: false, enabled: false });
+	});
+
+	it("a single explicit `true` opts IN without the second legacy flag (the two-flag trap is gone)", () => {
+		expect(readGraphEnvDecision({ HONEYCOMB_PIPELINE_GRAPH_ENABLED: "true" })).toEqual({
+			explicit: true,
+			enabled: true,
+		});
+		expect(readGraphEnvDecision({ HONEYCOMB_PIPELINE_GRAPH_EXTRACTION_WRITES: "1" })).toEqual({
+			explicit: true,
+			enabled: true,
+		});
+	});
+
+	it("a single explicit `false` on EITHER flag opts OUT (the operator kill switch)", () => {
+		expect(readGraphEnvDecision({ HONEYCOMB_PIPELINE_GRAPH_ENABLED: "false" })).toEqual({
+			explicit: true,
+			enabled: false,
+		});
+		expect(readGraphEnvDecision({ HONEYCOMB_PIPELINE_GRAPH_EXTRACTION_WRITES: "0" })).toEqual({
+			explicit: true,
+			enabled: false,
+		});
+	});
+
+	it("both set AND together (pre-ISS-002 both-true installs keep working; a false wins)", () => {
+		expect(
+			readGraphEnvDecision({
+				HONEYCOMB_PIPELINE_GRAPH_ENABLED: "true",
+				HONEYCOMB_PIPELINE_GRAPH_EXTRACTION_WRITES: "true",
+			}),
+		).toEqual({ explicit: true, enabled: true });
+		expect(
+			readGraphEnvDecision({
+				HONEYCOMB_PIPELINE_GRAPH_ENABLED: "true",
+				HONEYCOMB_PIPELINE_GRAPH_EXTRACTION_WRITES: "false",
+			}),
+		).toEqual({ explicit: true, enabled: false });
+	});
+
+	it("values coerce through the BoolFlag tokens with trimming (the trailing-space class)", () => {
+		expect(readGraphEnvDecision({ HONEYCOMB_PIPELINE_GRAPH_ENABLED: "true " })).toEqual({
+			explicit: true,
+			enabled: true,
+		});
+		// A non-token value is an explicit-but-off decision (BoolFlag: only true/1 enable).
+		expect(readGraphEnvDecision({ HONEYCOMB_PIPELINE_GRAPH_ENABLED: "yes" })).toEqual({
+			explicit: true,
+			enabled: false,
+		});
+	});
+});
+
+describe("ISS-002 resolveGraphEnabledVaultFirst — env > vault > default-follows-memory", () => {
+	const envAbstains = { explicit: false, enabled: false } as const;
+	const vaultAbsent = { decidedByVault: false, enabled: false } as const;
+
+	it("DEFAULT-FOLLOWS-MEMORY: no env, no vault → the resolved memory master switch decides", () => {
+		expect(resolveGraphEnabledVaultFirst(envAbstains, vaultAbsent, true)).toBe(true);
+		expect(resolveGraphEnabledVaultFirst(envAbstains, vaultAbsent, false)).toBe(false);
+	});
+
+	it("a PRESENT vault value decides (true enables; false disables even under a running pipeline)", () => {
+		expect(resolveGraphEnabledVaultFirst(envAbstains, { decidedByVault: true, enabled: true }, false)).toBe(true);
+		expect(resolveGraphEnabledVaultFirst(envAbstains, { decidedByVault: true, enabled: false }, true)).toBe(false);
+	});
+
+	it("an EXPLICIT env decision beats BOTH the vault and the memory default (back-compat / opt-out)", () => {
+		expect(
+			resolveGraphEnabledVaultFirst({ explicit: true, enabled: false }, { decidedByVault: true, enabled: true }, true),
+		).toBe(false);
+		expect(
+			resolveGraphEnabledVaultFirst({ explicit: true, enabled: true }, { decidedByVault: true, enabled: false }, false),
+		).toBe(true);
 	});
 });
