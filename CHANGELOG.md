@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.20.0 — 2026-07-13
+
+The embed supervisor's restart budget now self-heals over sustained uptime and automatically retries with backoff after hitting a terminal failed state, instead of requiring a manual daemon restart. The daemon's /health endpoint also gains a new embedSupervisor block reporting live restart-budget and recovery status, and supervisor lifecycle events are now logged.
+
 ## v0.19.1 — 2026-07-13
 
 Fixed a security hardening issue where very large search queries could produce unbounded, resource-intensive SQL statements; query text is now length-capped and sanitized before being used in searches, with no change to normal search results.

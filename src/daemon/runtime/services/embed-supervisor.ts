@@ -17,12 +17,24 @@
  * cold model (D-3) — until warm, recall degrades to lexical + `degraded:true`
  * (Wave-1 already returns that on an unreachable/timeout embed), NEVER a hung recall.
  *
- * ── Restart policy (D-6 / D-4) ───────────────────────────────────────────────
+ * ── Restart policy (D-6 / D-4, amended by ISS-023) ──────────────────────────
  * A crashed child → bounded restart attempts with a backoff window. Each restart
- * re-warms. Once the bound is exhausted the supervisor STOPS retrying and leaves
- * recall on the lexical path (degraded) — a crash loop never wedges the daemon and
- * never blocks a turn. A deliberate {@link EmbedSupervisor.restart} (the AC-5 live
- * toggle) resets the bound and brings semantic back.
+ * re-warms. Once the bound is exhausted the supervisor stops the TIGHT respawn loop
+ * and leaves recall on the lexical path (degraded) — a crash loop never wedges the
+ * daemon and never blocks a turn. A deliberate {@link EmbedSupervisor.restart} (the
+ * AC-5 live toggle) resets the bound and brings semantic back.
+ *
+ * ISS-023 (the availability inversion): the bound is no longer a LIFETIME latch.
+ *   - The budget SELF-HEALS: every {@link RESTART_CREDIT_REPLENISH_MS} of consecutive
+ *     warm time earns one restart credit back (a crash loop never reaches warm, so it
+ *     exhausts exactly as fast as before — the fork-bomb bound is intact).
+ *   - Terminal `failed` is never permanent: a backoff-retried spawn (1 min doubling to
+ *     a 30 min cap, {@link FAILED_RETRY_INITIAL_MS}/{@link FAILED_RETRY_MAX_MS}) keeps
+ *     attempting a normal spawn→warming cycle; reaching warm returns to normal. The
+ *     state stays honestly `failed` (with `nextRetryAt` surfaced) between attempts.
+ *   - The ON-DEMAND probe chain (recall's embed-timeout signal) confirms a suspect over
+ *     {@link ON_DEMAND_CONFIRM_MS}, not 1s — an embed timeout proves LOAD, not death,
+ *     and the tight confirm was killing live-but-slow children (see the constants).
  *
  * ── Liveness after warm (ISS-007 / ISS-008: the wedge detector) ──────────────
  * The pre-existing warm wait was a ONE-SHOT latch: once `/health.ready` answered
@@ -161,9 +173,83 @@ export interface EmbedSupervisorConfig {
 	 * ISS-007: delay between a first failed post-warm probe (`suspect`) and the CONFIRMING
 	 * re-probe, in ms. Default 1000. Two consecutive failures are required before the child
 	 * is declared wedged, so a single slow `/health` reply never flaps a warm daemon.
+	 * Applies to the PERIODIC probe chain only — see {@link onDemandConfirmMs} for why the
+	 * on-demand (recall-timeout-triggered) chain uses a much longer confirm window.
 	 */
 	readonly livenessRetryMs?: number;
+	/**
+	 * ISS-023: delay between a first failed ON-DEMAND probe (`suspect`) and its CONFIRMING
+	 * re-probe, in ms. Default {@link ON_DEMAND_CONFIRM_MS} (30s). See the constant's JSDoc
+	 * for the availability-inversion this window prevents.
+	 */
+	readonly onDemandConfirmMs?: number;
+	/**
+	 * ISS-023: how long the child must stay CONSECUTIVELY warm to earn back ONE restart
+	 * credit, in ms. Default {@link RESTART_CREDIT_REPLENISH_MS} (10 min). See the constant's
+	 * JSDoc for why the budget heals on sustained health but a crash loop still exhausts it.
+	 */
+	readonly creditReplenishMs?: number;
+	/**
+	 * ISS-023: the first failed-state retry delay, in ms. Default {@link FAILED_RETRY_INITIAL_MS}
+	 * (1 min); doubles per failed attempt up to {@link failedRetryMaxMs}.
+	 */
+	readonly failedRetryInitialMs?: number;
+	/** ISS-023: the failed-state retry backoff ceiling, in ms. Default {@link FAILED_RETRY_MAX_MS} (30 min). */
+	readonly failedRetryMaxMs?: number;
 }
+
+/**
+ * ISS-023: the confirm window for an ON-DEMAND (recall-timeout-triggered) suspect, in ms.
+ *
+ * WHY 30s, and why on-demand only: `checkNow` fires exactly when a recall's bounded embed
+ * burned its deadline — i.e. at a moment the child is BY CONSTRUCTION under load (CPU
+ * inference on this class of machine takes 10-27s per batch, blocking the event loop
+ * between FIFO yields, so the 2s-bounded `/health` fetch misses). With the periodic 1s
+ * confirm delay, BOTH probes of the kill-deciding pair land inside the same saturation
+ * window and a live-but-slow child is killed as if wedged — the exact availability
+ * inversion of the 2026-07-13 incident (five load-correlated kills exhausted the lifetime
+ * restart budget and turned embeddings permanently off).
+ *
+ * The 30s window is a principled discriminator, not a loosened detector: the instant the
+ * first miss marks `suspect`, recall's gate stops sending the child ANY new embeds, so a
+ * merely-busy child gets a quiet window to drain its in-flight compute (bounded by the
+ * observed 10-27s inference tail) and answers the confirm probe — recovered, no kill, no
+ * budget burned. A genuinely wedged child (blocked forever) still fails the confirm and is
+ * still killed. The PERIODIC chain keeps its tight 1s confirm: its ticks are NOT correlated
+ * with load, so the #301 wedge-detection latency there is unchanged.
+ */
+export const ON_DEMAND_CONFIRM_MS = 30_000;
+
+/**
+ * ISS-023: every this-many CONSECUTIVE milliseconds in `warm` restores ONE restart credit
+ * (up to `maxRestarts`). Default 10 minutes.
+ *
+ * WHY the budget must heal: the #301 budget was LIFETIME — deliberately never replenished —
+ * as anti-fork-bomb protection. That is correct against a crash-looping child (which never
+ * reaches warm, so it exhausts the budget exactly as fast with or without this constant),
+ * but it inverts availability for a HEALTHY child that gets wedge-killed occasionally over
+ * days/weeks of uptime: five transient bad patches, however far apart, permanently disabled
+ * embeddings until a manual daemon restart (the 2026-07-13 incident). Earning one credit per
+ * 10 sustained-warm minutes means only a child that is genuinely failing FASTER than it can
+ * prove health ever runs out — the fork-bomb bound is preserved, the terminal latch is not.
+ * The credit clock resets on ANY departure from warm (kill/crash/stop); a recovered `suspect`
+ * blip does not reset it (warm was never lost). An explicit `restart()` still fully resets.
+ */
+export const RESTART_CREDIT_REPLENISH_MS = 600_000;
+
+/**
+ * ISS-023: the FIRST retry delay after the supervisor enters terminal `failed`, in ms (1 min).
+ * Doubles on each failed attempt up to {@link FAILED_RETRY_MAX_MS}. WHY: `failed` used to be
+ * permanent-until-manual-restart — an availability inversion when the exhaustion was caused by
+ * transient load (the 2026-07-13 incident left embeddings off for good on a healthy machine).
+ * A backoff-retried spawn costs one process attempt per interval — at the 30 min cap this is
+ * negligible against a permanently lost capability. The state stays honestly `failed` (with
+ * `nextRetryAt` surfaced) between attempts; only actually reaching `warm` returns to normal.
+ */
+export const FAILED_RETRY_INITIAL_MS = 60_000;
+
+/** ISS-023: the exponential-backoff ceiling for failed-state retries, in ms (30 min). */
+export const FAILED_RETRY_MAX_MS = 1_800_000;
 
 /** Resolved supervisor config. */
 interface ResolvedConfig {
@@ -174,6 +260,10 @@ interface ResolvedConfig {
 	readonly warmTimeoutMs: number;
 	readonly livenessIntervalMs: number;
 	readonly livenessRetryMs: number;
+	readonly onDemandConfirmMs: number;
+	readonly creditReplenishMs: number;
+	readonly failedRetryInitialMs: number;
+	readonly failedRetryMaxMs: number;
 }
 
 function resolveConfig(c: EmbedSupervisorConfig | undefined): ResolvedConfig {
@@ -185,6 +275,10 @@ function resolveConfig(c: EmbedSupervisorConfig | undefined): ResolvedConfig {
 		warmTimeoutMs: c?.warmTimeoutMs ?? 120_000,
 		livenessIntervalMs: c?.livenessIntervalMs ?? 30_000,
 		livenessRetryMs: c?.livenessRetryMs ?? 1_000,
+		onDemandConfirmMs: c?.onDemandConfirmMs ?? ON_DEMAND_CONFIRM_MS,
+		creditReplenishMs: c?.creditReplenishMs ?? RESTART_CREDIT_REPLENISH_MS,
+		failedRetryInitialMs: c?.failedRetryInitialMs ?? FAILED_RETRY_INITIAL_MS,
+		failedRetryMaxMs: c?.failedRetryMaxMs ?? FAILED_RETRY_MAX_MS,
 	};
 }
 
@@ -378,6 +472,18 @@ export interface EmbedSupervisor extends DaemonService {
 	/** Current bounded restart count (for diagnostics). */
 	readonly restarts: number;
 	/**
+	 * ISS-023: the configured restart-budget cap (`maxRestarts`), for the /health
+	 * `embedSupervisor` block (`restartsUsed`/`restartsCap`). OPTIONAL (additive) so
+	 * pre-existing structural fakes still satisfy the contract.
+	 */
+	readonly restartsCap?: number;
+	/**
+	 * ISS-023: the wall-clock ms timestamp of the next failed-state backoff retry, present ONLY
+	 * while a retry is pending (state `failed`, between attempts). Surfaced on /health so an
+	 * operator sees that `failed` is a recovering state, not a terminal one. OPTIONAL (additive).
+	 */
+	readonly nextRetryAt?: number;
+	/**
 	 * ISS-007: fire ONE on-demand bounded liveness probe NOW (outside the periodic cadence) —
 	 * the recall path calls this when a bounded embed burns its deadline, so a wedge surfaces in
 	 * seconds instead of at the next 30s tick. Coalesced + non-reentrant: a call while a probe is
@@ -443,6 +549,90 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 	let probing = false;
 	// ISS-007: the cancel for the currently-scheduled periodic probe tick (null when none pending).
 	let cancelScheduledProbe: (() => void) | null = null;
+	// ISS-023: the wall-clock instant the NEXT restart credit is earned, or null while not warm.
+	// Set when warm is reached; advanced by one replenish interval per credit granted; cleared on
+	// ANY departure from warm (wedge/crash/stop) so only CONSECUTIVE warm time earns credits.
+	let nextCreditAt: number | null = null;
+	// ISS-023: the CURRENT failed-state retry delay (doubles per failed attempt, capped). Reset to
+	// the initial delay whenever warm is reached or a deliberate start/restart/re-enable happens.
+	let failedRetryDelayMs = cfg.failedRetryInitialMs;
+	// ISS-023: cancel for the pending failed-state retry timer (null when none pending).
+	let cancelFailedRetry: (() => void) | null = null;
+	// ISS-023: when the next failed-state retry fires (surfaced on /health), undefined when none.
+	let nextRetryAt: number | undefined;
+
+	/** ISS-023: cancel any pending failed-state retry (stop/restart/disable/deliberate paths). */
+	function cancelFailedRetryTimer(): void {
+		if (cancelFailedRetry !== null) {
+			cancelFailedRetry();
+			cancelFailedRetry = null;
+		}
+		nextRetryAt = undefined;
+	}
+
+	/**
+	 * ISS-023: schedule the next failed-state retry. The state stays honestly `failed` (with
+	 * `nextRetryAt` surfaced) until an attempt actually reaches `warm`; each attempt is a normal
+	 * spawn→warming cycle through {@link spawnAndWatch}. The delay doubles per scheduling up to
+	 * the cap, and resets to the initial delay only on warm / deliberate restart / re-enable.
+	 */
+	function scheduleFailedRetry(): void {
+		if (stopping || !enabled) return;
+		cancelFailedRetry?.();
+		const delayMs = failedRetryDelayMs;
+		failedRetryDelayMs = Math.min(failedRetryDelayMs * 2, cfg.failedRetryMaxMs);
+		nextRetryAt = clock.now() + delayMs;
+		logger.event("embed.retry_scheduled", { backoffMs: delayMs, nextRetryAt });
+		cancelFailedRetry = scheduleProbe(() => {
+			cancelFailedRetry = null;
+			nextRetryAt = undefined;
+			void attemptFailedRetry();
+		}, delayMs);
+	}
+
+	/**
+	 * ISS-023: one failed-state retry attempt — a normal spawn→warming cycle. If a live-but-
+	 * warm-failed child is still around (the `warmFailed` terminal), it is torn down first so
+	 * the fresh child re-attempts model warmup from scratch. Reaching warm clears the failure
+	 * signals (in {@link waitForWarm}); another crash/exhaustion re-enters the backoff loop.
+	 */
+	async function attemptFailedRetry(): Promise<void> {
+		if (stopping || !enabled) return;
+		logger.event("embed.retry_attempt", { restartsUsed: restarts, restartsCap: cfg.maxRestarts });
+		const stale = child;
+		if (stale !== null) {
+			child = null; // detach FIRST so the exit callback does not treat this as a fresh crash.
+			try {
+				stale.kill("SIGTERM");
+			} catch {
+				// already gone — the respawn below still runs.
+			}
+		}
+		await spawnAndWatch();
+	}
+
+	/**
+	 * ISS-023: earn back restart credits for sustained warm time. Called on every HEALTHY
+	 * post-warm probe (the natural 30s heartbeat), so credits accrue at probe granularity:
+	 * each full `creditReplenishMs` of unbroken warm decrements `restarts` by one (never below
+	 * zero). A crash loop never reaches warm → never calls this → exhausts exactly as fast as
+	 * the pre-ISS-023 lifetime budget.
+	 */
+	function replenishCredits(): void {
+		if (nextCreditAt === null) return;
+		const now = clock.now();
+		if (restarts === 0) {
+			// Nothing to earn — slide the anchor so a LATER kill starts earning from that point,
+			// not from a stale anchor that would burst-grant instantly.
+			nextCreditAt = now + cfg.creditReplenishMs;
+			return;
+		}
+		while (restarts > 0 && now >= nextCreditAt) {
+			restarts -= 1;
+			nextCreditAt += cfg.creditReplenishMs;
+			logger.event("embed.credit_replenished", { restartsUsed: restarts, restartsCap: cfg.maxRestarts });
+		}
+	}
 
 	/** Cancel any pending periodic liveness tick (stop/restart/crash/disable paths). */
 	function cancelLiveness(): void {
@@ -458,42 +648,69 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 		cancelScheduledProbe?.();
 		cancelScheduledProbe = scheduleProbe(() => {
 			cancelScheduledProbe = null;
-			void probeOnce(current);
+			void probeOnce(current, "periodic");
 		}, cfg.livenessIntervalMs);
+	}
+
+	/** What fired a liveness probe chain — decides the suspect→confirm window (ISS-023). */
+	type ProbeTrigger = "periodic" | "on_demand";
+
+	/** One bounded `/health` probe, timed + logged on miss (SP-3: no more invisible misses). */
+	async function timedProbe(trigger: ProbeTrigger, consecutive: 1 | 2, pid: number | undefined) {
+		const t0 = clock.now();
+		const result = await probeHealth();
+		if (!result.ok) {
+			// The probe missed (the 2s-bounded fetch failed/aborted). Emit the miss WITH its
+			// elapsed ms + what fired it, so a load-correlated miss is diagnosable from event_log.
+			logger.event("embed.probe_miss", { pid, trigger, consecutive, elapsedMs: clock.now() - t0 });
+		}
+		return result;
 	}
 
 	/**
 	 * ISS-007: ONE bounded liveness check of a warm child (periodic tick or on-demand). States:
 	 * a healthy reply keeps/returns `warm`; the FIRST failure → `suspect` (recall skips the embed;
-	 * no flap on one slow reply) + a confirming re-probe after `livenessRetryMs`; a SECOND
-	 * consecutive failure CONFIRMS the wedge → mark not-warm, kill the wedged child, and respawn
-	 * via the EXISTING bounded crash-restart machinery (the respawn transitions back through
-	 * `warming`, covering the ~40s post-respawn warmup tail without flapping). NON-REENTRANT:
-	 * overlapping periodic/on-demand calls coalesce into the one in-flight probe. Never throws.
+	 * no flap on one slow reply) + a confirming re-probe; a SECOND consecutive failure CONFIRMS
+	 * the wedge → mark not-warm, kill the wedged child, and respawn via the EXISTING bounded
+	 * crash-restart machinery (the respawn transitions back through `warming`, covering the ~40s
+	 * post-respawn warmup tail without flapping). NON-REENTRANT: overlapping periodic/on-demand
+	 * calls coalesce into the one in-flight probe. Never throws.
+	 *
+	 * ISS-023: the confirm delay depends on WHAT fired the chain. A `periodic` tick confirms after
+	 * `livenessRetryMs` (1s — the un-loosened #301 wedge detector). An `on_demand` chain (recall
+	 * just observed an embed timeout, so the child is KNOWN to be under load) confirms after
+	 * `onDemandConfirmMs` (30s) — see {@link ON_DEMAND_CONFIRM_MS} for why the tight confirm was
+	 * killing live-but-slow children and how the suspect state's embed-skip makes the long window
+	 * a real busy-vs-wedged discriminator.
 	 */
-	async function probeOnce(current: EmbedChild): Promise<void> {
+	async function probeOnce(current: EmbedChild, trigger: ProbeTrigger): Promise<void> {
 		if (probing) return; // non-reentrant: one probe in flight, overlapping calls coalesce.
 		probing = true;
 		try {
 			if (stopping || child !== current || !warm) return;
-			const first = await probeHealth();
+			const first = await timedProbe(trigger, 1, current.pid);
 			if (stopping || child !== current) return;
 			if (first.ok) {
 				suspect = false;
+				replenishCredits(); // ISS-023: sustained warm time earns restart credits back.
 				scheduleNextProbe(current);
 				return;
 			}
-			// First miss on a warm child → suspect. Recall's gate skips the embed from here on.
+			// First miss on a warm child → suspect. Recall's gate skips the embed from here on —
+			// which is also what quiesces a busy child so the on-demand confirm can discriminate.
+			const confirmDelayMs = trigger === "on_demand" ? cfg.onDemandConfirmMs : cfg.livenessRetryMs;
 			suspect = true;
-			logger.event("embed.suspect", { pid: current.pid });
-			await clock.sleep(cfg.livenessRetryMs);
+			logger.event("embed.suspect", { pid: current.pid, trigger, confirmDelayMs });
+			await clock.sleep(confirmDelayMs);
 			if (stopping || child !== current) return;
-			const second = await probeHealth();
+			const second = await timedProbe(trigger, 2, current.pid);
 			if (stopping || child !== current) return;
 			if (second.ok) {
 				// Transient (e.g. one slow reply under load) — recovered, no flap, keep probing.
+				// The credit clock keeps running: warm was never lost across a recovered suspect.
 				suspect = false;
-				logger.event("embed.recovered", { pid: current.pid });
+				logger.event("embed.recovered", { pid: current.pid, trigger });
+				replenishCredits();
 				scheduleNextProbe(current);
 				return;
 			}
@@ -503,7 +720,8 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 			suspect = false;
 			live = false;
 			warm = false;
-			logger.event("embed.wedged", { pid: current.pid });
+			nextCreditAt = null; // ISS-023: the consecutive-warm stretch ended — stop earning.
+			logger.event("embed.wedged", { pid: current.pid, trigger, reason: "liveness_confirmed_miss" });
 			child = null; // detach FIRST so the SIGTERM-driven exit callback does not double-restart.
 			try {
 				current.kill("SIGTERM");
@@ -539,7 +757,13 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 			if (ok && ready) {
 				warm = true;
 				warmFailed = false;
-				logger.event("embed.warm", { pid: child?.pid });
+				// ISS-023: reaching warm ends any failed episode — normal operation resumes, the credit
+				// clock starts (sustained health earns back credits), and the retry backoff resets so a
+				// FUTURE failure starts its recovery loop from the 1 min initial delay again.
+				restartExhausted = false;
+				failedRetryDelayMs = cfg.failedRetryInitialMs;
+				nextCreditAt = clock.now() + cfg.creditReplenishMs;
+				logger.event("embed.warm", { pid: child?.pid, restartsUsed: restarts, restartsCap: cfg.maxRestarts });
 				// ISS-007: warm reached — ARM the periodic liveness probe (the one-shot warm latch was
 				// the blind spot: a later wedge kept reporting warm forever). Armed ONLY here, after
 				// warm, so the ~40s warmup tail is never probed as if it were a wedge (no flap).
@@ -552,6 +776,9 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 			if (ok && probeWarmFailed) {
 				warmFailed = true;
 				logger.event("embed.warm_failed", { pid: child?.pid });
+				// ISS-023: a thrown warmup can be transient (an offline model fetch, a busy disk) — the
+				// same backoff loop keeps retrying instead of latching `failed` until a manual restart.
+				scheduleFailedRetry();
 				return;
 			}
 			await clock.sleep(cfg.pollIntervalMs);
@@ -579,6 +806,7 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 			if (stopping || child !== current) return;
 			live = false;
 			warm = false;
+			nextCreditAt = null; // ISS-023: a crash ends the consecutive-warm stretch.
 			cancelLiveness(); // ISS-007: a crashed child needs no further liveness ticks.
 			logger.event("embed.exited", { code, signal, pid });
 			void handleCrash();
@@ -606,16 +834,25 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 	async function handleCrash(): Promise<void> {
 		if (stopping) return;
 		if (restarts >= cfg.maxRestarts) {
-			// Crash loop bound hit: stop retrying. Recall stays lexical (degraded) — the host
-			// daemon is never wedged and no turn is ever blocked (D-4). Mark `restartExhausted` so
+			// Crash loop bound hit: stop the TIGHT respawn loop. Recall stays lexical (degraded) — the
+			// host daemon is never wedged and no turn is ever blocked (D-4). Mark `restartExhausted` so
 			// `/health` reports embeddings `failed` (the child never came live) instead of `warming`.
-			restartExhausted = true;
-			logger.event("embed.restart_exhausted", { restarts });
+			// ISS-023: `failed` is no longer permanent — a backoff-retried spawn (1 min doubling to the
+			// 30 min cap) keeps attempting recovery; only a genuine persistent failure stays failed.
+			if (!restartExhausted) {
+				restartExhausted = true;
+				logger.event("embed.restart_exhausted", { restarts, restartsCap: cfg.maxRestarts });
+			}
 			child = null;
+			scheduleFailedRetry();
 			return;
 		}
 		restarts += 1;
-		logger.event("embed.restart", { attempt: restarts, backoffMs: cfg.restartBackoffMs });
+		logger.event("embed.restart", {
+			attempt: restarts,
+			backoffMs: cfg.restartBackoffMs,
+			budgetRemaining: cfg.maxRestarts - restarts,
+		});
 		await clock.sleep(cfg.restartBackoffMs);
 		if (stopping) return;
 		await spawnAndWatch();
@@ -654,14 +891,22 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 		get restarts(): number {
 			return restarts;
 		},
+		get restartsCap(): number {
+			return cfg.maxRestarts;
+		},
+		get nextRetryAt(): number | undefined {
+			return nextRetryAt;
+		},
 
 		checkNow(): void {
 			// ISS-007 on-demand check (recall observed an embed timeout): fire one bounded probe now.
 			// probeOnce is non-reentrant + no-ops unless the child is currently considered warm, so
 			// this is safe to call from the hot path — fire-and-forget, never a throw, never a wait.
+			// ISS-023: the trigger is threaded so the suspect→confirm window spans the load envelope
+			// (an embed timeout is EVIDENCE of load, not of death — see ON_DEMAND_CONFIRM_MS).
 			const current = child;
 			if (current === null || stopping || !warm) return;
-			void probeOnce(current);
+			void probeOnce(current, "on_demand");
 		},
 
 		async start(): Promise<void> {
@@ -676,6 +921,10 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 			// A deliberate start re-arms the failure signals (a prior run may have exhausted restarts).
 			restartExhausted = false;
 			stopping = false;
+			// ISS-023: a deliberate start owns the spawn — no stale failed-retry may race it, and the
+			// retry backoff starts fresh.
+			cancelFailedRetryTimer();
+			failedRetryDelayMs = cfg.failedRetryInitialMs;
 			await spawnAndWatch();
 		},
 
@@ -684,6 +933,7 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 			stopping = true;
 			started = false;
 			cancelLiveness(); // ISS-007: no periodic tick may outlive the lifecycle.
+			cancelFailedRetryTimer(); // ISS-023: no failed-retry may outlive the lifecycle either.
 			const current = child;
 			child = null;
 			if (current !== null) {
@@ -704,12 +954,15 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 			}
 			live = false;
 			warm = false;
+			nextCreditAt = null; // ISS-023: stopped — no warm stretch, no earning.
 		},
 
 		async restart(): Promise<void> {
 			// The AC-5 live toggle: deliberate kill → respawn. Reset the bounded count so a
 			// restart after a crash-loop-exhaustion brings semantic back.
 			cancelLiveness(); // ISS-007: the old child's pending tick must not probe the new one.
+			cancelFailedRetryTimer(); // ISS-023: the deliberate respawn supersedes any pending retry.
+			failedRetryDelayMs = cfg.failedRetryInitialMs;
 			const current = child;
 			child = null;
 			if (current !== null) {
@@ -722,6 +975,7 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 			live = false;
 			warm = false;
 			restarts = 0;
+			nextCreditAt = null; // ISS-023: full deliberate reset — the credit clock re-arms at warm.
 			// Reset the failure signals: a deliberate restart re-attempts warmup and re-arms the budget.
 			restartExhausted = false;
 			warmFailed = false;
@@ -747,6 +1001,9 @@ export function createEmbedSupervisor(deps: EmbedSupervisorDeps = {}): EmbedSupe
 				}
 			} else {
 				logger.event("embed.disabled_live");
+				// ISS-023: a pending failed-retry must not respawn a deliberately-disabled embedder
+				// (and /health must not keep advertising a nextRetryAt that will never fire).
+				cancelFailedRetryTimer();
 				// Stop only when there is something to stop (a running child) — never a no-op stop pre-start.
 				if (child !== null) await api.stop();
 			}
@@ -769,6 +1026,7 @@ export const noopEmbedSupervisor: EmbedSupervisor = {
 	suspect: false,
 	state: "off",
 	restarts: 0,
+	restartsCap: 0,
 	checkNow(): void {
 		/* no-op stub — nothing to probe */
 	},
