@@ -41,6 +41,8 @@ import { mountMemoriesApi } from "../../../../src/daemon/runtime/memories/index.
 import {
 	buildLexicalMatchSql,
 	MAX_LEXICAL_MATCH_TOKENS,
+	MAX_LEXICAL_PHRASE_LENGTH,
+	MAX_LEXICAL_TOKEN_LENGTH,
 } from "../../../../src/daemon/runtime/memories/recall.js";
 import { FakeDeepLakeTransport, fakeCredentialRecord, stubProvider } from "../../../helpers/fake-deeplake.js";
 
@@ -447,5 +449,56 @@ describe("ISS-006 — buildLexicalMatchSql (the tokenized predicate)", () => {
 		expect(sql).toContain("o''brien"); // quote doubled — never a raw ' in the pattern.
 		expect(sql).not.toMatch(/[^']'%o'brien/); // no unescaped literal boundary.
 		expect(sql).toContain("100\\%"); // the LIKE wildcard is escaped, not live.
+	});
+});
+
+describe("ISS-006 hardening — pre-interpolation shaping + the colSql fragment contract", () => {
+	it("the statement size stays bounded for a pathological multi-megabyte query", () => {
+		// One 2MB blob token + a long multi-token tail: pre-hardening this interpolated the whole
+		// blob into the phrase pattern (and up to 8 token copies) — unbounded amplification.
+		const blob = "z".repeat(2 * 1024 * 1024);
+		const sql = buildLexicalMatchSql('"content"::text', blob);
+		expect(sql.length).toBeLessThan(MAX_LEXICAL_PHRASE_LENGTH + 200);
+
+		const manyLong = Array.from({ length: 40 }, (_, i) => `tok${i}${"y".repeat(5000)}`).join(" ");
+		const multi = buildLexicalMatchSql('"content"::text', manyLong);
+		// Bounded by construction: phrase cap + (token cap × conjunct cap) + fixed SQL glue.
+		expect(multi.length).toBeLessThan(MAX_LEXICAL_PHRASE_LENGTH + MAX_LEXICAL_MATCH_TOKENS * (MAX_LEXICAL_TOKEN_LENGTH + 40) + 200);
+	});
+
+	it("over-long tokens are TRUNCATED in the conjuncts (widen-only — a prefix pattern admits a superset)", () => {
+		const longToken = `needle${"x".repeat(500)}`;
+		const sql = buildLexicalMatchSql('"content"::text', `${longToken} anchor`);
+		// The CONJUNCT pattern carries the truncated prefix (the phrase arm keeps the full term —
+		// it rides under its own MAX_LEXICAL_PHRASE_LENGTH cap, and 506 chars is inside it).
+		expect(sql).toContain(`ILIKE '%${longToken.slice(0, MAX_LEXICAL_TOKEN_LENGTH)}%' AND `);
+		// The full 506-char token is interpolated ONCE (the phrase), never again as a conjunct.
+		expect(sql.split(longToken).length - 1).toBe(1);
+		expect(sql).toContain("%anchor%"); // the normal sibling token is untouched.
+	});
+
+	it("control characters are stripped from the interpolated patterns (defense-in-depth over sqlLike)", () => {
+		const sql = buildLexicalMatchSql('"content"::text', "alpha\u0001beta gamma\u001fdelta");
+		expect(sql).toContain("%alphabeta%");
+		expect(sql).toContain("%gammadelta%");
+		expect(sql).not.toMatch(/[\u0000-\u001f\u007f]/);
+	});
+
+	it("a normal query under the caps emits BYTE-IDENTICAL SQL to the unshaped form (no live behavior change)", () => {
+		expect(buildLexicalMatchSql('"content"::text', "quokka")).toBe(`"content"::text ILIKE '%quokka%'`);
+		expect(buildLexicalMatchSql('"content"::text', "alpha ledger quirk")).toBe(
+			`("content"::text ILIKE '%alpha ledger quirk%' OR ` +
+				`("content"::text ILIKE '%alpha%' AND "content"::text ILIKE '%ledger%' AND "content"::text ILIKE '%quirk%'))`,
+		);
+	});
+
+	it("the colSql tamper canary throws on a fragment carrying a statement separator or comment token", () => {
+		expect(() => buildLexicalMatchSql('"content"::text; DROP TABLE memories', "quokka")).toThrow(/compile-time-constant/);
+		expect(() => buildLexicalMatchSql('"content"::text -- comment', "quokka")).toThrow(/compile-time-constant/);
+		expect(() => buildLexicalMatchSql('"content"::text /* c */', "quokka")).toThrow(/compile-time-constant/);
+		// The real call-site shapes stay accepted (memories/memory/sessions/hive-graph arms).
+		expect(() => buildLexicalMatchSql('"content"::text', "quokka")).not.toThrow();
+		expect(() => buildLexicalMatchSql(`COALESCE(NULLIF("prose", ''), "message"::text)`, "quokka")).not.toThrow();
+		expect(() => buildLexicalMatchSql('v."title"::text', "quokka")).not.toThrow();
 	});
 });

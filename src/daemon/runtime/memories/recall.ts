@@ -469,12 +469,43 @@ export function resolveRecallLimit(limit: number | undefined): number {
  */
 export const MAX_LEXICAL_MATCH_TOKENS = 8;
 
-/** Whitespace-split `term` into the usable match tokens: length > 1, de-duped, capped. */
+/**
+ * Security shaping (ISS-006 hardening, mirrors the #298 remediation pattern): the free-text query
+ * is SHAPE-CONSTRAINED before any SQL interpolation. The route schema caps nothing (`z.string()
+ * .min(1)`, hooks may pass whole prompts), so without these caps a pathological multi-megabyte
+ * query would be interpolated up to 9 times per matched column (whole phrase + 8 token conjuncts;
+ * 27 times on the three-column hive-graph arm) — an unbounded statement-size amplification.
+ * Injection is already closed by `sqlLike` (quote doubling + control-char stripping); these caps
+ * close the resource-exhaustion half and keep the interpolated bytes bounded by construction:
+ *
+ *   - per-token cap {@link MAX_LEXICAL_TOKEN_LENGTH}: a longer token is TRUNCATED — an ILIKE
+ *     substring pattern built from a prefix admits a SUPERSET, so truncation only ever WIDENS
+ *     (never silently narrows recall, the same doctrine as the token-count cap above);
+ *   - whole-phrase cap {@link MAX_LEXICAL_PHRASE_LENGTH}: same truncate-to-widen rule;
+ *   - control characters (C0 + DEL) are stripped BEFORE interpolation (defense-in-depth — sqlLike
+ *     strips them too; stripping here keeps the dedupe/length logic operating on the final bytes).
+ *
+ * A normal query (no control chars, under the caps) produces BYTE-IDENTICAL SQL to the uncapped
+ * form, so live behavior is unchanged for every real search.
+ */
+export const MAX_LEXICAL_TOKEN_LENGTH = 128;
+/** The cap on the whole-phrase `ILIKE` pattern body (see {@link MAX_LEXICAL_TOKEN_LENGTH} note). */
+export const MAX_LEXICAL_PHRASE_LENGTH = 1024;
+/** C0 control characters + DEL — stripped from match text before interpolation. */
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/g;
+
+/** Strip control chars and truncate to `max` — the pre-interpolation shaping for match text. */
+function shapeMatchText(raw: string, max: number): string {
+	return raw.replace(CONTROL_CHARS, "").slice(0, max);
+}
+
+/** Whitespace-split `term` into the usable match tokens: length > 1, de-duped, shaped, capped. */
 function lexicalMatchTokens(term: string): string[] {
 	const seen = new Set<string>();
 	const tokens: string[] = [];
 	for (const raw of term.split(/\s+/)) {
-		const token = raw.trim();
+		// Shape BEFORE dedupe/length checks so the caps apply to the exact bytes interpolated.
+		const token = shapeMatchText(raw.trim(), MAX_LEXICAL_TOKEN_LENGTH);
 		if (token.length <= 1) continue; // drop stopword-length tokens (ISS-006 fix spec).
 		const key = token.toLowerCase();
 		if (seen.has(key)) continue;
@@ -498,11 +529,27 @@ function lexicalMatchTokens(term: string): string[] {
  *     — the whole-phrase arm is kept (and ranked above the conjunct-only rows TS-side by
  *     {@link rowsToPhraseRankedArm}), the AND-of-terms conjunction is the tokenized floor.
  *
- * SQL-safe: every token AND the whole phrase route through `sqlLike`; the caller passes an
- * already-guarded column expression (`colSql` is built from `sqlIdent` parts at the call site).
+ * SQL-safe: every token AND the whole phrase route through `sqlLike` AFTER the pre-interpolation
+ * shaping ({@link shapeMatchText} — control-char strip + the widen-only length caps), so the
+ * interpolated bytes are bounded by construction regardless of the caller-supplied query size.
+ *
+ * `colSql` CONTRACT (security invariant, asserted below): it MUST be a COMPILE-TIME-CONSTANT
+ * column expression built exclusively from `sqlIdent`-guarded parts at the call site (e.g.
+ * `` `${contentCol}::text` `` or the sessions arm's verbatim COALESCE expression). It is
+ * interpolated as a pre-built SQL fragment, so it must NEVER carry request-derived text. The
+ * guard below is a tamper canary, not an escape: a statement separator or comment token in
+ * `colSql` throws before any SQL is built, so a future call site that threads dynamic text
+ * here fails loudly in tests instead of shipping an injection seam.
  */
+const FORBIDDEN_COL_SQL = /;|--|\/\*/;
+
 export function buildLexicalMatchSql(colSql: string, term: string): string {
-	const phrasePatternSql = `'%${sqlLike(term)}%'`;
+	if (FORBIDDEN_COL_SQL.test(colSql)) {
+		throw new Error("buildLexicalMatchSql: colSql must be a compile-time-constant sqlIdent-guarded column expression");
+	}
+	// Pre-interpolation shaping (see MAX_LEXICAL_TOKEN_LENGTH note): strip controls + cap the
+	// phrase body, so the pattern literal is bounded no matter how large the request query is.
+	const phrasePatternSql = `'%${sqlLike(shapeMatchText(term, MAX_LEXICAL_PHRASE_LENGTH))}%'`;
 	const tokens = lexicalMatchTokens(term);
 	if (tokens.length <= 1) return `${colSql} ILIKE ${phrasePatternSql}`;
 	const conjunctsSql = tokens.map((token) => `${colSql} ILIKE '%${sqlLike(token)}%'`).join(" AND ");

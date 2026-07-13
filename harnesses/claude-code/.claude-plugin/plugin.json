@@ -1,7 +1,7 @@
 {
   "name": "honeycomb",
   "description": "Honeycomb — persistent memory for Claude Code sessions via the local Honeycomb daemon",
-  "version": "0.19.0",
+  "version": "0.19.1",
   "author": {
     "name": "Honeycomb"
   },

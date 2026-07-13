@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.19.1 — 2026-07-13
+
+Fixed a security hardening issue where very large search queries could produce unbounded, resource-intensive SQL statements; query text is now length-capped and sanitized before being used in searches, with no change to normal search results.
+
 ## v0.19.0 — 2026-07-13
 
 Memory-graph persistence now follows a single, vault-first `graph.enabled` setting (defaulting to the memory-formation switch) that can be toggled live without a restart, and the memory-graph dashboard view now reports why it's empty (gate off, nothing extracted yet, or a read error).
