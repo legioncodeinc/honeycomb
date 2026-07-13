@@ -101,6 +101,13 @@ export interface ShimSpec {
 	 * block. The default passes the block through verbatim. Ignored for `model-only`.
 	 */
 	renderUserVisible?(block: string): string;
+
+	/** Optional host-native hook stdout renderer; see {@link HarnessShim.renderHookResponse}. */
+	renderHookResponse?(
+		nativeEventName: string,
+		block: string,
+		extras?: { readonly systemMessage?: string },
+	): unknown | undefined;
 }
 
 /**
@@ -147,6 +154,7 @@ export function createShim(spec: ShimSpec): HarnessShim {
 		renderContext(block: string, extras?: { readonly systemMessage?: string }): ContextEnvelope {
 			return renderChannel(spec, block, extras);
 		},
+		...(spec.renderHookResponse !== undefined ? { renderHookResponse: spec.renderHookResponse } : {}),
 		// Surface the optional off-process hygiene hook only when the spec supplies it.
 		...(spec.spawnHygieneChild !== undefined ? { spawnHygieneChild: spec.spawnHygieneChild } : {}),
 	};

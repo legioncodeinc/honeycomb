@@ -51,6 +51,13 @@ export const ACTOR_HEADER = "x-honeycomb-actor" as const;
 /** The default `default` workspace sentinel when the credential carries no workspace. */
 const DEFAULT_WORKSPACE = "default" as const;
 
+/**
+ * Leave headroom beneath the shortest host capture-hook budget (Codex
+ * `UserPromptSubmit`, currently 10s). A degraded daemon must never own the host's
+ * entire hook deadline and turn a fail-soft capture into a visible hook failure.
+ */
+export const DEFAULT_DAEMON_HOOK_TIMEOUT_MS = 5_000;
+
 /** Options for {@link createDaemonHookClient}. */
 export interface DaemonHookClientOptions {
 	/**
@@ -69,6 +76,11 @@ export interface DaemonHookClientOptions {
 	 * test drives the request shape against a recording stub without a real socket.
 	 */
 	readonly fetch?: typeof fetch;
+	/**
+	 * Maximum loopback request duration in milliseconds. Defaults to
+	 * {@link DEFAULT_DAEMON_HOOK_TIMEOUT_MS}; injected at a smaller value in tests.
+	 */
+	readonly timeoutMs?: number;
 }
 
 /** The tenancy a credential resolves to (org + workspace + optional actor). */
@@ -95,6 +107,7 @@ export function createDaemonHookClient(options: DaemonHookClientOptions): Daemon
 	const host = options.host ?? DAEMON_HOST;
 	const port = options.port ?? DAEMON_PORT;
 	const doFetch = options.fetch ?? fetch;
+	const timeoutMs = options.timeoutMs ?? DEFAULT_DAEMON_HOOK_TIMEOUT_MS;
 	const base = `http://${host}:${port}/api/hooks`;
 
 	return {
@@ -110,11 +123,14 @@ export function createDaemonHookClient(options: DaemonHookClientOptions): Daemon
 			if (tenancy.actor !== undefined) headers[ACTOR_HEADER] = tenancy.actor;
 
 			const body = withTenancy(req.body, tenancy);
+			const controller = new AbortController();
+			const timer = setTimeout(() => controller.abort(), timeoutMs);
 			try {
 				const res = await doFetch(`${base}/${req.endpoint}`, {
 					method: "POST",
 					headers,
 					body: JSON.stringify(body),
+					signal: controller.signal,
 				});
 				return { status: res.status, body: await parseJson(res) };
 			} catch (err: unknown) {
@@ -124,6 +140,8 @@ export function createDaemonHookClient(options: DaemonHookClientOptions): Daemon
 				const reason = err instanceof Error ? err.message : String(err);
 				process.stderr.write(`honeycomb: hook capture transport failed (daemon unreachable): ${reason}\n`);
 				return { status: 0 };
+			} finally {
+				clearTimeout(timer);
 			}
 		},
 	};
