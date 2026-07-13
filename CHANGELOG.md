@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.18.0 — 2026-07-13
+
+Recall search now finds any memory visible in the list under the same scope, including workspace inbox rows in project-scoped views, and search hits carry actionable memory id/type for richer dashboard cards. Also fixes lexical search to match multi-word queries via tokenized matching instead of requiring an exact phrase.
+
 ## v0.17.0 — 2026-07-12
 
 Provider/API key and settings changes (e.g. memory toggle, model selection, Portkey config) now take effect live via an in-process reload instead of requiring a daemon restart, and project onboarding binds correctly track workspace/org switches after boot.

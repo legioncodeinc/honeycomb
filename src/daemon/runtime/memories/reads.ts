@@ -192,8 +192,13 @@ export function buildListSql(limit: number, project?: ListProjectScope): string 
 	// `limit` is a clamped integer (resolveListLimit) → a bare numeric interpolation,
 	// the same shape the rest of the data layer uses for a dynamic LIMIT (audit-safe).
 	const safeLimit = Math.max(1, Math.trunc(limit));
+	// ISS-006 (inbox reachability): `includeInbox` admits the workspace `__unsorted__` rows in a
+	// project-scoped list — the SAME flag the recall arms pass (projectConjunctFor), so the
+	// pre-search list and the search corpus stay symmetric for every scope input.
 	const projectClause =
-		project !== undefined ? ` AND ${buildProjectScopeClause({ projectId: project.projectId, bound: project.bound }).sql}` : "";
+		project !== undefined
+			? ` AND ${buildProjectScopeClause({ projectId: project.projectId, bound: project.bound, includeInbox: true }).sql}`
+			: "";
 	return (
 		`SELECT ${SELECT_COLS} FROM "${tbl}" ` +
 		`WHERE ${sqlIdent("is_deleted")} = 0${projectClause} ` +

@@ -316,6 +316,19 @@ export interface ProjectScopeInput {
 	 * arm, so an unpromoted skill stays isolated to its `project_id` (49c-AC-1).
 	 */
 	readonly promotionColumn?: string;
+	/**
+	 * ISS-006 (inbox reachability): when `true`, the predicate ALSO admits the workspace
+	 * `__unsorted__` inbox rows for a BOUND session — the disjunction gains
+	 * `OR project_id = '__unsorted__'`. Rows stored without a resolvable project (the MCP
+	 * `memory_store`, the dashboard Add form) land in the inbox; without this arm they are
+	 * invisible to every project-scoped list AND search (live-proven, `mem_mrhxs5hh_491kqe1b`).
+	 * The memories LIST ({@link import("../memories/reads.js").buildListSql}) and the memories
+	 * RECALL arms (`projectConjunctFor` in `memories/recall.ts`) BOTH pass it, so list + search
+	 * stay corpus-symmetric. DEFAULT `false` — the skills surfacing path (049c) and every other
+	 * caller keep the byte-identical 049b predicate (an unpromoted skill stays isolated).
+	 * A no-op for an UNBOUND session (the inbox is already the primary admitted id).
+	 */
+	readonly includeInbox?: boolean;
 }
 
 /**
@@ -371,6 +384,12 @@ export function buildProjectScopeClause(input: ProjectScopeInput): ProjectScopeC
 	// workspace-global / legacy rows). De-duped so a redundant `OR x OR x` is never emitted.
 	const primaryId = bound ? rawId : UNSORTED_PROJECT_ID;
 	const admitted = primaryId === PROJECT_ID_UNSET ? [PROJECT_ID_UNSET] : [primaryId, PROJECT_ID_UNSET];
+	// ISS-006 (inbox reachability): the memories list + recall callers opt the workspace inbox
+	// into a BOUND session's predicate so an unsorted (cwd-less) capture is reachable from every
+	// project-scoped view. De-duped: a no-op when the inbox is already the primary admitted id.
+	if (input.includeInbox === true && !admitted.includes(UNSORTED_PROJECT_ID)) {
+		admitted.push(UNSORTED_PROJECT_ID);
+	}
 	const disjuncts = admitted.map((id) => `${col} = ${sLiteral(id)}`);
 	const values = [...admitted];
 	// FIX #6: the column DEFAULT is '' (PROJECT_ID_UNSET), but a backend that healed pre-049b

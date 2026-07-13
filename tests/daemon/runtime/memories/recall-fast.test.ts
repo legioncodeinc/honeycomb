@@ -171,8 +171,9 @@ describe("L-A2 (a-AC-2): semantic arms SELECT content inline; every arm carries 
 		// It is NOT the heavy ids-only vector-search shape (`SELECT id AS id, … AS score` with no text).
 		expect(kindOf(memoriesSemantic)).toBe("fastSemantic");
 
-		// The EXACT 049b project segment is ANDed into EVERY arm (all 7).
-		const expectedSegment = buildProjectScopeConjunct({ projectId: "proj-A", bound: true });
+		// The EXACT 049b project segment is ANDed into EVERY arm (all 7). ISS-006: the recall arms
+		// pass `includeInbox` so the workspace `__unsorted__` inbox rows are admitted (list/search parity).
+		const expectedSegment = buildProjectScopeConjunct({ projectId: "proj-A", bound: true, includeInbox: true });
 		for (const sql of seen) {
 			expect(sql, `arm missing the project segment: ${sql}`).toContain(expectedSegment);
 		}

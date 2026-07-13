@@ -170,8 +170,9 @@ describe("a-AC-2 (parity): search top-k id order + scores match the `<#>` refere
 		const rows = index.search(makeVector(1), "proj-A", 5);
 		expect(rows.length).toBe(2);
 		for (const r of rows) {
-			// The uniform shape rowsToRankedArm consumes: source/id/text/created_at (+ score for ORDER BY).
-			expect(Object.keys(r).sort()).toEqual(["created_at", "id", "score", "source", "text"]);
+			// The uniform shape rowsToRankedArm consumes: source/id/text/created_at (+ score for ORDER BY,
+			// + the ISS-006 additive memory_type tag the presentation-parity contract carries).
+			expect(Object.keys(r).sort()).toEqual(["created_at", "id", "memory_type", "score", "source", "text"]);
 		}
 		// Scores are monotonically non-increasing (the arm's rank signal).
 		for (let i = 1; i < rows.length; i += 1) {
