@@ -69,6 +69,22 @@ export const DEFAULT_RECALL_LIMIT = 5;
 /** The default per-turn `tokenBudget` - small, to protect the turn's token budget + prompt-cache stability. */
 export const DEFAULT_RECALL_TOKEN_BUDGET = 600;
 
+/**
+ * ISS-024: the minimum fused RRF score a hit must carry to be INJECTED per-turn.
+ *
+ * PRD-045b removed the daemon-side confidence gate on the doctrine that every surface wants raw
+ * ranked recall — which left the per-turn injector with NO relevance floor: the top-`limit` hits
+ * ride into the model's context however weak they are (live-observed: hits scoring < 0.005 —
+ * displayed as 0.00 — injected on every turn of a session). The inject-or-not decision belongs to
+ * the INJECTOR, so the floor lives here, not in the daemon (dashboard/CLI/MCP still get raw recall).
+ *
+ * WHY 0.005: with RRF `k=60`, a rank-1 single-arm distilled hit scores `1/61 ≈ 0.016` fresh, and
+ * `≈ 0.008` at one recency half-life (180 days for `memories`, exponent 1.0). 0.005 admits a
+ * rank-1..5 fresh hit AND a half-life-aged fact, while cutting the deep-conjunct-rank noise tier
+ * (scores an order of magnitude below a real match). Tunable via {@link RecallRendererOptions.minScore}.
+ */
+export const MIN_INJECTION_SCORE = 0.005;
+
 /** The `default` workspace sentinel when the credential carries no workspace (mirrors the daemon-client). */
 const DEFAULT_WORKSPACE = "default" as const;
 
@@ -91,6 +107,8 @@ export interface RecallRendererOptions {
 	readonly limit?: number;
 	/** The per-turn token budget. Defaults to {@link DEFAULT_RECALL_TOKEN_BUDGET}. */
 	readonly tokenBudget?: number;
+	/** The minimum fused score a hit needs to inject (ISS-024). Defaults to {@link MIN_INJECTION_SCORE}. */
+	readonly minScore?: number;
 }
 
 /**
@@ -107,6 +125,7 @@ export function createRecallRenderer(options: RecallRendererOptions = {}): Recal
 	const timeoutMs = options.timeoutMs ?? DEFAULT_RECALL_TIMEOUT_MS;
 	const limit = options.limit ?? DEFAULT_RECALL_LIMIT;
 	const tokenBudget = options.tokenBudget ?? DEFAULT_RECALL_TOKEN_BUDGET;
+	const minScore = options.minScore ?? MIN_INJECTION_SCORE;
 	const url = `http://${host}:${port}${RECALL_PATH}`;
 
 	return {
@@ -141,7 +160,7 @@ export function createRecallRenderer(options: RecallRendererOptions = {}): Recal
 			try {
 				const res = await doFetch(url, { method: "POST", headers, body, signal: controller.signal });
 				if (res.status !== 200) return []; // non-200 (incl. the signed-out 400) → no injection.
-				return coerceHits(await readJsonSoft(res));
+				return coerceHits(await readJsonSoft(res), minScore);
 			} catch {
 				// Unreachable / refused / timed-out / aborted → no injection, no throw (a-AC-3).
 				return [];
@@ -173,17 +192,39 @@ function recallTenancyHeaders(cred: HookCredential | undefined): Record<string, 
  * and a stable `ref` for dedupe: `source:id` when an id is present, else a `text:` content
  * prefix (so a re-scored duplicate of the same content still dedupes - the PRD's preferred
  * key with the documented text fallback). A non-array `hits` or unknown shape yields `[]`.
+ *
+ * ── ISS-024: the injection gate ─────────────────────────────────────────────
+ * Two classes of hit are excluded from PER-TURN injection (they stay reachable via
+ * `honeycomb recall`, the dashboard, and the MCP tools — the daemon still returns them):
+ *   - RAW SESSION DUMPS: a hit the daemon classed `session` (`secondary: true` /
+ *     `kind: "session"`) is a captured-turn blob — for legacy rows, the full escaped
+ *     `message::text` JSON. The daemon tags them for drill-down; injecting them verbatim
+ *     is how a raw tool-call trace ends up in the model's context.
+ *   - BELOW-FLOOR SCORES: a hit whose fused RRF score is below `minScore` (see
+ *     {@link MIN_INJECTION_SCORE}). A MISSING/non-numeric score is KEPT (fail-open): the
+ *     thin client never blanks recall because an older daemon omitted a field.
  */
-function coerceHits(body: unknown): readonly RecallHit[] {
+function coerceHits(body: unknown, minScore: number): readonly RecallHit[] {
 	if (body === null || typeof body !== "object") return [];
 	const rawHits = (body as { hits?: unknown }).hits;
 	if (!Array.isArray(rawHits)) return [];
 	const out: RecallHit[] = [];
 	for (const item of rawHits) {
 		if (item === null || typeof item !== "object") continue;
-		const rec = item as { id?: unknown; source?: unknown; text?: unknown };
+		const rec = item as {
+			id?: unknown;
+			source?: unknown;
+			text?: unknown;
+			score?: unknown;
+			kind?: unknown;
+			secondary?: unknown;
+		};
 		const text = typeof rec.text === "string" ? rec.text : "";
 		if (text.trim().length === 0) continue;
+		// ISS-024: raw session dumps never inject per-turn (either provenance signal suffices).
+		if (rec.secondary === true || rec.kind === "session") continue;
+		// ISS-024: below-floor hits never inject; a missing/non-numeric score is kept (fail-open).
+		if (typeof rec.score === "number" && rec.score < minScore) continue;
 		const id = typeof rec.id === "string" ? rec.id : "";
 		const source = typeof rec.source === "string" ? rec.source : "";
 		out.push({ ref: id.length > 0 ? `${source}:${id}` : `text:${text.trim().slice(0, 120)}`, text });

@@ -28,6 +28,7 @@ import {
 	createRecallRenderer,
 	DEFAULT_RECALL_LIMIT,
 	DEFAULT_RECALL_TOKEN_BUDGET,
+	MIN_INJECTION_SCORE,
 	RECALL_PATH,
 } from "../../../src/hooks/shared/recall-renderer.js";
 
@@ -66,7 +67,8 @@ function recordingFetch(res: { status: number; body: string }): { fetch: typeof 
 const HITS_BODY = JSON.stringify({
 	hits: [
 		{ source: "memories", id: "m1", text: "Token TTL dropped to 1h (decided 2026-07-01).", score: 2, kind: "memory" },
-		{ source: "sessions", id: "conv-9", text: "auth refactor thread", score: 1, kind: "session" },
+		// ISS-024: a raw session dump — the injection gate excludes it per-turn (drill-down only).
+		{ source: "sessions", id: "conv-9", text: "auth refactor thread", score: 1, kind: "session", secondary: true },
 	],
 	sources: ["memories", "sessions"],
 	degraded: false,
@@ -93,10 +95,8 @@ describe("PRD-076a recall renderer - a-AC-1 request shape", () => {
 		expect(body.limit).toBe(DEFAULT_RECALL_LIMIT);
 		expect(body.tokenBudget).toBe(DEFAULT_RECALL_TOKEN_BUDGET);
 		// The daemon-bounded hits are coerced to { ref, text } (ref = source:id for dedupe).
-		expect(hits).toEqual([
-			{ ref: "memories:m1", text: "Token TTL dropped to 1h (decided 2026-07-01)." },
-			{ ref: "sessions:conv-9", text: "auth refactor thread" },
-		]);
+		// ISS-024: the raw sessions hit is gated out of per-turn injection.
+		expect(hits).toEqual([{ ref: "memories:m1", text: "Token TTL dropped to 1h (decided 2026-07-01)." }]);
 	});
 
 	it("a-AC-1: an empty prompt is not sent (no recall on a blank turn)", async () => {
@@ -188,6 +188,67 @@ describe("PRD-076a recall renderer - a-AC-3 graceful degradation (never a throw)
 		const { fetch: fakeFetch } = recordingFetch({ status: 200, body: JSON.stringify({ sources: [], degraded: true }) });
 		const renderer = createRecallRenderer({ fetch: fakeFetch });
 		expect(await renderer.render({ meta: META, credential: { token: "t", org: "acme" }, query: "auth?" })).toEqual([]);
+	});
+
+	it("ISS-024: below-floor scores are gated out; missing scores are kept (fail-open)", async () => {
+		const body = JSON.stringify({
+			hits: [
+				// A real fresh rank-1 hit (1/61 ≈ 0.016) — comfortably above the floor.
+				{ source: "memories", id: "m-keep", text: "kept fact", score: 0.016, kind: "memory" },
+				// The live-observed noise tier: fused scores rendering as 0.00 — gated.
+				{ source: "memories", id: "m-noise", text: "deep-conjunct-rank noise", score: 0.001, kind: "memory" },
+				// An older daemon that omits `score` entirely — kept, never blanked (fail-open).
+				{ source: "memories", id: "m-legacy", text: "legacy shape", kind: "memory" },
+			],
+			sources: ["memories"],
+			degraded: false,
+		});
+		const { fetch: fakeFetch } = recordingFetch({ status: 200, body });
+		const renderer = createRecallRenderer({ fetch: fakeFetch });
+		const hits = await renderer.render({ meta: META, credential: { token: "t", org: "acme" }, query: "auth?" });
+		expect(hits).toEqual([
+			{ ref: "memories:m-keep", text: "kept fact" },
+			{ ref: "memories:m-legacy", text: "legacy shape" },
+		]);
+	});
+
+	it("ISS-024: raw session dumps are gated on EITHER provenance signal (secondary OR kind)", async () => {
+		const body = JSON.stringify({
+			hits: [
+				// Signal 1: `secondary: true` alone (kind absent — a thin/older projection).
+				{ source: "sessions", id: "s1", text: '{"event":{"kind":"tool_call"}}', score: 0.06, secondary: true },
+				// Signal 2: `kind: "session"` alone (secondary absent).
+				{ source: "sessions", id: "s2", text: "raw turn text", score: 0.05, kind: "session" },
+				// A distilled hit rides through untouched.
+				{ source: "memory", id: "sum-1", text: "a session summary", score: 0.02, kind: "memory", secondary: false },
+			],
+			sources: ["sessions", "memory"],
+			degraded: false,
+		});
+		const { fetch: fakeFetch } = recordingFetch({ status: 200, body });
+		const renderer = createRecallRenderer({ fetch: fakeFetch });
+		const hits = await renderer.render({ meta: META, credential: { token: "t", org: "acme" }, query: "auth?" });
+		expect(hits).toEqual([{ ref: "memory:sum-1", text: "a session summary" }]);
+	});
+
+	it("ISS-024: a custom minScore overrides the default floor", async () => {
+		const body = JSON.stringify({
+			hits: [
+				{ source: "memories", id: "m1", text: "just above default floor", score: MIN_INJECTION_SCORE, kind: "memory" },
+			],
+			sources: ["memories"],
+			degraded: false,
+		});
+		const { fetch: fakeFetch } = recordingFetch({ status: 200, body });
+		// A stricter floor gates the hit the default admits.
+		const strict = createRecallRenderer({ fetch: fakeFetch, minScore: 0.01 });
+		expect(await strict.render({ meta: META, credential: { token: "t", org: "acme" }, query: "auth?" })).toEqual([]);
+		const { fetch: laxFetch } = recordingFetch({ status: 200, body });
+		// minScore: 0 disables the floor entirely (score >= 0 always passes).
+		const lax = createRecallRenderer({ fetch: laxFetch, minScore: 0 });
+		expect(await lax.render({ meta: META, credential: { token: "t", org: "acme" }, query: "auth?" })).toEqual([
+			{ ref: "memories:m1", text: "just above default floor" },
+		]);
 	});
 
 	it("a-AC-3: a slow daemon is bounded by the timeout and degrades to []", async () => {
