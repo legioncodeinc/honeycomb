@@ -73,6 +73,105 @@ export const LEGACY_SERVICE_TASK_NAME = "HoneycombDaemon" as const;
  */
 export const SERVICE_MODE_ENV = "HONEYCOMB_DAEMON_SERVICE" as const;
 
+/** Fixed host for exact-identity cleanup after Task Scheduler ends its conhost wrapper. */
+export const WINDOWS_POWERSHELL_PATH = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" as const;
+
+/** Shared PowerShell 5-safe decoder and exact expected-command builder. */
+const WINDOWS_HONEYCOMB_IDENTITY_SETUP_SCRIPT =
+	"$ErrorActionPreference='Stop'; " +
+	"$entry=[IO.Path]::GetFullPath([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($entry64))); " +
+	"$node=[IO.Path]::GetFullPath([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($node64))); " +
+	"$flagsJson=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($flags64)); " +
+	"$decodedFlags=ConvertFrom-Json -InputObject $flagsJson; " +
+	"if($null -eq $decodedFlags){$flagItems=@()}elseif($decodedFlags -is [System.Array]){$flagItems=$decodedFlags}else{$flagItems=@($decodedFlags)}; " +
+	"$flags=@(); foreach($flag in $flagItems){if($flag -isnot [string]){throw 'Honeycomb node flags must be strings.'}; $flags+=[string]$flag}; " +
+	"$dq=[char]34; $tokenPattern={ param([string]$value) " +
+	"$plain=[Regex]::Escape($value); $quoted=[Regex]::Escape(($dq+$value+$dq)); " +
+	"if($value.Contains(' ')){ $fragmented=[Regex]::Escape(($value -replace ' ',($dq+' '+$dq))); return '(?:'+$quoted+'|'+$fragmented+')' }; " +
+	"return '(?:'+$quoted+'|'+$plain+')' }; " +
+	"$expectedParts=@($node); foreach($flag in $flags){$expectedParts+=$flag}; $expectedParts+=$entry; " +
+	"$patterns=@(); foreach($part in $expectedParts){$patterns+=(& $tokenPattern ([string]$part))}; " +
+	"$expectedPattern='^\\s*'+($patterns -join '\\s+')+'\\s*$'; $expected=$expectedParts -join ' '; ";
+
+/**
+ * `schtasks /End` can leave the Node daemon alive beneath `conhost --headless`. Paths are supplied
+ * as UTF-16/base64 argv values, never interpolated into this fixed script. The filter requires the
+ * exact Node executable and exact Honeycomb daemon entry before terminating a process.
+ */
+export const WINDOWS_HONEYCOMB_PROCESS_CLEANUP_SCRIPT =
+	"& { param([string]$entry64,[string]$node64,[string]$flags64); " +
+	WINDOWS_HONEYCOMB_IDENTITY_SETUP_SCRIPT +
+	"$matching={ @((Get-CimInstance Win32_Process | Where-Object { " +
+	"$_.Name -ieq 'node.exe' -and $_.CommandLine -and $_.ExecutablePath -and " +
+	"[StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetFullPath($_.ExecutablePath),$node) -and " +
+	"[Regex]::IsMatch($_.CommandLine,$expectedPattern,[Text.RegularExpressions.RegexOptions]::IgnoreCase) " +
+	"})) }; " +
+	"@(& $matching) | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop }; " +
+	"Start-Sleep -Milliseconds 100; " +
+	"$remaining=@(& $matching); if($remaining.Count -ne 0){ throw 'Honeycomb daemon process remained after stop.' } }";
+
+/**
+ * Non-destructive PowerShell 5 regression probe using the exact production decoder/comparator.
+ * It never enumerates or stops processes: success means the supplied synthetic identity matches.
+ */
+export const WINDOWS_HONEYCOMB_PROCESS_IDENTITY_PROBE_SCRIPT =
+	"& { param([string]$entry64,[string]$node64,[string]$flags64,[string]$actualExe64,[string]$actualCommand64); " +
+	WINDOWS_HONEYCOMB_IDENTITY_SETUP_SCRIPT +
+	"$actualExe=[IO.Path]::GetFullPath([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($actualExe64))); " +
+	"$actualCommand=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($actualCommand64)); " +
+	"if(-not [StringComparer]::OrdinalIgnoreCase.Equals($actualExe,$node)){exit 4}; " +
+	"if(-not [Regex]::IsMatch($actualCommand,$expectedPattern,[Text.RegularExpressions.RegexOptions]::IgnoreCase)){exit 5}; " +
+	"Write-Output $expected }";
+
+function windowsCommandTokenPattern(value: string): string {
+	const escaped = value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+	const quoted = `"${value}"`.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+	if (!value.includes(" ")) return `(?:${quoted}|${escaped})`;
+	const fragmented = value.replaceAll(" ", '" "').replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+	return `(?:${quoted}|${fragmented})`;
+}
+
+export function matchesWindowsDaemonProcess(
+	executablePath: string,
+	commandLine: string,
+	spec: ServiceSpec,
+): boolean {
+	const executableMatches = win32.resolve(executablePath).toLowerCase() === win32.resolve(spec.nodePath).toLowerCase();
+	const expected = [spec.nodePath, ...spec.nodeFlags, spec.entry].map(windowsCommandTokenPattern).join("\\s+");
+	return executableMatches && new RegExp(`^\\s*${expected}\\s*$`, "iu").test(commandLine);
+}
+
+/** Fixed PowerShell probe: success only while the task and its exact Honeycomb Node descendant run. */
+export const WINDOWS_TASK_RUNNING_SCRIPT =
+	"& { param([string]$taskName,[string]$entry64,[string]$node64,[string]$flags64); " +
+	WINDOWS_HONEYCOMB_IDENTITY_SETUP_SCRIPT +
+	"$task=Get-ScheduledTask -TaskName $taskName -ErrorAction Stop; " +
+	"if([string]$task.State -ne 'Running'){ exit 3 }; " +
+	"$matching=@((Get-CimInstance Win32_Process | Where-Object { " +
+	"$_.Name -ieq 'node.exe' -and $_.CommandLine -and $_.ExecutablePath -and " +
+	"[StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetFullPath($_.ExecutablePath),$node) -and " +
+	"[Regex]::IsMatch($_.CommandLine,$expectedPattern,[Text.RegularExpressions.RegexOptions]::IgnoreCase) " +
+	"})); if($matching.Count -ne 1){ exit 4 } }";
+
+function encodedWindowsPath(value: string): string {
+	return Buffer.from(value, "utf16le").toString("base64");
+}
+
+function cleanupWindowsDaemon(runner: ServiceRunner, spec: ServiceSpec): void {
+	runner.run(WINDOWS_POWERSHELL_PATH, [
+		"-NoLogo",
+		"-NoProfile",
+		"-NonInteractive",
+		"-ExecutionPolicy",
+		"Bypass",
+		"-Command",
+		WINDOWS_HONEYCOMB_PROCESS_CLEANUP_SCRIPT,
+		encodedWindowsPath(spec.entry),
+		encodedWindowsPath(spec.nodePath),
+		encodedWindowsPath(JSON.stringify(spec.nodeFlags)),
+	]);
+}
+
 /**
  * Detect the OS service manager available on this host, or `null` when service registration is not
  * available / not wanted (→ the caller falls back to the detached spawn).
@@ -109,6 +208,19 @@ export function detectServiceManager(
 		if (xdg.length > 0) return "systemd-user";
 		return null;
 	}
+	return null;
+}
+
+/**
+ * Select the native manager for explicit service inspection/control. Unlike
+ * {@link detectServiceManager}, this deliberately ignores spawn-mode preference and Linux user-bus
+ * heuristics: explicit lifecycle and destructive removal must inspect the known platform identity
+ * and fail loudly when that inspection is unavailable.
+ */
+export function serviceManagerForPlatform(platform: NodeJS.Platform = process.platform): ServiceManager | null {
+	if (platform === "darwin") return "launchd";
+	if (platform === "win32") return "schtasks";
+	if (platform === "linux") return "systemd-user";
 	return null;
 }
 
@@ -207,6 +319,8 @@ export interface ServiceSpec {
 	 * it unconditionally for determinism; when absent the renderers simply omit the env line.
 	 */
 	readonly fleetRoot?: string;
+	/** Authoritative product-owned service log consumed by `honeycomb logs`. */
+	readonly logPath?: string;
 }
 
 /**
@@ -300,6 +414,7 @@ ${argvXml}
 	<true/>
 	<key>ProcessType</key>
 	<string>Background</string>
+	${spec.logPath !== undefined ? `<key>StandardOutPath</key>\n\t<string>${xmlEscape(spec.logPath)}</string>\n\t<key>StandardErrorPath</key>\n\t<string>${xmlEscape(spec.logPath)}</string>` : ""}
 </dict>
 </plist>
 `;
@@ -311,12 +426,20 @@ ${argvXml}
  * the liveness floor, restart-on-crash + start-on-login when the unit is `enable`d).
  */
 export function renderSystemdUnit(spec: ServiceSpec): string {
-	// systemd ExecStart wants a single command line; quote each argv token so a space in a path is
-	// preserved. The tokens are absolute paths we control (no user-supplied shell metacharacters).
-	const execStart = [spec.nodePath, ...spec.nodeFlags, spec.entry].map((a) => `"${a}"`).join(" ");
-	// PRD-072d: pin APIARY_HOME beside HONEYCOMB_WORKSPACE. systemd `Environment=` values with spaces
-	// need quoting; follow the same treatment the ExecStart tokens use.
-	const apiaryHomeLine = spec.fleetRoot !== undefined ? `\nEnvironment=${APIARY_HOME_ENV}="${spec.fleetRoot}"` : "";
+	// systemd parses these fields itself (there is no shell), including `%` specifiers and `$VAR`
+	// expansion in ExecStart. Reject those expansion carriers and quote/escape every variable token so
+	// an env-derived workspace/fleet root/log path cannot inject a unit directive or alter argv.
+	const systemdToken = (value: string): string => {
+		if (/[\u0000-\u001f\u007f%$]/u.test(value)) throw new Error("unsafe character in systemd service value");
+		return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+	};
+	const execStart = [spec.nodePath, ...spec.nodeFlags, spec.entry].map(systemdToken).join(" ");
+	const apiaryHomeLine =
+		spec.fleetRoot !== undefined ? `\nEnvironment=${systemdToken(`${APIARY_HOME_ENV}=${spec.fleetRoot}`)}` : "";
+	const logLines =
+		spec.logPath !== undefined
+			? `\nStandardOutput=${systemdToken(`append:${spec.logPath}`)}\nStandardError=${systemdToken(`append:${spec.logPath}`)}`
+			: "";
 	return `[Unit]
 Description=Honeycomb primary daemon (127.0.0.1:3850)
 After=network.target
@@ -324,10 +447,10 @@ After=network.target
 [Service]
 Type=simple
 ExecStart=${execStart}
-WorkingDirectory=${spec.workspace}
-Environment=HONEYCOMB_WORKSPACE=${spec.workspace}${apiaryHomeLine}
+WorkingDirectory=${systemdToken(spec.workspace)}
+Environment=${systemdToken(`HONEYCOMB_WORKSPACE=${spec.workspace}`)}${apiaryHomeLine}
 Restart=always
-RestartSec=5
+RestartSec=5${logLines}
 
 [Install]
 WantedBy=default.target
@@ -474,6 +597,7 @@ export function renderScheduledTaskXml(spec: ServiceSpec, userId: string, conhos
 	assertCmdSafe(spec.nodePath);
 	assertCmdSafe(spec.entry);
 	if (spec.fleetRoot !== undefined) assertCmdSafe(spec.fleetRoot);
+	if (spec.logPath !== undefined) assertCmdSafe(spec.logPath);
 	const nodeFlags = spec.nodeFlags.length > 0 ? `${spec.nodeFlags.join(" ")} ` : "";
 	// cmd's `set VAR=value && next` captures EVERYTHING up to `&&`, INCLUDING the space before it, into
 	// VAR — so an unquoted `set APIARY_HOME=<root> && ...` pins a TRAILING SPACE onto the value, and the
@@ -499,7 +623,12 @@ export function renderScheduledTaskXml(spec: ServiceSpec, userId: string, conhos
 	// the OS supervisor contract (systemd `Restart=on-failure`, launchd `KeepAlive`) that conhost breaks
 	// on Windows. The bound (60) with PT1M framing caps a hard boot-loop; the task's own PT1M x999 stays
 	// as a belt-and-suspenders for the (rare) case the whole conhost host itself dies non-zero.
-	const nodeInvoke = `"${spec.nodePath}" ${nodeFlags}"${spec.entry}"`;
+	// These are intentional cmd operators, not user-derived text. Do NOT caret-escape them: `^>`
+	// turns redirection into a literal argv token, causing Node to receive `>> <log> 2>&1` and leaving
+	// the service log unwritten. The surrounding task XML escapes `>`/`&` as markup after this command
+	// is assembled, while assertCmdSafe above keeps the interpolated log path non-executable.
+	const redirect = spec.logPath !== undefined ? ` >> "${spec.logPath}" 2>&1` : "";
+	const nodeInvoke = `"${spec.nodePath}" ${nodeFlags}"${spec.entry}"${redirect}`;
 	// NOTE `%i` (single, not `%%i`): the loop runs on the cmd COMMAND LINE (conhost passes a command
 	// string, not a `.bat` file), where `for` uses a single `%`. `%%i` is a batch-file-only escaping and
 	// errors ("%%i was unexpected at this time") on the command line. The counter var is unreferenced —
@@ -508,7 +637,7 @@ export function renderScheduledTaskXml(spec: ServiceSpec, userId: string, conhos
 		`for /l %i in (1,1,60) do (` +
 		`${nodeInvoke} & ` +
 		`if !errorlevel! equ 0 (exit /b 0) & ` +
-		`timeout /t 5 /nobreak ^>nul` +
+		`timeout /t 5 /nobreak >nul` +
 		`)`;
 	const innerCmd = `cmd /v:on /c "cd /d "${spec.workspace}" && set "HONEYCOMB_WORKSPACE=${spec.workspace}" && ${apiaryHomeSet}${relaunchLoop}"`;
 	// conhost --headless <inner> => no console window pops when the task runs (proven probe: Result 0).
@@ -585,7 +714,7 @@ export interface DaemonServiceController {
 	readonly manager: ServiceManager;
 	/** Register the service unit + load/enable it so the manager supervises it (idempotent). */
 	register(spec: ServiceSpec): ServiceOpResult;
-	/** Deregister the service (unload/disable + remove the unit). Idempotent + never throws. */
+	/** Deregister the service. Throws when required process termination cannot be verified. */
 	unregister(spec: ServiceSpec): ServiceOpResult;
 	/**
 	 * Best-effort removal of the PRE-decision-#32 LEGACY unit/label for this manager (PRD-003b
@@ -601,6 +730,8 @@ export interface DaemonServiceController {
 	stop(spec: ServiceSpec): ServiceOpResult;
 	/** True iff the service is currently REGISTERED with the manager (unit present / task exists). */
 	isRegistered(spec: ServiceSpec): boolean;
+	/** True iff the manager reports the registered service instance is actively running. */
+	isRunning?(spec: ServiceSpec): boolean;
 }
 
 /** Resolve the home dir for a spec (explicit `home` wins; else `os.homedir()`). */
@@ -683,6 +814,13 @@ function launchdController(runner: ServiceRunner): DaemonServiceController {
 		isRegistered(spec): boolean {
 			return runner.fileExists(launchdPlistPath(specHome(spec)));
 		},
+		isRunning(): boolean {
+			try {
+				return /\bstate = running\b/u.test(runner.run("launchctl", ["print", `${domain()}/${SERVICE_LABEL}`]));
+			} catch {
+				return false;
+			}
+		},
 	};
 }
 
@@ -747,6 +885,14 @@ function systemdController(runner: ServiceRunner): DaemonServiceController {
 		isRegistered(spec): boolean {
 			return runner.fileExists(systemdUnitPath(specHome(spec)));
 		},
+		isRunning(): boolean {
+			try {
+				runner.run("systemctl", ["--user", "is-active", "--quiet", unit]);
+				return true;
+			} catch {
+				return false;
+			}
+		},
 	};
 }
 
@@ -774,6 +920,12 @@ function schtasksController(runner: ServiceRunner): DaemonServiceController {
 			// Decision #32 migration: strip a lingering legacy task so a re-run never leaves two tasks
 			// racing over one daemon.
 			cleanupLegacy();
+			try {
+				runner.run("schtasks", ["/End", "/TN", SERVICE_TASK_NAME]);
+			} catch {
+				// Already stopped or absent; exact descendant cleanup below still runs.
+			}
+			cleanupWindowsDaemon(runner, spec);
 			// Administrator-Protection fix: scope the task to the current user (SID) and register it from
 			// a STAGED XML definition. `resolveWindowsUserId` throws when it cannot resolve an identity,
 			// which propagates as the "service path unavailable" signal (runtime.ts falls back to spawn).
@@ -793,6 +945,7 @@ function schtasksController(runner: ServiceRunner): DaemonServiceController {
 			} catch {
 				// Not running is fine, we still delete the task below.
 			}
+			cleanupWindowsDaemon(runner, spec);
 			try {
 				runner.run("schtasks", ["/Delete", "/TN", SERVICE_TASK_NAME, "/F"]);
 			} catch {
@@ -817,17 +970,43 @@ function schtasksController(runner: ServiceRunner): DaemonServiceController {
 			} catch {
 				// Already stopped is fine; proceed to /Run.
 			}
+			cleanupWindowsDaemon(runner, spec);
 			runner.run("schtasks", ["/Run", "/TN", SERVICE_TASK_NAME]);
 			return { ok: true, manager: "schtasks" };
 		},
-		stop(_spec): ServiceOpResult {
-			runner.run("schtasks", ["/End", "/TN", SERVICE_TASK_NAME]);
+		stop(spec): ServiceOpResult {
+			try {
+				runner.run("schtasks", ["/End", "/TN", SERVICE_TASK_NAME]);
+			} catch {
+				// A task already in Ready state can still have an orphaned Node descendant.
+			}
+			cleanupWindowsDaemon(runner, spec);
 			return { ok: true, manager: "schtasks" };
 		},
 		isRegistered(_spec): boolean {
 			// A registered task answers `/Query` with exit 0; a missing one throws (non-zero) → false.
 			try {
 				runner.run("schtasks", ["/Query", "/TN", SERVICE_TASK_NAME]);
+				return true;
+			} catch {
+				return false;
+			}
+		},
+		isRunning(spec): boolean {
+			try {
+				runner.run(WINDOWS_POWERSHELL_PATH, [
+					"-NoLogo",
+					"-NoProfile",
+					"-NonInteractive",
+					"-ExecutionPolicy",
+					"Bypass",
+					"-Command",
+					WINDOWS_TASK_RUNNING_SCRIPT,
+					SERVICE_TASK_NAME,
+					encodedWindowsPath(spec.entry),
+					encodedWindowsPath(spec.nodePath),
+					encodedWindowsPath(JSON.stringify(spec.nodeFlags)),
+				]);
 				return true;
 			} catch {
 				return false;

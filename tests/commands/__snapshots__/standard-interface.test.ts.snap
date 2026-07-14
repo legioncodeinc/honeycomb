@@ -1,0 +1,254 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`PRD-003 Honeycomb standard operational interface > AC-c9 missing logs have exact human and JSON failure goldens > missing-log-human 1`] = `"Unable to resolve honeycomb log source."`;
+
+exports[`PRD-003 Honeycomb standard operational interface > AC-c9 missing logs have exact human and JSON failure goldens > missing-log-json 1`] = `
+"{
+  "product": "honeycomb",
+  "command": "logs",
+  "ok": false,
+  "message": "Unable to resolve honeycomb log source."
+}"
+`;
+
+exports[`PRD-003 Honeycomb standard operational interface > AC-c9 not-installed status has exact human and JSON goldens > not-installed-human 1`] = `
+"Product: HONEYCOMB 0.0.0-dev
+Service: not-installed
+Process: stopped
+Health: unknown - http://127.0.0.1:3850/health - not reachable
+Registration: registered
+Update: unknown
+Config: /fixture/honeycomb
+Logs: /fixture/honeycomb/service.log
+Details:
+  serviceManager: null
+  port: 3850
+"
+`;
+
+exports[`PRD-003 Honeycomb standard operational interface > AC-c9 not-installed status has exact human and JSON goldens > not-installed-json 1`] = `
+"{
+  "product": "honeycomb",
+  "version": "0.0.0-dev",
+  "installation": "not-installed",
+  "process": {
+    "state": "stopped"
+  },
+  "health": {
+    "state": "unknown",
+    "endpoint": "http://127.0.0.1:3850/health",
+    "result": "not reachable"
+  },
+  "registration": "registered",
+  "paths": {
+    "config": "/fixture/honeycomb",
+    "logs": "/fixture/honeycomb/service.log"
+  },
+  "details": {
+    "serviceManager": null,
+    "port": 3850
+  },
+  "command": "status",
+  "ok": true,
+  "message": "Honeycomb status read."
+}"
+`;
+
+exports[`PRD-003 Honeycomb standard operational interface > AC-c9 running status has exact human and JSON goldens > running-human 1`] = `
+"Product: HONEYCOMB 0.0.0-dev
+Service: installed
+Process: running (PID 42)
+Health: healthy - http://127.0.0.1:3850/health - reachable
+Registration: registered
+Update: unknown
+Config: /fixture/honeycomb
+Logs: /fixture/honeycomb/service.log
+Details:
+  serviceManager: schtasks
+  port: 3850
+"
+`;
+
+exports[`PRD-003 Honeycomb standard operational interface > AC-c9 running status has exact human and JSON goldens > running-json 1`] = `
+"{
+  "product": "honeycomb",
+  "version": "0.0.0-dev",
+  "installation": "installed",
+  "process": {
+    "state": "running",
+    "pid": 42
+  },
+  "health": {
+    "state": "healthy",
+    "endpoint": "http://127.0.0.1:3850/health",
+    "result": "reachable"
+  },
+  "registration": "registered",
+  "paths": {
+    "config": "/fixture/honeycomb",
+    "logs": "/fixture/honeycomb/service.log"
+  },
+  "details": {
+    "serviceManager": "schtasks",
+    "port": 3850
+  },
+  "command": "status",
+  "ok": true,
+  "message": "Honeycomb status read."
+}"
+`;
+
+exports[`PRD-003 Honeycomb standard operational interface > AC-c9 stopped status has exact human and JSON goldens > stopped-human 1`] = `
+"Product: HONEYCOMB 0.0.0-dev
+Service: installed
+Process: stopped
+Health: unknown - http://127.0.0.1:3850/health - not reachable
+Registration: registered
+Update: unknown
+Config: /fixture/honeycomb
+Logs: /fixture/honeycomb/service.log
+Details:
+  serviceManager: schtasks
+  port: 3850
+"
+`;
+
+exports[`PRD-003 Honeycomb standard operational interface > AC-c9 stopped status has exact human and JSON goldens > stopped-json 1`] = `
+"{
+  "product": "honeycomb",
+  "version": "0.0.0-dev",
+  "installation": "installed",
+  "process": {
+    "state": "stopped"
+  },
+  "health": {
+    "state": "unknown",
+    "endpoint": "http://127.0.0.1:3850/health",
+    "result": "not reachable"
+  },
+  "registration": "registered",
+  "paths": {
+    "config": "/fixture/honeycomb",
+    "logs": "/fixture/honeycomb/service.log"
+  },
+  "details": {
+    "serviceManager": "schtasks",
+    "port": 3850
+  },
+  "command": "status",
+  "ok": true,
+  "message": "Honeycomb status read."
+}"
+`;
+
+exports[`PRD-003 Honeycomb standard operational interface > AC-c9 telemetry enabled has exact human and JSON goldens > telemetry-enabled-human 1`] = `
+"Honeycomb telemetry — glass box (everything this machine has phoned home, and what it would send next).
+
+anonymized id (distinct_id): 00000000-0000-4000-8000-000000000003
+Tier-2 usage telemetry: off (opt-in)
+
+ALREADY SENT (0):
+  (nothing has been sent from this machine)
+
+WOULD SEND NEXT (3):
+  • honeycomb_installed [tier1]
+      arch=<ARCH> honeycomb_version=0.0.0-dev node=<NODE> os=<OS> ref=golden tier=tier1
+  • honeycomb_first_link [tier1]
+      arch=<ARCH> honeycomb_version=0.0.0-dev node=<NODE> os=<OS> ref=golden tier=tier1
+  • honeycomb_hivemind_upgrade [tier1]
+      arch=<ARCH> honeycomb_version=0.0.0-dev node=<NODE> os=<OS> ref=golden tier=tier1
+
+To disable all telemetry: set HONEYCOMB_TELEMETRY=0 or DO_NOT_TRACK=1."
+`;
+
+exports[`PRD-003 Honeycomb standard operational interface > AC-c9 telemetry enabled has exact human and JSON goldens > telemetry-enabled-json 1`] = `
+"{
+  "product": "honeycomb",
+  "command": "telemetry",
+  "ok": true,
+  "message": "Honeycomb telemetry state read.",
+  "state": "enabled",
+  "controllingSetting": "default enabled; Tier-2 remains opt-in",
+  "destination": "hosted",
+  "queue": {
+    "pending": 3
+  },
+  "optOutInstruction": "Set HONEYCOMB_TELEMETRY=0 or DO_NOT_TRACK=1"
+}"
+`;
+
+exports[`PRD-003 Honeycomb standard operational interface > AC-c9 telemetry opted-out has exact human and JSON goldens > telemetry-opted-out-human 1`] = `
+"Honeycomb telemetry — glass box (everything this machine has phoned home, and what it would send next).
+
+anonymized id (distinct_id): 00000000-0000-4000-8000-000000000003
+Tier-2 usage telemetry: off (opt-in)
+status: OPTED OUT (HONEYCOMB_TELEMETRY=0 or DO_NOT_TRACK set) — nothing is sent.
+
+ALREADY SENT (0):
+  (nothing has been sent from this machine)
+
+WOULD SEND NEXT (0):
+  (opted out — nothing would be sent)
+
+To disable all telemetry: set HONEYCOMB_TELEMETRY=0 or DO_NOT_TRACK=1."
+`;
+
+exports[`PRD-003 Honeycomb standard operational interface > AC-c9 telemetry opted-out has exact human and JSON goldens > telemetry-opted-out-json 1`] = `
+"{
+  "product": "honeycomb",
+  "command": "telemetry",
+  "ok": true,
+  "message": "Honeycomb telemetry state read.",
+  "state": "opted-out",
+  "controllingSetting": "HONEYCOMB_TELEMETRY or DO_NOT_TRACK",
+  "destination": "disabled",
+  "queue": {
+    "pending": 0
+  },
+  "optOutInstruction": "Set HONEYCOMB_TELEMETRY=0 or DO_NOT_TRACK=1"
+}"
+`;
+
+exports[`PRD-003 Honeycomb standard operational interface > AC-c9 unhealthy status has exact human and JSON goldens > unhealthy-human 1`] = `
+"Product: HONEYCOMB 0.0.0-dev
+Service: installed
+Process: running (PID 42)
+Health: unhealthy - http://127.0.0.1:3850/health - not reachable
+Registration: registered
+Update: unknown
+Config: /fixture/honeycomb
+Logs: /fixture/honeycomb/service.log
+Details:
+  serviceManager: schtasks
+  port: 3850
+"
+`;
+
+exports[`PRD-003 Honeycomb standard operational interface > AC-c9 unhealthy status has exact human and JSON goldens > unhealthy-json 1`] = `
+"{
+  "product": "honeycomb",
+  "version": "0.0.0-dev",
+  "installation": "installed",
+  "process": {
+    "state": "running",
+    "pid": 42
+  },
+  "health": {
+    "state": "unhealthy",
+    "endpoint": "http://127.0.0.1:3850/health",
+    "result": "not reachable"
+  },
+  "registration": "registered",
+  "paths": {
+    "config": "/fixture/honeycomb",
+    "logs": "/fixture/honeycomb/service.log"
+  },
+  "details": {
+    "serviceManager": "schtasks",
+    "port": 3850
+  },
+  "command": "status",
+  "ok": true,
+  "message": "Honeycomb status read."
+}"
+`;

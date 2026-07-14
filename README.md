@@ -159,10 +159,17 @@ honeycomb install                    # one-shot install on a fresh machine
 honeycomb setup                      # detect your coding assistants and wire hooks
 honeycomb status                     # daemon + environment health at a glance
 honeycomb login                      # sign in via the Deeplake device flow, any time
-honeycomb start                      # start the daemon (bare verb)
-honeycomb stop                       # stop the daemon (bare verb)
-honeycomb daemon start|stop|status   # the same lifecycle, spelled the classic way
-honeycomb uninstall                  # remove hooks, service unit, registry entry, state dir
+honeycomb start                      # start the installed OS service and verify health
+honeycomb stop                       # stop the installed OS service
+honeycomb restart                   # restart through the OS service and verify health
+honeycomb service-install           # install/reconcile only the OS service
+honeycomb service-uninstall         # remove only the OS service; preserve state/registration
+honeycomb register                  # idempotently upsert Honeycomb in Doctor's registry
+honeycomb logs                      # last 100 service-log lines, then follow
+honeycomb telemetry                 # read-only telemetry state and delivery summary
+honeycomb update --check            # compare installed and approved release versions
+honeycomb daemon start|stop|status   # legacy process-level compatibility commands
+honeycomb uninstall --yes            # confirmed full removal of Honeycomb-owned state
 honeycomb remember "<fact>"          # write a memory from anywhere
 honeycomb recall "<query>"           # search the shared memory
 honeycomb sessions                   # browse captured sessions
@@ -174,6 +181,10 @@ honeycomb dashboard                  # open the dashboard (Hive portal, :3853)
 ```
 
 A few lifecycle notes:
+
+- **The suite-wide command contract is shared.** The normative matrix and semantics live in [`@legioncodeinc/cli-kit`](https://github.com/legioncodeinc/cli-kit/blob/main/library/notes/prd-003-command-matrix.md); this section documents Honeycomb-specific behavior and compatibility commands only.
+- **Automation is structured.** Every baseline operational verb accepts `--json`; malformed usage exits `2`, runtime failures exit `1`, and successful/idempotent requests exit `0`. Use `--no-color` or `NO_COLOR=1` for plain human output.
+- **Logs are isolated.** `honeycomb logs` can read only Honeycomb's configured service log. It supports `--lines <n>`, `--no-follow`, and `--since <duration-or-timestamp>` and redacts recognized credentials on output.
 
 - **Sign-in knows who owns it.** When [Hive](https://github.com/legioncodeinc/hive#readme) is installed alongside, `honeycomb install` never opens its own sign-in; Hive's onboarding is the one login surface, and the daemon sits degraded on `/health` until that login writes the shared `~/.deeplake/credentials.json`, then recovers on its own, no restart needed. Solo (no Hive), a fresh install with no credentials opens the device-flow sign-in automatically, and headless sessions get the URL and code printed instead of a browser. `honeycomb login` works the same way in both modes whenever you want it.
 - **`uninstall` is surgical.** It removes only Honeycomb's things: assistant hooks, the OS service unit (current and legacy labels), Honeycomb's entry in Doctor's registry, and `~/.apiary/honeycomb`. Shared credentials and every other product survive. Running it when nothing is installed is a friendly no-op. For a full-machine wipe, use `doctor purge` or the one-command uninstall at [get.theapiary.sh](https://get.theapiary.sh).

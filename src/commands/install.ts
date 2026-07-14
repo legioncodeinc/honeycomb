@@ -161,6 +161,10 @@ export interface InstallVerbDeps extends DaemonVerbDeps {
 	 * `~/.deeplake/onboarding.json` is never touched). Defaults to the real shared dir.
 	 */
 	readonly dir?: string;
+	/** Required onboarding commit seam; production uses the shared onboarding store. */
+	readonly persistInstalled?: (ref: string, dir: string | undefined, out: OutputSink) => boolean;
+	/** Required Doctor-registration commit seam; production writes Honeycomb's registry entry. */
+	readonly registerWithDoctor?: (dir: string | undefined, out: OutputSink) => boolean;
 	/**
 	 * Telemetry chokepoint seam (PRD-050e). The `honeycomb_installed` event emits through here AFTER
 	 * the user-facing success, fire-and-forget — its injected `fetch`/`dir` let a test assert zero or
@@ -263,9 +267,8 @@ export function applyHomeOverride(argv: readonly string[], env: NodeJS.ProcessEn
 
 /**
  * Persist onboarding `phase: "installed"` + the effective `ref` through the SHARED onboarding store
- * (a-AC-5). FAIL-SOFT: an IO error here logs a warning and returns `false` (the install still
- * succeeds — the marker is best-effort bookkeeping, never a hard dependency). Idempotent: re-running
- * leaves `phase` at "installed" and re-stamps the same ref.
+ * (a-AC-5). An IO error returns false; the caller aborts before registration, ready output, or
+ * telemetry. Re-running safely retries the same idempotent commit.
  */
 function writeInstalledMarker(ref: string, dir: string | undefined, out: OutputSink): boolean {
 	try {
@@ -274,8 +277,8 @@ function writeInstalledMarker(ref: string, dir: string | undefined, out: OutputS
 		saveOnboarding(next, dir);
 		return true;
 	} catch {
-		// Fail-soft (the onboarding file is bookkeeping, not a blocker) — never abort the install.
-		out("note: could not persist the onboarding marker (continuing — the install still succeeded).");
+		// The caller owns the phase-specific error and fail-closed boundary.
+		void out;
 		return false;
 	}
 }
@@ -283,10 +286,8 @@ function writeInstalledMarker(ref: string, dir: string | undefined, out: OutputS
 /**
  * Register (or refresh) honeycomb's entry in doctor's static registry (PRD-071 Contract A /
  * AC-1 / AC-071a.1), declaring honeycomb's identity, `/health` URL, and its fleet telemetry SQLite
- * path so doctor knows honeycomb should exist and where to poll it. FAIL-SOFT (071a technical
- * considerations): a registry write error (a locked file, a missing/unwritable `~/.honeycomb`)
- * logs a note and returns `false` — it NEVER aborts the install. Idempotent: re-running REPLACES
- * the existing `honeycomb` entry in place rather than duplicating it (AC-071a.1.2).
+ * path so Doctor knows Honeycomb should exist and where to poll it. A write error returns false;
+ * the caller aborts before ready output or telemetry. Re-running replaces the entry in place.
  */
 /**
  * Resolve the daemon bind (host/port) the registry entry's `healthUrl` should advertise, from the
@@ -315,7 +316,7 @@ function writeDoctorRegistryEntry(dir: string | undefined, out: OutputSink): boo
 		});
 		return true;
 	} catch {
-		out("note: could not register with doctor (continuing — the install still succeeded).");
+		void out;
 		return false;
 	}
 }
@@ -520,13 +521,21 @@ export async function runInstallCommand(argv: readonly string[], deps: InstallVe
 	//     that throws is swallowed, and an absent lifecycle seam simply skips the line).
 	await reportDaemonSupervision(deps, out);
 
-	// 2) Persist the onboarding "installed" marker + effective ref (a-AC-5). Fail-soft.
-	const wrote = writeInstalledMarker(ref, deps.dir, out);
-	if (wrote) out(`✓ onboarding marked installed (ref: ${ref}).`);
+	// 2) Persist the required onboarding marker. A failed required phase stops the transaction;
+	// later conveniences and success telemetry must not run.
+	const wrote = (deps.persistInstalled ?? writeInstalledMarker)(ref, deps.dir, out);
+	if (!wrote) {
+		out("error: install failed during the onboarding-marker phase; fix state-directory permissions and retry.");
+		return { exitCode: 1 };
+	}
+	out(`✓ onboarding marked installed (ref: ${ref}).`);
 
 	// 2b) Register (or refresh) honeycomb's doctor static-registry entry (PRD-071 Contract A).
-	// Fail-soft — see `writeDoctorRegistryEntry`.
-	writeDoctorRegistryEntry(deps.dir, out);
+	if (!(deps.registerWithDoctor ?? writeDoctorRegistryEntry)(deps.dir, out)) {
+		out("error: install failed during the Doctor-registration phase; no ready state was reported.");
+		return { exitCode: 1 };
+	}
+	out("✓ registered Honeycomb with Doctor.");
 
 	// 2c) PRD-003a: the solo-vs-fleet login decision (a-AC-1 / a-AC-3 / a-AC-6 / a-AC-7). Fires from
 	//     the install path ONLY. Fleet → defer to Hive (no popup); solo + no creds → auto device flow;

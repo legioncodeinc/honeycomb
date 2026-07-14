@@ -16,6 +16,7 @@ import {
 	probeCursorLogin,
 	type CursorLoginSpawn,
 	type CursorLoginSpawnResult,
+	WINDOWS_CURSOR_LOGIN_COMMAND,
 } from "../../src/cli/health-probes.js";
 import type { PluginCommandRunner } from "../../src/connectors/index.js";
 import { runStatusCommand } from "../../src/commands/status.js";
@@ -78,8 +79,35 @@ describe("PRD-021b b-AC-5 — status reports the real D1–D5 health", () => {
 			calls.push({ command, args });
 			return { status: 0, stdout: "Logged in as dev@acme.com\n" };
 		};
-		probeCursorLogin(spawn);
+		probeCursorLogin(spawn, "linux");
 		expect(calls).toEqual([{ command: "cursor-agent", args: ["status"] }]);
+	});
+
+	it("ISS-017 D4 uses fixed cmd.exe argv and shell:false for the Windows .cmd shim", () => {
+		const calls: Array<{ command: string; args: readonly string[]; shell: boolean }> = [];
+		const spawn: CursorLoginSpawn = (command, args, options) => {
+			calls.push({ command, args, shell: options.shell });
+			return { status: 0, stdout: "Logged in\n" };
+		};
+		probeCursorLogin(spawn, "win32");
+		expect(calls).toEqual([
+			{ command: "cmd.exe", args: ["/d", "/s", "/c", WINDOWS_CURSOR_LOGIN_COMMAND], shell: false },
+		]);
+	});
+
+	it.runIf(process.platform === "win32")("real Windows cursor-agent probe emits no DEP0190 warning", async () => {
+		const warnings: string[] = [];
+		const listener = (warning: Error & { code?: string }): void => {
+			if (warning.code === "DEP0190" || warning.message.includes("shell option true")) warnings.push(warning.message);
+		};
+		process.on("warning", listener);
+		try {
+			probeCursorLogin();
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(warnings).toEqual([]);
+		} finally {
+			process.off("warning", listener);
+		}
 	});
 
 	it("ISS-017 D4 parses a logged-in status line → ok:true with the account", () => {

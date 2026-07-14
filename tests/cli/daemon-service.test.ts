@@ -12,6 +12,10 @@
  *   - register/unregister/status argv is the exact fixed-argv the manager expects.
  */
 
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, win32 } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -24,14 +28,20 @@ import {
 	SERVICE_SYSTEMD_UNIT,
 	SERVICE_TASK_NAME,
 	STAGED_TASK_XML_NAME,
+	WINDOWS_HONEYCOMB_PROCESS_CLEANUP_SCRIPT,
+	WINDOWS_HONEYCOMB_PROCESS_IDENTITY_PROBE_SCRIPT,
+	WINDOWS_POWERSHELL_PATH,
+	WINDOWS_TASK_RUNNING_SCRIPT,
 	buildSchtasksCreateArgs,
 	createDaemonServiceController,
 	detectServiceManager,
+	serviceManagerForPlatform,
 	launchdPlistPath,
 	legacyLaunchdPlistPath,
 	renderLaunchdPlist,
 	renderScheduledTaskXml,
 	renderSystemdUnit,
+	matchesWindowsDaemonProcess,
 	resolveWindowsUserId,
 	stagedTaskXmlPath,
 	systemdUnitPath,
@@ -42,8 +52,18 @@ const FAKE_SID = "S-1-5-21-1111111111-2222222222-3333333333-1001";
 /** The `whoami /user /fo csv /nh` line shape the parser reads (last field is the SID). */
 const WHOAMI_CSV = `"ada-pc\\ada","${FAKE_SID}"`;
 
+function utf16Base64(value: string): string {
+	return Buffer.from(value, "utf16le").toString("base64");
+}
+
 /** A recording runner: captures every run/writeFile/removeFile call WITHOUT executing anything. */
-function recordingRunner(opts?: { fileExists?: boolean; queryThrows?: boolean; whoamiOut?: string }): ServiceRunner & {
+function recordingRunner(opts?: {
+	fileExists?: boolean;
+	queryThrows?: boolean;
+	whoamiOut?: string;
+	cleanupThrows?: boolean;
+	taskNotRunning?: boolean;
+}): ServiceRunner & {
 	runs: Array<{ cmd: string; args: readonly string[] }>;
 	writes: Array<{ path: string; contents: string }>;
 	removes: string[];
@@ -57,6 +77,9 @@ function recordingRunner(opts?: { fileExists?: boolean; queryThrows?: boolean; w
 		removes,
 		run(cmd, args) {
 			runs.push({ cmd, args });
+			if (opts?.cleanupThrows && args.includes(WINDOWS_HONEYCOMB_PROCESS_CLEANUP_SCRIPT))
+				throw new Error("daemon remained");
+			if (opts?.taskNotRunning && args.includes(WINDOWS_TASK_RUNNING_SCRIPT)) throw new Error("task is Ready");
 			// schtasks /Query is the isRegistered probe, throw to simulate "task absent".
 			if (opts?.queryThrows && cmd === "schtasks" && args[0] === "/Query") {
 				throw new Error("ERROR: The system cannot find the file specified.");
@@ -115,6 +138,12 @@ describe("PRD-064h detectServiceManager, cheap, side-effect-free, per-OS + fallb
 		).toBeNull();
 	});
 
+	it("explicit service selection ignores spawn preference and Linux bus heuristics", () => {
+		expect(serviceManagerForPlatform("darwin")).toBe("launchd");
+		expect(serviceManagerForPlatform("win32")).toBe("schtasks");
+		expect(serviceManagerForPlatform("linux")).toBe("systemd-user");
+	});
+
 	it("returns null on an unknown platform (→ spawn fallback)", () => {
 		expect(detectServiceManager({}, "aix")).toBeNull();
 	});
@@ -141,8 +170,8 @@ describe("PRD-064h AC-064h.4, launchd plist pins the writable workspace", () => 
 describe("PRD-064h AC-064h.4, systemd --user unit pins the writable workspace", () => {
 	const unit = renderSystemdUnit(SPEC);
 	it("pins WorkingDirectory AND Environment=HONEYCOMB_WORKSPACE", () => {
-		expect(unit).toContain("WorkingDirectory=/home/ada/.honeycomb");
-		expect(unit).toContain("Environment=HONEYCOMB_WORKSPACE=/home/ada/.honeycomb");
+		expect(unit).toContain('WorkingDirectory="/home/ada/.honeycomb"');
+		expect(unit).toContain('Environment="HONEYCOMB_WORKSPACE=/home/ada/.honeycomb"');
 	});
 	it("renders ExecStart with the full quoted argv + the restart-floor directives", () => {
 		expect(unit).toContain(`ExecStart="/usr/local/bin/node" "--experimental-sqlite" "/opt/honeycomb/daemon/index.js"`);
@@ -154,7 +183,92 @@ describe("PRD-064h AC-064h.4, systemd --user unit pins the writable workspace", 
 const WIN_SPEC_ROOTED: ServiceSpec = {
 	...WIN_SPEC,
 	fleetRoot: "C:\\Users\\ada\\.apiary",
+	logPath: "C:\\Users\\ada\\.apiary\\honeycomb\\service.log",
 };
+
+describe("PRD-003c authoritative service-log destinations", () => {
+	it("binds both launchd streams to Honeycomb's product-owned log", () => {
+		const rendered = renderLaunchdPlist({ ...SPEC, logPath: "/home/ada/.apiary/honeycomb/service.log" });
+		expect(rendered).toContain("<key>StandardOutPath</key>");
+		expect(rendered).toContain("<key>StandardErrorPath</key>");
+		expect(rendered.match(/service\.log/g)?.length).toBe(2);
+	});
+
+	it("binds both systemd streams to Honeycomb's product-owned log", () => {
+		const rendered = renderSystemdUnit({ ...SPEC, logPath: "/home/ada/.apiary/honeycomb/service.log" });
+		expect(rendered).toContain('StandardOutput="append:/home/ada/.apiary/honeycomb/service.log"');
+		expect(rendered).toContain('StandardError="append:/home/ada/.apiary/honeycomb/service.log"');
+	});
+
+	it("rejects systemd directive, specifier, and variable-expansion injection in env-derived paths", () => {
+		expect(() => renderSystemdUnit({ ...SPEC, logPath: "/tmp/service.log\nExecStart=/tmp/pwn" })).toThrow(
+			/unsafe character/,
+		);
+		expect(() => renderSystemdUnit({ ...SPEC, workspace: "/tmp/%h/$HOME" })).toThrow(/unsafe character/);
+	});
+
+	it("redirects the Windows daemon to Honeycomb's product-owned log", () => {
+		const rendered = renderScheduledTaskXml(WIN_SPEC_ROOTED, FAKE_SID);
+		expect(rendered).toContain(
+			`&gt;&gt; &quot;C:\\Users\\ada\\.apiary\\honeycomb\\service.log&quot; 2&gt;&amp;1`,
+		);
+		expect(rendered).not.toContain("^&gt;");
+		expect(rendered).not.toContain("^&amp;");
+	});
+
+	it.runIf(process.platform === "win32")(
+		"lets cmd consume stdout/stderr redirection instead of passing operators to Node argv",
+		() => {
+			const dir = mkdtempSync(join(tmpdir(), "honeycomb-task-redirection-"));
+			try {
+				const entry = join(dir, "emit.js");
+				const logPath = join(dir, "service.log");
+				writeFileSync(
+					entry,
+					'process.stdout.write("STDOUT\\n"); process.stderr.write("STDERR\\n"); console.log(`ARGV=${JSON.stringify(process.argv.slice(2))}`);',
+					"utf8",
+				);
+				const xml = renderScheduledTaskXml(
+					{ nodePath: process.execPath, entry, nodeFlags: [], workspace: dir, home: dir, logPath },
+					FAKE_SID,
+				);
+				const encodedArguments = xml.match(/<Arguments>([\s\S]*?)<\/Arguments>/u)?.[1];
+				expect(encodedArguments).toBeDefined();
+				const argumentsText = (encodedArguments ?? "")
+					.replaceAll("&quot;", '"')
+					.replaceAll("&gt;", ">")
+					.replaceAll("&lt;", "<")
+					.replaceAll("&amp;", "&");
+				const prefix = '--headless cmd /v:on /c "';
+				expect(argumentsText.startsWith(prefix)).toBe(true);
+				expect(argumentsText.endsWith('"')).toBe(true);
+				const innerCommand = argumentsText.slice(prefix.length, -1);
+				// Execute the exact node-invocation fragment emitted inside the renderer's relaunch loop.
+				// A temporary .cmd file avoids introducing a second, unrelated `/c` outer-quote layer into
+				// this test; cmd still parses the production `>> ... 2>&1` operators themselves.
+				const bodyStart = innerCommand.indexOf(" do (") + " do (".length;
+				const bodyEnd = innerCommand.indexOf(" & if !errorlevel!", bodyStart);
+				expect(bodyStart).toBeGreaterThan(" do (".length - 1);
+				expect(bodyEnd).toBeGreaterThan(bodyStart);
+				const commandFile = join(dir, "invoke.cmd");
+				writeFileSync(commandFile, `@echo off\r\n${innerCommand.slice(bodyStart, bodyEnd)}\r\n`, "utf8");
+				const systemRoot = process.env.SystemRoot ?? "C:\\Windows";
+				execFileSync(win32.join(systemRoot, "System32", "cmd.exe"), ["/d", "/c", commandFile], {
+					cwd: dir,
+					timeout: 10_000,
+					windowsHide: true,
+				});
+				const log = readFileSync(logPath, "utf8");
+				expect(log).toContain("STDOUT");
+				expect(log).toContain("STDERR");
+				expect(log).toContain("ARGV=[]");
+				expect(log).not.toContain(">>");
+			} finally {
+				rmSync(dir, { force: true, recursive: true });
+			}
+		},
+	);
+});
 
 describe("PRD-064h AC-064h.4, schtasks /Create registers from the staged SID-scoped XML", () => {
 	const xmlPath = stagedTaskXmlPath(WIN_SPEC_ROOTED);
@@ -333,11 +447,11 @@ describe("PRD-064h schtasks controller, register/restart/status argv (injected r
 		ctl.register(WIN_SPEC);
 		expect(runner.runs[0]?.args).toEqual(["/End", "/TN", LEGACY_SERVICE_TASK_NAME]);
 		expect(runner.runs[1]?.args).toEqual(["/Delete", "/TN", LEGACY_SERVICE_TASK_NAME, "/F"]);
-		// The SID probe runs before the task is created.
-		expect(runner.runs[2]?.cmd.toLowerCase().endsWith("whoami.exe")).toBe(true);
-		expect(runner.runs[3]?.args[0]).toBe("/Create");
-		expect(runner.runs[3]?.args).toContain("/XML");
-		expect(runner.runs[4]?.args).toEqual(["/Run", "/TN", SERVICE_TASK_NAME]);
+		// Exact descendant cleanup runs before replacement, then SID resolution and create/run.
+		expect(runner.runs.some((r) => r.cmd === WINDOWS_POWERSHELL_PATH)).toBe(true);
+		expect(runner.runs.some((r) => r.cmd.toLowerCase().endsWith("whoami.exe"))).toBe(true);
+		expect(runner.runs.find((r) => r.args[0] === "/Create")?.args).toContain("/XML");
+		expect(runner.runs.at(-1)?.args).toEqual(["/Run", "/TN", SERVICE_TASK_NAME]);
 		// The staged XML is written before /Create and carries the resolved SID in both places.
 		expect(runner.writes[0]?.path.endsWith(STAGED_TASK_XML_NAME)).toBe(true);
 		expect(runner.writes[0]?.contents).toContain(`<UserId>${FAKE_SID}</UserId>`);
@@ -347,8 +461,75 @@ describe("PRD-064h schtasks controller, register/restart/status argv (injected r
 		const runner = recordingRunner();
 		createDaemonServiceController("schtasks", runner).restart(WIN_SPEC);
 		expect(runner.runs[0]?.args).toEqual(["/End", "/TN", SERVICE_TASK_NAME]);
-		expect(runner.runs[1]?.args).toEqual(["/Run", "/TN", SERVICE_TASK_NAME]);
+		expect(runner.runs[1]?.cmd).toBe(WINDOWS_POWERSHELL_PATH);
+		expect(runner.runs[2]?.args).toEqual(["/Run", "/TN", SERVICE_TASK_NAME]);
 	});
+
+	it("cleanup normalizes WMI quote fragmentation but still requires full exact identity", () => {
+		expect(WINDOWS_HONEYCOMB_PROCESS_CLEANUP_SCRIPT).toContain("$expectedPattern");
+		expect(WINDOWS_HONEYCOMB_PROCESS_CLEANUP_SCRIPT).toContain("[Regex]::IsMatch");
+		expect(WINDOWS_HONEYCOMB_PROCESS_CLEANUP_SCRIPT).toContain("Honeycomb daemon process remained after stop");
+		expect(WINDOWS_HONEYCOMB_PROCESS_CLEANUP_SCRIPT).not.toContain("IndexOf($entry");
+		const fragmented =
+			'C:\\Program" "Files\\nodejs\\node.exe  --experimental-sqlite C:\\Users\\ada\\hc\\daemon\\index.js';
+		expect(matchesWindowsDaemonProcess(WIN_SPEC.nodePath, fragmented, WIN_SPEC)).toBe(true);
+		expect(matchesWindowsDaemonProcess(WIN_SPEC.nodePath, `${fragmented} --extra`, WIN_SPEC)).toBe(false);
+		expect(matchesWindowsDaemonProcess("C:\\other\\node.exe", fragmented, WIN_SPEC)).toBe(false);
+		// Removing all quotes would collapse this DIFFERENT argv layout to the expected display text.
+		// The anchored token pattern rejects it even if a caller lies about ExecutablePath.
+		const ambiguous =
+			'C:\\Program "Files\\nodejs\\node.exe --experimental-sqlite C:\\Users\\ada\\hc\\daemon\\index.js';
+		expect(matchesWindowsDaemonProcess(WIN_SPEC.nodePath, ambiguous, WIN_SPEC)).toBe(false);
+		const runner = recordingRunner();
+		createDaemonServiceController("schtasks", runner).stop(WIN_SPEC);
+		const cleanup = runner.runs.find((run) => run.cmd === WINDOWS_POWERSHELL_PATH);
+		expect(cleanup?.args).toHaveLength(10);
+		expect(Buffer.from(cleanup?.args.at(-1) ?? "", "base64").toString("utf16le")).toBe(
+			JSON.stringify(WIN_SPEC.nodeFlags),
+		);
+	});
+
+	it.runIf(process.platform === "win32")(
+		"PowerShell 5 flattens decoded flags and matches the live fragmented WMI command exactly",
+		() => {
+			const fragmented =
+				'C:\\Program" "Files\\nodejs\\node.exe  --experimental-sqlite C:\\Users\\ada\\hc\\daemon\\index.js';
+			const runProbe = (commandLine: string): string =>
+				execFileSync(
+					WINDOWS_POWERSHELL_PATH,
+					[
+						"-NoLogo",
+						"-NoProfile",
+						"-NonInteractive",
+						"-ExecutionPolicy",
+						"Bypass",
+						"-Command",
+						WINDOWS_HONEYCOMB_PROCESS_IDENTITY_PROBE_SCRIPT,
+						utf16Base64(WIN_SPEC.entry),
+						utf16Base64(WIN_SPEC.nodePath),
+						utf16Base64(JSON.stringify(WIN_SPEC.nodeFlags)),
+						utf16Base64(WIN_SPEC.nodePath),
+						utf16Base64(commandLine),
+					],
+					{ encoding: "utf8", timeout: 10_000, windowsHide: true },
+				).trim();
+
+			expect(runProbe(fragmented)).toBe(
+				"C:\\Program Files\\nodejs\\node.exe --experimental-sqlite C:\\Users\\ada\\hc\\daemon\\index.js",
+			);
+			expect(() => runProbe(`${fragmented} --extra`)).toThrow();
+			expect(() =>
+				runProbe(
+					'C:\\Program "Files\\nodejs\\node.exe --experimental-sqlite C:\\Users\\ada\\hc\\daemon\\index.js',
+				),
+			).toThrow();
+			expect(() =>
+				runProbe(
+					'C:\\Program" "Files\\nodejs\\node.exe C:\\Users\\ada\\hc\\daemon\\index.js --experimental-sqlite',
+				),
+			).toThrow();
+		},
+	);
 
 	it("isRegistered is true when /Query succeeds, false when it throws (task absent)", () => {
 		expect(
@@ -366,5 +547,31 @@ describe("PRD-064h schtasks controller, register/restart/status argv (injected r
 		expect(argvs).toContain(`/End /TN ${SERVICE_TASK_NAME}`);
 		expect(argvs).toContain(`/Delete /TN ${SERVICE_TASK_NAME} /F`);
 		expect(runner.removes.some((p) => p.endsWith(STAGED_TASK_XML_NAME))).toBe(true);
+	});
+
+	it("unregister fails closed and preserves the task when daemon-stop verification fails", () => {
+		const runner = recordingRunner({ cleanupThrows: true });
+		expect(() => createDaemonServiceController("schtasks", runner).unregister(WIN_SPEC)).toThrow(/daemon remained/);
+		expect(runner.runs.some((run) => run.args[0] === "/Delete" && run.args[2] === SERVICE_TASK_NAME)).toBe(false);
+	});
+
+	it("register fails closed before replacement when orphan-stop verification fails", () => {
+		const runner = recordingRunner({ cleanupThrows: true });
+		expect(() => createDaemonServiceController("schtasks", runner).register(WIN_SPEC)).toThrow(/daemon remained/);
+		expect(runner.runs.some((run) => run.args[0] === "/Create" && run.args.includes(SERVICE_TASK_NAME))).toBe(false);
+		expect(runner.writes).toHaveLength(0);
+	});
+
+	it("reports Ready/non-running task state separately from registration", () => {
+		const runningRunner = recordingRunner();
+		const running = createDaemonServiceController("schtasks", runningRunner);
+		const ready = createDaemonServiceController("schtasks", recordingRunner({ taskNotRunning: true }));
+		expect(running.isRunning?.(WIN_SPEC)).toBe(true);
+		const probe = runningRunner.runs.find((run) => run.args.includes(WINDOWS_TASK_RUNNING_SCRIPT));
+		expect(probe?.args).toHaveLength(11);
+		expect(Buffer.from(probe?.args.at(-1) ?? "", "base64").toString("utf16le")).toBe(
+			JSON.stringify(WIN_SPEC.nodeFlags),
+		);
+		expect(ready.isRunning?.(WIN_SPEC)).toBe(false);
 	});
 });

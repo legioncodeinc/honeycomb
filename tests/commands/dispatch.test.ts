@@ -52,7 +52,7 @@ describe("PRD-020a a-AC-1 — the unified dispatcher parses + routes", () => {
 		const d = createDispatcher();
 		const res = await d.dispatch(d.parse([]), deps);
 		expect(res.exitCode).toBe(0);
-		expect(lines.join("\n")).toMatch(/usage: honeycomb/);
+		expect(lines.join("\n")).toMatch(/Usage: honeycomb/);
 	});
 
 	it("a-AC-1 --version short-circuits to the version line", async () => {
@@ -201,20 +201,58 @@ describe("PRD-020a a-AC-1 — the unified dispatcher parses + routes", () => {
 
 	it("a-AC-1 an unknown command prints usage and exits non-zero", async () => {
 		const lines: string[] = [];
-		const deps: CommandDeps = { daemon: createFakeDaemonClient(), out: (l) => lines.push(l) };
+		const deps: CommandDeps = {
+			daemon: createFakeDaemonClient(),
+			out: (line) => lines.push(line),
+			err: (line) => lines.push(line),
+		};
 		const d = createDispatcher();
 		const res = await d.dispatch(d.parse(["frobnicate"]), deps);
-		expect(res.exitCode).toBe(1);
+		expect(res.exitCode).toBe(2);
 		expect(lines.join("\n")).toMatch(/unknown command/);
+	});
+
+	it("rejects referral values that could carry PII or terminal-control payloads before install mutation", async () => {
+		const lines: string[] = [];
+		const deps: CommandDeps = {
+			daemon: createFakeDaemonClient(),
+			out: (line) => lines.push(line),
+			err: (line) => lines.push(line),
+		};
+		const d = createDispatcher();
+		for (const ref of ["person@example.com", "bad\u001b[31mref", "a".repeat(65)]) {
+			const result = await d.dispatch(d.parse(["install", "--ref", ref, "--json"]), deps);
+			expect(result.exitCode).toBe(2);
+		}
+		expect(lines).toHaveLength(3);
+		expect(lines.every((line) => JSON.parse(line).ok === false)).toBe(true);
+		expect(lines.join("\n")).not.toMatch(/person@example\.com|\u001b/);
 	});
 });
 
 describe("FR-2 — `--help` lists EVERY command, branded + grouped", () => {
+	it("bare invocation and --help render identical output without operational adapters", async () => {
+		const bare: string[] = [];
+		const help: string[] = [];
+		const d = createDispatcher();
+		const daemon = createFakeDaemonClient();
+		expect((await d.dispatch(d.parse([]), { daemon, out: (line) => bare.push(line) })).exitCode).toBe(0);
+		expect((await d.dispatch(d.parse(["--help"]), { daemon, out: (line) => help.push(line) })).exitCode).toBe(0);
+		expect(bare).toEqual(help);
+	});
+
+	it("wraps narrow help while retaining the exact identity and credit", () => {
+		const text = usageText(40);
+		expect(text).toContain("HONEYCOMB");
+		expect(text).toContain("Legion Code Inc. x Activeloop");
+		expect(text).not.toMatch(/\u001b/);
+	});
+
 	it("renders the ASCII honeycomb banner atop the usage", () => {
 		const help = usageText();
-		expect(help).toMatch(/H O N E Y C O M B/);
+		expect(help).toMatch(/^.*HONEYCOMB/m);
 		// The two-row honeycomb cells render before the version line.
-		expect(help.indexOf("\\__/")).toBeLessThan(help.indexOf("usage: honeycomb"));
+		expect(help.indexOf("\\__/")).toBeLessThan(help.indexOf("Usage: honeycomb"));
 	});
 
 	it("lists every VERB_TABLE verb (no command silently missing from help)", () => {
@@ -235,10 +273,16 @@ describe("FR-2 — `--help` lists EVERY command, branded + grouped", () => {
 		for (const sub of AUTH_SUBCOMMANDS) expect(listed.has(sub)).toBe(true);
 	});
 
-	it("prints a header for every non-empty group", () => {
+	it("prints the standard group order plus one Product commands group", () => {
 		const help = usageText();
-		for (const { key, label } of VERB_GROUPS) {
-			if (VERB_TABLE.some((s) => s.group === key)) expect(help).toContain(`${label}:`);
-		}
+		for (const label of [
+			"Service lifecycle",
+			"Installation",
+			"Fleet",
+			"Diagnostics",
+			"Product commands",
+			"Global flags",
+		])
+			expect(help).toContain(label);
 	});
 });

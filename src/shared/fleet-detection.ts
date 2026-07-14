@@ -20,11 +20,9 @@
  *        and the legacy `~/.honeycomb/doctor.daemons.json` (whichever exist).
  *   S2 - any HTTP response from `http://127.0.0.1:3853/health` within a short (~750ms) budget.
  *   S3 - `@legioncodeinc/hive` present in `npm ls -g @legioncodeinc/hive --depth 0` (best-effort
- *        `execFile`; any failure means the signal is absent). On win32 ONLY the spawn sets
- *        `shell: true`, because Node's CVE-2024-27980 hardening makes a shell-less `npm.cmd`
- *        spawn throw EINVAL, which would silently blind this signal on every Windows machine;
- *        safe because every argv element is a compile-time constant, never user input (the same
- *        audited posture as nectar's mirror of this contract).
+ *        `execFile`; any failure means the signal is absent). Windows invokes fixed `cmd.exe`
+ *        with fixed `/d /s /c` argv and a fully constant npm command, always `shell:false`.
+ *        This supports the `.cmd` shim without Node DEP0190 or user-input interpolation.
  *
  * Classification (orchestrator decision, do not re-litigate): ANY signal fired means FLEET;
  * none means SOLO. Suppressing a popup wrongly is cheap; opening one wrongly is the bug this
@@ -45,6 +43,8 @@ import { type FleetRootOptions, fleetRootFile, legacyHoneycombDir } from "./flee
 
 /** The npm global package name that proves Hive is installed (S3). */
 export const HIVE_NPM_PACKAGE = "@legioncodeinc/hive" as const;
+/** Fully constant Windows command consumed by the fixed cmd.exe process, never user-derived. */
+export const WINDOWS_NPM_HIVE_COMMAND = `npm.cmd ls -g ${HIVE_NPM_PACKAGE} --depth 0` as const;
 /** The registry `daemons[].name` that proves Hive is registered (S1). */
 export const HIVE_REGISTRY_NAME = "hive" as const;
 /** The fleet-root registry file name (`~/.apiary/registry.json`) — S1 primary source. */
@@ -169,11 +169,10 @@ export async function defaultProbeHivePort(timeoutMs: number = FLEET_PORT_PROBE_
  * lazily via `createRequire` so this shared module carries no top-level subprocess import (the
  * OpenClaw ClawHub scanner posture, mirrored from `daemon-service.ts`).
  *
- * `npm` ships as `npm.cmd` on Windows, and since Node's CVE-2024-27980 hardening (all Node >= 22)
- * a `.cmd` cannot be spawned with `shell: false` (it throws EINVAL, which would silently blind
- * this signal on every Windows machine), so win32 ALONE sets `shell: true`. That is safe here
- * because every argv element is a compile-time constant, never user input; it also keeps this
- * module behavior-identical to nectar's mirror of the same contract (`nectar/src/fleet-detection.ts`).
+ * `npm` ships as `npm.cmd` on Windows, which cannot be passed directly to shell-less execFile on
+ * current Node. Windows therefore executes fixed `cmd.exe` with `/d /s /c` and the fully constant
+ * {@link WINDOWS_NPM_HIVE_COMMAND}. `shell` remains false everywhere, avoiding DEP0190 and argv
+ * re-parsing ambiguity.
  */
 export function defaultNpmGlobalHasHive(seams: FleetDetectionSeams = {}): Promise<boolean> {
 	return new Promise<boolean>((resolve) => {
@@ -188,9 +187,9 @@ export function defaultNpmGlobalHasHive(seams: FleetDetectionSeams = {}): Promis
 			const platform = seams.platform ?? process.platform;
 			const win32 = platform === "win32";
 			exec(
-				win32 ? "npm.cmd" : "npm",
-				["ls", "-g", HIVE_NPM_PACKAGE, "--depth", "0"],
-				{ timeout: 5000, windowsHide: true, shell: win32 },
+				win32 ? "cmd.exe" : "npm",
+				win32 ? ["/d", "/s", "/c", WINDOWS_NPM_HIVE_COMMAND] : ["ls", "-g", HIVE_NPM_PACKAGE, "--depth", "0"],
+				{ timeout: 5000, windowsHide: true, shell: false },
 				(err, stdout) => {
 					if (err) {
 						resolve(false);

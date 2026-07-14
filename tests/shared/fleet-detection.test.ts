@@ -31,6 +31,7 @@ import {
 	type ExecFileLike,
 	fleetSignalLine,
 	HIVE_NPM_PACKAGE,
+	WINDOWS_NPM_HIVE_COMMAND,
 } from "../../src/shared/fleet-detection.js";
 
 /** A no-signal seam set: every signal explicitly false (the pure-solo baseline). */
@@ -150,16 +151,30 @@ describe("PRD-003a S3 — defaultNpmGlobalHasHive spawns npm per platform (mirro
 		return { exec, calls };
 	}
 
-	it("win32 spawns npm.cmd WITH shell:true (Node 22 .cmd spawn hardening) and a constant argv", async () => {
+	it("win32 runs the constant npm.cmd command through fixed cmd.exe argv with shell:false", async () => {
 		const { exec, calls } = recordingExec({ stdout: `C:\\npm\\global\n+-- ${HIVE_NPM_PACKAGE}@0.5.1\n` });
 		const present = await defaultNpmGlobalHasHive({ platform: "win32", execFileImpl: exec });
 		expect(present).toBe(true);
 		expect(calls).toHaveLength(1);
-		expect(calls[0]?.cmd).toBe("npm.cmd");
-		expect(calls[0]?.shell).toBe(true);
-		// Injection-immune: the argv is 100% compile-time constants (safe under a win32 shell).
-		expect(calls[0]?.args).toEqual(["ls", "-g", HIVE_NPM_PACKAGE, "--depth", "0"]);
+		expect(calls[0]?.cmd).toBe("cmd.exe");
+		expect(calls[0]?.shell).toBe(false);
+		expect(calls[0]?.args).toEqual(["/d", "/s", "/c", WINDOWS_NPM_HIVE_COMMAND]);
 		expect(calls[0]?.windowsHide).toBe(true);
+	});
+
+	it.runIf(process.platform === "win32")("real Windows npm probe emits no DEP0190 warning", async () => {
+		const warnings: string[] = [];
+		const listener = (warning: Error & { code?: string }): void => {
+			if (warning.code === "DEP0190" || warning.message.includes("shell option true")) warnings.push(warning.message);
+		};
+		process.on("warning", listener);
+		try {
+			await defaultNpmGlobalHasHive();
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(warnings).toEqual([]);
+		} finally {
+			process.off("warning", listener);
+		}
 	});
 
 	it("POSIX spawns bare npm with shell:false (never a shell where none is needed)", async () => {

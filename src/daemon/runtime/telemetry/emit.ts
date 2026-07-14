@@ -268,8 +268,12 @@ export function buildAllowedProperties(input: {
 	extra?: Readonly<Record<string, unknown>>;
 }): AllowedProperties {
 	const facts = platformFacts();
+	// Referral attribution is operator-controlled at install time. Keep it a short opaque code so an
+	// email address, credential, or terminal payload can never become telemetry merely because `ref`
+	// is on the key allow-list. Legacy/on-disk invalid values degrade to a non-identifying sentinel.
+	const safeRef = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(input.ref) ? input.ref : "unknown";
 	const out: AllowedProperties = {
-		ref: input.ref,
+		ref: safeRef,
 		honeycomb_version: input.version,
 		os: facts.os,
 		arch: facts.arch,

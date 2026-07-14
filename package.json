@@ -77,6 +77,7 @@
     "mutation:normalize": "stryker run stryker/normalize.json",
     "mutation:state": "stryker run stryker/state.json",
     "pack:check": "node scripts/pack-check.mjs",
+    "test:packed-cli": "node scripts/packed-cli-conformance.mjs",
     "rebuild:native": "node scripts/ensure-tree-sitter.mjs",
     "ensure:embed-deps": "node scripts/ensure-embed-deps.mjs",
     "ci": "npm run typecheck && npm run dup && npm run test && npm run audit:sql",
@@ -123,6 +124,7 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.19.14",
+    "@legioncodeinc/cli-kit": "^0.3.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@noble/ciphers": "^2.2.0",
     "hono": "^4.12.25",

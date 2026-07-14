@@ -59,6 +59,8 @@ function probeCursorAgent(): ProbeOutcome {
 
 /** How long the D4 login probe waits for `cursor-agent status` before soft-failing (ISS-017). */
 const CURSOR_LOGIN_TIMEOUT_MS = 5_000;
+/** Fully constant Windows command for the cursor-agent `.cmd` shim; no values are interpolated. */
+export const WINDOWS_CURSOR_LOGIN_COMMAND = "cursor-agent status" as const;
 
 /** The slice of a `spawnSync` result the D4 probe reads (tests inject a fake). */
 export interface CursorLoginSpawnResult {
@@ -86,18 +88,24 @@ export type CursorLoginSpawn = (
  * 5s timeout → the soft "login state unknown" fail (FR-8: a non-wirable dim is surfaced, never a
  * false green and never a crash).
  */
-export function probeCursorLogin(spawn: CursorLoginSpawn = spawnSync): ProbeOutcome {
+export function probeCursorLogin(
+	spawn: CursorLoginSpawn = spawnSync,
+	platform: NodeJS.Platform = process.platform,
+): ProbeOutcome {
 	try {
-		// `cursor-agent` ships as a `.cmd` shim on Windows, and since Node's CVE-2024-27980
-		// hardening (all Node >= 22) a `.cmd` cannot be spawned with `shell: false` (EINVAL) —
-		// so win32 ALONE sets `shell: true`. Safe: every argv element is a compile-time constant,
-		// never user input (the same documented pattern as `npm.cmd` in shared/fleet-detection.ts).
-		const probe = spawn("cursor-agent", ["status"], {
-			encoding: "utf8",
-			timeout: CURSOR_LOGIN_TIMEOUT_MS,
-			windowsHide: true,
-			shell: process.platform === "win32",
-		});
+		// Windows runs the `.cmd` shim through explicit, fixed cmd.exe argv. `shell:false` remains
+		// binding everywhere, avoiding DEP0190 and any argv-to-shell concatenation.
+		const win32 = platform === "win32";
+		const probe = spawn(
+			win32 ? "cmd.exe" : "cursor-agent",
+			win32 ? ["/d", "/s", "/c", WINDOWS_CURSOR_LOGIN_COMMAND] : ["status"],
+			{
+				encoding: "utf8",
+				timeout: CURSOR_LOGIN_TIMEOUT_MS,
+				windowsHide: true,
+				shell: false,
+			},
+		);
 		if (probe.error !== undefined) {
 			// ENOENT / ETIMEDOUT / any spawn-level failure — soft-fail as unknown, like before.
 			return { ok: false, detail: `login state unknown (${probe.error.message})` };

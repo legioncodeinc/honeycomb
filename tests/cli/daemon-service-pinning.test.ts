@@ -51,8 +51,8 @@ describe("PRD-072d AC-072d.1.1 — every rendered unit pins APIARY_HOME beside H
 
 	it("AC-072d.1.1 systemd unit carries Environment=APIARY_HOME beside HONEYCOMB_WORKSPACE", () => {
 		const unit = renderSystemdUnit(SPEC);
-		expect(unit).toContain(`Environment=${APIARY_HOME_ENV}="/home/ada/.apiary"`);
-		expect(unit).toContain("Environment=HONEYCOMB_WORKSPACE=/home/ada/.apiary/honeycomb");
+		expect(unit).toContain(`Environment="${APIARY_HOME_ENV}=/home/ada/.apiary"`);
+		expect(unit).toContain('Environment="HONEYCOMB_WORKSPACE=/home/ada/.apiary/honeycomb"');
 	});
 
 	it("AC-072d.1.1 the schtasks task XML sets APIARY_HOME beside HONEYCOMB_WORKSPACE", () => {
@@ -80,7 +80,7 @@ describe("PRD-072d AC-072d.1.2 — a changed root produces a changed pin", () =>
 		const a = renderSystemdUnit(SPEC);
 		const b = renderSystemdUnit({ ...SPEC, fleetRoot: "/mnt/vol/apiary" });
 		expect(a).not.toBe(b);
-		expect(b).toContain(`Environment=${APIARY_HOME_ENV}="/mnt/vol/apiary"`);
+		expect(b).toContain(`Environment="${APIARY_HOME_ENV}=/mnt/vol/apiary"`);
 	});
 });
 
