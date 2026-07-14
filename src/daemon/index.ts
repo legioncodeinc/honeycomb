@@ -65,7 +65,12 @@ export {
 	runtimePathMiddleware,
 } from "./runtime/middleware/runtime-path.js";
 export { type FileWatcherService, noopFileWatcherService } from "./runtime/services/file-watcher.js";
-export { type JobInput, type JobQueueService, type LeasedJob, noopJobQueueService } from "./runtime/services/job-queue.js";
+export {
+	type JobInput,
+	type JobQueueService,
+	type LeasedJob,
+	noopJobQueueService,
+} from "./runtime/services/job-queue.js";
 export {
 	type EmbedSupervisor,
 	type EmbedSupervisorDeps,
@@ -254,8 +259,14 @@ export function installProcessSafetyNet(): void {
 // never on import (a test imports `assembleDaemon`/`runAssembledDaemon` without binding).
 if (isMainEntry()) {
 	// Every launchd/systemd/Task Scheduler start passes through this entry, so repeated restarts
-	// cannot grow the shared stdout/stderr destination without bound.
-	capHoneycombServiceLogAtStartup();
+	// cannot grow the shared stdout/stderr destination without bound. Housekeeping is fail-soft so
+	// an ownership or permissions mismatch cannot prevent the long-lived daemon from starting.
+	try {
+		capHoneycombServiceLogAtStartup();
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		process.stderr.write(`[honeycomb] service log cap failed (continuing): ${message}\n`);
+	}
 	installProcessSafetyNet();
 	runAssembledDaemon().catch((err: unknown) => {
 		const message = err instanceof Error ? err.message : String(err);

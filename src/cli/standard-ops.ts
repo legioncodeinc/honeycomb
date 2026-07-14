@@ -290,6 +290,8 @@ async function restartService(context: ServiceContext): Promise<StandardOperatio
 	if (!("manager" in installed)) return installed;
 	const result = installed.restart(context.serviceSpec);
 	if (!result.ok) return { ok: false, message: "Honeycomb's OS service manager rejected restart." };
+	if (!(await waitForServiceRunning(context, installed)))
+		return { ok: false, message: "Honeycomb's OS service manager did not regain ownership after restart." };
 	const healthy = await waitHealthy(context.daemon, context.options.healthAttempts);
 	return healthy
 		? { ok: true, changed: true, message: "Honeycomb restarted through its OS service and passed health." }
@@ -306,6 +308,8 @@ function createRuntimeLifecycleOps(
 			if (await context.daemon.ping()) return { ok: true, changed: false, message: "Honeycomb is already running." };
 			const result = installed.restart(context.serviceSpec);
 			if (!result.ok) return { ok: false, message: "Honeycomb's OS service manager rejected start." };
+			if (!(await waitForServiceRunning(context, installed)))
+				return { ok: false, message: "Honeycomb's OS service manager did not report the service running after start." };
 			return (await waitHealthy(context.daemon, context.options.healthAttempts))
 				? { ok: true, changed: true, message: "Honeycomb started through its installed OS service." }
 				: { ok: false, message: "Honeycomb's OS service did not become healthy within the start timeout." };
@@ -395,9 +399,12 @@ export function buildHoneycombStandardOps(
 	options: StandardOpsOptions = {},
 ): HoneycombStandardOps {
 	const service = createServiceLifecycleOps(daemon, lifecycle, serviceSpec, options);
+	const logPath = honeycombServiceLogPath();
+	if (serviceSpec.logPath !== undefined && serviceSpec.logPath !== logPath)
+		throw new Error("Honeycomb service log path must use the product-owned service.log destination.");
 	return {
 		configPath: honeycombStateDir(),
-		logPath: serviceSpec.logPath ?? honeycombServiceLogPath(),
+		logPath,
 		logFs: createHoneycombLogFileSystem(),
 		start: service.start,
 		stop: service.stop,

@@ -141,6 +141,7 @@ function serviceBoundaryFixture(
 	restartThrows = false,
 	serviceRunning = true,
 	daemonRunning = false,
+	daemonHealthy = true,
 ) {
 	const calls: string[] = [];
 	let healthChecks = 0;
@@ -192,7 +193,7 @@ function serviceBoundaryFixture(
 	const daemon = {
 		ping: async () => {
 			healthChecks++;
-			return true;
+			return daemonHealthy;
 		},
 	} as unknown as DaemonClient;
 	return {
@@ -224,6 +225,33 @@ describe("Honeycomb baseline service-only lifecycle boundary", () => {
 		await expect(ops.restart()).rejects.toThrow(/manager failed/);
 		expect(calls).toEqual(["inspect", "restart"]);
 		expect(calls).not.toContain("legacy-restart");
+	});
+
+	it.each([
+		"start",
+		"restart",
+	] as const)("%s rejects orphan health when the service manager is not running", async (verb) => {
+		const fixture = serviceBoundaryFixture(true, false, false, false, false);
+		const result = await fixture.ops[verb]();
+		expect(result).toMatchObject({ ok: false });
+		expect(result.message).toMatch(/service manager did not/);
+		expect(fixture.calls).toEqual(["inspect", "restart", "running"]);
+		expect(fixture.healthChecks).toBe(verb === "start" ? 1 : 0);
+	});
+
+	it("rejects a service spec that redirects logs away from the product-owned path", () => {
+		expect(() =>
+			buildHoneycombStandardOps(
+				{ ping: async () => true } as unknown as DaemonClient,
+				{
+					start: async () => ({ started: false, alreadyRunning: false }),
+					stop: async () => ({ stopped: true }),
+					status: async () => ({ running: false, port: 3850 }),
+					restart: async () => ({ restarted: false, viaService: false }),
+				},
+				{ ...SERVICE_SPEC, logPath: "/tmp/redirected.log" },
+			),
+		).toThrow(/product-owned service\.log/);
 	});
 
 	it("service-install rejects orphan health when the newly run service is not running", async () => {

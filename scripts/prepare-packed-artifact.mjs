@@ -16,7 +16,8 @@ if (typeof filename !== "string") throw new Error("npm pack did not report a tar
 
 const manifest = resolve(".pack-result.json");
 const tarball = resolve(filename);
-writeFileSync(manifest, raw, "utf8");
+// Exclusive creation fails closed if a stale file or symlink already occupies the manifest path.
+writeFileSync(manifest, raw, { encoding: "utf8", flag: "wx", mode: 0o600 });
 if (process.env.GITHUB_ENV) {
 	appendFileSync(
 		process.env.GITHUB_ENV,
