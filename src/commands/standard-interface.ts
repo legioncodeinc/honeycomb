@@ -1,8 +1,6 @@
-import { watch } from "node:fs";
-import { readFile, realpath } from "node:fs/promises";
-import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import {
 	formatStatus,
+	type LogFileSystem,
 	parseLogTailOptions,
 	redactLogSecrets,
 	statusToJson,
@@ -33,6 +31,8 @@ export interface HoneycombStandardOps {
 	update(checkOnly: boolean): Promise<StandardOperationResult>;
 	readonly configPath: string;
 	readonly logPath: string;
+	/** Product-owned filesystem adapter; production binds it to Honeycomb's fixed service log only. */
+	readonly logFs?: LogFileSystem;
 }
 
 export interface StandardCommandDeps extends CommandDeps {
@@ -109,16 +109,13 @@ async function logsCommand(argv: readonly string[], json: boolean, deps: Standar
 		return emit(out, err, json, "logs", { ok: false, message: "logs: product log source is unavailable." });
 	const parsed = parseLogTailOptions(argv);
 	if (!parsed.ok) return { ...emit(out, err, json, "logs", { ok: false, message: parsed.error }), exitCode: 2 };
-	const root = resolve(deps.standard.configPath);
-	const path = resolve(deps.standard.logPath);
-	const fromRoot = relative(root, path);
-	if (basename(path) !== "service.log" || fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot))
-		return emit(out, err, json, "logs", { ok: false, message: "logs: product log path escaped Honeycomb state." });
+	if (deps.standard.logFs === undefined)
+		return emit(out, err, json, "logs", { ok: false, message: "logs: product log reader is unavailable." });
 	const source = {
 		productId: "honeycomb",
 		serviceId: "honeycomb",
-		root,
-		path,
+		root: deps.standard.configPath,
+		path: deps.standard.logPath,
 	};
 	const lines: string[] = [];
 	const controller = new AbortController();
@@ -130,7 +127,7 @@ async function logsCommand(argv: readonly string[], json: boolean, deps: Standar
 			serviceId: "honeycomb",
 			source,
 			options: parsed.options,
-			fs: { readFile: (path) => readFile(path, "utf8"), realpath, watch: (path, cb) => watch(path, cb) },
+			fs: deps.standard.logFs,
 			write: (line) => {
 				const safe = redactLogSecrets(line);
 				if (json) lines.push(safe);

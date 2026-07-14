@@ -162,20 +162,24 @@ describe("PRD-003a S3 — defaultNpmGlobalHasHive spawns npm per platform (mirro
 		expect(calls[0]?.windowsHide).toBe(true);
 	});
 
-	it.runIf(process.platform === "win32")("real Windows npm probe emits no DEP0190 warning", async () => {
-		const warnings: string[] = [];
-		const listener = (warning: Error & { code?: string }): void => {
-			if (warning.code === "DEP0190" || warning.message.includes("shell option true")) warnings.push(warning.message);
-		};
-		process.on("warning", listener);
-		try {
-			await defaultNpmGlobalHasHive();
-			await new Promise<void>((resolve) => setImmediate(resolve));
-			expect(warnings).toEqual([]);
-		} finally {
-			process.off("warning", listener);
-		}
-	});
+	it.runIf(process.platform === "win32")(
+		"real Windows npm probe emits no DEP0190 warning",
+		async () => {
+			const warnings: string[] = [];
+			const listener = (warning: Error & { code?: string }): void => {
+				if (warning.code === "DEP0190" || warning.message.includes("shell option true")) warnings.push(warning.message);
+			};
+			process.on("warning", listener);
+			try {
+				await defaultNpmGlobalHasHive();
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				expect(warnings).toEqual([]);
+			} finally {
+				process.off("warning", listener);
+			}
+		},
+		15_000,
+	);
 
 	it("POSIX spawns bare npm with shell:false (never a shell where none is needed)", async () => {
 		const { exec, calls } = recordingExec({ stdout: `/usr/lib\n+-- ${HIVE_NPM_PACKAGE}@0.5.1\n` });

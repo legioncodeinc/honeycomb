@@ -1,8 +1,10 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, watch } from "node:fs";
+import { readFile, realpath } from "node:fs/promises";
 import { posix, resolve, win32 } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
+import type { LogFileSystem } from "@legioncodeinc/cli-kit";
 import type { HoneycombStandardOps, StandardOperationResult } from "../commands/standard-interface.js";
 import type { DaemonClient } from "../commands/contracts.js";
 import type { DaemonLifecycle } from "../commands/daemon.js";
@@ -35,23 +37,36 @@ interface NpmInvocation {
 	readonly argvPrefix: readonly string[];
 }
 
-/** Resolve npm without a shell; Windows requires npm-cli.js because `.cmd` shims need shell parsing. */
-export function resolveNpmInvocation(
-	execPath = process.execPath,
-	platform = process.platform,
-	exists: (path: string) => boolean = existsSync,
-): NpmInvocation {
+/** Pure cross-platform candidate construction used by the fixed production resolver. */
+export function npmInvocationCandidates(execPath: string, platform: NodeJS.Platform): readonly string[] {
 	const pathApi = platform === "win32" ? win32 : posix;
 	const executableDir = pathApi.dirname(execPath);
-	const candidates = [
+	return [
 		pathApi.join(executableDir, "node_modules", "npm", "bin", "npm-cli.js"),
 		pathApi.resolve(executableDir, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
 		pathApi.resolve(executableDir, "..", "node_modules", "npm", "bin", "npm-cli.js"),
 	];
-	const npmCli = candidates.find(exists);
+}
+
+/** Pure fail-closed selection once the trusted production probe has located npm-cli.js. */
+export function selectNpmInvocation(
+	execPath: string,
+	platform: NodeJS.Platform,
+	npmCli: string | undefined,
+): NpmInvocation {
 	if (npmCli !== undefined) return { file: execPath, argvPrefix: [npmCli] };
 	if (platform !== "win32") return { file: "npm", argvPrefix: [] };
 	throw new Error("Could not locate npm-cli.js beside the active Node.js runtime.");
+}
+
+/** Resolve npm from the active runtime only; no caller-controlled path reaches the filesystem. */
+export function resolveNpmInvocation(): NpmInvocation {
+	const candidates = npmInvocationCandidates(process.execPath, process.platform);
+	return selectNpmInvocation(
+		process.execPath,
+		process.platform,
+		candidates.find((candidate) => existsSync(candidate)),
+	);
 }
 
 export type NpmRunner = (args: readonly string[]) => Promise<string>;
@@ -75,6 +90,27 @@ async function globallyInstalledVersion(runNpm: NpmRunner): Promise<string> {
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+}
+
+/** Bind cli-kit's generic log reader to Honeycomb's two fixed product-owned paths. */
+function createHoneycombLogFileSystem(): LogFileSystem {
+	const root = honeycombStateDir();
+	const log = honeycombServiceLogPath();
+	return {
+		async readFile(candidate: string): Promise<string> {
+			if (candidate !== log) throw new Error("Honeycomb log reader rejected a non-product path.");
+			return readFile(log, "utf8");
+		},
+		async realpath(candidate: string): Promise<string> {
+			if (candidate === root) return realpath(root);
+			if (candidate === log) return realpath(log);
+			throw new Error("Honeycomb log reader rejected a non-product path.");
+		},
+		watch(candidate: string, onChange: () => void): { close(): void } {
+			if (candidate !== log) throw new Error("Honeycomb log reader rejected a non-product path.");
+			return watch(log, onChange);
+		},
+	};
 }
 
 async function waitHealthy(daemon: DaemonClient, attempts = 100): Promise<boolean> {
@@ -362,6 +398,7 @@ export function buildHoneycombStandardOps(
 	return {
 		configPath: honeycombStateDir(),
 		logPath: serviceSpec.logPath ?? honeycombServiceLogPath(),
+		logFs: createHoneycombLogFileSystem(),
 		start: service.start,
 		stop: service.stop,
 		restart: service.restartService,

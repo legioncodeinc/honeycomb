@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, watch, writeFileSync } from "node:fs";
+import { readFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -40,6 +41,7 @@ function fixture(): { deps: Record<string, unknown>; lines: string[]; lifecycle:
 	const standard: HoneycombStandardOps = {
 		configPath: dir,
 		logPath,
+		logFs: { readFile: (path) => readFile(path, "utf8"), realpath, watch: (path, cb) => watch(path, cb) },
 		async start() {
 			const changed = !running;
 			running = true;
@@ -240,7 +242,7 @@ describe("PRD-003 Honeycomb standard operational interface", () => {
 		const result = await dispatcher.dispatch(dispatcher.parse(["logs", "--no-follow", "--json"]), deps as never);
 		expect(result.exitCode).toBe(1);
 		expect(JSON.parse(lines[0] ?? "")).toMatchObject({ command: "logs", ok: false });
-		expect(lines.join("\n")).toContain("escaped Honeycomb state");
+		expect(lines.join("\n")).toContain("outside its owned log directory");
 	});
 
 	it("logs returns runtime exit 1 when Honeycomb's authoritative source is missing", async () => {

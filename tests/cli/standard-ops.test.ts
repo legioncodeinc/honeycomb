@@ -2,8 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { DaemonServiceController, ServiceSpec } from "../../src/cli/daemon-service.js";
 import {
 	buildHoneycombStandardOps,
+	npmInvocationCandidates,
 	registryContainsHoneycomb,
-	resolveNpmInvocation,
+	selectNpmInvocation,
 	updateHoneycomb,
 } from "../../src/cli/standard-ops.js";
 import type { DaemonClient } from "../../src/commands/contracts.js";
@@ -13,17 +14,20 @@ import { HONEYCOMB_VERSION } from "../../src/shared/constants.js";
 describe("Honeycomb standard updater npm resolution", () => {
 	it("uses the npm CLI bundled beside the active Windows Node runtime", () => {
 		const node = "C:\\Program Files\\nodejs\\node.exe";
-		const result = resolveNpmInvocation(node, "win32", (path) => path.endsWith("node_modules\\npm\\bin\\npm-cli.js"));
+		const npmCli = npmInvocationCandidates(node, "win32").find((path) =>
+			path.endsWith("node_modules\\npm\\bin\\npm-cli.js"),
+		);
+		const result = selectNpmInvocation(node, "win32", npmCli);
 		expect(result.file).toBe(node);
 		expect(result.argvPrefix[0]).toMatch(/npm-cli\.js$/);
 	});
 
 	it("uses fixed-argv PATH resolution on Unix when npm is not bundled beside Node", () => {
-		expect(resolveNpmInvocation("/usr/bin/node", "linux", () => false)).toEqual({ file: "npm", argvPrefix: [] });
+		expect(selectNpmInvocation("/usr/bin/node", "linux", undefined)).toEqual({ file: "npm", argvPrefix: [] });
 	});
 
 	it("fails closed on Windows rather than invoking a shell shim", () => {
-		expect(() => resolveNpmInvocation("C:\\portable\\node.exe", "win32", () => false)).toThrow(/npm-cli\.js/);
+		expect(() => selectNpmInvocation("C:\\portable\\node.exe", "win32", undefined)).toThrow(/npm-cli\.js/);
 	});
 });
 
