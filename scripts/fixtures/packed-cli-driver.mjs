@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, watch, writeFileSync } from "node:fs";
+import { readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -27,6 +28,7 @@ if (scenario === "inventory") {
 	const standard = {
 		configPath: root,
 		logPath,
+		logFs: { readFile: (path) => readFile(path, "utf8"), realpath, watch: (path, cb) => watch(path, cb) },
 		async start() {
 			if (scenario === "failure") return failed("start");
 			running = true;
