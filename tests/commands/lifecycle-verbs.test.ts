@@ -32,6 +32,46 @@ import {
 	type UninstallLifecycleSteps,
 	usageText,
 } from "../../src/commands/index.js";
+import type { HoneycombStandardOps } from "../../src/commands/standard-interface.js";
+
+function fakeStandard(): HoneycombStandardOps & { calls: string[] } {
+	const calls: string[] = [];
+	return {
+		calls,
+		configPath: "/tmp/honeycomb",
+		logPath: "/tmp/honeycomb/service.log",
+		async start() {
+			calls.push("start");
+			return { ok: true, changed: true, message: "Honeycomb started through its installed OS service." };
+		},
+		async stop() {
+			calls.push("stop");
+			return { ok: true, changed: true, message: "Honeycomb stopped through its installed OS service." };
+		},
+		async restart() {
+			calls.push("restart");
+			return { ok: true, changed: true, message: "Honeycomb restarted through its installed OS service." };
+		},
+		async serviceInstall() {
+			return { ok: true, message: "installed" };
+		},
+		async serviceUninstall() {
+			return { ok: true, message: "removed" };
+		},
+		async isServiceInstalled() {
+			return true;
+		},
+		async register() {
+			return { ok: true, message: "registered" };
+		},
+		async isRegistered() {
+			return true;
+		},
+		async update() {
+			return { ok: true, message: "current" };
+		},
+	};
+}
 
 /** A recording fake DaemonLifecycle: records every call + returns scripted results. */
 function fakeLifecycle(
@@ -40,48 +80,61 @@ function fakeLifecycle(
 	calls: string[];
 } {
 	const calls: string[] = [];
+	let running = true;
 	return {
 		calls,
 		async start() {
 			calls.push("start");
+			running = true;
 			return script.start ?? { started: true, alreadyRunning: false };
 		},
 		async stop() {
 			calls.push("stop");
+			running = false;
 			return script.stop ?? { stopped: true };
 		},
 		async status(): Promise<DaemonStatus> {
 			calls.push("status");
-			return { running: true, pid: 7, port: 3850 };
+			return running ? { running: true, pid: 7, port: 3850 } : { running: false, port: 3850 };
 		},
 	};
 }
 
 describe("PRD-003b b-AC-1 — bare `start` / `stop` verbs front the daemon lifecycle", () => {
-	it("b-AC-1 `honeycomb start` routes to lifecycle.start and reports it started", async () => {
+	it("b-AC-1 `honeycomb start` routes only to the installed-service adapter", async () => {
 		const lines: string[] = [];
 		const lifecycle = fakeLifecycle();
+		const standard = fakeStandard();
 		const deps: CommandDeps = {
 			daemon: createFakeDaemonClient({ alive: false }),
 			lifecycle,
+			standard,
 			out: (l) => lines.push(l),
 		};
 		const d = createDispatcher();
 		const res = await d.dispatch(d.parse(["start"]), deps);
 		expect(res.exitCode).toBe(0);
-		expect(lifecycle.calls).toContain("start");
-		expect(lines.join("\n")).toMatch(/daemon: (started|already running)/);
+		expect(standard.calls).toEqual(["start"]);
+		expect(lifecycle.calls).toEqual([]);
+		expect(lines.join("\n")).toMatch(/installed OS service/);
 	});
 
 	it("b-AC-1 `honeycomb stop` routes to lifecycle.stop and reports it stopped", async () => {
 		const lines: string[] = [];
 		const lifecycle = fakeLifecycle();
-		const deps: CommandDeps = { daemon: createFakeDaemonClient({ alive: true }), lifecycle, out: (l) => lines.push(l) };
+		const standard = fakeStandard();
+		const deps: CommandDeps = {
+			daemon: createFakeDaemonClient({ alive: true }),
+			lifecycle,
+			standard,
+			out: (l) => lines.push(l),
+		};
 		const d = createDispatcher();
 		const res = await d.dispatch(d.parse(["stop"]), deps);
 		expect(res.exitCode).toBe(0);
-		expect(lifecycle.calls).toEqual(["stop"]);
-		expect(lines.join("\n")).toMatch(/daemon: stopped/);
+		expect(standard.calls).toEqual(["stop"]);
+		expect(lifecycle.calls).toEqual([]);
+		expect(lines.join("\n")).toMatch(/installed OS service/);
 	});
 
 	it("b-AC-1 `start` and `stop` are registered verbs listed in --help", () => {
@@ -223,7 +276,7 @@ describe("PRD-003b b-AC-6 — uninstall with nothing installed exits 0 with a fr
 describe("PRD-003b / AC-9 — every uninstall step is best-effort and never aborts the verb", () => {
 	it("AC-9 a throwing step is reported as a note and the remaining steps still run (exit 0)", async () => {
 		const lines: string[] = [];
-		// The FIRST step throws; the verb must still run unregister/registry/state-dir + connector.
+		// The FIRST prerequisite throws; later destructive steps must not run.
 		const steps = recordingSteps({ stop: "throw" });
 		const deps: LocalDeps = {
 			daemon: createFakeDaemonClient({ alive: true }),
@@ -232,9 +285,8 @@ describe("PRD-003b / AC-9 — every uninstall step is best-effort and never abor
 			out: (l) => lines.push(l),
 		};
 		const res = await runConnectorVerb("uninstall", [], deps);
-		expect(res.exitCode).toBe(0);
-		// It kept going: every step was attempted despite the first one throwing.
-		expect(steps.calls).toEqual(["stop", "unregister", "registry", "stateDir"]);
-		expect(lines.join("\n")).toMatch(/could not stop the daemon \(continuing\)/);
+		expect(res.exitCode).toBe(1);
+		expect(steps.calls).toEqual(["stop"]);
+		expect(lines.join("\n")).toMatch(/no further removal was attempted/);
 	});
 });

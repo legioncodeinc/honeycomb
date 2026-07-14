@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.22.0 — 2026-07-14
+
+Honeycomb's CLI now speaks a standardized command interface with new restart, service-install, service-uninstall, register, logs, and JSON-envelope automation support, plus safer service update/uninstall flows with health-checked rollback. Existing daemon commands remain fully backward compatible.
+
+## Unreleased - Apiary CLI standard
+
+- Added canonical `restart`, `service-install`, `service-uninstall`, `register`, and product-isolated `logs` commands while retaining every existing Honeycomb product command.
+- Standardized branded help, grouped command ordering, exact `honeycomb v<version>` output, global `--json`/`--no-color`, and usage exit code `2`.
+- Changed `status`, `telemetry`, lifecycle, registry, service, update, install, and uninstall automation output to support one-document JSON envelopes.
+- Split service-only removal (`service-uninstall`, which preserves state and Doctor registration) from full confirmed removal (`uninstall --yes`).
+- `update` now resolves the approved npm release, preserves state, health-checks the restarted daemon, and rolls back on failed verification; `update --check` is read-only.
+- Native service definitions now write to Honeycomb's authoritative `~/.apiary/honeycomb/service.log`; Windows lifecycle operations reap only the exact Honeycomb daemon descendant left by Task Scheduler wrappers.
+- No Honeycomb command was renamed. Existing `daemon start|stop|status` remains supported as a product-specific compatibility surface; canonical automation should use the bare lifecycle verbs.
+
 ## v0.21.0 — 2026-07-13
 
 Memory formation now produces fewer, richer memories. The extraction prompt asks for consolidated, self-contained notes (context + what + why) instead of discrete facts, keeps at most 4 per captured event (was 20), allows each memory up to 2,000 characters (was 500), drops fragments under a configurable substance floor (default 80 characters, `HONEYCOMB_PIPELINE_MIN_FACT_CHARS`), and explicitly skips ephemeral trivia — run results, one-off command outcomes, tool-choice restatements. The write-confidence gate rises to 0.8, and the per-turn recall injection budget doubles to 1,200 tokens so substantial memories fit.

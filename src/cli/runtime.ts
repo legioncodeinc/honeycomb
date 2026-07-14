@@ -57,7 +57,13 @@ import { runHoneycombStateMigration } from "../daemon/runtime/state-migration/in
 import { unregisterHoneycombFromDoctor } from "../daemon/runtime/telemetry/fleet-registry.js";
 import { launchDashboard } from "../dashboard/launch.js";
 import { DAEMON_HOST, DAEMON_PORT, HARNESS_STATUS_INGEST_PATH } from "../shared/constants.js";
-import { honeycombStateDir, legacyHoneycombDir, preferExistingPath, resolveFleetRoot } from "../shared/fleet-root.js";
+import {
+	honeycombServiceLogPath,
+	honeycombStateDir,
+	legacyHoneycombDir,
+	preferExistingPath,
+	resolveFleetRoot,
+} from "../shared/fleet-root.js";
 import { authMain } from "./auth.js";
 import { buildConnectorRunner } from "./connector-runner.js";
 import { createHarnessReconciler, type HarnessReconcileResult, type HarnessReconciler } from "./harness-reconcile.js";
@@ -66,6 +72,7 @@ import {
 	createDaemonServiceController,
 	type DaemonServiceController,
 	detectServiceManager,
+	serviceManagerForPlatform,
 	type ServiceManager,
 	type ServiceSpec,
 } from "./daemon-service.js";
@@ -74,6 +81,7 @@ import { orgMain } from "./org.js";
 import { projectMain } from "./project.js";
 import { buildRealTokenIssuer } from "./token-issuer.js";
 import { whoamiMain } from "./whoami.js";
+import { buildHoneycombStandardOps } from "./standard-ops.js";
 
 /** The full dep bundle the bin hands `dispatch` — `CommandDeps` plus the local/status/daemon seams. */
 export interface RuntimeDeps extends CommandDeps {
@@ -85,6 +93,7 @@ export interface RuntimeDeps extends CommandDeps {
 	readonly loggedIn: boolean;
 	readonly lifecycle: DaemonLifecycle;
 	readonly uninstallSteps: UninstallLifecycleSteps;
+	readonly standard: import("../commands/standard-interface.js").HoneycombStandardOps;
 	/** PRD-006b: the self-healing harness auto-wire reconciler (started on daemon-up; status read by 006c/006d). */
 	readonly reconcile: HarnessReconciler;
 	/**
@@ -241,7 +250,7 @@ function isPidAlive(pid: number): boolean {
  * here (the same place `start()` resolves them for the spawn fallback), so service mode and spawn
  * mode agree on the entry, flags, and workspace.
  */
-function buildServiceSpec(): ServiceSpec {
+export function buildServiceSpec(): ServiceSpec {
 	return {
 		nodePath: process.execPath,
 		entry: resolveDaemonEntry(),
@@ -251,6 +260,7 @@ function buildServiceSpec(): ServiceSpec {
 		// service-launched daemon resolves the same root the installing CLI resolved (env drift and the
 		// Windows LocalSystem `System32` resolution are both closed by the pin).
 		fleetRoot: resolveFleetRoot(),
+		logPath: honeycombServiceLogPath(),
 	};
 }
 
@@ -386,6 +396,7 @@ export function buildDaemonLifecycle(client: DaemonClient, options: DaemonLifecy
 		const svc = serviceController();
 		if (svc !== null) {
 			try {
+				mkdirSync(runtimeDir(), { recursive: true });
 				svc.register(buildServiceSpec());
 				// The manager (RunAtLoad/enable --now/`/Run`) starts it; wait for /health to confirm.
 				if (await waitForHealth(client)) return { started: true, alreadyRunning: false };
@@ -590,44 +601,43 @@ function isRealBackendCredential(apiUrl: string | undefined): boolean {
 
 /**
  * Build the PRD-003b fleet-lifecycle uninstall steps (b-AC-2/3/4) the FULL `uninstall` verb runs
- * alongside the harness-hook reversal. Every step is best-effort and self-contained:
- *   - `stopDaemon` fronts the {@link DaemonLifecycle} stop path (service-aware where registered).
- *   - `unregisterService` removes the OS service unit (current label + best-effort legacy labels)
- *     through the same {@link createDaemonServiceController} the lifecycle uses; it reports `removed`
- *     only when the unit was actually registered before the call. A host with no service manager is
- *     a friendly no-op.
+ * alongside the harness-hook reversal. Every required step is self-contained and fails closed:
+ *   - `stopDaemon` quiesces the active daemon process before service removal begins.
+ *   - `unregisterService` requires explicit inspection/removal of the current OS service through a
+ *     platform adapter that ignores spawn preference. Unavailable inspection throws so registry/state
+ *     deletion cannot continue while a service might remain; only supplemental legacy-label cleanup
+ *     is best-effort.
  *   - `deleteRegistryEntry` deletes honeycomb's entry from doctor's registry (both the fleet-root and
  *     legacy files), leaving every other entry intact ({@link unregisterHoneycombFromDoctor}).
  *   - `removeStateDir` removes honeycomb's resolved absolute state dir ({@link honeycombStateDir}),
  *     never following a symlink out of the fleet root (a symlinked dir has only the link removed) and
  *     never glob-expanding. It touches NOTHING shared (`~/.deeplake`) and no other product's dir.
  */
-export function buildUninstallLifecycleSteps(lifecycle: DaemonLifecycle): UninstallLifecycleSteps {
+export interface UninstallLifecycleOptions {
+	readonly manager?: ServiceManager | null;
+	readonly controllerFor?: (manager: ServiceManager) => DaemonServiceController;
+}
+
+export function buildUninstallLifecycleSteps(
+	lifecycle: DaemonLifecycle,
+	options: UninstallLifecycleOptions = {},
+): UninstallLifecycleSteps {
 	return {
 		async stopDaemon(): Promise<{ readonly stopped: boolean }> {
 			return lifecycle.stop();
 		},
 		unregisterService(): { readonly removed: boolean; readonly manager?: string } {
-			const manager = detectServiceManager();
-			if (manager === null) return { removed: false };
+			const manager = options.manager !== undefined ? options.manager : serviceManagerForPlatform();
+			if (manager === null) throw new Error("Could not select an OS service manager for Honeycomb removal.");
 			const spec = buildServiceSpec();
-			let controller: DaemonServiceController;
-			try {
-				controller = createDaemonServiceController(manager);
-			} catch {
-				return { removed: false, manager };
-			}
+			const controller: DaemonServiceController = (options.controllerFor ?? createDaemonServiceController)(manager);
 			let wasRegistered = false;
 			try {
 				wasRegistered = controller.isRegistered(spec);
 			} catch {
-				wasRegistered = false;
+				throw new Error(`Could not inspect the ${manager} Honeycomb service.`);
 			}
-			try {
-				controller.unregister(spec);
-			} catch {
-				// Best-effort: a manager stop/remove failure never aborts the uninstall.
-			}
+			controller.unregister(spec);
 			try {
 				controller.unregisterLegacy?.(spec);
 			} catch {
@@ -636,11 +646,7 @@ export function buildUninstallLifecycleSteps(lifecycle: DaemonLifecycle): Uninst
 			return wasRegistered ? { removed: true, manager } : { removed: false, manager };
 		},
 		deleteRegistryEntry(): { readonly removed: boolean } {
-			try {
-				return { removed: unregisterHoneycombFromDoctor().removed };
-			} catch {
-				return { removed: false };
-			}
+			return { removed: unregisterHoneycombFromDoctor().removed };
 		},
 		removeStateDir(): { readonly removed: boolean; readonly dir: string } {
 			// The RESOLVED absolute honeycomb state dir under the fleet root (ADR-0003). Never a glob.
@@ -648,18 +654,14 @@ export function buildUninstallLifecycleSteps(lifecycle: DaemonLifecycle): Uninst
 			let isSymlink: boolean;
 			try {
 				isSymlink = lstatSync(dir).isSymbolicLink();
-			} catch {
-				// Absent (or unreadable): nothing to remove.
-				return { removed: false, dir };
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") return { removed: false, dir };
+				throw error;
 			}
-			try {
-				// A symlinked state dir: remove ONLY the link, never follow it out of the root.
-				if (isSymlink) rmSync(dir, { force: true });
-				else rmSync(dir, { recursive: true, force: true });
-				return { removed: true, dir };
-			} catch {
-				return { removed: false, dir };
-			}
+			// A symlinked state dir: remove ONLY the link, never follow it out of the root.
+			if (isSymlink) rmSync(dir, { force: true });
+			else rmSync(dir, { recursive: true, force: true });
+			return { removed: true, dir };
 		},
 	};
 }
@@ -767,6 +769,7 @@ export function buildRuntimeDeps(): RuntimeDeps {
 		loggedIn: creds !== null,
 		// PRD-003b: the FULL `uninstall` verb runs these alongside the harness-hook reversal.
 		uninstallSteps: buildUninstallLifecycleSteps(lifecycle),
+		standard: buildHoneycombStandardOps(daemon, lifecycle, buildServiceSpec()),
 		// PRD-006b: the self-healing harness auto-wire reconcile (start-trigger wired above via onDaemonUp).
 		reconcile,
 		// PRD-006c/006d: the connect/status/repair surface (built over the 006b reconcile).

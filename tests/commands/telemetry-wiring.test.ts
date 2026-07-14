@@ -138,6 +138,24 @@ describe("e-AC-4 install telemetry is fire-and-forget: a throwing fetch leaves t
 			rmSync(dirB, { recursive: true, force: true });
 		}
 	});
+
+	it("a failed required install phase emits no installed telemetry and no ready result", async () => {
+		const rec = recordingFetch();
+		const lines: string[] = [];
+		const result = await runInstallCommand([], {
+			daemon: createFakeDaemonClient({ alive: true }),
+			lifecycle: fakeLifecycle(),
+			dir,
+			out: (line) => lines.push(line),
+			persistInstalled: () => false,
+			telemetry: { fetch: rec.fetch, posthogKey: KEY },
+		});
+		expect(result.exitCode).toBe(1);
+		expect(lines.join("\n")).toContain("onboarding-marker phase");
+		expect(lines.join("\n")).not.toContain("Honeycomb is ready");
+		await waitFor(() => false, 5);
+		expect(rec.calls).toHaveLength(0);
+	});
 });
 
 describe("honeycomb_updated fires from the install verb when the build version changed since the last run", () => {
@@ -237,6 +255,29 @@ describe("honeycomb_uninstalled fires from the FULL uninstall verb, fire-and-for
 		});
 		expect(res.exitCode).toBe(0);
 	});
+
+	it("a failed required uninstall phase emits no uninstall telemetry", async () => {
+		const rec = recordingFetch();
+		const res = await runConnectorVerb("uninstall", [], {
+			daemon: createFakeDaemonClient({ alive: true }),
+			connector: recordingConnector(),
+			dir,
+			out: () => {},
+			telemetry: { fetch: rec.fetch, posthogKey: KEY },
+			uninstallSteps: {
+				async stopDaemon() {
+					throw new Error("stop failed");
+				},
+				unregisterService: () => ({ removed: true }),
+				deleteRegistryEntry: () => ({ removed: true }),
+				removeStateDir: () => ({ removed: true, dir }),
+			},
+		});
+		expect(res.exitCode).toBe(1);
+		await waitFor(() => false, 5);
+		expect(rec.calls).toHaveLength(0);
+	});
+
 });
 
 describe("e-AC-8 honeycomb telemetry --show renders the glass box", () => {

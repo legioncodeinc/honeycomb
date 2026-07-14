@@ -54,17 +54,18 @@ export interface DashboardLauncher {
 }
 
 /**
- * The PRD-003b fleet-lifecycle uninstall steps (b-AC-2 / b-AC-3 / b-AC-4). Each is a self-contained,
- * best-effort operation the FULL `uninstall` verb runs IN ADDITION to reversing harness hooks. The
- * real bindings are assembled in `src/cli/runtime.ts` (the daemon lifecycle, the OS-service
- * controller, the doctor-registry delete writer, and the resolved state-dir remover); a test injects
- * a recording fake so no daemon, no service manager, no real registry, and no real dir are touched.
- * Every method REPORTS what it did (or that there was nothing to do) so the caller narrates each step.
+ * The PRD-003b fleet-lifecycle uninstall steps (b-AC-2 / b-AC-3 / b-AC-4). A FULL `uninstall` runs
+ * these required phases in order before reversing harness hooks. The transaction fails closed: a
+ * failed phase stops later destructive work, and explicit OS-service inspection/removal cannot be
+ * bypassed by spawn mode. The real bindings are assembled in `src/cli/runtime.ts` (daemon quiescence,
+ * the explicit OS-service controller, the Doctor-registry delete writer, and the resolved state-dir
+ * remover); a test injects a recording fake so no live resources are touched. Every method reports
+ * what it did (or that there was nothing to do) so the caller narrates each committed phase.
  */
 export interface UninstallLifecycleSteps {
-	/** Stop the running daemon (fronts the DaemonLifecycle stop path). */
+	/** Quiesce the running daemon before mandatory explicit service inspection and removal. */
 	stopDaemon(): Promise<{ readonly stopped: boolean }>;
-	/** Remove honeycomb's OS service unit (current label + best-effort legacy labels). */
+	/** Remove Honeycomb's current OS service definition; legacy-label cleanup may be best-effort. */
 	unregisterService(): { readonly removed: boolean; readonly manager?: string };
 	/** Delete honeycomb's entry from doctor's registry, leaving every other entry intact. */
 	deleteRegistryEntry(): { readonly removed: boolean };
@@ -120,36 +121,24 @@ export async function runConnectorVerb(verb: string, argv: readonly string[], de
 		return { exitCode: 1 };
 	}
 	const harness = harnessArg(argv);
-	// The `honeycomb_uninstalled` lifecycle event (the-apiary fleet telemetry). Fires on the FULL
-	// `uninstall` (no harness arg - the "reverse everything Honeycomb wired" invocation), not a
-	// single-harness `uninstall <harness>` (that is a partial re-wire, not an uninstall). It fires
-	// BEFORE the connector engine reverses anything, fire-and-forget (`void`, never awaited), so a
-	// slow/broken telemetry hop can never delay or fail the uninstall - and every chokepoint gate
-	// (empty key / opt-out / once-per-machine dedupe) applies unchanged. The ref comes from the
-	// onboarding state, fail-soft to the build default. NOTE: no honeycomb verb removes the npm
-	// package or the state dir today; PACKAGE-removal coverage is the installer's `product_removed`
-	// event (see version-check.ts's module docstring for the full split).
 	const isFullUninstall = verb === "uninstall" && harness === undefined;
+	let uninstallRef = DEFAULT_REF;
 	if (isFullUninstall) {
-		let ref = DEFAULT_REF;
 		try {
-			ref = loadOnboarding(deps.dir).ref;
+			uninstallRef = loadOnboarding(deps.dir).ref;
 		} catch {
-			// Fail-soft: an unreadable onboarding state never blocks the uninstall (or the emit).
+			// Fail-soft: an unreadable onboarding state never blocks removal.
 		}
-		void emitTelemetry(
-			"honeycomb_uninstalled",
-			{ ref, tier: "tier1" },
-			{ ...(deps.telemetry ?? {}), ...(deps.dir !== undefined ? { dir: deps.dir } : {}) },
-		);
 	}
-	// PRD-003b (b-AC-2/3/4): the FULL uninstall ALSO removes the OS service unit, the doctor registry
-	// entry, and the state dir — in the contract order (stop → unregister → delete registry → remove
-	// state dir) — BEFORE the harness-hook reversal below. Each step is best-effort and reported. When
-	// the seam is unbound (older tests / a degraded build), uninstall reverses hooks only (unchanged).
+	// PRD-003b (b-AC-2/3/4): FULL uninstall is an ordered, fail-closed transaction: quiesce the daemon,
+	// explicitly inspect/remove the current OS service, delete Doctor registration, remove product state,
+	// then reverse harness hooks. A required-phase failure stops later destructive work; only supplemental
+	// legacy service-label cleanup is best-effort.
 	let fleetRemovedSomething = false;
 	if (isFullUninstall && deps.uninstallSteps !== undefined) {
-		fleetRemovedSomething = await runUninstallLifecycleSteps(deps.uninstallSteps, out);
+		const lifecycle = await runUninstallLifecycleSteps(deps.uninstallSteps, out);
+		fleetRemovedSomething = lifecycle.removedSomething;
+		if (!lifecycle.ok) return { exitCode: 1 };
 	}
 	const result = await deps.connector.run({ verb, ...(harness !== undefined ? { harness } : {}) });
 	if (result.harnesses.length > 0) {
@@ -162,25 +151,37 @@ export async function runConnectorVerb(verb: string, argv: readonly string[], de
 	if (isFullUninstall && deps.uninstallSteps !== undefined && !fleetRemovedSomething && result.harnesses.length === 0) {
 		out("uninstall: nothing to remove — Honeycomb was not installed here.");
 	}
+	// Commit-point telemetry: emit only after every required removal phase and connector reversal
+	// succeeded. A failed transaction must never consume the one-time uninstall event.
+	if (isFullUninstall && result.exitCode === 0) {
+		void emitTelemetry(
+			"honeycomb_uninstalled",
+			{ ref: uninstallRef, tier: "tier1" },
+			{ ...(deps.telemetry ?? {}), ...(deps.dir !== undefined ? { dir: deps.dir } : {}) },
+		);
+	}
 	return { exitCode: result.exitCode };
 }
 
 /**
- * Run the PRD-003b fleet-lifecycle uninstall steps in the contract order (stop → unregister service →
- * delete registry entry → remove state dir). Every step is best-effort: a throw is caught and reported
- * as a per-step note so a single failing step never aborts the uninstall (parent AC-9). Returns
- * whether ANY step actually removed something (drives the b-AC-6 nothing-to-remove message).
+ * Run required uninstall phases in contract order. A failed phase stops later destructive work and
+ * suppresses success telemetry.
  */
-async function runUninstallLifecycleSteps(steps: UninstallLifecycleSteps, out: OutputSink): Promise<boolean> {
+async function runUninstallLifecycleSteps(
+	steps: UninstallLifecycleSteps,
+	out: OutputSink,
+): Promise<{ readonly removedSomething: boolean; readonly ok: boolean }> {
 	let removedSomething = false;
 	// 1. Stop the daemon first so doctor never sees a registered-but-gone product mid-flight.
 	try {
 		const { stopped } = await steps.stopDaemon();
 		out(stopped ? "uninstall: stopped the daemon." : "uninstall: daemon was not running.");
 	} catch {
-		out("uninstall: could not stop the daemon (continuing).");
+		out("uninstall: could not stop the daemon; no further removal was attempted.");
+		return { removedSomething, ok: false };
 	}
-	// 2. Remove the OS service unit (current + best-effort legacy) so it no longer starts at boot.
+	// 2. Inspect and remove the current OS service explicitly so it cannot restart at boot. Failure is
+	//    fatal to the transaction; only supplemental legacy-label cleanup may be best-effort.
 	try {
 		const r = steps.unregisterService();
 		out(
@@ -190,7 +191,8 @@ async function runUninstallLifecycleSteps(steps: UninstallLifecycleSteps, out: O
 		);
 		removedSomething = removedSomething || r.removed;
 	} catch {
-		out("uninstall: could not remove the OS service unit (continuing).");
+		out("uninstall: could not remove the OS service unit; registration and state were preserved.");
+		return { removedSomething, ok: false };
 	}
 	// 3. Delete honeycomb's entry from doctor's registry, leaving every other entry intact.
 	try {
@@ -202,7 +204,8 @@ async function runUninstallLifecycleSteps(steps: UninstallLifecycleSteps, out: O
 		);
 		removedSomething = removedSomething || r.removed;
 	} catch {
-		out("uninstall: could not update doctor's registry (continuing).");
+		out("uninstall: could not update doctor's registry; product state was preserved.");
+		return { removedSomething, ok: false };
 	}
 	// 4. Remove honeycomb's state dir LAST, by resolved absolute path (never a glob, never a symlink
 	//    followed out of the fleet root).
@@ -215,9 +218,10 @@ async function runUninstallLifecycleSteps(steps: UninstallLifecycleSteps, out: O
 		);
 		removedSomething = removedSomething || r.removed;
 	} catch {
-		out("uninstall: could not remove the state directory (continuing).");
+		out("uninstall: could not remove the state directory.");
+		return { removedSomething, ok: false };
 	}
-	return removedSomething;
+	return { removedSomething, ok: true };
 }
 
 /**
@@ -252,22 +256,5 @@ export async function runHookCommand(argv: readonly string[], deps: LocalDeps): 
 		return runConnectorVerb("setup", argv.slice(1), deps);
 	}
 	out("hook: run `honeycomb hook wire` to (re)wire harness hooks, or `honeycomb status` for D1–D5.");
-	return { exitCode: 0 };
-}
-
-/**
- * Run `honeycomb update [--dry-run]` (FR-10). Self-updates the CLI, daemon, and bundles;
- * `--dry-run` reports the plan without writing. Local process + daemon-launch only. The real
- * self-update mechanism is deferred assembly (the bin owns the update fetch); the `--dry-run`
- * plan path is constructed-and-tested here.
- */
-export async function runUpdateCommand(argv: readonly string[], deps: LocalDeps): Promise<CommandResult> {
-	const out: OutputSink = deps.out ?? ((line: string): void => console.log(line));
-	const dryRun = argv.includes("--dry-run");
-	if (dryRun) {
-		out("update --dry-run: would update the CLI, daemon, and harness bundles to the latest release.");
-		return { exitCode: 0 };
-	}
-	out("update: self-update is performed by the bundled bin (deferred assembly); re-run with --dry-run to preview.");
 	return { exitCode: 0 };
 }

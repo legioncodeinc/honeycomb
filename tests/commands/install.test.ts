@@ -567,11 +567,7 @@ describe("PRD-071 Contract A — install registers honeycomb with doctor's stati
 		expect(doc.daemons.filter((d) => d.name === "honeycomb")).toHaveLength(1);
 	});
 
-	it("a registry write failure is fail-soft: the install still succeeds", async () => {
-		// An invalid `dir` (a file, not a directory) makes `mkdirp` fail inside the registry writer.
-		const notADir = join(tmpDir, "not-a-directory-marker");
-		const { writeFileSync } = await import("node:fs");
-		writeFileSync(notADir, "x");
+	it("a required registry write failure fails the install before ready/telemetry", async () => {
 		const lines: string[] = [];
 		const res = await runInstallCommand([], {
 			daemon: createFakeDaemonClient({ alive: true }),
@@ -579,11 +575,12 @@ describe("PRD-071 Contract A — install registers honeycomb with doctor's stati
 			openDashboard: () => true,
 			probeDashboard: reachablePortalProbe,
 			detectFleet: fleetDefer,
-			dir: notADir,
+			dir: tmpDir,
+			registerWithDoctor: () => false,
 			out: (l) => lines.push(l),
 		});
-		expect(res.exitCode).toBe(0);
-		expect(lines.join("\n")).toMatch(/Honeycomb is ready/);
+		expect(res.exitCode).toBe(1);
+		expect(lines.join("\n")).not.toMatch(/Honeycomb is ready/);
 	});
 });
 

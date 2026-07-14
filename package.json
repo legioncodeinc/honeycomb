@@ -1,6 +1,6 @@
 {
   "name": "@legioncodeinc/honeycomb",
-  "version": "0.21.0",
+  "version": "0.22.0",
   "//go-public": "Go-public switches are flipped: scoped name, public+provenance publishConfig live, `private` removed. CI auth is npm Trusted Publishing (OIDC); there is NO NPM_TOKEN. The go-live procedure is RELEASING.md 'Cut the release': the first publish is a one-time manual 2FA bootstrap that creates the package, after which every CI publish from release.yaml is tokenless OIDC.",
   "publishConfig": {
     "access": "public",
@@ -77,6 +77,8 @@
     "mutation:normalize": "stryker run stryker/normalize.json",
     "mutation:state": "stryker run stryker/state.json",
     "pack:check": "node scripts/pack-check.mjs",
+    "pack:prepare": "node scripts/prepare-packed-artifact.mjs",
+    "test:packed-cli": "node scripts/packed-cli-conformance.mjs",
     "rebuild:native": "node scripts/ensure-tree-sitter.mjs",
     "ensure:embed-deps": "node scripts/ensure-embed-deps.mjs",
     "ci": "npm run typecheck && npm run dup && npm run test && npm run audit:sql",
@@ -123,6 +125,7 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.19.14",
+    "@legioncodeinc/cli-kit": "^0.3.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@noble/ciphers": "^2.2.0",
     "hono": "^4.12.25",

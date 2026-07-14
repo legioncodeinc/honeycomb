@@ -79,6 +79,18 @@ describe("e-AC-1 each event emits exactly once at its lifecycle point carrying t
 });
 
 describe("e-AC-2 the payload contains ONLY allow-listed fields; the banned set is absent", () => {
+	it("normalizes a legacy PII/control-shaped referral value before it reaches telemetry", async () => {
+		const rec = recordingFetch();
+		await emitTelemetry(
+			"honeycomb_installed",
+			{ ref: "person@example.com\u001b[31m", tier: "tier1" },
+			{ dir, fetch: rec.fetch, posthogKey: KEY },
+		);
+		const serialized = rec.calls[0]!.init.body;
+		expect((bodyOf(rec).properties as Record<string, unknown>).ref).toBe("unknown");
+		expect(serialized).not.toMatch(/person@example\.com|\u001b/);
+	});
+
 	it("a caller-supplied banned field is DROPPED — never reaches the wire", async () => {
 		const rec = recordingFetch();
 		await emitTelemetry(

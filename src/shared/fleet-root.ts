@@ -24,7 +24,7 @@
  * these helpers downward (Tier 1), mirroring the `src/shared/constants.ts` discipline.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, statSync, truncateSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, win32 } from "node:path";
 
@@ -102,6 +102,33 @@ export function resolveFleetRoot(options: FleetRootOptions = {}): string {
  */
 export function honeycombStateDir(options: FleetRootOptions = {}): string {
 	return join(resolveFleetRoot(options), PRODUCT_SLUG);
+}
+
+/** The authoritative service stdout/stderr log consumed by `honeycomb logs`. */
+export function honeycombServiceLogPath(options: FleetRootOptions = {}): string {
+	return join(honeycombStateDir(options), "service.log");
+}
+
+/** Service log size cap enforced before every daemon start on every service manager. */
+export const SERVICE_LOG_MAX_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Truncate the authoritative service log when it reaches the cap. The path is derived internally
+ * from the contained fleet root—callers cannot select a file. A missing log is already bounded.
+ */
+export function capHoneycombServiceLogAtStartup(
+	options: FleetRootOptions = {},
+	fs: Pick<typeof import("node:fs"), "statSync" | "truncateSync"> = { statSync, truncateSync },
+): boolean {
+	const path = honeycombServiceLogPath(options);
+	try {
+		if (fs.statSync(path).size < SERVICE_LOG_MAX_BYTES) return false;
+		fs.truncateSync(path, 0);
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+		throw error;
+	}
 }
 
 /** Join a fleet-SHARED file name at the fleet root itself (registry.json, device.json, install-id). */

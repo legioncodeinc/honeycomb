@@ -30,6 +30,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	createDaemonServiceController,
+	type DaemonServiceController,
 	LEGACY_SERVICE_LABEL,
 	LEGACY_SERVICE_SYSTEMD_UNIT,
 	LEGACY_SERVICE_TASK_NAME,
@@ -54,6 +55,44 @@ function fakeLifecycle(): DaemonLifecycle {
 		},
 	};
 }
+
+describe("PRD-003b fail-closed explicit service removal", () => {
+	it("removes an inspected service even when daemon launch preference is spawn", () => {
+		const previous = process.env.HONEYCOMB_DAEMON_SERVICE;
+		process.env.HONEYCOMB_DAEMON_SERVICE = "spawn";
+		const calls: string[] = [];
+		const controller: DaemonServiceController = {
+			manager: "schtasks",
+			register: () => ({ ok: true, manager: "schtasks" }),
+			unregister: () => {
+				calls.push("unregister");
+				return { ok: true, manager: "schtasks" };
+			},
+			restart: () => ({ ok: true, manager: "schtasks" }),
+			stop: () => ({ ok: true, manager: "schtasks" }),
+			isRegistered: () => {
+				calls.push("inspect");
+				return true;
+			},
+		};
+		try {
+			const steps = buildUninstallLifecycleSteps(fakeLifecycle(), {
+				manager: "schtasks",
+				controllerFor: () => controller,
+			});
+			expect(steps.unregisterService()).toEqual({ removed: true, manager: "schtasks" });
+			expect(calls).toEqual(["inspect", "unregister"]);
+		} finally {
+			if (previous === undefined) delete process.env.HONEYCOMB_DAEMON_SERVICE;
+			else process.env.HONEYCOMB_DAEMON_SERVICE = previous;
+		}
+	});
+
+	it("throws when explicit service inspection is unavailable", () => {
+		const steps = buildUninstallLifecycleSteps(fakeLifecycle(), { manager: null });
+		expect(() => steps.unregisterService()).toThrow(/service manager/);
+	});
+});
 
 let fleetRoot: string;
 let prevApiaryHome: string | undefined;

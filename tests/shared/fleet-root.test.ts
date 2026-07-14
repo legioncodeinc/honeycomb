@@ -11,17 +11,20 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+	capHoneycombServiceLogAtStartup,
 	APIARY_HOME_ENV,
 	APIARY_ROOT_DIR_NAME,
 	fleetRootFile,
+	honeycombServiceLogPath,
 	honeycombStateDir,
 	legacyHoneycombDir,
 	LEGACY_FLEET_DIR_NAME,
 	preferExistingPath,
 	resolveFleetRoot,
+	SERVICE_LOG_MAX_BYTES,
 	XDG_STATE_HOME_ENV,
 } from "../../src/shared/fleet-root.js";
 
@@ -151,5 +154,33 @@ describe("preferExistingPath — new-first, legacy-second, else new (creation ta
 		const newP = join(dir, "new.json");
 		const legacyP = join(dir, "legacy.json");
 		expect(preferExistingPath(newP, legacyP)).toBe(newP);
+	});
+});
+
+describe("bounded service logs", () => {
+	it("truncates only the internally derived Honeycomb service log at the startup cap", () => {
+		const options = { env: { [APIARY_HOME_ENV]: "/fleet" }, platform: "linux" as const, home: HOME };
+		const statSync = vi.fn(() => ({ size: SERVICE_LOG_MAX_BYTES }));
+		const truncateSync = vi.fn();
+		expect(
+			capHoneycombServiceLogAtStartup(options, {
+				statSync,
+				truncateSync,
+			} as never),
+		).toBe(true);
+		const path = honeycombServiceLogPath(options);
+		expect(statSync).toHaveBeenCalledWith(path);
+		expect(truncateSync).toHaveBeenCalledWith(path, 0);
+	});
+
+	it("leaves a log below the cap unchanged", () => {
+		const truncateSync = vi.fn();
+		expect(
+			capHoneycombServiceLogAtStartup({}, {
+				statSync: () => ({ size: SERVICE_LOG_MAX_BYTES - 1 }),
+				truncateSync,
+			} as never),
+		).toBe(false);
+		expect(truncateSync).not.toHaveBeenCalled();
 	});
 });

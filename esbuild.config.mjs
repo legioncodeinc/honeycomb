@@ -50,10 +50,10 @@ const HONEYCOMB_POSTHOG_KEY = process.env.HONEYCOMB_POSTHOG_KEY ?? "";
 const HONEYCOMB_POSTHOG_HOST = process.env.HONEYCOMB_POSTHOG_HOST ?? "https://us.i.posthog.com";
 
 const VERSION_DEFINE = {
-  __HONEYCOMB_VERSION__: JSON.stringify(HONEYCOMB_VERSION),
-  __HONEYCOMB_REF_DEFAULT__: JSON.stringify(HONEYCOMB_REF_DEFAULT),
-  __HONEYCOMB_POSTHOG_KEY__: JSON.stringify(HONEYCOMB_POSTHOG_KEY),
-  __HONEYCOMB_POSTHOG_HOST__: JSON.stringify(HONEYCOMB_POSTHOG_HOST),
+	__HONEYCOMB_VERSION__: JSON.stringify(HONEYCOMB_VERSION),
+	__HONEYCOMB_REF_DEFAULT__: JSON.stringify(HONEYCOMB_REF_DEFAULT),
+	__HONEYCOMB_POSTHOG_KEY__: JSON.stringify(HONEYCOMB_POSTHOG_KEY),
+	__HONEYCOMB_POSTHOG_HOST__: JSON.stringify(HONEYCOMB_POSTHOG_HOST),
 };
 
 // The tree-sitter parser stack (PRD-014 codebase graph, D-1). RESOLVED to
@@ -68,19 +68,11 @@ const VERSION_DEFINE = {
 // external (esbuild cannot inline the sibling `.wasm` it `fs.readFileSync`s).
 // `tree-sitter-wasms` is external too: it is consumed only as a require.resolve()
 // anchor to locate the `out/*.wasm` grammar directory, never imported for code.
-const TREE_SITTER_EXTERNAL = [
-  "web-tree-sitter",
-  "tree-sitter-wasms",
-];
+const TREE_SITTER_EXTERNAL = ["web-tree-sitter", "tree-sitter-wasms"];
 
 const NATIVE_COMPRESSION_EXTERNAL = ["node-liblzma", "@mongodb-js/zstd"];
 
-const INFERENCE_EXTERNAL = [
-  "@huggingface/transformers",
-  "onnxruntime-node",
-  "onnxruntime-common",
-  "sharp",
-];
+const INFERENCE_EXTERNAL = ["@huggingface/transformers", "onnxruntime-node", "onnxruntime-common", "sharp"];
 
 // The OPTIONAL self-hosted Postgres driver. `pg` powers PgDeepLakeTransport
 // (src/daemon/storage/pg-transport.ts), reached only when the storage endpoint
@@ -93,11 +85,11 @@ const SELF_HOSTED_PG_EXTERNAL = ["pg"];
 // code (tree-sitter) and owns the inference-adjacent native deps, so it carries
 // the full external surface.
 const DAEMON_EXTERNAL = [
-  "node:*",
-  ...NATIVE_COMPRESSION_EXTERNAL,
-  ...INFERENCE_EXTERNAL,
-  ...TREE_SITTER_EXTERNAL,
-  ...SELF_HOSTED_PG_EXTERNAL,
+	"node:*",
+	...NATIVE_COMPRESSION_EXTERNAL,
+	...INFERENCE_EXTERNAL,
+	...TREE_SITTER_EXTERNAL,
+	...SELF_HOSTED_PG_EXTERNAL,
 ];
 
 // Harness / MCP thin clients: no native parsing or inference deps reachable —
@@ -106,15 +98,11 @@ const THIN_CLIENT_EXTERNAL = ["node:*"];
 
 // Embed daemon: its OWN external list (resolved open question). It loads the
 // inference stack + compression natives, but not tree-sitter.
-const EMBED_EXTERNAL = [
-  "node:*",
-  ...NATIVE_COMPRESSION_EXTERNAL,
-  ...INFERENCE_EXTERNAL,
-];
+const EMBED_EXTERNAL = ["node:*", ...NATIVE_COMPRESSION_EXTERNAL, ...INFERENCE_EXTERNAL];
 
 /** Write the ESM marker package.json beside a bundle so Node treats it as ESM. */
 function stampEsm(outdir) {
-  writeFileSync(`${outdir}/package.json`, ESM_PACKAGE_JSON);
+	writeFileSync(`${outdir}/package.json`, ESM_PACKAGE_JSON);
 }
 
 /**
@@ -124,32 +112,32 @@ function stampEsm(outdir) {
  * POSIX host.
  */
 function stampExecutable(file) {
-  chmodSync(file, 0o755);
+	chmodSync(file, 0o755);
 }
 
 // ---------------------------------------------------------------------------
 // 1. Daemon (DeepLake-linking core; the only bundle that may carry DeepLake).
 // ---------------------------------------------------------------------------
 await build({
-  entryPoints: { index: "dist/src/daemon/index.js" },
-  bundle: true,
-  platform: "node",
-  format: "esm",
-  outdir: "daemon",
-  external: DAEMON_EXTERNAL,
-  define: VERSION_DEFINE,
-  // ESM-bundle require shim. A transitively-bundled CJS dependency (`yaml`, pulled
-  // in by the inference-config loader `loadInferenceConfigFromYaml` that the daemon
-  // assembly calls to read `agent.yaml`) performs a dynamic `require("process")`.
-  // In an `format: "esm"` bundle esbuild replaces an unresolved `require` with a
-  // shim that THROWS ("Dynamic require of X is not supported") — UNLESS a real
-  // `require` is in scope, which the shim then uses. Define one via createRequire so
-  // the bundled CJS dep loads node builtins at runtime instead of crashing the
-  // daemon at startup. (In-process itests assemble the daemon directly and never hit
-  // the bundle, so only the real `daemon start` path exercised this — caught by dogfood.)
-  banner: {
-    js: "import { createRequire as __cr } from 'node:module'; const require = __cr(import.meta.url);",
-  },
+	entryPoints: { index: "dist/src/daemon/index.js" },
+	bundle: true,
+	platform: "node",
+	format: "esm",
+	outdir: "daemon",
+	external: DAEMON_EXTERNAL,
+	define: VERSION_DEFINE,
+	// ESM-bundle require shim. A transitively-bundled CJS dependency (`yaml`, pulled
+	// in by the inference-config loader `loadInferenceConfigFromYaml` that the daemon
+	// assembly calls to read `agent.yaml`) performs a dynamic `require("process")`.
+	// In an `format: "esm"` bundle esbuild replaces an unresolved `require` with a
+	// shim that THROWS ("Dynamic require of X is not supported") — UNLESS a real
+	// `require` is in scope, which the shim then uses. Define one via createRequire so
+	// the bundled CJS dep loads node builtins at runtime instead of crashing the
+	// daemon at startup. (In-process itests assemble the daemon directly and never hit
+	// the bundle, so only the real `daemon start` path exercised this — caught by dogfood.)
+	banner: {
+		js: "import { createRequire as __cr } from 'node:module'; const require = __cr(import.meta.url);",
+	},
 });
 stampEsm("daemon");
 
@@ -162,13 +150,13 @@ stampEsm("daemon");
 //     handler resolves it via `dirname(process.argv[1])` at runtime.
 // ---------------------------------------------------------------------------
 await build({
-  entryPoints: { "restart-helper": "dist/src/daemon/restart-helper.js" },
-  bundle: true,
-  platform: "node",
-  format: "esm",
-  outdir: "daemon",
-  external: ["node:*"],
-  define: VERSION_DEFINE,
+	entryPoints: { "restart-helper": "dist/src/daemon/restart-helper.js" },
+	bundle: true,
+	platform: "node",
+	format: "esm",
+	outdir: "daemon",
+	external: ["node:*"],
+	define: VERSION_DEFINE,
 });
 stampExecutable("daemon/restart-helper.js");
 
@@ -177,51 +165,66 @@ stampExecutable("daemon/restart-helper.js");
 //    Each is an independent thin-client bundle (FR-1). No DeepLake (FR-3).
 // ---------------------------------------------------------------------------
 const HOOK_HARNESSES = [
-  { name: "claude-code", entry: "dist/harnesses/claude-code/src/index.js", outdir: "harnesses/claude-code/bundle", aliases: ["session-start.js", "capture.js", "pre-tool-use.js", "session-end.js"] },
-  { name: "codex", entry: "dist/harnesses/codex/src/index.js", outdir: "harnesses/codex/bundle", aliases: ["session-start.js", "capture.js", "pre-tool-use.js"] },
-  { name: "cursor", entry: "dist/harnesses/cursor/src/index.js", outdir: "harnesses/cursor/bundle", aliases: ["session-start.js", "capture.js", "pre-tool-use.js", "session-end.js"] },
-  { name: "hermes", entry: "dist/harnesses/hermes/src/index.js", outdir: "harnesses/hermes/bundle" },
-  { name: "pi", entry: "dist/harnesses/pi/src/index.js", outdir: "harnesses/pi/bundle" },
+	{
+		name: "claude-code",
+		entry: "dist/harnesses/claude-code/src/index.js",
+		outdir: "harnesses/claude-code/bundle",
+		aliases: ["session-start.js", "capture.js", "pre-tool-use.js", "session-end.js"],
+	},
+	{
+		name: "codex",
+		entry: "dist/harnesses/codex/src/index.js",
+		outdir: "harnesses/codex/bundle",
+		aliases: ["session-start.js", "capture.js", "pre-tool-use.js"],
+	},
+	{
+		name: "cursor",
+		entry: "dist/harnesses/cursor/src/index.js",
+		outdir: "harnesses/cursor/bundle",
+		aliases: ["session-start.js", "capture.js", "pre-tool-use.js", "session-end.js"],
+	},
+	{ name: "hermes", entry: "dist/harnesses/hermes/src/index.js", outdir: "harnesses/hermes/bundle" },
+	{ name: "pi", entry: "dist/harnesses/pi/src/index.js", outdir: "harnesses/pi/bundle" },
 ];
 
 // Extra standalone entries per harness — built from their OWN source (NOT aliases of
 // index.js). Used for the detached hygiene child (claude-code/src/hygiene.ts), which
 // has different imports + a different runtime path than the hook binary.
 const HARNESS_EXTRA_ENTRIES = [
-  { entry: "dist/harnesses/claude-code/src/hygiene.js", outdir: "harnesses/claude-code/bundle", name: "hygiene" },
+	{ entry: "dist/harnesses/claude-code/src/hygiene.js", outdir: "harnesses/claude-code/bundle", name: "hygiene" },
 ];
 
 for (const h of HOOK_HARNESSES) {
-  await build({
-    entryPoints: { index: h.entry },
-    bundle: true,
-    platform: "node",
-    format: "esm",
-    outdir: h.outdir,
-    external: THIN_CLIENT_EXTERNAL,
-    define: VERSION_DEFINE,
-  });
-  stampExecutable(`${h.outdir}/index.js`);
-  for (const alias of h.aliases ?? []) {
-    copyFileSync(`${h.outdir}/index.js`, `${h.outdir}/${alias}`);
-    stampExecutable(`${h.outdir}/${alias}`);
-  }
-  stampEsm(h.outdir);
+	await build({
+		entryPoints: { index: h.entry },
+		bundle: true,
+		platform: "node",
+		format: "esm",
+		outdir: h.outdir,
+		external: THIN_CLIENT_EXTERNAL,
+		define: VERSION_DEFINE,
+	});
+	stampExecutable(`${h.outdir}/index.js`);
+	for (const alias of h.aliases ?? []) {
+		copyFileSync(`${h.outdir}/index.js`, `${h.outdir}/${alias}`);
+		stampExecutable(`${h.outdir}/${alias}`);
+	}
+	stampEsm(h.outdir);
 }
 
 // Extra standalone harness entries (the detached hygiene child). Each builds from its
 // own source into the named file under the harness bundle dir.
 for (const extra of HARNESS_EXTRA_ENTRIES) {
-  await build({
-    entryPoints: { [extra.name]: extra.entry },
-    bundle: true,
-    platform: "node",
-    format: "esm",
-    outdir: extra.outdir,
-    external: THIN_CLIENT_EXTERNAL,
-    define: VERSION_DEFINE,
-  });
-  stampExecutable(`${extra.outdir}/${extra.name}.js`);
+	await build({
+		entryPoints: { [extra.name]: extra.entry },
+		bundle: true,
+		platform: "node",
+		format: "esm",
+		outdir: extra.outdir,
+		external: THIN_CLIENT_EXTERNAL,
+		define: VERSION_DEFINE,
+	});
+	stampExecutable(`${extra.outdir}/${extra.name}.js`);
 }
 
 // ---------------------------------------------------------------------------
@@ -236,56 +239,56 @@ for (const extra of HARNESS_EXTRA_ENTRIES) {
 //    with `grep -rn "process.env.HONEYCOMB_" src harnesses/openclaw/src`.
 // ---------------------------------------------------------------------------
 const OPENCLAW_TUNING_KNOBS = [
-  "HONEYCOMB_DEBUG",
-  "HONEYCOMB_TRACE",
-  "HONEYCOMB_QUERY_TIMEOUT_MS",
-  "HONEYCOMB_STATE_DIR",
+	"HONEYCOMB_DEBUG",
+	"HONEYCOMB_TRACE",
+	"HONEYCOMB_QUERY_TIMEOUT_MS",
+	"HONEYCOMB_STATE_DIR",
 ];
 
 const openclawEnvDefine = Object.fromEntries(
-  OPENCLAW_TUNING_KNOBS.map((k) => [`process.env.${k}`, `globalThis.__honeycomb_tuning__.${k}`]),
+	OPENCLAW_TUNING_KNOBS.map((k) => [`process.env.${k}`, `globalThis.__honeycomb_tuning__.${k}`]),
 );
 
 await build({
-  entryPoints: { index: "harnesses/openclaw/src/index.ts" },
-  bundle: true,
-  splitting: true,
-  chunkNames: "chunks/[name]-[hash]",
-  platform: "node",
-  format: "esm",
-  outdir: "harnesses/openclaw/dist",
-  external: ["node:*"],
-  // Guarantee globalThis.__honeycomb_tuning__ exists (as {}) before any
-  // rewritten lazy env read fires. register() overlays the user's
-  // openclaw.json tuning onto this object; until then reads resolve to
-  // undefined and the call-site `?? fallback` applies. No optional chaining —
-  // esbuild rejects it as a `define` value, matching the reference rationale.
-  banner: { js: "globalThis.__honeycomb_tuning__ ??= {};" },
-  define: {
-    ...VERSION_DEFINE,
-    ...openclawEnvDefine,
-  },
-  plugins: [
-    {
-      // Dead-code elimination for transitively bundled exec-shelling helpers.
-      // OpenClaw is a pure gateway and never calls them through its entry, so
-      // resolving node:child_process to a no-op namespace drops the dead exec
-      // code instead of shipping unreachable exec calls that trip the ClawHub
-      // `dangerous-exec` scanner rule.
-      name: "stub-unused-child-process",
-      setup(b) {
-        b.onResolve({ filter: /^node:child_process$/ }, () => ({
-          path: "node:child_process",
-          namespace: "stub",
-        }));
-        b.onLoad({ filter: /.*/, namespace: "stub" }, () => ({
-          contents:
-            "export const execSync = () => {}; export const execFileSync = () => {}; export const spawn = () => {};",
-          loader: "js",
-        }));
-      },
-    },
-  ],
+	entryPoints: { index: "harnesses/openclaw/src/index.ts" },
+	bundle: true,
+	splitting: true,
+	chunkNames: "chunks/[name]-[hash]",
+	platform: "node",
+	format: "esm",
+	outdir: "harnesses/openclaw/dist",
+	external: ["node:*"],
+	// Guarantee globalThis.__honeycomb_tuning__ exists (as {}) before any
+	// rewritten lazy env read fires. register() overlays the user's
+	// openclaw.json tuning onto this object; until then reads resolve to
+	// undefined and the call-site `?? fallback` applies. No optional chaining —
+	// esbuild rejects it as a `define` value, matching the reference rationale.
+	banner: { js: "globalThis.__honeycomb_tuning__ ??= {};" },
+	define: {
+		...VERSION_DEFINE,
+		...openclawEnvDefine,
+	},
+	plugins: [
+		{
+			// Dead-code elimination for transitively bundled exec-shelling helpers.
+			// OpenClaw is a pure gateway and never calls them through its entry, so
+			// resolving node:child_process to a no-op namespace drops the dead exec
+			// code instead of shipping unreachable exec calls that trip the ClawHub
+			// `dangerous-exec` scanner rule.
+			name: "stub-unused-child-process",
+			setup(b) {
+				b.onResolve({ filter: /^node:child_process$/ }, () => ({
+					path: "node:child_process",
+					namespace: "stub",
+				}));
+				b.onLoad({ filter: /.*/, namespace: "stub" }, () => ({
+					contents:
+						"export const execSync = () => {}; export const execFileSync = () => {}; export const spawn = () => {};",
+					loader: "js",
+				}));
+			},
+		},
+	],
 });
 stampEsm("harnesses/openclaw/dist");
 stampExecutable("harnesses/openclaw/dist/index.js");
@@ -297,24 +300,21 @@ stampExecutable("harnesses/openclaw/dist/index.js");
 //      - repo-root mcp/bundle (shared MCP distribution path)
 //      - plugin-internal harnesses/claude-code/mcp/bundle (install-safe path)
 // ---------------------------------------------------------------------------
-const MCP_SERVER_OUTDIRS = [
-  "mcp/bundle",
-  "harnesses/claude-code/mcp/bundle",
-];
+const MCP_SERVER_OUTDIRS = ["mcp/bundle", "harnesses/claude-code/mcp/bundle"];
 
 for (const outdir of MCP_SERVER_OUTDIRS) {
-  await build({
-    entryPoints: { server: "dist/mcp/src/index.js" },
-    bundle: true,
-    platform: "node",
-    format: "esm",
-    outdir,
-    external: THIN_CLIENT_EXTERNAL,
-    banner: { js: "#!/usr/bin/env node" },
-    define: VERSION_DEFINE,
-  });
-  stampExecutable(`${outdir}/server.js`);
-  stampEsm(outdir);
+	await build({
+		entryPoints: { server: "dist/mcp/src/index.js" },
+		bundle: true,
+		platform: "node",
+		format: "esm",
+		outdir,
+		external: THIN_CLIENT_EXTERNAL,
+		banner: { js: "#!/usr/bin/env node" },
+		define: VERSION_DEFINE,
+	});
+	stampExecutable(`${outdir}/server.js`);
+	stampEsm(outdir);
 }
 
 // ---------------------------------------------------------------------------
@@ -332,22 +332,22 @@ for (const outdir of MCP_SERVER_OUTDIRS) {
 //     (vs. these subpath exports of the repo) is out of scope for 019e.
 // ---------------------------------------------------------------------------
 const SDK_ENTRIES = [
-  { entry: "dist/src/sdk/index.js", external: THIN_CLIENT_EXTERNAL },
-  { entry: "dist/src/sdk/react.js", external: [...THIN_CLIENT_EXTERNAL, "react"] },
-  { entry: "dist/src/sdk/vercel.js", external: [...THIN_CLIENT_EXTERNAL, "ai"] },
-  { entry: "dist/src/sdk/openai.js", external: THIN_CLIENT_EXTERNAL },
+	{ entry: "dist/src/sdk/index.js", external: THIN_CLIENT_EXTERNAL },
+	{ entry: "dist/src/sdk/react.js", external: [...THIN_CLIENT_EXTERNAL, "react"] },
+	{ entry: "dist/src/sdk/vercel.js", external: [...THIN_CLIENT_EXTERNAL, "ai"] },
+	{ entry: "dist/src/sdk/openai.js", external: THIN_CLIENT_EXTERNAL },
 ];
 
 for (const s of SDK_ENTRIES) {
-  await build({
-    entryPoints: [s.entry],
-    bundle: true,
-    platform: "node",
-    format: "esm",
-    outdir: "sdk",
-    external: s.external,
-    define: VERSION_DEFINE,
-  });
+	await build({
+		entryPoints: [s.entry],
+		bundle: true,
+		platform: "node",
+		format: "esm",
+		outdir: "sdk",
+		external: s.external,
+		define: VERSION_DEFINE,
+	});
 }
 stampEsm("sdk");
 
@@ -355,32 +355,41 @@ stampEsm("sdk");
 // 5. Unified CLI -> bundle/cli.js with a Node hash-bang + 0755 (FR-8).
 // ---------------------------------------------------------------------------
 await build({
-  entryPoints: { cli: "dist/src/cli/index.js" },
-  bundle: true,
-  platform: "node",
-  format: "esm",
-  outdir: "bundle",
-  external: [
-    "node:*",
-    ...NATIVE_COMPRESSION_EXTERNAL,
-    ...TREE_SITTER_EXTERNAL,
-  ],
-  banner: { js: "#!/usr/bin/env node" },
-  define: VERSION_DEFINE,
+	entryPoints: { cli: "dist/src/cli/index.js" },
+	bundle: true,
+	platform: "node",
+	format: "esm",
+	outdir: "bundle",
+	external: ["node:*", ...NATIVE_COMPRESSION_EXTERNAL, ...TREE_SITTER_EXTERNAL],
+	banner: { js: "#!/usr/bin/env node" },
+	define: VERSION_DEFINE,
 });
 stampExecutable("bundle/cli.js");
+
+// Importable production dispatcher core. The packed conformance runner imports this exact shipped
+// artifact and supplies all mutation adapters from an external fixture; there is no environment
+// test mode and no fake implementation in the package.
+await build({
+	entryPoints: { "cli-core": "dist/src/commands/packed-conformance.js" },
+	bundle: true,
+	platform: "node",
+	format: "esm",
+	outdir: "bundle",
+	external: ["node:*", ...NATIVE_COMPRESSION_EXTERNAL, ...TREE_SITTER_EXTERNAL],
+	define: VERSION_DEFINE,
+});
 
 // ---------------------------------------------------------------------------
 // 6. Standalone embed daemon -> embeddings/ (its own external list).
 // ---------------------------------------------------------------------------
 await build({
-  entryPoints: { "embed-daemon": "dist/embeddings/src/index.js" },
-  bundle: true,
-  platform: "node",
-  format: "esm",
-  outdir: "embeddings",
-  external: EMBED_EXTERNAL,
-  define: VERSION_DEFINE,
+	entryPoints: { "embed-daemon": "dist/embeddings/src/index.js" },
+	bundle: true,
+	platform: "node",
+	format: "esm",
+	outdir: "embeddings",
+	external: EMBED_EXTERNAL,
+	define: VERSION_DEFINE,
 });
 stampExecutable("embeddings/embed-daemon.js");
 
@@ -388,5 +397,5 @@ stampExecutable("embeddings/embed-daemon.js");
 // scripts/pack-check.mjs runs build via prepack) don't get log noise mixed
 // into their JSON data pipe.
 console.error(
-  `Built: 1 daemon + ${HOOK_HARNESSES.length} hook-harness + 1 OpenClaw + ${MCP_SERVER_OUTDIRS.length} MCP + ${SDK_ENTRIES.length} SDK + 1 CLI + 1 embed-daemon bundle @ ${HONEYCOMB_VERSION}`,
+	`Built: 1 daemon + ${HOOK_HARNESSES.length} hook-harness + 1 OpenClaw + ${MCP_SERVER_OUTDIRS.length} MCP + ${SDK_ENTRIES.length} SDK + 1 CLI + 1 embed-daemon bundle @ ${HONEYCOMB_VERSION}`,
 );

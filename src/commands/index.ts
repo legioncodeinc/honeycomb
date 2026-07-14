@@ -89,7 +89,6 @@ export {
 	runConnectorVerb,
 	runDashboardCommand,
 	runHookCommand,
-	runUpdateCommand,
 	type UninstallLifecycleSteps,
 } from "./local-handlers.js";
 

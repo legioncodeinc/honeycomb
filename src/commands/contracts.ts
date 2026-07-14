@@ -210,8 +210,13 @@ export const VERB_TABLE: readonly VerbSpec[] = Object.freeze([
 		summary: "bring up the daemon (health-gated) + open the dashboard (PRD-050a)",
 	},
 	{ verb: "status", cls: "local", group: "system", summary: "daemon connectivity + login + D1–D5 environment health" },
-	{ verb: "start", cls: "local", group: "system", summary: "start the daemon (bare alias of `daemon start`)" },
-	{ verb: "stop", cls: "local", group: "system", summary: "stop the daemon (bare alias of `daemon stop`)" },
+	{ verb: "start", cls: "local", group: "system", summary: "start the installed OS service and verify health" },
+	{ verb: "stop", cls: "local", group: "system", summary: "stop the installed OS service" },
+	{ verb: "restart", cls: "local", group: "system", summary: "restart the service and verify health" },
+	{ verb: "logs", cls: "local", group: "system", summary: "tail Honeycomb's authoritative service log" },
+	{ verb: "service-install", cls: "local", group: "system", summary: "install or reconcile the OS service" },
+	{ verb: "service-uninstall", cls: "local", group: "system", summary: "remove only the OS service definition" },
+	{ verb: "register", cls: "local", group: "system", summary: "register Honeycomb with Doctor" },
 	{ verb: "daemon", cls: "local", group: "system", summary: "start | stop | status the loopback daemon (3850)" },
 	{ verb: "dashboard", cls: "local", group: "system", summary: "launch the daemon-served dashboard (020b)" },
 	{ verb: "hook", cls: "local", group: "system", summary: "inspect/wire harness hooks" },
@@ -291,6 +296,8 @@ export interface GlobalFlags {
 	readonly json: boolean;
 	/** `--dry-run` → no side effects (e.g. `update --dry-run`, FR-10). */
 	readonly dryRun: boolean;
+	/** `--no-color` → suppress ANSI styling while preserving text content. */
+	readonly noColor: boolean;
 }
 
 /** The default (all-false) global flags. */
@@ -299,6 +306,7 @@ export const DEFAULT_GLOBAL_FLAGS: GlobalFlags = Object.freeze({
 	version: false,
 	json: false,
 	dryRun: false,
+	noColor: false,
 });
 
 /**
@@ -555,6 +563,8 @@ export interface CommandDeps {
 	readonly env?: NodeJS.ProcessEnv;
 	/** The output sink (defaults to `console.log`). NEVER receives a bearer token. */
 	readonly out?: OutputSink;
+	/** Human-readable failure sink (defaults to `console.error`). JSON remains on `out`. */
+	readonly err?: OutputSink;
 	/**
 	 * The auth-passthrough seam (FR-4 / a-AC-1). `org`/`workspace`/`login`/`logout` forward their
 	 * FULL argv (verb + tail) here. Optional so a plain handler test still type-checks; the
@@ -569,6 +579,12 @@ export interface CommandDeps {
 	 * cycle with `daemon.ts`; the dispatcher narrows it to `DaemonLifecycle` at the call site.
 	 */
 	readonly lifecycle?: unknown;
+	/**
+	 * The canonical installed-service operations used by bare `start`, `stop`, and `restart` plus
+	 * the remaining Apiary-standard verbs. These operations fail closed when the OS service is not
+	 * installed; they do not fall back to the process-level {@link lifecycle} compatibility seam.
+	 */
+	readonly standard?: unknown;
 }
 
 /**

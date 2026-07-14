@@ -7,7 +7,8 @@
 // secrets must never reach the tarball.
 
 import { execFileSync, execSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
 
 // On Windows the npm entry point is npm.cmd, which execFileSync cannot launch
 // directly. The command line is a fixed literal (no user input), so a plain
@@ -43,10 +44,21 @@ const FORBIDDEN = [
 	/(^|\/)credentials\.json$/,
 ];
 
-const raw =
-	process.platform === "win32"
-		? execSync(`npm ${PACK_ARGS.join(" ")}`, { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] })
-		: execFileSync("npm", PACK_ARGS, { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] });
+const manifestFromEnv = process.env.HONEYCOMB_PACK_MANIFEST;
+let raw;
+if (manifestFromEnv !== undefined) {
+	const manifest = resolve(manifestFromEnv);
+	if (dirname(manifest) !== resolve(".") || basename(manifest) !== ".pack-result.json")
+		throw new Error("HONEYCOMB_PACK_MANIFEST must name the workspace .pack-result.json file");
+	if (lstatSync(manifest).isSymbolicLink() || realpathSync(manifest) !== manifest)
+		throw new Error("HONEYCOMB_PACK_MANIFEST must be a regular workspace file, not a symlink");
+	raw = readFileSync(manifest, "utf8");
+} else {
+	raw =
+		process.platform === "win32"
+			? execSync(`npm ${PACK_ARGS.join(" ")}`, { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] })
+			: execFileSync("npm", PACK_ARGS, { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] });
+}
 const entries = JSON.parse(raw)[0].files.map((f) => f.path);
 const packedPathSet = new Set(entries);
 const hits = entries.filter((p) => FORBIDDEN.some((rx) => rx.test(p)));

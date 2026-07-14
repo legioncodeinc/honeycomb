@@ -20,13 +20,9 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { DaemonClient, StatusHealthSource } from "../commands/index.js";
+import { fixedSubprocessInvocation } from "../shared/fixed-subprocess.js";
 import { healthSourceFromCheck } from "../commands/status.js";
-import {
-	createAutoWiring,
-	createHealthCheck,
-	type HealthProbes,
-	type ProbeOutcome,
-} from "../notifications/index.js";
+import { createAutoWiring, createHealthCheck, type HealthProbes, type ProbeOutcome } from "../notifications/index.js";
 import {
 	CLAUDE_PLUGIN_NAME,
 	ClaudeCodeConnector,
@@ -47,9 +43,10 @@ function probeCli(): ProbeOutcome {
 /** D3 — is `cursor-agent` present on PATH? (best-effort; absence is a FAIL, not a crash). */
 function probeCursorAgent(): ProbeOutcome {
 	try {
-		const probe = process.platform === "win32"
-			? spawnSync("where", ["cursor-agent"], { stdio: "ignore", windowsHide: true })
-			: spawnSync("which", ["cursor-agent"], { stdio: "ignore", windowsHide: true });
+		const probe =
+			process.platform === "win32"
+				? spawnSync("where", ["cursor-agent"], { stdio: "ignore", windowsHide: true })
+				: spawnSync("which", ["cursor-agent"], { stdio: "ignore", windowsHide: true });
 		const ok = probe.status === 0;
 		return ok ? { ok: true, detail: "on PATH" } : { ok: false, detail: "cursor-agent not on PATH" };
 	} catch (err) {
@@ -59,6 +56,8 @@ function probeCursorAgent(): ProbeOutcome {
 
 /** How long the D4 login probe waits for `cursor-agent status` before soft-failing (ISS-017). */
 const CURSOR_LOGIN_TIMEOUT_MS = 5_000;
+/** Fully constant Windows command for the cursor-agent `.cmd` shim; no values are interpolated. */
+export const WINDOWS_CURSOR_LOGIN_COMMAND = "cursor-agent status" as const;
 
 /** The slice of a `spawnSync` result the D4 probe reads (tests inject a fake). */
 export interface CursorLoginSpawnResult {
@@ -86,17 +85,19 @@ export type CursorLoginSpawn = (
  * 5s timeout → the soft "login state unknown" fail (FR-8: a non-wirable dim is surfaced, never a
  * false green and never a crash).
  */
-export function probeCursorLogin(spawn: CursorLoginSpawn = spawnSync): ProbeOutcome {
+export function probeCursorLogin(
+	spawn: CursorLoginSpawn = spawnSync,
+	platform: NodeJS.Platform = process.platform,
+): ProbeOutcome {
 	try {
-		// `cursor-agent` ships as a `.cmd` shim on Windows, and since Node's CVE-2024-27980
-		// hardening (all Node >= 22) a `.cmd` cannot be spawned with `shell: false` (EINVAL) —
-		// so win32 ALONE sets `shell: true`. Safe: every argv element is a compile-time constant,
-		// never user input (the same documented pattern as `npm.cmd` in shared/fleet-detection.ts).
-		const probe = spawn("cursor-agent", ["status"], {
+		// Windows runs the `.cmd` shim through explicit, fixed cmd.exe argv. `shell:false` remains
+		// binding everywhere, avoiding DEP0190 and any argv-to-shell concatenation.
+		const invocation = fixedSubprocessInvocation(platform, "cursor-agent", ["status"], WINDOWS_CURSOR_LOGIN_COMMAND);
+		const probe = spawn(invocation.file, invocation.args, {
 			encoding: "utf8",
 			timeout: CURSOR_LOGIN_TIMEOUT_MS,
 			windowsHide: true,
-			shell: process.platform === "win32",
+			shell: false,
 		});
 		if (probe.error !== undefined) {
 			// ENOENT / ETIMEDOUT / any spawn-level failure — soft-fail as unknown, like before.
@@ -153,9 +154,7 @@ export function buildHealthProbes(
 		},
 		async probeDaemon(): Promise<ProbeOutcome> {
 			const alive = await daemon.ping();
-			return alive
-				? { ok: true, detail: "127.0.0.1:3850" }
-				: { ok: false, detail: "not reachable on 127.0.0.1:3850" };
+			return alive ? { ok: true, detail: "127.0.0.1:3850" } : { ok: false, detail: "not reachable on 127.0.0.1:3850" };
 		},
 		async probeCursorAgent(): Promise<ProbeOutcome> {
 			return probeCursorAgent();
