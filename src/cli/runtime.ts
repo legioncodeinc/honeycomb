@@ -57,7 +57,13 @@ import { runHoneycombStateMigration } from "../daemon/runtime/state-migration/in
 import { unregisterHoneycombFromDoctor } from "../daemon/runtime/telemetry/fleet-registry.js";
 import { launchDashboard } from "../dashboard/launch.js";
 import { DAEMON_HOST, DAEMON_PORT, HARNESS_STATUS_INGEST_PATH } from "../shared/constants.js";
-import { honeycombStateDir, legacyHoneycombDir, preferExistingPath, resolveFleetRoot } from "../shared/fleet-root.js";
+import {
+	honeycombServiceLogPath,
+	honeycombStateDir,
+	legacyHoneycombDir,
+	preferExistingPath,
+	resolveFleetRoot,
+} from "../shared/fleet-root.js";
 import { authMain } from "./auth.js";
 import { buildConnectorRunner } from "./connector-runner.js";
 import { createHarnessReconciler, type HarnessReconcileResult, type HarnessReconciler } from "./harness-reconcile.js";
@@ -244,10 +250,6 @@ function isPidAlive(pid: number): boolean {
  * here (the same place `start()` resolves them for the spawn fallback), so service mode and spawn
  * mode agree on the entry, flags, and workspace.
  */
-export function honeycombServiceLogPath(): string {
-	return join(honeycombStateDir(), "service.log");
-}
-
 export function buildServiceSpec(): ServiceSpec {
 	return {
 		nodePath: process.execPath,

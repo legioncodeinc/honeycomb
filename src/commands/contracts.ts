@@ -296,6 +296,7 @@ export interface GlobalFlags {
 	readonly json: boolean;
 	/** `--dry-run` → no side effects (e.g. `update --dry-run`, FR-10). */
 	readonly dryRun: boolean;
+	/** `--no-color` → suppress ANSI styling while preserving text content. */
 	readonly noColor: boolean;
 }
 

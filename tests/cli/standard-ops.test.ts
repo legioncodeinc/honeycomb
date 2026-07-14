@@ -1,11 +1,8 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { DaemonServiceController, ServiceSpec } from "../../src/cli/daemon-service.js";
 import {
 	buildHoneycombStandardOps,
-	registrationExists,
+	registryContainsHoneycomb,
 	resolveNpmInvocation,
 	updateHoneycomb,
 } from "../../src/cli/standard-ops.js";
@@ -31,16 +28,10 @@ describe("Honeycomb standard updater npm resolution", () => {
 });
 
 describe("Honeycomb Doctor registry inspection", () => {
-	it("distinguishes absence from malformed/uninspectable registry state", () => {
-		const dir = mkdtempSync(join(tmpdir(), "honeycomb-registry-inspection-"));
-		const path = join(dir, "registry.json");
-		try {
-			expect(registrationExists(path)).toBe(false);
-			writeFileSync(path, "{not-json", "utf8");
-			expect(() => registrationExists(path)).toThrow();
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
+	it("parses valid state and rejects malformed registry content without a caller-provided path", () => {
+		expect(registryContainsHoneycomb('{"daemons":[]}')).toBe(false);
+		expect(registryContainsHoneycomb('{"daemons":[{"name":"honeycomb"}]}')).toBe(true);
+		expect(() => registryContainsHoneycomb("{not-json")).toThrow();
 	});
 });
 

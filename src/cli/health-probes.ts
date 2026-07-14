@@ -20,13 +20,9 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { DaemonClient, StatusHealthSource } from "../commands/index.js";
+import { fixedSubprocessInvocation } from "../shared/fixed-subprocess.js";
 import { healthSourceFromCheck } from "../commands/status.js";
-import {
-	createAutoWiring,
-	createHealthCheck,
-	type HealthProbes,
-	type ProbeOutcome,
-} from "../notifications/index.js";
+import { createAutoWiring, createHealthCheck, type HealthProbes, type ProbeOutcome } from "../notifications/index.js";
 import {
 	CLAUDE_PLUGIN_NAME,
 	ClaudeCodeConnector,
@@ -47,9 +43,10 @@ function probeCli(): ProbeOutcome {
 /** D3 — is `cursor-agent` present on PATH? (best-effort; absence is a FAIL, not a crash). */
 function probeCursorAgent(): ProbeOutcome {
 	try {
-		const probe = process.platform === "win32"
-			? spawnSync("where", ["cursor-agent"], { stdio: "ignore", windowsHide: true })
-			: spawnSync("which", ["cursor-agent"], { stdio: "ignore", windowsHide: true });
+		const probe =
+			process.platform === "win32"
+				? spawnSync("where", ["cursor-agent"], { stdio: "ignore", windowsHide: true })
+				: spawnSync("which", ["cursor-agent"], { stdio: "ignore", windowsHide: true });
 		const ok = probe.status === 0;
 		return ok ? { ok: true, detail: "on PATH" } : { ok: false, detail: "cursor-agent not on PATH" };
 	} catch (err) {
@@ -95,17 +92,13 @@ export function probeCursorLogin(
 	try {
 		// Windows runs the `.cmd` shim through explicit, fixed cmd.exe argv. `shell:false` remains
 		// binding everywhere, avoiding DEP0190 and any argv-to-shell concatenation.
-		const win32 = platform === "win32";
-		const probe = spawn(
-			win32 ? "cmd.exe" : "cursor-agent",
-			win32 ? ["/d", "/s", "/c", WINDOWS_CURSOR_LOGIN_COMMAND] : ["status"],
-			{
-				encoding: "utf8",
-				timeout: CURSOR_LOGIN_TIMEOUT_MS,
-				windowsHide: true,
-				shell: false,
-			},
-		);
+		const invocation = fixedSubprocessInvocation(platform, "cursor-agent", ["status"], WINDOWS_CURSOR_LOGIN_COMMAND);
+		const probe = spawn(invocation.file, invocation.args, {
+			encoding: "utf8",
+			timeout: CURSOR_LOGIN_TIMEOUT_MS,
+			windowsHide: true,
+			shell: false,
+		});
 		if (probe.error !== undefined) {
 			// ENOENT / ETIMEDOUT / any spawn-level failure — soft-fail as unknown, like before.
 			return { ok: false, detail: `login state unknown (${probe.error.message})` };
@@ -161,9 +154,7 @@ export function buildHealthProbes(
 		},
 		async probeDaemon(): Promise<ProbeOutcome> {
 			const alive = await daemon.ping();
-			return alive
-				? { ok: true, detail: "127.0.0.1:3850" }
-				: { ok: false, detail: "not reachable on 127.0.0.1:3850" };
+			return alive ? { ok: true, detail: "127.0.0.1:3850" } : { ok: false, detail: "not reachable on 127.0.0.1:3850" };
 		},
 		async probeCursorAgent(): Promise<ProbeOutcome> {
 			return probeCursorAgent();

@@ -1,5 +1,6 @@
 import { watch } from "node:fs";
 import { readFile, realpath } from "node:fs/promises";
+import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import {
 	formatStatus,
 	parseLogTailOptions,
@@ -108,11 +109,16 @@ async function logsCommand(argv: readonly string[], json: boolean, deps: Standar
 		return emit(out, err, json, "logs", { ok: false, message: "logs: product log source is unavailable." });
 	const parsed = parseLogTailOptions(argv);
 	if (!parsed.ok) return { ...emit(out, err, json, "logs", { ok: false, message: parsed.error }), exitCode: 2 };
+	const root = resolve(deps.standard.configPath);
+	const path = resolve(deps.standard.logPath);
+	const fromRoot = relative(root, path);
+	if (basename(path) !== "service.log" || fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot))
+		return emit(out, err, json, "logs", { ok: false, message: "logs: product log path escaped Honeycomb state." });
 	const source = {
 		productId: "honeycomb",
 		serviceId: "honeycomb",
-		root: deps.standard.configPath,
-		path: deps.standard.logPath,
+		root,
+		path,
 	};
 	const lines: string[] = [];
 	const controller = new AbortController();
@@ -199,7 +205,7 @@ export async function runStandardCommand(
 					? { ok: false, message: "update: updater is unavailable." }
 					: await deps.standard.update(argv.includes("--check")),
 			);
-		if (command === "logs") return logsCommand(argv, json, deps);
+		if (command === "logs") return await logsCommand(argv, json, deps);
 		if (command === "status") {
 			const status = await statusResult(deps);
 			if (status === null)

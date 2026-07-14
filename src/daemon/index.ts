@@ -16,6 +16,7 @@
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { DAEMON_HOST, DAEMON_PORT, HONEYCOMB_VERSION } from "../shared/constants.js";
+import { capHoneycombServiceLogAtStartup } from "../shared/fleet-root.js";
 import { type AssembleDaemonOptions, type AssembledDaemon, assembleDaemon } from "./runtime/assemble.js";
 import { resolveRuntimeConfig } from "./runtime/config.js";
 import { startDaemon as startDaemonListener } from "./runtime/listen.js";
@@ -252,6 +253,9 @@ export function installProcessSafetyNet(): void {
 // Production auto-listen: ONLY when run as the main entry (the bundled daemon binary),
 // never on import (a test imports `assembleDaemon`/`runAssembledDaemon` without binding).
 if (isMainEntry()) {
+	// Every launchd/systemd/Task Scheduler start passes through this entry, so repeated restarts
+	// cannot grow the shared stdout/stderr destination without bound.
+	capHoneycombServiceLogAtStartup();
 	installProcessSafetyNet();
 	runAssembledDaemon().catch((err: unknown) => {
 		const message = err instanceof Error ? err.message : String(err);

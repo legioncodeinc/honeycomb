@@ -230,6 +230,19 @@ describe("PRD-003 Honeycomb standard operational interface", () => {
 		expect(result.exitCode).toBe(2);
 	});
 
+	it("logs fails closed when an injected adapter path escapes Honeycomb state", async () => {
+		const { deps, lines } = fixture();
+		deps.standard = {
+			...(deps.standard as HoneycombStandardOps),
+			logPath: join((deps.standard as HoneycombStandardOps).configPath, "..", "doctor", "service.log"),
+		};
+		const dispatcher = createDispatcher();
+		const result = await dispatcher.dispatch(dispatcher.parse(["logs", "--no-follow", "--json"]), deps as never);
+		expect(result.exitCode).toBe(1);
+		expect(JSON.parse(lines[0] ?? "")).toMatchObject({ command: "logs", ok: false });
+		expect(lines.join("\n")).toContain("escaped Honeycomb state");
+	});
+
 	it("logs returns runtime exit 1 when Honeycomb's authoritative source is missing", async () => {
 		const { deps, lines } = fixture();
 		rmSync((deps.standard as HoneycombStandardOps).logPath, { force: true });

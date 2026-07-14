@@ -77,6 +77,7 @@
     "mutation:normalize": "stryker run stryker/normalize.json",
     "mutation:state": "stryker run stryker/state.json",
     "pack:check": "node scripts/pack-check.mjs",
+    "pack:prepare": "node scripts/prepare-packed-artifact.mjs",
     "test:packed-cli": "node scripts/packed-cli-conformance.mjs",
     "rebuild:native": "node scripts/ensure-tree-sitter.mjs",
     "ensure:embed-deps": "node scripts/ensure-embed-deps.mjs",

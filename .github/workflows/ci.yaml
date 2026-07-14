@@ -128,9 +128,13 @@ jobs:
 
       # Publish-surface scanners: replicate the ClawHub static scan over the
       # OpenClaw bundle, then prove `npm pack`'s tarball carries no forbidden
-      # filenames (pack:check runs `prepack` → a fresh build first).
+      # filenames. Pack once without rerunning lifecycle scripts, then reuse that
+      # exact artifact and npm manifest in both package gates.
       - name: Audit OpenClaw bundle (ClawHub rules)
         run: npm run audit:openclaw
+
+      - name: Pack once for artifact gates
+        run: npm run pack:prepare
 
       - name: Pack-check (tarball secret/forbidden-file scan)
         run: npm run pack:check

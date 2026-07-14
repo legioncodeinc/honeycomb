@@ -49,7 +49,7 @@ import { runMemoryVerb } from "./memory.js";
 import { runPollinateVerb } from "./pollinate.js";
 import { parseSessionsArgs, runSessionsCommand } from "./sessions.js";
 import { runSettingsVerb } from "./settings.js";
-import { runStatusCommand, type StatusDeps } from "./status.js";
+import type { StatusDeps } from "./status.js";
 import { runStorageVerb } from "./storage-handlers.js";
 import { runTelemetryCommand, type TelemetryVerbDeps } from "./telemetry.js";
 import { runStandardCommand, type StandardCommandDeps } from "./standard-interface.js";
@@ -229,16 +229,23 @@ async function jsonWrappedOperation(
 ): Promise<CommandResult> {
 	if (!json) return run(deps);
 	const lines: string[] = [];
-	const result = await run({
-		...deps,
-		out: (line: string): void => {
-			lines.push(line);
-		},
-		err: (line: string): void => {
-			lines.push(line);
-		},
-	});
 	const out = deps.out ?? ((line: string): void => console.log(line));
+	let result: CommandResult;
+	try {
+		result = await run({
+			...deps,
+			out: (line: string): void => {
+				lines.push(line);
+			},
+			err: (line: string): void => {
+				lines.push(line);
+			},
+		});
+	} catch (error) {
+		const message = redactLogSecrets(error instanceof Error ? error.message : String(error));
+		out(JSON.stringify({ product: "honeycomb", command, ok: false, message }));
+		return { exitCode: 1 };
+	}
 	const message = redactLogSecrets(lines.join("\n") || `${command} completed.`);
 	out(
 		JSON.stringify({

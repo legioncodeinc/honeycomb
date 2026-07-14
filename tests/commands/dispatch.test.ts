@@ -12,6 +12,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { COMMAND_GROUPS } from "@legioncodeinc/cli-kit";
 
 import {
 	AUTH_SUBCOMMANDS,
@@ -22,7 +23,6 @@ import {
 	DASHBOARD_PORTAL_NOT_RUNNING_MESSAGE,
 	parseInvocation,
 	usageText,
-	VERB_GROUPS,
 	VERB_TABLE,
 } from "../../src/commands/index.js";
 
@@ -228,6 +228,29 @@ describe("PRD-020a a-AC-1 — the unified dispatcher parses + routes", () => {
 		expect(lines.every((line) => JSON.parse(line).ok === false)).toBe(true);
 		expect(lines.join("\n")).not.toMatch(/person@example\.com|\u001b/);
 	});
+
+	it("keeps rejected install operations inside one redacted JSON failure envelope", async () => {
+		const lines: string[] = [];
+		const deps = {
+			daemon: createFakeDaemonClient({ alive: true }),
+			detectFleet: async () => ({
+				mode: "fleet" as const,
+				signals: { registryHiveEntry: true, hivePortAnswering: false, hiveNpmGlobal: false },
+				firedSignals: ["registry Hive entry"],
+			}),
+			persistInstalled: () => {
+				throw new Error("Authorization: Bearer rejected-secret");
+			},
+			out: (line: string) => lines.push(line),
+			err: (line: string) => lines.push(line),
+		} as unknown as CommandDeps;
+		const d = createDispatcher();
+		const result = await d.dispatch(d.parse(["install", "--json"]), deps);
+		expect(result.exitCode).toBe(1);
+		expect(lines).toHaveLength(1);
+		expect(JSON.parse(lines[0] ?? "")).toMatchObject({ product: "honeycomb", command: "install", ok: false });
+		expect(lines[0]).not.toContain("rejected-secret");
+	});
 });
 
 describe("FR-2 — `--help` lists EVERY command, branded + grouped", () => {
@@ -275,14 +298,7 @@ describe("FR-2 — `--help` lists EVERY command, branded + grouped", () => {
 
 	it("prints the standard group order plus one Product commands group", () => {
 		const help = usageText();
-		for (const label of [
-			"Service lifecycle",
-			"Installation",
-			"Fleet",
-			"Diagnostics",
-			"Product commands",
-			"Global flags",
-		])
-			expect(help).toContain(label);
+		const labels = [...COMMAND_GROUPS, "Global flags"];
+		for (const label of labels) expect(help).toContain(label);
 	});
 });

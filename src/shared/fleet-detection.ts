@@ -37,6 +37,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fixedSubprocessInvocation } from "./fixed-subprocess.js";
 
 import { HIVE_HOST, HIVE_PORT } from "./constants.js";
 import { type FleetRootOptions, fleetRootFile, legacyHoneycombDir } from "./fleet-root.js";
@@ -185,19 +186,19 @@ export function defaultNpmGlobalHasHive(seams: FleetDetectionSeams = {}): Promis
 					return cp.execFile as unknown as ExecFileLike;
 				})();
 			const platform = seams.platform ?? process.platform;
-			const win32 = platform === "win32";
-			exec(
-				win32 ? "cmd.exe" : "npm",
-				win32 ? ["/d", "/s", "/c", WINDOWS_NPM_HIVE_COMMAND] : ["ls", "-g", HIVE_NPM_PACKAGE, "--depth", "0"],
-				{ timeout: 5000, windowsHide: true, shell: false },
-				(err, stdout) => {
-					if (err) {
-						resolve(false);
-						return;
-					}
-					resolve(typeof stdout === "string" && stdout.includes(HIVE_NPM_PACKAGE));
-				},
+			const invocation = fixedSubprocessInvocation(
+				platform,
+				"npm",
+				["ls", "-g", HIVE_NPM_PACKAGE, "--depth", "0"],
+				WINDOWS_NPM_HIVE_COMMAND,
 			);
+			exec(invocation.file, invocation.args, { timeout: 5000, windowsHide: true, shell: false }, (err, stdout) => {
+				if (err) {
+					resolve(false);
+					return;
+				}
+				resolve(typeof stdout === "string" && stdout.includes(HIVE_NPM_PACKAGE));
+			});
 		} catch {
 			resolve(false);
 		}

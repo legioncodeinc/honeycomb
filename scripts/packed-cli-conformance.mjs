@@ -2,7 +2,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 const work = mkdtempSync(join(tmpdir(), "honeycomb-packed-cli-"));
@@ -83,12 +83,27 @@ function assertResult(result, expected, label) {
 }
 
 let tarball;
+let ownsTarball = false;
 try {
 	const npmCli = npmCliPath();
-	const packed = JSON.parse(
-		execFileSync(process.execPath, [npmCli, "pack", "--json"], { cwd: resolve("."), encoding: "utf8" }),
-	);
-	tarball = resolve(packed[0].filename);
+	const prebuilt = process.env.HONEYCOMB_PACKED_TARBALL;
+	if (prebuilt !== undefined) {
+		tarball = resolve(prebuilt);
+		const fromWorkspace = relative(resolve("."), tarball);
+		if (
+			isAbsolute(fromWorkspace) ||
+			fromWorkspace.startsWith("..") ||
+			basename(tarball) !== `legioncodeinc-honeycomb-${pkg.version}.tgz`
+		)
+			throw new Error("HONEYCOMB_PACKED_TARBALL must be the current workspace package tarball");
+		if (!existsSync(tarball)) throw new Error("HONEYCOMB_PACKED_TARBALL does not exist");
+	} else {
+		const packed = JSON.parse(
+			execFileSync(process.execPath, [npmCli, "pack", "--json"], { cwd: resolve("."), encoding: "utf8" }),
+		);
+		tarball = resolve(packed[0].filename);
+		ownsTarball = true;
+	}
 	const install = join(work, "install");
 	execFileSync(process.execPath, [npmCli, "install", "--prefix", install, "--ignore-scripts", tarball], {
 		stdio: "ignore",
@@ -104,7 +119,8 @@ try {
 		"packed fixture ready",
 		"injected runtime failure",
 	]) {
-		if (coreSource.includes(forbidden)) throw new Error(`packed CLI core contains forbidden fixture surface: ${forbidden}`);
+		if (coreSource.includes(forbidden))
+			throw new Error(`packed CLI core contains forbidden fixture surface: ${forbidden}`);
 	}
 	const env = {
 		...process.env,
@@ -168,6 +184,9 @@ try {
 			const suffix = json ? [...tail, "--json"] : tail;
 			const success = runFixture("success", [command, ...suffix]);
 			assertResult(success, 0, `packed ${command} ${json ? "JSON" : "human"} success`);
+			if (command === "logs" && /packed-secret|Bearer/iu.test(`${success.stdout}${success.stderr}`)) {
+				throw new Error(`packed logs ${json ? "JSON" : "human"} output leaked an unredacted credential`);
+			}
 			if (json) {
 				const body = JSON.parse(success.stdout);
 				if (body.product !== "honeycomb" || body.command !== command || body.ok !== true)
@@ -195,6 +214,6 @@ try {
 	}
 	console.log("packed-cli-conformance OK - full 12-command human/JSON success/failure/usage matrix");
 } finally {
-	if (tarball) rmSync(tarball, { force: true });
+	if (ownsTarball && tarball) rmSync(tarball, { force: true });
 	rmSync(work, { recursive: true, force: true });
 }

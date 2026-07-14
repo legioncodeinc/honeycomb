@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { posix, resolve, win32 } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import type { HoneycombStandardOps, StandardOperationResult } from "../commands/standard-interface.js";
@@ -12,7 +12,7 @@ import {
 	registerHoneycombWithDoctor,
 } from "../daemon/runtime/telemetry/fleet-registry.js";
 import { HONEYCOMB_VERSION } from "../shared/constants.js";
-import { honeycombStateDir } from "../shared/fleet-root.js";
+import { honeycombServiceLogPath, honeycombStateDir, resolveFleetRoot } from "../shared/fleet-root.js";
 import {
 	createDaemonServiceController,
 	serviceManagerForPlatform,
@@ -41,11 +41,12 @@ export function resolveNpmInvocation(
 	platform = process.platform,
 	exists: (path: string) => boolean = existsSync,
 ): NpmInvocation {
-	const executableDir = dirname(execPath);
+	const pathApi = platform === "win32" ? win32 : posix;
+	const executableDir = pathApi.dirname(execPath);
 	const candidates = [
-		join(executableDir, "node_modules", "npm", "bin", "npm-cli.js"),
-		resolve(executableDir, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
-		resolve(executableDir, "..", "node_modules", "npm", "bin", "npm-cli.js"),
+		pathApi.join(executableDir, "node_modules", "npm", "bin", "npm-cli.js"),
+		pathApi.resolve(executableDir, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+		pathApi.resolve(executableDir, "..", "node_modules", "npm", "bin", "npm-cli.js"),
 	];
 	const npmCli = candidates.find(exists);
 	if (npmCli !== undefined) return { file: execPath, argvPrefix: [npmCli] };
@@ -72,10 +73,14 @@ async function globallyInstalledVersion(runNpm: NpmRunner): Promise<string> {
 	return installed;
 }
 
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+}
+
 async function waitHealthy(daemon: DaemonClient, attempts = 100): Promise<boolean> {
 	for (let i = 0; i < attempts; i++) {
 		if (await daemon.ping()) return true;
-		await new Promise((resolve) => setTimeout(resolve, 150));
+		await sleep(150);
 	}
 	return false;
 }
@@ -153,10 +158,18 @@ export async function updateHoneycomb(checkOnly: boolean, deps: HoneycombUpdateD
 			};
 }
 
-export function registrationExists(path = doctorRegistryPath()): boolean {
-	if (!existsSync(path)) return false;
-	const parsed = registrySchema.parse(JSON.parse(readFileSync(path, "utf8")));
+/** Parse a Doctor registry document without granting the caller filesystem access. */
+export function registryContainsHoneycomb(raw: string): boolean {
+	const parsed = registrySchema.parse(JSON.parse(raw));
 	return parsed.daemons.some((entry) => entry.name === HONEYCOMB_REGISTRY_NAME);
+}
+
+export function registrationExists(): boolean {
+	const path = doctorRegistryPath();
+	const expected = resolve(resolveFleetRoot(), "registry.json");
+	if (resolve(path) !== expected) throw new Error("Doctor registry path escaped the fleet root.");
+	if (!existsSync(path)) return false;
+	return registryContainsHoneycomb(readFileSync(path, "utf8"));
 }
 
 export interface StandardOpsOptions {
@@ -168,98 +181,132 @@ export interface StandardOpsOptions {
 	readonly runNpm?: NpmRunner;
 }
 
-export function buildHoneycombStandardOps(
+interface ServiceLifecycleOps {
+	readonly start: HoneycombStandardOps["start"];
+	readonly stop: HoneycombStandardOps["stop"];
+	readonly restartService: HoneycombStandardOps["restart"];
+	readonly serviceInstall: HoneycombStandardOps["serviceInstall"];
+	readonly serviceUninstall: HoneycombStandardOps["serviceUninstall"];
+	readonly isServiceInstalled: HoneycombStandardOps["isServiceInstalled"];
+}
+
+interface ServiceContext {
+	readonly daemon: DaemonClient;
+	readonly lifecycle: DaemonLifecycle;
+	readonly serviceSpec: ServiceSpec;
+	readonly options: StandardOpsOptions;
+	readonly controller: () => DaemonServiceController;
+}
+
+function createServiceContext(
 	daemon: DaemonClient,
 	lifecycle: DaemonLifecycle,
 	serviceSpec: ServiceSpec,
 	options: StandardOpsOptions = {},
-): HoneycombStandardOps {
+): ServiceContext {
 	const manager = options.manager !== undefined ? options.manager : serviceManagerForPlatform();
 	const controllerFor = options.controllerFor ?? createDaemonServiceController;
-	function serviceController(): DaemonServiceController {
-		if (manager === null) throw new Error("No supported OS service manager is available on this platform.");
-		return controllerFor(manager);
-	}
-	async function isServiceInstalled(): Promise<boolean> {
-		return serviceController().isRegistered(serviceSpec);
-	}
-	async function waitForServiceRunning(controller: DaemonServiceController): Promise<boolean> {
-		// Health alone cannot prove the installed manager owns the responder; an absent identity/state
-		// probe therefore fails closed instead of accepting a detached or unrelated loopback process.
-		if (controller.isRunning === undefined) return false;
-		const attempts = options.serviceStateAttempts ?? 20;
-		for (let attempt = 0; attempt < attempts; attempt++) {
-			if (controller.isRunning(serviceSpec)) return true;
-			if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, 100));
-		}
-		return false;
-	}
-	async function waitForDaemonStopped(): Promise<boolean> {
-		const attempts = options.stopAttempts ?? 100;
-		for (let attempt = 0; attempt < attempts; attempt++) {
-			if (!(await lifecycle.status()).running) return true;
-			if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, 150));
-		}
-		return false;
-	}
-	async function requireInstalled(command: string): Promise<DaemonServiceController | StandardOperationResult> {
-		const controller = serviceController();
-		if (!controller.isRegistered(serviceSpec))
-			return {
-				ok: false,
-				message: `${command}: Honeycomb's OS service is not installed; run \`honeycomb service-install\`.`,
-			};
-		return controller;
-	}
-	async function restartService(): Promise<StandardOperationResult> {
-		const installed = await requireInstalled("restart");
-		if (!("manager" in installed)) return installed;
-		const result = installed.restart(serviceSpec);
-		if (!result.ok) return { ok: false, message: "Honeycomb's OS service manager rejected restart." };
-		const healthy = await waitHealthy(daemon, options.healthAttempts);
-		return healthy
-			? { ok: true, changed: true, message: "Honeycomb restarted through its OS service and passed health." }
-			: { ok: false, message: "Honeycomb's OS service restarted but did not pass health within the timeout." };
-	}
 	return {
-		configPath: honeycombStateDir(),
-		logPath: serviceSpec.logPath ?? join(honeycombStateDir(), "service.log"),
+		daemon,
+		lifecycle,
+		serviceSpec,
+		options,
+		controller(): DaemonServiceController {
+			if (manager === null) throw new Error("No supported OS service manager is available on this platform.");
+			return controllerFor(manager);
+		},
+	};
+}
+
+async function waitForServiceRunning(context: ServiceContext, controller: DaemonServiceController): Promise<boolean> {
+	// Health alone cannot prove the installed manager owns the responder; an absent identity/state
+	// probe therefore fails closed instead of accepting a detached or unrelated loopback process.
+	if (controller.isRunning === undefined) return false;
+	const attempts = context.options.serviceStateAttempts ?? 20;
+	for (let attempt = 0; attempt < attempts; attempt++) {
+		if (controller.isRunning(context.serviceSpec)) return true;
+		if (attempt + 1 < attempts) await sleep(100);
+	}
+	return false;
+}
+
+async function waitForDaemonStopped(context: ServiceContext): Promise<boolean> {
+	const attempts = context.options.stopAttempts ?? 100;
+	for (let attempt = 0; attempt < attempts; attempt++) {
+		if (!(await context.lifecycle.status()).running) return true;
+		if (attempt + 1 < attempts) await sleep(150);
+	}
+	return false;
+}
+
+function requireInstalled(context: ServiceContext, command: string): DaemonServiceController | StandardOperationResult {
+	const controller = context.controller();
+	if (!controller.isRegistered(context.serviceSpec))
+		return {
+			ok: false,
+			message: `${command}: Honeycomb's OS service is not installed; run \`honeycomb service-install\`.`,
+		};
+	return controller;
+}
+
+async function restartService(context: ServiceContext): Promise<StandardOperationResult> {
+	const installed = requireInstalled(context, "restart");
+	if (!("manager" in installed)) return installed;
+	const result = installed.restart(context.serviceSpec);
+	if (!result.ok) return { ok: false, message: "Honeycomb's OS service manager rejected restart." };
+	const healthy = await waitHealthy(context.daemon, context.options.healthAttempts);
+	return healthy
+		? { ok: true, changed: true, message: "Honeycomb restarted through its OS service and passed health." }
+		: { ok: false, message: "Honeycomb's OS service restarted but did not pass health within the timeout." };
+}
+
+function createRuntimeLifecycleOps(
+	context: ServiceContext,
+): Pick<ServiceLifecycleOps, "start" | "stop" | "restartService"> {
+	return {
 		async start(): Promise<StandardOperationResult> {
-			const installed = await requireInstalled("start");
+			const installed = requireInstalled(context, "start");
 			if (!("manager" in installed)) return installed;
-			if (await daemon.ping()) return { ok: true, changed: false, message: "Honeycomb is already running." };
-			const result = installed.restart(serviceSpec);
+			if (await context.daemon.ping()) return { ok: true, changed: false, message: "Honeycomb is already running." };
+			const result = installed.restart(context.serviceSpec);
 			if (!result.ok) return { ok: false, message: "Honeycomb's OS service manager rejected start." };
-			return (await waitHealthy(daemon, options.healthAttempts))
+			return (await waitHealthy(context.daemon, context.options.healthAttempts))
 				? { ok: true, changed: true, message: "Honeycomb started through its installed OS service." }
 				: { ok: false, message: "Honeycomb's OS service did not become healthy within the start timeout." };
 		},
 		async stop(): Promise<StandardOperationResult> {
-			const installed = await requireInstalled("stop");
+			const installed = requireInstalled(context, "stop");
 			if (!("manager" in installed)) return installed;
-			if (!(await lifecycle.status()).running)
+			if (!(await context.lifecycle.status()).running)
 				return { ok: true, changed: false, message: "Honeycomb is already stopped." };
-			const result = installed.stop(serviceSpec);
+			const result = installed.stop(context.serviceSpec);
 			if (!result.ok) return { ok: false, message: "Honeycomb's OS service manager rejected stop." };
-			return (await waitForDaemonStopped())
+			return (await waitForDaemonStopped(context))
 				? { ok: true, changed: true, message: "Honeycomb stopped through its installed OS service." }
 				: { ok: false, message: "Honeycomb did not stop within the bounded timeout." };
 		},
-		async restart(): Promise<StandardOperationResult> {
-			return restartService();
+		restartService: () => restartService(context),
+	};
+}
+
+function createServiceRegistrationOps(
+	context: ServiceContext,
+): Pick<ServiceLifecycleOps, "serviceInstall" | "serviceUninstall" | "isServiceInstalled"> {
+	return {
+		async isServiceInstalled(): Promise<boolean> {
+			return context.controller().isRegistered(context.serviceSpec);
 		},
-		isServiceInstalled,
 		async serviceInstall(): Promise<StandardOperationResult> {
-			const controller = serviceController();
+			const controller = context.controller();
 			mkdirSync(honeycombStateDir(), { recursive: true });
-			const existed = controller.isRegistered(serviceSpec);
-			controller.register(serviceSpec);
-			if (!(await waitForServiceRunning(controller)))
+			const existed = controller.isRegistered(context.serviceSpec);
+			controller.register(context.serviceSpec);
+			if (!(await waitForServiceRunning(context, controller)))
 				return {
 					ok: false,
 					message: `Honeycomb service was registered with ${controller.manager}, but the manager reports it is not running.`,
 				};
-			const healthy = await waitHealthy(daemon, options.healthAttempts);
+			const healthy = await waitHealthy(context.daemon, context.options.healthAttempts);
 			return healthy
 				? {
 						ok: true,
@@ -275,10 +322,10 @@ export function buildHoneycombStandardOps(
 					};
 		},
 		async serviceUninstall(): Promise<StandardOperationResult> {
-			const controller = serviceController();
-			const existed = controller.isRegistered(serviceSpec);
-			controller.unregister(serviceSpec);
-			if (!(await waitForDaemonStopped()))
+			const controller = context.controller();
+			const existed = controller.isRegistered(context.serviceSpec);
+			controller.unregister(context.serviceSpec);
+			if (!(await waitForDaemonStopped(context)))
 				return {
 					ok: false,
 					message: `Honeycomb service removal from ${controller.manager} could not verify that the daemon stopped.`,
@@ -291,6 +338,36 @@ export function buildHoneycombStandardOps(
 					: "Honeycomb service is already absent.",
 			};
 		},
+	};
+}
+
+function createServiceLifecycleOps(
+	daemon: DaemonClient,
+	lifecycle: DaemonLifecycle,
+	serviceSpec: ServiceSpec,
+	options: StandardOpsOptions = {},
+): ServiceLifecycleOps {
+	const context = createServiceContext(daemon, lifecycle, serviceSpec, options);
+	return { ...createRuntimeLifecycleOps(context), ...createServiceRegistrationOps(context) };
+}
+
+/** Assemble the product-owned baseline operations from focused lifecycle, registry, and updater adapters. */
+export function buildHoneycombStandardOps(
+	daemon: DaemonClient,
+	lifecycle: DaemonLifecycle,
+	serviceSpec: ServiceSpec,
+	options: StandardOpsOptions = {},
+): HoneycombStandardOps {
+	const service = createServiceLifecycleOps(daemon, lifecycle, serviceSpec, options);
+	return {
+		configPath: honeycombStateDir(),
+		logPath: serviceSpec.logPath ?? honeycombServiceLogPath(),
+		start: service.start,
+		stop: service.stop,
+		restart: service.restartService,
+		serviceInstall: service.serviceInstall,
+		serviceUninstall: service.serviceUninstall,
+		isServiceInstalled: service.isServiceInstalled,
 		async isRegistered(): Promise<boolean> {
 			return registrationExists();
 		},
@@ -307,8 +384,8 @@ export function buildHoneycombStandardOps(
 		async update(checkOnly: boolean): Promise<StandardOperationResult> {
 			return updateHoneycomb(checkOnly, {
 				daemon,
-				isServiceInstalled,
-				restartService,
+				isServiceInstalled: service.isServiceInstalled,
+				restartService: service.restartService,
 				...(options.runNpm !== undefined ? { runNpm: options.runNpm } : {}),
 				...(options.healthAttempts !== undefined ? { healthAttempts: options.healthAttempts } : {}),
 			});
