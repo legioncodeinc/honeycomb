@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.22.0 — 2026-07-14
+
+Honeycomb's CLI now speaks a standardized command interface with new restart, service-install, service-uninstall, register, logs, and JSON-envelope automation support, plus safer service update/uninstall flows with health-checked rollback. Existing daemon commands remain fully backward compatible.
+
 ## Unreleased - Apiary CLI interface standard
 
 - Added canonical `restart`, `service-install`, `service-uninstall`, `register`, and product-isolated `logs` commands while retaining every existing Honeycomb product command.
