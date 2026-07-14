@@ -475,6 +475,7 @@ describe("PRD-064h schtasks controller, register/restart/status argv (injected r
 		expect(matchesWindowsDaemonProcess(WIN_SPEC.nodePath, fragmented, WIN_SPEC)).toBe(true);
 		expect(matchesWindowsDaemonProcess(WIN_SPEC.nodePath, `${fragmented} --extra`, WIN_SPEC)).toBe(false);
 		expect(matchesWindowsDaemonProcess("C:\\other\\node.exe", fragmented, WIN_SPEC)).toBe(false);
+		expect(matchesWindowsDaemonProcess("node.exe", fragmented, WIN_SPEC)).toBe(false);
 		// Removing all quotes would collapse this DIFFERENT argv layout to the expected display text.
 		// The anchored token pattern rejects it even if a caller lies about ExecutablePath.
 		const ambiguous =

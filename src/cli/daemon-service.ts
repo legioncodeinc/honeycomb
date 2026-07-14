@@ -136,7 +136,8 @@ export function matchesWindowsDaemonProcess(
 	commandLine: string,
 	spec: ServiceSpec,
 ): boolean {
-	const executableMatches = win32.resolve(executablePath).toLowerCase() === win32.resolve(spec.nodePath).toLowerCase();
+	if (!win32.isAbsolute(executablePath) || !win32.isAbsolute(spec.nodePath)) return false;
+	const executableMatches = win32.normalize(executablePath).toLowerCase() === win32.normalize(spec.nodePath).toLowerCase();
 	const expected = [spec.nodePath, ...spec.nodeFlags, spec.entry].map(windowsCommandTokenPattern).join("\\s+");
 	return executableMatches && new RegExp(`^\\s*${expected}\\s*$`, "iu").test(commandLine);
 }
