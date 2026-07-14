@@ -37,10 +37,10 @@ interface NpmInvocation {
 	readonly argvPrefix: readonly string[];
 }
 
-/** Pure cross-platform candidate construction used by the fixed production resolver. */
-export function npmInvocationCandidates(execPath: string, platform: NodeJS.Platform): readonly string[] {
-	const pathApi = platform === "win32" ? win32 : posix;
-	const executableDir = pathApi.dirname(execPath);
+/** Candidate construction is intentionally closed over the active runtime, never caller input. */
+function trustedNpmInvocationCandidates(): readonly string[] {
+	const pathApi = process.platform === "win32" ? win32 : posix;
+	const executableDir = pathApi.dirname(process.execPath);
 	return [
 		pathApi.join(executableDir, "node_modules", "npm", "bin", "npm-cli.js"),
 		pathApi.resolve(executableDir, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
@@ -61,7 +61,7 @@ export function selectNpmInvocation(
 
 /** Resolve npm from the active runtime only; no caller-controlled path reaches the filesystem. */
 export function resolveNpmInvocation(): NpmInvocation {
-	const candidates = npmInvocationCandidates(process.execPath, process.platform);
+	const candidates = trustedNpmInvocationCandidates();
 	return selectNpmInvocation(
 		process.execPath,
 		process.platform,

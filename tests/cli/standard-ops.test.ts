@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import type { DaemonServiceController, ServiceSpec } from "../../src/cli/daemon-service.js";
 import {
 	buildHoneycombStandardOps,
-	npmInvocationCandidates,
 	registryContainsHoneycomb,
 	selectNpmInvocation,
 	updateHoneycomb,
@@ -14,9 +13,7 @@ import { HONEYCOMB_VERSION } from "../../src/shared/constants.js";
 describe("Honeycomb standard updater npm resolution", () => {
 	it("uses the npm CLI bundled beside the active Windows Node runtime", () => {
 		const node = "C:\\Program Files\\nodejs\\node.exe";
-		const npmCli = npmInvocationCandidates(node, "win32").find((path) =>
-			path.endsWith("node_modules\\npm\\bin\\npm-cli.js"),
-		);
+		const npmCli = "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js";
 		const result = selectNpmInvocation(node, "win32", npmCli);
 		expect(result.file).toBe(node);
 		expect(result.argvPrefix[0]).toMatch(/npm-cli\.js$/);
