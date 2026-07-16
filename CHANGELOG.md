@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.22.1 — 2026-07-16
+
+Fixed a bug where token/cache usage counts could be omitted from stored session rows, causing storage write failures on the underlying data engine; absent counts are now stored as zero instead of being omitted.
+
 ## v0.22.0 — 2026-07-14
 
 Honeycomb's CLI now speaks a standardized command interface with new restart, service-install, service-uninstall, register, logs, and JSON-envelope automation support, plus safer service update/uninstall flows with health-checked rollback. Existing daemon commands remain fully backward compatible.
