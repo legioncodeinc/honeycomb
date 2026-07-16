@@ -247,9 +247,10 @@ describe("PRD-060 end-to-end: a transcript-backed Stop persists cache_read token
 		expect(res.status).toBe(201);
 		const insert = fake.requests.find((r) => /^\s*INSERT\s+INTO\s+"sessions"/i.test(r.sql));
 		const sql = insert?.sql ?? "";
-		// No token columns written (they stay SQL NULL); model writes the '' default (model unknown).
-		expect(sql).not.toMatch(/cache_read_input_tokens/);
+		// a-AC-6 reversed: absent usage zero-fills the token columns (non-nullable scalar); model
+		// writes the '' default (model unknown).
 		const cv = insertColumnValues(sql);
+		expect(cv.cache_read_input_tokens, "absent cache_read → 0").toBe("0");
 		expect(cv.model, "absent model writes the '' default").toBe("''");
 	});
 });

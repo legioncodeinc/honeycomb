@@ -45,16 +45,16 @@ const nonEmpty = z.string().trim().min(1);
  * Every field is itself OPTIONAL: a partial usage block populates only the counts
  * the harness actually saw, and a turn with NO usage omits the whole object.
  *
- * ── ZERO vs NULL DISCIPLINE (a-AC-1 / a-AC-6, the open-question ruling) ───────
- * A genuine `cacheRead = 0` (a real measurement: the turn read nothing from cache)
- * is DISTINCT from "no usage data" (the harness never produced a count). The
- * contract keeps them apart by ABSENCE, not by a sentinel: a measured zero is the
- * number `0`; "absent" is the field (or the whole `usage` object) simply not being
- * there. This is why the persisted columns are NULLABLE (no `DEFAULT 0`) — a
- * `DEFAULT 0` would silently collapse "absent" into "measured zero", which a-AC-6
- * forbids. Each count is a NON-NEGATIVE integer; a negative or fractional value is
- * a malformed count and is rejected at this boundary (the handler then omits it →
- * the column stays NULL, never a silent 0).
+ * ── ZERO-fill on persist (a-AC-6 REVERSED, 2026-07-16) ───────────────────────
+ * The normalized `usage` block still models "absent" as the field (or the whole
+ * object) simply not being there — a partial block carries only the counts the
+ * harness saw. But the PERSISTED columns can no longer keep absent distinct from a
+ * measured 0: pg-deeplake maps a scalar SQL column to a NON-NULLABLE deeplake type,
+ * so an omitted token column is rejected at flush ("None value for scalar type")
+ * rather than stored as SQL NULL. The capture writer (`usageColumns`) therefore
+ * zero-fills every absent count and the columns are `NOT NULL DEFAULT 0`. Each count
+ * is a NON-NEGATIVE integer; a negative or fractional value is a malformed count and
+ * is rejected at this boundary (the writer then treats it as absent → 0).
  */
 const tokenCount = z.number().int().nonnegative();
 

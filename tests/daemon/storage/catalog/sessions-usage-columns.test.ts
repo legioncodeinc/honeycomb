@@ -2,7 +2,8 @@
  * PRD-060a — Token & Cache Usage Capture: the additive `sessions` columns + heal.
  *
  *   - a-AC-3 — the `sessions` group gains `input_tokens`, `output_tokens`,
- *     `cache_read_input_tokens`, `cache_creation_input_tokens` (nullable BIGINT)
+ *     `cache_read_input_tokens`, `cache_creation_input_tokens` (BIGINT NOT NULL
+ *     DEFAULT 0 — a-AC-6 reversed 2026-07-16, the storage scalar is non-nullable)
  *     and `source_tool` (TEXT NOT NULL DEFAULT '') via the ADDITIVE schema-heal
  *     path; the heal is additive (ALTER ADD COLUMN, no drop/rewrite) and idempotent.
  *   - a-AC-4 — a legacy dataset MISSING the columns heals them in additively; the
@@ -26,14 +27,13 @@ function colSql(name: string): string | undefined {
 const TOKEN_COLUMNS = ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"] as const;
 
 describe("PRD-060a a-AC-3: the sessions group gains the five additive usage columns", () => {
-	it("a-AC-3 the four token columns are NULLABLE BIGINT (no DEFAULT 0 — zero ≠ null)", () => {
+	it("a-AC-3 the four token columns are BIGINT NOT NULL DEFAULT 0 (a-AC-6 reversed — absent = 0)", () => {
 		for (const name of TOKEN_COLUMNS) {
 			const sql = colSql(name);
-			expect(sql, name).toBe("BIGINT");
-			// The load-bearing zero-vs-null property: NO DEFAULT, so an absent count is SQL NULL
-			// ("token data absent"), kept DISTINCT from a measured 0. A `DEFAULT 0` would collapse them.
-			expect(sql, `${name} must not default`).not.toMatch(/DEFAULT/i);
-			expect(sql, `${name} must be nullable`).not.toMatch(/NOT NULL/i);
+			// a-AC-6 reversed (2026-07-16): pg-deeplake maps a scalar to a NON-NULLABLE deeplake type,
+			// so an omitted column is rejected at flush ("None value for scalar type") rather than stored
+			// as SQL NULL. Absent collapses to 0 — the writer zero-fills and the column is NOT NULL DEFAULT 0.
+			expect(sql, name).toBe("BIGINT NOT NULL DEFAULT 0");
 		}
 	});
 
@@ -50,7 +50,7 @@ describe("PRD-060a a-AC-3: the sessions group gains the five additive usage colu
 		expect(healTargetFor("sessions").columns.map((c) => c.name)).toContain("model");
 	});
 
-	it("a-AC-3 the whole sessions array still validates (nullable BIGINT is exempt from the NOT-NULL-DEFAULT guard)", () => {
+	it("a-AC-3 the whole sessions array still validates (NOT NULL token columns carry a DEFAULT 0)", () => {
 		expect(() => validateColumnDefs("sessions", SESSIONS_COLUMNS)).not.toThrow();
 	});
 
@@ -70,7 +70,9 @@ describe("PRD-060a a-AC-3 / a-AC-4: the heal is ADDITIVE (ALTER ADD COLUMN) and 
 	it("a-AC-3 each new column heals via a targeted ALTER TABLE ADD COLUMN — never a drop/rewrite", () => {
 		for (const name of TOKEN_COLUMNS) {
 			const def = SESSIONS_COLUMNS.find((c) => c.name === name)!;
-			expect(buildAddColumnSql("sessions", def)).toBe(`ALTER TABLE "sessions" ADD COLUMN ${name} BIGINT`);
+			expect(buildAddColumnSql("sessions", def)).toBe(
+				`ALTER TABLE "sessions" ADD COLUMN ${name} BIGINT NOT NULL DEFAULT 0`,
+			);
 		}
 		const srcDef = SESSIONS_COLUMNS.find((c) => c.name === "source_tool")!;
 		expect(buildAddColumnSql("sessions", srcDef)).toBe(
@@ -81,7 +83,7 @@ describe("PRD-060a a-AC-3 / a-AC-4: the heal is ADDITIVE (ALTER ADD COLUMN) and 
 	it("a-AC-3 the CREATE TABLE carries all five columns from the single ColumnDef source", () => {
 		const create = buildCreateTableSql("sessions", SESSIONS_COLUMNS);
 		for (const name of TOKEN_COLUMNS) {
-			expect(create).toMatch(new RegExp(`\\b${name} BIGINT\\b`));
+			expect(create).toMatch(new RegExp(`\\b${name} BIGINT NOT NULL DEFAULT 0\\b`));
 		}
 		expect(create).toMatch(/\bsource_tool TEXT NOT NULL DEFAULT ''/);
 	});

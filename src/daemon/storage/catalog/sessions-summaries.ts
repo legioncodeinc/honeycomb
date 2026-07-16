@@ -51,22 +51,21 @@ export const SESSIONS_COLUMNS = Object.freeze([
 	{ name: "agent_id", sql: "TEXT NOT NULL DEFAULT 'default'" },
 	{ name: "visibility", sql: "TEXT NOT NULL DEFAULT 'global'" },
 	// ── PRD-060a (a-AC-3 / a-AC-6): per-turn token + cache usage ──────────────────
-	// Additive columns, healed in via the SAME `ALTER TABLE ADD COLUMN` path the rest
-	// of the catalog uses (the heal engine iterates THIS array; nothing else to wire).
+	// Additive columns, healed in via the SAME `ALTER TABLE ADD COLUMN … DEFAULT 0`
+	// path the rest of the catalog uses (the heal engine iterates THIS array).
 	//
-	// ZERO vs NULL (a-AC-1 / a-AC-6, the open-question ruling): these four counts are
-	// NULLABLE BIGINT with NO `DEFAULT 0`. The distinction is load-bearing — a genuine
-	// `cache_read_input_tokens = 0` (a real measurement: nothing read from cache) must
-	// stay DISTINCT from "no usage data" (the count was never produced). A `DEFAULT 0`
-	// would collapse "absent" into "measured zero", which a-AC-6 forbids, so absent is
-	// encoded as SQL NULL and a measured zero as the integer 0. Nullable columns are
-	// exempt from the NOT-NULL-needs-a-DEFAULT load guard (NULL is their implicit
-	// default), so `ALTER TABLE ADD COLUMN … BIGINT` heals cleanly onto a populated
-	// legacy table: existing rows read back NULL = "token data absent" (a-AC-4).
-	{ name: "input_tokens", sql: "BIGINT" },
-	{ name: "output_tokens", sql: "BIGINT" },
-	{ name: "cache_read_input_tokens", sql: "BIGINT" },
-	{ name: "cache_creation_input_tokens", sql: "BIGINT" },
+	// ZERO, not NULL (a-AC-6 REVERSED, 2026-07-16): the original ruling made these
+	// NULLABLE BIGINT so "absent" (count never produced) stayed distinct from a measured
+	// 0. That distinction is NOT representable on this storage engine — pg-deeplake maps
+	// a scalar SQL column to a NON-NULLABLE deeplake type (SQL nullability is ignored), so
+	// a row that omitted a token column was rejected at flush time ("None value for scalar
+	// type") instead of storing SQL NULL. We therefore collapse absent → 0: the capture
+	// writer (`usageColumns`) always emits all four, and the column is `NOT NULL DEFAULT 0`
+	// like every other scalar here — heal-safe on a populated table (the default backfills).
+	{ name: "input_tokens", sql: "BIGINT NOT NULL DEFAULT 0" },
+	{ name: "output_tokens", sql: "BIGINT NOT NULL DEFAULT 0" },
+	{ name: "cache_read_input_tokens", sql: "BIGINT NOT NULL DEFAULT 0" },
+	{ name: "cache_creation_input_tokens", sql: "BIGINT NOT NULL DEFAULT 0" },
 	// ── PRD-060 ROI fix: the per-turn MODEL id ────────────────────────────────────
 	// The model the turn ran on (e.g. `claude-opus-4-8`), read from the Claude Code
 	// transcript so the ROI dashboard prices the turn at its REAL model's rate instead of
