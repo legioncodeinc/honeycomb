@@ -14,7 +14,16 @@
  * (Windows without the privilege), mirroring the connector's foreign-preserving posture.
  */
 
-import { mkdir, readFile, rm, stat, symlink as fsSymlink, readlink as fsReadlink, writeFile } from "node:fs/promises";
+import {
+	readlink as fsReadlink,
+	symlink as fsSymlink,
+	mkdir,
+	readFile,
+	rm,
+	rmdir,
+	stat,
+	writeFile,
+} from "node:fs/promises";
 import { dirname } from "node:path";
 
 import type { ConnectorFs } from "./contracts.js";
@@ -73,6 +82,15 @@ export function createNodeConnectorFs(): ConnectorFs {
 		},
 		async ensureDir(path: string): Promise<void> {
 			await mkdir(path, { recursive: true });
+		},
+		async removeEmptyDir(path: string): Promise<void> {
+			try {
+				await rmdir(path);
+			} catch (err) {
+				const code = (err as NodeJS.ErrnoException)?.code;
+				if (code === "ENOENT" || code === "ENOTEMPTY" || code === "EEXIST") return;
+				throw err;
+			}
 		},
 		async symlink(target: string, linkPath: string): Promise<void> {
 			await mkdir(dirname(linkPath), { recursive: true });

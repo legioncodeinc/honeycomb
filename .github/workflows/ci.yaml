@@ -139,7 +139,7 @@ jobs:
       - name: Pack-check (tarball secret/forbidden-file scan)
         run: npm run pack:check
 
-      - name: Packed CLI conformance
+      - name: Packed CLI + Hermes conformance
         run: npm run test:packed-cli
 
   # ── Windows smoke. The dev host is Windows and the build scripts
@@ -179,7 +179,7 @@ jobs:
       - name: Test
         run: npm run test
 
-      - name: Packed CLI conformance (Windows)
+      - name: Packed CLI + Hermes conformance (Windows)
         run: npm run test:packed-cli
 
   macos-service-smoke:
@@ -199,7 +199,7 @@ jobs:
         run: npm ci
       - name: Native launchd adapter tests
         run: npm test -- --run tests/cli/daemon-service.test.ts tests/cli/daemon-lifecycle-service.test.ts tests/commands/standard-interface.test.ts
-      - name: Packed CLI conformance (macOS)
+      - name: Packed CLI + Hermes conformance (macOS)
         run: npm run test:packed-cli
 
   # ── Secret gate. ───────────────────────────────────────────────────────────

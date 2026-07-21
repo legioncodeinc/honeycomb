@@ -76,6 +76,8 @@ export interface ConnectorFs {
 	exists(path: string): Promise<boolean>;
 	/** Ensure a directory exists (mkdir -p). */
 	ensureDir(path: string): Promise<void>;
+	/** Remove a directory only when empty; never removes foreign contents. */
+	removeEmptyDir(path: string): Promise<void>;
 	/** Create a symlink `linkPath` → `target`, never clobbering a foreign entry (FR-4 / a-AC-6). */
 	symlink(target: string, linkPath: string): Promise<void>;
 	/** Read a symlink's target, or `undefined` when `linkPath` is not a symlink. */
@@ -130,6 +132,9 @@ export function createFakeFs(seed?: { files?: Record<string, string>; links?: Re
 		async ensureDir(): Promise<void> {
 			/* in-memory: dirs are implicit */
 		},
+		async removeEmptyDir(): Promise<void> {
+			/* in-memory: dirs are implicit */
+		},
 		async symlink(target: string, linkPath: string): Promise<void> {
 			links.set(linkPath, target);
 		},
@@ -160,6 +165,12 @@ export interface HookHandlerEntry {
 	readonly timeout?: number;
 	/** True when the handler runs detached off the critical path (FR-3 latency discipline). */
 	readonly async?: boolean;
+}
+
+/** An additional install-time artifact copied alongside hook handlers (for example an MCP server bundle). */
+export interface InstallFileEntry {
+	readonly sourcePath: string;
+	readonly targetPath: string;
 }
 
 /**
@@ -255,6 +266,10 @@ export abstract class HarnessConnector {
 	protected abstract skillLinkTargets(): readonly SkillLinkTarget[];
 	/** SEAM 4 — the native event-name map (FR-1). */
 	protected abstract eventNameMap(): Readonly<Record<string, string>>;
+	/** Optional non-hook files this connector installs and owns. */
+	protected additionalFiles(): readonly InstallFileEntry[] {
+		return [];
+	}
 
 	/**
 	 * SEAM 3.5 (optional) — the config root that PROVES this harness is installed
@@ -356,12 +371,18 @@ export abstract class HarnessConnector {
 			await this.fs.writeFile(handler.handlerPath, body);
 			written.push(handler.handlerPath);
 		}
+		for (const file of this.additionalFiles()) {
+			const body = await this.fs.readFile(file.sourcePath);
+			if (body === undefined) continue;
+			await this.fs.ensureDir(dirOf(file.targetPath));
+			await this.fs.writeFile(file.targetPath, body);
+			written.push(file.targetPath);
+		}
 
 		// 2. Patch the config, foreign-preserving + idempotent.
 		const path = this.configPath();
-		const config = parseConfig(await this.fs.readFile(path));
-		const patched = this.patchConfig(config, handlers);
-		const wroteConfig = await this.writeJsonIfChanged(path, serializeConfig(patched));
+		const patchedText = this.patchConfigText(await this.fs.readFile(path), handlers);
+		const wroteConfig = await this.writeJsonIfChanged(path, patchedText);
 
 		// 3. Symlink skills, preserving foreign entries (FR-4 / a-AC-6).
 		const skillLinks = await this.linkSkills();
@@ -379,18 +400,17 @@ export abstract class HarnessConnector {
 	 */
 	async uninstall(): Promise<ConnectorRunResult> {
 		const path = this.configPath();
-		const config = parseConfig(await this.fs.readFile(path));
-		const stripped = this.stripHoneycomb(config);
+		const stripped = this.stripConfigText(await this.fs.readFile(path));
 
 		let wroteConfig = false;
-		if (this.isConfigEmpty(stripped)) {
+		if (stripped.empty) {
 			// FR-6: an emptied config is cleanly UNLINKED, not left as `{}`.
 			if (await this.fs.exists(path)) {
 				await this.fs.removeFile(path);
 				wroteConfig = true;
 			}
 		} else {
-			wroteConfig = await this.writeJsonIfChanged(path, serializeConfig(stripped));
+			wroteConfig = await this.writeJsonIfChanged(path, stripped.text);
 		}
 
 		// Remove the written handler files.
@@ -401,6 +421,12 @@ export abstract class HarnessConnector {
 				removedHandlers.push(handler.handlerPath);
 			}
 		}
+		for (const file of this.additionalFiles()) {
+			if (await this.fs.exists(file.targetPath)) {
+				await this.fs.removeFile(file.targetPath);
+				removedHandlers.push(file.targetPath);
+			}
+		}
 
 		// Unlink ONLY Honeycomb's skill symlinks (a foreign entry is never touched).
 		const removedLinks = await this.unlinkSkills();
@@ -409,6 +435,24 @@ export abstract class HarnessConnector {
 	}
 
 	// ── Internal patch/link helpers (shared by every connector) ───────────────
+
+	/**
+	 * Parse, patch, and serialize this harness's config text. JSON is the shared
+	 * default. A non-JSON harness (Hermes YAML) overrides this text seam while
+	 * retaining the base install/uninstall filesystem mechanics.
+	 */
+	protected patchConfigText(text: string | undefined, handlers: readonly HookHandlerEntry[]): string {
+		return serializeConfig(this.patchConfig(parseConfig(text), handlers));
+	}
+
+	/**
+	 * Strip Honeycomb-owned entries and serialize the remaining config. The
+	 * `empty` bit controls whether the base removes the config file entirely.
+	 */
+	protected stripConfigText(text: string | undefined): { readonly empty: boolean; readonly text: string } {
+		const stripped = this.stripHoneycomb(parseConfig(text));
+		return { empty: this.isConfigEmpty(stripped), text: serializeConfig(stripped) };
+	}
 
 	/**
 	 * Append fresh Honeycomb hook entries to the config, foreign-preserving (FR-2 / a-AC-1).

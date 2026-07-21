@@ -16,25 +16,22 @@
  */
 
 import { describe, expect, it } from "vitest";
-
 import {
+	createClaudeCodeShim,
+	createCodexShim,
+	createCursorShim,
 	createFakeContextRenderer,
 	createFakeCredentialReader,
 	createFakeDaemonHookClient,
+	createHermesShim,
+	createOpenClawShim,
+	createPiShim,
 	type HarnessShim,
 	type HookCoreDeps,
 	type HookInput,
 	type HookSessionMeta,
 	type LogicalEvent,
 	type NativeEvent,
-} from "../../../src/hooks/index.js";
-import {
-	createClaudeCodeShim,
-	createCodexShim,
-	createCursorShim,
-	createHermesShim,
-	createOpenClawShim,
-	createPiShim,
 } from "../../../src/hooks/index.js";
 import { runCapture } from "../../../src/hooks/shared/capture.js";
 
@@ -78,7 +75,10 @@ const fixtures: readonly NativeFixture[] = [
 		shim: reference,
 		events: {
 			user_message: { name: "UserPromptSubmit", payload: { prompt: userText } },
-			tool_call: { name: "PostToolUse", payload: { tool_name: "Bash", tool_input: { command: "ls" }, tool_response: "ok" } },
+			tool_call: {
+				name: "PostToolUse",
+				payload: { tool_name: "Bash", tool_input: { command: "ls" }, tool_response: "ok" },
+			},
 			assistant_message: { name: "Stop", payload: { text: asstText } },
 		},
 	},
@@ -86,7 +86,10 @@ const fixtures: readonly NativeFixture[] = [
 		shim: createCodexShim(),
 		events: {
 			user_message: { name: "UserPromptSubmit", payload: { prompt: userText } },
-			tool_call: { name: "PostToolUse", payload: { tool_name: "Bash", tool_input: { command: "ls" }, tool_response: "ok" } },
+			tool_call: {
+				name: "PostToolUse",
+				payload: { tool_name: "Bash", tool_input: { command: "ls" }, tool_response: "ok" },
+			},
 			assistant_message: { name: "Stop", payload: { text: asstText } },
 		},
 	},
@@ -94,17 +97,22 @@ const fixtures: readonly NativeFixture[] = [
 		shim: createCursorShim(),
 		events: {
 			user_message: { name: "beforeSubmitPrompt", payload: { prompt: userText } },
-			tool_call: { name: "postToolUse", payload: { tool_name: "Bash", tool_input: { command: "ls" }, tool_response: "ok" } },
+			tool_call: {
+				name: "postToolUse",
+				payload: { tool_name: "Bash", tool_input: { command: "ls" }, tool_response: "ok" },
+			},
 			assistant_message: { name: "afterAgentResponse", payload: { text: asstText } },
 		},
 	},
 	{
 		shim: createHermesShim(),
 		events: {
-			user_message: { name: "on_user_message", payload: { message: userText } },
-			// Hermes captures terminal tools only (FR-6); a terminal tool_use is equivalent
-			// to the reference's tool_call for the same tool.
-			tool_call: { name: "on_tool_use", payload: { tool_name: "Bash", tool_input: { command: "ls" }, tool_response: "ok" } },
+			user_message: { name: "pre_llm_call", payload: { extra: { user_message: userText } } },
+			tool_call: {
+				name: "post_tool_call",
+				payload: { tool_name: "Bash", tool_input: { command: "ls" }, extra: { result: "ok" } },
+			},
+			assistant_message: { name: "post_llm_call", payload: { extra: { assistant_response: asstText } } },
 		},
 	},
 ];
@@ -114,7 +122,7 @@ describe("PRD-019c c-AC-1: harness equivalence to the Claude Code reference", ()
 		expect(reference.mapEvent("UserPromptSubmit")).toBe<LogicalEvent>("user_message");
 		expect(createCodexShim().mapEvent("UserPromptSubmit")).toBe<LogicalEvent>("user_message");
 		expect(createCursorShim().mapEvent("beforeSubmitPrompt")).toBe<LogicalEvent>("user_message");
-		expect(createHermesShim().mapEvent("on_user_message")).toBe<LogicalEvent>("user_message");
+		expect(createHermesShim().mapEvent("pre_llm_call")).toBe<LogicalEvent>("user_message");
 		expect(createOpenClawShim().mapEvent("agent_end")).toBe<LogicalEvent>("session-end");
 		expect(createPiShim().mapEvent("session_shutdown")).toBe<LogicalEvent>("session-end");
 		// A non-lifecycle name maps to undefined (dropped) on every shim.
@@ -123,10 +131,7 @@ describe("PRD-019c c-AC-1: harness equivalence to the Claude Code reference", ()
 	});
 
 	it("c-AC-1 a user_message normalizes to the SAME daemon body across harnesses", async () => {
-		const refEvent = reference.normalize(
-			{ name: "UserPromptSubmit", payload: { prompt: userText } },
-			META,
-		);
+		const refEvent = reference.normalize({ name: "UserPromptSubmit", payload: { prompt: userText } }, META);
 		expect(refEvent).toBeDefined();
 		const refBody = await captureBody(refEvent as HookInput);
 		// The reference body's event payload is the canonical `{ kind:"user_message", text }`.
@@ -172,15 +177,20 @@ describe("PRD-019c c-AC-1: harness equivalence to the Claude Code reference", ()
 		expect(daemon.calls[0].runtimePath).toBe("legacy"); // Claude Code hook script.
 
 		const { deps: d2, daemon: dm2 } = deps();
-		const cur = createCursorShim().normalize({ name: "beforeSubmitPrompt", payload: { prompt: userText } }, META) as HookInput;
+		const cur = createCursorShim().normalize(
+			{ name: "beforeSubmitPrompt", payload: { prompt: userText } },
+			META,
+		) as HookInput;
 		await runCapture(cur, d2, {});
 		expect(dm2.calls[0].runtimePath).toBe("plugin"); // Cursor runtime extension.
 	});
 
 	it("c-AC-1 a dropped (non-lifecycle) native event normalizes to undefined", () => {
 		expect(reference.normalize({ name: "NotAnEvent", payload: {} }, META)).toBeUndefined();
-		// Hermes drops a non-terminal tool_use (terminal-only, FR-6) → no capture.
-		expect(createHermesShim().normalize({ name: "on_tool_use", payload: { tool_name: "Browser" } }, META)).toBeUndefined();
+		// Hermes does not claim unsupported pre-tool interception semantics.
+		expect(
+			createHermesShim().normalize({ name: "pre_tool_call", payload: { tool_name: "Browser" } }, META),
+		).toBeUndefined();
 		// Codex drops a non-Bash PreToolUse (Bash-only, FR-3).
 		expect(createCodexShim().normalize({ name: "PreToolUse", payload: { tool_name: "Read" } }, META)).toBeUndefined();
 	});
@@ -202,9 +212,9 @@ describe("PRD-019c c-AC-1: harness equivalence to the Claude Code reference", ()
 			META,
 		);
 		expect(input).toBeDefined();
-		expect(input!.event).toBe("pre-tool-use");
+		expect(input?.event).toBe("pre-tool-use");
 		// The EXACT canonical pre_tool_use shape: kind + tool + all three nested fields present.
-		expect(input!.data).toEqual({
+		expect(input?.data).toEqual({
 			kind: "pre_tool_use",
 			tool: "Bash",
 			command: "ls -la",
@@ -221,8 +231,8 @@ describe("PRD-019c c-AC-1: harness equivalence to the Claude Code reference", ()
 			META,
 		) as HookInput;
 		expect(input.data).toEqual({ kind: "pre_tool_use", tool: "Bash", command: "echo hi" });
-		expect(Object.prototype.hasOwnProperty.call(input.data, "path")).toBe(false);
-		expect(Object.prototype.hasOwnProperty.call(input.data, "query")).toBe(false);
+		expect(Object.hasOwn(input.data, "path")).toBe(false);
+		expect(Object.hasOwn(input.data, "query")).toBe(false);
 	});
 
 	it("c-AC-1 the reference pre-tool-use extractor reads the `path`/`query` fallback keys", () => {
@@ -251,7 +261,7 @@ describe("PRD-019c c-AC-1: harness equivalence to the Claude Code reference", ()
 			META,
 		) as HookInput;
 		expect(input.data).toEqual({ kind: "pre_tool_use", tool: "Read", path: "/only/path.ts" });
-		expect(Object.prototype.hasOwnProperty.call(input.data, "command")).toBe(false);
+		expect(Object.hasOwn(input.data, "command")).toBe(false);
 	});
 
 	it("c-AC-1 the reference session-start extractor lowers `source` (defaulting to startup)", () => {
@@ -281,13 +291,13 @@ describe("PRD-019c c-AC-1: harness equivalence to the Claude Code reference", ()
 		expect(withEmb.messageEmbedding).toEqual([0.1, 0.2, 0.3]);
 
 		const noEmb = reference.normalize({ name: "UserPromptSubmit", payload: { prompt: userText } }, META) as HookInput;
-		expect(Object.prototype.hasOwnProperty.call(noEmb, "messageEmbedding")).toBe(false);
+		expect(Object.hasOwn(noEmb, "messageEmbedding")).toBe(false);
 
 		// A non-numeric array is rejected (the `every(typeof === number)` guard) → no key added.
 		const badEmb = reference.normalize(
 			{ name: "UserPromptSubmit", payload: { prompt: userText, messageEmbedding: [1, "x", 3] } },
 			META,
 		) as HookInput;
-		expect(Object.prototype.hasOwnProperty.call(badEmb, "messageEmbedding")).toBe(false);
+		expect(Object.hasOwn(badEmb, "messageEmbedding")).toBe(false);
 	});
 });

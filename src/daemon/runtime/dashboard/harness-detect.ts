@@ -83,11 +83,9 @@ const HARNESS_MARKERS: readonly HarnessMarker[] = [
 	},
 	{
 		name: "hermes",
-		// No honeycomb connector wires hermes yet (only claude-code/codex/cursor have connectors). The
-		// marker is the honeycomb-NAMESPACED dir honeycomb would write, NEVER the dead hivemind-v1
-		// `~/.hermes/config.yaml` / `~/.hermes/hivemind` leftovers — so an old ~/.hermes no longer
-		// masquerades as installed. It reads absent until honeycomb actually wires hermes.
-		paths: (h) => [join(h, ".hermes", "honeycomb")],
+		// The Hermes connector writes this concrete handler and removes it on uninstall. Checking the
+		// file—not the parent directory—prevents an empty leftover directory from reading as wired.
+		paths: (h) => [join(h, ".hermes", "honeycomb", "bundle", "capture.js")],
 	},
 	{
 		name: "pi",

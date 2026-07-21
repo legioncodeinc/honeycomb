@@ -203,6 +203,7 @@ export const VERB_TABLE: readonly VerbSpec[] = Object.freeze([
 	},
 	// Setup & system — install/onboard, daemon lifecycle, dashboard, hooks, telemetry, update.
 	{ verb: "setup", cls: "local", group: "system", summary: "detect assistants, wire hooks, bring up the daemon" },
+	{ verb: "connect", cls: "local", group: "system", summary: "wire one supported assistant (`connect <harness>`)" },
 	{
 		verb: "install",
 		cls: "local",

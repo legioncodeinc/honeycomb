@@ -77,8 +77,8 @@ describe("PRD-039a a-AC-3: detectInstalledHarnesses — markers present → in t
 		expect(detectInstalledHarnesses(home, home).has("codex")).toBe(true);
 	});
 
-	it("hermes honeycomb marker (~/.hermes/honeycomb) → hermes in the set", () => {
-		touchDir(".hermes", "honeycomb");
+	it("Hermes installed hook bundle marker → hermes in the set", () => {
+		touchFile(".hermes", "honeycomb", "bundle", "capture.js");
 		expect(detectInstalledHarnesses(home, home).has("hermes")).toBe(true);
 	});
 
@@ -134,7 +134,7 @@ describe("PRD-039a a-AC-3: detectInstalledHarnesses — a present/absent MIX is 
 		touchFile(".claude", "settings.json");
 		touchFile(".cursor", "hooks.json");
 		touchFile(".codex", "hooks.json");
-		touchDir(".hermes", "honeycomb");
+		touchFile(".hermes", "honeycomb", "bundle", "capture.js");
 		touchDir(".pi", "honeycomb");
 		touchDir(".openclaw", "honeycomb");
 		const set = detectInstalledHarnesses(home, home);

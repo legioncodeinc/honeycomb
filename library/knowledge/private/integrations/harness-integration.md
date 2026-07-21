@@ -2,7 +2,7 @@
 
 > Category: Integrations | Version: 1.1 | Date: July 2026 | Status: Active
 
-How Honeycomb plugs underneath coding harnesses: the install-time connector base, the per-harness shims, MCP-server-via-install, and the capability detection plus idempotent install/uninstall contract that wires 3 supported harnesses today (Claude Code, Codex, Cursor) while tracking Hermes, pi, and OpenClaw as in progress.
+How Honeycomb plugs underneath coding harnesses: the install-time connector base, the per-harness shims, MCP-server-via-install, and the capability detection plus idempotent install/uninstall contract that wires 4 supported harnesses today (Claude Code, Codex, Cursor, Hermes) while tracking pi and OpenClaw as in progress.
 
 **Related:**
 - [`hook-lifecycle.md`](hook-lifecycle.md)
@@ -17,7 +17,7 @@ How Honeycomb plugs underneath coding harnesses: the install-time connector base
 
 Honeycomb does not try to be another agent shell. It runs underneath the harnesses people already use and gives them one shared memory layer. The challenge is that every harness exposes a different extension surface, and they share almost nothing at the integration layer. The answer is to write the memory logic once in the daemon and wrap it per harness with a thin shim. Adding a harness means writing a shim and a connector subclass, not a memory engine.
 
-Honeycomb currently supports 3 harnesses in production: **Claude Code, Codex, and Cursor**. Hermes, pi, and OpenClaw remain in progress. The daemon remains the only process that touches DeepLake, and supported harnesses reach it through the same three surfaces.
+Honeycomb currently supports 4 harnesses in production: **Claude Code, Codex, Cursor, and Hermes**. pi and OpenClaw remain in progress. The daemon remains the only process that touches DeepLake, and supported harnesses reach it through the same three surfaces.
 
 ## Three surfaces, one daemon
 
@@ -45,16 +45,17 @@ The connector touches the local filesystem only, it opens no DeepLake, holds no 
 
 ## The connector base
 
-Every per-harness connector is a subclass of the abstract `HarnessConnector` (`src/connectors/contracts.ts`). The base owns `install()` and `uninstall()` and all the shared mechanics; a subclass overrides only four seams:
+Every per-harness connector is a subclass of the abstract `HarnessConnector` (`src/connectors/contracts.ts`). The base owns `install()` and `uninstall()` and all the shared mechanics; a subclass overrides four required seams and may add owned install-time artifacts:
 
 1. **`configPath()`**, where the harness keeps its hook config.
 2. **`hookHandlers()`**, which compiled handlers to write and register.
 3. **`skillLinkTargets()`**, where org/team skills are symlinked.
 4. **`eventNameMap()`**, the native event names the handlers register under.
+5. **`additionalFiles()`** (optional), non-hook artifacts such as Hermes' stable MCP bundle copy.
 
 The base supplies everything else: the foreign-preserving config patch, the idempotent `writeJsonIfChanged`, the Honeycomb-entry predicate, skill symlinking, platform detection, and the reversible uninstall. All filesystem access goes through an injectable `ConnectorFs` seam, so the whole connector is testable against an in-memory `FakeFs`, a real `~/.cursor` or `~/.codex` is never touched in a test.
 
-The `ClaudeCodeConnector` is the reference; `CodexConnector` and `CursorConnector` prove the base is subclass-only, each is a small class that fills the four seams and inherits install/uninstall verbatim. Codex uses the same nested matcher-block config shape as Claude Code (`~/.codex/hooks.json`). Cursor overrides the config-shape seams because real Cursor stores each event's handlers as a *flat* array directly under the event key in `~/.cursor/hooks.json`, not the nested `{ matcher, hooks: [...] }` block, but it still inherits the base's foreign-preserve and idempotency guarantees on that flat shape.
+The `ClaudeCodeConnector` is the reference. Codex and Cursor adapt their JSON shapes; Hermes overrides the config-text seams for comment-preserving YAML while retaining the base's handler, owned-artifact, idempotency, detection, and skill-link mechanics. Hermes resolves the active profile from `$HERMES_HOME` (default `~/.hermes`).
 
 ### Idempotent install, foreign-safe uninstall
 
@@ -71,7 +72,7 @@ Each connector reports whether its harness is installed via `detectPlatforms()`,
 - **`honeycomb connect <harness>`**, wire exactly one named harness.
 - **`honeycomb uninstall [<harness>]`**, reverse only Honeycomb's footprint for one harness, or for every detected harness when no target is given.
 
-The connector registry (`src/cli/connector-runner.ts`, `createConnectorRegistry`) builds each connector over the real `node:fs`-backed `ConnectorFs` and the user's home. Claude Code is wired by registering its marketplace plugin via the real `claude plugin` CLI (rather than writing top-level `settings.json` hooks); Codex and Cursor are wired by the config-patch path. A new harness is a subclass added to the registry, never a fork of install logic.
+The connector registry (`src/cli/connector-runner.ts`, `createConnectorRegistry`) builds each connector over the real `node:fs`-backed `ConnectorFs` and the user's home. Claude Code is wired by registering its marketplace plugin via the real `claude plugin` CLI (rather than writing top-level `settings.json` hooks); Codex, Cursor, and Hermes are wired by their native config-patch paths. A new harness is a subclass added to the registry, never a fork of install logic.
 
 ## The support matrix
 
@@ -82,21 +83,15 @@ Each harness wires the same logical lifecycle events through its own mechanism; 
 | Claude Code | Supported | Marketplace plugin + hooks + MCP | Reference connector and reference hook set; model-only context, `legacy` runtime path |
 | Codex | Supported | `~/.codex/hooks.json` + hooks + MCP | Nested matcher-block config shape; user-visible context; Bash-only VFS intercept |
 | Cursor | Supported | `~/.cursor/hooks.json` + extension + MCP | Flat per-event config shape; first-party editor extension; `Shell`-tool VFS intercept; see [`../frontend/cursor-extension-architecture.md`](../frontend/cursor-extension-architecture.md) |
-| Hermes | In progress | Planned hook + MCP path | Not wired as a production connector path yet |
+| Hermes | Supported | `$HERMES_HOME/config.yaml` shell hooks + MCP | Native 0.19 lifecycle; model-only `pre_llm_call` recall; explicit first-use hook consent |
 | pi | In progress | Planned extension + `AGENTS.md` path | Not wired as a production connector path yet |
 | OpenClaw | In progress | Planned native-extension path | Not wired as a production connector path yet |
 
-The differences are real but shallow: native event names and payload fields vary, and the context channel is model-only on some harnesses (Claude Code, Cursor, OpenClaw) and user-visible on others (Codex, Hermes, pi), so each shim normalizes before handing off and renders the context block through its harness's channel.
+The differences are real but shallow: native event names and payload fields vary, and the context channel is model-only on some harnesses (Claude Code, Cursor, Hermes, OpenClaw) and user-visible on others (Codex, pi), so each shim normalizes before handing off and renders the context block through its harness's channel.
 
 ## MCP-server-via-install
 
-For harnesses that speak the Model Context Protocol, the Honeycomb MCP server is registered during install so its `honeycomb_*` tools appear in the harness's native tool list. The server bundle is built by esbuild to `mcp/bundle/server.js` and ships with the package. Hermes, for example, registers it through its `.mcp.json`:
-
-```json
-{ "mcpServers": { "honeycomb": { "command": "node", "args": ["mcp/bundle/server.js"] } } }
-```
-
-and the Hermes shim appends a user-visible mention so the agent knows the tools exist: `(Honeycomb MCP tools available: honeycomb_search, honeycomb_read, honeycomb_index.)`. The same `node mcp/bundle/server.js` stdio entry registers into the other MCP-speaking harnesses during their connect step. The tool surface, the read/resolve and search/mine clusters, and the registration mechanics are documented in [`mcp-and-sdk.md`](mcp-and-sdk.md).
+For harnesses that speak the Model Context Protocol, the Honeycomb MCP server is registered during install so its `honeycomb_*` tools appear in the harness's native tool list. The server bundle is built by esbuild to `mcp/bundle/server.js` and ships with the package. The Hermes connector copies it to `$HERMES_HOME/honeycomb/mcp/server.js` and writes a foreign-safe `mcp_servers.honeycomb` stdio entry in `config.yaml`; no repository-local `.mcp.json` is involved. The tool surface, the read/resolve and search/mine clusters, and the registration mechanics are documented in [`mcp-and-sdk.md`](mcp-and-sdk.md).
 
 ## The Claude Code plugin: packaging and delivery
 

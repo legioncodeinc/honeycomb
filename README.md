@@ -16,7 +16,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@legioncodeinc/honeycomb"><img src="https://img.shields.io/npm/v/@legioncodeinc/honeycomb?style=flat-square&color=F7A823&label=version" alt="npm version"></a>
-  <img src="https://img.shields.io/badge/harnesses-3%20supported%20%7C%203%20in%20progress-F7A823?style=flat-square" alt="3 supported, 3 in progress">
+  <img src="https://img.shields.io/badge/harnesses-4%20supported%20%7C%202%20in%20progress-F7A823?style=flat-square" alt="4 supported, 2 in progress">
   <img src="https://img.shields.io/badge/OS-windows%20%7C%20macos%20%7C%20linux-6E6A62?style=flat-square" alt="Windows, macOS, Linux">
 </p>
 
@@ -257,13 +257,15 @@ Most agent-memory tools bolt onto a vector-only store, which forces *every* acce
 
 ## 🔌 Supported harnesses
 
-Honeycomb supports 3 harnesses in production (Claude Code, Codex, Cursor). Hermes, pi, and OpenClaw are in progress.
+Honeycomb supports 4 harnesses in production (Claude Code, Codex, Cursor, and Hermes). pi and OpenClaw are in progress.
 
 | Supported today | In progress |
 |---|---|
-| **Claude Code**, **Cursor**, **Codex** | **Hermes**, **pi**, **OpenClaw** |
+| **Claude Code**, **Cursor**, **Codex**, **Hermes** | **pi**, **OpenClaw** |
 
 `honeycomb setup` detects the ones you have installed and wires each idempotently; `honeycomb uninstall` reverses only Honeycomb's changes. A skill mined while you were in Cursor is auto-pulled and ready in Claude Code on your next session.
+
+Hermes is wired through its native `$HERMES_HOME/config.yaml` shell hooks and `mcp_servers` entry. Honeycomb does not bypass Hermes' hook-consent boundary: after connecting Hermes, review and approve the exact Honeycomb hook commands at the next interactive Hermes start. Unapproved hooks are skipped in non-interactive/gateway sessions.
 
 <img src="assets/brand/divider-minor.svg" width="100%" height="3">
 

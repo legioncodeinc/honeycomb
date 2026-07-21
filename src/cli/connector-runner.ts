@@ -5,7 +5,7 @@
  * 020a's `runConnectorVerb` routes the CLI verb onto the 019a `connectorMain` through the
  * {@link ConnectorRunner} seam but left the seam UNBOUND (the deferred-assembly stub). 021b binds it:
  * this module builds the real {@link ConnectorRegistry} over a `node:fs`-backed {@link ConnectorFs}
- * and the claude-code + cursor connectors, then adapts `connectorMain`'s result into the
+ * and the supported connectors, then adapts `connectorMain`'s result into the
  * `{ exitCode, harnesses }` shape `runConnectorVerb` reports. No install logic is re-implemented —
  * every merge / foreign-preserve / idempotency / reversibility rule is the 019a engine's (D-4).
  *
@@ -24,11 +24,12 @@ import {
 	CodexConnector,
 	type ConnectorFs,
 	type ConnectorRegistry,
-	createClaudePluginRunner,
 	CursorConnector,
 	connectorMain,
+	createClaudePluginRunner,
 	createNodeConnectorFs,
 	type HarnessConnector,
+	HermesConnector,
 } from "../connectors/index.js";
 
 /** Resolve the package root so the connector finds the bundled `harnesses/<h>/bundle/` sources. */
@@ -49,8 +50,8 @@ function bundleSourceFor(slug: string): string {
 }
 
 /**
- * The real connector registry (D-4): the two supported hook-protocol connectors (claude-code as the
- * reference, cursor as the sibling), each built over the supplied `node:fs` {@link ConnectorFs} and
+ * The real connector registry (D-4): each supported harness connector is built over the supplied
+ * `node:fs` {@link ConnectorFs} and
  * pointed at the bundled handler sources + the user's home. A new harness is a SUBCLASS added here —
  * never a fork of install logic (019a a-AC-5).
  */
@@ -70,6 +71,14 @@ export function createConnectorRegistry(home: string = homedir()): ConnectorRegi
 			}),
 		codex: (fs) => new CodexConnector(fs, { home, bundleSource: bundleSourceFor("codex") }),
 		cursor: (fs) => new CursorConnector(fs, { home, bundleSource: bundleSourceFor("cursor") }),
+		hermes: (fs) =>
+			new HermesConnector(fs, {
+				home,
+				...(process.env.HERMES_HOME !== undefined ? { hermesHome: process.env.HERMES_HOME } : {}),
+				bundleSource: bundleSourceFor("hermes"),
+				mcpServerPath: join(packageRoot(), "mcp", "bundle", "server.js"),
+				notify: (line) => console.log(line),
+			}),
 	};
 	return {
 		build(harness: string, fs: ConnectorFs): HarnessConnector | undefined {
