@@ -77,3 +77,23 @@ export function memoryRow(path: string, summary: string): Row {
 export function sessionRow(message: string): Row {
 	return { message };
 }
+
+/**
+ * A `sessions` staleness-probe row: `count(*)` + `max(creation_date)`. Answers the cheap
+ * token probe the session cache dispatches before deciding whether to re-fetch the payload.
+ */
+export function sessionProbeRow(n: number, hwm: string): Row {
+	return { n, hwm };
+}
+
+/**
+ * Answer the session dispatch pair from ONE `respond`: the count/max probe SQL gets a
+ * {@link sessionProbeRow}; the `message` concat SQL gets `rows`; everything else gets `[]`.
+ */
+export function respondSession(n: number, hwm: string, rows: readonly Row[]): (sql: string) => readonly Row[] {
+	return (sql: string) => {
+		if (sql.includes("count(*)") && sql.includes('FROM "sessions"')) return [sessionProbeRow(n, hwm)];
+		if (sql.includes('FROM "sessions"')) return rows;
+		return [];
+	};
+}

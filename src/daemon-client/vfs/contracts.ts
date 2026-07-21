@@ -221,6 +221,16 @@ export function createFakeSnapshotLoader(snapshot: LoadedSnapshot | null): Snaps
 export type ContentCache = Map<string, string>;
 
 /**
+ * The session-recall cache (tier 5). Maps a session `path` to its concatenated body plus the
+ * monotone staleness TOKEN (`count(*)` + `max(creation_date)`) it was fetched at. A read
+ * dispatches only the cheap token probe (never the fat `message` column) and re-fetches the
+ * payload ONLY when the token changed — so an unchanged session, however large, is served
+ * without re-materializing tens of MB. Safe because `sessions` is append-only, making the
+ * token self-invalidating (a new turn bumps `count(*)`); no explicit invalidation is needed.
+ */
+export type SessionCache = Map<string, { token: string; body: string }>;
+
+/**
  * The pending-write buffer (FR-6, tier 4 / D-7). Holds writes that have been accepted but
  * not yet FLUSHED to storage (015b batches + debounces the flush). A read sees its OWN
  * pending write here BEFORE storage, so `cat` right after `Write` shows the change

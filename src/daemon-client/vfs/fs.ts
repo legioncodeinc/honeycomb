@@ -26,6 +26,7 @@ import {
 	type DaemonDispatch,
 	type FsVerb,
 	type PendingBuffer,
+	type SessionCache,
 	SessionPermissionError,
 	type SnapshotLoader,
 	type VfsScope,
@@ -43,6 +44,8 @@ export interface DeepLakeFsOptions {
 	readonly snapshots: SnapshotLoader;
 	/** Optional seed cache (defaults to empty). */
 	readonly cache?: ContentCache;
+	/** Optional seed session-recall cache (defaults to empty). */
+	readonly sessionCache?: SessionCache;
 	/** Optional seed pending buffer (defaults to empty). */
 	readonly pending?: PendingBuffer;
 }
@@ -57,6 +60,7 @@ export class DeepLakeFs {
 	private readonly dispatch: DaemonDispatch;
 	private readonly scope: VfsScope;
 	private readonly cache: ContentCache;
+	private readonly sessionCache: SessionCache;
 	private readonly pending: PendingBuffer;
 	private readonly snapshots: SnapshotLoader;
 	private readonly buffer: WriteBuffer;
@@ -65,6 +69,7 @@ export class DeepLakeFs {
 		this.dispatch = options.dispatch;
 		this.scope = options.scope;
 		this.cache = options.cache ?? new Map();
+		this.sessionCache = options.sessionCache ?? new Map();
 		this.pending = options.pending ?? new Map();
 		this.snapshots = options.snapshots;
 		// The write path is wired NOW (015b fills the flush). It shares the SAME dispatch
@@ -79,6 +84,7 @@ export class DeepLakeFs {
 			dispatch: this.dispatch,
 			scope: this.scope,
 			cache: this.cache,
+			sessionCache: this.sessionCache,
 			pending: this.pending,
 			snapshots: this.snapshots,
 		};

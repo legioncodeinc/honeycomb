@@ -21,7 +21,16 @@ import { handleGraphVfs } from "../../daemon/runtime/codebase/query.js";
 import { clampSessionTurns, sLiteral, sqlIdent } from "../../daemon/storage/sql.js";
 
 import { classifyPath, toMountRelative } from "./classify.js";
-import type { ContentCache, DaemonDispatch, PendingBuffer, Row, SnapshotLoader, VfsScope } from "./contracts.js";
+import type {
+	ContentCache,
+	DaemonDispatch,
+	PendingBuffer,
+	Row,
+	Rows,
+	SessionCache,
+	SnapshotLoader,
+	VfsScope,
+} from "./contracts.js";
 import { generateVirtualIndex } from "./index-gen.js";
 
 /** The `graph/` subtree prefix the bridge strips before delegating (FR-9). */
@@ -38,6 +47,12 @@ export interface ReadDeps {
 	readonly scope: VfsScope;
 	/** The in-memory content cache (tier 3). */
 	readonly cache: ContentCache;
+	/**
+	 * The session-recall cache (tier 5). When wired, session reads are gated on a cheap
+	 * staleness probe and re-fetch the fat payload only on change. Optional: when absent,
+	 * session reads fall back to the original unconditional fetch (no probe).
+	 */
+	readonly sessionCache?: SessionCache;
 	/** The pending-write buffer (tier 4) — the agent's own un-flushed writes. */
 	readonly pending: PendingBuffer;
 	/** The local snapshot loader for the graph bridge (tier 1) — zero network. */
@@ -154,11 +169,64 @@ export function buildSessionsConcatSql(path: string): string {
 }
 
 /**
- * Concatenate the session rows for a path (FR-7). Dispatches the bounded most-recent-N
- * SELECT (newest-first), reverses into chronological order, and joins each row's normalized
- * `message` with a newline. A path with no rows resolves to "" (an empty session file).
+ * Build the cheap session STALENESS probe for a `path`: `count(*)` + `max(creation_date)`,
+ * both filtered to this path. It reads ONLY the `path` + `creation_date` columns — it never
+ * touches the fat `message` column, so it costs a scalar scan (~sub-second) instead of
+ * materializing the tens-of-MB payload the concat fetch does.
+ *
+ * The two aggregates form a monotone staleness TOKEN (see {@link sessionToken}). `sessions`
+ * is append-only (rows are immutable once written — no UPDATE/DELETE), so a token change is
+ * necessary AND sufficient for the concatenated body to have changed: any new turn bumps
+ * `count(*)`, and no old turn can mutate. `count(*)` alone would suffice; `max(creation_date)`
+ * is a near-free second signal that also moves it forward.
+ */
+export function buildSessionHwmSql(path: string): string {
+	const tbl = sqlIdent("sessions");
+	const pathCol = sqlIdent("path");
+	const created = sqlIdent("creation_date");
+	return `SELECT count(*) AS n, max(${created}) AS hwm FROM "${tbl}" WHERE ${pathCol} = ${sLiteral(path)}`;
+}
+
+/** Derive the monotone staleness token (`"<count>:<max-creation_date>"`) from a probe row. */
+function sessionToken(probe: Rows): string {
+	const row = probe[0];
+	const n = row?.n ?? 0;
+	const hwm = row?.hwm ?? "";
+	return `${String(n)}:${String(hwm ?? "")}`;
+}
+
+/**
+ * Concatenate the session rows for a path (FR-7), served through a modification-time-gated
+ * cache when a {@link SessionCache} is wired.
+ *
+ * Flow: dispatch the cheap {@link buildSessionHwmSql} probe → derive the token. On a token
+ * HIT (session unchanged since we cached it), return the cached body WITHOUT re-fetching the
+ * fat `message` payload — the whole point, since re-reading an unchanged mega-session cold
+ * costs tens of seconds of S3 I/O for bytes we already have. On a MISS or a changed token,
+ * fetch the bounded most-recent-N turns, cache under the new token, and return. `n === 0`
+ * short-circuits to "" with no concat fetch (empty session file).
+ *
+ * The token is SELF-INVALIDATING for append-only data, so no explicit write-invalidation is
+ * needed even for the agent's own appends: the next probe sees the bumped `count(*)`.
+ *
+ * When no cache is wired (`deps.sessionCache` undefined — e.g. legacy callers/tests), this
+ * falls back to the original single unconditional fetch, adding no probe.
  */
 async function concatSessions(rel: string, deps: ReadDeps): Promise<string> {
+	if (deps.sessionCache === undefined) return fetchAndConcat(rel, deps);
+
+	const token = sessionToken(await deps.dispatch.query(buildSessionHwmSql(rel), deps.scope));
+	const cached = deps.sessionCache.get(rel);
+	if (cached !== undefined && cached.token === token) return cached.body;
+
+	// n===0 → empty session; skip the concat fetch entirely.
+	const body = token.startsWith("0:") ? "" : await fetchAndConcat(rel, deps);
+	deps.sessionCache.set(rel, { token, body });
+	return body;
+}
+
+/** Dispatch the bounded concat SELECT (newest-first), reverse to chronological, join lines. */
+async function fetchAndConcat(rel: string, deps: ReadDeps): Promise<string> {
 	const rows = await deps.dispatch.query(buildSessionsConcatSql(rel), deps.scope);
 	return rows
 		.slice()

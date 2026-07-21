@@ -19,13 +19,14 @@ import {
 	type Row,
 	type VfsScope,
 } from "../../../src/daemon-client/vfs/index.js";
-import { FIXTURE_SNAPSHOT, memoryRow, SCOPE, sessionRow } from "./fixtures.js";
+import { FIXTURE_SNAPSHOT, memoryRow, respondSession, SCOPE, sessionRow } from "./fixtures.js";
 
 /** Build a `DeepLakeFs` with the given dispatch responder + optional seeded maps. */
 function makeFs(opts: {
 	respond?: (sql: string, scope: VfsScope) => readonly Row[];
 	snapshot?: typeof FIXTURE_SNAPSHOT | null;
 	cache?: Map<string, string>;
+	sessionCache?: Map<string, { token: string; body: string }>;
 	pending?: PendingBuffer;
 }) {
 	const dispatch = createFakeDaemonDispatch({ respond: opts.respond });
@@ -34,6 +35,7 @@ function makeFs(opts: {
 		scope: SCOPE,
 		snapshots: createFakeSnapshotLoader(opts.snapshot === undefined ? FIXTURE_SNAPSHOT : opts.snapshot),
 		cache: opts.cache,
+		sessionCache: opts.sessionCache,
 		pending: opts.pending,
 	});
 	return { fs, dispatch };
@@ -91,15 +93,16 @@ describe("a-AC-1 read precedence: graph > index > cache > pending > sessions > S
 		// The bounded reader selects newest-first (`ORDER BY creation_date DESC LIMIT N`);
 		// concatSessions reverses the rows so the turn stream still reads oldest→newest.
 		const { fs, dispatch } = makeFs({
-			respond: (sql) => (sql.includes('FROM "sessions"') ? [sessionRow("turn 2"), sessionRow("turn 1")] : []),
+			respond: respondSession(2, "2026-01-02T00:00:00Z", [sessionRow("turn 2"), sessionRow("turn 1")]),
 		});
 		const body = await fs.readFile("sessions/2026/abc.md");
 		expect(body).toBe("turn 1\nturn 2");
-		// reached storage through the seam, with the bounded most-recent-N concat SQL
-		expect(dispatch.calls).toHaveLength(1);
+		// A session read dispatches the cheap staleness PROBE first, then the bounded concat.
+		expect(dispatch.calls).toHaveLength(2);
+		expect(dispatch.calls[0].sql).toContain("count(*)");
 		expect(dispatch.calls[0].sql).toContain('FROM "sessions"');
-		expect(dispatch.calls[0].sql).toContain("ORDER BY creation_date DESC");
-		expect(dispatch.calls[0].sql).toContain("LIMIT 2000");
+		expect(dispatch.calls[1].sql).toContain("ORDER BY creation_date DESC");
+		expect(dispatch.calls[1].sql).toContain("LIMIT 2000");
 	});
 
 	it("a-AC-1 tier 6 — a memory path falls through to a direct summary SELECT", async () => {
@@ -130,5 +133,74 @@ describe("a-AC-6 every storage-reaching read dispatches through the daemon under
 		const { fs, dispatch } = makeFs({ respond: () => [memoryRow("p.md", "s")] });
 		await fs.readFile("p.md");
 		expect(dispatch.calls[0].scope).toEqual(SCOPE);
+	});
+});
+
+describe("session-recall cache (Option 1): modification-time-gated re-fetch", () => {
+	it("serves an UNCHANGED session from cache after the cheap probe — no payload re-fetch", async () => {
+		// Same staleness token on every probe → the fat concat runs ONCE, then is cached.
+		const sessionCache = new Map<string, { token: string; body: string }>();
+		const { fs, dispatch } = makeFs({
+			sessionCache,
+			respond: respondSession(2, "2026-01-02T00:00:00Z", [sessionRow("turn 2"), sessionRow("turn 1")]),
+		});
+
+		const first = await fs.readFile("sessions/2026/abc.md");
+		expect(first).toBe("turn 1\nturn 2");
+		expect(dispatch.calls).toHaveLength(2); // probe + concat
+
+		const second = await fs.readFile("sessions/2026/abc.md");
+		expect(second).toBe("turn 1\nturn 2");
+		// Only ONE additional dispatch — the probe. The concat did NOT run again.
+		expect(dispatch.calls).toHaveLength(3);
+		expect(dispatch.calls[2].sql).toContain("count(*)");
+		expect(dispatch.calls.filter((c) => c.sql.includes("ORDER BY creation_date DESC"))).toHaveLength(1);
+	});
+
+	it("re-fetches when the token changes (a new turn was appended)", async () => {
+		const sessionCache = new Map<string, { token: string; body: string }>();
+		let turns = [sessionRow("turn 1")];
+		let n = 1;
+		let hwm = "2026-01-01T00:00:00Z";
+		const { fs, dispatch } = makeFs({
+			sessionCache,
+			respond: (sql) => {
+				if (sql.includes("count(*)")) return [{ n, hwm }];
+				if (sql.includes('FROM "sessions"')) return turns;
+				return [];
+			},
+		});
+
+		expect(await fs.readFile("sessions/s.md")).toBe("turn 1");
+		// A new turn lands: the token moves forward.
+		turns = [sessionRow("turn 2"), sessionRow("turn 1")];
+		n = 2;
+		hwm = "2026-01-02T00:00:00Z";
+		expect(await fs.readFile("sessions/s.md")).toBe("turn 1\nturn 2");
+		// Two concat fetches total — one per distinct token.
+		expect(dispatch.calls.filter((c) => c.sql.includes("ORDER BY creation_date DESC"))).toHaveLength(2);
+	});
+
+	it("an empty session (count 0) resolves to '' with NO concat fetch", async () => {
+		const { fs, dispatch } = makeFs({
+			sessionCache: new Map(),
+			respond: respondSession(0, "", []),
+		});
+		expect(await fs.readFile("sessions/empty.md")).toBe("");
+		// Only the probe ran; the fat concat was skipped entirely.
+		expect(dispatch.calls).toHaveLength(1);
+		expect(dispatch.calls[0].sql).toContain("count(*)");
+	});
+
+	it("the probe never reads the fat `message` column", async () => {
+		const { fs, dispatch } = makeFs({
+			sessionCache: new Map(),
+			respond: respondSession(1, "2026-01-01T00:00:00Z", [sessionRow("x")]),
+		});
+		await fs.readFile("sessions/s.md");
+		const probe = dispatch.calls[0].sql;
+		expect(probe).toContain("count(*)");
+		expect(probe).toContain("max(creation_date)");
+		expect(probe).not.toContain("message");
 	});
 });
