@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.23.0 — 2026-07-21
+
+Session file reads in the virtual filesystem now use a lightweight caching layer that avoids re-fetching large session payloads unless new data has actually been appended, improving read performance for large sessions.
+
 ## v0.22.0 — 2026-07-14
 
 Honeycomb's CLI now speaks a standardized command interface with new restart, service-install, service-uninstall, register, logs, and JSON-envelope automation support, plus safer service update/uninstall flows with health-checked rollback. Existing daemon commands remain fully backward compatible.
