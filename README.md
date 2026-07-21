@@ -265,7 +265,7 @@ Honeycomb supports 4 harnesses in production (Claude Code, Codex, Cursor, and He
 
 `honeycomb setup` detects the ones you have installed and wires each idempotently; `honeycomb uninstall` reverses only Honeycomb's changes. A skill mined while you were in Cursor is auto-pulled and ready in Claude Code on your next session.
 
-Hermes is wired through its native `$HERMES_HOME/config.yaml` shell hooks and `mcp_servers` entry. Honeycomb does not bypass Hermes' hook-consent boundary: after connecting Hermes, review and approve the exact Honeycomb hook commands at the next interactive Hermes start. Unapproved hooks are skipped in non-interactive/gateway sessions.
+Hermes is wired through its native `$HERMES_HOME/config.yaml` shell hooks and `mcp_servers` entry. For a non-default Hermes profile, run the connector with that profile's explicit home (for example, `HERMES_HOME="$HOME/.hermes/profiles/work" honeycomb connect hermes`); a sticky `active_profile` file alone is not inherited by a separately launched Honeycomb process. Honeycomb does not bypass Hermes' hook-consent boundary: after connecting Hermes, review and approve the exact Honeycomb hook commands at the next interactive Hermes start. Unapproved hooks are skipped in non-interactive/gateway sessions.
 
 <img src="assets/brand/divider-minor.svg" width="100%" height="3">
 
