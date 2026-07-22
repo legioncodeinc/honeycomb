@@ -24,7 +24,7 @@ Think of it as a shared brain your assistants read from and write to on every tu
 ## What you actually get
 
 - **Memory that survives.** What you figured out yesterday is waiting for you today, already summarized.
-- **Memory that travels across tools.** A note written while using one assistant is recalled by another. Honeycomb plugs underneath the coding assistants you already use (Claude Code, Cursor, and Codex today, with three more in progress).
+- **Memory that travels across tools.** A note written while using one assistant is recalled by another. Honeycomb plugs underneath the coding assistants you already use (Claude Code, Cursor, Codex, and Hermes today, with two more in progress).
 - **Skills that spread.** When you (or a teammate) solve something reusable, Honeycomb can turn it into a shareable "skill" that shows up automatically for everyone, no copy-paste.
 - **A memory that gets sharper, not noisier.** Honeycomb periodically tidies its own notes: merging duplicates, dropping junk, and keeping the current version of a fact instead of letting stale ones pile up.
 - **A friendly dashboard.** A simple local web page shows what has been remembered, how your tools are wired, and the health of everything. No database knowledge required.

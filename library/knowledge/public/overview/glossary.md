@@ -13,7 +13,7 @@ Plain-language definitions of the words you will see around Honeycomb. Each entr
 
 **Honeycomb**: A shared, lasting memory for your AI coding assistants. It remembers what you and your assistants do so the knowledge is there next time, in any tool, on any device.
 
-**Agent / assistant / harness**: All three words point at the same thing: the AI coding tool you actually use (for example Claude Code, Cursor, or Codex). "Harness" is just the technical word for "the tool Honeycomb plugs underneath." Honeycomb supports three today (Claude Code, Cursor, Codex), with three more (Hermes, pi, OpenClaw) in progress.
+**Agent / assistant / harness**: All three words point at the same thing: the AI coding tool you actually use (for example Claude Code, Cursor, Codex, or Hermes). "Harness" is just the technical word for "the tool Honeycomb plugs underneath." Honeycomb supports four today (Claude Code, Cursor, Codex, Hermes), with two more (pi, OpenClaw) in progress.
 
 **Daemon**: The small helper program that runs quietly in the background on your machine. It is the only part of Honeycomb that touches your memory store, which keeps everything in one safe, consistent place. You rarely interact with it directly; it starts itself when needed.
 

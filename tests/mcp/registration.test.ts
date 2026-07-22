@@ -1,49 +1,46 @@
 /**
- * PRD-021e e-AC-4 — the MCP server is registered in ONE MCP-speaking harness.
+ * PRD-021e e-AC-4 — the real Hermes connector registers Honeycomb's stdio MCP server.
  *
- * The acceptance bar is a single MCP-speaking harness whose native MCP config
- * lists the Honeycomb server, so its tool list would load the unified `honeycomb_`
- * surface. Hermes is that harness (the wave plan's MCP-speaking target). This test
- * asserts the distinct registration artifact (`harnesses/hermes/.mcp.json`) exists,
- * parses, and registers a `honeycomb` stdio server pointing at the BUILT bundle
- * entry — the same `mcp/bundle/server.js` that `startMcpServer` makes answer
- * `initialize`. It does NOT touch `harnesses/hermes/src/index.ts` (021c owns that).
+ * Hermes reads `mcp_servers` from `$HERMES_HOME/config.yaml`; repository-local
+ * `.mcp.json` files are not part of Hermes' protocol. This test exercises the
+ * production connector path and validates the emitted native YAML.
  */
 
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-
 import { describe, expect, it } from "vitest";
+import { parse } from "yaml";
 
-const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
-const CONFIG_PATH = `${REPO_ROOT}harnesses/hermes/.mcp.json`;
+import { createFakeFs, HermesConnector } from "../../src/connectors/index.js";
 
-interface McpServerEntry {
-	readonly command?: string;
-	readonly args?: readonly string[];
-	readonly env?: Record<string, string>;
-}
-interface McpConfig {
-	readonly mcpServers?: Record<string, McpServerEntry>;
-}
+const HOME = "/home/dev";
+const BUNDLE = "/repo/harnesses/hermes/bundle";
+const MCP_SOURCE = "/repo/mcp/bundle/server.js";
+const MCP_INSTALLED = `${HOME}/.hermes/honeycomb/mcp/server.mjs`;
 
-function readConfig(): McpConfig {
-	return JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as McpConfig;
-}
-
-describe("e-AC-4: the Honeycomb MCP server is registered in the hermes harness", () => {
-	it("e-AC-4 the registration artifact lists a honeycomb server", () => {
-		const config = readConfig();
-		expect(config.mcpServers).toBeDefined();
-		expect(config.mcpServers?.honeycomb).toBeDefined();
+function fixture() {
+	return createFakeFs({
+		files: {
+			[`${HOME}/.hermes`]: "",
+			[`${BUNDLE}/session-start.mjs`]: "x",
+			[`${BUNDLE}/capture.mjs`]: "x",
+			[`${BUNDLE}/session-end.mjs`]: "x",
+			[MCP_SOURCE]: "mcp",
+		},
 	});
+}
 
-	it("e-AC-4 the honeycomb server launches the built mcp/bundle/server.js over stdio", () => {
-		const entry = readConfig().mcpServers?.honeycomb;
-		expect(entry?.command).toBe("node");
-		// The args point at the BUILT MCP bundle — the stdio server startMcpServer serves.
-		expect(entry?.args).toBeDefined();
-		const joined = (entry?.args ?? []).join(" ");
-		expect(joined).toContain("mcp/bundle/server.js");
+describe("e-AC-4: Honeycomb MCP is registered through Hermes' native config", () => {
+	it("copies the MCP bundle and writes mcp_servers.honeycomb with an absolute installed path", async () => {
+		const fs = fixture();
+		await new HermesConnector(fs, { home: HOME, bundleSource: BUNDLE, mcpServerPath: MCP_SOURCE }).install();
+
+		const config = parse(fs.files.get(`${HOME}/.hermes/config.yaml`) as string) as {
+			mcp_servers?: Record<string, { command?: string; args?: string[]; enabled?: boolean }>;
+		};
+		expect(fs.files.get(MCP_INSTALLED)).toBe("mcp");
+		expect(config.mcp_servers?.honeycomb).toMatchObject({
+			command: process.execPath,
+			args: [MCP_INSTALLED],
+			enabled: true,
+		});
 	});
 });

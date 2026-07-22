@@ -19,7 +19,6 @@ import {
 	createHermesShim,
 	createOpenClawShim,
 	createPiShim,
-	HERMES_MCP_MENTION,
 } from "../../src/hooks/index.js";
 
 const BLOCK = "## Goals\n- ship v2\n## Rules\n- prefer small PRs";
@@ -31,7 +30,12 @@ function landed(env: ContextEnvelope): string {
 
 describe("PRD-019c c-AC-5: context channel routing", () => {
 	it("c-AC-5 model-only harnesses carry the VERBATIM block in additionalContext", () => {
-		const modelOnly: readonly HarnessShim[] = [createClaudeCodeShim(), createCursorShim(), createOpenClawShim()];
+		const modelOnly: readonly HarnessShim[] = [
+			createClaudeCodeShim(),
+			createCursorShim(),
+			createHermesShim(),
+			createOpenClawShim(),
+		];
 		for (const shim of modelOnly) {
 			const env = shim.renderContext(BLOCK);
 			expect(env.channel, shim.harness).toBe("model-only");
@@ -43,7 +47,7 @@ describe("PRD-019c c-AC-5: context channel routing", () => {
 	});
 
 	it("c-AC-5 user-visible harnesses carry the block as transcript text", () => {
-		const userVisible: readonly HarnessShim[] = [createCodexShim(), createHermesShim(), createPiShim()];
+		const userVisible: readonly HarnessShim[] = [createCodexShim(), createPiShim()];
 		for (const shim of userVisible) {
 			const env = shim.renderContext(BLOCK);
 			expect(env.channel, shim.harness).toBe("user-visible");
@@ -57,11 +61,10 @@ describe("PRD-019c c-AC-5: context channel routing", () => {
 		expect(landed(env)).toBe("honeycomb: signed in — memory recall active");
 	});
 
-	it("c-AC-5 Hermes lands the FULL block plus an MCP-tools mention (user-visible)", () => {
+	it("c-AC-5 Hermes lands the full block model-only through its { context } hook response", () => {
 		const env = createHermesShim().renderContext(BLOCK);
-		const text = landed(env);
-		expect(text).toContain(BLOCK); // the full logical block.
-		expect(text).toContain(HERMES_MCP_MENTION.trim());
+		expect(env.channel).toBe("model-only");
+		expect(landed(env)).toBe(BLOCK);
 	});
 
 	it("c-AC-5 pi lands the block as a static AGENTS.md fenced section (user-visible)", () => {
@@ -75,10 +78,10 @@ describe("PRD-019c c-AC-5: context channel routing", () => {
 	it("c-AC-5 the SAME block routes to BOTH a model-only and a user-visible harness", () => {
 		// One logical block; correct channel for each harness — the c-AC-5 property.
 		const modelOnly = createClaudeCodeShim().renderContext(BLOCK);
-		const userVisible = createHermesShim().renderContext(BLOCK);
+		const userVisible = createPiShim().renderContext(BLOCK);
 		expect(modelOnly.channel).toBe("model-only");
 		expect(userVisible.channel).toBe("user-visible");
-		// Both carry the same logical content (Hermes appends only the MCP mention).
+		// Both carry the same logical content through their native channels.
 		expect(landed(modelOnly)).toBe(BLOCK);
 		expect(landed(userVisible)).toContain(BLOCK);
 	});
@@ -100,6 +103,7 @@ describe("ISS-022: renderContext extras are safe on every non-recall shim", () =
 		const modelOnly: readonly HarnessShim[] = [
 			createClaudeCodeShim({ userPromptMode: "capture" }),
 			createCursorShim(),
+			createHermesShim(),
 			createOpenClawShim(),
 		];
 		for (const shim of modelOnly) {
@@ -110,8 +114,8 @@ describe("ISS-022: renderContext extras are safe on every non-recall shim", () =
 		}
 	});
 
-	it("user-visible shims (codex / hermes / pi) are UNCHANGED without extras and append only the suffix with them", () => {
-		const userVisible: readonly HarnessShim[] = [createCodexShim(), createHermesShim(), createPiShim()];
+	it("user-visible shims (codex / pi) are unchanged without extras and append only the suffix with them", () => {
+		const userVisible: readonly HarnessShim[] = [createCodexShim(), createPiShim()];
 		for (const shim of userVisible) {
 			const bare = shim.renderContext(BLOCK);
 			const again = shim.renderContext(BLOCK, undefined);

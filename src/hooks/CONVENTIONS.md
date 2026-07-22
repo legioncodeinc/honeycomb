@@ -72,7 +72,7 @@ carry the same logical content; only the routing + any `renderUserVisible` conde
 | codex       | user-visible  | legacy       | `codex exec --dangerously-bypass-approvals-and-sandbox` | detached setup, brief login line, Bash-only (FR-3 / c-AC-4) |
 | cursor      | model-only    | plugin       | `cursor-agent` → `claude` fallback                   | `additional_context` key, `workspace_roots` cwd, `Shell` intercept (FR-4) |
 | openclaw    | model-only    | plugin       | (native extension; no host-CLI exec)                 | batches at `agent_end`, new-slice only, no PreToolUse (FR-5 / c-AC-3) |
-| hermes      | user-visible  | legacy       | `hermes --non-interactive`                           | `{ context }` output + MCP mention, terminal-only tools (FR-6) |
+| hermes      | model-only    | legacy       | `hermes chat -Q -q`                                  | native `{ context }` output; no pre-tool interception |
 | pi          | user-visible  | plugin       | `pi --print --provider <p> --model <m>`              | static `AGENTS.md` block, no PreToolUse; ext source at `harnesses/pi/extension-source/honeycomb.ts` (FR-7) |
 
 OpenCode / Gemini CLI / Oh My Pi (FR-8) are DOCUMENTED FUTURE shims, not implemented this
@@ -85,8 +85,8 @@ config + a parametrized entry in the c-AC-1 equivalence table — no engine chan
 ## Context channel (FR-10 / c-AC-5 — PRD open question, recorded not resolved)
 
 `model-only` lands in the model's context but is not shown to the user (Claude Code, Cursor,
-OpenClaw); `user-visible` is rendered in the transcript (Codex's login line, Hermes's
-`{ context }`, pi's `AGENTS.md`). The shim normalizes the SAME logical block to its channel
+Hermes, OpenClaw); `user-visible` is rendered in the transcript (Codex's login line and
+pi's `AGENTS.md`). The shim normalizes the SAME logical block to its channel
 before handoff. Whether to NORMALIZE the difference or SURFACE it per harness is the PRD's
 open question — left to Wave 2 / a later decision, not pre-decided here.
 

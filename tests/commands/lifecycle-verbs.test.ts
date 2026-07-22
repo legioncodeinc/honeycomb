@@ -179,6 +179,25 @@ function recordingConnector(harnesses: string[] = ["cursor"]): ConnectorRunner &
 	};
 }
 
+describe("top-level connect routing", () => {
+	it("routes `honeycomb connect hermes` through the connector engine", async () => {
+		const connector = recordingConnector(["hermes"]);
+		const deps: LocalDeps = {
+			daemon: createFakeDaemonClient(),
+			connector,
+			out: () => {},
+		};
+		const dispatcher = createDispatcher();
+
+		const result = await dispatcher.dispatch(dispatcher.parse(["connect", "hermes"]), deps);
+
+		expect(result.exitCode).toBe(0);
+		expect(connector.runs).toEqual(["connect hermes"]);
+		expect(lookupVerb("connect")?.cls).toBe("local");
+		expect(usageText()).toContain("connect");
+	});
+});
+
 /** Recording UninstallLifecycleSteps: records order + returns scripted results (or throws). */
 function recordingSteps(
 	script: {
