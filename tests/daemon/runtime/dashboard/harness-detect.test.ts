@@ -162,9 +162,16 @@ describe("PRD-039a a-AC-3: detectInstalledHarnesses — a present/absent MIX is 
 
 describe("PRD-039a a-AC-3: detectInstalledHarnesses — fail-soft (never throws)", () => {
 	it("rejects a relative home root instead of probing outside a trusted absolute root", () => {
-		touchFile(".hermes", "honeycomb", "bundle", "capture.mjs");
-		const relativeHome = relative(process.cwd(), home);
-		expect(detectInstalledHarnesses(relativeHome, relativeHome).size).toBe(0);
+		const absoluteHome = mkdtempSync(join(process.cwd(), ".honeycomb-relative-home-"));
+		const relativeHome = relative(process.cwd(), absoluteHome);
+		try {
+			const markerDir = join(absoluteHome, ".hermes", "honeycomb", "bundle");
+			mkdirSync(markerDir, { recursive: true });
+			writeFileSync(join(markerDir, "capture.mjs"), "fixture\n", "utf8");
+			expect(detectInstalledHarnesses(relativeHome, relativeHome).size).toBe(0);
+		} finally {
+			rmSync(absoluteHome, { recursive: true, force: true });
+		}
 	});
 
 	it("a non-existent home root → empty set, NO throw", () => {
