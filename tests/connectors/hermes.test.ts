@@ -190,6 +190,26 @@ describe("HermesConnector", () => {
 		expect(fs.links.get(`${PLUGIN}/capture.mjs`)).toBe("/tmp/foreign-target");
 	});
 
+	it("refuses a symlinked Hermes config before reading or mutating it", async () => {
+		const fs = seedFs("model: test-model\n");
+		const c = connector(fs);
+		await fs.symlink("/tmp/foreign-config.yaml", CONFIG);
+
+		await expect(c.install()).rejects.toThrow(/symlink/iu);
+		await expect(c.uninstall()).rejects.toThrow(/symlink/iu);
+		expect(fs.writes).toHaveLength(0);
+	});
+
+	it("refuses a symlinked Hermes home before reading or mutating its config", async () => {
+		const fs = seedFs("model: test-model\n");
+		const c = connector(fs);
+		await fs.symlink("/tmp/foreign-hermes-home", `${HOME}/.hermes`);
+
+		await expect(c.install()).rejects.toThrow(/symlink/iu);
+		await expect(c.uninstall()).rejects.toThrow(/symlink/iu);
+		expect(fs.writes).toHaveLength(0);
+	});
+
 	it("preserves a managed artifact modified after installation during uninstall", async () => {
 		const fs = seedFs();
 		const c = connector(fs);

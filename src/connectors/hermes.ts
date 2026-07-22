@@ -217,6 +217,8 @@ export class HermesConnector extends HarnessConnector {
 
 	private async assertInstallTreeIsNotSymlinked(): Promise<void> {
 		const paths = new Set([
+			this.opts.hermesHome,
+			this.configPath(),
 			this.opts.pluginRoot,
 			`${this.opts.pluginRoot}/bundle`,
 			`${this.opts.pluginRoot}/mcp`,
@@ -306,6 +308,8 @@ export class HermesConnector extends HarnessConnector {
 	}
 
 	async install(): Promise<ConnectorRunResult> {
+		// Reject symlinked profile/config/managed paths before reading user configuration or writing artifacts.
+		await this.assertInstallTreeIsNotSymlinked();
 		const handlers = this.hookHandlers();
 		const managedFiles = this.managedFiles();
 		const sourceBodies = await this.readManagedSourceBodies(managedFiles);
@@ -314,7 +318,6 @@ export class HermesConnector extends HarnessConnector {
 		// conflicting user config fails closed without leaving a partial installation.
 		const configPath = this.configPath();
 		const patchedConfig = this.patchConfigText(await this.fs.readFile(configPath), handlers);
-		await this.assertInstallTreeIsNotSymlinked();
 
 		const manifestPath = this.ownershipManifestPath();
 		const manifestText = await this.validateManagedFileOwnership(managedFiles, manifestPath);
