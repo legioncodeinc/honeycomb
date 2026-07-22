@@ -79,7 +79,9 @@ describe("HermesConnector", () => {
 		expect(config.hooks?.pre_llm_call?.[1]?.command).not.toContain("--honeycomb-recall");
 		expect(config.hooks?.pre_tool_call).toBeUndefined();
 		expect(config.hooks?.on_session_end).toBeUndefined();
-		expect(config.hooks?.post_tool_call?.every((h) => h.matcher === undefined)).toBe(true);
+		expect(config.hooks?.post_tool_call).toHaveLength(1);
+		expect(config.hooks?.post_tool_call?.[0]?.command).toContain(`${PLUGIN}/capture.mjs`);
+		expect(config.hooks?.post_tool_call?.[0]?.matcher).toBeUndefined();
 		expect(config.mcp_servers?.honeycomb).toMatchObject({
 			command: process.execPath,
 			args: [INSTALLED_MCP],

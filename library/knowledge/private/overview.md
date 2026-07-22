@@ -22,7 +22,7 @@ Honeycomb is the merger of two systems. Hivemind contributed the broad product: 
 
 The result is one daemon that captures everything a harness does, distills it into structured, source-backed memory, and serves it back, all on a DeepLake substrate that a team can share.
 
-Honeycomb is production ready and live-tested end to end: the capture-to-recall path runs green against live Deeplake (`npm run smoke:golden-path` with credentials), and four harnesses (Claude Code, Cursor, Codex, Hermes) ship in production today, with pi and OpenClaw in progress. Embeddings, the distillation pipeline, and cross-device sharing are deliberate opt-in and by-design choices (covered below and in the linked operations docs), not gaps.
+Honeycomb is production-ready and live-tested end-to-end: the capture-to-recall path runs green against live Deeplake (`npm run smoke:golden-path` with credentials), and four harnesses (Claude Code, Cursor, Codex, Hermes) ship in production today, with pi and OpenClaw in progress. Embeddings, the distillation pipeline, and cross-device sharing are deliberate opt-in and by-design choices (covered below and in the linked operations docs), not gaps.
 
 ## The shape
 

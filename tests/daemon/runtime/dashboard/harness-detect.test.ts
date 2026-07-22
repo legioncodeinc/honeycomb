@@ -82,6 +82,11 @@ describe("PRD-039a a-AC-3: detectInstalledHarnesses — markers present → in t
 		expect(detectInstalledHarnesses(home, home)).toContain("hermes");
 	});
 
+	it("a directory named capture.mjs does not count as an installed Hermes hook", () => {
+		touchDir(".hermes", "honeycomb", "bundle", "capture.mjs");
+		expect(detectInstalledHarnesses(home, home)).not.toContain("hermes");
+	});
+
 	it("Hermes detection honors an explicit HERMES_HOME profile root", () => {
 		const previous = process.env.HERMES_HOME;
 		process.env.HERMES_HOME = join(home, ".hermes", "profiles", "work");

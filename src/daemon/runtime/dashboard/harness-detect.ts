@@ -39,7 +39,7 @@
  *   endpoint only consults `installed.has(name)`), so no secret can leak through it.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
@@ -55,6 +55,8 @@ interface HarnessMarker {
 	readonly name: string;
 	/** Build candidate marker paths from trusted roots (cheap `join`s, no IO). */
 	readonly paths: (homeDir: string, hermesHome?: string) => readonly string[];
+	/** Optional path validator for markers that require a concrete file rather than mere existence. */
+	readonly isValidPath?: (path: string) => boolean;
 }
 
 /**
@@ -86,6 +88,7 @@ const HARNESS_MARKERS: readonly HarnessMarker[] = [
 		// file—not the parent directory—prevents an empty leftover directory from reading as wired.
 		paths: (_homeDir, hermesHome) =>
 			hermesHome === undefined ? [] : [join(hermesHome, "honeycomb", "bundle", "capture.mjs")],
+		isValidPath: fileMarkerExists,
 	},
 	{
 		name: "pi",
@@ -108,6 +111,15 @@ function markerExists(path: string): boolean {
 	} catch {
 		// A marker that cannot be stat'd (permission, ELOOP, …) is treated as ABSENT — the detector
 		// must never throw and must never over-report. The harness simply reads `installed: false`.
+		return false;
+	}
+}
+
+/** True iff `path` is a regular file; failures are treated as an absent marker. */
+function fileMarkerExists(path: string): boolean {
+	try {
+		return statSync(path).isFile();
+	} catch {
 		return false;
 	}
 }
@@ -146,7 +158,8 @@ export function detectInstalledHarnesses(homeDir: string = homedir(), _cwd: stri
 		// Defensive: only ever record a canonical id (the registry is the source of truth; a marker for
 		// a non-canonical id is ignored so the set can never diverge from the six the endpoint enumerates).
 		if (!canonical.has(marker.name)) continue;
-		if (marker.paths(trustedHomeRoot, trustedHermesHome).some(markerExists)) installed.add(marker.name);
+		const isValidPath = marker.isValidPath ?? markerExists;
+		if (marker.paths(trustedHomeRoot, trustedHermesHome).some(isValidPath)) installed.add(marker.name);
 	}
 	return installed;
 }
