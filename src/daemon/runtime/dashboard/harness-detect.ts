@@ -20,11 +20,10 @@
  *     - `codex` → `~/.codex/hooks.json` (the connector's `configPath()`) OR the plugin root
  *       `~/.codex/plugins/honeycomb` (`src/connectors/codex.ts`). Repointed off the dead
  *       `~/.codex/hivemind` leftover.
- *     - `hermes` / `pi` / `openclaw` → NO honeycomb connector wires these yet (only claude-code,
- *       codex, and cursor have connectors). Their marker is the honeycomb-namespaced dir honeycomb
- *       WOULD write once wired (`~/.hermes/honeycomb`, `~/.pi/honeycomb`, `~/.openclaw/honeycomb`) —
- *       so they read absent today (the honest "not wired yet" picture) rather than reporting installed
- *       off a stale hivemind-v1 artifact (`~/.hermes/config.yaml`, `~/.pi/agent/…`, `~/.openclaw/extensions/hivemind`).
+ *     - `hermes` → `~/.hermes/honeycomb/bundle/capture.mjs`, the concrete installed hook alias.
+ *     - `pi` / `openclaw` → no Honeycomb connector wires these yet; their marker is the
+ *       honeycomb-namespaced directory Honeycomb would write once wired (`~/.pi/honeycomb`,
+ *       `~/.openclaw/honeycomb`), so stale hivemind-v1 artifacts never report installed.
  *
  *   A harness reads INSTALLED iff one of its markers exists. The check is intentionally OR-over-markers
  *   and tolerant: a partially-wired harness (e.g. the config written but the plugin dir pruned) still
@@ -40,9 +39,9 @@
  *   endpoint only consults `installed.has(name)`), so no secret can leak through it.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 import { CANONICAL_HARNESS_IDS } from "./harness-registry.js";
 
@@ -54,8 +53,10 @@ import { CANONICAL_HARNESS_IDS } from "./harness-registry.js";
 interface HarnessMarker {
 	/** The canonical harness id (must be one of {@link CANONICAL_HARNESS_IDS}). */
 	readonly name: string;
-	/** Build the candidate marker paths from the resolved home dir (cheap `join`s, no IO). */
-	readonly paths: (homeDir: string) => readonly string[];
+	/** Build candidate marker paths from trusted roots (cheap `join`s, no IO). */
+	readonly paths: (homeDir: string, hermesHome?: string) => readonly string[];
+	/** Optional path validator for markers that require a concrete file rather than mere existence. */
+	readonly isValidPath?: (path: string) => boolean;
 }
 
 /**
@@ -83,11 +84,11 @@ const HARNESS_MARKERS: readonly HarnessMarker[] = [
 	},
 	{
 		name: "hermes",
-		// No honeycomb connector wires hermes yet (only claude-code/codex/cursor have connectors). The
-		// marker is the honeycomb-NAMESPACED dir honeycomb would write, NEVER the dead hivemind-v1
-		// `~/.hermes/config.yaml` / `~/.hermes/hivemind` leftovers — so an old ~/.hermes no longer
-		// masquerades as installed. It reads absent until honeycomb actually wires hermes.
-		paths: (h) => [join(h, ".hermes", "honeycomb")],
+		// The Hermes connector writes this concrete handler and removes it on uninstall. Checking the
+		// file—not the parent directory—prevents an empty leftover directory from reading as wired.
+		paths: (_homeDir, hermesHome) =>
+			hermesHome === undefined ? [] : [join(hermesHome, "honeycomb", "bundle", "capture.mjs")],
+		isValidPath: fileMarkerExists,
 	},
 	{
 		name: "pi",
@@ -114,6 +115,23 @@ function markerExists(path: string): boolean {
 	}
 }
 
+/** True iff `path` is a regular file; failures are treated as an absent marker. */
+function fileMarkerExists(path: string): boolean {
+	try {
+		return statSync(path).isFile();
+	} catch {
+		return false;
+	}
+}
+
+/** Resolve Hermes' effective profile root, rejecting unsafe configured values. */
+function configuredHermesHome(homeDir: string): string | undefined {
+	const configured = process.env.HERMES_HOME?.trim();
+	const candidate = configured === undefined || configured === "" ? join(homeDir, ".hermes") : configured;
+	if (!isAbsolute(candidate) || candidate.includes("\0")) return undefined;
+	return resolve(candidate);
+}
+
 /**
  * Resolve which of the canonical six harnesses Honeycomb has wired on disk (a-AC-3). For each harness,
  * the result includes its id iff at least one of its install markers exists under `homeDir`. Cheap
@@ -129,13 +147,19 @@ function markerExists(path: string): boolean {
  *                 project-local marker could key off it); UNUSED today (no current marker is cwd-local).
  */
 export function detectInstalledHarnesses(homeDir: string = homedir(), _cwd: string = process.cwd()): Set<string> {
+	// Only probe beneath a concrete absolute home root. This function never accepts a caller-controlled
+	// relative path, so its fixed marker suffixes cannot escape through cwd resolution.
+	if (!isAbsolute(homeDir) || homeDir.includes("\0")) return new Set();
+	const trustedHomeRoot = resolve(homeDir);
+	const trustedHermesHome = configuredHermesHome(trustedHomeRoot);
 	const canonical = new Set<string>(CANONICAL_HARNESS_IDS);
 	const installed = new Set<string>();
 	for (const marker of HARNESS_MARKERS) {
 		// Defensive: only ever record a canonical id (the registry is the source of truth; a marker for
 		// a non-canonical id is ignored so the set can never diverge from the six the endpoint enumerates).
 		if (!canonical.has(marker.name)) continue;
-		if (marker.paths(homeDir).some(markerExists)) installed.add(marker.name);
+		const isValidPath = marker.isValidPath ?? markerExists;
+		if (marker.paths(trustedHomeRoot, trustedHermesHome).some(isValidPath)) installed.add(marker.name);
 	}
 	return installed;
 }

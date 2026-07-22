@@ -50,9 +50,10 @@ messages are sent, never re-sending already-captured ones.
 
 The shared core renders ONE block (`HookResult.additionalContext`). `shim.renderContext(block)`
 wraps it into a `ContextEnvelope`: `{ channel: "model-only", additionalContext }` (Claude Code,
-Cursor under `additional_context`, OpenClaw) or `{ channel: "user-visible", text }` (Codex's
-brief login line, Hermes's `{ context }` + MCP mention, pi's `AGENTS.md` block). Both channels
-carry the same logical content; only the routing + any `renderUserVisible` condensation differs.
+Cursor under `additional_context`, OpenClaw, and Hermes's native `{ context }` response) or
+`{ channel: "user-visible", text }` (Codex's brief login line and pi's `AGENTS.md` block). Both
+channels carry the same logical content; only the routing + any `renderUserVisible` condensation
+differs.
 
 ## The five divergences a shim overrides (FR-2)
 
@@ -72,7 +73,7 @@ carry the same logical content; only the routing + any `renderUserVisible` conde
 | codex       | user-visible  | legacy       | `codex exec --dangerously-bypass-approvals-and-sandbox` | detached setup, brief login line, Bash-only (FR-3 / c-AC-4) |
 | cursor      | model-only    | plugin       | `cursor-agent` → `claude` fallback                   | `additional_context` key, `workspace_roots` cwd, `Shell` intercept (FR-4) |
 | openclaw    | model-only    | plugin       | (native extension; no host-CLI exec)                 | batches at `agent_end`, new-slice only, no PreToolUse (FR-5 / c-AC-3) |
-| hermes      | user-visible  | legacy       | `hermes --non-interactive`                           | `{ context }` output + MCP mention, terminal-only tools (FR-6) |
+| hermes      | model-only    | legacy       | `hermes chat -Q -q`                                  | native `{ context }` output; no pre-tool interception |
 | pi          | user-visible  | plugin       | `pi --print --provider <p> --model <m>`              | static `AGENTS.md` block, no PreToolUse; ext source at `harnesses/pi/extension-source/honeycomb.ts` (FR-7) |
 
 OpenCode / Gemini CLI / Oh My Pi (FR-8) are DOCUMENTED FUTURE shims, not implemented this
@@ -85,8 +86,8 @@ config + a parametrized entry in the c-AC-1 equivalence table — no engine chan
 ## Context channel (FR-10 / c-AC-5 — PRD open question, recorded not resolved)
 
 `model-only` lands in the model's context but is not shown to the user (Claude Code, Cursor,
-OpenClaw); `user-visible` is rendered in the transcript (Codex's login line, Hermes's
-`{ context }`, pi's `AGENTS.md`). The shim normalizes the SAME logical block to its channel
+Hermes, OpenClaw); `user-visible` is rendered in the transcript (Codex's login line and
+pi's `AGENTS.md`). The shim normalizes the SAME logical block to its channel
 before handoff. Whether to NORMALIZE the difference or SURFACE it per harness is the PRD's
 open question — left to Wave 2 / a later decision, not pre-decided here.
 
@@ -119,14 +120,10 @@ protocol it implements in its module header.
 The non-reference placeholder modules declare ONLY their constants this wave so the directory +
 ownership exist with zero contention; Wave 2 adds the factory + exports it from `index.ts`.
 
-## Deferred assembly (honest deferral — mirrors 019b D-9 / PRD-015)
+## Runtime assembly
 
-The shims are CONSTRUCTED-AND-TESTED behind the 019b seams; they are NOT wired into a running
-harness binary or native extension. NO harness is claimed live-wired. The deferred per-harness
-runtime wiring (the real `harnesses/<h>/src/index.ts` dispatch + the native extensions, e.g.
-`harnesses/pi/extension-source/honeycomb.ts` delivered as raw `.ts`, the OpenClaw native
-extension, the Cursor extension) is the deferred assembly step — it dials the 019b core's real
-`DaemonHookClient`/`CredentialReader`/`SummarySpawn` (which are themselves the 019b deferred
-wiring). This wave delivers: the six shim factories, the shared `createShim` engine, the
-channel-router, the OpenClaw new-slice batch path, and the CLI-fallback wiring — all driven by
-the 019b recording fakes in `tests/hooks/<harness>/`.
+Hermes is live-wired through `harnesses/hermes/src/index.ts` and the Hermes connector: native
+lifecycle envelopes reach the shared runtime, and synchronous `pre_llm_call` recall returns the
+model-only `{ context }` response. Hermes still has no pre-tool interception contract. Other
+harnesses retain their own connector/plugin assembly status; consult `src/connectors/` and
+`harnesses/<h>/src/index.ts` rather than assuming every declared shim is installed.

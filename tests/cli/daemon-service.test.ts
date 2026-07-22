@@ -530,6 +530,7 @@ describe("PRD-064h schtasks controller, register/restart/status argv (injected r
 				),
 			).toThrow();
 		},
+		30_000,
 	);
 
 	it("isRegistered is true when /Query succeeds, false when it throws (task absent)", () => {

@@ -14,7 +14,7 @@
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -77,9 +77,26 @@ describe("PRD-039a a-AC-3: detectInstalledHarnesses — markers present → in t
 		expect(detectInstalledHarnesses(home, home).has("codex")).toBe(true);
 	});
 
-	it("hermes honeycomb marker (~/.hermes/honeycomb) → hermes in the set", () => {
-		touchDir(".hermes", "honeycomb");
-		expect(detectInstalledHarnesses(home, home).has("hermes")).toBe(true);
+	it("Hermes installed hook bundle marker → hermes in the set", () => {
+		touchFile(".hermes", "honeycomb", "bundle", "capture.mjs");
+		expect(detectInstalledHarnesses(home, home)).toContain("hermes");
+	});
+
+	it("a directory named capture.mjs does not count as an installed Hermes hook", () => {
+		touchDir(".hermes", "honeycomb", "bundle", "capture.mjs");
+		expect(detectInstalledHarnesses(home, home)).not.toContain("hermes");
+	});
+
+	it("Hermes detection honors an explicit HERMES_HOME profile root", () => {
+		const previous = process.env.HERMES_HOME;
+		process.env.HERMES_HOME = join(home, ".hermes", "profiles", "work");
+		try {
+			touchFile(".hermes", "profiles", "work", "honeycomb", "bundle", "capture.mjs");
+			expect(detectInstalledHarnesses(home, home)).toContain("hermes");
+		} finally {
+			if (previous === undefined) delete process.env.HERMES_HOME;
+			else process.env.HERMES_HOME = previous;
+		}
 	});
 
 	it("pi honeycomb marker (~/.pi/honeycomb) → pi in the set", () => {
@@ -134,7 +151,7 @@ describe("PRD-039a a-AC-3: detectInstalledHarnesses — a present/absent MIX is 
 		touchFile(".claude", "settings.json");
 		touchFile(".cursor", "hooks.json");
 		touchFile(".codex", "hooks.json");
-		touchDir(".hermes", "honeycomb");
+		touchFile(".hermes", "honeycomb", "bundle", "capture.mjs");
 		touchDir(".pi", "honeycomb");
 		touchDir(".openclaw", "honeycomb");
 		const set = detectInstalledHarnesses(home, home);
@@ -149,6 +166,19 @@ describe("PRD-039a a-AC-3: detectInstalledHarnesses — a present/absent MIX is 
 });
 
 describe("PRD-039a a-AC-3: detectInstalledHarnesses — fail-soft (never throws)", () => {
+	it("rejects a relative home root instead of probing outside a trusted absolute root", () => {
+		const absoluteHome = mkdtempSync(join(process.cwd(), ".honeycomb-relative-home-"));
+		const relativeHome = relative(process.cwd(), absoluteHome);
+		try {
+			const markerDir = join(absoluteHome, ".hermes", "honeycomb", "bundle");
+			mkdirSync(markerDir, { recursive: true });
+			writeFileSync(join(markerDir, "capture.mjs"), "fixture\n", "utf8");
+			expect(detectInstalledHarnesses(relativeHome, relativeHome).size).toBe(0);
+		} finally {
+			rmSync(absoluteHome, { recursive: true, force: true });
+		}
+	});
+
 	it("a non-existent home root → empty set, NO throw", () => {
 		const missing = join(home, "does", "not", "exist");
 		expect(() => detectInstalledHarnesses(missing, missing)).not.toThrow();

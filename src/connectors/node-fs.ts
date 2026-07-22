@@ -14,7 +14,18 @@
  * (Windows without the privilege), mirroring the connector's foreign-preserving posture.
  */
 
-import { mkdir, readFile, rm, stat, symlink as fsSymlink, readlink as fsReadlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import {
+	readlink as fsReadlink,
+	symlink as fsSymlink,
+	mkdir,
+	readFile,
+	rename,
+	rm,
+	rmdir,
+	stat,
+	writeFile,
+} from "node:fs/promises";
 import { dirname } from "node:path";
 
 import type { ConnectorFs } from "./contracts.js";
@@ -50,6 +61,16 @@ export function createNodeConnectorFs(): ConnectorFs {
 			await mkdir(dirname(path), { recursive: true });
 			await writeFile(path, contents, "utf8");
 		},
+		async writeFileAtomic(path: string, contents: string): Promise<void> {
+			await mkdir(dirname(path), { recursive: true });
+			const temporary = `${path}.tmp-${process.pid}-${randomUUID()}`;
+			try {
+				await writeFile(temporary, contents, { encoding: "utf8", flag: "wx", mode: 0o600 });
+				await rename(temporary, path);
+			} finally {
+				await rm(temporary, { force: true });
+			}
+		},
 		async removeFile(path: string): Promise<void> {
 			await rm(path, { force: true });
 		},
@@ -73,6 +94,15 @@ export function createNodeConnectorFs(): ConnectorFs {
 		},
 		async ensureDir(path: string): Promise<void> {
 			await mkdir(path, { recursive: true });
+		},
+		async removeEmptyDir(path: string): Promise<void> {
+			try {
+				await rmdir(path);
+			} catch (err) {
+				const code = (err as NodeJS.ErrnoException)?.code;
+				if (code === "ENOENT" || code === "ENOTEMPTY" || code === "EEXIST") return;
+				throw err;
+			}
 		},
 		async symlink(target: string, linkPath: string): Promise<void> {
 			await mkdir(dirname(linkPath), { recursive: true });
