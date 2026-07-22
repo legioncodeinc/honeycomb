@@ -23,9 +23,9 @@ import { isAbsolute } from "node:path";
 import { isMap, isSeq, parseDocument, YAMLMap, YAMLSeq } from "yaml";
 
 import {
-	type ConfigHookEntry,
 	type ConnectorFs,
 	type ConnectorRunResult,
+	dirOf,
 	HarnessConnector,
 	HONEYCOMB_ENTRY_KEY,
 	HONEYCOMB_MARKER,
@@ -230,25 +230,21 @@ export class HermesConnector extends HarnessConnector {
 		}
 	}
 
-	async install(): Promise<ConnectorRunResult> {
-		const handlers = this.hookHandlers();
-		const managedFiles = this.managedFiles();
+	private async readManagedSourceBodies(managedFiles: readonly InstallFileEntry[]): Promise<Map<string, string>> {
 		const sourceBodies = new Map<string, string>();
 		for (const file of managedFiles) {
 			const body = await this.fs.readFile(file.sourcePath);
 			if (body === undefined) throw new Error(`HermesConnector: required bundle is missing: ${file.sourcePath}`);
 			sourceBodies.set(file.targetPath, body);
 		}
+		return sourceBodies;
+	}
 
-		// Parse and structurally patch in memory before any artifact write. Malformed or
-		// conflicting user config fails closed without leaving a partial installation.
-		const configPath = this.configPath();
-		const patchedConfig = this.patchConfigText(await this.fs.readFile(configPath), handlers);
-		await this.assertInstallTreeIsNotSymlinked();
-
-		const manifestPath = this.ownershipManifestPath();
+	private async validateManagedFileOwnership(
+		managedFiles: readonly InstallFileEntry[],
+		manifestPath: string,
+	): Promise<string | undefined> {
 		const manifestText = await this.fs.readFile(manifestPath);
-		let priorManifest: HermesOwnershipManifest | undefined;
 		if (manifestText === undefined) {
 			if (await this.fs.exists(this.opts.pluginRoot)) {
 				throw new Error(
@@ -260,27 +256,42 @@ export class HermesConnector extends HarnessConnector {
 					throw new Error(`HermesConnector: refusing to overwrite foreign managed artifact: ${file.targetPath}`);
 				}
 			}
-		} else {
-			priorManifest = parseOwnershipManifest(manifestText, manifestPath);
-			for (const file of managedFiles) {
-				const current = await this.fs.readFile(file.targetPath);
-				if (current === undefined) continue;
-				const expected = priorManifest.files[file.targetPath];
-				if (expected === undefined || sha256(current) !== expected) {
-					throw new Error(`HermesConnector: owned artifact was modified; refusing to overwrite: ${file.targetPath}`);
-				}
-			}
+			return undefined;
 		}
 
+		const priorManifest = parseOwnershipManifest(manifestText, manifestPath);
+		for (const file of managedFiles) {
+			const current = await this.fs.readFile(file.targetPath);
+			if (current === undefined) continue;
+			const expected = priorManifest.files[file.targetPath];
+			if (expected === undefined || sha256(current) !== expected) {
+				throw new Error(`HermesConnector: owned artifact was modified; refusing to overwrite: ${file.targetPath}`);
+			}
+		}
+		return manifestText;
+	}
+
+	private async writeManagedFiles(
+		managedFiles: readonly InstallFileEntry[],
+		sourceBodies: ReadonlyMap<string, string>,
+	): Promise<string[]> {
 		const written: string[] = [];
 		for (const file of managedFiles) {
 			const body = sourceBodies.get(file.targetPath) as string;
 			if ((await this.fs.readFile(file.targetPath)) === body) continue;
-			await this.fs.ensureDir(file.targetPath.slice(0, file.targetPath.lastIndexOf("/")));
+			await this.fs.ensureDir(dirOf(file.targetPath));
 			await this.fs.writeFile(file.targetPath, body);
 			written.push(file.targetPath);
 		}
+		return written;
+	}
 
+	private async writeOwnershipManifest(
+		manifestPath: string,
+		manifestText: string | undefined,
+		managedFiles: readonly InstallFileEntry[],
+		sourceBodies: ReadonlyMap<string, string>,
+	): Promise<void> {
 		const manifest: HermesOwnershipManifest = {
 			_honeycomb: true,
 			version: OWNERSHIP_MANIFEST_VERSION,
@@ -289,7 +300,26 @@ export class HermesConnector extends HarnessConnector {
 			),
 		};
 		const nextManifestText = `${JSON.stringify(manifest, null, 2)}\n`;
-		if (manifestText !== nextManifestText) await this.fs.writeFileAtomic(manifestPath, nextManifestText);
+		if (manifestText === nextManifestText) return;
+		if (this.fs.writeFileAtomic !== undefined) await this.fs.writeFileAtomic(manifestPath, nextManifestText);
+		else await this.fs.writeFile(manifestPath, nextManifestText);
+	}
+
+	async install(): Promise<ConnectorRunResult> {
+		const handlers = this.hookHandlers();
+		const managedFiles = this.managedFiles();
+		const sourceBodies = await this.readManagedSourceBodies(managedFiles);
+
+		// Parse and structurally patch in memory before any artifact write. Malformed or
+		// conflicting user config fails closed without leaving a partial installation.
+		const configPath = this.configPath();
+		const patchedConfig = this.patchConfigText(await this.fs.readFile(configPath), handlers);
+		await this.assertInstallTreeIsNotSymlinked();
+
+		const manifestPath = this.ownershipManifestPath();
+		const manifestText = await this.validateManagedFileOwnership(managedFiles, manifestPath);
+		const written = await this.writeManagedFiles(managedFiles, sourceBodies);
+		await this.writeOwnershipManifest(manifestPath, manifestText, managedFiles, sourceBodies);
 
 		const wroteConfig = await this.writeJsonIfChanged(configPath, patchedConfig);
 		const skillLinks = await this.linkSkills();
@@ -335,7 +365,7 @@ export class HermesConnector extends HarnessConnector {
 		if (manifest !== undefined && !modifiedArtifact) await this.fs.removeFile(manifestPath);
 		const removedLinks = await this.unlinkSkills();
 		for (const dir of [`${this.opts.pluginRoot}/bundle`, `${this.opts.pluginRoot}/mcp`, this.opts.pluginRoot]) {
-			await this.fs.removeEmptyDir(dir);
+			await this.fs.removeEmptyDir?.(dir);
 		}
 		return { harness: this.harness, wroteConfig, handlers: removable, skillLinks: removedLinks };
 	}
@@ -377,15 +407,6 @@ export class HermesConnector extends HarnessConnector {
 
 	protected skillLinkTargets(): readonly SkillLinkTarget[] {
 		return this.opts.skillSources.map((source) => ({ dir: `${this.opts.hermesHome}/skills`, source }));
-	}
-
-	protected toConfigEntry(handler: HookHandlerEntry): ConfigHookEntry {
-		return {
-			type: "command",
-			command: handler.command,
-			...(handler.timeout === undefined ? {} : { timeout: handler.timeout }),
-			[HONEYCOMB_ENTRY_KEY]: true,
-		};
 	}
 
 	protected patchConfigText(text: string | undefined, handlers: readonly HookHandlerEntry[]): string {

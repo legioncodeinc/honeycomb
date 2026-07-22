@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { EventLogRecord, RequestLogRecord } from "../../../../src/daemon/runtime/logger.js";
+import { resolveHistoryQuery } from "../../../../src/daemon/runtime/logs/api.js";
 import {
 	DAEMON_DIR_NAME,
 	decodeCursor,
@@ -29,7 +30,6 @@ import {
 	openLogStore,
 	REQUEST_LOG_TABLE,
 } from "../../../../src/daemon/runtime/logs/log-store.js";
-import { resolveHistoryQuery } from "../../../../src/daemon/runtime/logs/api.js";
 
 /** A request record with a distinct path + status, for ordering / filter assertions. */
 function rec(i: number, overrides: Partial<RequestLogRecord> = {}): RequestLogRecord {
@@ -62,14 +62,15 @@ afterEach(() => {
 
 describe("PRD-043a openLogStore persists to disk", () => {
 	it("AC-1: records written before a restart are queryable after re-opening the same logs.db", () => {
+		const clock = { now: () => Date.parse("2026-06-21T00:00:00.000Z") };
 		// Write three records, then CLOSE (simulating the daemon stopping).
-		const first = openLogStore({ baseDir: dir });
+		const first = openLogStore({ baseDir: dir, clock });
 		expect(first.persistent).toBe(true);
 		for (let i = 0; i < 3; i++) first.appendRequest(rec(i));
 		first.close();
 
 		// A FRESH store opens the SAME on-disk file (the daemon restarting) and reads the records back.
-		const second = openLogStore({ baseDir: dir });
+		const second = openLogStore({ baseDir: dir, clock });
 		const page = second.queryRequests(resolveHistoryQuery({}));
 		expect(page.records).toHaveLength(3);
 		// Newest first.

@@ -165,7 +165,7 @@ describe("PRD-039a a-AC-3 (production wiring): live `installed` reflects real on
 		touchFile(".claude", "settings.json");
 		touchFile(".cursor", "hooks.json");
 		touchFile(".codex", "hooks.json");
-		touchFile(".hermes", "honeycomb", "bundle", "capture.js");
+		touchFile(".hermes", "honeycomb", "bundle", "capture.mjs");
 		touchDir(".pi", "honeycomb");
 		touchDir(".openclaw", "honeycomb");
 		const harnesses = await liveHarnesses();

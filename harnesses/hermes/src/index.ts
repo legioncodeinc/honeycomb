@@ -20,7 +20,7 @@ import { maybeRunHookBinaryMain, runHookBinary } from "../../../src/hooks/binary
 import { createHermesShim } from "../../../src/hooks/hermes/shim.js";
 import type { HookEventOutcome } from "../../../src/hooks/runtime.js";
 
-export async function runHermesHook(): Promise<HookEventOutcome> {
+export function runHermesHook(): Promise<HookEventOutcome> {
 	return runHookBinary({ shim: createHermesShim() });
 }
 

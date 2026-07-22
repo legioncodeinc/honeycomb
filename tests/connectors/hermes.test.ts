@@ -158,6 +158,19 @@ describe("HermesConnector", () => {
 		expect(fs.writes).toHaveLength(writesBefore);
 	});
 
+	it("supports ConnectorFs implementations created before atomic write and empty-dir cleanup were added", async () => {
+		const fullFs = seedFs();
+		const { writeFileAtomic: _writeFileAtomic, removeEmptyDir: _removeEmptyDir, ...legacyFs } = fullFs;
+		const c = new HermesConnector(legacyFs, {
+			home: HOME,
+			bundleSource: BUNDLE,
+			mcpServerPath: MCP,
+		});
+
+		await expect(c.install()).resolves.toMatchObject({ harness: "hermes" });
+		await expect(c.uninstall()).resolves.toMatchObject({ harness: "hermes" });
+	});
+
 	it("refuses malformed ownership manifests", async () => {
 		const fs = seedFs();
 		await fs.writeFile(MANIFEST, '{"_honeycomb":true,"version":1,"files":[]}\n');

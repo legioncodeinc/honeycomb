@@ -70,16 +70,16 @@ export interface ConnectorFs {
 	readFile(path: string): Promise<string | undefined>;
 	/** Write a UTF-8 file, creating parent dirs as needed. */
 	writeFile(path: string, contents: string): Promise<void>;
-	/** Atomically replace a UTF-8 file from a same-directory temporary file. */
-	writeFileAtomic(path: string, contents: string): Promise<void>;
+	/** Atomically replace a UTF-8 file from a same-directory temporary file when supported. */
+	writeFileAtomic?(path: string, contents: string): Promise<void>;
 	/** Remove a file. No-op when absent (idempotent uninstall). */
 	removeFile(path: string): Promise<void>;
 	/** True when a path exists (file, dir, or symlink). */
 	exists(path: string): Promise<boolean>;
 	/** Ensure a directory exists (mkdir -p). */
 	ensureDir(path: string): Promise<void>;
-	/** Remove a directory only when empty; never removes foreign contents. */
-	removeEmptyDir(path: string): Promise<void>;
+	/** Remove a directory only when empty when supported; never removes foreign contents. */
+	removeEmptyDir?(path: string): Promise<void>;
 	/** Create a symlink `linkPath` → `target`, never clobbering a foreign entry (FR-4 / a-AC-6). */
 	symlink(target: string, linkPath: string): Promise<void>;
 	/** Read a symlink's target, or `undefined` when `linkPath` is not a symlink. */
@@ -610,7 +610,7 @@ function isConfigEmpty(config: HarnessConfig): boolean {
 }
 
 /** The directory portion of a `/`-or-`\`-separated path. */
-function dirOf(path: string): string {
+export function dirOf(path: string): string {
 	const norm = path.replace(/\\/g, "/");
 	const idx = norm.lastIndexOf("/");
 	return idx <= 0 ? "" : norm.slice(0, idx);

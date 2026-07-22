@@ -139,7 +139,7 @@ jobs:
       - name: Pack-check (tarball secret/forbidden-file scan)
         run: npm run pack:check
 
-      - name: Packed CLI + Hermes conformance
+      - name: Packed CLI conformance
         run: npm run test:packed-cli
 
   minimum-node-packed-hermes:
@@ -150,14 +150,24 @@ jobs:
         uses: actions/checkout@v4.2.2
         with:
           persist-credentials: false
-      - name: Setup minimum supported Node
+      - name: Setup minimum supported runtime Node
         uses: actions/setup-node@v6.4.0
         with:
           node-version: '22.5.0'
+      - name: Preserve minimum runtime path
+        run: echo "MINIMUM_NODE=$(command -v node)" >> "$GITHUB_ENV"
+      - name: Setup build Node
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: '24.x'
           cache: npm
-      - name: Install
+      - name: Install build dependencies
         run: npm ci
-      - name: Build and execute packed Hermes artifacts
+      - name: Build and pack once
+        run: npm run build && npm run pack:prepare
+      - name: Install package with build Node and execute it with minimum Node
+        env:
+          HONEYCOMB_CONFORMANCE_NODE: ${{ env.MINIMUM_NODE }}
         run: npm run test:packed-hermes
 
   # ── Windows smoke. The dev host is Windows and the build scripts
@@ -197,7 +207,7 @@ jobs:
       - name: Test
         run: npm run test
 
-      - name: Packed CLI + Hermes conformance (Windows)
+      - name: Packed CLI conformance (Windows)
         run: npm run test:packed-cli
 
   macos-service-smoke:
@@ -217,7 +227,7 @@ jobs:
         run: npm ci
       - name: Native launchd adapter tests
         run: npm test -- --run tests/cli/daemon-service.test.ts tests/cli/daemon-lifecycle-service.test.ts tests/commands/standard-interface.test.ts
-      - name: Packed CLI + Hermes conformance (macOS)
+      - name: Packed CLI conformance (macOS)
         run: npm run test:packed-cli
 
   # ── Secret gate. ───────────────────────────────────────────────────────────

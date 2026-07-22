@@ -50,9 +50,10 @@ messages are sent, never re-sending already-captured ones.
 
 The shared core renders ONE block (`HookResult.additionalContext`). `shim.renderContext(block)`
 wraps it into a `ContextEnvelope`: `{ channel: "model-only", additionalContext }` (Claude Code,
-Cursor under `additional_context`, OpenClaw) or `{ channel: "user-visible", text }` (Codex's
-brief login line, Hermes's `{ context }` + MCP mention, pi's `AGENTS.md` block). Both channels
-carry the same logical content; only the routing + any `renderUserVisible` condensation differs.
+Cursor under `additional_context`, OpenClaw, and Hermes's native `{ context }` response) or
+`{ channel: "user-visible", text }` (Codex's brief login line and pi's `AGENTS.md` block). Both
+channels carry the same logical content; only the routing + any `renderUserVisible` condensation
+differs.
 
 ## The five divergences a shim overrides (FR-2)
 
@@ -119,14 +120,10 @@ protocol it implements in its module header.
 The non-reference placeholder modules declare ONLY their constants this wave so the directory +
 ownership exist with zero contention; Wave 2 adds the factory + exports it from `index.ts`.
 
-## Deferred assembly (honest deferral — mirrors 019b D-9 / PRD-015)
+## Runtime assembly
 
-The shims are CONSTRUCTED-AND-TESTED behind the 019b seams; they are NOT wired into a running
-harness binary or native extension. NO harness is claimed live-wired. The deferred per-harness
-runtime wiring (the real `harnesses/<h>/src/index.ts` dispatch + the native extensions, e.g.
-`harnesses/pi/extension-source/honeycomb.ts` delivered as raw `.ts`, the OpenClaw native
-extension, the Cursor extension) is the deferred assembly step — it dials the 019b core's real
-`DaemonHookClient`/`CredentialReader`/`SummarySpawn` (which are themselves the 019b deferred
-wiring). This wave delivers: the six shim factories, the shared `createShim` engine, the
-channel-router, the OpenClaw new-slice batch path, and the CLI-fallback wiring — all driven by
-the 019b recording fakes in `tests/hooks/<harness>/`.
+Hermes is live-wired through `harnesses/hermes/src/index.ts` and the Hermes connector: native
+lifecycle envelopes reach the shared runtime, and synchronous `pre_llm_call` recall returns the
+model-only `{ context }` response. Hermes still has no pre-tool interception contract. Other
+harnesses retain their own connector/plugin assembly status; consult `src/connectors/` and
+`harnesses/<h>/src/index.ts` rather than assuming every declared shim is installed.
