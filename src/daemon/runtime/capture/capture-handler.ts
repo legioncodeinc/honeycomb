@@ -709,13 +709,12 @@ class CaptureRouteHandler {
 			["last_update_date", val.str(nowIso)],
 		];
 		// PRD-060a (a-AC-5): the per-turn token + cache counts ride the SAME append-only
-		// INSERT as the turn — no second write, no row mutation. Only an assistant turn
-		// that actually carried a validated `usage` block contributes columns; each count
-		// is written ONLY when present (a measured value, including a real 0). Absent
-		// counts are OMITTED, so the nullable column defaults to SQL NULL = "token data
-		// absent" (a-AC-6) — never a silent 0. (No-usage / non-assistant turns add nothing.)
+		// INSERT as the turn — no second write, no row mutation. All four columns are ALWAYS
+		// emitted (so a batched multi-row INSERT stays column-consistent): the measured value
+		// when the assistant turn carried `usage`, else SQL NULL = "token data absent" (a-AC-6),
+		// never a silent 0.
 		for (const [col, value] of usageColumns(event)) {
-			row.push([col, val.num(value)]);
+			row.push([col, value]);
 		}
 		return row;
 	}
@@ -920,23 +919,25 @@ function embedTextFor(event: CaptureEvent): string {
 }
 
 /**
- * The per-turn token/cache columns an event contributes to its `sessions` row
- * (PRD-060a a-AC-5 / a-AC-6). ONLY an `assistant_message` that carried a validated
- * `usage` block contributes, and ONLY the counts actually present are emitted —
- * each as a measured integer (a real 0 included). An absent count is OMITTED so the
- * nullable column defaults to SQL NULL = "token data absent" (a-AC-6), never a
- * silent 0. The zod boundary already guaranteed every present count is a
- * non-negative integer, so no re-validation is needed here.
+ * The per-turn token/cache columns EVERY event contributes to its `sessions` row
+ * (PRD-060a a-AC-5 / a-AC-6). All four columns are ALWAYS emitted so a batched
+ * multi-row INSERT stays column-consistent, but each carries the MEASURED value only
+ * when the assistant turn produced it — otherwise SQL NULL.
+ *
+ * NULL = "token data absent", kept DISTINCT from a measured 0 (a-AC-6): a real
+ * `cache_read_input_tokens = 0` means "nothing read from cache", which must not be
+ * confused with "the count was never produced". The zod boundary already guaranteed
+ * every present count is a non-negative integer, so no re-validation is needed here.
  */
-function usageColumns(event: CaptureEvent): ReadonlyArray<readonly [string, number]> {
-	if (event.kind !== "assistant_message" || event.usage === undefined) return [];
-	const u = event.usage;
-	const cols: Array<readonly [string, number]> = [];
-	if (u.input !== undefined) cols.push(["input_tokens", u.input]);
-	if (u.output !== undefined) cols.push(["output_tokens", u.output]);
-	if (u.cacheRead !== undefined) cols.push(["cache_read_input_tokens", u.cacheRead]);
-	if (u.cacheCreation !== undefined) cols.push(["cache_creation_input_tokens", u.cacheCreation]);
-	return cols;
+function usageColumns(event: CaptureEvent): ReadonlyArray<readonly [string, ColumnValue]> {
+	const u = event.kind === "assistant_message" ? event.usage : undefined;
+	const cell = (n: number | undefined): ColumnValue => (n === undefined ? val.raw("NULL") : val.num(n));
+	return [
+		["input_tokens", cell(u?.input)],
+		["output_tokens", cell(u?.output)],
+		["cache_read_input_tokens", cell(u?.cacheRead)],
+		["cache_creation_input_tokens", cell(u?.cacheCreation)],
+	];
 }
 
 /**
@@ -962,17 +963,18 @@ interface FlushGroup {
  * (`org`+`workspace` — a multi-row INSERT cannot span partitions, PRD-062c L-C1), THEN by COLUMN
  * SIGNATURE (the ordered column-name list).
  *
- * BUG-03: `buildInsertMany` takes the first row as the header and rejects the WHOLE batch on any
- * width/name mismatch, so a window mixing a 15-column user turn with a 16–19-column
- * assistant-with-usage turn failed `row column count 15 != expected 19` and DROPPED the batch.
- * `buildRow` appends 0–4 nullable usage columns per turn (via {@link usageColumns}, in a fixed order),
- * so a flush window legitimately holds heterogeneous shapes. Sub-grouping by signature makes every
- * append uniform — absent-usage rows group together and keep those columns OMITTED (→ SQL NULL,
- * preserving the "absent = NULL, never a silent 0" semantic, PRD-060a a-AC-6) — while still coalescing
- * same-shape same-scope turns into one write. Insertion order is preserved within each group (first-seen
- * `Map` order) so `creation_date` ordering is unaffected. The common single-tenant same-shape window is
- * still one group → one append. (This mirrors the scope+signature grouping PRD-079c added for the outbox
- * drain, applied here to the PRIMARY capture flush.)
+ * BUG-03 (historical): `buildInsertMany` takes the first row as the header and rejects the WHOLE batch
+ * on any width/name mismatch, so a window mixing a 15-column user turn with a 16–19-column
+ * assistant-with-usage turn failed `row column count 15 != expected 19` and DROPPED the batch. That
+ * arose because `buildRow` appended 0–4 usage columns per turn.
+ *
+ * {@link usageColumns} now always emits all four counts on EVERY event (the measured value or SQL NULL),
+ * so `buildRow` emits a FIXED-width row and the handler can no longer produce heterogeneous shapes —
+ * BUG-03's trigger is gone at the source. The SCOPE grouping remains load-bearing regardless (a multi-row
+ * INSERT cannot span partitions, PRD-062c L-C1); the SIGNATURE sub-group is retained as defense-in-depth
+ * for any future conditional column (and mirrors the scope+signature grouping PRD-079c added for the
+ * outbox drain, whose rows can still be heterogeneous). Insertion order is preserved within each group
+ * (first-seen `Map` order) so `creation_date` ordering is unaffected.
  */
 function groupBufferedRows(batch: readonly BufferedRow[]): readonly FlushGroup[] {
 	const byKey = new Map<string, FlushGroup>();

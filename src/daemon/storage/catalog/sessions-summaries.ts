@@ -51,18 +51,16 @@ export const SESSIONS_COLUMNS = Object.freeze([
 	{ name: "agent_id", sql: "TEXT NOT NULL DEFAULT 'default'" },
 	{ name: "visibility", sql: "TEXT NOT NULL DEFAULT 'global'" },
 	// ── PRD-060a (a-AC-3 / a-AC-6): per-turn token + cache usage ──────────────────
-	// Additive columns, healed in via the SAME `ALTER TABLE ADD COLUMN` path the rest
-	// of the catalog uses (the heal engine iterates THIS array; nothing else to wire).
+	// Additive columns, healed in via the SAME `ALTER TABLE ADD COLUMN … DEFAULT 0`
+	// path the rest of the catalog uses (the heal engine iterates THIS array).
 	//
-	// ZERO vs NULL (a-AC-1 / a-AC-6, the open-question ruling): these four counts are
-	// NULLABLE BIGINT with NO `DEFAULT 0`. The distinction is load-bearing — a genuine
-	// `cache_read_input_tokens = 0` (a real measurement: nothing read from cache) must
-	// stay DISTINCT from "no usage data" (the count was never produced). A `DEFAULT 0`
-	// would collapse "absent" into "measured zero", which a-AC-6 forbids, so absent is
-	// encoded as SQL NULL and a measured zero as the integer 0. Nullable columns are
-	// exempt from the NOT-NULL-needs-a-DEFAULT load guard (NULL is their implicit
-	// default), so `ALTER TABLE ADD COLUMN … BIGINT` heals cleanly onto a populated
-	// legacy table: existing rows read back NULL = "token data absent" (a-AC-4).
+	// NULLABLE BIGINT, no DEFAULT (a-AC-6). The distinction is load-bearing: a measured
+	// `cache_read_input_tokens = 0` (nothing was read from cache — a real datapoint) must
+	// stay DISTINCT from "no usage data" (the count was never produced). Absent → SQL NULL,
+	// never a silent 0. The capture writer (`usageColumns`) always emits all four columns so
+	// a batched multi-row INSERT stays column-consistent, writing the measured value when
+	// present and NULL when absent. Additive/heal-safe on a populated table (BIGINT with no
+	// DEFAULT is exempt from the NOT-NULL-needs-a-DEFAULT load guard — NULL is its default).
 	{ name: "input_tokens", sql: "BIGINT" },
 	{ name: "output_tokens", sql: "BIGINT" },
 	{ name: "cache_read_input_tokens", sql: "BIGINT" },

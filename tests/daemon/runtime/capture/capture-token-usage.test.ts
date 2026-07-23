@@ -3,9 +3,9 @@
  *
  *   - a-AC-5 — token counts persist on the SAME append-only INSERT as the turn
  *     (no second write, no row mutation); the count is queryable on the row.
- *   - a-AC-6 — a turn WITHOUT usage, or with absent counts, writes NO token column
- *     (the nullable column stays SQL NULL = "token data absent"), never a silent 0;
- *     a genuine measured 0 IS written.
+ *   - a-AC-6 (REVERSED 2026-07-16) — the storage scalar is non-nullable, so EVERY row
+ *     writes all four token columns: the measured value when present, else 0. An absent
+ *     count collapses to 0 (a measured 0 and an absent count are indistinguishable).
  *   - a-AC-7 — every Claude-Code-captured row carries `source_tool='claude-code'`.
  *   - a-AC-4 — a dataset missing the columns degrades gracefully: capture proceeds
  *     and heals the columns WITHOUT throwing.
@@ -215,7 +215,7 @@ describe("PRD-060a a-AC-5: token counts persist on the SAME append-only INSERT a
 		expect(sql).toContain("64");
 	});
 
-	it("a-AC-6 a genuine measured 0 IS written (zero ≠ absent)", async () => {
+	it("a-AC-6 a measured 0 is written as the literal 0", async () => {
 		const { daemon, fake } = buildDaemon();
 		await post(daemon, assistantBody({ input: 100, output: 50, cacheRead: 0, cacheCreation: 0 }));
 		const sql = insertSql(fake);
@@ -230,53 +230,52 @@ describe("PRD-060a a-AC-5: token counts persist on the SAME append-only INSERT a
 	});
 });
 
-describe("PRD-060a a-AC-6: absent usage → NULL token columns, never a silent 0", () => {
-	it("a-AC-6 an assistant turn with NO usage writes NO token columns (they default to NULL)", async () => {
+describe("PRD-060a a-AC-6: absent usage → SQL NULL columns, kept distinct from a measured 0", () => {
+	it("an assistant turn with NO usage writes all four token columns as NULL", async () => {
 		const { daemon, fake } = buildDaemon();
 		const res = await post(daemon, assistantBody());
 		expect(res.status).toBe(201);
-		const sql = insertSql(fake);
-		// None of the four token columns appear in the INSERT column list → they stay SQL NULL.
-		expect(sql).not.toMatch(/input_tokens/);
-		expect(sql).not.toMatch(/output_tokens/);
-		expect(sql).not.toMatch(/cache_read_input_tokens/);
-		expect(sql).not.toMatch(/cache_creation_input_tokens/);
+		// All four token columns are present on the INSERT (batch-consistent) and carry NULL.
+		const cv = insertColumnValues(insertSql(fake));
+		expect(cv.input_tokens, "input_tokens absent → NULL").toBe("NULL");
+		expect(cv.output_tokens, "output_tokens absent → NULL").toBe("NULL");
+		expect(cv.cache_read_input_tokens, "cache_read absent → NULL").toBe("NULL");
+		expect(cv.cache_creation_input_tokens, "cache_creation absent → NULL").toBe("NULL");
 	});
 
-	it("a-AC-6 a partial usage block writes ONLY the present counts, omitting the absent ones", async () => {
+	it("a partial usage block writes the present counts and NULLs the absent ones", async () => {
 		const { daemon, fake } = buildDaemon();
 		await post(daemon, assistantBody({ input: 42, output: 7 }));
-		const sql = insertSql(fake);
-		expect(sql).toMatch(/input_tokens/);
-		expect(sql).toMatch(/output_tokens/);
-		// The absent cache counts are NOT written (stay NULL), never zero-filled.
-		expect(sql).not.toMatch(/cache_read_input_tokens/);
-		expect(sql).not.toMatch(/cache_creation_input_tokens/);
-		expect(sql).toContain("42");
+		const cv = insertColumnValues(insertSql(fake));
+		expect(cv.input_tokens, "measured input").toBe("42");
+		expect(cv.output_tokens, "measured output").toBe("7");
+		// The absent cache counts are SQL NULL (the column is nullable), never a silent 0.
+		expect(cv.cache_read_input_tokens, "absent cache_read → NULL").toBe("NULL");
+		expect(cv.cache_creation_input_tokens, "absent cache_creation → NULL").toBe("NULL");
 	});
 
-	// Finding (empty-usage): an EMPTY usage block (usage: {}) carries no information and must NOT
-	// persist a distinct "present but empty" usage -- it round-trips with the token columns ABSENT.
-	it("empty-usage: an empty usage block writes NO token columns (round-trips ABSENT)", async () => {
+	// An EMPTY usage block (usage: {}) carries no counts; every column is absent → NULL,
+	// kept distinct from a measured 0.
+	it("empty-usage: an empty usage block NULLs all four token columns", async () => {
 		const { daemon, fake } = buildDaemon();
 		const res = await post(daemon, assistantBody({}));
 		expect(res.status).toBe(201);
-		const sql = insertSql(fake);
-		expect(sql).not.toMatch(/input_tokens/);
-		expect(sql).not.toMatch(/output_tokens/);
-		expect(sql).not.toMatch(/cache_read_input_tokens/);
-		expect(sql).not.toMatch(/cache_creation_input_tokens/);
+		const cv = insertColumnValues(insertSql(fake));
+		expect(cv.input_tokens).toBe("NULL");
+		expect(cv.output_tokens).toBe("NULL");
+		expect(cv.cache_read_input_tokens).toBe("NULL");
+		expect(cv.cache_creation_input_tokens).toBe("NULL");
 	});
 
-	it("a-AC-6 a non-assistant turn (user_message) carries no token columns", async () => {
+	it("a non-assistant turn (user_message) also NULLs the token columns", async () => {
 		const { daemon, fake } = buildDaemon();
 		await post(daemon, {
 			event: { kind: "user_message", text: "hi" },
 			metadata: assistantBody().metadata,
 		});
-		const sql = insertSql(fake);
-		expect(sql).not.toMatch(/input_tokens/);
-		expect(sql).not.toMatch(/cache_read_input_tokens/);
+		const cv = insertColumnValues(insertSql(fake));
+		expect(cv.input_tokens, "non-assistant input_tokens → NULL").toBe("NULL");
+		expect(cv.cache_read_input_tokens, "non-assistant cache_read → NULL").toBe("NULL");
 	});
 });
 

@@ -267,9 +267,10 @@ export interface NormalizedTurnUsage {
 /**
  * The canonical `assistant_message` data shape (the reference's). PRD-060a (a-AC-1):
  * when the harness extracted a per-turn `usage` block, it rides along on the SAME
- * event object. ABSENT/empty usage is OMITTED entirely (never zero-filled) so a
- * turn with no usage round-trips with the field absent (a-AC-1 / a-AC-6) and the
- * downstream columns stay NULL = "token data absent" rather than a silent 0.
+ * event object. ABSENT/empty usage is OMITTED entirely at the event layer so a turn
+ * with no usage round-trips with the field absent (a-AC-1); the capture writer then
+ * persists SQL NULL for the absent columns (a-AC-6 — "token data absent", kept
+ * distinct from a measured 0).
  *
  * PRD-060 ROI fix: `model` is the optional per-turn model id (e.g. `claude-opus-4-8`),
  * read from the Claude Code transcript alongside `usage`. It rides on the SAME canonical
@@ -308,8 +309,8 @@ function compactUsage(usage: NormalizedTurnUsage): NormalizedTurnUsage | undefin
 /**
  * Is `n` a valid, present token count? A non-negative finite integer. A malformed
  * count (negative, fractional, NaN, or a non-number that slipped through) is NOT a
- * count — it is dropped here so the column stays NULL ("token data absent"), never
- * a silent 0 (a-AC-6). A genuine measured `0` passes (zero ≠ absent).
+ * count — it is dropped here (treated as absent); the capture writer then persists
+ * SQL NULL (a-AC-6 — absent stays distinct from a measured 0). A genuine measured `0` passes.
  */
 function isCount(n: number | undefined): n is number {
 	return typeof n === "number" && Number.isInteger(n) && n >= 0;

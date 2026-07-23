@@ -171,8 +171,8 @@ function insertSqls(fake: FakeDeepLakeTransport): string[] {
 
 const BATCH_ON: CaptureConfig = { batch: true, windowMs: 1_000, maxEvents: 25, envelopeBudgetBytes: 16_384 };
 
-describe("BUG-03: a mixed-width flush window is sub-grouped by column shape, never dropped", () => {
-	it("flushes a 15-col user turn + a 19-col assistant-with-usage turn as TWO uniform appends, both persisted", async () => {
+describe("BUG-03: a user turn + an assistant-with-usage turn share ONE shape, never dropped", () => {
+	it("flushes a user turn + an assistant-with-usage turn as ONE uniform append, both persisted", async () => {
 		const logged: string[] = [];
 		const logger = createRequestLogger({ silent: true });
 		const origEvent = logger.event.bind(logger);
@@ -183,10 +183,16 @@ describe("BUG-03: a mixed-width flush window is sub-grouped by column shape, nev
 		const clock = new FakeClock();
 		const { daemon, fake } = buildDaemon(BATCH_ON, clock, { logger });
 
-		// One window, one scope, TWO shapes: a user turn (15 cols, no usage) + an assistant turn with a full
-		// usage block (19 cols). PRE-FIX these coalesced into ONE mixed-width append that `buildInsertMany`
-		// rejected wholesale (`row column count 15 != expected 19`), dropping the batch. POST-FIX the flush
-		// sub-groups by column signature so each shape is its own uniform append.
+		// BUG-03's ROOT CAUSE IS GONE (a-AC-6 reversed, 2026-07-16). It was: `buildRow` appended 0–4
+		// usage columns per turn, so a user turn (15 cols) and an assistant-with-usage turn (19 cols)
+		// coalesced into ONE mixed-width append that `buildInsertMany` rejected wholesale
+		// (`row column count 15 != expected 19`), DROPPING the batch. `usageColumns` now zero-fills all
+		// four counts on EVERY event, so `buildRow` emits a fixed 19-column row and a flush window can no
+		// longer hold heterogeneous shapes — the mixed-width condition is eliminated at the source rather
+		// than mitigated. Both turns therefore land in ONE uniform append.
+		// The scope+signature sub-grouping is RETAINED as defense-in-depth (scope grouping is still
+		// load-bearing: a multi-row INSERT cannot span partitions). Its signature-split arm keeps its
+		// regression coverage in `capture-outbox.test.ts`, which synthesizes mixed-shape rows directly.
 		const user = await daemon.app.request("/api/hooks/capture", {
 			method: "POST",
 			headers: sessionHeaders(),
@@ -202,18 +208,18 @@ describe("BUG-03: a mixed-width flush window is sub-grouped by column shape, nev
 
 		expect(insertSqls(fake).length, "nothing written before the window closes").toBe(0);
 		clock.advance(1_000);
-		// A macrotask boundary drains ALL pending microtasks — the flush issues one append PER column shape,
-		// so both sequential appends settle before we assert (two `Promise.resolve()` ticks would only settle
-		// the first).
+		// A macrotask boundary drains ALL pending microtasks before we assert.
 		await new Promise((resolve) => setTimeout(resolve, 0));
 
 		const inserts = insertSqls(fake);
-		expect(inserts.length, "two shapes → two uniform appends (not one rejected batch)").toBe(2);
+		expect(inserts.length, "one uniform shape → ONE coalesced append (not one rejected batch)").toBe(1);
 		expect(logged, "no width-mismatch drop").not.toContain("capture.batch_insert.failed");
 		expect(logged, "no flush failure").not.toContain("capture.flush.failed");
-		// The wide append carries the usage columns; the narrow one omits them (→ SQL NULL, PRD-060a a-AC-6).
-		expect(inserts.some((sql) => /input_tokens/.test(sql)), "the assistant append carries usage columns").toBe(true);
-		expect(inserts.some((sql) => !/input_tokens/.test(sql)), "the user append omits usage columns").toBe(true);
+		// BOTH rows ride the single append, and the shared shape carries the usage columns — the user
+		// turn's counts are zero-filled rather than omitted.
+		expect(inserts[0], "the append carries the usage columns").toMatch(/input_tokens/);
+		expect(inserts[0].match(/'hello'|hello/), "the user turn is persisted").toBeTruthy();
+		expect(inserts[0], "the assistant turn is persisted (its measured counts ride along)").toMatch(/100/);
 	});
 
 	it("same-shape rows still coalesce into ONE append (the shape split does not fragment uniform batches)", async () => {
