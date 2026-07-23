@@ -54,18 +54,17 @@ export const SESSIONS_COLUMNS = Object.freeze([
 	// Additive columns, healed in via the SAME `ALTER TABLE ADD COLUMN … DEFAULT 0`
 	// path the rest of the catalog uses (the heal engine iterates THIS array).
 	//
-	// ZERO, not NULL (a-AC-6 REVERSED, 2026-07-16): the original ruling made these
-	// NULLABLE BIGINT so "absent" (count never produced) stayed distinct from a measured
-	// 0. That distinction is NOT representable on this storage engine — pg-deeplake maps
-	// a scalar SQL column to a NON-NULLABLE deeplake type (SQL nullability is ignored), so
-	// a row that omitted a token column was rejected at flush time ("None value for scalar
-	// type") instead of storing SQL NULL. We therefore collapse absent → 0: the capture
-	// writer (`usageColumns`) always emits all four, and the column is `NOT NULL DEFAULT 0`
-	// like every other scalar here — heal-safe on a populated table (the default backfills).
-	{ name: "input_tokens", sql: "BIGINT NOT NULL DEFAULT 0" },
-	{ name: "output_tokens", sql: "BIGINT NOT NULL DEFAULT 0" },
-	{ name: "cache_read_input_tokens", sql: "BIGINT NOT NULL DEFAULT 0" },
-	{ name: "cache_creation_input_tokens", sql: "BIGINT NOT NULL DEFAULT 0" },
+	// NULLABLE BIGINT, no DEFAULT (a-AC-6). The distinction is load-bearing: a measured
+	// `cache_read_input_tokens = 0` (nothing was read from cache — a real datapoint) must
+	// stay DISTINCT from "no usage data" (the count was never produced). Absent → SQL NULL,
+	// never a silent 0. The capture writer (`usageColumns`) always emits all four columns so
+	// a batched multi-row INSERT stays column-consistent, writing the measured value when
+	// present and NULL when absent. Additive/heal-safe on a populated table (BIGINT with no
+	// DEFAULT is exempt from the NOT-NULL-needs-a-DEFAULT load guard — NULL is its default).
+	{ name: "input_tokens", sql: "BIGINT" },
+	{ name: "output_tokens", sql: "BIGINT" },
+	{ name: "cache_read_input_tokens", sql: "BIGINT" },
+	{ name: "cache_creation_input_tokens", sql: "BIGINT" },
 	// ── PRD-060 ROI fix: the per-turn MODEL id ────────────────────────────────────
 	// The model the turn ran on (e.g. `claude-opus-4-8`), read from the Claude Code
 	// transcript so the ROI dashboard prices the turn at its REAL model's rate instead of

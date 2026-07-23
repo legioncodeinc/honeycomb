@@ -27,13 +27,13 @@ function colSql(name: string): string | undefined {
 const TOKEN_COLUMNS = ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"] as const;
 
 describe("PRD-060a a-AC-3: the sessions group gains the five additive usage columns", () => {
-	it("a-AC-3 the four token columns are BIGINT NOT NULL DEFAULT 0 (a-AC-6 reversed — absent = 0)", () => {
+	it("a-AC-3 the four token columns are nullable BIGINT (a-AC-6 — absent = NULL)", () => {
 		for (const name of TOKEN_COLUMNS) {
 			const sql = colSql(name);
 			// a-AC-6 reversed (2026-07-16): pg-deeplake maps a scalar to a NON-NULLABLE deeplake type,
 			// so an omitted column is rejected at flush ("None value for scalar type") rather than stored
 			// as SQL NULL. Absent collapses to 0 — the writer zero-fills and the column is NOT NULL DEFAULT 0.
-			expect(sql, name).toBe("BIGINT NOT NULL DEFAULT 0");
+			expect(sql, name).toBe("BIGINT");
 		}
 	});
 
@@ -50,7 +50,7 @@ describe("PRD-060a a-AC-3: the sessions group gains the five additive usage colu
 		expect(healTargetFor("sessions").columns.map((c) => c.name)).toContain("model");
 	});
 
-	it("a-AC-3 the whole sessions array still validates (NOT NULL token columns carry a DEFAULT 0)", () => {
+	it("a-AC-3 the whole sessions array still validates (nullable token columns)", () => {
 		expect(() => validateColumnDefs("sessions", SESSIONS_COLUMNS)).not.toThrow();
 	});
 
@@ -71,7 +71,7 @@ describe("PRD-060a a-AC-3 / a-AC-4: the heal is ADDITIVE (ALTER ADD COLUMN) and 
 		for (const name of TOKEN_COLUMNS) {
 			const def = SESSIONS_COLUMNS.find((c) => c.name === name)!;
 			expect(buildAddColumnSql("sessions", def)).toBe(
-				`ALTER TABLE "sessions" ADD COLUMN ${name} BIGINT NOT NULL DEFAULT 0`,
+				`ALTER TABLE "sessions" ADD COLUMN ${name} BIGINT`,
 			);
 		}
 		const srcDef = SESSIONS_COLUMNS.find((c) => c.name === "source_tool")!;
@@ -83,7 +83,7 @@ describe("PRD-060a a-AC-3 / a-AC-4: the heal is ADDITIVE (ALTER ADD COLUMN) and 
 	it("a-AC-3 the CREATE TABLE carries all five columns from the single ColumnDef source", () => {
 		const create = buildCreateTableSql("sessions", SESSIONS_COLUMNS);
 		for (const name of TOKEN_COLUMNS) {
-			expect(create).toMatch(new RegExp(`\\b${name} BIGINT NOT NULL DEFAULT 0\\b`));
+			expect(create).toMatch(new RegExp(`\\b${name} BIGINT\\b`));
 		}
 		expect(create).toMatch(/\bsource_tool TEXT NOT NULL DEFAULT ''/);
 	});

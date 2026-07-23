@@ -2,7 +2,7 @@
 
 ## v0.22.1 — 2026-07-16
 
-Fixed a bug where token/cache usage counts could be omitted from stored session rows, causing storage write failures on the underlying data engine; absent counts are now stored as zero instead of being omitted.
+Fixed a bug where token/cache usage counts could be omitted from stored session rows, causing storage write failures. All four counts are now always written on every turn — the measured value when present, or SQL NULL when absent — kept distinct from a measured 0.
 
 ## v0.22.0 — 2026-07-14
 

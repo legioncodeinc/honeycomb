@@ -709,12 +709,12 @@ class CaptureRouteHandler {
 			["last_update_date", val.str(nowIso)],
 		];
 		// PRD-060a (a-AC-5): the per-turn token + cache counts ride the SAME append-only
-		// INSERT as the turn — no second write, no row mutation. All four counts are ALWAYS
-		// written: the measured value when the assistant turn carried `usage`, else 0
-		// (a-AC-6 reversed, 2026-07-16 — see `usageColumns`: the storage scalar is
-		// non-nullable, so absent collapses to 0 rather than SQL NULL).
+		// INSERT as the turn — no second write, no row mutation. All four columns are ALWAYS
+		// emitted (so a batched multi-row INSERT stays column-consistent): the measured value
+		// when the assistant turn carried `usage`, else SQL NULL = "token data absent" (a-AC-6),
+		// never a silent 0.
 		for (const [col, value] of usageColumns(event)) {
-			row.push([col, val.num(value)]);
+			row.push([col, value]);
 		}
 		return row;
 	}
@@ -919,26 +919,24 @@ function embedTextFor(event: CaptureEvent): string {
 }
 
 /**
- * The per-turn token/cache columns EVERY event contributes to its `sessions` row.
- * All four counts are ALWAYS emitted: the measured integer when the assistant turn
- * carried a validated `usage` count, otherwise 0.
+ * The per-turn token/cache columns EVERY event contributes to its `sessions` row
+ * (PRD-060a a-AC-5 / a-AC-6). All four columns are ALWAYS emitted so a batched
+ * multi-row INSERT stays column-consistent, but each carries the MEASURED value only
+ * when the assistant turn produced it — otherwise SQL NULL.
  *
- * ZERO-fill, not NULL (a-AC-6 REVERSED, 2026-07-16): pg-deeplake maps a scalar SQL
- * column to a NON-NULLABLE deeplake type — it ignores SQL nullability — so a row that
- * OMITTED these columns was rejected at flush time ("None value for scalar type")
- * instead of storing SQL NULL. The absent-vs-measured-zero distinction the original
- * a-AC-6 encoded is thus not representable at the storage layer; absent collapses to
- * 0. Emitting all four on every event also keeps a batched multi-row INSERT
- * column-consistent. The zod boundary already guaranteed every present count is a
- * non-negative integer, so no re-validation is needed here.
+ * NULL = "token data absent", kept DISTINCT from a measured 0 (a-AC-6): a real
+ * `cache_read_input_tokens = 0` means "nothing read from cache", which must not be
+ * confused with "the count was never produced". The zod boundary already guaranteed
+ * every present count is a non-negative integer, so no re-validation is needed here.
  */
-function usageColumns(event: CaptureEvent): ReadonlyArray<readonly [string, number]> {
+function usageColumns(event: CaptureEvent): ReadonlyArray<readonly [string, ColumnValue]> {
 	const u = event.kind === "assistant_message" ? event.usage : undefined;
+	const cell = (n: number | undefined): ColumnValue => (n === undefined ? val.raw("NULL") : val.num(n));
 	return [
-		["input_tokens", u?.input ?? 0],
-		["output_tokens", u?.output ?? 0],
-		["cache_read_input_tokens", u?.cacheRead ?? 0],
-		["cache_creation_input_tokens", u?.cacheCreation ?? 0],
+		["input_tokens", cell(u?.input)],
+		["output_tokens", cell(u?.output)],
+		["cache_read_input_tokens", cell(u?.cacheRead)],
+		["cache_creation_input_tokens", cell(u?.cacheCreation)],
 	];
 }
 
@@ -970,7 +968,7 @@ interface FlushGroup {
  * assistant-with-usage turn failed `row column count 15 != expected 19` and DROPPED the batch. That
  * arose because `buildRow` appended 0–4 usage columns per turn.
  *
- * Since a-AC-6 was reversed (2026-07-16) {@link usageColumns} zero-fills all four counts on EVERY event,
+ * {@link usageColumns} now always emits all four counts on EVERY event (the measured value or SQL NULL),
  * so `buildRow` emits a FIXED-width row and the handler can no longer produce heterogeneous shapes —
  * BUG-03's trigger is gone at the source. The SCOPE grouping remains load-bearing regardless (a multi-row
  * INSERT cannot span partitions, PRD-062c L-C1); the SIGNATURE sub-group is retained as defense-in-depth
