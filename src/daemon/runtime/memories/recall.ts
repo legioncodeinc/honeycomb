@@ -3042,8 +3042,9 @@ function resolveMemoriesIndexRows(
 	limit: number,
 ): StorageRow[] | null {
 	const localIndex = deps.localVectorIndex;
-	// The in-RAM index has no agent_id or visibility, so an isolated caller cannot use it.
-	if (request.agentScopeIsolated === true) return null;
+	// The in-RAM index stores no agent_id or visibility. Any agent-policy clause, including
+	// shared and group, must take the scoped SQL arm instead of this unfiltered scan.
+	if (request.agentScopeSql !== undefined && request.agentScopeSql.trim() !== "") return null;
 	if (!semanticRan || !config.localAnnIndex || localIndex === undefined || !localIndex.ready || queryVector === null) {
 		return null;
 	}

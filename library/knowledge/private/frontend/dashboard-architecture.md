@@ -62,7 +62,7 @@ flowchart TD
 
 | Order | Builder | What the block shows |
 |---|---|---|
-| 1 | `buildKpisView` | Rows `Memories`, `Sessions`, and `Estimated savings` (`src/dashboard/views.ts:61-64`), plus any `extra` metrics. |
+| 1 | `buildKpisView` | Rows `Memories`, `Sessions`, and `Estimated savings`[^est-savings] (`src/dashboard/views.ts:61-64`), plus any `extra` metrics. |
 | 2 | `buildSessionsView` | A table titled `Sessions`, one row per captured session. |
 | 3 | `buildSettingsView` | Org, workspace, the settings string map, and a nested lifecycle-flags child. It does not call `/api/actions`. |
 | 4 | `buildGraphView` | An empty-state prompt, or a `graph-canvas` block with node and edge counts. |

@@ -39,13 +39,16 @@ describe("49b-AC-5 (b): the project_id predicate is on every memory recall query
 			expect(src).toContain(builder);
 		}
 		// The three arms are invoked WITH the computed project clause (not bare).
-		expect(src).toContain("buildMemoriesArmSql(term, limit, projectClause)");
+		// The memories arm also ANDs the agent read-policy fragment; the project clause stays the third argument.
+		expect(src).toContain("buildMemoriesArmSql(term, limit, projectClause, memoriesAgentAnd(request))");
 		expect(src).toContain("buildMemoryArmSql(term, limit, projectClause)");
 		expect(src).toContain("buildSessionsArmSql(term, limit, projectClause)");
 		// The semantic arm threads the project clause into the `<#>` vector search + the hydrate.
+		// Memories also append the agent clause onto that same conjunct (`scopedClause`).
 		expect(src).toContain("buildProjectScopeConjunct");
-		expect(src).toMatch(/extraClause:\s*projectClause/);
-		expect(src).toMatch(/buildSemanticHydrateSql\(spec, ids, projectClause\)/);
+		expect(src).toContain("const scopedClause = `${projectClause}${agentAnd}`");
+		expect(src).toMatch(/extraClause:\s*scopedClause/);
+		expect(src).toMatch(/buildSemanticHydrateSql\(spec, ids, scopedClause\)/);
 	});
 
 	it("the fast-path collection layer ANDs the project segment into the FTS + vector channels", () => {

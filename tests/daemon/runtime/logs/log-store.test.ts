@@ -31,10 +31,20 @@ import {
 } from "../../../../src/daemon/runtime/logs/log-store.js";
 import { resolveHistoryQuery } from "../../../../src/daemon/runtime/logs/api.js";
 
+/**
+ * Record times sit inside the default 30-day retention window. A fixed June 2026 stamp
+ * aged out of that window and the reopen sweep deleted the AC-1 rows.
+ */
+const REC_BASE_MS = Date.now() - 60 * 60 * 1000;
+
+function recTime(i: number): string {
+	return new Date(REC_BASE_MS + i * 1000).toISOString();
+}
+
 /** A request record with a distinct path + status, for ordering / filter assertions. */
 function rec(i: number, overrides: Partial<RequestLogRecord> = {}): RequestLogRecord {
 	return {
-		time: `2026-06-20T00:00:${String(i).padStart(2, "0")}.000Z`,
+		time: recTime(i),
 		method: "POST",
 		path: `/api/memories/recall/${i}`,
 		status: 200,
@@ -151,9 +161,10 @@ describe("PRD-043a history filters + pagination (AC-2)", () => {
 		expect(notFound.records).toHaveLength(2);
 		expect(notFound.records.every((r) => r.status === 404)).toBe(true);
 
-		// since/until window: only record #2 (time …:02Z).
+		// since/until window: only record #2.
+		const at = recTime(2);
 		const windowed = store.queryRequests(
-			resolveHistoryQuery({ since: "2026-06-20T00:00:02.000Z", until: "2026-06-20T00:00:02.999Z" }),
+			resolveHistoryQuery({ since: at, until: new Date(Date.parse(at) + 999).toISOString() }),
 		);
 		expect(windowed.records).toHaveLength(1);
 		expect(windowed.records[0]?.status).toBe(200);
