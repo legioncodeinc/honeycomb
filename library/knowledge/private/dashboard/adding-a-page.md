@@ -1,106 +1,61 @@
 # How to add a dashboard page
 
-> Category: Frontend | Version: 1.1 | Date: October 2026 | Status: Active
+> Category: Frontend | Version: 1.2 | Date: October 2026 | Status: Active
 
-A contributor how-to: adding a page to the daemon-served dashboard is one registry entry plus one component. Owner of the seam: PRD-037 (Dashboard Nav Shell); consumers: PRD-038 (home reorg), PRD-039 (Harnesses), PRD-040 (Memories), PRD-041 (Graph), PRD-042 (Sync), PRD-043 (Logs), PRD-044 (Settings).
+A contributor how-to for the dashboard that ships in this checkout. A page here is a `ViewBlock` builder composed by `renderDashboard`. Owner of that seam: `src/dashboard/views.ts` and `src/dashboard/dashboard.ts`. The React registry recipe (`src/dashboard/web/registry.tsx`, one `RouteEntry`, `/dashboard/app.js`) is absent.
 
 **Related:**
 - [`../frontend/dashboard-architecture.md`](../frontend/dashboard-architecture.md)
 - [`../architecture/daemon-surface.md`](../architecture/daemon-surface.md)
 
-This recipe names `src/dashboard/web/` (`sidebar.tsx`, `router.tsx`, `registry.tsx`, `page-frame.tsx`) and `src/daemon/runtime/dashboard/host.ts`. None of those paths are in this checkout. `src/dashboard/` here is the launch client and view tree (`launch.ts`, `views.ts`, `html.ts`). The browser SPA is the Hive portal on port 3853, documented in [`../frontend/dashboard-architecture.md`](../frontend/dashboard-architecture.md). The steps below are the historical registry contract. Follow them only in the tree that still contains those files.
+`src/dashboard/web/` is absent, including `sidebar.tsx`, `router.tsx`, `registry.tsx`, `page-frame.tsx`, `app.tsx`, and `pages/`. `src/daemon/runtime/dashboard/host.ts` is absent. Honeycomb has no `GET /dashboard` route. `src/dashboard/html.ts` still comments that the daemon serves `GET /dashboard`; that comment describes a route this tree does not mount. The browser origin constant is `HIVE_PORT` `3853`, documented in [`../frontend/dashboard-architecture.md`](../frontend/dashboard-architecture.md).
 
-The `/dashboard` mini-site is a left-nav multi-page app shell (PRD-037). The shell, the sidebar
-(`src/dashboard/web/sidebar.tsx`), the hash router (`src/dashboard/web/router.tsx`), and the app-shell
-split (`src/dashboard/web/app.tsx` → `<Shell>`), is built once. Adding a page is **one registry entry
-plus one component**. You do **not** edit the sidebar or the router.
+PRD-037 through PRD-044 named a hash-routed shell. That shell is not the seam in this repository. Follow the builders below.
 
-## The 3-step recipe
+## The recipe
 
-### 1. Write a page component
+### 1. Return a `ViewBlock`
 
-A page takes the shared `PageProps` (`src/dashboard/web/page-frame.tsx`) and wraps its content in
-`<PageFrame>`:
+Add a `build*View` in `src/dashboard/views.ts`. Builders are pure: they take a view-model and return a `ViewBlock` (`kind`, optional `title`, `rows`, `children`, `data`). They do not fetch and they do not import DeepLake.
 
-```tsx
-import React from "react";
-import { PageFrame, usePoll, type PageProps } from "../page-frame.js";
-
-export function LogsPage({ wire, daemonUp }: PageProps): React.JSX.Element {
-  const [lines, setLines] = React.useState<string[]>([]);
-  // Hydrate the SAME way the dashboard does: fetch-on-mount + poll + cleanup-on-unmount.
-  usePoll(async () => {
-    const records = await wire.logs(40);
-    setLines(records.map((r) => `${r.method} ${r.path}`));
-  }, 2500);
-
-  return (
-    <PageFrame title="Logs" eyebrow="live stream">
-      {/* your panels here */}
-    </PageFrame>
-  );
+```ts
+export function buildExampleView(view: ExampleView): ViewBlock {
+  return {
+    kind: "panel",
+    title: "Example",
+    rows: view.rows,
+    data: view,
+  };
 }
 ```
 
-Rules:
+Match the kinds hosts already switch on (`panel`, `table`, `metric`, `empty-state`, `graph-canvas`, `connectivity`) unless the host serializer grows a new kind in the same change.
 
-- **Use the shared `wire`** the shell passes in `PageProps`, never call `createWireClient()` yourself
-  (the shell builds exactly one client and hands it down).
-- **The shell owns the daemon-down state** (D-5). When the daemon is unreachable the shell swaps the
-  whole content region for the `ConnectivityBanner`; your page only ever renders for an up daemon. Use
-  `daemonUp` only if you want to gate your own polling further.
-- **DS tokens only.** Every color/space/font is an existing `var(--…)` token (the same set the rest of
-  the dashboard uses). No new design system, no new dependency.
-- **No secret in the page.** The shell stays local-mode-only and XSS-safe; render subsystem state, never
-  a token/credential/header (D-9).
-- **`usePoll(fn, ms)`** is the documented hydration recipe (fetch-on-mount + interval + cleanup). Reuse
-  it instead of re-deriving the lifecycle.
+### 2. Compose it from `renderDashboard`
 
-### 2. Add one registry entry
+`renderDashboard` in `src/dashboard/dashboard.ts` pushes the reachable views in a fixed order: KPIs, sessions, settings, graph, rules, skill-sync. That order is the contract the Cursor webview paints.
 
-In `src/dashboard/web/registry.tsx`, add a `RouteEntry` to the `ROUTES` array, in nav order:
+A nested `children` entry does not add a seventh top-level block. `buildLifecycleFlagsView` is the existing example: `buildSettingsView` attaches it as a child so the six-block order stays intact.
 
-```tsx
-{ route: "/logs", label: "Logs", icon: LogsIcon, component: LogsPage },
-```
+A new top-level block changes that contract. Add the `build*View` call in `renderDashboard` only when both hosts should show a new top-level block, and update the tests that lock the order.
 
-That is it. The sidebar renders the nav item from the registry; the router outlet mounts your component
-when the hash matches the route. The icon is an inline-SVG `ReactNode` stroked in `currentColor` (the
-sidebar tints it active/resting by row color), no icon-font, no icon registry.
+### 3. Feed it from the daemon read
 
-### 3. (Optional) Declare a dynamic group
+When the block needs data the six endpoints do not already return, add the read on the dashboard API (`src/daemon/runtime/dashboard/api.ts`) and include it in `createDaemonDashboardDataSource.fetchAll` (`src/dashboard/launch.ts`). `launchDashboard` performs that fetch once per launch. It does not poll.
 
-If your page's nav children come from **live install state** rather than a fixed list, e.g. the
-per-installed-harness items under Harnesses (PRD-039), set `dynamic` on the entry:
+Expensive scans belong behind `createTtlViewCache`. See [`../frontend/dashboard-performance.md`](../frontend/dashboard-performance.md).
 
-```tsx
-{
-  route: "/harnesses",
-  label: "Harnesses",
-  icon: HarnessesIcon,
-  component: HarnessesPage,
-  dynamic: { resolve: (live) => /* compute SubItem[] from live install state */ },
-}
-```
+## What this checkout checks
 
-`dynamic.resolve(live)` returns `SubItem[]` (`{ route, label }`) computed at render. These are
-**children** of a static top-level entry, distinct from the seven fixed routes. The registry defines the
-**contract**; the live data source is the consuming PRD's call (PRD-037 OQ-3). "Dynamically loaded" here
-means "registry entries computed from live state at render", **not** lazy code-splitting, the bundle
-stays one file (`/dashboard/app.js`).
+View structure is asserted without a DOM in:
 
-## Why this seam exists
+- `tests/dashboard/dashboard.test.ts`
+- `tests/dashboard/views.test.ts`
+- `tests/dashboard/html.test.ts`
+- `tests/dashboard/logs.test.ts`
 
-- **Hash routing, not History API** (PRD-037 D-1): the old rationale was that a daemon host at `src/daemon/runtime/dashboard/host.ts` served four GET routes and a real path refresh would 404, so the hash fragment stayed client-only. That host file is not in this checkout. Honeycomb has no `GET /dashboard` route; the Hive portal serves the SPA (`../frontend/dashboard-architecture.md`).
-- **One registry, two consumers** (D-7): the sidebar and the router outlet both read `ROUTES`. Editing
-  the list in one place updates both, which is exactly why adding a page never touches `sidebar.tsx` or
-  `router.tsx`.
-- **Lift-and-shift, then reorganize** (D-6): PRD-037 moved the old single-page content verbatim onto the
-  Dashboard route (`pages/dashboard.tsx`) with zero regression. Reorganizing that home page is PRD-038's
-  job; the other six pages (039-044) fill the empty-framed placeholders.
+`tests/dashboard/web/registry.test.tsx` is absent. There is no registry test that mounts a throwaway hash route.
 
-## Proof the seam works
+## Why the seam is a builder
 
-`tests/dashboard/web/registry.test.tsx` adds a **throwaway** registry entry in a test and proves it
-appears in the nav **and** routes to its component without editing `sidebar.tsx` or `router.tsx`
-(PRD-037c AC-6). That is the guarantee PRDs 038-044 build against.
+One `ViewBlock` tree feeds the launch client and the Cursor webview. `html.ts` serializes that same tree to HTML for a host that wants a document. The daemon does not mount a route that serves it. Hash routing and a single `/dashboard/app.js` bundle belonged to `host.ts` and `src/dashboard/web/`, which are not in this checkout.

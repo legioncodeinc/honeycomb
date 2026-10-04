@@ -1,6 +1,6 @@
 # Harness Integration
 
-> Category: Integrations | Version: 1.1 | Date: July 2026 | Status: Active
+> Category: Integrations | Version: 1.2 | Date: October 2026 | Status: Active
 
 How Honeycomb plugs underneath coding harnesses: the install-time connector base, the per-harness shims, MCP-server-via-install, and the capability detection plus idempotent install/uninstall contract that wires 3 supported harnesses today (Claude Code, Codex, Cursor) while tracking Hermes, pi, and OpenClaw as in progress.
 
@@ -27,11 +27,11 @@ A **connector** is install-time. It runs once during `honeycomb setup` or `honey
 
 A **hook** is a lifecycle event the harness fires that calls the daemon. Hooks are how capture and automatic recall happen; the per-harness event matrix is documented in [`hook-lifecycle.md`](hook-lifecycle.md).
 
-An **MCP server** is the on-demand tool surface, a registered server a harness invokes to ask for memory operations explicitly. Where a harness speaks MCP, the connector registers the Honeycomb server during install (MCP-server-via-install); the tool surface is documented in [`mcp-and-sdk.md`](mcp-and-sdk.md).
+An **MCP server** is the on-demand tool surface, a process a harness can spawn to ask for memory operations explicitly. Claude Code and Hermes ship that spawn as a static `.mcp.json`. Connect time patches hook config and skill links. The tool surface is documented in [`mcp-and-sdk.md`](mcp-and-sdk.md).
 
 ```mermaid
 flowchart TD
-    setup["honeycomb setup / connect"] --> connector["Connector (install-time):\npatch config, write handlers, link skills, register MCP"]
+    setup["honeycomb setup / connect"] --> connector["Connector (install-time):\npatch config, write handlers, link skills"]
     connector --> files["Harness config + hook handlers on disk"]
     session["Harness session"] --> hooks["Lifecycle hooks (thin clients)"]
     session --> mcp["MCP tools (on demand)"]
@@ -86,17 +86,17 @@ Each harness wires the same logical lifecycle events through its own mechanism; 
 | pi | In progress | Planned extension + `AGENTS.md` path | Not wired as a production connector path yet |
 | OpenClaw | In progress | Planned native-extension path | Not wired as a production connector path yet |
 
-The differences are real but shallow: native event names and payload fields vary, and the context channel is model-only on some harnesses (Claude Code, Cursor, OpenClaw) and user-visible on others (Codex, Hermes, pi), so each shim normalizes before handing off and renders the context block through its harness's channel.
+The differences are real but shallow: native event names and payload fields vary, and the context channel is model-only on some harnesses (Claude Code, Cursor, OpenClaw) and user-visible on others (Codex, Hermes, pi), so each shim normalizes before handing off. Codex's user-visible channel emits a one-line login string (`honeycomb: signed in — memory recall active`, or the read-only login hint) through `codexRenderUserVisible`. The other shims render the assembled block through their channel.
 
 ## MCP-server-via-install
 
-For harnesses that speak the Model Context Protocol, the Honeycomb MCP server is registered during install so its `honeycomb_*` tools appear in the harness's native tool list. The server bundle is built by esbuild to `mcp/bundle/server.js` and ships with the package. Hermes, for example, registers it through its `.mcp.json`:
+The server bundle is built by esbuild to `mcp/bundle/server.js` and ships with the package. MCP registration is a static manifest in the harness tree. Claude Code ships `harnesses/claude-code/.mcp.json`, whose args are `${CLAUDE_PLUGIN_ROOT}/mcp/bundle/server.js`. Hermes carries a static in-progress manifest, `harnesses/hermes/.mcp.json`:
 
 ```json
 { "mcpServers": { "honeycomb": { "command": "node", "args": ["mcp/bundle/server.js"] } } }
 ```
 
-and the Hermes shim appends a user-visible mention so the agent knows the tools exist: `(Honeycomb MCP tools available: honeycomb_search, honeycomb_read, honeycomb_index.)`. The same `node mcp/bundle/server.js` stdio entry registers into the other MCP-speaking harnesses during their connect step. The tool surface, the read/resolve and search/mine clusters, and the registration mechanics are documented in [`mcp-and-sdk.md`](mcp-and-sdk.md).
+Codex and Cursor have no `.mcp.json`. The Hermes shim appends a user-visible mention so the agent knows the tools exist: `(Honeycomb MCP tools available: honeycomb_search, honeycomb_read, honeycomb_index.)`. The tool surface and the read/resolve and search/mine clusters are documented in [`mcp-and-sdk.md`](mcp-and-sdk.md).
 
 ## The Claude Code plugin: packaging and delivery
 
@@ -117,11 +117,11 @@ An installed agent whose plugin is present but **not enabled** is a silent failu
 **The load-bearing tier constraint.** The daemon (Tier 2) may **not** import the connector composition (Tier 4). Both the reconcile and the status/repair surface therefore live at the **CLI tier** and are exposed to the daemon only through injected seams, never a direct Tier-2-to-Tier-4 import. Two documented consequences follow:
 
 - **W-1:** the recurring reconcile cadence is hosted in the short-lived CLI process (via `onDaemonUp` and each daemon-ensuring CLI verb), not a durable in-daemon idle loop; a persistent in-daemon loop is deferred because it needs a currently-forbidden contention-seam edit.
-- **W-2:** `GET /api/diagnostics/harnesses` `pluginEnabled` returns `false` in production because the resolver is not injected at the composition root. The **authoritative** value is `honeycomb harness status --json`; the dashboard/hive card must read the verb, not the endpoint field.
+- **W-2:** The composition root constructs `createHarnessPluginStatusHolder` and the harness mount reads it through `resolvePluginEnabled`. The set is empty until the first push. After reconcile, the CLI posts `pluginEnabled` to `POST /api/diagnostics/harness-status`. `GET /api/diagnostics/harnesses` therefore reports `pluginEnabled: false` until that push lands. `honeycomb harness status --json` is the inspection verb for the same wiring state.
 
 ## Identity sync
 
-`AGENTS.md` in the workspace is the source of truth for operating instructions, and the daemon's file watcher syncs it into each harness's identity file (`~/.claude/CLAUDE.md`, the pi `AGENTS.md` block, and so on), each copy stamped do-not-edit. A manual re-sync is `POST /api/harnesses/regenerate`. The watcher behavior is documented in [`../architecture/daemon-surface.md`](../architecture/daemon-surface.md).
+`src/daemon/runtime/services/harness-sync.ts` can stamp a do-not-edit header when a harness target is injected. Its canonical names are `agent.yaml`, `AGENTS.md`, `SOUL.md`, `MEMORY.md`, `IDENTITY.md`, and `USER.md`. Production assembly passes `harnessTargets: options.harnessTargets ?? []`, and no production caller supplies a non-empty list, so the watcher writes no harness identity copies. `~/.claude/CLAUDE.md` appears as a comment example in `src/daemon/runtime/services/file-watcher.ts`. There is no `POST /api/harnesses/regenerate` route. The helper is discussed alongside the daemon surface in [`../architecture/daemon-surface.md`](../architecture/daemon-surface.md).
 
 ## Capture and recall, directly
 
@@ -129,4 +129,4 @@ Beyond the hook lifecycle, a harness can call recall and remember directly throu
 
 ## The references gate
 
-Integration work carries a hard rule: before changing anything under a harness integration, the acting engineer inspects the sibling harness repo under `references/` (for example `references/openclaw/`, `references/cursor/`, `references/codex/`) for the exact protocol and runtime behavior. No direct sibling-harness check means no verdict on that integration. This is what keeps each connector and shim honest against the real harness, the Cursor connector's flat `hooks.json` shape, for instance, is implemented against `references/cursor/hooks-schema.ts`, not against an assumption.
+Integration work checks the hook-JSON oracles under `references/`. On disk that tree is `references/claude-code/`, `references/codex/`, and `references/cursor/`. `references/openclaw/`, `references/hermes/`, and `references/pi/` are absent. `references/README.md` describes those directories as zod oracles for hook JSON. The Cursor connector's flat `hooks.json` shape is implemented against `references/cursor/hooks-schema.ts`, which `src/connectors/cursor.ts` cites.

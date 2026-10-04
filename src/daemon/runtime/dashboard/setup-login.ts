@@ -32,6 +32,7 @@ import {
 	loginWithDeviceFlow,
 } from "../auth/index.js";
 import type { Daemon } from "../server.js";
+import { refuseRemoteSetup } from "./setup-loopback.js";
 
 /** The loopback route the "First time setup" button POSTs to (PRD-050c / 050b host group). */
 export const SETUP_LOGIN_PATH = "/setup/login" as const;
@@ -118,6 +119,8 @@ export function mountSetupLogin(daemon: Daemon, options: MountSetupLoginOptions 
 	const runDeviceFlow = options.runDeviceFlow ?? loginWithDeviceFlow;
 
 	root.post(SETUP_LOGIN_PATH, async (c) => {
+		const remote = refuseRemoteSetup(c);
+		if (remote !== null) return remote;
 		const body = await readBody(c);
 		// An explicit `--ref` override rides in the body; absent it, the effective ref resolves inside
 		// the device flow (onboarding.ref → DEFAULT_REF). `undefined` means "use the default" (c-AC-1);

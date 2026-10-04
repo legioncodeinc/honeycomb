@@ -1,8 +1,8 @@
 # Dashboard Actions Surface
 
-> Category: Frontend | Version: 1.1 | Date: July 2026 | Status: Active
+> Category: Frontend | Version: 1.2 | Date: October 2026 | Status: Active
 
-How the daemon-served dashboard performs CLI lifecycle actions, logout, embeddings on/off, daemon restart, and uninstall, through the guarded `/api/actions` group, and why these four are held to a stricter trust gate than the rest of the dashboard.
+How the daemon exposes lifecycle actions — logout, embeddings on/off, memory on/off, daemon restart, and uninstall — through the guarded `/api/actions` group. Five `POST`s are mounted. The settings `ViewBlock` in this checkout does not call them.
 
 **Related:**
 - [`dashboard-architecture.md`](dashboard-architecture.md)
@@ -15,85 +15,87 @@ How the daemon-served dashboard performs CLI lifecycle actions, logout, embeddin
 
 ## Why this surface exists
 
-For most of its life the dashboard was read-mostly: it rendered view-models (`api.ts`, `harness-api.ts`) and wrote vault settings (`/api/settings`) and secrets (`/api/secrets`). Anything that changed the *process*, the *credential*, or the *installation* was CLI-only, you signed out with `honeycomb logout`, toggled embeddings with `HONEYCOMB_EMBEDDINGS`, restarted with `honeycomb daemon`, and removed Honeycomb with `honeycomb uninstall`.
+Dashboard reads and ordinary settings writes live on other groups. Verbs that touch the credential file, the running process, embeddings, memory formation, or the install footprint are `POST`s on `/api/actions`, each behind `actionGuard`. `mountActionsGroup` registers five routes (`src/daemon/runtime/dashboard/actions-api.ts:232-323`): `/logout`, `/embeddings`, `/memory`, `/restart`, and `/uninstall`. There is no `prd-145` folder under `library/requirements/`. The fifth route is visible on the mount itself.
 
-PRD-145 makes the dashboard a peer of the CLI for those four named lifecycle actions. They differ in kind from a settings write: they are sharp, they touch the credential file, the running process, or the on-disk footprint, so they get their own mount (`/api/actions`) and their own guard rather than riding the settings path. The seam is deliberately extensible: a future verb is one handler plus one wire method plus one control, with no new route plumbing.
+`buildSettingsView` (`src/dashboard/views.ts:111-121`) renders org, workspace, and the settings string map. It does not call `/api/actions`. `src/dashboard/web/wire.ts` and `src/dashboard/web/pages/settings.tsx` are absent.
 
 ```mermaid
 flowchart LR
-    S[Settings page<br/>settings.tsx] -->|wire.ts| A[/api/actions/*]
-    A --> G{actionGuard}
+    A["POST /api/actions/*"] --> G{actionGuard}
     G -->|reject| R[403]
-    G -->|allow| H[logout · embeddings · restart · uninstall]
+    G -->|allow| H["logout · embeddings · memory · restart · uninstall"]
     H --> E[EmbedSupervisor.setEnabled]
     H --> V[VaultStore.setSetting]
     H --> K[restart-helper.js]
     H --> C[credential files]
 ```
 
-## The four actions
+## The five actions
 
-All four are `POST` under the `/api/actions` group (`src/daemon/runtime/dashboard/actions-api.ts`). No secret or token ever crosses a response, the richest payload is an uninstall outcome carrying ids and a command string.
+All five are `POST` under `/api/actions` (`ACTIONS_GROUP` in `src/daemon/runtime/dashboard/actions-api.ts`). Responses do not carry a secret or a token.
 
 | Action | Endpoint | Effect | Response |
 |---|---|---|---|
-| Logout | `POST /api/actions/logout` | Remove the shared + legacy credential files (idempotent, fail-soft) | `{ ok: true }` |
-| Embeddings | `POST /api/actions/embeddings` | Persist `embeddings.enabled` then actuate the supervisor live | `{ ok, enabled }` |
-| Restart | `POST /api/actions/restart` | Spawn the detached respawn helper, then gracefully stop this daemon | `{ ok, restarting }` |
-| Uninstall | `POST /api/actions/uninstall` | v1 guided: detect wired harnesses + return the exact reversal command | `UninstallOutcome` |
+| Logout | `POST /api/actions/logout` | Remove the shared and legacy credential files (idempotent, fail-soft) | `{ ok: true }` |
+| Embeddings | `POST /api/actions/embeddings` | Persist `embeddings.enabled`, then actuate the supervisor | `{ ok, enabled }` |
+| Memory | `POST /api/actions/memory` | Persist `memory.enabled`. When that write sticks and a pipeline reload seam is mounted, request a live reload | `{ ok, enabled, persisted, appliedLive, appliesOnRestart }` |
+| Restart | `POST /api/actions/restart` | Spawn the detached respawn helper, then gracefully stop this daemon | `{ ok, restarting: true }` |
+| Uninstall | `POST /api/actions/uninstall` | v1 guided: detect wired harnesses and return the reversal command | `UninstallOutcome` |
 
-Re-login is not a fifth handler: the page reuses the existing `/setup/login` device flow, now driven in-page instead of handed off to a terminal.
+Re-login uses the existing `/setup/login` device flow. It is not one of these five handlers.
 
-## The guard (these actions are sharp)
+## The guard
 
-Every handler calls `actionGuard(c, mode)` first, which returns a `Response` to short-circuit or `null` to proceed. It stacks three independent barriers on top of the daemon's loopback bind:
+Every handler calls `actionGuard(c, mode)` first. It returns a `Response` to short-circuit or `null` to proceed (`src/daemon/runtime/dashboard/actions-api.ts:117-138`). Three barriers sit on top of the loopback bind:
 
-1. **Local mode only.** A `team`/`hybrid` daemon returns `403`, the same posture as the dashboard host and `/setup/*` routes (`assemble.ts` security F-1). A self-destruct / credential surface is never exposed to a remote.
-2. **Origin / CSRF.** The daemon binds loopback, but a malicious site open in the user's browser could `POST` to `127.0.0.1:3850`. The guard rejects a browser cross-origin request (`Sec-Fetch-Site: cross-site|same-site`) and requires any present `Origin` to resolve to a loopback host (`127.0.0.1`, `localhost`, `::1`).
-3. **Dashboard session header.** It requires the dashboard's custom `x-honeycomb-session` header. A cross-origin `fetch` cannot set a custom header without a CORS preflight, and Honeycomb ships zero CORS allowance by design (`src/daemon/runtime/server.ts` mounts no CORS middleware, see [`dashboard-architecture.md`](dashboard-architecture.md)), so a preflight is never approved. That makes this a third, independent CSRF barrier, one that is only stronger now that no `Access-Control-*` header is emitted at all.
+1. **Local mode only.** A `team` or `hybrid` daemon returns `403`. A credential or self-destruct surface stays off remote modes.
+2. **Origin / CSRF.** The guard rejects `Sec-Fetch-Site: cross-site` or `same-site`, and any present `Origin` must be a loopback host (`127.0.0.1`, `localhost`, `::1`).
+3. **Dashboard session header.** The request must carry `x-honeycomb-session`. A cross-origin `fetch` cannot set that header without a CORS preflight, and Honeycomb ships zero CORS middleware (`src/daemon/runtime/server.ts`; see [`dashboard-architecture.md`](dashboard-architecture.md)).
 
-A non-browser client (the CLI, a unit test) sends no `Sec-Fetch-Site`, so it passes barrier 2 cleanly while still needing local mode and the session header.
+A non-browser client (the CLI, a unit test) sends no `Sec-Fetch-Site`, so it passes barrier 2 while still needing local mode and the session header.
 
 ## Embeddings: persist then actuate
 
-The embeddings toggle is the one action with durable state. The handler **persists first** (best-effort) so the choice survives a restart, then actuates the running supervisor:
+The embeddings handler persists first, best-effort, then actuates the running supervisor:
 
 ```ts
 if (store !== undefined) {
-  const sc = settingsScope.resolve(c);          // same local-default scope as /api/settings
+  const sc = settingsScope.resolve(c);
   if (sc !== null) {
     try { await store.setSetting(EMBEDDINGS_ENABLED_KEY, enabled, sc); }
     catch { /* a vault write failure must not block the live toggle */ }
   }
 }
-await embed.setEnabled(enabled);                 // spawn + warm, or stop the child
+await embed.setEnabled(enabled);
 ```
 
-The persisted key (`embeddings.enabled`) is read at daemon boot, so the supervisor comes up in the last-chosen state. The scope is resolved through the **same** `localDefaultScopeResolver` the `/api/settings` write uses, so a dashboard toggle and a CLI `honeycomb settings set` land under identical tenancy. A missing store or unresolvable scope simply skips persistence, the live toggle still applies for the session.
+`EMBEDDINGS_ENABLED_KEY` is `embeddings.enabled`. The scope resolver is the same `localDefaultScopeResolver` the `/api/settings` write uses. A missing store or an unresolvable scope skips persistence. The live toggle still applies for the session.
+
+## Memory: persist, then reload when both succeed
+
+`POST /api/actions/memory` reads the same `{ enabled }` body. It writes `memory.enabled` (`MEMORY_ENABLED_KEY`) when a store and a scope resolve. `appliedLive` is true only when that persist succeeded and `options.reload` is mounted; the handler then calls `requestReload("action:memory")`. `appliesOnRestart` is true when the value was persisted and the live seam is absent. A vault failure does not 500 the route.
 
 ## Restart: a separate respawn process
 
-A daemon cannot cleanly restart itself. It holds a single-instance lock, so a fresh daemon started while the old one still holds the lock would see "already running" and exit, leaving nothing; and a self-respawn cannot order itself after its own lock release.
-
-The restart handler therefore spawns `restart-helper.js` (`src/daemon/restart-helper.ts`), a tiny, dependency-free, **detached** process bundled beside the daemon entry, then defers the graceful shutdown one tick so the `200` flushes first:
+The restart handler spawns `restart-helper.js` (`src/daemon/restart-helper.ts`) detached, then defers shutdown one tick so the `200` can flush:
 
 ```ts
-spawnRestart();                                  // detached helper, unref'd, outlives the parent
-setTimeout(() => shutdown(), RESTART_SHUTDOWN_DELAY_MS);  // SIGTERM self; assembly drains
+spawnRestart();
+setTimeout(() => shutdown(), RESTART_SHUTDOWN_DELAY_MS);
 ```
 
-The helper waits for the old daemon's `/health` to stop answering, waits a short grace for the lock file to clear, then starts a fresh daemon and exits. The ordering is: old drains → old exits → helper sees `/health` down → helper starts the new daemon → new daemon acquires the lock cleanly. The helper is fail-soft: if it cannot determine the entry or the wait times out, it still attempts the spawn (a fresh daemon's own stale-lock reclaim is the backstop) and never throws. It reads two env vars stamped by the handler, `HONEYCOMB_RESTART_ENTRY` (the `daemon/index.js` path) and `HONEYCOMB_RESTART_PORT` (the loopback port).
+The handler stamps `HONEYCOMB_RESTART_ENTRY` (the daemon entry path) and `HONEYCOMB_RESTART_PORT` (`src/daemon/runtime/dashboard/actions-api.ts:185-192`). The helper documents the same variables (`src/daemon/restart-helper.ts`). `main()` returns without spawning when the entry is empty. When the entry is non-empty it polls `/health` until the daemon stops responding or the deadline expires, sleeps a fixed grace period, and then attempts the spawn. It does not check whether the lock file cleared.
 
-> **Known follow-up (PR-145):** the self-respawn is unit-tested with injected seams but not yet live-dogfooded; the graceful-stop path is the documented fallback. Verify a live restart before relying on the one-click flow.
+> **Known follow-up:** the self-respawn is unit-tested with injected seams (`tests/daemon/runtime/dashboard/actions-api.test.ts`) and is not yet live-dogfooded. The graceful-stop path is the documented fallback. Verify a live restart before relying on the one-click flow.
 
-## Uninstall: honest v1 (guided)
+## Uninstall: honest v1
 
-The destructive hook removal lives in the CLI connector engine (`honeycomb uninstall`), a non-daemon layer. Performing it from the very daemon serving the page would kill the page mid-operation. So `defaultUninstall()` surfaces the capability honestly rather than faking a one-click removal: it detects the wired harnesses (`detectInstalledHarnesses()`) and returns an `UninstallOutcome` naming them plus the exact reversal command (`honeycomb uninstall`) and a plain-language note. `removed` is `false` in v1, the seam is injectable so a future composition root can wire a real in-process remover.
+`defaultUninstall()` detects wired harnesses and returns an `UninstallOutcome` with those ids, `command: "honeycomb uninstall"`, and `removed: false` (`src/daemon/runtime/dashboard/actions-api.ts:204-209`). The destructive removal stays in the CLI connector engine. The seam is injectable so a later composition root can wire an in-process remover.
 
 ## Hermetic by injection
 
-Every effect is an injectable seam on `MountActionsOptions`, defaulting to the real behaviour: `removeCredentials`, `shutdown`, `spawnRestart`, `uninstall`, plus the `embed` supervisor and the optional `store`. The unit suite (`tests/daemon/runtime/dashboard/actions-api.test.ts`) drives every handler and every guard rejection against recorders, without removing a real credential, killing the test process, or spawning a real daemon.
+Effects on `MountActionsOptions` default to the real behaviour and can be replaced in tests: `removeCredentials`, `shutdown`, `spawnRestart`, `uninstall`, the `embed` supervisor, the optional `store`, and the optional `reload` seam. `tests/daemon/runtime/dashboard/actions-api.test.ts` drives the handlers and the guard against recorders.
 
 ## Mounting
 
-`mountActionsApi(daemon, options)` mirrors `mountHarnessApi`: it resolves the already-declared protected group (`daemon.group("/api/actions")`, declared in `server.ts`) and delegates to `mountActionsGroup`, which attaches the four handlers with zero `server.ts` handler edits. It is a no-op when the group is not mounted, so a unit-constructed daemon without the group never throws. The browser side is symmetrical: `wire.ts` exposes `logout()`, `restartDaemon()`, `uninstall()`, and the embeddings toggle, and `settings.tsx` renders the Embeddings and System Actions sections (each destructive action behind a step-by-step confirmation).
+`mountActionsApi(daemon, options)` resolves `daemon.group("/api/actions")` and delegates to `mountActionsGroup`, which attaches the five handlers. It returns without throwing when the group is not mounted. The in-repo settings view does not wrap these routes. A caller that wants them sends the five `POST`s with the guard headers above.

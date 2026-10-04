@@ -1,8 +1,8 @@
 # Dashboard performance and steady-state cost
 
-> Category: Frontend | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Frontend | Version: 1.1 | Date: October 2026 | Status: Active
 
-How the daemon-served dashboard keeps its idle and cold-load cost low: the background-tab polling pause, the single deduplicated `/health` poll, the short-TTL diagnostics caches, the split KPI read (cheap counts vs heavy savings), and the below-the-fold deferral. Read this before adding a new polling page or a new dashboard read so you inherit the existing cost controls instead of reintroducing the load they removed.
+How dashboard reads stay cheap in this checkout: `launchDashboard` fetches the daemon once per launch, and the dashboard API caches expensive diagnostics behind short TTLs. The React polling shell (`usePoll`, a `/health` poll owned by a page shell, below-the-fold deferral) is absent. Read this before adding a dashboard read so the new read joins the existing caches.
 
 **Related:**
 - [`dashboard-architecture.md`](dashboard-architecture.md)
@@ -12,80 +12,46 @@ How the daemon-served dashboard keeps its idle and cold-load cost low: the backg
 
 ---
 
-## The problem: an idle dashboard is not free
+## One fetch per launch
 
-The dashboard self-hydrates by polling same-origin loopback endpoints, and several of those endpoints fan out to DeepLake scans (KPIs, sessions, rules, skills) or a filesystem walk (installed assets). Left naive, a dashboard tab parked in the background keeps firing those polls forever, and the hash router REMOUNTS a page every time the operator navigates back to it, re-running the same scans. Both are pure waste: nobody is looking at a background tab, and re-landing on the home should not recompute a KPI sum that has not moved. PRD-049e (PR [#161](https://github.com/legioncodeinc/honeycomb/pull/161)) closed both gaps with steady-state and cold-load wins that do not change what the dashboard shows.
+`launchDashboard` (`src/dashboard/launch.ts:142-146`) builds a data source and calls `renderDashboard` once. The source probes `GET /health`, then `fetchAll` issues the six view reads together (`src/dashboard/launch.ts:106-130`). Nothing in `src/dashboard/` schedules a repeating poll. `usePoll`, `isTabHidden`, `HEALTH_POLL_MS`, `showSecondary`, and `document.visibilityState` are absent under `src/`. There is no dashboard entry in `esbuild.config.mjs`, so there is no host-served dashboard bundle and no tab-visibility seam to inherit.
 
-## Background-tab pause (the single visibility seam)
+A repeated call to the same diagnostics route inside the TTL is what the caches below skip. That is a daemon-side cache, not a browser remount.
 
-`usePoll(fn, ms)` (`src/dashboard/web/page-frame.tsx`) is the one polling primitive every page uses, and it is the single place the pause lives. Its interval keeps its cadence but does NO work while the tab is hidden:
+## Short-TTL diagnostics caches
 
-```ts
-export function isTabHidden(): boolean {
-  return typeof document !== "undefined" && document.visibilityState === "hidden";
-}
-```
-
-- Each tick early-returns when `isTabHidden()` is true, so a backgrounded dashboard stops hitting the daemon/DeepLake entirely.
-- A `visibilitychange` -> visible listener fires an IMMEDIATE tick on re-foreground, so returning to the tab refreshes at once rather than waiting up to `ms` (the skipped ticks left the view as stale as `ms` ago).
-- The exported `isTabHidden` predicate also guards the per-page RAW loops (the graph/memories/sync/settings pages run their own `setInterval`/raw fetch loops outside `usePoll`); those check it too, so the pause is total, not just for `usePoll` consumers.
-
-Because `usePoll` is the seam, any page authored to the documented `usePoll` recipe inherits the pause for free. A page that hand-rolls its own loop must call `isTabHidden()` itself.
-
-## Health dedup: one `/health` poll, reasons flow down
-
-The home page once polled `/health` a SECOND time to render its per-subsystem health strip, duplicating the shell's liveness poll. Now the shell (`src/dashboard/web/app.tsx`, `Shell`) owns the single `/health` poll, and the per-subsystem `reasons` flow DOWN to pages via `PageProps.healthReasons` (`HealthReasonsWire | null`, null until the first probe resolves):
-
-```ts
-usePoll(async () => {
-  const { up, reasons } = await wire.health();
-  setHealthReasons(reasons);
-  // ...daemon-down swap + recovery re-hydrate
-}, HEALTH_POLL_MS); // 5000ms
-```
-
-The shell's poll was migrated onto `usePoll`, so it inherits the background-tab pause too: a hidden dashboard stops probing `/health` as well. The home reads `healthReasons` from its props instead of polling, so there is exactly one `/health` poll for the whole app.
-
-## Short-TTL diagnostics caches (skip the re-nav scans)
-
-The dashboard API (`src/daemon/runtime/dashboard/api.ts`) wraps the expensive diagnostics reads in a keyed, time-bounded view cache so re-navigating to a page skips the underlying scan. The generalized helper is `createTtlViewCache<T>(ttlMs)` (the generalized form of the older installed-assets cache), keyed by `scopeCacheKey(scope, ...extra)`, which NUL-joins the scope plus any extra segments (e.g. sessions are keyed by page coordinates) so no value can forge a key boundary:
+The dashboard API (`src/daemon/runtime/dashboard/api.ts`) wraps expensive diagnostics reads in `createTtlViewCache<T>(ttlMs)`, keyed by `scopeCacheKey(scope, ...extra)`. The key NUL-joins the scope plus any extra segments so a value cannot forge a key boundary.
 
 ```ts
 type TtlViewCache<T> = (key: string, compute: () => Promise<T>) => Promise<T>;
 ```
 
-- **Sessions / rules / skills** reads are cached at the short `DIAG_TTL_MS = 10_000` (10s) per scope. Sessions are additionally keyed by `(limit, cursor)` so the default home panel page never collides with a deep Logs-page page. Re-landing on the home skips the DeepLake scan and (for skills) the disk inventory walk.
-- Each `mountDashboardApi` call gets its OWN cache instances, so the caches never outlive a daemon restart.
-- The map is bounded by `CACHE_MAX_KEYS = 64` and cleared wholesale when exceeded, a coarse but correct backstop for the handful of scopes a local dashboard ever touches.
+- Sessions, rules, and skills reads use `DIAG_TTL_MS = 10_000`. Sessions are additionally keyed by limit and cursor, so one page of sessions never collides with another.
+- Each `mountDashboardApi` call gets its own cache instances, so the maps do not outlive a daemon restart.
+- The map is bounded by `CACHE_MAX_KEYS = 64` and cleared wholesale when a new key would exceed that size.
 
-A 10s TTL is short enough that a freshly captured turn surfaces on the next load, long enough that navigating away and back is free.
+A 10s TTL is short enough that a freshly captured turn can show up on a later read, and long enough that a second read inside the window skips the scan.
 
-## Split KPI read: cheap counts vs heavy savings
+## KPI composition: three reads
 
-The KPI band has two very different reads behind it. The three COUNTS (Memories / Turns / etc.) are cheap and churn; the estimated-savings SUM scans `content` across the corpus, is the heaviest KPI query, and moves slowly. `fetchKpisView` was split so each is independently cacheable at its own TTL:
+`fetchKpisView` awaits three reads (`src/daemon/runtime/dashboard/api.ts:267-271`):
 
 ```ts
-// fetchKpisView now composes the two reads for direct callers (uncached):
-const [counts, savings] = await Promise.all([
+const [counts, estimatedSavings, injectedTokens] = await Promise.all([
   fetchKpiCounts(storage, scope, projectId),
   fetchEstimatedSavings(storage, scope, projectId),
+  fetchInjectedTokens(storage, scope, projectId),
 ]);
 ```
 
-The route caches `fetchKpiCounts` at `DIAG_TTL_MS` (10s) and `fetchEstimatedSavings` at `SAVINGS_TTL_MS = 60_000` (60s), so the most expensive query is recomputed roughly six times less often than the counts. `fetchKpisView` stays as the one-call composition so a direct caller or unit test still gets the whole view uncached in a single call.
+`fetchKpiCounts` is the count read. `fetchEstimatedSavings` is the corpus-length sum, the heaviest of the three. `fetchInjectedTokens` is the injected-token sum. The route caches the counts and the injected-token sum at `DIAG_TTL_MS` (10s) and `fetchEstimatedSavings` at `SAVINGS_TTL_MS = 60_000` (60s). `fetchKpisView` itself stays the uncached composition so a direct caller still gets the whole view in one call.
 
-> **Slated to change.** `fetchEstimatedSavings` computes a corpus-length proxy (`SUM(LENGTH(content)) / 4`), which measures inventory rather than tokens actually saved. [ADR-0010](../architecture/adr/0010-recall-weighted-est-savings.md) (Accepted) pivots "Est. savings" to a recall-weighted metric sourced from the PRD-060 ROI tracker and retires `fetchEstimatedSavings` / `buildEstimatedSavingsSql`; the re-wiring is tracked by IRD-278. The performance note above documents the corpus-SUM read as it stands today; once the pivot lands, the KPI's heaviest read becomes a lighter recall-event rollup that can move to a shorter TTL.
+The `ViewBlock` rows from `buildKpisView` are `Memories`, `Sessions`, and `Estimated savings`. The third await is part of the view-model, not a fourth label on that block.
 
-## Defer the below-the-fold area to a second paint
+> **Slated to change.** `fetchEstimatedSavings` computes a corpus-length proxy (`SUM(LENGTH(content)) / 4`). [ADR-0010](../architecture/adr/0010-recall-weighted-est-savings.md) (Proposed) pivots "Estimated savings" to a recall-weighted metric and retires `fetchEstimatedSavings` / `buildEstimatedSavingsSql`. The re-wiring is IRD-278. The note above documents the corpus-sum read as it stands. Once the pivot lands, the heaviest KPI read becomes a recall-event rollup that can use a shorter TTL.
 
-On the home, the harness area sits below the fold; the KPI band + recall box are what the operator actually looks at first. The home now mounts the harness-area CONTENTS on a SECOND paint (`showSecondary` flips in a passive effect after the first commit paints, `src/dashboard/web/pages/dashboard.tsx`) so the KPI band + recall are interactive first. The landmark element itself always renders (stable layout, no reflow jump); only its contents wait. This is a cold-load latency win with no change to what eventually renders.
+## For a new read
 
-## What was deliberately NOT done
-
-Route-level code-splitting (Tier 2.5) was deferred to its own PR. The dashboard is a single host-served bundle on loopback, so splitting it would need esbuild chunking, a new chunk-serving host route (a new security surface, see [`dashboard-architecture.md`](dashboard-architecture.md) on why the host route set is kept minimal), an asset resolver, and build-output test changes, all for a parse-time-only win that loopback delivery makes negligible. Not worth the added surface today.
-
-## For a new page or read
-
-- Poll through `usePoll` (or call `isTabHidden()` in your own loop) so a background tab goes quiet.
-- Read `/health` reasons from `PageProps.healthReasons`; do NOT add a second `/health` poll.
-- If your read fans out to a DeepLake scan or a filesystem walk, wrap it in a `createTtlViewCache` keyed by `scopeCacheKey(scope, ...)` so re-navigation is free; pick a short TTL for fast-moving data and a longer one for slow, heavy aggregates.
+- Put a DeepLake scan or a filesystem walk behind `createTtlViewCache`, keyed by `scopeCacheKey(scope, ...)`. Use `DIAG_TTL_MS` for data that should move within a few seconds and `SAVINGS_TTL_MS` for a slow aggregate.
+- A new visible block is a `build*View` composed by `renderDashboard`. See [`../dashboard/adding-a-page.md`](../dashboard/adding-a-page.md).
+- `launchDashboard` does not poll. A repeating client loop would be a new seam.

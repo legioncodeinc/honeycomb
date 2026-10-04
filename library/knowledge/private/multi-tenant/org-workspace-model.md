@@ -1,6 +1,6 @@
 # Org and Workspace Model
 
-> Category: Multi-tenant | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Multi-tenant | Version: 1.1 | Date: October 2026 | Status: Active
 
 The two-level tenancy that makes Honeycomb a team product: org and workspace boundaries enforced at the storage layer, how they nest with within-workspace agent scoping, and the credential and switching mechanics.
 
@@ -37,18 +37,18 @@ Since PRD-049 there is a fourth segment, **Project**, that sits as a *soft* inne
 
 ## How requests carry tenancy
 
-A request's org and workspace come from the caller's credentials and token. The daemon sends the resolved org on each DeepLake request, and the workspace is part of the storage path resolution. `agent_id` is resolved from the request body, then from a harness session key (for example OpenClaw's `agent:alice:...` form), then defaults to `'default'`. The daemon never hardcodes a tenancy value when a real one is known. The read-policy SQL that applies `agent_id` is documented in [`../security/scoping-and-visibility.md`](../security/scoping-and-visibility.md).
+A request's org and workspace come from the caller's credentials and token. The daemon sends the resolved org on each DeepLake request, and the workspace is part of the storage path resolution. Capture stores the `agent_id` already carried on the event (`meta.agentId`). The auth modules do not resolve that id from the request body, then a harness session key, then `'default'`. When a token claim has no agent id, the token authenticator maps it to `'default'`. The daemon never hardcodes a tenancy value when a real one is known. The read-policy SQL that applies `agent_id` is documented in [`../security/scoping-and-visibility.md`](../security/scoping-and-visibility.md).
 
 The daemon decodes the org from the real Deep Lake JWT, not from a stub. PR #236 fixed the Wave-1 tenancy gate, which rejected genuine Deep Lake tokens with "token could not be verified": `verifyTokenClaims` now decodes the real JWT and maps its `org_id` claim to the request org. A production token that authenticated fine at mint time is no longer bounced by the tenancy check.
 
 ## Explicit tenancy selection
 
-Tenancy is now an explicit choice, never a silent guess. Before PR #232 the device link would quietly assume `orgs[0]` plus a `"default"` workspace, which could bind capture to the wrong tenant on any multi-org account. Capture, skillify, and every write pipeline are dormant until tenancy is confirmed (this mirrors the bound-project gate described in [`../ai/session-capture.md`](../ai/session-capture.md)).
+The CLI path treats tenancy as an explicit choice. Before PR #232 the device link would quietly assume `orgs[0]` plus a `"default"` workspace, which could bind capture to the wrong tenant on any multi-org account. `isTenancyConfirmed` blocks capture. The capture ladder returns `tenancy_unconfirmed` before the bound-project check (see [`../ai/session-capture.md`](../ai/session-capture.md)). Health reads the same flag and reports `captureTenancyUnconfirmed`. Skillify, document, and memory writes do not read the flag.
 
 The link is now two-phase:
 
-1. **Enumerate.** After the device flow authenticates, the daemon enumerates the account's orgs and workspaces rather than picking one.
-2. **Persist an explicit choice.** The user's selected org and workspace are written through the canonical `/setup/tenancy/*` API (`src/dashboard/setup-tenancy.ts`), which stamps a `tenancyConfirmedAt` marker into the credential record. Capture stays **BLOCKED** until that marker is present.
+1. **Enumerate.** After the device flow authenticates, the CLI enumerates the account's orgs and workspaces and does not persist a silent `orgs[0]`. A multi-org dashboard login still persists the first enumerated org as a provisional credential (`tenancyPending: true`, workspace `default`, no `tenancyConfirmedAt`) so `/setup/state.authenticated` can flip. Capture stays closed for that file.
+2. **Persist an explicit choice.** The picker reads `GET /setup/tenancy`, `GET /setup/tenancy/orgs`, and `GET /setup/tenancy/workspaces`. The chosen pair is written with `POST /setup/tenancy/select` in `src/daemon/runtime/dashboard/setup-tenancy.ts`. A confirmed write stamps `tenancyConfirmedAt`. Capture is confirmed when that marker is set, or when the credential has a non-empty org id and `tenancyPending` is not true (a grandfathered install). Capture is unconfirmed when the file is missing, the org id is empty, or `tenancyPending` is true and the marker is absent.
 
 Selection rules follow the tenancy context:
 
@@ -56,7 +56,7 @@ Selection rules follow the tenancy context:
 - **Non-TTY CLI:** `--org` and `--workspace` are required; the link fails fast rather than guessing.
 - **Single-tenancy account:** the sole org/workspace pair is auto-selected, so a one-tenant user sees no extra prompt.
 
-Workspace creation is supported inline through Deep Lake `POST /workspaces`, so a user who wants a fresh workspace does not have to leave onboarding to make one. The confirmation plumbing lives in `auth/tenancy-confirmation.ts` alongside `auth/{credentials-store,deeplake-issuer,status-api}.ts`.
+Workspace creation is supported inline through Deep Lake `POST /workspaces`, so a user who wants a fresh workspace does not have to leave onboarding to make one. The confirmation plumbing lives in `src/daemon/runtime/auth/tenancy-confirmation.ts` alongside `src/daemon/runtime/auth/credentials-store.ts`, `src/daemon/runtime/auth/deeplake-issuer.ts`, and `src/daemon/runtime/auth/status-api.ts`.
 
 ### Grandfathering existing installs
 
@@ -64,7 +64,7 @@ An upgrade must not force a working install back through onboarding. Existing in
 
 ## Credentials and switching
 
-The credentials file carries the token, org id and name, user name, workspace id (often the `default` sentinel), and the daemon URL, at mode `0600`. Switching org re-mints a fresh org-bound token, because the org is baked into the token claim; switching workspace updates the file only, since the workspace resolves server-side. Environment overrides (`HONEYCOMB_ORG_ID`, `HONEYCOMB_WORKSPACE_ID`, `HONEYCOMB_TOKEN`) take precedence for scripted and CI use. The file layout is documented in [`../security/credential-storage.md`](../security/credential-storage.md).
+The credentials file carries the token, org id and name, user name, workspace id (often the `default` sentinel), and the daemon URL, at mode `0600`. Switching org re-mints a fresh org-bound token, because the org is baked into the token claim; switching workspace updates the file only, since the workspace resolves server-side. `HONEYCOMB_ORG_ID`, `HONEYCOMB_WORKSPACE_ID`, and `HONEYCOMB_TOKEN` are the login pins and the `resolveTenancy` overrides. `resolveTenancy` applies the org and workspace overrides, and it throws `TenancyIntegrityError` when the file org or the env org disagrees with the verified token org. `loadCredentials` does not apply the org or workspace overrides. When `HONEYCOMB_TOKEN` is set, `loadCredentials` returns that token and keeps the file's identity fields. The file layout is documented in [`../security/credential-storage.md`](../security/credential-storage.md).
 
 ```bash
 honeycomb org switch acme
@@ -72,13 +72,13 @@ honeycomb workspace use backend
 honeycomb status        # shows logged-in org, workspace, agent
 ```
 
-### Live-reload of tenancy scope (no restart)
+### Project bind on each capture
 
-The daemon used to snapshot `~/.deeplake/credentials.json` and `projects.json` once at boot and never reload, so a `project bind` or a login after boot never took effect: hooks fired but every capture was dropped and only `memory_jobs` materialized in Deep Lake. PR #236 fixed this with an mtime-gated live-reload. The daemon's storage and assemble paths (`src/daemon/storage/{index,live-reload}.ts`) re-read the daemon tenancy scope and rebuild the storage client when the credential or projects file mtime changes, so a bind or login is honored on the **next request** without a `honeycomb daemon restart`. The reload is gated to real production assembly; injected-fake test paths keep their fixed scope so tests stay deterministic.
+Capture resolves the project for each event. The capture handler calls `resolveScopeFromDisk` with the event working directory and reads `projects.json` at that moment. A project bind is not gated on the credential file's mtime, and that read does not rebuild the storage client.
 
 ## Drift healing
 
-A token can drift from the active org, for example after an org switch on another machine. On session start the daemon decodes the token's org claim, compares it to the configured org, and re-mints if they disagree, then realigns the stored org name and workspace. Healing is best-effort: on failure it logs a warning and continues with the stale token rather than blocking the session. This is the tenancy side of the auth flow in [`../auth/auth-architecture.md`](../auth/auth-architecture.md).
+A token can drift from the active org, for example after an org switch on another machine. When `buildOrgDriftHealer` runs and the disk credential `apiUrl` is the real backend, a token org that disagrees with the active org is returned as `drift-surfaced` and is not re-minted. `healOrgDrift` still re-mints, and the healer calls it only on the local or stub branch. A failed local heal logs a warning and continues with the stale token. The dispatched `honeycomb status` verb does not invoke the healer. `honeycomb org switch` still re-mints on the real client. This is the tenancy side of the auth flow in [`../auth/auth-architecture.md`](../auth/auth-architecture.md).
 
 ## What is shared and what is not
 

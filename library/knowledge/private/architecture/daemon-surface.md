@@ -16,7 +16,7 @@ The daemon's externally visible surface: the HTTP server, its route groups, the 
 
 ## The server
 
-The honeycomb daemon runs an HTTP server, by default on `127.0.0.1:3850`. Port, host, and bind address are overridable through `HONEYCOMB_PORT`, `HONEYCOMB_HOST`, and `HONEYCOMB_BIND`, which is how a team deployment widens the bind beyond localhost (`src/daemon/runtime/config.ts:10-15`). `/health` is the liveness check, `/api/*` is the working API, `/memory/*` keeps search and similarity aliases, and `/mcp` is the Model Context Protocol endpoint. `ROUTE_GROUPS` also scaffolds a `/` group (`src/daemon/runtime/server.ts:105`), and no module under `src/daemon` calls `group("/")` to attach a page there. The browser the install verb opens is the Hive portal at `http://127.0.0.1:3853/` (`src/shared/constants.ts:19-23`, `src/commands/install.ts:64-74`, `src/dashboard/launch.ts:167-178`). The daemon is the only process that opens Deeplake; every other surface reaches storage through it. The import and injection rules are in [Load-Bearing Boundaries](load-bearing-boundaries.md).
+The honeycomb daemon runs an HTTP server, by default on `127.0.0.1:3850`. Port, host, and bind address are overridable through `HONEYCOMB_PORT`, `HONEYCOMB_HOST`, and `HONEYCOMB_BIND`, which is how a team deployment widens the bind beyond localhost (`src/daemon/runtime/config.ts`). `/health` is the liveness check and `/api/*` is the working API. `ROUTE_GROUPS` scaffolds `/mcp` and `/v1`, and an unfilled scaffold returns 501 (`src/daemon/runtime/server.ts`). Production MCP is the stdio server, not that HTTP path. `ROUTE_GROUPS` also scaffolds a `/` group with `protect: false`. Setup routes mount on that group: `SETUP_LOGIN_GROUP`, `SETUP_STATE_GROUP`, `SETUP_TENANCY_GROUP`, and `SETUP_MIGRATE_GROUP` are `"/"` (`src/daemon/runtime/dashboard/setup-login.ts`, `setup-state.ts`, `setup-tenancy.ts`, `setup-migrate.ts`), and each module calls `daemon.group` on that constant. Each handler calls `refuseRemoteSetup` (`setup-loopback.ts`) and returns 403 when the TCP peer is not loopback, so a widened `HONEYCOMB_BIND` does not expose setup. An in-process request with no peer address is unchanged. `src/daemon/runtime/dashboard/host.ts` is absent, so no dashboard page is attached there. The browser the install verb opens is the Hive portal at `http://127.0.0.1:3853/` (`src/shared/constants.ts`, `src/commands/install.ts`, `src/dashboard/launch.ts`). The daemon is the only process that opens the DeepLake client; `src/daemon-client` does import SQL helpers from `src/daemon/storage/sql.ts`. The import and injection rules are in [Load-Bearing Boundaries](load-bearing-boundaries.md).
 
 ## Route groups
 
@@ -26,10 +26,10 @@ The API is organized into coherent groups. Permission semantics are defined in [
 |---|---|---|
 | `/health`, `/api/status` | Liveness, version, resolved config and providers | none |
 | `/api/auth/*` | Device-flow login, token issuance, whoami, org switch | varies |
-| `/setup/*` | Pre-auth guided setup: credential-presence state, on-page device-flow login, Hivemind migration (loopback, local-mode only) | none |
+| `/setup/*` | Pre-auth guided setup: credential-presence state, on-page device-flow login, Hivemind migration (local-mode only, and a non-loopback TCP peer is refused) | none |
 | `/api/memories`, `/memory/*` | List, search, similarity, remember, recall, forget, modify, recover, and the session-start `prime` digest | scoped |
 | `/api/assets/*` | Asset-sync substrate: publish, pull, tombstone synced assets across the team | scoped |
-| `/api/hooks/*` | session-start, user-prompt-submit, pre-compaction, compaction-complete, session-end, synthesis | remember/recall |
+| `/api/hooks/*` | `POST /api/hooks/capture`, `GET /api/hooks/conversation`, `POST /api/hooks/context`, `POST /api/hooks/session-end`. Per-turn recall is `POST /api/memories/recall`. Synthesis is a daemon worker under `src/daemon/runtime/summaries/synthesis.ts`. | remember/recall |
 | `/api/embeddings/*` | Vector export, health, 2D/3D projection | recall |
 | `/api/documents/*`, `/api/sources/*` | Document ingest, source connect/index/health/purge | documents/source |
 | `/api/connectors/*`, `/api/harnesses` | Connector registry and sync, harness config regenerate | connectors/local |
@@ -37,12 +37,13 @@ The API is organized into coherent groups. Permission semantics are defined in [
 | `/api/graph/*` | Codebase graph query (find, impact, neighborhood, tour) | scoped |
 | `/api/ontology/*` | Entities, aspects, proposals, assertions, apply | mutation |
 | `/api/secrets/*` | List names, store, delete, exec with secrets | admin/secret |
+| `/api/settings` | `GET /api/settings`, `GET /api/settings/:key`, `POST /api/settings/:key` (`src/daemon/runtime/vault/api.ts`). The group is scaffolded with `protect: true`. | protected |
 | `/api/org/*`, `/api/workspace/*` | Tenancy admin and switching | admin |
-| `/api/diagnostics`, `/api/pipeline/*`, `/api/repair/*` | Health report, pipeline stats, operator repair | diagnostics/operator |
+| `/api/diagnostics`, `/api/pipeline/*`, `/api/repair/*` | Health report, pipeline stats, repair | `connectorsAdmin`: `admin` and `member`. Frozen roles are `admin`, `member`, `readonly`, and `agent`. |
 | `/api/inference/*`, `/v1/*` | Native inference routing and OpenAI-compatible gateway (gateway implemented; external HTTP mount deferred, the router is reached internally via the `ModelClient` seam) | deferred |
 | `/api/tasks/*`, `/api/logs`, `/api/update/*`, `/api/git/*` | Scheduled tasks, logs, updates, git sync | local |
 | `/api/actions/*` | Dashboard lifecycle actions (logout, embeddings on/off, restart, uninstall) | local + CSRF |
-| `/` | Dashboard static assets | none |
+| `/` | Unprotected root group (`protect: false`). Setup routes attach here. No dashboard static-asset host is mounted (`src/daemon/runtime/dashboard/host.ts` is absent). The Hive portal is a separate port, `127.0.0.1:3853`. | none |
 
 The `/api/actions/*` group gives the dashboard CLI-parity for the sharp lifecycle actions; it runs behind a stricter guard than a settings write (local-mode only plus origin/CSRF plus the dashboard session header). The surface and its guard are documented in [`../frontend/dashboard-actions-surface.md`](../frontend/dashboard-actions-surface.md).
 
@@ -71,7 +72,7 @@ Connectors send `x-honeycomb-runtime-path` set to `plugin` or `legacy`. Once a s
 
 ## Health and diagnostics
 
-`/health` is the cheap check (liveness, uptime, version, coarse pipeline status). `/api/status` is the full picture including resolved providers and tenancy. `/api/diagnostics` runs a live report across the daemon's subsystems (queue, storage, index, provider, mutation, connector), and `/api/repair/*` exposes the operator actions that act on what diagnostics finds. The environment-side health checks that the CLI and harness shims run (daemon reachability, login state, hooks wired) are documented in [`../operations/notifications-and-health.md`](../operations/notifications-and-health.md).
+`/health` is the cheap check (liveness, uptime, version, coarse pipeline status). `/api/status` is the full picture including resolved providers and tenancy. `/api/diagnostics` runs a live report across the daemon's subsystems (queue, storage, index, provider, mutation, connector), and `/api/repair/*` exposes the repair actions that act on what diagnostics finds. Those routes, with `/api/pipeline`, are classified `connectorsAdmin`, which is `admin` and `member` (`src/daemon/runtime/auth/rbac.ts`). The frozen roles are `admin`, `member`, `readonly`, and `agent`. The rbac comment still uses "operator" as a parenthetical for `member`. The environment-side health checks that the CLI and harness shims run (daemon reachability, login state, hooks wired) are documented in [`../operations/notifications-and-health.md`](../operations/notifications-and-health.md).
 
 ## Daemon lifecycle: OS-native service, spawn fallback
 
@@ -97,6 +98,6 @@ Keeping remote storage round trips off local readiness also reinforces the idle-
 
 ### macOS stop semantics
 
-The `ai.honeycomb.daemon` launchd agent runs with `KeepAlive=true`, which is correct for crash recovery and login startup but means a stop that only signals the child process lets launchd immediately respawn it, silently keeping backend compute warm after the user believed the daemon was stopped. On macOS, `honeycomb daemon stop` therefore unloads the agent with `launchctl bootout` rather than only signaling the process, so explicit stop matches user intent while `KeepAlive` still covers crashes and logins.
+The live service label is `com.legioncode.honeycomb` (`src/cli/daemon-service.ts`). The older `ai.honeycomb.daemon` label remains only as the legacy unit the installer removes. `KeepAlive` is correct for crash recovery and login startup, and a stop that only signals the child process lets launchd immediately respawn it. On macOS, stop unloads the agent with `launchctl bootout` rather than only signaling the process, so explicit stop matches user intent while `KeepAlive` still covers crashes and logins.
 
 One companion nuance: Doctor treats roughly the first 60 seconds as booting/settling time per the health PRD work, but that grace window is a diagnostic period, not a license for the daemon to delay binding. The daemon still binds as fast as the readiness contract allows.

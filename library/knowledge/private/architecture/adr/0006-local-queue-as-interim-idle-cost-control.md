@@ -2,7 +2,7 @@
 
 > **Evolved by [ADR-0009](0009-local-queue-as-default-deeplake-is-not-a-queue.md) (2026-07-05):** the local queue is now the DEFAULT (not opt-in), and the driver is correctness — the shared DeepLake `memory_jobs` queue is unreliable under read-after-write lag — not just idle cost. This ADR's scope boundary and idle-cost invariants still hold.
 >
-> **Status:** Proposed (exploratory) | **Date:** 2026-06-29
+> **Status:** Accepted (evolved by ADR-0009) | **Date:** 2026-06-29
 > **Supersedes:** none | **Superseded by:** none (evolved by ADR-0009)
 > **Owners:** daemon, operations, storage | **Related:** PRD-062, PRD-066, ADR-0004, ADR-0009
 
@@ -153,7 +153,7 @@ Re-open this decision if any of these become true:
 
 ## Links
 
-- PRD-066: `library/requirements/backlog/prd-066-local-queue-idle-cost-control/prd-066-local-queue-idle-cost-control-index.md`
+- PRD-066: `library/requirements/in-work/prd-066-local-queue-idle-cost-control/prd-066-local-queue-idle-cost-control-index.md`
 - PRD-062: `library/requirements/completed/prd-062-deeplake-compute-cost-reduction/prd-062-deeplake-compute-cost-reduction-index.md`
 - ADR-0004: `library/knowledge/private/architecture/adr/0004-honeycomb-control-plane-and-postgres-boundary.md`
 - Persistent log store: `library/requirements/completed/prd-043-logs-page/prd-043a-logs-page-persistent-log-store.md`

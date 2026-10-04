@@ -1,6 +1,6 @@
 # PRD-066e: Upgrade And Rollback Hardening
 
-> **Status:** Backlog
+> **Status:** In Work
 > **Parent:** PRD-066
 > **Priority:** P0
 > **Effort:** M
@@ -85,9 +85,9 @@ Those are production risks, not PRD-066d verification risks. They need their own
    data migration.
 7. Rollback after local queue use must not silently lose queued local work; it must either drain
    first, block with a clear diagnostic, or mark local-only work as intentionally local and visible.
-8. Default-on behavior must be gated to single-machine installs only.
-9. Multi-device, fleet, or unknown topology installs must remain on conservative fallback until the
-   hosted control-plane work defines shared semantics.
+8. Default-on applies to an undeclared (unknown) or `single_machine` topology.
+9. A declared `fleet` or `multi_device` topology stays on the shared queue unless it explicitly
+   opts in. Unknown topology defaults to the local queue.
 10. Operator diagnostics must show local queue enabled/disabled, shared drain enabled/disabled,
     counts by local queue status, and whether pending shared jobs were detected.
 11. Upgrade documentation must explain how to roll back, what happens to old `memory_jobs`, and how
@@ -109,9 +109,9 @@ Those are production risks, not PRD-066d verification risks. They need their own
 - AC-6: With the rollback flag off after local queue has been used, the daemon returns to the old
   shared queue path and reports any local queued work that will not be processed under rollback.
 - AC-7: Rollback requires no DeepLake schema migration and no local DB deletion.
-- AC-8: Default-on is blocked unless the install is classified as single-machine/local topology.
-- AC-9: Multi-device, fleet, or unknown topology installs stay on fallback or require explicit
-  opt-in.
+- AC-8: Default-on applies to an undeclared (unknown) or `single_machine` topology.
+- AC-9: A declared `fleet` or `multi_device` topology stays on the shared queue unless it
+  explicitly opts in. Unknown topology defaults to the local queue.
 - AC-10: Upgrade diagnostics identify local queue status counts, shared drain mode, and pending old
   shared jobs.
 - AC-11: The packaged upgrade smoke also verifies second boot against the upgraded workspace.
@@ -158,13 +158,13 @@ The smoke should avoid using a developer's real home directory, daemon lock, or 
 
 ### Topology Gate
 
-Default-on must be tied to an explicit topology decision. Safe initial rule:
+Default-on follows ADR-0009:
 
-- local/single-machine mode: eligible for default-on after all ACs pass;
-- team, fleet, multi-device, or unknown mode: fallback stays on unless the user explicitly opts in.
+- undeclared (unknown) or `single_machine`: eligible for local-queue default-on;
+- declared `fleet` or `multi_device`: stay on the shared queue unless they explicitly opt in.
 
-This prevents PRD-066 from accidentally breaking cross-device expectations before ADR-0004 control
-plane work lands.
+Unknown topology defaults to the local queue. Absence of a declared multi-daemon topology means a
+single local daemon. Declared fleet and multi-device installs keep the shared queue.
 
 ### Rollback Contract
 
@@ -219,7 +219,8 @@ PRD-066 cannot be considered production-default-ready until:
 - **Risk:** Packaged behavior differs from repo-local built smoke.
   **Mitigation:** run the upgrade smoke through package/CLI entrypoints.
 - **Risk:** Multi-device users lose shared queue semantics.
-  **Mitigation:** topology gate keeps default-on limited to single-machine installs.
+  **Mitigation:** declared `fleet` and `multi_device` stay on the shared queue unless they opt in.
+  Unknown topology defaults to the local queue.
 - **Risk:** Local DB corruption appears during upgrade.
   **Mitigation:** quarantine corrupt DB, emit diagnostic, and keep fallback path available.
 

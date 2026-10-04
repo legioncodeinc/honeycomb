@@ -7,6 +7,7 @@ The master view of Honeycomb: the planes, the daemon at the center, the DeepLake
 **Related:**
 - [`request-lifecycle.md`](request-lifecycle.md)
 - [`daemon-surface.md`](daemon-surface.md)
+- [`cli-dispatcher.md`](cli-dispatcher.md)
 - [`../data/deeplake-storage.md`](../data/deeplake-storage.md)
 - [`../data/schema.md`](../data/schema.md)
 - [`../ai/memory-pipeline.md`](../ai/memory-pipeline.md)
@@ -30,7 +31,6 @@ flowchart TB
         cli[CLI]
         dash[Dashboard]
         cursorExt[Cursor extension]
-        desktop[Desktop]
     end
     subgraph integrations[Harness integrations]
         connectors[Connectors install-time]
@@ -52,7 +52,6 @@ flowchart TB
     cli --> runtime
     dash --> runtime
     cursorExt --> integrations
-    desktop --> runtime
     connectors --> runtime
     hooks --> runtime
     mcp --> runtime
@@ -68,7 +67,7 @@ flowchart TB
 
 Four planes. Surfaces are how a human drives Honeycomb. Integrations are how external harnesses reach it. The daemon is the runtime where all logic lives. DeepLake is the storage substrate. The arrows that matter: everything points at the daemon, and only the daemon points at DeepLake.
 
-Getting in is one command. The installer detects and sets up a Node runtime, installs the global package, brings the daemon up, and lands the user on the dashboard, with the DeepLake login driven from the UI rather than the terminal. See [`../operations/install-and-onboarding.md`](../operations/install-and-onboarding.md).
+The shell installers (`scripts/install/install.sh`, `scripts/install/install.ps1`) detect Node and run `npm i -g @legioncodeinc/honeycomb`. The `honeycomb install` verb then ensures the daemon is up. In solo mode it opens `http://127.0.0.1:3853/` only when that portal answers. In fleet mode it opens no browser. See [`../operations/install-and-onboarding.md`](../operations/install-and-onboarding.md).
 
 ## Component summary
 
@@ -79,8 +78,8 @@ Getting in is one command. The installer detects and sets up a Node runtime, ins
 | Capture shims | per-harness hooks | Map native lifecycle events to capture/recall calls on the daemon. |
 | Skillify miner | daemon worker | Mine recurring traces into reusable skills. See [`../ai/skillify-pipeline.md`](../ai/skillify-pipeline.md). |
 | Codebase graph | daemon worker | Live graph of files, symbols, imports. See [`../data/codebase-graph.md`](../data/codebase-graph.md). |
-| CLI | `honeycomb` | Install, setup, status, recall, agents, ontology, sources, skills, assets, org/workspace/project. |
-| MCP + SDK | MCP server, `@honeycomb/sdk` | Tool-based and typed access. See [`../integrations/mcp-and-sdk.md`](../integrations/mcp-and-sdk.md). |
+| CLI | `honeycomb` | `VERB_TABLE` in `src/commands/contracts.ts`: `remember`, `recall`, `memory`, `sessions`, `pollinate`, `maintenance`, `capture`, `skill`, `skillify`, `asset`, `ontology`, `graph`, `sources`, `goal`, `agent`, `route`, `secret`, `settings`, `login`, `logout`, `whoami`, `org`, `workspace`, `workspaces`, `project`, `setup`, `install`, `status`, `daemon`, `dashboard`, `hook`, `harness`, plus the service baseline (`start`, `stop`, `restart`, `logs`, `service-install`, `service-uninstall`, `register`, `telemetry`, `update`, `uninstall`). See [`cli-dispatcher.md`](cli-dispatcher.md). |
+| MCP + SDK | MCP stdio server, `@legioncodeinc/honeycomb` (`createHoneycombClient`) | Tool-based and typed access. See [`../integrations/mcp-and-sdk.md`](../integrations/mcp-and-sdk.md). |
 | Cursor extension | `harnesses/cursor/extension/` | Shipped Cursor/VS Code extension: hooks bundle, status bar, and the dashboard webview. See [`../frontend/cursor-extension-architecture.md`](../frontend/cursor-extension-architecture.md). |
 | Dashboard | Hive portal at `127.0.0.1:3853/` (`HIVE_PORT`) | Browser UI the install verb opens. The daemon on port 3850 serves the API that UI reads. See [`../frontend/dashboard-architecture.md`](../frontend/dashboard-architecture.md) and [`daemon-surface.md`](daemon-surface.md). |
 
@@ -94,7 +93,7 @@ The product subsystems, inherited from Hivemind, are what make the engine a team
 
 ## State and storage
 
-All durable state lives in DeepLake tables. The capture and recall substrate (`sessions`, `memory`) sits alongside the engine's model (memories and facts, the entity ontology, sources and artifacts, the job queue, the agent roster, api keys) and the product tables (`skills`, `rules`, `goals`, `kpis`, `codebase`, `synced_assets`). A `projects` registry backs per-project scoping, and memory rows carry a one-line Tier-1 `key` column that powers fast session priming alongside the summary and the raw session. Every row carries org and workspace identity for tenant isolation, and engine rows additionally carry `agent_id` for within-workspace scoping. The full catalog is [`../data/schema.md`](../data/schema.md), and the write patterns that keep it consistent under concurrent workers, including converged reads over DeepLake's eventual consistency, are in [`../data/deeplake-storage.md`](../data/deeplake-storage.md).
+Durable memory lives in DeepLake tables. Local coordination files resolve through `resolveFleetRoot` (`src/shared/fleet-root.ts`): an absolute `APIARY_HOME`, else `$XDG_STATE_HOME/apiary` on Linux when that value is absolute, else `~/.apiary`. Product state is `honeycombStateDir()`, `<fleetRoot>/honeycomb` (pid, telemetry, and the queue base). The SQLite queue file is `local-queue.db` at `<honeycombStateDir>/.daemon/local-queue.db`. The fleet registry write target is `<fleetRoot>/registry.json` when that directory exists (`src/cli/standard-ops.ts`, `src/daemon/runtime/telemetry/fleet-registry.ts`). `legacyHoneycombDir()` is the `~/.honeycomb` fallback. The capture and recall substrate (`sessions`, `memory`) sits alongside the engine's model (memories and facts, the entity ontology, sources and artifacts, the agent roster, api keys) and the product tables (`skills`, `rules`, `goals`, `kpis`, `codebase`, `synced_assets`). Pipeline jobs for an undeclared topology use the local SQLite queue rather than `memory_jobs`. A `projects` registry backs per-project scoping, and memory rows carry a one-line Tier-1 `key` column that powers fast session priming alongside the summary and the raw session. Tenant-scoped tables carry org and workspace identity. Not every catalog table has those columns. Engine rows that model an actor also carry `agent_id`. The catalog group list is the authority, not a blanket "every row" rule. The full catalog is [`../data/schema.md`](../data/schema.md), and the write patterns that keep it consistent under concurrent workers, including converged reads over DeepLake's eventual consistency, are in [`../data/deeplake-storage.md`](../data/deeplake-storage.md).
 
 ## Contracts that keep the planes apart
 

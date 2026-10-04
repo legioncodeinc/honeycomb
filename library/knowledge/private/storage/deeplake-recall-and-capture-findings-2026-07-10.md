@@ -29,7 +29,7 @@ Isolated scratch-table probes (created + dropped; no production data touched):
 - Latency is **highly variable**: reads 2.3s–40s, `CREATE` 9s–>25s across the same session. This is server-side (hosted Activeloop), not our client.
 
 ### 1.5 The per-statement timeout
-- `DEFAULT_QUERY_TIMEOUT_MS = 10_000` (`storage/config.ts:24`). Every statement (read or write) is bounded by 10s via an `AbortController` in `client.runAttempt`. When a degraded window pushes an append past 10s, it returns a `timeout` result.
+- `DEFAULT_QUERY_TIMEOUT_MS = 10_000` (`storage/config.ts:24`). The default bound is 10s, overridable by `HONEYCOMB_QUERY_TIMEOUT_MS` and per-call `timeoutMs`, enforced by an `AbortController` in `client.runAttempt`. When a degraded window pushes an append past that bound, it returns a `timeout` result.
 
 ---
 
@@ -54,7 +54,7 @@ Isolated scratch-table probes (created + dropped; no production data touched):
 
 ### 3.2 PRD-078 — local ANN recall index (branch `feat/prd-078-local-ann-recall-index`)
 The core architectural response to §1.1 (no vector index): move vector search **into the daemon**.
-- **078a — in-daemon `LocalVectorIndex`.** `id → {Float32Array(768), content, createdAt, projectId, isDeleted}`, **content stored inline** so the fast path needs zero Deeplake round-trips. Cold-built on boot by paging embedded `memories` (off the hot path; recall falls back to `<#>` until ready). `recallFast`'s `memories` semantic arm reads from RAM (flat cosine, sub-100ms) with the `<#>` SQL as fallback. `((1+cos)/2)` norm + 049b project scope + `ScoredId`/row shape preserved → RRF/recency byte-identical. Kill-switch flag `HONEYCOMB_LOCAL_ANN_INDEX` (default on).
+- **078a — in-daemon `LocalVectorIndex`.** `id → {Float32Array(768), content, createdAt, projectId, isDeleted, memoryType}`, **content stored inline** so the fast path needs zero Deeplake round-trips. Cold-built on boot by paging embedded `memories` (off the hot path; recall falls back to `<#>` until ready). `recallFast`'s `memories` semantic arm reads from RAM (flat cosine, sub-100ms) with the `<#>` SQL as fallback. `((1+cos)/2)` norm + 049b project scope + `ScoredId`/row shape preserved → RRF/recency byte-identical. Kill-switch flag `HONEYCOMB_LOCAL_ANN_INDEX` (default on).
 - **078a-fix — partial fusion on deadline.** With the local memories arm instant but the 6 still-unindexed Deeplake arms (sessions/hive semantic + lexical) hitting the 3s deadline, A was discarding the instant local hits. Now the deadline path fuses the local-index rows + any settled arms. `annHits` added to `recall.timing`.
 - **Parser DRY + observability.** `readEmbeddingCell` promoted to `vector.ts` as the single on-wire parser (shared by the rerank fetch and the cold-build). New `recall.index.built {loaded,skipped,pages,ms}` event so index population is visible (distinguishes "index empty" from "scope narrow").
 - **`<#>`-parity hardening.** Named `deeplakeCosineScore` scorer as the single source of the on-wire scoring semantics; live-grounded parity test with a baked oracle; corrected the false `<#>` comment.
@@ -106,8 +106,8 @@ PRD-079a made a failed capture durable and drained it on the drain interval; 079
 
 - **Capture-write drops during degraded windows (RESOLVED by PRD-079, PR #287 + PR #289, §3.3 + §3.4).** `capture.batch_insert.failed {timeout}` clustered in the backend's bad windows (measured 103 to 251s post-boot, i.e. warm, *not* cold-boot), and on failure the batch was **dropped** (no retry), so memories captured during a degraded window were lost, which capped how good recall could be regardless of the index. This is the "recommended fix: a durable retry-later queue" that PRD-079a shipped: a failed append is now persisted to a durable `capture_outbox` in the existing `local-queue.db` and re-appended by a background drainer when the backend recovers (§3.3). The remaining hardening then shipped in PRD-079b/c (PR #289, v0.12.0): terminal dead-letter for a row that can never land, a recovery-triggered drain on the "backend recovered" signal, an oldest-first active-backlog cap, and coalesced batched drains (§3.4). PRD-079 is complete.
 - **Local index freshness (PRD-078b/c, drafted, not built).** 078a cold-builds on boot only. Needs write-through on new `memories`, an `updated_at` watermark pull for fleet writes, lifecycle/activation eviction, and HNSW beyond ~100k vectors/workspace.
-- **State-dir bug (C).** The daemon writes `.daemon/`/`.secrets/` into `process.cwd()` when `HONEYCOMB_WORKSPACE` is unset (`assemble.ts:1950-1952`), violating ADR-0003 (neutral `~/.apiary/honeycomb/` root). This scattered state across ≥8 repo dirs and caused stale-log misreads during this investigation. Own branch/IRD.
-- **Dashboard read contention (D / BUG-19).** Hive dashboard polling competes on the read client; a recall-dedicated read lane (or a saner poll cadence) is the follow-up.
+- **State-dir bug (C).** Vault (`.secrets/`) and the local queue (`local-queue.db`) are on the fleet state root (`resolveVaultBaseDir()` / `resolveLocalQueueBaseDir()` → `honeycombStateDir()`, default `~/.apiary/honeycomb`). Logs (`.daemon/logs.db`) and `agent.yaml` still use the workspace dir, so they follow `process.cwd()` when `HONEYCOMB_WORKSPACE` is unset (`workspaceBaseDirCandidate`, `assemble.ts:2071`). This scattered state across ≥8 repo dirs and caused stale-log misreads during this investigation.
+- **Dashboard read contention (D / BUG-19).** The in-process fast-recall pool is already separate (`recallFastMaxConcurrency`, default 8). Dashboard polls still share the read `StorageClient` semaphore (`Semaphore(5)` with recall, heal, and prime). A saner poll cadence remains the follow-up for that shared client.
 
 ---
 
@@ -118,7 +118,7 @@ Recorded honestly because each cost investigation time and each was resolved by 
 | Asserted | Reality (measured) |
 |---|---|
 | `/health` flooding ~73/sec, daemon overwhelmed | SQL timestamp-format bug in the probe; real cadence is **1/sec** (normal). |
-| Capture-write **retry storm** (4× on timeout) starving reads | Captures were **already single-attempt** (`unsafe-write` short-circuit, `client.ts:477`, since PRD-062). Not the cause. |
+| Capture-write **retry storm** (4× on timeout) starving reads | Captures were **already single-attempt** (`unsafe-write` short-circuit, `client.ts:497`, since PRD-062). Not the cause. |
 | Cold-build **mis-parses** the `content_embedding` cell → index near-empty | Cell is a clean `number[768]`; parser was fine; the `annHits:1` was **project-scope degradation to `__unsorted__`** (probe omitted `cwd`). |
 | Local index **scoring bug** (0.016 vs 0.875) | 0.016 was the **RRF fusion score** `1/(60+rank)`, not the cosine; 0.875 was the pre-fusion cosine. No bug — the ranking was identical to Deeplake. |
 | Deeplake **serializes writes** — second append hangs | A **cold-table / eventual-consistency artifact** of a freshly-`CREATE`d table (the `CREATE` hadn't propagated). Warm appends are ~2s. Retracted. |
@@ -131,7 +131,7 @@ The durable through-line: **the real problems were backend-shaped (no vector ind
 
 Across this session Deeplake was shown to fail, with evidence, at all three of its jobs for this workload:
 - **Reads** — no vector index → brute-force scans that worsen linearly with corpus size.
-- **Writes** — flapping hosted latency → appends time out past the 10s statement bound → memories dropped.
+- **Writes** — flapping hosted latency → appends timed out past the 10s statement bound (REPORTED). Before the durable outbox, those memories were dropped; a non-ok append is now enqueued to `capture_outbox` (§3.3).
 - **Availability** — the workspace hibernates and cold-wakes (minutes-long blocks).
 
 Our side is now well-defended on both hot paths: recall is bounded/isolated/fail-soft and runs semantic search from an in-daemon index independent of Deeplake latency, and captures survive degraded/hibernation windows via the durable outbox that drains on recovery (§3.3) rather than dropping. Those are client-side defenses against a backend that flaps; the durable answer to the write/availability side (and the removal of the local-index cache-coherence and outbox-drain burden) is a store with **native vector indexing and reliable row-level writes** (pgvector on Postgres/Neon/Supabase, or Qdrant). Deeplake would remain viable only as durable/fleet blob storage behind such a tier; used as the live query+write engine it is a poor fit for a latency-critical per-turn memory loop. This is a deliberate architecture decision for the owner; the local ANN index (D-3) is the pragmatic bridge that unblocks recall today without forcing that decision.
@@ -140,14 +140,15 @@ Our side is now well-defended on both hot paths: recall is bounded/isolated/fail
 
 ## Appendix — key code anchors
 
-- Transport / client: `src/daemon/storage/transport.ts` (bare `fetch`, no keep-alive), `src/daemon/storage/client.ts` (`Semaphore`, `runAttempt`, `maxAttempts`, `queryTimeoutMs`), `src/daemon/storage/config.ts:24` (`DEFAULT_QUERY_TIMEOUT_MS`).
-- Vector ops: `src/daemon/storage/vector.ts` (`buildVectorSearchSql`, `<#>` score norm `:242`, `cosineSimilarity` `:137`, `deeplakeCosineScore`, `readEmbeddingCell`).
+- Transport / client: `src/daemon/storage/transport.ts` (bare `fetch`, no custom agent), `src/daemon/storage/client.ts` (`Semaphore`, `runAttempt`, `maxAttempts`, `queryTimeoutMs`), `src/daemon/storage/config.ts:24` (`DEFAULT_QUERY_TIMEOUT_MS`).
+- Postgres transport: `src/daemon/storage/pg-transport.ts` (`PgDeepLakeTransport` for a `postgres://` or `postgresql://` endpoint; SQL is not rewritten). See [`../../public/guides/self-hosting.md`](../../public/guides/self-hosting.md).
+- Vector ops: `src/daemon/storage/vector.ts` (`buildVectorSearchSql`, `<#>` score norm `:274`, `cosineSimilarity` `:137`, `deeplakeCosineScore`, `readEmbeddingCell`).
 - Recall engine: `src/daemon/runtime/memories/recall.ts` (`recallMemories`, `recallFast`, `fuseHits`, `runArm`, `applyRecencyActivation`, `SEMANTIC_ARMS`).
 - Local index: `src/daemon/runtime/memories/local-vector-index.ts` (`InMemoryLocalVectorIndex`, `coldBuildLocalVectorIndex`, `buildMemoriesColdBuildSql`).
 - Capture write: `src/daemon/runtime/capture/capture-handler.ts` (`flushBatch` → `appendOnlyInsertMany`, `capture.batch_insert.failed`, enqueue-on-failure).
 - Capture outbox (PRD-079a): `src/daemon/runtime/capture/capture-outbox.ts` (`capture_outbox` table, enqueue, drainer, backoff, `NULL_CAPTURE_OUTBOX` fail-soft), wired in `capture/attach.ts` + `assemble.ts`; `/health captureOutbox` in `src/daemon/runtime/health.ts`; the shared SQLite/trusted-root helpers in `src/daemon/runtime/services/local-job-queue.ts`.
 - Capture outbox 079b/c (PR #289): dead-letter (`CAPTURE_OUTBOX_DEAD`, `markDead`, `deadLetter`, `resolveCaptureOutboxLimits`), recovery kick (`kick`, `onDrainRejection`; `kickOutboxDrain` in `capture-handler.ts`; the `capture-outbox-drain` `Pausable` in `assemble.ts`), caps + coalescing (`shedToCap`, `groupDue`/`groupKey`, `reappendMany`, `maxDrainPerInterval`) in `src/daemon/runtime/capture/capture-outbox.ts`; the force-drain route `src/daemon/runtime/capture/capture-drain-api.ts` (`mountCaptureDrainApi`, `POST /api/diagnostics/capture-drain`); the CLI verb `src/commands/capture.ts` (`runCaptureVerb`, `honeycomb capture drain`).
-- Composition root: `src/daemon/runtime/assemble.ts` (read/write client split, cold-build wiring, `workspaceBaseDirCandidate:1950`).
+- Composition root: `src/daemon/runtime/assemble.ts` (read/write client split, cold-build wiring, `workspaceBaseDirCandidate:2071`).
 - Config knobs: `src/daemon/runtime/memories/amplification-config.ts` (`recallFast*`, `recallHeavyDeadlineMs`, `writeMaxConcurrency`, `localAnnIndex`).
 
 ## Appendix — commits (this session)

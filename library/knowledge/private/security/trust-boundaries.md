@@ -2,7 +2,7 @@
 
 > Category: Security | Version: 1.0 | Date: June 2026 | Status: Active
 
-Maps every trust boundary in the Honeycomb system: where code runs, what it can access, who controls each boundary, and what defenses prevent privilege escalation or data leakage between zones. The Honeycomb daemon is the central chokepoint; only it talks to DeepLake.
+Maps every trust boundary in the Honeycomb system: where code runs, what it can access, who controls each boundary, and what defenses prevent privilege escalation or data leakage between zones. The Honeycomb daemon is the storage-SQL chokepoint. The CLI process runs the DeepLake device flow.
 
 **Related:**
 - [`scoping-and-visibility.md`](scoping-and-visibility.md)
@@ -36,7 +36,7 @@ flowchart TD
     tenantPartition -- "GCS/Azure/S3 creds in vault" --> byocBucket
 ```
 
-Note: the credentials file and the BYOC bucket are the data-at-rest nodes, distinct from the process nodes. The single most important property of the map is that no process other than the daemon has a line into DeepLake.
+Note: the credentials file and the BYOC bucket are the data-at-rest nodes, distinct from the process nodes. Storage SQL into DeepLake stays on the daemon. The CLI process runs the device flow in `src/cli/auth.ts`, so auth HTTP to the DeepLake API also leaves from that process.
 
 ---
 
@@ -47,9 +47,9 @@ Note: the credentials file and the BYOC bucket are the data-at-rest nodes, disti
 | **User Browser** | User's OS | OAuth device-flow approval page | User-trusted (separate from agent) |
 | **Agent Process** | Coding agent (Claude Code, Codex, Cursor, etc.) | Agent LLM loop, tool calls | Host OS user |
 | **Hook / Thin Client Process** | Agent runtime | Spawned Node bundles at lifecycle events; call the daemon | Same OS user as agent |
-| **Honeycomb Daemon** | `honeycomb daemon` on port 3850 | Capture, recall, pipeline, secrets decrypt, the only DeepLake client | Same OS user; sole storage authority |
+| **Honeycomb Daemon** | `honeycomb daemon` on port 3850 | Capture, recall, pipeline, secrets decrypt, the DeepLake storage client | Same OS user; sole storage authority |
 | **Credentials File** | File system | `~/.deeplake/credentials.json` | Mode 0600; OS user only |
-| **DeepLake** | GPU-backed SQL/Vector backend | Session storage, memory, skill mining, vector search | Reached only by the daemon; org/workspace isolation enforced here |
+| **DeepLake** | GPU-backed SQL/Vector backend | Session storage, memory, skill mining, vector search | Storage SQL reached by the daemon; org/workspace isolation enforced here |
 | **Org/Workspace Partition** | DeepLake backend | Row- and partition-level org/workspace isolation | Server-enforced; AES-256 at rest |
 | **BYOC Bucket** | Customer's cloud (GCS/Azure/S3) | Raw object storage | Customer-controlled; creds in DeepLake vault |
 
@@ -57,12 +57,12 @@ Note: the credentials file and the BYOC bucket are the data-at-rest nodes, disti
 
 ## The Daemon as Chokepoint
 
-Honeycomb is daemon-centric. Hooks and CLI commands are thin clients: they assemble a request, hand it to the daemon over a local loopback connection, and render the response. They never open a connection to DeepLake themselves. This collapses the storage-facing attack surface to a single process.
+Honeycomb is daemon-centric for storage. Hooks assemble a request, hand it to the daemon over a local loopback connection, and render the response. They do not open a DeepLake storage connection. The CLI login path is separate: `src/cli/auth.ts` runs the device flow in the CLI process. This keeps the storage-facing attack surface on the daemon.
 
 Consequences for the trust model:
 
 - The bearer token and any secrets-subsystem decryption happen inside the daemon. A compromised hook can ask the daemon to do work on the user's behalf, but it cannot reach storage directly and cannot read another org's data because the daemon re-derives scope from the validated token on every request.
-- SQL construction, escaping, and the VFS allowlist all live in the daemon. A thin client cannot smuggle raw SQL to DeepLake because it has no DeepLake handle to smuggle it to.
+- SQL helpers live in `src/daemon/storage/sql.ts`. The daemon is the DeepLake client. `src/daemon-client` can build SQL strings with those helpers and still has no DeepLake transport handle.
 - Org and workspace isolation is enforced at the storage layer behind the daemon, not at a client the user could patch.
 
 ---
@@ -92,8 +92,7 @@ sequenceDiagram
 
 Key invariants:
 - The token is read from disk at hook startup and handed to the daemon. It is never passed as a command-line argument (visible in `ps aux`) or written to `process.env` (visible to child processes).
-- Only the daemon makes the network call to the backend, over TLS, with the token in an HTTP header rather than a URL query parameter.
-- `authLog` writes to `process.stderr`, not `stdout`, so token-adjacent messages cannot be parsed by callers that read hook stdout as structured data.
+- Storage queries leave from the daemon, over TLS, with the token in an HTTP header rather than a URL query parameter. The CLI process runs the device flow against the DeepLake API, so that auth HTTP is not limited to the daemon.
 
 ---
 
@@ -123,7 +122,7 @@ Because DeepLake has no parameterized-query interface, the daemon builds SQL by 
 - `sqlLike(value)` - safe LIKE pattern
 - `sqlIdent(value)` - safe identifier (table/column name)
 
-These prevent SQL injection from agent-provided values such as memory keys or search terms. The escaping runs inside the daemon, which is the only place SQL is ever assembled.
+These prevent SQL injection from agent-provided values such as memory keys or search terms. The helpers live in `src/daemon/storage/sql.ts`. `src/daemon-client` imports those helpers for VFS and skillify SQL. The DeepLake transport client is still constructed in the daemon.
 
 ---
 

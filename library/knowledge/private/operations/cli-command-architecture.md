@@ -22,8 +22,8 @@ Honeycomb is built with a single unified command-line interface (CLI) to reduce 
 The CLI is a thin client of the Honeycomb daemon (port 3850). It never opens the DeepLake backend directly; commands that touch memory, sessions, the codebase graph, or any other table issue requests to the daemon, which is the only process that talks to DeepLake. This keeps the CLI fast to start and means storage, encryption, and tenancy logic live in exactly one place.
 
 The design relies on a split:
-* **The Unified Entry Point (`src/cli/index.ts`):** Parses global CLI flags and dispatches arguments to specialized subcommands or separate scripts.
-* **The Command Handlers (`src/commands/`):** Contains the actual business logic for auth sessions, rules manipulation, codebase graphs, local trace mining, and database cleanups, all expressed as daemon calls.
+* **The Unified Entry Point (`src/cli/index.ts`):** `main` builds a dispatcher, calls `parse`, then `dispatch` (`src/cli/index.ts:32-40`). The file is 88 lines. It does not branch on each verb.
+* **The Command Handlers (`src/commands/`):** The dispatcher and the verb handlers. Storage verbs are one `DaemonClient` request. The install verb and several account modules also import `src/daemon/runtime`. They do not import `src/daemon/storage`.
 
 This split guarantees that CLI presentation details never entangle core storage, encryption, or synchronization logic.
 
@@ -35,27 +35,54 @@ The merged Honeycomb CLI consolidates the hivemind product verbs with our memory
 
 | Command | Purpose |
 |---|---|
-| `install` | Bootstrap entry: health-gate the daemon up, stamp the onboarding marker + referral code, open the dashboard |
+| `install` | Health-gate the daemon, stamp the onboarding marker, register with Doctor, run solo-vs-fleet login, wire harness hooks best-effort, and open the Hive portal in solo mode |
 | `setup` | Detect installed assistants, wire hooks, and bring up the daemon |
-| `status` | Report daemon connectivity, login state, and environment health |
-| `dashboard` | Open the local dashboard webview / TUI |
+| `status` | Report OS-service installation, process pid, `GET /health` on port 3850, Doctor registration, and log paths |
+| `dashboard` | Print whether the daemon is reachable. It does not open the Hive portal |
 | `remember` | Write a memory entry to the `memory` table via the daemon |
 | `recall` | Query memory (lexical + semantic) via the daemon |
+| `memory` | Lifecycle: conflicts, stale refs, and inspect |
+| `sessions` | List or prune captured sessions through the daemon. Prune is the subcommand `sessions prune` |
+| `pollinate` | Trigger a pollinating consolidation pass on the daemon |
+| `maintenance` | Run version-history compaction over version-bumped tables |
+| `capture` | Drain the durable capture retry outbox on the daemon |
 | `agent` | Manage `agent_id` scoping and per-agent settings |
 | `ontology` | Inspect and edit the memory ontology |
 | `secret` | Store and retrieve scoped secrets |
 | `skill` | Skillify scope, pull, unpull, and force operations (team skills sharing) |
+| `skillify` | Its own verb: pull team skills from the daemon |
+| `asset` | Register, promote, demote, and style skills and agents |
 | `hook` | Inspect and re-wire lifecycle hooks for each assistant |
 | `route` | Manage routing rules between agents and tables |
 | `sources` | Register and sync external source connectors |
 | `graph` | Build, query, and inspect the codebase graph |
 | `goal` | Manage org and session goals surfaced in agent context |
+| `settings` | Get, set, and list vault settings, plus the provider-to-model selector |
+| `login` | Authenticate via device flow, or `--token` for headless |
+| `logout` | Remove the shared credentials and sign out |
+| `whoami` | Show the authenticated user, org, and workspace |
 | `org` | Organization administration (create, switch, list) |
 | `workspace` | Workspace administration within the active org |
-| `sessions prune` | Scoped cleanup of captured trace history |
+| `workspaces` | List workspaces in the active org |
+| `project` | List, bind, and use projects, and show the resolved per-folder scope |
+| `start` | Start the installed OS service and verify health |
+| `stop` | Stop the installed OS service |
+| `restart` | Restart the service and verify health |
+| `logs` | Tail Honeycomb's service log |
+| `service-install` | Install or reconcile the OS service |
+| `service-uninstall` | Remove only the OS service definition |
+| `register` | Register Honeycomb with Doctor |
+| `daemon` | `start`, `stop`, or `status` the loopback daemon on port 3850. Separate from bare `start` and `stop` |
+| `harness` | Status, connect, or repair harness plugin wiring |
+| `telemetry` | Show what adoption telemetry has been or would be sent |
 | `update` | Self-update the CLI, daemon, and bundles |
+| `uninstall` | Reverse Honeycomb's service, Doctor registration, and product-owned state |
 
-Skillify operations that the hivemind docs referenced as `hivemind skillify ...` are reached under `honeycomb skill ...` in the merged surface (for example `honeycomb skill scope team --users alice,bob` and `honeycomb skill pull --force`). The `org` and `workspace` verbs are the merged home of the multi-tenant administration that used to live behind the auth passthrough.
+The live set is `VERB_TABLE` (`src/commands/contracts.ts:104-237`). `skillify` is its own verb (`src/commands/contracts.ts:145`) in addition to `skill`. Skillify operations that the hivemind docs referenced as `hivemind skillify ...` are also reached under `honeycomb skill ...` (for example `honeycomb skill scope team --users alice,bob` and `honeycomb skill pull --force`). `org`, `workspace`, `workspaces`, `project`, `whoami`, `login`, and `logout` are auth passthrough (`src/commands/contracts.ts:265-273`).
+
+Live `status` is `runStandardCommand` (`src/commands/dispatch.ts:412-418`). It reports service installation, process pid, `GET /health` on port 3850, Doctor registration, and log paths (`src/commands/standard-interface.ts:78-102`, `src/commands/standard-interface.ts:206-221`). `runStatusCommand` (`src/commands/status.ts:122-128`) still describes a D1-D5 report plus org-drift heal. A search of `src/` finds no caller of `runStatusCommand` except its definition. Dispatch does not call it.
+
+`honeycomb dashboard` calls `launchDashboard` and keeps only `reachable` (`src/cli/runtime.ts:724-730`), then prints `dashboard: launched` or a daemon-down line (`src/commands/local-handlers.ts:232-243`). `openDashboard` returns the Hive URL (`src/dashboard/launch.ts:153-178`) and has no caller under `src/` other than its export. The install verb is the path that opens `http://127.0.0.1:3853/`.
 
 ---
 
@@ -63,69 +90,22 @@ Skillify operations that the hivemind docs referenced as `hivemind skillify ...`
 
 `honeycomb install [--ref <code>]` (`src/commands/install.ts`) is the verb the one-command installer scripts hand off to once the global package is laid down. It is the "open logic lives once" seam: the two shell entrypoints (`install.sh`/`install.ps1`) own only the host bootstrap (detect/install Node+npm, pull embedding deps, `npm i -g`), then invoke this verb for everything between "package installed" and "browser open on the dashboard," so the daemon-ensure + health-gate + dashboard-open logic stays in one unit-tested TypeScript place rather than duplicated across two shell dialects.
 
-The verb composes existing seams, it is a thin daemon client, never a daemon-core import:
+The verb imports daemon runtime modules (`credentials-store.js`, `deeplake-issuer.js`, `config.js`, `onboarding/index.js`, `telemetry/fleet-registry.js`, and `telemetry/index.js` at `src/commands/install.ts:46-57`). It does not import `src/daemon/storage`.
 
-1. **Health-gate the daemon** via `ensureDaemonRunning` (the same PID/lock-guarded path `setup` and the first storage-touching call use). It is idempotent, an already-healthy daemon is a no-op, never a second bind of `127.0.0.1:3850`. If the daemon never becomes reachable, the verb prints "daemon didn't start" + a retry hint and exits non-zero.
-2. **Persist the onboarding marker**, `phase: "installed"` + the effective referral code, into `~/.deeplake/onboarding.json` (fail-soft: a write hiccup never fails the install).
-3. **Open the dashboard** at `http://127.0.0.1:3853/` (`src/commands/install.ts:64-74`, `src/commands/install.ts:344-356`). `openLocalDashboardUrl` accepts a host of `127.0.0.1`, `localhost`, or `::1` (`src/commands/install.ts:123-130`).
+1. **Health-gate the daemon** via `ensureDaemonRunning`. An already-healthy daemon is a no-op, never a second bind of `127.0.0.1:3850`. If the daemon never becomes reachable, the verb prints "daemon didn't start" plus a retry hint and returns exit 1.
+2. **Persist the onboarding marker**, `phase: "installed"` plus the effective referral code, into `~/.deeplake/onboarding.json`. `writeInstalledMarker` returns false on an IO error, and the verb then fails the install with exit 1. It does not warn and continue.
+3. **Register with Doctor.** A false registry write fails the install with exit 1 (`src/commands/install.ts:533-537`).
+4. **Solo versus fleet login.** Fleet mode opens no browser. Solo mode with no credentials calls `loginWithDeviceFlow` from the terminal (`src/commands/install.ts:389-393`). Solo mode with credentials skips that device-flow browser. Login failure does not change the install exit code.
+5. **Wire harness hooks, best-effort** (`src/commands/install.ts:550`, `src/commands/install.ts:463-478`). A setup failure prints one line and does not fail the install.
+6. **Open the dashboard in solo mode only**, at `http://127.0.0.1:3853/` when the 750 ms probe answers (`src/commands/install.ts:64-74`, `src/commands/install.ts:351-356`, `src/commands/install.ts:558-568`). Fleet mode opens nothing. `openLocalDashboardUrl` accepts a host of `127.0.0.1`, `localhost`, or `::1` (`src/commands/install.ts:123-130`).
 
-The effective referral code resolves `--ref <code>` → `onboarding.ref` → the build-time default (`__HONEYCOMB_REF_DEFAULT__`, shipped `mario`). The verb only *persists* the ref; the device-flow attribution header is the login flow's job, driven from the dashboard's "First time setup" button rather than the terminal. The full onboarding lifecycle, the one-daemon/two-phase model, the on-page device flow, Hivemind migration, and adoption telemetry, is documented in [Install and Onboarding](install-and-onboarding.md).
+The install verb's `resolveEffectiveRef` is `parseRefArg(argv) ?? DEFAULT_REF` (`src/commands/install.ts:226-228`). It does not read `onboarding.ref`. The precedence `--ref`, then `onboarding.ref`, then the build-time default (`__HONEYCOMB_REF_DEFAULT__`, shipped `mario`) is the login helper in `src/daemon/runtime/auth/deeplake-issuer.ts:186-190`. [Install and Onboarding](install-and-onboarding.md) describes that helper for the device-code request. The full onboarding lifecycle, the Hive portal, the on-page device flow, Hivemind migration, and adoption telemetry are documented there.
 
 ---
 
 ## Command Dispatching
 
-The unified CLI routes input arguments inside a centralized dispatcher. It recognizes standard commands and handles fallback routes, such as delegating account and organization administration tasks directly to the auth module.
-
-```409:445:src/cli/index.ts
-async function main(): Promise<void> {
-  const args = process.argv.slice(2);
-  const cmd = args[0];
-
-  if (!cmd || cmd === "--help" || cmd === "-h" || cmd === "help") {
-    log(USAGE);
-    return;
-  }
-  if (cmd === "--version" || cmd === "-v" || cmd === "version") {
-    log(getVersion());
-    return;
-  }
-
-  if (cmd === "setup") { await runSetup(args.slice(1)); return; }
-  if (cmd === "uninstall") {
-    const only = parseOnly(args.slice(1));
-    const targets: PlatformId[] = only ?? detectPlatforms().map(p => p.id);
-    for (const id of targets) runSingleUninstall(id);
-    return;
-  }
-
-  if (cmd === "login") { await ensureLoggedIn(); return; }
-  if (cmd === "status") { runStatus(); return; }
-  if (cmd === "update") {
-    const code = await runUpdate({ dryRun: hasFlag(args.slice(1), "--dry-run") });
-    process.exit(code);
-  }
-
-  if (cmd === "skill") {
-    runSkillCommand(args.slice(1));
-    return;
-  }
-
-  if (cmd === "route") {
-    await runRouteCommand(args.slice(1));
-    return;
-  }
-```
-
-If a command matches one of the organization or workspace subcommands, the dispatcher forwards the complete arguments array to the auth-login router:
-
-```486:491:src/cli/index.ts
-  // org / workspace subcommands, passthrough to the auth-login dispatcher.
-  if (AUTH_SUBCOMMANDS.has(cmd)) {
-    await runAuthCommand(args);
-    return;
-  }
-```
+`src/cli/index.ts` is 88 lines. `main` builds a dispatcher, calls `parse`, then `dispatch`, and `buildRuntimeDeps()` supplies the bound handlers (`src/cli/index.ts:32-40`). Parsing and routing live in `src/commands/dispatch.ts`. `main` does not branch on `setup`, `login`, `skill`, or `route`. Auth passthrough is `isAuthPassthrough` (`src/commands/dispatch.ts:486-492`). The set is `org`, `workspace`, `workspaces`, `project`, `whoami`, `login`, and `logout` (`src/commands/contracts.ts:265-273`). Those verbs forward the full argument array to the auth dispatcher. Storage verbs go to `dispatchStorage`. Local verbs go to `dispatchLocal`.
 
 ---
 
@@ -144,119 +124,16 @@ The daemon reads the same credential file at startup, so once the CLI logs in, e
 
 ### Resolving Token Drift
 
-A known challenge in multi-tenant SaaS environments is JWT organization drift. If a user switches organizations through the CLI, their stored active organization ID changes, but their existing org-bound JWT API token remains unchanged. This causes queries to execute against the previous tenant space or fail due to invalid claims.
+A known challenge in multi-tenant SaaS environments is JWT organization drift. `honeycomb org switch` changes the stored active organization. It does not re-mint the org-bound API token. After an out-of-band org change the stored token can still name the previous org. Live session-start does not re-mint that token. Queries can then run against the previous tenant space or fail on the claim mismatch.
 
-To resolve this, Honeycomb implements a self-healing algorithm `healDriftedOrgToken` that automatically runs on session start. It decodes the JWT payload, compares the `org_id` claim with the active organization ID, and re-mints a corrected token if they mismatch:
-
-```217:240:src/commands/auth.ts
-export async function healDriftedOrgToken(
-  creds: Credentials,
-  log: (msg: string) => void = () => {},
-): Promise<Credentials> {
-  if (!creds.token || !creds.orgId) return creds;
-  const payload = decodeJwtPayload(creds.token);
-  const claimOrg = payload && typeof payload.org_id === "string" ? payload.org_id : undefined;
-  if (!claimOrg || claimOrg === creds.orgId) return creds;
-  log(`token org drift detected: jwt.org_id=${claimOrg} creds.orgId=${creds.orgId}, re-minting`);
-  try {
-    const apiUrl = creds.apiUrl ?? DEFAULT_API_URL;
-    // Per-mint unique name. DeepLake rejects duplicate (user_id, name) with
-    // a 500 ("token creation failed"), and the heal runs on EVERY session
-    // start across multiple agents, a date-only suffix would collide as
-    // soon as the second agent heals on the same day. Date.now() suffices:
-    // resolution is ms, only one heal per session, single process per agent.
-    const tokenName = `deeplake-plugin-heal-${Date.now()}`;
-    const tokenData = await apiPost("/users/me/tokens", {
-      name: tokenName,
-      duration: 365 * 24 * 3600,
-      organization_id: creds.orgId,
-    }, creds.token, apiUrl) as { token: { token: string } };
-    const healed: Credentials = { ...creds, token: tokenData.token.token };
-```
+There is no `src/commands/auth.ts`. The function that decodes a token and re-mints is `healOrgDrift` (`src/daemon/runtime/auth/device-flow.ts:207-229`). Production session-start seams set `healDriftedOrgToken` to an empty async function (`src/hooks/shared/session-start-seams.ts:123`). `runSessionStart` calls that seam (`src/hooks/shared/session-start.ts:188`), so the live hook does not re-mint. `buildOrgDriftHealer` refuses to re-mint a credential whose `apiUrl` is `https://api.deeplake.ai` and returns `drift-surfaced` (`src/cli/runtime.ts:555-570`). That healer is reached from `runStatusCommand` (`src/commands/status.ts:127-128`), which dispatch does not call. Live `status` is `runStandardCommand`.
 
 ---
 
 ## Operational Database Management: Session Pruning
 
-As coding sessions accumulate, users need a way to inspect, prune, and clear their captured trace history. The `honeycomb sessions prune` subcommand provides scoped cleanup of session data by the logged-in author.
+`honeycomb sessions prune` is the verb `sessions` with subcommand `prune` (`src/commands/contracts.ts:119`, `src/commands/sessions.ts:47-55`). There is no `src/commands/session-prune.ts`.
 
-The pruning command asks the daemon to run direct, safe SQL statements against both the `sessions` table (where raw event traces are stored) and the `memory` table (where session summaries reside) in DeepLake.
+The CLI sends `DELETE /api/diagnostics/sessions/prune` with `before` and `session-id` query params and builds no SQL (`src/commands/sessions.ts:29`, `src/commands/sessions.ts:73-81`, `src/commands/sessions.ts:97`). The daemon appends a paired `sessions` tombstone and a paired `memory` summary tombstone for every match (`src/daemon/runtime/sessions/prune.ts:302-322`). It does not run the `DELETE FROM` statements this page used to quote. That pairing is what keeps traces and summaries from desyncing.
 
-### Querying and Filtering Sessions
-
-Pruning first queries the sessions table to group events by their session path, extracting the event counts, dates, and active projects:
-
-```70:90:src/commands/session-prune.ts
-async function listSessions(
-  daemon: DaemonClient,
-  sessionsTable: string,
-  author: string,
-): Promise<SessionInfo[]> {
-  const rows = await daemon.query(
-    `SELECT path, COUNT(*) as cnt, MIN(creation_date) as first_event, ` +
-    `MAX(creation_date) as last_event, MAX(project) as project ` +
-    `FROM "${sessionsTable}" WHERE author = '${sqlStr(author)}' ` +
-    `GROUP BY path ORDER BY first_event DESC`
-  );
-
-  return rows.map(r => ({
-    path: String(r.path),
-    rowCount: Number(r.cnt),
-    firstEvent: String(r.first_event),
-    lastEvent: String(r.last_event),
-    project: String(r.project ?? ""),
-  }));
-}
-```
-
-### Performing Deletion
-
-The client filters the sessions matching the user's criteria (such as `--before <date>` or `--session-id <id>`). For each target, the daemon executes a DELETE statement on the sessions table and removes the corresponding summary from the memory table:
-
-```91:133:src/commands/session-prune.ts
-async function deleteSessions(
-  config: Config,
-  sessionPaths: string[],
-): Promise<{ sessionsDeleted: number; summariesDeleted: number }> {
-  if (sessionPaths.length === 0) return { sessionsDeleted: 0, summariesDeleted: 0 };
-
-  const sessionsClient = daemonClient(
-    config.token, config.apiUrl, config.orgId, config.workspaceId,
-    config.sessionsTableName,
-  );
-  const memoryClient = daemonClient(
-    config.token, config.apiUrl, config.orgId, config.workspaceId,
-    config.tableName,
-  );
-
-  let sessionsDeleted = 0;
-  let summariesDeleted = 0;
-
-  for (const sessionPath of sessionPaths) {
-    // Delete all rows for this session from the sessions table
-    await sessionsClient.query(
-      `DELETE FROM "${config.sessionsTableName}" WHERE path = '${sqlStr(sessionPath)}'`
-    );
-    sessionsDeleted++;
-
-    // Delete the corresponding summary from the memory table
-    // Summary path: /summaries/<user>/<sessionId>.md
-    const sessionId = extractSessionId(sessionPath);
-    const summaryPath = `/summaries/${config.userName}/${sessionId}.md`;
-
-    const existing = await memoryClient.query(
-      `SELECT path FROM "${config.tableName}" WHERE path = '${sqlStr(summaryPath)}' LIMIT 1`
-    );
-    if (existing.length > 0) {
-      await memoryClient.query(
-        `DELETE FROM "${config.tableName}" WHERE path = '${sqlStr(summaryPath)}'`
-      );
-      summariesDeleted++;
-    }
-  }
-
-  return { sessionsDeleted, summariesDeleted };
-}
-```
-
-This ensures that trace history and their generated summaries never get out of sync, preventing empty references or orphaned summary entries in DeepLake.
+`src/commands/storage-handlers.ts:11-18` is the path for `remember`, `recall`, `skill`, and the other generic storage verbs: one `DaemonClient` request. The CLI does not open DeepLake.

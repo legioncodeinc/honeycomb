@@ -54,7 +54,7 @@ The identifier boundary is worth stating plainly: the local plane never leaves t
 
 ## The fleet registry and the check-in heartbeat
 
-doctor's model of the fleet is a static registry plus a runtime store (doctor ADR-0001 and ADR-0002). The registry file honeycomb writes and doctor reads is `~/.honeycomb/doctor.daemons.json`, a `{ "daemons": [...] }` document where each entry names a service that *should* exist. This path is post the decision-#35 rename from the former hivedoctor naming.
+doctor's model of the fleet is a static registry plus a runtime store (doctor ADR-0001 and ADR-0002). Honeycomb writes `~/.apiary/registry.json` when the fleet root directory exists, and otherwise the legacy `~/.honeycomb/doctor.daemons.json` (`src/daemon/runtime/telemetry/fleet-registry.ts`). The document is `{ "daemons": [...] }`. Each entry names a service that should exist.
 
 honeycomb's registry writer lives in `src/daemon/runtime/telemetry/fleet-registry.ts` and runs from the install flow (`src/commands/install.ts`). It upserts a single `honeycomb` entry carrying the daemon's identity, its `/health` URL (built from the daemon's actually-resolved host and port so a non-default bind advertises the right probe target), its pid-file path, the probe cadence and restart thresholds doctor should use, and a pointer to the telemetry database. The write is idempotent and crash-safe: the file is read tolerantly (a missing or unparseable file degrades to an empty daemon list rather than throwing), honeycomb's entry is replaced by name rather than duplicated on a re-install, and the write is atomic (temp file plus rename). Because several products can register concurrently, the upsert re-reads and re-verifies after its own write, re-merging into a competing writer's document so no other daemon's entry is dropped. Registry failure is fail-soft at the call site: a locked or unwritable file logs a note and never aborts the install.
 
@@ -62,7 +62,7 @@ The registry says a daemon *should* exist; the check-in service says it *does*. 
 
 ## The local SQLite store and what it records
 
-The telemetry database is `~/.honeycomb/telemetry/honeycomb.sqlite` (`src/daemon/runtime/telemetry/fleet-store.ts`). It reuses the built-in `node:sqlite` mechanism honeycomb's local job queue already runs on, so it adds no dependency, and it opens WAL mode so doctor's read-only poll never contends with honeycomb's own writes. This module is the one writer; doctor polls the same file read-only.
+The telemetry database opens at `~/.apiary/honeycomb/telemetry/honeycomb.sqlite`, with a legacy fallback at `~/.honeycomb/telemetry/honeycomb.sqlite` (`src/daemon/runtime/telemetry/fleet-store.ts`). It reuses the built-in `node:sqlite` mechanism honeycomb's local job queue already runs on, so it adds no dependency, and it opens WAL mode so doctor's read-only poll never contends with honeycomb's own writes. This module is the one writer; doctor polls the same file read-only.
 
 Three tables hold three shapes of fact:
 

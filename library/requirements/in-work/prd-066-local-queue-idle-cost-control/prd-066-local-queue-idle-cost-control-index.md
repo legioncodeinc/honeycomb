@@ -1,10 +1,10 @@
 # PRD-066: Local Queue Idle-Cost Control
 
-> **Status:** Backlog
+> **Status:** In Work
 > **Priority:** P0
 > **Effort:** L
 > **Created:** 2026-06-29
-> **Related:** ADR-0006, PRD-062, PRD-043a, ADR-0004
+> **Related:** ADR-0006, ADR-0009, PRD-062, PRD-043a, ADR-0004
 
 ## Overview
 

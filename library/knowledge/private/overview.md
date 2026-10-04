@@ -22,7 +22,7 @@ Honeycomb is the merger of two systems. Hivemind contributed the broad product: 
 
 The result is one daemon that captures everything a harness does, distills it into structured, source-backed memory, and serves it back, all on a DeepLake substrate that a team can share.
 
-Honeycomb is production ready and live-tested end to end: the capture-to-recall path runs green against live Deeplake (`npm run smoke:golden-path` with credentials), and three harnesses (Claude Code, Cursor, Codex) ship in production today, with Hermes, pi, and OpenClaw in progress. Embeddings, the distillation pipeline, and cross-device sharing are deliberate opt-in and by-design choices (covered below and in the linked operations docs), not gaps.
+Honeycomb is production ready and live-tested end to end: the capture-to-recall path runs green against live Deeplake (`npm run smoke:golden-path` with credentials), and three harnesses (Claude Code, Cursor, Codex) ship in production today, with Hermes, pi, and OpenClaw in progress. Embeddings default on: only `HONEYCOMB_EMBEDDINGS=false` or `0` turns them off, and recall then stays on the lexical arms (`src/daemon/runtime/services/embed-client.ts`). An undeclared or single-machine install also defaults the local SQLite queue on (`src/daemon/runtime/services/local-queue-diagnostics.ts`). Cross-device sharing stays a deliberate topology choice, covered in the linked operations docs.
 
 ## The shape
 
@@ -56,7 +56,7 @@ flowchart TB
 
 Honeycomb is daemon-centric. The honeycomb daemon (default port 3850) is the only process that talks to DeepLake. It runs the capture intake, the distillation pipeline, hybrid retrieval, the knowledge-graph ontology, the pollinating maintenance loop, the model and provider router, and the background workers for summaries, skillify, and the codebase graph. Harness shims, lifecycle hooks, the CLI, the SDK, and the MCP server are thin clients of the daemon.
 
-DeepLake is the substrate. It is a GPU-backed SQL and vector store, and all durable state lives in its tables. Org and workspace boundaries are enforced at the storage layer so two workspaces never share a row, partition, or index, and within a workspace our memory engine's agent_id scoping separates multiple agents. The storage mechanics (lazy schema healing, hand-escaped SQL because the query endpoint takes no bound parameters, append-only version-bumped writes around the UPDATE-coalescing quirk) are documented in [`data/deeplake-storage.md`](data/deeplake-storage.md).
+DeepLake is the substrate for memory tables. Org and workspace boundaries are enforced at the storage layer so two workspaces never share a row, partition, or index, and within a workspace our memory engine's agent_id scoping separates multiple agents. Local coordination that is not a DeepLake row lives under the fleet root: product state at `~/.apiary/honeycomb` (pid, local queue, telemetry) and the shared registry at `~/.apiary/registry.json` when that root exists, with a legacy `~/.honeycomb` read fallback (`src/shared/fleet-root.ts`). The storage mechanics (lazy schema healing, hand-escaped SQL because the query endpoint takes no bound parameters, append-only version-bumped writes around the UPDATE-coalescing quirk) are documented in [`data/deeplake-storage.md`](data/deeplake-storage.md). Hosted GPU use of the DeepLake service was not re-probed in this checkout. The embedder is a separate process at `http://127.0.0.1:3851` (`src/daemon/runtime/services/embed-client.ts`) running `nomic-ai/nomic-embed-text-v1.5` (`embeddings/src/index.ts`).
 
 ## Key components
 
@@ -68,7 +68,7 @@ DeepLake is the substrate. It is a GPU-backed SQL and vector store, and all dura
 | Skillify miner | daemon worker | Mine recurring traces into reusable skills |
 | Codebase graph | daemon worker | Live graph of files, symbols, and imports |
 | CLI | `honeycomb` | Setup, status, recall, agents, ontology, sources, skills, org/workspace |
-| SDK + MCP | `@honeycomb/sdk`, MCP server | Typed and tool-based access for apps and harnesses |
+| SDK + MCP | `@legioncodeinc/honeycomb` (`createHoneycombClient`), MCP stdio server | Typed and tool-based access for apps and harnesses |
 
 ## Reading guide
 

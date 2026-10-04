@@ -33,13 +33,15 @@ flowchart LR
 
 ### Connect
 
-Connecting registers the source and queues an index job. For Obsidian:
+Connecting registers the source and queues an index job. The live CLI verb is `sources` (`src/commands/contracts.ts`). `buildStorageRequest` sends a bare `sources` invocation to `GET /api/sources` and a non-read subcommand to `POST /api/sources/<subcommand>` (`src/commands/storage-handlers.ts`). The daemon connect handler is `POST /api/sources` (`src/daemon/runtime/sources/api.ts`). There is no `sources add` row in the verb table. For Obsidian the historical example was:
 
 ```bash
 honeycomb sources add obsidian /path/to/Vault --name "Vault"
 ```
 
-Discord and GitHub connect through the API or CLI with a stored secret reference for the token (never a raw token), plus bounds like which guilds or repos, resource types, and a `since` window.
+That spelling is not a verb-table row. The generic CLI maps `sources add` to `POST /api/sources/add`, which is not the daemon connect route `POST /api/sources`.
+
+Discord and GitHub connect through the API with a stored secret reference for the token (never a raw token), plus bounds like which guilds or repos, resource types, and a `since` window. The CLI does not connect them: `sources add` is not a mounted route, so that subcommand is not `POST /api/sources`.
 
 ### Index
 
@@ -65,7 +67,7 @@ Removing a source purges everything it owns and nothing else:
 4. purge the source's chunk embeddings and their vector tensor mirror,
 5. leave the source files untouched.
 
-The dashboard and API route `DELETE /api/sources/:sourceId` performs the full purge. If the daemon is unavailable, the CLI falls back to config-only removal with a warning.
+The dashboard and API route `DELETE /api/sources/:sourceId` performs the full purge. A non-read `sources` subcommand, including removal, is `POST /api/sources/<subcommand>` (`src/commands/storage-handlers.ts`). If the daemon is down, the CLI tries to start it; when that attempt does not leave the daemon reachable, dispatch prints an error and returns exit 1 (`src/commands/daemon.ts`, `src/commands/dispatch.ts`). There is no config-only source remover.
 
 ## The three source providers
 
@@ -87,6 +89,8 @@ Three sync modes cover different access patterns. REST (bounded) pulls guilds, c
 ### GitHub
 
 Indexes issues, pull requests, and discussions over GraphQL (token required), plus selected Markdown docs over REST, bounded by `maxItemsPerRepo` and path globs. Doc ingestion is limited to Markdown; arbitrary source code is not ingested.
+
+The daemon connect route is `POST /api/sources`. The CLI verb is `sources`, and a non-read subcommand is posted to `POST /api/sources/<subcommand>` (`src/commands/storage-handlers.ts`). The historical CLI spelling was:
 
 ```bash
 honeycomb sources add github --repo Org/Repo --token-ref GITHUB_TOKEN \

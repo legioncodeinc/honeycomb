@@ -15,36 +15,34 @@ The unified inference control plane: how the daemon decides which model runs eac
 
 ## Why a router
 
-Before the router, inference was scattered. Extraction picked its own model, synthesis picked another, interactive calls went straight to a harness, and there was no shared policy, no fallback, and no observability. The router pulls all of that into one place: the daemon owns inference routing, and every workload, extraction, synthesis, and interactive, flows through one policy engine. Harnesses reach it either through an OpenAI-compatible gateway or a native API, always as thin clients over HTTP; the daemon is the only thing that holds credentials and the only thing that talks to DeepLake.
+Before the router, inference was scattered. Extraction picked its own model, and there was no shared policy, no fallback, and no observability. The router is the daemon's inference control plane for the live workload tokens. Harnesses are meant to reach a gateway over HTTP; that gateway is implemented and not mounted. The daemon is the only thing that holds credentials and the only thing that talks to DeepLake.
 
 ## The config contract
 
-Inference is configured in a top-level `inference:` block in `agent.yaml`. Accounts hold provider credentials (with secret references, never raw keys). Targets name a model on an account with a privacy tier and capabilities. Policies define how to choose among targets. Task classes describe kinds of work, and workloads bind a task class to a policy.
+Inference is configured in a top-level `inference:` block in `agent.yaml`. Accounts hold provider credentials (with secret references, never raw keys). Targets and policies are keyed by `id`. Capabilities are the closed set `chat | streaming | vision | tools`. Workloads are an array of `{ name, policy }`, plus optional gate floors. There is no `taskClass` field. The committed block in `agent.yaml` declares one workload, `memory_pollinating`. A shape the parser accepts:
 
 ```yaml
 inference:
   accounts:
-    - id: anthropic-api
+    - id: anthropic
       provider: anthropic
       apiKey: ${ANTHROPIC_API_KEY}
   targets:
-    - name: haiku
-      account: anthropic-api
-      model: claude-3-5-haiku
+    - id: claude-sonnet
+      account: anthropic
+      model: claude-sonnet-4-6
       privacy: private
-      capabilities: [completion, caching]
+      capabilities: [chat]
+      contextWindow: 200000
   policies:
-    - name: memory_extraction
+    - id: pollinating-policy
       mode: strict
-      chain: [local-ollama, haiku]
+      chain: [claude-sonnet]
   workloads:
-    memory_extraction:
-      policy: memory_extraction
-      taskClass: memory_extraction
-    session_synthesis:
-      policy: synthesis_policy
-    interactive:
-      policy: interactive_policy
+    - name: memory_pollinating
+      policy: pollinating-policy
+      minPrivacyTier: private
+      requiredCapabilities: [chat]
 ```
 
 ## How a route is decided
@@ -68,7 +66,7 @@ Hard gates block a target outright: insufficient privacy tier, a missing require
 
 ## Workloads
 
-Three workloads route through the same engine. `memory_extraction` selects the model that drives the extraction stage of the [`memory-pipeline.md`](memory-pipeline.md), `session_synthesis` selects the summary model, and `interactive` covers user-facing chat and agent calls. The pollinating pass routes through its own stronger policy as described in [`pollinating-loop.md`](pollinating-loop.md). There are no separate extractors anymore; they all resolve through one policy engine.
+The live workload tokens are `memory_extraction`, `memory_decision`, and `memory_pollinating` (`MODEL_WORKLOADS` in `src/daemon/runtime/pipeline/model-client.ts`). `memory_extraction` selects the model for the extraction stage of the [`memory-pipeline.md`](memory-pipeline.md). `memory_decision` is the decision-stage token. `memory_pollinating` is the pollinating pass described in [`pollinating-loop.md`](pollinating-loop.md). `session_synthesis`, `interactive`, and `taskClass` are not tokens under `src/`. Committed `agent.yaml` declares only `memory_pollinating`.
 
 ## API and CLI
 
@@ -87,18 +85,7 @@ GET    /v1/models
 POST   /v1/chat/completions  (streaming)
 ```
 
-The CLI tools (`honeycomb route list / status / doctor / explain / test / pin / unpin`) are implemented and registered.
-
-The CLI mirrors the API for operators:
-
-```bash
-honeycomb route list
-honeycomb route status
-honeycomb route doctor
-honeycomb route explain
-honeycomb route test
-honeycomb route pin    # and unpin
-```
+`src/cli/route.ts` implements `route list`, `status`, `doctor`, `explain`, `test`, `pin`, and `unpin` (`routeMain`). Production `src/` does not import that module. Callers are `tests/cli/route.test.ts`. The registered `route` verb is the storage mapper in `src/commands/storage-handlers.ts`, which dispatches to `/api/inference/routes`. `mountInferenceGateway` exposes `/status`, `/history`, `/explain`, `/execute`, and `/stream` on the inference group, and it is not called from `assemble.ts`, so those gateway routes are not the live surface either.
 
 ## The Portkey alternate transport
 
@@ -106,8 +93,8 @@ The router is not the only inference path. An operator can turn on an optional P
 
 ## Telemetry and safety
 
-Routing history is daemon-local and redacted: it records the route and fallback sequence without secrets or request bodies, stored as `jsonb` event rows in DeepLake. The router validates any target override, clamps request bodies and headers, redacts errors, applies rate-limit buckets, and bounds concurrency. Secret references in accounts resolve through the secrets subsystem, never appearing in config dumps or logs; see [`../security/secrets.md`](../security/secrets.md).
+Routing history is daemon-local and redacted: it records the route and fallback sequence without secrets or request bodies, stored as `jsonb` event rows in DeepLake. Body clamp and error redaction live on the unmounted gateway (`src/daemon/runtime/inference/gateway.ts`). There is no rate-limit bucket and no concurrency cap under `src/daemon/runtime/inference`. A 401 marks an account expired in memory for the process lifetime (`src/daemon/runtime/inference/router.ts`); that set is not persisted across restarts. Secret references in accounts resolve through the secrets subsystem, never appearing in config dumps or logs; see [`../security/secrets.md`](../security/secrets.md).
 
 ## Current state
 
-The shared router core (config parsing, strict/automatic/hybrid resolution, privacy/capability/context gates), the daemon router service (routed execution with fallback, workload shims), and the CLI tools are in place, along with daemon-local routing telemetry. The router is reachable from within the daemon via the `ModelClient` seam used by the memory pipeline and pollinating loop. The **HTTP gateway** (`/api/inference/*` and `/v1/*`) is implemented but not yet mounted in the daemon's composition root, external HTTP access is deferred (PRD-045 scope boundary). Runtime degradation (treating 401/403 as expired and 429 as rate-limited) is in-memory and not yet persisted across restarts. A canonical top-level `models:` map, first-class session and subscription account lifecycle, circuit breaking with cooldown recovery, and full cost telemetry are deferred to a later phase.
+The shared router core (config parsing, strict/automatic/hybrid resolution, privacy/capability/context gates) and the daemon router service (routed execution with fallback, workload shims) are in place, along with daemon-local routing telemetry. The router is reachable from within the daemon via the `ModelClient` seam used by the memory pipeline and pollinating loop. The `src/cli/route.ts` verbs are implemented and unregistered; the live `honeycomb route` verb posts to `/api/inference/routes`. The **HTTP gateway** (`/api/inference/*` and `/v1/*`) is implemented but not yet mounted in the daemon's composition root, external HTTP access is deferred (PRD-045 scope boundary). Runtime degradation (treating 401/403 as expired and 429 as rate-limited) is in-memory and not yet persisted across restarts. A canonical top-level `models:` map, first-class session and subscription account lifecycle, circuit breaking with cooldown recovery, and full cost telemetry are deferred to a later phase.

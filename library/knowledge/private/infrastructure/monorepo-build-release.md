@@ -37,10 +37,11 @@ The entry point of the build process is the `package.json` scripts at `package.j
 
 To keep the release version in sync across the entire ecosystem, the `prebuild` hook runs a dedicated version sync script. This script reads the version number from the main `package.json` file and propagates it to all plugin manifest files:
 
-```13:25:scripts/sync-versions.mjs
+```19:29:scripts/sync-versions.mjs
 const SOURCE = "package.json";
 
-// Scalar targets: each has a single top-level `version` field tracking package.json.
+// Scalar targets: each carries a single top-level `version` field tracking
+// the root package.json version (PRD-001c FR-2).
 export const SCALAR_TARGETS = [
   ".claude-plugin/plugin.json",
   "harnesses/claude-code/.claude-plugin/plugin.json",
@@ -52,8 +53,7 @@ export const SCALAR_TARGETS = [
 
 The script is idempotent. It parses the JSON manifests, verifies whether the target version matches, and performs the file write only if there is a discrepancy. It also updates the marketplace definition file:
 
-```63:88:scripts/sync-versions.mjs
-  const marketplace = readJsonAt(root, MARKETPLACE_PATH);
+```87:111:scripts/sync-versions.mjs
   let mpChanged = false;
   if (marketplace.metadata?.version !== version) {
     const old = marketplace.metadata?.version;

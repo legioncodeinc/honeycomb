@@ -66,6 +66,7 @@ import {
 } from "../auth/deeplake-issuer.js";
 import { type Clock, type DiskCredentials, loadDiskCredentials, systemClock } from "../auth/credentials-store.js";
 import { resolveTenancyConfirmation } from "../auth/tenancy-confirmation.js";
+import { refuseRemoteSetup } from "./setup-loopback.js";
 
 /** The root route group the setup-tenancy routes attach to (already mounted, UNPROTECTED, in `server.ts`). */
 export const SETUP_TENANCY_GROUP = "/" as const;
@@ -375,6 +376,8 @@ export function mountSetupTenancyApi(daemon: Daemon, options: SetupTenancyOption
 
 	// ── GET /setup/tenancy — the pending/selected read (the hive onboarding polls this). ──
 	root.get(SETUP_TENANCY_PATH, (c) => {
+		const remote = refuseRemoteSetup(c);
+		if (remote !== null) return remote;
 		if (notLocal()) return c.json({ error: "not_found" }, 404);
 		const pending = options.store.get();
 		if (pending !== null) {
@@ -425,6 +428,8 @@ export function mountSetupTenancyApi(daemon: Daemon, options: SetupTenancyOption
 
 	// ── GET /setup/tenancy/orgs — the org list (pending-token or credential scoped). ──
 	root.get(SETUP_TENANCY_ORGS_PATH, async (c) => {
+		const remote = refuseRemoteSetup(c);
+		if (remote !== null) return remote;
 		if (notLocal()) return c.json({ error: "not_found" }, 404);
 		const pending = options.store.get();
 		if (pending !== null) {
@@ -444,6 +449,8 @@ export function mountSetupTenancyApi(daemon: Daemon, options: SetupTenancyOption
 
 	// ── GET /setup/tenancy/workspaces?org=<id> — that org's workspaces + the create affordance flag. ──
 	root.get(SETUP_TENANCY_WORKSPACES_PATH, async (c) => {
+		const remote = refuseRemoteSetup(c);
+		if (remote !== null) return remote;
 		if (notLocal()) return c.json({ error: "not_found" }, 404);
 		const org = (c.req.query("org") ?? "").trim();
 		const pending = options.store.get();
@@ -497,6 +504,8 @@ export function mountSetupTenancyApi(daemon: Daemon, options: SetupTenancyOption
 
 	// ── POST /setup/tenancy/select — phase 2: validate, mint for the chosen org, persist + marker. ──
 	root.post(SETUP_TENANCY_SELECT_PATH, async (c) => {
+		const remote = refuseRemoteSetup(c);
+		if (remote !== null) return remote;
 		if (notLocal()) return c.json({ error: "not_found" }, 404);
 		const parsed = await readBody(c, SelectBodySchema);
 		if (!parsed.ok) return c.json({ selected: false, error: "invalid request body" }, 400);
@@ -559,6 +568,8 @@ export function mountSetupTenancyApi(daemon: Daemon, options: SetupTenancyOption
 
 	// ── POST /setup/tenancy/workspaces — create a workspace (Deeplake supports it; canCreate=true). ──
 	root.post(SETUP_TENANCY_WORKSPACES_PATH, async (c) => {
+		const remote = refuseRemoteSetup(c);
+		if (remote !== null) return remote;
 		if (notLocal()) return c.json({ error: "not_found" }, 404);
 		const parsed = await readBody(c, CreateWorkspaceBodySchema);
 		if (!parsed.ok) return c.json({ created: false, error: "invalid request body" }, 400);

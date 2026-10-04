@@ -16,9 +16,9 @@ How Honeycomb generates, stores, and incrementally updates AI-written wiki summa
 
 ## What summaries are for
 
-Raw session rows in the `sessions` table are precise but verbose. Searching across them for "what did we decide about the database schema last week" would require ranking thousands of individual messages. Summaries solve this by collapsing each session into a structured markdown document that names entities, decisions, files modified, and open questions. That document is what shows up when you `Grep` across `~/.honeycomb/memory/` or follow links from `~/.honeycomb/memory/index.md`.
+Raw session rows in the `sessions` table are precise but verbose. Searching across them for "what did we decide about the database schema last week" would require ranking thousands of individual messages. Summaries solve this by collapsing each session into a structured markdown document that names entities, decisions, files modified, and open questions. That document is what shows up when you `Grep` across `~/.apiary/honeycomb/memory/` or follow links from `~/.apiary/honeycomb/memory/index.md`. Generated overviews use that mount (`MEMORY_MOUNT_DISPLAY_PATH` in `src/daemon-client/vfs/index-gen.ts`). The legacy `~/.honeycomb/memory/` shape is still recognized, and the virtual index filename is still `index.md`. The canonical synthesized wiki index inside the `memory` table is `/MEMORY.md`.
 
-Summaries also carry a `summary_embedding` vector (768-dim `nomic-embed-text-v1.5`) so semantic recall can promote a session even when the search terms do not match the exact words used at the time.
+Summaries also store a `summary_embedding` vector (768-dim `nomic-embed-text-v1.5`) on the `memory` row. Semantic recall does not query that column. Its arms are `memories.content_embedding`, `sessions.message_embedding`, and `hive_graph_versions.embedding` (`src/daemon/runtime/memories/recall.ts`). `embeddingColumnFor` returns null for source `memory`. Lexical recall does search `memory.summary`.
 
 ---
 
@@ -29,13 +29,11 @@ The summary worker is owned by the honeycomb daemon (port 3850). Hooks do not sp
 | Trigger | When |
 |---|---|
 | **Final** | At session end: `Stop`, `SessionEnd`, or `session_shutdown`, once per session |
-| **Periodic** | Mid-session, when messages since last summary reach `HONEYCOMB_SUMMARY_EVERY_N_MSGS` (default 50) OR elapsed time since last summary reaches `HONEYCOMB_SUMMARY_EVERY_HOURS` (default 2) |
+| **Periodic** | Mid-session, when the in-memory message counter crosses its threshold (default 20, `DEFAULT_SUMMARY_EVERY_MESSAGES` in `src/daemon/runtime/capture/turn-counters.ts`). No hours threshold is evaluated. |
 
-The periodic threshold check lives inside `maybeTriggerPeriodicSummary()` in `src/hooks/capture.ts`. After each capture event is recorded, the function bumps a per-session counter in `~/.claude/hooks/summary-state/<sessionId>.json` and calls `shouldTrigger()` to decide whether to ask the daemon to proceed.
+The periodic bump is `TurnCounters.recordMessage` in `src/daemon/runtime/capture/turn-counters.ts`, called from `src/daemon/runtime/capture/capture-handler.ts`. There is no `src/hooks/capture.ts` and no `maybeTriggerPeriodicSummary`. The counters are an in-memory per-session map and reset on daemon restart. There is no sidecar JSON of `{ lastSummaryAt, lastSummaryCount, totalCount }`.
 
-A lock file at `~/.claude/hooks/summary-state/<sessionId>.lock` prevents two summary runs from being triggered concurrently for the same session. If the lock is already held (an earlier trigger's run is still in flight on the daemon), the new trigger is suppressed. The lock is always released in the worker's `finally` block.
-
-A sidecar JSON at `~/.claude/hooks/summary-state/<sessionId>.json` tracks `{ lastSummaryAt, lastSummaryCount, totalCount }`. The directory is shared across all agents because session IDs are UUIDs and never collide. The file is never deleted, so resuming a session via `--resume` or `--continue` picks up the count from where it left off.
+A lock file at `~/.claude/hooks/summary-state/<sessionId>.lock` prevents two summary runs from being triggered concurrently for the same session. If the lock is already held (an earlier trigger's run is still in flight on the daemon), the new trigger is suppressed. The lock is always released in the worker's `finally` block. The summary-state directory is that lock root (`<sessionId>.lock` in `src/daemon/runtime/summaries/worker.ts`).
 
 ---
 
@@ -48,44 +46,34 @@ The summary worker runs inside the honeycomb daemon as a background job. Hooks a
 The worker queries the `sessions` table for all rows belonging to the session, ordered by `creation_date` ascending:
 
 ```sql
-SELECT message, creation_date FROM "sessions"
-WHERE path LIKE '/sessions/%<sessionId>%'
+SELECT * FROM "sessions"
+WHERE path = <session path, escaped with sLiteral>
 ORDER BY creation_date ASC
 ```
 
-The `LIKE` pattern is built through the `sqlLike` escaper rather than a parameterized query, because DeepLake does not support bind parameters. Because capture events are recorded asynchronously, DeepLake's eventual-consistency model means rows can lag behind the `SessionEnd` event. The worker retries with linear backoff up to `HONEYCOMB_WIKI_EVENT_RETRIES` (default 5) times at `HONEYCOMB_WIKI_EVENT_BACKOFF_MS` (default 1500 ms) intervals before giving up.
+`createSessionEventFetcher` in `src/daemon/runtime/summaries/worker.ts` matches `path` with `sLiteral`, because DeepLake does not support bind parameters. Because capture events are recorded asynchronously, DeepLake's eventual-consistency model means rows can lag behind the `SessionEnd` event. The worker retries with linear backoff up to `HONEYCOMB_WIKI_EVENT_RETRIES` (default 5) times at `HONEYCOMB_WIKI_EVENT_BACKOFF_MS` (default 1500 ms) intervals before giving up.
 
 If no events appear after all retries, the worker removes the "in progress" placeholder from the `memory` table (a row written when the session started to reserve the slot) rather than leaving it stranded forever.
 
-### Step 2: check for an existing summary
+### Step 2: no resume offset
 
-For resumed sessions, a prior summary may already exist. The worker queries the `memory` table for the session's summary row and, if found, reads the embedded `**JSONL offset**: N` marker to know how many events the previous summary already covered. This offset is passed to the gate prompt so the model can focus on events since the last checkpoint.
+The worker does not read a prior summary to learn how many events were already covered. There is no `JSONL offset` marker under `src/`. `runSummaryWorker` summarizes the events the fetcher returned. When a real summary row already exists, `writeSummary` skips the insert (step 4).
 
 ### Step 3: run the gate prompt
 
-The worker builds a structured prompt from a template, substituting the temp JSONL path, the existing summary path, the session ID, the project name, the previous offset, and the total event count. It then shells out to the host agent's own CLI:
+The worker builds a structured prompt from the session's events and shells out with `child_process.spawn` (`systemSummarySpawner` in `src/daemon/runtime/summaries/worker.ts`). The prompt is written to the child's stdin. The subprocess env sets `HONEYCOMB_WIKI_WORKER=1` and `HONEYCOMB_CAPTURE=false`. The gate returns stdout, parsed as JSON by `parseSummaryGate`. There is no `buildClaudeInvocation`, no `execFileSync`, and no temp `summary.md`. Using the host CLI means no separate API key is needed.
 
-```typescript
-const inv = buildClaudeInvocation(cfg.claudeBin, prompt);
-execFileSync(inv.file, inv.args, {
-  timeout: 120_000,
-  env: { ...process.env, HONEYCOMB_WIKI_WORKER: "1", HONEYCOMB_CAPTURE: "false" },
-});
-```
-
-The gate CLI writes the generated markdown to a temp file (`summary.md` in the run's temp dir). Using the host CLI means no separate API key is needed.
+Agent selection is `summaryCliSpecFor` in `src/daemon/runtime/summaries/job.ts`. The args are `-p` or `exec -` only: `claude -p`, `codex exec -`, `cursor-agent -p`, `hermes -p`, `pi -p`.
 
 ### Step 4: embed and upload
 
-If the temp summary file exists and is non-empty, the worker embeds the text via `EmbedClient.embed(text, "document")` (returns `null` if embeddings are disabled) and the daemon writes the summary to the `memory` table:
+If the gate returns markdown, the worker embeds the text via `EmbedClient.embed(markdown)` (one string argument; `src/daemon/runtime/services/embed-client.ts`; returns `null` if embeddings are disabled) and the daemon writes the summary to the `memory` table:
 
 ```
 memory table path: /summaries/<userName>/<sessionId>.md
 ```
 
-The write is keyed on the `path` column. Because DeepLake coalesces UPDATEs against freshly written rows, the daemon uses SELECT-before-INSERT: it checks for an existing row and either rewrites it or inserts a new one. The `description` column stores a short excerpt of the summary, and the `summary_embedding` column stores the 768-dim vector (or `NULL`).
-
-After a successful write, the sidecar is updated via `finalizeSummary(sessionId, jsonlLines)` to record the new baseline count.
+The write is keyed on the `path` column. `writeSummary` inserts only when no real row exists, and never rewrites one in place. The `description` column stores a short excerpt of the summary, and the `summary_embedding` column stores the 768-dim vector (or `NULL`). There is no `finalizeSummary` and no sidecar baseline to update.
 
 ```mermaid
 sequenceDiagram
@@ -96,18 +84,15 @@ sequenceDiagram
     participant gate as gateCli
     participant embed as embedWorker
 
-    capture ->> daemon: maybeTriggerPeriodicSummary (threshold crossed)
+    capture ->> daemon: recordMessage crosses the message threshold
     daemon ->> worker: run summary job for sessionId
-    worker ->> deeplake: SELECT events for sessionId (with retries)
+    worker ->> deeplake: SELECT events WHERE path = session path (with retries)
     deeplake -->> worker: rows
-    worker ->> deeplake: SELECT existing summary (for offset)
-    deeplake -->> worker: prev summary or empty
-    worker ->> gate: execFileSync(claudeBin, prompt)
-    gate -->> worker: writes summary.md to tmp dir
-    worker ->> embed: EmbedClient.embed(summaryText)
+    worker ->> gate: spawn host CLI, prompt on stdin
+    gate -->> worker: stdout JSON parsed by parseSummaryGate
+    worker ->> embed: EmbedClient.embed(markdown)
     embed -->> worker: vector or null
-    worker ->> deeplake: SELECT-before-INSERT /summaries/user/sessionId.md
-    worker ->> worker: finalizeSummary (update sidecar)
+    worker ->> deeplake: INSERT /summaries/user/sessionId.md if no real row
     worker ->> worker: releaseLock (finally block)
 ```
 
@@ -119,7 +104,7 @@ sequenceDiagram
 
 **No orphan placeholders.** If events never arrive, the worker deletes the "in progress" placeholder row. The guard `AND description = 'in progress'` means a concurrent run that already wrote a real summary is never clobbered.
 
-**Exponential backoff on API errors.** The daemon's `query()` helper retries on HTTP 401, 403, 429, 500, 502, and 503, with exponential backoff up to 30 seconds plus jitter. Cloudflare rate-limit 403s from IP bursts can take 30-60 seconds to clear, so the jitter matters.
+**Exponential backoff on API errors.** The daemon's `query()` helper retries transient HTTP 429, 500, 502, 503, and 504 (`src/daemon/storage/client.ts`). 401 and 403 are non-transient. The backoff ceiling is 1000 ms, and a statement gets 4 attempts.
 
 **Summary embedding failures are non-fatal.** If `EmbedClient.embed()` throws, the worker logs the error, writes `NULL` for the embedding, and proceeds with the upload. A summary without an embedding is still searchable via lexical ranking.
 
@@ -131,13 +116,13 @@ The summary worker is owned by the daemon, so the only per-agent variation is th
 
 | Agent | Gate CLI |
 |---|---|
-| claude_code | `claude -p <prompt> --no-session-persistence --model <model>` |
-| codex | `codex exec --dangerously-bypass-approvals-and-sandbox <prompt>` |
-| cursor | `cursor-agent --print --model <model> --force --output-format text <prompt>` |
-| hermes | `hermes -z <prompt> --provider <provider> -m <model> --yolo --ignore-user-config` |
-| pi | `pi --print --provider <provider> --model <model> <prompt>` |
+| claude_code | `claude -p` (prompt on stdin) |
+| codex | `codex exec -` |
+| cursor | `cursor-agent -p` |
+| hermes | `hermes -p` |
+| pi | `pi -p` |
 
-The daemon detects which host agent triggered the session and selects the matching gate invocation. Across every agent the work is owned by the same daemon worker and the same DeepLake connection.
+`summaryCliSpecFor` in `src/daemon/runtime/summaries/job.ts` selects that invocation from the session's agent. It does not pass a model or provider flag. `HONEYCOMB_CURSOR_MODEL`, `HONEYCOMB_HERMES_PROVIDER`, `HONEYCOMB_HERMES_MODEL`, `HONEYCOMB_PI_PROVIDER`, and `HONEYCOMB_PI_MODEL` are not read under `src/`. Across every agent the work is owned by the same daemon worker and the same DeepLake connection.
 
 ---
 
@@ -145,15 +130,10 @@ The daemon detects which host agent triggered the session and selects the matchi
 
 | Env var | Default | Effect |
 |---|---|---|
-| `HONEYCOMB_SUMMARY_EVERY_N_MSGS` | `50` | Message threshold for periodic trigger |
-| `HONEYCOMB_SUMMARY_EVERY_HOURS` | `2` | Time threshold for periodic trigger |
 | `HONEYCOMB_WIKI_EVENT_RETRIES` | `5` | Retry attempts when no session events are found |
 | `HONEYCOMB_WIKI_EVENT_BACKOFF_MS` | `1500` | Linear backoff base for event fetch retries |
-| `HONEYCOMB_CURSOR_MODEL` | `auto` | (cursor) Model passed to `cursor-agent --print --model` |
-| `HONEYCOMB_HERMES_PROVIDER` | `openrouter` | (hermes) Provider for the gate call |
-| `HONEYCOMB_HERMES_MODEL` | `anthropic/claude-haiku-4-5` | (hermes) Model for the gate call |
-| `HONEYCOMB_PI_PROVIDER` | `google` | (pi) Provider for the gate call |
-| `HONEYCOMB_PI_MODEL` | `gemini-2.5-flash` | (pi) Model for the gate call |
 | `HONEYCOMB_CAPTURE` | `true` | Set to `false` to disable capture and summary generation |
 
-Worker activity logs to `~/.claude/hooks/wiki.log`. Each line shows the session being processed, the event count, the gate exit code, and the write result.
+There is no `HONEYCOMB_SUMMARY_EVERY_N_MSGS` or `HONEYCOMB_SUMMARY_EVERY_HOURS`. The live periodic threshold is the constant 20 in `src/daemon/runtime/capture/turn-counters.ts`. No hours check runs.
+
+The worker does not write `~/.claude/hooks/wiki.log`. The job worker emits structured events such as `summary.worker.completed` (`src/daemon/runtime/summaries/job.ts`).

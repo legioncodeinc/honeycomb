@@ -32,16 +32,18 @@ GraphRAG is the mechanism for that minority of queries. It is a *follow-on*, not
 
 ---
 
-## 2. The design (transferable from the prior art)
+## 2. The design (prior-art template)
 
-Owl's Roost's GraphRAG is a clean, Postgres-native template that maps directly onto Honeycomb's
-SQL+vector store:
+Owl's Roost's GraphRAG is a Postgres-native template. Its hop walk is a recursive CTE. Honeycomb's
+daemon has no `WITH RECURSIVE` under `src/daemon`. Deep Lake does not run that Postgres hop walk.
+GraphRAG stays approved and unbuilt. The diagram below is the prior-art shape a later PRD would
+have to reimplement:
 
 ```mermaid
 flowchart TD
     Q["agent query"] --> V["vector recall (top-K candidates)"]
     Q --> E["find entities (lexical / FTS on entity text)"]
-    E --> T["traverse graph (recursive CTE, 2 hops, cycle-safe)"]
+    E --> T["prior-art hop walk (recursive CTE; not in this daemon)"]
     V --> F["RRF fuse (vector results + graph chains)"]
     T --> F
     F --> R["rerank top-N"]
@@ -53,12 +55,14 @@ flowchart TD
   INSIGHT / OUTCOME / GOAL).
 - **Relationships** are typed, weighted edges: RESOLVES, LEADS_TO, BUILDS_ON, CONTRADICTS,
   SIMILAR_TO, TRIGGERED_BY (again, the prior art's set, fit to code work).
-- **Traversal** is a recursive CTE (2-3 hops) with cycle detection, Postgres handles a sparse graph
-  (hundreds of nodes per repo) without a dedicated graph DB.
-- **Fusion** reuses the *same RRF* the recall engine already uses (vector list + graph-chain list,
-  `k = 60`), so graph results compose with the existing retrieval rather than replacing it.
+- **Traversal** in the prior art is a recursive CTE (2-3 hops) with cycle detection. That statement
+  describes Postgres. This daemon does not issue `WITH RECURSIVE`, and there is no GraphRAG extractor
+  or hop walker. A follow-on cannot assume the store already walks a sparse graph.
+- **Fusion** can reuse the *same RRF* the recall engine already uses (`RRF_K = 60` in
+  `src/daemon/runtime/memories/recall.ts`). That constant exists. A graph-chain list feeding it does not.
 
-This is deliberately the prior art's architecture, it is proven and it fits.
+The entity and relationship vocabulary above is the prior art's architecture. The fusion constant is
+the piece already in this tree.
 
 ---
 
@@ -67,9 +71,10 @@ This is deliberately the prior art's architecture, it is proven and it fits.
 Honeycomb does not start from zero on graph, which is a large part of why the follow-on is reasonable:
 
 - **A knowledge-graph table substrate already exists.** Honeycomb has graph entity/relationship
-  tables (`USING deeplake`) with typed nodes, weighted edges, and even `content_embedding` columns;
-  see [`knowledge-graph-ontology.md`](knowledge-graph-ontology.md). GraphRAG would *populate and
-  traverse* this, not invent it.
+  tables (`USING deeplake`) with typed nodes, weighted edges, and `content_embedding` on the graph
+  catalog (`src/daemon/storage/catalog/knowledge-graph.ts`); see
+  [`knowledge-graph-ontology.md`](knowledge-graph-ontology.md). GraphRAG would *populate and
+  traverse* this. The tables are not a recursive hop walker.
 - **A codebase graph already exists.** The tree-sitter codebase extractor builds a file/symbol/import
   graph into a `codebase` table (content-addressed cache). That is a second, code-structural graph the
   relational memory can lean on (e.g. "this decision touched these symbols").
@@ -102,8 +107,9 @@ proves itself, and built behind the same eval discipline that governs everything
 ## 5. Author's note (no strong disagreement)
 
 For the record, the design discussion did not surface a strong objection to building GraphRAG as a
-follow-on, the substrate exists, the architecture is proven, and AI-assisted build cost is low. The
-only caution carried forward is the sequencing-and-measurement one above: ship and measure the 3-tier
+follow-on. The table substrate, `content_embedding`, the codebase graph, and `RRF_K = 60` exist.
+The recursive-CTE hop walk does not, so the follow-on still has to specify traversal. The other
+caution carried forward is the sequencing-and-measurement one above: ship and measure the 3-tier
 prime first, then build the graph against a demonstrated relational gap. When that PRD is written,
 this doc is its design brief.
 

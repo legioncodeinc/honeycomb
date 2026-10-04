@@ -53,11 +53,11 @@ The `projects` table is a cross-cutting tenant-scoped registry. It carries expli
 
 ### The reserved inbox
 
-Every workspace has a reserved `__unsorted__` project, the capture inbox. A session that resolves no binding, no git signal, and no path candidate falls to this project so capture is **never dropped**. This mirrors how `agent_id` defaults to `'default'`: the inner ring defaults to a known bucket on the unknown rather than failing the write. The id `__unsorted__` is reserved, a user-created project may not adopt it (by id or by the reserved display name "Unsorted"); a create path routes through a collision guard that raises a structured `ReservedProjectIdError` before writing.
+Every workspace has a reserved `__unsorted__` project, the capture inbox. `resolveScope` returns that id with `bound: false` and `source: "inbox"` when neither a binding nor a git signal matches. Production capture writes that row only when the inbox opt-in is on (`HONEYCOMB_INBOX_CAPTURE`). With the opt-in off, an unbound cwd is gated and the handler writes nothing. The id `__unsorted__` is reserved, a user-created project may not adopt it (by id or by the reserved display name "Unsorted"); a create path routes through a collision guard that raises a structured `ReservedProjectIdError` before writing.
 
 ## Per-session resolution from the working directory
 
-The resolution function answers "what project is *this* session in?" from the cwd, replacing the single machine-global `workspaceId` read. It lives in `src/hooks/shared/project-resolver.ts` as a pure, deterministic `resolveScope({ cwd })`.
+The resolution function answers "what project is *this* session in?" from the cwd, replacing the single machine-global `workspaceId` read. It lives in `src/hooks/shared/project-resolver.ts`. `resolveScope` takes `{ cwd, cache, ... }` and is pure. Its order is a longest-prefix binding, then a canonical git-remote match, then the workspace inbox (`source: "inbox"`, `bound: false`). The env override is `projectIdOverride` on `resolveScopeFromDisk`: a non-empty override returns `source: "binding"` and skips the cache.
 
 ### Why it lives in the thin client
 
@@ -69,18 +69,17 @@ The cache file is untrusted external input, zod-validated at the boundary. A mis
 
 ```mermaid
 flowchart TD
-    start["resolveScope({ cwd })"] --> env{"HONEYCOMB_PROJECT_ID set?"}
-    env -->|yes| override["use the override project_id"]
-    env -->|no| binding{"folder to project binding? (longest-prefix match on cwd)"}
-    binding -->|yes| bound["bound project_id"]
-    binding -->|no| remote{"git remote matches a registry remote_signal?"}
-    remote -->|yes| gitbind["auto-suggest / auto-bind that project"]
-    remote -->|no| path{"cwd path is a stable candidate key?"}
-    path -->|yes| candidate["record a path identity (offer to bind later)"]
-    path -->|no| inbox["workspace __unsorted__ inbox (bound: false)"]
+    disk["resolveScopeFromDisk"] --> env{"projectIdOverride non-empty?"}
+    env -->|yes| override["source binding, skip the cache"]
+    env -->|no| pure["resolveScope cwd, cache, ..."]
+    pure --> binding{"longest-prefix folder binding?"}
+    binding -->|yes| bound["bound project_id, source binding"]
+    binding -->|no| remote{"git remote matches remote_signal?"}
+    remote -->|yes| gitbind["bound project_id, source git"]
+    remote -->|no| inbox["__unsorted__, bound false, source inbox"]
 ```
 
-The precedence is, in order: an explicit `HONEYCOMB_PROJECT_ID` env override (for scripted or CI use, mirroring the `HONEYCOMB_ORG_ID`/`HONEYCOMB_WORKSPACE_ID` precedence); the explicit folder→project binding with a longest-prefix path match so a child binding wins over a parent; the canonical git-remote signal matched against the cached registry projects; a path-fallback candidate key; and finally the workspace `__unsorted__` inbox. Resolution returns a usable scope in every case.
+The disk wrapper checks `projectIdOverride` first. `resolveScope` itself then applies, in order: the explicit folder→project binding with a longest-prefix path match so a child binding wins over a parent; the canonical git-remote signal matched against the cached registry projects; and the workspace `__unsorted__` inbox (`bound: false`, `source: "inbox"`). The pure function returns a usable scope in every case, and a git miss lands on that inbox result.
 
 `credentials.json.workspaceId` is demoted from "the active workspace" to a **fallback default**, consulted only when no binding resolves a workspace, and never as the project authority. A structural test asserts that no capture or recall path treats it as the authoritative active scope when a binding resolves one.
 
@@ -92,7 +91,7 @@ Resolution is a pure function of `(cwd, cache snapshot, fallback workspace)`. Th
 
 With per-session resolution in place, the resolved `project_id` threads through the two paths that touch user memory. The split between them is deliberate and **asymmetric**.
 
-**Capture must never drop a memory**, a lost memory is unrecoverable, so an unresolved project defaults to the `__unsorted__` inbox. Every capture resolves from the session cwd and writes its `project_id`. The existing free-text `project` column (a raw cwd path, kept for display and back-compat with no bulk migration) stays; `project_id` is the new resolved registry key the scope clause segments on.
+**An accepted capture writes its `project_id`.** `resolveScope` still returns `__unsorted__` with `bound: false` and `source: "inbox"` after a git miss. Production capture sets `boundProjectGate: true` and does not write that inbox row unless `HONEYCOMB_INBOX_CAPTURE` is on. An unbound cwd with the opt-in off returns `{ ok: true, gated: true, reason: "no_bound_project" }` and writes nothing. Every accepted capture resolves from the session cwd and writes its `project_id`. The existing free-text `project` column (a raw cwd path, kept for display and back-compat with no bulk migration) stays; `project_id` is the resolved registry key the scope clause segments on.
 
 **Recall must stay narrow**, a leak surfaces the wrong project, so an unbound session sees only its inbox plus workspace-global rows. Every recall resolves the same way and adds a `project_id` predicate to the scope clause, so candidate channels (lexical FTS, vector search, graph traversal) cannot surface another project's rows even on a strong vector or high-degree-entity hit. A strong hit can surface an id, but content cannot leak past the project filter.
 
@@ -102,7 +101,7 @@ The `project_id` predicate is built by `buildProjectScopeClause` and joins the e
 flowchart LR
     cwd["session cwd"] --> resolve["resolveScope"]
     resolve --> pid["project_id"]
-    pid --> capture["capture: write project_id (default __unsorted__)"]
+    pid --> capture["accepted capture writes project_id; unbound cwd is gated unless inbox opt-in is on"]
     pid --> recall["recall: AND project_id predicate into the scope clause"]
     recall --> narrow["sees only this project's rows + workspace-global"]
 ```
@@ -135,7 +134,7 @@ Every switch is session-safe: a `switch`, `use`, or `bind` does not corrupt anot
 
 The dashboard's project-specific surfaces, the home KPI band, codebase graph, memory graph, memories, and sync, all follow a single Org → Workspace → Project switcher in the nav shell. Picking a scope re-scopes every one of those pages, and the switcher lists only the scopes the user has privileges in. This makes the same three-level model visible and navigable in the UI that the daemon enforces underneath.
 
-Each scoped surface threads the selection the same way: the web client stamps the active project onto the read as an `x-honeycomb-project` header, the daemon handler resolves it with `resolveRequestProject`, and the SQL layer narrows the query with a `WHERE project_id = '<id>'` predicate. The home KPI band (Memories / Turns / Est. savings) is the canonical example: `fetchKpisView` builds the predicate with a shared `projectWhereClause` helper and applies it to the memories count, the `sessions` (turns) count, and the est-savings `SUM`. (The est-savings `SUM(LENGTH(content))` is a corpus-length proxy slated to be pivoted to a recall-weighted metric per [ADR-0010](adr/0010-recall-weighted-est-savings.md); the project-scoping mechanism described here is unchanged by that pivot.) With no project selected the predicate is omitted and the band falls back to workspace-wide totals (back-compat). Because the read also runs four DeepLake aggregate scans and the hash router remounts the home on every visit, the handler caches each result behind a short (10s) TTL keyed by `(scope, project)` so re-landing on the home does not re-run the scans, and scoping to a project additionally shrinks each scan to that project's segment.
+Each scoped surface threads the selection the same way: the web client stamps the active project onto the read as an `x-honeycomb-project` header, the daemon handler resolves it with `resolveRequestProject`, and the SQL layer narrows the query with a `WHERE project_id = '<id>'` predicate. The home KPI band (Memories / Turns / Est. savings) is the canonical example: `fetchKpisView` builds the predicate with a shared `projectWhereClause` helper and applies it to the memories count, the `sessions` (turns) count, and the est-savings `SUM`. The est-savings figure is still that corpus-length proxy: `buildEstimatedSavingsSql` is `SELECT SUM(LENGTH(content))` and `fetchEstimatedSavings` divides by `CHARS_PER_TOKEN` (`4`) in `src/daemon/runtime/dashboard/api.ts`. [ADR-0010](adr/0010-recall-weighted-est-savings.md) records a recall-weighted replacement and says this proxy is retired; those two functions are still the live read. Project scoping of the sum is unchanged. With no project selected the predicate is omitted and the band falls back to workspace-wide totals (back-compat). Because the read also runs four DeepLake aggregate scans and the hash router remounts the home on every visit, the handler caches each result behind a short (10s) TTL keyed by `(scope, project)` so re-landing on the home does not re-run the scans, and scoping to a project additionally shrinks each scan to that project's segment.
 
 One surface is deliberately **not** narrowed: team skills. The `synced_assets` table carries no `project_id` column because a published skill is shared with the **team** (workspace), not bound to a project (see [`../collaboration/team-skills-sharing.md`](../collaboration/team-skills-sharing.md)). So the KPI band's skills count, and any other `synced_assets` read, stays workspace-wide by design even when a project is selected. This is the same asymmetry the recall path enforces: project is the soft inner-ring segment for memory and mined skills, but the team-shared published catalog lives one ring out, at the workspace.
 

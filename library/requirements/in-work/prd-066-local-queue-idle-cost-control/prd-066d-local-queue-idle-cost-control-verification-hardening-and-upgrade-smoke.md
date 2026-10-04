@@ -1,6 +1,6 @@
 # PRD-066d: Verification Hardening And Upgrade Smoke
 
-> **Status:** Backlog
+> **Status:** In Work
 > **Parent:** PRD-066
 > **Priority:** P0
 > **Effort:** S

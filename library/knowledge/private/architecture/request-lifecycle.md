@@ -30,27 +30,30 @@ sequenceDiagram
     participant D as Daemon
     participant S as DeepLake
 
-    H->>D: POST /api/hooks/session-start (harness, agentId, sessionKey)
+    H->>D: POST /api/hooks/context (harness, agentId, sessionKey)
     D->>D: resolve org, workspace, agent_id, read policy
     D->>S: hybrid recall + identity + rules/goals
     S-->>D: scored memories, skills, context
-    D-->>H: inject (identity + memories + Memory Check Loop)
+    D-->>H: inject (identity + memories + recall-awareness notice)
 ```
 
-The daemon resolves the tenancy and scope (org and workspace from the credentials and token, the `project_id` from the session's working directory, `agent_id` from the request or session key), runs a scoped recall, and returns an injection block: identity, scored memories, active rules and goals, and the Memory Check Loop that tells the agent when prior context matters. Scoring and the confidence gate are documented in [`../ai/retrieval.md`](../ai/retrieval.md); the per-session project resolution that scopes this recall is in [`multi-project-and-context-switching.md`](multi-project-and-context-switching.md).
+Session-start context is `POST /api/hooks/context` (`src/daemon/runtime/capture/attach.ts`, `src/hooks/shared/context-renderer.ts`). The daemon resolves the tenancy and scope (org and workspace from the credentials and token, the `project_id` from the session's working directory, `agent_id` from the request or session key), runs a scoped recall, and returns an injection block: identity, scored memories, active rules and goals, and the recall-awareness notice. That notice is `RECALL_AWARENESS_NOTICE` in `src/hooks/shared/session-start.ts`, and it starts "Memory recall is available on demand". Scoring and the confidence gate are documented in [`../ai/retrieval.md`](../ai/retrieval.md); the per-session project resolution that scopes this recall is in [`multi-project-and-context-switching.md`](multi-project-and-context-switching.md).
 
 Alongside that injection, session-start also pushes a small, bounded **prime**: a compact index of the most relevant Tier-1 memory keys (one keyword-dense line each) served by `GET /api/memories/prime`. The prime is the cheap "here is what I already know about this project" header the agent skims once; it then pulls deeper detail on demand instead of paying for a full recall every turn. The push-once-pull-on-demand design, and why it avoids the lost-in-the-middle failure of injecting everything, are in [`../ai/session-priming-architecture.md`](../ai/session-priming-architecture.md) and [`../ai/three-tier-memory-strategy.md`](../ai/three-tier-memory-strategy.md).
 
 ## Per turn: capture and recall
 
-Every turn produces events. Each prompt, tool call, and response becomes one row in the `sessions` table through a single INSERT, never a concatenation, which is the deliberate fix for the write race the summary worker once hit. Capture is covered in [`../ai/session-capture.md`](../ai/session-capture.md).
+A turn can produce capture events. Production capture sets `boundProjectGate: true` and `inboxCapture: resolveInboxCaptureEnabled()`, and does not pass `firstRunGate` (`src/daemon/runtime/assemble.ts`). An unbound cwd with the inbox opt-in off is gated with `no_bound_project` and writes no `sessions` row (`src/daemon/runtime/capture/capture-handler.ts`). An accepted event becomes a `sessions` row through `POST /api/hooks/capture`. When batching is on, the handler buffers accepted rows and flushes them as a multi-row append. Capture is covered in [`../ai/session-capture.md`](../ai/session-capture.md).
 
 ```mermaid
 flowchart TD
-    event["Turn event (prompt / tool call / response)"] --> capture["POST /api/hooks capture -> sessions row (jsonb, INSERT-once)"]
-    capture --> embed["Optional 768-dim embedding attached"]
-    capture --> triggers["Counters: every N turns trigger skillify; periodic summary"]
-    prompt["User prompt mentions known entity"] --> recall["user-prompt-submit -> scoped recall -> optional inject"]
+    event["Turn event (prompt / tool call / response)"] --> gate{"unbound cwd and inbox opt-in off?"}
+    gate -->|yes| skip["gated ack: no_bound_project, no sessions write"]
+    gate -->|no| capture["POST /api/hooks/capture"]
+    capture --> write["accepted row: one INSERT, or a buffered multi-row append when batching is on"]
+    write --> embed["Optional 768-dim embedding attached"]
+    write --> triggers["Counters: every N turns trigger skillify; periodic summary"]
+    prompt["User prompt mentions known entity"] --> recall["user-prompt-submit -> POST /api/memories/recall -> optional inject"]
 ```
 
 Recall during a turn comes in two flavors. The automatic kind fires on `user-prompt-submit` and only injects when an entity match clears the confidence gate. The explicit kind is when the agent runs `recall`, browses the virtual filesystem, or calls an MCP tool; that bypasses the inject-on-confidence rule because the agent asked.
@@ -68,7 +71,7 @@ flowchart TD
     graph --> retain["Retention: decay + purge"]
 ```
 
-Extraction decomposes events into facts and entities; decision compares each fact against existing memory and proposes an action; controlled writes apply the safe ones with content-hash dedup; graph persistence updates the ontology; retention ages out what is stale. The full stage behavior, the modes (`shadowMode`, `mutationsFrozen`, `graphEnabled`, `autonomousEnabled`), and the durable job queue are in [`../ai/memory-pipeline.md`](../ai/memory-pipeline.md). Because writes land in DeepLake, the pipeline uses the storage patterns in [`../data/deeplake-storage.md`](../data/deeplake-storage.md): append-only version bumps for concurrent-edit tables, hand-escaped SQL, and lazy schema healing.
+Extraction decomposes events into facts and entities; decision compares each fact against existing memory and proposes an action; controlled writes apply the safe ones with content-hash dedup; graph persistence updates the ontology; retention ages out what is stale. The full stage behavior, the write gates (`shadowMode` and `mutationsFrozen` on controlled writes, `graphEnabled` on graph persist; update and delete also check `autonomous.allowUpdateDelete`), and the durable job queue are in [`../ai/memory-pipeline.md`](../ai/memory-pipeline.md). Because writes land in DeepLake, the pipeline uses the storage patterns in [`../data/deeplake-storage.md`](../data/deeplake-storage.md): append-only version bumps for concurrent-edit tables, hand-escaped SQL, and lazy schema healing.
 
 ## Session end: summarize and mine
 
@@ -93,4 +96,4 @@ When recall runs, several channels collect candidate IDs (full-text, vector, kno
 
 ## Why durable-first matters
 
-Capture commits the raw event before any model runs, so the worst a slow extractor can do is delay enrichment, never lose a memory. Distillation jobs live in a durable queue, so a daemon restart resumes them. This is the same principle on both sides of the merge: Hivemind captured raw events first and summarized later; our memory engine committed raw memory first and distilled later. Honeycomb keeps both, with the daemon owning everything downstream of capture.
+An accepted capture commits the raw event before any model runs, so a slow extractor delays enrichment of that row. A gated unbound cwd writes nothing. Distillation jobs for accepted work live in a durable queue, so a daemon restart resumes them. This is the same principle on both sides of the merge: Hivemind captured raw events first and summarized later; our memory engine committed raw memory first and distilled later. Honeycomb keeps both, with the daemon owning everything downstream of capture.

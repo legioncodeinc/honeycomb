@@ -30,7 +30,9 @@ Turning it on is a one-knob flip, via either mechanism (vault setting wins when 
 
 A vault `false` disables pollinating even when the environment variable is set, giving operators a runtime kill-switch without a redeploy. The same posture extends to the broader memory pipeline: the `HONEYCOMB_PIPELINE_*` flags gate the extraction/consolidation machinery so an install opts into spend explicitly rather than inheriting it.
 
-Once enabled, the live trigger flips: `POST /api/diagnostics/pollinate` returns `{triggered:true, status:"enqueued"}` at/over threshold (or `status:"running"` when a pass is already pending). PRD-026 proved this end-to-end against live DeepLake, a gated itest seeds a workspace with known duplicates, stale claims, and a junk entity, runs one real pass, and asserts the graph came back measurably smaller and sharper with nothing source-backed lost. So the consolidation promise rests on observed behavior on real data, not on an unrun loop.
+Once enabled, the live trigger flips: `POST /api/diagnostics/pollinate` returns `{triggered:true, status:"enqueued"}` at or over threshold, `{triggered:true, status:"running"}` when a pass is already pending, or `{triggered:true, status:"below-threshold"}` when the counter has not crossed the threshold (the trigger decision is `below_threshold`). The disabled ack stays `{triggered:false, status:"skipped", reason:"disabled"}`.
+
+`tests/integration/pollinating-consolidation-live.itest.ts` is a live consolidation itest. It is `describe.skipIf` unless both `HONEYCOMB_DEEPLAKE_TOKEN` and `ANTHROPIC_API_KEY` are set, and the `.itest.ts` suffix keeps it out of `npm run ci`. This tree does not record a passing live run. The consolidation behavior is specified by that test, and it is not an observed result of this checkout.
 
 ## When it fires
 
@@ -45,15 +47,15 @@ memory:
     backfillOnFirstRun: true
 ```
 
-## It runs as a real session
+## It runs as a job worker
 
-Pollinating is not a hidden worker. It goes through the normal session-start hook, captures a transcript, and gets summarized at the end like any other session. That choice is deliberate. Because the agent receives its startup identity context plus prior pollinating sessions and can see `MEMORY.md`, it can observe its own previous consolidation decisions and evaluate them: did those merges improve recall, was that pruning too aggressive. Adjustments compound across passes instead of starting from amnesia each time.
+The live consumer is `src/daemon/runtime/pollinating/worker.ts`. It leases a `pollinating` job and calls `runner.runPass`. The worker builds the incremental strategy with only `maxInputTokens`, which selects `defaultPollinatingIdentitySource`. That source returns empty identity files, empty prior pollinating sessions, and an empty `MEMORY.md`. There is no session-start hook and no transcript write on this path.
 
 ## What the pollinating agent reads
 
-A pass loads four things: the startup identity files according to the identity preset, the unprocessed session summaries since the last pass (in chronological order), a snapshot of the entity graph with aspects, attributes, and relationships, and a `POLLINATING.md` task prompt that is loaded only for pollinating sessions, never in normal startup.
+The incremental payload still has sections for the in-code `DEFAULT_POLLINATING_TASK_PROMPT` (the prompt text headed `# POLLINATING`, not a file loaded at session start), new summaries since the last pass, and a snapshot of entities and attributes that changed since the last pass. Identity files, prior sessions, and `MEMORY.md` are empty on the production source.
 
-Regular passes are incremental. The model receives only new summaries plus entities and attributes that changed since the last pass, a small bounded payload, with a query tool available to inspect the rest of the graph on demand. The model itself is chosen by the router for the pollinating workload, which favors a stronger target than extraction uses (see [`model-provider-router.md`](model-provider-router.md)). The first run, or an explicit compaction run, walks the full graph instead.
+`createGraphQueryTool` (`pollinating/incremental.ts`) can query entities and attributes, and the prompt pastes those tool names into the "Graph query tool" section. Nothing in `src` calls `createGraphQueryTool`. `ModelClient.complete` is one text completion. The model is not given a callable tool. The workload token is `memory_pollinating` (see [`model-provider-router.md`](model-provider-router.md)). The first run, or an explicit compaction strategy, is selected inside the same worker.
 
 ## What it can change
 

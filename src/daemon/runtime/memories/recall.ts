@@ -570,7 +570,12 @@ export function buildLexicalMatchSql(colSql: string, term: string): string {
  * memories hit reaches the surface with the SAME type badge the list row renders — no second
  * round-trip. Additive column; `rowsToRankedArm` reads it optionally.
  */
-export function buildMemoriesArmSql(term: string, perArmLimit: number, projectClause = ""): string {
+export function buildMemoriesArmSql(
+	term: string,
+	perArmLimit: number,
+	projectClause = "",
+	agentClause = "",
+): string {
 	const memoriesTbl = sqlIdent("memories");
 	const idCol = sqlIdent("id");
 	const contentCol = sqlIdent("content");
@@ -587,7 +592,7 @@ export function buildMemoriesArmSql(term: string, perArmLimit: number, projectCl
 	return (
 		`SELECT 'memories' AS source, ${idCol} AS id, ${contentCol}::text AS text, ${createdAtCol}::text AS created_at, ${typeCol}::text AS memory_type ` +
 		`FROM "${memoriesTbl}" ` +
-		`WHERE ${matchSql} AND ${isDeletedCol} = 0${projectClause} ` +
+		`WHERE ${matchSql} AND ${isDeletedCol} = 0${projectClause}${agentClause} ` +
 		`LIMIT ${perArm}`
 	);
 }
@@ -1294,6 +1299,17 @@ export interface MemoryRecallRequest {
 	 * MMR/budget failure fails-soft to the fixed top-`limit` list, never a 500.
 	 */
 	readonly tokenBudget?: number;
+	/**
+	 * Parenthesized agent read-policy fragment (`buildScopeClause`). Applied only to the
+	 * `memories` content arms, beside the deletion flag and the project predicate. Absent
+	 * leaves those arms unchanged (unit callers that build SQL directly).
+	 */
+	readonly agentScopeSql?: string;
+	/**
+	 * When true, the fast-path local ANN index is not used for memories. That index does not
+	 * store `agent_id` or `visibility`, so an isolated caller must take the scoped SQL arm.
+	 */
+	readonly agentScopeIsolated?: boolean;
 }
 
 /**
@@ -1303,6 +1319,13 @@ export interface MemoryRecallRequest {
  * the unbound inbox session (D8 / 49b-AC-3): the conjunct narrows to inbox + workspace-global.
  * The returned string is ANDed verbatim into each arm's WHERE (SQL-safe via `sLiteral`).
  */
+/** ` AND (<scope>)` for the memories arms, or "" when the request carries no agent clause. */
+function memoriesAgentAnd(request: MemoryRecallRequest): string {
+	const sql = request.agentScopeSql;
+	if (sql === undefined || sql.trim() === "") return "";
+	return ` AND ${sql}`;
+}
+
 function projectConjunctFor(request: MemoryRecallRequest): string {
 	// ISS-006 (corpus parity): a degraded-resolution recall (the route sets `projectUnscoped`)
 	// carries NO project predicate — the whole-workspace corpus, mirroring the degraded list.
@@ -1522,6 +1545,8 @@ async function runSemanticArm(
 	// PRD-049b (49b-AC-2): the project segment rides the `<#>` match (extraClause) AND the
 	// hydrate, so a strong cross-project cosine hit is filtered server-side before its id leaves.
 	const projectClause = projectConjunctFor(request);
+	const agentAnd = spec.source === "memories" ? memoriesAgentAnd(request) : "";
+	const scopedClause = `${projectClause}${agentAnd}`;
 	let scored: ScoredId[];
 	try {
 		// vectorSearch validates the dim (asserts 768) + over-fetches; the org/workspace
@@ -1541,7 +1566,7 @@ async function runSemanticArm(
 					queryVector,
 					scope: {},
 					limit,
-					...(projectClause !== "" ? { extraClause: projectClause } : {}),
+					...(scopedClause !== "" ? { extraClause: scopedClause } : {}),
 				},
 				undefined,
 				signal,
@@ -1559,7 +1584,7 @@ async function runSemanticArm(
 	// cosine ranking the vector match produced (the IN-list read order is unspecified).
 	const ids = scored.map((s) => s.id).filter((id) => id !== "");
 	if (ids.length === 0) return [];
-	const hydrated = await runArm(buildSemanticHydrateSql(spec, ids, projectClause), request, deps, signal);
+	const hydrated = await runArm(buildSemanticHydrateSql(spec, ids, scopedClause), request, deps, signal);
 	const textById = new Map<string, string>();
 	const tsById = new Map<string, string>(); // PRD-047d: id → creation timestamp (ISO, or "").
 	const typeById = new Map<string, string>(); // ISS-006: id → the `memory_type` tag (or "").
@@ -2800,7 +2825,7 @@ export async function recallMemories(
 		keywordOnly
 			? Promise.resolve({ run: null } as { readonly run: SemanticRun | null; readonly reason?: RecallDegradedReason })
 			: runSemanticArms(request, deps, limit, heavySignal),
-		runArm(buildMemoriesArmSql(term, limit, projectClause), request, deps, heavySignal),
+		runArm(buildMemoriesArmSql(term, limit, projectClause, memoriesAgentAnd(request)), request, deps, heavySignal),
 		runArm(buildMemoryArmSql(term, limit, projectClause), request, deps, heavySignal),
 		runArm(buildSessionsArmSql(term, limit, projectClause), request, deps, heavySignal),
 		// PRD-013a: the 4th (hive-graph) lexical arm — its OWN guarded statement, so a missing
@@ -3017,6 +3042,9 @@ function resolveMemoriesIndexRows(
 	limit: number,
 ): StorageRow[] | null {
 	const localIndex = deps.localVectorIndex;
+	// The in-RAM index stores no agent_id or visibility. Any agent-policy clause, including
+	// shared and group, must take the scoped SQL arm instead of this unfiltered scan.
+	if (request.agentScopeSql !== undefined && request.agentScopeSql.trim() !== "") return null;
 	if (!semanticRan || !config.localAnnIndex || localIndex === undefined || !localIndex.ready || queryVector === null) {
 		return null;
 	}
@@ -3180,11 +3208,16 @@ export async function recallFast(
 	// so NO Deep Lake query is issued for it; the sessions/hive semantic SQLs are unchanged.
 	const semanticSqls = semanticRan
 		? SEMANTIC_ARMS.filter((spec) => !(spec.source === "memories" && memoriesIndexRows !== null)).map((spec) =>
-				buildFastSemanticArmSql(spec, queryVector as readonly number[], limit, projectClause),
+				buildFastSemanticArmSql(
+					spec,
+					queryVector as readonly number[],
+					limit,
+					`${projectClause}${spec.source === "memories" ? memoriesAgentAnd(request) : ""}`,
+				),
 			)
 		: [];
 	const lexicalSqls = [
-		buildMemoriesArmSql(term, limit, projectClause),
+		buildMemoriesArmSql(term, limit, projectClause, memoriesAgentAnd(request)),
 		buildMemoryArmSql(term, limit, projectClause),
 		buildSessionsArmSql(term, limit, projectClause),
 		buildHiveGraphVersionsArmSql(term, limit, projectClause),

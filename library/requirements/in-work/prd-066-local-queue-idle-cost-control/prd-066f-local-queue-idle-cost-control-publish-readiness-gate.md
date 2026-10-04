@@ -1,6 +1,6 @@
 # PRD-066f: Publish Readiness Gate
 
-> **Status:** Backlog
+> **Status:** In Work
 > **Parent:** PRD-066
 > **Priority:** P0
 > **Effort:** M

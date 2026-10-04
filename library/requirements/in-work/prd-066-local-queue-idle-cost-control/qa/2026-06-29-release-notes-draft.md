@@ -6,8 +6,9 @@ The local queue is a scheduler boundary only. DeepLake remains the memory, recal
 
 ## Feature Flags
 
-- `HONEYCOMB_LOCAL_QUEUE_ENABLED=true` enables the local queue router.
-- `HONEYCOMB_LOCAL_QUEUE_ENABLED=false` or unset preserves the existing shared Deeplake-backed queue behavior.
+- `HONEYCOMB_LOCAL_QUEUE_ENABLED=true` forces the local queue router on.
+- `HONEYCOMB_LOCAL_QUEUE_ENABLED=false` restores the shared queue.
+- When the flag is unset, an undeclared (unknown) or `single_machine` topology defaults to the local queue. A declared `fleet` or `multi_device` topology stays on the shared queue unless it opts in.
 - `HONEYCOMB_LOCAL_QUEUE_DRAIN_SHARED=true` enables migration drain mode so old shared `memory_jobs` rows can be leased after the local queue is empty.
 
 ## Expected Cost Impact

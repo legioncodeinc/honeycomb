@@ -15,7 +15,7 @@ How a brand-new user goes from "I just logged in" to "Honeycomb is sourcing the 
 
 ## Why this exists
 
-[`multi-project-and-context-switching.md`](multi-project-and-context-switching.md) made **Project** a first-class, cwd-resolved segmentation dimension: a registry table, a resolution precedence (binding > git signal > path > `__unsorted__` inbox), the CLI verbs, and a dashboard switcher. What it did not ship was an *onboarding story* for that dimension. The data model existed; the path a new user walks to populate it did not. Run live, that gap produced three concrete failures, all observed during real onboarding.
+[`multi-project-and-context-switching.md`](multi-project-and-context-switching.md) made **Project** a first-class, cwd-resolved segmentation dimension: a registry table, a resolution precedence (binding, then git signal, then the `__unsorted__` inbox), the CLI verbs, and a dashboard switcher. What it did not ship was an *onboarding story* for that dimension. The data model existed; the path a new user walks to populate it did not. Run live, that gap produced three concrete failures, all observed during real onboarding.
 
 1. **Nothing to select.** A new user lands on the dashboard with zero bound projects. The registry and the local `projects.json` cache are empty until the first `honeycomb project bind`, so the project switcher is empty and there is no obvious next action.
 2. **Silent collection before consent.** Capture still ran and accrued to the per-workspace `__unsorted__` inbox (the predecessor's "never drop" policy), so the product hoarded unscoped sessions and memories behind an empty UI before the user had chosen anything to track. This is the defect tracked as IRD-123.
@@ -40,14 +40,17 @@ stateDiagram-v2
     Bound --> ZeroProjects: unbind the last folder
 
     note right of ZeroProjects
-        Capture GATED OFF for the initial first-run state only.
-        Hooks no-op with a once-per-session
-        "bind a project to start" notice.
+        Unbound cwd: capture gated
+        (no_bound_project) unless
+        HONEYCOMB_INBOX_CAPTURE is on.
+        Session-start may show a bind notice.
         Dashboard shows "Pick a folder to start".
     end note
     note right of Capturing
-        Gate OPEN. The __unsorted__ inbox
-        fallback resumes for unbound folders.
+        A bound cwd is captured.
+        Another unbound folder in the
+        same workspace stays gated
+        unless the inbox opt-in is on.
     end note
 ```
 
@@ -55,40 +58,50 @@ The gate is keyed on **local** bindings, not the synced registry. A workspace ca
 
 ## The capture gate (Hive PRD-014a / IRD-123)
 
-The predecessor chose "capture is never dropped, an identity-less folder falls to the per-workspace `__unsorted__` inbox." That is the right default for a set-up user. For a brand-new user with zero bound projects it means hoarding unscoped data before the user has opted into anything. Hive PRD-014a is a deliberate, scoped reversal of that policy, limited to the zero-projects pre-onboarding state.
+The predecessor chose "capture is never dropped, an identity-less folder falls to the per-workspace `__unsorted__` inbox." Hive PRD-014a added a one-shot reversal of that policy for the zero-projects pre-onboarding state. Production assembly superseded that one-shot gate: `assembleDaemon` sets `boundProjectGate: true` and `inboxCapture: resolveInboxCaptureEnabled()`, and does not pass `firstRunGate` (`src/daemon/runtime/assemble.ts`). `src/daemon/runtime/capture/attach.ts` records that the per-session gate supersedes the first-run gate. An unbound cwd stays gated unless the inbox opt-in is on, including after other folders in the workspace are bound.
 
 ### What the gate suppresses, and where it reads
 
-While the active workspace has no locally-bound project, the capture handler no-ops: it writes no row to `sessions`/`memory`/`memory_jobs`, enqueues no pipeline job, and kicks no embed. The gate lives in the daemon capture handler (`src/daemon/runtime/capture/capture-handler.ts`), checked before any write:
+On the production path the handler resolves the session scope, then applies the dormancy ladder before any write (`src/daemon/runtime/capture/capture-handler.ts`). An unconfirmed tenancy returns `{ ok: true, gated: true, reason: "tenancy_unconfirmed" }`. An unbound cwd with the inbox opt-in off returns `{ ok: true, gated: true, reason: "no_bound_project" }`. Neither path writes a `sessions`, `memory`, or `memory_jobs` row, enqueues a pipeline job, or kicks an embed. `firstRunGate` is a separate opt-in checked first, and only when a caller sets it to `true`.
 
 ```mermaid
 flowchart TD
-    fire["capture hook fires"] --> on{"firstRunGate enabled?"}
-    on -->|no| capture["capture normally (049a resolution + inbox fallback)"]
-    on -->|yes| bound{"hasBoundProjectOnDisk(workspace)?"}
-    bound -->|yes, gate OPEN| capture
-    bound -->|no, gate CLOSED| gated["no-op: write nothing, enqueue nothing<br/>return { ok: true, gated: true }"]
+    fire["capture hook fires"] --> fr{"firstRunGate true and no local binding?"}
+    fr -->|yes| gated["no-op, gated ack"]
+    fr -->|otherwise| resolve["resolveScopeFromDisk"]
+    resolve --> resolverThrow{"resolver throws?"}
+    resolverThrow -->|yes| inbox["inbox scope, bound false"]
+    resolverThrow -->|no| tenancy{"tenancyConfirmed throws?"}
+    tenancy -->|yes| confirmed["treat tenancy as confirmed"]
+    tenancy -->|returns false| tenGated["gated: tenancy_unconfirmed"]
+    tenancy -->|returns true| bound{"boundProjectGate, inbox off, unbound cwd?"}
+    confirmed --> bound
+    inbox --> tenancy
+    bound -->|yes| noBound["gated: no_bound_project, write nothing"]
+    bound -->|no| capture["accept the row"]
 ```
 
-The predicate is `hasBoundProjectOnDisk` in `src/hooks/shared/project-resolver.ts`, the same module the per-session resolver lives in. "Bound enough to start" is an **explicit local binding**: a folder to project binding in `~/.deeplake/projects.json` whose `projectId` is not the reserved `__unsorted__` inbox. The count is over `bindings[]`, never the synced `projects[]` copy, precisely so a registry copy synced from another device does not spuriously open the gate on a device that has imported nothing.
+The first-run predicate is `hasBoundProjectOnDisk` in `src/hooks/shared/project-resolver.ts`, the same module the per-session resolver lives in. Production dormancy calls `resolveScopeFromDisk` on the session cwd. "Bound" in both cases is an **explicit local binding**: a folder to project binding in `~/.deeplake/projects.json` whose `projectId` is not the reserved `__unsorted__` inbox. The first-run count is over `bindings[]`, never the synced `projects[]` copy, so a registry copy synced from another device does not by itself open that opt-in gate.
 
 Three properties matter:
 
-- **No network on the hot path (a-AC-3).** The check is `hasBoundProjectOnDisk`, a pure read of the local `projects.json` cache. No DeepLake call. It applies the same tenancy guard the resolver uses: a cache synced for a different workspace than the active one reads as empty.
-- **The gate returns success, not failure.** A gated capture returns `{ ok: true, gated: true }` so the harness shim treats the suppression as a clean outcome, not an error to retry.
-- **Fail-soft, asymmetric.** The gate is opt-in: the daemon assembly wires `firstRunGate: true` for production, but a direct-construction unit test that does not exercise onboarding keeps the pre-059a behavior. On an unexpected throw the handler fails *open* (capture proceeds), so a set-up user is never hard-blocked because a cache read hiccuped. Only the unambiguous empty/absent store, which the loader returns without throwing, keeps the gate closed.
+- **No network on the hot path (a-AC-3).** Both checks read the local `projects.json` cache. No DeepLake call. A cache synced for a different workspace than the active one reads as empty.
+- **The gate returns success, not failure.** A gated capture returns `{ ok: true, gated: true }`, with `reason` set to `tenancy_unconfirmed` or `no_bound_project` on the dormancy ladder, so the harness shim treats the suppression as a clean outcome, not an error to retry.
+- **Production wiring and the two failure modes.** The daemon assembly sets `boundProjectGate: true` and `inboxCapture: resolveInboxCaptureEnabled()`, and does not pass `firstRunGate`. `firstRunGateClosed` runs only when `firstRunGate === true`, so a direct-construction unit test that leaves the flag unset keeps the pre-059a path. A resolver throw returns the inbox scope (`bound: false`); the bound-project gate then suppresses the write. A throw inside `tenancyConfirmed()` is treated as confirmed, so that seam fails open and capture continues into the bound-project check. An unconfirmed tenancy gates with `tenancy_unconfirmed`. An unbound cwd gates with `no_bound_project` while the inbox opt-in is off.
 
 ### The once-per-session notice
 
-When the gate is closed, the user is told once, not on every turn. The notice is rendered at session-start (`src/hooks/shared/session-start.ts`, the `BIND_PROJECT_NOTICE` constant), prepended to the session's `additionalContext` block so it is the first thing the agent surfaces:
+When capture is gated because the cwd is unbound, the user is told once per session, not on every turn. `createSessionBindNoticeGate` in `src/hooks/shared/session-start.ts` does not show a bind notice when tenancy is unconfirmed and the cwd is bound. A workspace with no local binding gets `BIND_PROJECT_NOTICE`. A workspace that already has another binding, while this cwd is unbound, gets `BIND_PROJECT_CWD_NOTICE`. The chosen notice is prepended to the session's `additionalContext` block:
 
-> Honeycomb is paused: no project is bound to this workspace yet, so nothing is being captured. Bind a folder to start, open the Honeycomb dashboard and pick a folder, or run "honeycomb project bind" in the folder you want Honeycomb to remember.
+> Honeycomb is paused: no project is bound to this workspace yet, so nothing is being captured. Bind a folder to start: open the Honeycomb dashboard and pick a folder, or run "honeycomb project bind" in the folder you want Honeycomb to remember.
+
+> Honeycomb is paused for this folder: it is not bound to a project, so nothing is being captured here. Bind it to start: open the Honeycomb dashboard and pick this folder, or run "honeycomb project bind" in it.
 
 The notice gate is itself fail-soft and login-aware: when no credential or token is resolved (not logged in) it reports "bound" so no notice appears, because login, not bind, is the next step for a logged-out user. A read error also reads as "bound" so the notice never appears spuriously and never breaks session-start.
 
 ### What the gate does not do
 
-It does not remove the `__unsorted__` inbox; the inbox stays as the post-onboarding fallback for unbound folders, and resumes the moment the first project is bound. It does not delete or re-file data already in `__unsorted__` from before the gate shipped (an inbox-hygiene concern owned elsewhere). And per the design lean, once the gate opens it stays open for that workspace: the gate is strictly the first-run zero-state.
+The `__unsorted__` inbox stays the resolver result for an unbound cwd (`bound: false`, `source: "inbox"`). Production capture writes that row only when `HONEYCOMB_INBOX_CAPTURE` turns the inbox opt-in on. The one-shot first-run gate remains in the handler for callers that set `firstRunGate: true`. It does not delete or re-file data already in `__unsorted__` from before the gate shipped (an inbox-hygiene concern owned elsewhere). An unbound cwd stays gated for as long as the inbox opt-in is off. The assembly comment states that this no-op is not limited to the period before the first binding.
 
 ## The first-run empty state and the folder picker (Hive PRD-014b)
 

@@ -17,7 +17,7 @@ The canonical table catalog for Honeycomb on DeepLake: the capture and summary t
 
 ## How to read this catalog
 
-Every table here lives in DeepLake and is written through the daemon using the patterns in [`deeplake-storage.md`](deeplake-storage.md). Org and workspace isolation is enforced at the storage partition layer, so most tables do not need explicit tenancy columns; the engine tables additionally carry `agent_id` (default `'default'`), a `visibility` for within-workspace scoping, and a resolved `project_id` for per-project segmentation; and a few cross-cutting tenant-scoped tables (notably `codebase`, `projects`, and `synced_assets`) carry explicit `org_id` and `workspace_id`. DDL shown below is the logical shape; the runtime source of truth is the daemon's schema definition module, and the lazy heal pass converges every table toward it.
+Every table here lives in DeepLake and is written through the daemon using the patterns in [`deeplake-storage.md`](deeplake-storage.md). Org and workspace isolation is enforced at the storage partition layer, so most tables do not need explicit tenancy columns; the engine tables additionally carry `agent_id` (default `'default'`), a `visibility` for within-workspace scoping, and a resolved `project_id` for per-project segmentation. Cross-cutting tenant-scoped tables carry explicit tenancy columns: `codebase` and `projects` use `org_id` and `workspace_id`; `synced_assets` uses `org` and `workspace`. DDL shown below is the logical shape of the tables this page prints; the runtime source of truth is the daemon's schema definition module, and the lazy heal pass converges every table toward it. [Other live catalog tables](#other-live-catalog-tables) names the rest of `CATALOG` without inventing DDL.
 
 Three tables are easy to confuse because they all hold "memory," so fix them first. `sessions` is the raw capture stream (one row per event). `memories` is the distilled engine output (facts the pipeline decided to keep). `memory` is the wiki-summary and virtual-filesystem table. Capture writes `sessions`; the pipeline reads `sessions` and writes `memories`; the summary worker writes `memory`.
 
@@ -37,21 +37,27 @@ flowchart LR
 
 ```sql
 CREATE TABLE IF NOT EXISTS "sessions" (
-  id                TEXT NOT NULL DEFAULT '',
-  path              TEXT NOT NULL DEFAULT '',
-  filename          TEXT NOT NULL DEFAULT '',
-  message           JSONB,
-  prose             TEXT NOT NULL DEFAULT '',
-  message_embedding FLOAT4[],
-  author            TEXT NOT NULL DEFAULT '',
-  agent             TEXT NOT NULL DEFAULT '',
-  project           TEXT NOT NULL DEFAULT '',
-  project_id        TEXT NOT NULL DEFAULT '',
-  plugin_version    TEXT NOT NULL DEFAULT '',
-  agent_id          TEXT NOT NULL DEFAULT 'default',
-  visibility        TEXT NOT NULL DEFAULT 'global',
-  creation_date     TEXT NOT NULL DEFAULT '',
-  last_update_date  TEXT NOT NULL DEFAULT ''
+  id                          TEXT NOT NULL DEFAULT '',
+  path                        TEXT NOT NULL DEFAULT '',
+  filename                    TEXT NOT NULL DEFAULT '',
+  message                     JSONB,
+  message_embedding           FLOAT4[],
+  author                      TEXT NOT NULL DEFAULT '',
+  agent                       TEXT NOT NULL DEFAULT '',
+  project                     TEXT NOT NULL DEFAULT '',
+  project_id                  TEXT NOT NULL DEFAULT '',
+  plugin_version              TEXT NOT NULL DEFAULT '',
+  agent_id                    TEXT NOT NULL DEFAULT 'default',
+  visibility                  TEXT NOT NULL DEFAULT 'global',
+  input_tokens                BIGINT,
+  output_tokens               BIGINT,
+  cache_read_input_tokens     BIGINT,
+  cache_creation_input_tokens BIGINT,
+  model                       TEXT NOT NULL DEFAULT '',
+  source_tool                 TEXT NOT NULL DEFAULT '',
+  prose                       TEXT NOT NULL DEFAULT '',
+  creation_date               TEXT NOT NULL DEFAULT '',
+  last_update_date            TEXT NOT NULL DEFAULT ''
 ) USING deeplake;
 ```
 
@@ -59,7 +65,7 @@ The `project` column is the existing free-text raw cwd path, kept for display an
 
 The `prose` column (PRD-074) is the readable-text projection of the row's event, added additively as `NOT NULL DEFAULT ''` and heal-safe (mirroring the additive PRD-060a pattern), so a legacy `sessions` table converges to it on the next heal pass and a row written before the column existed still reads as `''`. It is populated at capture time by `buildRow` via `proseForEvent`: a `user_message` / `assistant_message` row stores `event.text` verbatim; a `tool_call` row stores a file-path-aware line 1 plus a bounded response slice. Its purpose is recall quality: the lexical (`ILIKE`) `sessions` arm now matches and returns `prose` (with a `COALESCE` fallback for legacy rows) instead of casting the JSONB `message` envelope to `::text`, so a `Read` tool call that had surfaced as ~400 chars of escaped JSON now surfaces as ~80 chars of clean prose. The recall side is documented in [`../ai/retrieval.md`](../ai/retrieval.md).
 
-`memory` holds wiki summaries and the virtual-filesystem file rows. Its `summary` is the file body and `summary_embedding` powers semantic recall over summaries. It is UPDATE-or-INSERT keyed by `path`. The VFS dispatch over this table is documented in [`memory-virtual-filesystem.md`](memory-virtual-filesystem.md).
+`memory` holds wiki summaries and the virtual-filesystem file rows. Its `summary` is the file body. The column `summary_embedding` exists on the catalog, and recall does not use it as a semantic arm. `embeddingColumnFor` leaves `memory` lexical (`src/daemon/runtime/memories/recall.ts`). Semantic arms are `memories`, `sessions`, and `hive_graph_versions`. `hive_graph_versions` is a recall arm outside this catalog: `SEMANTIC_ARMS` in `src/daemon/runtime/memories/recall.ts` reads `nectar`, `embedding`, `description`, `described_at`, and `describe_status`. No column array under `src/daemon/storage/catalog` defines that table, so this page does not print a CREATE TABLE for it. `memory` is UPDATE-or-INSERT keyed by `path`. The VFS dispatch over this table is documented in [`memory-virtual-filesystem.md`](memory-virtual-filesystem.md).
 
 ```sql
 CREATE TABLE IF NOT EXISTS "memory" (
@@ -89,34 +95,41 @@ CREATE TABLE IF NOT EXISTS "memory" (
 
 ```sql
 CREATE TABLE IF NOT EXISTS "memories" (
-  id                 TEXT NOT NULL DEFAULT '',
-  type               TEXT NOT NULL DEFAULT 'fact',
-  content            TEXT NOT NULL DEFAULT '',
-  key                TEXT NOT NULL DEFAULT '',
-  normalized_content TEXT NOT NULL DEFAULT '',
-  content_hash       TEXT NOT NULL DEFAULT '',
-  confidence         FLOAT4 NOT NULL DEFAULT 1.0,
-  importance         FLOAT4 NOT NULL DEFAULT 0.5,
-  tags               TEXT NOT NULL DEFAULT '[]',
-  who                TEXT NOT NULL DEFAULT '',
-  project            TEXT NOT NULL DEFAULT '',
-  project_id         TEXT NOT NULL DEFAULT '',
-  source_id          TEXT NOT NULL DEFAULT '',
-  source_type        TEXT NOT NULL DEFAULT '',
-  pinned             BIGINT NOT NULL DEFAULT 0,
-  is_deleted         BIGINT NOT NULL DEFAULT 0,
-  extraction_status  TEXT NOT NULL DEFAULT 'none',
-  agent_id           TEXT NOT NULL DEFAULT 'default',
-  visibility         TEXT NOT NULL DEFAULT 'global',
-  content_embedding  FLOAT4[],
-  created_at         TEXT NOT NULL DEFAULT '',
-  updated_at         TEXT NOT NULL DEFAULT ''
+  id                    TEXT NOT NULL DEFAULT '',
+  type                  TEXT NOT NULL DEFAULT 'fact',
+  content               TEXT NOT NULL DEFAULT '',
+  key                   TEXT NOT NULL DEFAULT '',
+  normalized_content    TEXT NOT NULL DEFAULT '',
+  content_hash          TEXT NOT NULL DEFAULT '',
+  confidence            FLOAT4 NOT NULL DEFAULT 1.0,
+  importance            FLOAT4 NOT NULL DEFAULT 0.5,
+  tags                  TEXT NOT NULL DEFAULT '[]',
+  who                   TEXT NOT NULL DEFAULT '',
+  project               TEXT NOT NULL DEFAULT '',
+  project_id            TEXT NOT NULL DEFAULT '',
+  source_id             TEXT NOT NULL DEFAULT '',
+  source_type           TEXT NOT NULL DEFAULT '',
+  pinned                BIGINT NOT NULL DEFAULT 0,
+  is_deleted            BIGINT NOT NULL DEFAULT 0,
+  extraction_status     TEXT NOT NULL DEFAULT 'none',
+  agent_id              TEXT NOT NULL DEFAULT 'default',
+  visibility            TEXT NOT NULL DEFAULT 'global',
+  content_embedding     FLOAT4[],
+  created_at            TEXT NOT NULL DEFAULT '',
+  updated_at            TEXT NOT NULL DEFAULT '',
+  last_reinforced_at    TIMESTAMPTZ,
+  access_count          BIGINT DEFAULT 0,
+  ref_status            TEXT,
+  verified_at           TIMESTAMPTZ,
+  stale_refs            TEXT,
+  access_compacted_at   TIMESTAMPTZ,
+  access_compacted_id   TEXT
 ) USING deeplake;
 ```
 
 The `key` column is the durable **Tier-1 key**: a one-sentence, keyword-dense headline of the distilled fact, written at distillation time so the session-priming digest can skim durable keys with a pure SQL select and no generation at read time. It is additive and heal-compatible (`NOT NULL DEFAULT ''`); a fact with no derived key falls back to its `content` at read time, so a legacy un-keyed row is still primeable. The same durable `key` appears on `memory` and on the wiki-summary rows. The priming flow is documented in [`../ai/session-priming-architecture.md`](../ai/session-priming-architecture.md).
 
-Supporting the engine: `memory_history` is the audit trail (every proposal, applied or shadowed, with `changed_by` distinguishing the harness from `pipeline` and `pipeline-shadow`); `memory_jobs` is the durable distillation queue (lease, complete, fail, dead, with bounded retries) that lets work survive a daemon restart; embeddings are stored on the `content_embedding` column and mirrored for GPU vector search. The pipeline that writes these is [`../ai/memory-pipeline.md`](../ai/memory-pipeline.md).
+Supporting the engine: `memory_history` is the audit trail (every proposal, applied or shadowed, with `changed_by` distinguishing the harness from `pipeline` and `pipeline-shadow`). The default distillation queue is the fleet-anchored SQLite file `<fleetRoot>/honeycomb/.daemon/local-queue.db` (`resolveLocalQueueBaseDir` returns `honeycombStateDir()`). When `HONEYCOMB_LOCAL_QUEUE_ENABLED` is unset, `resolveHybridJobQueueConfig` follows `resolveLocalQueueTopology().eligibleForDefaultOn`: an undeclared or single-machine topology uses that local queue, and distillation kinds in `DEFAULT_LOCAL_JOB_KINDS` (`memory_extraction`, `summary`, `skillify`, and the rest) enqueue there, so the work survives a daemon restart. `memory_jobs` remains the shared DeepLake queue for an explicit `fleet` or `multi_device` topology, and when `HONEYCOMB_LOCAL_QUEUE_ENABLED=false`. An explicit `HONEYCOMB_LOCAL_QUEUE_ENABLED=true` selects the local queue on those topologies too. It is version-bumped, with statuses `queued`, `leased`, `done`, `failed`, and `dead`, and bounded retries. See [ADR-0009](../architecture/adr/0009-local-queue-as-default-deeplake-is-not-a-queue.md) and the local-queue section of [`workspace-layout.md`](workspace-layout.md). Embeddings are stored on the `content_embedding` column and mirrored for GPU vector search. The pipeline that writes these is [`../ai/memory-pipeline.md`](../ai/memory-pipeline.md).
 
 ## Knowledge graph
 
@@ -130,13 +143,19 @@ CREATE TABLE IF NOT EXISTS "entity_attributes" (
   memory_id          TEXT NOT NULL DEFAULT '',
   kind               TEXT NOT NULL DEFAULT 'attribute',
   content            TEXT NOT NULL DEFAULT '',
-  confidence         FLOAT4 NOT NULL DEFAULT 0.0,
+  confidence         FLOAT4 NOT NULL DEFAULT 1.0,
   importance         FLOAT4 NOT NULL DEFAULT 0.5,
   status             TEXT NOT NULL DEFAULT 'active',
   superseded_by      TEXT NOT NULL DEFAULT '',
   claim_key          TEXT NOT NULL DEFAULT '',
   group_key          TEXT NOT NULL DEFAULT '',
   version            BIGINT NOT NULL DEFAULT 1,
+  visibility         TEXT NOT NULL DEFAULT 'global',
+  source_id          TEXT NOT NULL DEFAULT '',
+  source_kind        TEXT NOT NULL DEFAULT '',
+  source_path        TEXT NOT NULL DEFAULT '',
+  source_root        TEXT NOT NULL DEFAULT '',
+  content_embedding  FLOAT4[],
   created_at         TEXT NOT NULL DEFAULT '',
   updated_at         TEXT NOT NULL DEFAULT ''
 ) USING deeplake;
@@ -144,7 +163,7 @@ CREATE TABLE IF NOT EXISTS "entity_attributes" (
 
 ## Sources and documents
 
-External knowledge bases and ad-hoc documents land in their own tables. `memory_artifacts` holds source-backed rows keyed by `source_id` so a source can be purged cleanly; `documents` tracks ingested URLs and files through the `queued -> extracting -> chunking -> embedding -> indexing -> done` lifecycle; `document_memories` joins a document to its chunk memories; `connectors` tracks external connectors and their sync cursors. Soft-delete advances a status rather than updating in place, in keeping with the DeepLake write patterns. The lifecycle is documented in [`../sources/source-lifecycle.md`](../sources/source-lifecycle.md).
+External knowledge bases land in the sources catalog group: `memory_artifacts`, `document_memories`, and `document_chunk` (`src/daemon/storage/catalog/sources.ts`). This checkout's catalog does not define tables named `documents` or `connectors`. Soft-delete advances a status rather than updating in place, in keeping with the DeepLake write patterns. The lifecycle is documented in [`../sources/source-lifecycle.md`](../sources/source-lifecycle.md).
 
 ## Skills, rules, goals, KPIs
 
@@ -180,7 +199,7 @@ The current state for a `(project_key, name)` pair is the highest version. The l
 
 ## Codebase graph
 
-`codebase` stores one snapshot row per `(org, workspace, repo, user, worktree, commit)` identity. `snapshot_jsonb` holds the canonical node-link JSON and `snapshot_sha256` dedups identical content and detects extractor drift. The push path uses SELECT-before-INSERT and re-verifies to make concurrent-writer races observable. The build and pull lifecycle is in [`codebase-graph.md`](codebase-graph.md).
+`codebase` stores one snapshot row per `(org, workspace, repo, user, worktree, commit)` identity. `snapshot_jsonb` is `JSONB` and holds the canonical node-link JSON. `snapshot_sha256` dedups identical content and detects extractor drift. `pullSnapshot` orders by `created_at`. The push path uses SELECT-before-INSERT and re-verifies to make concurrent-writer races observable. The build lifecycle is in [`codebase-graph.md`](codebase-graph.md). `pullSnapshot` lives in `src/daemon/runtime/codebase/push-pull.ts` and is not mounted as a route.
 
 ```sql
 CREATE TABLE IF NOT EXISTS "codebase" (
@@ -191,18 +210,22 @@ CREATE TABLE IF NOT EXISTS "codebase" (
   worktree_id       TEXT NOT NULL DEFAULT '',
   commit_sha        TEXT NOT NULL DEFAULT '',
   branch            TEXT NOT NULL DEFAULT '',
+  parent_sha        TEXT NOT NULL DEFAULT '',
+  pushed_by         TEXT NOT NULL DEFAULT '',
   snapshot_sha256   TEXT NOT NULL DEFAULT '',
-  snapshot_jsonb    TEXT NOT NULL DEFAULT '',
+  snapshot_jsonb    JSONB,
   node_count        BIGINT NOT NULL DEFAULT 0,
   edge_count        BIGINT NOT NULL DEFAULT 0,
+  generator_name    TEXT NOT NULL DEFAULT 'honeycomb-graph',
   generator_version TEXT NOT NULL DEFAULT '',
-  schema_version    BIGINT NOT NULL DEFAULT 1
+  schema_version    BIGINT NOT NULL DEFAULT 1,
+  created_at        TEXT NOT NULL DEFAULT ''
 ) USING deeplake;
 ```
 
 ## Tenancy, agents, and auth
 
-`agents` is the within-workspace roster that drives read-policy enforcement (`isolated`, `shared`, `group` with a `policy_group`). `api_keys` holds named, revocable, hashed credentials for remote connectors, with a role, scope, optional explicit permission list, and connector/harness/agent binding. Org and workspace identity is carried on every request and resolved by DeepLake; the model is documented in [`../multi-tenant/org-workspace-model.md`](../multi-tenant/org-workspace-model.md), and the auth that consumes `api_keys` and `agents` is in [`../auth/auth-architecture.md`](../auth/auth-architecture.md) and [`../security/scoping-and-visibility.md`](../security/scoping-and-visibility.md).
+`agents` is the within-workspace roster that drives read-policy enforcement (`isolated`, `shared`, `group` with a `policy_group`). `api_keys` holds named, revocable, hashed credentials for remote connectors. Its columns (`src/daemon/storage/catalog/tenancy.ts`) are `id`, `name`, `key_hash`, `role`, `scope`, `permissions` (`TEXT NOT NULL DEFAULT '[]'`), `connector`, `harness`, `agent`, `revoked` (`BIGINT NOT NULL DEFAULT 0`), `org_id`, `workspace_id`, `created_at`, `last_used_at`, and `version` (`BIGINT NOT NULL DEFAULT 0`). The only credential column is `key_hash`. Writes are append-only and version-bumped by `id`. Org and workspace identity is carried on every request and resolved by DeepLake; the model is documented in [`../multi-tenant/org-workspace-model.md`](../multi-tenant/org-workspace-model.md), and the auth that consumes `api_keys` and `agents` is in [`../auth/auth-architecture.md`](../auth/auth-architecture.md) and [`../security/scoping-and-visibility.md`](../security/scoping-and-visibility.md).
 
 ```sql
 CREATE TABLE IF NOT EXISTS "agents" (
@@ -210,6 +233,8 @@ CREATE TABLE IF NOT EXISTS "agents" (
   name         TEXT NOT NULL DEFAULT '',
   read_policy  TEXT NOT NULL DEFAULT 'isolated',
   policy_group TEXT NOT NULL DEFAULT '',
+  org_id       TEXT NOT NULL DEFAULT '',
+  workspace_id TEXT NOT NULL DEFAULT '',
   created_at   TEXT NOT NULL DEFAULT '',
   updated_at   TEXT NOT NULL DEFAULT ''
 ) USING deeplake;
@@ -217,7 +242,7 @@ CREATE TABLE IF NOT EXISTS "agents" (
 
 ## Projects registry
 
-`projects` is the per-workspace registry of projects a folder can be bound to, the third tenancy level (Org → Workspace → Project) that segments memory and skills inside a workspace. It is a cross-cutting tenant-scoped table carrying explicit `org_id` and `workspace_id` (like `agents` and `synced_assets`), UPDATE-or-INSERT keyed by `project_id` because project CRUD is low-frequency and human-driven. A project is a registry-backed identity, **not** a GitHub repo id; a canonical git remote is only an optional auto-bind signal.
+`projects` is the per-workspace registry of projects a folder can be bound to, the third tenancy level (Org → Workspace → Project) that segments memory and skills inside a workspace. It is a cross-cutting tenant-scoped table carrying explicit `org_id` and `workspace_id`, the same pair `agents` carries. `synced_assets` is tenant-scoped on `org` and `workspace`. `projects` is UPDATE-or-INSERT keyed by `project_id` because project CRUD is low-frequency and human-driven. A project is a registry-backed identity, **not** a GitHub repo id; a canonical git remote is only an optional auto-bind signal.
 
 ```sql
 CREATE TABLE IF NOT EXISTS "projects" (
@@ -233,7 +258,7 @@ CREATE TABLE IF NOT EXISTS "projects" (
 ) USING deeplake;
 ```
 
-`remote_signal` is the canonicalized git remote (`host/owner/repo`) stored as a discrete column so the git-signal resolution branch is a single indexed equality lookup; `bound_paths` is a JSON array of normalized path prefixes, read whole by the longest-prefix matcher. `is_reserved` is `1` only on the reserved per-workspace `__unsorted__` inbox project, the bucket a session falls to when no binding, git signal, or path candidate resolves, so capture is never dropped. A user-created project may not collide with the reserved id or name. The resolution precedence and the local `~/.deeplake/projects.json` cache the thin client reads are documented in [`../architecture/multi-project-and-context-switching.md`](../architecture/multi-project-and-context-switching.md).
+`remote_signal` is the canonicalized git remote (`host/owner/repo`) stored as a discrete column so the git-signal resolution branch is a single indexed equality lookup; `bound_paths` is a JSON array of normalized path prefixes, read whole by the longest-prefix matcher. `is_reserved` is `1` only on the reserved per-workspace `__unsorted__` inbox project. Capture of an unbound session is gated. `HONEYCOMB_INBOX_CAPTURE` defaults off (`library/knowledge/private/ai/session-capture.md` matches the code; this sentence used to say capture is never dropped). A user-created project may not collide with the reserved id or name. The resolution precedence and the local `~/.deeplake/projects.json` cache the thin client reads are documented in [`../architecture/multi-project-and-context-switching.md`](../architecture/multi-project-and-context-switching.md).
 
 ## Synced assets
 
@@ -263,7 +288,23 @@ The `native` and `canonical` blobs are the per-harness and canonical asset paylo
 
 ## Telemetry
 
-Telemetry is opt-in and local to the deployment: usage counters and an optional recall QA ledger, used for diagnostics and never carrying secrets or request bodies. The router's redacted routing history (see [`../ai/model-provider-router.md`](../ai/model-provider-router.md)) lands here too.
+Telemetry is opt-in and local to the deployment. The catalog tables are `telemetry_counters` (usage counters: `counter_name`, `value`, `window`, plus `org_id` and `workspace_id`) and `recall_qa_ledger` (outcome metadata: `query_hash`, `recall_outcome`, `result_count`, `top_score`, `embedding_used`). `query_hash` is a hash of the query text. Two routing tables stay distinct. `routing_history` is the append-only log the live router writer uses (`src/daemon/runtime/inference/history-store.ts`); its `event` JSONB is the redacted decision. `router_history` is the tenancy table of `model`, `provider`, `workload`, `outcome`, and `latency_ms`. See [`../ai/model-provider-router.md`](../ai/model-provider-router.md).
+
+## Other live catalog tables
+
+`CATALOG` (`src/daemon/storage/catalog/index.ts`) also includes these tables. Column arrays live in the cited modules.
+
+| Table | Role | Module |
+|---|---|---|
+| `memory_conflicts` | Current-state projection of a semantic-conflict pair | `memory-conflicts.ts` |
+| `memory_access` | Append-only access-event log | `memory-lifecycle.ts` |
+| `memory_calibration` | Append-only calibration-curve snapshots | `memory-lifecycle.ts` |
+| `memory_injections` | Append-only injection telemetry for recall and prime | `memory-injections.ts` |
+| `pollinating_state` | Version-bumped pollinating token-budget counter | `pollinating-state.ts` |
+| `routing_history` | Append-only redacted routing decisions (the live writer) | `routing-history.ts` |
+| `router_history` | Tenancy routing outcome rows (`model`, `provider`, `workload`, `outcome`) | `tenancy.ts` |
+| `telemetry_counters` | Opt-in usage counters | `tenancy.ts` |
+| `recall_qa_ledger` | Optional recall-outcome QA rows | `tenancy.ts` |
 
 ## Spend ledger and teams (ROI)
 
@@ -316,15 +357,15 @@ CREATE TABLE IF NOT EXISTS "teams" (
 ) USING deeplake;
 ```
 
-The `sessions` capture table additionally gained five additive token/cache columns (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`) plus a `source_tool` discriminant, added via additive schema healing so the measured-savings half has per-turn token data; a missing/legacy column degrades the read to "token data absent" rather than throwing.
+The `sessions` capture table carries four token/cache columns (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`), each a nullable `BIGINT` with no default, plus `model` (`TEXT NOT NULL DEFAULT ''`) and `source_tool` (`TEXT NOT NULL DEFAULT ''`). The schema heal pass adds these four token and cache columns so the measured-savings half has per-turn token data. A missing value stays SQL NULL, which the read treats as "token data absent". A measured zero stays the integer `0`.
 
 ## Retention summary
 
 | Data | Default behavior |
 |---|---|
-| `sessions` raw events | Pruned by the `sessions prune` operation; summaries retained in `memory` |
+| `sessions` raw events | `sessions prune` tombstones the matched `sessions` rows and the paired `/summaries/<user>/<sessionId>.md` `memory` rows in one pass |
 | `memories` | Soft-delete window before purge; history retained longer |
-| `memory_jobs` | Completed purged after a window; dead jobs later |
+| `memory_jobs` | Shared DeepLake fallback. Completed rows are purged after a window; dead jobs later. The default distillation queue is the fleet-anchored SQLite file |
 | `memory_artifacts` | Soft-delete on source file removal, hard purge on source disconnect by `source_id` |
 | `skills` / `rules` | Append-only version history retained |
 | `roi_metrics` | Append-only ledger retained (re-price appends a new row; canonical = `MAX(created_at)` per session) |

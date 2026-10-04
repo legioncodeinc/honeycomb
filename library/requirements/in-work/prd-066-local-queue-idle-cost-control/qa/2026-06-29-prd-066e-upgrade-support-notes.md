@@ -79,8 +79,8 @@ for:
 
 ## Default-On Rule
 
-Default-on is allowed only for single-machine/local topology. Multi-device, fleet, team/hybrid, or
-unknown topology must stay conservative unless the user explicitly opts in.
+An undeclared (unknown) or `single_machine` topology defaults to the local queue. A declared
+`fleet` or `multi_device` topology stays on the shared queue unless it explicitly opts in.
 
 Recognized environment controls:
 
@@ -89,6 +89,6 @@ HONEYCOMB_TOPOLOGY=single-machine|multi-device|fleet|unknown
 HONEYCOMB_LOCAL_QUEUE_EXPLICIT_OPT_IN=true
 ```
 
-`HONEYCOMB_LOCAL_QUEUE_EXPLICIT_OPT_IN=true` allows an advanced user to override the topology guard.
-Without that override, unknown/fleet/multi-device installs are not eligible for local queue
-default-on.
+`HONEYCOMB_LOCAL_QUEUE_EXPLICIT_OPT_IN=true` allows an advanced user to force local-queue
+eligibility. Without that override, `fleet` and `multi_device` installs are not eligible for
+local-queue default-on. Unknown topology is eligible and defaults on.

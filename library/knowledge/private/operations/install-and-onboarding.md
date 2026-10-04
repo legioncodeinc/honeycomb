@@ -2,7 +2,7 @@
 
 > Category: Operations | Version: 1.2 | Date: October 2026 | Status: Active
 
-How a brand-new user goes from a single pasted command to a working, authenticated Honeycomb dashboard, the one-command installer, the one-daemon/two-phase model, the on-page device-flow login, Hivemind migration, and operator adoption telemetry.
+How a brand-new user goes from a single pasted command to a working, authenticated Honeycomb dashboard, the one-command installer, the Hive portal beside the local setup API, the on-page device-flow login, Hivemind migration, and operator adoption telemetry.
 
 **Related:**
 - [`cli-command-architecture.md`](cli-command-architecture.md)
@@ -54,21 +54,24 @@ The installer endpoint serves bytes that users pipe straight into `sh` or `iex`,
 
 1. **Protected `production` environment.** The deploy job declares `environment: { name: production, url: https://get.theapiary.sh }`. The environment is configured at **Settings → Environments → production** with **required reviewers** (trusted maintainers only), so even a tag that passes every other check pauses for an explicit human approval before deploying. This is a one-time operator setup step; without required reviewers the workflow still names the environment but will not pause, so the protection is only real once a reviewer is configured.
 
-2. **Branch-ancestry verification.** A guard step (`Guard — verify tag is on protected main branch`) runs *before* the build and deploy steps, gated on `github.event_name == 'push' && github.ref_type == 'tag'`. With `fetch-depth: 0` it runs `git merge-base --is-ancestor "$TAG_SHA" "$MAIN_SHA"`; if the tag's commit is **not** reachable from `origin/main` the step `exit 1`s and aborts before any installer bytes are read or built. Because a commit only lands on `main` through the required PR reviews and `ci.yaml` quality gate (`.github/rulesets/main-protection.json`), this proves the tagged tree was vetted. Legitimate releases (a tag on `main` or one of its ancestors, including commits brought in by a merge commit) pass; a tag on an unmerged feature branch, a commit ahead of `main`, or any off-`main` commit is rejected. `workflow_dispatch` deploys skip the guard (no tag to verify; manual deploys from `main` are operator-initiated).
+2. **Branch-ancestry verification.** A guard step (`Guard: verify tag is on protected main branch`) runs *before* the build and deploy steps, gated on `github.event_name == 'push' && github.ref_type == 'tag'`. With `fetch-depth: 0` it runs `git merge-base --is-ancestor "$TAG_SHA" "$MAIN_SHA"`; if the tag's commit is **not** reachable from `origin/main` the step `exit 1`s and aborts before any installer bytes are read or built. Because a commit only lands on `main` through the required PR reviews and `ci.yaml` quality gate (`.github/rulesets/main-protection.json`), this proves the tagged tree was vetted. Legitimate releases (a tag on `main` or one of its ancestors, including commits brought in by a merge commit) pass; a tag on an unmerged feature branch, a commit ahead of `main`, or any off-`main` commit is rejected. `workflow_dispatch` deploys skip the guard (no tag to verify; manual deploys from `main` are operator-initiated).
 
 3. **Immutable tag semantics.** Tags are immutable refs, so once a `v*` tag is pushed and deployed, re-pushing the same tag name is rejected by Git. A known-good release cannot be silently swapped for malicious bytes under the same name.
 
-These controls are documented for operators in `SECURITY.md` (§ Production deployment protection) and [the-apiary `site/install/README.md`](https://github.com/legioncodeinc/the-apiary/tree/main/site/install/README.md), and are regression-locked by `tests/security/deploy-install-site-guard.test.ts`, which parses the workflow YAML to assert the environment block, the guard step, and the guard-before-build ordering are all present, and unit-tests the `merge-base --is-ancestor` ancestry logic across the exploit and legitimate-release scenarios. Do not weaken the environment protection or the ancestry check without a documented security review. This pipeline is **distinct from** the npm publish pipeline (see [npm Publishing](../infrastructure/npm-publishing.md)), which protects the `@legioncodeinc/honeycomb` tarball with its own OIDC + pack-check + fails-closed guards.
+These controls are documented for operators in `SECURITY.md` (§ Production deployment protection) and [the-apiary `site/install/README.md`](https://github.com/legioncodeinc/the-apiary/tree/main/site/install/README.md). This Honeycomb checkout does not contain `.github/workflows/deploy-install-site.yaml` or `tests/security/deploy-install-site-guard.test.ts`. The three controls above are the external the-apiary pipeline; they were not re-checked against a the-apiary tree here. `.github/rulesets/main-protection.json` is present in this repo. Do not weaken the environment protection or the ancestry check without a documented security review. This pipeline is **distinct from** the npm publish pipeline (see [npm Publishing](../infrastructure/npm-publishing.md)), which protects the `@legioncodeinc/honeycomb` tarball with its own OIDC + pack-check + fails-closed guards.
 
 ### The `honeycomb install` verb
 
-`runInstallCommand` (`src/commands/install.ts`) composes existing seams, it is a thin daemon client, never a daemon-core import:
+`runInstallCommand` (`src/commands/install.ts`) imports daemon runtime modules: `credentials-store.js`, `deeplake-issuer.js`, `config.js`, `onboarding/index.js`, `telemetry/fleet-registry.js`, and `telemetry/index.js` (`src/commands/install.ts:46-57`). It does not import `src/daemon/storage`. The file header still calls the onboarding write fail-soft; the function body is the live path.
 
-1. **Health-gate the daemon up.** Reuses `ensureDaemonRunning` (`src/commands/daemon.ts`), which is idempotent via the PID/lock guard, an already-healthy daemon is a no-op, never a second bind of `127.0.0.1:3850`. If the daemon never becomes reachable within the wait budget, the verb prints "daemon didn't start" + a retry hint and exits non-zero.
-2. **Persist the onboarding marker.** Stamps `phase: "installed"` + the effective `ref` into `~/.deeplake/onboarding.json` via the shared onboarding store. The write is fail-soft, an onboarding hiccup logs a warning, never fails the install.
-3. **Open the dashboard, honestly (C-6).** The dashboard is the Hive portal on loopback port `3853`. The daemon stays on `:3850` for its API. The verb probes `http://127.0.0.1:3853/` for 750 ms and treats any HTTP response as proof the portal is up (`src/commands/install.ts:64-78`, `src/commands/install.ts:330-341`). Solo mode then opens that same URL (`src/commands/install.ts:344-356`). `openLocalDashboardUrl` accepts an `http:` or `https:` URL whose host is `127.0.0.1`, `localhost`, or `::1`, and it launches the browser with a fixed-argv `execFileSync` (`src/commands/install.ts:110-130`). If the portal is not reachable the verb opens nothing and prints `dashboardPortalNotRunningMessage` (`src/commands/install.ts:88-93`).
+1. **Health-gate the daemon up.** Reuses `ensureDaemonRunning` (`src/commands/daemon.ts`), which returns immediately when `/health` already answers. An already-healthy daemon is a no-op, never a second bind of `127.0.0.1:3850`. If the daemon never becomes reachable within the wait budget, the verb prints "daemon didn't start" plus a retry hint and returns exit 1. It does not open a browser.
+2. **Persist the onboarding marker.** Stamps `phase: "installed"` plus the effective `ref` into `~/.deeplake/onboarding.json`. `writeInstalledMarker` returns false on an IO error (`src/commands/install.ts:273-283`). `runInstallCommand` then prints `error: install failed during the onboarding-marker phase` and returns `{ exitCode: 1 }` (`src/commands/install.ts:526-529`). It does not warn and continue.
+3. **Register with Doctor.** When the registry write returns false, the verb prints `error: install failed during the Doctor-registration phase` and returns exit 1 (`src/commands/install.ts:533-537`).
+4. **Solo versus fleet login.** This step does not change the install exit code. Fleet mode prints a defer line and opens no browser (`src/commands/install.ts:431-434`). Solo mode with no credentials calls `loginWithDeviceFlow` from the terminal (`src/commands/install.ts:389-393`, `src/commands/install.ts:443-446`). Solo mode with credentials already present skips that device-flow browser (`src/commands/install.ts:437-441`).
+5. **Wire harness hooks, best-effort.** Runs the same connector engine as `honeycomb setup`, in solo and fleet mode. A missing seam or a thrown setup prints one line and does not fail the install (`src/commands/install.ts:550`, `src/commands/install.ts:463-478`).
+6. **Open the dashboard, honestly, in solo mode only.** The dashboard is the Hive portal on loopback port `3853`. The daemon stays on `:3850` for its API. Fleet mode opens nothing (`src/commands/install.ts:558-559`). Solo mode probes `http://127.0.0.1:3853/` for 750 ms and, when any HTTP response proves the portal is up, calls `openSoloDashboard` (`src/commands/install.ts:560-568`, `src/commands/install.ts:64-78`, `src/commands/install.ts:330-356`). `openLocalDashboardUrl` accepts an `http:` or `https:` URL whose host is `127.0.0.1`, `localhost`, or `::1`, and it launches the browser with a fixed-argv `execFileSync` (`src/commands/install.ts:110-130`). If the portal is not reachable the verb opens nothing and prints `dashboardPortalNotRunningMessage` (`src/commands/install.ts:88-93`).
 
-Every handled failure is a single readable line and a non-zero exit; the verb never lets a raw stack reach the bin. Re-running is safe: ensure-running short-circuits, the onboarding write is a stable upsert, and the dashboard is simply re-opened.
+A failure of the health gate, the onboarding marker, or Doctor registration is a single readable line and a non-zero exit. The verb never lets a raw stack reach the bin. Re-running is safe for the health gate: ensure-running short-circuits. A later solo run opens the portal again when the probe succeeds. Login and harness wiring stay best-effort.
 
 ---
 
@@ -86,7 +89,7 @@ The install-path login then branches on that result:
 
 - **Fleet mode:** the installer prints a defer line and **opens no browser**. Login is the fleet orchestrator's job; the hive supplies the shared credential. The daemon's existing 15 s storage probe flips `/health` from `503` to `200` on its own, no restart, the moment hive-side login lands `~/.deeplake/credentials.json`.
 - **Solo mode with no `~/.deeplake/credentials.json`:** the installer runs the same device flow `honeycomb login` uses. The verification URL and code are printed **before** any browser-open attempt, so a headless box still onboards.
-- **Solo mode with credentials already present:** the installer opens nothing.
+- **Solo mode with credentials already present:** existing credentials skip the device-flow browser. Solo mode still probes the Hive portal and, when it answers, calls `openSoloDashboard`. Fleet mode is the branch that opens no browser.
 
 `honeycomb login` is unchanged in both modes; only the install-path login defers. The state view of this branch is in [`../auth/device-and-fleet-enrollment-state-machine.md`](../auth/device-and-fleet-enrollment-state-machine.md).
 
@@ -94,15 +97,17 @@ The install-path login then branches on that result:
 
 ## Lifecycle verbs and uninstall (PR #234)
 
-The CLI now exposes bare lifecycle verbs. `honeycomb start` and `honeycomb stop` run the daemon lifecycle directly; the older `honeycomb daemon start|stop|status` forms are kept as aliases so existing scripts and docs keep working (`src/commands/{contracts,dispatch,index,local-handlers}.ts`, `src/cli/{daemon-service,runtime}.ts`).
+The CLI exposes bare lifecycle verbs and a separate `daemon` verb. `honeycomb start` and `honeycomb stop` go to `runStandardCommand` (`src/commands/dispatch.ts:419-424`), which drives the installed OS service (`src/commands/standard-interface.ts:67-75`, `src/cli/standard-ops.ts:305-316`). Canonical lifecycle commands never fall back to the process-level `DaemonLifecycle`. `honeycomb daemon start|stop|status` is its own verb, routed to `runDaemonCommand` (`src/commands/dispatch.ts:425-426`, `src/commands/contracts.ts:220`).
 
 `honeycomb uninstall` is a complete three-part teardown, run in order:
 
 1. **Stop** the running daemon.
 2. **Unregister the unit.** Removes the current `com.legioncode.honeycomb` service unit and, via `unregisterLegacy`, the legacy `ai.honeycomb.daemon` family, so an upgrade path never leaves an orphaned old unit behind.
-3. **Delete the registry entry and state.** Removes Honeycomb's own registry entry atomically, preserving every other entry in the shared registry, then removes the state directory in a symlink-safe way. Harness-hook cleanup is preserved.
+3. **Delete the registry entry, then the state directory.** Removes Honeycomb's own registry entry, preserving every other entry in the shared registry, then removes the state directory without following a symlink (`src/cli/runtime.ts:648-664`). Harness-hook cleanup runs after those phases, through the connector.
 
-When nothing is installed, `uninstall` is a friendly exit-0 no-op rather than an error, so re-running or running it on a clean machine is safe.
+A full uninstall asks for confirmation. It returns exit 2 when the operator cancels, when `--json` is set without `--yes`, or when confirmation is refused (`src/commands/dispatch.ts:295-328`). `--yes` skips the prompt.
+
+When nothing is installed, a full uninstall still prints `uninstall: nothing to remove — Honeycomb was not installed here.` and returns the connector exit code (`src/commands/local-handlers.ts:149-163`).
 
 ### The Windows APIARY_HOME trailing-space trap (PR #236)
 
@@ -110,16 +115,14 @@ On Windows the scheduled task that launches the daemon pinned `APIARY_HOME` with
 
 ---
 
-## The one-daemon / two-phase model
+## Hive portal and the Honeycomb setup API
 
-The pivotal architectural realization is **no second daemon: one daemon, two phases.**
+The install verb opens the Hive portal at `http://127.0.0.1:3853/` (`src/commands/install.ts:64-74`, `src/commands/install.ts:351-356`). `src/daemon/runtime/dashboard/host.ts` is not in this checkout. Assembly does not serve a viewable dashboard SPA from Honeycomb: Hive serves that SPA, and Honeycomb keeps the setup API routes (`src/daemon/runtime/assemble.ts:1442-1446`). The daemon does not need DeepLake credentials to boot. It keeps the data plane on port 3850. The lifecycle is:
 
-The Honeycomb daemon already serves a self-hydrating, token-free dashboard shell over loopback (`renderShell` / `mountDashboardHost` in `src/daemon/runtime/dashboard/host.ts`), and it does **not** need DeepLake credentials to *boot*, only to serve the surfaces that read DeepLake (capture, recall, graph). So the lifecycle is:
+1. **Pre-auth phase.** The daemon boots with zero credentials on disk. Guided setup is the local-mode `/setup/*` routes. DeepLake-backed surfaces stay empty until a credential exists. `loadCredentials()` returns `null` (not throwing) on an absent file (`src/daemon/runtime/auth/credentials-store.ts`).
+2. **Authenticated phase.** When login writes the shared credential, the same running daemon serves the authenticated API on the next request. `GET /setup/state` remains the local-mode poll for setup metadata.
 
-1. **Pre-auth phase.** The daemon boots with zero credentials on disk and serves `GET /dashboard` plus the guided-setup wizard. The DeepLake-backed surfaces show an empty "connect me" state, nothing throws or fails closed on a missing token. This rests on `loadCredentials()` returning `null` (not throwing) on an absent file (`src/daemon/runtime/auth/credentials-store.ts`).
-2. **Authenticated phase.** When login writes the shared credential, the **same** running daemon serves the authenticated surfaces on the next request, no `honeycomb daemon restart`, no second tab. The dashboard polls `GET /setup/state` while on the setup screen and swaps to the authenticated views the instant a valid credential loads.
-
-The embeddings runtime is the closest thing to "another daemon," but it is a **lazily-warmed sub-daemon** that comes up in the background when first needed and never gates the dashboard or the login. Until the model is warm, recall degrades to the BM25/lexical fallback.
+The embeddings runtime is the closest thing to "another daemon," but it is a **lazily-warmed sub-daemon** that comes up in the background when first needed and never gates the dashboard or the login. Until the model is warm, or when embeddings are explicitly off, recall stays on the lexical `ILIKE` arms.
 
 ### The setup state read
 
@@ -139,7 +142,7 @@ The embeddings runtime is the closest thing to "another daemon," but it is a **l
 
 `authenticated` is **derived** from `loadCredentials(...) !== null`, never from the onboarding `phase`. The onboarding file is a *hint* for which wizard copy to show; it can disagree with the credential (a half-written file), so it never decides auth. This is what lets the dashboard flip from guided-setup to authenticated the instant the credential lands, even if the onboarding file still reads `"linking"`.
 
-All setup routes (`GET /setup/state`, `POST /setup/login`, `POST /setup/migrate-from-hivemind`) sit beside `mountDashboardHost` on the unprotected root group and obey the same `mode === "local"` gate. In team/hybrid the routes are never mounted and a request gets a clean 404, indistinguishable from an unmounted path.
+Setup routes (`GET /setup/state`, `POST /setup/login`, `POST /setup/migrate-from-hivemind`) mount only when `daemon.config.mode === "local"` (`src/daemon/runtime/assemble.ts:1447`). The same block mounts `/setup/tenancy*` (`src/daemon/runtime/assemble.ts:1470-1477`) and wires `POST /setup/login` to the pending-link runner (`src/daemon/runtime/assemble.ts:1456-1465`), so a multi-tenant account is not persisted as a silent `orgs[0]` guess. A single-tenancy account can be auto-selected; a multi-tenant account stays in the pending window until `POST /setup/tenancy/select`. In team and hybrid those routes are not mounted.
 
 ---
 
@@ -152,12 +155,12 @@ The browser flow:
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant B as Dashboard (browser tab)
-    participant D as Honeycomb daemon (loopback)
+    participant B as Hive portal (browser tab)
+    participant D as Honeycomb daemon (loopback :3850)
     participant DL as DeepLake auth (api.deeplake.ai)
 
-    U->>D: paste install command → daemon up
-    D-->>B: GET /dashboard (pre-auth shell, no token)
+    U->>D: paste install command, daemon up on :3850
+    Note over B: Hive portal at http://127.0.0.1:3853/ when solo mode's probe answers. Honeycomb does not serve GET /dashboard.
     B-->>U: "First time setup" button
     U->>B: click First time setup
     B->>D: POST /setup/login
@@ -170,11 +173,17 @@ sequenceDiagram
     loop poll until approved
         D->>DL: POST /auth/device/token
     end
-    DL-->>D: long-lived org-bound token
+    DL-->>D: long-lived token into the pending-link window
+    opt one tenancy
+        D->>D: auto-select that tenancy
+    end
+    opt more than one tenancy
+        B->>D: POST /setup/tenancy/select
+    end
     D->>D: persist ~/.deeplake/credentials.json (0600)
     B->>D: GET /setup/state (poll)
     D-->>B: authenticated:true
-    B-->>U: dashboard hydrates, same tab, no restart
+    B-->>U: portal hydrates, same tab, no restart
 ```
 
 Secret discipline is preserved end to end: the response body carries only `user_code` + the verification URIs, never the device/bearer token and never the `device_code` poll handle. The reporter sink is swallowed so no token-adjacent line is logged, and `verification_uri_complete` is re-validated to an **https-only** URL before it is echoed to the page as a clickable link. On approval the flow mints and persists the shared `~/.deeplake/credentials.json` (0600) through the existing `persistFromToken` path, unchanged except for the added attribution headers (see [Referral attribution](#referral-attribution-the-growth-engine)).

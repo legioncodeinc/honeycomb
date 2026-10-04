@@ -42,10 +42,12 @@ flowchart TD
     kind -->|user message| row["Build sessions row (jsonb message)"]
     kind -->|tool call| row
     kind -->|assistant message| row
-    row --> embed["Optional 768-dim embedding"]
-    embed --> insert["Single INSERT via daemon -> sessions"]
-    insert --> triggers["Counters: trigger skillify / periodic summary"]
+    row --> insert["One sessions row per event; inserts may be batched"]
+    row --> embed["Optional 768-dim embedding, not awaited"]
+    insert --> triggers["Counters: skillify every N turns / summary every N messages"]
 ```
+
+The row is inserted without `message_embedding`. `buildRow` in `src/daemon/runtime/capture/capture-handler.ts` omits that column. When embeddings are on, `kickEmbed` in the same file attaches the vector after the row is built and does not wait for it.
 
 The `message` column is `JSONB` because each event is a structured payload (prompt text, tool input, tool response), and storing it as structured JSON keeps the original shape intact for later extraction. The capture call goes to the daemon, which owns the write to DeepLake; the shim never touches storage directly. The table shape is documented in [`../data/schema.md`](../data/schema.md).
 
@@ -96,7 +98,7 @@ Capture runs on every turn of a bound, tenancy-confirmed session, so it has to b
 
 ## What capture triggers
 
-Capture is also where the background workers get their cues. Per-turn counters trigger the skillify miner every N turns and the summary worker on a message or time threshold, both queued to run in the daemon. Capture does not run them inline; it records the event, bumps the counter, and lets the daemon schedule the work. The summary worker is documented in [`wiki-summary-workers.md`](wiki-summary-workers.md) and the miner in [`skillify-pipeline.md`](skillify-pipeline.md).
+Capture is also where the background workers get their cues. Per-turn counters trigger the skillify miner every N turns and the summary worker when the message count crosses its threshold, both queued to run in the daemon. The summary cue is a modulo on message count only (`TurnCounters.recordMessage` in `src/daemon/runtime/capture/turn-counters.ts`, default 20). No hours check runs. `PERIODIC_TRIGGER_REASONS` in `src/daemon/runtime/summaries/contracts.ts` still includes `"hours"`, and no capture path sets that reason. There is no `HONEYCOMB_SUMMARY_EVERY_HOURS`. Capture does not run the workers inline; it records the event, bumps the counter, and lets the daemon schedule the work. The summary worker is documented in [`wiki-summary-workers.md`](wiki-summary-workers.md) and the miner in [`skillify-pipeline.md`](skillify-pipeline.md).
 
 ## Feeding the pipeline
 
