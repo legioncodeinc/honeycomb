@@ -210,8 +210,8 @@ function addCount(running: number | undefined, addend: number | undefined): numb
 /**
  * Read one native count field as a non-negative integer, or `undefined`. A missing, non-numeric,
  * negative, or fractional value yields `undefined` (it contributes nothing → the bucket stays
- * absent → the column stays NULL, never a silent 0). A genuine `0` is returned (zero ≠ absent) —
- * the SAME `readCount`/`isCount` discipline as `normalize.ts`.
+ * absent → the capture writer persists SQL NULL, kept distinct from a measured 0 — a-AC-6). A
+ * genuine `0` is returned — the SAME `readCount`/`isCount` discipline as `normalize.ts`.
  */
 function readCount(block: Record<string, unknown>, key: string): number | undefined {
 	const value = block[key];
