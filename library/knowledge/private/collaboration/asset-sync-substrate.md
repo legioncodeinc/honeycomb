@@ -26,7 +26,7 @@ Everything that touches storage goes through the Honeycomb daemon on port 3850. 
 flowchart TD
     artifact["Skill dir / agent .md on disk"]
     register["honeycomb asset register\n(mint honeycomb_id, Local tier)"]
-    registry["Local registry\n~/.honeycomb/registry.json"]
+    registry["Local registry\n~/.apiary/honeycomb/registry.json"]
     promote["honeycomb asset promote\n(Device / Team)"]
     publishApi["POST /api/assets/publish"]
     table[("synced_assets table\n(version-bumped, append-only)")]
@@ -61,7 +61,7 @@ The hashing rules live in `src/daemon/runtime/assets/hashing.ts`. The substrate 
 
 ## The local registry
 
-`~/.honeycomb/registry.json` is the source of truth for what the local machine knows about each asset. It is plain local state, never DeepLake. Each entry (`RegistryEntry`, in `src/daemon/runtime/assets/registry.ts`) carries:
+`~/.apiary/honeycomb/registry.json` is the registry path (`defaultRegistryBaseDir` in `src/daemon/runtime/assets/registry.ts`), with a legacy `~/.honeycomb` read fallback. It is plain local state, never DeepLake. Each entry (`RegistryEntry`, in `src/daemon/runtime/assets/registry.ts`) carries:
 
 | Field | Meaning |
 |---|---|

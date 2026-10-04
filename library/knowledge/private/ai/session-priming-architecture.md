@@ -62,8 +62,10 @@ own framing, "a compacted memory summary before the LLM gets the prompt so it ca
 to invoke Honeycomb", is exactly the pull model, and it is the better of the two options that were
 on the table ("always query" being the other).
 
-**Rule of thumb:** *push the index per session; pull the detail per turn.* Nothing is auto-injected
-after the prime.
+**Rule of thumb:** *push the index per session; pull the detail per turn.* The prime itself is still
+once per session start. Claude Code also registers a `UserPromptSubmit` hook with
+`--honeycomb-recall` (`harnesses/claude-code/hooks/hooks.json`). `runUserPromptRecall` in
+`src/hooks/shared/user-prompt-recall.ts` injects `additionalContext` on that turn.
 
 ---
 
@@ -121,10 +123,13 @@ empty prime while every other layer looked healthy. The fix registers `/prime` *
 `mountMemoriesPrimeApi` (`src/daemon/runtime/memories/prime.ts`) is retained as a standalone shim for
 unit tests, and `assemble.ts` reflects the new mount order. It skims the Tier-1 `key` columns directly,
 a pure SQL read with no generation at request time (see `src/daemon/runtime/summaries/prime-digest.ts`,
-`prime-keys.ts`). The block is token-bounded, scoped to the repo/agent, recency-weighted, and
-**deduped** so the same fact never appears twice, the prime composes with the same PRD-047c semantic
-dedup and PRD-047d recency dampening the recall pipeline uses: the recent list is age-weighted, the
-durable list deliberately ages slowly (the "semantic facts age slowly" idea from the prior art).
+`prime-keys.ts`). The block is token-bounded, scoped to the repo/agent, and
+**deduped** so the same fact never appears twice. `assemblePrimeDigest` in
+`src/daemon/runtime/summaries/prime-digest.ts` defaults to `identityRecencyRanker` (the skim order)
+and `normalizedTextDeduper`. That file says the richer PRD-047d dampener is not built, and that
+PRD-047c semantic dedup composes in later. `renderPrime` in `src/daemon/runtime/memories/prime.ts`
+calls `assemblePrimeDigest` with no semantic deduper, so the prime keeps normalized-text dedup and
+does not age-weight the lists the way recall does.
 
 ---
 
@@ -188,7 +193,7 @@ sequenceDiagram
     participant A as Agent context
     U->>Hk: session start
     Hk->>D: GET prime digest (repo, agent scope)
-    D->>DL: cheap lexical+recency SQL (Tier-1 keys)
+    D->>DL: SQL skim of the key column, ordered by date
     DL-->>D: recent + durable keys
     D-->>Hk: compact digest (~300-800 tokens)
     Hk-->>A: inject as session context
@@ -197,15 +202,19 @@ sequenceDiagram
 
 - **Claude Code:** the `SessionStart` hook runs a command and contributes additional session
   context. Honeycomb installs capture/recall hooks here, and the prime is one more hook entry that
-  emits the digest. The pull tools are the registered Honeycomb MCP server
-  (`hivemind_search` / `hivemind_read` / `hivemind_index`).
+  emits the digest. The pull tools are `hivemind_search` and `hivemind_read`. The browse tool is
+  `honeycomb_index` (`mcp/src/tools.ts`).
 - **Cursor:** Cursor 1.7+ exposes a `~/.cursor/hooks.json` lifecycle surface (multiple events) wired
-  by Honeycomb's `src/cli/install-cursor.ts`, and the Honeycomb MCP server is registered for the pull
+  by Honeycomb's `src/connectors/cursor.ts`, and the Honeycomb MCP server is registered for the pull
   tools. The session-start equivalent emits the same digest.
 
-The digest endpoint and the pull tools are harness-agnostic; only the injection mechanism differs, so
-additional harnesses (Codex, Hermes, pi, OpenClaw) follow the same shape, the same prime endpoint,
-the same MCP tools, a per-host SessionStart entry.
+The digest endpoint and the pull tools are harness-agnostic. The session-start injection is not the
+same on every host. Codex has a connector (`src/connectors/codex.ts`) and uses the shared
+session-start hook. Hermes maps `on_session_start` (`src/hooks/hermes/shim.ts`) and OpenClaw maps
+`before_agent_start` (`src/hooks/openclaw/shim.ts`); neither has a file under `src/connectors/`
+(the harness connectors there are claude-code, cursor, and codex). pi maps only `agent_end` and
+`session_shutdown` (`src/hooks/pi/shim.ts`), and that shim's header says recall is on demand via a
+static `AGENTS.md` block.
 
 ---
 

@@ -1,6 +1,6 @@
 # PRD-077: Per-Turn Recall Fast Path
 
-> **Status:** Backlog
+> **Status:** Completed
 > **Priority:** P0 (the always-on memory-injection surface shipped in PRD-076a is currently **inert in every session**: live `~/.honeycomb/recall-sessions/<id>.json` records show `injectedRefs: []` across all sessions, and `request_log` shows `/api/memories/recall` p50 ≈ 40s / max ≈ 25min against a per-turn renderer timeout of 2.5s. The renderer aborts before recall answers on every qualifying turn, so the highest-value memory surface delivers zero context — the exact regression PRD-076a's latency budget was meant to prevent. This is the top functional defect from the 2026-07-09 investigation, BUG-17.)
 > **Effort:** M (~1-2d)
 > **Schema changes:** None. No catalog columns, no DDL. New content-inline read-only SQL variants over the existing recall tables (a content-returning `<#>` arm builder), a new fast recall entrypoint reusing the existing `StorageClient` + arm builders + `fuseHits`, a dedicated concurrency lane, server-side deadlines, and a per-turn timeout bump. No writer, ranker, or embedding changes.
@@ -84,8 +84,8 @@ The floor from PRD-076a becomes reliable; this PRD makes it *fit*. It changes no
 
 | Sub-PRD | Scope | Status |
 |---|---|---|
-| [`prd-077a-single-round-trip-fast-recall`](./prd-077a-single-round-trip-fast-recall.md) | A per-turn fast recall entrypoint that runs the heavy path's arms (all tables, semantic + lexical) as **content-inline** statements **in parallel**, project-scoped, then fuses with the in-memory `fuseHits` RRF + recency — skipping only the IDs-then-hydrate hop, the dedup embedding fetch, and the lifecycle/rerank stages. Wire `recall-renderer.ts` to it via `fast: true` on `/api/memories/recall` (D-1). RRF, recency, and full breadth preserved; one wall-clock round-trip. | Draft |
-| [`prd-077b-hot-lane-isolation-and-load-shedding`](./prd-077b-hot-lane-isolation-and-load-shedding.md) | A dedicated concurrency lane for the per-turn fast recall (so dashboard bursts can't starve it), a **server-side deadline** that aborts and frees the slot independent of the client abort, **queue-depth load-shedding** that fast-fails a per-turn recall under pool saturation, and a per-turn timeout bump (`DEFAULT_RECALL_TIMEOUT_MS` → ~4s). Makes the 25-minute tail structurally impossible. | Draft |
+| [`prd-077a-single-round-trip-fast-recall`](./prd-077a-single-round-trip-fast-recall.md) | A per-turn fast recall entrypoint that runs the heavy path's arms (all tables, semantic + lexical) as **content-inline** statements **in parallel**, project-scoped, then fuses with the in-memory `fuseHits` RRF + recency — skipping only the IDs-then-hydrate hop, the dedup embedding fetch, and the lifecycle/rerank stages. Wire `recall-renderer.ts` to it via `fast: true` on `/api/memories/recall` (D-1). RRF, recency, and full breadth preserved; one wall-clock round-trip. | Completed |
+| [`prd-077b-hot-lane-isolation-and-load-shedding`](./prd-077b-hot-lane-isolation-and-load-shedding.md) | A dedicated concurrency lane for the per-turn fast recall (so dashboard bursts can't starve it), a **server-side deadline** that aborts and frees the slot independent of the client abort, **queue-depth load-shedding** that fast-fails a per-turn recall under pool saturation, and a per-turn timeout bump (`DEFAULT_RECALL_TIMEOUT_MS` → ~4s). Makes the 25-minute tail structurally impossible. | Completed |
 
 ---
 

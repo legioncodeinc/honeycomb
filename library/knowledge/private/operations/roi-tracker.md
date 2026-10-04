@@ -59,7 +59,7 @@ The subsystem is six sub-PRDs, each a discrete seam:
 | **060b** | Cost + savings engine + rate table. Measured cache savings, the labeled modeled estimator, the honesty witness. | [`roi-savings.ts`](../../../../src/daemon/runtime/dashboard/roi-savings.ts), [`roi-rates.ts`](../../../../src/daemon/runtime/dashboard/roi-rates.ts), [`roi-honesty-contract.ts`](../../../../src/daemon/runtime/dashboard/roi-honesty-contract.ts) |
 | **060c** | DeepLake billing client + infra read-model. Creds-gated, fail-soft, TTL-cached, `session_type` breakdown. | [`roi-billing.ts`](../../../../src/daemon/runtime/dashboard/roi-billing.ts) |
 | **060d** | Pollination cost metering. Haiku skillify token cost + DeepLake GPU-session cost composed. | [`roi-pollination.ts`](../../../../src/daemon/runtime/dashboard/roi-pollination.ts), [`roi-skillify-meter.ts`](../../../../src/daemon/runtime/dashboard/roi-skillify-meter.ts), [`transport-anthropic.ts`](../../../../src/daemon/runtime/inference/transport-anthropic.ts) |
-| **060e** | The `/roi` dashboard page + composite read-model. | [`api.ts`](../../../../src/daemon/runtime/dashboard/api.ts), [`roi.tsx`](../../../../src/dashboard/web/pages/roi.tsx), [`roi-chart.tsx`](../../../../src/dashboard/web/pages/roi-chart.tsx) |
+| **060e** | Composite read-model for ROI. | [`api.ts`](../../../../src/daemon/runtime/dashboard/api.ts): `GET /api/diagnostics/roi` and `GET /api/diagnostics/roi/trend` |
 | **060f** | Shared cross-device spend ledger + teams roster. | [`roi-ledger.ts`](../../../../src/daemon/runtime/dashboard/roi-ledger.ts), [`roi-session-writer.ts`](../../../../src/daemon/runtime/dashboard/roi-session-writer.ts), [`tenancy.ts`](../../../../src/daemon/storage/catalog/tenancy.ts) |
 
 ```mermaid
@@ -133,14 +133,14 @@ Every ledger section reports one of **`ok` / `partial` / `absent` / `unreachable
 - Billing API unreachable/unauthenticated → a dash glyph on the affected line and a scoped retry, **never a fabricated number**, and the net is withheld.
 - First run → dash-glyph placeholders, not a misleading `$0.00`.
 
-The honey brand color **never encodes sign** (positive net = `var(--verified)`, negative = `var(--severity-critical)`), and a *rising* cost must not render green, a barely-using user can legitimately show a negative net and the page frames that honestly rather than as "this tool costs you money".
+`assembleRoiView` in [`api.ts`](../../../../src/daemon/runtime/dashboard/api.ts) returns status discriminants (`ok`, `partial`, `absent`, `unreachable`, `unauthenticated`). Sign color belongs to the Hive portal, which owns the browser UI. The tokens are `--verified` and `--severity-critical` in [`assets/tokens/colors.css`](../../../../assets/tokens/colors.css): positive net is `var(--verified)`, negative net is `var(--severity-critical)`. A rising cost must not render green. A barely-using user can show a negative net, and that surface frames the number honestly.
 
 ## The /roi page and read-model (060e)
 
-The page follows the one-registry-entry + one-component contract (see [`adding-a-page.md`](../dashboard/adding-a-page.md)): no sidebar or router file is hand-edited. It is a **pure function of the view-model**, it does no fetching itself and holds **no credentials**. Two daemon read routes back it, sitting beside the existing diagnostics fetchers in [`api.ts`](../../../../src/daemon/runtime/dashboard/api.ts) under the same loopback + local-mode gate as `mountDashboardHost`:
+The page follows the one-registry-entry + one-component contract (see [`adding-a-page.md`](../dashboard/adding-a-page.md)): no sidebar or router file is hand-edited. It is a **pure function of the view-model**, it does no fetching itself and holds **no credentials**. Two daemon read routes back it, sitting beside the diagnostics fetchers in [`api.ts`](../../../../src/daemon/runtime/dashboard/api.ts). `mountDashboardHost` and `host.ts` are not in this checkout. The browser UI is the Hive portal. The ROI read routes stay on the daemon.
 
 - `GET /api/diagnostics/roi`, a single **composite** read returning a `RoiView` with the per-section status discriminants. All money is integer cents, formatted to dollars only at the render edge.
-- `GET /api/diagnostics/roi/trend`, the time-series backing the **inline-SVG trend chart** ([`roi-chart.tsx`](../../../../src/dashboard/web/pages/roi-chart.tsx), the house GraphCanvas idiom, no new npm chart dependency).
+- `GET /api/diagnostics/roi/trend`, the time-series route on the daemon (`src/daemon/runtime/dashboard/api.ts`). `src/dashboard/web/pages/roi-chart.tsx` is not in this checkout.
 
 **Daemon is the sole egress.** Billing credentials live only in the daemon; the page reads a composite read-model over loopback. This is the same credential-isolation posture as the rest of the daemon surface.
 

@@ -1,7 +1,7 @@
 # PRD-077a: Single-Round-Trip Fast Recall
 
 > **Parent:** [PRD-077: Per-Turn Recall Fast Path](./prd-077-per-turn-recall-fast-path-index.md)
-> **Status:** Draft
+> **Status:** Completed
 > **Priority:** P0
 > **Effort:** S-M (~0.5-1d)
 > **Schema changes:** None.

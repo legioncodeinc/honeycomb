@@ -22,14 +22,16 @@ Env overrides yaml per-key; an absent key in both falls to the documented defaul
 
 ## Non-destructive defaults
 
-A fresh install demotes nothing. Every term that can demote ships behind an exponent that defaults to the identity:
+Confidence, staleness, and conflict auto-resolve ship dormant. Activation does not.
 
-- `a = 1` (activation/freshness live but neutral-shaped),
+`lifecycle-config.ts` defines `1.0` as raw activation and `0` as neutral. Recall multiplies the fused score by `A^activationExponent`. The class half-lives are 180 / 45 / 10 days, so the install default `a = 1` reorders equally relevant hits by age. The neutral exponent is `0`.
+
+- `a = 1` (raw activation; recency reorders by age),
 - `c = 0` (calibrated confidence dormant until proven),
 - `s = 0` (stale-ref posture `observe`, visible but inert),
 - conflict auto-resolve off (detect and queue only, human-in-the-loop).
 
-Turning a term on is a deliberate, reversible operator action.
+Turning confidence, staleness demotion, or conflict auto-resolve on is a deliberate, reversible operator action.
 
 ## The parameters
 
@@ -61,18 +63,18 @@ Flipping `staleRefPosture` from `observe` to `execute` moves `s` from `0` to its
 
 ## The health scalar `H(m,t)`
 
-The dashboard renders the query-independent health scalar:
+The query-independent health scalar is:
 
 ```text
 H(m,t) = A(m,t) · C(m) · (1 − σ(m,t)) · κ(m,t)      with  H ∈ [0,1]
 ```
 
-`H` is a read-side projection of the already-emitted term fields (`freshnessScore`/`activation` for `A`, `calibratedConfidence` for `C`, the stale-ref `σ`, the conflict gate `κ`). It adds no column, no job, no write. A dormant term's factor is the identity, so `H` degrades gracefully to the terms that are live: an install with every engine off reads `H = 1`, not a phantom demotion.
+`H` is a read-side projection of the already-emitted term fields (`freshnessScore`/`activation` for `A`, `calibratedConfidence` for `C`, the stale-ref `σ`, the conflict gate `κ`). It adds no column, no job, no write. A dormant term's factor is the identity (`c = 0` and observe-posture `s = 0` contribute `1`). `assembleHealth` in `src/daemon/runtime/memories/lifecycle-health.ts` is that function. The CLI recomputes the same product inline in `src/commands/memory.ts`. Nothing in the dashboard calls `assembleHealth`.
 
 ## Surfaces
 
-- **Dashboard:** the Memory health panel on the memories page renders the `H` badge, freshness, the open-conflict count and per-conflict resolve action, the stale-reference list and count, and the calibration view (ECE plus the reliability diagram).
-- **CLI:** `honeycomb memory conflicts` (list/resolve), `honeycomb memory stale-refs` (list), and `honeycomb memory inspect <id> --lifecycle` (freshnessScore, calibratedConfidence, refStatus, open-conflict status, and the computed `H`).
-- **Settings page:** this same flag reference (symbol, default, effect, env override).
+- **Dashboard:** there is no `src/dashboard/web/pages/lifecycle-panel.tsx`. The settings flag table is `buildLifecycleFlagsView` in `src/dashboard/views.ts`, nested under the settings panel. No dashboard caller renders the per-memory `H` badge from `assembleHealth`.
+- **CLI:** `honeycomb memory conflicts` (list/resolve), `honeycomb memory stale-refs` (list), and `honeycomb memory inspect <id> --lifecycle` (freshnessScore, calibratedConfidence, refStatus, open-conflict status, and `H` recomputed inline in `src/commands/memory.ts`).
+- **Settings page:** this same flag reference (symbol, default, effect, env override), served by `buildLifecycleFlagsView`.
 
 Every resolve, from the dashboard and the CLI, goes through the one already-defined 058b `POST /api/memories/conflicts/:id/resolve` endpoint; 058d defines no new write path.

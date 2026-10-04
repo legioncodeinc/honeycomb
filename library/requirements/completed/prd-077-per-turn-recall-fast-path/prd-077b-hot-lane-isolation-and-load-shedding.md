@@ -1,7 +1,7 @@
 # PRD-077b: Hot-Lane Isolation and Load-Shedding
 
 > **Parent:** [PRD-077: Per-Turn Recall Fast Path](./prd-077-per-turn-recall-fast-path-index.md)
-> **Status:** Draft
+> **Status:** Completed
 > **Priority:** P1 (077a delivers the single-round-trip win; 077b makes it robust under real concurrency and kills the 25-minute tail)
 > **Effort:** S-M (~0.5-1d)
 > **Schema changes:** None.

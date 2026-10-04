@@ -33,7 +33,7 @@ Three additive vault `setting`-class keys plus one secret drive the whole featur
 | `portkey.fallbackToProvider` | setting (boolean, default false) | Opt-in fallback to the per-provider path when the gateway is unreachable. |
 | `PORTKEY_API_KEY` | secret | The Portkey key, write-only and presence-only. No endpoint ever returns its value. |
 
-The Settings page (PRD-063a) renders a "Use Portkey gateway" toggle, the config field, a write-only `PORTKEY_API_KEY` row showing only presence ("set" / "not set"), and the opt-in fallback toggle. When Portkey is on, the per-provider key rows are de-emphasized because `activeProvider` is no longer authoritative for routing (D-2). The catalog entry lives in `src/daemon/runtime/vault/catalog.ts` (`portkey`, `openEnded`); the setting keys are validated in `vault/api.ts`; the dashboard surface is in `src/dashboard/web/panels.tsx` (`PortkeyGatewaySection`) and `pages/settings.tsx`.
+The vault keys exist. The catalog entry lives in `src/daemon/runtime/vault/catalog.ts` (`portkey`, `openEnded`); the setting keys are validated in `src/daemon/runtime/vault/api.ts` (`portkey.enabled`, `portkey.config`, `portkey.fallbackToProvider`). There is no `Portkey` string under `src/dashboard` or `src/daemon/runtime/dashboard`, and there is no `src/dashboard/web/panels.tsx` `PortkeyGatewaySection` or `pages/settings.tsx` Portkey panel. When Portkey is on, `activeProvider` is no longer authoritative for routing (D-2).
 
 ## The supersession
 
@@ -50,7 +50,7 @@ flowchart TD
     key -->|yes| build["resolvePortkeyClient: synthetic config + Portkey transport"]
     build --> fb{"fallbackToProvider?"}
     fb -->|off| solo["Portkey client alone"]
-    fb -->|on| wrap["PortkeyFallbackModelClient (Portkey, then provider on unreachable)"]
+    fb -->|on| wrap["PortkeyFallbackModelClient (Portkey, then provider on any error)"]
     solo --> okstat["status: ok"]
     wrap --> okstat
 ```
@@ -81,9 +81,9 @@ Precedence is: when Portkey is on, it supersedes the per-provider keys. The fail
 
 - **Missing key is always a hard error.** If `portkey.enabled` is on but `PORTKEY_API_KEY` is absent, `resolvePortkeyClient` throws `PortkeyUnconfiguredError` BEFORE building anything. The factory catches it and returns the no-op client with status `unconfigured`. This is fail-closed regardless of the fallback setting: a missing key is never silently papered over with a provider key. The presence check probes the scope's secret NAMES only and never decrypts a value.
 - **Default, fallback off.** The Portkey client stands alone. An unreachable gateway surfaces the transport error; the stage wrapper treats a rejection as "no usable output" and the daemon keeps booting.
-- **Opt-in, fallback on.** `resolvePortkeyClient` also builds the per-provider path client and wraps both in `PortkeyFallbackModelClient`. It tries Portkey first and, on an unreachable or transport gateway error, routes the SAME request through the per-provider path (resolving the provider's `${SECRET_REF}` as today). A non-transport error (for example the provider path also exhausting) propagates.
+- **Opt-in, fallback on.** `resolvePortkeyClient` also builds the per-provider path client and wraps both in `PortkeyFallbackModelClient`. `complete` catches every error from the Portkey client (`void err`) and calls the provider client with the same request. There is no transport-only filter. A later failure from that second call can still propagate.
 
-Fallback covers reachability, not the privacy floor. Routing through the gateway intentionally bypasses Honeycomb's per-provider privacy-tier gate (the synthetic target is admitted at the `public` tier). That trade-off is a conscious operator decision and is documented separately in [`../security/portkey-privacy-tier.md`](../security/portkey-privacy-tier.md).
+The fallback calls the per-provider client after any error from the Portkey client. The synthetic Portkey target is admitted at the `public` tier, so the gateway path bypasses Honeycomb's per-provider privacy-tier gate. That trade-off is a conscious operator decision and is documented separately in [`../security/portkey-privacy-tier.md`](../security/portkey-privacy-tier.md).
 
 ## Health and metering stay honest
 
@@ -92,9 +92,10 @@ Fallback covers reachability, not the privacy floor. Routing through the gateway
 - `off` means the toggle is off and the per-provider path is in force.
 - `ok` means Portkey is on, the key is present, and the Portkey path is built.
 - `unconfigured` means Portkey is on but the key is absent (fail-closed).
+- `no_model` means the gateway is on and `activeModel` is empty. Assembly sets this in `assemble.ts` and builds no Portkey target, so the daemon does not POST `model: ""`.
 - `unreachable` means an ACTUAL observed runtime failure: a real Portkey call could not connect or was auth-rejected.
 
-The first three are derived from config AT ASSEMBLY (the factory's `PortkeyStatus`), with no synchronous network probe. The `unreachable` state is derived ONLY from a cached last-failure signal: the transport's `onTransportError` callback fires with the HTTP status immediately before a `ProviderError` is thrown, assembly caches it, and the health builder reads it verbatim. A malformed-response 502 is NOT reported as unreachable (the gateway was reachable, the body was just bad). Like the other reasons, `reasons.portkey` is mode-gated: it appears on local `/health` and the protected diagnostics surface, and is stripped from the public team/hybrid `/health` so no subsystem topology leaks to an unauthenticated remote.
+`off`, `ok`, `unconfigured`, and `no_model` are derived at assembly, with no synchronous network probe. `no_model` is the read where the gateway is on and `activeModel` is empty. The `unreachable` state is derived ONLY from a cached last-failure signal: the transport's `onTransportError` callback fires with the HTTP status immediately before a `ProviderError` is thrown, assembly caches it, and the health builder reads it verbatim. A malformed-response 502 is NOT reported as unreachable (the gateway was reachable, the body was just bad). Like the other reasons, `reasons.portkey` is mode-gated: it appears on local `/health` and the protected diagnostics surface, and is stripped from the public team/hybrid `/health` so no subsystem topology leaks to an unauthenticated remote.
 
 Usage and cost metering keep working under the gateway. Portkey returns OpenAI-shaped `usage`, and the transport surfaces those counts through the SAME `UsageSink` seam the Anthropic transport uses: `prompt_tokens` maps to input tokens, `completion_tokens` to output tokens, and `prompt_tokens_details.cached_tokens` to cache-read tokens. Portkey's OpenAI shape has no cache-write count, so that field stays zero rather than being fabricated. PRD-060 ROI capture therefore does not silently zero out when inference routes through Portkey.
 

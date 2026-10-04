@@ -56,13 +56,15 @@ Two independent instruments, both driving the **real** backend:
    `429` / `5xx` / `timeout`) for each attempt.
 
 **The discriminator.** Our client's `isTransientResult` splits failures into two
-classes:
+classes. It classifies the status. Unsafe writes are single-attempt. Capture
+outboxes every non-ok append. Only the controlled-write path throws on a genuine
+error; a transient controlled write goes to the memory outbox.
 
-- **"Them" (transient):** `429`, `5xx`, connection drops, and **timeouts** —
-  the backend faulted or was too slow. These are retried and (post PRD-079/080)
-  routed to the durable outbox.
+- **"Them" (transient):** `429`, `500`, `502`, `503`, `504`, connection drops, and
+  **timeouts** — the backend faulted or was too slow. A `query_error` is
+  transient only when its status is in that set.
 - **"Us" (genuine):** `400` syntax, `401/403` permission, `42P01` missing-table —
-  a request *we* built wrong. These are thrown, never silently retried.
+  a request *we* built wrong. A `400` is not transient.
 
 So the test is simple: **classify every non-`200` outcome by its real status.**
 If they cluster in the transient class, it is them. They did.
@@ -153,11 +155,13 @@ not columns). We fixed the probe and re-ran. Two things this proves:
 
 1. **Honesty of the instrument.** The raw-transport probe surfaces *our* mistakes
    just as loudly as the backend's — a `400` for a bad column is unmistakable.
-2. **The classifier is correct.** That `400` is a *non-transient* status. Our
-   `isTransientResult` gate would (and does) classify it as **genuine → throw**,
-   never route it to the retry/outbox path. Contrast the backend's `timeout`s,
-   which classify as **transient → retry/defer**. The two failure modes are
-   cleanly distinguishable, and only the backend's lands in the "them" bucket.
+2. **The classifier is correct about the status split.** That `400` is a
+   *non-transient* status. `isTransientResult` marks it genuine. Unsafe writes
+   are single-attempt and return a `QueryResult`. Capture outboxes every non-ok
+   append, including a genuine `400`. Only the controlled-write path throws on a
+   genuine error; a transient there goes to the memory outbox. The backend's
+   `timeout`s classify as **transient**. The two failure modes are cleanly
+   distinguishable, and only the backend's lands in the "them" bucket.
 
 After the fix, **every remaining non-`200` outcome was a `timeout`** — 100 %
 backend, 0 % us.

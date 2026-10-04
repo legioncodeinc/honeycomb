@@ -2,8 +2,8 @@
 
 > **SUPERSEDED (2026-07-03):** Relocated to Queen, the fleet orchestrator. Canonical copy: `queen/library/knowledge/private/architecture/ADR-0003-trusted-device-custody-and-headless-enrollment.md`. Retained here for history only; do not update.
 
-> **Status:** Proposed (exploratory) | **Date:** 2026-06-29
-> **Supersedes:** none | **Superseded by:** queen ADR-0003 (relocated)
+> **Status:** Superseded by queen ADR-0003 (relocated 2026-07-03) | **Date:** 2026-06-29
+> **Supersedes:** none | **Superseded by:** queen ADR-0003 (relocated 2026-07-03)
 > **Owners:** auth, security, fleet, cloud-control-plane | **Related:** ADR-0002, PRD-054, PRD-055
 
 ## Context

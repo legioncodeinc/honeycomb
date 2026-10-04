@@ -2,7 +2,7 @@
 
 > Category: Data | Version: 1.0 | Date: June 2026 | Status: Active
 
-How Honeycomb makes a team-shared DeepLake database look like an ordinary directory at `~/.honeycomb/memory/`: the `DeepLakeFs` intercept, path-routed dispatch to the goals and KPIs tables, batched writes with debounced flush, the synthesized `index.md`, and the read-only sessions and graph bridges.
+How Honeycomb makes a team-shared DeepLake database look like an ordinary directory at `~/.apiary/honeycomb/memory/`: the `DeepLakeFs` intercept, path-routed dispatch to the goals and KPIs tables, batched writes with debounced flush, the synthesized `index.md`, and the read-only sessions and graph bridges.
 
 **Related:**
 - [`deeplake-storage.md`](deeplake-storage.md)
@@ -17,9 +17,9 @@ How Honeycomb makes a team-shared DeepLake database look like an ordinary direct
 
 ## Why a filesystem over a database
 
-Coding agents already know how to `cat`, `ls`, `grep`, and `find`. Honeycomb leans on that fluency: instead of teaching every assistant a new recall API, it presents memory as files under `~/.honeycomb/memory/` and intercepts the shell commands that touch that mount. From the agent's point of view it is browsing files; underneath, each operation is a SQL query against the `sessions`, `memory`, `goals`, and `kpis` tables described in [`schema.md`](schema.md).
+Coding agents already know how to `cat`, `ls`, `grep`, and `find`. Honeycomb leans on that fluency: instead of teaching every assistant a new recall API, it presents memory as files under `~/.apiary/honeycomb/memory/` (`MEMORY_MOUNT_DISPLAY_PATH` in `src/daemon-client/vfs/index-gen.ts`) and intercepts the shell commands that touch that mount. The pre-tool-use classifier still recognizes the legacy `~/.honeycomb/memory/` shape. From the agent's point of view it is browsing files; underneath, each operation is a SQL query against the `sessions`, `memory`, `goals`, and `kpis` tables described in [`schema.md`](schema.md).
 
-There are two consumers of this intercept. The PreToolUse hook rewrites Claude Code Bash, Read, Grep, and Glob commands one-shot and stateless. The standalone deeplake-shell exposes the same mount through a long-lived `DeepLakeFs` object that implements the `IFileSystem` interface from `just-bash`. Both produce the same view; this document focuses on the `DeepLakeFs` implementation in `src/shell/deeplake-fs.ts`, which is the richer of the two. Both route their actual SQL through the honeycomb daemon (port 3850), which owns the only connection to DeepLake.
+There are two consumers of this intercept. The PreToolUse hook rewrites Claude Code Bash, Read, Grep, and Glob commands one-shot and stateless. The standalone deeplake-shell exposes the same mount through a long-lived `DeepLakeFs` object that implements the `IFileSystem` interface from `just-bash`. Both produce the same view; this document focuses on the `DeepLakeFs` implementation in `src/daemon-client/vfs/fs.ts`, which is the richer of the two. Both route their actual SQL through the honeycomb daemon (port 3850), which owns the only connection to DeepLake.
 
 The mount is not a literal directory. No real files exist at these paths. Every read either hits an in-memory cache, a pending-write buffer, or a SQL query, and every write is buffered and flushed to DeepLake on a timer.
 
@@ -27,68 +27,53 @@ The mount is not a literal directory. No real files exist at these paths. Every 
 
 ## Anatomy of DeepLakeFs
 
-`DeepLakeFs` keeps four maps that together model the tree:
+`DeepLakeFs` (`src/daemon-client/vfs/fs.ts`) holds `dispatch`, `scope`, `cache`, `pending`, `snapshots`, and a `WriteBuffer`. `cache` is a `Map` from path to body (`ContentCache`). `pending` is a `Map` from path to a buffered write (`PendingBuffer`). `snapshots` loads the local graph snapshot. The write buffer shares that dispatch, scope, and pending map.
 
-- `files`: path to `Buffer` (content) or `null` (the row exists but its body has not been fetched yet).
-- `meta`: path to size, mime type, and mtime.
-- `dirs`: directory path to the set of immediate child names.
-- `pending`: paths written but not yet flushed to SQL.
-
-A `flushed` set tracks which paths have already been written at least once, so a later flush of the same path coalesces correctly rather than double-inserting. The constructor seeds the tree with the mount point and its parent.
-
-At construction the factory `create()` bootstraps four sources in parallel before returning, so `ls` and `cat` work immediately against the cache:
+The synthesized index is `generateVirtualIndex` in `src/daemon-client/vfs/index-gen.ts`. It runs two selects in parallel:
 
 ```mermaid
 flowchart TD
-    create["DeepLakeFs.create()"] --> ensure["ensureTable plus ensureGoalsTable plus ensureKpisTable"]
-    ensure --> parallel["Promise.all bootstrap"]
-    parallel --> mem["memory rows SELECT path size_bytes mime_type"]
-    parallel --> sess["sessions rows GROUP BY path MAX size_bytes"]
-    parallel --> goals["goals rows latest per goal_id"]
-    parallel --> kpis["kpis rows latest per goal_id kpi_id"]
-    mem --> tree["populate files meta dirs maps"]
-    sess --> tree
-    goals --> tree
-    kpis --> tree
+    index["generateVirtualIndex"] --> parallel["Promise.all"]
+    parallel --> mem["memory: path, summary ORDER BY last_update_date"]
+    parallel --> sess["sessions: GROUP BY path, MAX(creation_date)"]
+    mem --> render["build the two-section index"]
+    sess --> render
 ```
 
-The `ensureTable` family is DeepLake's lazy schema healing: a missing table or column is created on first touch rather than through an upfront migration. The memory bootstrap reads `path, size_bytes, mime_type` ordered by path and registers each row as an unfetched file (`files.set(p, null)`). Crucially, it skips any goal-shaped or KPI-shaped path when the dedicated tables are configured, because those rows belong exclusively to the structured tables. Surfacing the generic-table copies would re-inject phantom goals into the VFS namespace that the `honeycomb goal list` CLI (which reads only the structured table) would not see.
-
-The sessions bootstrap groups by `path` and takes `MAX(size_bytes)`, a workaround for a DeepLake behavior where `SUM(size_bytes)` returns NULL when combined with `GROUP BY path`. For the single-row-per-file layout MAX equals SUM; for multi-row layouts it under-reports but stays positive so files never look like empty placeholders.
+`buildRecentMemoriesSql` selects `path` and `summary`. `buildRecentSessionsSql` groups by `path` and takes `MAX(creation_date)`.
 
 ---
 
-## Path classification: three destinations
+## Path classification
 
-Every read and write is first classified by `classifyPath` (from `src/shell/goal-paths.ts`) into one of three kinds:
+Every read and write is first classified by `classifyPath` in `src/daemon-client/vfs/classify.ts`:
 
-| Kind | Path shape | Backing table |
+| Kind | Path shape | Backing |
 |---|---|---|
-| `goal` | `memory/goal/<owner>/<status>/<goal_id>.md` | `goals` |
-| `kpi` | `memory/kpi/<goal_id>/<kpi_id>.md` | `kpis` |
-| `memory` | anything else | `memory` |
+| `index` | mount-root `index.md` | synthesized index |
+| `session` | `sessions/...` | `sessions` |
+| `graph` | `graph` or `graph/...` | local snapshot |
+| `goal` | `goal/<owner>/<status>/<goal_id>.md` | `goals` |
+| `kpi` | `kpi/<goal_id>/<kpi_id>.md` | `kpis` |
+| `memory` | anything else, including a malformed goal or kpi shape | `memory` |
 
-The classifier strips any leading mount prefix by finding the last `/memory/` occurrence in the path, which lets it accept every shape an agent might produce: a mount-relative `/goal/...`, a test mount `/memory/goal/...`, a shell redirect `~/.honeycomb/memory/goal/...`, or a host-absolute `/home/<user>/.honeycomb/memory/goal/...`. The status component must be one of `opened`, `in_progress`, or `closed`, and the filename must end in `.md`; anything malformed falls back to `memory` so the generic path handles it.
+`index`, `session`, and `graph` are decided before the goal and kpi shape checks. The classifier strips any leading mount prefix by finding the last `/memory/` occurrence in the path, which lets it accept a mount-relative `goal/...`, a test mount, a shell redirect, or a host-absolute path. Goal status must be `opened`, `in_progress`, or `closed`, and the filename must be a non-empty stem ending in `.md`.
 
 ```typescript
-export function classifyPath(p: string): PathKind {
-  const segs = segmentsUnderMemory(p);
-  if (!segs) return "memory";
-  if (segs[0] === "goal") {
-    if (segs.length === 4 && segs[3].endsWith(".md") && VALID_STATUS.has(segs[2])) {
-      return "goal";
-    }
-    return "memory";
-  }
-  if (segs[0] === "kpi") {
-    if (segs.length === 3 && segs[2].endsWith(".md")) return "kpi";
-    return "memory";
-  }
+export function classifyPath(path: string): PathClass {
+  const rel = toMountRelative(path);
+  const segs = segmentsOf(rel);
+  if (segs.length === 1 && segs[0] === "index.md") return "index";
+  const head = segs[0];
+  if (head === "sessions") return "session";
+  if (head === "graph") return "graph";
+  if (isGoalShape(segs)) return "goal";
+  if (isKpiShape(segs)) return "kpi";
   return "memory";
 }
 ```
 
-The path encoding is the source of truth: `decomposeGoalPath` extracts `owner`, `status`, and `goal_id` from the path, and the row's `content` column stores only the markdown body. `composeGoalPath` and `composeKpiPath` rebuild the canonical mount-relative path (no mount prefix) that both the cache and the DB rows use.
+The path encoding is the source of truth. `decomposeGoalPath` and `decomposeKpiPath` (`src/daemon-client/vfs/write-buffer.ts`) extract `owner`, `status`, and the goal id from a goal path, and the goal id plus kpi id from a kpi path. `GOALS_COLUMNS` and `KPIS_COLUMNS` are `key`, `value`, `target`, `status`, `unit`, `agent_id`, `visibility`, `created_at`, and `updated_at`. `buildGoalInsertSql` inserts `key`, `value`, `status`, and `agent_id`. The markdown body is `value`. The goal id is `key`. Owner is written into `agent_id`.
 
 ---
 
@@ -122,7 +107,7 @@ sequenceDiagram
 
 The flush is serialized through a promise chain (`flushChain`) so two flushes never interleave. `_doFlush` drains the pending map, computes 768-dim `nomic-embed-text-v1.5` embeddings for the batch (skipping the embed hop entirely when embeddings are globally disabled, writing NULL for the vector columns), and writes every row in parallel via `Promise.allSettled`. Any row that fails is re-queued for the next flush unless a newer version was written in the meantime, and the flush throws so callers know some writes were deferred.
 
-`upsertRow` dispatches by path kind. Goal and KPI writes route to `upsertGoalRow` / `upsertKpiRow`, which do their own SELECT-before-INSERT keyed by `goal_id` (or `goal_id, kpi_id`) to work around DeepLake's UPDATE-coalescing quirk. The generic memory path branches on the `flushed` set: a path already flushed rewrites `summary`, `summary_embedding`, `mime_type`, `size_bytes`, and `last_update_date` (plus optional `project` and `description`); a fresh path gets a full INSERT with a new UUID. Text bodies are escaped with `sqlStr` and written with the `E'...'` literal form, because DeepLake offers no parameterized queries (see [`deeplake-storage.md`](deeplake-storage.md)).
+`upsertRow` dispatches by path kind. Goal and KPI writes route to `upsertGoalRow` / `upsertKpiRow`, which SELECT-before-INSERT on the `key` column (a goal id, or `<goal_id>/<kpi_id>` for a KPI) to work around DeepLake's UPDATE-coalescing quirk. `buildGoalInsertSql` writes `key`, `value`, `status`, and `agent_id`. The generic memory path writes `path`, `summary`, and `summary_embedding` (`buildMemoryInsertSql` / `buildMemoryUpdateSql`). Text bodies are escaped with `sqlStr` and written with the `E'...'` literal form, because DeepLake offers no parameterized queries (see [`deeplake-storage.md`](deeplake-storage.md)).
 
 `appendFile` takes a fast path that avoids a read-back: when the file already exists it issues a SQL-level concatenation (`summary = summary || E'...'`) and invalidates the content cache so the next read fetches fresh data. This makes append O(1) per call rather than read-modify-write.
 
@@ -164,19 +149,23 @@ Both operations preserve `created_at` and record the edit time in `updated_at`, 
 
 ## The graph VFS bridge
 
-A subtree at `<mount>/graph/` is not backed by any table at all. It is a synthesized read-only view over the local codebase-graph snapshot, dispatched by `handleGraphVfs` in `src/graph/vfs-handler.ts`. `DeepLakeFs` detects the `/graph/` prefix before its normal cache check, strips it, and delegates. The dispatcher is pure: it reads only the local snapshot file for the shell's current working directory and makes zero network calls.
+A subtree at `<mount>/graph/` is not backed by any table at all. It is a synthesized read-only view over the local codebase-graph snapshot. `resolveGraph` in `src/daemon-client/vfs/read.ts` loads that snapshot through the injected loader. When the snapshot is null it returns a `no-graph:` string body. Otherwise it calls `handleGraphVfs` in `src/daemon/runtime/codebase/query.ts`, which returns a string. The renderer reads only the local snapshot and makes zero network calls.
 
 ```typescript
-function readGraphFile(p: string, cwd: string): string {
-  const sub = graphSubpathOf(p);
-  const r = handleGraphVfs(sub, cwd);
-  if (r.kind === "ok") return r.body;
-  if (r.kind === "no-graph") return `(no-graph) ${r.message}`;
-  throw fsErr("ENOENT", `${r.message}`, p);
+function resolveGraph(rel: string, snapshots: SnapshotLoader): string {
+  const snapshot = snapshots.load();
+  if (snapshot === null) {
+    return [
+      "no-graph: no local codebase graph snapshot for this worktree.",
+      "Build one first (the PRD-014 graph build), then `cat graph/index.md` for the overview.",
+    ].join("\n");
+  }
+  const graphPath = rel.startsWith("graph/") ? rel.slice("graph/".length) : rel;
+  return handleGraphVfs(graphPath, snapshot);
 }
 ```
 
-The bridge keeps the FS contract honest. The `no-graph` result (no snapshot built yet for this cwd) is rendered as the file body rather than thrown as `ENOENT`, because the path conceptually exists and is reporting its own emptiness, mirroring how `/index.md` behaves when no rows exist. The `exists`, `stat`, and `realpath` methods are aligned so that `/graph`, `/graph/find`, and `/graph/show` are always-true directories while a leaf path only exists when the dispatcher returns `ok` or `no-graph`, never for an unknown endpoint. The query surface those paths expose is documented in [`codebase-graph.md`](codebase-graph.md).
+The bridge keeps the FS contract honest. A missing snapshot is rendered as the file body rather than thrown as `ENOENT`, because the path conceptually exists and is reporting its own emptiness, mirroring how `/index.md` behaves when no rows exist. The query surface those paths expose (`index.md`, `find`, `query`, `show`, `impact`, `neighborhood`, `layers`, `tour`, `path`) is documented in [`codebase-graph.md`](codebase-graph.md).
 
 ---
 

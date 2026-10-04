@@ -21,7 +21,7 @@ Coding assistant integrations are complex and fragile. They are highly dependent
 
 To prevent silent failures, Honeycomb implements two proactive operational guardrails:
 1. **The Notifications Framework:** Evaluates, queues, and delivers contextual alerts on session start, helping developers resolve subscription issues, account limits, and local mining opportunities.
-2. **The Environment Health Check:** Continuously monitors local prerequisites, verifies compiler tools and helper CLIs, confirms the daemon is up, and auto-wires lifecycle hooks with near-zero friction.
+2. **The Environment Health Check:** `honeycomb status` evaluates five probes (D1–D5) for the running CLI version, daemon reachability on `127.0.0.1:3850`, `cursor-agent` on PATH, `cursor-agent` login, and hook wiring. `createHealthCheck` in [`src/notifications/health.ts`](../../../../src/notifications/health.ts) has no timer. `status` calls `evaluate()`. Auto-wiring is a separate `autoWire()` on that same check.
 
 Together, these guardrails ensure that the shared memory layer remains robust, and that potential compilation, summarization, or daemon-connectivity failures are caught and surfaced before causing silent data loss.
 
@@ -29,72 +29,21 @@ Together, these guardrails ensure that the shared memory layer remains robust, a
 
 ## The Notifications Framework
 
-The notifications pipeline is trigger-agnostic and fail-soft. It is designed to run synchronously during `SessionStart` without introducing visible latency into the user's coding session. Backend notifications are fetched through the daemon, which holds the authenticated connection to the DeepLake cloud.
+The notifications pipeline is trigger-agnostic and fail-soft. It runs on session start without a timer of its own. Backend notifications are fetched through the daemon, which holds the authenticated connection to the DeepLake cloud.
 
-```77:104:src/notifications/index.ts
-export async function drainSessionStart(opts: DrainOptions): Promise<void> {
-  try {
-    const state = readState();
-    const queue = readQueue();
-    const ctx: NotificationContext = {
-      agent: opts.agent,
-      creds: opts.creds,
-      state,
-      localSkillsCount: opts.localSkillsCount ?? null,
-      latestInsightEntry: opts.latestInsightEntry ?? null,
-      sessionCount: opts.sessionCount,
-    };
-
-    const fromRules = evaluateRules("session_start", ctx);
-    const fromQueue = queue.queue;
-    // Two parallel fetches with independent 1.5s timeouts so session-start
-    // latency stays bounded by ~1.5s rather than 3s. Both fail-soft.
-    //
-    // pickPrimaryBanner returns the single banner for the welcome/savings
-    // priority slot (org savings > 1M → savings recap; else → welcome).
-    // Backend pushes remain additive in this PR, they're rare and not yet
-    // under the priority model. A follow-up will collapse all sources
-    // (including queue) under the same priority.
-    const [fromBackend, primary] = await Promise.all([
-      fetchBackendNotifications(opts.creds),
-      pickPrimaryBanner(opts.sessionId, opts.creds, opts.source),
-    ]);
-```
+The drain lives in [`src/notifications/pipeline.ts`](../../../../src/notifications/pipeline.ts). `createNotificationsPipeline` returns a pipeline whose `drain(trigger)` is the session-start operation (the module comment names it `drain(session_start)`). [`src/notifications/index.ts`](../../../../src/notifications/index.ts) is a barrel and re-exports `createNotificationsPipeline` and `DEFAULT_PIPELINE_TIMEOUT_MS`. That constant is `1500`. Local rules, the queue, and the backend fetch run in parallel. Each fetch is bounded by that timeout and fail-soft: a hang or a throw contributes no candidates and the drain still resolves.
 
 ### Double-Invocation Race Mitigation
 
 In some environments, such as Claude Code, the notifications hook can be registered in both the user's global configuration (`~/.claude/settings.json`) and the marketplace plugin definition (`hooks.json`). This causes two separate Node processes to spawn and run in parallel, both reading state before either writes.
 
-To prevent duplicate banners from cluttering the terminal, Honeycomb implements an atomic claiming lock using POSIX file semantics:
+To prevent duplicate banners from cluttering the terminal, Honeycomb implements an atomic claiming lock using POSIX file semantics. The lock is `createClaimLock` in [`src/notifications/state.ts`](../../../../src/notifications/state.ts). The claim directory name is `claims` (`CLAIM_DIR_NAME`) under `honeycombStateDir()`.
 
-```114:133:src/notifications/state.ts
-export function tryClaim(n: Notification): boolean {
-  const home = resolve(homedir());
-  const claimsDir = join(home, ".honeycomb", "notifications-claims");
-  try {
-    mkdirSync(claimsDir, { recursive: true, mode: 0o700 });
-  } catch (e: any) {
-    log(`tryClaim mkdir failed: ${e?.message ?? String(e)}`);
-    return true;
-  }
-  const claimPath = claimPathFor(claimsDir, n);
-  try {
-    const fd = openSync(claimPath, "wx", 0o600);
-    closeSync(fd);
-    return true;
-  } catch (e: any) {
-    if (e?.code === "EEXIST") return false;
-    log(`tryClaim open failed: ${e?.message ?? String(e)}`);
-    return true;
-  }
-}
-```
-
-The first process to call `openSync` with the exclusive write-creation flag (`wx`) succeeds and gains the claim. The racer process encounters an `EEXIST` error and immediately skips emitting that notification.
+`claim` exclusive-creates the claim file with `openSync(path, "wx")`. The first process creates the file and wins. A racer sees `EEXIST` and loses, and that notification is skipped. Any other filesystem error, including a `mkdir` failure, throws `StateFsError`.
 
 ### Transient vs. Persistent States
 
-* **Persistent Notifications:** Welcome messages, first-time guides, or organization-wide savings recaps are registered in state. Storing their `id` and `dedupKey` in `~/.honeycomb/notifications-state.json` ensures they display exactly once.
+* **Persistent Notifications:** Welcome messages, first-time guides, or organization-wide savings recaps are registered in state. Storing their `id` and `dedupKey` in `~/.apiary/honeycomb/notifications-state.json` ensures they display exactly once (`src/notifications/state.ts` resolves the directory with `honeycombStateDir()`).
 * **Transient Notifications:** Used for self-clearing events, such as payment failures or missing background dependencies. When a transient notification is drained, its claim file is unlinked using `releaseClaim`, allowing future sessions to re-emit the warning if the underlying issue continues.
 
 To prevent filesystem corruption during state updates, `writeState` writes output to a temporary process-tagged file first, then executes an atomic POSIX `renameSync` operation over the active state path.
@@ -103,15 +52,15 @@ To prevent filesystem corruption during state updates, `writeState` writes outpu
 
 ## Environment Health Check (D1 - D5)
 
-The health check resolves the silent-failure gap described in `prd-002a-health-check.md`. If a background summary worker fails because a compiler or tool binary is missing, or because the daemon is down, the error was previously swallowed. The check proactively monitors five independent dimensions of environment health.
+The health check resolves the silent-failure gap described in `prd-002a-health-check.md`. If a background summary worker fails because a compiler or tool binary is missing, or because the daemon is down, the error was previously swallowed. `honeycomb status` evaluates five independent dimensions. The dimension ids are still `D1` through `D5` ([`src/notifications/contracts.ts`](../../../../src/notifications/contracts.ts)). The probes are [`src/cli/health-probes.ts`](../../../../src/cli/health-probes.ts).
 
 | Dimension | Checked Precondition | Resolving Strategy |
 | --- | --- | --- |
-| **D1: `honeycomb` CLI** | Is the global `honeycomb` CLI binary installed? | PATH resolution with version probing. |
-| **D2: Honeycomb daemon** | Is the daemon running and reachable on port 3850? | TCP probe with a fast-start fallback that launches the daemon if absent. |
-| **D3: `cursor-agent` CLI** | Is `cursor-agent` present and executable? | PATH resolution with fallbacks to known IDE directories. |
-| **D4: `cursor-agent` login** | Is the user logged into `cursor-agent`? | A lightweight status query command. |
-| **D5: Hooks wired and current** | Are the correct lifecycle hooks present? | Checks `hooks.json` for matches against the current bundle. |
+| **D1: `honeycomb` CLI** | Is this process the `honeycomb` CLI? | In-process `HONEYCOMB_VERSION`. The probe does not spawn a PATH lookup. |
+| **D2: Honeycomb daemon** | Is the daemon reachable? | `daemon.ping()`, detail `127.0.0.1:3850`. The probe does not launch the daemon. |
+| **D3: `cursor-agent` CLI** | Is `cursor-agent` present? | `which`, or `where` on Windows. |
+| **D4: `cursor-agent` login** | Is the user logged into `cursor-agent`? | `cursor-agent status`, with a 5-second timeout. |
+| **D5: Hooks wired and current** | Is capture wired? | Healthy when the Claude Code plugin is installed and enabled. Otherwise healthy when `~/.cursor/hooks.json` exists. |
 
 Surfacing logged-out, daemon-down, and missing states upfront prevents the shared DeepLake store from filling with silent, empty placeholders.
 
@@ -130,7 +79,7 @@ The root cause was a resolve-path mismatch between the dev layout and the shippe
 The fix has two halves:
 
 1. **Probe candidate paths instead of hard-coding one.** `resolveEmbedEntry` now checks both the bundled sibling path (`../embeddings/...`) and the dev five-up path and picks whichever actually exists on disk. The selection logic was extracted as a pure `pickEmbedEntry` with a regression test covering both layouts, so a future packaging change that breaks one layout is caught in CI rather than in the field.
-2. **Report the honest embeddings state.** The supervisor now reads the embed daemon's own `/health.warmFailed` and tracks restart-exhaustion, and `/health` reports the real state, ready, failed, or falling back to BM25, rather than echoing the enabled flag. A user who turned embeddings on and is silently getting BM25 now sees that in `/health`.
+2. **Report the honest embeddings state.** The supervisor reads the embed daemon's own `/health` (`warmFailed`) and tracks restart-exhaustion. The daemon `/health` field is `EmbeddingsHealth`: `off`, `warming`, `on`, `suspect`, or `failed` ([`src/daemon/runtime/health.ts`](../../../../src/daemon/runtime/health.ts)). The coarse `embeddings` value mirrors that set when supervisor signals are wired. `HONEYCOMB_EMBEDDINGS=false` still forces `off`.
 
 The general lesson applies beyond embeddings: every subsystem that `/health` describes should be probed for its actual state (process alive, warmup succeeded, restart budget intact), never reported from the flag that was supposed to turn it on.
 
@@ -140,27 +89,16 @@ The general lesson applies beyond embeddings: every subsystem that `/health` des
 
 The auto-wiring engine removes the friction of manual hook setup by managing the `~/.cursor/hooks.json` configuration file on the developer's behalf.
 
-The engine wires six specific lifecycle events to redirect agent actions through the Honeycomb daemon:
+The engine wires six lifecycle events through `CURSOR_HANDLERS` in [`src/connectors/cursor.ts`](../../../../src/connectors/cursor.ts). Auto-wiring delegates to that connector ([`src/notifications/auto-wiring.ts`](../../../../src/notifications/auto-wiring.ts)). The cursor shim still accepts `afterAgentResponse` and maps it to `assistant_message` ([`src/hooks/cursor/shim.ts`](../../../../src/hooks/cursor/shim.ts)); the connector registers `assistant_message` on native `stop` only.
 
-```44:61:src/cli/install-cursor.ts
-function buildHookConfig(): Record<string, CursorHookEntry[]> {
-  return {
-    sessionStart: [buildHookCmd("session-start.js", 30)],
-    beforeSubmitPrompt: [buildHookCmd("capture.js", 10)],
-    // preToolUse with Shell matcher rewrites grep/rg against ~/.honeycomb/memory/
-    // into a single daemon fast-path call, matching Claude Code / Codex accuracy.
-    preToolUse: [buildHookCmdShellMatcher("pre-tool-use.js", 30)],
-    postToolUse: [buildHookCmd("capture.js", 15)],
-    afterAgentResponse: [buildHookCmd("capture.js", 15)],
-    // graph-on-stop: auto-build the code graph (A1 Cursor parity). Same hook
-    // Claude Code registers under Stop + SessionEnd. It's gated (rate limit +
-    // HEAD-changed + source-diff) so the common path is a ~5ms skip, and runs
-    // async so it never blocks Cursor.
-    stop: [buildHookCmd("capture.js", 15), buildHookCmd("graph-on-stop.js", 30)],
-    sessionEnd: [buildHookCmd("session-end.js", 30), buildHookCmd("graph-on-stop.js", 30)],
-  };
-}
-```
+| Native event | Handler | Timeout |
+| --- | --- | --- |
+| `sessionStart` | `session-start.js` | 10s |
+| `beforeSubmitPrompt` | `capture.js` | 10s |
+| `beforeShellExecution` | `pre-tool-use.js`, matcher `Shell` | 60s |
+| `postToolUse` | `capture.js` | 15s |
+| `stop` | `capture.js` (`assistant_message`) | 30s |
+| `sessionEnd` | `session-end.js` | 60s |
 
 ### Correctness and Safety Requirements
 

@@ -1,15 +1,16 @@
 # Three-Tier Memory Strategy (prime once, zoom on demand)
 
-> Category: Ai | Version: 2.0 | Date: June 2026 | Status: Active
+> Category: Ai | Version: 2.1 | Date: October 2026 | Status: Active
 
 A **3-tier "zoom" memory** layered on top of Honeycomb's Deep Lake store so a coding agent (Claude
-Code, Cursor) is *primed once per session* with a tiny index of distilled memory and then *resolves
-deeper on demand*. This is the conceptual anchor for a set of sibling docs. The strategy is shipped:
-as of PRD-046 ([#77](https://github.com/legioncodeinc/honeycomb/pull/77), merged 2026-06-22) the
-Tier-1 `key` columns, the prime endpoint, resolve/mine, and the CC/Cursor SessionStart hooks are all
-live (see the §3 table), and the dedup/recency shaping from PRD-047c/d composes into both the prime
-and the recall path. GraphRAG ([`graphrag-followon.md`](graphrag-followon.md)) is the approved later
-add on top of this foundation.
+Code, Cursor) is *primed once per session* with a tiny index of distilled memory, given a *bounded
+fast recall on each turn*, and then *resolves deeper on demand*. This is the conceptual anchor for a
+set of sibling docs. The strategy is shipped: as of PRD-046
+([#77](https://github.com/legioncodeinc/honeycomb/pull/77), merged 2026-06-22) the Tier-1 `key`
+columns, the prime endpoint, resolve/mine, and the CC/Cursor SessionStart hooks are all live (see
+the §3 table). Recall mining runs dedup and class-aware activation. The prime is a newest-first
+skim. GraphRAG ([`graphrag-followon.md`](graphrag-followon.md)) is the approved later add on top of
+this foundation.
 
 **Related:**
 - [`session-priming-architecture.md`](session-priming-architecture.md), the push/pull mechanism + harness wiring
@@ -33,12 +34,13 @@ cross-machine memory. The open question this strategy answers is: **how does Hon
 store actually reach the agent at the start of a fresh session, cheaply and without polluting the
 context window?**
 
-The naive answer, "inject relevant memories into every turn", is a trap (see §5). The better
-answer is a **resolution hierarchy**: give the agent a small, cheap *index* of what Honeycomb knows
-at session start, and let the agent *zoom in* on the few items it cares about by calling tools. This
-is progressive disclosure applied to memory. It is roughly how human recall works, a gist or
-keyword surfaces first ("oh, the CI thing"), which you can then expand into a summary, which you can
-expand into the full episode, which is why the project owner describes it as "like the human brain."
+An unbounded inject of full recall on every turn is the failure §5 bounds. The shipped boundary is
+a session-start prime, a bounded per-turn fast inject, and on-demand zoom. The better answer is a
+**resolution hierarchy**: give the agent a small, cheap *index* of what Honeycomb knows at session
+start, and let the agent *zoom in* on the few items it cares about by calling tools. This is
+progressive disclosure applied to memory. It is roughly how human recall works, a gist or keyword
+surfaces first ("oh, the CI thing"), which you can then expand into a summary, which you can expand
+into the full episode, which is why the project owner describes it as "like the human brain."
 
 ---
 
@@ -104,14 +106,18 @@ start**, all three of which now ship. Storage was not the hard part.
 
 - **depth 0 (KEY):** already in the agent's primed context; no call needed.
 - **depth 1 (SUMMARY):** fetch the `memory.summary` (or `memories.content`) row the key points to.
-- **depth 2 (RAW):** fetch the `sessions` rows linked to that summary (same `path` / session id).
+- **depth 2 (RAW):** fetch the `sessions` rows for that session. Capture stores the transcript path
+  on `sessions.path` and the session identity on `sessions.id`, so the join is
+  `id LIKE 'sess-<sessionId>-%'` plus a post-filter (`src/daemon/runtime/memories/resolve.ts`).
+  `resolve.ts` rejects a join that matches `sessions` by the summary path.
 
-The whole chain is a `SELECT … WHERE path = '<id>'` walk, no similarity search, no payload-pointer
-round-tripping. It maps directly onto Honeycomb's MCP read surface (`hivemind_read`): the key carries
-the row id, and each `depth` step is a lookup. The mining path (when the agent searches for memory it
-did *not* know to name) uses the hybrid recall (`hivemind_search` → `recall.ts`). See the
-hybrid-rationale doc for why "resolve = join" is the property that makes Deep Lake a better fit than a
-vector-only store.
+The chain is a deterministic SQL lookup, no similarity search, no payload-pointer round-tripping.
+Depth 1 selects `memory.summary` or `memories.content` by path or id. Depth 2 uses the session-id
+prefix above. It maps directly onto Honeycomb's MCP read surface (`hivemind_read` →
+`GET /api/memories/resolve`): the key carries the row id, and each `depth` step is a lookup. The
+mining path (when the agent searches for memory it did *not* know to name) uses the hybrid recall
+(`hivemind_search` → `POST /api/memories/recall`). See the hybrid-rationale doc for why "resolve =
+lookup" is the property that makes Deep Lake a better fit than a vector-only store.
 
 ---
 
@@ -121,30 +127,34 @@ vector-only store.
    and auto-compact them. Honeycomb owns the *persistent, cross-session* tiers (Summary, Raw) and the
    *index over them* (Key). It must not try to own a Valkey-style live working-memory tier for a
    coding agent, that tier already exists in the harness, and duplicating it invites drift.
-2. **Prime per session, pull per turn, never auto-inject per turn.** "Always query Honeycomb and
-   inject the results on every turn" adds latency to every turn and crowds the window with memory the
-   agent did not ask for (the "lost in the middle" failure the prior-art docs flag). The correct
-   shape is: push a tiny *index* once at session start; let the agent *pull* (resolve / search) only
-   what it wants, on whatever turn it wants. This is detailed in the priming-architecture doc.
+2. **Prime once, plus a bounded per-turn fast inject, plus on-demand pull.** Session start still
+   pushes a tiny index (`prime`). Each turn, `HookRuntime` dispatches `user_prompt_recall` to
+   `runUserPromptRecall` (`src/hooks/runtime.ts`), and the renderer posts `fast: true` to
+   `/api/memories/recall`. The agent can still pull (resolve / search) on demand. An unbounded
+   full-recall inject on every turn is the shape this boundary replaced. The hook detail lives in
+   the priming-architecture doc.
 
 ---
 
 ## 6. How this relates to the retrieval shaping work (PRD-047)
 
-This strategy sits *on top of* the recall engine, not instead of it. PRD-047 hardened the recall path
-the resolve/mine calls depend on, and all of it now ships:
+This strategy sits *on top of* the recall engine. PRD-047 hardened the mining path the mine call
+depends on:
 
-- **047a (closed):** the native `deeplake_hybrid_record` operator was benchmarked and rejected (it
-  returned degenerate constant-zero scores, and even after the vendor fix only ties RRF); the engine
-  keeps post-query RRF. The 3-tier mining path rides RRF, which measured recall@5 ≈ 0.72-0.78 live.
-  See [`deeplake-hybrid-record-operator-report.md`](deeplake-hybrid-record-operator-report.md).
-- **047b reranker / 047c semantic dedup / 047d recency dampening / 047e MMR / 047f graded-nDCG eval**
-  are wired into both the mining path and the prime: dedup keeps the index from showing the same fact
-  five times; recency dampening makes the "recent timestream" prime fresh-biased without forgetting
-  durable facts; the graded-nDCG eval is how priming gets *proven* rather than vibed.
+- **047a (closed):** the native `deeplake_hybrid_record` operator was benchmarked and left unwired
+  (the 2026-06-22 run returned degenerate constant-zero scores; the 2026-06-24 vendor fix only ties
+  RRF). The engine keeps post-query RRF. The 2026-06-22 band was recall@5 ≈ 0.72-0.78. The tie run
+  is recall@5 0.611 for both paths. See
+  [`deeplake-hybrid-record-operator-report.md`](deeplake-hybrid-record-operator-report.md).
+- **Mining and the prime do not share the PRD-047 stack.** Recall mining runs semantic dedup and
+  class-aware activation (`applyActrActivation` when the activation source is injected, otherwise
+  `applyRecencyActivation`). The reranker default is `none`. MMR engages only with a positive
+  `tokenBudget`. Graded nDCG gates ranking changes on the recall eval. The prime does not run that
+  stack. `prime.ts` issues `skimPrimeKeys` only. The prime assembler keeps the skim's newest-first
+  `ORDER BY`. The PRD-047d dampener is not built on the prime, and semantic dedup there is a later
+  seam. The default prime deduper is normalized text.
 
-The 3-tier prime is best thought of as **PRD-047's consumer**: it turns a good recall engine into a
-session-level capability the agent actually feels.
+Mining is the path that consumes those stages. The prime stays the newest-first skim.
 
 ---
 
@@ -156,7 +166,7 @@ hooks + the MCP read/search tools) already existed. The build was ~70% retrieval
 session-start hook, ~30% genuinely new (Tier-1 key generation + the resolve tool). The remaining risk
 is not plumbing, the plumbing ships; it is **distillation quality**, since a bland Tier-1 key is one
 the agent ignores, which wastes the prime. That risk is the subject of the distillation doc and is
-the single thing most worth getting right, which is why the prime eval (§6) gates it.
+the single thing most worth getting right.
 
 ---
 
@@ -164,6 +174,7 @@ the single thing most worth getting right, which is why the prime eval (§6) gat
 
 | Date | Version | Change |
 |------|---------|--------|
+| 2026-10 | 2.1 | Prime boundary is prime once, a bounded per-turn fast inject, and on-demand pull. Prime shaping is the skim order. Mining recall@5 dated to the 2026-06-24 tie. Depth 2 joins sessions by id prefix. |
 | 2026-06 | 2.0 | Status → Active: PRD-046 shipped. Tier-1 `key` columns, the prime endpoint, the resolve chain, and the SessionStart hooks are live; rewrote §3 state column, §4 resolve, §6 PRD-047 relationship, and §7 verdict in present tense. Added a `../data/schema.md` Related link for the backing columns. |
 | 2026-06 | 1.1 | **Correction:** Tier-2 (PRD-017 summaries + synthesis) is `Completed`/built, not a Wave-2 stub. The real gap is deferred live wiring of the worker. See the distillation doc §5. |
 | 2026-06 | 1.0 | Initial strategy capture from the 3-tier memory design discussion. |

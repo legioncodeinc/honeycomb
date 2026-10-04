@@ -1,6 +1,6 @@
 # PRD-066c: Idle-Cost Verification And Rollout
 
-> **Status:** Backlog
+> **Status:** In Work
 > **Parent:** PRD-066
 > **Priority:** P0
 > **Effort:** S

@@ -14,7 +14,7 @@ How the Honeycomb daemon's HTTP API is shaped: route grouping, the error and sta
 
 ## One service, grouped routes
 
-The Honeycomb daemon serves its HTTP API from one Hono server on port 3850 (`src/shared/constants.ts:13-17`). `/health` is the cheap liveness check, `/api/*` is the working API, `/memory/*` keeps search and similarity aliases, and `/mcp` and `/v1/*` carry MCP and the OpenAI-compatible gateway. `ROUTE_GROUPS` scaffolds a `/` group, and no module attaches a page handler to it (`src/daemon/runtime/server.ts:105`). The browser dashboard is the Hive portal on port 3853 (`src/shared/constants.ts:19-23`). The full surface is in [Daemon Surface](../architecture/daemon-surface.md); this doc covers the conventions behind the API.
+The Honeycomb daemon serves its HTTP API from one Hono server on port 3850 (`src/shared/constants.ts`). `/health` is the cheap liveness check and `/api/*` is the working API. `ROUTE_GROUPS` scaffolds `/mcp` and `/v1`. An unfilled scaffold returns 501. The OpenAI gateway module is `src/daemon/runtime/inference/gateway.ts`, and production `assemble.ts` does not call `group("/v1")`. Production MCP is the stdio server. `ROUTE_GROUPS` also scaffolds a `/` group, and no module attaches a page handler to it. The browser dashboard is the Hive portal on port 3853. The full surface is in [Daemon Surface](../architecture/daemon-surface.md); this doc covers the conventions behind the API.
 
 ## Route groups
 
@@ -45,7 +45,7 @@ Errors return a structured shape, by default `{ "error": "human-readable message
 | 429 | rate limit exceeded, with `Retry-After` |
 | 503 | mutation blocked by a kill switch (frozen mutations) |
 
-Upstream errors are masked behind client-safe messages. Rate-limited operations surface a dedicated rate-limit error with a `Retry-After` header, and dead-lettered jobs are not retried.
+Upstream errors are masked behind client-safe messages. The rate-limit middleware returns `429` with a `Retry-After` header. Production assembly leaves that middleware unmounted. Dead-lettered jobs are not retried.
 
 ## The contracts every route honors
 
@@ -57,8 +57,8 @@ Runtime path: a session uses one active runtime path. Connectors send `x-honeyco
 
 ## Auth at the route layer
 
-Authorization is mode-aware. In `local` mode every route is open. In `team` and `hybrid`, each protected route checks a required permission against the caller's role (admin, operator, agent, readonly), validates token scope against the resource within its org and workspace, and applies a rate-limit bucket for expensive or abuse-prone operations. The model is documented in [Auth Architecture](../auth/auth-architecture.md). The rule of thumb is that admin, token, diagnostics, source, connector, secret, and mutation routes always carry an explicit permission check.
+Authorization is mode-aware. In `local` mode every route is open. The frozen roles are `admin`, `member`, `readonly`, and `agent`. In `team`, each protected route checks a required permission against that role. In `hybrid`, the middleware skips the authenticator and the policy for a trusted local socket peer. That skip stays unreachable until a probe is wired, so the live server checks `hybrid` the same way it checks `team`. The route layer asks the policy for a capability and a project hint. The middleware stamps the validated identity so handlers can cross-check `x-honeycomb-org`. Production assembly leaves the rate-limit middleware unmounted. The model is documented in [Auth Architecture](../auth/auth-architecture.md). The rule of thumb is that admin, token, diagnostics, source, connector, secret, and mutation routes always carry an explicit permission check.
 
 ## Keeping the API and its docs honest
 
-`docs/API.md` and the per-group `docs/api/*.md` files are kept accurate to the daemon routes, and route changes update them in the same PR. Root docs duplicated into `docs/` are generated artifacts: the root source is edited and the sync script regenerates the copies, so the docs do not drift from the routes they describe. This is the API-surface case of the broader docs-drift rule in [Coding Standards (TypeScript)](coding-standards-typescript.md): code is the authority, and the documented surface is refreshed from implementation truth.
+This checkout's `docs/` directory contains `docs/ci.md` and `docs/license-header.txt`. There is no `docs/API.md` and no `docs/api/` tree here. Route changes belong in the daemon source and in these knowledge pages. Code is the authority.

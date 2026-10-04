@@ -2,8 +2,8 @@
 
 > **SUPERSEDED (2026-07-03):** Relocated to Queen, the fleet orchestrator. Canonical copy: `queen/library/knowledge/private/architecture/ADR-0004-honeycomb-control-plane-and-postgres-boundary.md`. Retained here for history only; do not update.
 
-> **Status:** Proposed (exploratory) | **Date:** 2026-06-29
-> **Supersedes:** none | **Superseded by:** queen ADR-0004 (relocated)
+> **Status:** Superseded by queen ADR-0004 (relocated 2026-07-03); queen runtime topology later superseded by queen ADR-0010 | **Date:** 2026-06-29
+> **Supersedes:** none | **Superseded by:** queen ADR-0004 (relocated 2026-07-03); queen runtime topology later superseded by queen ADR-0010
 > **Owners:** cloud-control-plane, security, operations | **Related:** ADR-0002, ADR-0003, PRD-054, PRD-055, PRD-062
 
 ## Context

@@ -9,6 +9,7 @@ How the daemon stops paying DeepLake compute to ask "is there local work?" by sc
 - [`deeplake-idle-hibernation.md`](deeplake-idle-hibernation.md)
 - [`observability-and-degradation.md`](observability-and-degradation.md)
 - [`../architecture/adr/0006-local-queue-as-interim-idle-cost-control.md`](../architecture/adr/0006-local-queue-as-interim-idle-cost-control.md)
+- [`../architecture/adr/0009-local-queue-as-default-deeplake-is-not-a-queue.md`](../architecture/adr/0009-local-queue-as-default-deeplake-is-not-a-queue.md)
 - [`../architecture/adr/0004-honeycomb-control-plane-and-postgres-boundary.md`](../architecture/adr/0004-honeycomb-control-plane-and-postgres-boundary.md)
 - [`../data/deeplake-storage.md`](../data/deeplake-storage.md)
 
@@ -43,7 +44,7 @@ The seam stays stable: every consumer still depends on a single `JobQueueService
 
 ## Layer 1: the local SQLite queue
 
-[`src/daemon/runtime/services/local-job-queue.ts`](../../../../src/daemon/runtime/services/local-job-queue.ts) is a durable, daemon-local queue built on the built-in `node:sqlite` driver. It is intentionally local-only: it never imports or calls the DeepLake storage client. The database lives at `.daemon/local-queue.db` under the daemon runtime directory. Specifically, as of PR #285 (v0.10.1), that is the fleet state root: `<fleetRoot>/honeycomb/.daemon/local-queue.db` via `resolveLocalQueueBaseDir()` = `honeycombStateDir()`, resolved from `os.homedir()`/`APIARY_HOME` and never `process.cwd()`, so a restart from any launch directory reopens the same durable queue instead of orphaning pending jobs (see [`../data/workspace-layout.md`](../data/workspace-layout.md)). It is a single `local_job` table with the columns `id`, `kind`, `payload_json`, `status`, `priority`, `attempts`, `max_attempts`, `run_after`, `lease_owner`, `leased_until`, `created_at`, `updated_at`, `completed_at`, and `last_error_class`.
+[`src/daemon/runtime/services/local-job-queue.ts`](../../../../src/daemon/runtime/services/local-job-queue.ts) is a durable, daemon-local queue built on the built-in `node:sqlite` driver. It is intentionally local-only: it never imports or calls the DeepLake storage client. The database file is `.daemon/local-queue.db`. Production assembly opens it under `honeycombStateDir()` (`resolveLocalQueueBaseDir()` in [`assemble.ts`](../../../../src/daemon/runtime/assemble.ts) passes that directory as `baseDir`). `honeycombStateDir()` is `resolveFleetRoot()` plus the product slug. Fleet root is absolute `APIARY_HOME`, else absolute `$XDG_STATE_HOME/apiary` on Linux, else `<home>/.apiary` ([`src/shared/fleet-root.ts`](../../../../src/shared/fleet-root.ts)). `~/.apiary/honeycomb/.daemon/local-queue.db` is that last leg, and only when `APIARY_HOME` is unset and, on Linux, `XDG_STATE_HOME` is unset or not absolute. A restart from any launch directory reopens the same durable queue (see [`../data/workspace-layout.md`](../data/workspace-layout.md)). It is a single `local_job` table with the columns `id`, `kind`, `payload_json`, `status`, `priority`, `attempts`, `max_attempts`, `run_after`, `lease_owner`, `leased_until`, `created_at`, `updated_at`, `completed_at`, and `last_error_class`.
 
 The service exposes the same lifecycle the DeepLake queue does, so it is a drop-in behind the router: `enqueue`, `lease(kinds?)`, `complete`, `fail`, `reclaimExpiredLeases`, `pruneCompleted`, `counts`, and `close`. A job moves through five statuses: `queued`, `retrying`, `leased`, `done`, `failed`. Lease ownership is single-winner within a daemon process; the reaper reclaims expired leases so a crashed run does not strand work. Because the store is local SQLite rather than an append-only eventually-consistent log, lease discovery is a direct indexed read with no convergence-poll multiplier, which is the entire point of the cost win.
 
@@ -67,23 +68,24 @@ PRD-066f hardened this loop against a real defect: repeated worker starts stacke
 
 PRD-066e adds an operator-facing inspection endpoint, [`src/daemon/runtime/local-queue-diagnostics-api.ts`](../../../../src/daemon/runtime/local-queue-diagnostics-api.ts), mounted at `GET /api/diagnostics/local-queue` on the already-protected `/api/diagnostics` group. The builder, [`src/daemon/runtime/services/local-queue-diagnostics.ts`](../../../../src/daemon/runtime/services/local-queue-diagnostics.ts), is pure except for an optional request-time DeepLake pending-job count. It never runs on an idle timer, so inspecting upgrade state does not reintroduce the idle cost the feature exists to remove.
 
-The response reports four things:
+The response reports five things:
 
 1. **Local queue state.** Whether the feature is enabled, whether the store is persistent, the drain flag, the local kind set, and live counts by status and kind.
-2. **Topology.** Resolved from `HONEYCOMB_TOPOLOGY` or `HONEYCOMB_INSTALL_TOPOLOGY` (`single_machine`, `multi_device`, `fleet`, or `unknown`). Single-machine installs are eligible for default-on; multi-device and fleet stay on the shared queue unless `HONEYCOMB_LOCAL_QUEUE_EXPLICIT_OPT_IN` overrides the guard. This is the gate that keeps a future default-on rollout from silently breaking cross-device coordination.
+2. **Topology.** Resolved from `HONEYCOMB_TOPOLOGY` or `HONEYCOMB_INSTALL_TOPOLOGY` (`single_machine`, `multi_device`, `fleet`, or `unknown`). An undeclared topology (`unknown`) and `single_machine` are eligible for default-on, and an unset `HONEYCOMB_LOCAL_QUEUE_ENABLED` already takes that path. `multi_device` and `fleet` stay on the shared queue unless `HONEYCOMB_LOCAL_QUEUE_EXPLICIT_OPT_IN` overrides the guard. That guard keeps cross-device coordination on the shared queue.
 3. **Rollback status.** Whether disabling the flag would strand local work. The key safety signal is `localWorkWillNotProcess`: if the flag is off but `.daemon/local-queue.db` still holds queued, retrying, or leased jobs, the response carries a warning that the work will not be processed until the flag is re-enabled. Rollback never requires a DeepLake migration or a local-DB deletion; it is a flag flip.
 4. **Pending shared local jobs.** An optional count of local-classified kinds still sitting in the DeepLake `memory_jobs` table, used to decide when migration drain is complete. The read is bounded by a 5-second timeout and degrades to `unavailable` rather than hanging the endpoint. Its query reads the latest version of each job (a `MAX(version)` self-join, matching the append-only convergence posture) and is built with validated bare table identifiers after `sqlIdent()`, closing the Aikido SQL finding PRD-066f remediated.
+5. **Query meter.** `queryMeter` is a snapshot plus a log line when a meter reader is injected, and `null` when no reader is injected. The diagnostics builder does not poll it on an idle timer.
 
 ## Flag posture
 
-The local queue inverts PRD-062's default-ON convention. Because it changes where local coordination happens, it ships **opt-in**: with every flag unset the daemon runs the exact pre-PRD shared-queue path.
+ADR-0009 reversed the original opt-in. `resolveLocalQueueTopology` treats an undeclared topology and `single_machine` as eligible for the local queue. `multi_device` and `fleet` stay on the shared queue unless `HONEYCOMB_LOCAL_QUEUE_EXPLICIT_OPT_IN` is set. `HONEYCOMB_LOCAL_QUEUE_ENABLED=false` still forces the shared rollback path (`src/daemon/runtime/services/local-queue-diagnostics.ts`). The assembled database file is `<fleetRoot>/honeycomb/.daemon/local-queue.db`, with fleet root resolved as absolute `APIARY_HOME`, else absolute `$XDG_STATE_HOME/apiary` on Linux, else `<home>/.apiary`. The CLI always passes `--experimental-sqlite` when it spawns the daemon (`src/cli/runtime.ts`).
 
 | Knob | Env var | Default |
 |---|---|---|
-| Master switch | `HONEYCOMB_LOCAL_QUEUE_ENABLED` | off (bare config keeps the shared DeepLake queue) |
+| Master switch | `HONEYCOMB_LOCAL_QUEUE_ENABLED` | on for undeclared and single-machine; `false` forces the shared queue |
 | Migration drain of shared local-kind rows | `HONEYCOMB_LOCAL_QUEUE_DRAIN_SHARED` | off (non-drain leaves the shared reaper stopped) |
-| Topology signal | `HONEYCOMB_TOPOLOGY` / `HONEYCOMB_INSTALL_TOPOLOGY` | `unknown` (not eligible for default-on) |
-| Explicit default-on override | `HONEYCOMB_LOCAL_QUEUE_EXPLICIT_OPT_IN` | off |
+| Topology signal | `HONEYCOMB_TOPOLOGY` / `HONEYCOMB_INSTALL_TOPOLOGY` | undeclared counts as local-queue eligible |
+| Explicit default-on override | `HONEYCOMB_LOCAL_QUEUE_EXPLICIT_OPT_IN` | off; set it to keep the local queue on a fleet topology |
 
 ## Required invariants
 

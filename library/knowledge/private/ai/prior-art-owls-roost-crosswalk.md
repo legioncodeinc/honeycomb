@@ -1,6 +1,6 @@
 # Prior Art: Owl's Roost Memory, Crosswalk
 
-> Category: Ai | Version: 1.0 | Date: June 2026 | Status: Strategy, reference / external prior art
+> Category: Ai | Version: 1.1 | Date: October 2026 | Status: Strategy, reference / external prior art
 
 A crosswalk between the 3-tier zoom strategy and the memory system the project owner previously built
 in the **Owl's Roost** coaching app (a separate repo). It records what transfers to Honeycomb, what
@@ -53,13 +53,13 @@ transfer strongly; several *implementation choices* are wrong for Honeycomb beca
 | Owl's Roost idea | Honeycomb disposition | Why |
 |---|---|---|
 | Two-step grounded summary (JSON facts → narrative) | **TRANSFER** | The anti-hallucination guarantee is domain-independent. Port it to PRD-017 + the Tier-1 key derivation. See distillation doc. |
-| Temporal decay (age multiplier; semantic ages slowly) | **TRANSFER (already in flight)** | This is exactly PRD-047d recency dampening. The "recent timestream" prime is age-weighted; durable facts age slowly. |
+| Temporal decay (age multiplier; semantic ages slowly) | **TRANSFER (shipped on recall)** | Recall recency is `applyRecencyActivation`, with half-lives `memories` 180d, `memory` 45d, and `sessions` 10d. `applyRecencyDampening` remains as a back-compat function and is not the stage `recallMemories` calls. The prime is newest-first `ORDER BY`. |
 | Cold-start graceful degradation | **TRANSFER** | A fresh repo / new agent has no memory; the prime must degrade to "nothing yet" cleanly, never error, matches Honeycomb's existing `degraded` recall posture. |
 | Three *zoom* levels of detail | **TRANSFER (re-framed)** | Honeycomb's tiers are zoom levels (key→summary→raw), not age buckets, see below. |
 | Tier-1 = Valkey working memory | **DROP** | The harness (Claude Code / Cursor) already owns live working memory + compaction. Honeycomb must not rebuild it. Honeycomb's "Tier 1" is an *index*, not working memory. |
 | Compaction at 40 turns / status machine | **DROP (mostly)** | That is the harness's job for a coding agent. Honeycomb captures turns and distills at session boundaries, not via a 40-turn in-memory compactor it owns. |
 | Qdrant vector-only + payload-pointer resolution | **DROP** | Deep Lake's SQL side does key resolution as a join; no payload-pointer scheme. See hybrid-rationale doc. |
-| Cohere rerank-v3.5 as the reranker | **ADAPT** | Reranking is right (PRD-047b), but Honeycomb reranks via its own configured reranker (embedding-cosine default / LLM), not a Cohere dependency. |
+| Cohere rerank-v3.5 as the reranker | **ADAPT** | Reranking is optional (PRD-047b). The default strategy is `none`, so recall keeps RRF order. `embedding-cosine` is an opt-in local strategy. `llm` is named in `RERANKER_STRATEGIES` and unimplemented; that branch falls through to RRF order. `cohere` is a real opt-in (`HONEYCOMB_RECALL_RERANKER=cohere`, model `rerank-v3.5` through Portkey). Recall runs with Cohere left off. |
 | GraphRAG behind a flag | **ADAPT → approved follow-on** | Relational multi-hop is valuable later; Honeycomb has its own graph substrate. See graphrag-followon doc. |
 
 ---
@@ -108,4 +108,5 @@ way and apply directly:
 
 | Date | Version | Change |
 |------|---------|--------|
+| 2026-10 | 1.1 | Recency row names shipped `applyRecencyActivation` and the newest-first prime. Reranker row names default `none`, optional `embedding-cosine`, unimplemented `llm`, and opt-in `cohere`. |
 | 2026-06 | 1.0 | Initial crosswalk from the Owl's Roost memory docs to the Honeycomb 3-tier strategy. |

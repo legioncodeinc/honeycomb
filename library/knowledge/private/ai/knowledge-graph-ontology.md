@@ -31,13 +31,13 @@ flowchart TD
     attr --> prov["provenance: memory_id, source, proposal_id"]
 ```
 
-An **entity** has a canonical name and a type, and can be pinned or mounted from an external source. **Aspects** are weighted dimensions of an entity; their weight rises when retrieval keeps confirming them and decays when they go stale. Inside an aspect, a `group_key` is a navigable subdivision and a `claim_key` is the specific slot a value lives in. An **entity_attribute** is the value in that slot, with a `kind` of `attribute` or `constraint`, a `status` of `active`, `superseded`, or `deleted`, a confidence and importance, a version lineage, and provenance back to the memory and proposal that produced it.
+An **entity** has a canonical name and a type, and can be pinned or mounted from an external source. **Aspects** are weighted dimensions of an entity. `confirmAspectWeight` and `decayAspectWeight` in `src/daemon/runtime/ontology/entity-model.ts` compute a raise and a decay, and tests call them. Recall does not. Inside an aspect, a `group_key` is a navigable subdivision and a `claim_key` is the specific slot a value lives in. An **entity_attribute** is the value in that slot, with a `kind` of `attribute` or `constraint`, a `status` of `active`, `superseded`, or `deleted`, a confidence and importance, a version lineage, and provenance back to the memory and proposal that produced it.
 
 Entity types include person, project, system, tool, concept, skill, task, source, artifact, agent, policy, action, workflow, event, object_type, interface, observation, claim_slot, claim_value, and unknown.
 
 ## Dependencies, not relations
 
-Edges between entities live in `entity_dependencies`. Each edge has a type, a strength, a confidence, and (for loose `related_to` edges) a required reason so there is always an audit trail for soft links. Traversal only follows edges whose strength times confidence clears a threshold. The older `relations` table is legacy; new audited links use `entity_dependencies`.
+Edges between entities live in `entity_dependencies`. Each edge has a type, a strength, a confidence, and (for loose `related_to` edges) a required reason so there is always an audit trail for soft links. A minimum strength-times-confidence gate is parsed as `minEdgeWeight` on the recall traversal config. No live recall walker applies it. The older `relations` table is legacy; new audited links use `entity_dependencies`.
 
 ## Supersession and currentness
 
@@ -53,9 +53,9 @@ Some statements are not facts about the world, they are facts about who said wha
 
 There are three write paths into the graph, and they are deliberately different in trust.
 
-The **inline entity linker** runs synchronously at write time. It scans new memory content for proper nouns and links to entities that already exist for the agent. It creates nothing, calls no model, and does no network I/O, so it is safe to run right after the memory commit and gives entity pages an immediate mention.
+The **inline entity linker** (`inlineLinkMemory` in `src/daemon/runtime/ontology/entity-model.ts`) scans memory content for proper nouns and links to entities that already exist. It creates nothing, calls no model, and does no network I/O. The only production call is the graph-persist stage (`src/daemon/runtime/pipeline/graph-persist.ts`), after the triples are written, and that call is skipped when there are no triples. The controlled-write commit does not call it.
 
-The **pipeline graph writer** runs in the background after extraction, gated by `graph.extractionWritesEnabled`. It upserts entities by canonical name and edges by triple, honoring org, workspace, and agent scope. This is the bulk path and it is non-fatal: a graph failure never reverts the facts that were already written.
+The **pipeline graph writer** runs in the background after extraction, gated by `graph.extractionWritesEnabled`. It upserts entities by canonical name and edges by triple. Org and workspace ride the storage partition. The writer sets `agentId` to `scope.workspace ?? "default"`, so the row's `agent_id` is the workspace id. This is the bulk path and it is non-fatal: a graph failure never reverts the facts that were already written.
 
 The **ontology control plane** is the audited path for deliberate structural change.
 
@@ -65,20 +65,14 @@ Structured changes go through `ontology_proposals`. A proposal has an operation,
 
 The mutation model has two modes. Clear, bounded, explicit operations apply directly and write an applied proposal row alongside the change, with the applied evidence copied onto the resulting attribute and dependency rows for lineage. Broad refactors, risky or destructive changes, and generated batches go into a pending review queue instead. Raw source artifacts and transcripts are never rewritten when graph or memory rows change.
 
-The control plane is driven from the CLI:
+`runOntologyCommand` in `src/cli/ontology.ts` implements `pipeline explain`, `proposals`, `assertions`, `entity merge-plan`, and `stream apply`. Nothing in production `src/` calls it. That function refuses a live `stream apply` unless `--dry-run` is set.
 
-```bash
-honeycomb ontology pipeline explain --json
-honeycomb ontology proposals --status pending --json
-honeycomb ontology assertions --limit 50 --json
-honeycomb ontology entity merge-plan "Target" "Source" --json
-honeycomb ontology stream apply ops.jsonl --dry-run --json
-```
+The registered `honeycomb ontology` verb is the storage mapper in `src/commands/storage-handlers.ts`. It dispatches onto `/api/ontology/<sub>`. The mounted routes in `src/daemon/runtime/ontology/api.ts` are `GET /`, `GET /entities`, `GET /edges`, `GET /claims`, `GET /assertions`, and `POST /proposals`. There is no `pipeline explain`, `merge-plan`, or `stream apply` route.
 
 ## Traversal
 
-Recall resolves focal entities in priority order: pinned entities, checkpoint entity IDs from session state, project-path matches, query-token matches against the entity FTS index, then a session-key fallback. From the focal set, traversal walks within a budget: a cap on aspects per entity, attributes per aspect, branching per focal entity, and total memory IDs, plus edge strength and confidence gates and a hard timeout. Active constraints surface regardless of aspect limits. The walk returns memory IDs with scores and paths, the constraints it found, an entity count, and whether it timed out. Those IDs flow into the candidate pool described in [`retrieval.md`](retrieval.md).
+PRD-045b de-scoped the recall traversal engine and removed `src/daemon/runtime/recall/traversal.ts`. The budgets remain config: `TraversalConfigSchema` in `src/daemon/runtime/recall/config.ts` still parses `aspectsPerEntity`, `attrsPerAspect`, `branching`, `totalIds`, `minEdgeWeight`, and `timeoutMs`. No other `src` file walks focal entities. Live recall sources are `memories`, `memory`, `sessions`, and `hive_graph_versions` (`src/daemon/runtime/memories/recall.ts`). That de-scope is the shipped retrieval shape. The candidate pool in [`retrieval.md`](retrieval.md) is those recall arms.
 
 ## Feedback and communities
 
-Aspect weights are not static. When recall and a session keep confirming memories under an aspect, that aspect's weight goes up; aspects that go stale beyond a window decay toward a floor. Community detection clusters related entities. Both keep the graph's shape tracking how the memory is actually used rather than how it was first extracted. The heavier, model-driven reshaping of the graph happens in the [`pollinating-loop.md`](pollinating-loop.md). The tables behind all of this are documented in [`../data/schema.md`](../data/schema.md).
+`confirmAspectWeight` and `decayAspectWeight` (`entity-model.ts`) raise an aspect weight on confirmation and decay a stale aspect toward a floor. Call sites under `src/` are those definitions. Tests call them. Recall does not. There is no community, Louvain, or cluster walker under `src/daemon`. The heavier, model-driven reshaping of the graph is the pollinating job described in [`pollinating-loop.md`](pollinating-loop.md). The tables behind the graph are documented in [`../data/schema.md`](../data/schema.md).

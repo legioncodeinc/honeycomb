@@ -89,9 +89,10 @@ flowchart LR
   inherits the grounding.
 
 Honeycomb's current summary worker (PRD-017) shells out to the *host agent's CLI* with a gate prompt
-(no API key of its own; secrets scrubbed first). That is a fine execution model; the change this
-strategy asks for is the *prompt discipline* (structured-extraction-first) layered on top, plus the
-extra key-derivation step.
+(no API key of its own; secrets scrubbed first). That execution model is what runs today. The live
+gate already emits `{ extraction, summary, key }` in that order (`src/daemon/runtime/summaries/key.ts`),
+and the worker writes `key` on the `memory` row (`src/daemon/runtime/summaries/worker.ts`). The
+structured-extraction-first discipline and the key-derivation step are the path the worker runs.
 
 ---
 
@@ -105,9 +106,12 @@ source: Tier-2 distillation is implemented, shipped, and now running in the live
 > unit + live itests; all CI gates green; security passed first). 017a generates a per-session
 > summary via the host-CLI gate and writes a `memory` row at `/summaries/<userName>/<sessionId>.md`
 > with `summary` + a short `description` + a (non-fatal) embedding; 017b synthesizes a top-level
-> `/MEMORY.md` linking those summaries. It is **not a stub**: the `notImplemented` reference lingering
-> in `summaries/index.ts`'s *header comment* is stale; the file body exports the real
-> `synthesizeMemoryIndex` / `synthesizeThreadHeads`.
+> `/MEMORY.md` linking those summaries. The synthesis functions are **not a stub**:
+> `synthesizeMemoryIndex` and `synthesizeThreadHeads` are implemented in
+> `src/daemon/runtime/summaries/synthesis.ts` and exported from
+> `src/daemon/runtime/summaries/index.ts`. The barrel *header* still calls 017b an honest stub.
+> It does not mention `notImplemented`. `notImplemented` is still a live export of that barrel
+> (defined in `src/daemon/runtime/summaries/contracts.ts`).
 
 What was once the gap, "built but not assembled", is now closed:
 
@@ -130,8 +134,10 @@ columns the summary gate now populates rather than generating keys at read time.
 Honeycomb already runs two distillation loops that the key generator should mirror rather than
 duplicate:
 
-- **The summary worker** (`memory` summaries, PRD-017, built + `Completed`), the natural home for
-  Tier-2 + key derivation once the worker is wired live. See [`wiki-summary-workers.md`](wiki-summary-workers.md).
+- **The summary worker** (`memory` summaries, PRD-017, built + `Completed`), the live home for
+  Tier-2 summaries and the `key` written on the memory row. The summary job worker is built in
+  `src/daemon/runtime/assemble.ts` and writes keys in `src/daemon/runtime/summaries/worker.ts`.
+  See [`wiki-summary-workers.md`](wiki-summary-workers.md).
 - **The skillify gate** (sessions → `SKILL.md`, a Haiku KEEP/MERGE/SKIP verdict), proof that
   Honeycomb already distills sessions into compact, judged artifacts with provenance. The Tier-1 key
   is a lighter sibling of a skill: "one sentence that indexes a memory" vs "a reusable lesson." See

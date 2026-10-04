@@ -18,7 +18,7 @@ Documents where Honeycomb stores device-flow credentials on disk, the shared `~/
 
 The device-flow credential (access token, org identity, workspace selection) must persist across processes and restarts without relying on a running daemon. A single JSON file under the user's home directory satisfies this requirement and is the conventional pattern for developer tools on all three supported platforms (macOS, Linux, Windows). A hook that needs to reach the Honeycomb daemon reads this file to learn who it is and which org it belongs to before it ever opens a socket.
 
-This file is distinct from the encrypted secrets subsystem documented in [`secrets.md`](secrets.md). Credential storage holds the single bearer token that proves identity to the daemon and backend; the secrets subsystem holds encrypted, scoped key/value material that the daemon decrypts on demand. They share neither a file nor a code path.
+This file is distinct from the encrypted secrets subsystem documented in [`secrets.md`](secrets.md). Credential storage holds the single bearer token that proves identity to the daemon and backend; the secrets subsystem holds encrypted, scoped key/value material that the daemon decrypts on demand. The two files stay separate. `src/daemon/runtime/vault/migrate.ts` imports `loadDiskCredentials`, and daemon boot calls `migrateDeeplakeToken`, which copies the login token into the vault.
 
 No keychain, secret manager, or OS credential store is used for the device-flow token. The security model relies entirely on file-system permissions: only the owning user can read or write the credentials file.
 
@@ -26,7 +26,7 @@ No keychain, secret manager, or OS credential store is used for the device-flow 
 
 ## The shared credential file (byte-compatible with Hivemind)
 
-Honeycomb and Hivemind **share one credentials file**: `~/.deeplake/credentials.json`. One `hivemind login` **or** `honeycomb login` authenticates both tools. To make the file byte-cross-compatible, the on-disk shape is Hivemind's exact shape, `{ token, orgId, orgName, userName, workspaceId, apiUrl, savedAt }` plus an additive `agentId` that Hivemind's loader ignores (it reads named fields and never enumerates keys). The IO layer maps `workspaceId ↔ workspace` on the disk boundary so the rest of Honeycomb keeps its in-memory `Credentials` shape unchanged.
+Honeycomb and Hivemind **share one credentials file**: `~/.deeplake/credentials.json`. One `hivemind login` **or** `honeycomb login` authenticates both tools. To make the file byte-cross-compatible, the on-disk shape is Hivemind's exact shape, `{ token, orgId, orgName, userName, workspaceId, apiUrl, savedAt }` plus additive Honeycomb fields `agentId`, `tenancyConfirmedAt`, and `tenancyPending` that Hivemind's loader ignores (it reads named fields and never enumerates keys). The IO layer maps `workspaceId ↔ workspace` on the disk boundary so the rest of Honeycomb keeps its in-memory `Credentials` shape unchanged.
 
 This shared file is the foundation of the install/onboarding migration path: because the credential is byte-compatible, a Hivemind→Honeycomb upgrader is usually adopted with **no re-auth at all**, a valid file is verified via `GET /me` and reused. See [Install and Onboarding](../operations/install-and-onboarding.md#hivemind-coexistence-and-migration).
 
@@ -97,7 +97,9 @@ The on-disk `DiskCredentials` shape (TypeScript source of truth in `src/daemon/r
 | `workspaceId` | `string` | no | Active workspace (maps to in-memory `workspace`). Defaults to `"default"` (the backend resolves the sentinel). |
 | `apiUrl` | `string` | no | Base URL for the DeepLake API. Defaults to `https://api.deeplake.ai` when absent. |
 | `agentId` | `string` | no | Additive Honeycomb-only field: the within-workspace actor id. Hivemind's loader ignores it. |
-| `savedAt` | `string` | yes | ISO 8601 timestamp stamped server-side on save. Evidence, not input; not validated at load time. |
+| `tenancyConfirmedAt` | `string` | no | ISO-8601 timestamp set by an explicit link-time selection. Additive. A pre-073 file omits it. |
+| `tenancyPending` | `boolean` | no | Set true when a multi-org login persists a provisional credential before selection. Additive. |
+| `savedAt` | `string` | no | ISO 8601 timestamp stamped server-side on save. `isDiskCredentials` requires `token` and `orgId` only. |
 
 Example file contents:
 
@@ -110,6 +112,7 @@ Example file contents:
   "workspaceId": "default",
   "apiUrl": "https://api.deeplake.ai",
   "agentId": "default",
+  "tenancyConfirmedAt": "2026-06-12T23:00:00.000Z",
   "savedAt": "2026-06-12T23:00:00.000Z"
 }
 ```

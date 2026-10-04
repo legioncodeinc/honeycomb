@@ -1,8 +1,8 @@
 # Memory Lifecycle Scoring Model
 
-> Category: Ai | Version: 1.0 | Date: June 2026 | Status: Proposed (PRD-055)
+> Category: Ai | Version: 1.1 | Date: October 2026 | Status: Reference for PRD-058 (in-work)
 
-The unified mathematical model behind PRD-055. Every lifecycle behavior (recency, reinforcement, confidence calibration, conflict resolution, stale-reference healing) is one term of a single **retrieval-priority** equation. This doc is the source of truth for the notation; each sub-PRD implements exactly one term and cites the equations here.
+The unified mathematical model for the memory lifecycle, implemented under PRD-058 (`library/requirements/in-work/prd-058-memory-lifecycle/`, code in `src/daemon/runtime/memories/lifecycle-config.ts`). Every lifecycle behavior (recency, reinforcement, confidence calibration, conflict resolution, stale-reference healing) is one term of a single **retrieval-priority** equation. This doc is the source of truth for the notation; each PRD-058 sub-PRD implements one term and cites the equations here.
 
 **Related:**
 - [`retrieval.md`](retrieval.md) - the relevance term `R(m,q)` this model multiplies.
@@ -17,7 +17,7 @@ The unified mathematical model behind PRD-055. Every lifecycle behavior (recency
 
 A store that only grows is not a memory, it is a log. Human memory is good precisely because it is *lossy in a principled way*: it lets the rarely-useful fade, strengthens what gets retrieved and confirmed, flags what it is unsure of, and reconciles contradictions instead of holding both. Honeycomb already has the durable substrate (append-only, `MAX(version)`, supersession). The lifecycle model adds the principled forgetting on top, as a soft re-ranking signal that never deletes a row. History stays total; only *salience* changes.
 
-Design rule that follows from this: every term is a bounded multiplier in `(0, 1]` (or a gate in `{0} ∪ (0,1]`), it can only *demote* relevance, never invent it, and it ships behind an exponent that defaults to a value *measured* on the golden set. A term with exponent zero is the identity, so an unproven term ships dormant exactly as recency does today.
+Design rule that follows from this: every term is a bounded multiplier in `(0, 1]` (or a gate in `{0} ∪ (0,1]`), it can only *demote* relevance, never invent it, and it ships behind an exponent. A term with exponent zero is the identity. Activation's exponent defaults to `1`, which applies raw activation, so recency reorders by age. Confidence and staleness exponents default to `0`, so those terms ship dormant.
 
 ## The master equation
 
@@ -29,30 +29,30 @@ P(m | q, t) = R(m,q) · A(m,t)^a · C(m)^c · (1 − σ(m,t))^s · κ(m,t)
 
 | Symbol | Range | Meaning | Owner |
 |---|---|---|---|
-| `R(m,q)` | `[0,1]` | Relevance: the existing RRF-fused, reranked, MMR-shaped score. Unchanged by PRD-055. | PRD-047 |
-| `A(m,t)` | `(0,1]` | Activation / freshness: recency + access frequency + reinforcement. | 055a + 055e |
-| `C(m)` | `[0,1]` | Calibrated confidence: model confidence mapped through the calibration curve. | 055e |
-| `σ(m,t)` | `[0,1]` | Staleness probability: fraction of code references that no longer resolve. | 055c |
-| `κ(m,t)` | `{0} ∪ (0,1]` | Conflict gate: `1` uncontested/winner, `ρ` open-conflict loser, `0` hard-superseded. | 055b |
-| `a, c, s` | `≥ 0` | Per-term exponents. Default to eval-measured values; `0` makes that term neutral. | 055d (config) |
+| `R(m,q)` | `[0,1]` | Relevance: the existing RRF-fused, reranked, MMR-shaped score. Unchanged by PRD-058. | PRD-047 |
+| `A(m,t)` | `(0,1]` | Activation / freshness: recency + access frequency + reinforcement. | 058a + 058e |
+| `C(m)` | `[0,1]` | Calibrated confidence: model confidence mapped through the calibration curve. | 058e |
+| `σ(m,t)` | `[0,1]` | Staleness probability: fraction of code references that no longer resolve. | 058c |
+| `κ(m,t)` | `{0} ∪ (0,1]` | Conflict gate: `1` uncontested/winner, `ρ` open-conflict loser, `0` hard-superseded. | 058b |
+| `a, c, s` | `≥ 0` | Per-term exponents. Default to eval-measured values; `0` makes that term neutral. | 058d (config) |
 
 `R` is the base. Each other factor is a bounded multiplier so the whole product stays interpretable: `P ≤ R` always, with equality only when every lifecycle signal is perfect (fresh, fully-confident, no dangling refs, uncontested). The exponents `a, c, s` let the eval harness sweep each term's influence independently and ship only the influence that measurably helps. `κ` is a multiplicative gate, not exponentiated, because a hard-superseded memory must be *excluded* (`κ = 0`), not merely demoted.
 
-The dashboard renders a single **memory health** scalar that is the query-independent part of this product:
+The query-independent part of this product is a single **memory health** scalar:
 
 ```text
 H(m,t) = A(m,t) · C(m) · (1 − σ(m,t)) · κ(m,t)
 ```
 
-`H ∈ [0,1]` is "how much should this memory be trusted right now, independent of any query." It is what the lifecycle panel (055d) visualizes per memory.
+`H ∈ [0,1]` is "how much should this memory be trusted right now, independent of any query." `assembleHealth` in `src/daemon/runtime/memories/lifecycle-health.ts` computes it. The CLI recomputes the same product inline. There is no lifecycle panel at `src/dashboard/web/pages/lifecycle-panel.tsx`.
 
 ---
 
 ## Term 1 - Activation `A(m,t)`
 
-Activation answers "how salient is this memory right now," combining recency, how often it has been useful, and the spacing of those uses. The model ships in two stages: a simple, immediately-measurable exponential decay (055a), upgraded to a cognitively-grounded activation function (055e). The simple form is the single-access special case of the full form, so the upgrade is continuous.
+Activation answers "how salient is this memory right now," combining recency, how often it has been useful, and the spacing of those uses. The model ships in two stages: a simple, immediately-measurable exponential decay (058a), upgraded to a cognitively-grounded activation function (058e). The simple form is the single-access special case of the full form, so the upgrade is continuous.
 
-### Stage 1 - exponential decay (055a)
+### Stage 1 - exponential decay (058a)
 
 ```text
 A_simple(m,t) = 2^( −(t − t_ref(m)) / h(class(m)) )
@@ -72,7 +72,7 @@ Per-class half-lives encode that durable distilled facts should outlive raw dial
 
 These defaults are starting points for the eval sweep, not assertions. The shipped value is whichever passes the recency-sensitivity gate (see Metrics).
 
-### Stage 2 - ACT-R base-level activation (055e)
+### Stage 2 - ACT-R base-level activation (058e)
 
 The rigorous form is Anderson and Schooler's base-level activation from ACT-R, which derives the shape of human forgetting from the statistics of how often information is actually needed. Over the access history `t_1 < t_2 < … < t_n` of memory `m` (creation is `t_1`, each useful recall adds a `t_k`):
 
@@ -209,24 +209,24 @@ A memory `m`: "the daemon stores embeddings via `src/daemon/storage/noopEmbedCli
 
 ## Parameters and defaults
 
-All parameters live in the `memory.lifecycle.*` config block (055d) with `HONEYCOMB_LIFECYCLE_*` env overrides. Defaults below are *initial sweep points*; the shipped value is the eval-gated one.
+All parameters live in the `memory.lifecycle.*` config block (058d) with `HONEYCOMB_LIFECYCLE_*` env overrides. Defaults below are *initial sweep points*; the shipped value is the eval-gated one.
 
 | Parameter | Symbol | Default | Set by |
 |---|---|---|---|
-| Activation exponent | `a` | `1.0` | eval sweep (055a) |
-| Confidence exponent | `c` | `0` (dormant until calibrated) | eval sweep (055e) |
-| Staleness exponent | `s` | `0` under `observe`, `1` under `execute` | posture (055c) |
-| Half-life, distilled | `h(memories)` | `180 d` | eval sweep (055a) |
-| Half-life, summary | `h(memory)` | `45 d` | eval sweep (055a) |
-| Half-life, raw | `h(sessions)` | `10 d` | eval sweep (055a) |
-| ACT-R decay | `d` | `0.5` | eval sweep (055e) |
-| Activation floor | `A_min` | `0.05` | 055e |
-| Verification half-life | `h_verify` | `14 d` | 055c |
-| Contradiction threshold | `θ_detect` | `0.6` | PR-curve tuned (055b) |
-| Corroboration weight | `γ` | `0.5` | 055b |
-| Supersede margin | `τ_supersede` | `0.5` | CRA-tuned (055b) |
-| Review margin | `τ_review` | `0.15` | CRA-tuned (055b) |
-| Open-conflict suppression | `ρ` | `0` (fully suppress, reversible) | 055b |
+| Activation exponent | `a` | `1.0` | eval sweep (058a) |
+| Confidence exponent | `c` | `0` (dormant until calibrated) | eval sweep (058e) |
+| Staleness exponent | `s` | `0` under `observe`, `1` under `execute` | posture (058c) |
+| Half-life, distilled | `h(memories)` | `180 d` | eval sweep (058a) |
+| Half-life, summary | `h(memory)` | `45 d` | eval sweep (058a) |
+| Half-life, raw | `h(sessions)` | `10 d` | eval sweep (058a) |
+| ACT-R decay | `d` | `0.5` | eval sweep (058e) |
+| Activation floor | `A_min` | `0.05` | 058e |
+| Verification half-life | `h_verify` | `14 d` | 058c |
+| Contradiction threshold | `θ_detect` | `0.6` | PR-curve tuned (058b) |
+| Corroboration weight | `γ` | `0.5` | 058b |
+| Supersede margin | `τ_supersede` | `0.5` | CRA-tuned (058b) |
+| Review margin | `τ_review` | `0.15` | CRA-tuned (058b) |
+| Open-conflict suppression | `ρ` | `0` (fully suppress, reversible) | 058b |
 
 ---
 

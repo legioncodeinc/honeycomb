@@ -1,6 +1,6 @@
 # Why Hybrid (SQL + Vector) Makes the Zoom Memory Doable
 
-> Category: Ai | Version: 1.1 | Date: June 2026 | Status: Active
+> Category: Ai | Version: 1.2 | Date: October 2026 | Status: Active
 
 Why Honeycomb's Deep Lake substrate (SQL *and* vector in one store) is a genuinely better fit for the
 3-tier zoom memory than a vector-only store, and what each half of the hybrid is responsible for.
@@ -32,7 +32,7 @@ right?"*, is correct.
 ```mermaid
 flowchart TD
     A["① Skim the index<br/>(prime: recent + durable keys)"] --> SQLa["lexical + recency<br/><b>SQL</b>, cheap, deterministic"]
-    B["② Resolve a key<br/>(key → summary → raw)"] --> SQLb["join by id / path<br/><b>SQL</b>, exact lookup"]
+    B["② Resolve a key<br/>(key → summary → raw)"] --> SQLb["lookup by id<br/><b>SQL</b>, exact"]
     C["③ Mine for memory<br/>(search you didn't know to name)"] --> VEC["semantic cosine + lexical, fused<br/><b>Vector + SQL (RRF)</b>"]
 ```
 
@@ -41,7 +41,7 @@ flowchart TD
    timestamp plus a keyword/lexical filter, a cheap SQL query with **no embedding cost**. You do not
    pay vector search to render a table of contents.
 2. **Resolve a key (the zoom).** `key → summary → raw` is "fetch the row this id points to, then the
-   `sessions` rows for that session." That is a **deterministic join by id/path**. It is the single
+   `sessions` rows for that session." That is a **deterministic SQL lookup by id**. It is the single
    most important property in this whole strategy, and it is exactly what SQL is for.
 3. **Mine (the search).** When the agent looks for memory it did not see in the index, semantic
    similarity matters, this is the `<#>` cosine vector path, fused with the lexical arm via RRF. This
@@ -61,9 +61,12 @@ The zoom hierarchy lives or dies on cheap, exact resolution. Consider the differ
   its summary and then its raw turns, you store relationship ids in each point's *payload* and issue
   follow-up filtered lookups. It works, but you are using a similarity engine to do a key-value join,
   and every step is a separate filtered scan.
-- **Deep Lake (SQL+vector):** resolution is a `SELECT … WHERE path = '<id>'` (and the raw turns are
-  `SELECT … FROM sessions WHERE path = '<session>'`). The id *is* the join key. The same store that
-  holds the embeddings answers the join.
+- **Deep Lake (SQL+vector):** depth 1 is a guarded select of `memory.summary` or `memories.content`
+  by path or id. Depth 2 does not match `sessions.path` to the summary path. Capture stores the
+  transcript path on `sessions.path` and the session identity in `sessions.id`, so depth 2 uses
+  `id LIKE 'sess-<sessionId>-%'` plus a post-filter (`src/daemon/runtime/memories/resolve.ts`).
+  `GET /api/memories/resolve` is the route; `hivemind_read` calls it. The same store that holds the
+  embeddings answers the lookup.
 
 Because the tiers already live in three SQL tables (`memories`, `memory`, `sessions`) keyed by
 `id`/`path`, the resolve chain is *already expressible*, it's the existing read path
@@ -76,7 +79,7 @@ Because the tiers already live in three SQL tables (`memories`, `memory`, `sessi
 | Concern | Engine | Why |
 |---|---|---|
 | Prime digest (Tier-1 index) | **SQL** (lexical `ILIKE` + recency `ORDER BY`) | Cheap, deterministic, no embedding cost; runs every session |
-| Resolve key → summary → raw | **SQL** (join by `id`/`path`) | Exact lookup; the zoom is a pointer walk, not a search |
+| Resolve key → summary → raw | **SQL** (lookup by id; depth 2 is a session-id prefix) | Exact lookup; the zoom is a pointer walk |
 | Mine (agent-initiated search) | **Vector + SQL, fused (RRF)** | Semantic recall for the unnamed; lexical arm catches exact tokens |
 | Scope / tenancy filter | **SQL** (org / workspace / agent) | Already enforced on every query in `recall.ts` |
 
@@ -90,17 +93,22 @@ index, the resolution, the scoping, is SQL. That is the efficiency argument for 
 A grounded caveat for any future agent, because it was settled with live measurement this cycle:
 
 - **The mining path uses post-query Reciprocal-Rank Fusion (RRF), and it works.** `recall.ts` runs a
-  `<#>` semantic arm and a BM25/`ILIKE` lexical arm per table and fuses their ranked lists with RRF
-  (`RRF_K = 60`, arm-class weights distilled `memory` 1.0 / raw `session` 0.4). Measured live:
-  recall@5 ≈ 0.72-0.78.
-- **Deep Lake's *native* `deeplake_hybrid_record` operator does NOT work for us and must not be used.**
-  Benchmarked live, it returns a constant `0` score for every row (degenerate ordering → near-random
-  recall@5 ≈ 0.14-0.17), independent of weight or vector-literal format. PRD-047a closed with "keep
-  RRF." Full report: [`deeplake-hybrid-record-operator-report.md`](deeplake-hybrid-record-operator-report.md).
+  `<#>` semantic arm and a tokenized `ILIKE` lexical arm per table (`buildLexicalMatchSql`; Deep Lake
+  `deeplake_index` is unwired) and fuses their ranked lists with RRF (`RRF_K = 60`, arm-class weights
+  distilled `memory` 1.0 / raw `session` 0.4). The 2026-06-22 live band was recall@5 ≈ 0.72-0.78.
+  The 2026-06-24 re-run measured RRF recall@5 at 0.611.
+- **Heavy path and per-turn path split on the memories semantic arm.** The heavy path still runs
+  `<#>` through `vectorSearch`. The per-turn path (`fast: true`) serves the `memories` semantic arm
+  from `InMemoryLocalVectorIndex` when the index is ready. Sessions and hive semantic SQL, and every
+  lexical arm, still run.
+- **Deep Lake's native `deeplake_hybrid_record` operator stays unwired.**
+  `src/daemon/runtime/memories/hybrid-recall.ts` exports `hybridRecall` and has no other `src/`
+  importer. The 2026-06-22 run returned a constant `0` score (recall@5 ≈ 0.14-0.17). The 2026-06-24
+  re-run is parity with RRF (recall@5 0.611 vs 0.611). Parity is not a win, so RRF stays the default.
+  Full report: [`deeplake-hybrid-record-operator-report.md`](deeplake-hybrid-record-operator-report.md).
 
-So "hybrid" here means **SQL for structure + vector for similarity, fused in our own RRF**, *not* the
-DB's native hybrid operator. A future agent that reads "hybrid" must not reach for
-`deeplake_hybrid_record`; it is filed as a vendor bug, not a tool.
+So "hybrid" here means **SQL for structure + vector for similarity, fused in our own RRF**. The native
+operator is a revisit candidate, recorded in the operator report and ADR-0001.
 
 ---
 
@@ -120,3 +128,4 @@ is *more* doable than the prior system it is modeled on, the owner's intuition i
 |------|---------|--------|
 | 2026-06 | 1.0 | Initial rationale for the SQL+vector division of labor; grounded in the PRD-047a operator finding. |
 | 2026-06 | 1.1 | Core shipped (PRD-046, merged #77); status normalized to Active; recall numbers and the native-operator finding reconciled with the live A/B. |
+| 2026-10 | 1.2 | Recall numbers dated to the 2026-06-22 band and the 2026-06-24 tie. Lexical arm named as tokenized ILIKE. Depth-2 resolve is a session-id prefix. Per-turn memories semantic arm can come from the local index. |

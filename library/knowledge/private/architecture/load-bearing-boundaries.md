@@ -47,10 +47,10 @@ There are no npm workspaces. `@honeycomb/*` names are TypeScript path aliases (`
 | 1, core | `src/shared`, `src/daemon-client` | tier 1 only |
 | 2, daemon | `src/daemon` | tier 1 |
 | 3, embeddings | `embeddings/src` | tier 1 |
-| 4, clients | `harnesses/*/src`, `mcp/src`, `src/cli` | tier 1 (`daemon-client` and `shared`) |
+| 4, clients | `harnesses/*/src`, `mcp/src`, `src/cli`, `src/sdk`, `src/hooks`, `src/dashboard`, `src/connectors`, `src/commands` | tier 1 (`daemon-client` and `shared`) |
 | 5, bundles | esbuild outputs | the compiled graph |
 
-A file imports only from its own tier or a lower-numbered tier. Tier N may import only from tiers `< N` (`BUILD.md:17-19`). Tier 4 clients import the thin client surface, and they do not import `src/daemon`. The esbuild entry roots for the six harnesses, the daemon, the CLI, the MCP server, and the embed daemon are listed in `BUILD.md:34-47`.
+`package.json` exports the SDK as `.`, `/react`, `/vercel`, and `/openai`, and `esbuild.config.mjs` bundles those four entries from `src/sdk`. A file imports only from its own tier or a lower-numbered tier in the intended build order (`BUILD.md`). That rule is not absolute in this tree. `src/commands` and `src/cli` import daemon runtime modules (auth, telemetry, onboarding, harness detection). `src/daemon-client` imports SQL helpers from `src/daemon/storage/sql.ts`. The DeepLake transport client stays under `src/daemon`. `src/eval/deeplake-stress.ts` imports the `DeepLakeTransport` type and the `TransportError` value from `src/daemon/storage/transport.ts`. Harness adapters stay on the thin client. The esbuild entry roots for the six harnesses, the daemon, the CLI, the MCP server, and the embed daemon are listed in `BUILD.md`.
 
 ## Deeplake stays inside the daemon
 
@@ -64,7 +64,7 @@ The CLI entry imports the dispatcher and `./runtime`, and its header forbids imp
 
 `createDaemon(options)` builds the Hono app and does not listen by itself (`src/daemon/runtime/server.ts:18-21`, `src/daemon/runtime/server.ts:230`). Route groups are scaffolded in `ROUTE_GROUPS` so a later module attaches handlers with `daemon.group(path)` and inherits the middleware already mounted (`src/daemon/runtime/server.ts:68-106`, `src/daemon/runtime/server.ts:206-213`).
 
-Wave-2 services (queue, file watcher, runtime path) are fields on `options.services`, each defaulting to a no-op stub (`src/daemon/runtime/server.ts:169-170`). `src/daemon/runtime/CONVENTIONS.md:10-14` tells a later service author to pass the real implementation into `createDaemon({ services })` and not to edit `server.ts`, `index.ts`, `config.ts`, `logger.ts`, or the permission middleware to register it. The same note says a service receives a `StorageQuery` and does not open Deeplake itself (`src/daemon/runtime/CONVENTIONS.md:60-74`).
+`DaemonServices` carries `queue`, `watcher`, `runtimePath`, `embed`, and `telemetry`. `createDaemon` fills any omitted field with `noopJobQueueService`, `noopFileWatcherService`, `noopRuntimePathService`, `noopEmbedSupervisor`, or `noopTelemetryService` (`src/daemon/runtime/server.ts:233-238`). The options-field comment at `src/daemon/runtime/server.ts:169-170` is the `services?: Partial<DaemonServices>` note. `src/daemon/runtime/CONVENTIONS.md:10-14` tells a later service author to pass the real implementation into `createDaemon({ services })` and to leave `server.ts`, `index.ts`, `config.ts`, `logger.ts`, and the permission middleware alone. The 004b section of that note also says to leave `services/types.ts` alone (`src/daemon/runtime/CONVENTIONS.md:100`). The same note says a service receives a `StorageQuery` and does not open Deeplake itself (`src/daemon/runtime/CONVENTIONS.md:60-74`).
 
 ## Shared constants live in one file
 
@@ -78,7 +78,7 @@ The Deeplake HTTP query endpoint binds no parameters. `sqlStr`, `sqlLike`, `sqlI
 
 The runtime config resolver defaults the listen address to `127.0.0.1:3850`. `HONEYCOMB_PORT`, `HONEYCOMB_HOST`, and `HONEYCOMB_BIND` override port, host, and bind address, and the resolver's own comment gives `0.0.0.0` as the example of an explicit widen (`src/daemon/runtime/config.ts:10-15`). `widened` records whether the bind left loopback (`src/daemon/runtime/config.ts:60-73`). The constant file's comment on `DAEMON_HOST` says the default host is loopback (`src/shared/constants.ts:16-17`). Those two comments are both in the tree: the constant is the default, and the resolver is the explicit override.
 
-The browser the install verb opens is not that daemon port. `loopbackDashboardUrl()` returns `http://127.0.0.1:3853/` (`src/commands/install.ts:64-74`). `openDashboard` returns the Hive portal base URL on `HIVE_PORT` plus `/` (`src/dashboard/launch.ts:149-178`). When that portal does not answer, the install path prints a command whose `--products` list is `honeycomb,doctor,hive` (`src/commands/install.ts:88-93`). The daemon route table scaffolds a `/` group (`src/daemon/runtime/server.ts:105`). No module in `src/daemon` calls `group("/")` to attach a page to it.
+The browser the install verb opens is not that daemon port. `loopbackDashboardUrl()` returns `http://127.0.0.1:3853/` (`src/commands/install.ts:64-74`). `openDashboard` returns the Hive portal base URL on `HIVE_PORT` plus `/` (`src/dashboard/launch.ts:149-178`). When that portal does not answer, the install path prints a command whose `--products` list is `honeycomb,doctor,hive` (`src/commands/install.ts:88-93`). The daemon route table scaffolds a `/` group with `protect: false` (`src/daemon/runtime/server.ts:105`). Setup routes mount on that group: `SETUP_LOGIN_GROUP`, `SETUP_STATE_GROUP`, `SETUP_TENANCY_GROUP`, and `SETUP_MIGRATE_GROUP` are `"/"` (`src/daemon/runtime/dashboard/setup-login.ts`, `setup-state.ts`, `setup-tenancy.ts`, `setup-migrate.ts`), and each module calls `daemon.group` on that constant, including `POST /setup/login`. `src/daemon/runtime/dashboard/host.ts` is absent, so the group carries those setup routes and no dashboard page.
 
 ## Where the other narratives already live
 

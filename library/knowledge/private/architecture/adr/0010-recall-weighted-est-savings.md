@@ -1,6 +1,6 @@
 # ADR-0010, Recall-weighted "Est. savings"; the corpus-length proxy is retired
 
-> **Status:** Accepted | **Date:** 2026-07-08
+> **Status:** Proposed | **Date:** 2026-07-08
 > **Supersedes:** the PRD-035b est-savings metric decision (a metric definition, not a prior ADR) | **Superseded by:** none
 > **Owners:** dashboard, daemon, operations | **Related:** IRD-278, PRD-035b, PRD-060 (ROI tracker)
 

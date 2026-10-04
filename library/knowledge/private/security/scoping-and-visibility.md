@@ -2,7 +2,7 @@
 
 > Category: Security | Version: 1.0 | Date: June 2026 | Status: Active
 
-How Honeycomb keeps memory in its lane: storage-level org and workspace isolation, within-workspace agent_id read policies, the authorization boundary in recall, and the fail-closed rules.
+How Honeycomb keeps memory in its lane: storage-level org and workspace isolation, the agent read-policy vocabulary, the project predicate on live recall, and the clause builder's isolated fallback.
 
 **Related:**
 - [`../multi-tenant/org-workspace-model.md`](../multi-tenant/org-workspace-model.md)
@@ -15,15 +15,15 @@ How Honeycomb keeps memory in its lane: storage-level org and workspace isolatio
 
 ---
 
-## Two rings of scoping
+## Tenancy, agent policy, and project
 
-Honeycomb scopes memory in two rings. The outer ring is tenancy: org and workspace, enforced at the DeepLake storage layer so two workspaces never share a row, partition, or index. The inner ring is the agent: within a single workspace, `agent_id` and a read policy separate multiple agents that share the same tables. The outer ring is the team boundary inherited from Hivemind; the inner ring is the multi-agent boundary inherited from our memory engine. Both have to hold for a row to be visible.
+Honeycomb scopes memory with an outer tenancy ring, an inner agent read-policy vocabulary, and a project predicate beside them. The outer ring is tenancy: org and workspace, enforced at the DeepLake storage layer so two workspaces never share a row, partition, or index. The inner ring is the agent: within a single workspace, `agent_id` and a read policy name separate multiple agents that share the same tables. `buildProjectScopeClause` in `src/daemon/runtime/recall/scope-clause.ts` compiles the project predicate. Live memory recall appends it through `projectConjunctFor` in `src/daemon/runtime/memories/recall.ts`, in the same statement as the match. The outer ring is the team boundary inherited from Hivemind; the inner ring is the multi-agent vocabulary from the memory engine.
 
 ```mermaid
 flowchart TD
-    req["Recall request"] --> tenancy["Storage: org + workspace partition"]
-    tenancy --> policy["Within workspace: agent_id read policy"]
-    policy --> result["Visible rows"]
+    req["Recall request"] --> tenancy["Storage QueryScope: org + workspace"]
+    tenancy --> live["Live memory SQL: is_deleted = 0 plus project conjunct"]
+    live --> result["Rows, with content selected in that statement"]
 ```
 
 ## agent_id everywhere
@@ -40,41 +40,40 @@ An agent's roster row in the `agents` table carries a `read_policy` and an optio
 | `shared` | workspace-global memories plus its own |
 | `group` | global memories from agents in the same `policy_group`, plus its own |
 
-Archived memories are excluded from all three. These policies are what give a team the shared-brain effect inside a workspace while letting a CI or personal agent keep a private lane, as described in [`../multi-tenant/org-workspace-model.md`](../multi-tenant/org-workspace-model.md).
+The clause builder excludes archived rows from all three with `is_deleted = 0`. These three names are the agents-roster vocabulary. How a workspace uses that vocabulary is described in [`../multi-tenant/org-workspace-model.md`](../multi-tenant/org-workspace-model.md).
 
-## Enforcement is in the SQL
+## The clause builder and live recall
 
-The inner ring is compiled into a SQL clause that every memory query carries, so a new code path either includes it or does not, which makes scoping auditable. A clause builder takes the agent id, read policy, and policy group and returns the WHERE fragment plus its escaped values (DeepLake takes no bound parameters, so the values are escaped through the helpers in [`../data/deeplake-storage.md`](../data/deeplake-storage.md)).
+`buildScopeClause` in `src/daemon/runtime/recall/scope-clause.ts` compiles the inner-ring vocabulary into a WHERE fragment. It takes the agent id, read policy, and a caller-supplied `groupAgentIds` list, and it escapes values through the helpers in [`../data/deeplake-storage.md`](../data/deeplake-storage.md) because DeepLake takes no bound parameters. No other file under `src/` calls `buildScopeClause`. Live memory SQL in `src/daemon/runtime/memories/recall.ts` filters with `is_deleted = 0` and appends the string from `projectConjunctFor`.
 
 ```sql
 -- isolated
-AND m.agent_id = '<id>' AND m.visibility != 'archived'
+(agent_id = '<id>' AND is_deleted = 0)
 
 -- shared
-AND (m.visibility = 'global' OR m.agent_id = '<id>') AND m.visibility != 'archived'
+((visibility = 'global' OR agent_id = '<id>') AND is_deleted = 0)
 
--- group
-AND ((m.visibility = 'global'
-      AND m.agent_id IN (SELECT id FROM "agents" WHERE policy_group = '<group>'))
-     OR m.agent_id = '<id>')
-AND m.visibility != 'archived'
+-- group, when the caller supplies member ids
+(((visibility = 'global' AND agent_id IN ('<member>', ...)) OR agent_id = '<id>') AND is_deleted = 0)
+
+-- group with an empty member list: own-only
+(agent_id = '<id>' AND is_deleted = 0)
 ```
 
-The outer ring (org and workspace) is enforced beneath this, at the storage partition, so even a buggy clause cannot cross a workspace boundary.
+The group arm renders the caller-supplied member ids. An empty member list degrades to own-only. The outer ring (org and workspace) is enforced beneath this, at the storage partition, so even a buggy clause cannot cross a workspace boundary.
 
 ## The authorization boundary in recall
 
-Recall is where scoping has to be exactly right, because the candidate channels (full-text, vector, graph traversal, hints) cast a wide net. The defense is ordering: those channels produce memory IDs only, and the scope clause authorizes candidates before any content loads. Every content-bearing stage that follows, reranking, summaries, transcript expansion, access tracking, runs only on the authorized set. A strong vector hit or a high-degree entity can surface an ID, but it cannot leak content past the read policy. The recall flow is detailed in [`../ai/retrieval.md`](../ai/retrieval.md).
+Recall is where scoping has to be exactly right, because the candidate channels (full-text, vector, graph traversal, hints) cast a wide net. The live memories arm in `src/daemon/runtime/memories/recall.ts` selects `content` as `text` in the same statement as the lexical match, together with `is_deleted = 0` and the project conjunct. That statement carries no `buildScopeClause` fragment. The recall flow is detailed in [`../ai/retrieval.md`](../ai/retrieval.md).
 
 ```mermaid
 flowchart TD
-    channels["FTS + vector + traversal -> candidate IDs"] --> outer["Org/workspace partition filter"]
-    outer --> inner["agent_id read-policy clause"]
-    inner --> authorized["Authorized rows only"]
-    authorized --> content["Rerank, summarize, expand, track"]
-    content --> out["Scoped results"]
+    match["Lexical match"] --> same["Same statement selects content as text"]
+    same --> deleted["is_deleted = 0"]
+    deleted --> project["projectConjunctFor"]
+    project --> out["Rows"]
 ```
 
 ## Fail-closed rules
 
-The subsystem leans toward refusing rather than over-sharing. A malformed caller falls back to `isolated` instead of widening access. Tenancy, scope, graph policy, mutation gates, and source access all fail closed. Errors are not swallowed and behavior is not silently downgraded; failures return structured errors with enough context (path, org, workspace, agent id, source id, session key, runtime path, route) to diagnose. This is the same posture as the request-level scope checks in [`../auth/auth-architecture.md`](../auth/auth-architecture.md) and the trust model in [`trust-boundaries.md`](trust-boundaries.md): when in doubt, deny.
+`buildScopeClause` refuses a wider policy. A blank agent id or an unknown read policy returns the `isolated` fragment and attaches a `ScopeClauseError` (`src/daemon/runtime/recall/scope-clause.ts`). Live memory recall does not call that builder, so the isolated fallback is the builder's posture. Request-level scope checks are described in [`../auth/auth-architecture.md`](../auth/auth-architecture.md) and [`trust-boundaries.md`](trust-boundaries.md).
