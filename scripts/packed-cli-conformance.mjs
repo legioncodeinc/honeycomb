@@ -59,6 +59,7 @@ const priorCommands = [
 	"telemetry",
 	"update",
 	"uninstall",
+	"connect",
 ];
 
 function npmCliPath() {
@@ -168,7 +169,7 @@ try {
 	const inventoryResult = runFixture("inventory", []);
 	assertResult(inventoryResult, 0, "packed inventory");
 	const inventory = JSON.parse(inventoryResult.stdout);
-	if (inventory.length !== 42) throw new Error(`packed command inventory expected 42, got ${inventory.length}`);
+	if (inventory.length !== 43) throw new Error(`packed command inventory expected 43, got ${inventory.length}`);
 	for (const command of priorCommands) {
 		if (!inventory.includes(command)) throw new Error(`packed command inventory regressed ${command}`);
 	}

@@ -27,10 +27,12 @@
 // `platform: "node"` and targets the repo Node engine (>=22). There is no need
 // to down-level harness bundles; all hosts run on the same Node 22 floor.
 
+import { chmodSync, copyFileSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { build } from "esbuild";
-import { chmodSync, copyFileSync, writeFileSync, readFileSync } from "node:fs";
 
 const ESM_PACKAGE_JSON = '{"type":"module"}\n';
+const CJS_REQUIRE_BANNER =
+	"import { createRequire as __cr } from 'node:module'; const require = __cr(import.meta.url);";
 
 // Single source of truth for the injected version: the root package.json
 // version (PRD-001c keeps every manifest in sync with this same value, so the
@@ -136,7 +138,7 @@ await build({
 	// daemon at startup. (In-process itests assemble the daemon directly and never hit
 	// the bundle, so only the real `daemon start` path exercised this — caught by dogfood.)
 	banner: {
-		js: "import { createRequire as __cr } from 'node:module'; const require = __cr(import.meta.url);",
+		js: CJS_REQUIRE_BANNER,
 	},
 });
 stampEsm("daemon");
@@ -183,7 +185,13 @@ const HOOK_HARNESSES = [
 		outdir: "harnesses/cursor/bundle",
 		aliases: ["session-start.js", "capture.js", "pre-tool-use.js", "session-end.js"],
 	},
-	{ name: "hermes", entry: "dist/harnesses/hermes/src/index.js", outdir: "harnesses/hermes/bundle" },
+	{
+		name: "hermes",
+		entry: "dist/harnesses/hermes/src/index.js",
+		outdir: "harnesses/hermes/bundle",
+		aliases: ["session-start.mjs", "capture.mjs", "session-end.mjs"],
+		staleAliases: ["session-start.js", "capture.js", "session-end.js"],
+	},
 	{ name: "pi", entry: "dist/harnesses/pi/src/index.js", outdir: "harnesses/pi/bundle" },
 ];
 
@@ -195,6 +203,7 @@ const HARNESS_EXTRA_ENTRIES = [
 ];
 
 for (const h of HOOK_HARNESSES) {
+	for (const staleAlias of h.staleAliases ?? []) rmSync(`${h.outdir}/${staleAlias}`, { force: true });
 	await build({
 		entryPoints: { index: h.entry },
 		bundle: true,
@@ -361,7 +370,9 @@ await build({
 	format: "esm",
 	outdir: "bundle",
 	external: ["node:*", ...NATIVE_COMPRESSION_EXTERNAL, ...TREE_SITTER_EXTERNAL],
-	banner: { js: "#!/usr/bin/env node" },
+	// The Hermes connector brings `yaml` into the CLI bundle. Its CommonJS build performs a
+	// dynamic `require("process")`, so the executable needs the same ESM require bridge as the daemon.
+	banner: { js: `#!/usr/bin/env node\n${CJS_REQUIRE_BANNER}` },
 	define: VERSION_DEFINE,
 });
 stampExecutable("bundle/cli.js");

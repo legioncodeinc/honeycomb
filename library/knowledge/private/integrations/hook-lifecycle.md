@@ -29,12 +29,12 @@ Each harness has its own event vocabulary. The table maps the logical Honeycomb 
 
 | Logical event | Claude Code | Codex | Cursor | Hermes | pi | OpenClaw |
 |---|---|---|---|---|---|---|
-| Session start / recall inject | `SessionStart` | `SessionStart` | `sessionStart` | `on_session_start` | AGENTS.md static block | `before_agent_start` + `before_prompt_build` |
-| Prompt capture | `UserPromptSubmit` | `UserPromptSubmit` | `beforeSubmitPrompt` | `on_user_message` | (batched) | `agent_end` (batch) |
-| Pre-tool intercept (VFS recall) | `PreToolUse` | `PreToolUse` (Bash) | `beforeShellExecution` (Shell) | `on_tool_use` (terminal only) | N/A | N/A |
-| Tool-call capture | `PostToolUse` | `PostToolUse` | `postToolUse` | `on_tool_use` (terminal only) | N/A | `agent_end` (batch) |
-| Assistant response capture | `Stop` / `SubagentStop` | `Stop` | `afterAgentResponse` / `stop` | N/A | N/A | `agent_end` (batch) |
-| Session end / summary spawn | `SessionEnd` | N/A (periodic only) | `sessionEnd` | `on_session_end` | `agent_end` / `session_shutdown` | `agent_end` (with summary slice) |
+| Session start / recall inject | `SessionStart` | `SessionStart` | `sessionStart` | `on_session_start` + `pre_llm_call` | AGENTS.md static block | `before_agent_start` + `before_prompt_build` |
+| Prompt capture | `UserPromptSubmit` | `UserPromptSubmit` | `beforeSubmitPrompt` | `pre_llm_call` (`extra.user_message`) | (batched) | `agent_end` (batch) |
+| Pre-tool intercept (VFS recall) | `PreToolUse` | `PreToolUse` (Bash) | `beforeShellExecution` (Shell) | N/A | N/A | N/A |
+| Tool-call capture | `PostToolUse` | `PostToolUse` | `postToolUse` | `post_tool_call` (`extra.result`) | N/A | `agent_end` (batch) |
+| Assistant response capture | `Stop` / `SubagentStop` | `Stop` | `afterAgentResponse` / `stop` | `post_llm_call` (`extra.assistant_response`) | N/A | `agent_end` (batch) |
+| Session end / summary spawn | `SessionEnd` | N/A (periodic only) | `sessionEnd` | `on_session_finalize` | `agent_end` / `session_shutdown` | `agent_end` (with summary slice) |
 
 A blank cell means that native event is not available on that harness. The lifecycle is still functionally complete: OpenClaw batches capture across the full conversation in `agent_end` rather than per-event, producing the same rows the daemon would have written incrementally, just grouped into one flush; pi reads its session-start context from the static `AGENTS.md` block rather than a live event.
 
@@ -45,7 +45,7 @@ Each harness also carries a context channel and a host CLI, both single-sourced 
 | Claude Code | model-only (`additionalContext`) | `legacy` | `claude -p` |
 | Codex | user-visible | `legacy` | `codex exec --dangerously-bypass-approvals-and-sandbox` |
 | Cursor | model-only (`additional_context`) | `plugin` | `cursor-agent` → `claude` fallback |
-| Hermes | user-visible (`{ context }` + MCP mention) | `legacy` | `hermes --non-interactive` |
+| Hermes | model-only (`{ context }`) | `legacy` | `hermes chat -Q -q` |
 | pi | user-visible | `plugin` | `pi --print --provider <p> --model <m>` |
 | OpenClaw | model-only | `plugin` | native extension slice (no host CLI) |
 
@@ -134,7 +134,7 @@ The pre-tool-use core is the VFS intercept. It runs before tool execution and lo
 - `grep` / `Glob` becomes a hybrid lexical-plus-semantic search through the daemon's grep-direct path.
 - `ls` becomes a path-prefix listing; `find` becomes a path-pattern query.
 
-Write and Edit on a memory path are denied with guidance to use the CLI instead. Commands the VFS cannot model (interpreters, pipes, command substitution) are rewritten to a harmless `echo`. The harnesses differ on coverage: Claude Code and Codex intercept Bash; Cursor normalizes its `Shell` tool to the canonical `Bash` shape so the same intercept applies; Hermes intercepts terminal tools only; pi and OpenClaw have no pre-tool intercept.
+Write and Edit on a memory path are denied with guidance to use the CLI instead. Commands the VFS cannot model (interpreters, pipes, command substitution) are rewritten to a harmless `echo`. The harnesses differ on coverage: Claude Code and Codex intercept Bash; Cursor normalizes its `Shell` tool to the canonical `Bash` shape so the same intercept applies; Hermes, pi, and OpenClaw have no pre-tool intercept.
 
 **This path went live in PRD-075.** It was previously scaffolded but dormant. 075a wires the real daemon-backed `VfsIntercept` and propagates a `PreToolDecision` back out of the shared core, and 075b renders that decision into the Claude Code `PreToolUse` contract as a **block-and-inject**: `permissionDecision: "deny"` plus `hookSpecificOutput.additionalContext` carrying the recalled content, so the model's tool call is intercepted and the memory is handed back in one response. The rendered shape is pinned to the real Claude Code contract by conformance tests (`references/claude-code/pretool-response-schema.ts`) so a harness contract change cannot silently break the inject. This is the **model-commanded recall arm**: the model reaches for a memory path and the hook answers, complementary to the always-on prompt-time floor above.
 

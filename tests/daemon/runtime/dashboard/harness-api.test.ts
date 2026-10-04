@@ -370,10 +370,10 @@ describe("PRD-039c c-AC-4 (server-folded descriptor): Cursor carries `agents`, C
 		expect(cursor?.capabilities.supportStatus).toBe("supported");
 		expect(claude?.capabilities.supportStatus).toBe("supported");
 		expect(harnesses.find((h) => h.name === "codex")?.capabilities.supportStatus).toBe("supported");
-		expect(hermes?.capabilities.supportStatus).toBe("in-progress");
+		expect(hermes?.capabilities.supportStatus).toBe("supported");
 		expect(openclaw?.capabilities.supportStatus).toBe("in-progress");
 		expect(harnesses.find((h) => h.name === "pi")?.capabilities.supportStatus).toBe("in-progress");
-		expect(hermes?.capabilities.mcpRegistration).toBeUndefined();
+		expect(hermes?.capabilities.mcpRegistration).toBe(true);
 		expect(openclaw?.capabilities.contractedTools).toBeUndefined();
 	});
 

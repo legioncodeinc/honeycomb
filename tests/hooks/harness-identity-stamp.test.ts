@@ -28,7 +28,6 @@
 import { describe, expect, it } from "vitest";
 
 import type { HarnessShim, NativeEvent } from "../../src/hooks/contracts.js";
-import type { HookInput, HookSessionMeta } from "../../src/hooks/shared/contracts.js";
 import {
 	createClaudeCodeShim,
 	createCodexShim,
@@ -36,10 +35,11 @@ import {
 	createHermesShim,
 	createOpenClawShim,
 	createPiShim,
-	openclawExpandBatch,
 	OPENCLAW_HARNESS,
 	type OpenClawMessage,
+	openclawExpandBatch,
 } from "../../src/hooks/index.js";
+import type { HookInput, HookSessionMeta } from "../../src/hooks/shared/contracts.js";
 
 /** The canonical six tokens the Harnesses page GROUPs BY — the contract the stamp must hit. */
 const THE_SIX = ["claude-code", "codex", "cursor", "hermes", "pi", "openclaw"] as const;
@@ -58,7 +58,7 @@ const REPRESENTATIVE_EVENT: Readonly<Record<string, NativeEvent>> = {
 	"claude-code": { name: "UserPromptSubmit", payload: { prompt: "find the bug" } },
 	codex: { name: "UserPromptSubmit", payload: { prompt: "find the bug" } },
 	cursor: { name: "beforeSubmitPrompt", payload: { prompt: "find the bug" } },
-	hermes: { name: "on_user_message", payload: { prompt: "find the bug", text: "find the bug" } },
+	hermes: { name: "pre_llm_call", payload: { extra: { user_message: "find the bug" } } },
 	pi: { name: "agent_end", payload: { reason: "session_shutdown" } },
 };
 
@@ -76,18 +76,17 @@ function hookShims(): Readonly<Record<string, HarnessShim>> {
 describe("harness identity → sessions.agent: every shim stamps its OWN canonical token", () => {
 	const shims = hookShims();
 
-	it.each(Object.keys(REPRESENTATIVE_EVENT))(
-		"%s normalizes a captured turn with meta.agent = its canonical token",
-		(harness) => {
-			const shim = shims[harness];
-			expect(shim.harness, "the shim's declared id is the canonical token").toBe(harness);
-			const input: HookInput | undefined = shim.normalize(REPRESENTATIVE_EVENT[harness], baseMeta());
-			expect(input, `${harness} maps its representative event → a capture event`).toBeDefined();
-			// THE FIX: the normalized capture metadata carries the harness's OWN canonical token,
-			// not the empty string — so `buildCaptureBody` forwards it into `sessions.agent`.
-			expect(input?.meta.agent).toBe(harness);
-		},
-	);
+	it.each(
+		Object.keys(REPRESENTATIVE_EVENT),
+	)("%s normalizes a captured turn with meta.agent = its canonical token", (harness) => {
+		const shim = shims[harness];
+		expect(shim.harness, "the shim's declared id is the canonical token").toBe(harness);
+		const input: HookInput | undefined = shim.normalize(REPRESENTATIVE_EVENT[harness], baseMeta());
+		expect(input, `${harness} maps its representative event → a capture event`).toBeDefined();
+		// THE FIX: the normalized capture metadata carries the harness's OWN canonical token,
+		// not the empty string — so `buildCaptureBody` forwards it into `sessions.agent`.
+		expect(input?.meta.agent).toBe(harness);
+	});
 
 	it("OpenClaw's batch path stamps agent = 'openclaw' on every expanded message", () => {
 		const messages: readonly OpenClawMessage[] = [

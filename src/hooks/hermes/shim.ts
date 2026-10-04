@@ -1,24 +1,16 @@
 /**
- * Hermes shim — PRD-019c Wave 2 (FR-6).
+ * Hermes shell-hook shim.
  *
- * Hermes (skill + shell hooks + MCP) maps `on_session_start`, `on_user_message`,
- * `on_tool_use` (terminal ONLY), `on_session_end`. Divergences from the reference:
- *   1. `on_tool_use` is captured ONLY for terminal tools — a non-terminal tool is
- *      dropped (returns no normalized data), per FR-6.
- *   2. context is USER-VISIBLE as a `{ context: "..." }` output carrying the FULL
- *      block PLUS an MCP-tools mention (so the user knows the `honeycomb_*` tools are
- *      available). {@link hermesRenderUserVisible} appends the mention;
- *      {@link hermesContextOutput} wraps it in the `{ context }` shape Hermes emits.
- *   3. host CLI `hermes --non-interactive`; runtime path `legacy` (shell hooks).
- *
- * References gate (FR-11 / D-3 / c-AC-6): cited at `references/hermes/`.
- *
- * THIN OVERRIDE: shares the `createShim` engine; the daemon call lives in the 019b
- * core. No SQL, no DeepLake (D-2).
+ * Hermes exposes lifecycle hooks through `$HERMES_HOME/config.yaml`. Each hook receives
+ * a JSON envelope on stdin with event-specific fields under `extra`. Honeycomb runs
+ * the pre-LLM hook twice: capture mode records the user message; recall mode performs
+ * synchronous per-turn recall and returns Hermes' native `{ context }` response.
+ * References gate: `references/hermes/` mirrors the authoritative Hermes shell-hook protocol.
  */
 
 import type { ContextChannel, HarnessShim, HostCli, RuntimePath } from "../contracts.js";
 import {
+	asRecord,
 	assistantMessageData,
 	createShim,
 	nested,
@@ -30,77 +22,92 @@ import {
 } from "../normalize.js";
 import type { HookSessionMeta, LogicalEvent } from "../shared/contracts.js";
 
+/** Current Hermes shell-hook events used by the capture-mode adapter. */
 export const HERMES_EVENT_MAP: Readonly<Record<string, LogicalEvent>> = {
 	on_session_start: "session-start",
-	on_user_message: "user_message",
-	on_tool_use: "tool_call",
-	on_session_end: "session-end",
+	pre_llm_call: "user_message",
+	post_tool_call: "tool_call",
+	post_llm_call: "assistant_message",
+	on_session_finalize: "session-end",
 };
 
-export const HERMES_CONTEXT_CHANNEL: ContextChannel = "user-visible";
+/** Recall-mode map: only the synchronous pre-LLM injector is active. */
+export const HERMES_RECALL_EVENT_MAP: Readonly<Record<string, LogicalEvent>> = {
+	pre_llm_call: "user_prompt_recall",
+};
+
+export type HermesHookMode = "capture" | "recall";
+export const HERMES_RECALL_HOOK_ARG = "--honeycomb-recall" as const;
+
+export function detectHermesHookMode(argv: readonly string[] = process.argv): HermesHookMode {
+	return argv.slice(2).includes(HERMES_RECALL_HOOK_ARG) ? "recall" : "capture";
+}
+
+export const HERMES_CONTEXT_CHANNEL: ContextChannel = "model-only";
 export const HERMES_RUNTIME_PATH: RuntimePath = "legacy";
-export const HERMES_HOST_CLI: HostCli = { bin: "hermes", args: ["--non-interactive"] };
+export const HERMES_HOST_CLI: HostCli = { bin: "hermes", args: ["chat", "-Q", "-q"] };
 export const HERMES_REFERENCES = "references/hermes/" as const;
 
-/** The MCP-tools mention appended to Hermes's user-visible context block (FR-6). */
-export const HERMES_MCP_MENTION =
-	"\n\n(Honeycomb MCP tools available: honeycomb_search, honeycomb_read, honeycomb_index.)" as const;
-
-/** True when a Hermes tool name is a terminal tool (the only tools captured, FR-6). */
-export function hermesIsTerminalTool(tool: string): boolean {
-	return tool === "terminal" || tool === "Terminal" || tool === "shell" || tool === "Shell" || tool === "Bash";
-}
-
-/**
- * Append the MCP-tools mention to the full context block for Hermes's user-visible
- * channel (FR-6 / c-AC-5). An empty block (signed-out / read-only) renders nothing —
- * the mention only rides a non-empty recall block.
- */
 export function hermesRenderUserVisible(block: string): string {
-	return block.trim() === "" ? "" : block + HERMES_MCP_MENTION;
+	return block;
 }
 
-/** Wrap Hermes's user-visible context text in the `{ context: "..." }` output shape (FR-6). */
 export function hermesContextOutput(text: string): { readonly context: string } {
 	return { context: text };
 }
 
 /**
- * Lower a Hermes native payload into the CANONICAL normalized data (c-AC-1). The
- * terminal-ONLY tool filter lives here: a non-terminal `on_tool_use` returns
- * `undefined` (dropped, FR-6). Every other event reuses the canonical `*Data`
- * builders, so Hermes's normalized output matches the reference's.
+ * Hermes consumes injected context only from `pre_llm_call`. Session-start recall is
+ * still run for Honeycomb's setup/notification lifecycle, but its stdout is a benign
+ * no-op because Hermes ignores context on that event.
  */
+export function hermesRenderHookResponse(nativeEventName: string, block: string): unknown | undefined {
+	if (nativeEventName === "pre_llm_call") return hermesContextOutput(hermesRenderUserVisible(block));
+	if (nativeEventName === "on_session_start") return {};
+	return undefined;
+}
+
+function extra(raw: unknown): Record<string, unknown> {
+	return asRecord(nested(raw, "extra"));
+}
+
+function extraString(raw: unknown, ...keys: readonly string[]): string {
+	return pickString(extra(raw), ...keys);
+}
+
+/** Lower the current Hermes shell-hook envelope into canonical Honeycomb data. */
 export function hermesExtractData(raw: unknown, logical: LogicalEvent): unknown | undefined {
 	switch (logical) {
 		case "session-start":
-			return sessionStartData(pickString(raw, "source") || "startup");
+			return sessionStartData(extraString(raw, "source") || "startup");
 		case "user_message":
-			return userMessageData(pickString(raw, "message", "prompt", "text"));
+		case "user_prompt_recall":
+			return userMessageData(extraString(raw, "user_message", "message", "prompt", "text"));
+
 		case "tool_call": {
 			const tool = pickString(raw, "tool_name", "tool");
-			if (!hermesIsTerminalTool(tool)) return undefined; // terminal-only (FR-6).
-			return toolCallData(tool, nested(raw, "tool_input"), nested(raw, "tool_response"));
+			return toolCallData(tool, nested(raw, "tool_input"), nested(extra(raw), "result"));
 		}
-		case "session-end":
-			return sessionEndData(pickString(raw, "reason") || "on_session_end");
 		case "assistant_message":
-			return assistantMessageData(pickString(raw, "text", "message"));
+			return assistantMessageData(extraString(raw, "assistant_response", "response", "text", "message"));
+		case "session-end":
+			return sessionEndData(extraString(raw, "reason") || "on_session_finalize");
 		default:
 			return undefined;
 	}
 }
 
-/** Construct the Hermes shim (FR-6). Terminal-only tools + `{ context }` + MCP mention. */
-export function createHermesShim(): HarnessShim {
+export function createHermesShim(options: { readonly mode?: HermesHookMode } = {}): HarnessShim {
+	const mode = options.mode ?? detectHermesHookMode();
 	return createShim({
 		harness: "hermes",
 		runtimePath: HERMES_RUNTIME_PATH,
 		contextChannel: HERMES_CONTEXT_CHANNEL,
 		hostCli: HERMES_HOST_CLI,
 		references: HERMES_REFERENCES,
-		eventMap: HERMES_EVENT_MAP,
+		eventMap: mode === "recall" ? HERMES_RECALL_EVENT_MAP : HERMES_EVENT_MAP,
 		renderUserVisible: hermesRenderUserVisible,
+		renderHookResponse: hermesRenderHookResponse,
 		extractData(raw: unknown, logical: LogicalEvent, _meta: HookSessionMeta): unknown | undefined {
 			void _meta;
 			return hermesExtractData(raw, logical);

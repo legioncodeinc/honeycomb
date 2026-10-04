@@ -142,6 +142,34 @@ jobs:
       - name: Packed CLI conformance
         run: npm run test:packed-cli
 
+  minimum-node-packed-hermes:
+    name: Packed Hermes conformance (minimum Node 22.5.0)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+      - name: Setup minimum supported runtime Node
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: '22.5.0'
+      - name: Preserve minimum runtime path
+        run: echo "MINIMUM_NODE=$(command -v node)" >> "$GITHUB_ENV"
+      - name: Setup build Node
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: '24.x'
+          cache: npm
+      - name: Install build dependencies
+        run: npm ci
+      - name: Build and pack once
+        run: npm run build && npm run pack:prepare
+      - name: Install package with build Node and execute it with minimum Node
+        env:
+          HONEYCOMB_CONFORMANCE_NODE: ${{ env.MINIMUM_NODE }}
+        run: npm run test:packed-hermes
+
   # ── Windows smoke. The dev host is Windows and the build scripts
   # (esbuild.config.mjs chmod, pack-check.mjs) have win32 branches that Linux CI
   # would never exercise. One pinned Node major is enough here — the Node matrix

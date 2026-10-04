@@ -65,7 +65,7 @@ const hits = entries.filter((p) => FORBIDDEN.some((rx) => rx.test(p)));
 
 if (hits.length) {
 	console.error("Refusing to publish — forbidden filenames in tarball:");
-	for (const h of hits) console.error("  " + h);
+	for (const h of hits) console.error(`  ${h}`);
 	process.exit(1);
 }
 
@@ -80,6 +80,10 @@ const REQUIRED = [
 	/(^|\/)bundle\/cli\.js$/, // the `honeycomb` bin
 	/(^|\/)daemon\/index\.js$/, // the daemon entry the CLI spawns
 	/(^|\/)harnesses\/claude-code\/mcp\/bundle\/server\.js$/, // Claude Code plugin-internal MCP server path
+	/(^|\/)harnesses\/hermes\/bundle\/session-start\.mjs$/, // Hermes lifecycle hook alias
+	/(^|\/)harnesses\/hermes\/bundle\/capture\.mjs$/, // Hermes capture + recall hook alias
+	/(^|\/)harnesses\/hermes\/bundle\/session-end\.mjs$/, // Hermes finalization hook alias
+	/(^|\/)mcp\/bundle\/server\.js$/, // copied into $HERMES_HOME/honeycomb/mcp on connect
 	/(^|\/)assets\/styles\.css$/, // resolveAssetsDir() locator
 	/(^|\/)assets\/tokens\/base\.css$/, // the DS token CSS the dashboard serves
 	/(^|\/)assets\/logos\/honeycomb-memory-cluster\.svg$/, // the brand mark the header renders
@@ -88,7 +92,7 @@ const REQUIRED = [
 const missing = REQUIRED.filter((rx) => !entries.some((p) => rx.test(p)));
 if (missing.length) {
 	console.error("Refusing to publish — required runtime files missing from tarball:");
-	for (const m of missing) console.error("  " + String(m));
+	for (const m of missing) console.error(`  ${String(m)}`);
 	console.error("  (widen package.json's `files` allowlist — the install would be broken)");
 	process.exit(1);
 }

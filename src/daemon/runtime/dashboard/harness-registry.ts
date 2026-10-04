@@ -31,19 +31,19 @@
 import {
 	CLAUDE_CODE_EVENT_MAP,
 	CODEX_EVENT_MAP,
+	type ContextChannel,
 	CURSOR_EVENT_MAP,
-	HERMES_EVENT_MAP,
-	OPENCLAW_EVENT_MAP,
-	PI_EVENT_MAP,
 	createClaudeCodeShim,
 	createCodexShim,
 	createCursorShim,
 	createHermesShim,
 	createOpenClawShim,
 	createPiShim,
-	type ContextChannel,
 	type HarnessShim,
+	HERMES_EVENT_MAP,
 	type HostCli,
+	OPENCLAW_EVENT_MAP,
+	PI_EVENT_MAP,
 } from "../../../hooks/index.js";
 import type { RuntimePath } from "../../../hooks/shared/contracts.js";
 
@@ -134,8 +134,8 @@ const HARNESS_SPECIFICS: Readonly<Record<string, Partial<HarnessCapabilities>>> 
 		agents: { kind: "cursor-agent", binary: "cursor-agent", fallbackBin: "claude" },
 		workspaceRoots: true,
 	},
-	// Hermes, pi, and OpenClaw remain in-progress in production (C-1 claim-reduction).
-	hermes: {},
+	// pi and OpenClaw remain in-progress in production (C-1 claim-reduction).
+	hermes: { mcpRegistration: true },
 	openclaw: {},
 	pi: {},
 	// Codex surfaces only the brief user-visible login line (CODEX_LOGIN_LINE, codex/shim.ts).
@@ -144,7 +144,7 @@ const HARNESS_SPECIFICS: Readonly<Record<string, Partial<HarnessCapabilities>>> 
 	"claude-code": {},
 });
 
-const SUPPORTED_HARNESSES = new Set(["claude-code", "codex", "cursor"]);
+const SUPPORTED_HARNESSES = new Set(["claude-code", "codex", "cursor", "hermes"]);
 
 /** Build one harness's capability descriptor from its shim statics + the grounded specifics. */
 function buildCapabilities(shim: HarnessShim): HarnessCapabilities {

@@ -298,6 +298,7 @@ describe("PRD-006b b-AC-5 - reuse, not fork", () => {
 		expect(wiring).toBeDefined();
 		expect(typeof wiring?.wire).toBe("function");
 		expect(typeof wiring?.unwire).toBe("function");
+		expect(buildConnectorWiring("hermes", home)).toBeDefined();
 		expect(buildConnectorWiring("not-a-real-harness", home)).toBeUndefined();
 	});
 

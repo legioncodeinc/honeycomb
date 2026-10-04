@@ -41,10 +41,12 @@ export {
 	HONEYCOMB_ENTRY_KEY,
 	HONEYCOMB_MARKER,
 	type HookHandlerEntry,
+	type InstallFileEntry,
 	notImplemented,
 	type SkillLinkTarget,
 } from "./contracts.js";
 export { CursorConnector, type CursorConnectorOptions } from "./cursor.js";
+export { HERMES_MCP_SERVER_NAME, HermesConnector, type HermesConnectorOptions } from "./hermes.js";
 export { createNodeConnectorFs } from "./node-fs.js";
 export {
 	createClaudePluginRunner,

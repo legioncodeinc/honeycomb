@@ -157,6 +157,12 @@ jobs:
       - name: Pack-check (tarball secret/forbidden-file + required-file scan)
         run: npm run pack:check
 
+      - name: Packed Hermes connector conformance
+        run: npm run test:packed-hermes
+        env:
+          HONEYCOMB_POSTHOG_KEY: ${{ secrets.HONEYCOMB_POSTHOG_KEY }}
+          HONEYCOMB_REF_DEFAULT: ${{ vars.HONEYCOMB_REF_DEFAULT }}
+
       # ── Tag-vs-package.json version guard. ───────────────────────────────────
       # On a tag push the pushed tag `vX.Y.Z` MUST equal package.json's version
       # (which sync-versions has already propagated into every manifest). A
