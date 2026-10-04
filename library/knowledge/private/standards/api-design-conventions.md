@@ -1,6 +1,6 @@
 # API Design Conventions
 
-> Category: Standards | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Standards | Version: 1.1 | Date: October 2026 | Status: Active
 
 How the Honeycomb daemon's HTTP API is shaped: route grouping, the error and status-code conventions, and the scoping and runtime-path contracts every route honors.
 
@@ -14,7 +14,7 @@ How the Honeycomb daemon's HTTP API is shaped: route grouping, the error and sta
 
 ## One service, grouped routes
 
-The Honeycomb daemon serves everything from one Hono server on port 3850. The root `/` serves the dashboard, `/api/*` is the working API, `/memory/*` keeps search and similarity aliases, `/health` is the cheap liveness check, and `/mcp` and `/v1/*` carry MCP and the OpenAI-compatible gateway. The full surface is enumerated in the [System Overview](../architecture/system-overview.md); this doc covers the conventions behind it.
+The Honeycomb daemon serves its HTTP API from one Hono server on port 3850 (`src/shared/constants.ts:13-17`). `/health` is the cheap liveness check, `/api/*` is the working API, `/memory/*` keeps search and similarity aliases, and `/mcp` and `/v1/*` carry MCP and the OpenAI-compatible gateway. `ROUTE_GROUPS` scaffolds a `/` group, and no module attaches a page handler to it (`src/daemon/runtime/server.ts:105`). The browser dashboard is the Hive portal on port 3853 (`src/shared/constants.ts:19-23`). The full surface is in [Daemon Surface](../architecture/daemon-surface.md); this doc covers the conventions behind the API.
 
 ## Route groups
 

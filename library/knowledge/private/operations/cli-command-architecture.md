@@ -1,6 +1,6 @@
 # CLI Command Architecture
 
-> Category: Operations | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Operations | Version: 1.1 | Date: October 2026 | Status: Active
 
 Architecture of the Honeycomb unified command-line tool, subcommand dispatching, authentication flows, and operational database commands routed through the daemon.
 
@@ -67,7 +67,7 @@ The verb composes existing seams, it is a thin daemon client, never a daemon-cor
 
 1. **Health-gate the daemon** via `ensureDaemonRunning` (the same PID/lock-guarded path `setup` and the first storage-touching call use). It is idempotent, an already-healthy daemon is a no-op, never a second bind of `127.0.0.1:3850`. If the daemon never becomes reachable, the verb prints "daemon didn't start" + a retry hint and exits non-zero.
 2. **Persist the onboarding marker**, `phase: "installed"` + the effective referral code, into `~/.deeplake/onboarding.json` (fail-soft: a write hiccup never fails the install).
-3. **Open the dashboard** at `honeycomb.local` best-effort, always falling back to the `http://127.0.0.1:3850/dashboard` loopback, via a fixed-argv opener that refuses any non-local URL.
+3. **Open the dashboard** at `http://127.0.0.1:3853/` (`src/commands/install.ts:64-74`, `src/commands/install.ts:344-356`). `openLocalDashboardUrl` accepts a host of `127.0.0.1`, `localhost`, or `::1` (`src/commands/install.ts:123-130`).
 
 The effective referral code resolves `--ref <code>` → `onboarding.ref` → the build-time default (`__HONEYCOMB_REF_DEFAULT__`, shipped `mario`). The verb only *persists* the ref; the device-flow attribution header is the login flow's job, driven from the dashboard's "First time setup" button rather than the terminal. The full onboarding lifecycle, the one-daemon/two-phase model, the on-page device flow, Hivemind migration, and adoption telemetry, is documented in [Install and Onboarding](install-and-onboarding.md).
 

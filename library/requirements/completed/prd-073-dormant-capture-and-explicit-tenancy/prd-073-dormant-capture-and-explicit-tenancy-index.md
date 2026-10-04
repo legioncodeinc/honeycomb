@@ -146,7 +146,7 @@ Full fresh-install protocol on the product owner's Windows machine. Each step li
 - **Fleet ADR-0003, mirrored locally** as [`0008-fleet-directory-ownership-and-neutral-state-root.md`](../../../knowledge/private/architecture/adr/0008-fleet-directory-ownership-and-neutral-state-root.md): the state-root context PRD-072 implements; this PRD adds no new home-anchored state family and is unaffected by the relocation.
 - **Doctor ADR-0002** (`doctor/library/knowledge/private/architecture/ADR-0002-service-registration-static-registry-plus-runtime-sqlite.md`): the service-registry contract is unaffected; the daemon stays registered and healthy while capture-dormant.
 - **The shared `~/.deeplake/projects.json` binding surface:** written by `src/daemon/runtime/projects/onboarding-api.ts` and the CLI `project bind`, read by nectar's `project-scope.ts` and honeycomb's resolver; this PRD consumes it unchanged.
-- [PRD-059 (projects onboarding)](../prd-059-projects-onboarding/) - the first-run gate, bind flow, and notice this PRD generalizes.
+- [PRD-059 (projects onboarding)](../../backlog/prd-059-projects-onboarding/) - the first-run gate, bind flow, and notice this PRD generalizes.
 - PRD-049 (completed) - the per-session resolver and the `__unsorted__` inbox this PRD makes opt-in.
 - PRD-050 (completed) - the guided-setup surface (`/setup/state`, `/setup/login`) 073c extends.
 - IRD-122 - the dashboard scope-switch persistence routes whose mechanics 073c reuses for the selection persist.

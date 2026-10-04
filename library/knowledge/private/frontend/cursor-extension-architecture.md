@@ -1,6 +1,6 @@
 # Cursor Extension Architecture
 
-> Category: Frontend | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Frontend | Version: 1.1 | Date: October 2026 | Status: Active
 
 How Honeycomb wires into Cursor 1.7+ via hooks.json, what each hook does, and how the session-start context block presents auth state and org identity to the agent.
 
@@ -207,6 +207,6 @@ The extension's TypeScript shell (`extension.ts`, `contracts.ts`, `bindings.ts`,
 
 ### Status bar and dashboard webview
 
-The status bar item paints five health dimensions as a glyph row (e.g. `Honeycomb ✓✓✗✓✓`) with a per-dimension tooltip: CLI install, daemon connectivity, `cursor-agent` availability, `cursor-agent` login, and hook wiring. Any failing dimension flips a `hasFailure` flag the host colors red. The dashboard command renders the *same* canonical dashboard view tree the daemon serves at `127.0.0.1:3850/dashboard` (KPIs, sessions, settings, graph canvas, rules, skill-sync state) into a webview, carrying a `data-connectivity="reachable" | "unreachable"` attribute so a daemon-down state shows a connectivity banner rather than a blank panel. The shared view tree is documented in [dashboard-architecture.md](dashboard-architecture.md).
+The status bar item paints five health dimensions as a glyph row (e.g. `Honeycomb ✓✓✗✓✓`) with a per-dimension tooltip: CLI install, daemon connectivity, `cursor-agent` availability, `cursor-agent` login, and hook wiring. Any failing dimension flips a `hasFailure` flag the host colors red. The dashboard command writes the rendered view tree into an editor webview (`harnesses/cursor/extension/extension.ts:108-113`). That view reads the daemon on `127.0.0.1:3850` (`src/dashboard/launch.ts:51-56`). The shared view tree is documented in [dashboard-architecture.md](dashboard-architecture.md).
 
 Product requirements: `library/requirements/in-work/prd-020-surfaces/prd-020c-surfaces-cursor-extension.md`.

@@ -343,7 +343,7 @@ Because PRD-081 changes no durable data, rollback requires no data repair.
 - [PRD-058: Memory Lifecycle](../../in-work/prd-058-memory-lifecycle/prd-058-memory-lifecycle-index.md)
 - [PRD-062: DeepLake Compute Cost Reduction](../../completed/prd-062-deeplake-compute-cost-reduction/prd-062-deeplake-compute-cost-reduction-index.md)
 - [PRD-066: Local Queue Idle-Cost Control](../../in-work/prd-066-local-queue-idle-cost-control/prd-066-local-queue-idle-cost-control-index.md)
-- [PRD-077: Per-Turn Recall Fast Path](../prd-077-per-turn-recall-fast-path/prd-077-per-turn-recall-fast-path-index.md)
+- [PRD-077: Per-Turn Recall Fast Path](../../completed/prd-077-per-turn-recall-fast-path/prd-077-per-turn-recall-fast-path-index.md)
 - [PRD-079: Durable Capture Retry Queue](../../completed/prd-079-durable-capture-retry-queue/prd-079-durable-capture-retry-queue-index.md)
 - [PRD-080: Durable Controlled-Write Outbox](../../completed/prd-080-durable-controlled-write-outbox/prd-080-durable-controlled-write-outbox-index.md)
 - `src/daemon/runtime/CONVENTIONS.md`

@@ -1,6 +1,6 @@
 # Dashboard Architecture
 
-> Category: Frontend | Version: 1.1 | Date: July 2026 | Status: Active
+> Category: Frontend | Version: 1.2 | Date: October 2026 | Status: Active
 
 How Honeycomb's web dashboard is built and shipped: the token-free self-hydrating React shell, the hash-routed page registry, and the eight surfaces (nav shell plus seven pages) that present memory, harnesses, graph, sync, logs, and settings. In the current fleet arrangement the Hive portal fronts the dashboard SPA on its own loopback origin and federates to Honeycomb server-side; Honeycomb itself is the `/api/*` data plane and serves no cross-origin browser traffic.
 
@@ -35,11 +35,13 @@ The operator opens the dashboard at the Hive portal:
 http://127.0.0.1:3853/
 ```
 
-`127.0.0.1` and `3853` are the Hive portal's loopback host and port (`HIVE_HOST` / `HIVE_PORT` in `src/shared/constants.ts`); `/` is the portal path (`DASHBOARD_HOST_PATH` in `src/dashboard/launch.ts`, `DASHBOARD_PATH` in `src/commands/install.ts`). `honeycomb dashboard` resolves this URL (`openDashboard` in `src/dashboard/launch.ts`) and opens the browser; `honeycomb install` opens it too, `honeycomb.local:3853` best-effort with the loopback URL as the always-correct fallback.
+`127.0.0.1` and `3853` are the Hive portal's loopback host and port (`HIVE_HOST` / `HIVE_PORT` in `src/shared/constants.ts:19-23`); `/` is the portal path (`DASHBOARD_HOST_PATH` in `src/dashboard/launch.ts:149-156`, `DASHBOARD_PATH` in `src/commands/install.ts:64-74`). `openDashboard` and solo `honeycomb install` both open `http://127.0.0.1:3853/` (`src/dashboard/launch.ts:167-178`, `src/commands/install.ts:344-356`).
 
 The Hive portal serves a complete HTML document with no inline token, secret, or credential: a mount point plus a module script that pulls the bundled SPA (React, ReactDOM, the router, every page). The shell **self-hydrates**: it boots from static HTML, then fills itself by fetching data same-origin from the Hive portal, which federates each read from Honeycomb server-side over loopback (Hive ADR-0002). There is no server-rendered state and no token round-trip, so a refresh re-hydrates from scratch with zero auth ceremony.
 
 Honeycomb serves no shell HTML, bundle, or static asset of its own: the dashboard host that once lived under `src/daemon/runtime/dashboard/` was removed once Hive took over the SPA origin, so Honeycomb has no `GET /dashboard` route. What Honeycomb serves is the data plane, its dashboard API (`src/daemon/runtime/dashboard/api.ts`) plus the harness, sync, diagnostics, and setup endpoints under `/api/*` (and `/setup/*` in local mode), all loopback, all metadata-only by construction. The auth-status read model, for example, returns org / workspace / agent / source / saved-at / expires-at and **never a token**. Those are the endpoints Hive's BFF proxy reads on the browser's behalf.
+
+This checkout's `src/dashboard/` is the view-tree and launch client: `dashboard.ts`, `launch.ts`, `views.ts`, `html.ts`, `contracts.ts`, `logs.ts`, and `index.ts`. It does not contain `src/dashboard/web/` (`app.tsx`, `router.tsx`, `registry.tsx`, `sidebar.tsx`, or `pages/`). The page paths named in the next sections are the SPA layout this document describes; they are not files in this repository. Hive's tree is a separate repository, called out in the cross-origin section below.
 
 ---
 

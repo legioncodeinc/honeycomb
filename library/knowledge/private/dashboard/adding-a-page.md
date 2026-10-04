@@ -1,12 +1,14 @@
 # How to add a dashboard page
 
-> Category: Frontend | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Frontend | Version: 1.1 | Date: October 2026 | Status: Active
 
 A contributor how-to: adding a page to the daemon-served dashboard is one registry entry plus one component. Owner of the seam: PRD-037 (Dashboard Nav Shell); consumers: PRD-038 (home reorg), PRD-039 (Harnesses), PRD-040 (Memories), PRD-041 (Graph), PRD-042 (Sync), PRD-043 (Logs), PRD-044 (Settings).
 
 **Related:**
 - [`../frontend/dashboard-architecture.md`](../frontend/dashboard-architecture.md)
 - [`../architecture/daemon-surface.md`](../architecture/daemon-surface.md)
+
+This recipe names `src/dashboard/web/` (`sidebar.tsx`, `router.tsx`, `registry.tsx`, `page-frame.tsx`) and `src/daemon/runtime/dashboard/host.ts`. None of those paths are in this checkout. `src/dashboard/` here is the launch client and view tree (`launch.ts`, `views.ts`, `html.ts`). The browser SPA is the Hive portal on port 3853, documented in [`../frontend/dashboard-architecture.md`](../frontend/dashboard-architecture.md). The steps below are the historical registry contract. Follow them only in the tree that still contains those files.
 
 The `/dashboard` mini-site is a left-nav multi-page app shell (PRD-037). The shell, the sidebar
 (`src/dashboard/web/sidebar.tsx`), the hash router (`src/dashboard/web/router.tsx`), and the app-shell
@@ -89,10 +91,7 @@ stays one file (`/dashboard/app.js`).
 
 ## Why this seam exists
 
-- **Hash routing, not History API** (PRD-037 D-1): the daemon host (`src/daemon/runtime/dashboard/host.ts`)
-  serves the dashboard at exactly four GET routes with no catch-all. A refresh on a real path
-  (`/dashboard/graph`) would 404; the hash fragment (`/dashboard#/graph`) is client-only, so deep links
-  are refresh-safe with zero host changes. Do not add a daemon route.
+- **Hash routing, not History API** (PRD-037 D-1): the old rationale was that a daemon host at `src/daemon/runtime/dashboard/host.ts` served four GET routes and a real path refresh would 404, so the hash fragment stayed client-only. That host file is not in this checkout. Honeycomb has no `GET /dashboard` route; the Hive portal serves the SPA (`../frontend/dashboard-architecture.md`).
 - **One registry, two consumers** (D-7): the sidebar and the router outlet both read `ROUTES`. Editing
   the list in one place updates both, which is exactly why adding a page never touches `sidebar.tsx` or
   `router.tsx`.

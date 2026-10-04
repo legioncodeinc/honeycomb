@@ -1,6 +1,6 @@
 # System Overview
 
-> Category: Architecture | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Architecture | Version: 1.1 | Date: October 2026 | Status: Active
 
 The master view of Honeycomb: the planes, the daemon at the center, the DeepLake substrate underneath, and how the memory engine and the product subsystems fit together.
 
@@ -82,7 +82,7 @@ Getting in is one command. The installer detects and sets up a Node runtime, ins
 | CLI | `honeycomb` | Install, setup, status, recall, agents, ontology, sources, skills, assets, org/workspace/project. |
 | MCP + SDK | MCP server, `@honeycomb/sdk` | Tool-based and typed access. See [`../integrations/mcp-and-sdk.md`](../integrations/mcp-and-sdk.md). |
 | Cursor extension | `harnesses/cursor/extension/` | Shipped Cursor/VS Code extension: hooks bundle, status bar, and the dashboard webview. See [`../frontend/cursor-extension-architecture.md`](../frontend/cursor-extension-architecture.md). |
-| Dashboard | daemon-served at `127.0.0.1:3850/dashboard` | Token-free loopback web UI: home, harnesses, memories, graph, sync, logs, settings, plus guided setup. See [`../frontend/dashboard-architecture.md`](../frontend/dashboard-architecture.md). |
+| Dashboard | Hive portal at `127.0.0.1:3853/` (`HIVE_PORT`) | Browser UI the install verb opens. The daemon on port 3850 serves the API that UI reads. See [`../frontend/dashboard-architecture.md`](../frontend/dashboard-architecture.md) and [`daemon-surface.md`](daemon-surface.md). |
 
 ## The two halves: engine and product
 

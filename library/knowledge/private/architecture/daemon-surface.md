@@ -1,6 +1,6 @@
 # Daemon Surface
 
-> Category: Architecture | Version: 1.1 | Date: June 2026 | Status: Active
+> Category: Architecture | Version: 1.2 | Date: October 2026 | Status: Active
 
 The daemon's externally visible surface: the HTTP server, its route groups, the file watcher, and the runtime-path contract that keeps integrations from colliding.
 
@@ -16,7 +16,7 @@ The daemon's externally visible surface: the HTTP server, its route groups, the 
 
 ## The server
 
-The honeycomb daemon runs an HTTP server, by default on `127.0.0.1:3850`. Port, host, and bind address are overridable through `HONEYCOMB_PORT`, `HONEYCOMB_HOST`, and `HONEYCOMB_BIND`, which is how a team deployment widens the bind beyond localhost. The root `/` serves the dashboard, `/health` is the liveness check, `/api/*` is the working API, `/memory/*` keeps search and similarity aliases, and `/mcp` is the Model Context Protocol endpoint. The daemon is the only process that opens DeepLake; every other surface reaches storage through it.
+The honeycomb daemon runs an HTTP server, by default on `127.0.0.1:3850`. Port, host, and bind address are overridable through `HONEYCOMB_PORT`, `HONEYCOMB_HOST`, and `HONEYCOMB_BIND`, which is how a team deployment widens the bind beyond localhost (`src/daemon/runtime/config.ts:10-15`). `/health` is the liveness check, `/api/*` is the working API, `/memory/*` keeps search and similarity aliases, and `/mcp` is the Model Context Protocol endpoint. `ROUTE_GROUPS` also scaffolds a `/` group (`src/daemon/runtime/server.ts:105`), and no module under `src/daemon` calls `group("/")` to attach a page there. The browser the install verb opens is the Hive portal at `http://127.0.0.1:3853/` (`src/shared/constants.ts:19-23`, `src/commands/install.ts:64-74`, `src/dashboard/launch.ts:167-178`). The daemon is the only process that opens Deeplake; every other surface reaches storage through it. The import and injection rules are in [Load-Bearing Boundaries](load-bearing-boundaries.md).
 
 ## Route groups
 
