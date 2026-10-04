@@ -4,7 +4,7 @@ Shard: `library/requirements/in-work/prd-064-doctor-self-healing-watchdog/` incl
 Checkout: no `doctor/` tree, no `scripts/install/`, no `.github` workflow whose name or body mentions doctor.
 Rule used: Doctor package internals are UNVERIFIABLE unless the criterion is implemented in honeycomb `src/`. Build outputs and `node_modules` were not used. QA notes from 2026-06-27 cite a Windows worktree (`doctor/src/...`) that is not this checkout; those paths are ABSENT and are not proof.
 
-Counts: 58 acceptance-criterion bullets. MET 6. UNMET 0. UNVERIFIABLE 52.
+Counts: 58 acceptance-criterion bullets. MET 5. UNMET 0. UNVERIFIABLE 53.
 
 Recommended bucket: **stay in-work**.
 
@@ -434,8 +434,8 @@ This child is implemented in honeycomb `src/`. Spawn fallback when no manager is
 
 - Quote: "Given Doctor performs a rung-1 restart, when it does, then it goes through the service manager and the PID/lock guard prevents any double-bind."
 - PRD: `library/requirements/in-work/prd-064-doctor-self-healing-watchdog/prd-064h-doctor-self-healing-watchdog-primary-daemon-os-native-service.md:37`
-- Verdict: MET
-- Source: `restart` prefers the registered manager at `src/cli/runtime.ts:471-480`. Manager argv: launchd `kickstart -k` `src/cli/daemon-service.ts:804-807`, systemd `restart` `src/cli/daemon-service.ts:877-880`, schtasks `/End` then `/Run` on the same task `src/cli/daemon-service.ts:966-976`. Double-bind guard: `acquireSingleInstanceLock` throws `DaemonAlreadyRunningError` when the recorded pid is alive (`src/daemon/runtime/assemble.ts:931-941`). Doctor calling this seam is not in the tree; the seam the criterion requires is.
+- Verdict: UNVERIFIABLE
+- Source: Honeycomb has a service-manager restart seam (`src/cli/runtime.ts:471-480`, launchd `kickstart -k`, systemd `restart`, schtasks `/End` then `/Run`). This checkout does not show Doctor invoking that seam, so the criterion is not met here and is not unmet inside honeycomb source.
 
 ### AC-064h.6
 

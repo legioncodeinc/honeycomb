@@ -30,7 +30,7 @@ Three additive vault `setting`-class keys plus one secret drive the whole featur
 |---|---|---|
 | `portkey.enabled` | setting (boolean) | The master toggle. Off (default) means the per-provider path runs unchanged. |
 | `portkey.config` | setting (string) | The Portkey config or virtual-key id, copied from the Portkey dashboard. Free-form, rejected if it contains control characters (it rides the `x-portkey-config` header). |
-| `portkey.fallbackToProvider` | setting (boolean, default false) | Opt-in fallback to the per-provider path when the gateway is unreachable. |
+| `portkey.fallbackToProvider` | setting (boolean, default false) | Opt-in fallback to the per-provider path on any Portkey error, including a non-2xx response, not only when the gateway is unreachable. |
 | `PORTKEY_API_KEY` | secret | The Portkey key, write-only and presence-only. No endpoint ever returns its value. |
 
 The vault keys exist. The catalog entry lives in `src/daemon/runtime/vault/catalog.ts` (`portkey`, `openEnded`); the setting keys are validated in `src/daemon/runtime/vault/api.ts` (`portkey.enabled`, `portkey.config`, `portkey.fallbackToProvider`). There is no `Portkey` string under `src/dashboard` or `src/daemon/runtime/dashboard`, and there is no `src/dashboard/web/panels.tsx` `PortkeyGatewaySection` or `pages/settings.tsx` Portkey panel. When Portkey is on, `activeProvider` is no longer authoritative for routing (D-2).

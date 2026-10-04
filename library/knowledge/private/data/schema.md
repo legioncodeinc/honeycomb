@@ -357,7 +357,7 @@ CREATE TABLE IF NOT EXISTS "teams" (
 ) USING deeplake;
 ```
 
-The `sessions` capture table carries four token/cache columns (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`), each a nullable `BIGINT` with no default, plus `model` (`TEXT NOT NULL DEFAULT ''`) and `source_tool` (`TEXT NOT NULL DEFAULT ''`). They are healed in additively so the measured-savings half has per-turn token data. A missing value stays SQL NULL, which the read treats as "token data absent". A measured zero stays the integer `0`.
+The `sessions` capture table carries four token/cache columns (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`), each a nullable `BIGINT` with no default, plus `model` (`TEXT NOT NULL DEFAULT ''`) and `source_tool` (`TEXT NOT NULL DEFAULT ''`). The schema heal pass adds these four token and cache columns so the measured-savings half has per-turn token data. A missing value stays SQL NULL, which the read treats as "token data absent". A measured zero stays the integer `0`.
 
 ## Retention summary
 

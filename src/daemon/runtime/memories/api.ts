@@ -73,6 +73,7 @@ import {
 // `recordInjection` is fail-soft by contract (never throws), so the response is byte-identical.
 import { recordInjection } from "../telemetry/injection-log.js";
 import { RecencyConfigSchema, type RecencyConfig } from "../recall/config.js";
+import { buildScopeClause } from "../recall/scope-clause.js";
 import { isValidRecallMode, type RecallMode } from "../vault/api.js";
 import type { VaultStore } from "../vault/store.js";
 import type { SecretScope } from "../secrets/contracts.js";
@@ -473,6 +474,29 @@ const ForgetBodySchema = z.object({
  * read/write). This is the pure HEADER step; the local-mode default-scope fallback is
  * layered on at the handler via {@link resolveScopeOrLocalDefault} (PRD-022).
  */
+/**
+ * The agent read-policy fragment for the memories content arms.
+ *
+ * A named `x-honeycomb-agent` with no policy fails closed to `isolated`. An unnamed
+ * caller uses agent `default` and `shared`, which admits workspace-global rows (the
+ * catalog default) plus that agent's own rows. `x-honeycomb-read-policy` overrides
+ * the policy when it is one of the builder's known tokens; an unknown token still
+ * fails closed inside `buildScopeClause`.
+ */
+export function resolveRecallAgentScope(
+	agentHeader: string | undefined,
+	policyHeader: string | undefined,
+	org: string,
+	workspace: string,
+): { readonly sql: string; readonly isolated: boolean } {
+	const named = agentHeader?.trim() ?? "";
+	const agentId = named !== "" ? named : "default";
+	const explicit = policyHeader?.trim() ?? "";
+	const readPolicy = explicit !== "" ? explicit : named !== "" ? "isolated" : "shared";
+	const clause = buildScopeClause({ agentId, readPolicy, org, workspace });
+	return { sql: clause.sql, isolated: clause.policyApplied === "isolated" };
+}
+
 export function resolveMemoryScope(c: Context): QueryScope | null {
 	return resolveScopeFromHeaders(c);
 }
@@ -804,10 +828,18 @@ export function mountMemoriesApi(daemon: Daemon, options: MountMemoriesOptions):
 		// lifecycle deps (reranker/dedup/staleness/activation/calibration/…) are still spread into
 		// deps and simply ignored by `recallFast` — no fast-path-specific branch downstream.
 		const recallEngine = parsed.data.fast === true ? recallFast : recallMemories;
+		const agentScope = resolveRecallAgentScope(
+			c.req.header("x-honeycomb-agent"),
+			c.req.header("x-honeycomb-read-policy"),
+			scope.org,
+			scope.workspace ?? "",
+		);
 		const result = await recallEngine(
 			{
 				query: parsed.data.query,
 				scope,
+				agentScopeSql: agentScope.sql,
+				agentScopeIsolated: agentScope.isolated,
 				// PRD-049b (49b-AC-2): the resolved project segment threaded into recall.
 				projectId: project.projectId,
 				projectBound: project.bound,

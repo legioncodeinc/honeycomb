@@ -33,10 +33,10 @@ The two roots are resolved by different code paths. The directory tree below sho
 
 ## The directory tree
 
-`$HONEYCOMB_WORKSPACE`, when set, is the workspace base dir. When it is unset, the candidate is the process cwd.
+`$HONEYCOMB_WORKSPACE`, when set and non-blank, is the workspace base dir. When it is unset or blank, the candidate is the process cwd.
 
 ```text
-$HONEYCOMB_WORKSPACE/                 (or the process cwd when unset)
+$HONEYCOMB_WORKSPACE/                 (or the process cwd when unset or blank)
 ├── agent.yaml                        # main config
 ├── AGENTS.md                         # operating instructions (synced to harnesses)
 ├── SOUL.md                           # optional personality and values
@@ -48,7 +48,8 @@ $HONEYCOMB_WORKSPACE/                 (or the process cwd when unset)
 │   ├── store.json                    # connection pointer to the DeepLake-backed store
 │   └── scripts/                      # python bridge for harness hooks
 ├── skills/                           # user-authored skills
-├── .secrets/                         # encrypted secrets (git-ignored)
+# Secret records are not in this tree. They live under `.secrets/` beneath
+# `resolveVaultBaseDir()` (`honeycombStateDir()`), in the fleet state root.
 ├── .daemon/
 │   ├── logs/                         # daemon logs
 │   └── auth-secret                   # local-mode token signing key (0600)

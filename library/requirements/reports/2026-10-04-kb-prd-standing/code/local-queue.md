@@ -287,7 +287,7 @@ Wave 1:
 - `library/requirements/reports/2026-10-04-kb-prd-standing/knowledge/data.md` (D-03 and the `memory_jobs` hold)
 - `library/requirements/reports/2026-10-04-kb-prd-standing/prds/in-work-066.md`
 - `library/requirements/reports/2026-10-04-kb-prd-standing/knowledge/architecture-adrs.md` (ADR-0006 and ADR-0009 sections)
-- `/home/marioaldayuz/.cursor/plans/kb_prd_standing_fleet_9354246d.plan.md` (Wave 2)
+- External local plan for this standing fleet (Wave 2). It is not a file in the repository.
 
 Knowledge and ADRs cited:
 

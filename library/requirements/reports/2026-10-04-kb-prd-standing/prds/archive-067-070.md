@@ -32,7 +32,7 @@ Unmet count: **21**.
 
 Verdict rule: `MET` means the quoted sentence is implemented in code that was read. A later hive or doctor screen that uses a different port, label, or route is cited as nearest code and stays `UNMET` when it does not satisfy the quote. `ABSENT` means no line implements the quoted behavior.
 
-Honeycomb has no `doctor/` tree. PRD-067 proof lives in the sibling doctor repo at `/home/marioaldayuz/Desktop/development/active/doctor`. A honeycomb-only search will miss it.
+Honeycomb has no `doctor/` tree. PRD-067 proof lives in the sibling doctor repository, which is not part of this checkout. A honeycomb-only search will miss it.
 
 ## Bucket recommendation
 
@@ -56,7 +56,7 @@ Honeycomb publishes the grace value into the doctor registry (`src/daemon/runtim
 
 Quote (`prd-067-doctor-boot-grace-release-blocker-index.md:104`): Given Doctor starts and the primary daemon is not yet listening, when the first probe returns `unreachable-refused` inside the first 60 seconds, then Doctor logs a booting observation and does not invoke the remediation ladder.
 
-Proof: `/home/marioaldayuz/Desktop/development/active/doctor/src/supervisor.ts:333-336` logs `tick.booting` and returns before `heal`. Test: `doctor/tests/supervisor.test.ts:200-217` expects `tick.booting`, no restart, no incident.
+Proof: sibling doctor repository `src/supervisor.ts` around the `tick.booting` return, before `heal`. Test: that repo's `tests/supervisor.test.ts` expects `tick.booting`, no restart, no incident. Not in this checkout.
 
 ### AC-2 MET
 
@@ -136,7 +136,7 @@ Quote (`...index.md:120`): Given the primary daemon has not answered `/health` a
 
 ABSENT. Status health is `ok | degraded | unreachable | unknown` (`doctor/src/status-page/server.ts:42`). The HTML has no `booting` string (`:206-225`). `unknown` shares the red style with `unreachable` (`:178`). The only `booting` string in doctor source is the log event `tick.booting` (`doctor/src/supervisor.ts:335`).
 
-Nearest code: hive `/buzzing` heading is "Waiting for the hive" and body copy is "Starting required services" (`/home/marioaldayuz/Desktop/development/active/hive/src/dashboard/web/buzzing-screen.tsx:297-308`). That screen has no 60 second `booting` label.
+Nearest code: the sibling hive repository's buzzing screen heading is "Waiting for the hive" and the body copy is "Starting required services". That screen has no 60 second `booting` label. Not in this checkout.
 
 ### AC-3 UNMET
 

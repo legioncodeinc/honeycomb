@@ -9,7 +9,7 @@ Uncommitted and kept as the text under test:
 
 Those two sentences match the tree. Later writers should leave them. Do not revert the dirty files.
 
-No security page should be removed. No new security page is warranted. Every page below stays, and five of six need a revision. Sibling links in the Related blocks resolve to files that exist.
+No security page should be removed. No new security page is warranted. Every page below stays, and six of six need a revision. Sibling links in the Related blocks resolve to files that exist.
 
 Defect count: 31 (FALSE, STALE, or HOLE). Holds are listed after the defects so a later pass does not undo them.
 

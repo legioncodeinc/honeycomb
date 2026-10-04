@@ -84,7 +84,7 @@ spawnRestart();
 setTimeout(() => shutdown(), RESTART_SHUTDOWN_DELAY_MS);
 ```
 
-The handler stamps `HONEYCOMB_RESTART_ENTRY` (the daemon entry path) and `HONEYCOMB_RESTART_PORT` (`src/daemon/runtime/dashboard/actions-api.ts:185-192`). The helper documents the same variables (`src/daemon/restart-helper.ts`). It waits until the old daemon's `/health` stops answering, waits for the lock file to clear, then starts a fresh daemon. If it cannot determine the entry or the wait times out, it still attempts the spawn.
+The handler stamps `HONEYCOMB_RESTART_ENTRY` (the daemon entry path) and `HONEYCOMB_RESTART_PORT` (`src/daemon/runtime/dashboard/actions-api.ts:185-192`). The helper documents the same variables (`src/daemon/restart-helper.ts`). `main()` returns without spawning when the entry is empty. When the entry is non-empty it polls `/health` until the daemon stops responding or the deadline expires, sleeps a fixed grace period, and then attempts the spawn. It does not check whether the lock file cleared.
 
 > **Known follow-up:** the self-respawn is unit-tested with injected seams (`tests/daemon/runtime/dashboard/actions-api.test.ts`) and is not yet live-dogfooded. The graceful-stop path is the documented fallback. Verify a live restart before relying on the one-click flow.
 

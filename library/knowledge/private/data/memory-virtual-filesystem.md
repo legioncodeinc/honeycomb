@@ -90,7 +90,7 @@ sequenceDiagram
     participant DL as deepLake
 
     Agent->>Fs: writeFile(path, content)
-    Fs->>Fs: update files meta dirs, enqueue PendingRow
+    Fs->>Fs: enqueue PendingWrite in pending via WriteBuffer
     alt pending >= 10
         Fs->>Fs: flush now
     else

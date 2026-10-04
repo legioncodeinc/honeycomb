@@ -6,7 +6,7 @@ Branch `legion/kb-sotu-and-prd-lifecycle`, parent `756bacb`. This file records t
 
 ### Knowledge revisions
 
-68 tracked files under `library/knowledge/private/` are dirty, plus the new ADR below. Writers applied rows a code report marked confirmed. Pages were corrected in place. No private page was deleted.
+68 tracked files under `library/knowledge/private/` are dirty, plus the new ADR below. Writers applied only the confirmed rows included in this commit. Other confirmed edits remain unapplied where a later note in this file says so. Pages were corrected in place. No private page was deleted.
 
 | Area | Files | What the confirmed rows correct |
 |---|---|---|

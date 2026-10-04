@@ -17,7 +17,7 @@ The unified mathematical model for the memory lifecycle, implemented under PRD-0
 
 A store that only grows is not a memory, it is a log. Human memory is good precisely because it is *lossy in a principled way*: it lets the rarely-useful fade, strengthens what gets retrieved and confirmed, flags what it is unsure of, and reconciles contradictions instead of holding both. Honeycomb already has the durable substrate (append-only, `MAX(version)`, supersession). The lifecycle model adds the principled forgetting on top, as a soft re-ranking signal that never deletes a row. History stays total; only *salience* changes.
 
-Design rule that follows from this: every term is a bounded multiplier in `(0, 1]` (or a gate in `{0} ∪ (0,1]`), it can only *demote* relevance, never invent it, and it ships behind an exponent. A term with exponent zero is the identity. Activation's exponent defaults to `1`, which applies raw activation, so recency reorders by age. Confidence and staleness exponents default to `0`, so those terms ship dormant.
+Design rule that follows from this: each multiplier ranges from `0` to `1`, because confidence and non-staleness can be zero. The conflict gate `κ` is the one that uses `{0} ∪ (0,1]`. A term can only *demote* relevance, never invent it, and it ships behind an exponent. A term with exponent zero is the identity. Activation's exponent defaults to `1`, which applies raw activation, so recency reorders by age. Confidence and staleness exponents default to `0`, so those terms ship dormant.
 
 ## The master equation
 
@@ -34,7 +34,7 @@ P(m | q, t) = R(m,q) · A(m,t)^a · C(m)^c · (1 − σ(m,t))^s · κ(m,t)
 | `C(m)` | `[0,1]` | Calibrated confidence: model confidence mapped through the calibration curve. | 058e |
 | `σ(m,t)` | `[0,1]` | Staleness probability: fraction of code references that no longer resolve. | 058c |
 | `κ(m,t)` | `{0} ∪ (0,1]` | Conflict gate: `1` uncontested/winner, `ρ` open-conflict loser, `0` hard-superseded. | 058b |
-| `a, c, s` | `≥ 0` | Per-term exponents. Default to eval-measured values; `0` makes that term neutral. | 058d (config) |
+| `a, c, s` | `≥ 0` | Per-term exponents. Configured now as `a = 1` and `c = s = 0`. Other values in the parameter section are sweep points still pending evaluation. `0` makes that term neutral. | 058d (config) |
 
 `R` is the base. Each other factor is a bounded multiplier so the whole product stays interpretable: `P ≤ R` always, with equality only when every lifecycle signal is perfect (fresh, fully-confident, no dangling refs, uncontested). The exponents `a, c, s` let the eval harness sweep each term's influence independently and ship only the influence that measurably helps. `κ` is a multiplicative gate, not exponentiated, because a hard-superseded memory must be *excluded* (`κ = 0`), not merely demoted.
 
@@ -44,7 +44,7 @@ The query-independent part of this product is a single **memory health** scalar:
 H(m,t) = A(m,t) · C(m) · (1 − σ(m,t)) · κ(m,t)
 ```
 
-`H ∈ [0,1]` is "how much should this memory be trusted right now, independent of any query." `assembleHealth` in `src/daemon/runtime/memories/lifecycle-health.ts` computes it. The CLI recomputes the same product inline. There is no lifecycle panel at `src/dashboard/web/pages/lifecycle-panel.tsx`.
+`H` is a separate health projection, not the query-independent portion of the exponentiated priority score. Absent inputs contribute identity factors to `H`. Dormant exponent settings do not. `assembleHealth` in `src/daemon/runtime/memories/lifecycle-health.ts` computes it. The CLI recomputes the same product inline. There is no lifecycle panel at `src/dashboard/web/pages/lifecycle-panel.tsx`.
 
 ---
 

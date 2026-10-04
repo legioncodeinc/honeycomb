@@ -234,6 +234,11 @@ describe("per-arm recall SQL builders keep the guards, limits, and soft-delete e
 		expect(sql).toContain("'memories' AS source");
 	});
 
+	it("the memories arm ANDs a caller-supplied agent scope fragment beside the project clause", () => {
+		const sql = buildMemoriesArmSql("t", 3, " AND (project)", " AND (agent_scope)");
+		expect(sql).toContain("is_deleted = 0 AND (project) AND (agent_scope)");
+	});
+
 	it("the memory arm and sessions arm match their own columns/tables with guarded ILIKE + LIMIT", () => {
 		const memorySql = buildMemoryArmSql("term", 5);
 		expect(memorySql).toContain('FROM "memory"');

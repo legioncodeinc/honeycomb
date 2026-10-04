@@ -124,7 +124,7 @@ The daemon reads the same credential file at startup, so once the CLI logs in, e
 
 ### Resolving Token Drift
 
-A known challenge in multi-tenant SaaS environments is JWT organization drift. If a user switches organizations through the CLI, their stored active organization ID changes, but their existing org-bound JWT API token remains unchanged. This causes queries to execute against the previous tenant space or fail due to invalid claims.
+A known challenge in multi-tenant SaaS environments is JWT organization drift. `honeycomb org switch` changes the stored active organization. It does not re-mint the org-bound API token. After an out-of-band org change the stored token can still name the previous org. Live session-start does not re-mint that token. Queries can then run against the previous tenant space or fail on the claim mismatch.
 
 There is no `src/commands/auth.ts`. The function that decodes a token and re-mints is `healOrgDrift` (`src/daemon/runtime/auth/device-flow.ts:207-229`). Production session-start seams set `healDriftedOrgToken` to an empty async function (`src/hooks/shared/session-start-seams.ts:123`). `runSessionStart` calls that seam (`src/hooks/shared/session-start.ts:188`), so the live hook does not re-mint. `buildOrgDriftHealer` refuses to re-mint a credential whose `apiUrl` is `https://api.deeplake.ai` and returns `drift-surfaced` (`src/cli/runtime.ts:555-570`). That healer is reached from `runStatusCommand` (`src/commands/status.ts:127-128`), which dispatch does not call. Live `status` is `runStandardCommand`.
 

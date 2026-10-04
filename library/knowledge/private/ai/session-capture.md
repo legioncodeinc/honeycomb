@@ -42,7 +42,7 @@ flowchart TD
     kind -->|user message| row["Build sessions row (jsonb message)"]
     kind -->|tool call| row
     kind -->|assistant message| row
-    row --> insert["Single INSERT via daemon -> sessions"]
+    row --> insert["One sessions row per event; inserts may be batched"]
     row --> embed["Optional 768-dim embedding, not awaited"]
     insert --> triggers["Counters: skillify every N turns / summary every N messages"]
 ```

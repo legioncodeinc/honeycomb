@@ -41,7 +41,7 @@ honeycomb sources add obsidian /path/to/Vault --name "Vault"
 
 That spelling is not a verb-table row. The generic CLI maps `sources add` to `POST /api/sources/add`, which is not the daemon connect route `POST /api/sources`.
 
-Discord and GitHub connect through the API or CLI with a stored secret reference for the token (never a raw token), plus bounds like which guilds or repos, resource types, and a `since` window.
+Discord and GitHub connect through the API with a stored secret reference for the token (never a raw token), plus bounds like which guilds or repos, resource types, and a `since` window. The CLI does not connect them: `sources add` is not a mounted route, so that subcommand is not `POST /api/sources`.
 
 ### Index
 

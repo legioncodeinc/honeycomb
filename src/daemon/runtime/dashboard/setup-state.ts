@@ -53,6 +53,7 @@ import type { Daemon } from "../server.js";
 import type { EmbedSupervisor } from "../services/embed-supervisor.js";
 import { CREDENTIALS_DIR_NAME, LEGACY_CREDENTIALS_DIR_NAME, loadCredentials } from "../auth/credentials-store.js";
 import { type OnboardingState, loadOnboarding } from "../onboarding/index.js";
+import { refuseRemoteSetup } from "./setup-loopback.js";
 
 /** The loopback route the guided-setup shell GETs its state from (PRD-050b). */
 export const SETUP_STATE_PATH = "/setup/state" as const;
@@ -245,6 +246,8 @@ export function resolveSetupState(deps: SetupStateApiDeps = {}): SetupStateBody 
  */
 export function mountSetupStateGroup(group: Hono, mode: DeploymentMode, deps: SetupStateApiDeps = {}): void {
 	group.get(SETUP_STATE_PATH, (c: Context) => {
+		const remote = refuseRemoteSetup(c);
+		if (remote !== null) return remote;
 		// b-AC-4: the setup endpoints are unreachable outside local mode. A 404 (not a redacted 200)
 		// makes the route INDISTINGUISHABLE from an unmounted path to a team/hybrid caller.
 		if (mode !== "local") return c.json({ error: "not_found" }, 404);

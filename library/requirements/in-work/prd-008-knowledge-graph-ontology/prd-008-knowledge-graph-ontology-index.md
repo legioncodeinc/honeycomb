@@ -1,6 +1,8 @@
 # PRD-008: Knowledge Graph and Ontology
 
 > **Status:** In Work
+>
+> Returned to In Work because required criteria are still absent. The PRD-045b traversal de-scope is not one of them. Earlier close-out history below stays. See `library/requirements/reports/2026-10-04-kb-prd-standing/code/capture.md`.
 > **Priority:** P1
 > **Effort:** L
 > **Schema changes:** Additive

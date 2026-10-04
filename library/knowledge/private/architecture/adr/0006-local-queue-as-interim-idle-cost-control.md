@@ -153,7 +153,7 @@ Re-open this decision if any of these become true:
 
 ## Links
 
-- PRD-066: `library/requirements/backlog/prd-066-local-queue-idle-cost-control/prd-066-local-queue-idle-cost-control-index.md`
+- PRD-066: `library/requirements/in-work/prd-066-local-queue-idle-cost-control/prd-066-local-queue-idle-cost-control-index.md`
 - PRD-062: `library/requirements/completed/prd-062-deeplake-compute-cost-reduction/prd-062-deeplake-compute-cost-reduction-index.md`
 - ADR-0004: `library/knowledge/private/architecture/adr/0004-honeycomb-control-plane-and-postgres-boundary.md`
 - Persistent log store: `library/requirements/completed/prd-043-logs-page/prd-043a-logs-page-persistent-log-store.md`

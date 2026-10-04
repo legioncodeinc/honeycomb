@@ -71,7 +71,7 @@ flowchart TD
 
 The home KPI rows are those three labels. There is no Turns tile in `buildKpisView`. The daemon view-model still carries `turnCount` as an alias of `sessionCount` (`src/daemon/runtime/dashboard/api.ts`); the label builder reads `sessionCount`.
 
-[^est-savings]: The "Estimated savings" figure is a corpus-length proxy (`SUM(LENGTH(content)) / 4`, `CHARS_PER_TOKEN = 4` in `src/daemon/runtime/dashboard/api.ts`). [ADR-0010](../architecture/adr/0010-recall-weighted-est-savings.md) (Accepted) pivots it to a recall-weighted metric. The re-wiring is IRD-278 and is not live. `fetchEstimatedSavings` is still the read.
+[^est-savings]: The "Estimated savings" figure is a corpus-length proxy (`SUM(LENGTH(content)) / 4`, `CHARS_PER_TOKEN = 4` in `src/daemon/runtime/dashboard/api.ts`). [ADR-0010](../architecture/adr/0010-recall-weighted-est-savings.md) (Proposed) pivots it to a recall-weighted metric. The re-wiring is IRD-278 and is not live. `fetchEstimatedSavings` is still the read.
 
 A hash router, a `ROUTES` array, and the paths `/`, `/harnesses`, `/memories`, `/graph`, `/sync`, `/logs`, and `/settings` are not implemented in this repository. `src/dashboard/web/registry.tsx` is absent.
 

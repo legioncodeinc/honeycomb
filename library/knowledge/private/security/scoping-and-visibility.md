@@ -44,7 +44,7 @@ The clause builder excludes archived rows from all three with `is_deleted = 0`. 
 
 ## The clause builder and live recall
 
-`buildScopeClause` in `src/daemon/runtime/recall/scope-clause.ts` compiles the inner-ring vocabulary into a WHERE fragment. It takes the agent id, read policy, and a caller-supplied `groupAgentIds` list, and it escapes values through the helpers in [`../data/deeplake-storage.md`](../data/deeplake-storage.md) because DeepLake takes no bound parameters. No other file under `src/` calls `buildScopeClause`. Live memory SQL in `src/daemon/runtime/memories/recall.ts` filters with `is_deleted = 0` and appends the string from `projectConjunctFor`.
+`buildScopeClause` in `src/daemon/runtime/recall/scope-clause.ts` compiles the inner-ring vocabulary into a WHERE fragment. It takes the agent id, read policy, and a caller-supplied `groupAgentIds` list, and it escapes values through the helpers in [`../data/deeplake-storage.md`](../data/deeplake-storage.md) because DeepLake takes no bound parameters. `POST /api/memories/recall` resolves the caller with `resolveRecallAgentScope` and ANDs that fragment into the `memories` lexical arm, the `memories` semantic match, and the `memories` hydration select, beside `is_deleted = 0` and `projectConjunctFor`. A named `x-honeycomb-agent` with no policy is `isolated`. An unnamed caller uses agent `default` and policy `shared`. The fast-path local ANN index does not store `agent_id`, so an isolated caller skips it and takes the scoped SQL arm.
 
 ```sql
 -- isolated
@@ -64,7 +64,7 @@ The group arm renders the caller-supplied member ids. An empty member list degra
 
 ## The authorization boundary in recall
 
-Recall is where scoping has to be exactly right, because the candidate channels (full-text, vector, graph traversal, hints) cast a wide net. The live memories arm in `src/daemon/runtime/memories/recall.ts` selects `content` as `text` in the same statement as the lexical match, together with `is_deleted = 0` and the project conjunct. That statement carries no `buildScopeClause` fragment. The recall flow is detailed in [`../ai/retrieval.md`](../ai/retrieval.md).
+Recall is where scoping has to be exactly right, because the candidate channels (full-text, vector, graph traversal, hints) cast a wide net. The live memories arm in `src/daemon/runtime/memories/recall.ts` selects `content` as `text` in the same statement as the lexical match, together with `is_deleted = 0`, the project conjunct, and the `buildScopeClause` fragment. The recall flow is detailed in [`../ai/retrieval.md`](../ai/retrieval.md).
 
 ```mermaid
 flowchart TD
@@ -76,4 +76,4 @@ flowchart TD
 
 ## Fail-closed rules
 
-`buildScopeClause` refuses a wider policy. A blank agent id or an unknown read policy returns the `isolated` fragment and attaches a `ScopeClauseError` (`src/daemon/runtime/recall/scope-clause.ts`). Live memory recall does not call that builder, so the isolated fallback is the builder's posture. Request-level scope checks are described in [`../auth/auth-architecture.md`](../auth/auth-architecture.md) and [`trust-boundaries.md`](trust-boundaries.md).
+`buildScopeClause` refuses a wider policy. A blank agent id or an unknown read policy returns the `isolated` fragment and attaches a `ScopeClauseError` (`src/daemon/runtime/recall/scope-clause.ts`). The memories recall path uses that fragment before content enters fusion. Request-level scope checks are described in [`../auth/auth-architecture.md`](../auth/auth-architecture.md) and [`trust-boundaries.md`](trust-boundaries.md).

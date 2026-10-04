@@ -57,6 +57,7 @@ import {
 	restoreHivemindBackup,
 } from "../onboarding/hivemind-uninstall.js";
 import { type EmitDeps, emitHivemindUpgrade } from "../telemetry/index.js";
+import { refuseRemoteSetup } from "./setup-loopback.js";
 
 /** The loopback route the "Proceed with Honeycomb" button POSTs to (PRD-050d / 050b host group). */
 export const SETUP_MIGRATE_PATH = "/setup/migrate-from-hivemind" as const;
@@ -319,6 +320,8 @@ export function mountSetupMigrate(daemon: Daemon, options: MountSetupMigrateOpti
 	if (root === undefined) return;
 
 	root.post(SETUP_MIGRATE_PATH, async (c: Context) => {
+		const remote = refuseRemoteSetup(c);
+		if (remote !== null) return remote;
 		try {
 			return c.json(await runMigration(options));
 		} catch {
@@ -337,6 +340,8 @@ export function mountSetupMigrate(daemon: Daemon, options: MountSetupMigrateOpti
 	});
 
 	root.post(SETUP_MIGRATE_ROLLBACK_PATH, (c: Context) => {
+		const remote = refuseRemoteSetup(c);
+		if (remote !== null) return remote;
 		try {
 			return c.json(runRollback(options));
 		} catch {

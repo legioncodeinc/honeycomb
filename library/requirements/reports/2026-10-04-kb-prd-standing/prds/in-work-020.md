@@ -4,7 +4,7 @@
 - Date: 2026-10-04
 - Commit context: `756bacb` moved this folder from `completed/` to `in-work/`. Re-checked against current source. The move matches the tree.
 - Sources read: the index, 020a, 020b, 020c, 020d, and the 2026-06-18 QA and security notes. Verdicts below ignore the QA scorecard (it marked 27/27 verified). Grounding trees: `src/cli`, `src/commands` (the dispatcher the CLI entry calls), `src/dashboard`, `harnesses/cursor`, `src/notifications`, plus the daemon handlers those surfaces call (`src/daemon/runtime/dashboard/api.ts`, `src/daemon/runtime/codebase/api.ts`, `src/daemon/runtime/sessions/prune.ts`, `src/daemon/runtime/assemble.ts`, `src/daemon/runtime/auth/`). Build outputs and `node_modules` were not used.
-- Criteria: 27. MET: 14. UNMET: 13. UNVERIFIABLE: 0.
+- Criteria: 27. MET: 13. UNMET: 14. UNVERIFIABLE: 0.
 
 ## Recommended bucket
 
@@ -95,8 +95,8 @@ The view builders and the daemon JSON are live. The CLI open path does not paint
 
 - Quote: "Given the daemon is running, when the dashboard loads, then it renders KPIs, sessions, settings, graph, rules, and skill-sync state from daemon-served data."
 - PRD: `prd-020b-surfaces-dashboard.md:48`
-- Verdict: MET
-- Source: `src/dashboard/dashboard.ts:72-80` builds the six views in that order after `source.fetchAll()`. `src/dashboard/launch.ts:110-129` GETs `/api/diagnostics/kpis`, `/api/diagnostics/sessions`, `/api/diagnostics/settings`, `/api/graph`, `/api/diagnostics/rules`, `/api/diagnostics/skills`. Those routes are mounted: `src/daemon/runtime/dashboard/api.ts:1314`, `:1355`, `:1374`, `:1408`, `:1421`, and `src/daemon/runtime/codebase/api.ts:341`. `honeycomb dashboard` does call `launchDashboard` (`src/cli/runtime.ts:728`) and then discards every view except reachability. The load function itself renders the six blocks from daemon data. Operator presentation is index AC-2, which is UNMET.
+- Verdict: UNMET
+- Source: `launchDashboard` prints launch or reachability output. It does not render the six views. `src/cli/runtime.ts:728` calls it from `honeycomb dashboard`. The view builders in `src/dashboard/dashboard.ts:72-80` exist, and the daemon routes are mounted, but this criterion is the dashboard load the CLI verb performs.
 
 ### b-AC-2
 
@@ -242,7 +242,7 @@ The session-start drain, claim lock, show-once state, 1.5s timeout, and idempote
 | a-AC-4 | UNMET | `src/hooks/shared/session-start-seams.ts:123` is a no-op |
 | a-AC-5 | UNMET | writes `~/.deeplake/credentials.json` (`credentials-store.ts:66`, `:541`) |
 | a-AC-6 | MET | `src/commands/storage-handlers.ts:99-106` |
-| b-AC-1 | MET | `src/dashboard/dashboard.ts:72-80`, daemon routes mounted |
+| b-AC-1 | UNMET | `honeycomb dashboard` prints launch or reachability output and does not render the six views |
 | b-AC-2 | MET | `src/dashboard/dashboard.ts:66-70` |
 | b-AC-3 | MET | `src/dashboard/views.ts:130-140`, `codebase/api.ts:341` |
 | b-AC-4 | MET | `src/daemon/runtime/dashboard/api.ts:665-678` |

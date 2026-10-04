@@ -1,6 +1,8 @@
 # PRD-029 — Degradation observability (surface the silent fallbacks)
 
 > Status: In Work - Owner: `/the-smoker` - Type: S/M (feature)
+>
+> The 2026-06-22 close-out below stays as history. The folder is In Work again because the dashboard lexical-fallback badge is not in this checkout. See `library/requirements/reports/2026-10-04-kb-prd-standing/00-standing.md`.
 > Goal: make the engine's degradation modes VISIBLE — in recall responses, in `/health`, and on the
 > dashboard — instead of degrading silently with no signal to the operator.
 

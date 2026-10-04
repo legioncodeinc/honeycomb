@@ -131,5 +131,5 @@ Checked against current code. Not defects.
 
 - Files read: 3 knowledge notes, plus the storage and runtime files cited above.
 - Defects: 10 (D1-D10). Verdicts: FALSE 1, STALE 7, HOLE 2, HOLDS 0 in the defect list.
-- Actions: REVISE 8, ADD 1, LEAVE 0 in the defect list. No REMOVE.
+- Actions: REVISE 9, ADD 1, LEAVE 0 in the defect list. No REMOVE.
 - REPORTED measurement blocks: leave all of them.

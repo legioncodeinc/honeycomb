@@ -135,7 +135,7 @@ const verified = (await pipeline(toVerify,
     if (ev && mat && evR === matR) {
       if (evR) status = 'REFUTED'
       else { const corr = ev.disposition === 'holds_with_corrections' || mat.disposition === 'holds_with_corrections'; status = corr ? 'CONFIRMED_WITH_CORRECTIONS' : 'CONFIRMED'
-        if (corr) { const sevs = [ev.corrected_severity, mat.corrected_severity].filter(Boolean).sort((a, b) => rank[b] - rank[a]); severity = sevs[0] || f.severity; claim = (ev.disposition === 'holds_with_corrections' ? ev.corrected_claim : mat.corrected_claim) || f.claim; disclosed = Boolean(ev.corrected_disclosed || mat.corrected_disclosed) } }
+        if (corr) { const sevs = [ev.corrected_severity, mat.corrected_severity].filter(Boolean).sort((a, b) => rank[a] - rank[b]); severity = sevs[0] || f.severity; claim = (ev.disposition === 'holds_with_corrections' ? ev.corrected_claim : mat.corrected_claim) || f.claim; disclosed = Boolean(ev.corrected_disclosed || mat.corrected_disclosed) } }
     } else if (ev && mat) {
       judge = await withRetry('judge:' + f.id, 'judge', () => judgePrompt(f, ev, mat), { label: 'judge:' + f.id, phase: 'Verify', model: 'opus', effort: 'high', schema: JUDGE_SCHEMA })
       if (judge) { status = judge.final_status; claim = judge.final_claim || f.claim; severity = judge.final_severity || f.severity; disclosed = judge.final_disclosed }

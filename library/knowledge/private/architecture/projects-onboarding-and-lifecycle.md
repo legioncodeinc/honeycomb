@@ -76,7 +76,7 @@ flowchart TD
     tenancy -->|returns false| tenGated["gated: tenancy_unconfirmed"]
     tenancy -->|returns true| bound{"boundProjectGate, inbox off, unbound cwd?"}
     confirmed --> bound
-    inbox --> bound
+    inbox --> tenancy
     bound -->|yes| noBound["gated: no_bound_project, write nothing"]
     bound -->|no| capture["accept the row"]
 ```
@@ -91,7 +91,7 @@ Three properties matter:
 
 ### The once-per-session notice
 
-When capture is gated, the user is told once per session, not on every turn. Production selection is `createSessionBindNoticeGate` in `src/hooks/shared/session-start.ts`. A workspace with no local binding gets `BIND_PROJECT_NOTICE`. A workspace that already has another binding, while this cwd is unbound, gets `BIND_PROJECT_CWD_NOTICE`. The chosen notice is prepended to the session's `additionalContext` block:
+When capture is gated because the cwd is unbound, the user is told once per session, not on every turn. `createSessionBindNoticeGate` in `src/hooks/shared/session-start.ts` does not show a bind notice when tenancy is unconfirmed and the cwd is bound. A workspace with no local binding gets `BIND_PROJECT_NOTICE`. A workspace that already has another binding, while this cwd is unbound, gets `BIND_PROJECT_CWD_NOTICE`. The chosen notice is prepended to the session's `additionalContext` block:
 
 > Honeycomb is paused: no project is bound to this workspace yet, so nothing is being captured. Bind a folder to start: open the Honeycomb dashboard and pick a folder, or run "honeycomb project bind" in the folder you want Honeycomb to remember.
 

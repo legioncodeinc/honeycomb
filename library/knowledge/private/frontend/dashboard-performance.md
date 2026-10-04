@@ -48,7 +48,7 @@ const [counts, estimatedSavings, injectedTokens] = await Promise.all([
 
 The `ViewBlock` rows from `buildKpisView` are `Memories`, `Sessions`, and `Estimated savings`. The third await is part of the view-model, not a fourth label on that block.
 
-> **Slated to change.** `fetchEstimatedSavings` computes a corpus-length proxy (`SUM(LENGTH(content)) / 4`). [ADR-0010](../architecture/adr/0010-recall-weighted-est-savings.md) (Accepted) pivots "Estimated savings" to a recall-weighted metric and retires `fetchEstimatedSavings` / `buildEstimatedSavingsSql`. The re-wiring is IRD-278. The note above documents the corpus-sum read as it stands. Once the pivot lands, the heaviest KPI read becomes a recall-event rollup that can use a shorter TTL.
+> **Slated to change.** `fetchEstimatedSavings` computes a corpus-length proxy (`SUM(LENGTH(content)) / 4`). [ADR-0010](../architecture/adr/0010-recall-weighted-est-savings.md) (Proposed) pivots "Estimated savings" to a recall-weighted metric and retires `fetchEstimatedSavings` / `buildEstimatedSavingsSql`. The re-wiring is IRD-278. The note above documents the corpus-sum read as it stands. Once the pivot lands, the heaviest KPI read becomes a recall-event rollup that can use a shorter TTL.
 
 ## For a new read
 

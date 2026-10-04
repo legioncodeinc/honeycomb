@@ -1,6 +1,8 @@
 # PRD-016: Skillify
 
 > **Status:** In Work
+>
+> Returned to In Work because required criteria are still absent. Earlier close-out history below stays. See `library/requirements/reports/2026-10-04-kb-prd-standing/code/capture.md`.
 > **Priority:** P1
 > **Effort:** M
 > **Schema changes:** Additive

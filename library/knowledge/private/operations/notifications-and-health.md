@@ -60,7 +60,7 @@ The health check resolves the silent-failure gap described in `prd-002a-health-c
 | **D2: Honeycomb daemon** | Is the daemon reachable? | `daemon.ping()`, detail `127.0.0.1:3850`. The probe does not launch the daemon. |
 | **D3: `cursor-agent` CLI** | Is `cursor-agent` present? | `which`, or `where` on Windows. |
 | **D4: `cursor-agent` login** | Is the user logged into `cursor-agent`? | `cursor-agent status`, with a 5-second timeout. |
-| **D5: Hooks wired and current** | Is capture wired? | Healthy when the Claude Code plugin is installed and enabled. Otherwise healthy when `~/.cursor/hooks.json` exists. |
+| **D5: Hooks wired and current** | Is capture configured? | `probeHooksWired` checks capture configuration. It does not prove the hooks run. The Cursor check only confirms that `~/.cursor/hooks.json` exists. It does not validate Honeycomb handlers. The Claude Code check is healthy when that plugin is installed and enabled. |
 
 Surfacing logged-out, daemon-down, and missing states upfront prevents the shared DeepLake store from filling with silent, empty placeholders.
 

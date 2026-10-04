@@ -1,6 +1,8 @@
 # PRD-006: Memory Pipeline
 
 > **Status:** In Work
+>
+> Returned to In Work because required criteria are still absent (graph `agent_id` taken from the workspace, and attribute rows that drop proposal provenance). Earlier close-out history below stays. See `library/requirements/reports/2026-10-04-kb-prd-standing/code/capture.md`.
 > **Priority:** P0
 > **Effort:** XL
 > **Schema changes:** Additive

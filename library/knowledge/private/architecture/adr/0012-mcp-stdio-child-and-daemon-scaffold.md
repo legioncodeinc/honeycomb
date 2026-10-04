@@ -21,8 +21,10 @@ records the same posture: a harness-spawned bundle runs stdio only, with no netw
 
 The daemon still lists `/mcp` as a protected, session-scoped route group
 (`src/daemon/runtime/server.ts`). No module in `src/daemon` attaches a handler to that group,
-and no daemon caller starts the MCP server. A request to a known group with no handler falls
-through to the root scaffold and returns 501 (`not_implemented`).
+and no daemon caller starts the MCP server. A request that passes permission middleware
+and still has no handler falls through to the root scaffold and returns 501
+(`not_implemented`). Local-mode middleware is open, so a local request reaches that
+fallback. A team or hybrid request can be rejected before it.
 
 Two requirements still describe an older shape. PRD-019d places the server inside the daemon,
 reachable at `/mcp` and on stdio. PRD-021e requires both transports connected, and its process

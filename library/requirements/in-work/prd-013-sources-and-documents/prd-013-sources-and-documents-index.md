@@ -1,6 +1,8 @@
 # PRD-013: Sources and Documents
 
 > **Status:** In Work
+>
+> Returned to In Work because the daemon-down source warning is absent. Earlier close-out history below stays. See `library/requirements/reports/2026-10-04-kb-prd-standing/code/mcp-sdk.md`.
 > **Priority:** P1
 > **Effort:** L
 > **Schema changes:** Additive

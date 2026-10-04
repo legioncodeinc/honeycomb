@@ -4,7 +4,7 @@ Honeycomb at `c1cb6bf` is a single npm package `@legioncodeinc/honeycomb` versio
 
 The daemon default bind is `127.0.0.1:3850`. The Hive portal constant is `127.0.0.1:3853`. VERIFIED: `src/shared/constants.ts`. `HONEYCOMB_HOST` and `HONEYCOMB_BIND` can widen the bind. VERIFIED by the security lens against `src/daemon/runtime/config.ts` and re-stated in `architecture/daemon-surface.md`.
 
-Durable memory is DeepLake, reached by the daemon. Local files under `~/.apiary` hold the registry, telemetry sqlite, pid, notifications state, local queue, skillify counters, and the asset registry, each with a legacy `~/.honeycomb` fallback. VERIFIED: `src/shared/fleet-root.ts` and the call sites cited in the true-up.
+Durable memory is DeepLake, reached by the daemon. Local files under the fleet root (`src/shared/fleet-root.ts`, default `~/.apiary/honeycomb`) hold the registry, telemetry sqlite, pid, and notifications state. Those call sites that still open a legacy `~/.honeycomb` file do so only as a read fallback when the fleet-root file is absent. The local SQLite job queue path is the fleet-root production file. It has no legacy read fallback. VERIFIED: `src/shared/fleet-root.ts` and the call sites cited in the true-up.
 
 Embeddings default on. Only `HONEYCOMB_EMBEDDINGS=false` or `0` disables them. VERIFIED: `src/daemon/runtime/services/embed-client.ts` lines 160-176. The local SQLite queue defaults on for an undeclared topology. VERIFIED: `resolveLocalQueueTopology` in `src/daemon/runtime/services/local-queue-diagnostics.ts`.
 
