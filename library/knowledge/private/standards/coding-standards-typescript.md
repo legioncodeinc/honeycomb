@@ -1,6 +1,6 @@
 # Coding Standards (TypeScript)
 
-> Category: Standards | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Standards | Version: 1.1 | Date: October 2026 | Status: Active
 
 The TypeScript conventions Honeycomb holds itself to: strict types, validation at the edges, closed result shapes, LOC discipline, and the naming and commit rules.
 
@@ -9,6 +9,7 @@ The TypeScript conventions Honeycomb holds itself to: strict types, validation a
 - [Documentation Framework](documentation-framework.md)
 - [DeepLake Storage](../data/deeplake-storage.md)
 - [Auth Architecture](../auth/auth-architecture.md)
+- [Load-Bearing Boundaries](../architecture/load-bearing-boundaries.md)
 
 ---
 
@@ -75,4 +76,4 @@ npm run typecheck   # tsc --noEmit
 npm run ci          # the full gate: typecheck + dup (jscpd) + test + audit:sql
 ```
 
-The build order is fixed because packages depend on each other: core first, then connector-base, then the plugins and native bindings, then the connectors, then the assembled distribution. The route-group conventions these commands build toward are documented in [API Design Conventions](api-design-conventions.md).
+The build order is a fixed import direction inside one npm package and one `tsc` pass (`BUILD.md:15-32`, `package.json:12`): tier 1 is `src/shared` and `src/daemon-client`, tier 2 is `src/daemon`, tier 3 is `embeddings/src`, tier 4 is the harnesses, the MCP server, and the CLI, and tier 5 is the esbuild bundles. Tier N may import only from tiers `< N` (`BUILD.md:17-19`). The full rule is in [Load-Bearing Boundaries](../architecture/load-bearing-boundaries.md). The route-group conventions these commands build toward are documented in [API Design Conventions](api-design-conventions.md).

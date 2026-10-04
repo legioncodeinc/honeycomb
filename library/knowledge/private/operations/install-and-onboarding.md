@@ -1,6 +1,6 @@
 # Install and Onboarding
 
-> Category: Operations | Version: 1.1 | Date: June 2026 | Status: Active
+> Category: Operations | Version: 1.2 | Date: October 2026 | Status: Active
 
 How a brand-new user goes from a single pasted command to a working, authenticated Honeycomb dashboard, the one-command installer, the one-daemon/two-phase model, the on-page device-flow login, Hivemind migration, and operator adoption telemetry.
 
@@ -66,7 +66,7 @@ These controls are documented for operators in `SECURITY.md` (§ Production depl
 
 1. **Health-gate the daemon up.** Reuses `ensureDaemonRunning` (`src/commands/daemon.ts`), which is idempotent via the PID/lock guard, an already-healthy daemon is a no-op, never a second bind of `127.0.0.1:3850`. If the daemon never becomes reachable within the wait budget, the verb prints "daemon didn't start" + a retry hint and exits non-zero.
 2. **Persist the onboarding marker.** Stamps `phase: "installed"` + the effective `ref` into `~/.deeplake/onboarding.json` via the shared onboarding store. The write is fail-soft, an onboarding hiccup logs a warning, never fails the install.
-3. **Open the dashboard, honestly (C-6).** The dashboard is the Hive portal, a separate surface on loopback port `3853` (the daemon keeps `:3850` for `/api/*` only). The verb first **probes** the loopback portal (`http://127.0.0.1:3853/`, 750 ms budget, any HTTP response proves it is running). Only if the probe succeeds does it open a browser: `http://honeycomb.local:3853/` first (best-effort), falling back to `http://127.0.0.1:3853/`. If the portal is not reachable it opens **nothing** and prints one plain sentence naming the command to install the portal, rather than launching a dead tab. The opener is a fixed-argv `execFileSync`, never a shell, that refuses any URL whose host is not the loopback IP, `localhost`, or `honeycomb.local`; a failed launch is non-fatal and the URL is printed for the user to open by hand.
+3. **Open the dashboard, honestly (C-6).** The dashboard is the Hive portal on loopback port `3853`. The daemon stays on `:3850` for its API. The verb probes `http://127.0.0.1:3853/` for 750 ms and treats any HTTP response as proof the portal is up (`src/commands/install.ts:64-78`, `src/commands/install.ts:330-341`). Solo mode then opens that same URL (`src/commands/install.ts:344-356`). `openLocalDashboardUrl` accepts an `http:` or `https:` URL whose host is `127.0.0.1`, `localhost`, or `::1`, and it launches the browser with a fixed-argv `execFileSync` (`src/commands/install.ts:110-130`). If the portal is not reachable the verb opens nothing and prints `dashboardPortalNotRunningMessage` (`src/commands/install.ts:88-93`).
 
 Every handled failure is a single readable line and a non-zero exit; the verb never lets a raw stack reach the bin. Re-running is safe: ensure-running short-circuits, the onboarding write is a stable upsert, and the dashboard is simply re-opened.
 

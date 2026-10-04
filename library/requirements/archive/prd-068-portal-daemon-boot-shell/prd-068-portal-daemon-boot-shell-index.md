@@ -2,7 +2,7 @@
 
 > **Status:** Superseded by [hive PRD-003 (portal landing gate and routing)](../../../../../hive/library/requirements/backlog/prd-003-portal-landing-gate-and-routing/prd-003-portal-landing-gate-and-routing-index.md) and [hive PRD-004 (/buzzing service loaders)](../../../../../hive/library/requirements/backlog/prd-004-buzzing-service-loaders/prd-004-buzzing-service-loaders-index.md). Archived 2026-07-03; a reference copy lives in the hive repo as hive PRD-006 (`hive/library/requirements/archive/prd-006-portal-daemon-boot-shell/`).
 >
-> The portal is no longer a honeycomb-owned boot shell. Under the fleet realignment hive owns the human-facing portal: PRD-003 handles the landing gate and routing and PRD-004 handles the /buzzing boot experience. Honeycomb's role is now that of a supervised service (see [PRD-071](../../backlog/prd-071-service-checkin-and-sqlite-telemetry/prd-071-service-checkin-and-sqlite-telemetry-index.md)).
+> The portal is no longer a honeycomb-owned boot shell. Under the fleet realignment hive owns the human-facing portal: PRD-003 handles the landing gate and routing and PRD-004 handles the /buzzing boot experience. Honeycomb's role is now that of a supervised service (see [PRD-071](../../completed/prd-071-service-checkin-and-sqlite-telemetry/prd-071-service-checkin-and-sqlite-telemetry-index.md)).
 
 > **Status:** Backlog
 > **Priority:** P1

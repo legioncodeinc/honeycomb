@@ -1,6 +1,6 @@
 # Monorepo Build and Release Pipeline
 
-> Category: Infrastructure | Version: 1.0 | Date: June 2026 | Status: Active
+> Category: Infrastructure | Version: 1.1 | Date: October 2026 | Status: Active
 
 How Honeycomb compiles, bundles, and packages its monorepo core, the daemon, and per-agent integrations.
 
@@ -29,28 +29,7 @@ This approach keeps the source code maintainable in a unified monorepo while del
 
 ## Pipeline Execution
 
-The entry point of the build process is defined in the workspace `package.json` scripts:
-
-```33:50:package.json
-  "scripts": {
-    "prebuild": "node scripts/sync-versions.mjs",
-    "build": "tsc && node esbuild.config.mjs",
-    "bundle": "node esbuild.config.mjs",
-    "dev": "tsc --watch",
-    "shell": "tsx src/shell/deeplake-shell.ts",
-    "cli": "tsx src/cli/index.ts",
-    "test": "vitest run",
-    "typecheck": "tsc --noEmit",
-    "dup": "jscpd src",
-    "audit:openclaw": "node scripts/audit-openclaw-bundle.mjs",
-    "pack:check": "node scripts/pack-check.mjs",
-    "rebuild:native": "node scripts/ensure-tree-sitter.mjs",
-    "ci": "npm run typecheck && npm run dup && npm test",
-    "postinstall": "node scripts/ensure-tree-sitter.mjs",
-    "prepare": "husky && npm run build",
-    "prepack": "npm run build"
-  },
-```
+The entry point of the build process is the `package.json` scripts at `package.json:53-91`. `prebuild` is `node scripts/sync-versions.mjs` (`package.json:54`). `build` is `tsc && node esbuild.config.mjs` (`package.json:56`). `ci` is `npm run typecheck && npm run dup && npm run test && npm run audit:sql` (`package.json:84`). `postinstall` runs `scripts/ensure-tree-sitter.mjs` and `scripts/ensure-embed-deps.mjs` (`package.json:85`). `dup` scans `src harnesses mcp embeddings` (`package.json:61`). Contributor commands and the daemon start verb are in [Developer Workflow](../operations/developer-workflow.md).
 
 ---
 

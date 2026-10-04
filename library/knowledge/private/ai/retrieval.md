@@ -1,6 +1,6 @@
 # Retrieval
 
-> Category: Ai | Version: 2.4 | Date: July 2026 | Status: Active
+> Category: Ai | Version: 2.5 | Date: October 2026 | Status: Active
 
 How recall works: hybrid lexical + semantic candidate collection over DeepLake, RRF fusion, the reranker/dedup/recency/MMR shaping stages (including the `cohere` provider reranker via the Portkey gateway), the per-turn fast path with its read/write client split and in-daemon local ANN index, the authorization boundary, the virtual-filesystem browse surface, and the nDCG eval harness that gates every ranking change.
 
@@ -30,7 +30,7 @@ Recall has to be cheap, scoped, current, and *shaped*. Cheap means it cannot run
 flowchart TD
     query["Incoming recall query"] --> lexical
     query --> semantic
-    lexical["Lexical arms: per-arm guarded query over memories + memory + sessions + hive_graph_versions (BM25/ILIKE)"] --> fuse
+    lexical["Lexical arms: per-arm guarded query over memories + memory + sessions + hive_graph_versions (tokenized ILIKE)"] --> fuse
     semantic["Semantic arms: &lt;#&gt; cosine over memories + sessions + hive_graph_versions (optional)"] --> fuse
     fuse["fuseHits: RRF blend + arm-class weights + nectar_rrf_multiplier → real score, ranked order"] --> rerank
     rerank["rerankHits: re-score top-k (default none)"] --> dedup
@@ -46,11 +46,11 @@ A fresh `honeycomb login` user gets hybrid lexical + 768-dim semantic recall out
 
 - **Embeddings are on by default.** `HONEYCOMB_EMBEDDINGS` is opt-*out*: unset/`true`/`1` is on, only an explicit `false`/`0` turns it off. `honeycomb login` provisions and owns the embed daemon (~600 MB `nomic-embed-text-v1.5`, 768-dim, downloaded once and warmed in the background), so the `<#>` cosine path is the default a real user hits.
 - **The store path populates the vector.** The default `embed` seam is the real `createEmbedAttachment`, so a deliberately-stored memory and a captured turn both land with a real 768-dim `FLOAT4[]` embedding. The dim invariant (`EMBEDDING_DIMS = 768` in `src/daemon/storage/vector.ts` ↔ the schema `FLOAT4[]` columns ↔ the model output) is locked end-to-end; a non-768 vector is rejected to NULL, never silently written.
-- **The `degraded` flag is honest.** Recall returns `degraded: false` when the semantic arm actually ran, and `degraded: true` only on genuine fallback, embeddings explicitly off, model still warming, embed daemon unreachable/crashed, a per-call timeout, or a malformed response. In every degraded case recall still answers with the BM25/ILIKE arms. **Recall never throws and never hangs on the embed path**, a degraded answer beats a 500 for an agent's turn (PRD-047 D-7 preserves this; no stage may turn the fallback into a throw).
+- **The `degraded` flag is honest.** Recall returns `degraded: false` when the semantic arm actually ran, and `degraded: true` only on genuine fallback, embeddings explicitly off, model still warming, embed daemon unreachable/crashed, a per-call timeout, or a malformed response. In every degraded case recall still answers with the lexical `ILIKE` arms (`src/daemon/runtime/memories/recall.ts:37-48`). **Recall never throws and never hangs on the embed path**, a degraded answer beats a 500 for an agent's turn (PRD-047 D-7 preserves this; no stage may turn the fallback into a throw).
 
 ## Lexical arms
 
-`recallMemories` runs **four** lexical arms, one per table a memory can live in, using BM25-style full-text search when the DeepLake index is present and falling back to `ILIKE` when it is not:
+`recallMemories` runs **four** lexical arms, one per table a memory can live in. Each arm calls `buildLexicalMatchSql`, which emits a tokenized `ILIKE` predicate (`src/daemon/runtime/memories/recall.ts:546`, call sites at `src/daemon/runtime/memories/recall.ts:584-715`). That function's comment states that Deeplake's `deeplake_index` is not wired on this path (`src/daemon/runtime/memories/recall.ts:519-530`). The four arms are:
 
 - `memories` (durable distilled facts), via `buildMemoriesArmSql`.
 - `memory` (per-session summaries), via `buildMemoryArmSql`.
@@ -65,7 +65,7 @@ The `hive_graph_versions` arm (`buildHiveGraphVersionsArmSql`) mirrors `buildMem
 
 ## Semantic arms and embeddings
 
-When embeddings are enabled, the query is embedded with the nomic embed daemon and a `<#>` cosine arm runs over the tables in the `SEMANTIC_ARMS` set, scored as a normalized cosine `((1 + (emb <#> vec)) / 2)` in `[0,1]`. Three tables carry a 768-dim `embedding`-class vector column and therefore a semantic arm: `memories` (`content_embedding`), `sessions` (`message_embedding`), and `hive_graph_versions` (`embedding`, PRD-013b). The `memory` summaries table has no embedding column, so it is a lexical-only arm. Each semantic arm runs through the same 768-dim dim guard as the store path, pairs with its lexical counterpart on a shared id space (`hive_graph_versions` fuses lexical and semantic hits on `source+nectar`), and stays **per-arm fail-soft**: a missing or empty table yields `[]` for that arm rather than a 500. Vectors are stored as DeepLake tensor columns, and the semantic filter and the scope filter run in one SQL statement. That statement is not an indexed lookup, though. A live investigation on 2026-07-09/10 established that DeepLake exposes no ANN/vector-index primitive (`CREATE INDEX ... USING vector` and `USING hnsw` are hard-rejected; `deeplake_index` is BM25/text-only), so `<#>` is an unavoidable brute-force full-column scan, measured at ~2.6s server exec for ~2,004 rows and linear in corpus size. This is the structural reason the per-turn path serves its `memories` semantic arm from an in-daemon index instead of this SQL scan (see the local ANN index below). An embedding tracker heals missing or stale vectors in the background, outside any write path.
+When embeddings are enabled, the query is embedded with the nomic embed daemon and a `<#>` cosine arm runs over the tables in the `SEMANTIC_ARMS` set, scored as a normalized cosine `((1 + (emb <#> vec)) / 2)` in `[0,1]`. The semantic arm list is `memories` (`content_embedding`), `sessions` (`message_embedding`), and `hive_graph_versions` (`embedding`, PRD-013b) (`src/daemon/runtime/memories/recall.ts:1375-1409`). The `memory` catalog still declares `summary_embedding` (`src/daemon/storage/catalog/sessions-summaries.ts:102-115`). `embeddingColumnFor` returns null for the `memory` source, so that table stays a lexical arm in recall (`src/daemon/runtime/memories/recall.ts:1695-1705`). Each semantic arm runs through the same 768-dim dim guard as the store path, pairs with its lexical counterpart on a shared id space (`hive_graph_versions` fuses lexical and semantic hits on `source+nectar`), and stays **per-arm fail-soft**: a missing or empty table yields `[]` for that arm rather than a 500. Vectors are stored as DeepLake tensor columns, and the semantic filter and the scope filter run in one SQL statement. That statement is not an indexed lookup, though. A live investigation on 2026-07-09/10 established that DeepLake exposes no ANN/vector-index primitive (`CREATE INDEX ... USING vector` and `USING hnsw` are hard-rejected; `deeplake_index` is BM25/text-only), so `<#>` is an unavoidable brute-force full-column scan, measured at ~2.6s server exec for ~2,004 rows and linear in corpus size. This is the structural reason the per-turn path serves its `memories` semantic arm from an in-daemon index instead of this SQL scan (see the local ANN index below). An embedding tracker heals missing or stale vectors in the background, outside any write path.
 
 ## RRF fusion and provenance-forward ranking (PRD-027)
 
