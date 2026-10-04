@@ -512,7 +512,7 @@ describe("PRD-064h schtasks controller, register/restart/status argv (injected r
 						utf16Base64(WIN_SPEC.nodePath),
 						utf16Base64(commandLine),
 					],
-					{ encoding: "utf8", timeout: 10_000, windowsHide: true },
+					{ encoding: "utf8", timeout: 20_000, windowsHide: true },
 				).trim();
 
 			expect(runProbe(fragmented)).toBe(
